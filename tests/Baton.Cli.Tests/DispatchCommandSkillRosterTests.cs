@@ -7,6 +7,7 @@ using Xunit;
 
 namespace Baton.Cli.Tests;
 
+[Collection(ConsoleOutCaptureCollection.Name)]
 public sealed class DispatchCommandSkillRosterTests
 {
     private sealed class DelegatingDiscoveryWorkerAdapter(
