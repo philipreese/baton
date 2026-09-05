@@ -354,6 +354,21 @@ still counted as an attempt and reported under the reason it produced none, neve
 including the warning about this verb's `--rebuild` form, which maintains an entirely separate file
 (`spec/baton.md` §7's burn ledger) and leaves these rows alone.
 
+**What memory is on this machine (`baton memory audit`).** A read-only inventory of every Claude
+memory root — the live `~/.claude/projects/<encoded-path>/memory` roots *and* the archived
+`~/.claude/memory-archive/<label>/` ones — each mapped to a canonical repository identity:
+
+```
+baton memory audit [--format text|json] [--help]
+```
+
+It writes nothing, moves nothing and deletes nothing, which is why it has **no `--dry-run`**; it
+reads a memory file's bytes only to digest them and never reports what one says. Findings are
+`duplicate`, `orphan`, `stale`, `no-provenance` and `ambiguous`, and **none of them is a ruling** —
+an `ambiguous` root prints both candidates and picks neither, because deciding whose memory it is
+needs the entries' text. `--format json` is the machine contract: one object
+`{claudeHome, roots, findings, counts}`. See `spec/baton.md` §12.
+
 ---
 
 ## 4. Adapter notes

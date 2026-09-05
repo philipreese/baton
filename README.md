@@ -33,6 +33,7 @@ narrowed daemon, and bindings/permissions. If this README and the spec disagree,
 | `baton rooms prune --terminal [--older-than <days>] [--state <state>] [--dry-run] [--yes]` | Batch form of `room delete`, plus unconditional registry hygiene (dedupe, drop lines whose directory is gone). Lists candidates by default; `--yes` actually deletes. |
 | `baton templates` | List the built-in workflow template catalog. |
 | `baton ledger [<room-dir>] [filters] [--format text\|json\|csv] [--drill]` | Read the repository's cost ledger: per-vendor token and estimate subtotals, then a labelled all-vendor estimate, for a room or the whole fleet. `baton ledger --rebuild` is the separate burn-ledger rebuild (`spec/baton.md` §7). |
+| `baton memory audit [--format text\|json]` | Read-only inventory of this machine's Claude memory roots (live and archived), each mapped to a canonical repository identity, with duplicate/orphan/stale/no-provenance/ambiguous findings. Writes nothing — see `spec/baton.md` §12. |
 | `baton mcp` / `baton daemon` | The stdio MCP server workers connect to (`fleet_status`, `yield`, `memory-edit-proposal`, `promote-artifact`, `room_detail`), and the narrowed background daemon (`spec/baton.md` §7). |
 
 `spec/baton.md` is the authority on every verb's exact contract — this table is an index, not a

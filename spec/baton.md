@@ -373,6 +373,7 @@ through `RoleDispatch.Materialize` against the real role catalog.
 | `templates` | `baton templates [--json]` | `Program.cs` |
 | `keep` | `baton keep <room-dir>` | `KeepOptionsParser.cs` |
 | `unkeep` | `baton unkeep <room-dir>` | `UnkeepOptionsParser.cs` |
+| `memory` | `baton memory audit [--format text\|json] [--help]` | `MemoryAuditOptionsParser.cs` |
 
 `templates` narrows to the built-in catalog only (`Baton.Vendors`'s `BuiltInWorkflowTemplates`) —
 there is no authoring UI to browse a saved-template library visually against (Appendix, R7 in the
@@ -4663,6 +4664,57 @@ and excluding `GeneratedCodeAttribute`/`CompilerGeneratedAttribute`/
 `ExcludeFromCodeCoverageAttribute`-marked types from the cobertura report. In the measured control,
 the generated `QuotaResetDurationRegex_0.RunnerFactory.Runner` contributed 197 coverable lines;
 with the settings file, that type and every `RegexGenerator.g.cs` class were absent.
+
+---
+
+## §12 Memory (#1852)
+
+**The authority model is ratified on #1852 (operator, 2026-09-04) and is not restated here** — read
+the issue for it, and for the phased plan and the Q1–Q5 rulings of 2026-09-05. What this section
+owns is the part that is now code: phase A's verb and the reading it produces.
+
+The one thing worth stating in the register, because every phase below rests on it: **the canonical
+store is keyed by `RepositoryIdentity`, not by a checkout path.** That is the same key §7's cost
+ledger already files under, reused rather than re-derived — see the "Canonical repository identity"
+paragraph there for the derivation and the worktree-convergence property it buys.
+
+**`baton memory audit [--format text|json]` — phase A, shipped.** Read-only, and read-only *by
+construction* rather than by flag: nothing on the path opens a file for writing, so there is
+deliberately **no `--dry-run`** (a flag with no off position is noise, and offering one would imply a
+writing mode that does not exist). It reports counts, paths, sizes, mtimes and SHA-256 digests. **It
+never reads what a memory file says** — bytes enter a digest and are discarded — and it never edits,
+moves or deletes one.
+
+**Population: both halves.** Every live root at `{claude-home}/projects/<encoded-path>/memory`, and
+every archived root at `{claude-home}/memory-archive/<label>/<name>`. The archive is not optional: a
+live root can be empty precisely *because* an earlier undocumented migration drained it into one, and
+an inventory of the live half alone would report such a machine as having no memory at all.
+
+**Mapping a root to a repository is ordered, and reports rather than guesses.** A project directory's
+name is a lossy flattening of the path it came from, so decoding it is not a function — several
+checkouts encode identically, and some characters cannot be recovered at all. `MemoryRootPath`'s own
+remarks enumerate which, with the live example. The ordering is what the register owns: session
+transcript `cwd` (ground truth — the value the name was derived *from*) beats a decoded reading that
+exists on disk, which beats reporting `ambiguous` with candidates and **no** selected path.
+`RepositoryIdentityResolver` then probes git at that checkout, and only when it exists.
+
+**Five finding kinds**, defined on `MemoryFindingKind` and partitioned on `MemoryAuditReport`:
+`duplicate`, `orphan`, `stale`, `no-provenance`, `ambiguous`. The ruling here is the one thing a
+reader would otherwise assume wrongly: **not one of them decides anything.** Each names something
+left open for the import to settle with the entries in hand. `stale` accordingly attaches to a whole
+archived root rather than to matched filenames — the per-file question is answerable only from the
+entries' text, and phase B's import is where it is answered.
+
+**Provenance and subject are two facts, not one.** Where a memory file came from is observable;
+whose memory it *is* is not, without reading it. #1852's `alpaca-agent-bot` root is the live case, and
+Q1's ruling settles it at **import** — a write, therefore phase B's. What phase A does is refuse to
+pre-empt that: both candidates on the row, neither selected. `MemorySubjectVocabulary` carries the
+constraint that makes the read reproducible (its own remarks say why it is a fixed table and what
+that costs).
+
+**What phase A does not do**, so a reader's prior does not fill the gap: it inventories Claude roots
+only (Codex, Antigravity and Baton's own `codex-home` store are phase A2's probe), it writes no
+canonical store, it projects nothing, and it deletes nothing anywhere, ever.
 
 ---
 
