@@ -462,7 +462,7 @@ public sealed partial class AgyWorkerAdapter : IWorkerAdapter, IPermissionGrantT
         invocation = ProjectCeilingGate.Apply(invocation, contract, ((IWorkerAdapter)this).WithheldWritesReachTheOutbox);
 
         var isWindows = OperatingSystem.IsWindows();
-        var prompt = BuildPrompt(invocation.PromptTemplate, contract, isWindows);
+        var prompt = BuildPrompt(invocation.PromptTemplate, contract, isWindows, invocation.WorkingDirectory);
         var permissionScope = ResolvePermissionScope(invocation);
         var artifactsRoot = EnvironmentReference("BATON_ARTIFACTS_ROOT", isWindows);
         var agyWorkspace = EnsureAgyWorkspace();
@@ -1206,9 +1206,36 @@ public sealed partial class AgyWorkerAdapter : IWorkerAdapter, IPermissionGrantT
         return invocation.PermissionScope ?? DefaultPermissionScope;
     }
 
-    private static string BuildPrompt(string promptTemplate, WorkerContract contract, bool isWindows)
+    /// <summary>
+    /// Inlines canonical skill packages (<c>skills/&lt;name&gt;/SKILL.md</c>) directly into the
+    /// dispatch prompt with a one-line header per skill (<c># Skill: &lt;name&gt;</c>) (#1151).
+    /// Returns the prompt unchanged if no canonical skill packages exist.
+    /// </summary>
+    public static string InlineSkills(string prompt, string? workingDirectory)
     {
-        var prompt = new StringBuilder(promptTemplate);
+        if (string.IsNullOrWhiteSpace(workingDirectory) || !Directory.Exists(workingDirectory))
+        {
+            return prompt;
+        }
+
+        var packages = SkillPackageReader.DiscoverPackages(workingDirectory);
+        if (packages.Count == 0)
+        {
+            return prompt;
+        }
+
+        var sb = new StringBuilder(prompt);
+        foreach (var package in packages)
+        {
+            sb.Append($"\n\n# Skill: {package.Name}\n{package.Content.Trim()}");
+        }
+        return sb.ToString();
+    }
+
+    private static string BuildPrompt(string promptTemplate, WorkerContract contract, bool isWindows, string? workingDirectory = null)
+    {
+        var inlined = InlineSkills(promptTemplate, workingDirectory);
+        var prompt = new StringBuilder(inlined);
 
         if (contract.RequiredInputs.Count > 0)
         {
@@ -1266,13 +1293,12 @@ public sealed partial class AgyWorkerAdapter : IWorkerAdapter, IPermissionGrantT
 
         if (!string.IsNullOrWhiteSpace(workingDirectory) && Directory.Exists(workingDirectory))
         {
-            // #1512 M2: whether agy actually reads SKILL.md from this directory is UNMEASURED --
-            // verify.py has no check for it and docs/decisions/0033-skills-attach-directly-no-persona.md
-            // describes agy's skill equivalent as "the plugin/agent equivalent", not a SKILL.md
-            // directory. Tracked by #1572. Not symmetric with claude's discovery either: no
-            // user-personal arm, and no name-based dedup (see docs/dispatch.md's skill-roster section).
-            var skillsDir = Path.Combine(workingDirectory, ".agents", "skills");
-            items.AddRange(SkillScanner.DiscoverSkills(skillsDir));
+            // Removed the .agents/skills scan (#1566) in favour of inlining canonical skill packages from skills/<name>/SKILL.md directly into the prompt (#1151, #1572).
+            var canonicalSkills = SkillPackageReader.DiscoverPackages(workingDirectory);
+            foreach (var package in canonicalSkills)
+            {
+                items.Add(new WorkerCapabilityItem($"{package.Name} (inlined)", "skill", package.Description));
+            }
         }
 
         return new WorkerCapabilities("agy", items, ParseModelLines(modelsOutput.Result));

@@ -182,10 +182,15 @@ Skills: none discovered
 
 or, when skills exist in the worker's environment (e.g. `~/.claude/skills/` or `<workspace>/.claude/skills/`
 for Claude — also `<CLAUDE_CONFIG_DIR>/skills` when `BATON_CLAUDE_CONFIG_ROOT` is set, replacing the
-`~/.claude` arm rather than adding to it — or `<workspace>/.agents/skills/` for agy):
+`~/.claude` arm rather than adding to it — or canonical skill packages `<workspace>/skills/<name>/SKILL.md`
+realized per-vendor as projected for Claude and inlined for agy, #1151):
 
 ```
-Skills: artifact-design, run-checks
+Skills: artifact-design (projected), run-checks (projected)
+```
+or for agy:
+```
+Skills: artifact-design (inlined), run-checks (inlined)
 ```
 
 For a worktree-provisioned binding (an audited role), the roster scans the source repository rather
@@ -195,9 +200,9 @@ finds there may not survive into the worker's actual checkout. Full rationale on
 and this line: `src/Baton.Cli/DispatchCommand.cs`'s skill-roster block.
 
 **Vendor coverage, honestly scoped.** The `<workspace>/.claude/skills` and personal-arm paths reflect
-Claude Code's own documented `SKILL.md` convention; the `BATON_CLAUDE_CONFIG_ROOT` arm and the agy
-`.agents/skills` path each rest on an unmeasured vendor fact, tracked in #1572 for agy and in the
-adapters' own comments (`src/Baton.Vendors/ClaudeWorkerAdapter.cs`, `AgyWorkerAdapter.cs`) for both.
+Claude Code's own documented `SKILL.md` convention; canonical packages under `skills/<name>/SKILL.md` are
+realized per vendor (#1151) — projected into `.claude/skills/` for Claude, inlined into the dispatch prompt
+for agy (since #1572 measured that agy does not read `.agents/skills` on its own).
 
 **Rule for briefs:** Dispatched workers run in their own process and do not inherit the conducting session's loaded skills. Briefs must inline what they need; a named skill only works if the worker's roster shows it. Skill forwarding is not performed by dispatch.
 

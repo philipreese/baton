@@ -119,6 +119,7 @@ public sealed partial class ClaudeWorkerAdapter : IWorkerAdapter, IPermissionGra
         invocation = ProjectCeilingGate.Apply(invocation, contract, WithheldWritesReachTheOutbox);
 
         var isWindows = OperatingSystem.IsWindows();
+        ProjectSkills(invocation.WorkingDirectory);
         var prompt = BuildPrompt(invocation.PromptTemplate, contract, isWindows);
         var permissionScope = ResolvePermissionScope(invocation);
         var artifactsRoot = EnvironmentReference("BATON_ARTIFACTS_ROOT", isWindows);
@@ -1239,6 +1240,50 @@ public sealed partial class ClaudeWorkerAdapter : IWorkerAdapter, IPermissionGra
         WorkerEnvironmentReference.For(name, isWindows);
 
     /// <summary>
+    /// Projects canonical skill packages from <c>skills/&lt;name&gt;/SKILL.md</c> into the location Claude CLI
+    /// reads (<c>.claude/skills/&lt;name&gt;/</c>) under the working directory (#1151).
+    /// Copies all files in the package directory preserving layout.
+    /// Returns the list of projected file paths, or an empty list if no canonical skill packages exist.
+    /// </summary>
+    public static IReadOnlyList<string> ProjectSkills(string? workingDirectory)
+    {
+        if (string.IsNullOrWhiteSpace(workingDirectory) || !Directory.Exists(workingDirectory))
+        {
+            return Array.Empty<string>();
+        }
+
+        var packages = SkillPackageReader.DiscoverPackages(workingDirectory);
+        if (packages.Count == 0)
+        {
+            return Array.Empty<string>();
+        }
+
+        var targetBase = Path.Combine(workingDirectory, ".claude", "skills");
+        var projectedPaths = new List<string>();
+
+        foreach (var package in packages)
+        {
+            var targetDir = Path.Combine(targetBase, package.Name);
+            Directory.CreateDirectory(targetDir);
+
+            foreach (var file in Directory.GetFiles(package.DirectoryPath, "*", SearchOption.AllDirectories))
+            {
+                var relPath = Path.GetRelativePath(package.DirectoryPath, file);
+                var destFile = Path.Combine(targetDir, relPath);
+                var destDir = Path.GetDirectoryName(destFile);
+                if (!string.IsNullOrEmpty(destDir))
+                {
+                    Directory.CreateDirectory(destDir);
+                }
+                File.Copy(file, destFile, overwrite: true);
+                projectedPaths.Add(destFile);
+            }
+        }
+
+        return projectedPaths;
+    }
+
+    /// <summary>
     /// Claude Code has no machine-readable "list models" subcommand — <c>--model</c> only documents
     /// its accepted values as help-text examples (<c>claude --help</c>: "Provide an alias for the
     /// latest model (e.g. 'sonnet', 'opus') or a model's full name"). Aliases are the stable
@@ -1360,9 +1405,28 @@ public sealed partial class ClaudeWorkerAdapter : IWorkerAdapter, IPermissionGra
         // dedup below keep that copy. The plain ~/.claude fallback (no config root set) was never
         // part of that measurement, so it keeps its prior project-over-user ordering (L3) rather
         // than being changed on an assumption.
+        // Canonical skill packages realization: discovered from skills/<name>/SKILL.md and reported as projected (#1151)
+        var canonicalNames = new HashSet<string>(StringComparer.Ordinal);
+        if (!string.IsNullOrWhiteSpace(workingDirectory) && Directory.Exists(workingDirectory))
+        {
+            var canonicalSkills = SkillPackageReader.DiscoverPackages(workingDirectory);
+            foreach (var package in canonicalSkills)
+            {
+                canonicalNames.Add(package.Name);
+                items.Add(new WorkerCapabilityItem($"{package.Name} (projected)", "skill", package.Description));
+            }
+        }
+
         foreach (var skillsDir in configRootSkillDirs.Concat(projectSkillDirs).Concat(userHomeSkillDirs))
         {
-            items.AddRange(SkillScanner.DiscoverSkills(skillsDir));
+            var nativeSkills = SkillScanner.DiscoverSkills(skillsDir);
+            foreach (var skill in nativeSkills)
+            {
+                if (!canonicalNames.Contains(skill.Name))
+                {
+                    items.Add(skill);
+                }
+            }
         }
 
         foreach (var commandsDir in commandDirs)
