@@ -303,6 +303,39 @@ public sealed class LedgerViewCommandTests : IDisposable
         Assert.Contains("endedAt >= 2026-09-04T00:00:00Z (inclusive) and < 2026-09-05T00:00:00Z (exclusive)", text, StringComparison.Ordinal);
     }
 
+    /// <summary>
+    /// #1901's acceptance criterion "<c>baton ledger --format json</c> groups correctly by <c>pr</c>".
+    /// <c>pr</c> is a FACET, not a grouping dimension — <c>LedgerRollup</c> groups by vendor and
+    /// nothing else — so "grouping by PR" is the query narrowed to one, and what this pins is that the
+    /// narrowing is exact in both directions: the other PR's rows are out, and so are the rows carrying
+    /// no PR at all. Both spellings of the same PR are one PR
+    /// (<c>LedgerQuery.NormalizeNumberReference</c>), which is the arm a writer that recorded
+    /// <c>#1907</c> and a filter that compared ordinally would fail.
+    /// </summary>
+    [Fact]
+    public async Task Json_narrowed_to_one_pr_carries_that_prs_rows_and_only_those()
+    {
+        using var first = JsonDocument.Parse(await RunAsync("--format", "json", "--drill", "--pr", "1907"));
+        using var second = JsonDocument.Parse(await RunAsync("--format", "json", "--drill", "--pr", "#1908"));
+        using var everything = JsonDocument.Parse(await RunAsync("--format", "json", "--drill"));
+
+        static string[] Executions(JsonDocument document) =>
+            [.. document.RootElement.GetProperty("rows").EnumerateArray().Select(r => r.GetProperty("execution").GetString()!)];
+
+        Assert.Equal(["e1", "e2"], Executions(first));
+        Assert.Equal(["e3"], Executions(second));
+
+        // The two views partition their PRs' rows, and neither swept in the three rows with no PR --
+        // the whole file is strictly larger than their union.
+        Assert.Equal(2, first.RootElement.GetProperty("total").GetProperty("attempts").GetInt32());
+        Assert.Equal(1, second.RootElement.GetProperty("total").GetProperty("attempts").GetInt32());
+        Assert.Equal(6, everything.RootElement.GetProperty("total").GetProperty("attempts").GetInt32());
+
+        // The echoed query says what the total is a total OF, which is what makes a stored reading
+        // interpretable later.
+        Assert.Equal("1907", first.RootElement.GetProperty("query").GetProperty("pr").GetString());
+    }
+
     [Fact]
     public async Task Help_says_which_ledger_this_reads_and_which_instant_the_window_is_on()
     {
@@ -355,11 +388,15 @@ public sealed class LedgerViewCommandTests : IDisposable
 
         CostLedgerEntry[] entries =
         [
-            claude,
-            claude with { Execution = "e2", Outcome = "Failed", EndedAt = Sep4.AddHours(11), TokensIn = 200 },
+            // #1901 C1: e1/e2 belong to one PR, e3 to another, and e4-e6 to none — so the --pr facet
+            // has something to be wrong about in both directions (a PR that over-matches, and rows with
+            // no PR being swept in).
+            claude with { PullRequest = "1907" },
+            claude with { Execution = "e2", Outcome = "Failed", EndedAt = Sep4.AddHours(11), TokensIn = 200, PullRequest = "1907" },
             claude with
             {
                 Execution = "e3",
+                PullRequest = "1908",
                 Room = _roomB,
                 Adapter = "agy",
                 Model = "gemini-3-pro",

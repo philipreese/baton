@@ -271,6 +271,7 @@ try
     }
 
     CommandResult result;
+    ResolveOptions? resolveOptions = null;
     switch (args[0])
     {
         case "run":
@@ -319,6 +320,9 @@ try
         case "resolve":
             {
                 var options = ResolveOptionsParser.Parse(args[1..]);
+                // #1901 C1 item 4: hoisted out of this block so the post-command cost-ledger stamp below
+                // can see WHICH resolution was recorded and why. Nothing else reads it.
+                resolveOptions = options;
                 result = await ResolveCommand.ExecuteAsync(options, hostStopSource.Token)
                     .ConfigureAwait(false);
                 break;
@@ -406,9 +410,18 @@ try
                 // the row.
                 var runwayOverrides = await RunwayOverrideReasons
                     .ReadForRoomAsync(terminalRoomDirectoryPath, CancellationToken.None).ConfigureAwait(false);
+
+                // #1901 C1: the issue, PR and diff shape each worker's own workspace still holds. Read
+                // here rather than inside the ledger for the same reason the overrides above are
+                // (WorkspaceDeliveryProbe's own remarks), and fail-open in exactly the same way -- a
+                // workspace that is gone, a `gh` that is absent, or a network that is down costs the
+                // stamp, never the row.
+                var delivery = await WorkspaceDeliveryProbe
+                    .ReadForRoomAsync(terminalRoomDirectoryPath, CancellationToken.None).ConfigureAwait(false);
                 var costEntries = CostLedgerStore.BuildEntries(
                     terminalEntries, terminalRoomDirectoryPath, repository,
-                    runwayOverrideReasonByWorker: runwayOverrides);
+                    runwayOverrideReasonByWorker: runwayOverrides,
+                    deliveryByWorker: delivery);
                 await CostLedgerStore.AppendAsync(costEntries, costLedgerPath, CancellationToken.None).ConfigureAwait(false);
             }
             else
@@ -463,6 +476,51 @@ try
               + "`baton decide <room-dir> --execution <execution-id> --type resume|reject|retry-with-revision|supersede "
               + "--bindings <bindings-file>` (the execution id is printed above), which is what resumes it."
             : $"Room is not yet complete — {RecoveryGuidance.RunRoomDirInstruction}.");
+    }
+
+    // #1901 C1 item 4: a conductor's resolution lands in the same file as the spend it followed.
+    // OUTSIDE the two branches above on purpose -- `baton resolve` reaches both of them (a --reject can
+    // carry the room to Terminal, an --accept-capture can leave it Running or Paused), and this fact is
+    // the same either way. After them, also on purpose: the Terminal branch is what writes the
+    // execution rows this row is a correction to, and BuildResolutionRow needs one to copy identity from.
+    if (resolveOptions is { } recordedResolution && result.RoomDirectoryPath is { } resolvedRoomDirectoryPath)
+    {
+        // Same fail-open posture as every other accounting write at this site: a stamp this call cannot
+        // make must never report a resolution that is already durable in flow.jsonl as failed.
+        try
+        {
+            var repository = await RepositoryIdentityResolver
+                .TryResolveForRoomAsync(resolvedRoomDirectoryPath, CancellationToken.None).ConfigureAwait(false);
+            if (repository is not null)
+            {
+                var costLedgerPath = BatonPaths.CostLedgerFile(repository.FileSlug);
+                var existingRows = await CostLedgerStore.ReadAllAsync(costLedgerPath, CancellationToken.None).ConfigureAwait(false);
+                var resolutionRow = CostLedgerStore.BuildResolutionRow(
+                    existingRows,
+                    BatonPaths.RecordKey(resolvedRoomDirectoryPath),
+                    recordedResolution.Accept
+                        ? ConductorResolution.AcceptCapture
+                        : recordedResolution.Close ? ConductorResolution.Close : ConductorResolution.Reject,
+                    recordedResolution.Reason);
+                if (resolutionRow is not null)
+                {
+                    await CostLedgerStore.AppendAsync([resolutionRow], costLedgerPath, CancellationToken.None).ConfigureAwait(false);
+                }
+                else
+                {
+                    // Said out loud rather than swallowed: a room with no cost-ledger row of its own
+                    // (settled before #1849 shipped, or never settled at all) has nothing to correct,
+                    // and a silently-missing resolution would read as "no one intervened".
+                    Console.Error.WriteLine(
+                        $"No cost ledger row exists for room '{resolvedRoomDirectoryPath}', so this resolution "
+                        + "was recorded on the room but not in the cost ledger.");
+                }
+            }
+        }
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or WaitHandleCannotBeOpenedException)
+        {
+            Console.Error.WriteLine($"Could not record this resolution in the cost ledger: {ex.Message}.");
+        }
     }
 
     // #1359: baton resume gets the same truthful exit-code table as run/dispatch — its own design

@@ -3721,7 +3721,47 @@ repeated-settle shapes, and what inflated totals that skip is buying, not restat
 | `planMeterEstimateUsd`, `planMeterEstimateStatus` | Plan-meter estimate and its status (`estimated` / `unpriced` / `unknown` / `unmeasured`). |
 | `estimateReason` | Why BOTH estimates are `unpriced` for a reason other than a missing rate: `multi-model-usage` or `model-mismatch` (below). Absent when pricing was attempted at all — absent never means *priced*. |
 | `priceCatalogId`, `priceCatalogVersion`, `planFactorTableId`, `planFactorTableVersion` | The four provenance stamps that make an estimate reproducible. |
-| `attempt`, `effort`, `issue`, `pr`, `parentRoom`, `workstream`, `raw` | **Reserved, no phase-A writer** — none is derivable from the events a settle has in hand. Named now so a later phase fills a reserved field rather than inventing a competing one. |
+| `issue`, `pr` | #1901 C1. `issue` is the leading `<n>-` of the workspace's checked-out branch — the only source Baton has, since no room record carries an issue number; `pr` is `gh pr list --head <branch>`'s answer at settle. Both bare decimal numbers with no `#` (`LedgerQuery` normalizes both spellings on the filter side). **Absent means "not resolvable at settle", never "none exists"**: a lane that settles before its PR is opened, a branch not created by `gh issue develop`, a `gh` that is missing or unauthenticated, and a workspace directory already gone (a #669 worktree torn down before the append — that teardown runs first) all read the same way. Phase C2's backfill is what fills those in. |
+| `filesChanged`, `additions`, `deletions`, `testFilesChanged` | #1901 C1. The shape of `git diff --numstat origin/main...HEAD` in that worker's workspace, from **one** spawn — the per-file form already carries every figure `--shortstat` would summarise plus the paths `testFilesChanged` counts (`tests/` prefix), so nothing is derived twice. Present together or absent together. The base ref is hardcoded `origin/main`: a workspace whose work is not based on trunk measures against the wrong base, and generalising it is not this phase. A binary file counts towards `filesChanged` and towards neither line total, because git reports no line counts for one. |
+| `reviewedRef`, `reviewedPr`, `reviewedHead`, `findingsHigh`, `findingsMedium`, `findingsLow` | #1901 C1. Parsed from the review execution's own `verdict.json` (the artifact #1889 stamps), through `ReviewVerdictSchema.TryParse` and no second reader — a file that is not a valid verdict yields none of the five rather than a partial set. `reviewedRef` is verbatim; `reviewedPr`/`reviewedHead` are only what a POSITIVE parse of it extracted (a `#n`/`.../pull/n` reference, or a 7–40 character hex SHA), absent for a branch-name ref. **The three counts are the one place on a row where `0` is a measurement**: `ReviewVerdict.Findings` says an empty array means the reviewer looked and found nothing, so a verdict that exists writes all three including zeros, and no verdict writes none of them. Three flat fields rather than one nested object, because a nested value renders in the CSV view as a quoted JSON blob and stops being summable. |
+| `resolution`, `resolutionReason` | #1901 C1. `accept-capture` / `reject` / `close` and the conductor's own `--reason`, on a **correcting row** — see below. Never on an execution row. |
+| `attempt`, `effort`, `parentRoom`, `workstream`, `raw` | **Reserved, no writer** — none is derivable from the events a settle has in hand (`modelEchoed`, above, is reserved for the same reason). Named now so a later phase fills a reserved field rather than inventing a competing one. |
+
+**A `baton resolve` appends a correcting row; it never rewrites the row it corrects.** This ledger is
+append-only and its rows are immutable, which is what #1849's reproducibility guarantee rests on — so
+`CostLedgerStore.BuildResolutionRow` returns a NEW row carrying the room's last execution row's
+identity (repository, room, workflow, step, role, issue, PR) and **none of its dimensions**: no tokens,
+no wall clock, no estimate. It is a fact about a person's intervention, not about spend. Its execution
+id is `<execution>#resolution-<kind>`, and that suffix is load-bearing rather than cosmetic on **both**
+of its halves. `CostLedgerStore.AppendAsync` dedupes on `execution`, so reusing the settled row's id
+verbatim would make the correcting row **silently vanish** into the skip that exists to stop
+double-counting, while a row with no id at all would be appended once per invocation instead of once
+per resolution. And the KIND has to be in the key because two resolutions of *different* kinds on one
+room is a supported sequence — `ResolveCommand` admits `--close` against a capture already
+resolved-`--reject`ed (#1877) — and both chain off the EXECUTION row, never off the first correcting
+row (a resolution is never itself corrected). A kind-free suffix would dedupe the second one away: the
+ledger would say `reject` forever and the close would be invisible, the same silent-swallow failure one
+level up. Keying on (execution, kind) keeps idempotence per kind while letting a genuinely different
+resolution land. Written for both shapes `resolve` can leave a room in — a `--reject` that reaches
+Terminal and an `--accept-capture` that does not — because the fact is the same either way.
+
+**What it costs a reading, in three places.** `LedgerRollup` counts rows, so a resolution row adds one
+to `attempts` **and one to `unread`** — the latter is a second meaning for a field documented as "an
+attempt nothing was read for", and a resolution row is not an attempt at all. It groups under the
+unknown-vendor subtotal, since it names no adapter. It also carries the corrected row's `issue`/`pr`,
+so a `--pr <n>` reading — #1901's own acceptance surface — counts one extra attempt per intervention on
+that PR. **All three are the same remedy:** an analysis that wants execution attempts alone filters
+rows whose `resolution` is absent, facet views included. Excluding them from the arithmetic instead
+would hide the interventions this row exists to make countable.
+
+**No `verdict` field, and that is a finding rather than an omission.** #1901's phase-C1 text asks a
+review row to carry a `verdict` of `APPROVE`/`BLOCK`. **No such value exists anywhere in the product**:
+`ReviewVerdict` is `reviewedRef` + `findings` + optional `summary`/`instruments`, and decision 0043's
+ruling — severity and status are evidence surfaced to a person, never inputs to routing (Architecture
+Rule 1) — is why the schema deliberately makes no overall approve/block judgment. Synthesising one from
+the severity counts would be the ledger inventing a judgment the reviewed artifact declines to make. The
+counts, the ref and its parsed PR/head are what a verdict actually contains, and they are what the row
+records. A future issue that wants an approve/block reading has to change what a reviewer WRITES first.
 
 **Two estimates, both labelled, neither an invoice.** `apiEquivalentUsd` comes from `PriceCatalog`
 (vendor → model → dimension → effective ranges, each with a source); `planMeterEstimateUsd` re-weights
@@ -3783,8 +3823,11 @@ its own remarks state the three sort keys and why the third is not redundant.
 
 `--format json` is the machine contract Fleet Glass (#1746) and enforcement (#1848) read — one object
 `{query, vendors, total, rows?}`, `WhenWritingNull`, with the ledger record's own field names inside
-it, `rows` present only with `--drill` (absent, not empty, so "not asked for" and "none matched" stay
-distinguishable). `--format csv` writes the rows only, header = the record's field names,
+it (the row schema above, including #1901 C1's `issue`/`pr`, the diff shape, the verdict fields and
+`resolution`), `rows` present only with `--drill` (absent, not empty, so "not asked for" and "none
+matched" stay distinguishable). **`pr` is a facet, not a grouping dimension** — the only grouping
+`LedgerRollup` does is per-vendor, so "group by PR" is `--pr <n>` narrowing the whole reading to one,
+with `query.pr` echoed back saying what the total is a total OF. `--format csv` writes the rows only, header = the record's field names,
 LF-terminated, and that column set is pinned against the record by test rather than by review.
 A subtotal keeps the row-level doctrine through the addition, and **discloses what its own arithmetic
 cannot preserve**: a token dimension **no** row reported is absent rather than `0` (agy reports no

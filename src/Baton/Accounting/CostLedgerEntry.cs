@@ -73,6 +73,25 @@ public enum CostCompleteness
 }
 
 /// <summary>
+/// Which <c>baton resolve</c> a conductor recorded on a room (#1901 C1 item 4) — the closed set of
+/// what that verb can do, so "how often did a person have to step in, and which way" is a filter
+/// rather than a string comparison. Carried on a CORRECTING row, never written back over the
+/// execution row it follows: <see cref="CostLedgerStore.BuildResolutionRow"/> states why.
+/// </summary>
+[JsonConverter(typeof(JsonStringEnumConverter<ConductorResolution>))]
+public enum ConductorResolution
+{
+    /// <summary><c>--accept-capture</c>: the capture honestly satisfies its declared outputs. The hand-fix.</summary>
+    [JsonStringEnumMemberName("accept-capture")] AcceptCapture,
+
+    /// <summary><c>--reject</c>: it does not, and the step settles resolved-but-Failed.</summary>
+    [JsonStringEnumMemberName("reject")] Reject,
+
+    /// <summary><c>--close</c>: a settle shape <c>--reject</c> does not admit — no captured response ever existed to judge.</summary>
+    [JsonStringEnumMemberName("close")] Close,
+}
+
+/// <summary>
 /// One immutable accounting row per <b>settled execution attempt</b> (#1849 phase A). Consumes the
 /// per-execution burn ledger's own source (<c>QuotaLedgerStore</c>, spec/baton.md §7) rather than
 /// replacing it: <c>quota-ledger.jsonl</c> stays the per-execution record, and this is the durable,
@@ -87,8 +106,8 @@ public enum CostCompleteness
 /// from "the vendor reported zero" by accident; absence is the only spelling of the former.
 /// </para>
 /// <para>
-/// <b>Fields reserved with no phase-A writer.</b> <see cref="Attempt"/>, <see cref="Effort"/>,
-/// <see cref="Issue"/>, <see cref="PullRequest"/>, <see cref="ParentRoom"/>, <see cref="Workstream"/>,
+/// <b>Fields reserved with no writer.</b> <see cref="Attempt"/>, <see cref="Effort"/>,
+/// <see cref="ParentRoom"/>, <see cref="Workstream"/>,
 /// <see cref="ModelEchoed"/> and <see cref="Raw"/> are named here but never populated by <see cref="CostLedgerStore.BuildEntries"/>:
 /// none of them is derivable from the events a settle already has in hand, and #1849's telemetry
 /// checklist wants the NAME pinned now so a later phase fills a reserved field rather than inventing
@@ -181,9 +200,25 @@ public sealed record CostLedgerEntry(
     [property: JsonPropertyName("outcome")]
     [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
     string? Outcome = null,
+    /// <summary>
+    /// #1901 C1: the issue this attempt's work belongs to, as a bare decimal number with no <c>#</c>
+    /// (<see cref="LedgerQuery"/> normalizes both spellings on the filter side, so the writer picks one).
+    /// Derived at settle from the leading <c>&lt;n&gt;-</c> of the workspace's checked-out branch — the
+    /// ONLY source Baton has, because no room record carries an issue number. <b>Absent means "this
+    /// branch does not name an issue", never "no issue"</b>: a branch created any other way than
+    /// <c>gh issue develop</c> is unattributable here, and a room whose workspace directory is gone by
+    /// settle time (a torn-down worktree) has nothing left to read.
+    /// </summary>
     [property: JsonPropertyName("issue")]
     [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
     string? Issue = null,
+    /// <summary>
+    /// #1901 C1: the pull request open for that branch, as a bare decimal number, from
+    /// <c>gh pr list --head &lt;branch&gt;</c> at settle. <b>Absent means "no PR was found for this
+    /// branch at settle time"</b> — including the very common case of a lane that settles BEFORE its PR
+    /// is opened, and the case where <c>gh</c> was missing, unauthenticated or offline. Phase C2's
+    /// backfill is what fills those in later; nothing here guesses.
+    /// </summary>
     [property: JsonPropertyName("pr")]
     [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
     string? PullRequest = null,
@@ -322,4 +357,97 @@ public sealed record CostLedgerEntry(
     /// </summary>
     [property: JsonPropertyName("runwayOverrideReason")]
     [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
-    string? RunwayOverrideReason = null);
+    string? RunwayOverrideReason = null,
+
+    // #1901 C1 item 3: the diff shape of what this attempt's workspace has pushed, from ONE
+    // `git diff --numstat origin/main...HEAD` in that workspace at settle. All four are present
+    // together or absent together -- one spawn produces all of them, so a partial set would only ever
+    // mean a bug. ABSENT, never zero, when the workspace pushed nothing, is gone by settle time, or is
+    // not a git repository; a genuine empty diff (a branch level with origin/main) reports four zeros,
+    // which is a measurement rather than an absence.
+    /// <summary>Files touched between <c>origin/main</c> and the workspace's HEAD.</summary>
+    [property: JsonPropertyName("filesChanged")]
+    [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    int? FilesChanged = null,
+    /// <summary>Lines added across those files. A binary file contributes to <see cref="FilesChanged"/> and to neither line count — git reports no line counts for one.</summary>
+    [property: JsonPropertyName("additions")]
+    [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    long? Additions = null,
+    /// <summary>Lines removed across those files, with the same binary-file caveat.</summary>
+    [property: JsonPropertyName("deletions")]
+    [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    long? Deletions = null,
+    /// <summary>
+    /// How many of <see cref="FilesChanged"/> live under this repository's <c>tests/</c> tree — the
+    /// crude "did this change ship a test" reading #1849 wants, deliberately a path prefix rather than
+    /// a judgment about whether a file IS a test.
+    /// </summary>
+    [property: JsonPropertyName("testFilesChanged")]
+    [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    int? TestFilesChanged = null,
+
+    // #1901 C1 item 2: what a review execution's own verdict.json says, parsed at settle from the
+    // artifact the engine already stamps (#1889). All five are absent together when the execution
+    // wrote no verdict.json, or wrote one that does not parse as a ReviewVerdict.
+    /// <summary>
+    /// <c>ReviewVerdict.ReviewedRef</c> verbatim — a branch, commit or PR reference, whichever the
+    /// reviewer named. The durable fact; <see cref="ReviewedPr"/>/<see cref="ReviewedHead"/> below are
+    /// only what a positive parse of it could extract.
+    /// </summary>
+    [property: JsonPropertyName("reviewedRef")]
+    [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    string? ReviewedRef = null,
+    /// <summary>
+    /// The PR number <see cref="ReviewedRef"/> names, as a bare decimal, when it positively parses as
+    /// one (<c>123</c>, <c>#123</c>, or a <c>.../pull/123</c> URL). <b>Absent means the ref did not name
+    /// a PR</b> — a branch-name or commit-SHA review is the ordinary case, not a defect.
+    /// </summary>
+    [property: JsonPropertyName("reviewedPr")]
+    [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    string? ReviewedPr = null,
+    /// <summary>
+    /// The commit <see cref="ReviewedRef"/> names, when it is a bare hex SHA (7–40 characters).
+    /// Absent for every other spelling, on the same "positively parsed or nothing" rule as
+    /// <see cref="ReviewedPr"/>. At most one of the two is ever written — an ambiguous ref that
+    /// satisfies both shapes yields neither, which <see cref="CostLedgerStore.SplitReviewedRef"/>
+    /// enforces and explains.
+    /// </summary>
+    [property: JsonPropertyName("reviewedHead")]
+    [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    string? ReviewedHead = null,
+    /// <summary>
+    /// High-severity findings in that verdict. <b>The one place on this row where <c>0</c> is a
+    /// measurement rather than an absence</b>: <c>ReviewVerdict.Findings</c>'s own doc says an empty
+    /// array is valid and meaningful (the reviewer looked and found nothing), so a verdict that exists
+    /// writes all three counts including zeros, and no verdict writes none of them. Three flat fields
+    /// rather than one nested object so the CSV view keeps them summable — a nested value renders there
+    /// as a quoted JSON blob (<see cref="LedgerCsv"/>'s own rule for <see cref="ModelsObserved"/>).
+    /// </summary>
+    [property: JsonPropertyName("findingsHigh")]
+    [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    int? FindingsHigh = null,
+    /// <summary>Medium-severity findings — same present/absent rule as <see cref="FindingsHigh"/>.</summary>
+    [property: JsonPropertyName("findingsMedium")]
+    [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    int? FindingsMedium = null,
+    /// <summary>Low-severity findings — same present/absent rule as <see cref="FindingsHigh"/>.</summary>
+    [property: JsonPropertyName("findingsLow")]
+    [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    int? FindingsLow = null,
+
+    /// <summary>
+    /// #1901 C1 item 4: which <c>baton resolve</c> a conductor recorded on this room. Present ONLY on a
+    /// correcting row appended after the execution rows it follows — never on an execution row, which
+    /// is immutable once written. <see cref="CostLedgerStore.BuildResolutionRow"/> is the one writer and
+    /// states the shape.
+    /// </summary>
+    [property: JsonPropertyName("resolution")]
+    [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    ConductorResolution? Resolution = null,
+    /// <summary>
+    /// The conductor's own <c>--reason</c>, verbatim. Absent when none was given, which
+    /// <c>ResolveOptionsParser</c> permits only for <c>--accept-capture</c>.
+    /// </summary>
+    [property: JsonPropertyName("resolutionReason")]
+    [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    string? ResolutionReason = null);
