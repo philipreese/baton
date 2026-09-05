@@ -64,6 +64,15 @@ public class ExecutionOutputDirectoryListingTests
         // unfiltered on purpose -- see that call site's own comment in FleetProjectionWriter.cs for why.
         ["Baton.Cli/Daemon/FleetProjectionWriter.cs"] =
             "GetFileSystemEntries lists the pruned room root, not an execution output directory; the nested EnumerateFiles walks a pruned execution's own former output directory but deliberately does not filter ExecutionStreamLogger.IsStreamLogFileName -- see #1557 comment above",
+        // #1852: both list a VENDOR's memory root under ~/.claude (projects/*/memory and
+        // memory-archive/<label>/*) and a Claude project directory's session transcripts. Neither is
+        // under a room's artifacts root at all, so an execution output directory is unreachable from
+        // here — and `baton memory audit` writes nothing, so nothing it lists can be presented as a
+        // worker's output.
+        ["Baton/Memory/MemoryRootInventory.cs"] =
+            "EnumerateFiles lists a ~/.claude memory root (live or archived), not an execution output directory",
+        ["Baton/Memory/MemoryRootPath.cs"] =
+            "EnumerateFiles lists a Claude project directory's session transcripts, not an execution output directory",
         // #496: lists artifacts/.versions/ (a named artifact's own version-history sidecar, one
         // index.jsonl per name), never an execution's own output directory.
         ["Baton/Artifacts/RoomArtifacts.cs"] =

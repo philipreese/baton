@@ -96,7 +96,7 @@ if (args.Length >= 1 && args[0] == "daemon")
     return 0;
 }
 
-var knownSubcommands = new[] { "run", "dispatch", "redispatch", "cancel", "decide", "resolve", "supply", "resume", "status", "watch", "deliver", "templates", "keep", "unkeep", "trust", "room", "rooms", "ledger", "mcp", "daemon" };
+var knownSubcommands = new[] { "run", "dispatch", "redispatch", "cancel", "decide", "resolve", "supply", "resume", "status", "watch", "deliver", "templates", "keep", "unkeep", "trust", "room", "rooms", "ledger", "memory", "mcp", "daemon" };
 if (args.Length == 0 || !knownSubcommands.Contains(args[0]))
 {
     Console.Error.WriteLine(RunOptionsParser.Usage);
@@ -131,6 +131,7 @@ if (args.Length == 0 || !knownSubcommands.Contains(args[0]))
     Console.Error.WriteLine($"       {LedgerViewOptionsParser.Usage[7..]}");
     Console.Error.WriteLine(
         "              (the two 'ledger' forms read different files -- 'baton ledger --help' says which)");
+    Console.Error.WriteLine($"       {MemoryAuditOptionsParser.Usage[7..]}");
     Console.Error.WriteLine(
         "       baton mcp [--capture-file <path>] [--memory-proposal-tool] [--fleet-status-tool] [--room-detail-tool]");
     Console.Error.WriteLine("       baton daemon [--no-mutex]");
@@ -268,6 +269,21 @@ try
         var ledgerViewOptions = LedgerViewOptionsParser.Parse(args[1..]);
         return await LedgerViewCommand
             .ExecuteAsync(ledgerViewOptions, Console.Out, cancellationToken: hostStopSource.Token).ConfigureAwait(false);
+    }
+
+    // #1852 phase A: a noun-first verb group like `room`/`rooms` above -- `audit` is the only
+    // sub-verb today, and `sync` (the writing half, phase C) is the reason the shape leaves room for
+    // a second. Read-only, produces no CommandResult, so it joins them rather than the switch below.
+    if (args[0] == "memory")
+    {
+        if (args.Length < 2 || args[1] != "audit")
+        {
+            throw new CliArgumentException($"Unknown 'baton memory' sub-verb. {MemoryAuditOptionsParser.Usage}");
+        }
+
+        var memoryAuditOptions = MemoryAuditOptionsParser.Parse(args[2..]);
+        return await MemoryAuditCommand
+            .ExecuteAsync(memoryAuditOptions, Console.Out, cancellationToken: hostStopSource.Token).ConfigureAwait(false);
     }
 
     CommandResult result;
