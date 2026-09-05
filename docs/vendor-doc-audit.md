@@ -2059,6 +2059,99 @@ this measurement: `ClaudeWorkerAdapter.HasSensitiveOutputPathComponent` now matc
 `.claude` path component rather than the config-root value, so this finding is closed, not merely
 recorded.
 
+## #1852 phase A2 — the non-Claude memory roots, one finding per family
+
+Four format probes, 2026-09-05, answering the same three questions of each family: **readable?
+writable? stable schema?** A "no" is a finding — it is what decides phase C's scope (#1852 Q4).
+
+**Scope, stated first because every row below inherits it.** One Windows 11 host, one operator, one
+day, with whatever Codex and Antigravity happened to have written there. Every "the vendor does not
+populate X" below is *this host does not have X populated*; no claim is made about a fresh install,
+another platform, or usage this operator has never exercised. Each finding carries a re-runnable
+check so a future host can answer for itself — `python tools/vendor-verify/verify.py --only memory`,
+which drives no vendor CLI and spends nothing.
+
+**Content-blind by construction.** What was read: names, counts, sizes, mtimes, sqlite table and
+column names, protobuf-text field names. What was not, anywhere — in the probe, in the checks'
+printed output, in this file, or in the shipped inventory — is the stored text itself, at any level:
+not a memory's prose, not a database cell, not a protobuf field's value.
+
+### 1. Codex markdown (`~/.codex/memories/`) — the only projectable surface, and it is nearly empty
+
+Readable **yes**, writable **yes**, stable schema **not applicable — there is no schema**. Three
+markdown files, none over 750 bytes; `rollout_summaries/` exists and is empty. The directory is a
+**git working tree** whose baseline commit tracks one file and leaves the two memory files
+untracked — so anything written here lands in a repository the vendor owns, and a projection would
+show up as untracked churn in `git status`. The format imposes nothing: free-form markdown, no
+front-matter, no index.
+Check: `memory.codex-markdown-root-is-plain-markdown` (sentinel — it fires if a data file ever
+appears beside the markdown, which is the vendor growing a schema here).
+
+### 2. Codex sqlite (`memories_*.sqlite`, both homes) — a derivation pipeline, and both are empty
+
+Readable **yes** (off a temp copy, WAL replayed). Writable **no, in the sense that matters**: the
+schema carries `_sqlx_migrations`, so the *vendor* versions it and moves it under any reader — the
+answer to "stable schema?" is a mechanism, not a snapshot. Contrast `conversation_summaries.db`'s
+`user_version = 2`; these two report `user_version = 0` and one migration row.
+
+The three tables are not a memory table. `jobs` is a leased work queue (`worker_id`,
+`ownership_token`, `lease_until`, `retry_at`, `retry_remaining`); `stage1_outputs` is derived output
+keyed by `thread_id` (`raw_memory`, `rollout_summary`, `rollout_slug`, `generated_at`,
+`selected_for_phase2`). This is the machinery that *produces* the markdown in finding 1, not a store
+of durable facts.
+
+**The row counts are the finding with the largest consequence.** `stage1_outputs` holds **zero rows
+in both stores**, and the Baton-managed `~/.baton/codex-home/memories_1.sqlite` is empty in `jobs`
+too. #1852's Q5 named that store as part of phase B's import population; **on this host it has
+nothing in it to import.** That does not retire the ruling — the store is still Baton's own and still
+must be preserved if it ever fills — but phase B should not be built expecting to find memories there.
+Check: `memory.codex-sqlite-is-a-derivation-pipeline-not-a-memory-table` (sentinel — the pipeline
+shape disappearing would mean the "do not write here" ruling needs re-deciding).
+
+### 3. Antigravity `brain` / `knowledge` — one is conversation scratch, one is shipped and never filled
+
+`knowledge/` exists under **both** Antigravity roots and holds exactly one thing in each: a
+zero-byte `knowledge.lock`. Present, not absent — the distinction the shipped inventory encodes
+explicitly, because "the vendor has no knowledge surface" and "the vendor ships one it does not fill"
+are different facts and only the second can change tomorrow.
+
+*Reading the audit's own output for this root, since the two words look like a contradiction and are
+not:* `baton memory audit` prints `presence=populated files=1 bytes=0`. `populated` there is defined
+narrowly — the family's selector matched at least one file — and the file it matched is the lock. The
+finding's "unpopulated" is about memories; the row's "populated" is about directory entries. A reader
+who wants the distinction in one glance should read the byte count beside it.
+Check: `memory.antigravity-knowledge-is-shipped-but-unpopulated` (sentinel — a real file appearing
+there would reopen Q4).
+
+`brain/` is the opposite problem: 11,554 files under `antigravity-cli` alone, one directory per
+conversation id, holding `.txt`/`.jsonl`/`.json`/`.log` plus `.system_generated`, `.user_uploaded`
+and `scratch` subdirectories. That is per-conversation working state, not durable memory. **Located
+and rejected**, with no check of its own: there is no claim here for a check to guard, and the
+inventory counts it without opening a byte of it. Readable in principle, writable in principle,
+stable schema **unknown and not pursued** — nothing is proposed that would need it.
+
+### 4. Antigravity `.pbtxt` — an annotation index, not a memory store
+
+127 files across the two roots' `annotations/` directories (plus three top-level `*_state.pbtxt`
+holding onboarding flags and migration state), 30–48 bytes each, one per conversation id.
+Readable **yes** — protobuf **text**, so it parses as lines. Writable **yes** as text, but the
+`.proto` is unpublished, so any write would be guessing at a schema the vendor can change silently.
+
+The whole field vocabulary is `title` and `last_user_view_time`: conversation metadata, no payload
+field anywhere in the population. That vocabulary is a **union over every file**, not a sample — the
+check's own docstring records what an earlier partial read of these files got wrong, and why the
+walk is exhaustive.
+Check: `memory.antigravity-pbtxt-carries-annotation-metadata-not-memory` (sentinel — an
+unrecognised field is the annotation record growing a payload).
+
+### What the four answer together
+
+**No non-Claude root on this host is a stable, writable memory surface.** Codex markdown is the only
+one that is plain text with no schema, and it holds three small files inside a git working tree the
+vendor owns. That is the empirical answer to Q4: phase C projects to markdown targets only, and the
+sqlite and protobuf stores are inventoried and never written — which is what the operator ruled on
+2026-09-05, now measured rather than assumed.
+
 ### Still not settled — recorded as untested, not refuted
 
 - **`defer`'s single-tool-call limit.** Three attempts failed to make the model batch tool calls

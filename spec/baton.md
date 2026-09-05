@@ -4971,17 +4971,45 @@ pre-empt that: both candidates on the row, neither selected. `MemorySubjectVocab
 constraint that makes the read reproducible (its own remarks say why it is a fixed table and what
 that costs).
 
-**What phase A does not do**, so a reader's prior does not fill the gap: it inventories Claude roots
-only (Codex and Antigravity — third-party surfaces whose formats nothing here has yet opened — are
-phase A2's probe), it writes no canonical store, it projects nothing, and it deletes nothing anywhere,
-ever.
+**What phase A does not do**, so a reader's prior does not fill the gap: it writes no canonical store,
+it projects nothing, and it deletes nothing anywhere, ever.
+
+**The non-Claude roots are enumerated, and they are a separate population — phase A2, shipped.**
+`VendorMemoryRootTable.Families` is the enumeration and this list is its gloss, not a second copy of
+it: **Codex markdown** (`~/.codex/memories`), **Codex sqlite** (`memories_*.sqlite`, in the vendor's
+own home *and* in `~/.baton/codex-home`), **Antigravity `brain`** and **Antigravity `knowledge`**
+(under both `~/.gemini/antigravity` and `~/.gemini/antigravity-cli`), and **Antigravity `.pbtxt`**
+(`annotations/*.pbtxt`, under both). Each row carries a `sourceVendor` and a `sourceScope`, and every
+family gets a row even when its directory is absent.
+
+Three rulings the register owns here, all of them things a reader would otherwise get wrong:
+
+- **They are reported beside the Claude roots and never merged into them**, and **no finding kind
+  attaches to them.** Every kind above is a claim about a root's mapping to a repository; these roots
+  are per-machine and encode no checkout, so passing them through would emit `no-provenance` for each
+  — definitionally true, and therefore saying nothing.
+- **A root's presence is a three-valued reading**, and the middle value — the directory is there and
+  the family's selector matched nothing — is never inferred from a file count of zero. Phase C's
+  scope turns on it; `VendorMemoryPresence`'s remarks carry the two live cases it was written from.
+- **The selector is per-family and narrow, and one family is counted rather than opened.** These
+  directories sit inside whole vendor homes holding hundred-megabyte databases and five-figure file
+  counts; an audit that walked them would digest all of that every run. `VendorMemoryFamily`'s
+  remarks carry the measurements behind both bounds.
+
+The phase-A contract is unchanged for them: path, size, mtime, SHA-256, and **nothing opened for
+what it says**. A `.sqlite` is digested as bytes exactly as a `.md` is; what those bytes *mean* was
+established by a separate one-time probe whose four findings live in `docs/vendor-doc-audit.md`
+(§"#1852 phase A2"), each with a re-runnable check in `tools/vendor-verify/verify.py` — the first
+checks there that drive no vendor CLI and spend nothing, and so the first that `--selftest` can
+exercise.
 
 **`~/.baton/codex-home` is not a vendor surface**, however much its `memories_1.sqlite` looks like
-one. Q5 (operator, 2026-09-05) ruled it **Baton's own first beta** of this memory system, so it does
-not belong with the third-party roots A2 probes: its memories are part of **phase B's import
-population** and must be preserved into the canonical store. Phase A does not read it — a store keyed
-by repository identity is the thing phase B builds, and importing into one that does not exist yet is
-not a read.
+one. Q5 (operator, 2026-09-05) ruled it **Baton's own first beta** of this memory system: A2
+inventories it as `sourceVendor: codex`, `sourceScope: baton-managed` — kept beside the third-party
+Codex store rather than merged with it, because the two diverged and collapsing them destroys the
+evidence of how — and its memories are part of **phase B's import population**, to be preserved into
+the canonical store. One thing phase B must not assume: **on the machine A2 measured, that store held
+no memories at all.** The ruling stands regardless; the expectation does not.
 
 ---
 

@@ -27,7 +27,8 @@ USAGE
 -----
     pixi run vendor-verify                 # every check that needs no special authorisation
     pixi run vendor-verify -- --list       # names and what each one costs
-    pixi run vendor-verify -- --only gate  # one group: gate | fanout | cost | lifecycle | agy | effort | models
+    pixi run vendor-verify -- --only gate  # one group, see --list for the full set
+    pixi run vendor-verify -- --selftest   # the local (filesystem) checks only; spends nothing
 
 SAFETY
 ------
@@ -97,8 +98,17 @@ _CURRENT = None      # name of the check being run, so run() knows whether to do
 _FULL_MODEL = False  # --full-model: run everything as originally measured
 
 
-def check(name, group, claim, safety="safe", sentinel=False):
+def check(name, group, claim, safety="safe", sentinel=False, local=False):
     """Register a check.
+
+    `local=True` marks a check that reads the FILESYSTEM rather than driving a vendor CLI (#1852
+    phase A2). It spends no subscription usage, starts no model, and is the only kind of check in
+    this file that can be exercised deterministically -- which is what `--selftest` does. Everything
+    else here needs an authenticated CLI and real money to run at all, so it is outside that
+    population; `--selftest` passing says nothing whatever about the vendor-CLI checks.
+
+    A local check takes an optional `home` argument so `--selftest` can point it at a fixture tree.
+    Called with no argument -- which is what the runner does -- it reads the operator's real home.
 
     `sentinel=True` marks the few checks worth re-running forever. The distinction exists because
     most checks here are ONE-TIME FINDINGS, not tests: the finding lives in a decision record and
@@ -114,7 +124,7 @@ def check(name, group, claim, safety="safe", sentinel=False):
     """
     def deco(fn):
         CHECKS[name] = {"fn": fn, "group": group, "claim": claim, "safety": safety,
-                        "sentinel": sentinel}
+                        "sentinel": sentinel, "local": local}
         return fn
     return deco
 
@@ -4077,6 +4087,381 @@ def _claude_allowedtools_space_before_paren():
     return FAIL, f"space-before-paren no longer grants -- reversal of the #1515 measurement -- {detail}"
 
 
+# ================================================================ memory (#1852 phase A2)
+# Four format probes over the NON-CLAUDE memory roots, one per family, answering the plan's three
+# questions each: readable? writable? stable schema? They drive no vendor CLI, spend nothing, and
+# start no model -- see `check(local=...)` and `--selftest`.
+#
+# CONTENT-BLIND, structurally and not by convention. Every one of these reads names, counts, sizes
+# and SCHEMA (sqlite table/column names, protobuf-text FIELD names) and nothing else. No memory text,
+# no sqlite row value and no pbtxt field value is read into a variable that outlives the parse, let
+# alone into a `detail` string -- and `detail` is printed. The pbtxt check is where that bites: the
+# one field those files carry is `title`, whose VALUE is conversation content.
+#
+# The findings themselves -- four families, three questions each -- live in the vendor register, not
+# in these docstrings. Read docs/vendor-doc-audit.md § "#1852 phase A2" for them.
+
+def _home(home=None):
+    return home if home else os.path.expanduser("~")
+
+
+def _sqlite_schema(db_path):
+    """Table names, their column names, and their ROW COUNTS, off a temp copy of `db_path`.
+
+    Copied rather than opened in place for two reasons, both load-bearing. The operator's stores are
+    live WAL databases a vendor process holds open, so reading them where they sit risks a lock and
+    -- worse -- sqlite would want to touch the -shm beside them, which is a write under ~/. And the
+    -wal has to come along: a schema read that ignored it would report the checkpointed past as the
+    present. The copy is opened read-WRITE so the WAL actually replays into it; the copy is ours.
+
+    Returns {table: {"cols": [...], "rows": n}}. Never a row VALUE -- a count is a fact about the
+    store's shape, its contents are not this tool's business.
+    """
+    import sqlite3
+    tmp = tempfile.mkdtemp(prefix="v-mem-schema-")
+    try:
+        for suffix in ("", "-wal", "-shm"):
+            source = db_path + suffix
+            if os.path.exists(source):
+                shutil.copy2(source, os.path.join(tmp, os.path.basename(source)))
+        con = sqlite3.connect(os.path.join(tmp, os.path.basename(db_path)))
+        try:
+            con.execute("pragma wal_checkpoint(TRUNCATE)")
+            schema = {}
+            for (table,) in con.execute(
+                    "select name from sqlite_master where type='table' order by name"):
+                cols = [row[1] for row in con.execute(f'pragma table_info("{table}")')]
+                rows = con.execute(f'select count(*) from "{table}"').fetchone()[0]
+                schema[table] = {"cols": cols, "rows": rows}
+            return schema
+        finally:
+            con.close()
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
+
+
+def _pbtxt_field_names(path):
+    """The top-level field NAMES in a protobuf-text file. Values are discarded before returning.
+
+    protobuf-text puts names and values on the same line, so this is the one place in the suite where
+    being content-blind takes an explicit act rather than a choice of API: the match keeps group(1)
+    and the rest of the line is dropped with the line.
+    """
+    names = set()
+    try:
+        with open(path, encoding="utf-8", errors="replace") as handle:
+            for line in handle:
+                m = re.match(r"^\s*([A-Za-z_][A-Za-z0-9_]*)\s*(:|\{)", line)
+                if m:
+                    names.add(m.group(1))
+    except OSError:
+        return None
+    return names
+
+
+@check("memory.codex-markdown-root-is-plain-markdown", "memory",
+       "~/.codex/memories holds free-form markdown with NO schema of any kind -- readable and "
+       "writable as ordinary text, so it is the one non-Claude family #1852 phase C could project "
+       "into. Claims the FORMAT only: whether Codex would ever READ back what was written there is "
+       "unmeasured, and this check cannot see it", sentinel=True, local=True)
+def _memory_codex_markdown(home=None):
+    """The claim is homogeneity: everything the family selects is markdown, so there is no second
+    format hiding in the directory that a projection would have to understand. A data file appearing
+    (a sqlite, a protobuf, an index) is the reversal worth catching, because it would mean Codex had
+    grown a schema here and the projection target had silently stopped being plain text.
+
+    `.git` is excluded from the population and reported separately -- the directory was a git working
+    tree when measured, which is a fact about writing there, not a second memory format.
+    """
+    root = os.path.join(_home(home), ".codex", "memories")
+    if not os.path.isdir(root):
+        return INCONCLUSIVE, "no ~/.codex/memories on this host -- nothing to judge the format of"
+
+    markdown, other = [], []
+    for dirpath, dirnames, filenames in os.walk(root):
+        dirnames[:] = [d for d in dirnames if d != ".git"]
+        for name in filenames:
+            (markdown if name.endswith(".md") else other).append(
+                os.path.relpath(os.path.join(dirpath, name), root).replace("\\", "/"))
+
+    is_git_tree = os.path.isdir(os.path.join(root, ".git"))
+    detail = (f"{len(markdown)} markdown file(s), {len(other)} non-markdown; "
+              f"git working tree: {is_git_tree}")
+    if other:
+        return FAIL, f"a non-markdown file appeared in the Codex markdown root: {sorted(other)} -- {detail}"
+    if not markdown:
+        return INCONCLUSIVE, f"the root exists but holds no markdown, so homogeneity is untested -- {detail}"
+    return PASS, f"plain markdown only, no schema -- {detail}"
+
+
+@check("memory.codex-sqlite-is-a-derivation-pipeline-not-a-memory-table", "memory",
+       "a Codex `memories_*.sqlite` is NOT a table of memories: its schema is a sqlx-MIGRATED "
+       "derivation pipeline (`_sqlx_migrations`, a leased `jobs` queue, `stage1_outputs`), so the "
+       "schema is versioned by the vendor and moves under any reader. Names and row COUNTS only; "
+       "no row value is read", sentinel=True, local=True)
+def _memory_codex_sqlite(home=None):
+    """Both stores in one check, because the finding is about the FORMAT and both homes carry it --
+    the vendor's ~/.codex and the Baton-managed ~/.baton/codex-home (Q5, operator 2026-09-05).
+
+    The discriminating fact is `_sqlx_migrations`. A snapshot of today's columns would say "the
+    schema looks like this"; the presence of a migrations table says the vendor MIGRATES it, which is
+    the answer to "stable schema?" and the reason phase C does not write here. Row counts come along
+    because an empty store and a full one are different facts about the import population, and Q5
+    named one of these as that population.
+    """
+    # Baton's own root is NOT `{home}/.baton` whenever BATON_HOME is set (BatonPaths.Root), so the
+    # Baton-managed store is looked up through that variable rather than under the user profile. A
+    # host that has relocated it would otherwise report INCONCLUSIVE for a store sitting right there.
+    # BATON_HOME is consulted only when reading the real host. Under a fixture home (--selftest) it
+    # is ignored deliberately: a control arm whose answer depends on the operator's environment is
+    # not a control.
+    baton_root = (os.path.join(home, ".baton") if home
+                  else os.environ.get("BATON_HOME") or os.path.join(_home(None), ".baton"))
+    stores = []
+    for label, directory in (("vendor", os.path.join(_home(home), ".codex")),
+                             ("baton-managed", os.path.join(baton_root, "codex-home"))):
+        for path in sorted(glob.glob(os.path.join(directory, "memories_*.sqlite"))):
+            stores.append((label, path))
+
+    if not stores:
+        return INCONCLUSIVE, "no memories_*.sqlite in either Codex home on this host"
+
+    reports, wrong = [], []
+    for label, path in stores:
+        try:
+            schema = _sqlite_schema(path)
+        except Exception as exc:                                   # noqa: BLE001
+            return INCONCLUSIVE, f"could not read the schema of the {label} store: {exc!r}"
+        tables = set(schema)
+        counts = ", ".join(f"{t}={schema[t]['rows']}" for t in sorted(schema))
+        reports.append(f"{label}: tables={sorted(tables)} rows({counts})")
+        if "_sqlx_migrations" not in tables or "stage1_outputs" not in tables:
+            wrong.append(label)
+
+    detail = " | ".join(reports)
+    if wrong:
+        return FAIL, (f"the pipeline shape is gone from the {wrong} store(s) -- a reversal of the "
+                      f"2026-09-05 measurement, so phase C's 'do not write here' needs re-deciding -- {detail}")
+    return PASS, f"sqlx-migrated derivation pipeline in every store found -- {detail}"
+
+
+@check("memory.antigravity-knowledge-is-shipped-but-unpopulated", "memory",
+       "Antigravity ships a `knowledge/` directory under BOTH its roots and leaves it holding "
+       "nothing but a zero-byte `knowledge.lock` -- present, not absent, and never filled. Scoped to "
+       "this host: whether the vendor populates it under some usage this operator has never "
+       "exercised is UNMEASURED and unmeasurable from here", sentinel=True, local=True)
+def _memory_antigravity_knowledge(home=None):
+    """A sentinel for the direction that would reopen phase C's scope. If a real file ever appears
+    here, Antigravity has a knowledge surface after all and the Q4 ruling ("markdown targets only")
+    rests on a measurement that has expired.
+
+    Present-and-empty is the whole finding, so the absent case is INCONCLUSIVE rather than a pass --
+    a host without Antigravity installed says nothing about what Antigravity ships.
+    """
+    roots = [os.path.join(_home(home), ".gemini", d, "knowledge")
+             for d in ("antigravity", "antigravity-cli")]
+    existing = [r for r in roots if os.path.isdir(r)]
+    if not existing:
+        return INCONCLUSIVE, "neither Antigravity knowledge directory exists on this host"
+
+    reports, populated = [], []
+    for root in existing:
+        entries = []
+        for dirpath, _, filenames in os.walk(root):
+            entries += [os.path.relpath(os.path.join(dirpath, n), root).replace("\\", "/")
+                        for n in filenames]
+        real = [e for e in entries if not e.endswith(".lock")]
+        reports.append(f"{os.path.basename(os.path.dirname(root))}: {len(entries)} file(s), "
+                       f"{len(real)} not a lock file")
+        if real:
+            populated.append((root, sorted(real)[:5]))
+
+    detail = " | ".join(reports)
+    if populated:
+        return FAIL, (f"a knowledge directory is populated after all -- {populated} -- so Q4's "
+                      f"'markdown targets only' rests on an expired measurement -- {detail}")
+    return PASS, f"shipped and unpopulated on both roots -- {detail}"
+
+
+# The annotation record's whole field vocabulary as measured 2026-09-05 over 127 files: a display
+# title and a view timestamp. Both are metadata ABOUT a conversation; neither is a payload. The check
+# below tests for an UNKNOWN field rather than for this exact set, because the set is a union over
+# whatever conversations a host happens to hold -- a host whose annotations all predate
+# `last_user_view_time` would fail an equality test for a reason that has nothing to do with the
+# vendor changing anything.
+PBTXT_ANNOTATION_FIELDS = {"title", "last_user_view_time"}
+
+
+@check("memory.antigravity-pbtxt-carries-annotation-metadata-not-memory", "memory",
+       "Antigravity's `annotations/*.pbtxt` are protobuf-TEXT whose entire field vocabulary is "
+       "conversation METADATA (`title`, `last_user_view_time`), one file per conversation id -- an "
+       "annotation index, not a memory store. Field NAMES only: `title`'s VALUE is conversation "
+       "content and is never read", sentinel=True, local=True)
+def _memory_antigravity_pbtxt(home=None):
+    """What makes this a format finding rather than a size observation: the field SET is the schema,
+    and a schema of a title and a timestamp cannot hold a memory whatever the file count. An
+    UNRECOGNISED field appearing is the reversal -- it would mean the annotation record had grown a
+    payload, and the payload is the thing phase C would then have had to understand.
+
+    The whole population is walked rather than a sample, and that is not a detail: a 25-file sample
+    taken while writing this reported the vocabulary as `title` alone, and the full 127-file walk
+    found `last_user_view_time` too. The union of field names over N files is a claim about N files.
+    """
+    roots = [os.path.join(_home(home), ".gemini", d, "annotations")
+             for d in ("antigravity", "antigravity-cli")]
+    paths = [p for root in roots for p in sorted(glob.glob(os.path.join(root, "*.pbtxt")))]
+    if not paths:
+        return INCONCLUSIVE, "no annotations/*.pbtxt under either Antigravity root on this host"
+
+    names, unreadable = set(), 0
+    for path in paths:
+        found = _pbtxt_field_names(path)
+        if found is None:
+            unreadable += 1
+            continue
+        names |= found
+
+    unknown = sorted(names - PBTXT_ANNOTATION_FIELDS)
+    detail = (f"{len(paths)} file(s), {unreadable} unreadable, field names observed: {sorted(names)} "
+              f"(known vocabulary: {sorted(PBTXT_ANNOTATION_FIELDS)})")
+    if unreadable == len(paths):
+        return INCONCLUSIVE, f"every annotation file was unreadable, so the field set is unknown -- {detail}"
+    if unknown:
+        return FAIL, (f"the annotation record has grown field(s) outside the measured metadata "
+                      f"vocabulary: {unknown} -- a reversal of the 2026-09-05 measurement, so Q4's "
+                      f"'no pbtxt target' needs re-deciding -- {detail}")
+    return PASS, f"metadata fields only, no payload field anywhere in the population -- {detail}"
+
+
+# ---------------------------------------------------------------------------------------------
+# --selftest: the discriminating control for the local checks above.
+#
+# `tools/audit-completeness/controls.py` is the model, and its rule is the one that matters here: a
+# green check means nothing on its own, so every check gets a fault injected and must go NOT-PASS.
+# That file could not host these, because it drives `selfcheck.py`'s checks and these live in
+# verify.py -- so the same discipline is implemented here, over the one thing verify.py has that
+# controls.py cannot supply: a fixture home a filesystem check can be pointed at.
+#
+# Each entry is (check name, build a faithful fixture, build a broken one). The faithful fixture must
+# PASS and the broken one must NOT, and both directions are required -- a check that passes on
+# anything and a check that fails on everything look identical from one arm.
+# ---------------------------------------------------------------------------------------------
+
+def _write(root, relative, content=""):
+    path = os.path.join(root, *relative.split("/"))
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    with open(path, "w", encoding="utf-8") as handle:
+        handle.write(content)
+    return path
+
+
+def _fixture_codex_markdown(root, broken):
+    _write(root, ".codex/memories/raw_memories.md", "# synthetic\n")
+    _write(root, ".codex/memories/extensions/ad_hoc/instructions.md", "# synthetic\n")
+    os.makedirs(os.path.join(root, ".codex", "memories", ".git"), exist_ok=True)
+    if broken:
+        # The reversal the check exists for: a data file, so the root is no longer plain text.
+        _write(root, ".codex/memories/index.sqlite", "not markdown")
+
+
+def _fixture_codex_sqlite(root, broken):
+    import sqlite3
+    path = os.path.join(root, ".codex", "memories_1.sqlite")
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    con = sqlite3.connect(path)
+    try:
+        if broken:
+            # A plain memory table with no migrations machinery -- what the check must NOT accept,
+            # because accepting it would mean it recognises "a sqlite file" rather than the pipeline.
+            con.execute("create table memories (id text primary key, text text)")
+        else:
+            con.execute("create table _sqlx_migrations (version bigint primary key, description text)")
+            con.execute("create table jobs (kind text, job_key text, status text)")
+            con.execute("create table stage1_outputs (thread_id text primary key, raw_memory text)")
+        con.commit()
+    finally:
+        con.close()
+
+
+def _fixture_antigravity_knowledge(root, broken):
+    for directory in ("antigravity", "antigravity-cli"):
+        _write(root, f".gemini/{directory}/knowledge/knowledge.lock", "")
+    if broken:
+        _write(root, ".gemini/antigravity-cli/knowledge/a-fact.md", "synthetic")
+
+
+def _fixture_antigravity_pbtxt(root, broken):
+    # Both known fields, split across files: the check unions over the population, so a fixture whose
+    # files each carry only one of them is the shape that actually exercises the union.
+    _write(root, ".gemini/antigravity-cli/annotations/aaaa.pbtxt", 'title: "synthetic"\n')
+    _write(root, ".gemini/antigravity/annotations/bbbb.pbtxt",
+           'title: "synthetic"\nlast_user_view_time: "synthetic"\n')
+    if broken:
+        # An unrecognised field: the annotation record has grown a payload, the finding's reversal.
+        _write(root, ".gemini/antigravity-cli/annotations/cccc.pbtxt",
+               'title: "synthetic"\nmemory_text: "synthetic"\n')
+
+
+SELFTEST_FIXTURES = {
+    "memory.codex-markdown-root-is-plain-markdown": _fixture_codex_markdown,
+    "memory.codex-sqlite-is-a-derivation-pipeline-not-a-memory-table": _fixture_codex_sqlite,
+    "memory.antigravity-knowledge-is-shipped-but-unpopulated": _fixture_antigravity_knowledge,
+    "memory.antigravity-pbtxt-carries-annotation-metadata-not-memory": _fixture_antigravity_pbtxt,
+}
+
+
+def selftest() -> int:
+    """Exercise every local check against a faithful fixture and a broken one. Costs nothing."""
+    local = sorted(n for n, c in CHECKS.items() if c["local"])
+    print("vendor-verify --selftest: the local (filesystem) checks only.")
+    print("Every other check here drives an authenticated vendor CLI and spends real subscription")
+    print("usage, so none of them is exercised and this says NOTHING about them.")
+    print("=" * 78)
+
+    failures = []
+
+    # A check with no fixture is a failure, for controls.py's reason: otherwise this quietly falls
+    # behind the checks it is supposed to be controlling.
+    for name in local:
+        if name not in SELFTEST_FIXTURES:
+            failures.append(f"{name}: no selftest fixture registered")
+            print(f" !! no selftest fixture registered for: {name}")
+    for name in SELFTEST_FIXTURES:
+        if name not in CHECKS or not CHECKS[name]["local"]:
+            failures.append(f"fixture for a check that is not a local check: {name}")
+            print(f" !! fixture registered for a check that is not a local check: {name}")
+
+    for name in local:
+        build = SELFTEST_FIXTURES.get(name)
+        if build is None:
+            continue
+        print(f"\n{name}")
+        for broken, expect in ((False, PASS), (True, "not " + PASS)):
+            root = tempfile.mkdtemp(prefix="v-selftest-")
+            try:
+                build(root, broken)
+                status, detail = CHECKS[name]["fn"](root)
+            except Exception as exc:                               # noqa: BLE001
+                status, detail = INCONCLUSIVE, f"raised: {exc!r}"
+            finally:
+                shutil.rmtree(root, ignore_errors=True)
+
+            ok = (status == PASS) if not broken else (status != PASS)
+            arm = "broken fixture" if broken else "faithful fixture"
+            if ok:
+                print(f"   OK  {arm}: {status} (expected {expect})")
+            else:
+                failures.append(f"{name}: {arm} returned {status}, expected {expect}")
+                print(f"   !!  {arm}: {status}, expected {expect}\n       {detail}")
+
+    print("\n" + "=" * 78)
+    if failures:
+        print(f"{len(failures)} problem(s) across {len(local)} local check(s).")
+        return 1
+    print(f"All {len(local)} local check(s) pass on a faithful fixture and refuse a broken one.")
+    return 0
+
+
 def project_slug_root():
     """Claude records a transcript per working directory under the config root.
 
@@ -4112,7 +4497,10 @@ def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__,
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--list", action="store_true")
-    ap.add_argument("--only", help="a group (gate | fanout | cost | lifecycle | agy | effort | models | claude) or a check-name prefix")
+    # Derived, not transcribed: a hand-written group list is a copy of something the registry already
+    # knows, and `memory` was added the day after the previous copy of this line stopped being true.
+    ap.add_argument("--only", help="a group (" + " | ".join(sorted({c["group"] for c in CHECKS.values()}))
+                                   + ") or a check-name prefix")
     ap.add_argument("--sentinels", action="store_true",
                     help="run ONLY the checks whose result a design already depends on, so a "
                          "vendor change there would break AER silently. This is the set worth "
@@ -4126,6 +4514,11 @@ def main() -> int:
                     help="run every check on the vendor's DEFAULT model instead of the cheapest "
                          "one. Costs far more; use when a cheap-model result looks wrong and you "
                          "need to know whether the model or the vendor changed.")
+    ap.add_argument("--selftest", action="store_true",
+                    help="exercise the LOCAL (filesystem) checks against fixture trees, each with "
+                         "the fault it exists to catch. Spends nothing and drives no vendor CLI -- "
+                         "and therefore says nothing about the vendor-CLI checks, which cannot be "
+                         "run without an authenticated CLI and real usage.")
     args = ap.parse_args()
 
     if args.selftest:
@@ -4169,9 +4562,13 @@ def main() -> int:
     global _FULL_MODEL, _CURRENT
     _FULL_MODEL = args.full_model
 
+    if args.selftest:
+        return selftest()
+
     if args.list:
         for n, c in sorted(CHECKS.items()):
-            tier = "default-model" if n in NEEDS_CAPABILITY else "cheap-model"
+            tier = ("local-probe" if c["local"]
+                    else "default-model" if n in NEEDS_CAPABILITY else "cheap-model")
             kind = "SENTINEL" if c["sentinel"] else "settled  "
             print(f"{n:<42} [{c['group']:<9}] {kind} {c['safety']:<15} {tier}\n    {c['claim']}")
         n_sent = sum(1 for c in CHECKS.values() if c["sentinel"])
@@ -4180,7 +4577,9 @@ def main() -> int:
         print(f"settled        {len(CHECKS) - n_sent} one-time findings. The conclusion lives in "
               "docs/decisions; the code is the receipt,\n               not a test. Re-running "
               "them spends usage to re-confirm what is no longer in question.")
-        print("\ncheap-model    runs on " + " / ".join(
+        print("\nlocal-probe    reads the filesystem only -- no vendor CLI, no model, no spend. The "
+              "one kind of check here\n               `--selftest` can exercise deterministically.")
+        print("cheap-model    runs on " + " / ".join(
             f"{v} {' '.join(f)}" for v, f in CHEAP.items()))
         print("default-model  what it observes depends on the model making a real choice "
               "(fan-out, tool substitution), so downgrading would\n               produce a "
@@ -4194,11 +4593,17 @@ def main() -> int:
     if not selected:
         print(f"no check matches --only {args.only!r}; see --list", file=sys.stderr)
         return 2
-    cheap = sum(1 for n in selected if n not in NEEDS_CAPABILITY)
-    tier = ("EVERY check on the vendor default model (--full-model)" if _FULL_MODEL
+    local = sum(1 for c in selected.values() if c["local"])
+    vendor = {n: c for n, c in selected.items() if not c["local"]}
+    cheap = sum(1 for n in vendor if n not in NEEDS_CAPABILITY)
+    tier = ("EVERY vendor check on the vendor default model (--full-model)" if _FULL_MODEL
             else f"{cheap} on the cheapest model, "
-                 f"{len(selected) - cheap} on the default (capability-dependent)")
-    print(f"running {len(selected)} check(s). Each spends real subscription usage.\n"
+                 f"{len(vendor) - cheap} on the default (capability-dependent)")
+    # The banner used to say flatly that every check spends usage. Since #1852 phase A2 that is no
+    # longer true of all of them, and a filesystem probe billed in the operator's head as a vendor
+    # call is the same misreading as a cheap-model result read as a default-model one.
+    print(f"running {len(selected)} check(s): {len(vendor)} drive a vendor CLI and spend real "
+          f"subscription usage,\n  {local} are local filesystem probes and spend nothing.\n"
           f"  model tier: {tier}\n")
 
     root, _ = project_slug_root()
@@ -4221,7 +4626,8 @@ def main() -> int:
         # Name the tier on every line. A result that was produced on a downgraded model must never
         # be indistinguishable from one produced as originally measured -- that is the same
         # "two causes, one observation" trap the checks themselves are built to avoid.
-        tag = "" if _FULL_MODEL or name in NEEDS_CAPABILITY else "  [cheap-model]"
+        tag = ("  [local-probe]" if c["local"]
+               else "" if _FULL_MODEL or name in NEEDS_CAPABILITY else "  [cheap-model]")
         print(f"{status:<13} {name}{tag}\n              {detail}")
 
     swept = sweep_transcripts(known_before)

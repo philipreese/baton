@@ -2,6 +2,7 @@ using System.Globalization;
 using System.Text.Json;
 using System.Text.Json.Serialization;
 using Baton.Memory;
+using Baton.Status;
 
 namespace Baton.Cli;
 
@@ -55,11 +56,26 @@ public static class MemoryAuditCommand
     /// A vendor's own config directory is deliberately not routed through <c>BatonPaths</c>, so there
     /// is no environment override to point this somewhere else with.
     /// </param>
+    /// <param name="userHomeOverride">
+    /// Test seam for the third-party vendor roots (#1852 phase A2) — production callers always use
+    /// <see cref="MemoryRootInventory.DefaultUserHome"/>. Separate from
+    /// <paramref name="claudeHomeOverride"/> because the two populations hang off different roots and
+    /// a fixture that moved one would otherwise silently move the other.
+    /// </param>
+    /// <param name="batonRootOverride">
+    /// Test seam for the Baton-managed Codex store, which lives under <c>BatonPaths.Root</c> rather
+    /// than under the user profile. <b>A fixture that overrides the user home and not this one still
+    /// reads the operator's real <c>~/.baton</c></b> — the two are genuinely independent directories
+    /// (<c>BATON_HOME</c> moves one and not the other), so they cannot share a seam; a test wanting a
+    /// hermetic scan passes both.
+    /// </param>
     public static async Task<int> ExecuteAsync(
         MemoryAuditOptions options,
         TextWriter output,
         string? claudeHomeOverride = null,
-        CancellationToken cancellationToken = default)
+        CancellationToken cancellationToken = default,
+        string? userHomeOverride = null,
+        string? batonRootOverride = null)
     {
         ArgumentNullException.ThrowIfNull(options);
         ArgumentNullException.ThrowIfNull(output);
@@ -86,15 +102,24 @@ public static class MemoryAuditCommand
 
         var report = MemoryAuditReport.Build(resolutions, MemorySubjectVocabulary.Default);
 
+        // Two bases, because they are two different directories: the vendor homes hang off the user
+        // profile, and the Baton-managed Codex store hangs off BatonPaths.Root, which BATON_HOME can
+        // point somewhere else entirely.
+        var userHome = userHomeOverride ?? MemoryRootInventory.DefaultUserHome;
+        var vendorRoots = MemoryRootInventory.ScanVendorRoots(
+            userHome, batonRootOverride ?? BatonPaths.Root);
+
         if (options.Format == MemoryAuditOutputFormat.Json)
         {
             output.WriteLine(JsonSerializer.Serialize(
-                new MemoryAuditJsonView(claudeHome, report.Roots, report.Findings, report.Counts),
+                new MemoryAuditJsonView(
+                    claudeHome, userHome, report.Roots, report.Findings, report.Counts, vendorRoots),
                 ViewSerializerOptions));
             return 0;
         }
 
         WriteText(output, claudeHome, report);
+        WriteVendorRoots(output, vendorRoots);
         return 0;
     }
 
@@ -130,14 +155,22 @@ public static class MemoryAuditCommand
     }
 
     /// <summary>
-    /// The JSON contract: the report plus the root it was taken over, so a stored report says which
-    /// machine's Claude home produced it rather than leaving that to the reader's assumption.
+    /// The JSON contract: the report plus the two roots it was taken over, so a stored report says
+    /// which machine's homes produced it rather than leaving that to the reader's assumption.
     /// </summary>
+    /// <remarks>
+    /// <c>vendorRoots</c> is an additive array (#1852 phase A2) and is deliberately NOT merged into
+    /// <c>roots</c>, nor counted in <c>counts</c>: those describe repository-keyed Claude roots and
+    /// every finding kind in them is a statement about a repository mapping that a per-machine vendor
+    /// root has no basis for. <see cref="MemoryRootInventory.ScanVendorRoots"/>'s remarks carry why.
+    /// </remarks>
     private sealed record MemoryAuditJsonView(
         string ClaudeHome,
+        string UserHome,
         IReadOnlyList<MemoryRootRow> Roots,
         IReadOnlyList<MemoryFinding> Findings,
-        MemoryAuditCounts Counts);
+        MemoryAuditCounts Counts,
+        IReadOnlyList<VendorMemoryRoot> VendorRoots);
 
     private static void WriteText(TextWriter output, string claudeHome, MemoryAuditReport report)
     {
@@ -187,6 +220,36 @@ public static class MemoryAuditCommand
             {
                 output.WriteLine($"    candidates: {string.Join("  |  ", candidates)}");
             }
+        }
+    }
+
+    /// <summary>
+    /// The non-Claude roots, printed under their own heading and with no findings attached — this
+    /// half of the report is an inventory only. Absent, empty and populated each print differently
+    /// (<see cref="VendorMemoryPresence"/> says why), and a family whose files were counted rather
+    /// than digested says so on its own line rather than leaving a reader to read an empty file list
+    /// as an empty directory.
+    /// </summary>
+    private static void WriteVendorRoots(TextWriter output, IReadOnlyList<VendorMemoryRoot> roots)
+    {
+        output.WriteLine();
+        output.WriteLine(
+            "Non-Claude memory roots (#1852 phase A2) -- INVENTORY ONLY. No finding is attached to " +
+            "these: they are per-machine, so they map to no repository and the finding kinds above " +
+            "would say nothing about them. Path, size, mtime and SHA-256 only, as above.");
+
+        foreach (var root in roots)
+        {
+            output.WriteLine();
+            output.WriteLine($"  {root.DirectoryPath}");
+            output.WriteLine(
+                $"    family={root.Family} vendor={root.SourceVendor} " +
+                $"scope={MemoryJsonNames.Of(root.SourceScope)} " +
+                $"presence={MemoryJsonNames.Of(root.Presence)}");
+            output.WriteLine(
+                $"    files={root.FileCount} bytes={root.TotalBytes.ToString("N0", CultureInfo.InvariantCulture)}" +
+                (root.NewestModifiedUtc is { } newest ? $" newest={newest:O}" : " newest=(none)") +
+                (root.Inventoried ? string.Empty : "  [counted only -- no file here was opened]"));
         }
     }
 }
