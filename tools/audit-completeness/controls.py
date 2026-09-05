@@ -491,6 +491,10 @@ def _recordonce_ignores_exclusion_reason():
 
         replacing(mod, "main", buggy_main)
 
+    with _loading_recordonce_as(omit_del_block):
+        yield
+
+
 AGY_TOOLS_CLASSIFIED = "the agy.tools-classified sentinel check discriminates on unknown or multiply-classified tools"
 
 
