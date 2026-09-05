@@ -1,5 +1,6 @@
 using Baton.Cli.Tests.TestSupport;
 using Baton.Domain;
+using Baton.Runway;
 using Baton.Status;
 using Baton.Vendors;
 

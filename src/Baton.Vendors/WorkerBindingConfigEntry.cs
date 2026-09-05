@@ -1,4 +1,5 @@
 using Baton.Domain;
+using Baton.Runway;
 
 namespace Baton.Vendors;
 
@@ -196,7 +197,11 @@ public sealed record WorkerBindingConfigEntry(
     // bindings.json (baton run/resume/decide) that omits this must not be able to spawn.
     bool AllowsSubagents = false,
     FallbackBinding? FallbackOnExhaustion = null,
-    RunwayOverride? RunwayOverride = null);
+    RunwayOverride? RunwayOverride = null,
+    // #1896, stamped on every entry at dispatch rather than only on an override. What it holds, why it
+    // sits beside RunwayOverride instead of inside it, and why the type lives in the engine layer: its
+    // own remarks (Baton.Runway.RunwayAdmission).
+    RunwayAdmission? RunwayAdmission = null);
 
 /// <summary>
 /// #1848: the audit record a <c>--override-runway "&lt;reason&gt;"</c> dispatch leaves on the room's

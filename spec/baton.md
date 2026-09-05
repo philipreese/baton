@@ -3629,7 +3629,10 @@ everything below — it is how the counters are measured.
 
 **Hold new admissions; never arrest for fleet reasons** (operator ruling, 2026-09-04). A dispatch that
 would start new vendor spend is refused before the room is provisioned; work already running always
-finishes. This gate arrests nothing, throttles nothing mid-flight, and reserves nothing across rooms.
+finishes. This gate arrests nothing and throttles nothing mid-flight. It **does** reserve headroom
+across concurrent rooms since #1896 — see "Reserving headroom across concurrent dispatches" below;
+reserving refuses a *new* admission, which is the same thing this ruling already permits, and touches
+nothing in flight.
 
 **Which entry points consult it.** `baton dispatch` from cold, per distinct adapter it would spawn on
 — and nothing else:
@@ -3684,9 +3687,67 @@ nothing to bypass and no decision its reason would annotate.
 
 **Without the flag, a Hold exits non-zero** (`ValidationRefused`, the same code every other pre-run
 refusal uses), printing the counters and the exact flag to use, once. **No flow event is emitted for
-any of the three decisions**: a Hold refuses before the room's journal exists, so there is no ledger to
-write to. All three surface as a stdout status line, plus the durable `bindings.json` record for an
-override.
+any decision**: a Hold refuses before the room's journal exists, so there is no *room* ledger to write
+to. What every decision does get, since #1896, is a row in the fleet-wide admission ledger below.
+
+### Reserving headroom across concurrent dispatches (#1896) — shipped
+
+**Every evaluation is recorded**, admitted or refused, as one append-only JSONL row in
+`BatonPaths.RunwayAdmissionLedgerFile` (`{BatonPaths.Root}/fleet/runway-admissions.jsonl`) — vendor,
+the counters the gate saw, the thresholds in force, the outstanding reservations, the role's estimated
+burn, the decision (`admitted` / `held` / `held-overridden` / `unmeasured`), which arm decided
+(`counters` / `reservation` / `unmeasured`), the room key, and the timestamp. Fleet-wide, not
+per-repository — `BatonPaths.RunwayAdmissionLedgerFile`'s own doc says why. It wraps the same
+`JsonLinesLedger<T>` the burn and cost ledgers do, under its own lock name, and **has no dedupe key**:
+every evaluation is its own fact, and collapsing two of them would erase the very concurrency this file
+exists to measure. Absent-safe by field and tolerant of unparseable lines, so an older reader loses a
+field rather than the file. The operator direction of 2026-09-05 is what this is for: *capture first,
+decide later, and never hard-wire a policy that should be dynamic.*
+
+**Reserving and recording are one critical section.** N dispatches fanned out back-to-back against one
+persisted snapshot reading 84 % all admitted before this, because nothing between rooms reserved
+headroom. Two `baton dispatch` invocations are two processes, so reading the ledger, computing what is
+outstanding, deciding, and appending the row all happen inside ONE `MutexGuardedFileLock` acquisition
+(`RunwayAdmissionLedgerStore.ReserveAndRecordAsync`) — a read-then-append with two acquisitions would
+let both admit, which is the race itself. Anything slow the decision needs, the cost-ledger read behind
+a burn estimate included, happens before the lock is taken, because that body must stay synchronous.
+
+**The unit is percentage points of the gated window**, the same unit the thresholds are in. A dispatch
+is held when *outstanding + this one's estimate* exceeds the headroom the counters left — the distance
+to the nearer of the two thresholds, computed by `RunwayGate` itself because only its window-name table
+knows which counter is which. One estimate is applied to each window's own headroom, which **treats a
+point as fungible between the weekly and the five-hour window and it is not**; that approximation is
+stated on `RunwayBurnEstimate` and is what the recorded rows exist to correct.
+
+**Nothing tracks a reservation but the ledger itself**, which makes the arithmetic approximate near a
+harvest boundary. `RunwayAdmissionLedgerStore`'s own remarks state the rule and what it costs; the
+ruling here is only that a `held` row reserves nothing (that dispatch never ran) while an `admitted` or
+`held-overridden` one does.
+
+**The arithmetic is a pluggable policy, never a constant.** `IRunwayReservationPolicy`, selected by
+`DaemonSettings.RunwayHold.ReservationPolicy` through `RunwayReservationPolicies.Resolve` — fleet-wide
+only, because two vendors' reservations priced in different units would not be comparable. Three ship:
+`ledger-median` (the default, which uses per-role cost-ledger evidence once there is enough of it),
+`flat`, and `off` — which estimates zero, so nothing is ever held by this arm while the recording half
+keeps running. **The anchor, the row threshold, and how the ledger is consulted are declared on
+`LedgerMedianRunwayReservationPolicy` and nowhere else** — cite the type, do not transcribe the numbers.
+An unrecognised token resolves to the default rather than disabling the gate, the same posture an
+out-of-range threshold takes.
+
+**Two states the reservation arm never touches**, both fail-safe in the same direction: a Hold the
+counters already took, and an `unmeasured` vendor. Only an Admit taken on readable counters can be
+converted to a Hold here. Holding a vendor Baton has never been able to read would gate work the
+counters say nothing about and would make #1923's bootstrap hole worse rather than better. The ledger
+itself **fails open**, the posture the burn and cost ledgers already take: a write that throws is logged
+on stderr and swallowed, and the dispatch proceeds on the counters' own verdict with nothing reserved.
+
+**Surfacing.** Every binding carries `"RunwayAdmission"` on the room's `bindings.json` — PascalCase, for
+the reason `RunwayOverride` is, and beside that record rather than folded into it (`RunwayAdmission`'s
+own remarks say why). `baton status` prints it and carries it on `--json` as `runway`; `fleet_status`
+and the daemon's fleet projection carry the same `RunwayAdmissionView` under the same `runway` key,
+absent-safe, so a room dispatched before #1896 and the glass rendering it are unchanged. **A refused
+dispatch provisions no room**, so no room-scoped surface can ever show a `held` decision — the refusals
+live only in the admission ledger, which is what that file is for.
 
 ### The burn ledger — shipped (#1570)
 

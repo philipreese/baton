@@ -4,6 +4,7 @@ using Baton.Artifacts;
 using Baton.Domain;
 using Baton.Outcomes;
 using Baton.Projection;
+using Baton.Runway;
 using Baton.Status;
 using Baton.Store;
 using Baton.Templates;
@@ -158,6 +159,15 @@ public static class StatusCommand
                 }
             }
 
+            // #1896: the room's own admission record, off the same bindings.json --follow already
+            // reads below. One read, both renderings, and fail-open like every other display read
+            // here — a room with no bindings.json (or one this build cannot parse) simply has no
+            // runway line, exactly as every room dispatched before #1896 does.
+            var runway = RunwayAdmissionView.From(
+                (await RoomAdapterLookup.TryLoadBindingsAsync(options.RoomDirectoryPath, cancellationToken)
+                    .ConfigureAwait(false))
+                .Values.Select(entry => entry.RunwayAdmission).FirstOrDefault(admission => admission is not null));
+
             if (options.Json)
             {
                 // #1356 point 1: the SAME state just projected above, not a second read of the
@@ -166,12 +176,13 @@ public static class StatusCommand
                 var view = WorkflowStatusProjector.Project(
                     state, snapshot, options.RoomDirectoryPath, entries, WorkerAdapterRegistry.Default, arrestLedger,
                     arrestLedgerUnavailableReason);
-                output.WriteLine(JsonSerializer.Serialize(view));
+                output.WriteLine(JsonSerializer.Serialize(view with { Runway = runway }));
                 return;
             }
 
             PrintState(output, state, logPath, events, entries, options.RoomDirectoryPath);
             PrintArrestLedger(output, arrestLedger, arrestLedgerUnavailableReason);
+            PrintRunway(output, runway);
 
             var streamOffsets = new Dictionary<string, long>(StringComparer.Ordinal);
             var lineAssemblers = new Dictionary<string, StreamLineAssembler>(StringComparer.Ordinal);
@@ -621,6 +632,50 @@ public static class StatusCommand
     /// <see cref="Baton.Status.WorkflowStatusView.ArrestLedgerUnavailableReason"/> rather than
     /// collapsing to the same absent <c>Arrests</c> a clean empty ledger produces.
     /// </summary>
+    /// <summary>
+    /// The text rendering of #1896's <see cref="RunwayAdmission"/> (its own remarks are the register).
+    /// Silent for a room carrying none — the same "absent means nothing to say" posture
+    /// <see cref="PrintArrestLedger"/> takes. The fleet-wide record, refusals included, is
+    /// <see cref="BatonPaths.RunwayAdmissionLedgerFile"/>.
+    /// </summary>
+    private static void PrintRunway(TextWriter output, RunwayAdmissionView? runway)
+    {
+        if (runway is null)
+        {
+            return;
+        }
+
+        var because = runway.Reason is { Length: > 0 } reason ? $" — {reason}" : string.Empty;
+        output.WriteLine($"Runway ({runway.Vendor}): {runway.Decision} by {runway.DecidedBy}{because}");
+
+        if (runway.Counters is { Count: > 0 } counters)
+        {
+            var rendered = counters.Select(c => c.PercentUsed is { } pct ? $"{c.Window} {pct}%" : $"{c.Window} unknown");
+            output.WriteLine($"  Counters: {string.Join(", ", rendered)}");
+        }
+
+        if (runway.WeekHoldPct is { } week && runway.SessionHoldPct is { } session)
+        {
+            output.WriteLine($"  Thresholds: week {week}%, session {session}%");
+        }
+
+        // One line, and only when the reservation arm actually ran: an admission taken with no
+        // readable counters has no headroom to report and reserved nothing against it.
+        if (runway.HeadroomPoints is { } headroom)
+        {
+            var estimate = runway.EstimatedBurnPoints is { } points
+                ? $", estimated {Points(points)} for this room ({runway.EstimateSource})"
+                : string.Empty;
+            output.WriteLine(
+                $"  Headroom: {Points(headroom)} points, "
+                + $"{Points(runway.OutstandingReservationPoints ?? 0)} outstanding{estimate}");
+        }
+    }
+
+    /// <summary>Invariant, two decimals at most — the same rendering the ledger's own refusal text uses.</summary>
+    private static string Points(double value) =>
+        value.ToString("0.##", System.Globalization.CultureInfo.InvariantCulture);
+
     private static void PrintArrestLedger(TextWriter output, IReadOnlyList<ArrestLedgerEntry> arrestLedger, string? unavailableReason = null)
     {
         if (unavailableReason is not null)

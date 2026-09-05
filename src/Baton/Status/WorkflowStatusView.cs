@@ -211,7 +211,14 @@ public sealed record WorkflowStatusView(
     // this null.
     [property: JsonPropertyName("arrestLedgerUnavailableReason")]
     [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
-    string? ArrestLedgerUnavailableReason = null);
+    string? ArrestLedgerUnavailableReason = null,
+    // The wire projection of the room's Baton.Runway.RunwayAdmission (#1896). NOT populated
+    // by WorkflowStatusProjector: it comes off bindings.json, which this layer has no parser for, so
+    // `baton status` sets it with a `with` expression after projecting and every other producer
+    // (TerminalSentinelWriter's frozen terminal.json included) leaves it null.
+    [property: JsonPropertyName("runway")]
+    [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    Baton.Runway.RunwayAdmissionView? Runway = null);
 
 /// <summary>
 /// #1530: the wire shape for one <see cref="ArrestLedgerEntry"/> — plain strings throughout, the

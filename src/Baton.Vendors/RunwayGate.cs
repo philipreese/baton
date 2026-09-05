@@ -1,3 +1,5 @@
+using Baton.Runway;
+
 namespace Baton.Vendors;
 
 /// <summary>Whether the gate lets a new dispatch in (#1848).</summary>
@@ -11,23 +13,29 @@ public enum RunwayDisposition
 }
 
 /// <summary>
-/// One vendor-reported counter the decision was taken against — the window's own name as the vendor
-/// spells it (<see cref="VendorUsageWindow.Name"/>) and its percent USED, or null when the vendor
-/// reported no number for it. Carried onto the refusal message and onto the room record so an
-/// override is auditable against what was actually on screen when it was taken.
-/// </summary>
-public sealed record RunwayCounter(string Window, int? PercentUsed);
-
-/// <summary>
 /// One vendor's admission decision (#1848). <see cref="Reason"/> is present for every
 /// <see cref="RunwayDisposition.Hold"/> and for the one Admit that is not a measurement —
 /// <see cref="RunwayGate.UnmeasuredReason"/>, a vendor with no usage source at all.
 /// </summary>
+/// <param name="HeadroomPoints">
+/// #1896: percentage points left before the NEARER of the two thresholds bites — the minimum of
+/// (weekHoldPct − week%) and (sessionHoldPct − session%). Computed here rather than by the caller
+/// because only this type's window-name table knows which counter is which. <b>Present only on an Admit
+/// taken against readable counters</b>: a Hold has no headroom to report, and an unmeasured vendor has no
+/// counters at all. That absence is what confines the reservation arm to the one case it is safe in.
+/// </param>
+/// <param name="SnapshotHarvestedAt">
+/// #1896: when the snapshot this decision rests on was harvested, or null when there was none. The
+/// reservation arm reconciles against this instant — spend recorded before it is already in the counters
+/// — so it is carried on the decision rather than re-read from disk by the caller.
+/// </param>
 public sealed record RunwayDecision(
     string Vendor,
     RunwayDisposition Disposition,
     string? Reason,
-    IReadOnlyList<RunwayCounter> Counters)
+    IReadOnlyList<RunwayCounter> Counters,
+    double? HeadroomPoints = null,
+    DateTimeOffset? SnapshotHarvestedAt = null)
 {
     public bool IsHold => Disposition == RunwayDisposition.Hold;
 
@@ -156,7 +164,8 @@ public static class RunwayGate
                 // on, and a comma decimal separator is not what a message contract should turn on.
                 $"the usage snapshot is {Hours(age)}h old (limit {Hours(thresholds.EffectiveMaxSnapshotAge)}h) — "
                 + "a stale counter is a lower bound on today's usage, not evidence of headroom",
-                Counters(snapshot, names));
+                Counters(snapshot, names),
+                SnapshotHarvestedAt: snapshot.HarvestedAt);
         }
 
         var week = Find(snapshot, names.Week);
@@ -170,7 +179,8 @@ public static class RunwayGate
                 vendor,
                 RunwayDisposition.Hold,
                 $"the harvested snapshot carries no '{missing}' window — the vendor's report was not readable",
-                counters);
+                counters,
+                SnapshotHarvestedAt: snapshot.HarvestedAt);
         }
 
         if (week.PercentUsed is not { } weekPct || session.PercentUsed is not { } sessionPct)
@@ -179,7 +189,8 @@ public static class RunwayGate
                 vendor,
                 RunwayDisposition.Hold,
                 "the harvested snapshot carries a window with no percentage — the vendor's report was not readable",
-                counters);
+                counters,
+                SnapshotHarvestedAt: snapshot.HarvestedAt);
         }
 
         if (weekPct >= thresholds.WeekHoldPct)
@@ -188,7 +199,8 @@ public static class RunwayGate
                 vendor,
                 RunwayDisposition.Hold,
                 $"'{names.Week}' is at {weekPct}% (holds at {thresholds.WeekHoldPct}%)",
-                counters);
+                counters,
+                SnapshotHarvestedAt: snapshot.HarvestedAt);
         }
 
         if (sessionPct >= thresholds.SessionHoldPct)
@@ -197,10 +209,17 @@ public static class RunwayGate
                 vendor,
                 RunwayDisposition.Hold,
                 $"'{names.Session}' is at {sessionPct}% (holds at {thresholds.SessionHoldPct}%)",
-                counters);
+                counters,
+                SnapshotHarvestedAt: snapshot.HarvestedAt);
         }
 
-        return new RunwayDecision(vendor, RunwayDisposition.Admit, Reason: null, counters);
+        return new RunwayDecision(
+            vendor,
+            RunwayDisposition.Admit,
+            Reason: null,
+            counters,
+            HeadroomPoints: Math.Min(thresholds.WeekHoldPct - weekPct, thresholds.SessionHoldPct - sessionPct),
+            SnapshotHarvestedAt: snapshot.HarvestedAt);
     }
 
     private static string Hours(TimeSpan span) =>
