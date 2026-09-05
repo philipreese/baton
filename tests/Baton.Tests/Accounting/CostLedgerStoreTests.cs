@@ -197,10 +197,30 @@ public sealed class CostLedgerStoreTests
             Assert.Equal(PlanFactorTable.Default.Id, row.PlanFactorTableId);
             Assert.Equal(PlanFactorTable.Default.Version, row.PlanFactorTableVersion);
 
-            // Phase-A reserved fields: named in the schema, no writer yet.
-            Assert.Null(row.Effort);
+            // #1901 C1: issue/pr/diff shape come from the settle site's workspace probe, which this
+            // call supplies nothing for -- so the ABSENT polarity of every one of them, in one place.
             Assert.Null(row.Issue);
             Assert.Null(row.PullRequest);
+            Assert.Null(row.FilesChanged);
+            Assert.Null(row.Additions);
+            Assert.Null(row.Deletions);
+            Assert.Null(row.TestFilesChanged);
+
+            // #1901 C1: no verdict.json in this execution's artifact directory, so all five verdict
+            // fields are absent -- including the three counts, which are never 0-for-missing.
+            Assert.Null(row.ReviewedRef);
+            Assert.Null(row.ReviewedPr);
+            Assert.Null(row.ReviewedHead);
+            Assert.Null(row.FindingsHigh);
+            Assert.Null(row.FindingsMedium);
+            Assert.Null(row.FindingsLow);
+
+            // #1901 C1: a resolution is a correcting row's field, never an execution row's.
+            Assert.Null(row.Resolution);
+            Assert.Null(row.ResolutionReason);
+
+            // Reserved fields: named in the schema, no writer yet.
+            Assert.Null(row.Effort);
             Assert.Null(row.Attempt);
             Assert.Null(row.Raw);
             Assert.Null(row.ModelEchoed);
@@ -1084,5 +1104,370 @@ public sealed class CostLedgerStoreTests
         {
             DirectoryCleanup.DeleteRecursively(room);
         }
+    }
+
+    /// <summary>
+    /// #1901 C1 items 1 and 3, both polarities in one place: the settle site's resolved workspace facts
+    /// land on the row for the worker they were resolved for, and a row whose worker has no entry
+    /// carries none of them — absent, not zero, and not present in the serialized JSON at all.
+    /// </summary>
+    [Fact]
+    public void The_issue_pr_and_diff_shape_land_on_the_row_for_the_worker_they_were_resolved_for()
+    {
+        var room = NewRoom();
+        try
+        {
+            var executionId = new ExecutionId("exec-delivery");
+            WriteCapturedStream(room, executionId, ClaudeTerminalLine);
+            var settled = SettledExecution(executionId, "claude", "claude-opus-5", Start);
+
+            var stamped = Assert.Single(CostLedgerStore.BuildEntries(
+                settled, room, Repository,
+                deliveryByWorker: new Dictionary<string, WorkspaceDelivery>(StringComparer.Ordinal)
+                {
+                    ["implement"] = new(
+                        Issue: "1901", PullRequest: "1907",
+                        FilesChanged: 6, Additions: 412, Deletions: 33, TestFilesChanged: 2),
+                }));
+
+            Assert.Equal("1901", stamped.Issue);
+            Assert.Equal("1907", stamped.PullRequest);
+            Assert.Equal(6, stamped.FilesChanged);
+            Assert.Equal(412, stamped.Additions);
+            Assert.Equal(33, stamped.Deletions);
+            Assert.Equal(2, stamped.TestFilesChanged);
+
+            // The discriminating control: the SAME events with the facts keyed on a different worker.
+            // Without it, a writer that ignored the key entirely would pass the arm above.
+            var otherWorker = Assert.Single(CostLedgerStore.BuildEntries(
+                settled, room, Repository,
+                deliveryByWorker: new Dictionary<string, WorkspaceDelivery>(StringComparer.Ordinal)
+                {
+                    ["review"] = new(Issue: "1901", PullRequest: "1907", FilesChanged: 6),
+                }));
+
+            Assert.Null(otherWorker.Issue);
+            Assert.Null(otherWorker.PullRequest);
+            Assert.Null(otherWorker.FilesChanged);
+
+            var json = JsonSerializer.Serialize(otherWorker);
+            Assert.DoesNotContain("\"issue\"", json, StringComparison.Ordinal);
+            Assert.DoesNotContain("\"pr\"", json, StringComparison.Ordinal);
+            Assert.DoesNotContain("filesChanged", json, StringComparison.Ordinal);
+        }
+        finally
+        {
+            DirectoryCleanup.DeleteRecursively(room);
+        }
+    }
+
+    /// <summary>
+    /// #1901 C1 item 3's absence polarity, stated separately from the presence arm above because it is
+    /// the one an operator will actually meet: an execution that pushed nothing has no diff shape at
+    /// all, which the settle site spells as a <see cref="WorkspaceDelivery"/> carrying only the issue.
+    /// </summary>
+    [Fact]
+    public void An_execution_that_pushed_nothing_carries_no_diff_shape_while_still_carrying_its_issue()
+    {
+        var room = NewRoom();
+        try
+        {
+            var executionId = new ExecutionId("exec-unpushed");
+            WriteCapturedStream(room, executionId, ClaudeTerminalLine);
+
+            var row = Assert.Single(CostLedgerStore.BuildEntries(
+                SettledExecution(executionId, "claude", "claude-opus-5", Start), room, Repository,
+                deliveryByWorker: new Dictionary<string, WorkspaceDelivery>(StringComparer.Ordinal)
+                {
+                    ["implement"] = new(Issue: "1901"),
+                }));
+
+            Assert.Equal("1901", row.Issue);
+            Assert.Null(row.PullRequest);
+            Assert.Null(row.FilesChanged);
+            Assert.Null(row.Additions);
+            Assert.Null(row.Deletions);
+            Assert.Null(row.TestFilesChanged);
+        }
+        finally
+        {
+            DirectoryCleanup.DeleteRecursively(room);
+        }
+    }
+
+    /// <summary>
+    /// #1901 C1 item 2: a review execution's own <c>verdict.json</c> becomes five fields on its row.
+    /// The fixture deliberately carries a high and a low finding but NO medium one, so the
+    /// <c>0</c>-is-a-measurement rule is asserted rather than assumed — a writer that omitted an empty
+    /// severity would fail here, and one that omitted all three when the file is missing is what the
+    /// next test pins.
+    /// </summary>
+    [Fact]
+    public void A_review_rows_verdict_fields_are_counted_from_the_verdict_the_execution_wrote()
+    {
+        var room = NewRoom();
+        try
+        {
+            var executionId = new ExecutionId("exec-review");
+            WriteCapturedStream(room, executionId, ClaudeTerminalLine);
+            WriteVerdict(room, executionId, """
+                {
+                  "reviewedRef": "#1907",
+                  "summary": "two real ones",
+                  "findings": [
+                    {"severity":"high","claim":"absence read as zero","status":"confirmed"},
+                    {"severity":"low","claim":"a stale comment","status":"unverified"}
+                  ]
+                }
+                """);
+
+            var row = Assert.Single(CostLedgerStore.BuildEntries(
+                SettledExecution(executionId, "claude", "claude-opus-5", Start, worker: "review"), room, Repository));
+
+            Assert.Equal("#1907", row.ReviewedRef);
+            Assert.Equal("1907", row.ReviewedPr);
+            Assert.Null(row.ReviewedHead);
+            Assert.Equal(1, row.FindingsHigh);
+            Assert.Equal(0, row.FindingsMedium);
+            Assert.Equal(1, row.FindingsLow);
+        }
+        finally
+        {
+            DirectoryCleanup.DeleteRecursively(room);
+        }
+    }
+
+    /// <summary>
+    /// #1901 C1 item 2, the ref-shape polarity: a verdict anchored to a commit records
+    /// <c>reviewedHead</c> and no <c>reviewedPr</c>, and a verdict anchored to a branch name records
+    /// neither while still keeping the ref verbatim. Both arms share one fixture shape, so a parser
+    /// that matched too eagerly fails on the arm it should have refused.
+    /// </summary>
+    [Theory]
+    [InlineData("cb6a1579cb6a1579cb6a1579cb6a1579cb6a1579", null, "cb6a1579cb6a1579cb6a1579cb6a1579cb6a1579")]
+    [InlineData("https://github.com/philipreese/baton/pull/1907", "1907", null)]
+    [InlineData("1907", "1907", null)]
+    [InlineData("1901-lane", null, null)]
+    // The overlap SplitReviewedRef's own doc names and states the cost of: nothing in this ref decides
+    // which of the two shapes it is, so neither field is recorded rather than both.
+    [InlineData("1234567", null, null)]
+    // ...and the control for it, one character either side of the ambiguity: 6 digits is too short to
+    // be a SHA (git's own abbreviation floor), and a `#` prefix cannot be one at all.
+    [InlineData("123456", "123456", null)]
+    [InlineData("#1234567", "1234567", null)]
+    [InlineData("1234abc", null, "1234abc")]
+    public void A_verdicts_reviewed_ref_is_split_into_a_pr_or_a_head_only_when_it_positively_parses_as_one(
+        string reviewedRef, string? expectedPr, string? expectedHead)
+    {
+        var room = NewRoom();
+        try
+        {
+            var executionId = new ExecutionId("exec-ref-shape");
+            WriteCapturedStream(room, executionId, ClaudeTerminalLine);
+            WriteVerdict(room, executionId, $$"""
+                {"reviewedRef": "{{reviewedRef}}", "findings": []}
+                """);
+
+            var row = Assert.Single(CostLedgerStore.BuildEntries(
+                SettledExecution(executionId, "claude", "claude-opus-5", Start, worker: "review"), room, Repository));
+
+            Assert.Equal(reviewedRef, row.ReviewedRef);
+            Assert.Equal(expectedPr, row.ReviewedPr);
+            Assert.Equal(expectedHead, row.ReviewedHead);
+
+            // An empty findings array is the reviewer looking and finding nothing -- three measured
+            // zeros, which is the whole reason these are absent rather than zero when there is no file.
+            Assert.Equal(0, row.FindingsHigh);
+            Assert.Equal(0, row.FindingsMedium);
+            Assert.Equal(0, row.FindingsLow);
+        }
+        finally
+        {
+            DirectoryCleanup.DeleteRecursively(room);
+        }
+    }
+
+    /// <summary>
+    /// #1901 C1 item 2: a <c>verdict.json</c> that does not satisfy <c>ReviewVerdictSchema</c> yields
+    /// NO verdict fields rather than partially-populated ones — the counts and the ref would otherwise
+    /// disagree with what every other reader of the same file sees.
+    /// </summary>
+    [Fact]
+    public void A_verdict_that_does_not_parse_leaves_every_verdict_field_absent()
+    {
+        var room = NewRoom();
+        try
+        {
+            var executionId = new ExecutionId("exec-bad-verdict");
+            WriteCapturedStream(room, executionId, ClaudeTerminalLine);
+
+            // Valid JSON, invalid verdict: `reviewedRef` is what the schema requires and this omits.
+            WriteVerdict(room, executionId, """{"findings": [{"severity":"high","claim":"x","status":"confirmed"}]}""");
+
+            var row = Assert.Single(CostLedgerStore.BuildEntries(
+                SettledExecution(executionId, "claude", "claude-opus-5", Start, worker: "review"), room, Repository));
+
+            Assert.Null(row.ReviewedRef);
+            Assert.Null(row.ReviewedPr);
+            Assert.Null(row.ReviewedHead);
+            Assert.Null(row.FindingsHigh);
+            Assert.Null(row.FindingsMedium);
+            Assert.Null(row.FindingsLow);
+        }
+        finally
+        {
+            DirectoryCleanup.DeleteRecursively(room);
+        }
+    }
+
+    /// <summary>
+    /// #1901 C1 item 4: a resolution is a CORRECTING row carrying the last execution row's identity and
+    /// none of its dimensions — history is never rewritten.
+    /// </summary>
+    [Fact]
+    public void A_resolution_row_copies_the_rooms_last_execution_rows_identity_and_none_of_its_spend()
+    {
+        var room = NewRoom();
+        try
+        {
+            var executionId = new ExecutionId("exec-resolved");
+            WriteCapturedStream(room, executionId, ClaudeTerminalLine);
+            var rows = CostLedgerStore.BuildEntries(
+                SettledExecution(executionId, "claude", "claude-opus-5", Start), room, Repository,
+                deliveryByWorker: new Dictionary<string, WorkspaceDelivery>(StringComparer.Ordinal)
+                {
+                    ["implement"] = new(Issue: "1901", PullRequest: "1907"),
+                });
+
+            var resolution = CostLedgerStore.BuildResolutionRow(
+                rows, BatonPaths.RecordKey(room), ConductorResolution.Close, "gates blocked on the build lock");
+
+            Assert.NotNull(resolution);
+            Assert.Equal(ConductorResolution.Close, resolution.Resolution);
+            Assert.Equal("gates blocked on the build lock", resolution.ResolutionReason);
+            Assert.Equal(BatonPaths.RecordKey(room), resolution.Room);
+            Assert.Equal("1901", resolution.Issue);
+            Assert.Equal("1907", resolution.PullRequest);
+            Assert.Equal("implement", resolution.Role);
+
+            // No spend on a correcting row -- spec/baton.md §7 states the reading that buys.
+            Assert.Null(resolution.TokensIn);
+            Assert.Null(resolution.TokensOut);
+            Assert.Null(resolution.WallClockMs);
+            Assert.Null(resolution.ApiEquivalentUsd);
+
+            // The settled row itself is untouched -- BuildResolutionRow returns a new row and rewrites
+            // nothing, which is the whole reason it is a separate row at all.
+            Assert.Null(Assert.Single(rows).Resolution);
+        }
+        finally
+        {
+            DirectoryCleanup.DeleteRecursively(room);
+        }
+    }
+
+    /// <summary>
+    /// #1901 C1 item 4, all three properties the suffixed execution id actually buys, asserted against
+    /// the real <see cref="CostLedgerStore.AppendAsync"/> dedupe rather than in the abstract: the
+    /// correcting row SURVIVES it (which the settled row's own id would not have), repeating the same
+    /// resolution adds no second copy, and a resolution of a DIFFERENT kind still lands. The third arm
+    /// is the one a kind-free suffix fails.
+    /// </summary>
+    [Fact]
+    public async Task A_resolution_row_survives_the_dedupe_repeats_idempotently_and_still_admits_a_different_kind()
+    {
+        var room = NewRoom();
+        var ledgerPath = NewLedgerPath();
+        try
+        {
+            var executionId = new ExecutionId("exec-resolved-twice");
+            WriteCapturedStream(room, executionId, ClaudeTerminalLine);
+            var rows = CostLedgerStore.BuildEntries(
+                SettledExecution(executionId, "claude", "claude-opus-5", Start), room, Repository);
+            await CostLedgerStore.AppendAsync(rows, ledgerPath, TestContext.Current.CancellationToken);
+
+            // The same resolution twice is idempotent; a DIFFERENT one afterwards must still land.
+            // `--close` against an already-rejected capture is a sequence ResolveCommand admits (#1877),
+            // and a kind-free suffix would dedupe this third call away -- leaving the ledger claiming
+            // `reject` forever, which is the silent swallow the suffix exists to prevent.
+            await ResolveAsync(ConductorResolution.Reject, "capture did not satisfy its outputs");
+            await ResolveAsync(ConductorResolution.Reject, "capture did not satisfy its outputs");
+            await ResolveAsync(ConductorResolution.Close, "and then closed by hand");
+
+            async Task ResolveAsync(ConductorResolution kind, string reason)
+            {
+                var existing = await CostLedgerStore.ReadAllAsync(ledgerPath, TestContext.Current.CancellationToken);
+                var resolution = CostLedgerStore.BuildResolutionRow(existing, BatonPaths.RecordKey(room), kind, reason);
+                Assert.NotNull(resolution);
+                await CostLedgerStore.AppendAsync([resolution], ledgerPath, TestContext.Current.CancellationToken);
+            }
+
+            var written = await CostLedgerStore.ReadAllAsync(ledgerPath, TestContext.Current.CancellationToken);
+            Assert.Equal(3, written.Count);
+            Assert.Equal("exec-resolved-twice", written[0].Execution);
+            Assert.Null(written[0].Resolution);
+
+            Assert.Equal(
+                "exec-resolved-twice" + CostLedgerStore.ResolutionExecutionSuffix(ConductorResolution.Reject),
+                written[1].Execution);
+            Assert.Equal(ConductorResolution.Reject, written[1].Resolution);
+
+            Assert.Equal(
+                "exec-resolved-twice" + CostLedgerStore.ResolutionExecutionSuffix(ConductorResolution.Close),
+                written[2].Execution);
+            Assert.Equal(ConductorResolution.Close, written[2].Resolution);
+            Assert.Equal("and then closed by hand", written[2].ResolutionReason);
+
+            // Every pass chained off the EXECUTION row, not off the correcting row already in the file
+            // (BuildResolutionRow skips rows carrying a resolution) -- so no id ever grew two suffixes.
+            Assert.All(written, row => Assert.DoesNotContain("resolution-reject#", row.Execution!, StringComparison.Ordinal));
+        }
+        finally
+        {
+            DirectoryCleanup.DeleteRecursively(room);
+            File.Delete(ledgerPath);
+        }
+    }
+
+    /// <summary>#1901 C1 item 4: with no settled row to correct, the builder refuses rather than minting a rootless one.</summary>
+    [Fact]
+    public void A_room_with_no_row_yet_produces_no_resolution_row()
+    {
+        var room = NewRoom();
+        try
+        {
+            Assert.Null(CostLedgerStore.BuildResolutionRow(
+                [], BatonPaths.RecordKey(room), ConductorResolution.Close, "nothing to correct"));
+
+            // And a ledger holding another room's rows is the discriminating control: without the room
+            // filter, this arm would return that room's row wearing this room's resolution.
+            var otherRoom = NewRoom();
+            var executionId = new ExecutionId("exec-elsewhere");
+            WriteCapturedStream(otherRoom, executionId, ClaudeTerminalLine);
+            try
+            {
+                var elsewhere = CostLedgerStore.BuildEntries(
+                    SettledExecution(executionId, "claude", "claude-opus-5", Start), otherRoom, Repository);
+                Assert.Null(CostLedgerStore.BuildResolutionRow(
+                    elsewhere, BatonPaths.RecordKey(room), ConductorResolution.Close, "nothing to correct"));
+            }
+            finally
+            {
+                DirectoryCleanup.DeleteRecursively(otherRoom);
+            }
+        }
+        finally
+        {
+            DirectoryCleanup.DeleteRecursively(room);
+        }
+    }
+
+    /// <summary>Writes a <c>verdict.json</c> into the same execution-scoped artifact directory the engine's own stamp (#1889) writes to.</summary>
+    private static void WriteVerdict(string roomDirectoryPath, ExecutionId executionId, string json)
+    {
+        var artifactsRoot = Path.Combine(roomDirectoryPath, ArtifactManager.ArtifactsDirectoryName);
+        var outputDirectory = ArtifactManager.ResolveOutputDirectory(artifactsRoot, executionId);
+        Directory.CreateDirectory(outputDirectory);
+        File.WriteAllText(Path.Combine(outputDirectory, CostLedgerStore.VerdictOutputName), json);
     }
 }

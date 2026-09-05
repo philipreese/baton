@@ -43,7 +43,9 @@ public static class LedgerCsv
         "peakBilledInWindow", "raw", "completeness", "completenessReason", "apiEquivalentUsd",
         "estimateStatus", "planMeterEstimateUsd", "planMeterEstimateStatus", "estimateReason",
         "priceCatalogId", "priceCatalogVersion", "planFactorTableId", "planFactorTableVersion",
-        "runwayOverrideReason",
+        "runwayOverrideReason", "filesChanged", "additions", "deletions", "testFilesChanged",
+        "reviewedRef", "reviewedPr", "reviewedHead", "findingsHigh", "findingsMedium", "findingsLow",
+        "resolution", "resolutionReason",
     ];
 
     public static void Write(TextWriter output, IReadOnlyList<CostLedgerEntry> rows)

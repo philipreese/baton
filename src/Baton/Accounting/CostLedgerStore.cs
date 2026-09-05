@@ -1,3 +1,4 @@
+using System.Text.RegularExpressions;
 using Baton.Artifacts;
 using Baton.Domain;
 using Baton.Status;
@@ -27,7 +28,7 @@ namespace Baton.Accounting;
 /// on stderr and swallow, never a reason a run that already reached Terminal reports as failed.
 /// </para>
 /// </remarks>
-public static class CostLedgerStore
+public static partial class CostLedgerStore
 {
     /// <summary>
     /// This ledger's shared store — <see cref="JsonLinesLedger{TEntry}"/>, whose own remarks state what
@@ -65,13 +66,21 @@ public static class CostLedgerStore
     /// <see cref="CostLedgerEntry.RunwayOverrideReason"/>'s own doc states what an absent value means
     /// and does not mean.
     /// </param>
+    /// <param name="deliveryByWorker">
+    /// #1901 C1: worker name to what that worker's WORKSPACE says about the work it delivered — issue,
+    /// PR, diff shape. Supplied by the settle site for the same two reasons
+    /// <paramref name="runwayOverrideReasonByWorker"/> is (<see cref="WorkspaceDelivery"/>'s own
+    /// remarks), null everywhere else. Absent entries leave the row's fields absent; nothing here
+    /// guesses one from another.
+    /// </param>
     public static IReadOnlyList<CostLedgerEntry> BuildEntries(
         IReadOnlyList<LogEntry> entries,
         string roomDirectoryPath,
         RepositoryIdentity? repository,
         PriceCatalog? catalog = null,
         PlanFactorTable? planFactors = null,
-        IReadOnlyDictionary<string, string>? runwayOverrideReasonByWorker = null)
+        IReadOnlyDictionary<string, string>? runwayOverrideReasonByWorker = null,
+        IReadOnlyDictionary<string, WorkspaceDelivery>? deliveryByWorker = null)
     {
         ArgumentNullException.ThrowIfNull(entries);
         ArgumentException.ThrowIfNullOrEmpty(roomDirectoryPath);
@@ -166,6 +175,20 @@ public static class CostLedgerStore
             var unavailableReason = usage.BilledReconciliationUnavailable;
             var completeness = ResolveCompleteness(unavailableReason, usage.BilledTokens);
 
+            // #1901 C1 item 1/3: the workspace facts the settle site resolved for THIS row's worker.
+            // Keyed on the worker name for the same reason the runway override is: bindings are
+            // per-worker, and a composed template's phases can sit in different workspaces.
+            var delivery = request?.Worker is { } deliveryWorker && deliveryByWorker is not null
+                && deliveryByWorker.TryGetValue(deliveryWorker, out var resolvedDelivery)
+                    ? resolvedDelivery
+                    : null;
+
+            // #1901 C1 item 2: read straight off this execution's own artifact directory. No injection
+            // needed and none wanted -- verdict.json is a file the engine already owns the path of
+            // (VerdictInstrumentStamp writes to the same one), so this reads the room it was handed
+            // rather than reaching anywhere new.
+            var verdict = ReadVerdictFacts(artifactsRootPath, executionId);
+
             result.Add(new CostLedgerEntry(
                 SourceKind: CostSourceKind.BatonExecution,
                 Repository: repository?.Value,
@@ -178,6 +201,8 @@ public static class CostLedgerStore
                 Model: binding.Model,
                 ModelsObserved: usage.ModelsObserved,
                 Outcome: outcome,
+                Issue: delivery?.Issue,
+                PullRequest: delivery?.PullRequest,
                 StartedAt: startedAt,
                 EndedAt: endedAt,
                 TokensIn: usage.TokensIn,
@@ -209,11 +234,196 @@ public static class CostLedgerStore
                 RunwayOverrideReason: request?.Worker is { } worker && runwayOverrideReasonByWorker is not null
                     && runwayOverrideReasonByWorker.TryGetValue(worker, out var runwayReason)
                         ? runwayReason
-                        : null));
+                        : null,
+                FilesChanged: delivery?.FilesChanged,
+                Additions: delivery?.Additions,
+                Deletions: delivery?.Deletions,
+                TestFilesChanged: delivery?.TestFilesChanged,
+                ReviewedRef: verdict?.ReviewedRef,
+                ReviewedPr: verdict?.ReviewedPr,
+                ReviewedHead: verdict?.ReviewedHead,
+                FindingsHigh: verdict?.High,
+                FindingsMedium: verdict?.Medium,
+                FindingsLow: verdict?.Low));
         }
 
         return result;
     }
+
+    /// <summary>
+    /// The five verdict-derived facts of one review row (#1901 C1 item 2). Internal and nullable as a
+    /// unit: they come from one file, so "no verdict" is one absence rather than five.
+    /// </summary>
+    internal readonly record struct VerdictFacts(
+        string ReviewedRef, string? ReviewedPr, string? ReviewedHead, int High, int Medium, int Low);
+
+    /// <summary>
+    /// The output name a verdict-producing role writes — the same literal
+    /// <c>Baton.Cli.VerdictInstrumentStamp.VerdictOutputName</c> stamps, kept as a constant here rather
+    /// than reached for across the project boundary (this layer cannot see <c>Baton.Cli</c>).
+    /// </summary>
+    internal const string VerdictOutputName = "verdict.json";
+
+    /// <summary>
+    /// This execution's <c>verdict.json</c> reduced to the row's fields, or <see langword="null"/> when
+    /// it wrote none — which is every non-review execution, so absence here is the overwhelmingly
+    /// common case rather than a failure.
+    /// <para>
+    /// <b>Parsed through <see cref="ReviewVerdictSchema.TryParse"/>, never through a second reader.</b>
+    /// A file that does not satisfy that one definition of "valid verdict" yields nothing at all rather
+    /// than a partially-populated row: the counts and the ref would then disagree with what every other
+    /// consumer of the same file sees. An unreadable file is the same absence — an accounting read
+    /// fails open, never past the settle site it was called from.
+    /// </para>
+    /// </summary>
+    private static VerdictFacts? ReadVerdictFacts(string artifactsRootPath, string executionId)
+    {
+        // ArtifactManager's own derivation, never a second spelling of the same path: it is what the
+        // engine used to CREATE this directory, so a rename there must reach this read too.
+        var verdictPath = Path.Combine(
+            ArtifactManager.ResolveOutputDirectory(artifactsRootPath, new ExecutionId(executionId)), VerdictOutputName);
+        if (!File.Exists(verdictPath))
+        {
+            return null;
+        }
+
+        byte[] bytes;
+        try
+        {
+            bytes = File.ReadAllBytes(verdictPath);
+        }
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
+        {
+            return null;
+        }
+
+        if (!ReviewVerdictSchema.TryParse(bytes, out var verdict, out _) || verdict is null)
+        {
+            return null;
+        }
+
+        var reviewedRef = verdict.ReviewedRef.Trim();
+        var (reviewedPr, reviewedHead) = SplitReviewedRef(reviewedRef);
+        return new VerdictFacts(
+            ReviewedRef: reviewedRef,
+            ReviewedPr: reviewedPr,
+            ReviewedHead: reviewedHead,
+            High: verdict.Findings.Count(f => f.Severity == ReviewFindingSeverity.High),
+            Medium: verdict.Findings.Count(f => f.Severity == ReviewFindingSeverity.Medium),
+            Low: verdict.Findings.Count(f => f.Severity == ReviewFindingSeverity.Low));
+    }
+
+    /// <summary>
+    /// <paramref name="reviewedRef"/> split into the PR it names and the commit it names — <b>at most
+    /// one of the two, never both</b>, which is what <see cref="CostLedgerEntry.ReviewedPr"/> and
+    /// <see cref="CostLedgerEntry.ReviewedHead"/> promise a reader.
+    /// <para>
+    /// A PR is a bare number, a <c>#</c>-prefixed one, or a <c>.../pull/&lt;n&gt;</c> URL as
+    /// <c>gh pr create</c> prints it. A commit is a bare hex SHA of 7–40 characters — git's own
+    /// abbreviation floor, without which a branch literally named <c>abc</c> would be recorded as a
+    /// commit.
+    /// </para>
+    /// <para>
+    /// <b>The two overlap, and an overlap yields NEITHER.</b> An all-digit string 7–40 characters long
+    /// (<c>1234567</c>) is both a well-formed PR number and a well-formed abbreviated SHA — roughly one
+    /// abbreviated SHA in 27 is all digits — and there is nothing in the ref itself that decides which
+    /// it is. Recording both would put a PR number that does not exist into a per-PR reading; picking
+    /// one would be the guess this whole method refuses. The unambiguous spellings are unaffected: a
+    /// <c>#</c> or a <c>/pull/</c> prefix cannot be a SHA, and a hex string containing any letter cannot
+    /// be a number. <see cref="CostLedgerEntry.ReviewedRef"/> keeps the text verbatim either way, so an
+    /// ambiguous ref loses nothing but the derived field it could not have earned.
+    /// </para>
+    /// </summary>
+    internal static (string? Pr, string? Head) SplitReviewedRef(string reviewedRef)
+    {
+        var prMatch = PullRequestReference().Match(reviewedRef);
+        var pr = prMatch.Success ? prMatch.Groups["n"].Value : null;
+        var head = CommitSha().IsMatch(reviewedRef) ? reviewedRef : null;
+
+        return pr is not null && head is not null ? (null, null) : (pr, head);
+    }
+
+    [GeneratedRegex(@"^(?:#|(?:.*/pull/))?(?<n>\d+)$", RegexOptions.CultureInvariant)]
+    private static partial Regex PullRequestReference();
+
+    [GeneratedRegex("^[0-9a-fA-F]{7,40}$", RegexOptions.CultureInvariant)]
+    private static partial Regex CommitSha();
+
+    /// <summary>
+    /// The correcting row a <c>baton resolve</c> appends to <paramref name="existingRows"/> for
+    /// <paramref name="recordedRoomKey"/> (#1901 C1 item 4), or <see langword="null"/> when that room
+    /// has no row to correct yet.
+    /// <para>
+    /// <b>spec/baton.md §7 is the record</b> — why this is a new row rather than a stamp on the one it
+    /// corrects, why the suffixed execution id below is load-bearing rather than cosmetic, and what a
+    /// resolution row costs a <c>LedgerRollup</c> reading, are stated there and not restated here.
+    /// </para>
+    /// <para>
+    /// The mechanics this method owns: which of the room's rows is copied (its LAST one that is not
+    /// itself a correcting row), which fields are copied from it and which are deliberately left off,
+    /// and the id <see cref="ResolutionExecutionSuffix"/> builds — which is what
+    /// <see cref="AppendAsync"/>'s dedupe on <see cref="CostLedgerEntry.Execution"/> then sees.
+    /// </para>
+    /// </summary>
+    /// <param name="existingRows">The ledger file's rows as already written — this method appends nothing itself.</param>
+    /// <param name="recordedRoomKey">A <see cref="BatonPaths.RecordKey"/>, matched with <see cref="BatonPaths.RecordKeyComparer"/>.</param>
+    public static CostLedgerEntry? BuildResolutionRow(
+        IReadOnlyList<CostLedgerEntry> existingRows,
+        string recordedRoomKey,
+        ConductorResolution resolution,
+        string? reason)
+    {
+        ArgumentNullException.ThrowIfNull(existingRows);
+        ArgumentException.ThrowIfNullOrEmpty(recordedRoomKey);
+
+        // Last in file order, and never another resolution row: two resolutions on one room must both
+        // describe the EXECUTION they followed, not chain off each other's stripped-down copy.
+        CostLedgerEntry? last = null;
+        foreach (var row in existingRows)
+        {
+            if (row.Resolution is null
+                && BatonPaths.RecordKeyComparer.Equals(row.Room ?? string.Empty, recordedRoomKey))
+            {
+                last = row;
+            }
+        }
+
+        if (last?.Execution is not { Length: > 0 } execution)
+        {
+            return null;
+        }
+
+        return new CostLedgerEntry(
+            SourceKind: last.SourceKind,
+            Repository: last.Repository,
+            Room: last.Room,
+            Workflow: last.Workflow,
+            Step: last.Step,
+            Execution: execution + ResolutionExecutionSuffix(resolution),
+            Role: last.Role,
+            Outcome: last.Outcome,
+            Issue: last.Issue,
+            PullRequest: last.PullRequest,
+            Resolution: resolution,
+            ResolutionReason: reason is { Length: > 0 } ? reason : null);
+    }
+
+    /// <summary>
+    /// What <see cref="BuildResolutionRow"/> appends to the settled execution's id. <c>#</c> cannot
+    /// occur in a <c>Guid</c>, which is what every <c>ExecutionId</c> is, so a suffixed id can never
+    /// collide with a real one.
+    /// <para>
+    /// <b>The KIND is part of the suffix, and that is the whole point of the parameter</b> — spec/baton.md
+    /// §7 states the sequence that makes it necessary and what a kind-free suffix would silently lose.
+    /// </para>
+    /// </summary>
+    public static string ResolutionExecutionSuffix(ConductorResolution resolution) => resolution switch
+    {
+        ConductorResolution.AcceptCapture => "#resolution-accept-capture",
+        ConductorResolution.Reject => "#resolution-reject",
+        ConductorResolution.Close => "#resolution-close",
+        _ => throw new ArgumentOutOfRangeException(nameof(resolution)),
+    };
 
     /// <summary>
     /// How much of an attempt a row accounts for, from the two things the stream reader reports about
