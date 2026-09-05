@@ -7,6 +7,19 @@ and `src/Baton.Vendors/CHANGELOG.md`, kept as history. New entries are prepended
 `vX.Y.Z`. See `release-please-config.json`. Everything below this line predates the split: the
 repo's single shared version through `0.14.0`.
 
+## [0.35.0](https://github.com/philipreese/baton/compare/v0.34.0...v0.35.0) (2026-09-05)
+
+
+### Features
+
+* **glass:** Read the daemon's projection file by default and keep the pusher's own derivation as the stale fallback ([#1905](https://github.com/philipreese/baton/issues/1905)) ([517382d](https://github.com/philipreese/baton/commit/517382d4863555c0c83ef504d1da9f05be547db8))
+
+
+### Bug Fixes
+
+* **glass:** Project a Codex execution's live tool calls, turns and billed tokens instead of a zero ([#1907](https://github.com/philipreese/baton/issues/1907)) ([2e140ca](https://github.com/philipreese/baton/commit/2e140ca8df753525232340ab2b785da283173b0f))
+* **review:** Stamp instruments on a redispatched review and drop the inherited verify paragraph ([#1906](https://github.com/philipreese/baton/issues/1906)) ([cb6a157](https://github.com/philipreese/baton/commit/cb6a1579d14c84ccdfd4121cd99fb3bb13509e86))
+
 ## [0.34.0](https://github.com/philipreese/baton/compare/v0.33.0...v0.34.0) (2026-09-05)
 
 
