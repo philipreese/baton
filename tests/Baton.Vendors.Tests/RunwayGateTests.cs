@@ -275,4 +275,44 @@ public class RunwayGateTests
             Now);
         Assert.Equal(RunwayDisposition.Hold, claudeDecision.Disposition);
     }
+
+    /// <summary>
+    /// #1926 re-review. The arm above changes adapter and provenance together, so it cannot tell an
+    /// adapter-keyed exemption from a provenance-keyed one. This arm separates them: a stale snapshot
+    /// MARKED derived but tagged with a gated vendor still Holds (the mark buys no staleness exemption —
+    /// a derivation is a lower bound and goes stale like any counter), and a codex snapshot marked as a
+    /// vendor counter still admits unmeasured (the exemption is codex's absence from the window table,
+    /// not its provenance). Either assertion flipping means the gate started reading the mark.
+    /// </summary>
+    [Fact]
+    public void The_derived_mark_neither_exempts_a_gated_vendor_from_staleness_nor_gates_codex()
+    {
+        var stale = Now.AddHours(-48);
+
+        var derivedClaude = RunwayGate.Evaluate(
+            "claude",
+            new VendorUsageSnapshot(
+                "claude",
+                stale,
+                null,
+                [new VendorUsageWindow("session", 1, null, "session: 1%")],
+                VendorUsageProvenance.Derived),
+            new RunwayThresholds(),
+            Now);
+        Assert.Equal(RunwayDisposition.Hold, derivedClaude.Disposition);
+        Assert.Contains("old", derivedClaude.Reason, StringComparison.Ordinal);
+
+        var vendorMarkedCodex = RunwayGate.Evaluate(
+            "codex",
+            new VendorUsageSnapshot(
+                "codex",
+                stale,
+                null,
+                [new VendorUsageWindow("5-hour", null, null, "5-hour: derived")],
+                VendorUsageProvenance.Vendor),
+            new RunwayThresholds(),
+            Now);
+        Assert.Equal(RunwayDisposition.Admit, vendorMarkedCodex.Disposition);
+        Assert.Equal(RunwayGate.UnmeasuredReason, vendorMarkedCodex.Reason);
+    }
 }

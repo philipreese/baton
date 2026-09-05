@@ -146,6 +146,11 @@ public static class RunwayGate
         ArgumentException.ThrowIfNullOrEmpty(vendor);
         ArgumentNullException.ThrowIfNull(thresholds);
 
+        // Gated-or-not is keyed on the ADAPTER (this table), never on the snapshot's provenance mark.
+        // A Derived-marked snapshot for a gated vendor gets no staleness exemption below: a derivation
+        // is a lower bound on usage and goes stale exactly like a vendor counter, so exempting it would
+        // fail open. The mark's one consumer is the burn ring (VendorUsageBurn), which skips derived
+        // blocks because their rolling window is not monotonic (#1926 review).
         if (!WindowNames.TryGetValue(vendor, out var names))
         {
             return new RunwayDecision(vendor, RunwayDisposition.Admit, UnmeasuredReason, []);
