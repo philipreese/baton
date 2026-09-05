@@ -73,6 +73,14 @@ public static partial class CostLedgerStore
     /// remarks), null everywhere else. Absent entries leave the row's fields absent; nothing here
     /// guesses one from another.
     /// </param>
+    /// <param name="labelByWorker">
+    /// #1901 C2: worker name to the <c>--label</c> recorded on that worker's binding at dispatch,
+    /// supplied by the settle site (and by the backfill) for the same two reasons
+    /// <paramref name="runwayOverrideReasonByWorker"/> is — the binding record is a
+    /// <c>Baton.Vendors</c> type this layer holds no reference to. <c>Baton.Cli.DispatchLabels</c> is
+    /// the one production producer. <see cref="CostLedgerEntry.Label"/>'s own doc states what an absent
+    /// value means and does not mean.
+    /// </param>
     public static IReadOnlyList<CostLedgerEntry> BuildEntries(
         IReadOnlyList<LogEntry> entries,
         string roomDirectoryPath,
@@ -80,7 +88,8 @@ public static partial class CostLedgerStore
         PriceCatalog? catalog = null,
         PlanFactorTable? planFactors = null,
         IReadOnlyDictionary<string, string>? runwayOverrideReasonByWorker = null,
-        IReadOnlyDictionary<string, WorkspaceDelivery>? deliveryByWorker = null)
+        IReadOnlyDictionary<string, WorkspaceDelivery>? deliveryByWorker = null,
+        IReadOnlyDictionary<string, string>? labelByWorker = null)
     {
         ArgumentNullException.ThrowIfNull(entries);
         ArgumentException.ThrowIfNullOrEmpty(roomDirectoryPath);
@@ -244,7 +253,11 @@ public static partial class CostLedgerStore
                 ReviewedHead: verdict?.ReviewedHead,
                 FindingsHigh: verdict?.High,
                 FindingsMedium: verdict?.Medium,
-                FindingsLow: verdict?.Low));
+                FindingsLow: verdict?.Low,
+                Label: request?.Worker is { } labelWorker && labelByWorker is not null
+                    && labelByWorker.TryGetValue(labelWorker, out var label)
+                        ? label
+                        : null));
         }
 
         return result;
@@ -421,8 +434,64 @@ public static partial class CostLedgerStore
             PullRequest: last.PullRequest,
             EndedAt: LedgerQuery.ToUtc(resolvedAt ?? DateTime.UtcNow),
             Resolution: resolution,
-            ResolutionReason: reason is { Length: > 0 } ? reason : null);
+            ResolutionReason: reason is { Length: > 0 } ? reason : null,
+            // #1901 C2: copied for the same reason issue/pr/role/outcome above are -- it is an
+            // identity of the work, not a dimension of the spend, and an arm reading filtered to one
+            // --label would otherwise miss the interventions on that arm entirely.
+            Label: last.Label);
     }
+
+    /// <summary>
+    /// One <see cref="CostSourceKind.GithubBackfill"/> row for a merged pull request (#1901 C2's
+    /// GitHub half) — the PR-level half of "what did an outcome cost", recovered from GitHub long
+    /// after the room that produced it may have been swept.
+    /// <para>
+    /// <b>It carries no token dimension, no wall clock and no estimate</b>, and that is structural
+    /// rather than an omission: nothing here ran, so there is no usage to read and no rate to apply.
+    /// It is the same shape as a correcting row in that respect — a fact about an outcome, not about
+    /// spend — which is why <see cref="CostSourceKind.GithubBackfill"/>'s own doc names the filter that
+    /// keeps the two populations apart in a reading.
+    /// </para>
+    /// <para>
+    /// <b><see cref="CostLedgerEntry.EndedAt"/> is the merge instant</b>, so a windowed reading places
+    /// the PR when it landed rather than when the backfill ran. Absent when <c>gh</c> reported no
+    /// <c>mergedAt</c>, which excludes the row from every windowed reading and counts it into
+    /// <c>undatedExcluded</c> — the ledger's own doctrine for time, not a special case here.
+    /// </para>
+    /// </summary>
+    public static CostLedgerEntry BuildGithubBackfillRow(MergedPullRequest pullRequest, RepositoryIdentity? repository)
+    {
+        ArgumentNullException.ThrowIfNull(pullRequest);
+
+        return new CostLedgerEntry(
+            SourceKind: CostSourceKind.GithubBackfill,
+            Repository: repository?.Value,
+            Room: pullRequest.Room,
+            Execution: GithubBackfillExecutionId(pullRequest.Number),
+            Issue: pullRequest.Issue,
+            PullRequest: pullRequest.Number.ToString(System.Globalization.CultureInfo.InvariantCulture),
+            EndedAt: pullRequest.MergedAt is { } mergedAt ? LedgerQuery.ToUtc(mergedAt) : null,
+            FilesChanged: pullRequest.FilesChanged,
+            Additions: pullRequest.Additions,
+            Deletions: pullRequest.Deletions,
+            Commits: pullRequest.Commits,
+            ReviewCount: pullRequest.ReviewCount);
+    }
+
+    /// <summary>
+    /// The dedupe key a <see cref="CostSourceKind.GithubBackfill"/> row is written under —
+    /// <c>github-pr-&lt;n&gt;</c>, which is what makes a second backfill write nothing.
+    /// <para>
+    /// <b>It must be non-empty, and that is load-bearing</b>: <see cref="JsonLinesLedger{TEntry}.AppendAsync"/>
+    /// always appends a row whose key is null or empty, because a row with no id cannot be deduplicated
+    /// against anything. A PR row left without one would therefore be appended once per backfill run
+    /// forever — the silent-inflation failure the skip exists to prevent. It cannot collide with an
+    /// <c>ExecutionId</c> (every one is a <c>Guid</c>) nor with
+    /// <see cref="ResolutionExecutionSuffix"/>'s suffixed ids.
+    /// </para>
+    /// </summary>
+    public static string GithubBackfillExecutionId(int pullRequestNumber) =>
+        "github-pr-" + pullRequestNumber.ToString(System.Globalization.CultureInfo.InvariantCulture);
 
     /// <summary>
     /// What <see cref="BuildResolutionRow"/> appends to the settled execution's id. <c>#</c> cannot

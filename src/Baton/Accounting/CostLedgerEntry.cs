@@ -8,9 +8,14 @@ namespace Baton.Accounting;
 /// rather than an inference from which fields happen to be populated (#1849's own requirement).
 /// </summary>
 /// <remarks>
-/// Only <see cref="BatonExecution"/> has a writer today. The other three are phase C's importers of
-/// the vendors' own native session logs, present here from day one so a phase-A row is already
-/// labelled against them rather than needing a schema migration to say what it always was.
+/// <para>
+/// <b>Two have writers</b>: <see cref="BatonExecution"/> (the settle site, and #1901 C2's backfill of
+/// rooms still on disk — a recovered execution is the same KIND of fact as a settled one, so it keeps
+/// this label rather than earning a "recovered" one) and <see cref="GithubBackfill"/> (#1901 C2's
+/// GitHub half). The other three are phase C's importers of the vendors' own native session logs,
+/// present here from day one so a phase-A row is already labelled against them rather than needing a
+/// schema migration to say what it always was.
+/// </para>
 /// </remarks>
 [JsonConverter(typeof(JsonStringEnumConverter<CostSourceKind>))]
 public enum CostSourceKind
@@ -19,6 +24,15 @@ public enum CostSourceKind
     [JsonStringEnumMemberName("claude-code-session")] ClaudeCodeSession,
     [JsonStringEnumMemberName("codex-session")] CodexSession,
     [JsonStringEnumMemberName("antigravity-session")] AntigravitySession,
+
+    /// <summary>
+    /// #1901 C2: a merged pull request reconstructed from GitHub, not from anything Baton ran. It
+    /// carries a PR's shape and outcome and <b>no token dimension of any kind</b> — there is no
+    /// execution behind it, so an analysis that mixes it with <see cref="BatonExecution"/> rows is
+    /// counting two different populations. <c>baton ledger --source-kind baton-execution</c> is the
+    /// filter that separates them.
+    /// </summary>
+    [JsonStringEnumMemberName("github-backfill")] GithubBackfill,
 }
 
 /// <summary>
@@ -464,4 +478,45 @@ public sealed record CostLedgerEntry(
     /// </summary>
     [property: JsonPropertyName("resolutionReason")]
     [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
-    string? ResolutionReason = null);
+    string? ResolutionReason = null,
+
+    /// <summary>
+    /// #1901 C2: the operator's <c>baton dispatch --label</c> for the worker this row is about, read
+    /// back off the room's <c>bindings.json</c> (<c>WorkerBindingConfigEntry.Label</c>, spec/baton.md
+    /// §2/§6) — the arm key the comparator (#1903) filters on, so an A/B of two dispatch shapes is a
+    /// filter rather than a hand-kept list of room paths. Already sanitized when it was recorded
+    /// (<c>Baton.Cli.DispatchOptionsParser.SanitizeLabel</c>); carried through verbatim here.
+    /// <para>
+    /// <b>Absent means "no label was recorded for this worker"</b>, never "unlabelled work" — a
+    /// <c>baton run</c> against a hand-authored <c>bindings.json</c>, a dispatch that passed no
+    /// <c>--label</c>, and a room whose bindings file is gone by settle time all read the same way.
+    /// A <see cref="CostSourceKind.GithubBackfill"/> row never carries one: a merged PR has no worker
+    /// and therefore no binding to read it from.
+    /// </para>
+    /// </summary>
+    [property: JsonPropertyName("label")]
+    [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    string? Label = null,
+
+    /// <summary>
+    /// #1901 C2, <see cref="CostSourceKind.GithubBackfill"/> rows only: how many commits the merged PR
+    /// carried, as <c>gh</c> reports them. Absent on every execution row — a settle has no PR-level
+    /// commit count in hand, and the diff shape beside it is a workspace measurement rather than a
+    /// GitHub one.
+    /// </summary>
+    [property: JsonPropertyName("commits")]
+    [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    int? Commits = null,
+
+    /// <summary>
+    /// #1901 C2, <see cref="CostSourceKind.GithubBackfill"/> rows only: how many <b>reviews</b>
+    /// <c>gh</c> reports for the merged PR. <b>Not a review-comment count</b>, which #1901's phase-C2
+    /// text asks for: <c>gh pr list --json</c> exposes <c>reviews</c> (one entry per submitted review)
+    /// and <c>comments</c> (the PR's issue comments), and neither is the per-thread review-comment
+    /// count — so this records the one that was actually measured, under a name that says which.
+    /// <c>0</c> is a measurement (nobody reviewed it); absence means <c>gh</c> reported no
+    /// <c>reviews</c> array at all.
+    /// </summary>
+    [property: JsonPropertyName("reviewCount")]
+    [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    int? ReviewCount = null);

@@ -3758,7 +3758,7 @@ repeated-settle shapes, and what inflated totals that skip is buying, not restat
 
 | Field | Meaning |
 |---|---|
-| `sourceKind` | Closed set: `baton-execution` (the only writer today), `claude-code-session`, `codex-session`, `antigravity-session` reserved for phase C. Makes "Baton-only rows" a filter, not an inference. |
+| `sourceKind` | Closed set. **Two have writers**: `baton-execution` (a settle, and #1901 C2's backfill of a room still on disk — a recovered execution is the same KIND of fact as a settled one, so it keeps this label rather than earning a "recovered" one) and `github-backfill` (#1901 C2's merged-PR half, below). `claude-code-session`, `codex-session`, `antigravity-session` stay reserved for phase C. Makes "Baton-only rows" a filter, not an inference. |
 | `repository` | `RepositoryIdentity.Value` — see below. |
 | `room`, `workflow`, `step`, `execution`, `role` | Identity, off the accepted `ExecutionRequest`. `role` is Baton's worker name; Baton has no second role concept. |
 | `adapter`, `model`, `outcome`, `startedAt`, `endedAt` | Route and lifecycle. **`model` is the model the step was REQUESTED at** (`ExecutionBindingResolver`, i.e. the accepted request plus any `StepRebound`), never the model the CLI echoed back — a substitution or a quota-driven downgrade is invisible in it, so grouping rows by `model` groups by intent, not by what ran. |
@@ -3776,6 +3776,8 @@ repeated-settle shapes, and what inflated totals that skip is buying, not restat
 | `filesChanged`, `additions`, `deletions`, `testFilesChanged` | #1901 C1. The shape of `git diff --numstat origin/main...HEAD` in that worker's workspace, from **one** spawn — the per-file form already carries every figure `--shortstat` would summarise plus the paths `testFilesChanged` counts (`tests/` prefix), so nothing is derived twice. Present together or absent together. **It measures the workspace's LOCAL `HEAD`, pushed or not** (#1913 review finding 3): `origin/main` is a remote-tracking ref an ordinary clone already has, and `...` diffs the merge base against local `HEAD`, so a branch that committed and never pushed still records its full shape — these are evidence of work done, never evidence of delivery, which is what `pr` answers. Absence means the diff command did not run or did not succeed: not a git repository, no `origin/main` ref, a workspace torn down before settle, or a spawn abandoned at its time bound. The base ref is hardcoded `origin/main`: a workspace whose work is not based on trunk measures against the wrong base, and generalising it is not this phase. Rename detection and `core.quotePath` are turned OFF, so every path is a plain path the `tests/` prefix can be tested against — a moved file therefore reads as one delete plus one add. A binary file counts towards `filesChanged` and towards neither line total, because git reports no line counts for one. |
 | `reviewedRef`, `reviewedPr`, `reviewedHead`, `findingsHigh`, `findingsMedium`, `findingsLow` | #1901 C1. Parsed from the review execution's own `verdict.json` (the artifact #1889 stamps), through `ReviewVerdictSchema.TryParse` and no second reader — a file that is not a valid verdict yields none of the five rather than a partial set. **A finding with no `severity` makes the file invalid** (#1913 review finding 4): the deserializer binds an absent one to `high`, which would have counted a severity nobody wrote into the one field below where `0` is a measurement, so the single reader refuses it — the same answer it already gives an unknown severity, and the review prompt names the field and shows it in its example. `reviewedRef` is verbatim; `reviewedPr`/`reviewedHead` are only what a POSITIVE parse of it extracted (a `#n`/`.../pull/n` reference, or a 7–40 character hex SHA), absent for a branch-name ref. **The three counts are the one place on a row where `0` is a measurement**: `ReviewVerdict.Findings` says an empty array means the reviewer looked and found nothing, so a verdict that exists writes all three including zeros, and no verdict writes none of them. Three flat fields rather than one nested object, because a nested value renders in the CSV view as a quoted JSON blob and stops being summable. |
 | `resolution`, `resolutionReason` | #1901 C1. `accept-capture` / `reject` / `close` and the conductor's own `--reason`, on a **correcting row** — see below. Never on an execution row. |
+| `label` | #1901 C2. The operator's `baton dispatch --label` for this row's worker, read back off the room's `bindings.json` (`WorkerBindingConfigEntry.Label`, §2/§6) at settle and again by the backfill — the arm key #1903's comparator filters on, so an A/B of two dispatch shapes is a filter rather than a hand-kept list of room paths. Already sanitized when it was recorded; carried through verbatim. Copied onto a correcting row for the same reason `issue`/`pr`/`role` are: it identifies the work, not the spend, and an arm reading would otherwise miss that arm's interventions. **Absent means "no label was recorded for this worker"**, never "unlabelled work" — a `baton run` against a hand-authored `bindings.json`, a dispatch that passed no `--label`, and a room whose bindings file is gone all read the same way. A `github-backfill` row never carries one: a merged PR has no worker and so no binding to read it from. |
+| `commits`, `reviewCount` | #1901 C2, `github-backfill` rows only. How many commits the merged PR carried and how many **reviews** `gh` reports for it. **`reviewCount` is not a review-comment count**, which #1901's C2 text asks for: `gh pr list --json` exposes `reviews` (one entry per submitted review) and `comments` (the PR's issue comments), and neither is the per-thread review-comment count — so the row records the one that was actually measured, under a name that says which. `0` is a measurement; absence means `gh` reported no such array at all. Both are absent on every execution row: a settle has no PR-level count in hand, and the diff shape beside it is a workspace measurement rather than a GitHub one. |
 | `attempt`, `effort`, `parentRoom`, `workstream`, `raw` | **Reserved, no writer** — none is derivable from the events a settle has in hand (`modelEchoed`, above, is reserved for the same reason). Named now so a later phase fills a reserved field rather than inventing a competing one. |
 
 **A `baton resolve` appends a correcting row; it never rewrites the row it corrects.** This ledger is
@@ -3818,6 +3820,75 @@ the same remedy, and it is expressible:** `baton ledger --resolution none` is ex
 alone, facet views included; `--resolution any` (or one of `accept-capture`/`reject`/`close`) is the
 interventions alone. Excluding them from the arithmetic by default instead would hide the
 interventions this row exists to make countable. The default — both, counted together — is the file.
+
+**`baton ledger backfill` — shipped (#1901 C2).** `baton ledger backfill [--dry-run] [--rooms-root
+<dir>] [--since <instant>]` recovers rows the ledger never got. Two halves, one exit code, and it can
+only ever ADD rows.
+
+- **Rooms on disk.** Every settled execution in a room that has no ledger row yet, through
+  `CostLedgerStore.BuildEntries` — *the same row builder the settle site calls*, over the same
+  `flow.jsonl` and the same captured streams, so a recovered row and a settled one are the same bytes
+  for the same execution. Tokens therefore come from the same projector, `completeness: "partial"`
+  lands by the same rule, and a `verdict.json` still on disk is read onto its own execution's row. The
+  room population is `BatonPaths.Rooms` **unioned with the room registry** (§8's whole point is that a
+  room can be registered outside the default root); `--rooms-root <dir>` is the operator overriding
+  that with "these and only these". The one thing this half cannot recover is the settle-time workspace
+  probe's answer — `issue`/`pr`/the diff shape come from a git workspace a settled lane has usually
+  already torn down, and the GitHub half below holds the PR-level version of those facts anyway.
+- **A room's repository identity falls back to the working directory when its recorded project root no
+  longer RESOLVES**, not only when the room has no registration — the wider case a backfill meets and a
+  settle does not. Measured 2026-09-05 over the operator's own `~/.baton/rooms`: 621 of 690 rooms
+  recorded a project root that was an auto-provisioned #669 worktree, torn down on Terminal, so the
+  strict reading loses nine tenths of the recoverable history. What it trades is exactly what
+  `RepositoryIdentityResolver.TryResolveForRoomAsync`'s remarks warn about — a backfill run from
+  another checkout keys those rows to the wrong repository — so the run reports how many rooms took the
+  fallback, and `--dry-run` is where that is seen first.
+- **Merged PRs.** One `github-backfill` row per merged pull request `gh pr list --state merged
+  --search "merged:>=<since>"` reports, through the `IGhCliRunner` seam #734 already owns, capped at
+  200 PRs in total. `--since` unset means the 2026-08-28 reset #1901 names, because `gh` needs a date to
+  search from; the ROOM half has no such need and walks everything on disk when `--since` is unset.
+  **The walk pages, and the page size is a measured ceiling rather than a taste.** `commits` costs
+  GitHub's GraphQL layer roughly 10,300 possible nodes per PR — it traverses each commit's authors
+  connection — so at `--limit 50` the estimate is 515,050 and the API refuses the *whole* query for
+  exceeding its 500,000-node ceiling (measured 2026-09-05 against `philipreese/baton`; 100 and 200
+  refuse harder). Forty per call, then a `merged:<=<oldest mergedAt>` cursor and ask again. That bound
+  is inclusive, so pages overlap by their boundary PR and the walk deduplicates on number — an
+  exclusive bound would drop two PRs merged in the same second entirely, and a missing row is worse
+  than a repeated one. Three independent stops (a short page, a page that added nothing new, a page
+  whose PRs carry no `mergedAt`), because any one alone can loop forever.
+  Each row carries `endedAt` = the merge instant, the diff shape GitHub reports, `commits`,
+  `reviewCount` and the issue it closed, and is **joined to a room by branch name** — the room's own
+  `delivery-branch.txt` output (§2's delivery-state convention), the one room-to-branch link that
+  survives a torn-down worktree. A PR no room's branch matches is still written, with `room` absent,
+  and reported. **Today that is every PR**: measured 2026-09-05 over the operator's own
+  `~/.baton/rooms`, 0 of 691 rooms carry a `delivery-branch.txt` at all. The key stays this one rather
+  than a host-specific substitute — a room's workspace directory happens to be named after its issue on
+  that machine, and joining on that would be a convention this repo has never declared — so what ships
+  is the key that exists plus a report that says how often it found nothing.
+- **Idempotent, on the ledger's own dedupe.** A room row dedupes on its `ExecutionId`; a PR row on
+  `github-pr-<n>`. Why a PR row needs an id at all rather than none is
+  `CostLedgerStore.GithubBackfillExecutionId`'s own doc: it names the `JsonLinesLedger` rule and what a
+  keyless row would cost, which is the same silent-inflation failure the append-time skip exists to
+  prevent and the same reason a correcting row's id is suffixed rather than omitted.
+- **Fail-open per unit, never fatal.** A room with no `flow.jsonl`, a room with no repository identity,
+  a `gh` that is missing or unauthenticated, a PR whose JSON carries no number: each costs exactly its
+  own rows, is counted, and is named with its own reason in the report. `--dry-run` walks everything,
+  writes nothing, and prints what a real run would write plus every unattributed unit and why — the
+  reason strings are the half an operator needs to tell "my gap to close" from "nothing to recover".
+- **What it cannot do, and why that is the guarantee rather than a limitation.** This ledger is
+  append-only and its rows are immutable, so an execution already ledgered keeps the row it got —
+  including fields absent because the writer of the day did not know how to fill them. A review
+  execution ledgered before #1901 C1 landed keeps its absent verdict fields forever; the run counts
+  those and says so on stdout rather than rewriting them.
+
+**A `github-backfill` row costs a reading what a correcting row does, and for the same reason.** It
+carries no adapter, no token dimension and no estimate — nothing ran — so `LedgerRollup` counts it into
+`attempts` and into `unread`, groups it under the unknown-vendor subtotal, and adds one to each of
+`apiEquivalentByStatus.unpriced`/`planMeterByStatus.unpriced`. Token sums, money sums and `reportedBy`
+are the safe half, for the identical reason: those fields are never set and `SumPresent` skips nulls.
+The remedy is expressible and is the one already documented above one level up — **`baton ledger
+--source-kind baton-execution` is the spend reading**, and it excludes this whole population by label
+rather than by inference, which is what `sourceKind` exists for.
 
 **No `verdict` field, and that is a finding rather than an omission.** #1901's phase-C1 text asks a
 review row to carry a `verdict` of `APPROVE`/`BLOCK`. **No such value exists anywhere in the product**:
@@ -3877,7 +3948,8 @@ rebuild, against a different file, and neither touches the other's. No `<room-di
 reading over the repository the operator is standing in (`--repo-identity <key>` names another); with
 one, it is that room's attempts and total — **literally the fleet reading with the room facet set**,
 because `LedgerRollup` is the one accounting projection and the CLI formats what it returns rather
-than summing anything itself (#1849's "one accounting projection, not divergent arithmetic"). Facets:
+than summing anything itself (#1849's "one accounting projection, not divergent arithmetic"). `baton ledger backfill` is the third form, against the same file the reading forms use — its own
+paragraph above. Facets:
 vendor, model, role, project, outcome, workflow, PR, issue, source kind. The **window is on
 `endedAt`** — `--since` inclusive, `--until` exclusive, so two adjacent windows partition a range.
 An attempt whose `endedAt` was never recorded cannot be placed in any window at all: it is left out
@@ -3910,9 +3982,16 @@ instead of refused — remain phase B's *unshipped* half; nothing above depends 
 writer. **B** is the CLI views — room and fleet, time-range and facet filters, JSON/CSV export. **C** is
 the import of the vendors' own native session logs under the three reserved `sourceKind` values (and is
 where `raw` gets a writer, since only a whole session log carries the vendor's fields verbatim). **D**
-is backfill of retained rooms plus compaction, at the 90-day window the native-retention survey on
-#1849 settles on. Nothing in B–D requires a schema migration: the source-kind label and the repository
-key exist from day one.
+is compaction, at the 90-day window the native-retention survey on #1849 settles on — the backfill half
+of D shipped early as #1901 C2 (`baton ledger backfill`, above), because rooms are perishable and the
+look-back that motivated it could not wait. Nothing in B–D requires a schema migration: the source-kind
+label and the repository key exist from day one.
+
+**The retention sweep is safe to run after a backfill** (#1901's own acceptance criterion): once
+`baton ledger backfill` has walked a room, everything an analysis reads about that room's spend is in
+the ledger, which lives outside the room and is pruned by nothing. What a sweep still destroys is the
+room's own artifacts — transcripts, captures, a `verdict.json` whose execution was ledgered before the
+verdict fields existed — and the backfill's report is what names those before they go.
 
 ---
 

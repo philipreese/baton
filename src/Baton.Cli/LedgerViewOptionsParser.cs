@@ -45,8 +45,12 @@ public static class LedgerViewOptionsParser
         "  --project           Matches a row's repository identity. One ledger file holds one repository",
         "                      today, so this matches all rows or none; it is here for the cross-repository",
         "                      reads phase C and #1848 bring.",
-        "  --source-kind       baton-execution | claude-code-session | codex-session | antigravity-session.",
-        "                      Only baton-execution has a writer today.",
+        "  --source-kind       baton-execution | github-backfill | claude-code-session | codex-session |",
+        "                      antigravity-session. Two have writers: baton-execution (a settle, or",
+        "                      'baton ledger backfill' recovering one from a room still on disk) and",
+        "                      github-backfill (a merged PR that backfill reconstructed). A",
+        "                      github-backfill row carries NO token dimension and no estimate -- nothing",
+        "                      ran -- so '--source-kind baton-execution' is the spend reading.",
         "  --resolution        A `baton resolve` appends a CORRECTING row rather than rewriting the row it",
         "                      corrects, so a conductor's intervention is one more row in every reading --",
         "                      counted in 'attempts' and in 'unread', carrying the corrected row's role,",
@@ -278,8 +282,8 @@ public static class LedgerViewOptionsParser
         catch (JsonException)
         {
             throw new CliArgumentException(
-                $"Unknown --source-kind '{value}'. Known kinds: baton-execution, claude-code-session, " +
-                $"codex-session, antigravity-session. {Usage}");
+                $"Unknown --source-kind '{value}'. Known kinds: baton-execution, github-backfill, " +
+                $"claude-code-session, codex-session, antigravity-session. {Usage}");
         }
     }
 

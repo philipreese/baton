@@ -411,6 +411,51 @@ public sealed class LedgerViewCommandTests : IDisposable
         Assert.Contains("resolution=none", await RunOverAsync(ledgerPath, "--resolution", "none"), StringComparison.Ordinal);
     }
 
+    /// <summary>
+    /// #1901 C2: the dispatch <c>--label</c> survives the write, the JSON view and the CSV export — the
+    /// three surfaces #1903's comparator reads an arm off. Over a ledger of its own so the shared
+    /// fixture's counts stay what every other test here asserts.
+    /// <para>
+    /// The control is the second row, dispatched with no label: its <c>label</c> is ABSENT in the JSON
+    /// (not <c>null</c>, not <c>""</c>) and an empty cell in the CSV, so a writer that defaulted the
+    /// field to a string could not pass both halves.
+    /// </para>
+    /// </summary>
+    [Fact]
+    public async Task A_dispatch_label_round_trips_through_the_json_view_and_the_csv_export()
+    {
+        var ledgerPath = Path.Combine(Path.GetDirectoryName(_ledgerFilePath)!, "labels.jsonl");
+        await CostLedgerStore.AppendAsync(
+            [
+                new CostLedgerEntry(
+                    CostSourceKind.BatonExecution,
+                    Room: _roomA,
+                    Execution: "labelled",
+                    Adapter: "claude",
+                    EndedAt: Sep4.AddHours(10),
+                    Label: "arm-b"),
+                new CostLedgerEntry(
+                    CostSourceKind.BatonExecution,
+                    Room: _roomA,
+                    Execution: "unlabelled",
+                    Adapter: "claude",
+                    EndedAt: Sep4.AddHours(11)),
+            ],
+            ledgerPath,
+            TestContext.Current.CancellationToken);
+
+        using var json = JsonDocument.Parse(await RunOverAsync(ledgerPath, "--format", "json", "--drill"));
+        var rows = json.RootElement.GetProperty("rows").EnumerateArray().ToList();
+        Assert.Equal("arm-b", rows[0].GetProperty("label").GetString());
+        Assert.False(rows[1].TryGetProperty("label", out _));
+
+        var csv = await RunOverAsync(ledgerPath, "--format", "csv");
+        var lines = csv.Split('\n', StringSplitOptions.RemoveEmptyEntries);
+        var labelColumn = LedgerCsv.Columns.ToList().IndexOf("label");
+        Assert.Equal("arm-b", lines[1].Split(',')[labelColumn]);
+        Assert.Equal(string.Empty, lines[2].Split(',')[labelColumn]);
+    }
+
     private async Task<string> RunOverAsync(string ledgerFilePath, params string[] args)
     {
         var output = new StringWriter { NewLine = "\n" };

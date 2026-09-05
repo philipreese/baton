@@ -129,8 +129,9 @@ if (args.Length == 0 || !knownSubcommands.Contains(args[0]))
     Console.Error.WriteLine($"       {RoomsPruneOptionsParser.Usage[7..]}");
     Console.Error.WriteLine($"       {LedgerCommand.Usage[7..]}");
     Console.Error.WriteLine($"       {LedgerViewOptionsParser.Usage[7..]}");
+    Console.Error.WriteLine($"       {LedgerBackfillOptionsParser.Usage[7..]}");
     Console.Error.WriteLine(
-        "              (the two 'ledger' forms read different files -- 'baton ledger --help' says which)");
+        "              ('ledger --rebuild' is a different FILE from the other two -- 'baton ledger --help' says which)");
     Console.Error.WriteLine($"       {MemoryAuditOptionsParser.Usage[7..]}");
     Console.Error.WriteLine(
         "       baton mcp [--capture-file <path>] [--memory-proposal-tool] [--fleet-status-tool] [--room-detail-tool]");
@@ -251,10 +252,18 @@ try
     // joins room/rooms above rather than the CommandResult/FlowStateReporter switch below.
     if (args[0] == "ledger")
     {
-        // Two commands under one verb, against two different files: `--rebuild` re-walks live rooms
-        // into the per-execution BURN ledger (#1570, quota-ledger.jsonl), everything else READS the
-        // repository-keyed COST ledger (#1849 phase B, ledger/<repo>.jsonl). Neither touches the
-        // other's file -- LedgerViewOptionsParser.HelpLines says so where an operator will see it.
+        // Three commands under one verb, against two different files: `--rebuild` re-walks live rooms
+        // into the per-execution BURN ledger (#1570, quota-ledger.jsonl), `backfill` recovers rows into
+        // the repository-keyed COST ledger (#1901 C2), and everything else READS that same cost ledger
+        // (#1849 phase B, ledger/<repo>.jsonl). `--rebuild` touches neither of the others' file --
+        // LedgerViewOptionsParser.HelpLines says so where an operator will see it.
+        if (args.Length >= 2 && args[1] == "backfill")
+        {
+            var backfillOptions = LedgerBackfillOptionsParser.Parse(args[2..]);
+            return await LedgerBackfillCommand
+                .ExecuteAsync(backfillOptions, Console.Out, hostStopSource.Token).ConfigureAwait(false);
+        }
+
         if (args.Length >= 2 && args[1] == "--rebuild")
         {
             if (args.Length > 2)
@@ -443,10 +452,17 @@ try
                 // fields absent, which is the same absence a missing `gh` produces.
                 var delivery = await WorkspaceDeliveryProbe
                     .ReadForRoomAsync(terminalRoomDirectoryPath, hostStopSource.Token).ConfigureAwait(false);
+
+                // #1901 C2: the dispatch --label off the same bindings.json the overrides above came
+                // from -- the arm key #1903's comparator filters on. A pure file read, so
+                // CancellationToken.None like the overrides rather than the probe's token.
+                var labels = await DispatchLabels
+                    .ReadForRoomAsync(terminalRoomDirectoryPath, CancellationToken.None).ConfigureAwait(false);
                 var costEntries = CostLedgerStore.BuildEntries(
                     terminalEntries, terminalRoomDirectoryPath, repository,
                     runwayOverrideReasonByWorker: runwayOverrides,
-                    deliveryByWorker: delivery);
+                    deliveryByWorker: delivery,
+                    labelByWorker: labels);
                 await CostLedgerStore.AppendAsync(costEntries, costLedgerPath, CancellationToken.None).ConfigureAwait(false);
             }
             else
