@@ -33,7 +33,7 @@ public sealed class VendorUsageHarvester : BackgroundService
     private readonly Func<CancellationToken, Task<Dictionary<string, int>>> _countLiveLanes;
 
     public VendorUsageHarvester()
-        : this([new ClaudeUsageSlashCommandSource(), new AgyUsageSlashCommandSource()])
+        : this([new ClaudeUsageSlashCommandSource(), new AgyUsageSlashCommandSource(), new CodexUsageSource()])
     {
     }
 
@@ -163,7 +163,7 @@ public sealed class VendorUsageHarvester : BackgroundService
             }
 
             var json = JsonSerializer.Serialize(new PersistedVendorUsage(
-                snapshot.Vendor, snapshot.HarvestedAt, snapshot.Caveat, snapshot.Windows, rings));
+                snapshot.Vendor, snapshot.HarvestedAt, snapshot.Caveat, snapshot.Windows, rings, snapshot.Source));
             var tempPath = $"{path}.{Guid.NewGuid():N}.tmp";
             File.WriteAllText(tempPath, json);
             File.Move(tempPath, path, overwrite: true);

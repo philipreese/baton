@@ -1346,9 +1346,15 @@ function banner(html){ $("banner").innerHTML = html ? `<div class="banner">${htm
 // file never derives them from percent history of its own. "unknown" whenever either is absent, on
 // exactly the same freshness footing as the block head's harvest age: these describe the last
 // harvest, not this instant, so an old `harvestedAt` qualifies them just as it qualifies the percent.
-function vendorUsageRowHtml(vendor, w){
+// #1904: `derived` is the block's own `source === "derived"`, passed down because it changes what an
+// ABSENT field means on the row. On a vendor block, a missing `resetsAt` means the vendor's reset
+// clause did not parse -- "reset unknown" is the honest word. On a derived block the windows are a
+// rolling lookback with no reset instant BY CONSTRUCTION (CodexUsageSource's own doc comment), so
+// "unknown" would report a parse failure that did not happen and imply a boundary that does not exist.
+function vendorUsageRowHtml(vendor, w, derived){
   const pct = typeof w.percentUsed === "number" ? `${w.percentUsed}% used` : "unknown";
-  const resets = w.resetsAt ? `resets ${new Date(w.resetsAt).toLocaleString()}` : "reset unknown";
+  const resets = w.resetsAt ? `resets ${new Date(w.resetsAt).toLocaleString()}`
+    : derived ? "rolling window, no reset" : "reset unknown";
   const rate = typeof w.ratePctPerHour === "number" ? `${w.ratePctPerHour}%/h` : "rate unknown";
   const eta = typeof w.minutesToExhaustion === "number"
     ? `${w.minutesToExhaustion < 90 ? Math.round(w.minutesToExhaustion) + "m"
@@ -1365,8 +1371,9 @@ function vendorUsageHtml(vendors){
   if(!Array.isArray(vendors) || vendors.length === 0){ $("vendorusage").innerHTML = ""; return; }
   const blocks = vendors.map(v => {
     const windows = Array.isArray(v.windows) ? v.windows : [];
+    const isDerived = v.source === "derived";
     const rows = windows.length
-      ? windows.map(w => vendorUsageRowHtml(v.adapter, w)).join("")
+      ? windows.map(w => vendorUsageRowHtml(v.adapter, w, isDerived)).join("")
       : `<div class="vendorusage-row">${esc(v.adapter)} unknown</div>`;
     const caveat = typeof v.caveat === "string" && v.caveat
       ? `<div class="vendorusage-caveat">${esc(v.caveat)}</div>` : "";
@@ -1378,8 +1385,14 @@ function vendorUsageHtml(vendors){
     const harvested = harvestAge === null ? "harvest time unknown"
       : harvestAge === "just now" ? "harvested just now"
       : `harvested ${harvestAge} ago`;
+    // #1904: `source` says whether these windows are the vendor's own counter or Baton's derivation
+    // from its own burn ledger. The word is rendered ONLY on a derived block -- "vendor" is the
+    // default every #1391 block already was, and labelling it would train the eye past the one label
+    // that carries information. Absent `source` (a pre-#1904 projection) reads as vendor, matching
+    // PersistedVendorUsage.Source's own default.
+    const derived = isDerived ? ", derived — not a vendor counter" : "";
     return `<div class="vendorusage-block"><div class="vendorusage-head">${esc(v.adapter)} — `
-      + `${liveLanes} live lane${liveLanes === 1 ? "" : "s"}, ${esc(harvested)}</div>`
+      + `${liveLanes} live lane${liveLanes === 1 ? "" : "s"}, ${esc(harvested)}${esc(derived)}</div>`
       + rows + caveat + `</div>`;
   }).join("");
   $("vendorusage").innerHTML = `<div class="vendorusage">${blocks}</div>`;

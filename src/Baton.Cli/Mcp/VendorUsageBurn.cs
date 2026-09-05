@@ -27,15 +27,20 @@ public sealed record VendorUsageSample(DateTimeOffset At, int PercentUsed);
 /// </summary>
 /// <param name="Rings">Sample ring per <see cref="VendorUsageWindow.Name"/>, oldest first, bounded at
 /// <see cref="VendorUsageBurn.RingCapacity"/>. Null on a pre-#1746 file.</param>
+/// <param name="Source">#1904: <see cref="VendorUsageSnapshot.Source"/>, persisted. Trailing with a
+/// <see cref="VendorUsageProvenance.Vendor"/> default, so a pre-#1904 file (no <c>Source</c> key,
+/// written only by the two vendor-reported sources) deserializes to exactly what it always was rather
+/// than needing a migration to say so.</param>
 public sealed record PersistedVendorUsage(
     string Vendor,
     DateTimeOffset HarvestedAt,
     string? Caveat,
     IReadOnlyList<VendorUsageWindow> Windows,
-    IReadOnlyDictionary<string, IReadOnlyList<VendorUsageSample>>? Rings)
+    IReadOnlyDictionary<string, IReadOnlyList<VendorUsageSample>>? Rings,
+    VendorUsageProvenance Source = VendorUsageProvenance.Vendor)
 {
     /// <summary>The snapshot half, for a caller that wants #1869's record shape back.</summary>
-    public VendorUsageSnapshot ToSnapshot() => new(Vendor, HarvestedAt, Caveat, Windows);
+    public VendorUsageSnapshot ToSnapshot() => new(Vendor, HarvestedAt, Caveat, Windows, Source);
 }
 
 /// <summary>
@@ -68,6 +73,15 @@ public static class VendorUsageBurn
     /// Folds <paramref name="snapshot"/> into <paramref name="existing"/>, returning the rings to
     /// persist beside it. Rules, in the order they apply per window:
     /// <list type="bullet">
+    /// <item>A <see cref="VendorUsageProvenance.Derived"/> snapshot keeps NO ring at all, and drops any
+    /// it already had. Keyed on PROVENANCE rather than on any one window's shape, deliberately: the
+    /// rollover rule below detects a reset by the reading falling, which is only sound when the vendor
+    /// declares the boundary it fell across. A derived figure has no such boundary to be checked
+    /// against, so no derived reading can be told apart from a rolled-over one — whatever shape a
+    /// future derived source's windows take. What makes today's one fall without a reset:
+    /// <see cref="CodexUsageSource"/>'s "rolling total is NOT monotonic" paragraph, which also has why
+    /// the monotonic alternative is unavailable. spec/baton.md §6's <c>windows[]</c> table states the
+    /// resulting wire absence.</item>
     /// <item>A window whose <see cref="VendorUsageWindow.Name"/> appears more than once in this one
     /// snapshot keeps NO ring — two rows under one key would merge into one nonsense rate, and no
     /// rate is the conservative reading. (Neither vendor's parser produces duplicates today; agy
@@ -89,6 +103,11 @@ public static class VendorUsageBurn
         IReadOnlyDictionary<string, IReadOnlyList<VendorUsageSample>>? existing,
         VendorUsageSnapshot snapshot)
     {
+        if (snapshot.Source == VendorUsageProvenance.Derived)
+        {
+            return new Dictionary<string, IReadOnlyList<VendorUsageSample>>(StringComparer.Ordinal);
+        }
+
         var duplicated = snapshot.Windows
             .GroupBy(w => w.Name, StringComparer.Ordinal)
             .Where(g => g.Count() > 1)

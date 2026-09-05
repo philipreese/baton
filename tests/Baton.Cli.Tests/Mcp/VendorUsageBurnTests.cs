@@ -48,6 +48,37 @@ public sealed class VendorUsageBurnTests : IDisposable
         return ring!;
     }
 
+    /// <summary>
+    /// #1926 review. A <see cref="VendorUsageProvenance.Derived"/> snapshot's percentage is a rolling
+    /// lookback, not a monotonic counter, so no ring is kept for it and any ring it already had is
+    /// dropped — otherwise a fall caused by a row aging off the back of the window would be read as a
+    /// window reset and a burn rate published off a boundary that never happened. The control is the
+    /// second half: the SAME two readings under <see cref="VendorUsageProvenance.Vendor"/> do build a
+    /// ring, so the emptiness is the provenance's doing and nothing else's.
+    /// </summary>
+    [Fact]
+    public void Advance_keeps_no_ring_for_a_derived_snapshot_and_drops_one_it_already_had()
+    {
+        VendorUsageWindow[] windows = [new("rolling 5h (derived)", 50, null, "derived: 500 billed tokens")];
+
+        var vendorRings = VendorUsageBurn.Advance(
+            null, new VendorUsageSnapshot("codex", T0, null, windows, VendorUsageProvenance.Vendor));
+        var vendorRings2 = VendorUsageBurn.Advance(
+            vendorRings, new VendorUsageSnapshot("codex", T0.AddHours(1), null, windows, VendorUsageProvenance.Vendor));
+        Assert.Equal(2, RingFor(vendorRings2, "rolling 5h (derived)").Count);
+
+        // Same windows, same instants, same prior ring -- only the provenance differs.
+        var derivedRings = VendorUsageBurn.Advance(
+            vendorRings, new VendorUsageSnapshot("codex", T0.AddHours(1), null, windows, VendorUsageProvenance.Derived));
+        Assert.Empty(derivedRings);
+
+        // And the projection therefore publishes no rate and no ETA for that window.
+        var (rate, eta) = VendorUsageBurn.Derive(
+            derivedRings.GetValueOrDefault("rolling 5h (derived)"), percentUsed: 50);
+        Assert.Null(rate);
+        Assert.Null(eta);
+    }
+
     [Fact]
     public void Advance_keeps_only_the_last_RingCapacity_harvests()
     {

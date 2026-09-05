@@ -16,8 +16,9 @@ namespace Baton.Cli.Mcp;
 /// </summary>
 public static class VendorUsageProjectionReader
 {
-    /// <summary>Every adapter tag a snapshot file can exist for (issue #1391's scope: claude/agy —
-    /// Codex is explicitly out of scope, see the issue's "Decisions already made"). One list, owned by
+    /// <summary>Every adapter tag a snapshot file can exist for — claude/agy since #1391, plus codex
+    /// since #1904 (whose snapshot is <see cref="VendorUsageProvenance.Derived"/>, not a vendor
+    /// counter). One list, owned by
     /// <see cref="RunwayGate.MeasuredVendors"/> since #1848: the population that has an
     /// <see cref="Baton.Vendors.IVendorUsageSource"/> and the population whose snapshot files exist are
     /// the same population, and a second copy here is how one of them would go stale.</summary>
@@ -81,7 +82,8 @@ public static class VendorUsageProjectionReader
                         w.Name, w.PercentUsed, w.ResetsAt, w.RawLine, ratePctPerHour, minutesToExhaustion);
                 })
                 .ToList();
-            entries.Add(new VendorUsageProjectionView(vendor, snapshot.HarvestedAt, snapshot.Caveat, windows, liveLanes));
+            entries.Add(new VendorUsageProjectionView(
+                vendor, snapshot.HarvestedAt, snapshot.Caveat, windows, liveLanes, snapshot.Source));
         }
 
         return entries.Count > 0 ? entries : null;
@@ -110,6 +112,11 @@ public static class VendorUsageProjectionReader
 }
 
 /// <summary>One vendor's projected usage windows plus its current live-lane count (issue #1391).</summary>
+/// <param name="Source">#1904: <c>"vendor"</c> when these windows are the vendor CLI's own counter,
+/// <c>"derived"</c> when Baton computed them itself because the vendor exposes no counter Baton has
+/// measured — see <see cref="VendorUsageProvenance"/>. Always emitted, never omitted: a reader that has
+/// to infer provenance from a missing key is exactly what this field exists to prevent, and
+/// <c>glass.html</c> renders the word beside the adapter tag on a derived block.</param>
 public sealed record VendorUsageProjectionView(
     [property: JsonPropertyName("adapter")] string Adapter,
     [property: JsonPropertyName("harvestedAt")] DateTimeOffset HarvestedAt,
@@ -117,7 +124,8 @@ public sealed record VendorUsageProjectionView(
     [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
     string? Caveat,
     [property: JsonPropertyName("windows")] IReadOnlyList<VendorUsageWindowView> Windows,
-    [property: JsonPropertyName("liveLanes")] int LiveLanes);
+    [property: JsonPropertyName("liveLanes")] int LiveLanes,
+    [property: JsonPropertyName("source")] VendorUsageProvenance Source = VendorUsageProvenance.Vendor);
 
 /// <summary>One harvested usage window on the wire (issue #1391) — see
 /// <see cref="Baton.Vendors.VendorUsageWindow"/>'s own doc comment for what each field means and when

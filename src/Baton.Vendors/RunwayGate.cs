@@ -88,13 +88,23 @@ public sealed record RunwayThresholds(
 public static class RunwayGate
 {
     /// <summary>
-    /// The vendors this gate can measure at all: exactly the adapter tags an
+    /// The vendors a usage snapshot exists for at all: exactly the adapter tags an
     /// <see cref="IVendorUsageSource"/> exists for. Canonical list — <c>VendorUsageProjectionReader</c>
     /// reads its snapshot-file population from here rather than keeping a second copy. A vendor
-    /// outside it (codex today) is admitted with <see cref="UnmeasuredReason"/>. The register for why
-    /// that differs from an unreadable snapshot's Hold: spec/baton.md §7, "Runway hold (#1848)".
+    /// outside it is admitted with <see cref="UnmeasuredReason"/>. The register for why that differs
+    /// from an unreadable snapshot's Hold: spec/baton.md §7, "Runway hold (#1848)".
+    /// <para>
+    /// <b>Membership here is not the same as being gated (#1904).</b> <see cref="Evaluate"/> keys on
+    /// <see cref="WindowNames"/>, not on this list, and codex is on this list without being in that
+    /// table: <see cref="CodexUsageSource"/> harvests a snapshot (so the glass gets a codex block) whose
+    /// windows are DERIVED and carry no percentage unless the operator declared a plan ceiling. Putting
+    /// those names in the table would send every ceiling-less codex dispatch down the "recognized
+    /// window, no percentage" Hold arm — holding a vendor for the same absence #1848 chose to admit as
+    /// unmeasured. So codex is still admitted with <see cref="UnmeasuredReason"/>, and gating on the
+    /// derived counters is a follow-up decision, not a side effect of this list growing.
+    /// </para>
     /// </summary>
-    public static readonly IReadOnlyList<string> MeasuredVendors = ["claude", "agy"];
+    public static readonly IReadOnlyList<string> MeasuredVendors = ["claude", "agy", "codex"];
 
     /// <summary><see cref="RunwayDecision.Reason"/> for the Admit given to a vendor with no usage source.</summary>
     public const string UnmeasuredReason = "runway: unmeasured";
@@ -108,6 +118,11 @@ public static class RunwayGate
     /// also reports a <c>"week (Fable)"</c> window the operator ruling of 2026-09-05 excludes
     /// (spec/baton.md §7, "Runway hold (#1848)") — a prefix or contains match on "week" would silently
     /// gate on it.
+    /// <para>
+    /// <b>This table, not <see cref="MeasuredVendors"/>, is what makes a vendor gated</b>, and codex is
+    /// deliberately absent from it even though it now has a source — that list's own doc comment states
+    /// why (#1904).
+    /// </para>
     /// </summary>
     private static readonly Dictionary<string, (string Week, string Session)> WindowNames = new(StringComparer.Ordinal)
     {
@@ -131,6 +146,11 @@ public static class RunwayGate
         ArgumentException.ThrowIfNullOrEmpty(vendor);
         ArgumentNullException.ThrowIfNull(thresholds);
 
+        // Gated-or-not is keyed on the ADAPTER (this table), never on the snapshot's provenance mark.
+        // A Derived-marked snapshot for a gated vendor gets no staleness exemption below: a derivation
+        // is a lower bound on usage and goes stale exactly like a vendor counter, so exempting it would
+        // fail open. The mark's one consumer is the burn ring (VendorUsageBurn), which skips derived
+        // blocks because their rolling window is not monotonic (#1926 review).
         if (!WindowNames.TryGetValue(vendor, out var names))
         {
             return new RunwayDecision(vendor, RunwayDisposition.Admit, UnmeasuredReason, []);

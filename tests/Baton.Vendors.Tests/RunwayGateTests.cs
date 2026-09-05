@@ -199,12 +199,120 @@ public class RunwayGateTests
     // ---- unmeasured vendor -------------------------------------------------------------------------
 
     [Fact]
-    public void A_vendor_with_no_usage_source_is_admitted_as_unmeasured()
+    public void A_vendor_outside_the_window_table_is_admitted_as_unmeasured()
     {
+        var decision = Evaluate("gpt-hypothetical", snapshot: null);
+
+        Assert.Equal(RunwayDisposition.Admit, decision.Disposition);
+        Assert.Equal(RunwayGate.UnmeasuredReason, decision.Reason);
+    }
+
+    /// <summary>
+    /// #1904's whole gate-side claim in one arm: codex gained an <see cref="IVendorUsageSource"/> and is
+    /// on <see cref="RunwayGate.MeasuredVendors"/> (which is what gives it a snapshot file and a glass
+    /// block), and it is STILL admitted as unmeasured — because <see cref="RunwayGate.Evaluate"/> keys on
+    /// the window-name table, which codex is deliberately not in. Both halves are asserted together on
+    /// purpose: separately, either one passes while the pair that matters is broken. Adding codex to the
+    /// window table would fail this test, which is the point — that is a decision to take, not a side
+    /// effect of the list growing.
+    /// </summary>
+    [Fact]
+    public void Codex_is_on_the_measured_list_and_still_admitted_as_unmeasured()
+    {
+        Assert.Contains("codex", RunwayGate.MeasuredVendors);
+
         var decision = Evaluate("codex", snapshot: null);
 
         Assert.Equal(RunwayDisposition.Admit, decision.Disposition);
         Assert.Equal(RunwayGate.UnmeasuredReason, decision.Reason);
-        Assert.DoesNotContain("codex", RunwayGate.MeasuredVendors);
+    }
+
+    /// <summary>
+    /// The polarity of the arm above. A codex snapshot that HAS been harvested — the ordinary state on a
+    /// fleet running codex lanes, and one whose derived windows carry no percentage without a declared
+    /// ceiling — is admitted too. Without this, "codex admits" could be resting on the snapshot being
+    /// null rather than on codex being outside the window table.
+    /// </summary>
+    [Fact]
+    public void A_harvested_codex_snapshot_with_no_percentage_still_admits()
+    {
+        var snapshot = CodexUsageSource.Aggregate(
+            [new Baton.Status.QuotaLedgerEntry(At: Now.AddHours(-1).UtcDateTime, Execution: "e1", Adapter: "codex", TokensIn: 500)],
+            ceiling: null,
+            Now);
+        Assert.All(snapshot!.Windows, w => Assert.Null(w.PercentUsed));
+
+        var decision = RunwayGate.Evaluate("codex", snapshot, new RunwayThresholds(), Now);
+
+        Assert.Equal(RunwayDisposition.Admit, decision.Disposition);
+        Assert.Equal(RunwayGate.UnmeasuredReason, decision.Reason);
+    }
+
+    /// <summary>
+    /// #1926 review. Adding codex to <see cref="RunwayGate.MeasuredVendors"/> must not have put it
+    /// behind the staleness arm either: a codex snapshot far older than <c>maxSnapshotAgeHours</c> still
+    /// admits as unmeasured, because the window-table check runs first. The control is the arm directly
+    /// below: the same age on <c>claude</c>, which IS in the table, Holds — so this test is measuring
+    /// codex's exemption and not a broken staleness check.
+    /// </summary>
+    [Fact]
+    public void A_stale_derived_codex_snapshot_still_admits_while_the_same_age_holds_claude()
+    {
+        var stale = Now.AddHours(-48);
+        var codex = CodexUsageSource.Aggregate(
+            [new Baton.Status.QuotaLedgerEntry(At: stale.UtcDateTime, Execution: "e1", Adapter: "codex", TokensIn: 500)],
+            ceiling: null,
+            stale);
+
+        var codexDecision = RunwayGate.Evaluate("codex", codex, new RunwayThresholds(), Now);
+        Assert.Equal(RunwayDisposition.Admit, codexDecision.Disposition);
+        Assert.Equal(RunwayGate.UnmeasuredReason, codexDecision.Reason);
+
+        var claudeDecision = RunwayGate.Evaluate(
+            "claude",
+            new VendorUsageSnapshot("claude", stale, null, [new VendorUsageWindow("session", 1, null, "session: 1%")]),
+            new RunwayThresholds(),
+            Now);
+        Assert.Equal(RunwayDisposition.Hold, claudeDecision.Disposition);
+    }
+
+    /// <summary>
+    /// #1926 re-review. The arm above changes adapter and provenance together, so it cannot tell an
+    /// adapter-keyed exemption from a provenance-keyed one. This arm separates them: a stale snapshot
+    /// MARKED derived but tagged with a gated vendor still Holds (the mark buys no staleness exemption —
+    /// a derivation is a lower bound and goes stale like any counter), and a codex snapshot marked as a
+    /// vendor counter still admits unmeasured (the exemption is codex's absence from the window table,
+    /// not its provenance). Either assertion flipping means the gate started reading the mark.
+    /// </summary>
+    [Fact]
+    public void The_derived_mark_neither_exempts_a_gated_vendor_from_staleness_nor_gates_codex()
+    {
+        var stale = Now.AddHours(-48);
+
+        var derivedClaude = RunwayGate.Evaluate(
+            "claude",
+            new VendorUsageSnapshot(
+                "claude",
+                stale,
+                null,
+                [new VendorUsageWindow("session", 1, null, "session: 1%")],
+                VendorUsageProvenance.Derived),
+            new RunwayThresholds(),
+            Now);
+        Assert.Equal(RunwayDisposition.Hold, derivedClaude.Disposition);
+        Assert.Contains("old", derivedClaude.Reason, StringComparison.Ordinal);
+
+        var vendorMarkedCodex = RunwayGate.Evaluate(
+            "codex",
+            new VendorUsageSnapshot(
+                "codex",
+                stale,
+                null,
+                [new VendorUsageWindow("5-hour", null, null, "5-hour: derived")],
+                VendorUsageProvenance.Vendor),
+            new RunwayThresholds(),
+            Now);
+        Assert.Equal(RunwayDisposition.Admit, vendorMarkedCodex.Disposition);
+        Assert.Equal(RunwayGate.UnmeasuredReason, vendorMarkedCodex.Reason);
     }
 }

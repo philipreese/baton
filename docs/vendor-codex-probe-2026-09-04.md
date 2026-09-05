@@ -233,7 +233,14 @@ The included error fixture is schema-derived rather than a live quota-wall captu
   reset-time availability, retry behavior, and process exit code remain unmeasured.
 - The reusable probe observed three app-server rate-limit windows with used percentages and reset
   instants. It did not establish human-facing names or how each window maps to ChatGPT product limits,
-  so they must not be relabelled or presented as an inferred token allowance.
+  so they must not be relabelled or presented as an inferred token allowance. It also did not record
+  the response's own **payload shape** — `CodexProbe.CollectRateLimitWindows` walks the result
+  recursively and discards the property path, and no response fixture is in the index below. A parser
+  written against it today would be a guess, which is why `#1904` ships a **derived** codex usage
+  source (`CodexUsageSource`, aggregating Baton's own burn ledger and labelled `source: derived`)
+  rather than a reader of this surface. **One authenticated `account/rateLimits/read` capture is what
+  unblocks the real thing** — a `CodexRateLimitsSource` through `CodexAppServerBroker`, which already
+  speaks app-server JSON-RPC and is already an approved spawn site — and retires the derivation.
 - App-server dynamic tools have enforced a read-only/outbox-only Baton grant on this host. A live
   workspace-write role, extra writable roots, network access, and subprocess cancellation during an
   active tool call remain unmeasured.

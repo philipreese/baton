@@ -1,4 +1,5 @@
 using System.Text.Json;
+using System.Text.Json.Serialization;
 
 namespace Baton.Vendors;
 
@@ -43,6 +44,18 @@ public sealed record DaemonSettings
         // round-tripped through the store, which is what DaemonSettingsStoreTests asserts.
         init => _runwayHold = value ?? DefaultRunwayHold;
     }
+
+    /// <summary>
+    /// #1904: the operator's own declared ChatGPT-plan token ceilings, and the ONLY thing that lets
+    /// <see cref="CodexUsageSource"/> report a percentage at all. Null (the default) means no ceiling
+    /// has been declared, and every derived codex window's <c>percentUsed</c> is then absent rather
+    /// than computed against a guess — <see cref="CodexUsageSource"/>'s own doc comment has why Baton
+    /// has no allowance of its own to fall back on. Shape:
+    /// <code>
+    /// { "CodexPlanCeiling": { "FiveHourTokens": 5000000, "WeeklyTokens": 120000000 } }
+    /// </code>
+    /// </summary>
+    public CodexPlanCeilingSettings? CodexPlanCeiling { get; init; }
 
     private static readonly RunwayHoldSettings DefaultRunwayHold = new();
 
@@ -105,6 +118,34 @@ public sealed record RunwayHoldSettings
     private static int Percent(int value, int fallback) => value is > 0 and <= 100 ? value : fallback;
 
     private static int Hours(int value) => value > 0 ? value : RunwayThresholds.DefaultMaxSnapshotAgeHours;
+}
+
+/// <summary>
+/// The operator's own statement of how many tokens their ChatGPT plan allows per window (#1904).
+/// <b>Not a measurement</b> — nothing in the tree knows a real Codex allowance, and this record's
+/// only purpose is to let an operator who knows their own plan turn Baton's derived token totals into
+/// a percentage. Each field is independently absent: declaring only <see cref="WeeklyTokens"/> yields
+/// a percentage on the 7-day window and none on the 5-hour one, rather than one borrowed from the
+/// other. A zero or negative value is an operator typo — the same posture
+/// <see cref="RunwayHoldSettings"/> takes for an out-of-range percentage — and reads as absent.
+/// </summary>
+public sealed record CodexPlanCeilingSettings
+{
+    public long? FiveHourTokens { get; init; }
+
+    public long? WeeklyTokens { get; init; }
+
+    /// <summary>The declared five-hour ceiling, or null when absent or non-positive.
+    /// <c>[JsonIgnore]</c> because System.Text.Json serializes a public get-only property:
+    /// <see cref="DaemonSettingsStore.SaveAsync"/> would otherwise write four keys into the operator's
+    /// settings file where this record documents two.</summary>
+    [JsonIgnore]
+    public long? EffectiveFiveHourTokens => FiveHourTokens is > 0 ? FiveHourTokens : null;
+
+    /// <summary>The declared weekly ceiling, or null when absent or non-positive — same
+    /// <c>[JsonIgnore]</c> reason as above.</summary>
+    [JsonIgnore]
+    public long? EffectiveWeeklyTokens => WeeklyTokens is > 0 ? WeeklyTokens : null;
 }
 
 /// <summary>One vendor's overrides of <see cref="RunwayHoldSettings"/>; every field is null-for-inherit.</summary>

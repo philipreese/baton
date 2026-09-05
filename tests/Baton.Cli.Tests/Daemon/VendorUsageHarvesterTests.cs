@@ -1,5 +1,6 @@
 using System.Text.Json;
 using Baton.Cli.Daemon;
+using Baton.Cli.Mcp;
 using Baton.Status;
 using Baton.Vendors;
 using Xunit;
@@ -115,5 +116,57 @@ public sealed class VendorUsageHarvesterTests : IDisposable
 
         Assert.Equal(0, source.Reads);
         Assert.False(File.Exists(BatonPaths.VendorUsageSnapshotFile("claude")));
+    }
+
+    /// <summary>
+    /// #1904. Every arm above drives a snapshot whose windows carry a percentage, which is what EVERY
+    /// #1391 source produces — so nothing here had ever pushed a null-percent window through
+    /// <see cref="VendorUsageHarvester.Persist"/> and its <c>VendorUsageBurn.Advance</c> call.
+    /// <see cref="CodexUsageSource"/> produces exactly that on any machine where the operator has
+    /// declared no plan ceiling, which is every machine on day one: if <c>Advance</c> threw on the
+    /// null, <c>Persist</c>'s catch (IOException/UnauthorizedAccessException only) would not hold it,
+    /// the whole tick would fail, and codex would silently never be persisted at all while every unit
+    /// test stayed green. This is the arm that makes that failure visible.
+    /// </summary>
+    [Fact]
+    public async Task TickOnce_DerivedSnapshotWithNoPercentage_PersistsWithItsDerivedLabelAndNoFabricatedRing()
+    {
+        var derived = new VendorUsageSnapshot(
+            "codex",
+            new DateTimeOffset(2026, 9, 5, 12, 0, 0, TimeSpan.Zero),
+            CodexUsageSource.DerivedCaveat,
+            [new VendorUsageWindow(CodexUsageSource.FiveHourWindowName, PercentUsed: null, ResetsAt: null, "derived: 0 billed tokens")],
+            VendorUsageProvenance.Derived);
+
+        var harvester = new VendorUsageHarvester(
+            [new FakeSource("codex", derived)],
+            AlwaysDueScheduler(),
+            countLiveLanes: _ => Task.FromResult(new Dictionary<string, int>(StringComparer.Ordinal) { ["codex"] = 1 }));
+
+        await harvester.TickOnceAsync(DateTimeOffset.UtcNow, TestContext.Current.CancellationToken);
+
+        var path = BatonPaths.VendorUsageSnapshotFile("codex");
+        Assert.True(File.Exists(path), $"expected a persisted codex snapshot at {path}");
+        var persisted = JsonSerializer.Deserialize<PersistedVendorUsage>(
+            await File.ReadAllTextAsync(path, TestContext.Current.CancellationToken))!;
+
+        Assert.Equal(VendorUsageProvenance.Derived, persisted.Source);
+        Assert.Null(Assert.Single(persisted.Windows).PercentUsed);
+        // A derived snapshot keeps NO ring at all (VendorUsageBurn.Advance's first rule) -- and a null
+        // percentage would contribute no sample either way. The alternative, a fabricated 0, would let
+        // VendorUsageBurn.Derive publish a burn rate and an ETA built out of invented zeros, in the one
+        // place this whole change says "never a number".
+        Assert.True(persisted.Rings is null || persisted.Rings.Count == 0);
+
+        // The STRING, on the path glass.html actually compares against. Everything above asserts the
+        // enum survived the persisted file's round trip; glass.html tests `v.source === "derived"`
+        // against the projection's JSON, so an enum serialized as a number (0/1) or as PascalCase
+        // "Derived" would leave every arm above green while the glass silently labelled a derived
+        // block as a vendor counter. Spacing included: FleetStatusTool.SerializerOptions is
+        // WriteIndented, which is the same options the daemon's projection writer uses.
+        var wire = JsonSerializer.Serialize(
+            VendorUsageProjectionReader.ReadAll(new Dictionary<string, int>(StringComparer.Ordinal)),
+            FleetStatusTool.SerializerOptions);
+        Assert.Contains("\"source\": \"derived\"", wire, StringComparison.Ordinal);
     }
 }
