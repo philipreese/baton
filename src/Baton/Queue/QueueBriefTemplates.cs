@@ -5,10 +5,9 @@ using Baton.Status;
 namespace Baton.Queue;
 
 /// <summary>
-/// The three brief templates a work item's spec is rendered from (#1934 slice 2; operator ruling
-/// 2026-09-06: "every brief the conductor writes by hand is friction to remove, so the templates are
-/// the product, not a convenience"). The specimen they replace is the scratchpad generator that
-/// produced eleven hand-edited briefs in one morning.
+/// The three brief templates a work item's spec is rendered from (#1934 slice 2). The operator ruling
+/// that makes these the product rather than a convenience is spec/baton.md §13's, with the specimen it
+/// was made against.
 /// </summary>
 /// <remarks>
 /// <para>

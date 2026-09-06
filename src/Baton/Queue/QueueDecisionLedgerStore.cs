@@ -68,8 +68,7 @@ public sealed record QueueDecisionEntry(
     /// <summary>
     /// A work item moved from one <see cref="WorkStage"/> to the next (#1934 slice 2). A fourth
     /// decision word rather than a launch: the transition and the launch it leads to are two facts, and
-    /// folding them would lose the evidence — the outcome word, the PR head, the verdict's counts —
-    /// that the transition was derived from.
+    /// folding them would lose what the transition was derived from — spec/baton.md §13 enumerates it.
     /// <para>
     /// <b>Its <see cref="Reason"/> must name that evidence</b>, for the mechanical reason spec/baton.md
     /// §13 states as well as the readable one: it feeds <see cref="VerdictKey"/>, which the collapse

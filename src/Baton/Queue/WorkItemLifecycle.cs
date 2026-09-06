@@ -17,10 +17,9 @@ namespace Baton.Queue;
 /// <para>
 /// <b>Architecture Rule 1 and where this sits with respect to it.</b> The Flow engine may never route
 /// on what a worker wrote; <see cref="ReviewVerdict"/>'s own doc says severity and status are evidence
-/// for a person, never inputs to routing. This is not the Flow engine — it is the conductor's queue,
-/// the surface that was a PowerShell loop reading the same file with <c>jq</c> last week — and
-/// spec/baton.md §13 carries that as an explicit ruling rather than leaving a reader to reconcile the
-/// two. What the ruling buys is paid for here in one way that matters:
+/// for a person, never inputs to routing. This is not the Flow engine, and spec/baton.md §13 carries
+/// that distinction as an explicit ruling rather than leaving a reader to reconcile the two. What the
+/// ruling buys is paid for here in one way that matters:
 /// <see cref="IsBlocking"/> reads <b>structured, enumerated fields only</b>. Nothing here reads
 /// <see cref="ReviewVerdict.Summary"/> or a finding's <c>detail</c> — parsing model prose to pick a
 /// branch is the thing Rule 1 actually forbids, and it stays forbidden.
