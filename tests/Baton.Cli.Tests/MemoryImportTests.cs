@@ -931,6 +931,16 @@ public sealed class MemoryImportTests : IDisposable
         Assert.Equal("gitdir:c:/repos/x/.git", Assert.Single(gitdir.Assertions).Repository);
     }
 
+    [Fact]
+    public void An_asserted_repository_without_a_host_is_refused()
+    {
+        var refused = Assert.Throws<CliArgumentException>(
+            () => MemoryImportOptionsParser.Parse(["--assert", @"C:\root=owner/repo"]));
+
+        Assert.Contains("is not a repository identity", refused.Message, StringComparison.Ordinal);
+        Assert.Contains("github.com/owner/repo", refused.Message, StringComparison.Ordinal);
+    }
+
     /// <summary>
     /// An operator path that <c>Path.GetFullPath</c> cannot take surfaces as this verb's own refusal,
     /// not as a bare <see cref="ArgumentException"/> — for both flags that take one.

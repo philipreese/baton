@@ -103,10 +103,9 @@ public sealed record RepositoryIdentity
     /// (<c>https://github.com/Owner/Repo.git</c>, <c>git@github.com:Owner/Repo.git</c>) canonicalizes,
     /// and then behind an <c>https://</c> so the bare <c>host/owner/repo</c> spelling an operator
     /// actually types is read as the host-and-path it is. That second attempt <b>supplies a scheme and
-    /// nothing else</b>: it does not invent a host, so <c>owner/repo</c> canonicalizes to
-    /// <c>owner/repo</c> (host <c>owner</c>, path <c>repo</c>) and never to
-    /// <c>github.com/owner/repo</c> — guessing a forge would file a repository under an identity no
-    /// probe could ever reproduce.
+    /// nothing else</b>: it requires the host plus its path to already be present, so
+    /// <c>owner/repo</c> is refused rather than treating <c>owner</c> as a host. Guessing a forge
+    /// would file a repository under an identity no probe could ever reproduce.
     /// </para>
     /// <para>
     /// <b>Null is a refusal, not a fallback.</b> A caller that cannot canonicalize an operator's string
@@ -126,7 +125,16 @@ public sealed record RepositoryIdentity
 
         return raw.StartsWith(GitDirectoryPrefix, StringComparison.OrdinalIgnoreCase)
             ? From(originUrl: null, gitCommonDirectoryPath: raw[GitDirectoryPrefix.Length..])?.Value
-            : TryNormalizeRemote(raw) ?? TryNormalizeRemote("https://" + raw);
+            : TryNormalizeRemote(raw) ?? TryNormalizeBareHostAndPath(raw);
+    }
+
+    private static string? TryNormalizeBareHostAndPath(string raw)
+    {
+        // A bare identity needs host/owner/repo. Prefixing owner/repo with https:// would instead
+        // reinterpret owner as a host, creating an identity no ordinary probe could reproduce.
+        return raw.Count(static c => c == '/') >= 2
+            ? TryNormalizeRemote("https://" + raw)
+            : null;
     }
 
     /// <summary>
