@@ -48,6 +48,23 @@ public sealed record RunwayDecision(
 }
 
 /// <summary>
+/// One on-demand harvest attempt made for a vendor that had no persisted snapshot (#1923), passed
+/// into <see cref="RunwayGate.Evaluate"/> so a Hold can say which of two different things happened.
+/// <b>"Never harvested" and "harvested and it failed" are not the same claim</b>: the first is a
+/// bootstrap state the operator can fix by starting the daemon, the second is a vendor or CLI fault
+/// they have to look at. #1923 measured the cost of collapsing them — an agy window that had just
+/// reset read as "no readable usage snapshot" and refused every dispatch.
+/// </summary>
+/// <param name="At">When the attempt was made — rendered into the refusal text.</param>
+/// <param name="FailureReason">
+/// Why the harvest produced no usable snapshot, or null when it produced one. A non-null value here
+/// with a null snapshot is the "attempted and failed" arm; null with a null snapshot means the
+/// harvest ran and wrote something the gate could not then read, which is stated as its own failure
+/// rather than silently falling back to the never-harvested wording.
+/// </param>
+public sealed record RunwayHarvestAttempt(DateTimeOffset At, string? FailureReason);
+
+/// <summary>
 /// The hold thresholds for one vendor. Defaults are the operator's 2026-09-04 starting point
 /// (week ≥85%, session ≥90%), not a measurement — issue #1848's own wording. Overridable per vendor
 /// through <see cref="RunwayHoldSettings"/>, which is where <c>~/.baton/settings.json</c> binds.
@@ -75,9 +92,12 @@ public sealed record RunwayThresholds(
 
 /// <summary>
 /// <b>The admission gate for new vendor spend (#1848).</b> Pure: it takes the vendor's latest
-/// persisted usage snapshot and answers Admit or Hold. It never runs a vendor CLI — the daemon's
-/// <c>VendorUsageHarvester</c> (#1391/#1869) harvests, dispatch reads, so a gate check costs no
-/// subscription usage and cannot itself be the thing that exhausts the runway it is protecting.
+/// persisted usage snapshot and answers Admit or Hold. <b>This type</b> never runs a vendor CLI, and
+/// that stays true after #1923 — the on-demand harvest a missing snapshot now triggers happens in
+/// <c>Baton.Cli.OnDemandRunwayHarvest</c>, before this method is called, and reaches it only as a
+/// <see cref="RunwayHarvestAttempt"/> value. What is no longer true of the gate as a whole is that a
+/// check costs no subscription usage: the first check for a vendor with no snapshot spends one
+/// <c>/usage</c> call. spec/baton.md §7's "Runway hold (#1848)" is the register for that bound.
 /// </summary>
 /// <remarks>
 /// <para>
@@ -139,17 +159,34 @@ public static class RunwayGate
     };
 
     /// <summary>
+    /// Whether this vendor's counters are what decide its admission — membership in the window-name
+    /// table above, which is a narrower thing than <see cref="MeasuredVendors"/> (that list's own doc
+    /// comment has why codex is on it and not here). Exposed for #1923's on-demand harvest, which must
+    /// not spend a <c>/usage</c> call on a vendor whose decision cannot turn on the result.
+    /// </summary>
+    public static bool IsGated(string vendor) =>
+        !string.IsNullOrEmpty(vendor) && WindowNames.ContainsKey(vendor);
+
+    /// <summary>
     /// Decides admission for one vendor. <paramref name="snapshot"/> is that vendor's latest
-    /// PERSISTED snapshot (null when none exists or it could not be read) — never a live
-    /// <c>/usage</c> call made from inside dispatch.
+    /// PERSISTED snapshot (null when none exists or it could not be read) — this method itself never
+    /// makes a live <c>/usage</c> call.
     /// </summary>
     /// <param name="vendor">The adapter tag being dispatched to, e.g. <c>"claude"</c>.</param>
     /// <param name="now">The clock, passed in so the staleness arm is testable without waiting.</param>
+    /// <param name="harvest">
+    /// #1923: the on-demand harvest the caller already ran for this vendor because it had no persisted
+    /// snapshot, or null when none was run (no source for the vendor, or a caller that does not harvest
+    /// at all). It only ever changes the WORDING of the missing-snapshot Hold — never the disposition,
+    /// which stays a Hold in every arm, because a failed harvest is exactly as much evidence of headroom
+    /// as no harvest at all.
+    /// </param>
     public static RunwayDecision Evaluate(
         string vendor,
         VendorUsageSnapshot? snapshot,
         RunwayThresholds thresholds,
-        DateTimeOffset now)
+        DateTimeOffset now,
+        RunwayHarvestAttempt? harvest = null)
     {
         ArgumentException.ThrowIfNullOrEmpty(vendor);
         ArgumentNullException.ThrowIfNull(thresholds);
@@ -169,7 +206,7 @@ public static class RunwayGate
             return new RunwayDecision(
                 vendor,
                 RunwayDisposition.Hold,
-                "no readable usage snapshot has been harvested for this vendor",
+                DescribeMissingSnapshot(harvest),
                 []);
         }
 
@@ -241,6 +278,23 @@ public static class RunwayGate
             HeadroomPoints: Math.Min(thresholds.WeekHoldPct - weekPct, thresholds.SessionHoldPct - sessionPct),
             SnapshotHarvestedAt: snapshot.HarvestedAt);
     }
+
+    /// <summary>
+    /// The missing-snapshot Hold's wording, which is the whole point of #1923: it must say whether a
+    /// harvest was ever attempted. The time is rendered from the attempt's OWN offset with the
+    /// invariant culture — the same reason the staleness arm below formats its number that way, since
+    /// this text is asserted on and a local-time conversion would make the assertion machine-dependent.
+    /// </summary>
+    private static string DescribeMissingSnapshot(RunwayHarvestAttempt? harvest) => harvest switch
+    {
+        null => "no readable usage snapshot has been harvested for this vendor",
+        { FailureReason: { } why } =>
+            $"harvest attempted at {At(harvest.At)} and failed: {why}",
+        _ => $"harvest attempted at {At(harvest.At)} and failed: it wrote no snapshot this gate could read",
+    };
+
+    private static string At(DateTimeOffset instant) =>
+        instant.ToString("HH:mm", System.Globalization.CultureInfo.InvariantCulture);
 
     private static string Hours(TimeSpan span) =>
         span.TotalHours.ToString("0.#", System.Globalization.CultureInfo.InvariantCulture);

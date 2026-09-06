@@ -12,6 +12,13 @@ namespace Baton.Cli.Daemon;
 /// vendor to <see cref="BatonPaths.VendorUsageSnapshotFile"/> — that property's own doc comment has
 /// the restart-survival reasoning. Advisory only — nothing here gates dispatch (#1848 owns that);
 /// this type only ever reads and writes, never blocks a worker.
+/// <para>
+/// It is not the only caller of <see cref="Persist"/> since #1923: the runway hold harvests a gated
+/// vendor once inline when this service has never produced a snapshot for it
+/// (<c>OnDemandRunwayHarvest</c>, which writes through this same method for the same reason there is
+/// one snapshot format). Both read <see cref="VendorUsageSources.Default"/>, so neither can be
+/// harvesting a vendor the other has never heard of.
+/// </para>
 /// </summary>
 /// <remarks>
 /// Live-lane counts are read from the SAME room scan <see cref="FleetStatusTool.DiscoverRoomsAsync"/>/
@@ -33,7 +40,7 @@ public sealed class VendorUsageHarvester : BackgroundService
     private readonly Func<CancellationToken, Task<Dictionary<string, int>>> _countLiveLanes;
 
     public VendorUsageHarvester()
-        : this([new ClaudeUsageSlashCommandSource(), new AgyUsageSlashCommandSource(), new CodexUsageSource()])
+        : this(VendorUsageSources.Default)
     {
     }
 
