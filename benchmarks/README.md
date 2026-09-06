@@ -8,6 +8,7 @@ capture, so a directory each would be a directory per week holding one file.
 
 | Snapshot | What it holds | Feeds |
 |---|---|---|
+| [`deepswe/2026-09-05`](deepswe/2026-09-05/README.md) | 41 selected vendor/model/effort configurations from the DeepSWE v1.1 live artifact. | Routing evidence |
 | [`deepswe/2026-09-04`](deepswe/2026-09-04/README.md) | 36 vendor/model/effort configurations from the DeepSWE v1.1 selector: pass@1, API-cost proxy, output tokens, agent steps. | Tier pins (#1861, #1863) |
 | [`subscription-usage/2026-09-04`](subscription-usage/2026-09-04/README.md) | Baton-launched versus native Claude Code sessions, 2026-08-31 to 09-04: responses, output, cache-read, implement-room outcomes. | #1848, #1849, #1391 |
 | [`ledger`](ledger/README.md) | Weekly `baton ledger export` snapshots of the cost ledger (`spec/baton.md` §7), one dated CSV per export, plus the per-model / per-vendor / per-arm medians `derive.py` computes from them. | #1901, #1903, #1863 |
@@ -25,6 +26,30 @@ written into the column header, and `--sweep` prints the top rows under several 
 can be had with the table in front of you. `--check` exits 1 if one committed derived file differs from
 a fresh derivation. The normal gates run `pixi run deepswe-derived-check`, which checks every dated
 snapshot with a raw input and fails when its derived output is stale or missing.
+
+[`deepswe/refresh_snapshot.py`](deepswe/refresh_snapshot.py) fetches DeepSWE's public live JSON,
+applies the model-family rules in [`deepswe/selection.json`](deepswe/selection.json), and creates a
+new dated raw snapshot, derived scores, provenance README, index row, and the README's entry in
+`tools/audit-completeness/docs-allowlist.txt`. Run `pixi run deepswe-refresh-dry-run` to inspect the
+delta, then `pixi run deepswe-refresh` to record it. It exits without writing when the selected
+upstream data has not changed and refuses to overwrite a dated snapshot. Extending the tracked
+families is a regex edit in `selection.json`; the current Claude 5 rule intentionally also matches
+patch generations such as a future `claude-fable-5-1`.
+
+Recording a refresh is one command, but landing it is one command **plus an `operator-merge` label**
+on the PR: the allowlist the collector has to write lives in a protected-tooling directory
+(`tools/diff-shape/diff_shape.py`, spec/baton.md C-15). The alternative — leaving the entry to a hand
+edit — is what makes the refresh leave a red tree, since every tracked `.md` must be on that
+allowlist. The generated entry still lands in a human-reviewed PR, which is the reviewer moment
+`tools/audit-completeness/docsbudget.py` exists to create.
+
+The collector fails closed on the drift classes a plausible-looking wrong number would otherwise
+ride in on, each with a named escape hatch to be used only after inspecting both sources:
+`--allow-removals` for a configuration upstream no longer reports, `--allow-cost-drift` for a
+displayed cost more than 4x from the artifact's own cost for the same configuration, and
+`--allow-missing-provider REASON` for upstream dropping the `provider` field the vendor column is
+cross-checked against. Each escape hatch that is used is recorded in the snapshot's own README, and
+so is which source the recorded costs came from.
 
 The file is sorted with `on_vendor_frontier` rows first, then by utility, then by quality — so a row a
 same-vendor sibling dominates (Opus xhigh, 73 at 89 steps, behind Opus high's 73 at 73) sorts below

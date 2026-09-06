@@ -301,6 +301,9 @@ diff-shape-selftest = { cmd = "python -u tools/diff-shape/diff_shape.py --selfte
 
 deepswe-derived-check = { cmd = "python -u benchmarks/deepswe/derive_scores.py --check-all" }
 deepswe-derived-check-selftest = { cmd = "python -u benchmarks/deepswe/derive_scores.py --selftest" }
+deepswe-refresh = { cmd = "python -u benchmarks/deepswe/refresh_snapshot.py" }
+deepswe-refresh-dry-run = { cmd = "python -u benchmarks/deepswe/refresh_snapshot.py --dry-run" }
+deepswe-refresh-selftest = { cmd = "python -u benchmarks/deepswe/refresh_snapshot.py --selftest" }
 
 # #1901 C3, the same pair one benchmark over: the committed cost-ledger medians must be a fresh
 # derivation of the committed exports, and the selftest is what proves that check discriminates
