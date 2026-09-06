@@ -191,7 +191,8 @@ public static class MemoryImportCommand
             plan.Unfiled,
             machinery,
             linkRows.OrderBy(l => l.LinksFilePath, StringComparer.OrdinalIgnoreCase)
-                .ThenBy(l => l.LinkId, StringComparer.Ordinal).ToList());
+                .ThenBy(l => l.LinkId, StringComparer.Ordinal).ToList(),
+            plan.ProjectionsSkipped);
 
         string? manifestPath = null;
         if (!options.DryRun)
@@ -615,7 +616,10 @@ public static class MemoryImportCommand
         output.WriteLine(
             $"Entries: {manifest.Entries.Count}   {(options.DryRun ? "would append" : "appended")}: {appended}   " +
             $"already present: {manifest.Entries.Count - appended}");
-        output.WriteLine($"Unfiled: {manifest.Unfiled.Count}   machinery recorded: {manifest.Machinery.Count}");
+        var projectionsSkipped = manifest.ProjectionsSkipped ?? [];
+        output.WriteLine(
+            $"Unfiled: {manifest.Unfiled.Count}   machinery recorded: {manifest.Machinery.Count}   " +
+            $"projection-skipped: {projectionsSkipped.Count}");
 
         var links = manifest.Links ?? [];
         var appendedLinks = manifest.AppendedLinks.Count();
@@ -639,6 +643,21 @@ public static class MemoryImportCommand
             foreach (var reason in manifest.Unfiled.GroupBy(u => u.Reason).OrderBy(g => g.Key, StringComparer.Ordinal))
             {
                 output.WriteLine($"  [{reason.Count()} file(s)] {reason.Key}");
+            }
+        }
+
+        if (projectionsSkipped.Count > 0)
+        {
+            // Named, not counted, and named separately from the unfiled: these are Baton's own caches,
+            // and an operator who saw them only as a total would have no way to tell a projection this
+            // verb correctly refused from a memory it failed to file.
+            output.WriteLine();
+            output.WriteLine(
+                "Projection-skipped -- Baton's own generated caches, recognised by their format marker " +
+                "and imported NOWHERE. Re-importing one would feed the store its own contents:");
+            foreach (var row in projectionsSkipped.OrderBy(r => r.SourcePath, StringComparer.OrdinalIgnoreCase))
+            {
+                output.WriteLine($"  {row.SourcePath}");
             }
         }
 

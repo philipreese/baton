@@ -130,6 +130,15 @@ public sealed record MemoryProjectionResult(
 /// history reads the store, which still holds every row (nothing in this namespace deletes one).
 /// </para>
 /// <para>
+/// <b>An archived-origin entry (<see cref="MemoryKind.HistoricalNote"/>) IS projected, and is labelled
+/// rather than hidden.</b> The filter above is on supersession, not on kind, and deliberately: an
+/// archived fact whose live counterpart was renamed or deleted has no link, and dropping it would be
+/// the silent omission this whole surface refuses. It cannot be mistaken for a current one — the
+/// ordinal kind sort groups every <c>historical-note</c> contiguously, and each section names the kind
+/// in both the machine comment and the prose line. The ruling is glossed in one clause in
+/// spec/baton.md §12.
+/// </para>
+/// <para>
 /// <b>Conflict resolution is precedence over a digest, never a merge and never a read.</b> A
 /// repository-origin candidate and a vendor-origin one collide when they share a subject and a source
 /// <b>filename</b> — the same key phase B already uses for supersession, reused rather than
@@ -148,10 +157,42 @@ public static class MemoryProjection
     public const string FormatMarker = "<!-- baton:projection v1 -->";
 
     /// <summary>
+    /// Whether <paramref name="text"/> is a file this projector wrote — the first line is
+    /// <see cref="FormatMarker"/>.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// <b>The writer and the reader share one constant, which is the whole point of this method.</b>
+    /// <c>baton memory sync --apply</c> writes a projection into a vendor memory root, and that root is
+    /// <c>baton memory import</c>'s population — so without a test here the two verbs form a loop that
+    /// re-ingests each cycle's cache as a fresh memory and doubles the store's bytes per cycle.
+    /// <c>MemoryImportPlan.Build</c> is the caller; the loop and what it costs are stated once in
+    /// spec/baton.md §12.
+    /// </para>
+    /// <para>
+    /// <b>The marker, not the filename.</b> A name test would have to know two spellings —
+    /// <see cref="ClaudeProjectionTarget.ProjectionFileName"/> and the
+    /// <c>baton-projection.md.&lt;guid&gt;.tmp</c> a crashed write leaves behind — and would miss a
+    /// projection an operator copied under another name. The negative a reader would otherwise assume:
+    /// a <c>.tmp</c> truncated before its first line finished carries no marker and is NOT recognised,
+    /// because the staging write is not atomic. Such a file imports as an ordinary memory; the marker is
+    /// a test on content, never a guarantee about a partial file.
+    /// </para>
+    /// </remarks>
+    public static bool IsProjectedFile(string? text) =>
+        text is not null && text.StartsWith(FormatMarker, StringComparison.Ordinal);
+
+    /// <summary>
     /// <paramref name="candidates"/> rendered for <paramref name="repository"/>, bounded by
     /// <paramref name="budget"/>, with everything left out accounted for.
     /// </summary>
-    /// <param name="repository">The subject. Candidates filed under any other are not this projection's.</param>
+    /// <param name="repository">
+    /// The subject named in the header. <b>Not a filter</b> — every candidate handed in is projected,
+    /// whatever its own <see cref="MemoryEntry.Repository"/> says, and the caller is what keeps the two
+    /// agreeing (<c>MemorySyncCommand</c> reads one repository's store and filters the checked-in facts
+    /// to it). Filtering here would drop a candidate with no named row, which is the one thing this
+    /// surface refuses; see <see cref="ProjectionOmission"/>.
+    /// </param>
     /// <param name="canonicalStorePath">
     /// The <c>entries.jsonl</c> these came from, named in the header so the cache points at its truth.
     /// </param>
@@ -253,13 +294,23 @@ public static class MemoryProjection
     /// belongs to supersession rather than to precedence: a vendor copy identical to the repository's
     /// is still a copy the projection must not emit twice, and saying so is cheaper than leaving the
     /// operator to notice it vanished.
+    /// <para>
+    /// <b>The key is case-INSENSITIVE, and two repository facts that collide under it are not an
+    /// error.</b> The lookup groups rather than throwing: both repository facts are projected (a
+    /// repository-origin candidate is never overridden), and the one a colliding vendor copy is reported
+    /// as outranked by is the first in the caller's already-total <c>(repository, kind, id)</c> order.
+    /// So <c>Rules.md</c> and <c>rules.md</c> in one facts directory on a case-sensitive filesystem give
+    /// a deterministic answer where <c>ToDictionary</c> threw <see cref="ArgumentException"/> out of a
+    /// public pure function.
+    /// </para>
     /// </remarks>
     private static List<MemoryProjectionCandidate> SelectRepositoryTruth(
         List<MemoryProjectionCandidate> live, List<ProjectionOmission> overridden)
     {
         var repositoryKeys = live
             .Where(c => c.Origin == MemoryFactOrigin.Repository)
-            .ToDictionary(ConflictKey, c => c.Entry, StringComparer.OrdinalIgnoreCase);
+            .GroupBy(ConflictKey, StringComparer.OrdinalIgnoreCase)
+            .ToDictionary(g => g.Key, g => g.First().Entry, StringComparer.OrdinalIgnoreCase);
 
         if (repositoryKeys.Count == 0)
         {

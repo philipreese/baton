@@ -5400,12 +5400,31 @@ from, and stating that an edit made in it is lost on the next sync and never rea
 back-points to the canonical entry id it was projected from. **There is no timestamp in the output, and
 that is the mechanism rather than a stylistic choice** — a generated-at stamp is exactly what makes
 "re-running sync without source changes produces no diff" impossible, so the header carries a **content
-hash** of the body in its place. `MemoryProjection` is a pure function of `(entries, budget)` and its
-remarks carry the other three properties that hold the byte-identity up (a total `(repository, kind,
-id)` order, pinned `\n`/UTF-8/no-BOM, invariant-culture numbers) and why the hash covers the body and
-not the header. **`--apply` is the only thing that puts a byte on disk**, and short of it the verb has
-no filesystem effect whatever — `MemorySyncCommand`'s remarks carry why that has to be said as a
-negative rather than left as "it only reports".
+hash** of the body in its place. `MemoryProjection` is a pure function of `(repository,
+canonicalStorePath, entries, budget)` — the store path is an input because the header names it, so two
+runs differing only in it produce different bytes — and its remarks carry the other three properties
+that hold the byte-identity up (a total `(repository, kind, id)` order, pinned `\n`/UTF-8/no-BOM,
+invariant-culture numbers) and why the hash covers the body and not the header. **Byte-identity is
+therefore a per-machine claim**: absolute source paths and the store path are rendered into the output,
+so the same store on two machines projects two different files, and "an unchanged store produces no
+diff" is a statement about one machine over time. **`--apply` is the only thing that puts a byte on
+disk**, and short of it the verb has no filesystem effect whatever — `MemorySyncCommand`'s remarks
+carry why that has to be said as a negative rather than left as "it only reports".
+
+**The two verbs are not a loop: `import` recognises a projection and refuses to file it.** `sync`
+writes into a vendor root, and that root is `import`'s own population — so without a test the pair
+would re-ingest each cycle's cache as a fresh memory, growing the store by one entry and roughly
+doubling its bytes per cycle until the projection budget began evicting real memories. The test is the
+format marker on the projected file's first line, one constant shared by the writer and the reader
+(`MemoryProjection.IsProjectedFile`), checked **before** the subject is resolved so such a file is
+reported as `projection-skipped` and never as `unfiled` — the two mean different things, and only
+`unfiled` is a state an operator fixes with `--assert`. The marker is a test on content and not a
+guarantee about a partial file: the staging write is not atomic, so a `.tmp` truncated before its first
+line completed carries no marker and imports as an ordinary memory.
+
+**An archived-origin entry (`historical-note`) is projected and labelled, never dropped** — the
+projector's remarks carry the derivation; the register's part is that labelling rather than hiding is
+the ruling, on the same reasoning every other omission on this surface is named rather than counted.
 
 **A superseded entry is omitted from the projection and named in the report** — the projector's own
 remarks carry the derivation; the register's part is that omitting is the ruling, since a cache is the
@@ -5436,7 +5455,12 @@ deliberately **no forward encoding** from a repository identity to a Claude proj
 `MemoryRootPath` shows the encoding is lossy, so `sync` runs the same `MemoryRootInventory` discovery
 `audit` and `import` run and writes into the roots that came back. **A repository with no discovered
 root gets no target and is reported as having none, because a projection written into a directory the
-vendor has never heard of is a file nothing ever reads, reported as a success.** Each target root
+vendor has never heard of is a file nothing ever reads, reported as a success.** **An archived Claude
+root is refused by construction, and an operator assertion does not lift the refusal** — an archive is
+a record of what was, a projection is the current reading, and `MemorySyncCommand`'s discovery remarks
+carry why the check has to run ahead of resolution. Every discovered root that is not a target is
+listed in the report with its reason, so "discovered and never written" is printed rather than only
+claimed. Each target root
 receives exactly one Baton-owned file and no other file in it is touched — not `MEMORY.md`, not the
 vendor's own memories. The honest consequence, stated because a reader's prior fills the gap the other
 way: a vendor that surfaces only the memories it has indexed may not read the projection until

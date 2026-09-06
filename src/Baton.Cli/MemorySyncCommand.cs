@@ -70,14 +70,14 @@ public static class MemorySyncCommand
         var userHome = userHomeOverride ?? MemoryRootInventory.DefaultUserHome;
 
         var repositoryFacts = ReadRepositoryFacts(options);
-        var targetsByRepository = await DiscoverTargetsAsync(claudeHome, userHome, cancellationToken)
+        var discovery = await DiscoverTargetsAsync(claudeHome, userHome, cancellationToken)
             .ConfigureAwait(false);
 
         var reports = new List<SyncRepositoryReport>();
         foreach (var slug in StoredRepositorySlugs(options.Repository))
         {
             var report = await SyncOneAsync(
-                slug, options, repositoryFacts, targetsByRepository, cancellationToken).ConfigureAwait(false);
+                slug, options, repositoryFacts, discovery.ByRepository, cancellationToken).ConfigureAwait(false);
             if (report is not null)
             {
                 reports.Add(report);
@@ -88,7 +88,8 @@ public static class MemorySyncCommand
             options.Apply,
             options.RepositoryFactsDirectory,
             repositoryFacts.Count,
-            reports.OrderBy(r => r.Repository, StringComparer.Ordinal).ToList());
+            reports.OrderBy(r => r.Repository, StringComparer.Ordinal).ToList(),
+            discovery.NonTargets);
 
         if (options.Format == MemoryAuditOutputFormat.Json)
         {
@@ -262,23 +263,50 @@ public static class MemorySyncCommand
     /// the repository it resolves to.
     /// </summary>
     /// <remarks>
+    /// <para>
     /// <b>The same discovery <c>audit</c> and <c>import</c> use, filtered — never a second
     /// enumeration.</b> <see cref="MemoryRootInventory"/> stays the single definition of "a memory
     /// root" (spec/baton.md §12), which is what keeps <c>audit</c> a preview of what the other two
-    /// verbs will touch. What is filtered out here is everything that is not a markdown surface: the
-    /// Codex sqlite family and every Antigravity family are discovered, and then are not targets, by
-    /// Q4's ruling.
+    /// verbs will touch. What is filtered out here is everything that is not a live markdown surface:
+    /// the Codex sqlite family and every Antigravity family are discovered and then are not targets, by
+    /// Q4's ruling, and an <b>archived</b> Claude root is refused by construction — see
+    /// <see cref="NonTargetRoot"/> for why an archive is never written into even when an operator has
+    /// asserted a repository for it, which is precisely the workflow Q2 recommends.
+    /// </para>
+    /// <para>
+    /// <b>Every discovered root that is not a target comes back with a reason.</b> A root silently
+    /// absent from the report is indistinguishable from one that does not exist, and "discovered, not
+    /// written" is a claim four documents make (<see cref="MemorySyncOptionsParser.HelpLines"/>,
+    /// spec/baton.md §12, README.md, docs/agents/invoking-baton.md) that nothing used to print.
+    /// </para>
     /// </remarks>
-    private static async Task<IReadOnlyDictionary<string, List<ProjectionTarget>>> DiscoverTargetsAsync(
+    private static async Task<TargetDiscovery> DiscoverTargetsAsync(
         string claudeHome, string userHome, CancellationToken cancellationToken)
     {
         var byRepository = new Dictionary<string, List<ProjectionTarget>>(StringComparer.OrdinalIgnoreCase);
+        var nonTargets = new List<NonTargetRoot>();
 
         var aliases = await MemoryAliasStore
             .ReadAllAsync(BatonPaths.MemoryAliasFile, cancellationToken).ConfigureAwait(false);
 
         foreach (var root in MemoryRootInventory.Scan(claudeHome, cancellationToken))
         {
+            // Checked BEFORE any resolution, so an asserted archive cannot become a target by another
+            // route. The alias fallback below is exactly how an archived root acquires a repository
+            // (its flattened name decodes to no checkout), so ordering these the other way would leave
+            // the refusal resting on a resolution that is designed to succeed here.
+            if (root.Kind != MemoryRootKind.Live)
+            {
+                nonTargets.Add(new NonTargetRoot(
+                    root.DirectoryPath,
+                    MemoryRootInventory.ClaudeVendor,
+                    $"READ-ONLY historical root (memory-archive/{root.ArchiveLabel}). A projection is the " +
+                    "CURRENT reading of a repository's memory and an archive is a record of what was, so " +
+                    "this is never a write target -- including when an operator has asserted a repository " +
+                    "for it, which is how an archive is imported. Nothing was written here."));
+                continue;
+            }
+
             var resolved = await ClaudeMemoryRootResolver.ResolveAsync(root, cancellationToken).ConfigureAwait(false);
             var repository = resolved.RepositoryValue
                 ?? MemoryAliasStore.Resolve(aliases, resolved.Path.CheckoutPath)
@@ -287,13 +315,31 @@ public static class MemorySyncCommand
             {
                 Add(byRepository, repository, ClaudeProjectionTarget.For(root.DirectoryPath));
             }
+            else
+            {
+                nonTargets.Add(new NonTargetRoot(
+                    root.DirectoryPath,
+                    MemoryRootInventory.ClaudeVendor,
+                    "no repository identity resolves for this root, so there is no store to project from. " +
+                    "Assert one with 'baton memory import --assert <this root>=<repository>'."));
+            }
         }
 
         foreach (var root in MemoryRootInventory.ScanVendorRoots(userHome, BatonPaths.Root, limits: null, cancellationToken))
         {
-            if (root.Family != VendorMemoryRootTable.CodexMarkdownFamily
-                || !Directory.Exists(root.DirectoryPath))
+            if (!Directory.Exists(root.DirectoryPath))
             {
+                continue;
+            }
+
+            if (root.Family != VendorMemoryRootTable.CodexMarkdownFamily)
+            {
+                nonTargets.Add(new NonTargetRoot(
+                    root.DirectoryPath,
+                    root.SourceVendor,
+                    $"family '{root.Family}' is not a markdown surface, so it is inventoried and NEVER " +
+                    "written: Q4 (operator, 2026-09-05) confined this phase to markdown, and byte-identical " +
+                    "idempotence over sqlite+WAL is a different problem with a different instrument."));
                 continue;
             }
 
@@ -301,9 +347,20 @@ public static class MemorySyncCommand
             {
                 Add(byRepository, repository, CodexProjectionTarget.For(root.DirectoryPath, root.SourceScope));
             }
+            else
+            {
+                nonTargets.Add(new NonTargetRoot(
+                    root.DirectoryPath,
+                    root.SourceVendor,
+                    "a per-machine root that encodes no checkout, and no operator has asserted a repository " +
+                    "for it -- so it is UNASSIGNED rather than handed whichever repository this run named. " +
+                    "Assert one with 'baton memory import --assert <this root>=<repository>'."));
+            }
         }
 
-        return byRepository;
+        return new TargetDiscovery(
+            byRepository,
+            nonTargets.OrderBy(r => r.RootDirectoryPath, StringComparer.OrdinalIgnoreCase).ToList());
 
         static void Add(Dictionary<string, List<ProjectionTarget>> map, string repository, ProjectionTarget target)
         {
@@ -401,6 +458,7 @@ public static class MemorySyncCommand
         {
             output.WriteLine();
             output.WriteLine("No repository has a canonical memory store yet. Run 'baton memory import' first.");
+            WriteNonTargets(output, report.NonTargetRoots);
             return;
         }
 
@@ -424,6 +482,28 @@ public static class MemorySyncCommand
             WriteOmissions(output, "omitted as superseded", repository.Superseded);
             WriteOmissions(output, "OVERRIDDEN by checked-in repository truth", repository.Overridden);
             WriteOmissions(output, "dropped by the projection budget", repository.Dropped);
+        }
+
+        WriteNonTargets(output, report.NonTargetRoots);
+    }
+
+    /// <summary>
+    /// Every root this run discovered and did not write into, named with its reason — the same "never
+    /// silently" posture <see cref="WriteOmissions"/> applies to entries, applied to roots.
+    /// </summary>
+    private static void WriteNonTargets(TextWriter output, IReadOnlyList<NonTargetRoot> roots)
+    {
+        if (roots.Count == 0)
+        {
+            return;
+        }
+
+        output.WriteLine();
+        output.WriteLine($"{roots.Count} discovered root(s) are NOT projection targets and were not written:");
+        foreach (var root in roots)
+        {
+            output.WriteLine($"  [{root.Vendor}] {root.RootDirectoryPath}");
+            output.WriteLine($"    {root.Reason}");
         }
     }
 
@@ -456,11 +536,34 @@ public static class MemorySyncCommand
         DefaultIgnoreCondition = JsonIgnoreCondition.WhenWritingNull,
     };
 
+    /// <summary>
+    /// What <see cref="DiscoverTargetsAsync"/> found: the write targets by repository, and every root
+    /// it discovered and will not write into, with why.
+    /// </summary>
+    private sealed record TargetDiscovery(
+        IReadOnlyDictionary<string, List<ProjectionTarget>> ByRepository,
+        IReadOnlyList<NonTargetRoot> NonTargets);
+
+    /// <summary>
+    /// One discovered memory root that is not a projection target, and the reason in the operator's
+    /// terms. Machine-level rather than per-repository: an archived root or a sqlite store is not a
+    /// target for <b>any</b> subject, so filing it under one would suggest another subject might have
+    /// written into it.
+    /// </summary>
+    /// <param name="RootDirectoryPath">The root that exists and was not written into.</param>
+    /// <param name="Vendor">Whose root it is, in <see cref="MemoryEntry.SourceVendor"/>'s vocabulary.</param>
+    /// <param name="Reason">Why it is not a target, and what (if anything) an operator does about it.</param>
+    private sealed record NonTargetRoot(
+        [property: JsonPropertyName("rootDirectoryPath")] string RootDirectoryPath,
+        [property: JsonPropertyName("vendor")] string Vendor,
+        [property: JsonPropertyName("reason")] string Reason);
+
     private sealed record SyncReport(
         [property: JsonPropertyName("apply")] bool Apply,
         [property: JsonPropertyName("repositoryFactsDirectory")] string? RepositoryFactsDirectory,
         [property: JsonPropertyName("repositoryFactsConsidered")] int RepositoryFactsConsidered,
-        [property: JsonPropertyName("repositories")] IReadOnlyList<SyncRepositoryReport> Repositories);
+        [property: JsonPropertyName("repositories")] IReadOnlyList<SyncRepositoryReport> Repositories,
+        [property: JsonPropertyName("nonTargetRoots")] IReadOnlyList<NonTargetRoot> NonTargetRoots);
 
     private sealed record SyncRepositoryReport(
         [property: JsonPropertyName("repository")] string Repository,

@@ -238,6 +238,92 @@ public sealed class MemoryProjectionTests : IDisposable
         Assert.Single(projection.ProjectedEntryIds, id => id == repositoryFact.Id);
     }
 
+    /// <summary>
+    /// Two checked-in facts whose names differ only in case do not throw out of the public projector —
+    /// the state a case-sensitive filesystem makes reachable. Both reach the bytes — precedence only
+    /// ever removes a vendor copy — and the answer is stable: the same inputs in the other order give
+    /// the same bytes and pick the same winner for the colliding vendor copy.
+    /// </summary>
+    [Fact]
+    public void Two_repository_facts_differing_only_in_case_project_without_throwing()
+    {
+        var upper = Entry("Rules.md", "the upper-case copy", sourceDirectory: "C:/checkout/facts");
+        var lower = Entry("rules.md", "the lower-case copy", sourceDirectory: "C:/checkout/facts");
+        var vendorCopy = Entry("rules.md", "the vendor's copy");
+
+        MemoryProjectionCandidate[] candidates =
+        [
+            new(upper, MemoryFactOrigin.Repository),
+            new(lower, MemoryFactOrigin.Repository),
+            Vendor(vendorCopy),
+        ];
+
+        var projection = MemoryProjection.Build(
+            Repository, "store.jsonl", candidates, ProjectionBudget.Default);
+
+        Assert.Equal(2, projection.ProjectedEntryIds.Count);
+        Assert.Contains(upper.Id, projection.ProjectedEntryIds);
+        Assert.Contains(lower.Id, projection.ProjectedEntryIds);
+
+        // The vendor copy still loses to one of them — the key really is case-insensitive, so this arm
+        // is not passing because the collision quietly stopped being a collision.
+        var loser = Assert.Single(projection.Overridden);
+        Assert.Equal(vendorCopy.Id, loser.EntryId);
+
+        var reversed = MemoryProjection.Build(
+            Repository, "store.jsonl", candidates.Reverse().ToList(), ProjectionBudget.Default);
+        Assert.Equal(projection.Bytes, reversed.Bytes);
+        Assert.Equal(loser.Reason, Assert.Single(reversed.Overridden).Reason);
+    }
+
+    /// <summary>
+    /// An archived-origin entry IS projected, and it is labelled twice over — the <c>baton:entry</c>
+    /// comment a machine reads and the sentence a person reads both carry <c>historical-note</c>. The
+    /// ruling is the projector's remarks', glossed in spec/baton.md §12. The control is a live entry in
+    /// the same projection, whose own sections carry neither.
+    /// </summary>
+    [Fact]
+    public void An_archived_origin_entry_projects_and_is_labelled_historical()
+    {
+        var historical = Entry("feedback_archived.md", "what was true then") with
+        {
+            Kind = MemoryKind.HistoricalNote,
+            KindSource = MemoryKindSource.InferredFromArchive,
+        };
+        var current = Entry("feedback_rules.md", "what is true now");
+
+        var projection = MemoryProjection.Build(
+            Repository, "store.jsonl", [Vendor(historical), Vendor(current)], ProjectionBudget.Default);
+        var text = Encoding.UTF8.GetString(projection.Bytes);
+
+        Assert.Equal(2, projection.ProjectedEntryIds.Count);
+        Assert.Contains($"<!-- baton:entry id={historical.Id} kind=historical-note", text, StringComparison.Ordinal);
+        Assert.Contains($"`{historical.Id}` (historical-note)", text, StringComparison.Ordinal);
+
+        // Control: the live entry in the same projection carries its own kind, not this one.
+        Assert.DoesNotContain($"<!-- baton:entry id={current.Id} kind=historical-note", text, StringComparison.Ordinal);
+    }
+
+    /// <summary>
+    /// <c>canonicalStorePath</c> is a projector INPUT, not incidental: one store rendered against two
+    /// store paths gives two different files. Pinned because spec/baton.md §12 used to gloss the
+    /// signature without it, and because it is half of why byte-identity is scoped to one machine.
+    /// </summary>
+    [Fact]
+    public void The_canonical_store_path_is_an_input_that_changes_the_bytes()
+    {
+        var candidates = new[] { Vendor(Entry("feedback_a.md", "alpha")) };
+
+        var here = MemoryProjection.Build(Repository, "C:/one/entries.jsonl", candidates, ProjectionBudget.Default);
+        var there = MemoryProjection.Build(Repository, "D:/other/entries.jsonl", candidates, ProjectionBudget.Default);
+
+        Assert.NotEqual(here.Bytes, there.Bytes);
+
+        // …and only the header moved: the body hash, which is what the idempotence claim rests on, is
+        // the same. That is the split the projector's remarks describe, measured rather than asserted.
+        Assert.Equal(here.BodySha256, there.BodySha256);
+    }
+
     // ---------------------------------------------------------------------------------------------
     // `baton memory sync` end to end.
     // ---------------------------------------------------------------------------------------------
@@ -443,6 +529,153 @@ public sealed class MemoryProjectionTests : IDisposable
         Assert.False(Directory.Exists(directory));
     }
 
+    /// <summary>
+    /// <b>The no-feedback-loop acceptance.</b> <c>sync --apply</c> writes into a root that is
+    /// <c>import</c>'s own population, so a projection re-ingested as a memory would feed the store its
+    /// own contents once per cycle. The claim is a FIXED POINT measured in store bytes: with the root's
+    /// real memory already imported, a sync-then-import cycle changes nothing, and a second cycle
+    /// changes nothing either.
+    /// </summary>
+    /// <remarks>
+    /// Two non-vacuity checks and one control, because "the bytes did not change" passes for a great
+    /// many wrong reasons: the projection file must actually exist on disk, the import must report the
+    /// skip by name and under its own heading rather than the <c>unfiled</c> one (<c>MemoryImportPlan</c>
+    /// says what the two populations mean), and an ordinary <c>.md</c> dropped into the same root
+    /// between cycles MUST change the store — otherwise the comparison is measuring an import that
+    /// stopped importing.
+    /// </remarks>
+    [Fact]
+    public async Task Importing_a_root_sync_wrote_into_adds_nothing_and_reports_the_projection_skipped()
+    {
+        var root = await SeedStoreAndClaudeRootAsync();
+        var entriesFile = BatonPaths.MemoryEntriesFile(Slug);
+
+        // Cycle 0: the root's own memory becomes canonical, so what follows is about what SYNC added.
+        await ImportAsync();
+        var settled = File.ReadAllBytes(entriesFile);
+
+        // Cycle 1.
+        await RunAsync("--repository", Repository, "--apply");
+        var projection = Path.Combine(root, ClaudeProjectionTarget.ProjectionFileName);
+        Assert.True(File.Exists(projection));
+
+        var imported = await ImportAsync();
+        Assert.Equal(settled, File.ReadAllBytes(entriesFile));
+        Assert.Contains("projection-skipped: 1", imported, StringComparison.Ordinal);
+        Assert.Contains(projection, imported, StringComparison.Ordinal);
+        Assert.DoesNotContain("Unfiled -- read, digested", imported, StringComparison.Ordinal);
+
+        // Cycle 2: the same pair again. Store bytes unchanged, and the skip count is still exactly the
+        // number of files sync projected — one target, one skip, not one more per cycle.
+        await RunAsync("--repository", Repository, "--apply");
+        var again = await ImportAsync();
+        Assert.Equal(settled, File.ReadAllBytes(entriesFile));
+        Assert.Contains("projection-skipped: 1", again, StringComparison.Ordinal);
+
+        // No entry in the store was ever sourced from the projection file.
+        var stored = await MemoryStore.ReadAllAsync(entriesFile, TestContext.Current.CancellationToken);
+        Assert.DoesNotContain(stored, e => e.SourcePath.Contains(
+            ClaudeProjectionTarget.ProjectionFileName, StringComparison.OrdinalIgnoreCase));
+
+        // Control: an ordinary memory dropped into the same root DOES reach the store. Without this the
+        // three assertions above would pass over an import that had simply stopped working.
+        File.WriteAllText(Path.Combine(root, "user_new.md"), "a memory a person wrote");
+        await ImportAsync();
+        Assert.NotEqual(settled, File.ReadAllBytes(entriesFile));
+    }
+
+    /// <summary>
+    /// An archived root is never a projection write target — not even with a repository asserted for it,
+    /// which is exactly how Q2 says an archive gets imported, so the case is reachable rather than
+    /// theoretical. The control is the same alias on a LIVE root, which does receive a file: that is
+    /// what proves the refusal is the root's kind and not the fixture failing to resolve.
+    /// </summary>
+    /// <remarks>
+    /// The arm carries the other two non-target classes too, because they are one report and one
+    /// printer: a live Claude root nothing resolves, and an unassigned per-machine Codex root. All four
+    /// reasons are report output, and report output nothing asserts is a claim with no instrument.
+    /// </remarks>
+    [Fact]
+    public async Task An_archived_root_is_refused_as_a_target_even_with_a_repository_asserted()
+    {
+        await SeedStoreAsync();
+
+        var archived = Path.Combine(ClaudeHome, "memory-archive", "2026-09-03", "c--fixture-checkout-memory");
+        Directory.CreateDirectory(archived);
+        File.WriteAllText(Path.Combine(archived, "feedback_rules.md"), "the archived copy");
+        await AssertAliasAsync(archived);
+
+        // Two more roots that exist and are not targets, for two different reasons.
+        Directory.CreateDirectory(Path.Combine(ClaudeHome, "projects", "c--unclaimed", "memory"));
+        Directory.CreateDirectory(Path.Combine(UserHome, ".codex", "memories"));
+
+        var output = await RunAsync("--repository", Repository, "--apply");
+
+        Assert.Contains("NO TARGET", output, StringComparison.Ordinal);
+        Assert.Contains("READ-ONLY historical root (memory-archive/2026-09-03)", output, StringComparison.Ordinal);
+        Assert.Empty(Directory.GetFiles(archived, "baton-*"));
+
+        // The unresolvable Claude root and the unassigned Codex root are named with their own reasons,
+        // not folded into the archive's or left out of the report entirely.
+        Assert.Contains("no repository identity resolves for this root", output, StringComparison.Ordinal);
+        Assert.Contains("UNASSIGNED rather than handed whichever repository", output, StringComparison.Ordinal);
+        Assert.Empty(Directory.GetFiles(Path.Combine(UserHome, ".codex", "memories"), "baton-*"));
+
+        // Control: a live root under the same asserted repository IS written into, in the same run shape.
+        var live = Path.Combine(ClaudeHome, "projects", "c--fixture-checkout", "memory");
+        Directory.CreateDirectory(live);
+        await AssertAliasAsync(live);
+
+        var second = await RunAsync("--repository", Repository, "--apply");
+        Assert.Contains("[created]", second, StringComparison.Ordinal);
+        Assert.True(File.Exists(Path.Combine(live, ClaudeProjectionTarget.ProjectionFileName)));
+
+        // …and the archive is still untouched after the run that did write something.
+        Assert.Empty(Directory.GetFiles(archived, "baton-*"));
+    }
+
+    /// <summary>
+    /// The Codex markdown target end to end — written, byte-identical on a second run — beside the
+    /// negative four documents assert and nothing used to check: a Codex sqlite root is discovered and
+    /// NEVER projected, with the report saying why. Both in one arm because the two are one condition
+    /// apart: a family filter that stopped discriminating would fail this in both directions at once.
+    /// </summary>
+    [Fact]
+    public async Task The_codex_markdown_root_is_projected_and_a_sqlite_root_never_is()
+    {
+        await SeedStoreAsync();
+
+        var codexHome = Path.Combine(UserHome, ".codex");
+        var markdownRoot = Path.Combine(codexHome, "memories");
+        Directory.CreateDirectory(markdownRoot);
+
+        // The sqlite store sits in the SAME Codex home, and is asserted to the same repository — so the
+        // only thing keeping it out of the targets is the family test.
+        File.WriteAllBytes(Path.Combine(codexHome, "memories_main.sqlite"), [0x53, 0x51, 0x4C, 0x69]);
+        await AssertAliasAsync(markdownRoot);
+        await AssertAliasAsync(codexHome);
+
+        var output = await RunAsync("--repository", Repository, "--apply");
+        var target = Path.Combine(markdownRoot, CodexProjectionTarget.ProjectionFileName);
+
+        Assert.Contains("[created] codex:", output, StringComparison.Ordinal);
+        Assert.True(File.Exists(target));
+
+        var first = File.ReadAllBytes(target);
+        Assert.StartsWith(MemoryProjection.FormatMarker, Encoding.UTF8.GetString(first), StringComparison.Ordinal);
+
+        // The sqlite root: discovered, named, and not written into. The Codex home holds exactly the
+        // sqlite file and the memories directory it had before the run.
+        Assert.Contains("codex-sqlite", output, StringComparison.Ordinal);
+        Assert.Contains("is not a markdown surface", output, StringComparison.Ordinal);
+        Assert.Equal(["memories_main.sqlite"], Directory.GetFiles(codexHome).Select(Path.GetFileName).ToArray());
+
+        // Byte-identical on a second apply, at the Codex target rather than only the Claude one.
+        var second = await RunAsync("--repository", Repository, "--apply");
+        Assert.Contains("[unchanged] codex:", second, StringComparison.Ordinal);
+        Assert.Equal(first, File.ReadAllBytes(target));
+    }
+
     /// <summary><c>--repository-facts</c> without <c>--repository</c> is refused, never defaulted.</summary>
     [Fact]
     public void Repository_facts_without_a_repository_is_refused()
@@ -469,6 +702,32 @@ public sealed class MemoryProjectionTests : IDisposable
         return writer.ToString();
     }
 
+    /// <summary>
+    /// <c>baton memory import</c> over the same two fixture homes — the other half of the pair the
+    /// feedback-loop arm is about. Driven through the real command rather than the plan, because the
+    /// loop is between two VERBS and a pure-plan test could not see the file sync wrote.
+    /// </summary>
+    private async Task<string> ImportAsync()
+    {
+        var writer = new StringWriter();
+        var exitCode = await MemoryImportCommand.ExecuteAsync(
+            MemoryImportOptionsParser.Parse([]),
+            writer,
+            ClaudeHome,
+            TestContext.Current.CancellationToken,
+            UserHome);
+
+        Assert.Equal(0, exitCode);
+        return writer.ToString();
+    }
+
+    /// <summary>An operator assertion filing <paramref name="rootDirectory"/> under <see cref="Repository"/>.</summary>
+    private static Task AssertAliasAsync(string rootDirectory) =>
+        MemoryAliasStore.AppendAsync(
+            [new MemoryAliasEntry(BatonPaths.RecordKey(rootDirectory), Repository, "test", default)],
+            BatonPaths.MemoryAliasFile,
+            TestContext.Current.CancellationToken);
+
     /// <summary>Two entries in the canonical store, and nothing else.</summary>
     private async Task SeedStoreAsync() =>
         await MemoryStore.AppendAsync(
@@ -488,10 +747,7 @@ public sealed class MemoryProjectionTests : IDisposable
         Directory.CreateDirectory(root);
         File.WriteAllText(Path.Combine(root, "feedback_rules.md"), "the vendor's copy");
 
-        await MemoryAliasStore.AppendAsync(
-            [new MemoryAliasEntry(BatonPaths.RecordKey(root), Repository, "test", default)],
-            BatonPaths.MemoryAliasFile,
-            TestContext.Current.CancellationToken);
+        await AssertAliasAsync(root);
 
         return root;
     }

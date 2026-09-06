@@ -546,6 +546,50 @@ public sealed class MemoryImportTests : IDisposable
     }
 
     /// <summary>
+    /// A Baton projection sitting in an importable root is skipped, and the skip SURVIVES THE MANIFEST
+    /// — read back off disk, the same round trip <see cref="ImportManifest.Machinery"/> gets, because a
+    /// population that only exists in a live object is one an undo or an audit can never see.
+    /// </summary>
+    /// <remarks>
+    /// The behaviour end to end (sync writes it, import refuses it, store bytes unchanged across two
+    /// cycles) is <c>MemoryProjectionTests</c>'s, which owns the pair of verbs. What this arm adds is
+    /// the serialization: the row, its digest, and the two negatives beside it — no entry from the
+    /// file, and nothing in <c>unfiled</c>, which is a different population meaning a different thing.
+    /// </remarks>
+    [Fact]
+    public async Task A_projection_in_an_importable_root_is_skipped_and_the_manifest_records_it()
+    {
+        WriteClaudeRoot(
+            "C--projected", Checkout("projected"),
+            ("user_real.md", "a memory a person wrote"),
+            (ClaudeProjectionTarget.ProjectionFileName, MemoryProjection.FormatMarker + "\n# a cache\n"));
+        var rootDirectory = Path.Combine(ClaudeHome, "projects", "C--projected", "memory");
+
+        var text = await RunAsync(
+            "--assert", $"{rootDirectory}=github.com/philipreese/projected", "--asserted-by", "the-test");
+
+        Assert.Contains("projection-skipped: 1", text, StringComparison.Ordinal);
+        Assert.Contains("Unfiled: 0", text, StringComparison.Ordinal);
+
+        var manifest = ImportManifest.Read(
+            Directory.GetFiles(Path.Combine(BatonPaths.Root, BatonPaths.MemoryImportsDirectoryName)).Single());
+
+        var skipped = Assert.Single(manifest.ProjectionsSkipped!);
+        Assert.EndsWith(ClaudeProjectionTarget.ProjectionFileName, skipped.SourcePath, StringComparison.Ordinal);
+        Assert.NotEmpty(skipped.Sha256);
+        Assert.Empty(manifest.Unfiled);
+
+        // The control that keeps this from passing over an import that read nothing at all: the
+        // ordinary memory in the SAME root did import.
+        Assert.Equal(
+            "a memory a person wrote",
+            Assert.Single(await StoreAsync("github.com/philipreese/projected")).Text);
+        Assert.DoesNotContain(
+            manifest.Entries,
+            e => e.SourcePath.EndsWith(ClaudeProjectionTarget.ProjectionFileName, StringComparison.Ordinal));
+    }
+
+    /// <summary>
     /// A root with no derivable repository is reported unfiled and imported nowhere — and the same
     /// root WITH an assertion imports, which is what makes the first half a refusal rather than a
     /// blind spot.
