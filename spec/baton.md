@@ -5407,6 +5407,236 @@ source" looks like on disk rather than as a promise.
 
 ---
 
+## §13 The conductor queue (#1934 slice 1)
+
+The conductor's dispatch queue was a PowerShell loop in a per-session scratchpad directory: a JSON
+item list, weighted concurrency slots, a time-of-day memory floor, per-vendor model defaults, and a
+`baton dispatch` shell-out. Every operator ruling about concurrency, tiers and defaults lived in that
+loop's comments and nowhere in the product, and its launch log died with the session. This section is
+that loop, in Baton, with every decision recorded.
+
+**Slice 1 is a dispatch request queue and nothing more.** No issue-anchored lifecycle, no verdict
+reading, no automatic fix rounds — those are slice 2 (#1934 Q2, answer "(a) first, then (b)"). Adding
+a field here for a lifecycle no code advances would be a promise the product does not keep.
+
+### Where it lives
+
+- **`~/.baton/queue/queue.json`** — the items, in operator order, and the `held` flag. Two writers
+  that are not one process (the `baton queue` verbs and the daemon's scheduler), so every mutation is
+  one read-modify-write inside one `MutexGuardedFileLock` acquisition. An absent file reads as an
+  empty queue; a **malformed one is refused**, never silently read as empty — that asymmetry is the
+  difference between "there is no queue yet" and "your work list just vanished".
+- **`~/.baton/queue/specs/<tag>.md`** — baton's own copy of each item's spec (Q6). `baton queue add`
+  copies the operator's file at add time, so an item still launches the brief it was queued with after
+  the scratch file has been rewritten. The tag is a slug (lower-case letters, digits, `-`, `_`,
+  1–64 chars) because it names this file and labels the room.
+- **`~/.baton/fleet/queue.jsonl`** — the decision ledger. See "The recorded fact" below.
+
+### The verbs
+
+`baton queue add <tag> --role <role> --spec <file> (--issue <n> | --workspace <dir>) [--scope
+engine|tooling|docs] [--adapter] [--model] [--effort] [--timeout <minutes>] [--max-tool-steps]
+[--token-budget] [--override-runway <reason>] [--reason <why>]`, plus `list`, `hold`, `resume`, and
+`import <file>`.
+
+**No verb launches anything.** Adding an item is a durable request; the running daemon is the only
+thing that dispatches, which is what keeps one auditable path into a room. `hold`/`resume` pause
+launches without stopping the daemon — the usage harvester, the projection writer and the delivery
+poller keep running and live lanes are untouched, the same "work already running is unaffected"
+posture the runway hold (§7) takes.
+
+`--issue <n>` provisions at **add** time, not launch time: `gh issue develop <n> --name <n>-lane`,
+`git worktree add <root>/w<n> <n>-lane`, then the workspace is trusted at the `all` ceiling (§9). Add
+time because an operator queueing eight items at 23:00 should learn immediately that the issue does
+not exist, and because it keeps `gh`/`git` spawning in the CLI rather than in the background host.
+`<root>` — which the issue left undefined — is `Queue.WorktreeRoot`, defaulting to **the parent
+directory of the checkout the verb was invoked from**, which is the sibling-repos layout the runner
+assumed. The `all` ceiling is a real widening and is stated rather than left to be inferred.
+
+`import <file>` reads the runner's own shape (`{tag, role, model, effort, timeout, workspace|issue,
+adapter, maxToolSteps, tokenBudget, overrideRunway, reason, pinModel, external}`) for Q7's cutover. A
+**launched tag comes in launched** — resetting it would re-dispatch a lane the operator already has
+running. The import refuses as a whole rather than importing the readable subset: a partial import at
+cutover looks like a successful one. The file is also checked **against itself**: a tag listed twice
+is refused, because a tag is an identity that names one spec file, so the two rows would launch two
+lanes off one brief.
+
+`list` prints each item and, when the queue's last recorded decision was a wait, one queue-level line
+saying what it is waiting on and since when — read off the ledger, never recomputed, so it cannot
+disagree with the scheduler's own reading. `add` raises its refusals — a launched tag above all —
+**before** it copies the spec or provisions a worktree: the copy overwrites, and the launched-tag
+refusal exists precisely to keep the brief a running lane was queued with.
+
+### The policy, and where its numbers live
+
+Everything is `settings.json`'s `Queue` block. An absent block, an explicit `null`, and an
+out-of-range value all leave the shipped defaults in force — the same posture `RunwayHold` takes, and
+for the same reason: a `0` cap would hold every launch forever and a negative gap would disable the
+gap silently, and neither is a setting anyone means.
+
+| Setting | Shipped default | What it is |
+|---|---|---|
+| `MaxLiveWeight` | `4` | The weighted concurrency cap. |
+| `FloorGbDay` / `FloorGbNight` | `2.0` / `1.2` | Free-physical-memory floor, in GiB, per hour band. |
+| `NightStartHour` / `DayStartHour` | `20` / `9` | The band boundary, in the operator's **local wall clock**. |
+| `GapSeconds` | `180` | Minimum seconds between two launches. |
+| `TickSeconds` | `30` | How often the scheduler evaluates. Distinct from the gap: the tick is how often a decision is *made*, the gap how often a launch is *allowed*. |
+| `Tiers` | see below | Overlaid on the shipped table entry by entry, so naming one key does not lose the others. |
+| `AdapterDefaultModels` | `agy` → `gemini-3.8-flash-high` | Model for an item whose tier names an adapter and no model. |
+| `WorktreeRoot` | parent of the invoking checkout | Where `--issue` puts `w<n>`. |
+
+**Lane weights: implement 1.0, an item on the `codex` adapter 0.5, `review` 0.** One function computes
+both the live tally over running rooms and the candidate's own weight; two copies would drift and the
+cap would still *look* enforced. Review is **two** behaviours, not one — weight zero *and* cap
+bypassing — because `live + candidate <= max` still fails at `live == max` when the candidate adds
+nothing. A review lane bypasses the memory floor for the same reason it bypasses the cap: it is not
+what consumes the memory the floor protects. It still honours `hold` and the gap.
+
+**The hour band is local, not UTC.** "Night is 20:00–09:00" is a statement about when a person is at
+the machine; computing it in UTC moves it by the host's offset and applies the night floor through
+the afternoon.
+
+**An unmeasurable memory reading does not block.** Off Windows there is no reading at all and on
+Windows the call can fail; either way the floor is not applied and the fact records the reading as
+**absent, never zero** — the same "admit (unmeasured)" posture the runway gate already takes. A
+fabricated zero would halt the queue permanently; a fabricated large value would disable the gate
+silently.
+
+**The queue does not read `/usage` (Q5).** `baton dispatch`'s own runway hold (§7) is the only
+plan-usage gate. The launcher hands dispatch a wrapper around its own runway evaluator and branches
+on **what that wrapper recorded**, never on the exception type — a `CliArgumentException` is also what
+a missing spec file, an unknown role and a drain marker raise, and treating those as "held" would
+leave a permanently-broken item retrying every gap forever with a false reason recorded. A hold leaves
+the item **queued** to retry after the gap; anything else fails it out of the queue.
+
+### The tier table (Q3)
+
+Keyed by role and scope class, flattened to one token: `engine`, `tooling`, `docs` for the mutating
+roles and `review-<scope>` for `review`. The shipped table is the operator's 2026-09-05 rulings.
+
+| Key | Adapter | Model | Effort |
+|---|---|---|---|
+| `engine` | claude | opus | high |
+| `tooling` | claude | opus | medium |
+| `docs` | claude | opus | medium |
+| `review-engine` | claude | opus | high |
+| `review-tooling` | codex | gpt-5.6-sol | high |
+| `review-docs` | codex | gpt-5.6-sol | high |
+
+The three axes stay independent (decision 0017), so overriding one keeps the tier's other two. An item
+that overrides any axis **must** carry `--reason`, and the reason reaches the room as its
+`bindings.json` label alongside the tag. A scope class the table has no entry for **fails the item**
+rather than falling back — silently launching on the role's own default model is the failure the table
+exists to prevent. An item that names no scope class resolves to nulls, which means "whatever the
+role's own tier says", exactly as a bare `baton dispatch` does; that is not an override, because there
+was no tier to depart from.
+
+**`sonnet` is not promoted.** An item that asks for it gets it, and the launch fact says the tier was
+departed from. Nothing in the queue substitutes a model.
+
+### The recorded fact (Q4)
+
+One line per evaluation in `~/.baton/fleet/queue.jsonl`, through the same `JsonLinesLedger` the burn
+and cost ledgers share. Fields: `at`, `tag`, `decision` (`launched` | `waited` | `failed`), `reason`
+(`slots` | `memory` | `gap` | `hold` | `runway-held` | `no-items`, or the error), `liveWeight`,
+`freeGb` (absent when unmeasured), `floorGb`, `tier`, `adapter`, `model`, `effort`, `tierOverride`,
+`overrideReason`, `room`.
+
+**It records transitions, every launch and every failure — not a per-tick heartbeat.** A verdict
+identical to the one immediately before it is not re-appended, so a queue waiting on memory for three
+hours writes one line rather than three hundred and sixty. "Is it still waiting, and on what" is
+`baton queue list`'s question. The gate order is hold → no-items → gap → memory → slots, and that
+order is load-bearing for the reason recorded: an operator who held the queue must read `hold`, not
+whichever other gate happens also to be shut. The ledger **fails open** like every other accounting
+write: a recording failure is never the reason a lane that launched is treated as not having launched.
+
+`fleet_status` and the projection carry nothing new for the queue in slice 1; #1912 is the reader.
+
+### Launching, done detection, and shutdown
+
+The scheduler dispatches **in-process, through `DispatchCommand.ExecuteAsync`** — the same code path
+`baton dispatch` uses, not a shell-out. A spawned CLI would be a new process-spawn site whose exit
+code cannot distinguish a runway hold from a bad spec.
+
+Because it runs in-process, the terminal sentinel and both ledgers — the block that used to live only
+in `Program.cs`'s top-level code — are now `TerminalSettleRecorder`, shared rather than copied. Without
+that, a queue-launched room would carry no `terminal.json` (invisible to `fleet_status`'s
+sentinel-first path) and no cost-ledger row, which is indistinguishable from a lane that spent nothing.
+
+An item is **done** when its room reaches a terminal state, read from the room itself — no `.done`
+sentinel files, so a restarted daemon resolves an item it never launched. **The fate comes from the
+room's own outcome word**, the one `WorkflowOutcome` writes into the sentinel (§3): only `Succeeded`
+is done, and Cancelled / Failed / Indeterminate — and any word this reader does not know, including a
+sentinel carrying none — are **failed, with the room id and that word**. Not from the sentinel's
+step list or its error field: a cancelled lane has no failed step and a rejected one carries no
+failure reason, so both read as a clean completion under either. Resolving and redispatching stay
+operator verbs in slice 1: nothing here retries. A resolution is recorded on the *item*; the ledger
+records decisions, and reading a room that finished is not one.
+
+**No item stays launched with nothing to read.** Two paths would otherwise leave one there forever,
+and each is closed where the fact exists:
+
+- A lane that **faults or is cancelled after launch** never reaches Terminal, so nothing writes its
+  `terminal.json`. The launcher's own continuation writes the room a `Failed` sentinel instead, and
+  done detection resolves it like any other settled room. Both non-success shapes are covered, not
+  only the throw: a pump whose `OperationCanceledException` escapes ends its task *cancelled* rather
+  than *faulted*, and a fault-only gate left that one settling nothing at all. It never creates a room
+  the dispatch never provisioned — that would put a lane in `fleet_status` that never ran — and never
+  overwrites a refusal the dispatch already recorded, which carries the `try` line a person acts on.
+
+  **That sentinel is projected from the room's own ledger, never fabricated.** The path is reached
+  only by a lane that got past provisioning, so the room normally has a real `flow.jsonl`; a
+  hand-built `Failed`/no-steps/no-outputs view erased which steps ran and what they produced for the
+  one reader that returns a sentinel verbatim (`fleet_status`'s sentinel-first path re-projects
+  nothing). It is the same "a room with a real ledger must not be overwritten by a fabricated
+  sentinel" rule §3 states for the pre-ledger refusal, applied at the other end of the lane. Three
+  consequences, each deliberate: the outcome word is always `Failed` whatever the projection reads,
+  because nothing will ever carry this room to a recorded settle and only that word resolves the item;
+  the fault is the terminal `error`, with the room's own last recorded failure folded in beside it
+  rather than replacing it; and each step's live `liveness` probe is dropped, since a value read at
+  projection time would be frozen into a file read long after that engine exited. A room with no
+  ledger, no bound snapshot, or an unreadable one still gets the bare sentinel — the write is
+  unconditional, because an unprojectable room is exactly the one that would otherwise wedge its item
+  in `launched` forever.
+
+  Keeping a mid-lane `Running` step is safe at both readers that key on one, and each for its own
+  reason. The live-weight tally behind `MaxLiveWeight` skips any room carrying a sentinel at all
+  (`includeTerminal: false`), so a settled lane cannot hold the queue's own cap open. The fleet
+  projection does attach its per-step `processAlive` diagnostic to such a room, which is exactly the
+  case §6 says that field exists to report (`elapsed` needs the liveness record a sentinel-frozen step
+  never wrote, so §6's rule withholds it); the `live` block itself stays withheld,
+  gated on the room's displayed state being `Running`, which a settled room's never is.
+- A launch whose **room was never created** can produce no sentinel at all. The scheduler's own sweep
+  fails it once the room is still absent a grace period after the launch (the refusal window plus
+  slack for a slow pre-provision `git` spawn). Items carrying no room *at all* — the imported ones,
+  which the runner never recorded one for — are excluded, not swept.
+
+**Shutdown does not arrest a launched lane.** The dispatch runs on a detached task with
+`CancellationToken.None`, deliberately not the host's stopping token — stopping the daemon must not
+kill lanes it started. The cost, stated rather than left emergent: a daemon that exits mid-lane
+orphans that lane's *supervision*. The room's own record and the worker keep going, and nothing marks
+the item done until a daemon comes back and re-reads the room, which is precisely why done detection
+reads from disk.
+
+**The launch is recorded before it is started, under the same token it runs on.** The item is marked
+launched — with the room the scheduler picks and hands to the dispatch — *before* the dispatch
+begins, and that write, like the dispatch, takes `CancellationToken.None`. Recorded afterwards on the
+stopping token, a daemon stopped in that window left a worker running in the item's worktree against
+an item still `queued`, and the next daemon start dispatched a **second worker into the same
+workspace**. The item's state is the anti-relaunch record, so it is written first; the *ledger* row
+still waits for the outcome, because a `launched` line for a lane the runway then held would be a
+false fact in the file this queue exists to make auditable. A hold undoes the mark and returns the
+item to `queued`.
+
+**Every evaluation writes a fact, including the ones that fail.** A throw that reaches no decision
+arm — a malformed `settings.json`, an unreadable queue file — is recorded as `failed` with a reason
+saying its counters were never read (`freeGb` absent, never a fabricated zero), and a throw out of
+the launcher that is not modelled as an outcome fails the *item* with the room id rather than
+unwinding into the loop's catch-all. The ledger's collapse rule keeps a failure repeating every tick
+to one line.
+
+---
+
 ## Appendix: full subsystem ruling table
 
 One vocabulary note, so this table and §11 never diverge: code is **DELETED** or **NARROWED** —

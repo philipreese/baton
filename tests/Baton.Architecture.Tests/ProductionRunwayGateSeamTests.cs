@@ -14,9 +14,11 @@ namespace Baton.Architecture.Tests;
 /// <remarks>
 /// <para>
 /// Pure file reading over <c>src/</c>, no project references, matching <see cref="VendorSpawnGateTests"/>
-/// and <see cref="ReferenceDirectionTests"/>. The allowlist is empty today and is meant to stay that
-/// way: a production caller that genuinely needs its own evaluator is a change to the gate's contract
-/// (spec/baton.md §7, "Runway hold (#1848)"), not a line added here in passing.
+/// and <see cref="ReferenceDirectionTests"/>. The allowlist holds exactly ONE entry — #1934's queue
+/// launcher, for the <c>evaluateRunway</c> seam only, on a contract stated in spec/baton.md §13 before
+/// any code was written. The bar for a second is unchanged and is the one that kept it empty until now:
+/// a production caller that genuinely needs its own evaluator or policy is a change to the gate's
+/// contract (spec/baton.md §7, "Runway hold (#1848)"), not a line added here in passing.
 /// </para>
 /// <para>
 /// <b>Its false negatives, named rather than left for someone to discover</b> — the same disclosure
@@ -33,19 +35,23 @@ namespace Baton.Architecture.Tests;
 /// pinned by <c>Baton.Vendors.Tests.RunwayGateTests</c> and
 /// <c>Baton.Vendors.Tests.RunwayHoldSettingsTests</c>; that the settings key selects the shipped policy is
 /// pinned by <c>RunwayHoldSettingsTests</c>'s own end-to-end arm — not by a file scan.</item>
-/// <item><see cref="ApprovedEvaluatorOverrides"/> is keyed by FILE, not by (file, seam): an entry would
-/// allowlist that file for both seams at once. It is empty, and splitting the key is the change to make
-/// before the first entry is ever added rather than after.</item>
+/// <item><see cref="ApprovedEvaluatorOverrides"/> is keyed by (FILE, SEAM) since #1934 — the split
+/// #1932's own note said to make before the first entry was added, made in the change that added it. A
+/// file allowlisted for <c>evaluateRunway</c> is still an offender for <c>reservationPolicy</c>, so the
+/// one approved entry buys exactly the one seam its reason argues for.</item>
 /// </list>
 /// </remarks>
 public class ProductionRunwayGateSeamTests
 {
     /// <summary>
     /// Production call sites permitted to pass their own <c>evaluateRunway</c> or <c>reservationPolicy</c>,
-    /// with why. Empty by design — see the remarks above before adding one, including what the file-only
-    /// key means.
+    /// keyed by (file, seam), with why. One entry today — see the remarks above before adding another,
+    /// including what the per-seam key does and does not buy.
     /// </summary>
-    private static readonly Dictionary<string, string> ApprovedEvaluatorOverrides = new();
+    private static readonly Dictionary<(string File, string Seam), string> ApprovedEvaluatorOverrides = new()
+    {
+        [("src/Baton.Cli/Daemon/QueueLauncher.cs", EvaluatorSeamMarker)] = "#1934 slice 1, and a contract change made first in spec/baton.md §13, not a line added in passing. It does NOT substitute an evaluator: it awaits DispatchCommand.CreateDiskRunwayEvaluatorAsync — the same production evaluator a null seam would have built — and passes a wrapper that calls it, returns its verdict unchanged, and only REMEMBERS whether any vendor came back IsHold. The gate's thresholds, snapshot and decision are the production ones in full; nothing is admitted that a null seam would have held. The observation is load-bearing for the queue: DispatchCommand raises CliArgumentException for a hold AND for a drain marker, a missing spec, an unknown role and a non-git workspace, so a scheduler branching on the exception type would leave a permanently-broken item retrying every gap forever with 'runway-held' falsely recorded as the reason. QueueLauncher's own remarks state the same thing at the call site.",
+    };
 
     private const string CallMarker = "DispatchCommand.ExecuteAsync(";
     private const string EvaluatorSeamMarker = "evaluateRunway";
@@ -80,7 +86,7 @@ public class ProductionRunwayGateSeamTests
 
         var offenders = callSites
             .Where(site => site.Statement.Contains(seamMarker, StringComparison.Ordinal))
-            .Where(site => !ApprovedEvaluatorOverrides.ContainsKey(site.File))
+            .Where(site => !ApprovedEvaluatorOverrides.ContainsKey((site.File, seamMarker)))
             .Select(site => $"{site.File}:{site.Line}")
             .ToList();
 

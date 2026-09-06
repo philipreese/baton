@@ -1,5 +1,6 @@
 using System.Text.Json;
 using System.Text.Json.Serialization;
+using Baton.Queue;
 
 namespace Baton.Vendors;
 
@@ -57,7 +58,23 @@ public sealed record DaemonSettings
     /// </summary>
     public CodexPlanCeilingSettings? CodexPlanCeiling { get; init; }
 
+    /// <summary>
+    /// #1934 slice 1 — see <see cref="QueueSettings"/> for what it holds. Never null, and by exactly
+    /// the mechanism <see cref="RunwayHold"/> uses above: read-through nullable backing field,
+    /// coalesced on the way in as well as out. That property's remarks carry the whole argument,
+    /// record equality included, and it applies here unchanged.
+    /// </summary>
+    public QueueSettings Queue
+    {
+        get => _queue ?? DefaultQueue;
+        init => _queue = value ?? DefaultQueue;
+    }
+
     private static readonly RunwayHoldSettings DefaultRunwayHold = new();
+
+    private static readonly QueueSettings DefaultQueue = new();
+
+    private readonly QueueSettings? _queue = DefaultQueue;
 
     private readonly RunwayHoldSettings? _runwayHold = DefaultRunwayHold;
 

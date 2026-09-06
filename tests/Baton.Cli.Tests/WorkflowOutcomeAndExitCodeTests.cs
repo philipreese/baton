@@ -320,8 +320,9 @@ public class WorkflowOutcomeAndExitCodeTests
             ],
             members);
         // Adding a member? Sweep: RunExitCodeResolver.Resolve, RedispatchCommand's parent gate,
-        // StatusCommand, FleetStatusTool, glass.html chipsHtml + render buckets, spec/baton.md §3's
-        // table. #1608 review finding 10: this is a WorkflowOutcome sweep only -- adding a new
+        // StatusCommand, FleetStatusTool, QueueSchedulerService.ClassifyTerminal (#1934 — it decides a
+        // queue item's fate from this word, and fails the item closed on one it does not know),
+        // glass.html chipsHtml + render buckets, spec/baton.md §3's table. #1608 review finding 10: this is a WorkflowOutcome sweep only -- adding a new
         // FlowEvent is a DIFFERENT, unlisted population with its own two display sites (glass.html's
         // EVENT_NAMES map, RoomDetailTool.FlowEventStepId) that this list does not cover and no test
         // enumerates; check both by hand when a FlowEvent variant is added.

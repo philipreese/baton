@@ -752,6 +752,18 @@ public static class DispatchCommand
             vendor, RunwaySnapshotReader.Read(vendor), settings.RunwayHold.For(vendor), DateTimeOffset.UtcNow);
 
     /// <summary>
+    /// The same production evaluator as <see cref="CreateDiskRunwayEvaluator"/>, over settings this
+    /// method loads itself, for a caller that has not already loaded them. <c>internal</c> since
+    /// #1934 — <c>QueueLauncher</c> wraps THIS evaluator to observe whether a hold was what refused a
+    /// queued dispatch, because the exception type alone cannot tell a hold apart from a missing spec
+    /// file. It changes no verdict: the wrapper returns each decision unchanged
+    /// (<c>ProductionRunwayGateSeamTests.ApprovedEvaluatorOverrides</c> carries the full argument).
+    /// </summary>
+    internal static async Task<Func<string, RunwayDecision>> CreateDiskRunwayEvaluatorAsync(CancellationToken cancellationToken) =>
+        CreateDiskRunwayEvaluator(
+            await DaemonSettingsStore.LoadAsync(BatonPaths.SettingsFile, cancellationToken).ConfigureAwait(false));
+
+    /// <summary>
     /// #1841: persists ids already recovered from live worker stdout by
     /// <see cref="IWorkerAdapter.TryParseSessionId"/>. A no-op write when nothing was reported; never
     /// records an empty/null id and never changes <see cref="WorkerBindingConfigEntry.ResumeSession"/>.

@@ -318,6 +318,63 @@ public static class BatonPaths
     public const string FleetProjectionFileName = "projection.json";
 
     /// <summary>
+    /// <c>{Root}/fleet/queue.jsonl</c> — the conductor queue's append-only decision ledger (#1934
+    /// slice 1, spec/baton.md §13): one line per scheduler evaluation whose verdict changed, plus
+    /// every launch and every failure. Under <see cref="FleetDirectoryName"/> rather than the root,
+    /// because it is a fleet-level record like <see cref="FleetProjectionFile"/> beside it and not a
+    /// per-execution one like <see cref="QuotaLedgerFile"/>. What a row holds is
+    /// <c>Baton.Queue.QueueDecisionEntry</c>'s to state, not this property's.
+    /// </summary>
+    public static string QueueDecisionLedgerFile => Path.Combine(Root, FleetDirectoryName, QueueDecisionLedgerFileName);
+
+    /// <summary>Filename of <see cref="QueueDecisionLedgerFile"/> relative to <see cref="FleetDirectoryName"/>.</summary>
+    public const string QueueDecisionLedgerFileName = "queue.jsonl";
+
+    /// <summary>
+    /// <c>{Root}/queue</c> — the conductor queue's own directory (#1934 slice 1): the item list
+    /// (<see cref="QueueFile"/>) and the specs baton owns copies of (<see cref="QueueSpecsDirectory"/>).
+    /// A sibling of <see cref="Rooms"/>, never a child: a queue item is a request for a room that does
+    /// not exist yet, so filing it under a room root would make every room scan walk it.
+    /// </summary>
+    public static string Queue => Path.Combine(Root, QueueDirectoryName);
+
+    /// <summary>Directory name of <see cref="Queue"/> relative to a root.</summary>
+    public const string QueueDirectoryName = "queue";
+
+    /// <summary>
+    /// <c>{Root}/queue/queue.json</c> — the queue's items and its hold flag, read-modify-written by
+    /// both the CLI verbs and the daemon's scheduler under one <see cref="MutexGuardedFileLock"/>
+    /// (<c>Baton.Queue.QueueStore</c> owns that contract).
+    /// </summary>
+    public static string QueueFile => Path.Combine(Queue, QueueFileName);
+
+    /// <summary>Filename of <see cref="QueueFile"/> relative to <see cref="QueueDirectoryName"/>.</summary>
+    public const string QueueFileName = "queue.json";
+
+    /// <summary>
+    /// <c>{Root}/queue/specs</c> — the briefs baton owns rather than references (#1934 Q6;
+    /// spec/baton.md §13 has what that buys). One file per item, named by tag.
+    /// </summary>
+    public static string QueueSpecsDirectory => Path.Combine(Queue, QueueSpecsDirectoryName);
+
+    /// <summary>Directory name of <see cref="QueueSpecsDirectory"/> relative to <see cref="QueueDirectoryName"/>.</summary>
+    public const string QueueSpecsDirectoryName = "specs";
+
+    /// <summary>
+    /// <c>{Root}/queue/specs/&lt;tag&gt;.md</c> — one item's owned spec copy.
+    /// </summary>
+    /// <param name="tag">
+    /// The item's tag. Already constrained to a filename-safe slug by
+    /// <c>Baton.Queue.QueueTag.IsValid</c> — this method does not re-check it, so callers that did
+    /// not come through the parser must.
+    /// </param>
+    public static string QueueSpecFile(string tag)
+    {
+        ArgumentException.ThrowIfNullOrEmpty(tag);
+        return Path.Combine(QueueSpecsDirectory, $"{tag}.md");
+    }
+
+    /// <summary>
     /// <c>{Root}/fleet-glass/secretpatterns.local.txt</c> — the fail-closed secret-gate denylist
     /// <c>tools/fleet-glass/pusher.py</c>'s <c>load_secret_patterns</c>/<c>secret_hit_index</c> already
     /// define (spec/baton.md §6): one regex per line, '#' starts a comment, blank lines ignored. The
