@@ -4,12 +4,12 @@ namespace Baton.Vendors;
 /// How a canonical skill package asks to be realized (#1151 §3.2/§4.4).
 /// </summary>
 /// <remarks>
-/// <b>Both values behave identically today, and this is the one place that says so.</b> The floor —
-/// instructions carried into the worker's brief and assets projected where the vendor reads them — is
-/// what every realization does in this slice; <see cref="NativePreferred"/> is RECORDED off the
-/// manifest and changes nothing until #1151's S3 (claude) and S4 (agy) land the native realizations,
-/// each gated on its own measurement (S2). A package that sets it is stating an intent for a later
-/// slice, not selecting a behaviour that exists.
+/// <b>Both values behave identically today, and this is the one place in the CODE that says so.</b>
+/// The floor — instructions carried into the worker's brief and assets projected where the vendor
+/// reads them — is what every realization does in this slice; <see cref="NativePreferred"/> is
+/// RECORDED off the manifest and acts on nothing yet. spec/baton.md §9's "What is recorded but does
+/// not act yet" is the register for which later slice changes that and what gates it. A package
+/// setting it is stating an intent, not selecting a behaviour that exists.
 /// </remarks>
 public enum SkillRealization
 {

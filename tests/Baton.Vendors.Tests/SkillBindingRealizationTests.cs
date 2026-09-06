@@ -26,7 +26,6 @@ public sealed class SkillBindingRealizationTests : IDisposable
         Directory.CreateDirectory(_workspace);
     }
 
-    // #438/#295: routed through DirectoryCleanup, never a raw recursive delete.
     public void Dispose() => Baton.Tests.Shared.DirectoryCleanup.DeleteRecursively(_root);
 
     private void WriteAccountPackage(string name, string body, string? manifest = null)
