@@ -347,7 +347,7 @@ public static class RoleDispatch
             promptBuilder.Append($"\n\n{VerifyResultsParagraph(verifyResultsPath)}");
         }
 
-        promptBuilder.Append($"\n\nRequired outputs:\n{instructions}\n\n{OneShotContract}");
+        promptBuilder.Append($"\n\n{RequiredOutputsHeading}\n{instructions}\n\n{OneShotContract}");
         return promptBuilder.ToString();
     }
 
@@ -364,8 +364,8 @@ public static class RoleDispatch
         + "exact command line, exit code, wall clock and output tail for each one, captured by the "
         + "engine rather than reported by anybody. A non-zero exit there is evidence for your review, "
         + "not a reason to stop reviewing. Every runtime claim your verdict makes — a test count, an "
-        + "exit code, whether something builds — must cite that file; if a claim you want to make is "
-        + "not answered there, say it was not measured rather than asserting it.";
+        + $"exit code, whether something builds — {VerifyResultsCitationClause}; if a claim you want to "
+        + "make is not answered there, say it was not measured rather than asserting it.";
 
     /// <summary>
     /// The paragraph's opening clause, shared by the builder above and
@@ -377,6 +377,25 @@ public static class RoleDispatch
         "Before your first turn the engine ran a set of allowlisted commands for you";
 
     /// <summary>
+    /// #1911 review, low: the paragraph's SECOND recognizable phrase, extracted for the same reason
+    /// <see cref="VerifyResultsParagraphOpening"/> was — written by the builder above and read by
+    /// <see cref="WithoutVerifyResultsParagraph"/>, so one literal, not two. The strip requires both,
+    /// which is what stops an operator block that merely opens with the clause from being removed when
+    /// position alone would have condemned it.
+    /// </summary>
+    private const string VerifyResultsCitationClause = "must cite that file";
+
+    /// <summary>
+    /// The outputs block's opening line, shared by <see cref="BuildPrompt"/> and
+    /// <see cref="WithoutVerifyResultsParagraph"/>. It is what makes the verify paragraph's POSITION
+    /// recognizable (#1911): the builder appends that paragraph immediately before this block and
+    /// nothing else ever goes between them, so "the block before the outputs block" identifies the
+    /// engine's own paragraph without having to trust its text — which the operator's brief may also
+    /// contain.
+    /// </summary>
+    private const string RequiredOutputsHeading = "Required outputs:";
+
+    /// <summary>
     /// #1895: the same prompt with <see cref="VerifyResultsParagraph"/> removed, or unchanged when it
     /// carries none. Its one caller is <c>RedispatchCommand.InheritBinding</c>, and spec/baton.md §9
     /// is the register for why a redispatched review must not inherit it — not restated here.
@@ -384,6 +403,31 @@ public static class RoleDispatch
     /// Matched on the opening clause and removed whole, paragraph-wise, because the sentence that
     /// carries the path is the second one — a path-substring match would leave the "the engine ran a
     /// set of allowlisted commands for you" claim standing with the citation requirement attached.
+    /// </para>
+    /// <para>
+    /// #1911: ANCHORED BY POSITION AND BY TWO PHRASES, not by the opening clause alone. The earliest
+    /// version removed every block opening with that clause, so a brief quoting the paragraph — the
+    /// operator's own words — lost it silently on redispatch. The engine appends its paragraph in
+    /// exactly one place, immediately before the <see cref="RequiredOutputsHeading"/> block, so only
+    /// that block is a candidate; and the candidate must also carry
+    /// <see cref="VerifyResultsCitationClause"/>, so a quoted OPENING adjacent to the outputs block is
+    /// not enough to condemn it. Position rather than a written marker because
+    /// <c>RedispatchCommand</c> reads prompts off rooms already on disk, none of which would carry a
+    /// marker introduced today.
+    /// </para>
+    /// <para>
+    /// <b>The residual case, stated rather than claimed away (#1911 review, low):</b> a brief that
+    /// reproduces the engine's paragraph closely enough to open with the clause AND contain the
+    /// citation phrase, as its LAST block before the outputs block, is still removed — nothing on
+    /// disk distinguishes it from the engine's own. Every other brief round-trips byte for byte,
+    /// including one that quotes the opening clause anywhere, and one whose quoting block is adjacent
+    /// to the outputs block.
+    /// </para>
+    /// <para>
+    /// A prompt with no outputs block was not written by <see cref="BuildPrompt"/> at all, and is
+    /// returned unchanged rather than guessed at: there is no position to anchor to, and mangling an
+    /// operator's hand-written prompt is the worse of the two failures. It is not the only unchanged
+    /// shape — see the paragraph above for the rest.
     /// </para>
     /// </summary>
     public static string WithoutVerifyResultsParagraph(string promptTemplate)
@@ -396,10 +440,25 @@ public static class RoleDispatch
         }
 
         // The same "\n\n" BuildPrompt joins its blocks with -- this only ever reads a prompt that
-        // builder wrote, so there is no other separator to consider.
-        var paragraphs = promptTemplate
-            .Split("\n\n")
-            .Where(paragraph => !paragraph.TrimStart().StartsWith(VerifyResultsParagraphOpening, StringComparison.Ordinal));
+        // builder wrote, so there is no other separator to consider. Removing exactly one element
+        // from the split removes exactly one separator, so every other byte round-trips unchanged.
+        var paragraphs = promptTemplate.Split("\n\n").ToList();
+        var outputsIndex = paragraphs.FindLastIndex(
+            paragraph => paragraph.StartsWith(RequiredOutputsHeading, StringComparison.Ordinal));
+        if (outputsIndex <= 0)
+        {
+            return promptTemplate;
+        }
+
+        var candidateIndex = outputsIndex - 1;
+        var candidate = paragraphs[candidateIndex];
+        if (!candidate.TrimStart().StartsWith(VerifyResultsParagraphOpening, StringComparison.Ordinal)
+            || !candidate.Contains(VerifyResultsCitationClause, StringComparison.Ordinal))
+        {
+            return promptTemplate;
+        }
+
+        paragraphs.RemoveAt(candidateIndex);
         return string.Join("\n\n", paragraphs);
     }
 

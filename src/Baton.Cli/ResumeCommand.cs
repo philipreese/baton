@@ -185,6 +185,14 @@ public static class ResumeCommand
 
         var worktreeTeardowns = WorktreeProvisioner.TeardownIfTerminal(settledState.Status, provisionedWorktrees);
 
-        return new CommandResult(settledState, snapshot, RoomDirectoryPath: options.RoomDirectoryPath, WorktreeTeardowns: worktreeTeardowns);
+        var result = new CommandResult(settledState, snapshot, RoomDirectoryPath: options.RoomDirectoryPath, WorktreeTeardowns: worktreeTeardowns);
+
+        // #1911: the removal arm of the same stamp `baton dispatch` runs — this verb runs no verify
+        // step, and a resumed review writes its verdict like any other. Unscoped on purpose:
+        // VerdictInstrumentStamp's own doc has why the step walk here cannot reach an execution some
+        // earlier verb already settled, which is what makes scoping unnecessary rather than skipped.
+        await VerdictInstrumentStamp.ApplyAsync(options.RoomDirectoryPath, result, verifyStep: null).ConfigureAwait(false);
+
+        return result;
     }
 }
