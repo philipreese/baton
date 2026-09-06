@@ -130,8 +130,9 @@ if (args.Length == 0 || !knownSubcommands.Contains(args[0]))
     Console.Error.WriteLine($"       {LedgerCommand.Usage[7..]}");
     Console.Error.WriteLine($"       {LedgerViewOptionsParser.Usage[7..]}");
     Console.Error.WriteLine($"       {LedgerBackfillOptionsParser.Usage[7..]}");
+    Console.Error.WriteLine($"       {LedgerExportOptionsParser.Usage[7..]}");
     Console.Error.WriteLine(
-        "              ('ledger --rebuild' is a different FILE from the other two -- 'baton ledger --help' says which)");
+        "              ('ledger --rebuild' is a different FILE from the other three -- 'baton ledger --help' says which)");
     Console.Error.WriteLine($"       {MemoryAuditOptionsParser.Usage[7..]}");
     Console.Error.WriteLine(
         "       baton mcp [--capture-file <path>] [--memory-proposal-tool] [--fleet-status-tool] [--room-detail-tool]");
