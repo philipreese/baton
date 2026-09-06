@@ -42,13 +42,28 @@ public static class QueueTierTable
         };
 
     /// <summary>
-    /// The shipped per-adapter fallback model, for an item whose tier names none. Since #1927 this is
-    /// <see cref="Domain.AdapterDefaultModels.Shipped"/> itself rather than a second copy of it — the
-    /// bind-time resolution needs the same answer, and the value sat in two places for exactly as long
-    /// as it took someone to look. That type's own doc carries each entry's provenance and why an
-    /// unmeasured adapter is absent rather than guessed.
+    /// The shipped per-adapter fallback model, for an item whose tier names none — a deliberate SUBSET
+    /// of <see cref="Domain.AdapterDefaultModels.Shipped"/>, whose values it reads rather than restates
+    /// (#1927).
     /// </summary>
-    public static IReadOnlyDictionary<string, string> ShippedAdapterDefaultModels => Domain.AdapterDefaultModels.Shipped;
+    /// <remarks>
+    /// <b>Why a subset and not that table itself.</b> This value becomes the vendor CLI's own
+    /// <c>--model</c> (<c>Baton.Cli.Daemon.QueueLauncher</c>); that one is display-only. agy's entry
+    /// belongs in both: it is an operator PLACEMENT (#1925) made in order to be passed, and the
+    /// conductor's runner already passes it. codex's does not: it is a captured reading of what that
+    /// CLI picks for itself, and <c>docs/vendor-codex-probe-2026-09-04.md</c> says in terms that the
+    /// model list "should be discovered rather than frozen" and that defaults can change — so freezing
+    /// it into an argv would start naming a model on the queue's behalf that Baton had been content to
+    /// let codex choose. Stale display is visibly stale; a stale flag value is not.
+    /// <para>
+    /// Pinned by <c>QueueTierTableTests</c>, because a comment is not what keeps codex out of here.
+    /// </para>
+    /// </remarks>
+    public static readonly IReadOnlyDictionary<string, string> ShippedAdapterDefaultModels =
+        new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase)
+        {
+            ["agy"] = Domain.AdapterDefaultModels.Shipped["agy"],
+        };
 
     /// <summary>The review role, whose tier keys carry the <c>review-</c> prefix and whose live
     /// weight is zero (<see cref="QueueWeights"/>).</summary>

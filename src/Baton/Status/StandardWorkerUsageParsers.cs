@@ -405,6 +405,13 @@ public sealed class ClaudeUsageParser : IWorkerUsageParser
     /// <c>model:"&lt;synthetic&gt;"</c> — so reading init would make this field a second copy of
     /// <c>CostLedgerEntry.Model</c> (intent) under a name that promises the opposite (what ran).
     /// </para>
+    /// <para>
+    /// <b>A failed turn's echo is the literal string <c>&lt;synthetic&gt;</c></b>, from the same
+    /// measurement: an unrecognized model id resolves to <c>model:"&lt;synthetic&gt;"</c> with
+    /// <c>is_error:true</c>. That is not a parser defect and is deliberately not filtered — it is the
+    /// vendor's own answer to "what ran", it is true (nothing did), and inventing an absence for it
+    /// would hide a failed dispatch behind the same blank a healthy agy row wears.
+    /// </para>
     /// </summary>
     public string? TryParseEchoedModel(string rawLine)
     {
