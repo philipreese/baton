@@ -1229,6 +1229,62 @@ public sealed class FleetStatusToolTests : IDisposable
     }
 
     /// <summary>
+    /// #1927 (and its review's MEDIUM): the room the issue was filed about — <c>baton dispatch
+    /// --adapter agy</c> with no <c>--model</c> and no <c>--effort</c>, whose binding therefore carries
+    /// null in both dispatch-input fields and the resolved stamps beside them. The acceptance line is
+    /// <c>&lt;vendor&gt; · &lt;model&gt; · &lt;effort&gt;</c>, so this asserts on the projection a
+    /// render surface actually reads rather than on the binding: the effort segment was empty until the
+    /// suffix rung existed, because <c>EffortResolved</c> was an exact duplicate of <c>Effort</c> and
+    /// this fallback was unreachable by construction.
+    /// </summary>
+    [Fact]
+    public async Task ActiveRoom_DispatchedWithNoModelOrEffort_ProjectsTheResolvedStampsAndMarksThemResolved()
+    {
+        var defaultRoomsDir = Path.Combine(_tempHome, BatonPaths.RoomsDirectoryName);
+        var room = Path.Combine(defaultRoomsDir, "resolved-room");
+        Directory.CreateDirectory(room);
+
+        var stepDef = new WorkflowStepDefinition(new StepId("step-resolved"), "architect", [], [], [], new RetryPolicy(1));
+        var def = new WorkflowDefinition(new WorkflowTemplateId("resolved-wf"), 1, [stepDef]);
+        var snapshot = SnapshotBinder.Bind(def);
+        await SnapshotBinder.PersistAsync(
+            snapshot, Path.Combine(room, "snapshot.json"), TestContext.Current.CancellationToken);
+
+        // Exactly what RoleDispatch.ToBinding writes for that dispatch: the two dispatch inputs stay
+        // null (spec/baton.md §2's display-only invariant) and the stamps carry the answer.
+        var entry = RoleDispatch.ToBinding(
+            WorkerRoleCatalog.For("review"), "Draft a plan.", adapterOverride: "agy", workerName: "architect");
+        Assert.Null(entry.Model);
+        Assert.Null(entry.Effort);
+
+        await WorkerBindingConfigWriter.SaveToFileAsync(
+            new Dictionary<string, WorkerBindingConfigEntry> { ["architect"] = entry },
+            BatonPaths.RoomBindingsFile(room), TestContext.Current.CancellationToken);
+
+        var writer = new FlowEventLogWriter(Path.Combine(room, "flow.jsonl"));
+        var execId = new ExecutionId("exec-resolved-1");
+        await writer.AppendAsync(
+            new FlowEvent.ExecutionRequestAccepted(new ExecutionRequest(
+                execId, new WorkflowId("resolved-wf"), stepDef.StepId, stepDef.Worker,
+                [], [], TimeSpan.FromMinutes(5), [], new Dictionary<StepId, ExecutionId>())),
+            TestContext.Current.CancellationToken);
+        await writer.AppendAsync(new CoreEvent.ExecutionStarted(execId, Pid: 6011), TestContext.Current.CancellationToken);
+        await writer.DisposeAsync();
+
+        var result = await new FleetStatusTool().CallAsync(Parse("{}"), TestContext.Current.CancellationToken);
+
+        Assert.False(result.IsError);
+        var singleRoom = Assert.Single(JsonSerializer.Deserialize<FleetStatusResponse>(result.Text)!.Rooms!);
+        Assert.Equal("agy", singleRoom.Adapter);
+        Assert.Equal("gemini-3.8-flash-high", singleRoom.Model);
+        // The segment the MEDIUM was about: present, and marked as Baton's resolution rather than the
+        // operator's own choice on both axes.
+        Assert.Equal("high", singleRoom.Effort);
+        Assert.Equal(BindingValueSource.ResolvedDefault, singleRoom.ModelSource);
+        Assert.Equal(BindingValueSource.ResolvedDefault, singleRoom.EffortSource);
+    }
+
+    /// <summary>
     /// #1584: after a failover rebind, <see cref="FleetRoomStatusView.Adapter"/> and
     /// <see cref="FleetRoomStatusView.Model"/> prefer the running step's recorded-at-accept
     /// <see cref="ExecutionRequest"/> values rather than the room's current <c>bindings.json</c>,

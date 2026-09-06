@@ -194,10 +194,16 @@ namespace Baton.Vendors;
 /// second case so an operator can tell "I asked for this" from "this is what it fell back to".
 /// </param>
 /// <param name="EffortResolved">
-/// #1927: the same fact for effort, resolved the same way minus the CLI-default rung (no vendor's
-/// default effort is measured here; codex's per-model <c>defaultReasoningEffort</c> is recorded in
-/// <c>docs/vendor-codex-probe-2026-09-04.md</c> but is per model, not per adapter, and reading it is
-/// not this change). So: the dispatcher's <c>--effort</c>, else the role's tier, else null.
+/// #1927: the same fact for effort — the dispatcher's <c>--effort</c>, else the role's tier, else
+/// <b>agy's model-id suffix</b>, the issue's own stated mechanism: on that vendor effort is not a
+/// separate axis but part of the model name, so <c>gemini-3.8-flash-high</c> IS effort <c>high</c>
+/// (<c>RoleDispatch.ResolveEffortStamp</c> reads it through the rule <c>AgyWorkerAdapter</c> already
+/// enforces agreement against). Without that third rung this field was an exact duplicate of
+/// <see cref="Effort"/> for every input, which is what left the issue's own room rendering no effort
+/// segment at all. There is deliberately no adapter-wide DEFAULT effort rung: no vendor's is measured
+/// here, and codex's per-model <c>defaultReasoningEffort</c> (recorded in
+/// <c>docs/vendor-codex-probe-2026-09-04.md</c>) is per model rather than per adapter, so reading it
+/// is not this change.
 /// </param>
 /// <param name="EffortSource">Which rung answered for <paramref name="EffortResolved"/>; same vocabulary as <paramref name="ModelSource"/>.</param>
 public sealed record WorkerBindingConfigEntry(

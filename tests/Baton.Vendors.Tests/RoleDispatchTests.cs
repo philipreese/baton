@@ -465,10 +465,52 @@ public class RoleDispatchTests
         Assert.Null(swapped.Model);
         Assert.Null(swapped.Effort);
         Assert.Equal("gemini-3.8-flash-high", swapped.ModelResolved);
-        // Effort has no adapter-default rung, so a swap that drops the tier's effort leaves it
-        // unresolved rather than inventing one.
-        Assert.Null(swapped.EffortResolved);
-        Assert.Null(swapped.EffortSource);
+        // The same invariant on the effort axis, which since the review's MEDIUM does resolve here:
+        // the stamp names an effort and the dispatch input stays null.
+        Assert.Equal("high", swapped.EffortResolved);
+    }
+
+    /// <summary>
+    /// #1927 review MEDIUM — the issue's own stated mechanism, "agy's effort is the id suffix", which
+    /// went unimplemented and left <c>EffortResolved</c> an exact duplicate of <c>Effort</c> for every
+    /// input. Read off the RESOLVED model, not the tier's: the room the rung exists for is
+    /// <c>--adapter agy</c> with no <c>--model</c>, where the swap dropped the tier model and the
+    /// adapter default is what named one. Rests on <c>AgyWorkerAdapter.GeminiEffortSuffix</c>, the same
+    /// rule the adapter already enforces agreement against.
+    /// </summary>
+    [Fact]
+    public void An_agy_swap_resolves_the_effort_the_models_own_id_suffix_encodes()
+    {
+        var binding = RoleDispatch.ToBinding(Review, "spec", adapterOverride: "agy");
+
+        Assert.Equal("gemini-3.8-flash-high", binding.ModelResolved);
+        Assert.Equal("high", binding.EffortResolved);
+        // Not "requested": the dispatcher named no effort, Baton read it back off the model id.
+        Assert.Equal(BindingValueSource.ResolvedDefault, binding.EffortSource);
+
+        // The same rung on an explicitly requested suffixed id, so the arm is about the suffix rather
+        // than about the adapter default alone.
+        var low = RoleDispatch.ToBinding(Review, "spec", adapterOverride: "agy", modelOverride: "gemini-3.8-flash-low");
+        Assert.Equal("low", low.EffortResolved);
+        Assert.Equal(BindingValueSource.ResolvedDefault, low.EffortSource);
+    }
+
+    /// <summary>
+    /// The polarity arm for the rung above, both halves: a model id carrying no effort suffix resolves
+    /// no effort, and neither does a NON-agy vendor whose model id happens to end in one — the suffix
+    /// rule is agy's, and <c>gpt-oss-120b-medium</c>'s trailing <c>-medium</c> is part of a name rather
+    /// than an effort (<c>AgyWorkerAdapter.GeminiEffortSuffix</c>'s own claim-scope note).
+    /// </summary>
+    [Fact]
+    public void A_model_id_with_no_effort_suffix_resolves_no_effort()
+    {
+        var bare = RoleDispatch.ToBinding(Review, "spec", adapterOverride: "agy", modelOverride: "gpt-oss-120b-medium");
+        Assert.Null(bare.EffortResolved);
+        Assert.Null(bare.EffortSource);
+
+        var otherVendor = RoleDispatch.ToBinding(Review, "spec", adapterOverride: "codex", modelOverride: "gemini-3.8-flash-high");
+        Assert.Null(otherVendor.EffortResolved);
+        Assert.Null(otherVendor.EffortSource);
     }
 
     /// <summary>

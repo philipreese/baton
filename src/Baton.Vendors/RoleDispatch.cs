@@ -196,19 +196,8 @@ public static class RoleDispatch
         // exactly the dispatch shape -- `--adapter agy` with no `--model` -- that produced the bare
         // vendor, so the adapter-default rung is what closes it. All three silent means null, never a
         // guess.
-        var (modelResolved, modelSource) =
-            !string.IsNullOrWhiteSpace(modelOverride) ? (modelOverride, BindingValueSource.Requested)
-            : model is { Length: > 0 } ? (model, BindingValueSource.ResolvedDefault)
-            : Domain.AdapterDefaultModels.For(adapter) is { Length: > 0 } adapterDefault
-                ? (adapterDefault, BindingValueSource.ResolvedDefault)
-                : ((string?)null, (string?)null);
-
-        // Effort has no adapter-default rung -- see EffortResolved's own doc for why nothing here
-        // invents one.
-        var (effortResolved, effortSource) =
-            !string.IsNullOrWhiteSpace(effortOverride) ? (effortOverride, BindingValueSource.Requested)
-            : effort is { Length: > 0 } ? (effort, BindingValueSource.ResolvedDefault)
-            : ((string?)null, (string?)null);
+        var (modelResolved, modelSource) = ResolveModelStamp(adapter, modelOverride, model);
+        var (effortResolved, effortSource) = ResolveEffortStamp(adapter, effortOverride, effort, modelResolved);
 
         var grant = role.Grant;
         var grantAuditMode = GrantAuditMode.Enforced;
@@ -284,6 +273,45 @@ public static class RoleDispatch
             EffortResolved: effortResolved,
             EffortSource: effortSource);
     }
+
+    /// <summary>
+    /// #1927: the model rungs, as one function so <c>RedispatchCommand</c> re-runs the IDENTICAL
+    /// resolution on a vendor swap rather than a second copy of it. In order: what the dispatcher asked
+    /// for (<paramref name="requestedModel"/>, source <see cref="BindingValueSource.Requested"/>), then
+    /// the value the role's tier already produced (<paramref name="tierModel"/>), then the vendor's
+    /// measured CLI default (<see cref="Domain.AdapterDefaultModels"/>). All three silent means null,
+    /// never a guess — see <see cref="WorkerBindingConfigEntry.ModelResolved"/>.
+    /// </summary>
+    public static (string? Resolved, string? Source) ResolveModelStamp(
+        string adapter, string? requestedModel, string? tierModel) =>
+        !string.IsNullOrWhiteSpace(requestedModel) ? (requestedModel, BindingValueSource.Requested)
+        : tierModel is { Length: > 0 } ? (tierModel, BindingValueSource.ResolvedDefault)
+        : Domain.AdapterDefaultModels.For(adapter) is { Length: > 0 } adapterDefault
+            ? (adapterDefault, BindingValueSource.ResolvedDefault)
+            : ((string?)null, (string?)null);
+
+    /// <summary>
+    /// #1927: the effort rungs, the same shape as <see cref="ResolveModelStamp"/>. The third rung is
+    /// NOT an adapter-wide default effort (none is measured — <see cref="WorkerBindingConfigEntry.EffortResolved"/>
+    /// says why nothing here invents one): it is agy's own <b>model-id suffix</b>, where effort is not
+    /// a separate axis at all but part of the model name (<c>gemini-3.8-flash-high</c> IS effort
+    /// <c>high</c>, the measured rule <c>AgyWorkerAdapter</c> already enforces agreement against). Read
+    /// off <paramref name="modelResolved"/> rather than the raw tier model, because the room this rung
+    /// exists for — <c>--adapter agy</c> with no <c>--model</c> — has no tier model at all: the vendor
+    /// swap dropped it and the adapter default is what named one.
+    /// <para>
+    /// Source is <see cref="BindingValueSource.ResolvedDefault"/> for the suffix rung: the dispatcher
+    /// did not name an effort, Baton read it back off the model id.
+    /// </para>
+    /// </summary>
+    public static (string? Resolved, string? Source) ResolveEffortStamp(
+        string adapter, string? requestedEffort, string? tierEffort, string? modelResolved) =>
+        !string.IsNullOrWhiteSpace(requestedEffort) ? (requestedEffort, BindingValueSource.Requested)
+        : tierEffort is { Length: > 0 } ? (tierEffort, BindingValueSource.ResolvedDefault)
+        : string.Equals(adapter, "agy", StringComparison.OrdinalIgnoreCase)
+          && AgyWorkerAdapter.GeminiEffortSuffix(modelResolved) is { Length: > 0 } suffix
+            ? (suffix, BindingValueSource.ResolvedDefault)
+            : ((string?)null, (string?)null);
 
     /// <summary>
     /// Whether <paramref name="adapter"/> is one of the vendors that streams JSON on stdout
