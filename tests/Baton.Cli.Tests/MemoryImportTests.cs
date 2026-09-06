@@ -870,6 +870,78 @@ public sealed class MemoryImportTests : IDisposable
     }
 
     /// <summary>
+    /// #1948: a source rewritten between the inventory walk and the read is recorded as one consistent
+    /// (mtime, digest, size) triple, all three describing the bytes that were actually read.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// <b>The stale row IS the inventory.</b> <see cref="MemoryImportCommand.ReadSourceFiles"/>'s own
+    /// remarks say why it is reached directly rather than through the verb; what the seam is used for is
+    /// this: the file row handed in carries the values the walk took from the old contents, which is
+    /// exactly what it would hold had the file been rewritten in the window. Asserting against a file
+    /// nobody touched cannot discriminate — with the defect present, an unchanged file's walk mtime and
+    /// its read mtime are the same value.
+    /// </para>
+    /// <para>
+    /// <b>The mtime difference is forced, not hoped for.</b> The old mtime is a distinctive sentinel a
+    /// year in the past rather than whatever a quick rewrite happens to produce: filesystem timestamp
+    /// granularity can make a rewritten file's before and after equal, and this arm would then pass with
+    /// the defect intact. Size and digest are asserted against the current bytes too, so a later change
+    /// that refreshes the mtime alone still fails here.
+    /// </para>
+    /// <para>
+    /// <b>What this arm does not pin.</b> Its oracle is the mtime by path, so it cannot tell a read from
+    /// the open handle apart from a second <c>stat</c> — nothing moves between the two here, and both
+    /// answer alike. #1948's window is what is covered; the same-handle property beside it is a
+    /// narrower claim the code makes and this does not measure. The <c>Kind</c> assertion is not
+    /// decoration: <c>Assert.Equal</c> on two <see cref="DateTime"/>s compares ticks and ignores
+    /// <see cref="DateTimeKind"/>, so slipping to the local-time overload would shift every recorded
+    /// mtime by the machine's offset and read as green on a UTC runner.
+    /// </para>
+    /// </remarks>
+    [Fact]
+    public void RereadsMtimeWithTheDigestWhenTheSourceChangedSinceTheWalk()
+    {
+        var directory = Path.Combine(_root, "rewritten");
+        Directory.CreateDirectory(directory);
+        var path = Path.Combine(directory, "user_who.md");
+
+        var staleBytes = System.Text.Encoding.UTF8.GetBytes("the memory the inventory walk saw");
+        var staleMtime = new DateTime(2025, 1, 2, 3, 4, 5, DateTimeKind.Utc);
+        var staleRow = new MemoryImportFile(
+            path,
+            "user_who.md",
+            Text: string.Empty,
+            Sha256: Convert.ToHexString(SHA256.HashData(staleBytes)).ToLowerInvariant(),
+            ModifiedUtc: staleMtime,
+            SizeBytes: staleBytes.Length);
+
+        // The rewrite: different bytes, a different length, and a last-write time that provably is not
+        // the walk's.
+        var currentBytes = System.Text.Encoding.UTF8.GetBytes("the memory that is actually on disk now");
+        File.WriteAllBytes(path, currentBytes);
+        File.SetLastWriteTimeUtc(path, new DateTime(2026, 6, 7, 8, 9, 10, DateTimeKind.Utc));
+        var currentMtime = File.GetLastWriteTimeUtc(path);
+        Assert.NotEqual(staleMtime, currentMtime);
+        Assert.NotEqual(staleRow.SizeBytes, currentBytes.Length);
+
+        var read = Assert.Single(MemoryImportCommand.ReadSourceFiles(new MemoryImportSource(
+            directory,
+            MemoryRootInventory.ClaudeVendor,
+            VendorMemoryScope.Vendor,
+            Archived: false,
+            "github.com/philipreese/baton",
+            UnfiledReason: null,
+            [staleRow])));
+
+        Assert.Equal("the memory that is actually on disk now", read.Text);
+        Assert.Equal(Convert.ToHexString(SHA256.HashData(currentBytes)).ToLowerInvariant(), read.Sha256);
+        Assert.Equal(currentBytes.Length, read.SizeBytes);
+        Assert.Equal(currentMtime, read.ModifiedUtc);
+        Assert.Equal(DateTimeKind.Utc, read.ModifiedUtc.Kind);
+    }
+
+    /// <summary>
     /// Two Claude roots resolving to one repository through a real worktree, plus a live entry the
     /// archive tests supersede. Three files, all under <c>github.com/philipreese/baton</c>.
     /// </summary>

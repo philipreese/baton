@@ -14,7 +14,11 @@ namespace Baton.Memory;
 /// <param name="FileName">Its name, which is what the kind-prefix table reads.</param>
 /// <param name="Text">Its text, verbatim.</param>
 /// <param name="Sha256">Lower-case hex SHA-256 of its bytes.</param>
-/// <param name="ModifiedUtc">Its last-write time.</param>
+/// <param name="ModifiedUtc">
+/// Its last-write time. On a row the importer has read, this and <paramref name="Sha256"/>/
+/// <paramref name="SizeBytes"/> all come from that one read — see
+/// <see cref="MemoryEntry.SourceMtimeUtc"/>.
+/// </param>
 /// <param name="SizeBytes">Its length.</param>
 public sealed record MemoryImportFile(
     string Path,
