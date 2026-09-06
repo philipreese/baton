@@ -32,6 +32,106 @@ public sealed class CodexDynamicToolPolicyTests
         Assert.Contains(CodexDynamicToolPolicy.RunCommandTool, names);
     }
 
+    // #1920: one row per refusal shape in the issue's measured table — the four Baton-produced ones
+    // (row 1 a path outside the readable roots, rows 2-3 a backslash path, row 9 the standing deny
+    // list, rows 11-15 a command matching no allow pattern) plus the audit comment's dominant
+    // unknown-tool case, five apply_patch attempts. A shape with no row here is a shape that can
+    // regress to teaching nothing, which is what the issue measured.
+    [Theory]
+    [InlineData("outside-readable-roots", "ask for its content quoted inline")]
+    [InlineData("unsupported-backslash", "use forward slashes")]
+    [InlineData("standing-deny", "permanently closed for this role")]
+    [InlineData("ungranted-pattern",
+        "this session's granted shell patterns are: git diff*, git log*, git show*, git status*")]
+    [InlineData("write-shaped-unknown-tool", "cannot edit workspace files")]
+    public async Task Each_refusal_shape_names_its_granted_alternative(
+        string refusalShape, string expectedAlternative)
+    {
+        using var fixture = new PolicyFixture(ReviewShapedGrant, ["report.md"]);
+
+        var result = await ExecuteRefusalShapeAsync(fixture, refusalShape);
+
+        Assert.False(result.Success);
+        Assert.Contains(expectedAlternative, result.Text, StringComparison.Ordinal);
+    }
+
+    // The polarity arm for the rows above: every SHELL refusal also names the granted read path,
+    // which is #1920's literal ask (the measured loop was `rg` four times before baton_search_text).
+    [Theory]
+    [InlineData("unsupported-backslash")]
+    [InlineData("standing-deny")]
+    [InlineData("ungranted-pattern")]
+    public async Task Every_shell_refusal_names_the_granted_read_tools(string refusalShape)
+    {
+        using var fixture = new PolicyFixture(ReviewShapedGrant, ["report.md"]);
+
+        var result = await ExecuteRefusalShapeAsync(fixture, refusalShape);
+
+        Assert.False(result.Success);
+        Assert.Contains(CodexDynamicToolPolicy.ReadTextTool, result.Text, StringComparison.Ordinal);
+        Assert.Contains(CodexDynamicToolPolicy.SearchTextTool, result.Text, StringComparison.Ordinal);
+    }
+
+    // The negative arm the rows above need to discriminate: the clause is derived from the tools this
+    // role actually declared, so a grant that withholds reads is told nothing rather than pointed at
+    // two tools it does not have. Without this, a hardcoded clause passes every row above.
+    [Fact]
+    public async Task A_shell_refusal_names_no_read_tool_when_the_role_declares_none()
+    {
+        var grant = ReviewShapedGrant with { ReadFiles = false };
+        using var fixture = new PolicyFixture(grant, []);
+
+        var result = await ExecuteRefusalShapeAsync(fixture, "ungranted-pattern");
+
+        Assert.False(result.Success);
+        Assert.DoesNotContain(CodexDynamicToolPolicy.ReadTextTool, result.Text, StringComparison.Ordinal);
+        Assert.DoesNotContain(CodexDynamicToolPolicy.SearchTextTool, result.Text, StringComparison.Ordinal);
+    }
+
+    // The write half of #1920's ask 2, in both directions: the same apply_patch attempt is answered
+    // with baton_write_text on a write-granted role and with the declared-output write on a review
+    // role, never with the read tools.
+    [Fact]
+    public async Task A_write_shaped_unknown_tool_names_the_write_path_the_role_actually_has()
+    {
+        using var reviewFixture = new PolicyFixture(ReviewShapedGrant, ["report.md"]);
+        using var implementFixture = new PolicyFixture(
+            ReviewShapedGrant with { WriteFiles = true }, ["changes.md"]);
+
+        var onReview = await ExecuteRefusalShapeAsync(reviewFixture, "write-shaped-unknown-tool");
+        var onImplement = await ExecuteRefusalShapeAsync(implementFixture, "write-shaped-unknown-tool");
+
+        Assert.Contains(CodexDynamicToolPolicy.WriteOutputTool, onReview.Text, StringComparison.Ordinal);
+        Assert.DoesNotContain(CodexDynamicToolPolicy.WriteTextTool, onReview.Text, StringComparison.Ordinal);
+        Assert.Contains(CodexDynamicToolPolicy.WriteTextTool, onImplement.Text, StringComparison.Ordinal);
+        Assert.DoesNotContain("cannot edit workspace files", onImplement.Text, StringComparison.Ordinal);
+    }
+
+    /// <summary>The shipped review role's shape: reads, a scoped read-only shell, no workspace write.</summary>
+    private static PermissionGrant ReviewShapedGrant => new(
+        ReadFiles: true,
+        RunShellCommands: true,
+        ShellCommandPatterns: ["git diff*", "git log*", "git show*", "git status*"],
+        DeniedShellCommandPatterns: ["git remote*"],
+        ShellCommandsAreReadOnly: true);
+
+    private static Task<CodexDynamicToolResult> ExecuteRefusalShapeAsync(
+        PolicyFixture fixture, string refusalShape) => refusalShape switch
+        {
+            "outside-readable-roots" => fixture.ExecuteAsync(
+                CodexDynamicToolPolicy.ReadTextTool,
+                new { path = Path.Combine(Path.GetTempPath(), "baton-another-room", "verdict.json") }),
+            "unsupported-backslash" => fixture.ExecuteAsync(
+                CodexDynamicToolPolicy.RunCommandTool, new { command = @"git status C:\repo" }),
+            "standing-deny" => fixture.ExecuteAsync(
+                CodexDynamicToolPolicy.RunCommandTool, new { command = "git remote -v" }),
+            "ungranted-pattern" => fixture.ExecuteAsync(
+                CodexDynamicToolPolicy.RunCommandTool, new { command = "rg needle" }),
+            "write-shaped-unknown-tool" => fixture.ExecuteAsync(
+                "apply_patch", new { path = "src/file.cs", content = "patch" }),
+            _ => throw new InvalidOperationException($"Unknown refusal fixture '{refusalShape}'."),
+        };
+
     [Fact]
     public async Task Withheld_workspace_write_can_still_write_only_an_exact_declared_output()
     {

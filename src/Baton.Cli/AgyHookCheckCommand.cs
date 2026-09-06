@@ -376,9 +376,17 @@ public static class AgyHookCheckCommand
 
                 if (!result.IsAllowed)
                 {
+                    // #1920: same append as the claude hook's Bash rung — the matcher states the rule,
+                    // this site knows the vendor and names agy's own read/search tools, suppressed
+                    // when this session withheld them, and (see there) only on a scoped grant, since
+                    // an unscoped one reaches this rung for a write-shaped standing deny.
+                    var alternative = shellPatternList.Patterns.Count > 0
+                        ? Baton.Vendors.GrantedReadToolHint.ForAgy(tool => IsWithheld(denied, tool))
+                        : null;
                     return DenyJson(
                         $"AER: the command line '{commandLine}' is denied under this session's shell " +
-                        $"grant — {result.Reason}.");
+                        $"grant — {result.Reason}." +
+                        (alternative is null ? string.Empty : $" To proceed, {alternative}."));
                 }
             }
 

@@ -111,7 +111,7 @@ public sealed class CodexDynamicToolPolicy
                     RequiredString(arguments, "path"), RequiredString(arguments, "content")),
                 RunCommandTool => await RunCommandAsync(
                     RequiredString(arguments, "command"), cancellationToken).ConfigureAwait(false),
-                _ => CodexDynamicToolResult.Denied($"Tool '{toolName}' is not present in this Baton role grant."),
+                _ => CodexDynamicToolResult.Denied(DescribeUnknownTool(toolName)),
             };
         }
         catch (Exception ex) when (ex is ArgumentException or IOException or UnauthorizedAccessException
@@ -119,6 +119,77 @@ public sealed class CodexDynamicToolPolicy
         {
             return CodexDynamicToolResult.Denied(ex.Message);
         }
+    }
+
+    /// <summary>
+    /// #1920 ask 2: what an unrecognised tool name is told. The measured dominant case on this arm is
+    /// codex reaching for its native <c>apply_patch</c> five times, so a write-shaped attempt is
+    /// answered about the WRITE path rather than handed two read tools — the extra step this issue
+    /// exists to remove. Every clause is derived from <see cref="DeclaredToolNames"/> rather than
+    /// re-deriving the grant conditions in <see cref="BuildToolDefinitions"/>, so a role that declares
+    /// no search tool is never told to search.
+    /// </summary>
+    private string DescribeUnknownTool(string toolName)
+    {
+        var declared = DeclaredToolNames();
+        var known = declared.Count > 0
+            ? $"This role's tools are: {string.Join(", ", declared)}."
+            : "This role declares no dynamic tools.";
+        var guidance = LooksLikeWriteAttempt(toolName)
+            ? DescribeWritePath(declared)
+            : DescribeReadPath(declared);
+
+        return $"Tool '{toolName}' is not present in this Baton role grant. {known}"
+            + (guidance is null ? string.Empty : $" {guidance}");
+    }
+
+    /// <summary>
+    /// The tool names this dispatch actually declared, read back from the single declaration site so
+    /// the two cannot drift.
+    /// </summary>
+    private IReadOnlyCollection<string> DeclaredToolNames() =>
+        BuildToolDefinitions()
+            .Select(tool => tool?["name"]?.GetValue<string>())
+            .Where(name => !string.IsNullOrEmpty(name))
+            .Select(name => name!)
+            .ToArray();
+
+    /// <summary>
+    /// A name a model reaches for when it means to change a file — <c>apply_patch</c> is the measured
+    /// one (#1920). Deliberately a name test only: nothing here inspects arguments.
+    /// </summary>
+    private static bool LooksLikeWriteAttempt(string toolName) =>
+        WriteAttemptFragments.Any(fragment => toolName.Contains(fragment, StringComparison.OrdinalIgnoreCase));
+
+    // Deliberately short of "update"/"insert": codex's own `update_plan` is not a file write, and
+    // answering it about the write path would be the same non-responsive guidance in the other
+    // direction. These four cover the measured `apply_patch`.
+    private static readonly string[] WriteAttemptFragments = ["patch", "write", "edit", "apply"];
+
+    private static string? DescribeReadPath(IReadOnlyCollection<string> declared) =>
+        (declared.Contains(ReadTextTool), declared.Contains(SearchTextTool)) switch
+        {
+            (true, true) => $"Read with {ReadTextTool} and search with {SearchTextTool}.",
+            (true, false) => $"Read with {ReadTextTool}.",
+            (false, true) => $"Search with {SearchTextTool}.",
+            _ => null,
+        };
+
+    private string DescribeWritePath(IReadOnlyCollection<string> declared)
+    {
+        if (declared.Contains(WriteTextTool))
+        {
+            return $"Write with {WriteTextTool}, which takes a path and the file's complete new content.";
+        }
+
+        if (declared.Contains(WriteOutputTool))
+        {
+            return "This role cannot edit workspace files. Its only write is "
+                + $"{WriteOutputTool}, for one of its declared outputs: "
+                + $"{string.Join(", ", _declaredOutputs.Order(PathComparer))}.";
+        }
+
+        return "This role has no write tool at all: it cannot create or edit any file.";
     }
 
     private CodexDynamicToolResult ReadText(string requestedPath)
@@ -256,7 +327,20 @@ public sealed class CodexDynamicToolPolicy
             commandLine, _grant.ShellCommandPatterns, _grant.DeniedShellCommandPatterns);
         if (!decision.IsAllowed)
         {
-            return CodexDynamicToolResult.Denied(decision.Reason ?? "Baton denied the command line.");
+            // #1920: the matcher's reason states the rule; this site knows the vendor, so it is where
+            // the granted alternative gets named (see GrantedReadToolHint). Covers every shell refusal
+            // shape the matcher produces — unparseable, standing-deny and not-in-grant alike.
+            // Scoped grants only, matching both hooks: on an unscoped grant this refusal is a
+            // standing deny (a write-shaped command), and read tools are no answer to one.
+            var reason = decision.Reason ?? "Baton denied the command line.";
+            var declared = DeclaredToolNames();
+            var alternative = _grant.ShellCommandPatterns is { Count: > 0 }
+                ? GrantedReadToolHint.Clause(
+                    declared.Contains(ReadTextTool) ? ReadTextTool : null,
+                    declared.Contains(SearchTextTool) ? SearchTextTool : null)
+                : null;
+            return CodexDynamicToolResult.Denied(
+                alternative is null ? reason : $"{reason}. {char.ToUpperInvariant(alternative[0])}{alternative[1..]}.");
         }
         if (ShellCommandPatternMatcher.IsDeniedByOptionToken(commandLine, _grant.DeniedShellOptionTokens))
         {
@@ -338,7 +422,30 @@ public sealed class CodexDynamicToolPolicy
         {
             return candidate;
         }
-        throw new UnauthorizedAccessException($"Path '{requestedPath}' is outside this Baton's readable roots.");
+        // #1920 (table row 1, the conductor-brief case): the refusal names the roots it checked and
+        // the remedy, because the measured failure was a worker handed another room's path and left
+        // to guess. Another Baton room is never readable from here, however the path was obtained.
+        throw new UnauthorizedAccessException(
+            $"Path '{requestedPath}' is outside this Baton's readable roots. "
+            + $"Readable here: {DescribeReadableRoots()}. Files under another Baton room are never "
+            + "readable from this worker — if a brief pointed at one, ask for its content quoted "
+            + "inline instead.");
+    }
+
+    /// <summary>
+    /// The roots <see cref="ResolveAllowedRead"/> just checked, in the order it checked them — the
+    /// workspace only when reads are granted, since that is the condition the check itself carries.
+    /// </summary>
+    private string DescribeReadableRoots()
+    {
+        List<string> roots = [];
+        if (_grant.ReadFiles && _workspaceRoot is not null)
+        {
+            roots.Add($"the workspace ({_workspaceRoot})");
+        }
+        roots.Add($"this worker's outbox ({_outputRoot})");
+        roots.AddRange(_inputRoots.Select(input => $"the declared input '{input}'"));
+        return string.Join("; ", roots);
     }
 
     private string ResolveWithinWorkspace(string requestedPath)
