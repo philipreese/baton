@@ -130,11 +130,22 @@ internal static class RepositoryIdentityResolver
     /// thousands of ten-second-timeout git invocations behind one audited root.
     /// </para>
     /// <para>
-    /// <b>Where the two diverge, they diverge safely.</b> A <c>.git</c> file whose <c>gitdir:</c> pointer
-    /// is broken, a stray non-repository directory named <c>.git</c>, and a bare repository all pass here
-    /// and then fail <see cref="TryResolveAsync"/>, which yields no identity — a <c>no-provenance</c>
-    /// finding, never a confident wrong repository. That is the direction this predicate exists to
-    /// protect (#1908 review F1).
+    /// <b>What it actually checks, stated narrowly</b> (#1908 re-review low 1, correcting a remark that
+    /// claimed more): the entry named <c>.git</c> is not validated at all — not opened, not parsed, not
+    /// followed. A <c>.git</c> file whose <c>gitdir:</c> pointer is broken and a stray non-repository
+    /// directory named <c>.git</c> both satisfy this predicate. <b>A bare repository does not</b>: it
+    /// has no <c>.git</c> entry, so it fails here rather than passing and being rejected later.
+    /// </para>
+    /// <para>
+    /// <b>What that costs, and why it is still the right predicate.</b> The value this buys is the
+    /// direction it was added for: a decoded reading that is merely a directory <i>inside</i> a checkout
+    /// no longer counts as having found that checkout (see
+    /// <see cref="Baton.Memory.MemoryRootPath.Resolve"/>'s tie-break comment). What it does not buy is a
+    /// guarantee about what happens to the two false positives above — <see cref="TryResolveAsync"/>
+    /// probes git at that path, and git discovers a repository by walking <b>up</b>, so a stray
+    /// <c>.git</c> directory planted inside a real checkout resolves to that checkout's identity rather
+    /// than to nothing. Nothing here has measured which of those it does in each case, so nothing here
+    /// claims it.
     /// </para>
     /// </remarks>
     public static bool IsWorkTreeRoot(string path)

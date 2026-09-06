@@ -2154,6 +2154,16 @@ sqlite and protobuf stores are inventoried and never written — which is what t
 
 ### Still not settled — recorded as untested, not refuted
 
+- **Where a Claude Code session transcript carries its `cwd`** (#1908 re-review low 3). `MemoryRootPath`
+  reads the absolute working directory out of a project's `*.jsonl` transcripts, and that field is the
+  ground truth the whole root-to-repository mapping rests on. **What is unmeasured is the shape, not the
+  existence:** no check here and no finding above establishes that the *first* record carries it, that
+  every record does, or that the vendor guarantees it at all. Deliberately not pursued, and safe to leave
+  so, because nothing depends on it: the reader scans for the field rather than assuming a position
+  (`MaxSessionLinesScanned` lines per file), and a transcript carrying none contributes no ground truth
+  and degrades the root to the decoder's own ambiguity. Measuring it would mean reading the operator's
+  real transcripts, which the #1852 lanes are barred from; a future probe on a synthetic Claude session
+  is what would settle it.
 - **`defer`'s single-tool-call limit.** Three attempts failed to make the model batch tool calls
   (`[1]`, `[1,1,1]`, `[1,1,1,1,1,1]` blocks per assistant message) even under an explicit
   instruction to emit them together. The documented limit was therefore never exercised. It

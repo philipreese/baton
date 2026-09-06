@@ -214,8 +214,10 @@ public static class MemoryRootPath
     /// transcripts must not cost 149 full file reads to audit. <b>The record shape is looked for, not
     /// assumed</b> — a blank, non-JSON, or <c>cwd</c>-less leading line is skipped rather than ending the
     /// file, because "the opening record carries the <c>cwd</c>" is a claim about a vendor's format that
-    /// nothing here has measured (no <c>tools/vendor-verify</c> check and no
-    /// <c>docs/vendor-doc-audit.md</c> entry covers it), and a scan is right whether or not it holds.
+    /// nothing here has measured. It is registered as unmeasured in <c>docs/vendor-doc-audit.md</c>
+    /// (§"Still not settled", #1908 re-review low 3), which is also where what it would take to settle it
+    /// is recorded; a scan is right whether or not it holds, which is why the claim is registered rather
+    /// than pursued.
     /// </para>
     /// <para>
     /// <b>Only <c>cwd</c> is read.</b> No other field of a transcript reaches a report, a log or an
