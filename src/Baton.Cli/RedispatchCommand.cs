@@ -191,11 +191,11 @@ public static class RedispatchCommand
                 Label = (options.LabelSpecified || options.Label is not null) ? options.Label : parentEntry.Label,
                 Workstream = (options.WorkstreamSpecified || options.Workstream is not null) ? options.Workstream : parentEntry.Workstream,
                 ToolSha = BatonPaths.TryResolveCurrentToolSha() ?? parentEntry.ToolSha,
-                // #1151: RoleSpecMaterializer was handed the same resolved list, so this only restates
-                // the inheritance rule for the case where the flag was NOT passed -- exactly the hole
-                // #1686 review F2 found when --max-tool-steps was threaded on one redispatch path and
-                // not the other.
-                Skills = ResolveSkills(parentEntry, options),
+                // #1151 is deliberately NOT restated here: RebuildFromAmendedSpecAsync hands the same
+                // ResolveSkills list to RoleSpecMaterializer, and RoleDispatch.ToBinding sets Skills from
+                // it (including the --skill "" clear, which resolves to an empty list and lands as null).
+                // Assigning it a second time here made the one that matters undeletable-by-test -- #1941
+                // review MEDIUM: either assignment alone satisfied every arm, so neither was discriminated.
             };
         }
 

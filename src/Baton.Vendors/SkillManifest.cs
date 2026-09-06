@@ -109,14 +109,28 @@ public sealed record SkillRequirements(
     /// checked and is not).
     /// </summary>
     /// <remarks>
-    /// <b>Exact membership, not subsumption.</b> A required pattern is satisfied only when the grant
-    /// lists that same string, compared <see cref="StringComparison.Ordinal"/> — the comparison
-    /// <see cref="ShellCommandPatternMatcher"/> itself uses, so this check can never be laxer than the
-    /// gate that enforces the grant at runtime. There is no pattern-covers-pattern predicate anywhere in
-    /// the tree (the matcher's <c>IsAllowed</c>/<c>IsDenied</c> take a command LINE, not a pattern), so
-    /// the cost is a false refusal in the covered case — a grant carrying <c>gh:*</c> refuses a package
-    /// requiring <c>gh pr:*</c>. That direction is the safe one: it is an error message naming both
-    /// strings, not a skill that passes the check and is then denied mid-lane.
+    /// <b>The two halves compare differently, and #1941's re-review is why.</b>
+    /// <para>
+    /// <b>Allow side: exact membership.</b> A required pattern is satisfied only when the grant lists
+    /// that same string, compared <see cref="StringComparison.Ordinal"/>. The cost is a false refusal in
+    /// the covered case — a grant carrying <c>gh:*</c> refuses a package requiring <c>gh pr:*</c>. That
+    /// direction is the safe one: an error message naming both strings, never a skill that passes here
+    /// and is then denied mid-lane.
+    /// </para>
+    /// <para>
+    /// <b>Deny side: the runtime predicate itself.</b> Exact membership INVERTS here — a deny entry that
+    /// COVERS the required pattern (<c>gh label*</c> against a required <c>gh label list*</c>, both live
+    /// on the <c>implement</c> role's unscoped-shell grant in <c>WorkerRoles.json</c>) is not equal to
+    /// it, so membership alone bound the package and the gate then denied every such command mid-lane —
+    /// exactly the failure this method exists to catch. Stripping a required pattern's trailing <c>*</c>
+    /// yields the shortest command line that pattern admits, so handing THAT to
+    /// <see cref="ShellCommandPatternMatcher.IsDenied"/> asks the gate's own predicate whether the family
+    /// is denied. Membership is kept as well rather than replaced: <c>IsDenied</c> fails closed on a line
+    /// it cannot parse (its metacharacter scan), so a de-starred pattern carrying one would otherwise
+    /// lose even the exact-equality catch. Composite, this side is never laxer than the gate; it can
+    /// still be stricter (a deny entry NARROWER than the required pattern denies only part of the family
+    /// and is not caught here — the residual, and it is a mid-lane deny of the narrow case only).
+    /// </para>
     /// <para>
     /// Three rules, in the order they fire:
     /// </para>
@@ -127,9 +141,10 @@ public sealed record SkillRequirements(
     ///   RunShellCommands is set"), so it refuses here rather than passing on a technicality;</item>
     /// <item>an UNSCOPED granted shell (<see cref="PermissionGrant.ShellCommandPatterns"/> null or
     ///   empty) means "any command", so every declared pattern is satisfied by it;</item>
-    /// <item>a pattern the grant lists in <see cref="PermissionGrant.DeniedShellCommandPatterns"/> is
-    ///   unsatisfied even when the allowlist also carries it — deny-over-allow is that field's own rule,
-    ///   and a package requiring a standing "never" must not bind.</item>
+    /// <item>a pattern <see cref="PermissionGrant.DeniedShellCommandPatterns"/> lists <em>or covers</em>
+    ///   is unsatisfied even when the allowlist also carries it, and even when the granted shell is
+    ///   unscoped — deny-over-allow is that field's own rule, and a package requiring a standing "never"
+    ///   must not bind.</item>
     /// </list>
     /// </remarks>
     private IReadOnlyList<string> UnsatisfiedShellPatterns(PermissionGrant grant)
@@ -146,7 +161,11 @@ public sealed record SkillRequirements(
         {
             var allowed = grant.RunShellCommands
                 && (granted.Count == 0 || granted.Contains(pattern, StringComparer.Ordinal));
-            if (!allowed || denied.Contains(pattern, StringComparer.Ordinal))
+            // Exact membership OR the gate's own predicate on the shortest line the pattern admits --
+            // the remark above states why both, and why neither alone is enough.
+            var deniedByGrant = denied.Contains(pattern, StringComparer.Ordinal)
+                || ShellCommandPatternMatcher.IsDenied(pattern.TrimEnd('*'), denied);
+            if (!allowed || deniedByGrant)
             {
                 unsatisfied.Add(pattern);
             }

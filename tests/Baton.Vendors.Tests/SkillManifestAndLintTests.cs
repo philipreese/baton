@@ -241,4 +241,38 @@ public sealed class SkillManifestAndLintTests : IDisposable
         // And a package declaring no patterns is unaffected by any of it.
         Assert.Empty(new SkillRequirements(RunShellCommands: true).MissingFrom(scopedElsewhere));
     }
+
+    /// <summary>
+    /// #1941 re-review MEDIUM: exact membership is the safe direction on the allow half and INVERTS on
+    /// the deny half — a deny entry that COVERS the required pattern is not equal to it, so the package
+    /// bound and the gate denied every such command mid-lane. <c>UnsatisfiedShellPatterns</c>' remark
+    /// states why the deny half now runs the gate's own predicate over the de-starred pattern; this pins
+    /// the covering case red and two non-covering ones green, so "always refuse" cannot pass.
+    /// </summary>
+    [Fact]
+    public void A_deny_pattern_covering_a_required_one_is_unsatisfied_while_a_narrower_deny_still_binds()
+    {
+        // The control, read first: the gate's predicate on the shortest command line the required
+        // pattern admits. A green refusal below is about coverage only if this is true.
+        Assert.True(ShellCommandPatternMatcher.IsDenied("dotnet build", ["dotnet *"]));
+
+        var requires = new SkillRequirements(RunShellCommands: true, ShellCommandPatterns: ["dotnet build*"]);
+
+        // The shipped shape (the implement role's grant, WorkerRoles.json): an UNSCOPED shell, which
+        // satisfies the allow half outright, plus a covering deny entry. Exact membership passed this.
+        Assert.Equal(
+            ["ShellCommandPatterns (dotnet build*)"],
+            requires.MissingFrom(new PermissionGrant(
+                RunShellCommands: true, ShellCommandPatterns: [], DeniedShellCommandPatterns: ["dotnet *"])).ToArray());
+
+        // Polarity 1: a deny entry NARROWER than the required pattern is not a standing "never" over the
+        // family, so it still binds — the residual the remark names, not a case this check claims.
+        Assert.Empty(requires.MissingFrom(new PermissionGrant(
+            RunShellCommands: true, ShellCommandPatterns: [],
+            DeniedShellCommandPatterns: ["dotnet build --no-restore*"])));
+
+        // Polarity 2: an unrelated deny entry refuses nothing.
+        Assert.Empty(requires.MissingFrom(new PermissionGrant(
+            RunShellCommands: true, ShellCommandPatterns: [], DeniedShellCommandPatterns: ["gh *"])));
+    }
 }
