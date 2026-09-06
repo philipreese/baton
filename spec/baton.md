@@ -869,7 +869,35 @@ delta against the sha read at spawn, while the **changed-path half is absolute**
 whatever is there, with no baseline taken — so a lane dispatched into an already-dirty tree settles
 Indeterminate on a timeout even if its worker wrote nothing. The ruling accepts that: its own wording
 is "uncommitted changes, untracked files" without a baseline, and the failure it prices is a clobbered
-tree (unrecoverable) against a spurious conductor resolution (a minute of someone's time). A null path — an execution with nowhere to leave work — keeps the retry, and so
+tree (unrecoverable) against a spurious conductor resolution (a minute of someone's time).
+
+**One exception to "absolute", added by #1929's review of #1151.** The absolute half counts what is on
+disk *regardless of who put it there* — including AER, once an adapter is allowed to write into the
+worker's working directory before spawning it (the claude adapter's canonical-skill projection lands in
+`<workspace>/.claude/skills/`, untracked, inside the operator's own checkout). Counting AER's own writes
+would make the engine assert the worker mutated a tree on evidence the engine created, and would decide
+the retry with it. So the dispatcher records the exact files it placed — **path and the digest of the
+bytes placed there** — and every reader of this tree subtracts those files, and only while each still
+holds those bytes; the list is journaled as `FlowEvent.EngineFilesPlaced` so the exclusion is auditable
+rather than trusted. Everything a *worker* wrote, and every pre-existing dirty path, still counts — the
+"already-dirty tree settles Indeterminate" sentence above is unchanged, and so, now literally, is
+"everything a worker wrote": a worker that **edits** a file AER projected has done work, and the digest
+is what keeps that visible rather than erased. A fact carrying no digest subtracts nothing.
+`WorktreeProvisioner.ChangedPathsExcludingEnginePlaced` is the one predicate and the one place the
+readers are enumerated — including the deliberate non-reader, `WorktreeProvisioner.Audit`, which cannot
+subtract (its `git status` collapses an untracked directory to one line) and therefore says so in the
+refusal it composes instead of counting silently.
+
+Scope: **both dispatch paths**. A crash-recovery classification rebuilds its dispatch result from a
+recorded exit and so has no placement list of its own; it refills one by reading the journaled
+`FlowEvent.EngineFilesPlaced` back through the projection (#1933), and subtracts exactly what the live
+path would have. That fact is appended **before the spawn**, from the dispatcher's own placement
+callback, for the same reason `FlowEvent.ExecutionAttemptStarted` below is: an execution that reached a
+recorded exit reached the placement fact first, so no crash window produces a recovery classification
+missing it. An execution carrying no such fact subtracts nothing and therefore counts everything, which
+is the direction this whole reading already fails toward.
+
+A null path — an execution with nowhere to leave work — keeps the retry, and so
 does #1089's finished-then-hung guard, which sits upstream of this branch and is unchanged (a
 tree-changing worker that satisfied its contract has a mutated tree by construction; that is what
 finishing looks like). The reason text opens with `OutcomeClassifier.TimeoutSentence`, so

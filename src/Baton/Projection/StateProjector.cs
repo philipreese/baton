@@ -401,6 +401,20 @@ public static class StateProjector
 
                 break;
 
+            case FlowEvent.EngineFilesPlaced enginePlaced:
+                // #1933: NOT diagnostic-only, unlike the arm below -- this event used to sit in it. The
+                // crash-recovery classification rebuilds its CoreDispatchResult from a recorded exit, so
+                // this projection is the only place the paths AER itself wrote can come back from (see
+                // FlowEvent.EngineFilesPlaced's own remarks). It still changes no StepState: it is
+                // per-execution evidence a classifier reads, the same shape
+                // WorkspaceHeadShaAtStartByExecutionId above already has.
+                //
+                // A null Files is a journal line predating the digest-carrying shape: projected as an
+                // empty list, which subtracts nothing and so counts everything -- the direction
+                // WorktreeProvisioner.ChangedPathsExcludingEnginePlaced's remarks name.
+                state.EnginePlacedFilesByExecutionId[enginePlaced.ExecutionId] = [.. enginePlaced.Files ?? []];
+                break;
+
             case FlowEvent.ExecutionRequestRejected:
             case FlowEvent.ZeroOutputsDespiteSubstantialWork:
             case FlowEvent.VerifyDeclarationIgnored:

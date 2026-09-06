@@ -40,6 +40,7 @@ namespace Baton.Domain;
 [JsonDerivedType(typeof(DeliveryChecksRed), "deliveryChecksRed")]
 [JsonDerivedType(typeof(DeliveryMerged), "deliveryMerged")]
 [JsonDerivedType(typeof(StreamLogLossDeclared), "streamLogLossDeclared")]
+[JsonDerivedType(typeof(EngineFilesPlaced), "engineFilesPlaced")]
 public abstract record FlowEvent
 {
     private FlowEvent()
@@ -365,6 +366,54 @@ public abstract record FlowEvent
     public sealed record VerifyDeclarationUnreviewed(
         ExecutionId ExecutionId,
         string? Digest) : FlowEvent;
+
+    /// <summary>
+    /// #1929 review (MEDIUM, and the escape clause of its HIGH): the files AER itself wrote into the
+    /// worker's working directory immediately before spawning it — today only the claude adapter's
+    /// canonical-skill projection (#1151). The room's durable answer to "what did AER put in my
+    /// repository during this lane", which before this event existed only as terminal scrollback.
+    /// <para>
+    /// It is also the record the HIGH's fix rests on: those exact files are subtracted from
+    /// <c>workspaceChanged</c> and from the #1373 timeout-retry guard
+    /// (<c>WorktreeProvisioner.ChangedPathsExcludingEnginePlaced</c>), so an auditor can see which
+    /// paths the engine excluded from its own work-product evidence rather than take the subtraction on
+    /// trust. Appended only when at least one file was actually placed — a plan that placed nothing
+    /// appends nothing, which is exactly the distinction the MEDIUM was about.
+    /// </para>
+    /// <para>
+    /// <b>Appended before the spawn, not after the exit</b> (#1929 review round 3, LOW). The dispatcher
+    /// raises <c>CoreDispatchTarget.OnEngineFilesPlaced</c> the moment the copies are made and awaits the
+    /// append, so the fact is durable before the worker process exists. Journaling it after
+    /// <c>DispatchAsync</c> returned left an interval — between the durable
+    /// <c>CoreEvent.ExecutionExited</c> and the append — in which a crash produced exactly the
+    /// crash-recovery classification below with no fact to read, i.e. the defect this event closed. Same
+    /// ordering as <see cref="ExecutionAttemptStarted"/>, and now the same durability ordering too.
+    /// </para>
+    /// <para>
+    /// It changes no StepState and no FlowState, but it is <b>not</b> reader-less the way the
+    /// <c>Verify*</c> facts above are: <c>StateProjector</c> projects it into
+    /// <c>ProjectionCheckpointState.EnginePlacedFilesByExecutionId</c> (#1933), which is what the
+    /// crash-recovery path — where <c>CoreDispatchResult</c> is rebuilt from a recorded exit and would
+    /// otherwise carry no placement list — reads to make the same subtraction the live path makes. Both
+    /// paths therefore judge the worker's work product on the worker's own writes;
+    /// <c>WorktreeProvisioner.ChangedPathsExcludingEnginePlaced</c>'s remarks state what an execution
+    /// carrying no such fact then reads as.
+    /// </para>
+    /// </summary>
+    /// <param name="Files">
+    /// The destination paths actually written, in the order placed, each with the digest of the bytes
+    /// placed there — see <see cref="EnginePlacedFile"/> for why the digest is not optional to the
+    /// design. <see langword="null"/> only on a journal line predating this shape, which subtracts
+    /// nothing.
+    /// </param>
+    /// <param name="Groups">
+    /// The adapter's own labels for what was placed (<c>CoreDispatchSeedCopy.Group</c> — the canonical
+    /// skill package names, for claude). Echoed, never interpreted (Architecture Rule 1).
+    /// </param>
+    public sealed record EngineFilesPlaced(
+        ExecutionId ExecutionId,
+        IReadOnlyList<EnginePlacedFile>? Files,
+        IReadOnlyList<string> Groups) : FlowEvent;
 
     /// <summary>
     /// #1623 (contract: <c>spec/baton.md</c> §3; the addendum's own words are quoted on

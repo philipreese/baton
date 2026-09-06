@@ -83,7 +83,8 @@ public sealed record ProjectionCheckpointState(
     Dictionary<StepId, string?>? HollowReasonByStepId = null,
     Dictionary<StepId, string?>? VerifyNotRunReasonByStepId = null,
     HashSet<StepId>? ConductorRejectedStepIds = null,
-    Dictionary<ExecutionId, string>? WorkspaceHeadShaAtStartByExecutionId = null)
+    Dictionary<ExecutionId, string>? WorkspaceHeadShaAtStartByExecutionId = null,
+    Dictionary<ExecutionId, List<EnginePlacedFile>>? EnginePlacedFilesByExecutionId = null)
 {
     public Dictionary<StepId, int> ExecutionCountByStepId { get; init; } = ExecutionCountByStepId ?? new();
 
@@ -208,6 +209,26 @@ public sealed record ProjectionCheckpointState(
     /// </summary>
     public Dictionary<ExecutionId, string> WorkspaceHeadShaAtStartByExecutionId { get; init; } = WorkspaceHeadShaAtStartByExecutionId ?? new();
 
+    /// <summary>
+    /// #1933: the durable half of <see cref="FlowEvent.EngineFilesPlaced"/> — see that event's own
+    /// remarks for what these are and which reader needs them back, and
+    /// <see cref="EnginePlacedFile"/> for why each carries a digest rather than being a bare path.
+    /// Same trailing-optional
+    /// replay-safety shape as
+    /// <see cref="RetryForeclosedStepIds"/> above, and the same <see cref="DeepCopy"/> load-bearing
+    /// note applies — with the list value deep-copied per entry, the way
+    /// <see cref="LatestUnsatisfiedOutputNamesByStepId"/> already is.
+    /// <para>
+    /// <b>No <see cref="ProjectionCheckpoint.Version"/> bump</b>, and not by the ordinary
+    /// trailing-optional argument the members above make: this is the shape #1877's own comment says
+    /// DOES force a bump — an already-journalled event changing how it projects — except that
+    /// <see cref="FlowEvent.EngineFilesPlaced"/> is itself new in the same PR as this reader, so no
+    /// checkpoint at <see cref="ProjectionCheckpoint.CurrentVersion"/> can carry one and there is no
+    /// stale answer to re-derive.
+    /// </para>
+    /// </summary>
+    public Dictionary<ExecutionId, List<EnginePlacedFile>> EnginePlacedFilesByExecutionId { get; init; } = EnginePlacedFilesByExecutionId ?? new();
+
     public static ProjectionCheckpointState CreateEmpty() => new(
         new Dictionary<StepId, ExecutionId>(),
         new Dictionary<StepId, Dictionary<StepId, ExecutionId>>(),
@@ -277,5 +298,6 @@ public sealed record ProjectionCheckpointState(
         new Dictionary<StepId, string?>(HollowReasonByStepId),
         new Dictionary<StepId, string?>(VerifyNotRunReasonByStepId),
         new HashSet<StepId>(ConductorRejectedStepIds),
-        new Dictionary<ExecutionId, string>(WorkspaceHeadShaAtStartByExecutionId));
+        new Dictionary<ExecutionId, string>(WorkspaceHeadShaAtStartByExecutionId),
+        EnginePlacedFilesByExecutionId.ToDictionary(kvp => kvp.Key, kvp => new List<EnginePlacedFile>(kvp.Value)));
 }

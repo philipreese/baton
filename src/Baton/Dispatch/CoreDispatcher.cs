@@ -76,7 +76,20 @@ public sealed record CoreDispatchTarget(
     // record the arming fact durably (ExecutionRequest.HookVerdictLedgerFileName) rather than only
     // holding a delegate that cannot survive a journal round-trip. Non-null exactly when
     // CountHookVerdicts is non-null -- same gate, same reason.
-    string? HookVerdictLedgerFileName = null)
+    string? HookVerdictLedgerFileName = null,
+    // #1151: files copied verbatim into place when this execution starts, never clobbering a differing
+    // existing file — see CoreDispatchSeedCopy for why this is not a CoreDispatchSeedFile carrying the
+    // text. Appended last so no positional caller of the parameters above shifts.
+    IReadOnlyList<CoreDispatchSeedCopy>? SeedCopies = null,
+    // #1929 review round 3 (LOW): raised — and AWAITED — the moment SeedCopies above have been placed
+    // and BEFORE the worker is spawned, so the caller can make the placement durable while no process
+    // exists yet. MutationInterface wires it to the FlowEvent.EngineFilesPlaced append; journaling that
+    // fact after DispatchAsync returned instead left a window in which a crash between the durable
+    // CoreEvent.ExecutionExited and the append reached the recovery classifier with no fact, counting
+    // AER's own copies as the worker's. Same seam and same composition rule as OnStdoutLine above: the
+    // dispatcher supplies the fact and never interprets it (Architecture Rule 1). Null on every path
+    // with no journal to write to (tests, CommandWorkerAdapter), which simply records nothing.
+    Func<IReadOnlyList<EnginePlacedFile>, IReadOnlyList<string>, Task>? OnEngineFilesPlaced = null)
 {
     /// <summary>
     /// #1373: returns this target with <paramref name="preamble"/> prepended to the instructional text
@@ -137,6 +150,37 @@ public sealed record CoreDispatchTarget(
 public sealed record CoreDispatchSeedFile(string PathTemplate, string Content);
 
 /// <summary>
+/// A file an adapter needs copied <em>verbatim</em> into place when an execution starts — the same
+/// dispatch-time seam as <see cref="CoreDispatchSeedFile"/>, for content AER did not author and must not
+/// rewrite. <paramref name="PathTemplate"/> takes the usual <c>%NAME%</c>/<c>$NAME</c> placeholder
+/// grammar; the bytes at <paramref name="SourcePath"/> are copied unchanged, with no variable expansion
+/// (#1929 review, HIGH at <c>ClaudeWorkerAdapter.Resolve</c>).
+/// </summary>
+/// <remarks>
+/// <para>
+/// <b>Never clobbers.</b> An existing destination whose bytes differ from the source is left exactly as
+/// it is and the copy is skipped — the guarantee is in the type rather than in a flag, because the first
+/// user copies into the operator's own working directory, where a differing file is by definition
+/// content AER did not put there. Identical bytes are rewritten harmlessly; nothing is ever pruned.
+/// </para>
+/// <para>
+/// Deliberately byte-verbatim rather than a <see cref="CoreDispatchSeedFile"/> carrying the text: a seed
+/// body is expanded by <see cref="CoreDispatcher.RenderSeedContent"/>, so a package file mentioning
+/// <c>$BATON_OUTPUT_DIR</c> would land differing from its source, and any reader that predicts the
+/// skip-vs-write outcome from the source bytes (the dispatch roster does) would then disagree with what
+/// this loop actually did. One set of bytes, one predicate, two readers.
+/// </para>
+/// </remarks>
+/// <param name="Group">
+/// An adapter-authored label naming what this copy belongs to (the claude adapter passes the canonical
+/// skill package's name), used only to compose the record the dispatcher writes after placing —
+/// #1929 review MEDIUM asked that line to name the packages, and the engine must not learn a vendor's
+/// grouping by parsing its paths (Architecture Rule 1). Echoed verbatim, never interpreted; null on a
+/// copy with nothing to group by.
+/// </param>
+public sealed record CoreDispatchSeedCopy(string PathTemplate, string SourcePath, string? Group = null);
+
+/// <summary>
 /// The raw, unclassified facts of a completed dispatch (<c>NaturalExit</c> |
 /// <c>TimedOut</c> | <c>CancelRequested</c> vocabulary). M7 Phase 6 explicitly excludes outcome
 /// classification — mapping this into <c>ExecutionSucceeded</c>/<c>ExecutionFailed</c>/
@@ -186,7 +230,17 @@ public sealed record CoreDispatchResult(
     // F6 (#1593 review): latched from CoreDispatchTarget.DetectsTerminalResult — spec/baton.md §3 F6
     // is the register entry for why OutcomeClassifier's dead-worker predicate reads this field rather
     // than TerminalSuccessObserved.
-    bool TerminalResultObserved = false);
+    bool TerminalResultObserved = false,
+    // #1929 review HIGH: the files this dispatch's own SeedCopies actually placed inside the worker's
+    // working directory (EnginePlacedFile carries what each element records and why), so the workspace
+    // readers can subtract AER's writes from what they attribute to the worker, and only while those
+    // writes are still AER's. What was WRITTEN, not what was planned — see
+    // CoreDispatchSeedCopy and WorktreeProvisioner.ChangedPathsExcludingEnginePlaced. On the
+    // crash-recovery path, which rebuilds a result from a recorded exit, MutationInterface refills this
+    // from the journaled FlowEvent.EngineFilesPlaced through the projection (#1933) — unlike
+    // StderrTail/StdoutTail above, it does survive a crash. Null only when no such fact was recorded,
+    // which counts the paths.
+    IReadOnlyList<EnginePlacedFile>? EnginePlacedFiles = null);
 
 
 /// <summary>
@@ -752,6 +806,74 @@ public sealed class CoreDispatcher(ICoreEventLogWriter coreEventLogWriter, IStre
             }
         }
 
+        // #1151: verbatim copies, same dispatch-time seam, different guarantee — see
+        // CoreDispatchSeedCopy. Never clobbers a differing destination, never prunes, and never fails
+        // the dispatch: an unreadable source or a locked destination costs that one file and says so,
+        // rather than throwing out of a path whose whole point is that it runs before every execution.
+        // #1929 review HIGH: the files this dispatch actually placed, so the workspace readers can
+        // subtract AER's own writes from what they attribute to the worker. Collected here because
+        // this is the only place that knows which copies were MADE rather than merely planned -- a
+        // destination holding different bytes is skipped below, and must not be excluded from the
+        // evidence, since AER did not write it.
+        var enginePlacedFiles = new List<EnginePlacedFile>();
+        var placedGroups = new List<string>();
+        if (target.SeedCopies is { Count: > 0 } seedCopies)
+        {
+            foreach (var copy in seedCopies)
+            {
+                var destinationPath = ExpandVariables(copy.PathTemplate, pathVariables);
+                try
+                {
+                    if (File.Exists(destinationPath) && !FilesHaveIdenticalBytes(copy.SourcePath, destinationPath))
+                    {
+                        continue;
+                    }
+
+                    var destinationDirectory = Path.GetDirectoryName(destinationPath);
+                    if (!string.IsNullOrEmpty(destinationDirectory))
+                    {
+                        Directory.CreateDirectory(destinationDirectory);
+                    }
+
+                    File.Copy(copy.SourcePath, destinationPath, overwrite: true);
+                    // Digested from the DESTINATION after the copy, never from the source: what the
+                    // readers later compare against is the bytes that are actually sitting in the
+                    // worker's tree. A digest that cannot be taken is recorded as null, which makes the
+                    // path unsubtractable rather than wrongly subtractable (EnginePlacedFile.Sha256).
+                    enginePlacedFiles.Add(new EnginePlacedFile(destinationPath, EnginePlacedFile.TryDigest(destinationPath)));
+                    if (copy.Group is { Length: > 0 } group && !placedGroups.Contains(group))
+                    {
+                        placedGroups.Add(group);
+                    }
+                }
+                catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or System.Security.SecurityException)
+                {
+                    Console.Error.WriteLine(
+                        $"Warning: could not place '{destinationPath}' from '{copy.SourcePath}': {ex.Message}");
+                }
+            }
+
+            // #1929 review MEDIUM: the adapter's announce at resolve time is future tense ("will be
+            // placed ... when a dispatch of this binding runs") and a plan can be declared and then
+            // placed zero times. This is the record of the ACT, written after the loop so its count is
+            // what was copied, not what was intended. The room-visible half is
+            // FlowEvent.EngineFilesPlaced, appended by the callback below from the same list.
+            var groups = placedGroups.Count > 0 ? $" ({string.Join(", ", placedGroups)})" : string.Empty;
+            var root = CommonDirectory([.. enginePlacedFiles.Select(f => f.Path)]);
+            var where = root is null ? string.Empty : $" into '{root}'";
+            Console.Error.WriteLine(
+                $"Placed {enginePlacedFiles.Count} of {seedCopies.Count} declared file(s){groups}{where} "
+                + "for this execution.");
+        }
+
+        // #1929 review round 3 (LOW): the durable half, raised HERE — after the copies exist on disk and
+        // before anything below can spawn a process. See CoreDispatchTarget.OnEngineFilesPlaced for the
+        // crash window this ordering closes, and FlowEvent.EngineFilesPlaced for the fact itself.
+        if (enginePlacedFiles.Count > 0 && target.OnEngineFilesPlaced is { } onEngineFilesPlaced)
+        {
+            await onEngineFilesPlaced(enginePlacedFiles, placedGroups).ConfigureAwait(false);
+        }
+
         // #598: measured here, on the expanded arguments, because this is the only place the real
         // command line exists — an adapter builds `%BATON_OUTPUT_DIR%`, not the absolute path that
         // placeholder becomes above, so a guard living in an adapter would measure the wrong string.
@@ -1079,10 +1201,40 @@ public sealed class CoreDispatcher(ICoreEventLogWriter coreEventLogWriter, IStre
         }
 
         return new CoreDispatchResult(
-            exitCode, reason, capturedStderr, terminalSuccessLatched, capturedStdoutTail, terminalResultLatched);
+            exitCode, reason, capturedStderr, terminalSuccessLatched, capturedStdoutTail, terminalResultLatched,
+            enginePlacedFiles);
 
     }
 
+
+    /// <summary>
+    /// The deepest directory containing every path in <paramref name="paths"/>, or null when there is
+    /// none to name (no paths, or paths on different roots). Used only to say WHERE a placement landed
+    /// in the line the dispatcher writes after copying (#1929 review MEDIUM) — never to decide anything.
+    /// </summary>
+    private static string? CommonDirectory(IReadOnlyList<string> paths)
+    {
+        if (paths.Count == 0)
+        {
+            return null;
+        }
+
+        var comparison = OperatingSystem.IsWindows() ? StringComparison.OrdinalIgnoreCase : StringComparison.Ordinal;
+        var common = Path.GetDirectoryName(paths[0]);
+        for (var i = 1; i < paths.Count && !string.IsNullOrEmpty(common); i++)
+        {
+            var candidate = Path.GetDirectoryName(paths[i]);
+            while (!string.IsNullOrEmpty(common)
+                   && !(candidate is not null
+                        && (candidate.Equals(common, comparison)
+                            || candidate.StartsWith(common + Path.DirectorySeparatorChar, comparison))))
+            {
+                common = Path.GetDirectoryName(common);
+            }
+        }
+
+        return string.IsNullOrEmpty(common) ? null : common;
+    }
 
     private static CoreExitReason ToCoreExitReason(BatonExitReason reason) => reason switch
     {
@@ -1145,4 +1297,53 @@ public sealed class CoreDispatcher(ICoreEventLogWriter coreEventLogWriter, IStre
     /// </summary>
     internal static string RenderSeedContent(string content, Dictionary<string, string> pathVariables) =>
         ExpandVariables(content, pathVariables.ToDictionary(kv => kv.Key, kv => kv.Value.Replace('\\', '/')));
+
+    /// <summary>
+    /// Whether two files hold the same bytes — the single predicate deciding whether a
+    /// <see cref="CoreDispatchSeedCopy"/> is written or the existing file is kept (#1151).
+    /// </summary>
+    /// <remarks>
+    /// Public, and deliberately so: an adapter that reports ahead of time how many files a projection
+    /// will keep must answer that question with <em>this</em> function rather than one of its own, or the
+    /// two answers can disagree — the roster stating something the write path then contradicts. Compares
+    /// length first, then content, streaming rather than loading both files whole. A file that cannot be
+    /// read answers <see langword="false"/> (treated as differing), so the fail direction is "keep what
+    /// is already there".
+    /// </remarks>
+    public static bool FilesHaveIdenticalBytes(string leftPath, string rightPath)
+    {
+        try
+        {
+            var left = new FileInfo(leftPath);
+            var right = new FileInfo(rightPath);
+            if (!left.Exists || !right.Exists || left.Length != right.Length)
+            {
+                return false;
+            }
+
+            using var leftStream = File.OpenRead(leftPath);
+            using var rightStream = File.OpenRead(rightPath);
+            var leftBuffer = new byte[4096];
+            var rightBuffer = new byte[4096];
+            while (true)
+            {
+                var leftRead = leftStream.ReadAtLeast(leftBuffer, leftBuffer.Length, throwOnEndOfStream: false);
+                var rightRead = rightStream.ReadAtLeast(rightBuffer, rightBuffer.Length, throwOnEndOfStream: false);
+                if (leftRead != rightRead
+                    || !leftBuffer.AsSpan(0, leftRead).SequenceEqual(rightBuffer.AsSpan(0, rightRead)))
+                {
+                    return false;
+                }
+
+                if (leftRead == 0)
+                {
+                    return true;
+                }
+            }
+        }
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or System.Security.SecurityException)
+        {
+            return false;
+        }
+    }
 }

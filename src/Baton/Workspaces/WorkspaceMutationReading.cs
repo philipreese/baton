@@ -19,9 +19,12 @@ namespace Baton.Workspaces;
 /// is then meaningless and <see cref="Mutated"/> reads true regardless.
 /// </param>
 /// <param name="ChangedPathCount">
-/// Uncommitted and untracked paths, counted from <c>git status --porcelain --untracked-files=normal</c>
-/// — <c>--untracked-files=normal</c> explicit for the same reason its siblings state it, so an ambient
-/// <c>status.showUntrackedFiles = no</c> cannot make an untracked-only work product invisible here.
+/// Uncommitted and untracked paths, as counted by
+/// <see cref="WorktreeProvisioner.ReadWorkspaceMutation"/>. What the count includes, what it excludes
+/// and why the git flag is what it is are stated once, on <c>WorktreeProvisioner</c>'s
+/// <c>UntrackedFilesArgument</c> and <c>ChangedPathsExcludingEnginePlaced</c> (#1929 review HIGH) —
+/// the latter is also where the full list of readers that subtract engine-placed files lives, which
+/// since #1929's round-3 MEDIUM includes all three siblings above.
 /// </param>
 /// <param name="NewCommitCount">
 /// Commits since the ref the probe was given, or null when no ref was available and the reflog

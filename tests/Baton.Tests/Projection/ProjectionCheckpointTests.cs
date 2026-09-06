@@ -1046,4 +1046,61 @@ public class ProjectionCheckpointTests
             DirectoryCleanup.DeleteRecursively(tempDir);
         }
     }
+
+    /// <summary>
+    /// #1933: <see cref="FlowEvent.EngineFilesPlaced"/> projects into
+    /// <c>ProjectionCheckpointState.EnginePlacedFilesByExecutionId</c>, and that member survives both
+    /// halves of a checkpointed resume — the positional <c>DeepCopy</c> every new member has to be added
+    /// to by hand (its own remarks name the #1606 loss this reproduces), and the JSON save/load. Without
+    /// both, the crash-recovery classification reads an empty placement list and counts AER's own writes
+    /// as the worker's, which is the very defect this issue closed.
+    /// </summary>
+    [Fact]
+    public async Task Scope1c_EnginePlacedPaths_SurviveDeepCopyAndCheckpointRoundTrip()
+    {
+        var tempDir = Path.Combine(Path.GetTempPath(), "baton_1933_placed_" + Guid.NewGuid().ToString("n"));
+        Directory.CreateDirectory(tempDir);
+        try
+        {
+            var snapshot = TestSnapshot();
+            var logPath = Path.Combine(tempDir, "flow.jsonl");
+            var writer = new FlowEventLogWriter(logPath);
+
+            var exec1 = new ExecutionId("exec-1");
+            // The digest travels with the path, or the crash-recovery reader can no longer tell "still
+            // AER's bytes" from "the worker edited it" — losing it across the round trip would silently
+            // stop the subtraction rather than break it loudly.
+            EnginePlacedFile[] placed =
+            [
+                new(@"C:\repo\.claude\skills\audit-tool\SKILL.md", "9f2b1c"),
+                new(@"C:\repo\.claude\skills\audit-tool\reference\notes.md", null),
+            ];
+
+            await writer.AppendAsync(new FlowEvent.ExecutionRequestAccepted(MakeRequest(exec1, Step1)), TestContext.Current.CancellationToken);
+            await writer.AppendAsync(new FlowEvent.EngineFilesPlaced(exec1, placed, ["audit-tool"]), TestContext.Current.CancellationToken);
+
+            var reader = new FlowEventLogReader(logPath);
+            var logSnapshot = await reader.ReadSnapshotAsync(TestContext.Current.CancellationToken);
+            var (_, checkpoint) = StateProjector.ProjectAndCheckpoint(
+                logSnapshot.FlowEvents, snapshot, logByteOffset: logSnapshot.ByteOffset);
+
+            // ProjectAndCheckpoint hands back state.DeepCopy(), so this arm already fails on a member
+            // left out of that positional constructor.
+            Assert.Equal(placed, checkpoint.State.EnginePlacedFilesByExecutionId[exec1]);
+
+            ProjectionCheckpointStore.Save(tempDir, checkpoint);
+            var loaded = ProjectionCheckpointStore.Load(tempDir)!;
+            Assert.Equal(placed, loaded.State.EnginePlacedFilesByExecutionId[exec1]);
+
+            // The list itself is copied, not shared: a resume that mutated the loaded copy must not
+            // reach back into the checkpoint it came from.
+            var copy = loaded.State.DeepCopy();
+            copy.EnginePlacedFilesByExecutionId[exec1].Add(new EnginePlacedFile(@"C:\repo\not-placed.md", null));
+            Assert.Equal(placed, loaded.State.EnginePlacedFilesByExecutionId[exec1]);
+        }
+        finally
+        {
+            DirectoryCleanup.DeleteRecursively(tempDir);
+        }
+    }
 }

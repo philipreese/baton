@@ -259,7 +259,8 @@ settings values, not command-line flags.
 | `/permissions` | "interactive tool permissions manager panel" |
 | `/diff` | "Interactive Diff Viewer to view changes, turns, and commits" |
 | `/planning` | "multi-turn plan generation mode" |
-| `/hooks`, `/skills`, `/mcp`, `/model`, `/statusline`, `/keybindings`, `/artifact` | — |
+| `/skills` | Documented/reserved — measured NOT to read `.agents/skills`; the measurement is this file's "agy `.agents/skills/*/SKILL.md` is NOT read by the vendor on its own (#1572)" section |
+| `/hooks`, `/mcp`, `/model`, `/statusline`, `/keybindings`, `/artifact` | — |
 
 Two land directly on open work:
 
@@ -2058,6 +2059,10 @@ claim, not because anything currently depends on the wider one. Sentinel:
 this measurement: `ClaudeWorkerAdapter.HasSensitiveOutputPathComponent` now matches on the literal
 `.claude` path component rather than the config-root value, so this finding is closed, not merely
 recorded.
+
+### agy `.agents/skills/*/SKILL.md` is NOT read by the vendor on its own (#1572, 2026-09-05)
+
+Measured 2026-09-05 ET, `dispatch-implement-3a5d0756`, `gemini-3.8-flash` default. A sentinel skill `.agents/skills/sentinel-1572/SKILL.md` was placed in the worktree before dispatch instructing the model to end its final message with the exact line `SENTINEL-1572-READ`. Baton's dispatch roster printed `Skills: sentinel-1572` (the #1566 scan found the file), but agy's final message did not carry the sentinel line and the string appeared nowhere in the room's stream. agy does not read `.agents/skills/*/SKILL.md` on its own.
 
 ## #1852 phase A2 — the non-Claude memory roots, one finding per family
 

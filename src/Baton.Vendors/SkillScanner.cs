@@ -39,6 +39,44 @@ public static class SkillScanner
     }
 
     /// <summary>
+    /// The body of a <c>SKILL.md</c> with its leading <c>---</c>-delimited YAML front matter removed
+    /// (#1929 review LOW). Content that does not open with a front-matter fence is returned unchanged, as
+    /// is content whose fence is never closed — an unterminated block is more likely a document that
+    /// happens to start with a rule than a truncated header, and dropping the whole file would be the
+    /// worse error.
+    /// </summary>
+    /// <remarks>
+    /// This is a fence strip, not a YAML parse. #1151's design comment (section 0.3) wants a realizer emitting front
+    /// matter it controls and never passing the operator's through; for the agy floor realization, whose
+    /// target is a prompt rather than a file the vendor parses, "control" means removing it — a
+    /// <c>description:</c>/<c>name:</c>/<c>allowed-tools:</c> block read as instructions is noise at
+    /// best.
+    /// </remarks>
+    public static string StripFrontmatter(string? markdownContent)
+    {
+        if (string.IsNullOrEmpty(markdownContent))
+        {
+            return string.Empty;
+        }
+
+        var lines = markdownContent.Split('\n');
+        if (lines.Length == 0 || lines[0].TrimEnd('\r').Trim() != "---")
+        {
+            return markdownContent;
+        }
+
+        for (var i = 1; i < lines.Length; i++)
+        {
+            if (lines[i].TrimEnd('\r').Trim() == "---")
+            {
+                return string.Join('\n', lines[(i + 1)..]);
+            }
+        }
+
+        return markdownContent;
+    }
+
+    /// <summary>
     /// Reads the description from a <c>SKILL.md</c> file, or returns a fallback description
     /// (<c>"Skill in {fallbackName}"</c>) if the file does not exist, has no description, or cannot be read.
     /// Explicitly catches I/O and permission exceptions rather than swallowing all exceptions bare.

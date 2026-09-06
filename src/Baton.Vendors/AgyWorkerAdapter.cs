@@ -462,7 +462,7 @@ public sealed partial class AgyWorkerAdapter : IWorkerAdapter, IPermissionGrantT
         invocation = ProjectCeilingGate.Apply(invocation, contract, ((IWorkerAdapter)this).WithheldWritesReachTheOutbox);
 
         var isWindows = OperatingSystem.IsWindows();
-        var prompt = BuildPrompt(invocation.PromptTemplate, contract, isWindows);
+        var prompt = BuildPrompt(invocation.PromptTemplate, contract, isWindows, invocation.WorkingDirectory);
         var permissionScope = ResolvePermissionScope(invocation);
         var artifactsRoot = EnvironmentReference("BATON_ARTIFACTS_ROOT", isWindows);
         var agyWorkspace = EnsureAgyWorkspace();
@@ -1206,9 +1206,68 @@ public sealed partial class AgyWorkerAdapter : IWorkerAdapter, IPermissionGrantT
         return invocation.PermissionScope ?? DefaultPermissionScope;
     }
 
-    private static string BuildPrompt(string promptTemplate, WorkerContract contract, bool isWindows)
+    /// <summary>
+    /// A byte count rendered for the dispatch roster — whole bytes below 1 KiB, one decimal above, so a
+    /// short skill does not read as <c>0.0 KB</c>.
+    /// </summary>
+    private static string DescribeSize(int byteCount) =>
+        byteCount < 1024
+            ? $"{byteCount} B"
+            : string.Create(System.Globalization.CultureInfo.InvariantCulture, $"{byteCount / 1024.0:0.0} KB");
+
+    /// <summary>
+    /// The exact text one canonical skill package contributes to an agy dispatch prompt: the
+    /// <c>SKILL.md</c> body with its YAML front matter stripped (#1151, #1929 review LOW).
+    /// </summary>
+    /// <remarks>
+    /// One function so the roster's per-package size and the prompt's actual content are measured on the
+    /// same string — a size computed off the raw file would over-report by the front matter this drops.
+    /// </remarks>
+    public static string InlinedSkillBody(SkillPackage package)
     {
-        var prompt = new StringBuilder(promptTemplate);
+        ArgumentNullException.ThrowIfNull(package);
+        return SkillScanner.StripFrontmatter(package.Content).Trim();
+    }
+
+    /// <summary>
+    /// Inlines canonical skill packages (<c>skills/&lt;name&gt;/SKILL.md</c>) directly into the
+    /// dispatch prompt with a one-line header per skill (<c># Skill: &lt;name&gt;</c>) (#1151).
+    /// Returns the prompt unchanged if no canonical skill packages exist.
+    /// </summary>
+    /// <remarks>
+    /// <b>Uncapped, and the roster is what discloses it.</b> Every package's body goes in whole, so the
+    /// worker's context budget is spent in proportion to what the repository carries, and one non-trivial
+    /// package pushes the dispatch onto #748's oversize-prompt path. There is no argv hazard there
+    /// (<c>OversizePromptWrapper</c> swaps the inline prompt for a <c>BATON_PROMPT_FILE</c> reference far
+    /// below the platform ceiling), so the cost is context rather than failure — which is why this
+    /// discloses a per-package size in the dispatch roster instead of silently truncating. A cap belongs
+    /// with the manifest #1151's slice 1 still owes, not here.
+    /// </remarks>
+    public static string InlineSkills(string prompt, string? workingDirectory)
+    {
+        if (string.IsNullOrWhiteSpace(workingDirectory) || !Directory.Exists(workingDirectory))
+        {
+            return prompt;
+        }
+
+        var packages = SkillPackageReader.DiscoverPackages(workingDirectory);
+        if (packages.Count == 0)
+        {
+            return prompt;
+        }
+
+        var sb = new StringBuilder(prompt);
+        foreach (var package in packages)
+        {
+            sb.Append($"\n\n# Skill: {package.Name}\n{InlinedSkillBody(package)}");
+        }
+        return sb.ToString();
+    }
+
+    private static string BuildPrompt(string promptTemplate, WorkerContract contract, bool isWindows, string? workingDirectory)
+    {
+        var inlined = InlineSkills(promptTemplate, workingDirectory);
+        var prompt = new StringBuilder(inlined);
 
         if (contract.RequiredInputs.Count > 0)
         {
@@ -1266,13 +1325,15 @@ public sealed partial class AgyWorkerAdapter : IWorkerAdapter, IPermissionGrantT
 
         if (!string.IsNullOrWhiteSpace(workingDirectory) && Directory.Exists(workingDirectory))
         {
-            // #1512 M2: whether agy actually reads SKILL.md from this directory is UNMEASURED --
-            // verify.py has no check for it and docs/decisions/0033-skills-attach-directly-no-persona.md
-            // describes agy's skill equivalent as "the plugin/agent equivalent", not a SKILL.md
-            // directory. Tracked by #1572. Not symmetric with claude's discovery either: no
-            // user-personal arm, and no name-based dedup (see docs/dispatch.md's skill-roster section).
-            var skillsDir = Path.Combine(workingDirectory, ".agents", "skills");
-            items.AddRange(SkillScanner.DiscoverSkills(skillsDir));
+            // Removed the .agents/skills scan (#1566) in favour of inlining canonical skill packages from skills/<name>/SKILL.md directly into the prompt (#1151, #1572).
+            // The size is what the prompt actually gains, measured on InlinedSkillBody rather than on the
+            // raw file, because inlining is uncapped and otherwise invisible (#1929 review LOW).
+            var canonicalSkills = SkillPackageReader.DiscoverPackages(workingDirectory);
+            foreach (var package in canonicalSkills)
+            {
+                var size = DescribeSize(Encoding.UTF8.GetByteCount(InlinedSkillBody(package)));
+                items.Add(new WorkerCapabilityItem($"{package.Name} (inlined, {size})", "skill", package.Description));
+            }
         }
 
         return new WorkerCapabilities("agy", items, ParseModelLines(modelsOutput.Result));
