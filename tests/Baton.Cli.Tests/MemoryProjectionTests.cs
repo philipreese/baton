@@ -108,9 +108,9 @@ public sealed class MemoryProjectionTests : IDisposable
     }
 
     /// <summary>
-    /// A budget too small for everything truncates at the first entry that does not fit and names
-    /// EXACTLY the tail it dropped — asserted as the precise id set, not as "something was dropped",
-    /// because a truncation that dropped a different subset each run would pass the weaker assertion.
+    /// An overflowing budget keeps a prefix of the total order and names EXACTLY the ids it left out —
+    /// asserted as the precise set, not as "something was dropped", because a run leaving out a
+    /// different subset each time would pass the weaker assertion and fail the claim.
     /// </summary>
     [Fact]
     public void Budget_overflow_truncates_deterministically_and_names_every_dropped_entry()
