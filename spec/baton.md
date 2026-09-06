@@ -4337,14 +4337,23 @@ created-at.
   one flat wait, because under six or more live rooms the flat wait was reporting a transient queue as a
   failure. `RoomRegistryStore`'s own `WaitPolicy` is where that measurement and the resulting budget are
   recorded; neither is transcribed here. `LockWaitPolicy`
-  (`src/Baton/Status/MutexGuardedFileLock.cs`) carries why a jittered gap between attempts is not the
-  same thing as one longer wait. **The fail-open contract is unchanged**, only deferred: an access that
-  still cannot be had after the whole budget fails exactly as before — a write reported on stderr and
-  swallowed, a read resolving to no entries — so nothing here can gate a dispatch. The cost, stated
-  rather than left emergent, at both ends: a `fleet_status` call contending with a wedged holder now
-  blocks for the whole budget before degrading to its directory scan, and a `baton run`/`dispatch`
-  start stalls for it before its registration falls back to stderr — each instead of giving up after
-  one wait.
+  (`src/Baton/Status/MutexGuardedFileLock.cs`) carries what the gap between attempts buys and what it
+  does not. **Every access's own failure contract is unchanged**, only deferred: one that still cannot
+  be had after the whole budget fails exactly the way it failed after a single wait. Which failure that
+  is depends on the access, and the fail-open swallow does not cover all of them: every read resolves
+  to no entries, and an `AppendAsync` write is reported on stderr and swallowed by its caller (`baton
+  run`/`dispatch` registration, `baton deliver`). The two whole-file rewrites are the exception —
+  `RemoveByRoomPathAsync` (`baton room delete`) and `CompactAsync` (`baton rooms prune --yes`) surface
+  the timeout to their verb, which fails with it. No path here can fail a dispatch. The cost, stated
+  rather than left emergent: an access contending with a wedged holder now blocks for the whole budget
+  before it degrades, instead of giving up after one wait — a `fleet_status` call before falling back
+  to its directory scan, a `baton run`/`dispatch` start before its registration falls back to stderr,
+  and the daemon's four registry readers (`FleetProjectionWriter`, `DeliveryPoller`,
+  `VendorUsageHarvester`, and `QueueSchedulerService`'s live-weight tally, which feeds its launch
+  decision) each on their own tick. A tick that waits is late by up to the budget, never skipped —
+  the services are independent and each recovers on its next interval — so the consequence is a stale
+  projection, a late delivery poll or usage sample, and, for the scheduler alone, a queued lane
+  launched that much later: this can *delay* a dispatch, never fail one.
 - **Reader.** `FleetStatusTool` unions the registry's entries with its existing `BatonPaths.Rooms` +
   caller `roots` scan. A registry entry whose room directory no longer exists is skipped (not pruned
   from the file yet — see below). Every room `fleet_status` returns, whether found by the scan or the
