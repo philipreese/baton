@@ -620,6 +620,9 @@ def run_arms(name: str, check, arms, failures: list[str], emit=print) -> int:
         # The run already exits non-zero through the TEARDOWN entry; the qualifier is so a red arm
         # under a dirty tree does not read as a discriminating one -- the same "an arm that compared
         # nothing prints as a verdict" shape this function exists to remove, one step out.
+        # Scoped to this check, and safe to reset at the next one only because `main` runs a GREEN
+        # BASELINE per check: a mutation that leaked past the boundary surfaces there as "baseline is
+        # not green", not as an unqualified verdict under a tree nobody put back.
         qualified = describe if restored else f"{describe} (fixture not restored)"
         cm = fault()
         try:
