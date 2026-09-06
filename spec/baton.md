@@ -5157,9 +5157,9 @@ paragraph there for the derivation and the worktree-convergence property it buys
 directories with the memory store **inside** each — `~/.baton/<repo-slug>/memory/…`, explicitly *not*
 `~/.baton/memory/<repo-slug>` — because the repository directory is the unit the operator intends to
 work in. `BatonPaths.MemoryEntriesFile` is the one spelling of it (`<repo-slug>/memory/entries.jsonl`),
-and `MemoryStore` is what writes it: append-only JSONL through the same `JsonLinesLedger` +
-`MutexGuardedFileLock` the two ledgers use, under its own lock prefix, rather than a third concurrency
-mechanism. **Phase A wrote no canonical store at all**, and still writes none. The same ruling carries a
+`BatonPaths.MemoryLinksFile` of the `links.jsonl` beside it, and `MemoryStore` is what writes both:
+append-only JSONL through the same `JsonLinesLedger` + `MutexGuardedFileLock` the two ledgers use, each
+file under its own lock, rather than a third concurrency mechanism. **Phase A wrote no canonical store at all**, and still writes none. The same ruling carries a
 follow-up for the cost ledger's own path (§7) — moving under the same per-repo root, with a reader that
 accepts both during the transition — which is a later phase's work, not a correction to what §7 states
 now.
@@ -5182,17 +5182,52 @@ on **same subject + same filename + different digest**, all three, because a nam
 the `MEMORY.md` every root carries and a cross-subject link would reintroduce the leak the
 per-repository layout exists to make impossible.
 
+**A supersession link is its own appended fact, not a field on an entry** (#1940 review round). An
+entry's `id` is derived from subject, source path and digest — none of which supersession changes — and
+the store skips an id it already holds, so a link a *later* import discovers could never be written
+onto a row an *earlier* one wrote: importing the live roots and then the archive landed the archived
+half of every link and silently dropped the live half, and two separate `--root` runs dropped both.
+`MemorySupersessionLink` is therefore a row in `links.jsonl` keyed by the ordered pair of entry ids,
+computed over **the store plus the incoming run** rather than over one run's plan, and
+`MemoryStore.ReadResolvedAsync` is what projects it back onto `supersedes`/`supersededBy` for a reader.
+A link whose two entries are not both present is dropped on resolution rather than reported: after an
+undo, or against a hand-edited store, "superseded by an entry you cannot see" is not a thing a reader
+should be told, and the link reappears intact if the entry is imported again.
+
 **`baton memory import` — phase B, shipped. Non-destructive by construction, and reversible.** Every
 source is opened read-only and left byte-identical; the verb writes in exactly two places, both under
-Baton's own root: the per-repository store and one `ImportManifest`. The manifest accounts for **every
-file the import looked at** — imported, unfiled, or recorded as machinery — because a manifest listing
-only successes is what the undocumented `memory-archive/2026-09-03` migration already demonstrated the
-cost of. `--undo <manifest>` removes exactly the entries that run appended and no others; rows an
-earlier import had already written are excluded, so an undo cannot reverse work its manifest did not
-do. `--dry-run` writes **nothing at all**, manifest included: a manifest for an import that did not
-happen would replay to nothing. `--root` is a filter over what discovery found and never an addition
-to it, so `MemoryRootInventory` stays the single definition of "a memory root" and `audit` stays a
-preview of what `import` will do.
+Baton's own root: the per-repository store and one `ImportManifest`. What an entry carries is a UTF-8
+**decode** of the source's bytes with the byte digest beside it, both taken from **one** read — the
+digest is the authority on what the file held, and taking it from the earlier inventory walk instead
+would let a file edited in between be stored under a digest describing a version nobody kept. The
+manifest accounts for **every file the import looked at** — imported, unfiled, or recorded as
+machinery — because a manifest listing only successes is what the undocumented
+`memory-archive/2026-09-03` migration already demonstrated the cost of. `--undo <manifest>` removes
+exactly the entries and links that run appended and no others; rows an earlier import had already
+written are excluded, so an undo cannot reverse work its manifest did not do. **An undo that reversed
+less than its manifest claims exits non-zero and names the store files that came up short, and one
+whose `batonRoot` is not this process's root refuses before touching anything** (#1940 review round):
+`MemoryStore.RemoveAsync` answering 0 for an absent file is right for it and wrong for the report built
+on top, which used to print "Removed 0 canonical entries" and exit 0. `--dry-run` writes **nothing at
+all**, manifest included: a manifest for an import that did not happen would replay to nothing.
+`--root` is a filter over what discovery found and never an addition to it — narrowing the manifest's
+machinery rows along with the sources, so a filtered run accounts for the roots it looked at and no
+others — which keeps `MemoryRootInventory` the single definition of "a memory root" and `audit` a
+preview of what `import` will do. The two verbs share one resolution
+(`ClaudeMemoryRootResolver`) rather than two copies of it, so that last claim is structural. `--root`
+selects only what this verb can *import*, which is narrower than what `audit` reports: a Codex
+`memories_*.sqlite` root is selectable (its manifest rows are what narrowing means for it) and an
+Antigravity root is not, and the help and the refusal both say so.
+
+**An `--assert`ed repository is canonicalized through `RepositoryIdentity.TryCanonicalize` at the
+parser** (#1940 review round), so `GitHub.com/Owner/Repo`, `github.com/owner/repo` and a pasted
+`https://github.com/Owner/Repo.git` are one identity and therefore one store file — an uncanonicalized
+assertion differing from the probe's answer only in case gave one repository two `entries.jsonl` with
+every entry duplicated across them, silently. It runs the same two normalisations `RepositoryIdentity.From`
+does and invents no third (in particular it does not invent a host), and a string with no
+host-and-path in it is refused rather than turned into a store. Canonicalization is on the **write**
+path only: the alias file is append-only and hand-editable, and rewriting a row on read would change
+what an operator can see it say.
 
 **It will not guess a subject, and that is the whole of what it refuses.** A root whose checkout is
 gone, an archived root whose flattened name decodes to no work tree, and a per-machine root

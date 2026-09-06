@@ -248,8 +248,8 @@ public static class MemoryImportCommand
     /// <remarks>
     /// <para>
     /// The path resolution is <see cref="ClaudeMemoryRootResolver"/>'s — literally the same method
-    /// <see cref="MemoryAuditCommand"/> calls, which is what makes "the audit is a preview of what the
-    /// import will do" a property of the code rather than a claim in two doc comments. What is added
+    /// <see cref="MemoryAuditCommand"/> calls, which is what makes the help text's preview claim a
+    /// property of the code rather than a sentence in two doc comments. What is added
     /// here is the alias fallback, which fires only where the probe produced nothing:
     /// <see cref="MemoryAliasStore"/>'s own remarks state why an assertion may never displace a
     /// measurement, and why this is not the mechanism for the subject-versus-origin question.
@@ -498,9 +498,9 @@ public static class MemoryImportCommand
     /// <para>
     /// <b>It exits non-zero unless it removed exactly what the manifest says the import appended.</b>
     /// <see cref="MemoryStore.RemoveAsync"/> answers 0 rather than throwing for a store file that is
-    /// not there, which is right for it — a partially-undone import must be re-undoable — and wrong for
-    /// the report built on top: "Removed 0 canonical entries" printed with exit 0 told an operator the
-    /// undo had run when nothing had been reversed at all. The count is compared per store file, so the
+    /// not there, which is right for that method (its own remarks give the reason) and wrong for the
+    /// report built on top: "Removed 0 canonical entries" printed with exit 0 told an operator the undo
+    /// had run when nothing had been reversed at all. The count is compared per store file, so the
     /// report names which one came up short rather than only that a total did.
     /// </para>
     /// <para>

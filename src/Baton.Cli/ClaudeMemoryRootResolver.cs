@@ -8,13 +8,14 @@ namespace Baton.Cli;
 /// </summary>
 /// <remarks>
 /// <para>
-/// <b>Shared rather than copied, because both verbs make the claim that they agree.</b> The import's
-/// help says <c>baton memory audit</c> is a preview of what the import will do, and the import's own
-/// remarks said its resolution "is <see cref="MemoryAuditCommand"/>'s, unchanged" — while the code was
-/// a line-for-line copy that both statements would have stopped describing the first time either site
-/// was edited and the other was not. One method makes the claim structural. What the import adds on
-/// top (an alias fallback where this produced nothing) stays at the import's own site: it is a
-/// difference, and a difference belongs where a reader can see it.
+/// <b>Shared rather than copied, because both verbs make the claim that they agree</b> — see
+/// <see cref="MemoryImportOptionsParser"/>'s help text for the claim itself, and
+/// <see cref="MemoryImportCommand.ExecuteAsync"/>'s remarks for what rests on it. Until #1940's review
+/// round this was a line-for-line copy in each command, and the import's own doc asserted the two were
+/// identical: both statements would have stopped being true, silently, the first time one site was
+/// edited and the other was not. What the import adds on top (an alias fallback where this produced
+/// nothing) stays at the import's own site: it is a difference, and a difference belongs where a reader
+/// can see it.
 /// </para>
 /// <para>
 /// <b>Session <c>cwd</c> is ground truth; the decoded name is a guess.</b> The decoder's tie-break is

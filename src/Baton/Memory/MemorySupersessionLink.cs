@@ -12,9 +12,10 @@ namespace Baton.Memory;
 /// supersession input, so a live entry's id is identical whether or not it supersedes anything, and
 /// <see cref="MemoryStore.AppendAsync"/> skips a row whose id is already in the file. An import that
 /// files the live root first and the archive second would therefore recompute the link correctly and
-/// then discard the live half of it — permanently, because the store is append-only and has no
-/// overwrite to offer. Two separate <c>--root</c> runs lose both halves. Recording the link as its own
-/// fact is what makes it landable at any time, in either order, from either side.
+/// then discard the live half of it — permanently, since nothing in this namespace rewrites a row that
+/// is already down (<see cref="MemoryEntry"/>'s own doc says what an append-only store offers instead).
+/// Two separate <c>--root</c> runs lose both halves. Recording the link as its own fact is what makes
+/// it landable at any time, in either order, from either side.
 /// </para>
 /// <para>
 /// <b><see cref="Id"/> is the pair, so a re-import is a no-op here too.</b> The same dedupe property
