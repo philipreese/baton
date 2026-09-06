@@ -4552,9 +4552,8 @@ commands before the worker's first turn, sequentially, and the contract is:
   arm: no verify step can run on any of those paths — `--verify-cmd` is a `DispatchOptions` field with no
   binding to inherit, so a redispatched review has no instruments of its own and the key is removed
   rather than left carrying whatever the model wrote. A resumed turn and a supplied file are the same
-  case: neither has a verify outcome of its own behind it, so removal is the only honest engine record
-  even where a prior `dispatch --verify-cmd` stamped true rows onto that same verdict — losing those
-  is the accepted cost of failing closed. (Not `--verify`, the post-exit flag, which *is*
+  case, and why removal there is deliberate even over an earlier true stamp is stated once, on
+  `VerdictInstrumentStamp`'s own remarks. (Not `--verify`, the post-exit flag, which *is*
   inherited as `WorkerBindingConfigEntry.VerifyCommandOverride` — §3's "Verify command resolution";
   conflating the two is what the earlier wording of this sentence did.) The prompt half of the same
   door is closed with it: the bare (`--spec`-less) redispatch reuses the parent's already-built
