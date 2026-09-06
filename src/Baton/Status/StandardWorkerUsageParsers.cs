@@ -399,6 +399,17 @@ public sealed class ClaudeUsageParser : IWorkerUsageParser
     /// <c>model</c>, falling back to an assistant turn's <c>message.model</c> when the result event
     /// carries none. Both are the CLI's own resolution of whatever id it was handed.
     /// <para>
+    /// <b>Only the fallback is measured</b> (#1927 review LOW): <c>docs/vendor-doc-audit.md</c> §5
+    /// records the assistant turn's <c>message.model</c>. The <c>result</c> rung is UNMEASURED here —
+    /// the repository's only captured result lines
+    /// (<c>tests/Baton.Vendors.Tests/Fixtures/claude-weekly-limit-result.captured.jsonl</c>) are both
+    /// error results carrying <c>modelUsage</c> and no top-level <c>model</c>, which does not
+    /// generalise to a successful one either way. It is read first and kept because claude answers
+    /// through the measured fallback regardless, so the rung is free if the vendor never populates it;
+    /// capturing one successful result line into the audit is what would settle it. Contrast codex,
+    /// where the absence is not a gap in measurement but a structural one — <see cref="CodexUsageParser"/>.
+    /// </para>
+    /// <para>
     /// <b><c>"type":"system"</c> is deliberately not read</b>, and that is the whole discrimination this
     /// method exists for: <c>docs/vendor-doc-audit.md</c> §5 measured that <c>system:init</c> echoes the
     /// <c>--model</c> string VERBATIM — a bogus id is echoed back unchanged and the turn then fails with
