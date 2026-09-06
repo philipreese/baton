@@ -35,9 +35,18 @@ public sealed class VendorUsageHarvester : BackgroundService
     public static readonly TimeSpan PostExitDelay = TimeSpan.FromSeconds(60);
     public static readonly TimeSpan CoalesceWindow = TimeSpan.FromSeconds(60);
 
+    /// <summary>
+    /// #1966: the floor cadence for a vendor with NO live lane — thirty minutes, well inside the runway
+    /// hold's six-hour staleness limit (<c>RunwayThresholds.EffectiveMaxSnapshotAge</c>), so an idle
+    /// vendor's snapshot never ages out of being evidence. spec/baton.md §7 is the register for it and
+    /// for what the extra <c>/usage</c> calls cost.
+    /// </summary>
+    public static readonly TimeSpan IdleInterval = TimeSpan.FromMinutes(30);
+
     private readonly IReadOnlyList<IVendorUsageSource> _sources;
     private readonly VendorUsageHarvestScheduler _scheduler;
     private readonly Func<CancellationToken, Task<Dictionary<string, int>>> _countLiveLanes;
+    private readonly Func<string, IReadOnlyList<DateTimeOffset>> _readWindowBoundaries;
 
     public VendorUsageHarvester()
         : this(VendorUsageSources.Default)
@@ -50,15 +59,21 @@ public sealed class VendorUsageHarvester : BackgroundService
     /// no, source returns null, source returns a snapshot — can be driven without fabricating a
     /// Running room per arm. The null-returns-nothing arm is #1869's red arm for
     /// "an errored harvest must not blank the last good snapshot".
+    /// <paramref name="readWindowBoundaries"/> substitutes for the on-disk snapshot read so #1966's
+    /// boundary trigger can be driven without persisting a fixture whose resets are relative to the
+    /// suite's own clock.
     /// </summary>
     internal VendorUsageHarvester(
         IReadOnlyList<IVendorUsageSource> sources,
         VendorUsageHarvestScheduler? scheduler = null,
-        Func<CancellationToken, Task<Dictionary<string, int>>>? countLiveLanes = null)
+        Func<CancellationToken, Task<Dictionary<string, int>>>? countLiveLanes = null,
+        Func<string, IReadOnlyList<DateTimeOffset>>? readWindowBoundaries = null)
     {
         _sources = sources;
-        _scheduler = scheduler ?? new VendorUsageHarvestScheduler(PeriodicInterval, Jitter, PostExitDelay, CoalesceWindow);
+        _scheduler = scheduler
+            ?? new VendorUsageHarvestScheduler(PeriodicInterval, Jitter, PostExitDelay, CoalesceWindow, IdleInterval);
         _countLiveLanes = countLiveLanes ?? CountLiveLanesByVendorAsync;
+        _readWindowBoundaries = readWindowBoundaries ?? ReadWindowBoundaries;
     }
 
     protected override async Task ExecuteAsync(CancellationToken stoppingToken)
@@ -89,7 +104,14 @@ public sealed class VendorUsageHarvester : BackgroundService
         }
     }
 
-    /// <summary>One tick's worth of work — public entry point for tests, and what <see cref="ExecuteAsync"/> loops.</summary>
+    /// <summary>
+    /// One tick's worth of work — internal entry point for tests, and what <see cref="ExecuteAsync"/>
+    /// loops. <b>Strictly serial across vendors</b>, and that is a contract rather than an accident of
+    /// the loop: every source spawns its vendor's own CLI, and two vendor CLIs running at once on the
+    /// operator's machine is the cost #1966's every-vendor cadence would otherwise add. The
+    /// <c>await</c> inside the loop is what enforces it; <c>VendorUsageHarvesterTests</c>' concurrency
+    /// arm is what would notice a <c>Task.WhenAll</c> replacing it.
+    /// </summary>
     internal async Task TickOnceAsync(DateTimeOffset now, CancellationToken cancellationToken)
     {
         var liveLanesByVendor = await _countLiveLanes(cancellationToken).ConfigureAwait(false);
@@ -97,7 +119,11 @@ public sealed class VendorUsageHarvester : BackgroundService
         foreach (var source in _sources)
         {
             var anyLive = liveLanesByVendor.TryGetValue(source.Vendor, out var count) && count > 0;
-            if (!_scheduler.OnTick(source.Vendor, now, anyLive))
+
+            // Read BEFORE the harvest: after it, the boundaries would be the ones the snapshot this tick
+            // just wrote names, which are in the future, so the trigger could never fire.
+            var boundaries = _readWindowBoundaries(source.Vendor);
+            if (!_scheduler.OnTick(source.Vendor, now, anyLive, boundaries))
             {
                 continue;
             }
@@ -125,6 +151,18 @@ public sealed class VendorUsageHarvester : BackgroundService
             Persist(source.Vendor, snapshot);
         }
     }
+
+    /// <summary>
+    /// The reset instants this vendor's last persisted snapshot names (#1966), read through the same
+    /// <see cref="RunwaySnapshotReader"/> the runway hold reads — one on-disk snapshot format, one
+    /// reader, so the cadence and the gate can never disagree about what was last harvested. A window
+    /// whose <see cref="VendorUsageWindow.ResetsAt"/> did not parse contributes nothing rather than a
+    /// guessed instant, which is #1391's "unparsed → unknown, never a number" applied here.
+    /// </summary>
+    private static IReadOnlyList<DateTimeOffset> ReadWindowBoundaries(string vendor) =>
+        RunwaySnapshotReader.Read(vendor) is { } snapshot
+            ? [.. snapshot.Windows.Where(w => w.ResetsAt is not null).Select(w => w.ResetsAt!.Value)]
+            : [];
 
     private static async Task<Dictionary<string, int>> CountLiveLanesByVendorAsync(CancellationToken cancellationToken)
     {

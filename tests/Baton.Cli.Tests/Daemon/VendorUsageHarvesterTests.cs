@@ -35,9 +35,24 @@ public sealed class VendorUsageHarvesterTests : IDisposable
         }
     }
 
-    /// <summary>Every interval zero, so the very first tick with a live lane is due to harvest.</summary>
+    /// <summary>Every interval zero, so the very first tick is due to harvest — live lane or not, which
+    /// since #1966 is the same answer either way.</summary>
     private static VendorUsageHarvestScheduler AlwaysDueScheduler() =>
-        new(TimeSpan.Zero, TimeSpan.Zero, TimeSpan.Zero, TimeSpan.Zero, jitterSource: () => 0);
+        new(TimeSpan.Zero, TimeSpan.Zero, TimeSpan.Zero, TimeSpan.Zero, TimeSpan.Zero, jitterSource: () => 0);
+
+    /// <summary>
+    /// Every interval an hour, so no first tick is ever due. #1966 replaced the idle backoff with a
+    /// floor cadence, so "no live lane" is no longer a way to make the scheduler say no — a control that
+    /// needs the scheduler to refuse has to say so with the intervals instead.
+    /// </summary>
+    private static VendorUsageHarvestScheduler NeverDueScheduler() =>
+        new(
+            TimeSpan.FromHours(1),
+            TimeSpan.Zero,
+            TimeSpan.FromHours(1),
+            TimeSpan.Zero,
+            TimeSpan.FromHours(1),
+            jitterSource: () => 0);
 
     private sealed class FakeSource(string vendor, VendorUsageSnapshot? result) : IVendorUsageSource
     {
@@ -49,6 +64,58 @@ public sealed class VendorUsageHarvesterTests : IDisposable
         {
             Reads++;
             return Task.FromResult(result);
+        }
+    }
+
+    /// <summary>Counts how many sources are inside <c>ReadAsync</c> at once, and how many finished.</summary>
+    private sealed class ConcurrencyTracker
+    {
+        private int _current;
+
+        public int MaxConcurrent { get; private set; }
+
+        public int Completed { get; private set; }
+
+        public void Enter()
+        {
+            var now = Interlocked.Increment(ref _current);
+            lock (this)
+            {
+                MaxConcurrent = Math.Max(MaxConcurrent, now);
+            }
+        }
+
+        public void Exit()
+        {
+            Interlocked.Decrement(ref _current);
+            lock (this)
+            {
+                Completed++;
+            }
+        }
+    }
+
+    /// <summary>
+    /// A source that stays inside <c>ReadAsync</c> long enough for a second one to overlap it if the
+    /// harvester ever stopped awaiting each in turn. The delay is the whole instrument: a source that
+    /// returned synchronously would observe no overlap even under <c>Task.WhenAll</c>.
+    /// </summary>
+    private sealed class OverlapDetectingSource(string vendor, ConcurrencyTracker tracker) : IVendorUsageSource
+    {
+        public string Vendor => vendor;
+
+        public async Task<VendorUsageSnapshot?> ReadAsync(CancellationToken cancellationToken)
+        {
+            tracker.Enter();
+            try
+            {
+                await Task.Delay(TimeSpan.FromMilliseconds(50), cancellationToken);
+                return FreshSnapshot() with { Vendor = vendor };
+            }
+            finally
+            {
+                tracker.Exit();
+            }
         }
     }
 
@@ -103,9 +170,32 @@ public sealed class VendorUsageHarvesterTests : IDisposable
     [Fact]
     public async Task TickOnce_SchedulerSaysNo_NeverReadsTheSourceAtAll()
     {
-        // Control arm for both tests above: with no live lane the scheduler's idle backoff must stop
-        // the tick before any vendor CLI is spawned, so "no file written" there cannot be explained
-        // by the harvester simply never running.
+        // Control arm for both tests above: when the scheduler says no, the tick stops before any vendor
+        // CLI is spawned, so "no file written" there cannot be explained by the harvester simply never
+        // running. Before #1966 the refusal was bought with an empty live-lane map (the idle backoff);
+        // that no longer refuses anything, so the intervals are what say no now.
+        var source = new FakeSource("claude", FreshSnapshot());
+        var harvester = new VendorUsageHarvester(
+            [source],
+            NeverDueScheduler(),
+            countLiveLanes: _ => Task.FromResult(new Dictionary<string, int>(StringComparer.Ordinal)));
+
+        await harvester.TickOnceAsync(DateTimeOffset.UtcNow, TestContext.Current.CancellationToken);
+
+        Assert.Equal(0, source.Reads);
+        Assert.False(File.Exists(BatonPaths.VendorUsageSnapshotFile("claude")));
+    }
+
+    /// <summary>
+    /// #1966's ask 2, at the level that matters to an operator: a vendor with NO live lane still gets a
+    /// snapshot written on a tick. The measured failure it closes — no agy lane ran overnight, so no agy
+    /// harvest fired, so the morning's first agy dispatch was refused on a 12.2 h-old counter. The
+    /// live-lane map is deliberately empty, which before this change was exactly the condition that
+    /// stopped the tick (see the control above).
+    /// </summary>
+    [Fact]
+    public async Task TickOnce_NoLiveLaneForTheVendor_StillWritesItsSnapshot()
+    {
         var source = new FakeSource("claude", FreshSnapshot());
         var harvester = new VendorUsageHarvester(
             [source],
@@ -114,8 +204,37 @@ public sealed class VendorUsageHarvesterTests : IDisposable
 
         await harvester.TickOnceAsync(DateTimeOffset.UtcNow, TestContext.Current.CancellationToken);
 
-        Assert.Equal(0, source.Reads);
-        Assert.False(File.Exists(BatonPaths.VendorUsageSnapshotFile("claude")));
+        Assert.Equal(1, source.Reads);
+        Assert.True(
+            File.Exists(BatonPaths.VendorUsageSnapshotFile("claude")),
+            "a vendor with no live lane must still be harvested on a tick");
+    }
+
+    /// <summary>
+    /// The cost side of harvesting every vendor rather than the live ones: two vendor CLIs must never be
+    /// running at once on the operator's machine. Asserted on observed overlap, not on the shape of the
+    /// loop — a <c>Task.WhenAll</c> refactor is the edit this exists to catch, and it would leave every
+    /// other arm in this file green.
+    /// </summary>
+    [Fact]
+    public async Task TickOnce_TwoVendors_NeverRunsTheirSourcesConcurrently()
+    {
+        var tracker = new ConcurrencyTracker();
+        var harvester = new VendorUsageHarvester(
+            [new OverlapDetectingSource("claude", tracker), new OverlapDetectingSource("agy", tracker)],
+            AlwaysDueScheduler(),
+            countLiveLanes: _ => Task.FromResult(new Dictionary<string, int>(StringComparer.Ordinal)
+            {
+                ["claude"] = 1,
+                ["agy"] = 1,
+            }));
+
+        await harvester.TickOnceAsync(DateTimeOffset.UtcNow, TestContext.Current.CancellationToken);
+
+        // The discriminator: both sources really did run. A tick that harvested nothing would trivially
+        // observe no overlap.
+        Assert.Equal(2, tracker.Completed);
+        Assert.Equal(1, tracker.MaxConcurrent);
     }
 
     /// <summary>

@@ -11,6 +11,7 @@ namespace Baton.Cli.Tests.Daemon;
 public sealed class VendorUsageHarvestSchedulerTests
 {
     private static readonly TimeSpan Periodic = TimeSpan.FromMinutes(15);
+    private static readonly TimeSpan Idle = TimeSpan.FromMinutes(30);
     private static readonly TimeSpan Jitter = TimeSpan.FromSeconds(90);
     private static readonly TimeSpan PostExit = TimeSpan.FromSeconds(60);
     private static readonly TimeSpan Coalesce = TimeSpan.FromSeconds(60);
@@ -19,19 +20,83 @@ public sealed class VendorUsageHarvestSchedulerTests
     // Zero jitter throughout unless a test asserts the jitter bound itself -- makes every other test's
     // due instant exact rather than a range to reason about.
     private static VendorUsageHarvestScheduler NoJitterScheduler() =>
-        new(Periodic, Jitter, PostExit, Coalesce, jitterSource: () => 0);
+        new(Periodic, Jitter, PostExit, Coalesce, Idle, jitterSource: () => 0);
 
+    /// <summary>
+    /// #1966 inverted this arm. It used to assert that an idle vendor is NEVER harvested (the idle
+    /// backoff), which is what let an idle vendor's snapshot age past the runway hold's six-hour
+    /// staleness limit and refuse every dispatch. The floor cadence now applies with no live lane —
+    /// and still at the slower idle interval, which is the second assertion: nothing due at the live
+    /// interval, due at the idle one.
+    /// </summary>
     [Fact]
-    public void Idle_NoLiveLaneEver_NeverHarvests()
+    public void Idle_NoLiveLaneEver_StillHarvestsOnTheIdleInterval()
     {
         var scheduler = NoJitterScheduler();
         var now = Start;
 
-        for (var i = 0; i < 200; i++)
+        Assert.False(scheduler.OnTick("claude", now, anyLiveLaneNow: false));
+
+        // The live interval is NOT what an idle vendor gets -- without this the arm below is satisfied
+        // by a scheduler that simply ignores liveness.
+        now += Periodic;
+        Assert.False(scheduler.OnTick("claude", now, anyLiveLaneNow: false));
+
+        now = Start + Idle;
+        Assert.True(scheduler.OnTick("claude", now, anyLiveLaneNow: false));
+
+        // And it repeats, rather than firing once and reverting to the old backoff.
+        now += Idle;
+        Assert.True(scheduler.OnTick("claude", now, anyLiveLaneNow: false));
+    }
+
+    /// <summary>
+    /// A vendor that goes live under a pending idle schedule is pulled in to the live interval rather
+    /// than waiting out the idle one — otherwise a lane starting one minute after an idle harvest would
+    /// wait 30 minutes for its first live reading.
+    /// </summary>
+    [Fact]
+    public void GoingLiveUnderAnIdleSchedule_PullsTheNextHarvestInToTheLiveInterval()
+    {
+        var scheduler = NoJitterScheduler();
+
+        Assert.False(scheduler.OnTick("claude", Start, anyLiveLaneNow: false));
+        Assert.False(scheduler.OnTick("claude", Start + TimeSpan.FromSeconds(30), anyLiveLaneNow: true));
+
+        // Live interval measured from the tick the lane went live on, not from Start.
+        var due = Start + TimeSpan.FromSeconds(30) + Periodic;
+        Assert.False(scheduler.OnTick("claude", due - TimeSpan.FromSeconds(1), anyLiveLaneNow: true));
+        Assert.True(scheduler.OnTick("claude", due, anyLiveLaneNow: true));
+    }
+
+    /// <summary>
+    /// #1966's boundary trigger: one harvest after each reset instant the vendor's last snapshot names,
+    /// and only one. A boundary still in the future buys nothing (the control — without it, a scheduler
+    /// that harvested on every tick with any boundary at all would pass).
+    /// </summary>
+    [Fact]
+    public void AWindowBoundaryThatHasPassed_HarvestsOnceAndNotAgain()
+    {
+        var scheduler = NoJitterScheduler();
+        var boundary = Start + TimeSpan.FromMinutes(5);
+
+        // Before the boundary: not due, though the same boundary list is supplied.
+        Assert.False(scheduler.OnTick("claude", Start, anyLiveLaneNow: false, [boundary]));
+        Assert.False(scheduler.OnTick("claude", boundary - TimeSpan.FromSeconds(1), anyLiveLaneNow: false, [boundary]));
+
+        Assert.True(scheduler.OnTick("claude", boundary, anyLiveLaneNow: false, [boundary]));
+
+        // Consumed: the same boundary never fires a second harvest, however many ticks pass under the
+        // idle interval.
+        for (var i = 1; i <= 20; i++)
         {
-            Assert.False(scheduler.OnTick("claude", now, anyLiveLaneNow: false));
-            now += TimeSpan.FromSeconds(30);
+            Assert.False(scheduler.OnTick(
+                "claude", boundary + TimeSpan.FromSeconds(30 * i), anyLiveLaneNow: false, [boundary]));
         }
+
+        // A LATER boundary -- the next window's reset -- fires its own harvest.
+        var next = boundary + TimeSpan.FromMinutes(10);
+        Assert.True(scheduler.OnTick("claude", next, anyLiveLaneNow: false, [boundary, next]));
     }
 
     [Fact]
@@ -60,7 +125,7 @@ public sealed class VendorUsageHarvestSchedulerTests
     }
 
     [Fact]
-    public void LaneExit_HarvestsOnceAfterPostExitDelay_ThenStopsWithNoFurtherLiveLane()
+    public void LaneExit_HarvestsOnceAfterPostExitDelay_ThenFallsBackToTheIdleInterval()
     {
         var scheduler = NoJitterScheduler();
         var now = Start;
@@ -77,13 +142,23 @@ public sealed class VendorUsageHarvestSchedulerTests
         // Due: the one post-exit harvest fires.
         now += TimeSpan.FromSeconds(1);
         Assert.True(scheduler.OnTick("claude", now, anyLiveLaneNow: false));
+        var postExitHarvest = now;
 
-        // Idle afterward -- no further calls, ever (idle backoff).
-        for (var i = 0; i < 100; i++)
+        // The post-exit trigger is one-shot: nothing fires again on its account, tick after tick.
+        while (now < Start + Periodic - TimeSpan.FromSeconds(30))
         {
-            now += TimeSpan.FromMinutes(5);
+            now += TimeSpan.FromSeconds(30);
             Assert.False(scheduler.OnTick("claude", now, anyLiveLaneNow: false));
         }
+
+        Assert.True(now > postExitHarvest + Coalesce, "the quiet stretch must outlast the coalesce window");
+
+        // #1966: where this arm used to assert silence forever, the periodic schedule now survives the
+        // lane exit -- the one armed while the lane was live still comes due -- and reschedules on the
+        // slower IDLE interval afterwards, not the live one.
+        Assert.True(scheduler.OnTick("claude", Start + Periodic, anyLiveLaneNow: false));
+        Assert.False(scheduler.OnTick("claude", Start + Periodic + Periodic, anyLiveLaneNow: false));
+        Assert.True(scheduler.OnTick("claude", Start + Periodic + Idle, anyLiveLaneNow: false));
     }
 
     /// <summary>
@@ -107,7 +182,8 @@ public sealed class VendorUsageHarvestSchedulerTests
     private static (bool Harvested, TimeSpan GapFromPriorHarvest) RunPeriodicThenPostExit(
         double jitter, TimeSpan exitAfterHarvest)
     {
-        var scheduler = new VendorUsageHarvestScheduler(Periodic, Jitter, PostExit, Coalesce, jitterSource: () => jitter);
+        var scheduler = new VendorUsageHarvestScheduler(
+            Periodic, Jitter, PostExit, Coalesce, Idle, jitterSource: () => jitter);
         var now = Start;
 
         Assert.False(scheduler.OnTick("claude", now, anyLiveLaneNow: true));
@@ -128,8 +204,11 @@ public sealed class VendorUsageHarvestSchedulerTests
         {
             // Discriminator: prove the trigger was DUE and got coalesced away, not merely early. A
             // consumed trigger never fires later; a deferred one would fire on this next tick, which
-            // is past both the due instant and the coalesce window.
-            Assert.False(scheduler.OnTick("claude", postExitDueAt + Coalesce + Periodic, anyLiveLaneNow: false));
+            // is past both the due instant and the coalesce window. One second past, not a whole
+            // interval past: since #1966 the periodic schedule survives the lane exit, so a tick far
+            // enough out would harvest for that reason instead and prove nothing about the trigger.
+            Assert.False(scheduler.OnTick(
+                "claude", postExitDueAt + Coalesce + TimeSpan.FromSeconds(1), anyLiveLaneNow: false));
         }
 
         return (harvested, postExitDueAt - harvestedAt);
@@ -178,7 +257,7 @@ public sealed class VendorUsageHarvestSchedulerTests
     {
         // jitterSource always returns +1 -- the due instant should land at interval + full jitter, not
         // exactly at the bare interval.
-        var scheduler = new VendorUsageHarvestScheduler(Periodic, Jitter, PostExit, Coalesce, jitterSource: () => 1);
+        var scheduler = new VendorUsageHarvestScheduler(Periodic, Jitter, PostExit, Coalesce, Idle, jitterSource: () => 1);
         var now = Start;
 
         Assert.False(scheduler.OnTick("claude", now, anyLiveLaneNow: true));

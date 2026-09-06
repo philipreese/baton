@@ -5,11 +5,14 @@ namespace Baton.Cli;
 
 /// <summary>
 /// #1923: the runway hold's own harvest, run once inline for a vendor whose counters decide its
-/// admission and whose snapshot file does not exist yet. <b>The bootstrap this closes:</b> the
-/// daemon's <see cref="VendorUsageHarvester"/> only harvests a vendor while one of its lanes is live
-/// (or just after one exits), so a vendor with no lane running never got a snapshot, and the hold read
-/// "no snapshot" as halted — the first agy lane of a window could not start because no agy lane was
-/// running. Measured 2026-09-05 and ruled in spec/baton.md §7, which is the register for the contract.
+/// admission and whose snapshot cannot decide it — absent, or (since #1966) stale. <b>The bootstrap
+/// this closes:</b> the daemon's <see cref="VendorUsageHarvester"/> used to harvest a vendor only while
+/// one of its lanes was live (or just after one exited), so a vendor with no lane running never got a
+/// snapshot, and the hold read "no snapshot" as halted — the first agy lane of a window could not start
+/// because no agy lane was running. Measured 2026-09-05 and ruled in spec/baton.md §7, which is the
+/// register for the contract. #1966 gave that harvester a live-lane-independent cadence
+/// (<see cref="VendorUsageHarvester.IdleInterval"/>), so this path is now the exception it was always
+/// meant to be rather than the only thing that harvests an idle vendor.
 /// </summary>
 /// <remarks>
 /// <para>
