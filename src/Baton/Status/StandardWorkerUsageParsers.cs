@@ -393,6 +393,57 @@ public sealed class ClaudeUsageParser : IWorkerUsageParser
             return 0;
         }
     }
+
+    /// <summary>
+    /// #1927: the model claude reports having RUN — the terminal <c>"type":"result"</c> event's own
+    /// <c>model</c>, falling back to an assistant turn's <c>message.model</c> when the result event
+    /// carries none. Both are the CLI's own resolution of whatever id it was handed.
+    /// <para>
+    /// <b><c>"type":"system"</c> is deliberately not read</b>, and that is the whole discrimination this
+    /// method exists for: <c>docs/vendor-doc-audit.md</c> §5 measured that <c>system:init</c> echoes the
+    /// <c>--model</c> string VERBATIM — a bogus id is echoed back unchanged and the turn then fails with
+    /// <c>model:"&lt;synthetic&gt;"</c> — so reading init would make this field a second copy of
+    /// <c>CostLedgerEntry.Model</c> (intent) under a name that promises the opposite (what ran).
+    /// </para>
+    /// </summary>
+    public string? TryParseEchoedModel(string rawLine)
+    {
+        if (string.IsNullOrWhiteSpace(rawLine))
+        {
+            return null;
+        }
+
+        try
+        {
+            using var doc = JsonDocument.Parse(rawLine);
+            var root = doc.RootElement;
+            if (root.ValueKind != JsonValueKind.Object
+                || !root.TryGetProperty("type", out var typeProp))
+            {
+                return null;
+            }
+
+            return typeProp.GetString() switch
+            {
+                "result" => ReadModel(root),
+                "assistant" => root.TryGetProperty("message", out var message) && message.ValueKind == JsonValueKind.Object
+                    ? ReadModel(message)
+                    : null,
+                _ => null,
+            };
+        }
+        catch (JsonException)
+        {
+            return null;
+        }
+    }
+
+    private static string? ReadModel(JsonElement element) =>
+        element.TryGetProperty("model", out var model)
+        && model.ValueKind == JsonValueKind.String
+        && model.GetString() is { Length: > 0 } name
+            ? name
+            : null;
 }
 
 /// <summary>
@@ -411,6 +462,13 @@ public sealed class ClaudeUsageParser : IWorkerUsageParser
 /// Turns come from <c>result.num_turns</c>, read independently of the usage object. This shape is
 /// attribution, never the reset-time source of truth -- see <see cref="ClaudeUsageParser"/>'s own doc
 /// comment for the <c>spec/baton.md</c> §7 ruling this rests on.
+/// <para>
+/// <b>No <see cref="IWorkerUsageParser.TryParseEchoedModel"/> override, on purpose</b> (#1927): agy's
+/// stream was measured — a whole real room's capture — to carry no <c>model</c> key on any event, so
+/// this vendor has nothing to echo and inherits the interface's null. That is why the resolved-at-bind
+/// half of #1927 exists at all: for agy it is the only surface that can name a model, and
+/// <c>CostLedgerEntry.ModelEchoed</c> stays ABSENT on every agy row rather than blank.
+/// </para>
 /// </summary>
 public sealed class AgyUsageParser : IWorkerUsageParser
 {

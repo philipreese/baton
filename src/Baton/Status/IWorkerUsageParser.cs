@@ -58,4 +58,24 @@ public interface IWorkerUsageParser
     /// opts out cleanly rather than being forced to implement this.
     /// </summary>
     int CountToolSteps(string rawLine) => 0;
+
+    /// <summary>
+    /// #1927: the model name <paramref name="rawLine"/> reports the vendor CLI as having actually RUN,
+    /// or null when this line reports none. Read at settle over the whole captured stream
+    /// (<c>ExecutionUsageProjector</c>), which keeps the LAST non-null answer, and landing on
+    /// <c>Accounting.CostLedgerEntry.ModelEchoed</c>.
+    /// <para>
+    /// <b>Not every line naming a model qualifies.</b> The value has to be the vendor's own resolution,
+    /// not its restatement of what Baton asked for: claude's <c>system:init</c> echoes the
+    /// <c>--model</c> string verbatim even when that string is invalid (measured,
+    /// <c>docs/vendor-doc-audit.md</c> §5), so an implementation that read it would report a model that
+    /// never ran — the exact substitution/downgrade this field exists to expose. Each vendor's own
+    /// implementation states which event it reads and why.
+    /// </para>
+    /// <para>
+    /// Default null: a vendor that echoes nothing (agy — measured, no <c>model</c> key anywhere in its
+    /// stream, #1927) opts out cleanly, and its ledger row carries the field ABSENT rather than blank.
+    /// </para>
+    /// </summary>
+    string? TryParseEchoedModel(string rawLine) => null;
 }

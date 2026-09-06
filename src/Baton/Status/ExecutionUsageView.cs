@@ -107,6 +107,18 @@ public sealed record ExecutionUsageView(
     [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
     IReadOnlyList<string>? ModelsObserved = null,
     /// <summary>
+    /// #1927: the model the vendor CLI itself reported having RUN, off the last line of the captured
+    /// stream that named one (<see cref="IWorkerUsageParser.TryParseEchoedModel"/>). <b>Not the model
+    /// that was requested</b> — that is the binding's, and a substitution or quota-driven downgrade is
+    /// visible only as a difference between the two. Absent when the vendor echoes none, which on agy
+    /// is structural (its stream carries no <c>model</c> key at all) and never "blank".
+    /// <see cref="ModelsObserved"/> is a different fact: it names every model the execution TREE billed
+    /// against, where this names the one the main conversation ran on.
+    /// </summary>
+    [property: JsonPropertyName("modelEchoed")]
+    [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    string? ModelEchoed = null,
+    /// <summary>
     /// #1882: how long <see cref="Mutation.VerifyStepRunner"/>'s commands took, in milliseconds. NOT a
     /// token figure and not part of any Σ above. Attribution, the all-or-nothing pairing with
     /// <see cref="VerifyResultsBytes"/>, and what an absent sidecar means are spec/baton.md §3's
@@ -396,6 +408,10 @@ public static class ExecutionUsageProjector
                 unavailable,
                 peakBilledInWindow,
                 usage?.ModelsObserved,
+                // #1927: off `reading`, not `usage` -- the echo survives an execution whose terminal
+                // usage line was never parsed (an arrest, a truncated capture), which is precisely the
+                // execution whose model a reader most needs named.
+                reading?.ModelEchoed,
                 // #1882: both figures together or neither -- see VerifyStepMs's own remarks.
                 string.Equals(executionId, verifyStepExecutionId, StringComparison.Ordinal) ? verifyStep!.TotalWallClockMs : null,
                 string.Equals(executionId, verifyStepExecutionId, StringComparison.Ordinal) ? verifyStep!.ResultsBytes : null);
@@ -527,7 +543,16 @@ public static class ExecutionUsageProjector
     /// append and re-reads, which is correct rather than merely tolerable.
     /// </para>
     /// </summary>
-    private sealed record UsageReading(WorkerUsage? Terminal, long? LiveBilled, string? LiveUnavailableReason = null);
+    /// <param name="ModelEchoed">
+    /// #1927: the last model any line of the captured stream reported the vendor as having RUN
+    /// (<see cref="IWorkerUsageParser.TryParseEchoedModel"/>). Null when this vendor echoes none —
+    /// which for agy is structural, not a read failure.
+    /// </param>
+    private sealed record UsageReading(
+        WorkerUsage? Terminal,
+        long? LiveBilled,
+        string? LiveUnavailableReason = null,
+        string? ModelEchoed = null);
 
     /// <summary>
     /// The memo behind <see cref="UsageReading"/>'s L3 note. Concurrent because both readers above are
@@ -663,6 +688,27 @@ public static class ExecutionUsageProjector
             break;
         }
 
+        // #1927: the echoed model, scanned from the END so the LAST line that names one wins -- a
+        // substitution announced on the terminal event outranks whatever the opening lifecycle line
+        // claimed. Read through `replayParser`, NOT `adapter`, for the reason the replay site below
+        // spells out at length: the vendor ADAPTERS delegate only TryParseFinalUsage, so every optional
+        // interface method reached through one silently takes its default -- here, null on every real
+        // execution while a unit test constructing ClaudeUsageParser directly passes.
+        //
+        // Deliberately computed BEFORE the two marker early-returns: `lines` has already been read in
+        // full, and a stream whose reconciliation is unavailable is exactly a stream whose model is
+        // still worth naming. Withholding it there would make the vendor-substitution signal vanish on
+        // the executions most likely to have suffered one.
+        string? modelEchoed = null;
+        for (var i = lines.Length - 1; i >= 0; i--)
+        {
+            if (replayParser.TryParseEchoedModel(lines[i]) is { Length: > 0 } echoed)
+            {
+                modelEchoed = echoed;
+                break;
+            }
+        }
+
         // #1706 review: the replay must span the WHOLE stream, and `.stdout.log` is only its tail once
         // ExecutionStreamLogger has rolled over at 8 MiB (its single `.stdout.log.1`, written FIRST and
         // therefore replayed first). Reading the current file alone was harmless while this projector
@@ -691,12 +737,12 @@ public static class ExecutionUsageProjector
         // Checking rollover first is what #1888 found: see WarnOnChannelDisagreement.
         if (File.Exists(writeFailureMarkerPath))
         {
-            return Memoize(cacheKey, new UsageReading(terminal, null, ExecutionUsageView.StreamTruncatedByWriteFailureReason));
+            return Memoize(cacheKey, new UsageReading(terminal, null, ExecutionUsageView.StreamTruncatedByWriteFailureReason, modelEchoed));
         }
 
         if (File.Exists(truncationMarkerPath))
         {
-            return Memoize(cacheKey, new UsageReading(terminal, null, ExecutionUsageView.StreamTruncatedByRolloverReason));
+            return Memoize(cacheKey, new UsageReading(terminal, null, ExecutionUsageView.StreamTruncatedByRolloverReason, modelEchoed));
         }
 
         string[] rolledLines = [];
@@ -711,7 +757,7 @@ public static class ExecutionUsageProjector
                 // Same posture as the current-file arm above -- except that here the honest response is
                 // to report NO live figure at all rather than a partial one, since a partial Σ over the
                 // tail alone is exactly the fabricated under-read this whole comment exists about.
-                return Memoize(cacheKey, new UsageReading(terminal, null, ExecutionUsageView.RolloverSegmentUnreadableReason));
+                return Memoize(cacheKey, new UsageReading(terminal, null, ExecutionUsageView.RolloverSegmentUnreadableReason, modelEchoed));
             }
         }
 
@@ -741,7 +787,7 @@ public static class ExecutionUsageProjector
             replayMonitor.OnStdoutLine(line);
         }
 
-        return Memoize(cacheKey, new UsageReading(terminal, replayMonitor.SnapshotUsage().BilledTokens));
+        return Memoize(cacheKey, new UsageReading(terminal, replayMonitor.SnapshotUsage().BilledTokens, null, modelEchoed));
     }
 
     /// <summary>

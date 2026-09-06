@@ -223,6 +223,10 @@ public static partial class CostLedgerStore
                 Role: request?.Worker,
                 Adapter: binding.Adapter,
                 Model: binding.Model,
+                // #1927: what the vendor said it RAN, beside what was asked for. The two are recorded
+                // separately and never merged -- a row where they differ is a substitution or a
+                // quota-driven downgrade, and collapsing them would erase exactly that reading.
+                ModelEchoed: usage.ModelEchoed,
                 ModelsObserved: usage.ModelsObserved,
                 Outcome: outcome,
                 Issue: delivery?.Issue,

@@ -55,6 +55,44 @@ public sealed class CodexUsageParser : IWorkerUsageParser
 
     public int CountToolSteps(string rawLine) => TryParseToolName(rawLine) is null ? 0 : 1;
 
+    /// <summary>
+    /// #1927: the model codex reports having RUN, off either lifecycle event that can name one —
+    /// <c>thread.started</c> (stamped by <c>Baton.Vendors.CodexAppServerBroker</c> from the
+    /// app-server's own <c>thread/start</c> answer, when that answer names a model) or
+    /// <c>turn.completed</c>. Both are read because they are two independent chances at the same fact
+    /// and the projector keeps the last one, so a mid-execution substitution announced on the terminal
+    /// event wins over the thread's opening claim.
+    /// <para>
+    /// Absent-safe by construction: neither event is REQUIRED to carry <c>model</c>, and one that does
+    /// not simply yields null here — the same absence agy's stream produces structurally, never a blank
+    /// string.
+    /// </para>
+    /// </summary>
+    public string? TryParseEchoedModel(string rawLine)
+    {
+        if (string.IsNullOrWhiteSpace(rawLine))
+        {
+            return null;
+        }
+
+        try
+        {
+            using var document = JsonDocument.Parse(rawLine);
+            var root = document.RootElement;
+            if (root.ValueKind != JsonValueKind.Object
+                || ReadString(root, "type") is not ("thread.started" or "turn.completed"))
+            {
+                return null;
+            }
+
+            return ReadString(root, "model") is { Length: > 0 } model ? model : null;
+        }
+        catch (JsonException)
+        {
+            return null;
+        }
+    }
+
     private static bool TryParse(string rawLine, out WorkerUsage? usage)
     {
         usage = null;
