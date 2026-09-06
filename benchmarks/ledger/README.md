@@ -24,9 +24,12 @@ two exports means a field was added or renamed in between.
 
 These files are published from a machine, into a public repository, so they go through the narrowing
 spec/baton.md §7 describes — including why it fails closed rather than scrubbing best-effort. As a
-reader of what landed here: room identities appear as bare names rather than paths, `repository` still
-carries the public `github.com/owner/repo` handle because that is the ledger's key, and an export that
-would have carried anything else does not exist — it failed instead of landing.
+reader of what landed here: room identities appear as bare names rather than paths, and `repository` still
+carries the public `github.com/owner/repo` handle because that is the ledger's key. The scan is a
+pattern set, not a proof: it refuses drive-qualified paths, `/Users/` and `/home/` segments, and the
+exporting account's name, so an export that carried one of those does not exist — it failed instead of
+landing. Free-text reason cells can still carry other strings (a UNC share, a relative path, another
+host's account name); read them before trusting a fresh export, and widen the pattern set when one slips.
 
 ## Exports
 
