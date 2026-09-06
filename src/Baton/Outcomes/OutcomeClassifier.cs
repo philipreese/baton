@@ -734,8 +734,8 @@ public static class OutcomeClassifier
         // `false`, which would pin `hollow` off exactly where the probe is blind.
         // #1929 review HIGH: AER's own dispatch-time writes into this tree (the claude adapter's skill
         // projection) are subtracted here, so `workspaceChanged` cannot be a positive the engine itself
-        // manufactured. Empty on the crash-recovery path — WorktreeProvisioner's
-        // ChangedPathsExcludingEnginePlaced states that scope once.
+        // manufactured. Refilled from the journaled room fact on the crash-recovery path too (#1933) —
+        // WorktreeProvisioner's ChangedPathsExcludingEnginePlaced states the scope once.
         if (!Workspaces.WorktreeProvisioner.TryReadWorkspaceChanged(
                 changesTreeWorkingDirectory, worktreeBaseRef, out var workspaceChanged, enginePlacedPaths))
         {

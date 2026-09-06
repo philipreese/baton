@@ -880,9 +880,11 @@ the retry with it. So the dispatcher records the exact paths it placed, and both
 #1622/#1390's `workspaceChanged` subtract those paths and only those; the list is journaled as
 `FlowEvent.EngineFilesPlaced` so the exclusion is auditable rather than trusted. Everything a *worker*
 wrote, and every pre-existing dirty path, still counts — the "already-dirty tree settles Indeterminate"
-sentence above is unchanged. Scope: the live dispatch path only. A crash-recovery classification rebuilds
-its dispatch result from a recorded exit, carries no placement list, and therefore still counts them —
-#1933, which is where reading the journaled event back through the projection is tracked.
+sentence above is unchanged. Scope: **both dispatch paths**. A crash-recovery classification rebuilds its
+dispatch result from a recorded exit and so has no placement list of its own; it refills one by reading
+the journaled `FlowEvent.EngineFilesPlaced` back through the projection (#1933), and subtracts exactly
+what the live path would have. An execution carrying no such fact subtracts nothing and therefore counts
+everything, which is the direction this whole reading already fails toward.
 
 A null path — an execution with nowhere to leave work — keeps the retry, and so
 does #1089's finished-then-hung guard, which sits upstream of this branch and is unchanged (a

@@ -401,6 +401,16 @@ public static class StateProjector
 
                 break;
 
+            case FlowEvent.EngineFilesPlaced enginePlaced:
+                // #1933: NOT diagnostic-only, unlike the arm below -- this event used to sit in it. The
+                // crash-recovery classification rebuilds its CoreDispatchResult from a recorded exit, so
+                // this projection is the only place the paths AER itself wrote can come back from (see
+                // FlowEvent.EngineFilesPlaced's own remarks). It still changes no StepState: it is
+                // per-execution evidence a classifier reads, the same shape
+                // WorkspaceHeadShaAtStartByExecutionId above already has.
+                state.EnginePlacedPathsByExecutionId[enginePlaced.ExecutionId] = [.. enginePlaced.Paths];
+                break;
+
             case FlowEvent.ExecutionRequestRejected:
             case FlowEvent.ZeroOutputsDespiteSubstantialWork:
             case FlowEvent.VerifyDeclarationIgnored:
@@ -413,7 +423,6 @@ public static class StateProjector
             case FlowEvent.DeliveryChecksRed:
             case FlowEvent.DeliveryMerged:
             case FlowEvent.StreamLogLossDeclared:
-            case FlowEvent.EngineFilesPlaced:
                 // Diagnostic-only facts: durable in the ledger, but no StepState/FlowState consequence.
                 // The two VerifyDeclaration* events are listed here on purpose rather than by falling off
                 // the end of this switch -- see their own docs for why they stay reader-less (#1708 H1/M1).

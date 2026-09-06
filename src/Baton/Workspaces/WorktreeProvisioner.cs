@@ -634,10 +634,11 @@ public static class WorktreeProvisioner
     /// directory names and are neither renames nor, in practice, quoted.
     /// </para>
     /// <para>
-    /// Scoped to the LIVE dispatch path. On crash recovery <c>CoreDispatchResult</c> is rebuilt from the
-    /// recorded exit and carries no placement list, so a recovered classification still counts AER's own
-    /// copies; the placement is journaled as <c>FlowEvent.EngineFilesPlaced</c>, and reading it back
-    /// through the projection is the fix — #1933.
+    /// <b>Both dispatch paths, on the same evidence.</b> The live path passes the paths the dispatcher
+    /// just wrote; the crash-recovery path, which rebuilds <c>CoreDispatchResult</c> from a recorded
+    /// exit, refills them from the journaled <c>FlowEvent.EngineFilesPlaced</c> read back through the
+    /// projection (#1933). An execution with no such fact recorded subtracts nothing and so counts
+    /// everything, which is the same failure direction the paragraph above chooses.
     /// </para>
     /// </remarks>
     private static IReadOnlyList<string> ChangedPathsExcludingEnginePlaced(

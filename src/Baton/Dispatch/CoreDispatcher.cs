@@ -225,11 +225,14 @@ public sealed record CoreDispatchResult(
     // #1929 review HIGH: the absolute paths this dispatch's own SeedCopies actually placed inside the
     // worker's working directory, so the workspace readers can subtract AER's writes from what they
     // attribute to the worker. What was WRITTEN, not what was planned — see CoreDispatchSeedCopy and
-    // WorktreeProvisioner.ChangedPathsExcludingEnginePlaced. Empty on the crash-recovery path, which
-    // rebuilds a result from a recorded exit (same shape as StderrTail/StdoutTail above).
+    // WorktreeProvisioner.ChangedPathsExcludingEnginePlaced. On the crash-recovery path, which rebuilds
+    // a result from a recorded exit, MutationInterface refills this from the journaled
+    // FlowEvent.EngineFilesPlaced through the projection (#1933) — unlike StderrTail/StdoutTail above,
+    // it does survive a crash. Null only when no such fact was recorded, which counts the paths.
     IReadOnlyList<string>? EnginePlacedPaths = null,
     // The adapter's own labels for what those paths belong to (CoreDispatchSeedCopy.Group), for the
-    // room fact's benefit. Echoed, never interpreted — Architecture Rule 1.
+    // room fact's benefit. Echoed, never interpreted — Architecture Rule 1. Stays null on the
+    // crash-recovery path: nothing downstream of a rebuilt result reads it (#1933).
     IReadOnlyList<string>? EnginePlacedGroups = null);
 
 

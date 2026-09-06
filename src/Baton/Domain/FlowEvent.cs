@@ -381,10 +381,14 @@ public abstract record FlowEvent
     /// appends nothing, which is exactly the distinction the MEDIUM was about.
     /// </para>
     /// <para>
-    /// Diagnostic-only, like the <c>Verify*</c> facts above: it changes no StepState and no FlowState,
-    /// and <c>StateProjector</c> lists it with the other reader-less events on purpose. Reading it back
-    /// on the crash-recovery path — where <c>CoreDispatchResult</c> is rebuilt from a recorded exit and
-    /// carries no placement list — would need a projection reader; that is #1933, not built here.
+    /// It changes no StepState and no FlowState, but it is <b>not</b> reader-less the way the
+    /// <c>Verify*</c> facts above are: <c>StateProjector</c> projects it into
+    /// <c>ProjectionCheckpointState.EnginePlacedPathsByExecutionId</c> (#1933), which is what the
+    /// crash-recovery path — where <c>CoreDispatchResult</c> is rebuilt from a recorded exit and would
+    /// otherwise carry no placement list — reads to make the same subtraction the live path makes. Both
+    /// paths therefore judge the worker's work product on the worker's own writes;
+    /// <c>WorktreeProvisioner.ChangedPathsExcludingEnginePlaced</c>'s remarks state what an execution
+    /// carrying no such fact then reads as.
     /// </para>
     /// </summary>
     /// <param name="Paths">The absolute destination paths actually written, in the order placed.</param>

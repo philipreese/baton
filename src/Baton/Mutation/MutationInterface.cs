@@ -1213,8 +1213,18 @@ public static class MutationInterface
                         // reflog heuristic exactly as before when absent.
                         var workspaceHeadShaAtStart =
                             latestCheckpoint.State.WorkspaceHeadShaAtStartByExecutionId.GetValueOrDefault(executionId);
+
+                        // #1933: the same recorded-facts-alone shape one line up, for AER's own
+                        // dispatch-time writes -- FlowEvent.EngineFilesPlaced's own remarks are the
+                        // canonical description, and WorktreeProvisioner.ChangedPathsExcludingEnginePlaced
+                        // states what the absent case reads as. Groups stay null: nothing reads them
+                        // here, and the room already carries the event, so recovery never re-appends it.
+                        var enginePlacedPaths =
+                            latestCheckpoint.State.EnginePlacedPathsByExecutionId.GetValueOrDefault(executionId);
                         var classification = OutcomeClassifier.Classify(
-                            new CoreDispatchResult(exit.ExitCode, exit.Reason, exit.StderrTail), contract, outputDirectory,
+                            new CoreDispatchResult(
+                                exit.ExitCode, exit.Reason, exit.StderrTail, EnginePlacedPaths: enginePlacedPaths),
+                            contract, outputDirectory,
                             grantAuditMode: grantAuditMode, worktreePath: worktreePath, responseParser: responseParser,
                             usageParser: usageParser, worktreeBaseRef: worktreeBaseRef, changesTree: changesTree,
                             changesTreeWorkingDirectory: changesTreeWorkingDirectory, toolCallCount: toolCallCount,
