@@ -3751,7 +3751,7 @@ on stderr and swallowed, and the dispatch proceeds on the counters' own verdict 
 **An admission that proceeded unrecorded is not silent** (#1932 review): the posture is unchanged, but
 because nothing was reserved, that dispatch and every concurrent one are back to the race #1896 closed,
 so the reason is stamped on every binding as `RunwayAdmission.UnrecordedReason` and printed by
-`baton status` as `runway admission unrecorded: <reason>`. A stderr line a conductor lane's log swallows
+`baton status` as `Runway admission unrecorded: <reason>`. A stderr line a conductor lane's log swallows
 is not an audit trail.
 
 **Surfacing.** Every binding carries `"RunwayAdmission"` on the room's `bindings.json` — PascalCase, for

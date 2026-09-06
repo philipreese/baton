@@ -93,14 +93,6 @@ public class RunwayHoldSettingsTests
     }
 
     /// <summary>
-    /// #1848 review: <c>"RunwayHold": null</c> in an otherwise well-formed file parses cleanly — the
-    /// store's defaults-on-failure arm never fires for it — so before the null-coalescing accessor the
-    /// first <c>For(vendor)</c> threw a NullReferenceException and an operator's typo took dispatch down
-    /// instead of leaving the shipped thresholds in force. The honoured-value arm above is this one's
-    /// control: it proves a settings file's contents reach <c>For</c> at all, so "gates at 85/90" here
-    /// means the null fell back rather than the file being ignored.
-    /// </summary>
-    /// <summary>
     /// #1932 review: the #1896 policy knob, end to end from a hand-written <c>settings.json</c> through
     /// the store to the policy object dispatch actually runs — the one step no other test covered, since
     /// every arm elsewhere injects a policy directly. Both directions in one arm: the operator's <c>off</c>
@@ -141,6 +133,14 @@ public class RunwayHoldSettingsTests
         }
     }
 
+    /// <summary>
+    /// #1848 review: <c>"RunwayHold": null</c> in an otherwise well-formed file parses cleanly — the
+    /// store's defaults-on-failure arm never fires for it — so before the null-coalescing accessor the
+    /// first <c>For(vendor)</c> threw a NullReferenceException and an operator's typo took dispatch down
+    /// instead of leaving the shipped thresholds in force. The honoured-value arm above is this one's
+    /// control: it proves a settings file's contents reach <c>For</c> at all, so "gates at 85/90" here
+    /// means the null fell back rather than the file being ignored.
+    /// </summary>
     [Fact]
     public async Task An_explicit_null_runway_hold_still_gates_at_the_defaults()
     {

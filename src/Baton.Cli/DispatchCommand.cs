@@ -667,7 +667,7 @@ public static class DispatchCommand
                 + $"'{string.Join("', '", requests.Select(r => r.Vendor))}': {ex.Message} "
                 + "The counters' own verdict still applies; no headroom was reserved across dispatches, "
                 + "so concurrent dispatches on this machine are deciding against the same snapshot "
-                + "unaware of each other. Recorded on the room as 'runway admission unrecorded'.");
+                + "unaware of each other. Recorded on the room as 'Runway admission unrecorded'.");
             return (RunwayAdmissionLedgerStore.Decide(
                 [.. requests.Select(r => r with { HeadroomPoints = null })], []), reason);
         }
