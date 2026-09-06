@@ -4332,6 +4332,17 @@ created-at.
   writers at the store's public API and asserts none are lost). "Last-writer-wins per room" is the
   *read-time* semantic on top of that — `RoomRegistryStore.ReadDistinctByRoomAsync` folds repeated
   lines for one room path down to the last one written.
+- **A contended access retries with jittered backoff before it fails open (#1942).** Every access here —
+  read and write alike — makes *several* waits for the lock, separated by a randomized gap, rather than
+  one flat wait, because under six or more live rooms the flat wait was reporting a transient queue as a
+  failure. `RoomRegistryStore`'s own `WaitPolicy` is where that measurement and the resulting budget are
+  recorded; neither is transcribed here. `LockWaitPolicy`
+  (`src/Baton/Status/MutexGuardedFileLock.cs`) carries why a jittered gap between attempts is not the
+  same thing as one longer wait. **The fail-open contract is unchanged**, only deferred: an access that
+  still cannot be had after the whole budget fails exactly as before — a write reported on stderr and
+  swallowed, a read resolving to no entries — so nothing here can gate a dispatch. The cost, stated
+  rather than left emergent: a `fleet_status` call contending with a wedged holder now blocks for the
+  whole budget before degrading to its directory scan, instead of degrading after one wait.
 - **Reader.** `FleetStatusTool` unions the registry's entries with its existing `BatonPaths.Rooms` +
   caller `roots` scan. A registry entry whose room directory no longer exists is skipped (not pruned
   from the file yet — see below). Every room `fleet_status` returns, whether found by the scan or the
