@@ -115,7 +115,7 @@ public class ResumeCommandEndToEndTests : IDisposable
         // #1911 low 1: `baton resume` puts a fresh worker turn into a bound room, and a resumed review
         // writes a verdict like any other -- one nothing stamped, so a fabricated `instruments` rode
         // into `--notify` payloads unchallenged. This verb runs no verify step, so removal is the whole
-        // arm (VerdictInstrumentStamp's doc has why removal is right even over an earlier true stamp).
+        // arm (VerdictInstrumentStamp's doc has the scope removal is allowed to cover).
         var testRoot = Path.Combine(Path.GetTempPath(), $"cli-resume-verdict-{Guid.NewGuid():N}");
         var roomDirectory = Path.Combine(testRoot, "task");
         try
@@ -151,7 +151,8 @@ public class ResumeCommandEndToEndTests : IDisposable
 
             // Discriminating control: `baton run` stamps nothing, so the execution the resume linked
             // FROM still carries the model's array. Without this, "no instruments" could be a fake
-            // worker that never wrote one.
+            // worker that never wrote one. It is also the pin behind resume's unscoped walk: the
+            // earlier execution is no longer the step's latest, so the walk provably never visits it.
             Assert.True(ReadVerdict(roomDirectory, firstExecutionId).TryGetProperty("instruments", out _));
         }
         finally

@@ -4548,12 +4548,24 @@ commands before the worker's first turn, sequentially, and the contract is:
   Skipping the stamp when no step ran is what made the field a claim rather than a record on the
   majority of review lanes: nothing removed a model-written array, and `--notify` carries
   `verdict.json` verbatim off disk. **`baton redispatch`, `baton resume` and `baton supply` stamp too
-  (#1895, #1911)** — every verb that can put a `verdict.json` into a room — always on the removal
+  (#1895, #1911)** — so four verbs stamp, always on the removal
   arm: no verify step can run on any of those paths — `--verify-cmd` is a `DispatchOptions` field with no
   binding to inherit, so a redispatched review has no instruments of its own and the key is removed
   rather than left carrying whatever the model wrote. A resumed turn and a supplied file are the same
-  case, and why removal there is deliberate even over an earlier true stamp is stated once, on
-  `VerdictInstrumentStamp`'s own remarks. (Not `--verify`, the post-exit flag, which *is*
+  case, and the scope removal may cover — the executions the invocation itself produced, never one an
+  earlier verb already settled — is stated once, on `VerdictInstrumentStamp`'s own remarks.
+  **Four verbs, not every verb that can write a `verdict.json`: `baton run` and `baton decide` both
+  can and neither stamps, and that hole is open rather than closed here (#1911 review, medium 2).**
+  Both pump a bound workflow to a fixed point, so a review role writing a fabricated `instruments`
+  under either of them still rides into a `--notify` payload — `WatchFireService.BuildPayload` reads
+  whatever `verdict.json` the room's outputs name and does not ask which verb produced it. `baton
+  run` is a documented review-producing path (`docs/agents/invoking-baton.md`), which is what makes
+  this a real gap rather than a theoretical one; `ResumeCommandEndToEndTests`' discriminating control
+  is where the un-stamped `run` behaviour is pinned today. The two are one gap seen twice: scoping
+  supply's removal to its own execution (above) also stopped supply from incidentally cleaning up a
+  `run`-produced verdict it was never entitled to rewrite. Out of scope for a different reason:
+  `baton resolve` pumps nothing and writes no artifact, and `baton deliver` writes under
+  `artifacts/conductor`, outside the `execution_*` population this stamp walks. (Not `--verify`, the post-exit flag, which *is*
   inherited as `WorkerBindingConfigEntry.VerifyCommandOverride` — §3's "Verify command resolution";
   conflating the two is what the earlier wording of this sentence did.) The prompt half of the same
   door is closed with it: the bare (`--spec`-less) redispatch reuses the parent's already-built
