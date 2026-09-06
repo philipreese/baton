@@ -419,6 +419,35 @@ public sealed class MemoryImportTests : IDisposable
     }
 
     /// <summary>
+    /// The second failure shape the review names: one <c>--root</c> run per root, where NEITHER half of
+    /// the link is in the other's plan.
+    /// </summary>
+    /// <remarks>
+    /// Distinct from the test above, which imports everything in run 2 and so still had both entries in
+    /// one plan — enough to expose the append skip, but not enough to prove where the link population
+    /// comes from. Here run 2's plan holds the archived entry and nothing else, so the live half can
+    /// only come from the store. That is the arm that discriminates between "the union is right" and
+    /// "the union happened to be sufficient".
+    /// </remarks>
+    [Fact]
+    public async Task A_supersession_link_lands_when_each_root_is_imported_under_its_own_root_flag()
+    {
+        await BuildStandardFixtureAsync();
+        var archived = WriteArchivedRoot("c--baton-memory", ("user_who.md", "the older who"));
+
+        await RunAsync("--root", Path.Combine(ClaudeHome, "projects", "C--baton", "memory"));
+        await RunAsync(
+            "--root", archived, "--assert", $"{archived}=github.com/philipreese/baton",
+            "--asserted-by", "the-test");
+
+        var store = await StoreAsync("github.com/philipreese/baton");
+        var note = Assert.Single(store, e => e.Text == "the older who");
+        var live = Assert.Single(store, e => e.Text == "who we are");
+        Assert.Equal([live.Id], note.SupersededBy);
+        Assert.Equal([note.Id], live.Supersedes);
+    }
+
+    /// <summary>
     /// An undo that removed nothing exits non-zero and says so, and one replayed against a different
     /// storage root refuses before touching anything.
     /// </summary>
