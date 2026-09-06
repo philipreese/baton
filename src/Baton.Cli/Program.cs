@@ -429,11 +429,12 @@ try
             {
                 var costLedgerPath = BatonPaths.CostLedgerFile(repository.FileSlug);
 
-                // #1848: the audited runway override, read back off this room's own bindings.json so a
-                // row that only exists because a hold was bypassed says so. Fail-open by construction
-                // (RunwayOverrideReasons' own doc) -- an unreadable bindings file costs the stamp, never
-                // the row.
-                var runwayOverrides = await RunwayOverrideReasons
+                // #1848's audited runway override and #1499's dispatch --label, both read back off this
+                // room's own bindings.json in ONE parse (RoomBindingStamps' own remarks say why one
+                // reader rather than two). Fail-open by construction -- an unreadable bindings file
+                // costs the stamps, never the row. A pure file read, so CancellationToken.None like the
+                // other local writes here rather than the delivery probe's token.
+                var stamps = await RoomBindingStamps
                     .ReadForRoomAsync(terminalRoomDirectoryPath, CancellationToken.None).ConfigureAwait(false);
 
                 // #1901 C1: the issue, PR and diff shape each worker's own workspace still holds. Read
@@ -453,16 +454,11 @@ try
                 var delivery = await WorkspaceDeliveryProbe
                     .ReadForRoomAsync(terminalRoomDirectoryPath, hostStopSource.Token).ConfigureAwait(false);
 
-                // #1901 C2: the dispatch --label off the same bindings.json the overrides above came
-                // from -- the arm key #1903's comparator filters on. A pure file read, so
-                // CancellationToken.None like the overrides rather than the probe's token.
-                var labels = await DispatchLabels
-                    .ReadForRoomAsync(terminalRoomDirectoryPath, CancellationToken.None).ConfigureAwait(false);
                 var costEntries = CostLedgerStore.BuildEntries(
                     terminalEntries, terminalRoomDirectoryPath, repository,
-                    runwayOverrideReasonByWorker: runwayOverrides,
+                    runwayOverrideReasonByWorker: stamps.RunwayOverrideReasonByWorker,
                     deliveryByWorker: delivery,
-                    labelByWorker: labels);
+                    labelByWorker: stamps.LabelByWorker);
                 await CostLedgerStore.AppendAsync(costEntries, costLedgerPath, CancellationToken.None).ConfigureAwait(false);
             }
             else

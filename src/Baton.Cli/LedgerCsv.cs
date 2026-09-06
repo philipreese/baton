@@ -45,7 +45,7 @@ public static class LedgerCsv
         "priceCatalogId", "priceCatalogVersion", "planFactorTableId", "planFactorTableVersion",
         "runwayOverrideReason", "filesChanged", "additions", "deletions", "testFilesChanged",
         "reviewedRef", "reviewedPr", "reviewedHead", "findingsHigh", "findingsMedium", "findingsLow",
-        "resolution", "resolutionReason", "label", "commits", "reviewCount",
+        "resolution", "resolutionReason", "label", "commits", "reviewCount", "identitySource",
     ];
 
     public static void Write(TextWriter output, IReadOnlyList<CostLedgerEntry> rows)

@@ -106,6 +106,38 @@ public enum ConductorResolution
 }
 
 /// <summary>
+/// Which lookup produced a row's <see cref="CostLedgerEntry.Repository"/> — the join key every reading
+/// of this ledger groups on, so "how did we decide which repository this belongs to" is a field rather
+/// than an inference from the run that wrote it (#1931 review HIGH, operator ruling 2026-09-05).
+/// </summary>
+/// <remarks>
+/// Written by <c>baton ledger backfill</c> and by no other writer today. <b>Absence therefore means
+/// "the writer of this row recorded no source", never <see cref="RecordedRoot"/></b>: every settle-site
+/// row is absent, because <c>Baton.Cli.RepositoryIdentityResolver.TryResolveForRoomAsync</c> resolves
+/// the recorded project root and the working directory through one call and cannot report which of the
+/// two answered. spec/baton.md §7's backfill section is the record of the exposure this field
+/// discloses.
+/// </remarks>
+[JsonConverter(typeof(JsonStringEnumConverter<RepositoryIdentitySource>))]
+public enum RepositoryIdentitySource
+{
+    /// <summary>
+    /// The room's own recorded project root (its <c>RoomRegistryEntry.ProjectRoot</c>) resolved to a
+    /// repository. The row is keyed to the repository the work was actually done in.
+    /// </summary>
+    [JsonStringEnumMemberName("recorded-root")] RecordedRoot,
+
+    /// <summary>
+    /// The recorded project root resolved to nothing (an auto-provisioned worktree torn down on
+    /// Terminal is the ordinary case) and the identity came from the directory the run was invoked in
+    /// instead. <b>A run invoked from the wrong checkout keys such a row to the wrong repository</b>,
+    /// and this value is what makes that visible after the fact — the ledger is append-only, so the row
+    /// cannot be repaired, only identified.
+    /// </summary>
+    [JsonStringEnumMemberName("working-directory")] WorkingDirectory,
+}
+
+/// <summary>
 /// One immutable accounting row per <b>settled execution attempt</b> (#1849 phase A). Consumes the
 /// per-execution burn ledger's own source (<c>QuotaLedgerStore</c>, spec/baton.md §7) rather than
 /// replacing it: <c>quota-ledger.jsonl</c> stays the per-execution record, and this is the durable,
@@ -519,4 +551,15 @@ public sealed record CostLedgerEntry(
     /// </summary>
     [property: JsonPropertyName("reviewCount")]
     [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
-    int? ReviewCount = null);
+    int? ReviewCount = null,
+
+    /// <summary>
+    /// #1931 review HIGH: which lookup produced <see cref="Repository"/> — see
+    /// <see cref="RepositoryIdentitySource"/> for the closed set, who writes it, and what its absence
+    /// does and does not mean. A row keyed by
+    /// <see cref="RepositoryIdentitySource.WorkingDirectory"/> is well-formed and may still be keyed to
+    /// the wrong repository; nothing else on the row can tell a reader that.
+    /// </summary>
+    [property: JsonPropertyName("identitySource")]
+    [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    RepositoryIdentitySource? IdentitySource = null);

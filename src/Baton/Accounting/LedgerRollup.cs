@@ -76,9 +76,27 @@ public sealed record LedgerEstimateStatusCounts(
 /// with a nonzero count here as a floor on what was spent, not a measurement of it.
 /// </param>
 /// <param name="Unread">
-/// How many of <paramref name="Attempts"/> carry NO completeness label at all: nothing was read for
-/// them (no parser for the adapter, no captured stream). Distinct from <paramref name="Partial"/> on
-/// purpose — <see cref="CostLedgerStore.ResolveCompleteness"/> states the three-state split.
+/// How many <b>execution</b> rows carry NO completeness label at all: nothing was read for them (no
+/// parser for the adapter, no captured stream). Distinct from <paramref name="Partial"/> on purpose —
+/// <see cref="CostLedgerStore.ResolveCompleteness"/> states the three-state split.
+/// <para>
+/// <b><see cref="CostSourceKind.GithubBackfill"/> rows are excluded, and that is this field's own
+/// definition being honoured rather than an arithmetic preference</b> (#1931 review MEDIUM): nothing
+/// ran behind a merged PR, so "nothing was read for it" is a false statement about it, and one
+/// backfill run put 235 of them into a bucket that reads as 235 attempts whose usage was lost. They
+/// are counted in <paramref name="PullRequests"/> instead.
+/// </para>
+/// </param>
+/// <param name="Executions">
+/// How many of <paramref name="Attempts"/> are about something Baton ran — every row that is not a
+/// <see cref="CostSourceKind.GithubBackfill"/> one, correcting rows included (spec/baton.md §7's
+/// ruling is that an intervention stays counted with the attempts it corrects).
+/// </param>
+/// <param name="PullRequests">
+/// How many of <paramref name="Attempts"/> are <see cref="CostSourceKind.GithubBackfill"/> rows: a
+/// merged pull request recovered from GitHub, with no execution, no usage and no estimate behind it.
+/// <b>Carried here so a surface can print the two populations apart without summing anything itself</b>
+/// — <c>Executions + PullRequests == Attempts</c>, always.
 /// </param>
 public sealed record LedgerSubtotal(
     [property: JsonPropertyName("adapter")]
@@ -90,6 +108,10 @@ public sealed record LedgerSubtotal(
     int Partial,
     [property: JsonPropertyName("unread")]
     int Unread,
+    [property: JsonPropertyName("executions")]
+    int Executions,
+    [property: JsonPropertyName("pullRequests")]
+    int PullRequests,
     [property: JsonPropertyName("tokensIn")]
     [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
     long? TokensIn,
@@ -242,7 +264,9 @@ public sealed record LedgerRollup(
             Vendor: vendor,
             Attempts: rows.Count,
             Partial: rows.Count(r => r.Completeness == CostCompleteness.Partial),
-            Unread: rows.Count(r => r.Completeness is null),
+            Unread: rows.Count(r => r.Completeness is null && r.SourceKind != CostSourceKind.GithubBackfill),
+            Executions: rows.Count(r => r.SourceKind != CostSourceKind.GithubBackfill),
+            PullRequests: rows.Count(r => r.SourceKind == CostSourceKind.GithubBackfill),
             TokensIn: SumPresent(rows, r => r.TokensIn),
             TokensOut: SumPresent(rows, r => r.TokensOut),
             CacheReadTokens: SumPresent(rows, r => r.CacheReadTokens),

@@ -136,9 +136,22 @@ public static class LedgerBackfillCommand
                 cancellationToken)
             .ConfigureAwait(false);
 
-        await WriteAsync(options.DryRun, pending, report, cancellationToken).ConfigureAwait(false);
+        // PLAN, then DISCLOSE, then WRITE -- and that order is the operator's ruling of 2026-09-05
+        // (#1931 review HIGH), not an implementation detail. The disclosure this report carries is
+        // "these rows were keyed to THIS working directory's repository, so run me from the right
+        // checkout": printed after the append, it describes a ledger that has already been written
+        // wrong, and this ledger is append-only, so a corrective run cannot repair it -- it writes into
+        // a DIFFERENT repository's file whose dedupe never sees the bad rows. Printed first, the same
+        // sentence is something the operator can still act on with Ctrl-C.
+        var planned = await PlanAsync(pending, report, cancellationToken).ConfigureAwait(false);
 
         report.Print(output);
+
+        if (!options.DryRun)
+        {
+            await CommitAsync(planned, cancellationToken).ConfigureAwait(false);
+        }
+
         return 0;
     }
 
@@ -217,7 +230,7 @@ public static class LedgerBackfillCommand
                 branchByRoom[branch] = BatonPaths.RecordKey(roomDirectoryPath);
             }
 
-            var (repository, fromWorkingDirectory) = await ResolveRoomRepositoryAsync(
+            var (repository, identitySource) = await ResolveRoomRepositoryAsync(
                 roomDirectoryPath, registrations, probe, cancellationToken).ConfigureAwait(false);
             if (repository is null)
             {
@@ -229,7 +242,7 @@ public static class LedgerBackfillCommand
                 continue;
             }
 
-            if (fromWorkingDirectory)
+            if (identitySource == RepositoryIdentitySource.WorkingDirectory)
             {
                 report.RoomsKeyedByWorkingDirectory++;
             }
@@ -247,9 +260,20 @@ public static class LedgerBackfillCommand
                 continue;
             }
 
-            var labels = await DispatchLabels.ReadForRoomAsync(roomDirectoryPath, cancellationToken).ConfigureAwait(false);
+            // Both bindings stamps in one parse -- the label (#1499) and #1848's runway-override
+            // reason, which is a pure read of the same file rather than the settle-time workspace
+            // probe this half genuinely cannot recover (spec/baton.md §7's backfill section states
+            // which is which). Fail-open: an unreadable bindings file costs the stamps, not the rows.
+            var stamps = await RoomBindingStamps.ReadForRoomAsync(roomDirectoryPath, cancellationToken)
+                .ConfigureAwait(false);
             var rows = CostLedgerStore
-                .BuildEntries(entries, roomDirectoryPath, repository, labelByWorker: labels)
+                .BuildEntries(
+                    entries,
+                    roomDirectoryPath,
+                    repository,
+                    runwayOverrideReasonByWorker: stamps.RunwayOverrideReasonByWorker,
+                    labelByWorker: stamps.LabelByWorker,
+                    identitySource: identitySource)
                 .Where(window.TimeMatches)
                 .ToList();
 
@@ -279,11 +303,13 @@ public static class LedgerBackfillCommand
     /// backfill section is the record of exactly how much wider, the measurement that forced it, and
     /// the exposure it accepts — which is the one
     /// <see cref="RepositoryIdentityResolver.TryResolveForRoomAsync"/>'s own remarks warn about, so read
-    /// those two together rather than this comment alone. What this method owns is the flag it returns,
-    /// which is how the run reports the exposure instead of hiding it.
+    /// those two together rather than this comment alone. What this method owns is the
+    /// <see cref="RepositoryIdentitySource"/> it returns, which is how the run reports the exposure
+    /// instead of hiding it — on stdout as a count, and on every row it produces as
+    /// <see cref="CostLedgerEntry.IdentitySource"/>, which is the half that survives the run.
     /// </para>
     /// </summary>
-    private static async Task<(RepositoryIdentity? Identity, bool FromWorkingDirectory)> ResolveRoomRepositoryAsync(
+    private static async Task<(RepositoryIdentity? Identity, RepositoryIdentitySource Source)> ResolveRoomRepositoryAsync(
         string roomDirectoryPath,
         IReadOnlyList<RoomRegistryEntry> registrations,
         RepositoryProbe probe,
@@ -298,11 +324,13 @@ public static class LedgerBackfillCommand
         {
             if (await probe(projectRoot, cancellationToken).ConfigureAwait(false) is { } fromProjectRoot)
             {
-                return (fromProjectRoot, false);
+                return (fromProjectRoot, RepositoryIdentitySource.RecordedRoot);
             }
         }
 
-        return (await probe(Environment.CurrentDirectory, cancellationToken).ConfigureAwait(false), true);
+        return (
+            await probe(Environment.CurrentDirectory, cancellationToken).ConfigureAwait(false),
+            RepositoryIdentitySource.WorkingDirectory);
     }
 
     /// <summary>
@@ -356,7 +384,7 @@ public static class LedgerBackfillCommand
         var repository = await probe(workingDirectory, cancellationToken).ConfigureAwait(false);
         if (repository is null)
         {
-            report.GithubSkippedReason =
+            report.GithubIncompleteReason =
                 $"no repository identity for '{workingDirectory}', so there is no ledger file to write PR rows to";
             return;
         }
@@ -393,15 +421,18 @@ public static class LedgerBackfillCommand
             }
             catch (Exception ex) when (ex is IOException or OperationCanceledException)
             {
-                report.GithubSkippedReason = $"gh could not be run: {ex.Message}";
-                return;
+                report.GithubIncompleteReason = $"gh could not be run: {ex.Message}";
+                break;
             }
 
             if (!result.Started || result.ExitCode != 0)
             {
                 // A page that fails after earlier pages succeeded still loses only what it would have
-                // held: the PRs already collected are written, and the reason is reported.
-                report.GithubSkippedReason =
+                // held: the PRs already collected are written, and the reason is reported. That the
+                // report then says "stopped early" rather than "skipped" is the whole point (#1931
+                // review LOW) -- the old wording told an operator the half wrote nothing while its
+                // rows were being appended.
+                report.GithubIncompleteReason =
                     $"gh did not answer (started={result.Started}, exit={result.ExitCode}): {result.Stderr.Trim()}";
                 break;
             }
@@ -432,6 +463,23 @@ public static class LedgerBackfillCommand
                 break;
             }
 
+            // A FOURTH stop, and the one that is about someone else's behaviour rather than this
+            // loop's: the cursor advance below is only sound if each page is the newest of what
+            // remains, i.e. if gh returns merged-descending. GitHub's search API cannot be asked for
+            // that -- `gh search prs --help` enumerates its sorts as
+            // comments/reactions/interactions/created/updated (default best-match) and none of them is
+            // merge time, so `sort:updated-desc` would pin an order that drags the cursor BACKWARDS
+            // past unseen PRs rather than fixing anything. What can be done is to notice: if a page
+            // comes back out of merge order, the assumption has failed, and the walk stops and says so
+            // instead of silently excluding every PR merged after this page's oldest entry.
+            if (FirstOutOfMergeOrder(page.Items) is { } outOfOrder)
+            {
+                report.GithubIncompleteReason =
+                    $"gh returned a page out of merge order (#{outOfOrder} is newer than the entry before it), "
+                        + "and this walk's merged:<= cursor assumes newest-first";
+                break;
+            }
+
             cursor = oldest;
         }
 
@@ -454,10 +502,40 @@ public static class LedgerBackfillCommand
                         + "retention, opened by hand, or a lane that declares no delivery branch)");
             }
 
-            rows.Add(CostLedgerStore.BuildGithubBackfillRow(pullRequest with { Room = room }, repository));
+            // WorkingDirectory, and it is a statement of fact rather than a fallback: the repository
+            // these PRs came from is by construction the one `gh` was run in.
+            rows.Add(CostLedgerStore.BuildGithubBackfillRow(
+                pullRequest with { Room = room }, repository, RepositoryIdentitySource.WorkingDirectory));
         }
 
         Accumulate(pending, LedgerFilePathFor(repository, ledgerDirectoryOverride), rows);
+    }
+
+    /// <summary>
+    /// The number of the first pull request in <paramref name="items"/> that is NEWER than the one
+    /// before it, or <see langword="null"/> when the page is ordered newest-merge-first as the cursor
+    /// walk requires. Entries carrying no <c>mergedAt</c> are skipped rather than treated as a break in
+    /// the order: they are already excluded from the cursor for the same reason.
+    /// </summary>
+    private static int? FirstOutOfMergeOrder(List<MergedPullRequest> items)
+    {
+        DateTime? previous = null;
+        foreach (var item in items)
+        {
+            if (item.MergedAt is not { } mergedAt)
+            {
+                continue;
+            }
+
+            if (previous is { } bound && mergedAt > bound)
+            {
+                return item.Number;
+            }
+
+            previous = mergedAt;
+        }
+
+        return null;
     }
 
     /// <summary>
@@ -481,7 +559,7 @@ public static class LedgerBackfillCommand
         }
         catch (JsonException ex)
         {
-            report.GithubSkippedReason = $"gh's output did not parse as JSON: {ex.Message}";
+            report.GithubIncompleteReason = $"gh's output did not parse as JSON: {ex.Message}";
             return null;
         }
 
@@ -489,7 +567,7 @@ public static class LedgerBackfillCommand
         {
             if (document.RootElement.ValueKind != JsonValueKind.Array)
             {
-                report.GithubSkippedReason = "gh returned something other than a JSON array of pull requests";
+                report.GithubIncompleteReason = "gh returned something other than a JSON array of pull requests";
                 return null;
             }
 
@@ -516,8 +594,9 @@ public static class LedgerBackfillCommand
     }
 
     /// <summary>
-    /// Splits <paramref name="pending"/> into "already there" and "to write", and writes the second
-    /// half unless this is a dry run.
+    /// Splits <paramref name="pending"/> into "already there" and "to write", fills the report's
+    /// counters, and returns the second half for <see cref="CommitAsync"/> — <b>writing nothing</b>, so
+    /// the whole plan exists before a word of the report is printed and before a byte is appended.
     /// <para>
     /// <b>The read here is for the REPORT, not for correctness.</b>
     /// <see cref="CostLedgerStore.AppendAsync"/> re-checks the same ids inside its own lock, so a
@@ -525,12 +604,12 @@ public static class LedgerBackfillCommand
     /// this read buys is a count a dry run can print without holding a write lock.
     /// </para>
     /// </summary>
-    private static async Task WriteAsync(
-        bool dryRun,
+    private static async Task<List<(string LedgerFilePath, List<CostLedgerEntry> Rows)>> PlanAsync(
         Dictionary<string, List<CostLedgerEntry>> pending,
         BackfillReport report,
         CancellationToken cancellationToken)
     {
+        var planned = new List<(string, List<CostLedgerEntry>)>();
         foreach (var (ledgerFilePath, rows) in pending.OrderBy(p => p.Key, StringComparer.OrdinalIgnoreCase))
         {
             var existing = await CostLedgerStore.ReadAllAsync(ledgerFilePath, cancellationToken).ConfigureAwait(false);
@@ -567,12 +646,26 @@ public static class LedgerBackfillCommand
             report.RowsToWrite += fresh.Count;
             report.Files[ledgerFilePath] = fresh.Count;
 
-            if (dryRun || fresh.Count == 0)
+            if (fresh.Count > 0)
             {
-                continue;
+                planned.Add((ledgerFilePath, fresh));
             }
+        }
 
-            await CostLedgerStore.AppendAsync(fresh, ledgerFilePath, cancellationToken).ConfigureAwait(false);
+        return planned;
+    }
+
+    /// <summary>
+    /// The append half, run only after <see cref="BackfillReport.Print"/> has said what it is about to
+    /// do — see <see cref="ExecuteAsync(LedgerBackfillOptions, TextWriter, IGhCliRunner?, string?, RepositoryProbe?, CancellationToken)"/>
+    /// for why that order is the ruling rather than a preference. Never called on a dry run.
+    /// </summary>
+    private static async Task CommitAsync(
+        List<(string LedgerFilePath, List<CostLedgerEntry> Rows)> planned, CancellationToken cancellationToken)
+    {
+        foreach (var (ledgerFilePath, rows) in planned)
+        {
+            await CostLedgerStore.AppendAsync(rows, ledgerFilePath, cancellationToken).ConfigureAwait(false);
         }
     }
 
@@ -630,7 +723,13 @@ public static class LedgerBackfillCommand
 
         public DateTime? GithubSince { get; set; }
 
-        public string? GithubSkippedReason { get; set; }
+        /// <summary>
+        /// Why the GitHub half did not walk the whole window — <b>whether or not it collected
+        /// anything first</b>. <see cref="Print"/> is what tells those two apart: with no PR collected
+        /// the half was skipped; with some collected the walk stopped early and those rows ARE
+        /// written, which is the sentence #1931's review found missing.
+        /// </summary>
+        public string? GithubIncompleteReason { get; set; }
 
         public Dictionary<string, int> Files { get; } = new(StringComparer.OrdinalIgnoreCase);
 
@@ -667,6 +766,11 @@ public static class LedgerBackfillCommand
                     $"    {RoomsKeyedByWorkingDirectory} of them recorded a project root that no longer resolves (an "
                         + "auto-provisioned worktree, torn down on Terminal) and were keyed to THIS working "
                         + "directory's repository instead. Run this from the checkout those rooms belong to.");
+                Write(
+                    output,
+                    "    Every row from those rooms carries identitySource: working-directory, so a wrong key "
+                        + "stays identifiable afterwards -- but this ledger is append-only and a later run from "
+                        + "the right checkout writes a DIFFERENT repository's file, so it cannot repair them.");
             }
 
             Write(output, $"  Rooms not attributed: {_unattributedRoomCount}");
@@ -680,7 +784,7 @@ public static class LedgerBackfillCommand
                 Write(output, $"    ... and {_unattributedRoomCount - _unattributedRooms.Count} more");
             }
 
-            if (GithubSkippedReason is { Length: > 0 } skipped)
+            if (GithubIncompleteReason is { Length: > 0 } skipped && PullRequestsSeen == 0)
             {
                 Write(output, $"  Merged PRs: the GitHub half was skipped -- {skipped}");
             }
@@ -688,6 +792,14 @@ public static class LedgerBackfillCommand
             {
                 var since = GithubSince ?? DefaultGithubSince;
                 Write(output, $"  Merged PRs since {since:yyyy-MM-dd}: {PullRequestsSeen}");
+                if (GithubIncompleteReason is { Length: > 0 } stoppedEarly)
+                {
+                    Write(
+                        output,
+                        $"    (the walk STOPPED EARLY after {PullRequestsSeen} PR(s) -- {stoppedEarly}. Those rows are "
+                            + "written; there may be older merged PRs inside the window this run never saw.)");
+                }
+
                 if (GithubHitTheCap)
                 {
                     Write(
@@ -716,7 +828,15 @@ public static class LedgerBackfillCommand
             }
 
             Write(output, $"  Rows already in the ledger: {AlreadyLedgered}");
-            Write(output, dryRun ? $"  Rows this would write: {RowsToWrite}" : $"  Rows written: {RowsToWrite}");
+
+            // Future tense in BOTH modes, because this report is printed before the append (see
+            // ExecuteAsync). "Rows written" here would be a claim about something that has not
+            // happened yet, and an append that then throws would have made it false.
+            Write(
+                output,
+                dryRun
+                    ? $"  Rows this would write: {RowsToWrite}"
+                    : $"  Rows to write, appended after this report: {RowsToWrite}");
             foreach (var (path, count) in Files.OrderBy(p => p.Key, StringComparer.OrdinalIgnoreCase))
             {
                 Write(output, $"    {path}: {count}");

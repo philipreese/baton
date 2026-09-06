@@ -71,7 +71,7 @@ public sealed class LedgerBackfillCommandTests : IDisposable
         Assert.Equal(100, row.TokensIn);
         Assert.Equal(50, row.TokensOut);
         Assert.Equal(CostCompleteness.Complete, row.Completeness);
-        Assert.Contains("Rows written: 1", output, StringComparison.Ordinal);
+        Assert.Contains("Rows to write, appended after this report: 1", output, StringComparison.Ordinal);
     }
 
     /// <summary>
@@ -138,7 +138,7 @@ public sealed class LedgerBackfillCommandTests : IDisposable
 
         Assert.Equal(afterFirst, afterSecond);
         Assert.Contains("Rows already in the ledger: 1", second, StringComparison.Ordinal);
-        Assert.Contains("Rows written: 0", second, StringComparison.Ordinal);
+        Assert.Contains("Rows to write, appended after this report: 0", second, StringComparison.Ordinal);
     }
 
     /// <summary>
@@ -343,9 +343,10 @@ public sealed class LedgerBackfillCommandTests : IDisposable
     {
         // Newest first, as gh orders them. 500 down to 461 is a FULL page; the second call repeats 461
         // (the inclusive `merged:<=` bound) and adds two older ones.
-        var gh = new ScriptedGh(
+        var gh = new ScriptedGh([
             Page(Enumerable.Range(0, LedgerBackfillCommand.PullRequestPageSize).Select(i => 500 - i)),
-            Page([461, 460, 459]));
+            Page([461, 460, 459]),
+        ]);
 
         await RunAsync(gh: gh);
 
@@ -382,6 +383,118 @@ public sealed class LedgerBackfillCommandTests : IDisposable
 
         Assert.Equal(pageCount - 1, gh.Calls.Count);
         Assert.Equal(LedgerBackfillCommand.MaxPullRequests, (await ReadLedgerAsync()).Count);
+    }
+
+    /// <summary>
+    /// #1931 review HIGH: a room whose recorded project root does not resolve is keyed to the working
+    /// directory's repository, and <b>every row it produces says so</b> — the fixture rooms here carry
+    /// no registry entry, which is exactly that case. <c>CostLedgerStoreTests</c> owns the other arm
+    /// (<c>recorded-root</c>, and the absence a writer that cannot say leaves); what this pins is that
+    /// the backfill actually passes the source it resolved rather than leaving the field empty.
+    /// </summary>
+    [Fact]
+    public async Task Rows_keyed_by_the_working_directory_carry_that_provenance_and_the_run_discloses_the_count()
+    {
+        await WriteSettledRoomAsync("settled", "exec-settled");
+
+        var output = await RunAsync(gh: new StubGh(
+            """[{"number":1913,"headRefName":"1901-lane","mergedAt":"2026-09-05T12:00:00Z"}]"""));
+
+        var rows = await ReadLedgerAsync();
+        Assert.All(rows, r => Assert.Equal(RepositoryIdentitySource.WorkingDirectory, r.IdentitySource));
+        Assert.Equal(2, rows.Count);
+        Assert.Contains("1 of them recorded a project root that no longer resolves", output, StringComparison.Ordinal);
+        Assert.Contains("identitySource: working-directory", output, StringComparison.Ordinal);
+    }
+
+    /// <summary>
+    /// The disclosure is printed BEFORE a row is appended (operator ruling 2026-09-05) — asserted the
+    /// only way that discriminates: the append is made to FAIL, and the report is read back anyway. A
+    /// run that wrote first and printed second produces an empty report here, because the exception
+    /// leaves before the print.
+    /// </summary>
+    [Fact]
+    public async Task The_report_is_printed_before_the_append_even_when_the_append_fails()
+    {
+        await WriteSettledRoomAsync("settled", "exec-settled");
+
+        // The ledger FILE's path is a directory, so opening it for append throws.
+        Directory.CreateDirectory(LedgerFilePath);
+
+        var writer = new StringWriter();
+        await Assert.ThrowsAnyAsync<SystemException>(() => LedgerBackfillCommand.ExecuteAsync(
+            new LedgerBackfillOptions(RoomsRoot: RoomsRoot),
+            writer,
+            new StubGh("[]"),
+            LedgerDirectory,
+            (_, _) => Task.FromResult<RepositoryIdentity?>(Repository),
+            TestContext.Current.CancellationToken));
+
+        var output = writer.ToString();
+        Assert.Contains("Run this from the checkout those rooms belong to.", output, StringComparison.Ordinal);
+        Assert.Contains("Rows to write, appended after this report: 1", output, StringComparison.Ordinal);
+    }
+
+    /// <summary>
+    /// #1901 C2 item 2's other half: #1848's runway-override reason is a pure read of the same
+    /// <c>bindings.json</c> the label comes from, so a recovered row carries it too. The control is the
+    /// binding whose override was recorded but <c>Used: false</c> — a flag that bypassed nothing is not
+    /// an override of this row's spend, and a backfill that copied every recorded reason would fail here.
+    /// </summary>
+    [Fact]
+    public async Task A_runway_override_that_bypassed_a_hold_lands_on_its_recovered_row_and_an_unused_one_does_not()
+    {
+        await WriteSettledRoomAsync("bypassed", "exec-bypassed");
+        WriteBindings(Path.Combine(RoomsRoot, "bypassed"), "implement", label: null, overrideReason: "ship the fix", used: true);
+        await WriteSettledRoomAsync("not-bypassed", "exec-not-bypassed");
+        WriteBindings(Path.Combine(RoomsRoot, "not-bypassed"), "implement", label: null, overrideReason: "flag passed", used: false);
+
+        await RunAsync();
+
+        var rows = await ReadLedgerAsync();
+        Assert.Equal("ship the fix", Assert.Single(rows, r => r.Execution == "exec-bypassed").RunwayOverrideReason);
+        Assert.Null(Assert.Single(rows, r => r.Execution == "exec-not-bypassed").RunwayOverrideReason);
+    }
+
+    /// <summary>
+    /// #1931 review LOW: a <c>gh</c> failure part-way through the walk WRITES what it already
+    /// collected, so the report must say "stopped early" rather than "the GitHub half was skipped".
+    /// Both halves are asserted — the rows are on disk AND the sentence matches them — because the
+    /// defect was precisely those two disagreeing.
+    /// </summary>
+    [Fact]
+    public async Task A_gh_failure_part_way_through_the_walk_says_the_walk_stopped_early_rather_than_skipped()
+    {
+        var gh = new ScriptedGh(
+            [Page(Enumerable.Range(0, LedgerBackfillCommand.PullRequestPageSize).Select(i => 500 - i))],
+            failFrom: 1);
+
+        var output = await RunAsync(gh: gh);
+
+        Assert.Equal(LedgerBackfillCommand.PullRequestPageSize, (await ReadLedgerAsync()).Count);
+        Assert.Contains("STOPPED EARLY after 40 PR(s)", output, StringComparison.Ordinal);
+        Assert.DoesNotContain("the GitHub half was skipped", output, StringComparison.Ordinal);
+    }
+
+    /// <summary>
+    /// #1931 review LOW: the <c>merged:&lt;=</c> cursor is only sound while <c>gh</c> answers
+    /// newest-merge-first, and GitHub's search API offers no merge-time sort to pin it with (its sorts
+    /// are comments/reactions/interactions/created/updated). So the walk CHECKS instead: a page that
+    /// comes back out of merge order stops it, with the reason, rather than advancing a cursor that
+    /// would exclude every PR merged after that page's oldest entry.
+    /// </summary>
+    [Fact]
+    public async Task A_page_that_comes_back_out_of_merge_order_stops_the_walk_and_says_why()
+    {
+        // A full page, ASCENDING -- the same page the walk would otherwise cursor off the newest entry.
+        var ascending = Page(Enumerable.Range(0, LedgerBackfillCommand.PullRequestPageSize).Select(i => 461 + i));
+        var gh = new ScriptedGh([ascending, ascending]);
+
+        var output = await RunAsync(gh: gh);
+
+        Assert.Single(gh.Calls);
+        Assert.Equal(LedgerBackfillCommand.PullRequestPageSize, (await ReadLedgerAsync()).Count);
+        Assert.Contains("out of merge order", output, StringComparison.Ordinal);
     }
 
     /// <summary>
@@ -481,7 +594,12 @@ public sealed class LedgerBackfillCommandTests : IDisposable
     /// breaks this fixture at compile time instead of leaving it silently unparseable and the assertion
     /// passing against an empty label dictionary.
     /// </summary>
-    private static void WriteBindings(string roomDirectoryPath, string worker, string label) =>
+    private static void WriteBindings(
+        string roomDirectoryPath,
+        string worker,
+        string? label = null,
+        string? overrideReason = null,
+        bool used = false) =>
         File.WriteAllText(
             Path.Combine(roomDirectoryPath, "bindings.json"),
             JsonSerializer.Serialize(new Dictionary<string, WorkerBindingConfigEntry>
@@ -491,7 +609,10 @@ public sealed class LedgerBackfillCommandTests : IDisposable
                     new WorkerContract(worker, [], [new ProducedOutput("out")], []),
                     "echo unused",
                     TimeSpan.FromSeconds(30),
-                    Label: label),
+                    Label: label,
+                    RunwayOverride: overrideReason is null
+                        ? null
+                        : new RunwayOverride("claude", overrideReason, used, Counters: [])),
             }));
 
     /// <summary>
@@ -512,7 +633,12 @@ public sealed class LedgerBackfillCommandTests : IDisposable
     /// with an empty array, so a walk that failed to terminate would run out of script rather than hang
     /// the test.
     /// </summary>
-    private sealed class ScriptedGh(params string[] pages) : IGhCliRunner
+    /// <param name="failFrom">
+    /// The call index from which <c>gh</c> starts failing (exit 1), or <see langword="null"/> for a
+    /// <c>gh</c> that always answers — how a mid-walk failure, as opposed to a walk that never started,
+    /// is scripted.
+    /// </param>
+    private sealed class ScriptedGh(string[] pages, int? failFrom = null) : IGhCliRunner
     {
         public List<IReadOnlyList<string>> Calls { get; } = [];
 
@@ -521,8 +647,10 @@ public sealed class LedgerBackfillCommandTests : IDisposable
         {
             var index = Calls.Count;
             Calls.Add(args);
-            return Task.FromResult(new GhCliResult(
-                Started: true, ExitCode: 0, index < pages.Length ? pages[index] : "[]", string.Empty));
+            return Task.FromResult(failFrom is { } bound && index >= bound
+                ? new GhCliResult(Started: true, ExitCode: 1, string.Empty, "API rate limit exceeded")
+                : new GhCliResult(
+                    Started: true, ExitCode: 0, index < pages.Length ? pages[index] : "[]", string.Empty));
         }
     }
 }

@@ -77,9 +77,17 @@ public static partial class CostLedgerStore
     /// #1901 C2: worker name to the <c>--label</c> recorded on that worker's binding at dispatch,
     /// supplied by the settle site (and by the backfill) for the same two reasons
     /// <paramref name="runwayOverrideReasonByWorker"/> is — the binding record is a
-    /// <c>Baton.Vendors</c> type this layer holds no reference to. <c>Baton.Cli.DispatchLabels</c> is
-    /// the one production producer. <see cref="CostLedgerEntry.Label"/>'s own doc states what an absent
+    /// <c>Baton.Vendors</c> type this layer holds no reference to. <c>Baton.Cli.RoomBindingStamps</c>
+    /// is the one production producer of both this and
+    /// <paramref name="runwayOverrideReasonByWorker"/>, from one parse of that file. <see cref="CostLedgerEntry.Label"/>'s own doc states what an absent
     /// value means and does not mean.
+    /// </param>
+    /// <param name="identitySource">
+    /// #1931 review HIGH: which lookup produced <paramref name="repository"/>, stamped verbatim on
+    /// every row this call builds. Supplied by the caller because only the caller knows — this method
+    /// is handed an identity, not the probe that found one. <see langword="null"/> where the caller
+    /// cannot say which lookup answered, which is what
+    /// <see cref="CostLedgerEntry.IdentitySource"/>'s absence means.
     /// </param>
     public static IReadOnlyList<CostLedgerEntry> BuildEntries(
         IReadOnlyList<LogEntry> entries,
@@ -89,7 +97,8 @@ public static partial class CostLedgerStore
         PlanFactorTable? planFactors = null,
         IReadOnlyDictionary<string, string>? runwayOverrideReasonByWorker = null,
         IReadOnlyDictionary<string, WorkspaceDelivery>? deliveryByWorker = null,
-        IReadOnlyDictionary<string, string>? labelByWorker = null)
+        IReadOnlyDictionary<string, string>? labelByWorker = null,
+        RepositoryIdentitySource? identitySource = null)
     {
         ArgumentNullException.ThrowIfNull(entries);
         ArgumentException.ThrowIfNullOrEmpty(roomDirectoryPath);
@@ -257,7 +266,8 @@ public static partial class CostLedgerStore
                 Label: request?.Worker is { } labelWorker && labelByWorker is not null
                     && labelByWorker.TryGetValue(labelWorker, out var label)
                         ? label
-                        : null));
+                        : null,
+                IdentitySource: identitySource));
         }
 
         return result;
@@ -438,7 +448,11 @@ public static partial class CostLedgerStore
             // #1901 C2: copied for the same reason issue/pr/role/outcome above are -- it is an
             // identity of the work, not a dimension of the spend, and an arm reading filtered to one
             // --label would otherwise miss the interventions on that arm entirely.
-            Label: last.Label);
+            Label: last.Label,
+            // Copied for a narrower reason than the fields above: this row's `repository` IS the
+            // copied row's, so stating a different provenance -- or none -- would leave one of the two
+            // rows keyed by an unexplained join key.
+            IdentitySource: last.IdentitySource);
     }
 
     /// <summary>
@@ -459,7 +473,16 @@ public static partial class CostLedgerStore
     /// <c>undatedExcluded</c> — the ledger's own doctrine for time, not a special case here.
     /// </para>
     /// </summary>
-    public static CostLedgerEntry BuildGithubBackfillRow(MergedPullRequest pullRequest, RepositoryIdentity? repository)
+    /// <param name="identitySource">
+    /// Which lookup produced <paramref name="repository"/> — see <see cref="BuildEntries"/>'s own
+    /// parameter. On this half it is always the working directory in practice, because the repository
+    /// asked is the one <c>gh</c> was run in; it is a parameter rather than a constant so the row never
+    /// asserts a provenance its caller did not actually use.
+    /// </param>
+    public static CostLedgerEntry BuildGithubBackfillRow(
+        MergedPullRequest pullRequest,
+        RepositoryIdentity? repository,
+        RepositoryIdentitySource? identitySource = null)
     {
         ArgumentNullException.ThrowIfNull(pullRequest);
 
@@ -475,7 +498,8 @@ public static partial class CostLedgerStore
             Additions: pullRequest.Additions,
             Deletions: pullRequest.Deletions,
             Commits: pullRequest.Commits,
-            ReviewCount: pullRequest.ReviewCount);
+            ReviewCount: pullRequest.ReviewCount,
+            IdentitySource: identitySource);
     }
 
     /// <summary>

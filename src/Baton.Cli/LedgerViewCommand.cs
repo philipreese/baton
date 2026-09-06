@@ -218,10 +218,19 @@ public static class LedgerViewCommand
             completeness.Add($"{Number(subtotal.Unread)} with no usage read");
         }
 
+        // ATTEMPTS is the execution count, never the row count (#1931 review MEDIUM). A github-backfill
+        // row is a merged PR nothing ran for, and folding it in read as "235 attempts, 235 of them with
+        // no usage read" after one backfill. The two populations are printed side by side rather than
+        // one silently absorbed into the other; LedgerSubtotal carries both counts, so nothing here
+        // sums anything (this command formats).
         Write(
             output,
-            $"{label} -- {Number(subtotal.Attempts)} attempt(s)"
-                + (completeness.Count > 0 ? $" ({string.Join(", ", completeness)})" : string.Empty));
+            $"{label} -- {Number(subtotal.Executions)} attempt(s)"
+                + (completeness.Count > 0 ? $" ({string.Join(", ", completeness)})" : string.Empty)
+                + (subtotal.PullRequests > 0
+                    ? $" + {Number(subtotal.PullRequests)} merged-PR row(s), which record an outcome rather "
+                        + "than an attempt -- no execution, no usage, no estimate"
+                    : string.Empty));
         Write(
             output,
             "  tokens: "
@@ -233,6 +242,10 @@ public static class LedgerViewCommand
         {
             Write(output, $"  partial -- summed from SOME of the attempts only: {partial}");
         }
+
+        // "row(s)", not "attempt(s)": the denominator is every row in the subtotal, and a merged-PR row
+        // is counted into the by-status buckets beside it (spec/baton.md §7 -- unlike `unread`, that is
+        // a true statement about a row with no estimate, so it stays).
 
         Write(
             output,
@@ -262,9 +275,11 @@ public static class LedgerViewCommand
             ("thinking", subtotal.ReportedBy.ThinkingTokens),
         ];
 
+        // Denominator is EXECUTIONS: only an execution row can report a token dimension, so counting
+        // merged-PR rows here would print every dimension as partial after one backfill.
         var partial = dimensions
-            .Where(d => d.Count > 0 && d.Count < subtotal.Attempts)
-            .Select(d => $"{d.Name} {Number(d.Count)} of {Number(subtotal.Attempts)}")
+            .Where(d => d.Count > 0 && d.Count < subtotal.Executions)
+            .Select(d => $"{d.Name} {Number(d.Count)} of {Number(subtotal.Executions)}")
             .ToList();
 
         return partial.Count == 0 ? null : string.Join(", ", partial);
@@ -276,7 +291,7 @@ public static class LedgerViewCommand
     /// filed under <c>unpriced</c> with three other states (#1893 review M2). A state no attempt is in
     /// is omitted rather than printed as a zero.
     /// </summary>
-    private static string Contributors(int reportedBy, int attempts, LedgerEstimateStatusCounts byStatus)
+    private static string Contributors(int reportedBy, int rows, LedgerEstimateStatusCounts byStatus)
     {
         (string Name, int Count)[] states =
         [
@@ -287,7 +302,7 @@ public static class LedgerViewCommand
         ];
 
         var reasons = states.Where(s => s.Count > 0).Select(s => $"{s.Name}: {Number(s.Count)}").ToList();
-        return $"(summed from {Number(reportedBy)} of {Number(attempts)} attempt(s)"
+        return $"(summed from {Number(reportedBy)} of {Number(rows)} row(s)"
             + (reasons.Count > 0 ? $"; {string.Join(", ", reasons)})" : ")");
     }
 
@@ -314,6 +329,15 @@ public static class LedgerViewCommand
         if (row.Resolution is { } resolution)
         {
             builder.Append("  resolution=").Append(JsonSerializer.Serialize(resolution).Trim('"'));
+        }
+
+        // #1931 review MEDIUM, the same clause for the same reason one line up: a github-backfill row
+        // renders identically to an execution attempt nothing was read for -- (unknown) vendor, '-'
+        // model, '-' role, '-' outcome, every token column '-'. Its `github-pr-<n>` execution id is an
+        // incidental tell, which #1913 finding 6 already ruled insufficient for correcting rows.
+        if (row.SourceKind == CostSourceKind.GithubBackfill)
+        {
+            builder.Append("  merged-PR row (github-backfill): no execution behind it");
         }
 
         return builder.ToString();

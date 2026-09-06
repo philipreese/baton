@@ -441,6 +441,55 @@ public sealed class CostLedgerStoreTests
         }
     }
 
+    /// <summary>
+    /// #1931 review HIGH: a row says WHICH lookup produced its repository key, and it survives the
+    /// file. All three states in one test, because the field is only worth having if they are
+    /// distinguishable: <c>recorded-root</c>, <c>working-directory</c>, and the ABSENCE a writer that
+    /// cannot say leaves — without the third arm a stamp that defaulted to <c>recorded-root</c> for
+    /// every settle-site row would pass, which is exactly the "well-formed row with a wrong join key"
+    /// this field exists to make visible.
+    /// </summary>
+    [Fact]
+    public async Task Which_lookup_keyed_a_row_to_its_repository_is_recorded_and_survives_the_file()
+    {
+        var room = NewRoom();
+        var ledgerPath = NewLedgerPath();
+        try
+        {
+            var executionId = new ExecutionId("exec-provenance");
+            WriteCapturedStream(room, executionId, ClaudeTerminalLine);
+            var events = SettledExecution(executionId, "claude", "claude-opus-5", Start);
+
+            Assert.Equal(
+                RepositoryIdentitySource.RecordedRoot,
+                Assert.Single(CostLedgerStore.BuildEntries(
+                    events, room, Repository, identitySource: RepositoryIdentitySource.RecordedRoot)).IdentitySource);
+
+            // The absence: a writer that cannot say which lookup answered stamps nothing.
+            Assert.Null(Assert.Single(CostLedgerStore.BuildEntries(events, room, Repository)).IdentitySource);
+
+            await CostLedgerStore.AppendAsync(
+                CostLedgerStore.BuildEntries(
+                    events, room, Repository, identitySource: RepositoryIdentitySource.WorkingDirectory),
+                ledgerPath,
+                TestContext.Current.CancellationToken);
+
+            var stored = Assert.Single(await CostLedgerStore.ReadAllAsync(ledgerPath, TestContext.Current.CancellationToken));
+            Assert.Equal(RepositoryIdentitySource.WorkingDirectory, stored.IdentitySource);
+
+            // The wire spelling, not just the enum: a reader of the JSONL joins on this string.
+            Assert.Contains(
+                "\"identitySource\":\"working-directory\"",
+                await File.ReadAllTextAsync(ledgerPath, TestContext.Current.CancellationToken),
+                StringComparison.Ordinal);
+        }
+        finally
+        {
+            FileCleanup.Delete(ledgerPath);
+            DirectoryCleanup.DeleteRecursively(room);
+        }
+    }
+
     [Fact]
     public void A_whole_tree_total_split_across_two_models_is_refused_rather_than_priced_at_the_requested_ones_rate()
     {
