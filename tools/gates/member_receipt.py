@@ -6,9 +6,10 @@ which members must be present for a push to skip -- is stated once, in `gates.py
 file writes, reads and authenticates individual receipts and decides nothing about a push.
 
 **One writer.** `write()` below is the only thing that creates one of these files, and `gates.py` is
-the only caller (through its `--record-member` front door, which is what a lane's component commands
-invoke, and through its own post-run recording of every member it ran). Nothing writes a receipt for
-a command it did not itself watch exit 0.
+the only caller (through its `--record-member` front door, which runs the named member's own gate
+command -- `gates.py`'s `record_member` states why the caller cannot supply one -- and through its
+own post-run recording of every member it ran). Nothing writes a receipt for a command it did not
+itself watch exit 0.
 
 **Authentication, and its honest scope.** Each file carries an HMAC-SHA256 over its whole payload --
 INCLUDING the member name -- keyed by a random per-git-dir secret this module creates on first use.
@@ -30,7 +31,10 @@ costs one `gates --fast` run rather than granting a skip.
 in place when its member runs again, so the directory holds at most one file per member name, whatever
 identity it was last written at; a receipt for a tree that no longer exists simply never matches and
 is never counted. There is deliberately no sweeper: nothing to reclaim (a bounded, tiny directory),
-and a sweeper would have to race the overlap phase, where a dozen members record concurrently.
+and a sweeper would have to race the writers. Who those are, corrected by the #1936 review: separate
+PROCESSES -- a `--record-member` call, or a `gates` run in the same worktree -- and never the members
+of a gates run itself, which write nothing here; `gates.py` records all of them afterwards, in one
+serial pass in the parent.
 """
 import hashlib
 import hmac
@@ -54,9 +58,10 @@ def key_path(git_dir):
 def load_key(git_dir, create=False):
     """The per-git-dir MAC key, or None. `create=True` mints one on first use (writers only).
 
-    Exclusive create, then re-read on collision: two members recording concurrently (the overlap
-    phase does exactly that) must end up with the SAME key, or each would invalidate the other's
-    receipts.
+    Exclusive create, then re-read on collision: two writers recording at once -- two
+    `--record-member` calls, or one alongside a `gates` run -- must end up with the SAME key, or each
+    would invalidate the other's receipts. (Which writers can overlap, and which cannot, is the
+    module docstring's no-sweeper note.)
     """
     path = key_path(git_dir)
     try:

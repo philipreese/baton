@@ -25,8 +25,24 @@ unset GIT_DIR GIT_WORK_TREE GIT_INDEX_FILE GIT_PREFIX GIT_COMMON_DIR GIT_OBJECT_
 # artifact directory for the cost ledger to read at settle. The file name below is decided by
 # Baton.Accounting.CostLedgerStore.PushTimingOutputName, which says why this file spells it too.
 # Timing is measurement only: every step of it is failure-tolerant, and none of it may change the
-# exit code below.
-gate_start_ms=$(date +%s%3N 2>/dev/null) || gate_start_ms=""
+# exit code below. WHICH queueing `pushWaitMs` reports, on each of the two paths this hook can take,
+# is stated once in spec/baton.md §7's `pushWaitMs` row and not restated here.
+#
+# `date +%s%3N` is a GNU extension (#1936 review). No supported host lacks it -- this repo is
+# Windows-only and git-bash ships GNU coreutils -- but a `date` without %N returns something that is
+# not a number, and feeding that to the `$((...))` below is an arithmetic error: on a POSIX sh fatal
+# to the whole hook, aborting a push that was otherwise fine. So the clock is read through now_ms(),
+# which yields the empty string for anything that is not all digits, and every reader of it is
+# guarded: no usable clock, no timing line, push unaffected.
+now_ms() {
+    ms=$(date +%s%3N 2>/dev/null) || ms=""
+    case "$ms" in
+        '' | *[!0-9]*) ms="" ;;
+    esac
+    printf '%s' "$ms"
+}
+
+gate_start_ms=$(now_ms)
 wait_log=$(mktemp 2>/dev/null) || wait_log=""
 if [ -n "$wait_log" ]; then
     # Only this hook sets it, which is what makes the number attributable to the PUSH rather than
@@ -43,7 +59,8 @@ record_push_timing() {
         wait_ms=0
     fi
     if [ -n "$gate_start_ms" ] && [ -n "$BATON_OUTPUT_DIR" ] && [ -d "$BATON_OUTPUT_DIR" ]; then
-        gate_end_ms=$(date +%s%3N 2>/dev/null) || return 0
+        gate_end_ms=$(now_ms)
+        [ -n "$gate_end_ms" ] || return 0
         printf '{"pushWaitMs":%s,"prePushGateMs":%s}\n' \
             "${wait_ms:-0}" "$((gate_end_ms - gate_start_ms))" \
             >> "$BATON_OUTPUT_DIR/push-timing.jsonl" 2>/dev/null || return 0

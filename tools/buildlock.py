@@ -22,8 +22,16 @@ Priority classes: TWO, and the whole difference is whether the command can start
                   starts no MSBuild and therefore has nothing to serialize against: it runs
                   IMMEDIATELY, never queueing behind a build or a test run. That is a priority, not a
                   bypass -- a `readonly` command whose argv looks MSBuild-owning (`starts_msbuild`
-                  below) is REFUSED with exit 2 rather than run outside the exclusion, so the class
-                  cannot be used to smuggle a build past the lock. `pixi run gates-check-receipt` is
+                  below) is REFUSED with exit 2 rather than run outside the exclusion.
+                  THE GUARD'S EXACT REACH, since it is narrower than "cannot smuggle a build past the
+                  lock" (#1936 review): it reads the argv it is handed and catches a DIRECT
+                  `dotnet`/`msbuild` invocation on a build verb. An indirect launcher carries no such
+                  token and is NOT detected -- `pixi run lint`, `sh -c "dotnet build"`, `cmd /c
+                  build.cmd` (the verb is inside one argv element) all pass it, and they are pinned as
+                  fixtures in the selftest so the claim and the code stay the same width. So the guard
+                  is a tripwire on the one task line that declares this class, not a sandbox around an
+                  arbitrary command, which is why the class stays restricted to that line rather than
+                  being offered as a general opt-out. `pixi run gates-check-receipt` is
                   the caller this exists for: a push's receipt check is pure git and file reads, and
                   making it wait behind a lane's `dotnet test` was the largest single source of push
                   latency measured on 2026-09-05 (spec/baton.md C-12, ruling C).
@@ -91,7 +99,9 @@ def starts_msbuild(command: list[str]) -> bool:
     """Whether `command`'s argv looks like it starts an MSBuild -- the readonly class's guard.
 
     Pure and fixture-tested (selftest arm below) so the refusal cannot rot into a rubber stamp: a
-    readonly caller that names a build verb is refused rather than run outside the exclusion.
+    readonly caller that names a build verb is refused rather than run outside the exclusion. How
+    far that reaches, and what it deliberately does not catch, is the module docstring's Priority
+    classes note -- read it before widening either the check or a claim made for it.
     """
     for index, token in enumerate(command):
         name = os.path.basename(token).lower()
@@ -224,7 +234,11 @@ def split_class(argv: list[str]) -> tuple[str, list[str]]:
     if argv and argv[0].startswith("--class"):
         if argv[0] == "--class":
             return (argv[1] if len(argv) > 1 else ""), argv[2:]
-        return argv[0].split("=", 1)[1], argv[1:]
+        # `partition`, not `split("=", 1)[1]` (#1936 review): a typo like `--classx` starts with
+        # `--class` and carries no `=`, and indexing [1] raised IndexError -- a traceback where
+        # main()'s "unknown priority class" exit 2 below is the answer this file already had.
+        _, sep, value = argv[0].partition("=")
+        return (value if sep else ""), argv[1:]
     return CLASS_BUILD, argv
 
 
@@ -326,12 +340,32 @@ def _wait_for_holder(lock_file: str, holder_pid: int, ceiling_s: float = 10.0) -
     return False
 
 
-def _spawn_selftest_child(code: str, lock_file: str, *args: str, hold_s: str | None = None) -> subprocess.Popen:
+def _selftest_env(**overrides: str) -> dict[str, str]:
+    """This process's environment minus the two variables a selftest child must never inherit.
+
+    HELD_MARKER: an inherited nesting marker would let a child skip the acquisition these arms are
+    measuring.
+
+    WAIT_LOG_VAR (#1936 review): `.githooks/pre-push` exports it for a whole `gates --fast` run, and
+    `buildlock-selftest` is one of that run's members -- so its children's DELIBERATE contention
+    (arm 1's loser waiting out a POLL_S tick, arms 3 and 5 timing out on purpose) was appended to the
+    push's own log, about 4s of fabricated queueing against a temp lock file. It landed on the
+    fallback path only, which is one half of exactly the before/after comparison C-12's ruling C
+    exists to drive. Arm 7 sets its own log path explicitly on top of this.
+    """
     env = dict(os.environ)
-    env["BATON_BUILDLOCK_FILE"] = lock_file
-    env["BATON_BUILDLOCK_TIMEOUT_S"] = "20"
     env.pop(HELD_MARKER, None)
-    env["PYTHONPATH"] = os.path.dirname(os.path.abspath(__file__))
+    env.pop(WAIT_LOG_VAR, None)
+    env.update(overrides)
+    return env
+
+
+def _spawn_selftest_child(code: str, lock_file: str, *args: str, hold_s: str | None = None) -> subprocess.Popen:
+    env = _selftest_env(
+        BATON_BUILDLOCK_FILE=lock_file,
+        BATON_BUILDLOCK_TIMEOUT_S="20",
+        PYTHONPATH=os.path.dirname(os.path.abspath(__file__)),
+    )
     if hold_s is not None:
         env["BATON_BUILDLOCK_SELFTEST_HOLD_S"] = hold_s
     return subprocess.Popen(
@@ -345,6 +379,15 @@ def selftest() -> int:
     with tempfile.TemporaryDirectory() as td:
         lock_file = os.path.join(td, "selftest.lock")
         stamps = os.path.join(td, "stamps.txt")
+
+        # #1936 review, and the one arm that covers every child spawned below: an INHERITED wait log
+        # must collect nothing from this file's synthetic contention (`_selftest_env` says why that
+        # matters). Set for the whole selftest and asserted empty at the end, so a child env that
+        # ever stops scrubbing it is caught wherever it is spawned. Restored below; nothing else in
+        # this process reads it.
+        inherited_log = os.path.join(td, "inherited-wait.log")
+        prior_wait_log = os.environ.get(WAIT_LOG_VAR)
+        os.environ[WAIT_LOG_VAR] = inherited_log
 
         # 1. Two wrapped commands started together must serialize (no interval overlap).
         a = _spawn_selftest_child(_CHILD_HOLD_AND_STAMP, lock_file, stamps)
@@ -373,10 +416,7 @@ def selftest() -> int:
         # 2. A holder that dies without releasing must free the lock (OS-level release).
         crasher = _spawn_selftest_child(_CHILD_ACQUIRE_AND_DIE, lock_file)
         crasher.communicate(timeout=30)
-        env = dict(os.environ)
-        env["BATON_BUILDLOCK_FILE"] = lock_file
-        env["BATON_BUILDLOCK_TIMEOUT_S"] = "3"
-        env.pop(HELD_MARKER, None)
+        env = _selftest_env(BATON_BUILDLOCK_FILE=lock_file, BATON_BUILDLOCK_TIMEOUT_S="3")
         after = subprocess.run(
             [sys.executable, os.path.abspath(__file__), sys.executable, "-c", "pass"],
             env=env, capture_output=True, text=True, check=False, timeout=30,
@@ -499,6 +539,15 @@ def selftest() -> int:
             (["dotnet", "build", "-warnaserror"], True),
             ([r"C:\Program Files\dotnet\dotnet.exe", "test", "--no-build"], True),
             (["msbuild", "Baton.slnx"], True),
+            # The DOCUMENTED non-detections (#1936 review), pinned here so the module docstring's
+            # claim and this function keep the same width: an indirect launcher hides the token
+            # from an argv reader, and `watch` is not itself a build verb. Each of these DOES start
+            # an MSBuild when run; none is caught, which is the reason the class stays confined to
+            # one task line rather than being a general opt-out.
+            (["pixi", "run", "lint"], False),
+            (["sh", "-c", "dotnet build"], False),
+            (["cmd", "/c", "build.cmd"], False),
+            (["dotnet", "watch", "build"], False),
         ):
             if starts_msbuild(argv) != want:
                 print(f"  control FAILED: starts_msbuild({argv}) != {want}")
@@ -513,6 +562,49 @@ def selftest() -> int:
             print(
                 f"  control FAILED: --class readonly ran an MSBuild command instead of refusing "
                 f"it -- exit {refused.returncode}, stdout {refused.stdout!r}"
+            )
+            ok = False
+
+        # 6b. #1936 review: a readonly command's NONZERO exit must propagate. `gates-check-receipt`
+        #     is composed as `buildlock.py --class readonly python gates.py --check-receipt`
+        #     (pixi.toml) and .githooks/pre-push's whole decision is that exit code, so a readonly
+        #     path that ever swallowed it into a constant 0 would make every push skip the gates
+        #     silently -- and arm 5's readonly probe, which runs a command that exits 0, could not
+        #     tell. 3 is arbitrary, nonzero, and distinct from the 2 a refusal uses.
+        propagated = subprocess.run(
+            [sys.executable, os.path.abspath(__file__), "--class", CLASS_READONLY,
+             sys.executable, "-c", "import sys; sys.exit(3)"],
+            env=env, capture_output=True, text=True, check=False, timeout=30,
+        )
+        if propagated.returncode != 3:
+            print(
+                f"  control FAILED: a --class readonly command's exit 3 did not propagate -- got "
+                f"{propagated.returncode}"
+            )
+            ok = False
+
+        # 6c. #1936 review: `--class` parsing over the forms a caller can actually type. The
+        #     `--classx` rows are the regression: that argv starts with `--class`, carries no `=`,
+        #     and used to raise IndexError instead of reaching the unknown-class refusal.
+        for parsed, want in (
+            (["--class", CLASS_READONLY, "python"], (CLASS_READONLY, ["python"])),
+            ([f"--class={CLASS_READONLY}", "python"], (CLASS_READONLY, ["python"])),
+            (["--classx", "python"], ("", ["python"])),
+            (["--class"], ("", [])),
+            (["python", "--class=whatever"], (CLASS_BUILD, ["python", "--class=whatever"])),
+        ):
+            if split_class(parsed) != want:
+                print(f"  control FAILED: split_class({parsed}) -> {split_class(parsed)}, want {want}")
+                ok = False
+
+        typo = subprocess.run(
+            [sys.executable, os.path.abspath(__file__), "--classx", sys.executable, "-c", "pass"],
+            env=env, capture_output=True, text=True, check=False, timeout=30,
+        )
+        if typo.returncode != 2 or "unknown priority class" not in typo.stdout:
+            print(
+                f"  control FAILED: a `--class` typo did not reach the unknown-class refusal -- "
+                f"exit {typo.returncode}, stdout {typo.stdout!r}, stderr {typo.stderr!r}"
             )
             ok = False
 
@@ -564,7 +656,23 @@ def selftest() -> int:
                     f"{contended.returncode}, log {waits}"
                 )
                 ok = False
-        env.pop("BATON_BUILDLOCK_WAIT_LOG", None)
+        env.pop(WAIT_LOG_VAR, None)
+
+        # The inherited-log sentinel set at the top: every child spawned above ran with
+        # BATON_BUILDLOCK_WAIT_LOG pointing here, and none of their fabricated waits may have
+        # reached it. Red before the fix at ~4s across three arms.
+        if prior_wait_log is None:
+            os.environ.pop(WAIT_LOG_VAR, None)
+        else:
+            os.environ[WAIT_LOG_VAR] = prior_wait_log
+        if os.path.exists(inherited_log):
+            with open(inherited_log, encoding="utf-8") as f:
+                leaked = f.read().split()
+            print(
+                f"  control FAILED: this selftest's synthetic contention leaked into an inherited "
+                f"{WAIT_LOG_VAR} -- {leaked} ms"
+            )
+            ok = False
 
     print("selftest: pass" if ok else "selftest: FAIL")
     return 0 if ok else 1
