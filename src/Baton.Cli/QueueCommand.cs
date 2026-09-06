@@ -42,8 +42,8 @@ public static class QueueCommand
         QueueOptions options, TextWriter output, string? repositoryDirectory, CancellationToken cancellationToken)
     {
         var tag = options.Tag!;
-        var specSource = options.SpecFilePath!;
-        if (!File.Exists(specSource))
+        var specSource = options.SpecFilePath;
+        if (specSource is not null && !File.Exists(specSource))
         {
             throw new CliArgumentException(
                 $"Spec file '{specSource}' does not exist.",
@@ -84,7 +84,6 @@ public static class QueueCommand
         // file had become is the failure this copy exists to stop.
         Directory.CreateDirectory(BatonPaths.QueueSpecsDirectory);
         var specDestination = BatonPaths.QueueSpecFile(tag);
-        File.Copy(specSource, specDestination, overwrite: true);
 
         var item = new QueueItem
         {
@@ -102,8 +101,33 @@ public static class QueueCommand
             OverrideRunwayReason = options.OverrideRunwayReason,
             Reason = options.Reason,
             Issue = options.Issue,
+            Stage = options.Lifecycle ? WorkStage.Implement : null,
+            Branch = options.Lifecycle ? IssueWorktreeProvisioner.BranchNameFor(options.Issue!.Value) : null,
             AddedAt = DateTimeOffset.UtcNow,
         };
+
+        if (options.Lifecycle)
+        {
+            // The templates are the product (operator ruling 2026-09-06): a work item's brief is
+            // RENDERED here, not written by hand and copied. A --spec is still honoured -- its text
+            // becomes the template's "## Do" section -- so an operator who has already written the
+            // instructions keeps them, and gets the standing rules and the ship block for free.
+            var (title, body) = specSource is null
+                ? await IssueWorktreeProvisioner.FetchIssueAsync(
+                    options.Issue!.Value, repositoryDirectory ?? Directory.GetCurrentDirectory(),
+                    cancellationToken: cancellationToken).ConfigureAwait(false)
+                : ($"Implement #{options.Issue}", await File.ReadAllTextAsync(specSource, cancellationToken).ConfigureAwait(false));
+
+            await File.WriteAllTextAsync(
+                specDestination,
+                QueueBriefTemplates.Compose(
+                    WorkStage.Implement, item, new QueueBriefTemplates.BriefContext(Title: title, Do: body.Trim())),
+                cancellationToken).ConfigureAwait(false);
+        }
+        else
+        {
+            File.Copy(specSource!, specDestination, overwrite: true);
+        }
 
         var replaced = false;
         await QueueStore.MutateAsync(BatonPaths.QueueFile, snapshot =>
@@ -170,7 +194,16 @@ public static class QueueCommand
             var state = item.State.ToString().ToLowerInvariant();
             var where = item.RoomDirectory is { Length: > 0 } room ? $"  room: {room}" : string.Empty;
             var external = item.External ? "  (external — counted, never launched)" : string.Empty;
-            output.WriteLine($"{item.Tag}  {state}  {item.Role}{external}{where}");
+
+            // The stage, when there is one. A slice-1 dispatch request prints exactly what it printed
+            // before -- the absence of a stage is the absence of a lifecycle, and inventing a word for
+            // it ("none", "single") would read as a stage the product has.
+            var stage = item.Stage is { } workStage
+                ? $"  stage: {WorkStages.Token(workStage)}"
+                    + (item.Round > 0 ? $" (round {item.Round})" : string.Empty)
+                    + (item.PullRequest is { } pr ? $"  PR #{pr}" : string.Empty)
+                : string.Empty;
+            output.WriteLine($"{item.Tag}  {state}  {item.Role}{stage}{external}{where}");
             if (item.Error is { Length: > 0 } error)
             {
                 output.WriteLine($"  error: {error}");

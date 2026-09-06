@@ -13,7 +13,8 @@ public static class QueueOptionsParser
 {
     public const string Usage =
         "Usage: baton queue add <tag> --role <role> --spec <file> (--issue <n> | --workspace <dir>) " +
-        "[--scope engine|tooling|docs] [--adapter <a>] [--model <m>] [--effort <e>] [--timeout <minutes>] " +
+        "[--lifecycle] [--scope engine|tooling|docs] [--adapter <a>] [--model <m>] [--effort <e>] " +
+        "[--timeout <minutes>] " +
         "[--max-tool-steps <n>] [--token-budget <n>] [--override-runway <reason>] [--reason <why>] | " +
         "baton queue list | baton queue hold | baton queue resume | baton queue import <file>";
 
@@ -64,6 +65,7 @@ public static class QueueOptionsParser
         string? adapter = null, model = null, effort = null, overrideRunway = null, reason = null;
         int? issue = null, timeout = null, maxToolSteps = null;
         long? tokenBudget = null;
+        var lifecycle = false;
 
         var i = 1;
         while (i < args.Count)
@@ -110,6 +112,10 @@ public static class QueueOptionsParser
                 case "--token-budget":
                     tokenBudget = TakeLong(args, ref i, "--token-budget");
                     continue;
+                case "--lifecycle":
+                    lifecycle = true;
+                    i++;
+                    continue;
                 default:
                     if (arg.StartsWith("--", StringComparison.Ordinal))
                     {
@@ -125,6 +131,34 @@ public static class QueueOptionsParser
                     i++;
                     continue;
             }
+        }
+
+        // The lifecycle relaxations, all four in one place (#1934 slice 2, spec/baton.md §13 "Work
+        // items"). A work item is anchored on an issue, so `--issue` is the one thing it cannot do
+        // without; the STAGE picks its role, so naming one would be a second answer that the first
+        // advance would silently overwrite; and the tag defaults to the branch's own name so the
+        // ordinary invocation is `baton queue add --issue 1934 --lifecycle` and nothing more.
+        if (lifecycle)
+        {
+            if (issue is null)
+            {
+                throw new CliArgumentException(
+                    "'--lifecycle' adds an issue-anchored work item, so it needs '--issue <n>' — the issue is "
+                    + "what its briefs are rendered from and what its PR is looked for on.",
+                    "pass '--issue <n>', or drop '--lifecycle' to queue a single dispatch request.");
+            }
+
+            if (role is not null)
+            {
+                throw new CliArgumentException(
+                    "'--role' and '--lifecycle' are two answers to the same question: a work item's role comes "
+                    + "from its stage (implement, then review, then fix, then re-review), so a role named here "
+                    + "would be replaced at the first advance.",
+                    "drop '--role'.");
+            }
+
+            tag ??= $"{issue}-lane";
+            role = WorkStages.RoleFor(WorkStage.Implement);
         }
 
         if (tag is null)
@@ -146,7 +180,10 @@ public static class QueueOptionsParser
             throw new CliArgumentException($"Missing required '--role <role>'. {Usage}");
         }
 
-        if (string.IsNullOrWhiteSpace(spec))
+        // A lifecycle item with no --spec renders its implement brief from the issue body; one WITH a
+        // --spec puts that file's text in the brief's "## Do" section. Either way the item launches a
+        // rendered brief, so the flag is optional here and required everywhere else.
+        if (string.IsNullOrWhiteSpace(spec) && !lifecycle)
         {
             throw new CliArgumentException($"Missing required '--spec <file>'. {Usage}");
         }
@@ -215,7 +252,7 @@ public static class QueueOptionsParser
 
         return new QueueOptions(
             QueueVerb.Add, tag, role, spec, issue, workspace, scope, adapter, model, effort,
-            timeout, maxToolSteps, tokenBudget, overrideRunway, reason);
+            timeout, maxToolSteps, tokenBudget, overrideRunway, reason, ImportFilePath: null, Lifecycle: lifecycle);
     }
 
     private static string TakeValue(IReadOnlyList<string> args, ref int i, string option)
