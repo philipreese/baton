@@ -1657,6 +1657,103 @@ public sealed class CostLedgerStoreTests
         }
     }
 
+    /// <summary>
+    /// #1910: the pre-push hook's per-push timing reaches the row, SUMMED across pushes, and is absent —
+    /// not zero — for an execution that recorded none. Three arms in one theory on purpose: a reader
+    /// that took only the last line would pass the present arm and fail the two-push one, and a reader
+    /// that defaulted to zero would pass both and fail the absent one.
+    /// </summary>
+    [Theory]
+    [InlineData(0, null, null)]
+    [InlineData(1, 1200L, 4500L)]
+    [InlineData(2, 1500L, 7000L)]
+    public void The_push_timing_figures_are_summed_across_pushes_and_absent_when_none_were_recorded(
+        int pushes, long? expectedWaitMs, long? expectedGateMs)
+    {
+        var room = NewRoom();
+        try
+        {
+            var executionId = new ExecutionId("exec-push-timing");
+            WriteCapturedStream(room, executionId, ClaudeTerminalLine);
+
+            var lines = new[]
+            {
+                "{\"pushWaitMs\":1200,\"prePushGateMs\":4500}",
+                "{\"pushWaitMs\":300,\"prePushGateMs\":2500}",
+            };
+            if (pushes > 0)
+            {
+                WritePushTiming(room, executionId, lines.Take(pushes));
+            }
+
+            var row = Assert.Single(CostLedgerStore.BuildEntries(
+                SettledExecution(executionId, "claude", "claude-opus-5", Start), room, Repository));
+
+            Assert.Equal(expectedWaitMs, row.PushWaitMs);
+            Assert.Equal(expectedGateMs, row.PrePushGateMs);
+
+            // Absent on the wire, never a zero a reader summing the column would count as a measurement.
+            var json = JsonSerializer.Serialize(row);
+            Assert.Equal(pushes > 0, json.Contains("\"prePushGateMs\":", StringComparison.Ordinal));
+            Assert.DoesNotContain("\"pushWaitMs\":0", json, StringComparison.Ordinal);
+        }
+        finally
+        {
+            DirectoryCleanup.DeleteRecursively(room);
+        }
+    }
+
+    /// <summary>
+    /// #1910: a malformed line is skipped rather than taken as zero, and a file with nothing usable in
+    /// it reads exactly like no file at all. The discriminating half of the absence contract — without
+    /// it, a reader that caught the parse failure and kept its running zeros would report a push that
+    /// waited on nothing.
+    /// </summary>
+    [Fact]
+    public void An_unparseable_push_timing_line_is_skipped_and_a_wholly_unusable_file_reads_as_absent()
+    {
+        var room = NewRoom();
+        try
+        {
+            var executionId = new ExecutionId("exec-push-timing-junk");
+            WriteCapturedStream(room, executionId, ClaudeTerminalLine);
+            WritePushTiming(room, executionId, [
+                "not json at all",
+                "{\"pushWaitMs\":\"soon\",\"prePushGateMs\":4500}",
+                "{\"prePushGateMs\":4500}",
+                "",
+                "{\"pushWaitMs\":700,\"prePushGateMs\":900}",
+            ]);
+
+            var row = Assert.Single(CostLedgerStore.BuildEntries(
+                SettledExecution(executionId, "claude", "claude-opus-5", Start), room, Repository));
+            Assert.Equal(700L, row.PushWaitMs);
+            Assert.Equal(900L, row.PrePushGateMs);
+
+            var junkOnly = new ExecutionId("exec-push-timing-junk-only");
+            WriteCapturedStream(room, junkOnly, ClaudeTerminalLine);
+            WritePushTiming(room, junkOnly, ["not json at all"]);
+
+            var junkRow = Assert.Single(CostLedgerStore.BuildEntries(
+                SettledExecution(junkOnly, "claude", "claude-opus-5", Start), room, Repository));
+            Assert.Null(junkRow.PushWaitMs);
+            Assert.Null(junkRow.PrePushGateMs);
+        }
+        finally
+        {
+            DirectoryCleanup.DeleteRecursively(room);
+        }
+    }
+
+    /// <summary>Writes the hook's own <c>push-timing.jsonl</c> into this execution's artifact directory (#1910).</summary>
+    private static void WritePushTiming(string roomDirectoryPath, ExecutionId executionId, IEnumerable<string> lines)
+    {
+        var artifactsRoot = Path.Combine(roomDirectoryPath, ArtifactManager.ArtifactsDirectoryName);
+        var outputDirectory = ArtifactManager.ResolveOutputDirectory(artifactsRoot, executionId);
+        Directory.CreateDirectory(outputDirectory);
+        File.WriteAllLines(Path.Combine(outputDirectory, CostLedgerStore.PushTimingOutputName), lines);
+    }
+
     /// <summary>Writes a <c>verdict.json</c> into the same execution-scoped artifact directory the engine's own stamp (#1889) writes to.</summary>
     private static void WriteVerdict(string roomDirectoryPath, ExecutionId executionId, string json)
     {

@@ -3895,6 +3895,7 @@ repeated-settle shapes, and what inflated totals that skip is buying, not restat
 | `modelEchoed` | **Reserved, no phase-A writer** — the model as the CLI itself echoed it, which is the one `model` is not. Named now so phase C fills it rather than inventing a competitor. |
 | `tokensIn`, `tokensOut`, `cacheRead`, `cacheCreation`, `thinking`, `turns`, `wallClockMs` | The dimensions `QuotaLedgerEntry` carries, same names and same nullability. Cache-read is first-class here, never folded into a billed figure. |
 | `verifyStepMs`, `verifyResultsBytes` | #1882's two non-token dimensions, carried through from `ExecutionUsageView` under the same names and by the same attribution — §3 above states which execution gets them and why they are present together or not at all. Neither enters either estimate: a zero-token step changes no price. |
+| `pushWaitMs`, `prePushGateMs` | #1910. What this attempt's own `git push`es spent in the pre-push gate, summed across every push it made: `prePushGateMs` is the hook's whole wall clock (receipt check, plus the fallback `gates --fast` when the receipt did not cover the tree), `pushWaitMs` the part of it spent QUEUED on the shared build lock rather than doing work — the figure C-12's ruling C exists to drive down. **Whose queueing, per path, since only two are reachable and the comparison is between them (#1936 review):** on the SKIP path it is 0 by construction, the receipt check running in `tools/buildlock.py`'s read-only class and queueing on nothing; on the FALLBACK path it is what that `gates --fast` run's own lock-taking members waited for. Nothing else in the hook's process tree may contribute — a gate member's selftest fabricating contention against a temp lock file is not this push waiting, and `tools/buildlock.py`'s `_selftest_env` is what keeps it out. Read at settle from `push-timing.jsonl` in the execution's own artifact directory, which `.githooks/pre-push` appends one line to per push. Present together or absent together — one file produces both. **Absent means "no push timing was recorded"**, never "the push was instant" and never "no push happened": an execution that never pushed, a hook that ran with no Baton-supplied `BATON_OUTPUT_DIR`, and an artifact directory gone by settle time all read the same way. `0` is a measurement — a push that waited on nothing. Neither enters either estimate. |
 | `billedTokens`, `liveBilledTokens`, `billedUnderReadTokens`, `peakBilledInWindow` | #1706/#1709's vendor-derived figures, carried through under the names `ExecutionUsageView` already defines. |
 | `completeness`, `completenessReason` | `complete` / `partial` / **absent**, plus the stream reader's own reason string. `complete` requires a terminal line to have parsed AND the replay over the same bytes to have reconciled against it (§3's #1706 triple present) — it is *not* the default. **Every** value of `billedReconciliationUnavailable` maps to `partial` — including the two that describe no truncation at all, whose ambiguity `ExecutionUsageView`'s reason constants state — because an undecidable case takes the weaker label. **Absent** is the third state, for an attempt whose usage was never read (no parser registered for its adapter, no captured `.stdout.log`): neither label is true of a row nothing was read for, and calling it `complete` is what put an empty row in #1848's trustworthy set. `CostLedgerStore.ResolveCompleteness` is the one decision point. |
 | `apiEquivalentUsd`, `estimateStatus` | List-price estimate and its status (`estimated` / `unpriced`). |
@@ -5008,6 +5009,41 @@ untracked file before the next push, still matches -- the receipt does not re-ve
 diff HEAD` cannot see. A clean tree gaining any file `git status --porcelain` reports (tracked or
 untracked) is still caught, because that flips the dirty bool itself -- a `.gitignore`d file is not
 reported by `--porcelain` either, so it is not caught by that path or any other.
+
+**Ruling C, operator, 2026-09-05 (#1910): a lane's own component runs can stand as the receipt, for
+the gates-fast subset only.** Measured that day: the receipt above is written by a whole `gates`
+run and by nothing else, so a lane that had already run `dotnet build -warnaserror`, its tests,
+`dotnet format --verify-no-changes` and `audit-completeness` still re-ran every one of them at push
+time, behind whatever held the build lock — the largest single source of post-push lane time-outs.
+`tools/gates/gates.py` now also writes a PER-MEMBER receipt for each member that exits 0 (the store,
+its per-git-dir HMAC and what that authentication does and does not buy are `tools/gates/
+member_receipt.py`'s own docstring), and `--check-receipt` skips when EITHER the whole-run receipt
+holds as before, OR the union of per-member receipts covers the whole fast member set at the same
+tree identity and inside the same six-hour ceiling. **The covering rule is stated once, in
+`gates.py`, and the union has to cover the whole set** — nothing narrower is accepted, which is what
+makes the skip honest rather than a widening of the hook. `pixi run gates-fast-cover` is what makes
+it reachable: it runs only the fast members this tree has no receipt for, so the expensive MSBuild
+legs a lane already paid for are not paid twice, and it writes per-member receipts only — a partial
+run never mints a whole-run receipt. The hook, the exit-code contract above, and the ban on
+`--no-verify`, environment-variable and per-worktree-`hooksPath` bypasses are all unchanged; CI still
+runs everything and is never skipped by any receipt. Two supporting changes ship with it:
+`tools/buildlock.py` gains a **read-only priority class** (`--class readonly`, refused for any argv
+that directly invokes `dotnet`/`msbuild` on a build verb — a tripwire on the single task line that
+declares the class rather than a sandbox, its exact reach and its documented blind spots stated in
+that file's header) that `gates-check-receipt` runs under, so a push's receipt check never queues
+behind a lane's test run; and `.githooks/pre-push` appends one line per push to
+`push-timing.jsonl` in the running execution's artifact directory, which the settle site reads into
+the cost ledger's `pushWaitMs`/`prePushGateMs` (§7) so the effect is measured rather than asserted.
+
+**How a lane earns a per-member receipt, narrowed by the 2026-09-06 review of #1936.**
+`--record-member <member>` is handed a member NAME and nothing else: the command comes from
+`gates.py`'s own member table and is run by `gates.py`, never supplied by the caller. What a receipt
+then attests is that member's OWN gate command exiting 0 — precisely what the covering rule assumes
+when it lets a push skip that member. A component command a lane invoked for itself therefore earns
+nothing, however close it looks: `dotnet build -warnaserror` is not `lint`, whose task line forces
+`--no-incremental`. `gates.py`'s `record_member` holds the rule and the failure it closes. The
+ruling's own words — a lane's component runs standing as the receipt — are unchanged: the front door
+is how a lane makes such a run count.
 
 **Measured 2026-09-02 (#1648):** git exports `GIT_DIR`/`GIT_INDEX_FILE`/etc. to every hook, and
 `gates.py`'s own selftest fixture spawned `git init` in a temp dir without scrubbing them, so a

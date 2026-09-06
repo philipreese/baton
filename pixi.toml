@@ -321,11 +321,19 @@ gates-fast = { cmd = "python -u tools/gates/gates.py --fast" }
 gates-quiet = { cmd = "python -u tools/gates/gates.py --quiet" }
 gates-fast-quiet = { cmd = "python -u tools/gates/gates.py --fast --quiet" }
 gates-selftest = { cmd = "python -u tools/gates/gates.py --selftest" }
+# #1910: the completion pass a lane runs before pushing -- what it skips, and why it writes no
+# whole-run receipt, are stated at tools/gates/gates.py's covering rule (spec/baton.md C-12 ruling C).
+gates-fast-cover = { cmd = "python -u tools/gates/gates.py --fast --skip-covered" }
+gates-fast-cover-quiet = { cmd = "python -u tools/gates/gates.py --fast --skip-covered --quiet" }
 # #1676: what .github/workflows/ci.yml's own required job runs (see that job's own comment for why).
 gates-ci-quiet = { cmd = "python -u tools/gates/gates.py --ci --quiet" }
 gate-sabotage = { cmd = "python -u tools/gates/sabotage.py" }
 # #1636 (spec/baton.md C-12): what .githooks/pre-push runs before deciding whether to skip.
-gates-check-receipt = { cmd = "python -u tools/gates/gates.py --check-receipt" }
+# #1910: through buildlock.py's read-only priority class, not unwrapped -- it is pure git and file
+# reads, so it runs immediately instead of queueing behind a lane's `dotnet test`. The class's guard
+# is a tripwire on this line, not a sandbox -- exactly how far it reaches is stated once, in
+# tools/buildlock.py's header under "Priority classes", and this line is the caller it names.
+gates-check-receipt = { cmd = "python -u tools/buildlock.py --class readonly python -u tools/gates/gates.py --check-receipt" }
 
 # One-time per clone: point git at the committed hooks. .git/hooks is not version-controlled, so a
 # pre-push gate left there binds one machine and silently protects nobody else.

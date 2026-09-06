@@ -1,3 +1,4 @@
+using System.Text.Json;
 using System.Text.RegularExpressions;
 using Baton.Artifacts;
 using Baton.Domain;
@@ -208,6 +209,10 @@ public static partial class CostLedgerStore
             // rather than reaching anywhere new.
             var verdict = ReadVerdictFacts(artifactsRootPath, executionId);
 
+            // #1910: same shape as the verdict read above -- a file this execution's own artifact
+            // directory already owns the path of, read absent-safe, no injection.
+            var pushTiming = ReadPushTiming(artifactsRootPath, executionId);
+
             result.Add(new CostLedgerEntry(
                 SourceKind: CostSourceKind.BatonExecution,
                 Repository: repository?.Value,
@@ -235,6 +240,11 @@ public static partial class CostLedgerStore
                 // both, every other row gets neither. No arithmetic here on purpose.
                 VerifyStepMs: usage.VerifyStepMs,
                 VerifyResultsBytes: usage.VerifyResultsBytes,
+                // #1910: both figures together or neither -- one file produces both, so a partial
+                // pair would only ever mean a bug. CostLedgerEntry.PushWaitMs states what an
+                // absence means and does not mean.
+                PushWaitMs: pushTiming?.PushWaitMs,
+                PrePushGateMs: pushTiming?.PrePushGateMs,
                 BilledTokens: usage.BilledTokens,
                 LiveBilledTokens: usage.LiveBilledTokens,
                 BilledUnderReadTokens: usage.BilledUnderReadTokens,
@@ -338,6 +348,94 @@ public static partial class CostLedgerStore
             High: verdict.Findings.Count(f => f.Severity == ReviewFindingSeverity.High),
             Medium: verdict.Findings.Count(f => f.Severity == ReviewFindingSeverity.Medium),
             Low: verdict.Findings.Count(f => f.Severity == ReviewFindingSeverity.Low));
+    }
+
+    /// <summary>
+    /// <b>The single home of the file name <c>.githooks/pre-push</c> appends its per-push timing to</b>
+    /// (#1910). The hook is `sh` and compiles against nothing, so it spells the name itself and cites
+    /// this constant in a comment — the same arrangement <see cref="VerdictOutputName"/> has with
+    /// <c>WorkerRoles.json</c>, and for the same reason: a rename here has to reach the other speller
+    /// by hand, so the constant is where the name is decided.
+    /// </summary>
+    public const string PushTimingOutputName = "push-timing.jsonl";
+
+    /// <summary>
+    /// The two push-timing figures of one execution (#1910), summed across however many pushes it made,
+    /// or <see langword="null"/> when it recorded none — which is every execution that never pushed, so
+    /// absence here is the common case rather than a failure.
+    /// </summary>
+    internal readonly record struct PushTimingFacts(long PushWaitMs, long PrePushGateMs);
+
+    /// <summary>
+    /// This execution's <c>push-timing.jsonl</c> reduced to the row's two fields (#1910).
+    /// <para>
+    /// <b>Every failure is the same absence.</b> A missing file, an unreadable one, a line that is not
+    /// an object, and a line whose two fields are absent or not integers all yield nothing rather than a
+    /// half-populated pair: an accounting read fails open, never past the settle site it was called
+    /// from. A file whose lines all parse but carry no usable pair therefore reads exactly like no file
+    /// at all, which is what <see cref="CostLedgerEntry.PushWaitMs"/> promises a reader.
+    /// </para>
+    /// </summary>
+    private static PushTimingFacts? ReadPushTiming(string artifactsRootPath, string executionId)
+    {
+        // ArtifactManager's own derivation, never a second spelling -- the same rule ReadVerdictFacts
+        // above states.
+        var path = Path.Combine(
+            ArtifactManager.ResolveOutputDirectory(artifactsRootPath, new ExecutionId(executionId)),
+            PushTimingOutputName);
+        if (!File.Exists(path))
+        {
+            return null;
+        }
+
+        string[] lines;
+        try
+        {
+            lines = File.ReadAllLines(path);
+        }
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
+        {
+            return null;
+        }
+
+        long waitMs = 0;
+        long gateMs = 0;
+        var any = false;
+        foreach (var line in lines)
+        {
+            if (string.IsNullOrWhiteSpace(line))
+            {
+                continue;
+            }
+
+            try
+            {
+                using var document = JsonDocument.Parse(line);
+                // ValueKind checked before TryGetInt64, which THROWS rather than returning false on a
+                // non-number element -- the failure this method's own "every failure is the same
+                // absence" promise would otherwise break, straight past the settle site.
+                if (document.RootElement.ValueKind is not JsonValueKind.Object
+                    || !document.RootElement.TryGetProperty("pushWaitMs", out var wait)
+                    || !document.RootElement.TryGetProperty("prePushGateMs", out var gate)
+                    || wait.ValueKind is not JsonValueKind.Number
+                    || gate.ValueKind is not JsonValueKind.Number
+                    || !wait.TryGetInt64(out var waitValue)
+                    || !gate.TryGetInt64(out var gateValue))
+                {
+                    continue;
+                }
+
+                waitMs += waitValue;
+                gateMs += gateValue;
+                any = true;
+            }
+            catch (JsonException)
+            {
+                continue;
+            }
+        }
+
+        return any ? new PushTimingFacts(waitMs, gateMs) : null;
     }
 
     /// <summary>

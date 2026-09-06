@@ -72,7 +72,8 @@ use it until that command has been run once per clone.
 | `fmt` | `dotnet format` (fix) |
 | `fmt-check` | `dotnet format --verify-no-changes` (CI) |
 | `gates` | every local gate under **one exit code** (#685) — membership lives in `tools/gates/gates.py`, never restated here. Run this rather than the members individually: reading per-member statuses is what has twice reported green while a checker exited 1 |
-| `gates-fast` | the same minus `test`. What the pre-push hook runs |
+| `gates-fast` | the same minus `test`. What the pre-push hook runs when no receipt covers the tree |
+| `gates-fast-cover` | the same, minus every member this tree already holds a per-member receipt for (#1910). To get those receipts, run the member itself through `python tools/gates/gates.py --record-member <member>` — pass the name only; it runs that member's own gate task for you and receipts what it watched, so a `dotnet build` you ran by hand is not a `lint` receipt. This pass then completes the fast set and the push skips. Never mints a whole-run receipt |
 | `setup-hooks` | one-time per clone: `git config core.hooksPath .githooks` |
 
 **.NET 10 SDK** is required and installed separately — pixi does not manage it:

@@ -27,6 +27,9 @@ import tempfile
 import time
 from datetime import datetime, timedelta, timezone
 
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+import member_receipt  # noqa: E402 -- sibling module, importable however this file was invoked
+
 # Sequencing (#986): one full run used to build the .NET tree twice -- `lint` forces a full
 # `--no-incremental` build and `test` then built it all again -- and every audit waited for both.
 # Now the pure-file audits run DURING the build phase, and the test suite reuses lint's build
@@ -455,6 +458,82 @@ def delete_receipt(cwd=None):
 
 
 # ---------------------------------------------------------------------------------------------
+# Per-member receipts (#1910, spec/baton.md C-12 ruling C). The store, its authentication and the
+# reasons for both are member_receipt.py's; THE COVERING RULE IS HERE, stated once:
+#
+#   `--check-receipt` exits 0 when EITHER a whole-run receipt still holds for the current tree
+#   identity (the #1636 rule above, unchanged), OR every member of the fast set -- exactly the
+#   members `gates --fast` itself runs, `fast_member_set()` below -- holds a valid per-member
+#   receipt for that SAME identity. A member missing, or present at a different identity, or older
+#   than RECEIPT_MAX_AGE_S, means no skip: the hook falls through to a real `gates --fast` run.
+#
+# Nothing narrower is accepted. The union has to cover the whole fast set, which is what makes the
+# skip honest -- the ruling's "names the same member set". `--fast --skip-covered` (pixi's
+# `gates-fast-cover`) is what makes reaching that union affordable rather than a second full run.
+# ---------------------------------------------------------------------------------------------
+
+
+def fast_member_set():
+    """The members `gates --fast` runs -- the population a member-receipt union has to cover."""
+    return _dedupe(OVERLAP + BUILD_PHASE + AFTER_BUILD_FAST)
+
+
+def tree_identity(cwd=None):
+    """The identity every receipt, whole-run or per-member, is checked against."""
+    tree, dirty, diff_hash = _tree_and_dirty(cwd)
+    return {"tree": tree, "dirty": dirty, "diff_hash": diff_hash}
+
+
+def record_member_result(member, code, cwd=None, git_dir=None, identity=None):
+    """Record `member` at the current identity on exit 0; drop any receipt it has otherwise.
+
+    The delete half is not symmetry for its own sake: a member that passed at this tree earlier and
+    FAILS now would otherwise leave a valid receipt behind, and the union would keep covering the
+    fast set with a member that is currently red.
+
+    `git_dir`/`identity` are passed in by `record_run_members` below, which computes both once for a
+    whole run; alone, this resolves them itself.
+    """
+    try:
+        git_dir = git_dir or _git_dir(cwd)
+        if code == 0:
+            member_receipt.write(git_dir, member, identity or tree_identity(cwd))
+        else:
+            member_receipt.delete(git_dir, member)
+    except (OSError, subprocess.CalledProcessError) as e:
+        print(f"gates: could not record the {member} receipt ({e})", flush=True)
+
+
+def record_run_members(names, failed, blocked, cwd=None):
+    """One pass over a finished run: every member that exited 0 records, every other one drops.
+
+    Done here rather than inside the runners so that a fake-runner selftest cannot write receipts
+    into a real git dir, and so the identity is computed once for the whole run -- once, literally
+    (#1936 review): this used to recompute `_git_dir` + `tree_identity` per member, which is four
+    `git` processes each (one of them `git diff HEAD` over the whole tree) at the end of every run.
+    """
+    not_passed = set(failed) | set(blocked)
+    try:
+        git_dir = _git_dir(cwd)
+        identity = tree_identity(cwd)
+    except (OSError, subprocess.CalledProcessError) as e:
+        print(f"gates: could not record per-member receipts ({e})", flush=True)
+        return
+    for name in names:
+        record_member_result(name, 1 if name in not_passed else 0, cwd,
+                             git_dir=git_dir, identity=identity)
+
+
+def covered_members(cwd=None, max_age_s=RECEIPT_MAX_AGE_S):
+    """The fast members holding a valid per-member receipt for the CURRENT tree identity."""
+    try:
+        return member_receipt.covered(
+            _git_dir(cwd), tree_identity(cwd), fast_member_set(), max_age_s)
+    except (OSError, subprocess.CalledProcessError):
+        return set()
+
+
+# ---------------------------------------------------------------------------------------------
 # Telemetry (#1671). What is recorded, when, and why a separate sidecar: spec/baton.md §11 C-13.
 # Every function here is best-effort: a telemetry read that fails must never turn a gates run red.
 # ---------------------------------------------------------------------------------------------
@@ -607,13 +686,59 @@ def check_receipt():
     """
     try:
         valid, receipt, age = receipt_status()
-        if not valid:
-            return 1
-        print(f"pre-push: gates receipt for tree {receipt['tree'][:7]} "
-              f"({receipt['mode']}, {_format_age(age)} old) -- skipping", flush=True)
-        return 0
+        if valid:
+            print(f"pre-push: gates receipt for tree {receipt['tree'][:7]} "
+                  f"({receipt['mode']}, {_format_age(age)} old) -- skipping", flush=True)
+            return 0
+
+        # #1910: the member union, per the covering rule above. Second, not first, because a
+        # whole-run receipt is the cheaper check and the commoner case.
+        members = fast_member_set()
+        covered = covered_members()
+        if set(members) <= covered:
+            identity = tree_identity()
+            print(f"pre-push: per-member gate receipts cover all {len(members)} fast members for "
+                  f"tree {identity['tree'][:7]} -- skipping", flush=True)
+            return 0
+        return 1
     except (OSError, subprocess.CalledProcessError, KeyError):
         return 1
+
+
+def record_member(member, runner=None, cwd=None):
+    """`--record-member <member>`: run THAT member's own gate command, receipt it iff it exits 0.
+
+    The front door the component runs spec/baton.md C-12's ruling C names go through. The caller
+    supplies a member NAME and nothing else, and the command is resolved HERE, from the one table
+    this file already owns -- its member lists, every entry of which is a pixi task -- and run
+    through `pixi_runner`, the identical invocation `run_gates` makes during a real run. So the
+    receipt attests "baton ran member X's own command against this tree and watched it exit 0",
+    which is exactly what the covering rule above assumes when it lets a push skip member X.
+
+    Why the caller may not choose the command (#1936 review, and this is the whole reason for the
+    shape): the receipt is filed under the member NAME, so a weaker command recorded under it covers
+    a member that never ran. `--record-member lint -- dotnet build -warnaserror` exits 0 without
+    recompiling an untouched project -- while `lint`'s own task line forces `--no-incremental`
+    precisely because MSBuild skipping a project is how a non-compiling tree passes (pixi.toml says
+    so at that line) -- and the push then skipped the rebuild that would have failed. `argparse`
+    refuses trailing argv for us (unrecognised arguments, exit 2); this refuses a name with no entry
+    in the table, since a name this file does not run has no command to resolve.
+
+    A member outside `fast_member_set()` -- `test-no-build`, say -- is still recordable and still
+    covers nothing: the covering rule reads the fast set alone, so that receipt is a diagnostic.
+    """
+    if member not in _all_members():
+        print(f"gates: --record-member {member!r} is not a gate member, so there is no command to "
+              f"run for it -- `gates.py --help` lists every member", flush=True)
+        return 2
+    # `runner=None` and resolved here, not `runner=pixi_runner` in the signature: a default argument
+    # binds the function object at DEFINITION time, so a selftest arm that patches the module global
+    # would silently spawn a real `pixi run <member>` from inside `gates-selftest` -- an OVERLAP
+    # member, running concurrently with `lint`'s build, which is the concurrent-MSBuild hazard that
+    # OVERLAP comment exists to prevent.
+    code = (runner or pixi_runner)(member)
+    record_member_result(member, code, cwd)
+    return code
 
 
 def _init_temp_repo(path):
@@ -870,6 +995,191 @@ def selftest():
             print("  control FAILED: a receipt older than the 6h ceiling matched")
             ok = False
 
+        # ---- Per-member receipts and the covering rule (#1910) ----
+        # The whole-run receipt above is deliberately left as the arms above left it: these arms
+        # touch only the per-member store, and the telemetry arm below still needs that receipt.
+        git_dir = _git_dir(repo)
+        identity = tree_identity(repo)
+        fast = fast_member_set()
+        file_txt = os.path.join(repo, "file.txt")
+
+        def _record_all(ident=None):
+            for name in fast:
+                member_receipt.write(git_dir, name, ident or tree_identity(repo))
+
+        # The union covers the fast set only when every member of it is present. Both directions:
+        # a covering union that did not cover would make the whole mechanism dead, and a
+        # non-covering union that DID would let a push skip a member that never ran.
+        _record_all(identity)
+        if covered_members(cwd=repo) != set(fast):
+            print(f"  control FAILED: a full set of member receipts did not cover the fast set -- "
+                  f"missing {sorted(set(fast) - covered_members(cwd=repo))}")
+            ok = False
+        member_receipt.delete(git_dir, fast[0])
+        if set(fast) <= covered_members(cwd=repo):
+            print(f"  control FAILED: the union covered the fast set with {fast[0]!r} missing")
+            ok = False
+
+        # A receipt for a different tree covers nothing -- the stale-hash arm.
+        member_receipt.write(git_dir, fast[0], dict(identity, tree="0" * 40))
+        if fast[0] in covered_members(cwd=repo):
+            print("  control FAILED: a member receipt for a different tree matched")
+            ok = False
+
+        # The age ceiling, through the injected clock rather than a forged timestamp (the MAC makes
+        # forging one impossible, which is the point of the arms below).
+        _record_all(identity)
+        aged = member_receipt.covered(
+            git_dir, identity, fast, RECEIPT_MAX_AGE_S, now=int(time.time()) + 7 * 3600)
+        if aged:
+            print(f"  control FAILED: member receipts older than the {RECEIPT_MAX_AGE_S}s ceiling "
+                  f"matched -- {sorted(aged)}")
+            ok = False
+
+        # Forgery 1, member_receipt.py's own docstring: written by hand here on purpose, since this
+        # is the file a lane could trivially produce for itself to skip a gate that never ran.
+        with open(os.path.join(member_receipt.member_dir(git_dir), f"{fast[0]}.json"),
+                  "w", encoding="utf-8") as f:
+            json.dump({"member": fast[0], **identity, "written_epoch": int(time.time())}, f)
+        if fast[0] in covered_members(cwd=repo):
+            print("  control FAILED: an unsigned hand-made member receipt was accepted")
+            ok = False
+
+        # Forgery 2, member_receipt.py's own docstring: the copy an unsigned scheme cannot tell from
+        # the real thing, since the two files differ only in their filename.
+        shutil.copyfile(
+            os.path.join(member_receipt.member_dir(git_dir), f"{fast[1]}.json"),
+            os.path.join(member_receipt.member_dir(git_dir), f"{fast[0]}.json"))
+        if fast[0] in covered_members(cwd=repo):
+            print(f"  control FAILED: {fast[1]}'s receipt was accepted as {fast[0]}'s")
+            ok = False
+
+        # Fail closed: no key, no coverage. A lost key costs one gates run, never a free skip.
+        _record_all(identity)
+        key_backup = member_receipt.key_path(git_dir) + ".bak"
+        os.replace(member_receipt.key_path(git_dir), key_backup)
+        if covered_members(cwd=repo):
+            print("  control FAILED: member receipts were accepted with the MAC key gone")
+            ok = False
+        os.replace(key_backup, member_receipt.key_path(git_dir))
+
+        # A member that FAILS drops its receipt rather than keeping the one an earlier pass wrote.
+        record_member_result(fast[0], 0, cwd=repo)
+        if fast[0] not in covered_members(cwd=repo):
+            print("  control FAILED: record_member_result did not record a passing member")
+            ok = False
+        record_member_result(fast[0], 1, cwd=repo)
+        if fast[0] in covered_members(cwd=repo):
+            print("  control FAILED: a member that failed kept its earlier receipt")
+            ok = False
+
+        # ---- The front door: a receipt names the command BATON ran (#1936 review) ----
+        # Before this fix `--record-member <name> -- <anything>` filed the caller's command under
+        # the caller's chosen name, so a weaker command minted a receipt covering a member that
+        # never ran. Four arms: the member's own command is what runs, an unrecordable name runs
+        # nothing, a failing member is not receipted, and (below, through the real CLI) a
+        # caller-supplied command is refused before anything executes.
+        asked = []
+
+        def _recording_runner(name):
+            asked.append(name)
+            return 0
+
+        if record_member(fast[0], runner=_recording_runner, cwd=repo) != 0 or asked != [fast[0]]:
+            print(f"  control FAILED: --record-member did not run the named member's own command "
+                  f"-- ran {asked}")
+            ok = False
+        if fast[0] not in covered_members(cwd=repo):
+            print("  control FAILED: --record-member did not receipt a member that exited 0")
+            ok = False
+
+        def _refusing_runner(name):
+            raise AssertionError(f"--record-member ran a command for {name!r}, which is no member")
+
+        if record_member("not-a-gate-member", runner=_refusing_runner, cwd=repo) != 2:
+            print("  control FAILED: --record-member accepted a name that is not a gate member")
+            ok = False
+
+        if record_member(fast[0], runner=lambda name: 1, cwd=repo) != 1 or \
+                fast[0] in covered_members(cwd=repo):
+            print("  control FAILED: --record-member receipted a member whose own command failed")
+            ok = False
+
+        # The CLI itself, since the repro in the finding was a command line: a caller-supplied
+        # command must be refused BEFORE it runs. The marker file is what discriminates -- an
+        # implementation that refused after running the command would leave it behind.
+        marker = os.path.join(td, "record-member-ran.marker")
+        supplied = subprocess.run(
+            [sys.executable, os.path.abspath(__file__), "--record-member", fast[0], "--",
+             sys.executable, "-c", f"open({marker!r}, 'w').close()"],
+            cwd=repo, capture_output=True, text=True, check=False)
+        if supplied.returncode != 2 or os.path.exists(marker):
+            print(f"  control FAILED: --record-member accepted a caller-supplied command -- exit "
+                  f"{supplied.returncode}, the command ran: {os.path.exists(marker)}")
+            ok = False
+
+        # #1936 re-review: the empty name is a name, and main() has to dispatch on the flag being
+        # PRESENT rather than on its value being truthy -- a falsy value that fell through ran the
+        # whole gate suite instead of the refusal. Exit 2 plus the refusal line is what discriminates:
+        # a fall-through would exit 0 or 1, minutes later, with the members' own output.
+        empty_name = subprocess.run(
+            [sys.executable, os.path.abspath(__file__), "--record-member", ""],
+            cwd=repo, capture_output=True, text=True, check=False)
+        if empty_name.returncode != 2 or "is not a gate member" not in empty_name.stdout:
+            print(f"  control FAILED: `--record-member ''` did not refuse -- exit "
+                  f"{empty_name.returncode} stdout={empty_name.stdout[:200]!r}")
+            ok = False
+
+        # The identity is computed ONCE for a whole run, which is what record_run_members' docstring
+        # claims -- it used to recompute it per member, ~4 git processes each across ~30 members.
+        # Counted through an injected wrapper, so the arm reads the property rather than the timing.
+        identity_calls = []
+        real_tree_and_dirty = globals()["_tree_and_dirty"]
+
+        def _counting_tree_and_dirty(cwd=None):
+            identity_calls.append(cwd)
+            return real_tree_and_dirty(cwd)
+
+        globals()["_tree_and_dirty"] = _counting_tree_and_dirty
+        try:
+            record_run_members([fast[0], fast[1], fast[2]], [fast[1]], [], cwd=repo)
+        finally:
+            globals()["_tree_and_dirty"] = real_tree_and_dirty
+        if len(identity_calls) != 1:
+            print(f"  control FAILED: record_run_members computed the tree identity "
+                  f"{len(identity_calls)} time(s) for a 3-member run, not once")
+            ok = False
+        recorded = covered_members(cwd=repo)
+        if fast[1] in recorded or not {fast[0], fast[2]} <= recorded:
+            print(f"  control FAILED: a shared identity changed which members a run records -- "
+                  f"{sorted(recorded)}")
+            ok = False
+
+        # Dirty-tree arm 1: recorded CLEAN, checked dirty. The receipt is for a tree that no longer
+        # exists, and nothing on the file itself says so -- the identity recomputation is what does.
+        _record_all()
+        with open(file_txt, "a", encoding="utf-8") as f:
+            f.write("uncommitted\n")
+        if covered_members(cwd=repo):
+            print("  control FAILED: member receipts recorded on a clean tree matched a dirty one")
+            ok = False
+
+        # Dirty-tree arm 2: recorded DIRTY, checked at a DIFFERENT dirty state. Distinct from arm 1:
+        # a check that only compared the dirty BOOL would pass this one, since both states are dirty.
+        _record_all()
+        if covered_members(cwd=repo) != set(fast):
+            print("  control FAILED: member receipts recorded on a dirty tree did not match that "
+                  "same dirty tree")
+            ok = False
+        with open(file_txt, "a", encoding="utf-8") as f:
+            f.write("and more\n")
+        if covered_members(cwd=repo):
+            print("  control FAILED: member receipts matched a differently-dirty tree")
+            ok = False
+
+        subprocess.run(["git", "-C", repo, "checkout", "--", "file.txt"],
+                       check=True, env=scrubbed_env())
+
         # #1671: telemetry lives in its own sidecar and never perturbs --check-receipt. A valid
         # receipt (the "full" one written just above, still forged-stale) stays INVALID after
         # write_telemetry runs -- the discriminating half: if telemetry ever wrote into
@@ -934,6 +1244,27 @@ def selftest():
             hookenv_decoy = os.path.join(td, "hookenv-decoy", ".git")
             env["GIT_DIR"] = hookenv_decoy
             env["GIT_INDEX_FILE"] = os.path.join(hookenv_decoy, "index")
+            # #1910: the room-side directory the hook records its push timing into -- a real
+            # directory, so the arms below read the file it actually wrote rather than asserting on
+            # a path. Named explicitly rather than inherited: this process may itself be running
+            # inside a dispatched execution, whose own artifact directory the selftest must not
+            # append to.
+            output_dir = os.path.join(td, "output")
+            os.makedirs(output_dir)
+            env["BATON_OUTPUT_DIR"] = output_dir
+            timing_file = os.path.join(output_dir, "push-timing.jsonl")
+
+            def _timing_lines():
+                try:
+                    with open(timing_file, encoding="utf-8") as f:
+                        return [json.loads(line) for line in f if line.strip()]
+                except (OSError, ValueError):
+                    return []
+
+            # The per-member arms above left receipts for a dirty identity behind; clear them so
+            # the two arms below turn on the whole-run receipt alone, and the union arms after them
+            # turn on receipts this block wrote.
+            shutil.rmtree(member_receipt.member_dir(_git_dir(repo)), ignore_errors=True)
 
             write_receipt("fast", cwd=repo)
             hit = subprocess.run([sh, hook], cwd=repo, env=env,
@@ -964,6 +1295,90 @@ def selftest():
                 print(f"  control FAILED: hook did not propagate gates-fast's own exit code -- "
                       f"got {miss.returncode}, gates-fast exited 7")
                 ok = False
+
+            # #1910 item 3: the hook records one timing line per push -- both on the skip path and
+            # on the fallback path, which is the pair the ledger's before/after reading needs.
+            timings = _timing_lines()
+            if len(timings) != 2 or any(
+                    not isinstance(t.get("pushWaitMs"), int)
+                    or not isinstance(t.get("prePushGateMs"), int)
+                    or t["prePushGateMs"] < 0 for t in timings):
+                print(f"  control FAILED: the hook did not record one well-formed push-timing line "
+                      f"per push -- {timings!r}")
+                ok = False
+
+            # #1910: with NO whole-run receipt, a full set of per-member receipts for this tree
+            # makes the hook skip -- the covering rule end to end, through the real --check-receipt.
+            os.remove(call_log)
+            union_identity = tree_identity(repo)
+            for name in fast_member_set():
+                member_receipt.write(_git_dir(repo), name, union_identity)
+            union_hit = subprocess.run([sh, hook], cwd=repo, env=env,
+                                       capture_output=True, text=True, check=False)
+            if union_hit.returncode != 0 or "-- skipping" not in union_hit.stdout:
+                print(f"  control FAILED: hook did not skip on a covering member union -- "
+                      f"exit={union_hit.returncode} stdout={union_hit.stdout!r}")
+                ok = False
+            if os.path.exists(call_log):
+                print("  control FAILED: hook called gates-fast despite a covering member union")
+                ok = False
+
+            # One member short and it falls through again. The discriminating half: without it, a
+            # covered() that returned everything it was asked about would pass the arm above.
+            member_receipt.delete(_git_dir(repo), fast_member_set()[0])
+            union_miss = subprocess.run([sh, hook], cwd=repo, env=env,
+                                        capture_output=True, text=True, check=False)
+            if not os.path.exists(call_log) or union_miss.returncode != 7:
+                print(f"  control FAILED: hook skipped with {fast_member_set()[0]!r} unreceipted -- "
+                      f"exit={union_miss.returncode} stdout={union_miss.stdout!r}")
+                ok = False
+
+            # #1936 review: a millisecond clock that returns a non-number reaches the hook's
+            # `$((...))` as an arithmetic error -- fatal under a POSIX sh, aborting an otherwise-good
+            # push -- unless the hook's numeric guard catches it first. With a stub clock ahead of
+            # everything on PATH the hook must still take its decision, print its skip line, write NO
+            # timing line, and say nothing on stderr. Asserting the exit code alone would not
+            # discriminate: bash (which is `sh` under git-bash) reports an arithmetic error and
+            # carries on where dash dies, so the empty-stderr and no-new-timing-line halves are what
+            # catch the guard being removed.
+            #
+            # The stub shadows `python`, which is what the hook reads its clock through and why --
+            # stated once, next to now_ms() in .githooks/pre-push. The probe below asserts the shadow
+            # is IN EFFECT before this arm concludes anything from the hook's behaviour, and what it
+            # buys is a LEGIBLE failure rather than a missing one: where the double is unreachable the
+            # real clock runs, the hook writes its line, and the assertion below fires anyway -- a red
+            # blaming the hook for a fault the harness never managed to inject. That is exactly what
+            # the `date` version of this arm did on CI. The probe names it as the harness's failure
+            # instead. The other direction -- a clock that resolves nowhere, so this arm would pass
+            # for the wrong reason -- is held by the one-well-formed-line-per-push arm above, which
+            # is what fails if the hook stops recording timing at all.
+            clock_dir = os.path.join(td, "noclock")
+            os.makedirs(clock_dir)
+            clock_stub = os.path.join(clock_dir, "python")
+            with open(clock_stub, "w", encoding="utf-8", newline="\n") as f:
+                f.write("#!/bin/sh\nprintf 'not-a-number\\n'\n")
+            os.chmod(clock_stub, 0o755)
+            broken_clock_env = dict(env)
+            broken_clock_env["PATH"] = clock_dir + os.pathsep + env["PATH"]
+            probe = subprocess.run(
+                [sh, "-c", "python -c 'import time; print(int(time.time() * 1000))'"],
+                cwd=repo, env=broken_clock_env, capture_output=True, text=True, check=False)
+            if probe.stdout.strip() != "not-a-number":
+                print(f"  control FAILED: the broken-clock stub is not in effect under {sh!r}, so "
+                      f"the arm below would prove nothing -- probe stdout={probe.stdout!r}")
+                ok = False
+            write_receipt("fast", cwd=repo)
+            before_timings = len(_timing_lines())
+            no_clock = subprocess.run([sh, hook], cwd=repo, env=broken_clock_env,
+                                      capture_output=True, text=True, check=False)
+            if (no_clock.returncode != 0 or "-- skipping" not in no_clock.stdout
+                    or no_clock.stderr.strip() or len(_timing_lines()) != before_timings):
+                print(f"  control FAILED: the hook did not survive a clock that returns a "
+                      f"non-number -- exit={no_clock.returncode} stdout={no_clock.stdout!r} "
+                      f"stderr={no_clock.stderr!r} timing lines {before_timings} -> "
+                      f"{len(_timing_lines())}")
+                ok = False
+            delete_receipt(cwd=repo)
 
     # Tripwire (#1648): _init_temp_repo must survive an inherited GIT_DIR/GIT_INDEX_FILE, not
     # merely work in a plain shell. A DECOY repo stands in for "the real repo an inherited
@@ -1053,6 +1468,112 @@ def selftest():
         after_mtime = os.path.getmtime(rp)
         if before_mtime != after_mtime:
             print("  control FAILED: --bogus modified the gate receipt")
+            ok = False
+
+    # `--fast --skip-covered` (pixi's gates-fast-cover), which had no control arm at all (#1936
+    # review). Two invariants in one fixture, and the second is the one that matters: it runs only
+    # the members this tree has no receipt for, and the receipt kind it may NOT leave behind is the
+    # whole-run one, which covers the entire fast set by itself -- so a gates-fast-cover run that
+    # ran nothing would otherwise certify every member it skipped. Driven through main() against
+    # injected globals rather than a subprocess: the real run_gates_and_shutdown spawns `dotnet
+    # build-server shutdown` in its finally, and this file's own OVERLAP entry says gates-selftest
+    # starts no MSBuild.
+    with tempfile.TemporaryDirectory() as td:
+        repo = os.path.join(td, "repo")
+        os.makedirs(repo)
+        _init_temp_repo(repo)
+        ran = []
+
+        def _fake_cover_runner(name):
+            ran.append(name)
+            return 0
+
+        def _fake_cover_spawner(name):
+            ran.append(name)
+            return fake_spawner(0)
+
+        def _fake_run_gates_and_shutdown(after_build, runner, quiet, skip=frozenset()):
+            return run_all(after_build, spawner=_fake_cover_spawner, runner=runner,
+                           quiet=quiet, skip=skip)
+
+        prior_cwd = os.getcwd()
+        prior_argv = list(sys.argv)
+        prior_globals = (pixi_runner, telemetry_snapshot, run_gates_and_shutdown)
+        try:
+            os.chdir(repo)
+            globals()["pixi_runner"] = _fake_cover_runner
+            globals()["telemetry_snapshot"] = lambda: {}
+            globals()["run_gates_and_shutdown"] = _fake_run_gates_and_shutdown
+
+            fast = fast_member_set()
+            for name in fast:
+                member_receipt.write(_git_dir(repo), name, tree_identity(repo))
+            delete_receipt(cwd=repo)
+
+            sys.argv = ["gates.py", "--fast", "--skip-covered"]
+            covered_rc = main()
+            covered_ran, ran[:] = list(ran), []
+            covered_receipt = os.path.exists(receipt_path(repo))
+
+            member_receipt.delete(_git_dir(repo), fast[0])
+            sys.argv = ["gates.py", "--fast", "--skip-covered"]
+            short_rc = main()
+            short_ran, ran[:] = list(ran), []
+            short_receipt = os.path.exists(receipt_path(repo))
+
+            # The polarity arm: the SAME fixture and the same fake runner, without --skip-covered,
+            # must run every fast member and write the whole-run receipt. Without it, "no receipt
+            # afterwards" is satisfiable by a fixture that could never have produced one.
+            delete_receipt(cwd=repo)
+            sys.argv = ["gates.py", "--fast"]
+            full_rc = main()
+            full_ran, ran[:] = list(ran), []
+            full_receipt = os.path.exists(receipt_path(repo))
+
+            # C-12: CI is the independent run and never skips a member on a receipt written by the
+            # machine it is checking, so the two flags are refused together rather than reconciled.
+            delete_receipt(cwd=repo)
+            sys.argv = ["gates.py", "--fast", "--skip-covered", "--ci"]
+            ci_rc = main()
+            ci_ran, ran[:] = list(ran), []
+
+            # `--record-member`'s name-only path END TO END through main(): parse, dispatch,
+            # resolve, run, receipt. The arms in the fixture above call record_member directly, and
+            # the CLI arm dies in parse_args before the dispatch is reached -- so without this the
+            # one line main() dispatches on has no execution anywhere, and it is the line CLAUDE.md
+            # tells every lane to use.
+            member_receipt.delete(_git_dir(repo), fast[1])
+            sys.argv = ["gates.py", "--record-member", fast[1]]
+            front_door_rc = main()
+            front_door_ran, ran[:] = list(ran), []
+            front_door_covered = fast[1] in covered_members(cwd=repo)
+        finally:
+            os.chdir(prior_cwd)
+            sys.argv = prior_argv
+            (globals()["pixi_runner"], globals()["telemetry_snapshot"],
+             globals()["run_gates_and_shutdown"]) = prior_globals
+
+        if covered_rc != 0 or covered_ran or covered_receipt:
+            print(f"  control FAILED: --fast --skip-covered with every member already receipted "
+                  f"exited {covered_rc}, ran {covered_ran}, and left a whole-run receipt: "
+                  f"{covered_receipt}")
+            ok = False
+        if short_rc != 0 or short_ran != [fast[0]] or short_receipt:
+            print(f"  control FAILED: --fast --skip-covered with {fast[0]!r} unreceipted exited "
+                  f"{short_rc}, ran {short_ran}, and minted a whole-run receipt: {short_receipt}")
+            ok = False
+        if full_rc != 0 or full_ran != fast or not full_receipt:
+            print(f"  control FAILED: a full --fast run over the same fixture ran {len(full_ran)} "
+                  f"of {len(fast)} member(s) and wrote a whole-run receipt: {full_receipt}")
+            ok = False
+        if ci_rc != 2 or ci_ran:
+            print(f"  control FAILED: --skip-covered with --ci was not refused -- exit {ci_rc}, "
+                  f"ran {ci_ran}")
+            ok = False
+        if front_door_rc != 0 or front_door_ran != [fast[1]] or not front_door_covered:
+            print(f"  control FAILED: `--record-member {fast[1]}` through main() exited "
+                  f"{front_door_rc}, ran {front_door_ran}, and left it covered: "
+                  f"{front_door_covered}")
             ok = False
 
     # The CI_SKIP ratchet (#1676): an orphan name (not a real member) and a blank reason must both
@@ -1145,6 +1666,13 @@ def build_parser():
                         help="run this file's own control-arm suite instead of any gate")
     parser.add_argument("--check-receipt", action="store_true",
                         help="exit 0 and print the skip line iff a still-valid gate receipt exists")
+    parser.add_argument("--skip-covered", action="store_true",
+                        help="run only the members with no valid per-member receipt for this tree "
+                             "(#1910; with --fast, this is what completes a lane's own coverage)")
+    parser.add_argument("--record-member", metavar="MEMBER",
+                        help="run gate member MEMBER's own command (`pixi run MEMBER`) and record a "
+                             "per-member receipt for this tree iff it exits 0 (#1910). The name is "
+                             "the whole input -- a command of your own is not accepted")
     parser.add_argument("--ci", action="store_true",
                         help="exclude CI_SKIP members, validate the ratchet, and assert the run "
                              "matches the tracked member list (#1676; what CI's own job passes)")
@@ -1162,10 +1690,26 @@ def main():
 
     args = build_parser().parse_args()
 
+    # #1936 review: argparse owns this now. `--record-member` takes a member NAME and nothing else,
+    # so trailing argv (`--record-member lint -- dotnet build`) is refused for free as unrecognised
+    # arguments, exit 2 -- the hand-rolled pre-argparse dispatch this replaces existed only to pass
+    # a caller's command through uninterpreted, which is the thing `record_member` no longer accepts.
+    # `is not None`, not truthiness (#1936 re-review): `--record-member ""` is a member name this
+    # file cannot run, and record_member says so and exits 2. Dispatching on truthiness dropped it
+    # through to a FULL gate run instead -- the same surprise build_parser's docstring above exists
+    # to stop, in the same file.
+    if args.record_member is not None:
+        return record_member(args.record_member)
     if args.selftest:
         return selftest()
     if args.check_receipt:
         return check_receipt()
+    if args.skip_covered and args.ci:
+        # CI is the independent run (C-12): it never skips a member on the strength of a receipt
+        # written by the machine it is checking, and --ci's own member-list assertion would fail
+        # anyway. Refused loudly rather than silently ignored.
+        print("gates: --skip-covered is not usable with --ci -- CI runs every member", flush=True)
+        return 2
 
     if args.ci:
         problems = validate_ci_skip()
@@ -1179,6 +1723,14 @@ def main():
     after_build = AFTER_BUILD_FAST if mode == "fast" else AFTER_BUILD_FULL
     quiet = args.quiet
     skip = frozenset(CI_SKIP) if args.ci else frozenset()
+    if args.skip_covered:
+        # #1910: the completion pass. Skipping a member here is the same decision --check-receipt
+        # makes about the whole set, taken one member at a time and against the same identity, so
+        # the two cannot disagree about what a receipt is worth.
+        already = covered_members()
+        skip = frozenset(skip | already)
+        print(f"gates: {len(already)} member(s) already receipted for this tree, skipping them: "
+              f"{', '.join(sorted(already)) or '(none)'}")
 
     start_snapshot = telemetry_snapshot()
     names, failed, blocked = run_gates_and_shutdown(
@@ -1208,8 +1760,17 @@ def main():
     # (1): the room-level engine caller (Baton.Mutation.VerifyRunner) discriminates on gates.py's
     # printed marker line, not this process's own exit code, but a human or CI script reading only
     # the exit code must still see three distinct outcomes.
+    # #1910: every member this run actually ran gets (or loses) its own receipt, whatever the
+    # aggregate verdict was -- that is what lets a later `--skip-covered` pass stand on the legs
+    # this run already paid for, and what stops a member that just went red from staying covered.
+    record_run_members(names, failed, blocked)
     if failed or blocked:
         delete_receipt()
+    elif args.skip_covered:
+        # A partial run must never mint a WHOLE-run receipt: it did not run every fast member, and
+        # the whole-run receipt claims exactly that. Its member receipts carry what it did prove,
+        # and the covering rule is what reads them -- the two receipt kinds stay unblurred.
+        print("gates: partial run (--skip-covered) -- per-member receipts only, no whole-run receipt")
     else:
         write_receipt(mode)
     if failed:
