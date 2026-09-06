@@ -42,7 +42,7 @@ public sealed class DispatchCommandSkillRosterTests
     /// <summary>
     /// Each realized entry on a roster line, split into its package name and its realization suffix.
     /// Parsed with a pattern rather than a comma split because a suffix may itself carry a comma
-    /// (<c>(projected, 1 file(s) kept)</c>, <c>(inlined, 30 B)</c>).
+    /// (claude's kept-count suffix — <c>docs/dispatch.md</c> has the shape — and <c>(inlined, 30 B)</c>).
     /// </summary>
     private static IReadOnlyList<(string Name, string Realization)> RealizedSkills(string output) =>
     [
@@ -51,7 +51,7 @@ public sealed class DispatchCommandSkillRosterTests
     ];
 
     private static readonly Regex RealizedEntry = new(
-        @"(?:^|,\s*)(?<name>[^,()]+?)\s*\((?<realization>projected|inlined)[^)]*\)",
+        @"(?:^|,\s*)(?<name>[^,()]+?)\s*\((?<realization>to be projected|inlined)[^)]*\)",
         RegexOptions.Compiled);
 
     private static IReadOnlyList<string> SkillNames(string output) =>
@@ -111,7 +111,7 @@ public sealed class DispatchCommandSkillRosterTests
             Console.SetOut(originalOut);
 
             var claudeText = claudeOutput.ToString();
-            Assert.Equal("alpha-skill (projected), beta-skill (projected)", SkillLine(claudeText));
+            Assert.Equal("alpha-skill (to be projected), beta-skill (to be projected)", SkillLine(claudeText));
 
             // 2. Agy dispatch
             var agyRoom = Path.Combine(testRoot, "room-agy");
@@ -131,7 +131,7 @@ public sealed class DispatchCommandSkillRosterTests
             // The claim in this test's name, actually checked: one package list, two realizations.
             Assert.Equal(SkillNames(claudeText), SkillNames(agyText));
             Assert.Equal(["alpha-skill", "beta-skill"], SkillNames(claudeText));
-            Assert.All(RealizedSkills(claudeText), entry => Assert.Equal("projected", entry.Realization));
+            Assert.All(RealizedSkills(claudeText), entry => Assert.Equal("to be projected", entry.Realization));
             Assert.All(RealizedSkills(agyText), entry => Assert.Equal("inlined", entry.Realization));
         }
         finally
@@ -141,12 +141,26 @@ public sealed class DispatchCommandSkillRosterTests
         }
     }
 
+    /// <summary>
+    /// The control arm for the test above, isolated the SAME way (#1929 re-review LOW). It asserts
+    /// <c>none discovered</c>, which is strictly more brittle than an equality between two rosters: any
+    /// personal skill on the running host — or an operator machine with <c>BATON_CLAUDE_CONFIG_ROOT</c>
+    /// set per <c>docs/runbooks/claude-shared-config-root.md</c> — would otherwise fail it for a reason
+    /// unrelated to the claim. It previously passed here only because this machine happens to have no
+    /// <c>~/.claude/skills</c>. An empty config-root scope replaces the user-home arm wholesale
+    /// (#1512 M3: <c>DiscoverCapabilitiesCore</c> takes the config-root branch instead of
+    /// <c>Environment.GetFolderPath(UserProfile)</c>), so both ambient sources are closed by one scope.
+    /// </summary>
     [Fact]
     public async Task Dispatch_Control_WhenNoSkills_PrintsNoneDiscoveredForBothVendors()
     {
         var testRoot = Path.Combine(Path.GetTempPath(), $"dispatch-roster-empty-{Guid.NewGuid():N}");
         Directory.CreateDirectory(testRoot);
         var originalOut = Console.Out;
+        var emptyConfigRoot = Path.Combine(testRoot, "claude-config-root");
+        Directory.CreateDirectory(emptyConfigRoot);
+        using var environmentScope = BatonEnvironmentSnapshot.BeginScope(
+            BatonEnvironmentSnapshot.Current with { ClaudeConfigRootOverride = emptyConfigRoot });
         try
         {
             var workspace = Path.Combine(testRoot, "empty-workspace");

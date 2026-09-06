@@ -416,6 +416,68 @@ public sealed class WorktreeProvisionerTests : IDisposable
         Assert.True(changedAgainstSha);
     }
 
+    /// <summary>
+    /// #1929 review HIGH: a dispatch's own skill projection lands untracked in the worker's working
+    /// directory, and both readers must attribute it to AER rather than to the worker. Against a real
+    /// git tree, in the exact shape the claude adapter produces
+    /// (<c>&lt;workspace&gt;/.claude/skills/&lt;name&gt;/</c>).
+    /// </summary>
+    /// <remarks>
+    /// Three arms, and the two controls are the point. WITHOUT the list both readers must answer
+    /// "changed" — that is the defect, and an exclusion that passed only because the tree was already
+    /// clean would fail here. WITH a non-projected untracked file present alongside they must answer
+    /// "changed" again — an exclusion that suppressed everything (or that matched the collapsed
+    /// <c>?? .claude/</c> line <c>--untracked-files=normal</c> used to emit, and so swallowed the whole
+    /// directory) passes the first arm and fails this one.
+    /// </remarks>
+    [Fact]
+    public void Both_workspace_readers_subtract_paths_AER_itself_placed()
+    {
+        // A provisioned worktree rather than the plain checkout: once the projection is subtracted the
+        // status arm is silent, and TryReadWorkspaceChanged then falls through to its commit probes --
+        // which report UNMEASURABLE on a plain checkout with no upstream, by its own design. The
+        // measured `changed: false` this test is about only exists where those probes can answer.
+        var (repo, reference) = CreateRepoWithBranch("committed.txt");
+        var workspace = Path.Combine(NewDir("task"), "workspace");
+        WorktreeProvisioner.Provision(workspace, repo, reference);
+        var baseSha = RunGitCapture(repo, "rev-parse", "HEAD").Trim();
+
+        var projectedDirectory = Path.Combine(workspace, ".claude", "skills", "audit-tool");
+        Directory.CreateDirectory(projectedDirectory);
+        var projected = new[]
+        {
+            Path.Combine(projectedDirectory, "SKILL.md"),
+            Path.Combine(projectedDirectory, "reference", "notes.md"),
+        };
+        Directory.CreateDirectory(Path.GetDirectoryName(projected[1])!);
+        foreach (var path in projected)
+        {
+            File.WriteAllText(path, "projected content");
+        }
+
+        // Control 1: the same tree, read the way it was read before this fix.
+        Assert.True(WorktreeProvisioner.TryReadWorkspaceChanged(workspace, baseSha, out var changedWithoutList));
+        Assert.True(changedWithoutList);
+        Assert.True(WorktreeProvisioner.ReadWorkspaceMutation(workspace, baseSha)!.Mutated);
+
+        // The claim: AER's own copies are not the worker's work product.
+        Assert.True(WorktreeProvisioner.TryReadWorkspaceChanged(workspace, baseSha, out var changed, projected));
+        Assert.False(changed);
+
+        var reading = WorktreeProvisioner.ReadWorkspaceMutation(workspace, baseSha, projected)!;
+        Assert.False(reading.Mutated);
+        Assert.Equal(0, reading.ChangedPathCount);
+
+        // Control 2: one path AER did not place, alongside the ones it did.
+        File.WriteAllText(Path.Combine(workspace, "worker-output.txt"), "the worker's own work");
+        Assert.True(WorktreeProvisioner.TryReadWorkspaceChanged(workspace, baseSha, out var changedWithWorkerFile, projected));
+        Assert.True(changedWithWorkerFile);
+
+        var readingWithWorkerFile = WorktreeProvisioner.ReadWorkspaceMutation(workspace, baseSha, projected)!;
+        Assert.True(readingWithWorkerFile.Mutated);
+        Assert.Equal(1, readingWithWorkerFile.ChangedPathCount);
+    }
+
     // #1373: ReadWorkspaceMutation, against real git trees for the reason this class's own summary
     // gives — the probe shells out, so a double would only re-state the assumption under test. The
     // hermetic half (which branch OutcomeClassifier takes GIVEN a reading) lives in

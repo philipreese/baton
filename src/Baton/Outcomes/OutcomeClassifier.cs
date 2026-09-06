@@ -229,7 +229,8 @@ public static class OutcomeClassifier
             // falls through to today's behaviour, so the guard fails safe.
             if (result.TerminalSuccessObserved && ContractValidator.IsSatisfied(contract, outputDirectory))
             {
-                return BuildSucceededClassification(contract, changesTreeWorkingDirectory, worktreeBaseRef, changesTree);
+                return BuildSucceededClassification(
+                    contract, changesTreeWorkingDirectory, worktreeBaseRef, changesTree, result.EnginePlacedPaths);
             }
 
             // #1373: a timeout kill stays retryable only over an empty workspace. The ruling, the
@@ -248,7 +249,14 @@ public static class OutcomeClassifier
             var mutationProbePath = worktreePath ?? changesTreeWorkingDirectory;
             if (mutationProbePath is not null)
             {
-                var probe = workspaceMutationProbe ?? Workspaces.WorktreeProvisioner.ReadWorkspaceMutation;
+                // #1929 review HIGH: the default probe subtracts AER's own dispatch-time writes, for the
+                // same reason BuildSucceededClassification does — otherwise a timeout over an
+                // otherwise-clean tree reads Mutated on evidence the engine created and settles
+                // Indeterminate instead of a retryable Failed. Bound in a closure rather than widened on
+                // the delegate, so an injected test double keeps its two-argument shape.
+                var probe = workspaceMutationProbe
+                    ?? ((path, since) => Workspaces.WorktreeProvisioner.ReadWorkspaceMutation(
+                        path, since, result.EnginePlacedPaths));
                 var reading = probe(mutationProbePath, workspaceHeadShaAtStart ?? worktreeBaseRef);
                 if (reading is { Mutated: true })
                 {
@@ -349,6 +357,18 @@ public static class OutcomeClassifier
             {
                 // Premise verification: BATON_OUTPUT_DIR (the outbox, under artifacts/) lives OUTSIDE the provisioned worktree
                 // (workspaces/<worker>), so legitimate output writes never dirty the worktree.
+                //
+                // #1929 review HIGH, correcting that premise rather than restating it: since #1151 an
+                // adapter MAY place files inside the worker's working directory before spawn (the claude
+                // adapter's canonical-skill projection), and Audit -- unlike the two readers above -- does
+                // not subtract them. Not reachable through `baton dispatch --role` for claude, whose
+                // WithheldWritesReachTheOutbox is true, so RoleDispatch never auto-provisions the audited
+                // worktree; it IS reachable from a hand-written binding pairing claude with Worktree +
+                // AuditedNotEnforced, where the projection would be audited as a stray path. Left as-is
+                // deliberately: Audit's own read is `--untracked-files` default, whose collapsed
+                // untracked-directory line an exact-path list cannot match (see
+                // WorktreeProvisioner.UntrackedFilesArgument), so closing it is a change to Audit's
+                // message shape, not a one-line filter.
                 var audit = Workspaces.WorktreeProvisioner.Audit(worktreePath);
                 if (!audit.IsClean)
                 {
@@ -431,7 +451,8 @@ public static class OutcomeClassifier
                         result.StderrTail));
             }
 
-            return BuildSucceededClassification(contract, changesTreeWorkingDirectory, worktreeBaseRef, changesTree);
+            return BuildSucceededClassification(
+                contract, changesTreeWorkingDirectory, worktreeBaseRef, changesTree, result.EnginePlacedPaths);
         }
 
         // #1593: Natural exit 0 with unsatisfied contract settles Indeterminate (spec/baton.md §3 Producers).
@@ -699,7 +720,8 @@ public static class OutcomeClassifier
     /// retry-protected <c>worktreePath</c>.
     /// </summary>
     private static OutcomeClassification BuildSucceededClassification(
-        WorkerContract contract, string? changesTreeWorkingDirectory, string? worktreeBaseRef, bool changesTree)
+        WorkerContract contract, string? changesTreeWorkingDirectory, string? worktreeBaseRef, bool changesTree,
+        IReadOnlyList<string>? enginePlacedPaths)
     {
         if (!changesTree)
         {
@@ -710,8 +732,12 @@ public static class OutcomeClassifier
         // failure) both fields stay NULL and render as absent -- never a fabricated `true`, which is
         // what negating the fail-closed IsWorkspaceUntouched produced, and never a fabricated
         // `false`, which would pin `hollow` off exactly where the probe is blind.
+        // #1929 review HIGH: AER's own dispatch-time writes into this tree (the claude adapter's skill
+        // projection) are subtracted here, so `workspaceChanged` cannot be a positive the engine itself
+        // manufactured. Empty on the crash-recovery path — WorktreeProvisioner's
+        // ChangedPathsExcludingEnginePlaced states that scope once.
         if (!Workspaces.WorktreeProvisioner.TryReadWorkspaceChanged(
-                changesTreeWorkingDirectory, worktreeBaseRef, out var workspaceChanged))
+                changesTreeWorkingDirectory, worktreeBaseRef, out var workspaceChanged, enginePlacedPaths))
         {
             return new OutcomeClassification(OutcomeVerdict.Succeeded);
         }

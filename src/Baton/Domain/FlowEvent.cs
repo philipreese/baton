@@ -40,6 +40,7 @@ namespace Baton.Domain;
 [JsonDerivedType(typeof(DeliveryChecksRed), "deliveryChecksRed")]
 [JsonDerivedType(typeof(DeliveryMerged), "deliveryMerged")]
 [JsonDerivedType(typeof(StreamLogLossDeclared), "streamLogLossDeclared")]
+[JsonDerivedType(typeof(EngineFilesPlaced), "engineFilesPlaced")]
 public abstract record FlowEvent
 {
     private FlowEvent()
@@ -365,6 +366,36 @@ public abstract record FlowEvent
     public sealed record VerifyDeclarationUnreviewed(
         ExecutionId ExecutionId,
         string? Digest) : FlowEvent;
+
+    /// <summary>
+    /// #1929 review (MEDIUM, and the escape clause of its HIGH): the files AER itself wrote into the
+    /// worker's working directory immediately before spawning it — today only the claude adapter's
+    /// canonical-skill projection (#1151). The room's durable answer to "what did AER put in my
+    /// repository during this lane", which before this event existed only as terminal scrollback.
+    /// <para>
+    /// It is also the record the HIGH's fix rests on: those exact paths are subtracted from
+    /// <c>workspaceChanged</c> and from the #1373 timeout-retry guard
+    /// (<c>WorktreeProvisioner.ChangedPathsExcludingEnginePlaced</c>), so an auditor can see which
+    /// paths the engine excluded from its own work-product evidence rather than take the subtraction on
+    /// trust. Appended only when at least one file was actually placed — a plan that placed nothing
+    /// appends nothing, which is exactly the distinction the MEDIUM was about.
+    /// </para>
+    /// <para>
+    /// Diagnostic-only, like the <c>Verify*</c> facts above: it changes no StepState and no FlowState,
+    /// and <c>StateProjector</c> lists it with the other reader-less events on purpose. Reading it back
+    /// on the crash-recovery path — where <c>CoreDispatchResult</c> is rebuilt from a recorded exit and
+    /// carries no placement list — would need a projection reader; that is #1933, not built here.
+    /// </para>
+    /// </summary>
+    /// <param name="Paths">The absolute destination paths actually written, in the order placed.</param>
+    /// <param name="Groups">
+    /// The adapter's own labels for what was placed (<c>CoreDispatchSeedCopy.Group</c> — the canonical
+    /// skill package names, for claude). Echoed, never interpreted (Architecture Rule 1).
+    /// </param>
+    public sealed record EngineFilesPlaced(
+        ExecutionId ExecutionId,
+        IReadOnlyList<string> Paths,
+        IReadOnlyList<string> Groups) : FlowEvent;
 
     /// <summary>
     /// #1623 (contract: <c>spec/baton.md</c> §3; the addendum's own words are quoted on

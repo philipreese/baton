@@ -162,7 +162,14 @@ public sealed record CoreDispatchSeedFile(string PathTemplate, string Content);
 /// this loop actually did. One set of bytes, one predicate, two readers.
 /// </para>
 /// </remarks>
-public sealed record CoreDispatchSeedCopy(string PathTemplate, string SourcePath);
+/// <param name="Group">
+/// An adapter-authored label naming what this copy belongs to (the claude adapter passes the canonical
+/// skill package's name), used only to compose the record the dispatcher writes after placing —
+/// #1929 review MEDIUM asked that line to name the packages, and the engine must not learn a vendor's
+/// grouping by parsing its paths (Architecture Rule 1). Echoed verbatim, never interpreted; null on a
+/// copy with nothing to group by.
+/// </param>
+public sealed record CoreDispatchSeedCopy(string PathTemplate, string SourcePath, string? Group = null);
 
 /// <summary>
 /// The raw, unclassified facts of a completed dispatch (<c>NaturalExit</c> |
@@ -214,7 +221,16 @@ public sealed record CoreDispatchResult(
     // F6 (#1593 review): latched from CoreDispatchTarget.DetectsTerminalResult — spec/baton.md §3 F6
     // is the register entry for why OutcomeClassifier's dead-worker predicate reads this field rather
     // than TerminalSuccessObserved.
-    bool TerminalResultObserved = false);
+    bool TerminalResultObserved = false,
+    // #1929 review HIGH: the absolute paths this dispatch's own SeedCopies actually placed inside the
+    // worker's working directory, so the workspace readers can subtract AER's writes from what they
+    // attribute to the worker. What was WRITTEN, not what was planned — see CoreDispatchSeedCopy and
+    // WorktreeProvisioner.ChangedPathsExcludingEnginePlaced. Empty on the crash-recovery path, which
+    // rebuilds a result from a recorded exit (same shape as StderrTail/StdoutTail above).
+    IReadOnlyList<string>? EnginePlacedPaths = null,
+    // The adapter's own labels for what those paths belong to (CoreDispatchSeedCopy.Group), for the
+    // room fact's benefit. Echoed, never interpreted — Architecture Rule 1.
+    IReadOnlyList<string>? EnginePlacedGroups = null);
 
 
 /// <summary>
@@ -784,6 +800,13 @@ public sealed class CoreDispatcher(ICoreEventLogWriter coreEventLogWriter, IStre
         // CoreDispatchSeedCopy. Never clobbers a differing destination, never prunes, and never fails
         // the dispatch: an unreadable source or a locked destination costs that one file and says so,
         // rather than throwing out of a path whose whole point is that it runs before every execution.
+        // #1929 review HIGH: the paths this dispatch actually placed, so the workspace readers can
+        // subtract AER's own writes from what they attribute to the worker. Collected here because
+        // this is the only place that knows which copies were MADE rather than merely planned -- a
+        // destination holding different bytes is skipped below, and must not be excluded from the
+        // evidence, since AER did not write it.
+        var enginePlacedPaths = new List<string>();
+        var placedGroups = new List<string>();
         if (target.SeedCopies is { Count: > 0 } seedCopies)
         {
             foreach (var copy in seedCopies)
@@ -803,6 +826,11 @@ public sealed class CoreDispatcher(ICoreEventLogWriter coreEventLogWriter, IStre
                     }
 
                     File.Copy(copy.SourcePath, destinationPath, overwrite: true);
+                    enginePlacedPaths.Add(destinationPath);
+                    if (copy.Group is { Length: > 0 } group && !placedGroups.Contains(group))
+                    {
+                        placedGroups.Add(group);
+                    }
                 }
                 catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or System.Security.SecurityException)
                 {
@@ -810,6 +838,18 @@ public sealed class CoreDispatcher(ICoreEventLogWriter coreEventLogWriter, IStre
                         $"Warning: could not place '{destinationPath}' from '{copy.SourcePath}': {ex.Message}");
                 }
             }
+
+            // #1929 review MEDIUM: the adapter's announce at resolve time is future tense ("will be
+            // placed ... when a dispatch of this binding runs") and a plan can be declared and then
+            // placed zero times. This is the record of the ACT, written after the loop so its count is
+            // what was copied, not what was intended. The room-visible half is
+            // FlowEvent.SkillPackagesProjected, appended by MutationInterface from the same list.
+            var groups = placedGroups.Count > 0 ? $" ({string.Join(", ", placedGroups)})" : string.Empty;
+            var root = CommonDirectory(enginePlacedPaths);
+            var where = root is null ? string.Empty : $" into '{root}'";
+            Console.Error.WriteLine(
+                $"Placed {enginePlacedPaths.Count} of {seedCopies.Count} declared file(s){groups}{where} "
+                + "for this execution.");
         }
 
         // #598: measured here, on the expanded arguments, because this is the only place the real
@@ -1139,10 +1179,40 @@ public sealed class CoreDispatcher(ICoreEventLogWriter coreEventLogWriter, IStre
         }
 
         return new CoreDispatchResult(
-            exitCode, reason, capturedStderr, terminalSuccessLatched, capturedStdoutTail, terminalResultLatched);
+            exitCode, reason, capturedStderr, terminalSuccessLatched, capturedStdoutTail, terminalResultLatched,
+            enginePlacedPaths, placedGroups);
 
     }
 
+
+    /// <summary>
+    /// The deepest directory containing every path in <paramref name="paths"/>, or null when there is
+    /// none to name (no paths, or paths on different roots). Used only to say WHERE a placement landed
+    /// in the line the dispatcher writes after copying (#1929 review MEDIUM) — never to decide anything.
+    /// </summary>
+    private static string? CommonDirectory(IReadOnlyList<string> paths)
+    {
+        if (paths.Count == 0)
+        {
+            return null;
+        }
+
+        var comparison = OperatingSystem.IsWindows() ? StringComparison.OrdinalIgnoreCase : StringComparison.Ordinal;
+        var common = Path.GetDirectoryName(paths[0]);
+        for (var i = 1; i < paths.Count && !string.IsNullOrEmpty(common); i++)
+        {
+            var candidate = Path.GetDirectoryName(paths[i]);
+            while (!string.IsNullOrEmpty(common)
+                   && !(candidate is not null
+                        && (candidate.Equals(common, comparison)
+                            || candidate.StartsWith(common + Path.DirectorySeparatorChar, comparison))))
+            {
+                common = Path.GetDirectoryName(common);
+            }
+        }
+
+        return string.IsNullOrEmpty(common) ? null : common;
+    }
 
     private static CoreExitReason ToCoreExitReason(BatonExitReason reason) => reason switch
     {

@@ -2095,6 +2095,19 @@ public static class MutationInterface
             var dispatchResult = await dispatcher.DispatchAsync(prepared.Request, target, effectiveCancellationToken)
                 .ConfigureAwait(false);
 
+            // #1929 review MEDIUM: the room's own record of what AER placed in the worker's working
+            // directory before spawning it, and (the HIGH's escape clause) of which exact paths the
+            // classification below therefore excludes from its work-product evidence. Appended from what
+            // was WRITTEN, never from the plan — see FlowEvent.EngineFilesPlaced's own doc.
+            if (dispatchResult.EnginePlacedPaths is { Count: > 0 } placedPaths)
+            {
+                await eventLogWriter.AppendAsync(
+                        new FlowEvent.EngineFilesPlaced(
+                            prepared.Request.ExecutionId, placedPaths, dispatchResult.EnginePlacedGroups ?? []),
+                        CancellationToken.None)
+                    .ConfigureAwait(false);
+            }
+
             if (budgetMonitor is { Arrested: true })
             {
                 // The budget's own token fired, not the caller's dispatchCancellationToken -- an

@@ -37,7 +37,7 @@ public sealed record SkillProjectionPlan(string TargetBaseDirectory, IReadOnlyLi
 /// (#1929 review). <c>ClaudeWorkerAdapter.Resolve</c> turns a plan into
 /// <see cref="CoreDispatchSeedCopy"/> entries the dispatcher writes when an execution starts;
 /// <c>ClaudeWorkerAdapter.DiscoverCapabilitiesAsync</c> turns the same plan into the roster's
-/// <c>(projected, N file(s) kept)</c> suffix. Both read the same bytes through
+/// <c>(to be projected, N file(s) to be kept)</c> suffix. Both read the same bytes through
 /// <see cref="CoreDispatcher.FilesHaveIdenticalBytes"/>, so the roster cannot claim something the write
 /// path then contradicts.
 /// </summary>
@@ -90,17 +90,21 @@ public static class SkillProjection
     }
 
     /// <summary>
-    /// Every file under <paramref name="packageDirectory"/>, as paths relative to it, <b>not</b>
-    /// descending into a symlinked or junctioned subdirectory (#1929 review LOW).
+    /// Every file under <paramref name="packageDirectory"/>, as paths relative to it, skipping
+    /// <b>both</b> a symlinked or junctioned subdirectory and a symlinked file (#1929 review LOW, and
+    /// its re-review LOW).
     /// </summary>
     /// <remarks>
     /// A recursive <see cref="Directory.GetFiles(string, string, SearchOption)"/> follows directory
     /// links, so a link inside a package would pull an unrelated tree into the operator's repository
-    /// under the vendor's own skills directory, where the CLI then reads it. The destination side is
-    /// already pinned (every path is composed from a relative path under the package), so this closes the
-    /// source side. Linked directories are skipped silently rather than refused: the package is still
-    /// usable without them, and refusing the dispatch over a link would be a larger behaviour than the
-    /// defect warrants.
+    /// under the vendor's own skills directory, where the CLI then reads it. Skipping linked
+    /// subdirectories closes the recursive-descent half; skipping linked FILES closes the rest, because
+    /// <see cref="File.Copy(string, string, bool)"/> copies the link target's bytes — so
+    /// <c>skills/foo/notes.md</c> pointing outside the repository would otherwise land inside it
+    /// verbatim. Together those are the source side; the destination side was already pinned (every path
+    /// is composed from a relative path under the package). Links are skipped silently rather than
+    /// refused: the package is still usable without them, and refusing the dispatch over a link would be
+    /// a larger behaviour than the defect warrants.
     /// </remarks>
     private static IReadOnlyList<string> EnumerateProjectableFiles(string packageDirectory)
     {
@@ -115,6 +119,11 @@ public static class SkillProjection
             {
                 foreach (var file in Directory.GetFiles(directory))
                 {
+                    if (new FileInfo(file).LinkTarget is not null)
+                    {
+                        continue;
+                    }
+
                     relativePaths.Add(Path.Combine(relativePrefix, Path.GetFileName(file)));
                 }
 

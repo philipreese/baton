@@ -1279,19 +1279,24 @@ public sealed partial class ClaudeWorkerAdapter : IWorkerAdapter, IPermissionGra
         plan.Entries.Count == 0
             ? null
             : [.. plan.Entries
-                .SelectMany(entry => entry.Files)
+                .SelectMany(entry => entry.Files.Select(file => (entry.Package.Name, File: file)))
                 // The destination is an absolute path already, and CoreDispatcher expands %NAME%/$NAME
                 // tokens in a path template -- a repository directory literally containing a
                 // BATON_-prefixed token would otherwise be rewritten. None of AER's computed names can
                 // appear here by construction (they are all BATON_* and a path segment carrying one
                 // would have to be named for it), so the raw path IS the template.
-                .Select(file => new CoreDispatchSeedCopy(file.DestinationPath, file.SourcePath))];
+                //
+                // #1929 review MEDIUM: the package name rides along as CoreDispatchSeedCopy.Group so the
+                // dispatcher's post-write line and the room fact can name the packages actually placed,
+                // without the engine parsing a vendor's directory layout back out of the paths.
+                .Select(pair => new CoreDispatchSeedCopy(
+                    pair.File.DestinationPath, pair.File.SourcePath, pair.Name))];
 
     /// <summary>
     /// Records the projection this binding declares: one line naming the destination, the packages, and
-    /// how many pre-existing files would be kept rather than overwritten (#1929 review HIGH). The
-    /// room-visible half is the dispatch preamble's own skill roster, which carries the same kept-count
-    /// per package (<c>docs/dispatch.md</c>).
+    /// how many pre-existing files would be kept rather than overwritten (#1929 review HIGH). Still a
+    /// PREDICTION — the record of the act is written by the dispatcher after copying, and made
+    /// room-visible as <c>FlowEvent.EngineFilesPlaced</c> (#1929 review MEDIUM).
     /// </summary>
     /// <remarks>
     /// Worded for every caller of <c>Resolve</c>, not only the dispatching ones: <c>baton decide</c>
@@ -1449,12 +1454,16 @@ public sealed partial class ClaudeWorkerAdapter : IWorkerAdapter, IPermissionGra
             // #1929 review MEDIUM: a canonical package colliding with a config-root skill is projected
             // and then shadowed, per the #1575 precedence pinned above -- so the roster says both halves
             // rather than reporting the copy the CLI does not read.
-            var kept = entry.KeptFileCount > 0 ? $", {entry.KeptFileCount} file(s) kept" : string.Empty;
+            // #1929 review MEDIUM: future tense on purpose. Nothing is written when a roster is printed
+            // -- the placement happens later, on the dispatch path (SkillProjection's own remarks), and
+            // may place fewer files than this line names. FlowEvent.EngineFilesPlaced is the record of
+            // what actually happened; this is the prediction.
+            var kept = entry.KeptFileCount > 0 ? $", {entry.KeptFileCount} file(s) to be kept" : string.Empty;
             var shadowed = configRootNames.Contains(entry.Package.Name)
                 ? ", shadowed by the config root"
                 : string.Empty;
             items.Add(new WorkerCapabilityItem(
-                $"{entry.Package.Name} (projected{kept}{shadowed})", "skill", entry.Package.Description));
+                $"{entry.Package.Name} (to be projected{kept}{shadowed})", "skill", entry.Package.Description));
         }
 
         // Config-root skills are never deduped away by a canonical package of the same name: on this arm

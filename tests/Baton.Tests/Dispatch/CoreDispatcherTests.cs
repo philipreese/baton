@@ -442,8 +442,8 @@ public class CoreDispatcherTests
             {
                 SeedCopies =
                 [
-                    new CoreDispatchSeedCopy(placedDestination, placedSource),
-                    new CoreDispatchSeedCopy(keptDestination, keptSource),
+                    new CoreDispatchSeedCopy(placedDestination, placedSource, "placed-package"),
+                    new CoreDispatchSeedCopy(keptDestination, keptSource, "kept-package"),
                 ],
             };
 
@@ -458,6 +458,13 @@ public class CoreDispatcherTests
             Assert.Equal(
                 "the operator's own content",
                 await File.ReadAllTextAsync(keptDestination, TestContext.Current.CancellationToken));
+
+            // #1929 review HIGH/MEDIUM: the result carries what was WRITTEN, which is what the workspace
+            // readers subtract and what the room fact records. The kept destination must NOT appear —
+            // AER did not write it, so excluding it from the work-product evidence would suppress a path
+            // the operator (or an earlier run) put there.
+            Assert.Equal([placedDestination], result.EnginePlacedPaths);
+            Assert.Equal(["placed-package"], result.EnginePlacedGroups);
         }
         finally
         {

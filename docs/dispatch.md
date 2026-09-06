@@ -186,7 +186,7 @@ for Claude — also `<CLAUDE_CONFIG_DIR>/skills` when `BATON_CLAUDE_CONFIG_ROOT`
 realized per vendor, #1151):
 
 ```
-Skills: artifact-design (projected), run-checks (projected, 1 file(s) kept)
+Skills: artifact-design (to be projected), run-checks (to be projected, 1 file(s) to be kept)
 ```
 or for agy:
 ```
@@ -207,29 +207,60 @@ can actually consume, and nothing else about #1151 ships yet:
 
 | vendor | realization | what the roster says |
 |---|---|---|
-| claude | the package's files are **projected** into `<workspace>/.claude/skills/<name>/`, where the CLI reads project skills | `<name> (projected)` |
+| claude | the package's files are **projected** into `<workspace>/.claude/skills/<name>/`, where the CLI reads project skills — **inside the operator's own checkout**, see "Where the projection lands" below | `<name> (to be projected)` |
 | agy | the `SKILL.md` body is **inlined** into the dispatch prompt under a `# Skill: <name>` header AER emits, since #1572 measured that agy does not read `.agents/skills` on its own | `<name> (inlined, <size>)` |
 | codex | **none.** No codex path reads a canonical package, so a codex binding in a repository carrying `skills/` reports `Skills: none discovered` and receives nothing — a realization for it is unbuilt work under #1151, not an omission this doc glosses over | — |
+
+**Both realizations are predictions at roster time**, and only claude's is written in the future tense.
+Neither has happened when the line is printed: the projection is placed later, by the dispatcher, and
+agy's inlining happens later still, at prompt build. Claude's is tensed because it is the one whose
+prediction can come out *false* — a destination holding different bytes is kept, so a declared file may
+not be placed (#1929 review). Agy's cannot: the size it reports is measured on the same string the
+prompt gets (`AgyWorkerAdapter.InlinedSkillBody`), so `(inlined, <size>)` is a prediction that a
+dispatch cannot contradict.
 
 **When the projection happens, and what it will not do.** Nothing is written while a binding is merely
 resolved: `baton decide`, `run` and `resume` all resolve bindings that may never dispatch, and the
 working directory carries the constraint `ClaudeWorkerAdapter.Resolve` already states for launch config.
 The files are placed by the dispatcher when an execution actually starts, and:
 
-- **an existing file that does not already match the package is never overwritten.** It is kept and
-  counted, and the roster says so: `<name> (projected, N file(s) kept)`. The count is a snapshot taken
+- **an existing file that does not already match the package is never overwritten.** It is kept, and the
+  roster's suffix carries the count (the sample above shows the shape). That count is a snapshot taken
   when the roster is printed; the dispatcher re-measures the same predicate immediately before each copy,
   so the guarantee holds even when the number is stale.
 - **nothing is ever pruned.** Renaming `skills/foo` to `skills/bar` leaves `.claude/skills/foo` on disk,
   where the CLI still loads it. Removing it is the operator's call.
-- the projection is announced on stderr as one line naming the destination and the packages.
+- **the roster line is a prediction, not a record.** It is printed before anything is written, which is
+  why its realization reads in the future tense. Two records follow the act: one stderr line from the
+  dispatcher naming how many of the declared files were placed, which packages, and where; and one
+  durable room fact, `FlowEvent.EngineFilesPlaced` (that type's own doc is the canonical description).
+
+### Where the projection lands
+
+**Inside the operator's own checkout, untracked.** `<workspace>/.claude/skills/<name>/` is a real path
+in the working tree; this repository's `.gitignore` narrows its `.claude` exclusion to
+`.claude/worktrees/` deliberately, so a projected `SKILL.md` appears in `git status` and is committable.
+There is no AER-owned alternative to move it to, and the reasons are measured rather than assumed:
+
+- `BatonPaths.WorkerLaunchConfig` is AER-owned but is reached by the `--settings` and `--mcp-config`
+  flags. It is not a `CLAUDE_CONFIG_DIR`, so a `skills/` directory under it is read by nothing.
+- AER injects `CLAUDE_CONFIG_DIR` only when the **operator** has set `BATON_CLAUDE_CONFIG_ROOT`
+  (`docs/runbooks/claude-shared-config-root.md`), and cannot mint a root of its own: a fresh one starts
+  without subscription credentials and every dispatch under it fails loudly — measured,
+  `durability.config-dir-redirect-breaks-auth` in `tools/vendor-verify/verify.py`.
+- `--add-dir` loads no configuration at all — measured, `gate.add-dir-loads-no-config`.
+
+Because those files are AER's and not the worker's, the engine subtracts them from its own work-product
+evidence and from its timeout-retry guard. The rule and its two uncovered scopes (one of which, the
+crash-recovery path, is tracked as #1933) are stated once, in `spec/baton.md` §3's #1373 paragraph; the
+mechanism is `WorktreeProvisioner.ChangedPathsExcludingEnginePlaced`.
 
 **Precedence, written down here because nothing has ratified it.** A canonical package shadows a
 same-named native skill under `<workspace>/.claude/skills/` (that is where the projection lands) and
 under `~/.claude/skills/` (project beats user). The one exception runs the other way: under
 `BATON_CLAUDE_CONFIG_ROOT`, #1575 measured that the CLI resolves a collision to the **config-root** copy
 and the project copy does not surface at all — so the config-root entry is reported unsuppressed and the
-canonical one reads `<name> (projected, shadowed by the config root)`. This rule is a consequence of what
+canonical one reads `<name> (to be projected, shadowed by the config root)`. This rule is a consequence of what
 ships, not an operator ruling; #1151's Q3 deferred the precedence question along with the repo-local
 overlay, and this floor slice reopened it by keying on the working directory.
 
@@ -241,8 +272,8 @@ the **repo-local overlay Q3 explicitly deferred**, not any of the rungs. There i
 `dispatch`/`redispatch`, no `Skills` field on `WorkerBindingConfigEntry` and so no requirement check at
 bind time and no inheritance across a redispatch, no `spec/baton.md` §9 entry, and no amendment to
 decision 0010. Activation — whether either vendor's model actually *invokes* a skill under `-p` — is
-unmeasured on both vendors; #1151's S2 is the measurement, and the roster's `(projected)`/`(inlined)`
-is a claim about **placement**, never about activation.
+unmeasured on both vendors; #1151's S2 is the measurement, and the roster's
+`(to be projected)`/`(inlined)` is a claim about **placement**, never about activation.
 
 **Rule for briefs:** Dispatched workers run in their own process and do not inherit the conducting session's loaded skills. Briefs must inline what they need; a named skill only works if the worker's roster shows it. Skill forwarding is not performed by dispatch.
 

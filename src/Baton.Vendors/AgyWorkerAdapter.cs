@@ -1207,14 +1207,6 @@ public sealed partial class AgyWorkerAdapter : IWorkerAdapter, IPermissionGrantT
     }
 
     /// <summary>
-    /// The exact text one canonical skill package contributes to an agy dispatch prompt: the
-    /// <c>SKILL.md</c> body with its YAML front matter stripped (#1151, #1929 review LOW).
-    /// </summary>
-    /// <remarks>
-    /// One function so the roster's per-package size and the prompt's actual content are measured on the
-    /// same string — a size computed off the raw file would over-report by the front matter this drops.
-    /// </remarks>
-    /// <summary>
     /// A byte count rendered for the dispatch roster — whole bytes below 1 KiB, one decimal above, so a
     /// short skill does not read as <c>0.0 KB</c>.
     /// </summary>
@@ -1223,6 +1215,14 @@ public sealed partial class AgyWorkerAdapter : IWorkerAdapter, IPermissionGrantT
             ? $"{byteCount} B"
             : string.Create(System.Globalization.CultureInfo.InvariantCulture, $"{byteCount / 1024.0:0.0} KB");
 
+    /// <summary>
+    /// The exact text one canonical skill package contributes to an agy dispatch prompt: the
+    /// <c>SKILL.md</c> body with its YAML front matter stripped (#1151, #1929 review LOW).
+    /// </summary>
+    /// <remarks>
+    /// One function so the roster's per-package size and the prompt's actual content are measured on the
+    /// same string — a size computed off the raw file would over-report by the front matter this drops.
+    /// </remarks>
     public static string InlinedSkillBody(SkillPackage package)
     {
         ArgumentNullException.ThrowIfNull(package);

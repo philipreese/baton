@@ -869,7 +869,22 @@ delta against the sha read at spawn, while the **changed-path half is absolute**
 whatever is there, with no baseline taken — so a lane dispatched into an already-dirty tree settles
 Indeterminate on a timeout even if its worker wrote nothing. The ruling accepts that: its own wording
 is "uncommitted changes, untracked files" without a baseline, and the failure it prices is a clobbered
-tree (unrecoverable) against a spurious conductor resolution (a minute of someone's time). A null path — an execution with nowhere to leave work — keeps the retry, and so
+tree (unrecoverable) against a spurious conductor resolution (a minute of someone's time).
+
+**One exception to "absolute", added by #1929's review of #1151.** The absolute half counts what is on
+disk *regardless of who put it there* — including AER, once an adapter is allowed to write into the
+worker's working directory before spawning it (the claude adapter's canonical-skill projection lands in
+`<workspace>/.claude/skills/`, untracked, inside the operator's own checkout). Counting AER's own writes
+would make the engine assert the worker mutated a tree on evidence the engine created, and would decide
+the retry with it. So the dispatcher records the exact paths it placed, and both this reading and
+#1622/#1390's `workspaceChanged` subtract those paths and only those; the list is journaled as
+`FlowEvent.EngineFilesPlaced` so the exclusion is auditable rather than trusted. Everything a *worker*
+wrote, and every pre-existing dirty path, still counts — the "already-dirty tree settles Indeterminate"
+sentence above is unchanged. Scope: the live dispatch path only. A crash-recovery classification rebuilds
+its dispatch result from a recorded exit, carries no placement list, and therefore still counts them —
+#1933, which is where reading the journaled event back through the projection is tracked.
+
+A null path — an execution with nowhere to leave work — keeps the retry, and so
 does #1089's finished-then-hung guard, which sits upstream of this branch and is unchanged (a
 tree-changing worker that satisfied its contract has a mutated tree by construction; that is what
 finishing looks like). The reason text opens with `OutcomeClassifier.TimeoutSentence`, so

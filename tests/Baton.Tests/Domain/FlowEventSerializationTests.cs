@@ -117,6 +117,13 @@ public class FlowEventSerializationTests
         // #1708 M1 -- the HEAD fallback's announcement, and the null-digest shape.
         yield return [new FlowEvent.VerifyDeclarationUnreviewed(ExecutionId, "0f2b")];
         yield return [new FlowEvent.VerifyDeclarationUnreviewed(ExecutionId, null)];
+        // #1929 review MEDIUM -- the placement record, with and without adapter group labels.
+        yield return
+        [
+            new FlowEvent.EngineFilesPlaced(
+                ExecutionId, [@"C:\repo\.claude\skills\audit-tool\SKILL.md"], ["audit-tool"])
+        ];
+        yield return [new FlowEvent.EngineFilesPlaced(ExecutionId, [@"C:\repo\.claude\skills\a\SKILL.md"], [])];
         yield return [new FlowEvent.ExecutionArrested(ExecutionId)];
         yield return
         [

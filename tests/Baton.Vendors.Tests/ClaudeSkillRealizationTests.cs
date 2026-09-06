@@ -179,12 +179,61 @@ public sealed class ClaudeSkillRealizationTests
                 configRootDirectory: string.Empty,
                 cancellationToken: TestContext.Current.CancellationToken);
 
-            Assert.Contains(caps.Items, i => i.Name == "audit-tool (projected)" && i.Kind == "skill" && i.Description == "Audit tool skill");
+            Assert.Contains(caps.Items, i => i.Name == "audit-tool (to be projected)" && i.Kind == "skill" && i.Description == "Audit tool skill");
         }
         finally
         {
             DirectoryCleanup.DeleteRecursively(tempWorkspace);
             DirectoryCleanup.DeleteRecursively(emptyUserHome);
+        }
+    }
+
+    /// <summary>
+    /// #1929 re-review LOW: a symlinked FILE inside a package is skipped rather than dereferenced, and
+    /// so is a linked subdirectory — both halves in one run. What that closes is on
+    /// <c>SkillProjection.EnumerateProjectableFiles</c>.
+    /// </summary>
+    /// <remarks>
+    /// Skipped on a host that refuses symlink creation (unprivileged Windows without Developer Mode),
+    /// the same capability check <c>CodexDynamicToolPolicyTests</c> uses. The plain files beside the
+    /// links are the control: a plan that placed nothing would satisfy the negative assertions alone.
+    /// </remarks>
+    [Fact]
+    public void PlanSkillProjection_SkipsLinkedFilesAndLinkedDirectories()
+    {
+        var workspace = MakeWorkspaceWithSkill("claude-plan-links", "audit-tool", "description: Audit tool skill");
+        var outside = Path.Combine(Path.GetTempPath(), $"claude-link-outside-{Guid.NewGuid():N}");
+        try
+        {
+            Directory.CreateDirectory(outside);
+            var outsideFile = Path.Combine(outside, "secret.md");
+            File.WriteAllText(outsideFile, "content from outside the repository");
+
+            var packageDirectory = Path.Combine(workspace, "skills", "audit-tool");
+            var linkedFile = Path.Combine(packageDirectory, "notes.md");
+            var linkedDirectory = Path.Combine(packageDirectory, "reference");
+            try
+            {
+                File.CreateSymbolicLink(linkedFile, outsideFile);
+                Directory.CreateSymbolicLink(linkedDirectory, outside);
+            }
+            catch (Exception ex) when (ex is UnauthorizedAccessException or IOException or PlatformNotSupportedException)
+            {
+                return;
+            }
+
+            var plan = ClaudeWorkerAdapter.PlanSkillProjection(workspace);
+            var entry = Assert.Single(plan.Entries);
+            var placed = entry.Files.Select(f => Path.GetFileName(f.SourcePath)).ToList();
+
+            Assert.Equal(["SKILL.md"], placed);
+            Assert.DoesNotContain("notes.md", placed);
+            Assert.DoesNotContain("secret.md", placed);
+        }
+        finally
+        {
+            DirectoryCleanup.DeleteRecursively(workspace);
+            DirectoryCleanup.DeleteRecursively(outside);
         }
     }
 
@@ -208,7 +257,7 @@ public sealed class ClaudeSkillRealizationTests
                 configRootDirectory: string.Empty,
                 cancellationToken: TestContext.Current.CancellationToken);
 
-            Assert.Contains(caps.Items, i => i.Name == "audit-tool (projected, 1 file(s) kept)");
+            Assert.Contains(caps.Items, i => i.Name == "audit-tool (to be projected, 1 file(s) to be kept)");
         }
         finally
         {
@@ -243,7 +292,7 @@ public sealed class ClaudeSkillRealizationTests
             // The copy the CLI actually loads is present, unsuppressed...
             Assert.Contains(caps.Items, i => i.Name == "audit-tool" && i.Description == "Config root audit tool");
             // ...and the projected one says it is not the live entry.
-            Assert.Contains(caps.Items, i => i.Name == "audit-tool (projected, shadowed by the config root)");
+            Assert.Contains(caps.Items, i => i.Name == "audit-tool (to be projected, shadowed by the config root)");
         }
         finally
         {
@@ -276,7 +325,7 @@ public sealed class ClaudeSkillRealizationTests
                 cancellationToken: TestContext.Current.CancellationToken);
 
             Assert.DoesNotContain(caps.Items, i => i.Name == "audit-tool");
-            Assert.Contains(caps.Items, i => i.Name == "audit-tool (projected)");
+            Assert.Contains(caps.Items, i => i.Name == "audit-tool (to be projected)");
         }
         finally
         {
