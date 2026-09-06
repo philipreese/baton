@@ -206,10 +206,10 @@ public sealed class DispatchCommandSkillRosterTests
     }
 
     /// <summary>
-    /// #1941 review MEDIUM: a binding that declares its own skill set gets exactly that set — the
-    /// declared set REPLACES the workspace scan — so a roster printed from the scan named a package the
-    /// worker would not receive and omitted the one it would, inverting reality on the one dispatch
-    /// where the operator was most explicit. Asserted on the whole line rather than through
+    /// #1941 review MEDIUM. The roster used to print the workspace scan even for a binding carrying its
+    /// own names, so it named a package the worker would not receive and omitted the one it would;
+    /// <c>DispatchCommand</c>'s skill-roster block states the rule this pins. Asserted on the whole line
+    /// rather than through
     /// <see cref="RealizedSkills"/>, whose regex only knows the two scan-derived realization suffixes.
     /// </summary>
     [Fact]
