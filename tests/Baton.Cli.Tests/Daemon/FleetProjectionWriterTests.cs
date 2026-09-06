@@ -725,7 +725,7 @@ public sealed class FleetProjectionWriterTests : IDisposable
         var first = await writer.BuildProjectionJsonAsync(TestContext.Current.CancellationToken);
         var firstEntries = JsonNode.Parse(first)!["timelines"]![room]!.ToJsonString();
 
-        File.Delete(Path.Combine(room, BatonPaths.FlowLogFileName));
+        FileCleanup.Delete(Path.Combine(room, BatonPaths.FlowLogFileName));
 
         var second = await writer.BuildProjectionJsonAsync(TestContext.Current.CancellationToken);
         var secondEntries = JsonNode.Parse(second)!["timelines"]![room]!.ToJsonString();
@@ -739,7 +739,7 @@ public sealed class FleetProjectionWriterTests : IDisposable
         var uncachedWriter = new FleetProjectionWriter();
         Assert.True(JsonNode.Parse(await uncachedWriter.BuildProjectionJsonAsync(TestContext.Current.CancellationToken))!
             ["timelines"]!.AsObject().ContainsKey(runningRoom));
-        File.Delete(Path.Combine(runningRoom, BatonPaths.FlowLogFileName));
+        FileCleanup.Delete(Path.Combine(runningRoom, BatonPaths.FlowLogFileName));
         Assert.False(JsonNode.Parse(await uncachedWriter.BuildProjectionJsonAsync(TestContext.Current.CancellationToken))!
             ["timelines"]!.AsObject().ContainsKey(runningRoom));
     }
