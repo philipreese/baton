@@ -271,7 +271,16 @@ public static class DispatchCommand
             // one before this room existed), which is why no rung or realization suffix is added.
             if (binding.Skills is { Count: > 0 } declaredSkills)
             {
-                var declaredLabel = multipleSkillWorkers ? $"Skills ({workerName}, declared)" : "Skills (declared)";
+                // H1's worktree disclosure is kept rather than dropped with the scan: a declared name
+                // is re-resolved at run time against the provisioned worktree, so a bottom-rung
+                // (<workspace>/skills/) name is not guaranteed to be the same package there -- the
+                // divergence spec/baton.md §9 records for that rung specifically.
+                var worktreeNote = binding.Worktree is not null
+                    ? "; a <workspace>/skills/ name re-resolves in the worker's fresh worktree at HEAD"
+                    : string.Empty;
+                var declaredLabel = multipleSkillWorkers
+                    ? $"Skills ({workerName}, declared{worktreeNote})"
+                    : $"Skills (declared{worktreeNote})";
                 Console.Out.WriteLine($"{declaredLabel}: {string.Join(", ", declaredSkills)}");
                 continue;
             }

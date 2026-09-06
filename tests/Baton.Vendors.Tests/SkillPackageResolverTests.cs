@@ -125,7 +125,8 @@ public sealed class SkillPackageResolverTests : IDisposable
     /// <remarks>
     /// Cleans up after itself rather than through <c>_root</c>: this one package lives outside the
     /// test's temp tree by construction, and leaving it behind would leak a resolvable name into every
-    /// later test in the assembly.
+    /// later test in the assembly — which runs in parallel with it. The directory itself is removed too
+    /// when this test is what created it, so no residue survives the run.
     /// </remarks>
     [Fact]
     public void The_assembly_rung_resolves_a_name_and_loses_to_the_account_library()
@@ -134,6 +135,7 @@ public sealed class SkillPackageResolverTests : IDisposable
         var home = NewDirectory("home");
         var homeSkills = Path.Combine(home, "skills");
         Directory.CreateDirectory(homeSkills);
+        var rungDirectoryIsOurs = !Directory.Exists(assemblySkills);
         Directory.CreateDirectory(assemblySkills);
         var assemblyOnly = WritePackage(assemblySkills, "shipped-starter", "# from beside the assembly");
         var assemblyShadowed = WritePackage(assemblySkills, "shared", "# from beside the assembly");
@@ -166,6 +168,10 @@ public sealed class SkillPackageResolverTests : IDisposable
         {
             Baton.Tests.Shared.DirectoryCleanup.DeleteRecursively(assemblyOnly);
             Baton.Tests.Shared.DirectoryCleanup.DeleteRecursively(assemblyShadowed);
+            if (rungDirectoryIsOurs)
+            {
+                Baton.Tests.Shared.DirectoryCleanup.DeleteRecursively(assemblySkills);
+            }
         }
     }
 
