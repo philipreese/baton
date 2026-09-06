@@ -328,6 +328,64 @@ public class RedispatchBindingTests
     }
 
     /// <summary>
+    /// #1927 re-review MEDIUM: on agy the effort stamp is NOT an independent axis — it is read off the
+    /// resolved model id's own suffix (<see cref="RoleDispatch.ResolveEffortStamp"/>'s third rung) — so
+    /// a SAME-VENDOR <c>--model</c> moves the correct effort answer with it. The measured room is the
+    /// one #1927 exists for: <c>--adapter agy</c> with no <c>--model</c>/<c>--effort</c>, redispatched
+    /// onto a <c>-low</c> id. Inheriting the parent's stamp put <c>high</c> on the glass while the CLI
+    /// ran at <c>low</c>, and made redispatch disagree with <see cref="RoleDispatch.ToBinding"/> for
+    /// identical inputs.
+    /// </summary>
+    [Fact]
+    public void A_same_vendor_model_override_re_reads_agys_effort_off_the_new_model_id()
+    {
+        var parent = ParentEntry(adapter: "agy", model: null, effort: null) with
+        {
+            ModelResolved = AdapterDefaultModels.For("agy"),
+            ModelSource = BindingValueSource.ResolvedDefault,
+            EffortResolved = "high",
+            EffortSource = BindingValueSource.ResolvedDefault,
+        };
+
+        var entry = RedispatchCommand.InheritBinding(
+            parent, new RedispatchOptions("parent-room", "new-room", Model: "gemini-3.8-flash-low"));
+
+        Assert.Equal("gemini-3.8-flash-low", entry.ModelResolved);
+        Assert.Equal("low", entry.EffortResolved);
+        Assert.Equal(BindingValueSource.ResolvedDefault, entry.EffortSource);
+        // The control that this is the STAMP moving and not the axis: the dispatch input stays null,
+        // so the CLI is still handed no --effort of its own, exactly as ToBinding would leave it.
+        Assert.Null(entry.Effort);
+    }
+
+    /// <summary>
+    /// The polarity arm for the test above, and the reason its trigger is <c>--model</c> given AND a
+    /// parent that recorded no effort, rather than "the model stamp moved". A parent whose effort WAS
+    /// requested keeps both the value and the <see cref="BindingValueSource.Requested"/> source across
+    /// a same-vendor <c>--model</c>: re-resolving there would restamp it <c>resolved-default</c> and
+    /// claim the child fell back to a value it was actually given.
+    /// </summary>
+    [Fact]
+    public void A_same_vendor_model_override_does_not_demote_an_effort_the_parent_was_asked_for()
+    {
+        var parent = ParentEntry(adapter: "claude", model: "opus", effort: "careful") with
+        {
+            ModelResolved = "opus",
+            ModelSource = BindingValueSource.Requested,
+            EffortResolved = "careful",
+            EffortSource = BindingValueSource.Requested,
+        };
+
+        var entry = RedispatchCommand.InheritBinding(
+            parent, new RedispatchOptions("parent-room", "new-room", Model: "haiku"));
+
+        Assert.Equal("haiku", entry.ModelResolved);
+        Assert.Equal(BindingValueSource.Requested, entry.ModelSource);
+        Assert.Equal("careful", entry.EffortResolved);
+        Assert.Equal(BindingValueSource.Requested, entry.EffortSource);
+    }
+
+    /// <summary>
     /// #1927 review HIGH, sub-note: the <c>--spec</c> path passed <c>options.Model ?? parentEntry.Model</c>
     /// straight into <see cref="RoleDispatch.ToBinding"/> as an explicit override, which does NOT apply
     /// the vendor-swap axis rule to it — so an amended-spec redispatch onto agy handed the vendor CLI

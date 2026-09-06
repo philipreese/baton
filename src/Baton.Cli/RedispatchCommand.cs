@@ -365,6 +365,23 @@ public static class RedispatchCommand
     /// <see cref="BindingValueSource.ResolvedDefault"/> — the child inherited the value, it did not
     /// fall back to it.
     /// </para>
+    /// <para>
+    /// #1927 re-review MEDIUM corrects that "per axis" for the one case where the two axes are NOT
+    /// independent: <see cref="RoleDispatch.ResolveEffortStamp"/>'s third rung reads agy's effort off
+    /// the RESOLVED MODEL ID's suffix, so moving the model axis moves the correct effort answer too.
+    /// A same-vendor <c>--model gemini-3.8-flash-low</c> over an agy parent stamped <c>high</c> kept
+    /// that <c>high</c> while the CLI ran at <c>low</c> — an effort the room displays and the model id
+    /// contradicts, which is worse than the bare vendor #1927 set out to fix.
+    /// </para>
+    /// <para>
+    /// The trigger is <c>--model</c> given AND the parent recorded NO effort of its own, not "the model
+    /// stamp moved": re-resolving whenever the model moves is what would reintroduce the downgrade the
+    /// paragraph above warns about (a parent with <c>EffortResolved="careful"</c>/<c>requested</c>
+    /// re-stamped <c>careful</c>/<c>resolved-default</c>). A null <c>parentEntry.Effort</c> is exactly
+    /// the room the suffix rung exists for: <see cref="RoleDispatch.ToBinding"/> leaves <c>Effort</c>
+    /// null only when nothing was requested and no tier supplied one, so nothing requested can be lost
+    /// here.
+    /// </para>
     /// Public for the same reason <see cref="InheritBinding"/> is: unit-testable against a hand-built
     /// entry, without a room on disk.
     /// </summary>
@@ -379,7 +396,11 @@ public static class RedispatchCommand
         var (modelResolved, modelSource) = options.Model is null && !vendorSwapped
             ? (parentEntry.ModelResolved, parentEntry.ModelSource)
             : RoleDispatch.ResolveModelStamp(entry.Adapter, options.Model, entry.Model);
-        var (effortResolved, effortSource) = options.Effort is null && !vendorSwapped
+        // The one axis interaction, stated in this method's own remarks: agy's effort rung is a
+        // function of `modelResolved`, so a same-vendor --model with nothing requested on the effort
+        // axis must re-read the suffix off the NEW id rather than inherit an answer the id contradicts.
+        var effortFollowsTheModel = options.Model is not null && parentEntry.Effort is null;
+        var (effortResolved, effortSource) = options.Effort is null && !vendorSwapped && !effortFollowsTheModel
             ? (parentEntry.EffortResolved, parentEntry.EffortSource)
             : RoleDispatch.ResolveEffortStamp(entry.Adapter, options.Effort, entry.Effort, modelResolved);
 
