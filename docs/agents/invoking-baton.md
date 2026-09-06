@@ -404,7 +404,8 @@ last-write time.
 
 Three readings the output does **not** support, each of which a reader's prior will otherwise supply.
 A room reporting **no counts at all** did not necessarily run zero tools — its stream may simply carry
-no tool activity this reader can parse. A **`refused 0`** is not evidence of a well-behaved lane on a
+no tool activity this reader can parse, or `--vendor` may have excluded every execution it had, which
+the output discloses as its own count rather than as an unreadable stream. A **`refused 0`** is not evidence of a well-behaved lane on a
 room captured before this shipped: `spec/baton.md` §7 states which zero is false and why. And a
 **`repeated 0`** does not always mean distinct calls — on a vendor whose stream omits arguments there
 was nothing to compare, which is what the per-vendor breakdown exists to show.

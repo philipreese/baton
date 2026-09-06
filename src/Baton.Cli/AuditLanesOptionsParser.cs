@@ -42,7 +42,7 @@ public static class AuditLanesOptionsParser
         "             file's last-write time rather than any recorded endedAt.",
         "  --vendor   One adapter name (claude, agy, codex), matched case-insensitively. A room whose",
         "             executions are all filtered out is absent, never reported at zero, and is",
-        "             disclosed under its own excluded-by---vendor count rather than as a room whose",
+        "             disclosed under its own excluded-by-vendor count rather than as a room whose",
         "             stream could not be read.",
         "  --rooms-root  Walk this directory's immediate children instead of ~/.baton/rooms.",
         "",
