@@ -66,8 +66,9 @@ public sealed class MemoryAuditCommandTests : IDisposable
     /// <summary>
     /// The fixture user home the non-Claude roots (#1852 phase A2) are read from. Supplied on EVERY
     /// run, never defaulted: without it these tests would walk the operator's real <c>~/.gemini</c>,
-    /// which is neither hermetic nor cheap — <c>antigravity-cli/brain</c> held 11,554 files when it
-    /// was measured.
+    /// which is neither hermetic nor cheap — see <c>VendorMemoryFamily</c>'s remarks for the size of
+    /// the tree that would be walked, and <c>docs/vendor-doc-audit.md</c> §"#1852 phase A2" for the
+    /// measurement itself.
     /// </summary>
     private string UserHome => Path.Combine(_root, "home");
 

@@ -33,8 +33,13 @@ public sealed class VendorMemoryRootTests : IDisposable
 
     private VendorMemoryRoot Root(string family, string absoluteDirectory) =>
         Assert.Single(
-            MemoryRootInventory.ScanVendorRoots(_home, BatonRoot),
+            Scan(),
             r => r.Family == family && r.DirectoryPath == absoluteDirectory);
+
+    private IReadOnlyList<VendorMemoryRoot> Scan(
+        VendorRootWalkLimits? limits = null, Func<string, string[]>? listEntries = null) =>
+        MemoryRootInventory.ScanVendorRoots(
+            _home, BatonRoot, limits, listEntries, TestContext.Current.CancellationToken);
 
     private string UnderHome(string relative) =>
         Path.Combine(_home, relative.Replace('/', Path.DirectorySeparatorChar));
@@ -99,7 +104,7 @@ public sealed class VendorMemoryRootTests : IDisposable
 
         // The decoy is in no row at all: exactly one Baton-managed root exists, and it is the one
         // the supplied Baton root names.
-        var managedRows = MemoryRootInventory.ScanVendorRoots(_home, BatonRoot)
+        var managedRows = Scan()
             .Where(r => r.SourceScope == VendorMemoryScope.BatonManaged)
             .ToList();
         Assert.Equal([UnderBatonRoot("codex-home")], managedRows.Select(r => r.DirectoryPath));
@@ -170,7 +175,7 @@ public sealed class VendorMemoryRootTests : IDisposable
     {
         Directory.CreateDirectory(_home);
 
-        var roots = MemoryRootInventory.ScanVendorRoots(_home, BatonRoot);
+        var roots = Scan();
 
         Assert.Equal(VendorMemoryRootTable.Families.Count, roots.Count);
         Assert.All(roots, r =>
@@ -199,5 +204,146 @@ public sealed class VendorMemoryRootTests : IDisposable
         Assert.Equal(
             ["extensions/ad_hoc/instructions.md", "raw_memories.md"],
             root.Files.Select(f => f.RelativePath));
+    }
+
+    /// <summary>
+    /// A directory that could not be read is <c>unreadable</c>, never <c>empty</c> — and carries no
+    /// file count at all rather than the partial one the walk had gathered when the listing failed.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// The control arm is the same tree walked with the real lister: it reports two files, so this
+    /// test discriminates between "the walk failed" and "there was nothing there" rather than passing
+    /// on a fixture that is empty either way. The fault is injected one level down, at the nested
+    /// <c>ad_hoc</c> directory, so the walk has already gathered a file when it hits it — which is the
+    /// measured defect's exact shape (a partial gather reported as an authoritative count).
+    /// </para>
+    /// <para>
+    /// Injected through the listing seam rather than planted as a denied ACL: an ACL fixture is a
+    /// privilege gamble on a hosted runner, and the thing under test is what this type does when a
+    /// listing throws, which is identical either way.
+    /// </para>
+    /// </remarks>
+    [Fact]
+    public void An_unreadable_directory_is_reported_unreadable_with_no_count_rather_than_empty()
+    {
+        Write(".codex/memories/raw_memories.md", "readable");
+        Write(".codex/memories/extensions/ad_hoc/instructions.md", "behind the denied listing");
+
+        var denied = UnderHome(".codex/memories/extensions/ad_hoc");
+        var complete = Assert.Single(
+            Scan(),
+            r => r.Family == "codex-markdown" && r.DirectoryPath == UnderHome(".codex/memories"));
+        Assert.Equal(VendorMemoryPresence.Populated, complete.Presence);
+        Assert.Equal(2, complete.FileCount);
+
+        var partial = Assert.Single(
+            Scan(listEntries: path => path == denied
+                ? throw new UnauthorizedAccessException("denied, as a real ACL would")
+                : Directory.GetFileSystemEntries(path)),
+            r => r.Family == "codex-markdown" && r.DirectoryPath == UnderHome(".codex/memories"));
+
+        Assert.Equal(VendorMemoryPresence.Unreadable, partial.Presence);
+        Assert.Null(partial.FileCount);
+        Assert.Null(partial.TotalBytes);
+        Assert.Null(partial.NewestModifiedUtc);
+        Assert.Empty(partial.Files);
+    }
+
+    /// <summary>
+    /// A walk that hits its ceiling reports <c>capped</c> and no count — the state, not the prefix it
+    /// had reached. The same tree under the default limits reports a real count, which is what makes
+    /// this an assertion about the ceiling rather than about the fixture.
+    /// </summary>
+    [Fact]
+    public void A_walk_that_hits_its_ceiling_reports_capped_rather_than_the_prefix_it_reached()
+    {
+        for (var i = 0; i < 5; i++)
+        {
+            Write($".codex/memories/fact-{i}.md", "synthetic");
+        }
+
+        var complete = Assert.Single(
+            Scan(),
+            r => r.Family == "codex-markdown" && r.DirectoryPath == UnderHome(".codex/memories"));
+        Assert.Equal(VendorMemoryPresence.Populated, complete.Presence);
+        Assert.Equal(5, complete.FileCount);
+
+        var capped = Assert.Single(
+            Scan(limits: new VendorRootWalkLimits(EntryCeiling: 2, Budget: TimeSpan.FromMinutes(1))),
+            r => r.Family == "codex-markdown" && r.DirectoryPath == UnderHome(".codex/memories"));
+
+        Assert.Equal(VendorMemoryPresence.Capped, capped.Presence);
+        Assert.Null(capped.FileCount);
+        Assert.Null(capped.TotalBytes);
+        Assert.Empty(capped.Files);
+
+        // The ceiling is recorded on the row, and it is the one this walk was GIVEN -- reporting the
+        // default here would misreport every row measured under custom limits, this one included.
+        Assert.Equal(2, capped.CappedAtEntries);
+        Assert.Null(complete.CappedAtEntries);
+    }
+
+    /// <summary>
+    /// A junction pointing at its own parent is not descended into and is not counted, so a cycle
+    /// planted under a vendor root terminates instead of running until the ceiling stops it.
+    /// </summary>
+    /// <remarks>
+    /// A junction rather than a symbolic link on purpose: <c>mklink /J</c> needs no Developer Mode or
+    /// elevation, so this arm actually runs on an ordinary host. If the host refuses it anyway the
+    /// test skips LOUDLY — a silent return would make an unexercised cycle look exactly like an
+    /// exercised one. The ceiling is set small so a walk that DID follow the cycle would come back
+    /// <c>capped</c> rather than merely slow: this arm fails if the reparse-point skip is removed.
+    /// </remarks>
+    [Fact]
+    public void A_junction_under_a_vendor_root_is_neither_followed_nor_counted()
+    {
+        Write(".gemini/antigravity-cli/brain/a-conversation/steps.jsonl", "steps");
+        var brain = UnderHome(".gemini/antigravity-cli/brain");
+
+        var mklink = System.Diagnostics.Process.Start(new System.Diagnostics.ProcessStartInfo(
+            "cmd.exe", $"/c mklink /J \"{Path.Combine(brain, "loop")}\" \"{brain}\"")
+        {
+            RedirectStandardOutput = true,
+            RedirectStandardError = true,
+        });
+
+        if (mklink is null)
+        {
+            Assert.Skip("this host could not start cmd.exe, so a junction cannot be planted here");
+            return;
+        }
+
+        mklink.WaitForExit();
+        if (mklink.ExitCode != 0 || !Directory.Exists(Path.Combine(brain, "loop")))
+        {
+            Assert.Skip("this host refused `mklink /J`, so the reparse-point cycle cannot be planted here");
+            return;
+        }
+
+        var root = Assert.Single(
+            Scan(limits: new VendorRootWalkLimits(EntryCeiling: 50, Budget: TimeSpan.FromSeconds(20))),
+            r => r.Family == "antigravity-brain" && r.DirectoryPath == brain);
+
+        Assert.Equal(VendorMemoryPresence.Populated, root.Presence);
+        Assert.Equal(1, root.FileCount);
+    }
+
+    /// <summary>
+    /// A cancelled scan throws rather than returning the rows it had built. A short report is
+    /// indistinguishable from a machine with fewer roots, which is the misreading every state on
+    /// <see cref="VendorMemoryPresence"/> exists to stop, one layer up.
+    /// </summary>
+    [Fact]
+    public void A_cancelled_scan_throws_rather_than_returning_a_short_report()
+    {
+        Write(".codex/memories/raw_memories.md", "a fact");
+
+        using var cancelled = new CancellationTokenSource();
+        cancelled.Cancel();
+
+        Assert.ThrowsAny<OperationCanceledException>(() =>
+            MemoryRootInventory.ScanVendorRoots(_home, BatonRoot, limits: null, listEntries: null,
+                cancelled.Token));
     }
 }

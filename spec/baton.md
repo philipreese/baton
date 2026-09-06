@@ -4988,20 +4988,29 @@ Three rulings the register owns here, all of them things a reader would otherwis
   attaches to them.** Every kind above is a claim about a root's mapping to a repository; these roots
   are per-machine and encode no checkout, so passing them through would emit `no-provenance` for each
   — definitionally true, and therefore saying nothing.
-- **A root's presence is a three-valued reading**, and the middle value — the directory is there and
-  the family's selector matched nothing — is never inferred from a file count of zero. Phase C's
-  scope turns on it; `VendorMemoryPresence`'s remarks carry the two live cases it was written from.
-- **The selector is per-family and narrow, and one family is counted rather than opened.** These
-  directories sit inside whole vendor homes holding hundred-megabyte databases and five-figure file
-  counts; an audit that walked them would digest all of that every run. `VendorMemoryFamily`'s
-  remarks carry the measurements behind both bounds.
+- **A root's presence is a five-valued reading, and it is the only field that says whether the walk
+  finished.** Three values describe a completed walk — absent, present-and-empty, populated — and the
+  middle one is never inferred from a file count of zero. The other two describe a walk that did not
+  finish: `capped` (it hit its own ceiling) and `unreadable` (a listing failed). **A row in either of
+  those states carries no file count, no byte total and no newest mtime at all** — a partially
+  gathered count reads exactly like a complete one, and an unreadable directory reported as `empty`
+  says the selector matched nothing about a tree nothing could be read from. Phase C's scope turns on
+  this field; `VendorMemoryPresence`'s remarks carry the live cases each value was written from.
+- **The selector is per-family and narrow, one family is counted rather than opened, and every walk
+  is bounded, interruptible and refuses to follow a reparse point.** These directories sit inside
+  whole vendor homes holding hundred-megabyte databases and five-figure file counts; an audit that
+  walked them would digest all of that every run, a junction planted under one would be descended
+  into forever, and a walk already running could not be cancelled. `VendorMemoryFamily`'s remarks
+  carry the measurements behind the selector bounds and `VendorRootWalkLimits`' carry the walk's.
 
 The phase-A contract is unchanged for them: path, size, mtime, SHA-256, and **nothing opened for
 what it says**. A `.sqlite` is digested as bytes exactly as a `.md` is; what those bytes *mean* was
 established by a separate one-time probe whose four findings live in `docs/vendor-doc-audit.md`
 (§"#1852 phase A2"), each with a re-runnable check in `tools/vendor-verify/verify.py` — the first
 checks there that drive no vendor CLI and spend nothing, and so the first that `--selftest` can
-exercise.
+exercise. That selftest is a **gate member** (`vendor-verify-selftest`, `tools/gates/gates.py`
+OVERLAP): a free control that only runs when someone remembers it is a control that degrades
+silently, which is the failure the gate list exists to stop.
 
 **`~/.baton/codex-home` is not a vendor surface**, however much its `memories_1.sqlite` looks like
 one. Q5 (operator, 2026-09-05) ruled it **Baton's own first beta** of this memory system: A2

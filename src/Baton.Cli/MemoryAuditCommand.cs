@@ -107,7 +107,7 @@ public static class MemoryAuditCommand
         // point somewhere else entirely.
         var userHome = userHomeOverride ?? MemoryRootInventory.DefaultUserHome;
         var vendorRoots = MemoryRootInventory.ScanVendorRoots(
-            userHome, batonRootOverride ?? BatonPaths.Root);
+            userHome, batonRootOverride ?? BatonPaths.Root, limits: null, cancellationToken);
 
         if (options.Format == MemoryAuditOutputFormat.Json)
         {
@@ -225,11 +225,16 @@ public static class MemoryAuditCommand
 
     /// <summary>
     /// The non-Claude roots, printed under their own heading and with no findings attached — this
-    /// half of the report is an inventory only. Absent, empty and populated each print differently
+    /// half of the report is an inventory only. Each presence prints differently
     /// (<see cref="VendorMemoryPresence"/> says why), and a family whose files were counted rather
     /// than digested says so on its own line rather than leaving a reader to read an empty file list
     /// as an empty directory.
     /// </summary>
+    /// <remarks>
+    /// A capped or unreadable row prints <b>no</b> file count, byte total or newest mtime, and says
+    /// which of the two it is instead. Printing a partial count next to the word <c>files=</c> is
+    /// what a reader has no way to tell from a complete one — the defect this half of the fix is for.
+    /// </remarks>
     private static void WriteVendorRoots(TextWriter output, IReadOnlyList<VendorMemoryRoot> roots)
     {
         output.WriteLine();
@@ -246,8 +251,19 @@ public static class MemoryAuditCommand
                 $"    family={root.Family} vendor={root.SourceVendor} " +
                 $"scope={MemoryJsonNames.Of(root.SourceScope)} " +
                 $"presence={MemoryJsonNames.Of(root.Presence)}");
+            if (root.FileCount is not { } fileCount || root.TotalBytes is not { } totalBytes)
+            {
+                output.WriteLine(
+                    root.Presence == VendorMemoryPresence.Capped
+                        ? $"    files=(not counted -- the walk was capped at {root.CappedAtEntries} " +
+                          "entries and abandoned there; that is the LIMIT, not a count of this directory)"
+                        : "    files=(not counted -- this directory could not be read, which is not " +
+                          "the same as it holding nothing)");
+                continue;
+            }
+
             output.WriteLine(
-                $"    files={root.FileCount} bytes={root.TotalBytes.ToString("N0", CultureInfo.InvariantCulture)}" +
+                $"    files={fileCount} bytes={totalBytes.ToString("N0", CultureInfo.InvariantCulture)}" +
                 (root.NewestModifiedUtc is { } newest ? $" newest={newest:O}" : " newest=(none)") +
                 (root.Inventoried ? string.Empty : "  [counted only -- no file here was opened]"));
         }

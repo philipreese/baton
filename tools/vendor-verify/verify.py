@@ -29,22 +29,37 @@ USAGE
     pixi run vendor-verify -- --list       # names and what each one costs
     pixi run vendor-verify -- --only gate  # one group, see --list for the full set
     pixi run vendor-verify -- --selftest   # the local (filesystem) checks only; spends nothing
+    pixi run vendor-verify-selftest        # the same thing, and what `pixi run gates` runs
 
 SAFETY
 ------
 Checks are `safe` unless marked otherwise. `safe` means: temp directories only, no writes outside
-them, and no mutation of the operator's `~/.claude` or `~/.gemini`. Checks marked `mutates-config`
-are SKIPPED unless `--allow-config-writes` is passed; they back up byte-exact, add exactly one key,
-restore in a `finally`, and re-verify the sha256.
+them, and no mutation of any vendor home the suite reads -- `~/.claude` and `~/.gemini` for the
+vendor-CLI checks, and (since #1852 phase A2) `~/.codex` and Baton's own root, which the memory
+checks read and never write. Checks marked `mutates-config` are SKIPPED unless
+`--allow-config-writes` is passed; they back up byte-exact, add exactly one key, restore in a
+`finally`, and re-verify the sha256.
 
-Every check spends real subscription usage, so this NEVER runs in CI -- same rule as
-`pixi run vendor-probe` and the live smoke tests.
+WHAT RUNS IN CI, AND WHAT NEVER CAN
+-----------------------------------
+Every check that drives a vendor CLI spends real subscription usage, so a full run NEVER happens in
+CI -- same rule as `pixi run vendor-probe` and the live smoke tests. The `local=True` checks are the
+exception and are the reason to read this paragraph rather than assume the older, simpler rule: they
+read the filesystem, drive nothing, spend nothing, and `--selftest` exercises them against fixture
+trees. That selftest IS gated (`vendor-verify-selftest`, a `tools/gates/gates.py` OVERLAP member), so
+a control that stopped discriminating is caught by a normal `pixi run gates` rather than by whoever
+next remembers this file exists.
+
+A temp COPY of a vendor sqlite store is made outside the user's home and removed loudly -- see
+`_scratch_root` for why both halves of that sentence are load-bearing.
 """
 from __future__ import annotations
 
 import argparse
+import contextlib
 import glob
 import hashlib
+import io
 import json
 import os
 import re
@@ -4092,17 +4107,69 @@ def _claude_allowedtools_space_before_paren():
 # questions each: readable? writable? stable schema? They drive no vendor CLI, spend nothing, and
 # start no model -- see `check(local=...)` and `--selftest`.
 #
-# CONTENT-BLIND, structurally and not by convention. Every one of these reads names, counts, sizes
-# and SCHEMA (sqlite table/column names, protobuf-text FIELD names) and nothing else. No memory text,
-# no sqlite row value and no pbtxt field value is read into a variable that outlives the parse, let
-# alone into a `detail` string -- and `detail` is printed. The pbtxt check is where that bites: the
-# one field those files carry is `title`, whose VALUE is conversation content.
+# CONTENT-BLIND. Every one of these reads names, counts, sizes and SCHEMA (sqlite table/column names,
+# protobuf-text FIELD names) and nothing else. No memory text, no sqlite row value and no pbtxt field
+# value is read into a variable that outlives the parse, let alone into a `detail` string -- and
+# `detail` is printed. The pbtxt check is where that bites: the one field those files carry is
+# `title`, whose VALUE is conversation content.
+#
+# Structural everywhere EXCEPT one spot, which is named rather than glossed over: the sqlite side is
+# blind by choice of API (a `pragma table_info` cannot return a row value), while `_pbtxt_field_names`
+# is a line-oriented regex and is blind by the vendor's SERIALIZER CONVENTION -- see that function's
+# own docstring for the exact case that breaks it and the selftest arm that pins it.
 #
 # The findings themselves -- four families, three questions each -- live in the vendor register, not
 # in these docstrings. Read docs/vendor-doc-audit.md § "#1852 phase A2" for them.
 
 def _home(home=None):
     return home if home else os.path.expanduser("~")
+
+
+def _under_home(path):
+    """True when `path` resolves inside the user's home directory."""
+    try:
+        home = os.path.realpath(os.path.expanduser("~"))
+        return os.path.commonpath([os.path.realpath(path), home]) == home
+    except ValueError:                                             # different drives: not under it
+        return False
+
+
+def _scratch_root():
+    """A writable directory for a temp COPY of a vendor store, guaranteed OUTSIDE the user's home.
+
+    `tempfile.mkdtemp()` resolves under %TEMP% (C:/Users/<user>/AppData/Local/Temp on Windows), i.e.
+    under ~/, so a copy of a memory store made there lands in the very tree this lane's rule keeps
+    everything out of. Nothing beside a vendor file is touched either way -- the rule is about WHERE
+    a plaintext copy of someone's memories may exist, not about what it is copied from.
+
+    `BATON_VENDOR_VERIFY_TMP` overrides the default, which is a directory on the system drive root
+    (an ordinary user can create one there on a default Windows install; /tmp elsewhere). Raises
+    rather than falling back to %TEMP%: a check that quietly relocated the copy back under ~/ is the
+    failure this function exists to make impossible, and INCONCLUSIVE with a reason beats it.
+    """
+    candidates = []
+    override = os.environ.get("BATON_VENDOR_VERIFY_TMP")
+    if override:
+        candidates.append(override)
+    if os.name == "nt":
+        candidates.append(os.path.join(os.environ.get("SystemDrive", "C:") + os.sep, "baton-scratch"))
+    else:
+        candidates.append("/tmp/baton-scratch")
+
+    problems = []
+    for candidate in candidates:
+        if _under_home(candidate):
+            problems.append(f"{candidate}: under the user home")
+            continue
+        try:
+            os.makedirs(candidate, exist_ok=True)
+        except OSError as exc:
+            problems.append(f"{candidate}: {exc!r}")
+            continue
+        return candidate
+    raise RuntimeError(
+        "no scratch directory outside the user home is writable, so no copy of a vendor store can "
+        f"be made: {problems}. Set BATON_VENDOR_VERIFY_TMP to one.")
 
 
 def _sqlite_schema(db_path):
@@ -4116,9 +4183,13 @@ def _sqlite_schema(db_path):
 
     Returns {table: {"cols": [...], "rows": n}}. Never a row VALUE -- a count is a fact about the
     store's shape, its contents are not this tool's business.
+
+    The copy lands OUTSIDE the user's home (`_scratch_root`) and its removal is LOUD: a cleanup that
+    fails leaves a full plaintext copy of someone's memory store on disk, and `ignore_errors=True`
+    made that outcome indistinguishable from a clean one.
     """
     import sqlite3
-    tmp = tempfile.mkdtemp(prefix="v-mem-schema-")
+    tmp = tempfile.mkdtemp(prefix="v-mem-schema-", dir=_scratch_root())
     try:
         for suffix in ("", "-wal", "-shm"):
             source = db_path + suffix
@@ -4137,7 +4208,23 @@ def _sqlite_schema(db_path):
         finally:
             con.close()
     finally:
-        shutil.rmtree(tmp, ignore_errors=True)
+        _remove_scratch(tmp)
+
+
+def _remove_scratch(path):
+    """Remove a temp copy of a vendor store, REPORTING a failure instead of swallowing it.
+
+    Never raises: a cleanup failure must not turn a schema read into a crash, and the check's own
+    result is still valid. What it must not do is stay quiet -- the copy is plaintext, and an
+    operator who is never told cannot remove it by hand.
+    """
+    try:
+        shutil.rmtree(path)
+    except OSError as exc:
+        print(f"  !! could not remove the temp copy of a vendor store at {path}: {exc!r}\n"
+              f"     A PLAINTEXT COPY IS STILL ON DISK -- remove it by hand.", flush=True)
+        return False
+    return True
 
 
 def _pbtxt_field_names(path):
@@ -4146,6 +4233,16 @@ def _pbtxt_field_names(path):
     protobuf-text puts names and values on the same line, so this is the one place in the suite where
     being content-blind takes an explicit act rather than a choice of API: the match keeps group(1)
     and the rest of the line is dropped with the line.
+
+    WHAT THIS RESTS ON, stated because the block comment above used to claim otherwise for the whole
+    family: this match is line-oriented and has NO notion of quoting, so it is blind by the vendor's
+    SERIALIZER CONVENTION, not structurally. A value containing a LITERAL newline followed by an
+    identifier and a `:` or `{` would have that token captured as a field name -- it would land in
+    `unknown` and be printed in a FAIL detail, which is a name derived from a VALUE. Conforming
+    protobuf-text serializers escape newlines as `\\n`, so this was not observed on any real file, and
+    the capture group's `[A-Za-z_][A-Za-z0-9_]*` bounds the worst case to one identifier-shaped word
+    of a title. `selftest()` pins the limitation with a synthetic file rather than leaving the claim
+    to be re-derived; a quote-aware parser is the fix if a vendor ever emits one.
     """
     names = set()
     try:
@@ -4454,12 +4551,113 @@ def selftest() -> int:
                 failures.append(f"{name}: {arm} returned {status}, expected {expect}")
                 print(f"   !!  {arm}: {status}, expected {expect}\n       {detail}")
 
+    failures += _selftest_scratch_copy()
+    failures += _selftest_pbtxt_limitation()
+
     print("\n" + "=" * 78)
     if failures:
         print(f"{len(failures)} problem(s) across {len(local)} local check(s).")
         return 1
-    print(f"All {len(local)} local check(s) pass on a faithful fixture and refuse a broken one.")
+    print(f"All {len(local)} local check(s) pass on a faithful fixture and refuse a broken one, "
+          "the sqlite temp copy lands outside the user home and reports a failed cleanup, and the "
+          "pbtxt parser's one convention-dependent case is pinned.")
     return 0
+
+
+def _selftest_scratch_copy():
+    """Where a temp copy of a vendor store may live, and that a failed cleanup is REPORTED.
+
+    Both arms discriminate. `_under_home` is exercised in both directions -- a function that answered
+    False for everything would make the location assertion vacuous -- and `_remove_scratch` is called
+    once with a cleanup that fails and once with one that succeeds, so a version that printed nothing
+    and a version that printed always both go red.
+    """
+    print("\n_scratch_root / _remove_scratch")
+    failures = []
+
+    if not _under_home(os.path.join(os.path.expanduser("~"), "some-file")):
+        failures.append("_under_home says a path inside the home is not under it")
+        print("   !!  _under_home did not recognise a path inside the user home")
+    else:
+        print("   OK  _under_home recognises a path inside the user home (the control arm)")
+
+    try:
+        scratch = _scratch_root()
+    except RuntimeError as exc:
+        failures.append(f"_scratch_root: {exc}")
+        print(f"   !!  no scratch root outside the user home is available: {exc}")
+        return failures
+
+    if _under_home(scratch):
+        failures.append(f"_scratch_root returned {scratch}, which is under the user home")
+        print(f"   !!  the sqlite temp copy would land under the user home: {scratch}")
+    else:
+        print(f"   OK  the sqlite temp copy lands outside the user home: {scratch}")
+
+    quiet = tempfile.mkdtemp(prefix="v-scratch-ok-", dir=scratch)
+    captured = io.StringIO()
+    with contextlib.redirect_stdout(captured):
+        removed = _remove_scratch(quiet)
+    if not removed or os.path.exists(quiet) or captured.getvalue().strip():
+        failures.append("_remove_scratch was not silent on a successful removal")
+        print(f"   !!  a successful cleanup did not stay quiet -- {captured.getvalue()!r}")
+    else:
+        print("   OK  a successful cleanup removes the copy and says nothing")
+
+    loud = tempfile.mkdtemp(prefix="v-scratch-stuck-", dir=scratch)
+    real_rmtree = shutil.rmtree
+    captured = io.StringIO()
+    try:
+        shutil.rmtree = lambda *a, **k: (_ for _ in ()).throw(OSError("the handle is still open"))
+        with contextlib.redirect_stdout(captured):
+            removed = _remove_scratch(loud)
+    finally:
+        shutil.rmtree = real_rmtree
+    if removed or loud not in captured.getvalue() or "PLAINTEXT" not in captured.getvalue():
+        failures.append("a failed cleanup of the sqlite temp copy was not reported")
+        print(f"   !!  a failed cleanup was swallowed -- returned {removed!r}, said "
+              f"{captured.getvalue()!r}")
+    else:
+        print("   OK  a failed cleanup names the leftover copy loudly")
+    real_rmtree(loud, ignore_errors=True)
+
+    return failures
+
+
+def _selftest_pbtxt_limitation():
+    """PINS A KNOWN LIMITATION -- not a control arm, and the distinction matters.
+
+    `_pbtxt_field_names` is line-oriented, so a value carrying a LITERAL newline can contribute an
+    identifier-shaped token as a field name. That is a defect in the FIELD-NAME parser's blindness
+    claim, recorded here so the claim in its docstring rests on something executable rather than on a
+    reader re-deriving it. It deliberately does NOT live in SELFTEST_FIXTURES: a fixture like this in
+    the faithful arm would make the check FAIL (an unknown field), and in the broken arm it would
+    "pass" for a reason unrelated to the reversal that arm exists to catch.
+    """
+    print("\n_pbtxt_field_names (pinned limitation, not a control)")
+    failures = []
+    root = tempfile.mkdtemp(prefix="v-selftest-pbtxt-")
+    try:
+        conforming = _write(root, "conforming.pbtxt", 'title: "synthetic"\nlast_user_view_time: "0"\n')
+        if _pbtxt_field_names(conforming) != {"title", "last_user_view_time"}:
+            failures.append("the pbtxt parser did not read a conforming file's field names")
+            print("   !!  a conforming file's field names did not parse")
+        else:
+            print("   OK  a conforming file yields exactly its field names")
+
+        # A literal newline inside a quoted value -- what a conforming serializer escapes as \n.
+        leaky = _write(root, "leaky.pbtxt", 'title: "synthetic\nnot_a_field: still the title"\n')
+        names = _pbtxt_field_names(leaky)
+        if "not_a_field" not in names:
+            failures.append(
+                "the pbtxt parser no longer captures a value-derived token -- the limitation its "
+                "docstring records has been fixed, and both should be updated together")
+            print("   !!  the pinned limitation no longer reproduces (fixed? then update the docstring)")
+        else:
+            print("   OK  the convention-dependent case reproduces, as the docstring records")
+    finally:
+        shutil.rmtree(root, ignore_errors=True)
+    return failures
 
 
 def project_slug_root():

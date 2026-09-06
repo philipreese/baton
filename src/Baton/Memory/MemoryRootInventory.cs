@@ -187,6 +187,13 @@ public static class MemoryRootInventory
     /// <see cref="VendorMemoryPresence"/>'s own remarks say why that distinction carries the ruling.
     /// </para>
     /// <para>
+    /// <b>Each walk carries an entry ceiling, a time budget and a cancellation token, and stops at a
+    /// reparse point rather than descending through it</b> (<see cref="VendorRootWalkLimits"/> has
+    /// the reasoning; <c>spec/baton.md</c> §12 has the ruling). These are third-party trees: one of the families named
+    /// here is a per-conversation scratch directory whose growth nothing in this repo controls, and a
+    /// junction planted under any of them would otherwise be descended into forever.
+    /// </para>
+    /// <para>
     /// Sqlite sidecars (<c>-wal</c>, <c>-shm</c>) are outside every selector, so a digest here is of
     /// the main database file alone and does not cover uncheckpointed state sitting in a write-ahead
     /// log. Said rather than left to inference: the digest is stable enough to recognise a copy, and
@@ -199,15 +206,46 @@ public static class MemoryRootInventory
     /// A Baton-managed family hangs off this rather than off <paramref name="userHomePath"/>; see
     /// <see cref="VendorMemoryFamily.RelativeDirectory"/> for what resolving it the other way costs.
     /// </param>
-    public static IReadOnlyList<VendorMemoryRoot> ScanVendorRoots(string userHomePath, string batonRootPath)
+    /// <param name="limits">
+    /// What bounds each family's walk; <see cref="VendorRootWalkLimits.Default"/> when null.
+    /// </param>
+    /// <param name="cancellationToken">
+    /// Checked per directory entry. A cancelled scan throws rather than returning a short report —
+    /// an abandoned walk is not a measurement, and a partial one that looked complete is the exact
+    /// misreading <see cref="VendorMemoryPresence"/>'s two failure states exist to stop.
+    /// </param>
+    public static IReadOnlyList<VendorMemoryRoot> ScanVendorRoots(
+        string userHomePath,
+        string batonRootPath,
+        VendorRootWalkLimits? limits = null,
+        CancellationToken cancellationToken = default)
+        => ScanVendorRoots(userHomePath, batonRootPath, limits, listEntries: null, cancellationToken);
+
+    /// <summary>
+    /// Test-only seam (Baton.Tests, via <c>InternalsVisibleTo</c>): <paramref name="listEntries"/>
+    /// replaces <see cref="Directory.GetFileSystemEntries(string)"/>, which is the only way to make a
+    /// listing fail deterministically. Planting a real denied ACL would make the test a privilege
+    /// gamble, and the failure being simulated — a listing that throws mid-walk — is the same one
+    /// either way.
+    /// </summary>
+    internal static IReadOnlyList<VendorMemoryRoot> ScanVendorRoots(
+        string userHomePath,
+        string batonRootPath,
+        VendorRootWalkLimits? limits,
+        Func<string, string[]>? listEntries,
+        CancellationToken cancellationToken)
     {
         ArgumentException.ThrowIfNullOrEmpty(userHomePath);
         ArgumentException.ThrowIfNullOrEmpty(batonRootPath);
 
+        var bounds = limits ?? VendorRootWalkLimits.Default;
+        var list = listEntries ?? Directory.GetFileSystemEntries;
         var roots = new List<VendorMemoryRoot>(VendorMemoryRootTable.Families.Count);
 
         foreach (var family in VendorMemoryRootTable.Families)
         {
+            cancellationToken.ThrowIfCancellationRequested();
+
             var basePath = family.SourceScope == VendorMemoryScope.BatonManaged ? batonRootPath : userHomePath;
             var directory = Path.Combine(
                 basePath, family.RelativeDirectory.Replace('/', Path.DirectorySeparatorChar));
@@ -221,7 +259,27 @@ public static class MemoryRootInventory
                 continue;
             }
 
-            var selected = SelectFiles(directory, family.FilePattern, family.Recursive);
+            var walk = SelectFiles(
+                directory, family.FilePattern, family.Recursive, bounds, list, cancellationToken);
+
+            if (walk.Outcome != VendorMemoryPresence.Populated)
+            {
+                // Capped or unreadable: no count, no total, no newest mtime. VendorMemoryPresence's
+                // remarks say what those two states mean and why a number here would be worse than
+                // no number at all.
+                roots.Add(new VendorMemoryRoot(
+                    family.Family, family.SourceVendor, family.SourceScope, directory,
+                    walk.Outcome, FileCount: null, TotalBytes: null, NewestModifiedUtc: null,
+                    Files: [], family.Inventoried,
+                    // The ceiling this walk was given, not the one a later reader's defaults would
+                    // have: a row measured under custom limits must report the limit it actually hit.
+                    CappedAtEntries: walk.Outcome == VendorMemoryPresence.Capped
+                        ? bounds.EntryCeiling
+                        : null));
+                continue;
+            }
+
+            var selected = walk.Files;
             var files = family.Inventoried ? ReadFiles(directory, selected) : [];
 
             roots.Add(new VendorMemoryRoot(
@@ -241,23 +299,106 @@ public static class MemoryRootInventory
     }
 
     /// <summary>
+    /// What one family's walk found, and whether the walk finished. <see cref="Outcome"/> carries
+    /// exactly three of the presence states: <see cref="VendorMemoryPresence.Capped"/> and
+    /// <see cref="VendorMemoryPresence.Unreadable"/> mean it did not finish, and
+    /// <see cref="VendorMemoryPresence.Populated"/> means it did — the caller is what narrows a
+    /// finished walk that matched nothing to <see cref="VendorMemoryPresence.Empty"/>. An unfinished
+    /// walk's partial gather is deliberately not handed back.
+    /// </summary>
+    private sealed record VendorRootWalk(VendorMemoryPresence Outcome, IReadOnlyList<FileInfo> Files);
+
+    /// <summary>
     /// The files a family's selector matches, as <see cref="FileInfo"/> — size and mtime only, so a
     /// family that is counted rather than inventoried never has a byte of its files read.
     /// </summary>
     /// <remarks>
+    /// <para>
+    /// <b>Hand-rolled rather than <see cref="Directory.EnumerateFiles(string, string, SearchOption)"/></b>,
+    /// which offers no way to bound a walk, no way to interrupt one, and no way to refuse to descend
+    /// into a junction — all three of which a third-party tree a live vendor process writes needs.
+    /// A reparse point is skipped, never followed and never counted, which is what makes a cycle
+    /// unenterable; <see cref="VendorRootWalkLimits"/> says why that removes the need for a visited
+    /// set and what the ceiling still backstops.
+    /// </para>
+    /// <para>
     /// A file that vanishes between the listing and the stat is skipped, for the reason
-    /// <see cref="ReadFiles(string, IReadOnlyList{FileInfo})"/> gives. An unreadable directory yields
-    /// nothing rather than throwing: these are third-party trees a live vendor process is writing.
+    /// <see cref="ReadFiles(string, IReadOnlyList{FileInfo})"/> gives — one lost row, in a walk that
+    /// otherwise finished. A whole LISTING that fails is the opposite case and is reported as
+    /// <see cref="VendorMemoryPresence.Unreadable"/>: it is not known what is in that directory, and
+    /// an empty selection would have said the selector matched nothing.
+    /// </para>
     /// </remarks>
-    private static IReadOnlyList<FileInfo> SelectFiles(string directoryPath, string pattern, bool recursive)
+    private static VendorRootWalk SelectFiles(
+        string directoryPath,
+        string pattern,
+        bool recursive,
+        VendorRootWalkLimits limits,
+        Func<string, string[]> listEntries,
+        CancellationToken cancellationToken)
     {
-        var depth = recursive ? SearchOption.AllDirectories : SearchOption.TopDirectoryOnly;
         var selected = new List<FileInfo>();
+        var pending = new Stack<string>();
+        pending.Push(directoryPath);
 
-        try
+        var started = System.Diagnostics.Stopwatch.StartNew();
+        var visited = 0;
+
+        while (pending.Count > 0)
         {
-            foreach (var path in Directory.EnumerateFiles(directoryPath, pattern, depth))
+            cancellationToken.ThrowIfCancellationRequested();
+
+            string[] entries;
+            try
             {
+                entries = listEntries(pending.Pop());
+            }
+            catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
+            {
+                return new VendorRootWalk(VendorMemoryPresence.Unreadable, []);
+            }
+
+            foreach (var path in entries)
+            {
+                cancellationToken.ThrowIfCancellationRequested();
+
+                if (++visited > limits.EntryCeiling || started.Elapsed > limits.Budget)
+                {
+                    return new VendorRootWalk(VendorMemoryPresence.Capped, []);
+                }
+
+                FileAttributes attributes;
+                try
+                {
+                    attributes = File.GetAttributes(path);
+                }
+                catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
+                {
+                    // Gone or locked between the listing and the stat. Nothing true to record.
+                    continue;
+                }
+
+                if (attributes.HasFlag(FileAttributes.ReparsePoint))
+                {
+                    continue;
+                }
+
+                if (attributes.HasFlag(FileAttributes.Directory))
+                {
+                    if (recursive)
+                    {
+                        pending.Push(path);
+                    }
+
+                    continue;
+                }
+
+                if (!System.IO.Enumeration.FileSystemName.MatchesSimpleExpression(
+                        pattern, Path.GetFileName(path)))
+                {
+                    continue;
+                }
+
                 try
                 {
                     var info = new FileInfo(path);
@@ -270,13 +411,8 @@ public static class MemoryRootInventory
                 }
             }
         }
-        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
-        {
-            // The whole walk failed. An empty selection is the honest answer; the presence of the
-            // directory itself is already recorded by the caller.
-        }
 
-        return selected;
+        return new VendorRootWalk(VendorMemoryPresence.Populated, selected);
     }
 
     /// <summary>

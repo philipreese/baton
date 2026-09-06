@@ -213,6 +213,14 @@ vendor-survey = { cmd = "python tools/vendor-survey/vendor_survey.py" }
 # redirected, and a run killed on a timeout loses everything it had already found.
 vendor-verify = { cmd = "python -u tools/vendor-verify/verify.py" }
 
+# #1852 phase A2 (2026-09-05 review): the control arm for verify.py's `local=True` checks -- the only
+# checks in that file that drive no vendor CLI and spend nothing. Each runs against a faithful fixture
+# tree that must PASS and a mutated one that must NOT, plus the sqlite temp-copy and pbtxt-parser arms.
+# GATED (tools/gates/gates.py OVERLAP), unlike `vendor-verify` above, precisely because it is free:
+# without it, widening PBTXT_ANNOTATION_FIELDS or drifting a fixture degrades a control silently and
+# nothing red ever appears. Not wrapped in buildlock.py -- pure python over temp fixtures, no MSBuild.
+vendor-verify-selftest = { cmd = "python -u tools/vendor-verify/verify.py --selftest" }
+
 # Recomputes the #527 audit's completeness register: for each step of the chain, the population that
 # was supposed to be covered and whether every member of it carries a disposition. Exists because
 # "we read everything" is unfalsifiable -- a completeness claim ships with the artifact that lets
