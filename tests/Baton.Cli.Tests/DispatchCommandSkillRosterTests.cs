@@ -205,6 +205,69 @@ public sealed class DispatchCommandSkillRosterTests
         }
     }
 
+    /// <summary>
+    /// #1941 review MEDIUM: a binding that declares its own skill set gets exactly that set — the
+    /// declared set REPLACES the workspace scan — so a roster printed from the scan named a package the
+    /// worker would not receive and omitted the one it would, inverting reality on the one dispatch
+    /// where the operator was most explicit. Asserted on the whole line rather than through
+    /// <see cref="RealizedSkills"/>, whose regex only knows the two scan-derived realization suffixes.
+    /// </summary>
+    [Fact]
+    public async Task Dispatch_WithADeclaredSkill_PrintsTheDeclaredSetRatherThanTheWorkspaceScan()
+    {
+        var testRoot = Path.Combine(Path.GetTempPath(), $"dispatch-roster-declared-{Guid.NewGuid():N}");
+        Directory.CreateDirectory(testRoot);
+        var originalOut = Console.Out;
+        var emptyConfigRoot = Path.Combine(testRoot, "claude-config-root");
+        var libraryDirectory = Path.Combine(testRoot, "library");
+        Directory.CreateDirectory(emptyConfigRoot);
+        var declaredPackage = Path.Combine(libraryDirectory, "house-style");
+        Directory.CreateDirectory(declaredPackage);
+        using var environmentScope = BatonEnvironmentSnapshot.BeginScope(
+            BatonEnvironmentSnapshot.Current with
+            {
+                ClaudeConfigRootOverride = emptyConfigRoot,
+                SkillsPathOverride = libraryDirectory,
+            });
+        try
+        {
+            await File.WriteAllTextAsync(
+                Path.Combine(declaredPackage, "SKILL.md"), "description: House style",
+                TestContext.Current.CancellationToken);
+
+            // The repo-local package is the discriminator: it is what the scan would have reported, and
+            // it is precisely what the worker will NOT get.
+            var workspace = Path.Combine(testRoot, "workspace");
+            var repoSkill = Path.Combine(workspace, "skills", "repo-thing");
+            Directory.CreateDirectory(repoSkill);
+            await File.WriteAllTextAsync(
+                Path.Combine(repoSkill, "SKILL.md"), "description: Repo thing", TestContext.Current.CancellationToken);
+
+            var specPath = await WriteSpecAsync(testRoot, "Review the change.");
+            var options = new DispatchOptions(
+                "review", specPath, Path.Combine(testRoot, "room"), Adapter: "claude-worker",
+                WorkspaceDirectory: workspace, Skills: ["house-style"]);
+            var adapters = new Dictionary<string, IWorkerAdapter>
+            {
+                ["claude-worker"] = new DelegatingDiscoveryWorkerAdapter(new ClaudeWorkerAdapter()),
+            };
+
+            using var output = new StringWriter();
+            Console.SetOut(output);
+            await DispatchCommand.ExecuteAsync(options, adapters, TestContext.Current.CancellationToken);
+            Console.SetOut(originalOut);
+
+            var text = output.ToString();
+            Assert.Contains("Skills (declared): house-style", text, StringComparison.Ordinal);
+            Assert.DoesNotContain("repo-thing", text, StringComparison.Ordinal);
+        }
+        finally
+        {
+            Console.SetOut(originalOut);
+            DirectoryCleanup.DeleteRecursively(testRoot);
+        }
+    }
+
     private static async Task<string> WriteSpecAsync(string directory, string content)
     {
         Directory.CreateDirectory(directory);

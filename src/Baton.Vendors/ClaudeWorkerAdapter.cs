@@ -1300,8 +1300,8 @@ public sealed partial class ClaudeWorkerAdapter : IWorkerAdapter, IPermissionGra
             return SkillProjection.PlanFor(declaredSkills, SkillProjectionDirectory(workingDirectory!));
         }
 
-        // Nothing declared: no working directory means no workspace scan, which is #1929's behaviour and
-        // discards nothing an operator asked for.
+        // Nothing declared: the empty plan below, unchanged since #1929 -- see
+        // SkillProjectionUnplaceableException for why only the declared arm above refuses.
         return workingDirectoryIsUsable
             ? SkillProjection.Plan(workingDirectory, SkillProjectionDirectory(workingDirectory!))
             : new SkillProjectionPlan(string.Empty, Array.Empty<SkillProjectionEntry>());

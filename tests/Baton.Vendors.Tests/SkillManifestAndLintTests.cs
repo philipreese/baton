@@ -125,9 +125,13 @@ public sealed class SkillManifestAndLintTests : IDisposable
         Assert.Contains("${CLAUDE_SKILL_DIR}", ex.Message, StringComparison.Ordinal);
         Assert.Contains(Path.Combine(offending, "SKILL.md"), ex.Message, StringComparison.Ordinal);
 
-        // Polarity: the SAME sentence with Baton's own placeholder loads.
+        // Polarity: the SAME sentence with Baton's own placeholder loads. That is ALL this asserts --
+        // the token is reserved, not substituted (#1941 review HIGH; SkillPackageLint's own remarks and
+        // spec/baton.md §9), so a package carrying it still ships the literal text to the model. The
+        // remedy the rule prints is prose naming the file, and this arm is not evidence otherwise.
         var clean = Package("portable", "Read ${BATON_SKILL_DIR}/checklist.md first.");
         Assert.Equal("portable", SkillPackageReader.LoadPackage(clean).Name);
+        Assert.Contains("no placeholder is substituted today", ex.TryInvocation!, StringComparison.Ordinal);
     }
 
     [Fact]
@@ -196,5 +200,45 @@ public sealed class SkillManifestAndLintTests : IDisposable
 
         // A null grant is the raw PermissionScope escape hatch: nothing structured to check against.
         Assert.Empty(requires.MissingFrom(null));
+    }
+
+    /// <summary>
+    /// #1941 review MEDIUM: <c>shell_command_patterns</c> parses, is documented as part of the
+    /// comparison, and used to be read by nothing — so a package requiring <c>gh:*</c> bound cleanly to
+    /// a grant scoped to <c>git:*</c> and had every <c>gh</c> call denied mid-lane instead. Each arm
+    /// below is one rule of <c>UnsatisfiedShellPatterns</c>, with the polarity that discriminates it.
+    /// </summary>
+    [Fact]
+    public void A_required_shell_pattern_the_grant_lacks_is_unsatisfied_and_one_it_carries_is_not()
+    {
+        var requires = new SkillRequirements(RunShellCommands: true, ShellCommandPatterns: ["gh:*"]);
+
+        var scopedElsewhere = new PermissionGrant(RunShellCommands: true, ShellCommandPatterns: ["git:*"]);
+        var missing = Assert.Single(requires.MissingFrom(scopedElsewhere));
+        Assert.Equal("ShellCommandPatterns (gh:*)", missing);
+
+        // Polarity 1: the identical requirement against a grant that lists the pattern.
+        Assert.Empty(requires.MissingFrom(
+            new PermissionGrant(RunShellCommands: true, ShellCommandPatterns: ["git:*", "gh:*"])));
+
+        // Polarity 2: an UNSCOPED granted shell means "any command", so it satisfies the pattern.
+        Assert.Empty(requires.MissingFrom(new PermissionGrant(RunShellCommands: true, ShellCommandPatterns: [])));
+
+        // Deny beats allow, the standing rule of DeniedShellCommandPatterns: listing it both ways is
+        // still a refusal, and the arm above is what shows the allowlist alone would have passed.
+        Assert.Contains(
+            "ShellCommandPatterns (gh:*)",
+            requires.MissingFrom(new PermissionGrant(
+                RunShellCommands: true, ShellCommandPatterns: ["gh:*"], DeniedShellCommandPatterns: ["gh:*"])));
+
+        // A manifest naming patterns while omitting run_shell_commands is asking for a shell it never
+        // declared: refused, rather than passing because the boolean was absent.
+        Assert.Equal(
+            ["ShellCommandPatterns (gh:*)"],
+            new SkillRequirements(ShellCommandPatterns: ["gh:*"])
+                .MissingFrom(new PermissionGrant(ReadFiles: true)).ToArray());
+
+        // And a package declaring no patterns is unaffected by any of it.
+        Assert.Empty(new SkillRequirements(RunShellCommands: true).MissingFrom(scopedElsewhere));
     }
 }

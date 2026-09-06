@@ -924,6 +924,55 @@ public sealed class CodexWorkerAdapterTests
     }
 
     /// <summary>
+    /// #1941 review LOW: codex has no skill realization, and until now a <c>--skill</c> on a codex
+    /// binding resolved, linted, requirement-checked, persisted — and reached the worker as nothing,
+    /// disclosed only in two registers the operator may never have opened. The notice is what
+    /// <c>Resolve</c> writes to stderr; the polarity arm is a binding that declared none, which must
+    /// stay silent rather than printing an empty roster line at every ordinary dispatch.
+    /// </summary>
+    [Fact]
+    public void A_declared_skill_on_a_codex_binding_is_announced_as_skipped_rather_than_ignored()
+    {
+        var packageRoot = Path.Combine(Path.GetTempPath(), $"codex-skill-{Guid.NewGuid():N}", "house-style");
+        Directory.CreateDirectory(packageRoot);
+        try
+        {
+            File.WriteAllText(Path.Combine(packageRoot, "SKILL.md"), "description: House style");
+            var package = SkillPackageReader.LoadPackage(packageRoot);
+
+            var notice = CodexWorkerAdapter.SkillSkipNotice([package]);
+
+            Assert.NotNull(notice);
+            Assert.Contains("house-style", notice, StringComparison.Ordinal);
+            Assert.Contains("will NOT reach this worker", notice, StringComparison.Ordinal);
+
+            Assert.Null(CodexWorkerAdapter.SkillSkipNotice([]));
+            Assert.Null(CodexWorkerAdapter.SkillSkipNotice(null));
+
+            // And Resolve actually says it -- a notice nothing prints is the same silence, one
+            // indirection further away.
+            var originalError = Console.Error;
+            using var captured = new StringWriter();
+            try
+            {
+                Console.SetError(captured);
+                new CodexWorkerAdapter().Resolve(
+                    new WorkerInvocation("Inspect.", Skills: [package]), NoOutputContract);
+            }
+            finally
+            {
+                Console.SetError(originalError);
+            }
+
+            Assert.Contains("house-style", captured.ToString(), StringComparison.Ordinal);
+        }
+        finally
+        {
+            DirectoryCleanup.DeleteRecursively(Path.GetDirectoryName(packageRoot)!);
+        }
+    }
+
+    /// <summary>
     /// The embedded recording exactly as it ships: raw app-server JSONL, initialize response and
     /// notification included. What the loader reads.
     /// </summary>

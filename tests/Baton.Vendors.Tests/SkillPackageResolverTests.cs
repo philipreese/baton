@@ -115,6 +115,60 @@ public sealed class SkillPackageResolverTests : IDisposable
         Assert.Contains("from the repository", package.Content, StringComparison.Ordinal);
     }
 
+    /// <summary>
+    /// #1941 review LOW: the beside-the-assembly rung had neither an arm nor a discriminating negative,
+    /// so swapping it with the account library in <see cref="SkillPackageResolver.Rungs"/> failed no
+    /// test. Nothing ships under it today — that is what makes it the easy rung to break silently — but
+    /// <c>{AppContext.BaseDirectory}/skills/</c> is the test binary's own output directory and is
+    /// writable, so the rung can be exercised exactly as an operator's future starter library would be.
+    /// </summary>
+    /// <remarks>
+    /// Cleans up after itself rather than through <c>_root</c>: this one package lives outside the
+    /// test's temp tree by construction, and leaving it behind would leak a resolvable name into every
+    /// later test in the assembly.
+    /// </remarks>
+    [Fact]
+    public void The_assembly_rung_resolves_a_name_and_loses_to_the_account_library()
+    {
+        var assemblySkills = Path.Combine(AppContext.BaseDirectory, "skills");
+        var home = NewDirectory("home");
+        var homeSkills = Path.Combine(home, "skills");
+        Directory.CreateDirectory(homeSkills);
+        Directory.CreateDirectory(assemblySkills);
+        var assemblyOnly = WritePackage(assemblySkills, "shipped-starter", "# from beside the assembly");
+        var assemblyShadowed = WritePackage(assemblySkills, "shared", "# from beside the assembly");
+        try
+        {
+            WritePackage(homeSkills, "shared", "# from the account library");
+
+            using var scope = BatonEnvironmentSnapshot.BeginScope(
+                BatonEnvironmentSnapshot.Current with { SkillsPathOverride = null, HomeOverride = home });
+
+            // The arm: a name only this rung carries resolves from it...
+            Assert.Contains(
+                "from beside the assembly",
+                SkillPackageResolver.Resolve("shipped-starter", workspaceDirectory: null).Content,
+                StringComparison.Ordinal);
+
+            // ...and the discriminating negative: it is BELOW the account library, so a name both carry
+            // resolves from the library. Swapping the two rungs fails exactly one of these two.
+            Assert.Contains(
+                "from the account library",
+                SkillPackageResolver.Resolve("shared", workspaceDirectory: null).Content,
+                StringComparison.Ordinal);
+
+            // The rung is named in a refusal too, which is where an operator learns it exists.
+            var ex = Assert.Throws<UnknownSkillPackageException>(
+                () => SkillPackageResolver.Resolve("typo", workspaceDirectory: null));
+            Assert.Contains(assemblySkills, ex.TryInvocation!, StringComparison.Ordinal);
+        }
+        finally
+        {
+            Baton.Tests.Shared.DirectoryCleanup.DeleteRecursively(assemblyOnly);
+            Baton.Tests.Shared.DirectoryCleanup.DeleteRecursively(assemblyShadowed);
+        }
+    }
+
     [Fact]
     public void An_unknown_name_refuses_and_names_every_rung_searched()
     {

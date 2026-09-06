@@ -4911,10 +4911,10 @@ projection's consequences are described for an operator.
 
 `${BATON_SKILL_DIR}` is the second recorded-but-inert thing here (#1941 review HIGH). The lint
 reserves the token — it is the one `${…}` spelling `vendor-placeholder` does not refuse — but **no
-realization substitutes it**: claude copies package files byte-for-byte and agy inlines the body
-verbatim, so today it reaches the model as literal text exactly as a vendor-native placeholder would.
-Performing the substitution is S3/S4 work alongside the native realizations. Until then the rule's
-remedy is prose naming the file, and `SkillPackageLint` is the register for both halves.
+realization substitutes it**, so today it reaches the model as literal text exactly as a vendor-native
+placeholder would. Performing the substitution is S3/S4 work alongside the native realizations. Until
+then the rule's remedy is prose naming the file; `SkillPackageLint` is the register for the reasoning
+and for which realization does what to a package's bytes.
 
 ---
 

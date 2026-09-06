@@ -129,6 +129,46 @@ public sealed class SkillBindingRealizationTests : IDisposable
         Assert.DoesNotContain(target.Args, arg => arg.Contains("# Skill: repo-skill", StringComparison.Ordinal));
     }
 
+    /// <summary>
+    /// #1941 review HIGH, the failure this whole class exists to prevent, one binding shape over: the
+    /// claude realization is a projection into <c>&lt;working directory&gt;/.claude/skills/</c>, and a
+    /// binding may legally carry no working directory (most hand-authored entries do not set one). It
+    /// used to return an empty plan — no seed copies, no roster line, no error — so a declared skill
+    /// was resolved, linted, requirement-checked, persisted, and then dropped in silence.
+    /// </summary>
+    [Fact]
+    public void A_claude_binding_with_no_working_directory_refuses_a_declared_skill_rather_than_dropping_it()
+    {
+        WriteAccountPackage("house-style", "# House style");
+        using var scope = AccountLibraryScope();
+
+        var entry = new WorkerBindingConfigEntry(
+            Adapter: "claude", Contract: Contract, PromptTemplate: "Do the work.",
+            Timeout: TimeSpan.FromMinutes(5), Skills: ["house-style"]);
+
+        var ex = Assert.Throws<SkillProjectionUnplaceableException>(() => WorkerBindingResolver.Resolve(
+            new Dictionary<string, WorkerBindingConfigEntry> { ["worker"] = entry },
+            new Dictionary<string, IWorkerAdapter> { ["claude"] = new ClaudeWorkerAdapter() }));
+        Assert.Equal(["house-style"], ex.SkillNames.ToArray());
+        Assert.Contains("house-style", ex.Message, StringComparison.Ordinal);
+
+        // Polarity 1, the arm that keeps the refusal scoped to a REAL loss: the same working-directory-less
+        // binding declaring NOTHING still resolves. Nothing was asked for, so nothing is dropped.
+        var bindings = WorkerBindingResolver.Resolve(
+            new Dictionary<string, WorkerBindingConfigEntry> { ["worker"] = entry with { Skills = null } },
+            new Dictionary<string, IWorkerAdapter> { ["claude"] = new ClaudeWorkerAdapter() });
+        var target = Assert.IsType<Baton.Mutation.WorkerBinding.Process>(bindings["worker"]).Target;
+        Assert.True(target.SeedCopies is null or { Count: 0 });
+
+        // Polarity 2: agy's realization writes nothing anywhere, so the identical binding is not a loss
+        // there and must NOT refuse — the package still reaches the prompt.
+        var agyBindings = WorkerBindingResolver.Resolve(
+            new Dictionary<string, WorkerBindingConfigEntry> { ["worker"] = entry with { Adapter = "agy" } },
+            new Dictionary<string, IWorkerAdapter> { ["agy"] = new AgyWorkerAdapter() });
+        var agyTarget = Assert.IsType<Baton.Mutation.WorkerBinding.Process>(agyBindings["worker"]).Target;
+        Assert.Contains(agyTarget.Args, arg => arg.Contains("# Skill: house-style", StringComparison.Ordinal));
+    }
+
     [Fact]
     public void An_unknown_skill_on_a_hand_authored_binding_refuses_at_resolve()
     {
