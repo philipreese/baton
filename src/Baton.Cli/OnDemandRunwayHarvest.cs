@@ -25,8 +25,8 @@ namespace Baton.Cli;
 /// <para>
 /// <b>Spends at most one <c>/usage</c> call per gated vendor per dispatch</b>, and only when that
 /// vendor's snapshot cannot decide the admission — absent, or (since #1966) older than
-/// <see cref="RunwayThresholds.EffectiveMaxSnapshotAge"/>. A vendor holding a FRESH snapshot is never
-/// harvested here, so the common path still spends nothing. #1961 confined this to absent on the
+/// <see cref="RunwayThresholds.EffectiveMaxSnapshotAge"/> — spec/baton.md §7 states that bound and what
+/// the common path therefore costs. #1961 confined this to absent on the
 /// reasoning that the daemon's cadence already refreshed a stale one; #1966 measured that it did not —
 /// that cadence only fired while a lane of the same vendor was live, so an idle vendor's snapshot aged
 /// past the limit and every dispatch was refused on a counter no harvest was going to replace. The

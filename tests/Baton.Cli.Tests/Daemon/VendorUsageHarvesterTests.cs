@@ -109,6 +109,9 @@ public sealed class VendorUsageHarvesterTests : IDisposable
             tracker.Enter();
             try
             {
+                // This delay is not a wait for anything -- it IS the instrument: the window during which
+                // a concurrent harvester would be caught with two sources in flight.
+                // wait-ok: the instrument itself, never a timeout -- a 60s floor buys the same assertion
                 await Task.Delay(TimeSpan.FromMilliseconds(50), cancellationToken);
                 return FreshSnapshot() with { Vendor = vendor };
             }

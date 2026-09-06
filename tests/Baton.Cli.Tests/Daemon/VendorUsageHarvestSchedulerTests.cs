@@ -23,11 +23,10 @@ public sealed class VendorUsageHarvestSchedulerTests
         new(Periodic, Jitter, PostExit, Coalesce, Idle, jitterSource: () => 0);
 
     /// <summary>
-    /// #1966 inverted this arm. It used to assert that an idle vendor is NEVER harvested (the idle
-    /// backoff), which is what let an idle vendor's snapshot age past the runway hold's six-hour
-    /// staleness limit and refuse every dispatch. The floor cadence now applies with no live lane —
-    /// and still at the slower idle interval, which is the second assertion: nothing due at the live
-    /// interval, due at the idle one.
+    /// #1966 inverted this arm. It used to assert that an idle vendor is NEVER harvested — the idle
+    /// backoff, whose cost <see cref="VendorUsageHarvestScheduler"/>'s own remarks and spec/baton.md §7
+    /// state. The floor cadence now applies with no live lane — and still at the slower idle interval,
+    /// which is the second assertion: nothing due at the live interval, due at the idle one.
     /// </summary>
     [Fact]
     public void Idle_NoLiveLaneEver_StillHarvestsOnTheIdleInterval()
@@ -51,9 +50,9 @@ public sealed class VendorUsageHarvestSchedulerTests
     }
 
     /// <summary>
-    /// A vendor that goes live under a pending idle schedule is pulled in to the live interval rather
-    /// than waiting out the idle one — otherwise a lane starting one minute after an idle harvest would
-    /// wait 30 minutes for its first live reading.
+    /// The live/idle transition rule <see cref="VendorUsageHarvestScheduler.OnTick"/> states at the
+    /// reschedule itself: a lane starting just after an idle harvest must not wait out the whole idle
+    /// interval for its first live reading.
     /// </summary>
     [Fact]
     public void GoingLiveUnderAnIdleSchedule_PullsTheNextHarvestInToTheLiveInterval()

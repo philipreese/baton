@@ -221,9 +221,9 @@ public sealed class OnDemandRunwayHarvestTests : IDisposable
     }
 
     /// <summary>
-    /// <b>#1966's measured incident, end to end.</b> 2026-09-06 07:22 ET: an agy analysis lane was held
-    /// on a 12.2 h-old snapshot because no agy lane had run overnight, and the conductor had to
-    /// <c>--override-runway</c>. The stale snapshot's counters are DELIBERATELY under both thresholds and
+    /// <b>#1966's measured incident, end to end</b> — the morning hold on a 12.2 h-old agy snapshot that
+    /// the conductor had to <c>--override-runway</c> past; spec/baton.md §7 carries the measurement, and
+    /// the age below is its. The stale snapshot's counters are DELIBERATELY under both thresholds and
     /// identical to the fresh ones, so the only thing that can move this from Hold to Admit is deciding
     /// on the re-read snapshot rather than the one in hand — an evaluator that harvests and then still
     /// evaluates its stale copy stays red here, which a fixture with admissible-only-when-fresh counters
