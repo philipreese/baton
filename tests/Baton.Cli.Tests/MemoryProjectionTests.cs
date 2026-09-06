@@ -377,7 +377,7 @@ public sealed class MemoryProjectionTests : IDisposable
 
     /// <summary>
     /// A repository-origin section does not claim to be a canonical store row, because its id is not
-    /// one: repository facts are read from a checkout at projection time and never imported. The
+    /// one — <see cref="MemoryProjection"/>'s section remarks carry why the two ids differ. The
     /// control is the vendor section in the same file, which DOES carry the canonical wording and whose
     /// id is asserted to resolve in the store — without it this arm would pass over a projection that
     /// back-pointed nothing at all.
@@ -424,8 +424,8 @@ public sealed class MemoryProjectionTests : IDisposable
 
     /// <summary>
     /// A dry run against a repository with no canonical store creates nothing under Baton's own root.
-    /// <c>--repository</c> names a slug rather than selecting a directory that exists, so this state is
-    /// reachable by a typo, which is exactly when "nothing was written" has to still be true. <b>What
+    /// The state is reachable by a typo (<c>MemorySyncCommand</c>'s own comment says why), which is
+    /// exactly when "nothing was written" has to still be true. <b>What
     /// this pins is the property, not any one guard</b>: the arm was run with
     /// <c>MemorySyncCommand</c>'s early <c>File.Exists</c> check removed and still passed, which is
     /// recorded here rather than left implied — that check is defence, and the comment beside it says
