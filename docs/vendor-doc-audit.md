@@ -1927,6 +1927,8 @@ same reflected-hook-config approach) is that narrowing's acceptance test for the
 channel, not for the tool surface as a whole. Scratch directory deleted after the run; nothing
 persists outside the `#1387` issue comment recording the same table.
 
+Sentinel: `agy.tools-classified` (`tools/vendor-verify/verify.py`) — pins agy's live tool catalogue to `AgyWorkerAdapter`'s tool-name lists (#623).
+
 ### agy's sub-agent turns leave NO usage-bearing line in the parent's stream at all (#1742, capture `dispatch-implement-2807af38`, 2026-09-03)
 
 Measured against a real agy lane's already-captured `.stdout.log` (copied into a second worktree as

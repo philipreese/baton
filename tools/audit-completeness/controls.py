@@ -495,6 +495,47 @@ def _recordonce_ignores_exclusion_reason():
         yield
 
 
+AGY_TOOLS_CLASSIFIED = "the agy.tools-classified sentinel check discriminates on unknown or multiply-classified tools"
+
+
+@control(AGY_TOOLS_CLASSIFIED, "the check stops rejecting unknown tool names, passing an unclassified tool")
+def _agy_tools_unknown_tool_passes():
+    orig_classify = selfcheck.verify._classify_agy_tools
+
+    def broken_classify(tools, tool_lists):
+        _, mult = orig_classify(tools, tool_lists)
+        return [], mult
+
+    with swap(selfcheck.verify, "_classify_agy_tools", broken_classify):
+        yield
+
+
+@control(AGY_TOOLS_CLASSIFIED, "the check stops rejecting multiply-classified tool names")
+def _agy_tools_multiply_classified_passes():
+    orig_classify = selfcheck.verify._classify_agy_tools
+
+    def broken_classify(tools, tool_lists):
+        unclass, _ = orig_classify(tools, tool_lists)
+        return unclass, []
+
+    with swap(selfcheck.verify, "_classify_agy_tools", broken_classify):
+        yield
+
+
+@control(AGY_TOOLS_CLASSIFIED, "the failure message omits the unclassified tool name")
+def _agy_tools_message_omits_name():
+    orig_classified = selfcheck.verify._agy_tools_classified
+
+    def broken_classified(catalogue=None, tool_lists=None):
+        st, msg = orig_classified(catalogue=catalogue, tool_lists=tool_lists)
+        if st == selfcheck.verify.FAIL and "unclassified" in msg:
+            return st, "unclassified tool(s): generic failure message without names"
+        return st, msg
+
+    with swap(selfcheck.verify, "_agy_tools_classified", broken_classified):
+        yield
+
+
 def main() -> int:
     print(__doc__.strip().splitlines()[0])
     print("=" * 78)

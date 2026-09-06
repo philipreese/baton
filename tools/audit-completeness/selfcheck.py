@@ -73,6 +73,7 @@ def load(path: Path, name: str):
 LINT_DIRS = (ROOT / "tools" / "audit-completeness",)
 
 completeness = load(ROOT / "tools" / "audit-completeness" / "completeness.py", "_selfcheck_audit")
+verify = load(ROOT / "tools" / "vendor-verify" / "verify.py", "_selfcheck_verify")
 
 
 
@@ -1014,6 +1015,43 @@ def _recordonce_applies_every_exclusion():
         )
 
     return f"{len(reasons)} dynamically enumerated exclusion reason(s) ({', '.join(sorted(reasons))}) applied and deleted in main()"
+
+
+@check("the agy.tools-classified sentinel check discriminates on unknown or multiply-classified tools")
+def _agy_tools_classified_discriminates():
+    """#1928 / #623: asserts _agy_tools_classified rejects uncatalogued or duplicated tools.
+
+    Validates that unregistered tools produce FAIL naming the tool, valid fixtures PASS,
+    and entries appearing in multiple categories cause FAIL.
+    """
+    tool_lists = verify.load_agy_adapter_tool_lists()
+    expected_lists = {"ReadTools", "WriteTools", "ShellTools", "SubagentAndTaskTools", "NetworkTools"}
+    assert expected_lists.issubset(set(tool_lists.keys())), (
+        f"missing expected lists in AgyWorkerAdapter.cs: {expected_lists - set(tool_lists.keys())}"
+    )
+
+    fixture_known = [
+        "view_file", "list_dir", "find_by_name", "grep_search",
+        "write_to_file", "replace_file_content", "multi_replace_file_content", "generate_image",
+        "run_command", "manage_task", "invoke_subagent", "define_subagent", "manage_subagents",
+        "search_web", "read_url_content", "browser_click", "browser_navigate",
+    ]
+    status, msg = verify._agy_tools_classified(fixture_known, tool_lists=tool_lists)
+    assert status == verify.PASS, f"known tools fixture failed classification: {status} -- {msg}"
+
+    unknown_tool = "__unknown_test_tool__"
+    fixture_unknown = ["view_file", unknown_tool]
+    status, msg = verify._agy_tools_classified(fixture_unknown, tool_lists=tool_lists)
+    assert status == verify.FAIL, f"unknown tool fixture did not FAIL: {status} -- {msg}"
+    assert unknown_tool in msg, f"unknown tool {unknown_tool} not named in failure message: {msg}"
+
+    duplicate_lists = {k: list(v) for k, v in tool_lists.items()}
+    duplicate_lists["ReadTools"].append("run_command")
+    status, msg = verify._agy_tools_classified(fixture_known, tool_lists=duplicate_lists)
+    assert status == verify.FAIL, f"multiply-classified tool fixture did not FAIL: {status} -- {msg}"
+    assert "multiply classified" in msg, f"multiply-classified failure message missing expected text: {msg}"
+
+    return "3 classification arms (matching PASS, unknown FAIL with name, duplicate FAIL)"
 
 
 def main() -> int:

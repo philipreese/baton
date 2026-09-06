@@ -223,6 +223,7 @@ public sealed partial class AgyWorkerAdapter : IWorkerAdapter, IPermissionGrantT
     /// disclose directory structure rather than contents and are withheld with reads on the same
     /// reasoning 0004's "fail closed" applies elsewhere.
     /// </remarks>
+    // AGY_TOOL_LISTS:START
     private static readonly IReadOnlyList<string> ReadTools =
         ["view_file", "list_dir", "find_by_name", "grep_search"];
 
@@ -284,6 +285,7 @@ public sealed partial class AgyWorkerAdapter : IWorkerAdapter, IPermissionGrantT
     /// </remarks>
     private static readonly IReadOnlyList<string> NetworkTools =
         ["search_web", "read_url_content", "browser_*"];
+    // AGY_TOOL_LISTS:END
 
     /// <summary>
     /// The agy tool names this invocation's grant withholds, comma-joined for

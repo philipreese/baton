@@ -3857,6 +3857,99 @@ def _models_agy_value_set():
                   f"(now: {sorted(found)})")
 
 
+def load_agy_adapter_tool_lists(adapter_path=None):
+    """Parse the tool-name lists from AgyWorkerAdapter.cs's AGY_TOOL_LISTS marker block (#623)."""
+    if adapter_path is None:
+        adapter_path = os.path.normpath(os.path.join(HERE, "..", "..", "src", "Baton.Vendors", "AgyWorkerAdapter.cs"))
+    with open(adapter_path, "r", encoding="utf-8") as f:
+        content = f.read()
+
+    marker_match = re.search(r"// AGY_TOOL_LISTS:START(.*?)// AGY_TOOL_LISTS:END", content, re.DOTALL)
+    if not marker_match:
+        raise ValueError("Could not find AGY_TOOL_LISTS marker block in AgyWorkerAdapter.cs")
+
+    block = marker_match.group(1)
+    tool_lists = {}
+    for match in re.finditer(r"IReadOnlyList<string>\s+(\w+)\s*=\s*\[(.*?)\];", block, re.DOTALL):
+        list_name = match.group(1)
+        items = re.findall(r'"([^"]+)"', match.group(2))
+        tool_lists[list_name] = items
+    return tool_lists
+
+
+def _classify_agy_tools(tools, tool_lists):
+    """Classify tool names against AgyWorkerAdapter's tool_lists.
+
+    Returns (unclassified_tools, multiply_classified_tools).
+    """
+    unclassified = []
+    multiply_classified = []
+
+    for tool in sorted(tools):
+        matched_categories = []
+        for cat_name, patterns in tool_lists.items():
+            for pat in patterns:
+                if pat.endswith("*"):
+                    if tool.startswith(pat[:-1]):
+                        matched_categories.append(cat_name)
+                        break
+                elif tool == pat:
+                    matched_categories.append(cat_name)
+                    break
+        if len(matched_categories) == 0:
+            unclassified.append(tool)
+        elif len(matched_categories) > 1:
+            multiply_classified.append((tool, matched_categories))
+
+    return unclassified, multiply_classified
+
+
+@check("agy.tools-classified", "agy",
+       "asserts that every tool name reported by agy tools is classified into exactly one of "
+       "ReadTools / WriteTools / ShellTools / NetworkTools / SubagentAndTaskTools in AgyWorkerAdapter.cs (#623)",
+       sentinel=True)
+def _agy_tools_classified(catalogue=None, tool_lists=None):
+    """Reads agy's live tool catalogue via `agy tools` and asserts that every reported tool is
+    classified into exactly one list in AgyWorkerAdapter.cs.
+
+    Under `--dangerously-skip-permissions`, the PreToolUse hook reading AER_HOOK_DENIED_TOOLS is the
+    only thing withholding a declined category, so an unclassified tool name is an ungated hole.
+    """
+    if tool_lists is None:
+        tool_lists = load_agy_adapter_tool_lists()
+    if not tool_lists:
+        return FAIL, "could not parse tool-name lists from AgyWorkerAdapter.cs"
+
+    if catalogue is not None:
+        found = set(catalogue)
+    else:
+        # Discriminating control: a fixture catalogue with one unknown tool name MUST fail classification
+        control_status, control_msg = _agy_tools_classified(
+            ["view_file", "__unknown_test_tool__"], tool_lists=tool_lists
+        )
+        if control_status != FAIL or "__unknown_test_tool__" not in control_msg:
+            return INCONCLUSIVE, "discriminating control failed: fixture catalogue with unknown tool name was not rejected"
+
+        rc, out, err = run_bare(["agy", "tools"])
+        if rc != 0:
+            return INCONCLUSIVE, f"agy tools exited {rc} -- {(err or out).strip()[:200]}"
+
+        found = {tok for ln in out.splitlines() for tok in ln.split("\t", 1)[0].split() if tok and not tok.startswith("#")}
+        if not found:
+            return INCONCLUSIVE, "agy tools returned no tool names in output"
+
+    unclassified, multiply_classified = _classify_agy_tools(found, tool_lists)
+    if unclassified or multiply_classified:
+        msg_parts = []
+        if unclassified:
+            msg_parts.append(f"unclassified tool(s): {unclassified}")
+        if multiply_classified:
+            msg_parts.append(f"multiply classified tool(s): {multiply_classified}")
+        return FAIL, " ".join(msg_parts)
+
+    return PASS, f"all {len(found)} agy tools classified: {sorted(found)}"
+
+
 @check("models.claude-alias-floor", "models",
        "claude has no model-list subcommand (0023 §4; vendor-doc-audit.md item 2), so the full set "
        "cannot be enumerated the way agy's can -- this only re-confirms the three ALIASES the "
@@ -4027,11 +4120,51 @@ def main() -> int:
                          "conclusions live in docs/decisions and need no re-confirmation.")
     ap.add_argument("--allow-config-writes", action="store_true",
                     help="also run checks that touch the operator's real settings files")
+    ap.add_argument("--selftest", action="store_true",
+                    help="run internal selftests of verify.py parsers and classification controls")
     ap.add_argument("--full-model", action="store_true",
                     help="run every check on the vendor's DEFAULT model instead of the cheapest "
                          "one. Costs far more; use when a cheap-model result looks wrong and you "
                          "need to know whether the model or the vendor changed.")
     args = ap.parse_args()
+
+    if args.selftest:
+        try:
+            tool_lists = load_agy_adapter_tool_lists()
+            expected_lists = {"ReadTools", "WriteTools", "ShellTools", "SubagentAndTaskTools", "NetworkTools"}
+            if not expected_lists.issubset(set(tool_lists.keys())):
+                print(f"selftest FAIL: missing expected lists in AgyWorkerAdapter.cs: {expected_lists - set(tool_lists.keys())}", file=sys.stderr)
+                return 1
+
+            fixture_known = [
+                "view_file", "list_dir", "find_by_name", "grep_search",
+                "write_to_file", "replace_file_content", "multi_replace_file_content", "generate_image",
+                "run_command", "manage_task", "invoke_subagent", "define_subagent", "manage_subagents",
+                "search_web", "read_url_content", "browser_click", "browser_navigate",
+            ]
+            st, msg = _agy_tools_classified(fixture_known, tool_lists=tool_lists)
+            if st != PASS:
+                print(f"selftest FAIL: known tools failed classification: {st} -- {msg}", file=sys.stderr)
+                return 1
+
+            fixture_unknown = ["view_file", "__unknown_test_tool__"]
+            st_unk, msg_unk = _agy_tools_classified(fixture_unknown, tool_lists=tool_lists)
+            if st_unk != FAIL or "__unknown_test_tool__" not in msg_unk:
+                print(f"selftest FAIL: unknown tool in fixture was not caught as unclassified: {st_unk} -- {msg_unk}", file=sys.stderr)
+                return 1
+
+            duplicate_lists = {k: list(v) for k, v in tool_lists.items()}
+            duplicate_lists["ReadTools"].append("run_command")
+            st_dup, msg_dup = _agy_tools_classified(fixture_known, tool_lists=duplicate_lists)
+            if st_dup != FAIL or "multiply classified" not in msg_dup:
+                print(f"selftest FAIL: duplicate tool was not caught as multiply classified: {st_dup} -- {msg_dup}", file=sys.stderr)
+                return 1
+
+            print("verify.py selftest: PASS")
+            return 0
+        except Exception as exc:
+            print(f"selftest FAIL: {exc!r}", file=sys.stderr)
+            return 1
 
     global _FULL_MODEL, _CURRENT
     _FULL_MODEL = args.full_model
