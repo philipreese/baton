@@ -209,8 +209,32 @@ public static class QueueLauncher
     /// here: the write below is unconditional, taken even when the projection comes back null — the
     /// register says why that room in particular cannot be skipped.
     /// </para>
+    /// <para>
+    /// <b>A HELD ledger is retried; a corrupt or missing one is not</b> (#1951) — spec/baton.md §13's
+    /// post-launch bullet has the argument and the bound. Mechanically: <see cref="TryProjectRoomAsync"/>
+    /// reports WHY it could not project, this loop re-reads only while that answer is
+    /// <see cref="RoomProjectionFailure.Held"/>, and whichever answer it ends on is appended to the
+    /// sentinel's <c>error</c> — so a bare sentinel says which of the two produced it rather than
+    /// leaving a reader to guess. The retry is a re-READ inside one fault record, not the item-level
+    /// retry §13 rules out.
+    /// </para>
     /// </remarks>
-    internal static async Task RecordPostLaunchFaultAsync(string tag, string roomDirectory, string reason)
+    /// <param name="tag">The queued item's tag.</param>
+    /// <param name="roomDirectory">The room the lane was dispatched into.</param>
+    /// <param name="reason">Why the pump did not complete.</param>
+    /// <param name="heldAttempts">
+    /// How many projection attempts a held ledger gets in total, including the first. A test seam in
+    /// the same sense as <see cref="SettleFinishedPumpAsync"/>: a holder released on a real machine's
+    /// timing cannot be steered from outside, so the two arms that measure this path set their own
+    /// bound rather than sleeping against the default.
+    /// </param>
+    /// <param name="heldRetryDelay">The pause between those attempts; defaults to <see cref="HeldLedgerRetryDelay"/>.</param>
+    internal static async Task RecordPostLaunchFaultAsync(
+        string tag,
+        string roomDirectory,
+        string reason,
+        int heldAttempts = HeldLedgerAttempts,
+        TimeSpan? heldRetryDelay = null)
     {
         try
         {
@@ -221,12 +245,26 @@ public static class QueueLauncher
                 return;
             }
 
-            var projected = await TryProjectRoomAsync(roomDirectory).ConfigureAwait(false);
+            var delay = heldRetryDelay ?? HeldLedgerRetryDelay;
+            var attempt = await TryProjectRoomAsync(roomDirectory).ConfigureAwait(false);
+            for (var remaining = heldAttempts - 1; attempt.Failure == RoomProjectionFailure.Held && remaining > 0; remaining--)
+            {
+                await Task.Delay(delay).ConfigureAwait(false);
+                attempt = await TryProjectRoomAsync(roomDirectory).ConfigureAwait(false);
+            }
 
+            var projected = attempt.View;
             var error = $"the queue-launched lane '{tag}' did not complete after launch: {reason}";
             if (projected?.Error is { Length: > 0 } recordedFailure)
             {
                 error += $" — the room's own last recorded failure: {recordedFailure}";
+            }
+            else if (projected is null && attempt.Reason is { Length: > 0 } degraded)
+            {
+                var stillHeld = attempt.Failure == RoomProjectionFailure.Held
+                    ? $" (still held after {heldAttempts} attempt(s))"
+                    : string.Empty;
+                error += $" — this record carries no steps or outputs because {degraded}{stillHeld}";
             }
 
             var view = (projected ?? new WorkflowStatusView(WorkflowOutcome.Failed, [], [], null)) with
@@ -245,6 +283,39 @@ public static class QueueLauncher
     }
 
     /// <summary>
+    /// Why <see cref="TryProjectRoomAsync"/> came back without a view. Only
+    /// <see cref="Held"/> is worth waiting on — the other two are as true a second later as they are now.
+    /// </summary>
+    private enum RoomProjectionFailure
+    {
+        /// <summary>It projected.</summary>
+        None,
+
+        /// <summary>No ledger yet, or no bound snapshot — nothing to project, and nothing arriving.</summary>
+        Absent,
+
+        /// <summary>Another process holds <c>flow.jsonl</c> with a conflicting share; a release makes this projectable.</summary>
+        Held,
+
+        /// <summary>The ledger or the snapshot is there and could not be read or parsed.</summary>
+        Unreadable,
+    }
+
+    /// <summary>One projection attempt: the view, or why there is none in the words the sentinel carries.</summary>
+    private readonly record struct RoomProjection(WorkflowStatusView? View, RoomProjectionFailure Failure, string? Reason);
+
+    /// <summary>Total projection attempts a held ledger gets, including the first.</summary>
+    private const int HeldLedgerAttempts = 5;
+
+    /// <summary>
+    /// The pause between those attempts. Four of them bound the wait at ~1.2s, which is what a
+    /// transient append by a sibling command costs; a live <c>baton run</c> engine holding the ledger
+    /// for its whole run is not something any bound here can outwait, and degrading is the answer for
+    /// that one — the item resolving is what matters, and it resolves either way.
+    /// </summary>
+    private static readonly TimeSpan HeldLedgerRetryDelay = TimeSpan.FromMilliseconds(300);
+
+    /// <summary>
     /// The room's <em>actual</em> state, projected the way <see cref="TerminalSettleRecorder"/> and
     /// <c>StatusCommand</c> already project one: bound snapshot + <c>flow.jsonl</c> +
     /// <c>ProjectionCheckpointStore</c>, through the same <c>StateProjector</c>/
@@ -253,11 +324,19 @@ public static class QueueLauncher
     /// than shared with <c>FleetStatusTool.ProcessRoomAsync</c>'s identical block, which is a seam worth
     /// extracting on its own rather than inside this fix.
     /// <para>
-    /// Returns null — never throws — for a room this cannot project: no real ledger yet
+    /// Returns a null view — never throws — for a room this cannot project: no real ledger yet
     /// (<see cref="RoomLedgerProbe"/>, which is also why the ledger-less room in
     /// <c>QueueLauncherTests</c> still gets the bare view), no bound snapshot, or a read/parse failure.
     /// The caller writes the bare <c>Failed</c> sentinel in that case: a degraded record still resolves
     /// the item, where a throw out of the discarded continuation this runs in would resolve nothing.
+    /// </para>
+    /// <para>
+    /// <b>A sharing violation is <see cref="RoomProjectionFailure.Held"/>, not
+    /// <see cref="RoomProjectionFailure.Unreadable"/></b> (#1951). <see cref="FlowJournalHeldException"/>
+    /// derives from <see cref="BatonFlowException"/>, so the single catch below used to fold a ledger
+    /// somebody is mid-append on into the same answer as a truncated one — and the caller, seeing one
+    /// answer, could neither wait out the first nor say which had happened. The narrow arm comes first
+    /// for that reason; the ORDER is the fix.
     /// </para>
     /// <para>
     /// <b><see cref="WorkflowStatusStepView.Liveness"/> is dropped from every step</b>, while each
@@ -265,12 +344,15 @@ public static class QueueLauncher
     /// spec/baton.md §13's post-launch bullet has why the two are treated differently.
     /// </para>
     /// </summary>
-    private static async Task<WorkflowStatusView?> TryProjectRoomAsync(string roomDirectory)
+    private static async Task<RoomProjection> TryProjectRoomAsync(string roomDirectory)
     {
         var snapshotPath = Path.Combine(roomDirectory, BatonPaths.SnapshotFileName);
         if (!RoomLedgerProbe.HasLedger(roomDirectory) || !File.Exists(snapshotPath))
         {
-            return null;
+            return new RoomProjection(
+                null,
+                RoomProjectionFailure.Absent,
+                "the room carries no ledger of its own, or no bound snapshot to project it against");
         }
 
         try
@@ -292,7 +374,20 @@ public static class QueueLauncher
             var view = WorkflowStatusProjector.Project(
                 state, snapshot, roomDirectory, entries, WorkerAdapterRegistry.Default);
 
-            return view with { Steps = [.. view.Steps.Select(step => step with { Liveness = null })] };
+            return new RoomProjection(
+                view with { Steps = [.. view.Steps.Select(step => step with { Liveness = null })] },
+                RoomProjectionFailure.None,
+                null);
+        }
+        catch (FlowJournalHeldException ex)
+        {
+            // Must precede the BatonFlowException arm below, which it would otherwise be swallowed by
+            // — see this method's own remarks for why the two answers cannot share one.
+            Console.Error.WriteLine(
+                $"QueueLauncher: '{roomDirectory}' could not be projected for its post-launch fault "
+                + $"record because its ledger is held: {ex.Message}");
+            return new RoomProjection(
+                null, RoomProjectionFailure.Held, $"the room's ledger is held open by another process: {ex.Message}");
         }
         catch (Exception ex) when (ex is BatonFlowException or IOException or UnauthorizedAccessException)
         {
@@ -302,7 +397,10 @@ public static class QueueLauncher
             Console.Error.WriteLine(
                 $"QueueLauncher: could not project '{roomDirectory}' for its post-launch fault record, "
                 + $"so its sentinel carries no steps or outputs: {ex.Message}");
-            return null;
+            return new RoomProjection(
+                null,
+                RoomProjectionFailure.Unreadable,
+                $"the room's ledger or snapshot could not be read: {ex.Message}");
         }
     }
 
