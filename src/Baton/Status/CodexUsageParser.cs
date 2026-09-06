@@ -7,6 +7,23 @@ namespace Baton.Status;
 /// Parses the per-turn usage on Codex CLI JSONL <c>turn.completed</c> events (#1853). Codex reports
 /// <c>input_tokens</c> inclusive of <c>cached_input_tokens</c>; Baton's additive shape keeps those
 /// dimensions disjoint, so <see cref="WorkerUsage.TokensIn"/> is the non-cached remainder.
+/// <para>
+/// <b>No <see cref="IWorkerUsageParser.TryParseEchoedModel"/> override, because codex has no reachable
+/// source for one</b> (#1927 review HIGH). The absence is a DIFFERENT kind from agy's beside it: agy's
+/// vendor stream was measured to carry no <c>model</c> key, whereas codex never reaches Baton as a
+/// vendor stream at all. Both lifecycle events on this vendor's stdout are synthesized by
+/// <c>Baton.Vendors.CodexAppServerBroker</c> — <c>thread.started</c> carries a thread id and nothing
+/// else, <c>turn.completed</c> a usage object and nothing else — so a parser reading either would be
+/// reading Baton's own two keys back. The emitter is in-tree, which makes this deterministic rather
+/// than a sample; the captured stream agrees (<c>tests/Baton.Cli.Tests/Fixtures/codex-live-stream.jsonl</c>,
+/// 261 lines, no <c>model</c> key on any of them), and neither does the app-server event grammar
+/// recorded in <c>docs/vendor-codex-probe-2026-09-04.md</c> name one. So <c>modelEchoed</c> is ABSENT
+/// on every codex row and the fact is UNMEASURED rather than measured-negative: stamping the broker's
+/// own <c>configuration.Model</c> onto its <c>thread.started</c> would echo Baton's INTENT, which is
+/// exactly what claude's <c>system:init</c> is refused for (<see cref="ClaudeUsageParser"/>). Closing
+/// it needs the app-server's own answer to <c>thread/start</c> inspected for a model field, which no
+/// in-tree recording carries. spec/baton.md §7's ledger row is the register.
+/// </para>
 /// </summary>
 public sealed class CodexUsageParser : IWorkerUsageParser
 {
@@ -54,44 +71,6 @@ public sealed class CodexUsageParser : IWorkerUsageParser
     }
 
     public int CountToolSteps(string rawLine) => TryParseToolName(rawLine) is null ? 0 : 1;
-
-    /// <summary>
-    /// #1927: the model codex reports having RUN, off either lifecycle event that can name one —
-    /// <c>thread.started</c> (stamped by <c>Baton.Vendors.CodexAppServerBroker</c> from the
-    /// app-server's own <c>thread/start</c> answer, when that answer names a model) or
-    /// <c>turn.completed</c>. Both are read because they are two independent chances at the same fact
-    /// and the projector keeps the last one, so a mid-execution substitution announced on the terminal
-    /// event wins over the thread's opening claim.
-    /// <para>
-    /// Absent-safe by construction: neither event is REQUIRED to carry <c>model</c>, and one that does
-    /// not simply yields null here — the same absence agy's stream produces structurally, never a blank
-    /// string.
-    /// </para>
-    /// </summary>
-    public string? TryParseEchoedModel(string rawLine)
-    {
-        if (string.IsNullOrWhiteSpace(rawLine))
-        {
-            return null;
-        }
-
-        try
-        {
-            using var document = JsonDocument.Parse(rawLine);
-            var root = document.RootElement;
-            if (root.ValueKind != JsonValueKind.Object
-                || ReadString(root, "type") is not ("thread.started" or "turn.completed"))
-            {
-                return null;
-            }
-
-            return ReadString(root, "model") is { Length: > 0 } model ? model : null;
-        }
-        catch (JsonException)
-        {
-            return null;
-        }
-    }
 
     private static bool TryParse(string rawLine, out WorkerUsage? usage)
     {

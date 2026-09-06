@@ -20,17 +20,63 @@ namespace Baton.Cli.Tests;
 /// </summary>
 public sealed class EchoedModelProjectionTests
 {
+    /// <summary>
+    /// The MEASURED claude arm: <c>docs/vendor-doc-audit.md</c> §5 records that the assistant turn
+    /// carries the CLI's own resolution in <c>message.model</c> (it is where the <c>&lt;synthetic&gt;</c>
+    /// answer to a bogus id was observed). This is the shape the field actually rests on.
+    /// </summary>
     [Fact]
-    public void Claude_result_events_model_is_recorded_as_the_echoed_model()
+    public void Claude_assistant_turns_model_is_recorded_as_the_echoed_model()
     {
         var view = ProjectSingle(
             "claude",
             """{"type":"assistant","message":{"model":"claude-opus-4-6-20260115","content":[]}}""",
-            """{"type":"result","model":"claude-opus-4-6-20260115","num_turns":4,"usage":{"input_tokens":7,"output_tokens":3}}""");
+            """{"type":"result","num_turns":4,"usage":{"input_tokens":7,"output_tokens":3}}""");
 
         Assert.Equal("claude-opus-4-6-20260115", view.ModelEchoed);
         // The control the arm rests on: the usage read still works, so a green ModelEchoed cannot be
         // the projector having silently skipped this stream.
+        Assert.Equal(7, view.TokensIn);
+    }
+
+    /// <summary>
+    /// The scan direction, pinned on two MEASURED events (#1927 review): the projector keeps the LAST
+    /// line naming a model, so a mid-execution substitution outranks the opening turn's answer. This
+    /// arm replaces a codex one that pinned the same direction on a shape nothing emits —
+    /// <see cref="CodexUsageParser"/>'s own doc has why.
+    /// </summary>
+    [Fact]
+    public void The_last_event_naming_a_model_outranks_an_earlier_one()
+    {
+        var view = ProjectSingle(
+            "claude",
+            """{"type":"assistant","message":{"model":"claude-opus-4-6-20260115","content":[]}}""",
+            """{"type":"assistant","message":{"model":"claude-sonnet-4-6-20260115","content":[]}}""",
+            """{"type":"result","num_turns":2,"usage":{"input_tokens":5,"output_tokens":2}}""");
+
+        Assert.Equal("claude-sonnet-4-6-20260115", view.ModelEchoed);
+        Assert.Equal(5, view.TokensIn);
+    }
+
+    /// <summary>
+    /// The terminal <c>result</c> event's own top-level <c>model</c> is read FIRST when present, and
+    /// that rung is <b>unmeasured</b>: the repository's only captured claude result lines
+    /// (<c>tests/Baton.Vendors.Tests/Fixtures/claude-weekly-limit-result.captured.jsonl</c>) are both
+    /// error results and carry no top-level <c>model</c> at all, and neither vendor register records a
+    /// successful one that does. The line below is therefore hand-written to a shape no in-tree capture
+    /// confirms; it is kept because claude answers through the measured <c>assistant</c> fallback
+    /// either way, so the rung costs nothing if the vendor never populates it. Capturing one successful
+    /// result line into <c>docs/vendor-doc-audit.md</c> is what would close it.
+    /// </summary>
+    [Fact]
+    public void A_result_events_own_model_is_read_when_the_vendor_does_supply_one()
+    {
+        var view = ProjectSingle(
+            "claude",
+            """{"type":"assistant","message":{"model":"claude-opus-4-6-20260115","content":[]}}""",
+            """{"type":"result","model":"claude-haiku-4-5-20251001","num_turns":4,"usage":{"input_tokens":7,"output_tokens":3}}""");
+
+        Assert.Equal("claude-haiku-4-5-20251001", view.ModelEchoed);
         Assert.Equal(7, view.TokensIn);
     }
 
@@ -50,17 +96,23 @@ public sealed class EchoedModelProjectionTests
         Assert.Equal(2, view.TokensIn);
     }
 
+    /// <summary>
+    /// #1927 review HIGH. Codex leaves the field absent, and the stream here is the REAL one this
+    /// vendor produces — both lines copied from what <c>CodexAppServerBroker</c> itself writes, which
+    /// is the whole finding: Baton synthesizes both lifecycle events, so there is no vendor echo to
+    /// read. A parser reading them back would be reading Baton's own keys.
+    /// </summary>
     [Fact]
-    public void Codex_turn_completed_model_outranks_the_threads_opening_claim()
+    public void Codex_streams_leave_the_echoed_model_absent_because_baton_synthesizes_both_lifecycle_events()
     {
-        // Both events are read; the projector's last-wins scan is what makes the terminal answer beat
-        // the opening one, and this arm is what would catch that scan being reversed.
         var view = ProjectSingle(
             "codex",
-            """{"type":"thread.started","thread_id":"t-1","model":"gpt-6-astra"}""",
-            """{"type":"turn.completed","model":"gpt-5.6-luna","usage":{"input_tokens":10,"cached_input_tokens":4,"output_tokens":6}}""");
+            """{"type":"thread.started","thread_id":"t-1"}""",
+            """{"type":"turn.completed","usage":{"input_tokens":10,"cached_input_tokens":4,"output_tokens":6}}""");
 
-        Assert.Equal("gpt-5.6-luna", view.ModelEchoed);
+        Assert.Null(view.ModelEchoed);
+        // The control: the usage read off the same two lines still works, so the absence above is the
+        // field having no source rather than the projector skipping this stream.
         Assert.Equal(6, view.TokensIn);
     }
 
