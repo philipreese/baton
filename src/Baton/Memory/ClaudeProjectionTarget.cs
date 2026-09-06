@@ -23,8 +23,8 @@ public sealed record ProjectionTarget(
 /// (<c>\</c> and <c>-</c> both become <c>-</c>), which means minting one would be asserting a mapping
 /// nothing on the machine can confirm. What <c>baton memory sync</c> does instead is run the same
 /// discovery <c>baton memory audit</c> runs, keep the roots that resolve to the repository being
-/// synced, and write into those. A repository with no such root gets <b>no target</b> and is reported
-/// as having none; spec/baton.md §12 carries that ruling and the failure it avoids.
+/// synced, and write into those. What happens when that search comes back empty — and why it is not a
+/// case for constructing one — is spec/baton.md §12's ruling.
 /// </para>
 /// <para>
 /// <b>One file, owned outright, and not the vendor's index.</b> Baton writes exactly

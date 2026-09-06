@@ -204,9 +204,9 @@ public sealed class MemoryProjectionTests : IDisposable
     }
 
     /// <summary>
-    /// A checked-in repository fact and a vendor-memory fact of the same name: repository truth is
-    /// projected, the vendor entry is reported as overridden with its canonical id, and neither is
-    /// merged. The control is a vendor entry with a name nothing collides with — it survives, which is
+    /// A checked-in repository fact and a vendor-memory fact of the same name: the checked-in text is
+    /// what reaches the bytes, the losing row comes back in the report carrying its canonical id, and
+    /// the two are not combined. The control is a vendor entry nothing collides with — it survives, which is
     /// what proves the override is the collision's doing rather than a blanket preference for
     /// repository-origin candidates.
     /// </summary>
