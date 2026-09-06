@@ -231,8 +231,8 @@ public sealed class SkillManifestAndLintTests : IDisposable
             requires.MissingFrom(new PermissionGrant(
                 RunShellCommands: true, ShellCommandPatterns: ["gh:*"], DeniedShellCommandPatterns: ["gh:*"])));
 
-        // A manifest naming patterns while omitting run_shell_commands is asking for a shell it never
-        // declared: refused, rather than passing because the boolean was absent.
+        // Patterns declared with no run_shell_commands: refused rather than passing because the boolean
+        // was absent -- rule 1 of UnsatisfiedShellPatterns, which states why.
         Assert.Equal(
             ["ShellCommandPatterns (gh:*)"],
             new SkillRequirements(ShellCommandPatterns: ["gh:*"])

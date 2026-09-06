@@ -257,10 +257,10 @@ public sealed class DispatchTemplateEndToEndTests : IDisposable
     }
 
     /// <summary>
-    /// #1941 review MEDIUM: the refusal shipped with the flag and had no arm — a template binds one
-    /// worker per phase, so a single <c>--skill</c> names no phase to attach to (spec/baton.md §9), and
-    /// silently attaching it to all of them would be a guess. Refused for the same reason
-    /// <c>--attach</c> and <c>--spec</c> are, one test over.
+    /// #1941 review MEDIUM: the refusal shipped with the flag and had no arm. Why a template refuses
+    /// <c>--skill</c> rather than spreading it over the phases is stated at the refusal itself, in
+    /// <c>DispatchCommand.MaterializeTemplateAsync</c> (and spec/baton.md §9); this is its arm, alongside
+    /// the sibling ones for <c>--attach</c> and <c>--spec</c>.
     /// </summary>
     [Fact]
     public async Task A_template_rejects_a_skill_because_a_single_flag_names_no_phase()
