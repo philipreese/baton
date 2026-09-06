@@ -57,7 +57,25 @@ public sealed record DaemonSettings
     /// </summary>
     public CodexPlanCeilingSettings? CodexPlanCeiling { get; init; }
 
+    /// <summary>
+    /// #1934 slice 1: the conductor queue's scheduling policy and tier table. Never null, and for the
+    /// same reason <see cref="RunwayHold"/> is not — an absent or explicitly-null <c>Queue</c> key
+    /// leaves the shipped defaults (which are the operator's own 2026-09-05 numbers) in force, so the
+    /// scheduler behaves identically on a machine that has never been configured. The read-through
+    /// nullable backing field, and why the coalesce happens on the way IN as well as out, are
+    /// <see cref="RunwayHold"/>'s remarks — the same record-equality argument applies verbatim.
+    /// </summary>
+    public QueueSettings Queue
+    {
+        get => _queue ?? DefaultQueue;
+        init => _queue = value ?? DefaultQueue;
+    }
+
     private static readonly RunwayHoldSettings DefaultRunwayHold = new();
+
+    private static readonly QueueSettings DefaultQueue = new();
+
+    private readonly QueueSettings? _queue = DefaultQueue;
 
     private readonly RunwayHoldSettings? _runwayHold = DefaultRunwayHold;
 
