@@ -98,8 +98,7 @@ public sealed record SkillRequirements(
 
 /// <summary>
 /// The typed <c>skill.json</c> manifest — <b>the only file in a canonical skill package Baton parses</b>
-/// (#1151 §3.2, operator ruling Q1 2026-09-01). Its sibling instructions file is markdown Baton copies
-/// or inlines but never interprets, which is what keeps a YAML parser out of this tree.
+/// (#1151 §3.2, operator ruling Q1 2026-09-01). spec/baton.md §9 states what that buys.
 /// </summary>
 /// <param name="Name">
 /// Advisory only. The package's identity is its DIRECTORY name, matching claude's own rule that a
