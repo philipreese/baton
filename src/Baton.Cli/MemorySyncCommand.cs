@@ -120,6 +120,20 @@ public static class MemorySyncCommand
         CancellationToken cancellationToken)
     {
         var entriesFile = BatonPaths.MemoryEntriesFile(slug);
+
+        // Checked BEFORE the lock. `--repository <id>` names a slug rather than selecting a directory
+        // that exists, so an identity with no store reaches here -- a typo is enough. Measured, so the
+        // comment does not overclaim: removing this guard does NOT break
+        // `A_repository_with_no_store_creates_nothing_under_the_baton_root`, because
+        // MutexGuardedFileLock does not create the path it locks. It stays because it makes the
+        // no-store answer independent of that behaviour rather than resting on it, and because taking a
+        // named mutex to discover a file is absent is work with no result. The store-is-empty case is
+        // still handled below: an existing but empty file is a different state from an absent one.
+        if (!File.Exists(entriesFile))
+        {
+            return null;
+        }
+
         var links = await MemoryStore
             .ReadLinksAsync(BatonPaths.MemoryLinksFile(slug), cancellationToken).ConfigureAwait(false);
 

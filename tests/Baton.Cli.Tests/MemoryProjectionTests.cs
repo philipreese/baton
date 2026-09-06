@@ -343,19 +343,104 @@ public sealed class MemoryProjectionTests : IDisposable
         Assert.Empty(Directory.GetDirectories(Path.Combine(ClaudeHome, "projects")));
     }
 
-    /// <summary>The JSON report is a parseable contract, with the omission lists in it by name.</summary>
+    /// <summary>
+    /// The JSON report is a parseable contract AND it carries the omissions by id — asserted against a
+    /// fixture that actually produces one, because a report shape checked over an empty
+    /// <c>overridden</c> array would pass whether or not the field is ever populated.
+    /// </summary>
     [Fact]
     public async Task The_json_report_carries_every_omission_by_name()
     {
         await SeedStoreAndClaudeRootAsync();
+        var facts = Path.Combine(_root, "json-facts");
+        Directory.CreateDirectory(facts);
+        File.WriteAllText(Path.Combine(facts, "feedback_rules.md"), "the checked-in copy");
 
-        var output = await RunAsync("--repository", Repository, "--format", "json");
+        var output = await RunAsync(
+            "--repository", Repository, "--repository-facts", facts, "--format", "json");
 
         using var document = JsonDocument.Parse(output);
+        Assert.False(document.RootElement.GetProperty("apply").GetBoolean());
+        Assert.Equal(1, document.RootElement.GetProperty("repositoryFactsConsidered").GetInt32());
+
         var repository = document.RootElement.GetProperty("repositories")[0];
         Assert.Equal(Repository, repository.GetProperty("repository").GetString());
         Assert.NotEmpty(repository.GetProperty("bodySha256").GetString()!);
-        Assert.False(document.RootElement.GetProperty("apply").GetBoolean());
+
+        var overridden = Assert.Single(repository.GetProperty("overridden").EnumerateArray().ToList());
+        Assert.Equal(
+            Entry("feedback_rules.md", "the vendor's copy").Id,
+            overridden.GetProperty("entryId").GetString());
+        Assert.Equal("feedback_rules.md", overridden.GetProperty("sourceFileName").GetString());
+        Assert.NotEmpty(overridden.GetProperty("reason").GetString()!);
+    }
+
+    /// <summary>
+    /// A repository-origin section does not claim to be a canonical store row, because its id is not
+    /// one: repository facts are read from a checkout at projection time and never imported. The
+    /// control is the vendor section in the same file, which DOES carry the canonical wording and whose
+    /// id is asserted to resolve in the store — without it this arm would pass over a projection that
+    /// back-pointed nothing at all.
+    /// </summary>
+    [Fact]
+    public async Task A_repository_fact_section_does_not_claim_a_canonical_store_row()
+    {
+        var root = await SeedStoreAndClaudeRootAsync();
+        var facts = Path.Combine(_root, "provenance-facts");
+        Directory.CreateDirectory(facts);
+        var factPath = Path.Combine(facts, "feedback_only_checked_in.md");
+        File.WriteAllText(factPath, "a fact that lives only in the checkout");
+
+        await RunAsync("--repository", Repository, "--repository-facts", facts, "--apply");
+        var text = File.ReadAllText(Path.Combine(root, ClaudeProjectionTarget.ProjectionFileName));
+
+        var stored = await MemoryStore.ReadAllAsync(
+            BatonPaths.MemoryEntriesFile(Slug), TestContext.Current.CancellationToken);
+        var storedIds = stored.Select(e => e.Id).ToHashSet(StringComparer.Ordinal);
+
+        // Every back-pointed id either resolves in the canonical store, or its section says outright
+        // that it does not. Nothing in between.
+        foreach (var match in System.Text.RegularExpressions.Regex.Matches(text, @"<!-- baton:entry id=(\w+) [^>]*origin=(\w+)"))
+        {
+            var id = ((System.Text.RegularExpressions.Match)match).Groups[1].Value;
+            var origin = ((System.Text.RegularExpressions.Match)match).Groups[2].Value;
+            if (origin == "repository")
+            {
+                Assert.DoesNotContain(id, storedIds);
+                Assert.Contains($"Checked-in repository fact `{id}`", text, StringComparison.Ordinal);
+                Assert.Contains("**Not a canonical store row**", text, StringComparison.Ordinal);
+            }
+            else
+            {
+                Assert.Contains(id, storedIds);
+                Assert.Contains($"Canonical entry `{id}`", text, StringComparison.Ordinal);
+            }
+        }
+
+        // Non-vacuity: the loop above saw both kinds, not zero sections of one of them.
+        Assert.Contains("origin=repository", text, StringComparison.Ordinal);
+        Assert.Contains("origin=vendor", text, StringComparison.Ordinal);
+    }
+
+    /// <summary>
+    /// A dry run against a repository with no canonical store creates nothing under Baton's own root.
+    /// <c>--repository</c> names a slug rather than selecting a directory that exists, so this state is
+    /// reachable by a typo, which is exactly when "nothing was written" has to still be true. <b>What
+    /// this pins is the property, not any one guard</b>: the arm was run with
+    /// <c>MemorySyncCommand</c>'s early <c>File.Exists</c> check removed and still passed, which is
+    /// recorded here rather than left implied — that check is defence, and the comment beside it says
+    /// so.
+    /// </summary>
+    [Fact]
+    public async Task A_repository_with_no_store_creates_nothing_under_the_baton_root()
+    {
+        const string absent = "github.com/philipreese/no-such-repository";
+        var directory = BatonPaths.RepositoryDirectory(RepositoryIdentity.FileSlugFor(absent));
+
+        var output = await RunAsync("--repository", absent);
+
+        Assert.Contains("No repository has a canonical memory store yet", output, StringComparison.Ordinal);
+        Assert.False(Directory.Exists(directory));
     }
 
     /// <summary><c>--repository-facts</c> without <c>--repository</c> is refused, never defaulted.</summary>

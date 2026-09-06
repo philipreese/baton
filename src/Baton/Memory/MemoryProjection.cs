@@ -34,9 +34,10 @@ public sealed record MemoryProjectionCandidate(MemoryEntry Entry, MemoryFactOrig
 /// <remarks>
 /// Three producers, and the type is shared across them deliberately: superseded, overridden by
 /// repository truth, and dropped by <see cref="ProjectionBudget"/> are three reasons a memory is
-/// missing from a cache, and an operator reading the report needs the same four facts about each —
-/// which entry, which file, which repository, and why. A count with no names attached is what "never
-/// dropped silently" forbids, whichever of the three did the dropping.
+/// missing from a cache, and an operator reading the report needs the same three facts about each —
+/// which entry, which file, and why. The repository is the enclosing report's and is not repeated on
+/// every row. A count with no names attached is what "never dropped silently" forbids, whichever of
+/// the three did the dropping.
 /// </remarks>
 /// <param name="EntryId">The canonical <see cref="MemoryEntry.Id"/>, so the operator can find it in the store.</param>
 /// <param name="SourceFileName">The file it was imported from, for a reader who knows the memory by its name.</param>
@@ -301,10 +302,20 @@ public static class MemoryProjection
         "(repository, kind, id) are absent from the cache and present in the canonical store.";
 
     /// <summary>
-    /// One entry's section. The HTML comment is the machine-readable back-pointer to the canonical
-    /// entry; the heading beside it is what a person reads. Both name the id, because a cache whose
-    /// provenance is only in a comment is one Markdown renderer away from having none.
+    /// One entry's section. The HTML comment is the machine-readable back-pointer; the line beside it
+    /// is what a person reads. Both name the id, because a cache whose provenance is only in a comment
+    /// is one Markdown renderer away from having none.
     /// </summary>
+    /// <remarks>
+    /// <b>The provenance line differs by origin, because the two ids point at different things.</b> A
+    /// vendor-origin id is a row in the canonical <c>entries.jsonl</c> named in the header, and saying
+    /// so is the acceptance line about linking to canonical provenance. A repository-origin id is
+    /// derived the same way (<see cref="MemoryEntry.Derive"/>, so it is stable across runs) but is
+    /// <b>not in the store</b> — repository facts are read from a checkout at projection time and never
+    /// imported. Printing "canonical entry" over one would send an operator into the store after an id
+    /// that is not there, which is a back-pointer that resolves to nothing dressed as one that
+    /// resolves.
+    /// </remarks>
     private static string RenderSection(MemoryProjectionCandidate candidate)
     {
         var entry = candidate.Entry;
@@ -318,9 +329,16 @@ public static class MemoryProjection
             $"<!-- baton:entry id={entry.Id} kind={MemoryJsonNames.Of(entry.Kind)} " +
             $"kind-source={MemoryJsonNames.Of(entry.KindSource)} origin={MemoryJsonNames.Of(candidate.Origin)} " +
             $"vendor={entry.SourceVendor} -->\n");
-        builder.Append(
-            CultureInfo.InvariantCulture,
-            $"Canonical entry `{entry.Id}` ({MemoryJsonNames.Of(entry.Kind)}), projected from `{entry.SourcePath}`.\n\n");
+        var provenance = candidate.Origin == MemoryFactOrigin.Repository
+            ? string.Create(
+                CultureInfo.InvariantCulture,
+                $"Checked-in repository fact `{entry.Id}` ({MemoryJsonNames.Of(entry.Kind)}), read from " +
+                $"`{entry.SourcePath}` in the checkout. **Not a canonical store row** -- this id is derived " +
+                $"for reference and will not be found in the store file named above.\n\n")
+            : string.Create(
+                CultureInfo.InvariantCulture,
+                $"Canonical entry `{entry.Id}` ({MemoryJsonNames.Of(entry.Kind)}), projected from `{entry.SourcePath}`.\n\n");
+        builder.Append(provenance);
         builder.Append(Normalize(entry.Text).TrimEnd('\n'));
         builder.Append("\n\n");
 
@@ -352,7 +370,11 @@ public static class MemoryProjection
             "back into Baton. To change what it says, change the canonical store it is projected from:\n\n");
         builder.Append(CultureInfo.InvariantCulture, $"    {canonicalStorePath}\n\n");
         builder.Append(
-            "Every section below back-points to the canonical entry id it came from. **There is deliberately\n" +
+            "Sections marked `origin=repository` are the exception: those are checked-in facts read straight\n" +
+            "from a checkout at projection time, they are **not** rows in the store above, and each says so\n" +
+            "on its own line. Change one by editing the checked-in file.\n\n");
+        builder.Append(
+            "Every other section back-points to the canonical entry id it came from. **There is deliberately\n" +
             "no timestamp in this file** -- an unchanged store projects byte-identical bytes, so any diff here\n" +
             "means the store changed, and the content hash below is what a generated-at stamp would otherwise\n" +
             "have been.\n\n");
