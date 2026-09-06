@@ -815,8 +815,8 @@ public sealed record FleetStepStatusView(
     ExecutionUsageView? LinkedFromUsage = null,
     // spec/baton.md §3/§6: the same WorkflowStatusStepView.Liveness FleetStatusTool already reads
     // off the shared projection (sentinel step's Liveness / stepView.Liveness) -- copied, never a
-    // second EngineLivenessProbe call. Present exactly when WorkflowStatusProjector.Project itself
-    // populates it -- spec/baton.md §3 states which steps that is and why.
+    // second EngineLivenessProbe call. Present per WorkflowStatusProjector.Project, except for
+    // sentinel-frozen steps — see spec/baton.md §3 for the presence rule and its sentinel exception.
     [property: JsonPropertyName("liveness")]
     [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
     string? Liveness = null,
