@@ -289,19 +289,29 @@ try
             .ExecuteAsync(ledgerViewOptions, Console.Out, cancellationToken: hostStopSource.Token).ConfigureAwait(false);
     }
 
-    // #1852 phase A: a noun-first verb group like `room`/`rooms` above -- `audit` is the only
-    // sub-verb today, and `sync` (the writing half, phase C) is the reason the shape leaves room for
-    // a second. Read-only, produces no CommandResult, so it joins them rather than the switch below.
+    // #1852: a noun-first verb group like `room`/`rooms` above -- `audit` (phase A, read-only) and
+    // `import` (phase B, which writes only under BatonPaths.Root). `sync`, phase C's projection half,
+    // is the reason the shape leaves room for a third. Neither produces a CommandResult, so they join
+    // the groups here rather than the switch below.
     if (args[0] == "memory")
     {
-        if (args.Length < 2 || args[1] != "audit")
+        if (args.Length >= 2 && args[1] == "audit")
         {
-            throw new CliArgumentException($"Unknown 'baton memory' sub-verb. {MemoryAuditOptionsParser.Usage}");
+            var memoryAuditOptions = MemoryAuditOptionsParser.Parse(args[2..]);
+            return await MemoryAuditCommand
+                .ExecuteAsync(memoryAuditOptions, Console.Out, cancellationToken: hostStopSource.Token).ConfigureAwait(false);
         }
 
-        var memoryAuditOptions = MemoryAuditOptionsParser.Parse(args[2..]);
-        return await MemoryAuditCommand
-            .ExecuteAsync(memoryAuditOptions, Console.Out, cancellationToken: hostStopSource.Token).ConfigureAwait(false);
+        if (args.Length >= 2 && args[1] == "import")
+        {
+            var memoryImportOptions = MemoryImportOptionsParser.Parse(args[2..]);
+            return await MemoryImportCommand
+                .ExecuteAsync(memoryImportOptions, Console.Out, cancellationToken: hostStopSource.Token).ConfigureAwait(false);
+        }
+
+        throw new CliArgumentException(
+            $"Unknown 'baton memory' sub-verb. {MemoryAuditOptionsParser.Usage} " +
+            $"{MemoryImportOptionsParser.Usage}");
     }
 
     CommandResult result;

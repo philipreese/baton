@@ -228,18 +228,43 @@ public sealed record VendorRootWalkLimits(int EntryCeiling, TimeSpan Budget)
 /// </remarks>
 public static class VendorMemoryRootTable
 {
+    /// <summary>
+    /// The family slug of Codex's markdown memories — <b>the one non-Claude family phase B imports
+    /// FROM</b> (the evening ruling of 2026-09-05: the markdown is what the CLI reads as memory).
+    /// Named here rather than spelled at the importer, so the two can never drift apart silently.
+    /// </summary>
+    public const string CodexMarkdownFamily = "codex-markdown";
+
+    /// <summary>
+    /// The family slug of Codex's sqlite stores — <b>machinery, never a memory source</b>: A2 measured
+    /// them to be the pipeline that produces the markdown above (docs/vendor-doc-audit.md, §"#1852
+    /// phase A2"). Phase B records them in its manifest for provenance and reads nothing out of them.
+    /// </summary>
+    public const string CodexSqliteFamily = "codex-sqlite";
+
     /// <summary>Every family, in report order: Codex first, then Antigravity.</summary>
     public static IReadOnlyList<VendorMemoryFamily> Families { get; } =
     [
         // Codex's markdown memories. Free-form .md with no schema, so the selector is the extension.
-        new("codex-markdown", "codex", VendorMemoryScope.Vendor, ".codex/memories", "*.md", Recursive: true, Inventoried: true),
+        new(CodexMarkdownFamily, "codex", VendorMemoryScope.Vendor, ".codex/memories", "*.md", Recursive: true, Inventoried: true),
+
+        // The same family under Baton's own Codex home. DERIVED BY MIRRORING the row above under
+        // BatonPaths.Root, exactly as the Baton-managed `codex-sqlite` row below is -- CODEX_HOME
+        // relocates a whole Codex root, so a family's relative path is the same on both sides of it.
+        // NOT independently probed on 2026-09-05: A2 visited this directory for `memories_*.sqlite`
+        // and nothing else, so `absent` here is a measurement of a host rather than a claim that the
+        // vendor never writes markdown under a relocated home. It is enumerated because Q5 (operator,
+        // 2026-09-05) puts this store's memories in phase B's import population and the evening ruling
+        // of the same day makes MARKDOWN the only memory source -- without this row that population is
+        // unreachable, and would stay silently unreachable if the directory ever filled.
+        new(CodexMarkdownFamily, "codex", VendorMemoryScope.BatonManaged, "codex-home/memories", "*.md", Recursive: true, Inventoried: true),
 
         // Codex's sqlite memory stores, one per Codex home. Top-level only and `memories_*` only:
         // every other .sqlite in these directories is a log, a queue or a thread history, and two of
         // them are over 100 MB.
-        new("codex-sqlite", "codex", VendorMemoryScope.Vendor, ".codex", "memories_*.sqlite", Recursive: false, Inventoried: true),
+        new(CodexSqliteFamily, "codex", VendorMemoryScope.Vendor, ".codex", "memories_*.sqlite", Recursive: false, Inventoried: true),
         // Relative to BatonPaths.Root, not to the user home -- BATON_HOME moves it.
-        new("codex-sqlite", "codex", VendorMemoryScope.BatonManaged, "codex-home", "memories_*.sqlite", Recursive: false, Inventoried: true),
+        new(CodexSqliteFamily, "codex", VendorMemoryScope.BatonManaged, "codex-home", "memories_*.sqlite", Recursive: false, Inventoried: true),
 
         // Antigravity's per-conversation working directories. LOCATED AND COUNTED, NEVER OPENED --
         // the register (docs/vendor-doc-audit.md, "#1852 phase A2") has what was found in them, the
