@@ -417,10 +417,14 @@ public class RoomRegistryStoreTests
     }
 
     /// <summary>
-    /// #1942, the retry policy's own budget scaled down to milliseconds: many short attempts rather than
-    /// three twenty-second ones, so a test can drive the contended path without sleeping out the real
-    /// budget. The <em>shape</em> is what these tests pin — attempt, back off, attempt again — not the
-    /// production numbers, which live on <c>RoomRegistryStore.WaitPolicy</c> alone.
+    /// #1942, the retry policy's own budget scaled down: many short attempts rather than three
+    /// twenty-second ones, so a test can drive the contended path without sleeping out the real budget.
+    /// Every arm using this releases the lock inside the first second, so what it costs is a second, not
+    /// its ceiling — sixty attempts plus their growing backoff is ≈ 42 s if a holder ever wedges, which
+    /// is a slow arm rather than a hung one. The <em>shape</em> is what these tests pin — attempt, back
+    /// off, attempt again — not the production numbers, which live on
+    /// <c>RoomRegistryStore.WaitPolicy</c> alone; that a retrying policy still gives up is pinned by
+    /// <c>MutexGuardedFileLockTests</c> on the primitive itself.
     /// </summary>
     private static readonly LockWaitPolicy FastRetryPolicy = new(
         AttemptTimeout: TimeSpan.FromMilliseconds(100), MaxAttempts: 60, BackoffBase: TimeSpan.FromMilliseconds(20));

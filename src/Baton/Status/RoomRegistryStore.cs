@@ -85,10 +85,9 @@ public static class RoomRegistryStore
     /// and the same access succeeded ~20 s later — so the timeout was reporting a *transient queue*, not
     /// a wedged one, and turned a finished lane into a runner "timed out" line an operator had to
     /// resolve by hand. The budget is now three waits rather than one, which keeps every attempt long
-    /// relative to the critical sections it guards while taking the total past 30 s, and the jittered
-    /// gap between them desynchronizes a group of processes that arrived together
-    /// (<see cref="LockWaitPolicy"/>'s own remarks carry why that gap is not equivalent to one longer
-    /// wait). It stays bounded: an access that genuinely cannot be had still fails open, on this store's
+    /// relative to the critical sections it guards while taking the total past 30 s, separated by a
+    /// jittered gap (<see cref="LockWaitPolicy"/>'s own remarks carry what that gap buys and what it
+    /// does not). It stays bounded: an access that genuinely cannot be had still fails open, on this store's
     /// unchanged contract, roughly a minute in rather than never.
     /// </remarks>
     private static readonly LockWaitPolicy WaitPolicy = new(

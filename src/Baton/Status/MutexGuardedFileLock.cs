@@ -29,59 +29,6 @@ namespace Baton.Status;
 /// file, which is exactly the loss this primitive exists to prevent.
 /// </para>
 /// </remarks>
-/// <summary>
-/// How <see cref="MutexGuardedFileLock"/> waits for a lock another process already holds (#1942): one
-/// kernel wait of <paramref name="AttemptTimeout"/>, and — if that elapses — up to
-/// <paramref name="MaxAttempts"/> of them in total, separated by a jittered backoff. A caller that
-/// wants the historical single-shot behaviour uses <see cref="Single"/>, which is exactly one attempt
-/// and therefore never sleeps.
-/// </summary>
-/// <remarks>
-/// <b>Why retry a wait that already timed out, rather than just passing a bigger
-/// <paramref name="AttemptTimeout"/>.</b> The two are not the same under the failure this exists for.
-/// A single long wait sits in one kernel queue for its whole budget; the jittered gap between attempts
-/// is what desynchronizes a group of processes that arrived together (six live rooms all polling the
-/// same registry file) so they stop re-colliding on every release. The per-attempt wait still stays
-/// long relative to any critical section this guards, because each timeout costs the caller its place
-/// in the wait queue — short slices would trade one failure mode for a worse one.
-/// </remarks>
-/// <param name="AttemptTimeout">How long one <see cref="Mutex.WaitOne(TimeSpan)"/> waits.</param>
-/// <param name="MaxAttempts">How many such waits are made in total, including the first.</param>
-/// <param name="BackoffBase">
-/// The unit the gap between attempts is built from: attempt <c>n</c> sleeps <c>n</c> times this plus a
-/// random extra of up to one more, so two processes that timed out together do not retry together.
-/// </param>
-public sealed record LockWaitPolicy(TimeSpan AttemptTimeout, int MaxAttempts, TimeSpan BackoffBase)
-{
-    /// <summary>
-    /// One attempt, no retry and no backoff — byte-for-byte the behaviour every caller had before
-    /// #1942, and what the <c>TimeSpan</c>-taking <see cref="MutexGuardedFileLock.RunUnderLock{T}(string,string,TimeSpan,Func{T})"/>
-    /// overloads still resolve to.
-    /// </summary>
-    public static LockWaitPolicy Single(TimeSpan lockTimeout) =>
-        new(lockTimeout, MaxAttempts: 1, BackoffBase: TimeSpan.Zero);
-
-    /// <summary>
-    /// The worst-case wait before <see cref="MutexGuardedFileLock.RunUnderLock{T}(string,string,LockWaitPolicy,Func{T})"/>
-    /// gives up — the kernel waits only, excluding the backoff sleeps, since those are randomized. What
-    /// the timeout <see cref="IOException"/> reports, so an operator reading it is told the budget that
-    /// actually elapsed rather than a single attempt's slice.
-    /// </summary>
-    public TimeSpan MaxTotalWait => AttemptTimeout * MaxAttempts;
-
-    /// <summary>
-    /// The gap after a failed attempt <paramref name="attemptNumber"/> (1-based). Grows linearly and
-    /// carries up to one <see cref="BackoffBase"/> of jitter; zero for a policy with no backoff.
-    /// </summary>
-    internal TimeSpan BackoffAfterAttempt(int attemptNumber)
-    {
-        var baseMilliseconds = (int)BackoffBase.TotalMilliseconds;
-        return baseMilliseconds <= 0
-            ? TimeSpan.Zero
-            : TimeSpan.FromMilliseconds((baseMilliseconds * attemptNumber) + Random.Shared.Next(baseMilliseconds));
-    }
-}
-
 public static class MutexGuardedFileLock
 {
     /// <summary>
@@ -171,4 +118,60 @@ public static class MutexGuardedFileLock
             action();
             return null;
         });
+}
+
+/// <summary>
+/// How <see cref="MutexGuardedFileLock"/> waits for a lock another process already holds (#1942): one
+/// kernel wait of <paramref name="AttemptTimeout"/>, and — if that elapses — up to
+/// <paramref name="MaxAttempts"/> of them in total, separated by a jittered backoff. A caller that
+/// wants the historical single-shot behaviour uses <see cref="Single"/>, which is exactly one attempt
+/// and therefore never sleeps.
+/// </summary>
+/// <remarks>
+/// <b>What retrying a timed-out wait buys, and what it does not.</b> It buys a bounded, varied re-entry:
+/// the budget is spent as several separately-timed bids with a gap no other waiter is sleeping for,
+/// each one reported and ended on a stated slice, rather than as one undifferentiated wait — and the
+/// ceiling stays stated in one place (<see cref="MaxTotalWait"/>). It does <em>not</em> break up a
+/// collision: <see cref="Mutex.WaitOne(TimeSpan)"/> parks in a kernel wait queue and the object is
+/// handed to one waiter at a time, so there is no re-collision on release for the jitter to
+/// desynchronize, and a waiter that times out rejoins that queue at the back. (That queueing behaviour
+/// is reasoned from the platform's contract, not measured here.) Which is why the per-attempt wait
+/// stays long relative to any critical section this guards: each timeout costs the caller its place in
+/// the queue, so short slices would trade one failure mode for a worse one.
+/// </remarks>
+/// <param name="AttemptTimeout">How long one <see cref="Mutex.WaitOne(TimeSpan)"/> waits.</param>
+/// <param name="MaxAttempts">How many such waits are made in total, including the first.</param>
+/// <param name="BackoffBase">
+/// The unit the gap between attempts is built from: attempt <c>n</c> sleeps <c>n</c> times this plus a
+/// random extra of up to one more, so two processes that timed out together do not retry together.
+/// </param>
+public sealed record LockWaitPolicy(TimeSpan AttemptTimeout, int MaxAttempts, TimeSpan BackoffBase)
+{
+    /// <summary>
+    /// One attempt, no retry and no backoff — byte-for-byte the behaviour every caller had before
+    /// #1942, and what the <c>TimeSpan</c>-taking <see cref="MutexGuardedFileLock.RunUnderLock{T}(string,string,TimeSpan,Func{T})"/>
+    /// overloads still resolve to.
+    /// </summary>
+    public static LockWaitPolicy Single(TimeSpan lockTimeout) =>
+        new(lockTimeout, MaxAttempts: 1, BackoffBase: TimeSpan.Zero);
+
+    /// <summary>
+    /// The worst-case wait before <see cref="MutexGuardedFileLock.RunUnderLock{T}(string,string,LockWaitPolicy,Func{T})"/>
+    /// gives up — the kernel waits only, excluding the backoff sleeps, since those are randomized. What
+    /// the timeout <see cref="IOException"/> reports, so an operator reading it is told the budget that
+    /// actually elapsed rather than a single attempt's slice.
+    /// </summary>
+    public TimeSpan MaxTotalWait => AttemptTimeout * MaxAttempts;
+
+    /// <summary>
+    /// The gap after a failed attempt <paramref name="attemptNumber"/> (1-based). Grows linearly and
+    /// carries up to one <see cref="BackoffBase"/> of jitter; zero for a policy with no backoff.
+    /// </summary>
+    internal TimeSpan BackoffAfterAttempt(int attemptNumber)
+    {
+        var baseMilliseconds = (int)BackoffBase.TotalMilliseconds;
+        return baseMilliseconds <= 0
+            ? TimeSpan.Zero
+            : TimeSpan.FromMilliseconds((baseMilliseconds * attemptNumber) + Random.Shared.Next(baseMilliseconds));
+    }
 }
