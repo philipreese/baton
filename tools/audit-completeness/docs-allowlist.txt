@@ -54,9 +54,5 @@ docs/vendor-codex-probe-2026-09-04.md
 docs/vendor-coverage.md
 docs/vendor-doc-audit.md
 spec/baton.md
-src/Baton.Vendors/CHANGELOG.md
-src/Baton.Cli/CHANGELOG.md
-src/Baton.Daemon/CHANGELOG.md
-src/Baton/CHANGELOG.md
 tools/fleet-glass/README.md
 tools/vendor-verify/README.md

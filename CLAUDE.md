@@ -30,10 +30,6 @@ baton/
 │                                (serving fleet_status/the registry), the snapshot push loop, and
 │                                the quota-runway ledger (spec/baton.md §7) are unbuilt new work for
 │                                a later PR, not something #1420's narrowing preserved
-│   └── Baton.Daemon/            CHANGELOG.md only (#1458 3b) — release-please's "simple" type has no
-│                              live package left to version, so the historical file stays at its old
-│                              path rather than being renamed or merged into another CHANGELOG; the
-│                              dir survives solely to hold it
 ├── tests/                     Unit/integration tests; live-smoke test projects (Baton.Cli.SmokeTests)
 │                              live outside Baton.slnx (default CI skips them) — see docs/runbooks/
 ├── spec/
