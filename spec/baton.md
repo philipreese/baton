@@ -5182,17 +5182,14 @@ on **same subject + same filename + different digest**, all three, because a nam
 the `MEMORY.md` every root carries and a cross-subject link would reintroduce the leak the
 per-repository layout exists to make impossible.
 
-**A supersession link is its own appended fact, not a field on an entry** (#1940 review round). An
-entry's `id` is derived from subject, source path and digest — none of which supersession changes — and
-the store skips an id it already holds, so a link a *later* import discovers could never be written
-onto a row an *earlier* one wrote: importing the live roots and then the archive landed the archived
-half of every link and silently dropped the live half, and two separate `--root` runs dropped both.
-`MemorySupersessionLink` is therefore a row in `links.jsonl` keyed by the ordered pair of entry ids,
-computed over **the store plus the incoming run** rather than over one run's plan, and
-`MemoryStore.ReadResolvedAsync` is what projects it back onto `supersedes`/`supersededBy` for a reader.
-A link whose two entries are not both present is dropped on resolution rather than reported: after an
-undo, or against a hand-edited store, "superseded by an entry you cannot see" is not a thing a reader
-should be told, and the link reappears intact if the entry is imported again.
+**A supersession link is its own appended fact, not a field on an entry** (#1940 review round). The
+ruling the register owns is that one sentence; `MemorySupersessionLink` carries the derivation, and it
+is the mechanism the layout above exists to accommodate. What it buys, stated as the failure it
+removes: an import that filed the live roots in one run and the archive in the next used to record only
+the archived side of each pair, and two `--root` runs recorded neither side. The links are computed
+over **the store plus the incoming run**, never over one run's plan alone, and
+`MemoryStore.ReadResolvedAsync` projects them back onto `supersedes`/`supersededBy` for a reader,
+dropping any whose endpoints are not both in the store it is reading.
 
 **`baton memory import` — phase B, shipped. Non-destructive by construction, and reversible.** Every
 source is opened read-only and left byte-identical; the verb writes in exactly two places, both under
@@ -5210,24 +5207,19 @@ whose `batonRoot` is not this process's root refuses before touching anything** 
 `MemoryStore.RemoveAsync` answering 0 for an absent file is right for it and wrong for the report built
 on top, which used to print "Removed 0 canonical entries" and exit 0. `--dry-run` writes **nothing at
 all**, manifest included: a manifest for an import that did not happen would replay to nothing.
-`--root` is a filter over what discovery found and never an addition to it — narrowing the manifest's
-machinery rows along with the sources, so a filtered run accounts for the roots it looked at and no
-others — which keeps `MemoryRootInventory` the single definition of "a memory root" and `audit` a
-preview of what `import` will do. The two verbs share one resolution
-(`ClaudeMemoryRootResolver`) rather than two copies of it, so that last claim is structural. `--root`
-selects only what this verb can *import*, which is narrower than what `audit` reports: a Codex
-`memories_*.sqlite` root is selectable (its manifest rows are what narrowing means for it) and an
-Antigravity root is not, and the help and the refusal both say so.
+`--root` is a filter over the discovered population and never an addition to it, so
+`MemoryRootInventory` stays the single definition of "a memory root" and `audit` stays a preview of
+what `import` will do — a claim made structural in the #1940 round by giving the two verbs one
+`ClaudeMemoryRootResolver` instead of a copy each, and made honest by narrowing the manifest's
+machinery rows with the same selection. The population it selects from is the **importable** one,
+which is narrower than what `audit` reports; the help text and the refusal both name what falls
+outside it.
 
-**An `--assert`ed repository is canonicalized through `RepositoryIdentity.TryCanonicalize` at the
-parser** (#1940 review round), so `GitHub.com/Owner/Repo`, `github.com/owner/repo` and a pasted
-`https://github.com/Owner/Repo.git` are one identity and therefore one store file — an uncanonicalized
-assertion differing from the probe's answer only in case gave one repository two `entries.jsonl` with
-every entry duplicated across them, silently. It runs the same two normalisations `RepositoryIdentity.From`
-does and invents no third (in particular it does not invent a host), and a string with no
-host-and-path in it is refused rather than turned into a store. Canonicalization is on the **write**
-path only: the alias file is append-only and hand-editable, and rewriting a row on read would change
-what an operator can see it say.
+**An `--assert`ed repository is canonicalized at the parser, through
+`RepositoryIdentity.TryCanonicalize`** (#1940 review round), which is what makes "one repository, one
+store file" hold for an operator's typing as well as for a probe's answer. That method's own doc
+carries the derivation and the refusal; the register's part is where it runs — on the **write** path
+only, because the alias file is append-only and an operator can read it.
 
 **It will not guess a subject, and that is the whole of what it refuses.** A root whose checkout is
 gone, an archived root whose flattened name decodes to no work tree, and a per-machine root
