@@ -54,6 +54,60 @@ public class FleetGlassStaleMarkerTests
             "glass.html must not have regressed to keying the ⚠ on journal-event age (`t`) alone.");
     }
 
+    /// <summary>
+    /// #1981 (2026-09-06 round-3 review): the <c>projection</c> banner must stay ranked BELOW the two
+    /// other <c>derived_at</c>-keyed rows of <c>glass.html</c>'s banner chain — row 8 (the #1829
+    /// neutral "cadence has widened" line) and row 9 ("derivation may be stuck"). The projection arm
+    /// (a) fires at 90s on exactly the state those two need at ten minutes, so any higher rung makes
+    /// both of them dead code and re-promotes the #1829 false positive that was deliberately demoted.
+    /// <para>
+    /// This property has been lost three times — #1613, #1829, and once inside #1981 itself — and it
+    /// is silent until an operator misreads a fault mid-incident, so it gets a check that runs and
+    /// fails rather than only the precedence table at the chain's head (which stays as the WHY: which
+    /// state reaches each row is not source-order and is not checkable here).
+    /// </para>
+    /// <para>
+    /// Each anchor is asserted to occur exactly ONCE before its index is used: the precedence table
+    /// spells out the same branch conditions in prose a few lines above the chain, so an anchor that
+    /// matched the comment instead of the code would report the comment's index and go on passing
+    /// after a real reorder. The <c>} else if(</c> prefix is what the table cannot contain.
+    /// </para>
+    /// </summary>
+    [Fact]
+    public void ProjectionBanner_ranks_below_the_two_derived_at_banners_it_would_otherwise_shadow()
+    {
+        var html = GlassSource();
+
+        var projectionIndex = SoleIndexOf(html, @"\}\s*else\s+if\(projection\)\{", "the #1981 projection branch");
+        var row8Index = SoleIndexOf(
+            html,
+            @"\}\s*else\s+if\(isFinite\(hbMs\)\s*&&\s*isFinite\(derivedMs\)\s*&&\s*hbMs\s*>\s*RUNNING_SUSPICION_MS",
+            "row 8, the #1829 neutral heartbeat/derivation-aging-together branch");
+        var row9Index = SoleIndexOf(
+            html,
+            @"\}\s*else\s+if\(running\s*&&\s*isFinite\(derivedMs\)\s*&&\s*derivedMs\s*>\s*RUNNING_SUSPICION_MS\)\{",
+            "row 9, the \"derivation may be stuck\" branch");
+
+        Assert.True(projectionIndex > row8Index,
+            "glass.html's `projection` banner must be checked AFTER the #1829 neutral line (row 8) — "
+            + "above it, arm (a)'s 90s threshold makes that row dead code.");
+        Assert.True(projectionIndex > row9Index,
+            "glass.html's `projection` banner must be checked AFTER the \"derivation may be stuck\" "
+            + "line (row 9) — above it, arm (a)'s 90s threshold makes that row dead code.");
+    }
+
+    /// <summary>Index of the one and only match of <paramref name="pattern"/>. Fails when the branch is
+    /// absent (renamed/deleted) or ambiguous (matched the precedence comment as well as the code) —
+    /// either way an index read off it would not mean what the ordering assertion claims.</summary>
+    private static int SoleIndexOf(string html, string pattern, string what)
+    {
+        var matches = Regex.Matches(html, pattern);
+        Assert.True(matches.Count == 1,
+            $"glass.html must contain exactly one occurrence of {what} (found {matches.Count}) — "
+            + "the banner-ordering assertions read its source index.");
+        return matches[0].Index;
+    }
+
     private static string RepoRoot()
     {
         var dir = new DirectoryInfo(AppContext.BaseDirectory);

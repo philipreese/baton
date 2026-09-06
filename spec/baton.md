@@ -3230,8 +3230,10 @@ is the false-fire the 2026-09-06 review caught before deploy. No cadence reporte
   as a banner above the fleet table, ranked below the pusher-liveness banners (a dead pusher explains a
   frozen `derived_at` with no daemon fault) and **below** the two other `derived_at`-keyed banners: arm
   (a) fires at 90s on the same state those two need at ten minutes, so any higher rung makes them dead
-  code (it did, before the 2026-09-06 review). The chain's own precedence table beside it in
-  `glass.html` is the record of which state reaches each row — that page has no test harness, which is
+  code (it did, before the 2026-09-06 review). One consequence of that ranking, recorded in full in
+  that table: on **the page**, an `unreachable` verdict reaches the neutral #1829 banner rather than
+  its own, so that arm's own wording is read through `fleet_status` alone. The chain's own precedence
+  table beside it in `glass.html` is the record of which state reaches each row — that page has no test harness, which is
   why the table is written down. It is computed in the Worker, not the page, because the page is an
   artifact that cannot import that module and a copy there would be a second implementation nothing
   tests.

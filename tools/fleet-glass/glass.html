@@ -2052,12 +2052,28 @@ window.addEventListener("hashchange", applyRoute);
         //  8 hb & derived aging together, |diff| < KV_CAP_SYNC_MS  The #1829 NEUTRAL line. Reached
         //                            when the ping cadence has widened on an idle fleet: hbMs and
         //                            derivedMs both > 10min. Not an alarm, deliberately.
+        //                            ALSO catches every reason==="unreachable" verdict — see row 10.
         //  9 running && derivedMs > RUNNING_SUSPICION_MS  Derivation stuck while rooms are Running.
         //                            Reached when the heartbeat is FRESH (or row 8's |diff| test
         //                            fails) and derivation is not.
         // 10 projection (#1981)      The daemon may be hung. Last of the derived_at-keyed rows: its
         //                            arm (a) fires at 90s on the same state rows 8 and 9 need at ten
         //                            minutes, so any higher rung makes both of them dead code.
+        //                            REACHED ONLY BY reason==="hung" (2026-09-06 round-3 review).
+        //                            Arm (b) implies arm (a) stayed quiet, i.e. derivedMs - hbMs is
+        //                            in [0, 90s], AND now - derivedAt > 3x the ping cadence (>= 15
+        //                            min) — which is row 8's condition exactly (both ages past
+        //                            RUNNING_SUSPICION_MS, |diff| < KV_CAP_SYNC_MS), checked first;
+        //                            past 2.5h row 5 takes it instead. So this row's second detail
+        //                            string ("nothing fresher has reached this page at all") is
+        //                            DEAD on this page and reachable only through fleet_status,
+        //                            which serves the same `projection` object with no chain over
+        //                            it. Recorded rather than fixed by reordering: ranking arm (b)
+        //                            above row 8 is what the round-2 review's finding B was, and
+        //                            folding the detail into row 8's text would re-promote the
+        //                            #1829 false positive from the other side, since arm (b) itself
+        //                            false-fires for the length of a hard-429 cap window
+        //                            (worker.core.mjs, PROJECTION_UNREACHABLE_CADENCE_MULTIPLE).
         // 11 else                    Clear the banner.
         if(kvWriteCapResetsAt){
           banner(`<b>The worker is refusing writes</b> (Cloudflare's daily KV write cap, confirmed by a live 429; writes resume ${esc(kvWriteCapResetsAt)}). Data below is from the last push before the cap hit.`);
