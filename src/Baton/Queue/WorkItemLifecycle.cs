@@ -26,11 +26,10 @@ namespace Baton.Queue;
 /// branch is the thing Rule 1 actually forbids, and it stays forbidden.
 /// </para>
 /// <para>
-/// <b>Pushed-ness, not the timeout word, is what discriminates re-review from continue.</b> A lane
-/// that runs out of wall clock settles as <c>Failed</c> — there is no distinct "timed out" outcome
-/// word (<c>WorkflowOutcome</c>'s five), so keying on one would mean string-matching an error message.
-/// The fact that actually decides is whether the work reached the PR: a PR head equal to the
-/// workspace's head is work someone can review, and anything else is work to finish.
+/// <b>Pushed-ness, not the timeout word, is what discriminates re-review from continue</b> —
+/// spec/baton.md §13 has the argument. What it means for the code below: nothing reads
+/// <c>WorkflowOutcome</c> beyond "is it <c>Succeeded</c>", and <see cref="IsPushed"/> is the whole
+/// discriminator for everything else.
 /// </para>
 /// </remarks>
 public static class WorkItemLifecycle

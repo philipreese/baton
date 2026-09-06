@@ -71,11 +71,10 @@ public sealed record QueueDecisionEntry(
     /// folding them would lose the evidence — the outcome word, the PR head, the verdict's counts —
     /// that the transition was derived from.
     /// <para>
-    /// <b>Its <see cref="Reason"/> must name that evidence</b>, and not only for the reader: the
-    /// collapse rule below keys on <see cref="VerdictKey"/>, so two rounds whose reasons read alike
-    /// would collapse into one row and the second transition would vanish from the file this queue
-    /// exists to make auditable. <c>WorkItemLifecycle</c>'s reasons carry the stage pair and the head
-    /// sha for exactly that purpose.
+    /// <b>Its <see cref="Reason"/> must name that evidence</b>, for the mechanical reason spec/baton.md
+    /// §13 states as well as the readable one: it feeds <see cref="VerdictKey"/>, which the collapse
+    /// below is keyed on. <c>WorkItemLifecycle</c>'s reasons carry the stage pair and the head sha for
+    /// exactly that purpose.
     /// </para>
     /// </summary>
     public const string Advanced = "advanced";

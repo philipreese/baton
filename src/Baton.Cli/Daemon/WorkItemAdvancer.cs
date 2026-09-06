@@ -26,10 +26,9 @@ namespace Baton.Cli.Daemon;
 /// </para>
 /// <para>
 /// <b>A <see cref="WorkStage.Ready"/> item is parked in <see cref="QueueItemState.Queued"/>, not
-/// marked done.</b> It is not finished — the conductor still has to merge it — and leaving it in the
-/// operator's live list is what makes "waiting on a merge" visible in <c>baton queue list</c>. What
-/// keeps it from launching is <c>QueueScheduler.Decide</c>'s own stage guard, which is therefore the
-/// single load-bearing rule rather than a belt beside a braces.
+/// marked done</b> — spec/baton.md §13 has the ruling and what it buys. The consequence for this file:
+/// nothing here stops such an item launching, because <c>QueueScheduler.Decide</c> does, and a second
+/// guard here would quietly become the one that mattered.
 /// </para>
 /// </remarks>
 public sealed class WorkItemAdvancer

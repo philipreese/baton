@@ -19,11 +19,10 @@ namespace Baton.Queue;
 /// product and one that is a fixture the tool keeps stamping back over.
 /// </para>
 /// <para>
-/// <b>No template ever carries a room path.</b> A lane's grant cannot read another room's directory,
-/// so a brief that pointed at one would be a brief the worker cannot follow — which is exactly why the
-/// conductor was copying findings by hand. The findings travel as TEXT, inlined verbatim by
-/// <see cref="RenderFindings"/>; <c>QueueItem.LastVerdict</c> keeps the path for the operator's own
-/// trace and nothing renders it.
+/// <b>No template ever carries a room path</b> — spec/baton.md §13 has why that is a mechanism rather
+/// than a preference. Here it means: the findings travel as TEXT, inlined verbatim by
+/// <see cref="RenderFindings"/>, and <c>QueueItem.LastVerdict</c> keeps the path for the operator's own
+/// trace with nothing rendering it.
 /// </para>
 /// <para>
 /// <b>Three templates, five stages.</b> <see cref="WorkStage.Continue"/> renders from

@@ -3,10 +3,9 @@ using System.Text.Json.Serialization;
 namespace Baton.Queue;
 
 /// <summary>
-/// One item in the conductor's queue — either shape (spec/baton.md §13). A <b>dispatch request</b>
-/// (#1934 slice 1, Q2 answer (a)) is a spec plus the parameters <c>baton dispatch</c> needs. A
-/// <b>work item</b> (slice 2, Q2 answer (b)) is that plus the lifecycle fields below, anchored on an
-/// issue, whose next dispatch the scheduler derives from the PR's and the last verdict's state.
+/// One item in the conductor's queue, in either of the two shapes spec/baton.md §13 defines — a
+/// slice-1 dispatch request, or a slice-2 issue-anchored work item, which is the same record plus the
+/// lifecycle fields below.
 /// </summary>
 /// <remarks>
 /// <para>
