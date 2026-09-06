@@ -127,9 +127,12 @@ public sealed record SkillRequirements(
     /// <see cref="ShellCommandPatternMatcher.IsDenied"/> asks the gate's own predicate whether the family
     /// is denied. Membership is kept as well rather than replaced: <c>IsDenied</c> fails closed on a line
     /// it cannot parse (its metacharacter scan), so a de-starred pattern carrying one would otherwise
-    /// lose even the exact-equality catch. Composite, this side is never laxer than the gate; it can
-    /// still be stricter (a deny entry NARROWER than the required pattern denies only part of the family
-    /// and is not caught here — the residual, and it is a mid-lane deny of the narrow case only).
+    /// lose even the exact-equality catch. Composite, this side is never laxer than the gate's
+    /// <em>pattern</em> rung; the gate has two more this method does not model —
+    /// <see cref="PermissionGrant.DeniedShellOptionTokens"/> and the unscoped runtime deny grammar — so
+    /// a package can still bind here and be denied mid-lane by either of those. It can also be stricter
+    /// (a deny entry NARROWER than the required pattern denies only part of the family and is not caught
+    /// here — the residual, and it is a mid-lane deny of the narrow case only).
     /// </para>
     /// <para>
     /// Three rules, in the order they fire:
