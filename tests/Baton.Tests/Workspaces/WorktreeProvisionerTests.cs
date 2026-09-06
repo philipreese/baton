@@ -556,6 +556,37 @@ public sealed class WorktreeProvisionerTests : IDisposable
     }
 
     /// <summary>
+    /// A <b>modified tracked</b> path survives the porcelain read whole, in the operator-visible string
+    /// <see cref="WorktreeProvisioner.DescribeWorkspaceEvidence"/> composes.
+    /// </summary>
+    /// <remarks>
+    /// The two-character status field is read positionally, so the lines must reach that read UNTRIMMED
+    /// (<c>SplitPorcelainLines</c>): a worktree-modified line is <c>" M path"</c>, and trimming it before
+    /// the <c>l[3..]</c> slice yields <c>"ath"</c> — a truncated path in a grant-audit refusal and in the
+    /// conductor's reason text, and, on the same read, a status field the engine-placed subtraction can
+    /// no longer parse. Untracked lines (<c>"?? path"</c>) survive trimming, which is why every other arm
+    /// in this class passes either way and this one is the discriminator: revert the split to
+    /// <c>TrimEntries</c> and only this assertion goes red.
+    /// </remarks>
+    [Fact]
+    public void A_modified_tracked_path_is_named_in_full_in_the_workspace_evidence()
+    {
+        var (repo, reference) = CreateRepoWithBranch("committed.txt");
+        var workspace = Path.Combine(NewDir("task"), "workspace");
+        WorktreeProvisioner.Provision(workspace, repo, reference);
+        var baseSha = RunGitCapture(repo, "rev-parse", "HEAD").Trim();
+
+        // Tracked and modified, so git reports it as " M committed.txt" — leading space and all.
+        var tracked = Path.Combine(workspace, "committed.txt");
+        Assert.True(File.Exists(tracked), "the fixture's committed file should be checked out");
+        File.WriteAllText(tracked, "the worker edited the tracked file");
+        Assert.Contains(" M committed.txt", RunGitCapture(workspace, "status", "--porcelain"));
+
+        var evidence = WorktreeProvisioner.DescribeWorkspaceEvidence(workspace, baseSha);
+        Assert.Contains("committed.txt", evidence);
+    }
+
+    /// <summary>
     /// #1929 review round 3 (MEDIUM): a placement fact whose <see cref="EnginePlacedFile.Sha256"/> is
     /// null is not AER's to subtract, so its path COUNTS — see that property for the two ways a fact
     /// ends up in that state.
