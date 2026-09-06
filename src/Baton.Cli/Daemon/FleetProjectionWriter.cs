@@ -72,7 +72,7 @@ public sealed class FleetProjectionWriter : BackgroundService
     // `terminal_timeline_cache` is its counterpart. In-memory only: a restart self-heals. Plain CLR
     // entries, not JsonNode: a JsonNode has a single parent, so a cached node re-attached on the next
     // tick would throw (ComputePrunedInfo's DeepClone is the other way out of the same trap).
-    private readonly Dictionary<string, IReadOnlyList<ProjectedTimelineEntry>> _terminalTimelineCache =
+    private readonly Dictionary<string, TerminalTimelineCacheEntry> _terminalTimelineCache =
         new(StringComparer.Ordinal);
 
     private bool _loggedMissingSecretPatterns;
@@ -414,6 +414,33 @@ public sealed class FleetProjectionWriter : BackgroundService
     /// ledger is frozen, so it is read once and served from <see cref="_terminalTimelineCache"/>
     /// afterwards, while a non-terminal room's still-growing timeline is re-read every tick.
     /// <para>
+    /// <b>A room can go terminal → non-terminal → terminal in the same directory</b> — that is exactly
+    /// what <see cref="TerminalSentinelWriter.DeleteStaleSentinel"/> exists for (a re-run into a room
+    /// that already finished), so "terminal" is not a one-way door and the cache entry has to be
+    /// invalidated on the way back. Two halves, because neither covers the other:
+    /// <list type="bullet">
+    /// <item><description>the room reads non-terminal on some tick → the entry is EVICTED, so the
+    /// re-run's own growing ledger is read live;</description></item>
+    /// <item><description>the entry is keyed on the sentinel's own last-write time, so a re-run that
+    /// starts AND finishes between two ticks — the daemon never observing the non-terminal window —
+    /// still misses the cache and re-reads.</description></item>
+    /// </list>
+    /// Without both, a re-run room served the FIRST run's entries until the daemon process restarted,
+    /// and the daemon is a long-lived scheduled task (spec/baton.md §7). <c>pusher.py</c>'s
+    /// <c>resolve_room_timeline</c> still has the hole; parity with it is not a correctness argument,
+    /// and <c>file</c> is the default source now.
+    /// </para>
+    /// <para>
+    /// <para>
+    /// <b>A non-terminal room's <c>flow.jsonl</c> is read and parsed twice per tick</b>, deliberately:
+    /// <see cref="FleetStatusTool.ProcessRoomAsync"/> already parses the whole ledger for its own
+    /// projection but does not return the raw entries, and this reads it again through
+    /// <see cref="RoomDetailTool.ReadTimelineAsync"/>. Threading the parsed entries out of that method
+    /// would change a shared MCP tool's signature for a caller-specific optimisation; the trade is the
+    /// same one <see cref="TryGetEngineIdentityAsync"/>'s own remark already records, and both are
+    /// cheap next to the per-cycle <c>dotnet mcp</c> spawn this whole file removes. Terminal rooms —
+    /// the ones that accumulate — pay nothing, between the sentinel fast path and the cache above.
+    /// </para>
     /// Empty for a room with no <c>flow.jsonl</c>, none it could read, or no projectable entry — the
     /// caller then writes no <c>timelines</c> key for it at all, matching derive's own <c>if entries:</c>.
     /// <b>Deliberate divergence from <c>extract_timeline</c>:</b> that function keeps
@@ -427,10 +454,24 @@ public sealed class FleetProjectionWriter : BackgroundService
     private async Task<IReadOnlyList<ProjectedTimelineEntry>> ResolveTimelineAsync(
         string roomPath, TextWriter diagnostics, CancellationToken cancellationToken)
     {
-        var isTerminal = File.Exists(Path.Combine(roomPath, TerminalSentinelWriter.TerminalSentinelFileName));
-        if (isTerminal && _terminalTimelineCache.TryGetValue(roomPath, out var cached))
+        // One FileInfo snapshot answers both "is it terminal" and "is it the SAME terminal fact the
+        // cached entry was read under" -- a second stat is what a File.Exists plus a separate
+        // GetLastWriteTimeUtc would cost.
+        var sentinel = new FileInfo(Path.Combine(roomPath, TerminalSentinelWriter.TerminalSentinelFileName));
+        var isTerminal = sentinel.Exists;
+        var sentinelWrittenAtUtc = isTerminal ? sentinel.LastWriteTimeUtc : default;
+        if (!isTerminal)
         {
-            return cached;
+            _terminalTimelineCache.Remove(roomPath);
+        }
+        else if (_terminalTimelineCache.TryGetValue(roomPath, out var cached))
+        {
+            if (cached.SentinelWrittenAtUtc == sentinelWrittenAtUtc)
+            {
+                return cached.Entries;
+            }
+
+            _terminalTimelineCache.Remove(roomPath);
         }
 
         IReadOnlyList<ProjectedTimelineEntry> entries;
@@ -450,7 +491,11 @@ public sealed class FleetProjectionWriter : BackgroundService
 
         if (isTerminal && entries.Count > 0)
         {
-            _terminalTimelineCache[roomPath] = entries;
+            // Keyed on the write time observed BEFORE the read, deliberately: a sentinel rewritten
+            // while this tick was reading the ledger then mismatches on the next tick and re-reads,
+            // whereas keying on a post-read stat would pin entries under a terminal fact they may
+            // predate.
+            _terminalTimelineCache[roomPath] = new TerminalTimelineCacheEntry(sentinelWrittenAtUtc, entries);
         }
 
         return entries;
@@ -464,8 +509,18 @@ public sealed class FleetProjectionWriter : BackgroundService
     /// this code failing to name it — which is also why the view is projected by hand here instead of
     /// serialized, since serializing it would carry <c>detail</c> (an exception message) straight out.
     /// No event type is filtered, deliberately (#1537): the vocabulary is whatever the engine journals.
+    /// <para>
+    /// <b>Two implementations of one projection, kept in lock-step by a shared fixture</b>
+    /// (<c>tests/fixtures/timeline-projection-sample.json</c>) rather than by a literal shared
+    /// implementation across the C#/Python boundary — the same pattern <c>doingNow</c> uses
+    /// (spec/baton.md §6). This method and <c>pusher.py</c>'s <c>extract_timeline</c> both project that
+    /// fixture's <c>roomDetail</c> to its <c>expected</c> array byte-for-byte, so a drift in either —
+    /// a moved cap, a field added or dropped, a reordered key — reds one side. <c>internal</c>, not
+    /// private, so the xunit half can assert the projection itself rather than only its effect on a
+    /// whole tick's JSON.
+    /// </para>
     /// </summary>
-    private static IReadOnlyList<ProjectedTimelineEntry> ProjectTimeline(RoomTimelineView? timeline)
+    internal static IReadOnlyList<ProjectedTimelineEntry> ProjectTimeline(RoomTimelineView? timeline)
     {
         if (timeline is null)
         {
@@ -489,7 +544,10 @@ public sealed class FleetProjectionWriter : BackgroundService
             : projected;
     }
 
-    private static JsonArray RenderTimeline(IReadOnlyList<ProjectedTimelineEntry> entries)
+    /// <summary>The projected entries as the JSON the file actually carries — key order
+    /// <c>type, timestamp, stepId, exitCode</c>, which the shared fixture's own order matches so the
+    /// lock-step arm can compare serialized text rather than walking the tree.</summary>
+    internal static JsonArray RenderTimeline(IReadOnlyList<ProjectedTimelineEntry> entries)
     {
         var array = new JsonArray();
         foreach (var entry in entries)
@@ -847,5 +905,10 @@ public sealed class FleetProjectionWriter : BackgroundService
     private sealed record PrunedCacheEntry(DateTime DirMtimeUtc, int ChildCount, JsonObject? Result);
 
     /// <summary>One timeline entry, already reduced to the four fields the projection publishes.</summary>
-    private sealed record ProjectedTimelineEntry(string Type, string? Timestamp, string? StepId, int? ExitCode);
+    internal sealed record ProjectedTimelineEntry(string Type, string? Timestamp, string? StepId, int? ExitCode);
+
+    /// <summary>One terminal room's cached entries, plus the identity of the terminal fact they were
+    /// read under — <see cref="ResolveTimelineAsync"/>'s own remarks carry why the key exists.</summary>
+    private sealed record TerminalTimelineCacheEntry(
+        DateTime SentinelWrittenAtUtc, IReadOnlyList<ProjectedTimelineEntry> Entries);
 }

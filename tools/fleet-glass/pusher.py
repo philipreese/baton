@@ -3656,7 +3656,8 @@ def compare_projection(dll: str, roots: list) -> int:
     the file side the later sample) -- so ordering is read from each side's own `derived_at`
     instead of assumed from either the claimed or the actual call order. `derive_parsed`
     (fleet_status's raw result) carries no top-level `derived_at` the way the projection FILE does
-    (`FleetProjectionWriter.cs:162`), so the derive side's timestamp is captured explicitly, right
+    (`FleetProjectionWriter.BuildProjectionJsonAsync`, cited by symbol rather than by line: the
+    line number in that file has already rotted twice), so the derive side's timestamp is captured explicitly, right
     after `attach_live_telemetry` has read each room's live counters straight off disk -- that is
     the actual moment those counters were observed."""
     text, _timelines = derive_snapshot_and_timelines(dll, roots)
@@ -4630,6 +4631,36 @@ def _selftest() -> int:
 
     check("extract_timeline degrades to [] for a room_detail response with no timeline at all",
           extract_timeline({"name": "room-y", "note": "no flow.jsonl yet"}) == [])
+
+    # -- #1902 LOCK-STEP: this content projection exists TWICE (here, and in C# as
+    # FleetProjectionWriter.ProjectTimeline, which the daemon uses to write the projection file's
+    # `timelines`). Nothing in the type vocabulary can drift -- both consume the same in-process
+    # RoomDetailTool.DescribeEntry output -- but the CONTENT projection and its cap are two
+    # independent implementations, and until this arm nothing failed if they diverged. Both sides
+    # assert the SAME checked-in fixture, the doingNow pattern (spec/baton.md §6): a moved cap, an
+    # added or dropped field, or a reordered key reds one of them. The fixture's own `_readme` says
+    # which of its properties are load-bearing.
+    # The existence check is deliberately its own `check`, not an `if ...exists()` skip: a path bug
+    # that silently skipped the whole arm is exactly the failure class this arm exists to close.
+    timeline_fixture_path = (Path(__file__).resolve().parent.parent.parent
+                             / "tests" / "fixtures" / "timeline-projection-sample.json")
+    check("#1902 lock-step: the shared C#/Python timeline-projection fixture is present",
+          timeline_fixture_path.is_file())
+    if timeline_fixture_path.is_file():
+        timeline_fixture = json.loads(timeline_fixture_path.read_text(encoding="utf-8"))
+        fixture_projected = extract_timeline(timeline_fixture["roomDetail"])
+        check("#1902 lock-step: extract_timeline projects the shared fixture to its `expected` "
+              "entries exactly -- the same assertion FleetProjectionWriterTests makes against "
+              "ProjectTimeline, which is what keeps the two implementations from drifting. "
+              f"Actual length {len(fixture_projected)} vs expected {len(timeline_fixture['expected'])}",
+              fixture_projected == timeline_fixture["expected"])
+        # (control) the fixture must actually exercise the cap in the direction claimed -- otherwise
+        # the arm above would pass on an implementation that kept the OLDEST tail instead.
+        check("(control) #1902 lock-step: the fixture carries more entries than TIMELINE_CAP, and "
+              "the entry the cap drops is the OLDEST one",
+              len(timeline_fixture["roomDetail"]["timeline"]["entries"]) > TIMELINE_CAP
+              and len(fixture_projected) == TIMELINE_CAP
+              and timeline_fixture["roomDetail"]["timeline"]["entries"][0] not in fixture_projected)
 
     # #1537: extract_timeline admits every event TYPE -- it has never filtered on `type`, only on
     # field shape (KEEP-ONLY type+timestamp, see the function's own docstring). This is the
@@ -6420,7 +6451,9 @@ def _selftest() -> int:
             ]
             ident_underhood = [{"k": "v"}]
             # What `derive_snapshot_and_timelines` would return from its per-room `room_detail`
-            # calls -- the file has no counterpart, which is the whole point of the exclusion below.
+            # calls. Since #1902 the file has a counterpart, so the same dict is written into the
+            # fixture projection file below -- which is why this arm can only show the field
+            # survives the trip, never that the two projections agree (see the check below).
             ident_timelines = {str(ident_run_room): [{"type": "executionStarted",
                                                        "timestamp": "2026-09-05T00:00:00Z"}]}
 
@@ -6476,8 +6509,14 @@ def _selftest() -> int:
             check("#1557 PR-B2 acceptance: each posted body carries its source's derived_at",
                   derive_post_body["derived_at"] == derive_derived_at
                   and file_post_body["derived_at"] == file_derived_at)
-            check("#1902: both sources carry the SAME per-room timelines -- not 'derive has entries, "
-                  "file has none' (the pre-#1902 shape), and not two different sets of entries",
+            # Scoped to what one hand-written dict fed to BOTH sides can actually prove: that the
+            # `timelines` the file supplies reaches the pushed body intact, instead of being dropped
+            # or replaced on the way through (the pre-#1902 shape was 'derive has entries, file has
+            # none'). It is NOT evidence that the two CONTENT projections agree -- that claim is
+            # about two implementations, and the arm that tests it is the shared-fixture lock-step
+            # check above (`extract_timeline` vs. C#'s ProjectTimeline).
+            check("#1902: the file source's own per-room timelines survive into the pushed body "
+                  "unchanged, exactly as the derive source's do",
                   derive_wrapped["timelines"] == ident_timelines
                   and file_wrapped["timelines"] == ident_timelines)
 
