@@ -631,4 +631,138 @@ public sealed class FleetProjectionWriterTests : IDisposable
         var root = JsonNode.Parse(json)!.AsObject();
         Assert.False(root.ContainsKey("vendors"));
     }
+
+    /// <summary>
+    /// #1902: writes per-room timelines into projection.json; running rooms are re-read every cycle
+    /// and terminal rooms are read once and served from memory after.
+    /// </summary>
+    [Fact]
+    public async Task BuildProjectionJson_RunningAndTerminalRooms_ProduceExpectedTimelinesAndServeTerminalFromMemory()
+    {
+        var liveIdentity = (Environment.ProcessId, new DateTimeOffset(System.Diagnostics.Process.GetCurrentProcess().StartTime).ToUniversalTime());
+        var (runningRoom, runningExecId) = await CreateRunningRoomAsync("running-timeline-room", liveIdentity);
+
+        var runLogWriter = new FlowEventLogWriter(Path.Combine(runningRoom, BatonPaths.FlowLogFileName));
+        await runLogWriter.AppendAsync(
+            new CoreEvent.ExecutionStarted(runningExecId, (uint)liveIdentity.Item1),
+            TestContext.Current.CancellationToken);
+        await runLogWriter.DisposeAsync();
+
+        var terminalRoom = Path.Combine(_tempHome, BatonPaths.RoomsDirectoryName, "terminal-timeline-room");
+        Directory.CreateDirectory(terminalRoom);
+        var sentinel = new WorkflowStatusView("Succeeded", [], ["/tmp/out.txt"], null, null);
+        await TerminalSentinelWriter.WriteAsync(terminalRoom, sentinel, TestContext.Current.CancellationToken);
+
+        var termExecId = new ExecutionId("exec-term-1");
+        var termLogWriter = new FlowEventLogWriter(Path.Combine(terminalRoom, BatonPaths.FlowLogFileName));
+        await termLogWriter.AppendAsync(
+            new CoreEvent.ExecutionStarted(termExecId, 1234),
+            TestContext.Current.CancellationToken);
+        await termLogWriter.AppendAsync(
+            new CoreEvent.ExecutionExited(termExecId, ExitCode: 0, CoreExitReason.Natural),
+            TestContext.Current.CancellationToken);
+        await termLogWriter.DisposeAsync();
+
+        var writer = new FleetProjectionWriter();
+        var json = await writer.BuildProjectionJsonAsync(TestContext.Current.CancellationToken);
+
+        var root = JsonNode.Parse(json)!.AsObject();
+        var timelines = root["timelines"]!.AsObject();
+
+        Assert.True(timelines.ContainsKey(runningRoom));
+        Assert.True(timelines.ContainsKey(terminalRoom));
+
+        var runningTimeline = timelines[runningRoom]!.AsArray();
+        Assert.Equal(2, runningTimeline.Count);
+        Assert.Equal("flow.executionRequestAccepted", runningTimeline[0]!["type"]!.GetValue<string>());
+        Assert.Equal("core.executionStarted", runningTimeline[1]!["type"]!.GetValue<string>());
+
+        var terminalTimeline = timelines[terminalRoom]!.AsArray();
+        Assert.Equal(2, terminalTimeline.Count);
+        Assert.Equal("core.executionStarted", terminalTimeline[0]!["type"]!.GetValue<string>());
+        Assert.Equal("core.executionExited", terminalTimeline[1]!["type"]!.GetValue<string>());
+        Assert.Equal(0, terminalTimeline[1]!["exitCode"]!.GetValue<int>());
+
+        // Serve terminal from memory: delete terminal room's flow.jsonl from disk.
+        File.Delete(Path.Combine(terminalRoom, BatonPaths.FlowLogFileName));
+
+        // Append a new event to the running room's flow.jsonl to prove it is re-read.
+        var runLogWriter2 = new FlowEventLogWriter(Path.Combine(runningRoom, BatonPaths.FlowLogFileName));
+        await runLogWriter2.AppendAsync(
+            new CoreEvent.ExecutionExited(runningExecId, ExitCode: 42, CoreExitReason.Natural),
+            TestContext.Current.CancellationToken);
+        await runLogWriter2.DisposeAsync();
+
+        var json2 = await writer.BuildProjectionJsonAsync(TestContext.Current.CancellationToken);
+        var root2 = JsonNode.Parse(json2)!.AsObject();
+        var timelines2 = root2["timelines"]!.AsObject();
+
+        // Terminal room served from memory despite missing flow.jsonl on disk
+        var terminalTimeline2 = timelines2[terminalRoom]!.AsArray();
+        Assert.Equal(2, terminalTimeline2.Count);
+        Assert.Equal("core.executionExited", terminalTimeline2[1]!["type"]!.GetValue<string>());
+
+        // Running room re-read and updated with the new event
+        var runningTimeline2 = timelines2[runningRoom]!.AsArray();
+        Assert.Equal(3, runningTimeline2.Count);
+        Assert.Equal("core.executionExited", runningTimeline2[2]!["type"]!.GetValue<string>());
+        Assert.Equal(42, runningTimeline2[2]!["exitCode"]!.GetValue<int>());
+    }
+
+    /// <summary>
+    /// #1902: timeline entries are capped at <see cref="FleetProjectionWriter.TimelineCap"/> (30),
+    /// keeping the newest tail.
+    /// </summary>
+    [Fact]
+    public async Task BuildProjectionJson_TimelineHonoursCap()
+    {
+        var room = Path.Combine(_tempHome, BatonPaths.RoomsDirectoryName, "capped-timeline-room");
+        Directory.CreateDirectory(room);
+        var sentinel = new WorkflowStatusView("Succeeded", [], [], null, null);
+        await TerminalSentinelWriter.WriteAsync(room, sentinel, TestContext.Current.CancellationToken);
+
+        var logWriter = new FlowEventLogWriter(Path.Combine(room, BatonPaths.FlowLogFileName));
+        var total = FleetProjectionWriter.TimelineCap + 5;
+        for (var i = 0; i < total; i++)
+        {
+            await logWriter.AppendAsync(
+                new CoreEvent.ExecutionExited(new ExecutionId($"exec-{i}"), ExitCode: i, CoreExitReason.Natural),
+                TestContext.Current.CancellationToken);
+        }
+        await logWriter.DisposeAsync();
+
+        var writer = new FleetProjectionWriter();
+        var json = await writer.BuildProjectionJsonAsync(TestContext.Current.CancellationToken);
+        var root = JsonNode.Parse(json)!.AsObject();
+        var timelines = root["timelines"]!.AsObject();
+        var roomTimeline = timelines[room]!.AsArray();
+
+        Assert.Equal(FleetProjectionWriter.TimelineCap, roomTimeline.Count);
+        Assert.Equal(5, roomTimeline[0]!["exitCode"]!.GetValue<int>());
+        Assert.Equal(total - 1, roomTimeline[^1]!["exitCode"]!.GetValue<int>());
+    }
+
+    /// <summary>
+    /// Corrupt flow events exclude the room from the timelines map without throwing.
+    /// </summary>
+    [Fact]
+    public async Task BuildProjectionJson_UnreadableFlowLog_YieldsNoTimelinesEntryRatherThanThrow()
+    {
+        var room = Path.Combine(_tempHome, BatonPaths.RoomsDirectoryName, "unreadable-flow-room");
+        Directory.CreateDirectory(room);
+        var sentinel = new WorkflowStatusView("Succeeded", [], [], null, null);
+        await TerminalSentinelWriter.WriteAsync(room, sentinel, TestContext.Current.CancellationToken);
+
+        await File.WriteAllTextAsync(
+            Path.Combine(room, BatonPaths.FlowLogFileName),
+            "{ not valid json at all\n",
+            TestContext.Current.CancellationToken);
+
+        var writer = new FleetProjectionWriter();
+        var json = await writer.BuildProjectionJsonAsync(TestContext.Current.CancellationToken);
+        var root = JsonNode.Parse(json)!.AsObject();
+        var timelines = root["timelines"]!.AsObject();
+
+        Assert.False(timelines.ContainsKey(room));
+    }
 }

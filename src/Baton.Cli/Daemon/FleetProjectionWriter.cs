@@ -55,8 +55,12 @@ public sealed class FleetProjectionWriter : BackgroundService
     // spec/baton.md §6 (#1155): newest N pruned execution dirs surfaced per room.
     private const int PrunedItemsCap = 20;
 
+    // spec/baton.md §6: last N timeline entries kept per room (#1902) -- matches pusher.py's TIMELINE_CAP.
+    public const int TimelineCap = 30;
+
     private readonly Dictionary<string, ExecutionLiveState> _liveCache = new(StringComparer.Ordinal);
     private readonly Dictionary<string, PrunedCacheEntry> _prunedCache = new(StringComparer.Ordinal);
+    private readonly Dictionary<string, IReadOnlyList<RoomTimelineEntryView>> _terminalTimelineCache = new(StringComparer.Ordinal);
     private bool _loggedMissingSecretPatterns;
 
     public static TimeSpan GetInterval()
@@ -116,6 +120,7 @@ public sealed class FleetProjectionWriter : BackgroundService
         diagnostics ??= Console.Error;
         var discovered = await FleetStatusTool.DiscoverRoomsAsync([], cancellationToken).ConfigureAwait(false);
         var roomsArray = new JsonArray();
+        var timelinesObject = new JsonObject();
         var liveKeysThisTick = new HashSet<string>(StringComparer.Ordinal);
         var liveLanesByVendor = new Dictionary<string, int>(StringComparer.Ordinal);
 
@@ -178,15 +183,23 @@ public sealed class FleetProjectionWriter : BackgroundService
             }
 
             roomsArray.Add(node);
+
+            var timeline = await ResolveRoomTimelineAsync(view.Path, cancellationToken).ConfigureAwait(false);
+            if (timeline is { Count: > 0 })
+            {
+                timelinesObject[view.Path] = JsonSerializer.SerializeToNode(timeline, FleetStatusTool.SerializerOptions);
+            }
         }
 
         PruneLiveCache(liveKeysThisTick);
         PrunePrunedCache(discovered);
+        PruneTerminalTimelineCache(discovered);
 
         var root = new JsonObject
         {
             ["derived_at"] = DateTimeOffset.UtcNow.ToString("O"),
             ["rooms"] = roomsArray,
+            ["timelines"] = timelinesObject,
         };
 
         // #1391: same vendors[] block fleet_status returns, using the liveLanesByVendor tally this
@@ -362,6 +375,65 @@ public sealed class FleetProjectionWriter : BackgroundService
         foreach (var staleKey in _prunedCache.Keys.Where(k => !roomPaths.Contains(k)).ToList())
         {
             _prunedCache.Remove(staleKey);
+        }
+    }
+
+    private void PruneTerminalTimelineCache(IReadOnlyList<FleetStatusTool.DiscoveredRoom> discovered)
+    {
+        var roomPaths = new HashSet<string>(discovered.Select(r => r.RoomDir), StringComparer.Ordinal);
+        foreach (var staleKey in _terminalTimelineCache.Keys.Where(k => !roomPaths.Contains(k)).ToList())
+        {
+            _terminalTimelineCache.Remove(staleKey);
+        }
+    }
+
+    private async Task<IReadOnlyList<RoomTimelineEntryView>?> ResolveRoomTimelineAsync(
+        string roomPath, CancellationToken cancellationToken)
+    {
+        var isTerminal = IsTerminalRoom(roomPath);
+        if (isTerminal && _terminalTimelineCache.TryGetValue(roomPath, out var cached))
+        {
+            return cached;
+        }
+
+        var entries = await ReadTimelineEntriesAsync(roomPath, cancellationToken).ConfigureAwait(false);
+        if (isTerminal && entries is { Count: > 0 })
+        {
+            _terminalTimelineCache[roomPath] = entries;
+        }
+
+        return entries;
+    }
+
+    private static bool IsTerminalRoom(string roomDir)
+    {
+        return File.Exists(Path.Combine(roomDir, TerminalSentinelWriter.TerminalSentinelFileName));
+    }
+
+    private static async Task<IReadOnlyList<RoomTimelineEntryView>?> ReadTimelineEntriesAsync(
+        string roomDir, CancellationToken cancellationToken)
+    {
+        var logPath = Path.Combine(roomDir, BatonPaths.FlowLogFileName);
+        if (!File.Exists(logPath))
+        {
+            return null;
+        }
+
+        try
+        {
+            var reader = new FlowEventLogReader(logPath);
+            var entries = await reader.ReadAllEntriesWithTimestampsAsync(cancellationToken).ConfigureAwait(false);
+            if (entries.Count == 0)
+            {
+                return null;
+            }
+
+            return RoomDetailTool.BuildTimelineEntries(entries, TimelineCap);
+        }
+        catch (Exception ex) when (ex is BatonFlowException or IOException or UnauthorizedAccessException or JsonException)
+        {
+            // Corrupt or inaccessible flow logs omit the room from timelines rather than failing the tick.
+            return null;
         }
     }
 

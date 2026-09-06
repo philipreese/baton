@@ -450,7 +450,14 @@ public sealed class RoomDetailTool : IMcpTool
         }
 
         var totalEntries = entries.Count;
-        var startIndex = Math.Max(0, totalEntries - DefaultTimelineTailEntries);
+        var timeline = BuildTimelineEntries(entries, DefaultTimelineTailEntries);
+        return new RoomTimelineView(timeline, Truncated: totalEntries > DefaultTimelineTailEntries, TotalEntries: totalEntries);
+    }
+
+    internal static IReadOnlyList<RoomTimelineEntryView> BuildTimelineEntries(IReadOnlyList<LogEntry> entries, int cap)
+    {
+        var totalEntries = entries.Count;
+        var startIndex = Math.Max(0, totalEntries - cap);
 
         var timeline = new List<RoomTimelineEntryView>(totalEntries - startIndex);
         for (var i = startIndex; i < totalEntries; i++)
@@ -459,10 +466,10 @@ public sealed class RoomDetailTool : IMcpTool
             timeline.Add(new RoomTimelineEntryView(type, timestamp, stepId, exitCode));
         }
 
-        return new RoomTimelineView(timeline, Truncated: startIndex > 0, TotalEntries: totalEntries);
+        return timeline;
     }
 
-    private static (string Type, string? Timestamp, string? StepId, int? ExitCode) DescribeEntry(LogEntry entry)
+    internal static (string Type, string? Timestamp, string? StepId, int? ExitCode) DescribeEntry(LogEntry entry)
     {
         return entry switch
         {

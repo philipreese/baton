@@ -6419,7 +6419,7 @@ def _selftest() -> int:
             ]
             ident_underhood = [{"k": "v"}]
             # What `derive_snapshot_and_timelines` would return from its per-room `room_detail`
-            # calls -- the file has no counterpart, which is the whole point of the exclusion below.
+            # calls, matched by the projection file (#1902).
             ident_timelines = {str(ident_run_room): [{"type": "executionStarted",
                                                        "timestamp": "2026-09-05T00:00:00Z"}]}
 
@@ -6452,6 +6452,7 @@ def _selftest() -> int:
             ident_projection.write_text(json.dumps({
                 "derived_at": file_derived_at,
                 "rooms": file_rooms,
+                "timelines": ident_timelines,
             }), encoding="utf-8")
             ident_data, ident_staleness = read_projection_file(ident_projection, time.time())
             check("#1557 PR-B2 identity arm: the fixture projection file reads fresh (no fallback)",
@@ -6462,17 +6463,16 @@ def _selftest() -> int:
                 file_timelines if isinstance(file_timelines, dict) else {}, 0)
 
             file_post_body = json.loads(snapshot_post_body(file_wrapped, ident_data["derived_at"]))
-            identity_diffs = snapshot_identity_diffs(derive_post_body, file_post_body)
-            check("#1557 PR-B2 acceptance: the full posted bodies differ only in source-dependent "
-                  "`derived_at` and missing file `timelines`. "
+            identity_diffs = snapshot_identity_diffs(derive_wrapped, file_wrapped)
+            check("#1557 PR-B2 / #1902 acceptance: the finished snapshots differ in no keys "
+                  "between sources (empty diff). "
                   f"Actual diff: {identity_diffs}",
-                  identity_diffs == ["derived_at", "timelines"])
+                  identity_diffs == [])
             check("#1557 PR-B2 acceptance: each posted body carries its source's derived_at",
                   derive_post_body["derived_at"] == derive_derived_at
                   and file_post_body["derived_at"] == file_derived_at)
-            check("#1557 PR-B2 acceptance: and the `timelines` difference is exactly 'derive has "
-                  "entries, file has none' -- not two different sets of entries",
-                  derive_wrapped["timelines"] == ident_timelines and file_wrapped["timelines"] == {})
+            check("#1902 acceptance: and the `timelines` entries are identical between sources",
+                  derive_wrapped["timelines"] == ident_timelines and file_wrapped["timelines"] == ident_timelines)
 
             # CONTROL, read before trusting the green above: the comparator must RED on a real
             # derivation difference. Without this the arm certifies the harness, not the change.
