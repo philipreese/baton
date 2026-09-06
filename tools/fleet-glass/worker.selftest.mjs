@@ -17,7 +17,6 @@ import {
   maxIsoOrNull,
   projectionStaleness,
   PROJECTION_STALE_AFTER_MS,
-  PROJECTION_UNREACHABLE_AFTER_MS,
   classifyKvError,
   nextUtcMidnightIso,
 } from "./worker.core.mjs";
@@ -193,9 +192,9 @@ check("neither heartbeat nor push recorded yet: stays absent, never fabricated",
         hung.ageMs === 5 * 60_000);
 
   // (a control) THE FALSE-FIRE THIS ARM EXISTS TO AVOID: a healthy daemon on a quiet fleet, whose
-  // derived_at is 4 minutes old only because pusher.py's 300s ping cadence hasn't delivered a
-  // fresher one yet. The gap AT CONTACT is one tick, so nothing fires -- a now-keyed 90s threshold
-  // would have lit this up permanently (the #1613 false-fire, repeated).
+  // derived_at is 4 minutes old only because pusher.py's ping cadence (adaptive, 300s at its floor)
+  // hasn't delivered a fresher one yet. The gap AT CONTACT is one tick, so nothing fires -- a
+  // now-keyed 90s threshold would have lit this up permanently (the #1613 false-fire, repeated).
   const quietButHealthy = projectionStaleness(iso(now - 4 * 60_000), iso(now - 4 * 60_000 + 30_000), now);
   check("(#1981 arm a control) a healthy daemon whose derived_at is merely UNDELIVERED does not fire",
         quietButHealthy.stale === false && quietButHealthy.reason === null);
@@ -207,17 +206,54 @@ check("neither heartbeat nor push recorded yet: stays absent, never fabricated",
         projectionStaleness(iso(now - 60_000), iso(now - 60_000 + PROJECTION_STALE_AFTER_MS + 1), now).reason === "hung");
 
   // (b) UNREACHABLE: nothing fresh has arrived at all -- the pusher died alongside the daemon, so
-  // arm (a) is frozen at whatever gap it last saw and would stay quiet forever.
-  const bothDead = projectionStaleness(iso(now - 30 * 60_000), iso(now - 30 * 60_000 + 5_000), now);
+  // arm (a) is frozen at whatever gap it last saw and would stay quiet forever. The threshold is
+  // 3x the cadence the PUSHER reported for its own derived-freshness ping, never a constant here.
+  //
+  // THE FALSE-FIRE FIXTURE THE 2026-09-06 REVIEW ASKED FOR (finding A). This is a HEALTHY, QUIET
+  // fleet at the pusher's widest realistic cadence: pusher.py paces the ping against its heartbeat
+  // sub-budget (86400 / HEARTBEAT_DAILY_WRITES = 1440s at the start of a UTC day), so between pings
+  // `now - derived_at` sweeps all the way to ~24 minutes with nothing whatsoever wrong. The bound
+  // this arm shipped with before the review -- 7 minutes, taken from the 300s ping FLOOR -- lit up
+  // for roughly 17 of every 24 of those minutes. Nothing here may fire.
+  const quietCadenceMs = (86400 / 60) * 1000;  // pusher.py adaptive_heartbeat_interval_s at day start
+  for (const elapsedMs of [0, quietCadenceMs / 2, quietCadenceMs, quietCadenceMs + 60_000]) {
+    // The last ping landed `elapsedMs` ago; at that moment the daemon's projection was one 30s tick
+    // old, which is what a healthy file-mode cycle looks like.
+    const contact = now - elapsedMs;
+    const verdict = projectionStaleness(iso(contact - 30_000), iso(contact), now, quietCadenceMs);
+    check(`(#1981 FALSE-FIRE FIXTURE) a healthy quiet fleet ${Math.round(elapsedMs / 60_000)}min into `
+          + "a 24min ping cadence shows no hung-daemon verdict",
+          verdict.stale === false && verdict.reason === null);
+  }
+
+  const bothDead = projectionStaleness(iso(now - 90 * 60_000), iso(now - 90 * 60_000 + 5_000), now, quietCadenceMs);
   check("(#1981 arm b) a frozen contact AND a frozen derivation still reads stale",
         bothDead.stale === true && bothDead.reason === "unreachable");
-  check("(#1981 arm b) its age is measured against the reader's own clock", bothDead.ageMs === 30 * 60_000);
+  check("(#1981 arm b) its age is measured against the reader's own clock", bothDead.ageMs === 90 * 60_000);
 
-  // (b control) under the ping cadence + slop, a delivery that simply hasn't happened yet is quiet.
-  check("(#1981 arm b control) a derived_at younger than the ping cadence + slop does not fire",
-        projectionStaleness(iso(now - (PROJECTION_UNREACHABLE_AFTER_MS - 1)), null, now).stale === false);
-  check("(#1981 arm b) past the ping cadence + slop it fires even with no contact timestamp at all",
-        projectionStaleness(iso(now - (PROJECTION_UNREACHABLE_AFTER_MS + 1)), null, now).reason === "unreachable");
+  // (b boundary, both sides, against the REPORTED cadence rather than a designed constant)
+  check("(#1981 arm b) exactly 3x the reported cadence is not yet stale (strictly greater fires)",
+        projectionStaleness(iso(now - 3 * quietCadenceMs), null, now, quietCadenceMs).stale === false);
+  check("(#1981 arm b) one millisecond past 3x the reported cadence fires with no contact stamp at all",
+        projectionStaleness(iso(now - (3 * quietCadenceMs + 1)), null, now, quietCadenceMs).reason === "unreachable");
+
+  // (b control, the polarity that proves the threshold TRACKS the cadence rather than ignoring it)
+  // The same age that is quiet under a 24-minute cadence fires under the 300s floor -- so a pusher
+  // pinging fast really does get a tighter reading, and the widening is not just "off".
+  const twentyMinutesMs = 20 * 60_000;
+  check("(#1981 arm b) the same 20min-old derivation fires under a 300s cadence and not under a 24min one",
+        projectionStaleness(iso(now - twentyMinutesMs), null, now, 300_000).reason === "unreachable"
+        && projectionStaleness(iso(now - twentyMinutesMs), null, now, quietCadenceMs).stale === false);
+
+  // No cadence reported (an unredeployed pusher, or a malformed one) -> arm (b) is not armed at all.
+  // Fail-quiet, deliberately: a guessed cadence is precisely what produced the false-fire above.
+  // The second half is the control -- arm (a), which needs no cadence, still fires on the incident.
+  check("(#1981 arm b) with no cadence reported the arm stays unarmed rather than guessing one",
+        projectionStaleness(iso(now - 6 * 60 * 60_000), null, now).stale === false
+        && projectionStaleness(iso(now - 6 * 60 * 60_000), null, now, 0).stale === false
+        && projectionStaleness(iso(now - 6 * 60 * 60_000), null, now, "1440").stale === false);
+  check("(#1981 arm b control) arm (a) needs no cadence and still catches the 2026-09-06 shape",
+        projectionStaleness(iso(now - 6 * 60_000), iso(now - 60_000), now).reason === "hung");
 
   // Never a fabricated verdict: an absent/unparseable derived_at has its own banner already.
   check("(#1981) a missing derived_at yields no verdict at all, never stale:false",
@@ -225,8 +261,8 @@ check("neither heartbeat nor push recorded yet: stays absent, never fabricated",
         && projectionStaleness("not-a-date", iso(now), now) === null
         && projectionStaleness(undefined, iso(now), now) === null);
   check("(#1981) an unparseable CONTACT timestamp degrades to arm (b) alone, never throws",
-        projectionStaleness(iso(now - 60_000), "not-a-date", now).stale === false
-        && projectionStaleness(iso(now - 30 * 60_000), "not-a-date", now).reason === "unreachable");
+        projectionStaleness(iso(now - 60_000), "not-a-date", now, 300_000).stale === false
+        && projectionStaleness(iso(now - 30 * 60_000), "not-a-date", now, 300_000).reason === "unreachable");
   check("(#1981) a derived_at stamped slightly ahead of the reader's clock floors at 0, never negative",
         projectionStaleness(iso(now + 2_000), iso(now + 1_000), now).ageMs === 0);
 }

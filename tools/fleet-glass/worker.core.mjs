@@ -97,35 +97,57 @@ export function maxIsoOrNull(a, b) {
 // `stdoutTail`/`doingNow` port pairs already accept (there is no shared module across the boundary).
 // A daemon run with a widened BATON_FLEET_PROJECTION_INTERVAL_SECONDS would need this widened too.
 export const PROJECTION_STALE_AFTER_MS = 90 * 1000;
-// The second arm's threshold is NOT the same number, deliberately: it is measured against the
-// reader's own clock, and `derived_at` only REACHES the mailbox on pusher.py's
-// DERIVED_PING_INTERVAL_SECONDS (300s) cadence when the change-gate is suppressing pushes. Anything
-// at or under that cadence would light on a healthy, quiet fleet -- the exact false-fire #1613 had
-// to pull the old pushed_at-keyed banner out for. 7 minutes = the ping interval plus two minutes of
-// slop for a cycle that lands late.
-export const PROJECTION_UNREACHABLE_AFTER_MS = 7 * 60 * 1000;
+// The second arm has NO constant of its own, deliberately -- and this is the correction the
+// 2026-09-06 review forced. It is measured against the reader's own clock, so it must sit above the
+// cadence on which a fresh `derived_at` actually REACHES the mailbox, and that cadence is not a
+// constant anywhere: pusher.py paces the derived-freshness ping adaptively against its heartbeat
+// sub-budget (`adaptive_producer_interval_s`, `HEARTBEAT_DAILY_WRITES = 60`), so it starts a UTC day
+// at ~1440s and widens from there -- DERIVED_PING_INTERVAL_SECONDS (300s) is only its FLOOR. A fixed
+// 7-minute bound derived from that floor fired on a healthy, quiet fleet for roughly 17 of every 24
+// minutes: the exact false-fire #1613 pulled the old pushed_at-keyed banner out for, and #1829
+// demoted its successor to a neutral line for.
+//
+// So the pusher now reports the interval it actually coalesced to (`derived_ping_interval_s`, the
+// same value its "interval now Ns" log line carries) in the ping body, worker.js stores it beside
+// `derived_at`, and this arm marks stale at 3x it. Three, matching FleetProjectionWriter's own
+// StaleAfterTicks: one missed delivery is ordinary, three in a row is not.
+//
+// Two consequences worth stating rather than leaving a reader to infer:
+//  - No reported cadence, no arm. An unredeployed pusher sends no `derived_ping_interval_s`, and this
+//    fails QUIET (arm (a) still covers the incident this exists for) rather than falling back to a
+//    guessed number, which is the guess that produced the defect above.
+//  - The bound self-widens as the budget depletes. `adaptive_producer_interval_s` returns
+//    `seconds_left_in_day / writes_left`, so the last cadence the pusher reports before its heartbeat
+//    sub-budget runs out is already most of the remaining day -- and once it is out, `heartbeat_
+//    allowed` stops the ping entirely and no fresher cadence arrives. Arm (b) is therefore effectively
+//    off for the rest of that day instead of alarming about a pusher that is rationing writes on
+//    purpose; a pusher that has genuinely died is what glass.html's HEARTBEAT_DEAD_MS banner owns,
+//    and it ranks above this one.
+export const PROJECTION_UNREACHABLE_CADENCE_MULTIPLE = 3;
 
 // Two arms, one verdict, because neither covers the other:
 //
 //  (a) "hung"        -- `lastContactAt - derivedAt`: how stale the projection ALREADY WAS at the
-//      moment the fleet machine last spoke to the mailbox. Both timestamps travel in the same POST,
-//      so delivery lag cancels out and this can be sensitive (90s) without false-firing on a quiet
-//      fleet. This is the arm that would have caught 2026-09-06 while the pusher kept pinging.
+//      moment the fleet machine last spoke to the mailbox. Insensitive to WHEN that POST arrived --
+//      a delivery that took a minute does not age the gap it reports -- which is what lets this be
+//      sensitive (90s) without false-firing on a quiet fleet whose next ping is 24 minutes out.
+//      This is the arm that would have caught 2026-09-06 while the pusher kept pinging.
 //  (b) "unreachable" -- `now - derivedAt`: fires when nothing fresh has arrived at all, which is
 //      what (a) cannot see -- if the pusher dies alongside the daemon, `lastContactAt` freezes too
 //      and (a) stays quiet forever at whatever gap it last saw.
 //
 // Clock note: `derivedAt` is stamped by the fleet machine, `lastContactAt` by the Worker (worker.js
-// re-stamps pushed_at / heartbeat_at on arrival), so arm (a) carries one clock-skew term between two
-// NTP-disciplined hosts -- seconds against a 90s threshold, and arm (b) compares the reader's clock
-// against the same fleet-machine stamp. Neither is exact enough to shave; both thresholds are chosen
-// with room for that.
+// re-stamps pushed_at / heartbeat_at on arrival, see its /heartbeat and /push handlers), so arm (a)
+// is NOT two stamps from one clock -- it carries a full fleet<->Cloudflare skew term plus however
+// long the POST took, and arm (b) compares the reader's clock against the same fleet-machine stamp.
+// Seconds either way between NTP-disciplined hosts; neither threshold is exact enough to shave, and
+// both are chosen with room for that.
 //
 // Returns null -- never a fabricated verdict -- when `derivedAt` is missing or unparseable; that case
 // is already its own banner ("No derivation timestamp yet"), and a `stale: true` here would double it.
-export function projectionStaleness(derivedAt, lastContactAt, nowMs,
+export function projectionStaleness(derivedAt, lastContactAt, nowMs, pingIntervalMs = null,
                                     staleAfterMs = PROJECTION_STALE_AFTER_MS,
-                                    unreachableAfterMs = PROJECTION_UNREACHABLE_AFTER_MS) {
+                                    cadenceMultiple = PROJECTION_UNREACHABLE_CADENCE_MULTIPLE) {
   const derivedMs = typeof derivedAt === "string" && derivedAt ? Date.parse(derivedAt) : NaN;
   if (!Number.isFinite(derivedMs)) return null;
   const contactMs = typeof lastContactAt === "string" && lastContactAt ? Date.parse(lastContactAt) : NaN;
@@ -136,7 +158,11 @@ export function projectionStaleness(derivedAt, lastContactAt, nowMs,
   if (ageAtContactMs !== null && ageAtContactMs > staleAfterMs) {
     return { stale: true, reason: "hung", ageMs: ageAtContactMs };
   }
-  if (ageMs > unreachableAfterMs) {
+  // Absent/zero/negative cadence -> arm (b) is simply not armed (see the constant's comment).
+  const unreachableAfterMs = typeof pingIntervalMs === "number" && Number.isFinite(pingIntervalMs) && pingIntervalMs > 0
+    ? pingIntervalMs * cadenceMultiple
+    : null;
+  if (unreachableAfterMs !== null && ageMs > unreachableAfterMs) {
     return { stale: true, reason: "unreachable", ageMs };
   }
   return { stale: false, reason: null, ageMs };

@@ -2044,6 +2044,19 @@ def snapshot_post_body(wrapped: dict, derived_at: str | None) -> str:
     return json.dumps({**wrapped, "derived_at": derived_at})
 
 
+def heartbeat_ping_payload(derived_at: str | None, ping_interval_s: float,
+                           pending_push_age_s: float | None) -> dict:
+    """The `/heartbeat` ping body (#1486 heartbeat, #1613 derived_at, #1981 derived_ping_interval_s).
+    A function rather than a dict literal inside main() so `--selftest` can exercise the contract the
+    Worker reads: `pending_push_age_s` is OMITTED when nothing is pending (absent, never 0 -- 0 is a
+    meaningful "waiting since this instant"), and the cadence is always present, because a reader
+    with no cadence has to leave its staleness arm unarmed (worker.core.mjs)."""
+    payload = {"derived_at": derived_at, "derived_ping_interval_s": round(ping_interval_s, 1)}
+    if pending_push_age_s is not None:
+        payload["pending_push_age_s"] = pending_push_age_s
+    return payload
+
+
 def snapshot_hash(wrapped: dict) -> str:
     """Stable hash of the wrapped {rooms, underhood} body -- sort_keys so the hash does not depend
     on dict insertion order upstream, independent of the (unsorted) exact string actually POSTed."""
@@ -4076,10 +4089,14 @@ def main() -> None:
                     if (heartbeat_due or derived_ping_due) and not heartbeat_allowed(hb_ledger):
                         log("write budget exhausted -- heartbeat/derived-ping skipped this cycle")
                     elif heartbeat_due or derived_ping_due:
-                        payload_dict = {"derived_at": last_derived_at}
-                        if pending_push_age is not None:
-                            payload_dict["pending_push_age_s"] = pending_push_age
-                        payload = json.dumps(payload_dict)
+                        # #1981 (2026-09-06 review, finding A): the body now also carries the interval
+                        # this ping was paced to, so a reader can decide whether a `derived_at` that
+                        # has stopped advancing means anything. It is the ONLY number that makes that
+                        # decidable -- the cadence is adaptive (adaptive_producer_interval_s), so a
+                        # reader holding DERIVED_PING_INTERVAL_SECONDS holds the floor, not the
+                        # cadence, and alarms through most of every healthy cycle.
+                        payload = json.dumps(
+                            heartbeat_ping_payload(last_derived_at, ping_interval, pending_push_age))
                         extra_state = {DERIVED_PING_STATE_KEY: now_ts} if derived_ping_due else None
                         # F3(b): charge before the POST -- send_heartbeat_and_record's own
                         # POST-then-record ordering (for HEARTBEAT_STATE_KEY/DERIVED_PING_STATE_KEY)
@@ -4504,6 +4521,30 @@ def _selftest() -> int:
           should_send_derived_ping({LAST_PUSH_TS_KEY: 10_000.0}, 10_000.0 + DERIVED_PING_INTERVAL_SECONDS - 1) is False)
     check("a ping is due once the interval has fully elapsed since the last push",
           should_send_derived_ping({LAST_PUSH_TS_KEY: 10_000.0}, 10_000.0 + DERIVED_PING_INTERVAL_SECONDS) is True)
+
+    # -- #1981 (2026-09-06 review, finding A): the ping reports the cadence it was actually paced to,
+    # because that is the one number that makes "derived_at has not moved" decidable downstream. The
+    # discriminating arm is the second one: a payload carrying the 300s FLOOR when the ledger says the
+    # real cadence is ~1440s is exactly the defect the review found, so the check compares against
+    # what adaptive_heartbeat_interval_s returns rather than against a transcribed number.
+    _day_start_ts = datetime(2026, 9, 6, 0, 0, 0, tzinfo=timezone.utc).timestamp()
+    _fresh_ledger = {"date": "2026-09-06", "snapshot": 0, "deliver": 0, "heartbeat": 0}
+    _fresh_cadence = adaptive_heartbeat_interval_s(_fresh_ledger, _day_start_ts)
+    check("(#1981) the heartbeat ping body carries derived_at and the cadence it was paced to",
+          heartbeat_ping_payload("2026-09-06T14:51:00Z", _fresh_cadence, None)
+          == {"derived_at": "2026-09-06T14:51:00Z", "derived_ping_interval_s": round(_fresh_cadence, 1)})
+    check("(#1981) that cadence is the pusher's ADAPTIVE one, not DERIVED_PING_INTERVAL_SECONDS -- "
+          "a reader given the floor would alarm through most of every healthy cycle",
+          _fresh_cadence > DERIVED_PING_INTERVAL_SECONDS
+          and abs(_fresh_cadence - 86400 / HEARTBEAT_DAILY_WRITES) < 1.0)
+    check("(#1981 control, other direction) with the heartbeat sub-budget nearly spent the reported "
+          "cadence widens toward the rest of the day, so the reader's arm self-disarms",
+          adaptive_heartbeat_interval_s(
+              {"date": "2026-09-06", "snapshot": 0, "deliver": 0, "heartbeat": HEARTBEAT_DAILY_WRITES - 1},
+              _day_start_ts) > _fresh_cadence * 10)
+    check("(#1981) pending_push_age_s stays omitted when nothing is pending, and 0 is not 'nothing'",
+          "pending_push_age_s" not in heartbeat_ping_payload("x", 300.0, None)
+          and heartbeat_ping_payload("x", 300.0, 0)["pending_push_age_s"] == 0)
     check("a prior PING (not just a push) also resets the interval",
           should_send_derived_ping({DERIVED_PING_STATE_KEY: 10_000.0}, 10_000.0 + 60) is False)
     check("whichever landed MORE RECENTLY wins -- a fresher ping beats a stale push",

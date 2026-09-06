@@ -3205,10 +3205,16 @@ checked at the same priority rung as the write-budget one, never a new banner me
 **#1981 — a hung daemon is a first-class reading, on both surfaces, well before that 900s fallback.**
 On 2026-09-06 the daemon stopped writing the projection for thirteen minutes with its process alive
 and its scheduled task reporting Running; every consumer kept serving the frozen picture as current,
-and the `staleness` field above never fired because 900s had not elapsed. Two fields, one threshold —
-**three ticks of `FleetProjectionWriter.GetInterval()`**, stated once as
-`FleetProjectionWriter.StaleAfterTicks` and derived from there by both consumers rather than
-transcribed:
+and the `staleness` field above never fired because 900s had not elapsed. Two fields; **three ticks of
+`FleetProjectionWriter.GetInterval()`** is the threshold, stated once as
+`FleetProjectionWriter.StaleAfterTicks`. Its C# consumers derive from that symbol; the JS side cannot
+reach it and transcribes it as `PROJECTION_STALE_AFTER_MS` (`worker.core.mjs`), which says at its own
+declaration that it is a transcription and what widening `BATON_FLEET_PROJECTION_INTERVAL_SECONDS`
+therefore costs. **A second, unrelated threshold lives on the JS side only** and has its own home: the
+"nothing fresh has reached the mailbox at all" arm is measured against the cadence `pusher.py` reports
+in its ping body (`derived_ping_interval_s`, `heartbeat_ping_payload`), never against a constant —
+that cadence is adaptive, and a reader holding `DERIVED_PING_INTERVAL_SECONDS` holds its floor, which
+is the false-fire the 2026-09-06 review caught before deploy. No cadence reported, no arm:
 - **`fleet_status` gains `projectionAgeSeconds` (omitted when unknown) and `stale` (serialized only
   when true)** — seconds since the projection file's own `derived_at`, read at call time by
   `Baton.Cli.Mcp.FleetProjectionStaleness`, whose doc comment owns the fail-closed rules for a file it
@@ -3219,11 +3225,16 @@ transcribed:
 - **The pushed snapshot gains `projection: {stale, reason, ageMs}`**, merged in by `worker.js` at read
   time (like `heartbeat_at`/`derived_at`/`pending_push_age_s`, and for the same change-gate reason)
   from `projectionStaleness` in `worker.core.mjs` — that function's own comment is the canonical record
-  of why there are **two** arms and why their thresholds differ, and `worker.selftest.mjs` holds both
-  polarities of each. `glass.html` renders it as a banner above the fleet table, ranked below the
-  pusher-liveness banners (a dead pusher explains a frozen `derived_at` with no daemon fault) and above
-  the derivation/push ones. It is computed in the Worker, not the page, because the page is an artifact
-  that cannot import that module and a copy there would be a second implementation nothing tests.
+  of why there are **two** arms and why their thresholds have different homes, and `worker.selftest.mjs`
+  holds both polarities of each plus the healthy-quiet-fleet false-fire fixture. `glass.html` renders it
+  as a banner above the fleet table, ranked below the pusher-liveness banners (a dead pusher explains a
+  frozen `derived_at` with no daemon fault) and **below** the two other `derived_at`-keyed banners: arm
+  (a) fires at 90s on the same state those two need at ten minutes, so any higher rung makes them dead
+  code (it did, before the 2026-09-06 review). The chain's own precedence table beside it in
+  `glass.html` is the record of which state reaches each row — that page has no test harness, which is
+  why the table is written down. It is computed in the Worker, not the page, because the page is an
+  artifact that cannot import that module and a copy there would be a second implementation nothing
+  tests.
 
 `python pusher.py --compare-projection` runs BOTH sources once against the live rooms and diffs them
 field-by-field after canonical (sorted-keys) JSON serialization, exiting 0 identical / 1 with the

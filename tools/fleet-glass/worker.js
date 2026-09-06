@@ -48,13 +48,13 @@
  *                          inflates the everyday response; a paged call reads it out of this same
  *                          value instead of a separate key.
  *  - "heartbeat_at"      : JSON `{"at": ISO-8601, "derived_at"?: ISO-8601, "pending_push_age_s"?:
- *                          number}` (#1613 item 2 widened this from a bare ISO-8601 string;
- *                          `pending_push_age_s` was added by a 2026-09-01 review finding; a bare
+ *                          number, "derived_ping_interval_s"?: number}` (#1613 item 2 widened this
+ *                          from a bare ISO-8601 string; `pending_push_age_s` was added by a
+ *                          2026-09-01 review finding, `derived_ping_interval_s` by #1981's; a bare
  *                          string still reads back as a legacy `at` value, self-healing the moment
  *                          the next heartbeat lands). Deliberately NOT part of the "snapshot" value
- *                          or its hash -- none of `at`/`derived_at`/`pending_push_age_s` may ever
- *                          count as a snapshot content change and trigger the change-gate (#1457)
- *                          to push early.
+ *                          or its hash -- none of these fields may ever count as a snapshot content
+ *                          change and trigger the change-gate (#1457) to push early.
  *  - "inbox:index"       : JSON array of deliverable METADATA (no content), newest-first, capped at
  *                          INBOX_CAP entries -- what deliverables_list returns. Each entry carries a
  *                          `batch_id` (#1690 item 2) naming which "inbox:batch:<id>" blob holds its
@@ -175,18 +175,20 @@ function readStoredHeartbeat(raw) {
         at: parsed.at ?? null,
         derivedAt: parsed.derived_at ?? null,
         pendingPushAgeS: typeof parsed.pending_push_age_s === "number" ? parsed.pending_push_age_s : null,
+        derivedPingIntervalS: typeof parsed.derived_ping_interval_s === "number"
+          ? parsed.derived_ping_interval_s : null,
       };
     }
   } catch {
     // Falls through to the legacy bare-string reading below.
   }
-  return { at: raw, derivedAt: null, pendingPushAgeS: null };
+  return { at: raw, derivedAt: null, pendingPushAgeS: null, derivedPingIntervalS: null };
 }
 
 async function readHeartbeat(env) {
   const raw = await env.FLEET.get("heartbeat_at");
-  const { at, derivedAt, pendingPushAgeS } = readStoredHeartbeat(raw);
-  return { heartbeatAt: at, derivedAt, pendingPushAgeS };
+  const { at, derivedAt, pendingPushAgeS, derivedPingIntervalS } = readStoredHeartbeat(raw);
+  return { heartbeatAt: at, derivedAt, pendingPushAgeS, derivedPingIntervalS };
 }
 
 async function readInboxIndex(env) {
@@ -305,7 +307,8 @@ async function handleMcp(request, env) {
         return json(rpcResult(id, toolText(JSON.stringify(computeFleetStatusPage(archive, args.page, args.limit)))));
       }
       const stored = await env.FLEET.get("snapshot");
-      const { heartbeatAt, derivedAt: derivedAtFromHeartbeat, pendingPushAgeS } = await readHeartbeat(env);
+      const { heartbeatAt, derivedAt: derivedAtFromHeartbeat, pendingPushAgeS, derivedPingIntervalS } =
+        await readHeartbeat(env);
       const storedSnapshot = stored === null ? null : JSON.parse(stored);
       // derived_at (#1613 item 2, spec/baton.md §6) can reach this Worker by two independent
       // routes: a snapshot push's own body, or a dedicated /heartbeat ping (see readHeartbeat).
@@ -334,7 +337,11 @@ async function handleMcp(request, env) {
       // that cannot import a module, so a copy over there would be a second implementation nothing
       // tests. Merged in at read time like the three fields above, for the same reason: it must not
       // enter pusher.py's change-gate hash. Absent when derived_at is missing/unparseable.
-      const projection = projectionStaleness(derivedAt, heartbeatDisplayAt, Date.now());
+      // The cadence argument is the pusher's own reported ping interval (2026-09-06 review finding
+      // A): without it the "nothing fresh has arrived at all" arm stays unarmed rather than guessing.
+      const projection = projectionStaleness(
+        derivedAt, heartbeatDisplayAt, Date.now(),
+        derivedPingIntervalS === null ? null : derivedPingIntervalS * 1000);
       const snapshot = { ...restSnapshot, heartbeat_at: heartbeatDisplayAt, derived_at: derivedAt, pending_push_age_s: pendingPushAgeS };
       if (projection) snapshot.projection = projection;
       return json(rpcResult(id, toolText(JSON.stringify(snapshot))));
@@ -455,8 +462,12 @@ export default {
       // OWN derivation last completed; how long ITS OWN content has been waiting to push), which
       // this Worker has no other way to learn. A missing/unparseable body (including the
       // pre-#1613 literal "{}") degrades to neither field on this ping -- still a valid heartbeat.
+      // #1981 (2026-09-06 review): `derived_ping_interval_s` rides the same rule -- the cadence this
+      // ping was paced to is a fact only the pusher knows, and it is what makes fleet_status's
+      // `projection` arm (b) decidable at all (worker.core.mjs). Absent from an unredeployed pusher.
       let derivedAt = null;
       let pendingPushAgeS = null;
+      let derivedPingIntervalS = null;
       try {
         const body = await request.text();
         if (body) {
@@ -467,6 +478,10 @@ export default {
           if (parsed && typeof parsed.pending_push_age_s === "number" && isFinite(parsed.pending_push_age_s)) {
             pendingPushAgeS = parsed.pending_push_age_s;
           }
+          if (parsed && typeof parsed.derived_ping_interval_s === "number"
+              && isFinite(parsed.derived_ping_interval_s) && parsed.derived_ping_interval_s > 0) {
+            derivedPingIntervalS = parsed.derived_ping_interval_s;
+          }
         }
       } catch {
         // Malformed body -- treat exactly like an absent one; still a valid liveness ping.
@@ -474,6 +489,7 @@ export default {
       const stored = { at: new Date().toISOString() };
       if (derivedAt) stored.derived_at = derivedAt;
       if (pendingPushAgeS !== null) stored.pending_push_age_s = pendingPushAgeS;
+      if (derivedPingIntervalS !== null) stored.derived_ping_interval_s = derivedPingIntervalS;
       try {
         await env.FLEET.put("heartbeat_at", JSON.stringify(stored));
       } catch (err) {
