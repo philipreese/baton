@@ -44,8 +44,8 @@ public static class WorkItemLifecycle
         ArgumentNullException.ThrowIfNull(observation);
 
         // Ready is checked FIRST, ahead of even "has it settled": an approved item must not be
-        // re-derived from a room that is re-read every tick forever. spec/baton.md §13's "the queue
-        // records ready and does nothing" is this line.
+        // re-derived from a room that is re-read every tick forever. QueueScheduler's own IsReady is
+        // the other half of this rule, and spec/baton.md §13 is where the rule itself lives.
         if (WorkStages.IsTerminal(observation.Stage))
         {
             return WorkItemTransition.None("the item is ready — the conductor merges or resolves it");

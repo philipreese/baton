@@ -5504,7 +5504,7 @@ source" looks like on disk rather than as a promise.
 
 ---
 
-## §13 The conductor queue (#1934 slice 1)
+## §13 The conductor queue (#1934 slices 1–2)
 
 The conductor's dispatch queue was a PowerShell loop in a per-session scratchpad directory: a JSON
 item list, weighted concurrency slots, a time-of-day memory floor, per-vendor model defaults, and a
@@ -5512,9 +5512,13 @@ item list, weighted concurrency slots, a time-of-day memory floor, per-vendor mo
 loop's comments and nowhere in the product, and its launch log died with the session. This section is
 that loop, in Baton, with every decision recorded.
 
-**Slice 1 is a dispatch request queue and nothing more.** No issue-anchored lifecycle, no verdict
-reading, no automatic fix rounds — those are slice 2 (#1934 Q2, answer "(a) first, then (b)"). Adding
-a field here for a lifecycle no code advances would be a promise the product does not keep.
+**Two item shapes, and one field tells them apart.** A **dispatch request** (slice 1, Q2 answer (a))
+is a spec plus the parameters `baton dispatch` needs: the operator asked for one lane, and the queue
+runs exactly that lane. A **work item** (slice 2, answer (b)) is anchored on an issue and carries a
+`stage` the daemon advances. `stage` is null for the first and set for the second; there is no second
+"kind" field, because two fields answering one question is one of them going stale. Slice 1's rule —
+a field carrying a lifecycle no code advances is a promise the product does not keep — is now
+satisfied rather than avoided: `WorkItemLifecycle` is the code that advances these.
 
 ### Where it lives
 
@@ -5631,13 +5635,87 @@ was no tier to depart from.
 **`sonnet` is not promoted.** An item that asks for it gets it, and the launch fact says the tier was
 departed from. Nothing in the queue substitutes a model.
 
+### Work items: the lifecycle the queue drives (slice 2)
+
+`baton queue add --issue <n> --lifecycle [--spec <file>]` adds a **work item**. `--lifecycle` is the
+one spelling of that choice — no `--kind work` alias. It needs `--issue` (the issue is what its
+briefs are rendered from and what its PR is looked for on), refuses `--role` (the stage picks it), and
+defaults its tag to `<n>-lane`. The item carries `issue`, its worktree, `branch`, `stage`, `pr`,
+`lastVerdict` and `round` alongside every slice-1 field.
+
+The lifecycle is the one the conductor ran by hand roughly forty times in the week before it was
+written:
+
+| At stage | The lane settled | Then | Because |
+|---|---|---|---|
+| implement / fix / continue | `Succeeded`, PR open | **review** | there is something to review |
+| implement / fix / continue | `Succeeded`, no PR | **operator** | the queue never opens a PR |
+| review / re-review | `Succeeded`, verdict approves | **ready** | the conductor merges; the queue never does |
+| review / re-review | `Succeeded`, verdict blocks | **fix**, round + 1 | the brief is the findings |
+| review / re-review | `Succeeded`, no readable verdict | **operator** | silence is not an approval |
+| implement / fix / continue | anything else, work pushed | **re-review** | the PR head is the workspace head |
+| implement / fix / continue | anything else, work unpushed | **continue** | finish and push it |
+| review / re-review | anything else | **re-review** | a reviewer has nothing to push |
+| ready | anything | nothing | it stops here |
+
+**APPROVE and BLOCK are derived from two enumerated fields and nothing else.** A finding that is both
+`severity: high` and `status: confirmed` blocks; every other combination — and an empty findings array
+— approves. Both fields are required by `ReviewVerdictSchema`, so neither can be absent. **Nothing
+reads the verdict's `summary` or a finding's `detail` to decide anything**, and that is the line this
+ruling draws: routing on a worker's prose is what Architecture Rule 1 forbids, and it stays forbidden.
+Routing on the verdict's *structured* fields is permitted **here and only here** — the conductor's
+queue is not the Flow engine, and it is the surface that was a PowerShell loop reading the same file
+with `jq` last week. `ReviewVerdict`'s "evidence for a person, never an input to routing" (decision
+0043) continues to hold where it was written: inside the engine's own routing.
+
+**Pushed-ness, not a timeout word, discriminates re-review from continue.** A lane that runs out of
+wall clock settles `Failed` — `WorkflowOutcome` has no distinct word for it — so keying on one would
+mean string-matching an error message. The PR's `headRefOid` equal to the worktree's `HEAD` is work
+someone can review; anything else, including an absent PR or an unreadable head, is work to finish.
+`gh` goes through the daemon's existing `IGhCliRunner` seam and the head through
+`WorkspaceHead.CaptureAsync`: **the advance adds no process-spawn site.**
+
+**A `ready` item is parked in `queued`, not marked done**, because the conductor still has to merge it
+and it belongs in the operator's live list until then. What keeps it from launching is
+`QueueScheduler.Decide`'s own stage guard — the single load-bearing rule, so it cannot be a belt with
+a braces that silently takes over. An arm the queue cannot derive fails the item with the reason on
+it, where `baton queue list` shows it; it never guesses.
+
+### The brief templates (operator ruling, 2026-09-06)
+
+"Every brief the conductor writes by hand is friction to remove, so the templates are the product, not
+a convenience." Three, at **`~/.baton/queue/templates/{implement,fix,re-review}.md`**, shipped
+compiled-in and **materialized only when the file is absent** — an operator's edit survives every
+later `add`. `{{TOKEN}}` placeholders are substituted; an unknown one is left alone rather than
+blanked, since a hole a reader cannot see is worse than a token they can.
+
+The fix and re-review briefs mirror the conductor's own headers ("Fix round for PR #N",
+"Re-review PR #N at `<sha>`") and **inline the findings verbatim — never a room path**. That is the
+mechanism, not a preference: a lane's grant cannot read another room's directory, which is exactly
+why the findings were being copied by hand. `lastVerdict` keeps the path on the item for the
+operator's trace and nothing renders it.
+
+The implement template carries the standing lane rules **once** — buildlock, no `pixi run gates`, no
+sub-agents, no live vendor CLI, no issue filing, never `--no-verify`, checkpoint commits, the
+test-hygiene tripwires, record-once, the ship block, and `Closes #N` alone on the last line with no AI
+attribution. `continue` renders from that same template with one generated paragraph naming what the
+previous lane left behind: a continuation *is* the implement brief plus that sentence, and a fourth
+file would be the same text with one paragraph different, drifting the first time the rules changed.
+
 ### The recorded fact (Q4)
 
 One line per evaluation in `~/.baton/fleet/queue.jsonl`, through the same `JsonLinesLedger` the burn
-and cost ledgers share. Fields: `at`, `tag`, `decision` (`launched` | `waited` | `failed`), `reason`
+and cost ledgers share. Fields: `at`, `tag`, `decision` (`launched` | `waited` | `failed` |
+`advanced`), `reason`
 (`slots` | `memory` | `gap` | `hold` | `runway-held` | `no-items`, or the error), `liveWeight`,
 `freeGb` (absent when unmeasured), `floorGb`, `tier`, `adapter`, `model`, `effort`, `tierOverride`,
 `overrideReason`, `room`.
+
+**`advanced` is one line per work-item stage change** (slice 2), naming the evidence it was derived
+from: the stage pair, the outcome word, the PR head, the verdict's counts. That is not decoration —
+the collapse rule below keys on `decision|reason|tag`, so two rounds whose reasons read alike would
+collapse into one row and the second transition would vanish from the file this queue exists to make
+auditable.
 
 **It records transitions, every launch and every failure — not a per-tick heartbeat.** A verdict
 identical to the one immediately before it is not re-appended, so a queue waiting on memory for three

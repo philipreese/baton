@@ -46,8 +46,7 @@ public sealed class QueueBriefTemplatesTests
         Assert.Contains("File.Copy has already overwritten it", brief, StringComparison.Ordinal);
         Assert.Contains("src/Baton.Cli/QueueCommand.cs:87", brief, StringComparison.Ordinal);
 
-        // The whole reason the findings are inlined: a lane's grant cannot read another room, so a
-        // brief naming one is a brief its worker cannot follow (spec/baton.md §13).
+        // Why the findings are inlined at all: QueueBriefTemplates' own remarks, and spec/baton.md §13.
         Assert.DoesNotContain(".baton", brief, StringComparison.OrdinalIgnoreCase);
         Assert.DoesNotContain("rooms", brief, StringComparison.OrdinalIgnoreCase);
     }

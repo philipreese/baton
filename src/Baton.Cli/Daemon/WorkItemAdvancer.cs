@@ -140,9 +140,8 @@ public sealed class WorkItemAdvancer
     {
         var next = transition.NextStage!.Value;
 
-        // The findings travel as TEXT. Not the verdict's path: a lane's grant cannot read another
-        // room's directory, so a brief naming one would be a brief its worker cannot follow — the exact
-        // friction the conductor was removing by hand (spec/baton.md §13).
+        // The findings travel as TEXT, never the verdict's path -- QueueBriefTemplates' own remarks
+        // have the mechanism and spec/baton.md §13 the ruling.
         var findings = verdict is null ? null : QueueBriefTemplates.RenderFindings(verdict);
 
         // The previous brief carries the issue's own instructions, which a continuation still needs.

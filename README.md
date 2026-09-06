@@ -38,7 +38,8 @@ narrowed daemon, and bindings/permissions. If this README and the spec disagree,
 | `baton memory audit [--format text\|json]` | Read-only inventory of this machine's Claude memory roots (live and archived), each mapped to a canonical repository identity, with duplicate/orphan/stale/no-provenance/ambiguous findings. Writes nothing — see `spec/baton.md` §12. |
 | `baton memory import [--dry-run] [--root <dir>]... [--assert <path>=<repository>]... \| --undo <manifest>` | Copy those roots' memories — plus the Codex markdown ones — into Baton's canonical per-repository store at `~/.baton/<repo-slug>/memory/entries.jsonl` (with `links.jsonl` beside it for supersession, so a link lands whichever run discovers it). Non-destructive: every source is opened read-only and left byte-identical, re-importing an unchanged tree appends nothing, and the manifest each run emits replays to a full undo — one that reversed less than its manifest claims exits non-zero and says which store file came up short. It never guesses whose memory something is: a root with no derivable repository is reported unfiled until `--assert` says otherwise, and Codex's `memories_*.sqlite` is recorded as machinery rather than read (`spec/baton.md` §12). |
 | `baton queue add <tag> --role <r> --spec <f> (--issue <n> \| --workspace <d>) [--scope engine\|tooling\|docs] [--adapter] [--model] [--effort] [--timeout] [--max-tool-steps] [--token-budget] [--override-runway <reason>] [--reason <why>]` | Queue a dispatch request. Copies the spec into `~/.baton/queue/specs/<tag>.md`; `--issue` provisions and trusts a worktree there and then. |
-| `baton queue list` / `baton queue hold` / `baton queue resume` / `baton queue import <file>` | Show each item's state and room, pause and unpause launches without stopping the daemon, and import the pre-Baton scratchpad queue file. |
+| `baton queue add --issue <n> --lifecycle [--spec <f>] [--scope …]` | Queue an issue-anchored **work item** instead: the daemon derives its next dispatch (implement → review → fix round → re-review → ready) from the PR's and the last verdict's state, and renders each brief from `~/.baton/queue/templates/`. Without `--spec` the implement brief comes from the issue body; with one, that file's text becomes its "## Do" section. |
+| `baton queue list` / `baton queue hold` / `baton queue resume` / `baton queue import <file>` | Show each item's state, stage and room, pause and unpause launches without stopping the daemon, and import the pre-Baton scratchpad queue file. |
 | `baton mcp` / `baton daemon` | The stdio MCP server workers connect to (`fleet_status`, `yield`, `memory-edit-proposal`, `promote-artifact`, `room_detail`), and the narrowed background daemon (`spec/baton.md` §7). |
 
 `spec/baton.md` is the authority on every verb's exact contract — this table is an index, not a
@@ -53,8 +54,13 @@ adapter/model/effort from a role-and-scope tier table. Every evaluation lands as
 `~/.baton/fleet/queue.jsonl`, so "why did this lane start when it did" is answerable afterwards. The
 numbers and the tier table live in `~/.baton/settings.json` under `Queue`.
 
-`spec/baton.md` §13 is the contract — the shipped defaults, the recorded fact's shape, and what
-happens when free memory cannot be read.
+An item added with `--lifecycle` carries a **stage** as well as a state, and the daemon advances it:
+a settled lane's room, its `verdict.json` and `gh pr view` decide whether the next round is a review,
+a fix round carrying the reviewer's findings verbatim, a re-review, or a continuation of work that
+never reached the PR. An approved item stops at `ready` — **the queue never merges**.
+
+`spec/baton.md` §13 is the contract — the shipped defaults, the recorded fact's shape, what happens
+when free memory cannot be read, and the lifecycle's own transition table.
 
 ## Fleet Glass push notifications
 
