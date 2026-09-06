@@ -3778,6 +3778,7 @@ repeated-settle shapes, and what inflated totals that skip is buying, not restat
 | `resolution`, `resolutionReason` | #1901 C1. `accept-capture` / `reject` / `close` and the conductor's own `--reason`, on a **correcting row** — see below. Never on an execution row. |
 | `label` | #1901 C2. The operator's `baton dispatch --label` for this row's worker, read back off the room's `bindings.json` (`WorkerBindingConfigEntry.Label`, §2/§6) at settle and again by the backfill — the arm key #1903's comparator filters on, so an A/B of two dispatch shapes is a filter rather than a hand-kept list of room paths. Already sanitized when it was recorded; carried through verbatim. Copied onto a correcting row for the same reason `issue`/`pr`/`role` are: it identifies the work, not the spend, and an arm reading would otherwise miss that arm's interventions. **Absent means "no label was recorded for this worker"**, never "unlabelled work" — a `baton run` against a hand-authored `bindings.json`, a dispatch that passed no `--label`, and a room whose bindings file is gone all read the same way. A `github-backfill` row never carries one: a merged PR has no worker and so no binding to read it from. |
 | `commits`, `reviewCount` | #1901 C2, `github-backfill` rows only. How many commits the merged PR carried and how many **reviews** `gh` reports for it. **`reviewCount` is not a review-comment count**, which #1901's C2 text asks for: `gh pr list --json` exposes `reviews` (one entry per submitted review) and `comments` (the PR's issue comments), and neither is the per-thread review-comment count — so the row records the one that was actually measured, under a name that says which. `0` is a measurement; absence means `gh` reported no such array at all. Both are absent on every execution row: a settle has no PR-level count in hand, and the diff shape beside it is a workspace measurement rather than a GitHub one. |
+| `identitySource` | #1931 review HIGH (operator ruling 2026-09-05). Which lookup produced this row's `repository` — `recorded-root` (the room's own recorded project root resolved) or `working-directory` (it did not, and the identity came from wherever the run was invoked). Closed set. Written by `baton ledger backfill` and by no other writer today, so **absence means "the writer recorded no source", never `recorded-root`**: every settle-site row is absent, because `RepositoryIdentityResolver.TryResolveForRoomAsync` resolves the recorded root and the working directory through one call and cannot report which answered. A `working-directory` row is well-formed and may still be keyed to the WRONG repository — the exposure the fallback below accepts — and this field is the only thing on the row that can say so afterwards. It cannot repair one: the ledger is append-only, and a corrective run from the right checkout writes a different repository's file whose dedupe never sees the bad row. |
 | `attempt`, `effort`, `parentRoom`, `workstream`, `raw` | **Reserved, no writer** — none is derivable from the events a settle has in hand (`modelEchoed`, above, is reserved for the same reason). Named now so a later phase fills a reserved field rather than inventing a competing one. |
 
 **A `baton resolve` appends a correcting row; it never rewrites the row it corrects.** This ledger is
@@ -3835,14 +3836,25 @@ only ever ADD rows.
   that with "these and only these". The one thing this half cannot recover is the settle-time workspace
   probe's answer — `issue`/`pr`/the diff shape come from a git workspace a settled lane has usually
   already torn down, and the GitHub half below holds the PR-level version of those facts anyway.
+  Everything the room's own files still hold IS recovered, and that includes both `bindings.json`
+  stamps: the dispatch `--label` and #1848's `runwayOverrideReason` (#1931 review MEDIUM — the
+  override is a pure file read rather than a workspace probe, and it was the one field this list used
+  to lose in silence). One reader, `RoomBindingStamps`, parses that file once for both.
 - **A room's repository identity falls back to the working directory when its recorded project root no
   longer RESOLVES**, not only when the room has no registration — the wider case a backfill meets and a
-  settle does not. Measured 2026-09-05 over the operator's own `~/.baton/rooms`: 621 of 690 rooms
-  recorded a project root that was an auto-provisioned #669 worktree, torn down on Terminal, so the
-  strict reading loses nine tenths of the recoverable history. What it trades is exactly what
-  `RepositoryIdentityResolver.TryResolveForRoomAsync`'s remarks warn about — a backfill run from
-  another checkout keys those rows to the wrong repository — so the run reports how many rooms took the
-  fallback, and `--dry-run` is where that is seen first.
+  settle does not. **The measurement of record**, 2026-09-05 over the operator's own `~/.baton/rooms`,
+  is the command's own dry-run transcript: **627 of 691 rooms** recorded a project root that no longer
+  resolves (an auto-provisioned #669 worktree, torn down on Terminal), so the strict reading loses nine
+  tenths of the recoverable history. Every other statement of that figure — the PR body, a commit
+  message — cites this line rather than restating it; an earlier draft of this sentence said 621 of 690
+  and disagreed with the command's own output (#1931 review LOW). What the fallback trades is exactly
+  what `RepositoryIdentityResolver.TryResolveForRoomAsync`'s remarks warn about — a backfill run from
+  another checkout keys those rows to the wrong repository — so **three things ship with it** (operator
+  ruling 2026-09-05, on #1931's review HIGH): every row carries `identitySource` saying which lookup
+  keyed it (schema table above), the run's report names the count and the remedy BEFORE it appends a
+  row rather than after, and `--dry-run` reports the same count so it can be seen without writing. The
+  print-then-write order is the load-bearing half: the ledger is append-only, so a disclosure printed
+  after the append describes rows that can no longer be repaired.
 - **Merged PRs.** One `github-backfill` row per merged pull request `gh pr list --state merged
   --search "merged:>=<since>"` reports, through the `IGhCliRunner` seam #734 already owns, **bounded at
   200 PRs — checked at each page boundary, so a run ends holding at most one page more** rather than
@@ -3883,14 +3895,36 @@ only ever ADD rows.
   execution ledgered before #1901 C1 landed keeps its absent verdict fields forever; the run counts
   those and says so on stdout rather than rewriting them.
 
-**A `github-backfill` row costs a reading what a correcting row does, and for the same reason.** It
-carries no adapter, no token dimension and no estimate — nothing ran — so `LedgerRollup` counts it into
-`attempts` and into `unread`, groups it under the unknown-vendor subtotal, and adds one to each of
-`apiEquivalentByStatus.unpriced`/`planMeterByStatus.unpriced`. Token sums, money sums and `reportedBy`
-are the safe half, for the identical reason: those fields are never set and `SumPresent` skips nulls.
-The remedy is expressible and is the one already documented above one level up — **`baton ledger
---source-kind baton-execution` is the spend reading**, and it excludes this whole population by label
-rather than by inference, which is what `sourceKind` exists for.
+**A `github-backfill` row costs a reading most of what a correcting row does — with one exception that
+is a correction rather than a preference (#1931 review MEDIUM).** It carries no adapter, no token
+dimension and no estimate, because nothing ran. So `LedgerRollup` still counts it into `attempts` (the
+ROW count, which is what "Rows: n matched" reports and what the correcting row's ruling above keeps
+counted together), still groups it under the unknown-vendor subtotal, and still adds one to each of
+`apiEquivalentByStatus.unpriced`/`planMeterByStatus.unpriced` — a row with no estimate is unpriced, and
+that is true of it. Token sums, money sums and `reportedBy` are the safe half, for the identical
+reason: those fields are never set and `SumPresent` skips nulls.
+
+**It is NOT in `unread`, and it is not printed as an attempt.** That bucket's own definition is "an
+attempt nothing was read for (no parser for the adapter, no captured stream)", which is a false
+statement about a merged PR — and one backfill run put 235 of them into it against 63 pre-existing
+rows, so the default screen read "298 attempt(s) (235 with no usage read)". `LedgerSubtotal` therefore
+carries `executions` and `pullRequests` — a partition of `attempts` — and the text view prints the two
+populations side by side rather than folding one into the other; it sums nothing itself. The drill
+digest marks the row for the reason #1913 review finding 6 marked a correcting row: with `(unknown)`
+vendor and every column `-`, it otherwise renders exactly as an execution attempt nothing was read for,
+and its `github-pr-<n>` id is the incidental tell that ruling already refused. The remedy for the rest
+is unchanged and is the one documented one level up — **`baton ledger --source-kind baton-execution` is
+the spend reading**, excluding this whole population by label rather than by inference, which is what
+`sourceKind` exists for.
+
+**The merged-PR walk checks its own ordering rather than pinning it** (#1931 review LOW). The
+`merged:<=` cursor is only sound while `gh` answers newest-merge-first, and GitHub's search API offers
+no merge-time sort to ask for — its sorts are `comments`/`reactions`/`interactions`/`created`/`updated`
+(default best-match), so `sort:updated-desc` would pin an order that drags the cursor BACKWARDS past
+unseen PRs rather than fixing anything. The walk therefore stops, with a reason, on the first page that
+comes back out of merge order. In the same spirit, a `gh` failure part-way through the walk reports
+"stopped early after N PRs" and keeps its counts: those rows ARE written, and the old wording said the
+half had been skipped while they were being appended.
 
 **No `verdict` field, and that is a finding rather than an omission.** #1901's phase-C1 text asks a
 review row to carry a `verdict` of `APPROVE`/`BLOCK`. **No such value exists anywhere in the product**:

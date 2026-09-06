@@ -445,9 +445,9 @@ public sealed class CostLedgerStoreTests
     /// #1931 review HIGH: a row says WHICH lookup produced its repository key, and it survives the
     /// file. All three states in one test, because the field is only worth having if they are
     /// distinguishable: <c>recorded-root</c>, <c>working-directory</c>, and the ABSENCE a writer that
-    /// cannot say leaves — without the third arm a stamp that defaulted to <c>recorded-root</c> for
-    /// every settle-site row would pass, which is exactly the "well-formed row with a wrong join key"
-    /// this field exists to make visible.
+    /// cannot say leaves. Without that third arm a stamp defaulting to <c>recorded-root</c> on every
+    /// settle-site row would pass here, and <see cref="RepositoryIdentitySource"/>'s own doc is what
+    /// that absence has to keep meaning.
     /// </summary>
     [Fact]
     public async Task Which_lookup_keyed_a_row_to_its_repository_is_recorded_and_survives_the_file()

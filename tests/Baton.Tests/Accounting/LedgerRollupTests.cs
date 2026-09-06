@@ -196,15 +196,14 @@ public sealed class LedgerRollupTests
     }
 
     /// <summary>
-    /// #1931 review MEDIUM: a <c>github-backfill</c> row is a merged PR nothing ran for, so it is
-    /// counted apart from the attempts and is NOT in <c>unread</c> — whose own doc says "nothing was
-    /// read for them (no parser for the adapter, no captured stream)", a false statement about a PR.
+    /// #1931 review MEDIUM: a merged-PR row is counted apart from the attempts and is NOT in
+    /// <c>unread</c>, whose own definition (<see cref="LedgerSubtotal.Unread"/>) is a false statement
+    /// about a pull request.
     /// <para>
     /// Three arms, because the fix must not be a blanket exclusion: the row still counts into
     /// <c>attempts</c> (the row count every surface's "Rows: n matched" is), it still takes its
     /// unpriced status bucket (spec/baton.md §7's ruling for the correcting row it is modelled on), and
-    /// the undated execution row beside it still IS unread. The control is <see cref="Undated"/>,
-    /// which carries no completeness label either.
+    /// <see cref="Undated"/> — an execution row with no completeness label either — still IS unread.
     /// </para>
     /// </summary>
     [Fact]

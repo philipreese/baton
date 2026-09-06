@@ -389,7 +389,7 @@ public sealed class LedgerBackfillCommandTests : IDisposable
     /// #1931 review HIGH: a room whose recorded project root does not resolve is keyed to the working
     /// directory's repository, and <b>every row it produces says so</b> — the fixture rooms here carry
     /// no registry entry, which is exactly that case. <c>CostLedgerStoreTests</c> owns the other arm
-    /// (<c>recorded-root</c>, and the absence a writer that cannot say leaves); what this pins is that
+    /// (<c>recorded-root</c>, and the absent case); what this pins is that
     /// the backfill actually passes the source it resolved rather than leaving the field empty.
     /// </summary>
     [Fact]
@@ -438,8 +438,8 @@ public sealed class LedgerBackfillCommandTests : IDisposable
     /// <summary>
     /// #1901 C2 item 2's other half: #1848's runway-override reason is a pure read of the same
     /// <c>bindings.json</c> the label comes from, so a recovered row carries it too. The control is the
-    /// binding whose override was recorded but <c>Used: false</c> — a flag that bypassed nothing is not
-    /// an override of this row's spend, and a backfill that copied every recorded reason would fail here.
+    /// binding recorded with <c>Used: false</c>, which <see cref="RoomBindingStamps"/>'s own doc says is
+    /// not carried: a backfill that copied every recorded reason would fail on that arm.
     /// </summary>
     [Fact]
     public async Task A_runway_override_that_bypassed_a_hold_lands_on_its_recovered_row_and_an_unused_one_does_not()

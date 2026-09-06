@@ -115,8 +115,8 @@ public enum ConductorResolution
 /// "the writer of this row recorded no source", never <see cref="RecordedRoot"/></b>: every settle-site
 /// row is absent, because <c>Baton.Cli.RepositoryIdentityResolver.TryResolveForRoomAsync</c> resolves
 /// the recorded project root and the working directory through one call and cannot report which of the
-/// two answered. spec/baton.md §7's backfill section is the record of the exposure this field
-/// discloses.
+/// two answered. What the exposure is, and the three conditions it ships under, are in spec/baton.md
+/// §7 under `baton ledger backfill`.
 /// </remarks>
 [JsonConverter(typeof(JsonStringEnumConverter<RepositoryIdentitySource>))]
 public enum RepositoryIdentitySource

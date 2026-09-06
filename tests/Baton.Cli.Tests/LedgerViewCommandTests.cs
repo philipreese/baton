@@ -459,8 +459,8 @@ public sealed class LedgerViewCommandTests : IDisposable
     /// <summary>
     /// #1931 review MEDIUM, the two halves at the surface an operator reads: a <c>github-backfill</c>
     /// row is not counted as an attempt nor as one "with no usage read" on the default screen, and it
-    /// is MARKED in the drill digest — where it otherwise renders identically to an execution attempt
-    /// nothing was read for, which is the defect #1913 finding 6 fixed for the correcting row.
+    /// is MARKED in the drill digest — <c>LedgerViewCommand.DescribeRow</c>'s own comment states what
+    /// that clause is for, and it is the defect #1913 finding 6 fixed for the correcting row.
     /// <para>
     /// The control is the execution row beside it: it IS the one attempt, it IS the one unread row
     /// (nothing was read for it), and it carries no marker — so a blanket exclusion or an
