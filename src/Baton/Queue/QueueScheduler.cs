@@ -60,9 +60,8 @@ public static class QueueScheduler
         }
 
         // The `ready` exclusion is HERE rather than left to the advancer that sets the stage (#1934
-// slice 2). An approved item is parked back in `queued` -- it is not done, since the conductor still
-        // has to merge it -- and this is the only function that picks a candidate, so a guard anywhere
-        // else would be a second reader of the same rule with the launch still going through this one.
+        // slice 2). This is the only function that picks a candidate, so a guard anywhere else would
+        // be a second reader of the same rule with the launch still coming through this one.
         var candidate = items.FirstOrDefault(i =>
             i.State == QueueItemState.Queued && !i.External && !IsReady(i));
         if (candidate is null)
