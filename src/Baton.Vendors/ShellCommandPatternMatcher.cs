@@ -59,9 +59,13 @@ public static class ShellCommandPatternMatcher
     /// The claude/agy tool names a shell command line can be read from — claude's <c>Bash</c> and
     /// agy's <c>run_command</c>. The one canonical list (record-once): the grant amender's
     /// pattern derivation and the gate UI's command display both gate on this rather than each
-    /// restating the pair, and any other tool name reads back no command line at all.
+    /// restating the pair, and any other tool name reads back no command line at all. claude's half
+    /// comes from <see cref="ClaudeCliVocabulary.BashTool"/> — the same constant the adapter emits on
+    /// <c>--allowedTools</c>/<c>--disallowedTools</c>, so the name cannot drift between what is
+    /// granted and what is read back (#1918). agy has no vocabulary class of its own, so
+    /// <c>run_command</c> stays a literal here rather than being pulled into a claude-named one.
     /// </summary>
-    public static readonly string[] ShellToolNames = ["Bash", "run_command"];
+    public static readonly string[] ShellToolNames = [ClaudeCliVocabulary.BashTool, "run_command"];
 
     /// <summary>
     /// Reads the raw shell command line (e.g. <c>"rm -rf build/"</c>) out of a shell tool's asked
