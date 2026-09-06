@@ -492,6 +492,100 @@ public sealed class MemoryImportTests : IDisposable
     }
 
     /// <summary>
+    /// #1947: an undo over a manifest that appended a supersession link removes exactly that row from
+    /// <c>links.jsonl</c> and nothing else, and a control where a manifest with no links leaves
+    /// <c>links.jsonl</c> byte-identical.
+    /// </summary>
+    /// <remarks>
+    /// Both arms in one fixture: link removal removes the one row while preserving an earlier
+    /// import's link intact, and the control proves that an undo whose manifest carries no links
+    /// does not touch <c>links.jsonl</c> at all.
+    /// </remarks>
+    [Fact]
+    public async Task An_undo_removes_an_appended_supersession_link_and_leaves_unrelated_links_and_linkless_manifests_alone()
+    {
+        await BuildStandardFixtureAsync();
+
+        // Run 1: live entries only. Manifest 1 records 3 entries and no links.
+        await RunAsync();
+
+        // Run 2: first archive root with a superseding entry. Appends Link 1.
+        var archived1 = WriteArchivedRoot("c--baton-archive-1", ("user_who.md", "the older who"));
+        await RunAsync(
+            "--root", archived1, "--assert", $"{archived1}=github.com/philipreese/baton",
+            "--asserted-by", "the-test");
+
+        // Run 3: second archive root with a superseding entry. Appends Link 2.
+        var archived2 = WriteArchivedRoot("c--baton-archive-2", ("project_plan.md", "the older plan"));
+        await RunAsync(
+            "--root", archived2, "--assert", $"{archived2}=github.com/philipreese/baton",
+            "--asserted-by", "the-test");
+
+        // Run 4: third archive root with no matching live entry. Appends 1 entry and no links.
+        var archived3 = WriteArchivedRoot("c--baton-archive-3", ("standalone.md", "no live counterpart"));
+        await RunAsync(
+            "--root", archived3, "--assert", $"{archived3}=github.com/philipreese/baton",
+            "--asserted-by", "the-test");
+
+        var manifests = Directory
+            .GetFiles(Path.Combine(BatonPaths.Root, BatonPaths.MemoryImportsDirectoryName))
+            .Order(StringComparer.Ordinal)
+            .ToList();
+        Assert.Equal(4, manifests.Count);
+        var manifestLinkless = manifests[3];
+        var manifestWithLink = manifests[2];
+
+        var linksPath = BatonPaths.MemoryLinksFile(RepositoryIdentity.FileSlugFor("github.com/philipreese/baton"));
+        Assert.True(File.Exists(linksPath));
+
+        var initialLinks = await LinksAsync("github.com/philipreese/baton");
+        Assert.Equal(2, initialLinks.Count);
+
+        // Control arm: undo over a manifest that appended no links leaves links.jsonl byte-identical.
+        var bytesBeforeControl = File.ReadAllBytes(linksPath);
+        var controlText = await RunAsync("--undo", manifestLinkless);
+        Assert.Contains("0 supersession link(s)", controlText, StringComparison.Ordinal);
+        var bytesAfterControl = File.ReadAllBytes(linksPath);
+        Assert.Equal(bytesBeforeControl, bytesAfterControl);
+        Assert.Equal(2, (await LinksAsync("github.com/philipreese/baton")).Count);
+
+        // Link-removal arm: undo over a manifest that appended a supersession link removes exactly that row
+        // and nothing else.
+        var manifest = ImportManifest.Read(manifestWithLink);
+        var removedLinkRow = Assert.Single(manifest.AppendedLinks);
+        var undoText = await RunAsync("--undo", manifestWithLink);
+        Assert.Contains("1 supersession link(s)", undoText, StringComparison.Ordinal);
+
+        var remainingLinks = await LinksAsync("github.com/philipreese/baton");
+        var remainingLink = Assert.Single(remainingLinks);
+        Assert.Equal(initialLinks[0].Id, remainingLink.Id);
+        Assert.NotEqual(removedLinkRow.LinkId, remainingLink.Id);
+
+        var remainingLines = File.ReadAllLines(linksPath);
+        var singleLine = Assert.Single(remainingLines);
+        var parsed = JsonSerializer.Deserialize<MemorySupersessionLink>(singleLine);
+        Assert.NotNull(parsed);
+        Assert.Equal(remainingLink.Id, parsed.Id);
+
+        // In the resolved store, the remaining pair still links while the undone pair does not.
+        var store = await StoreAsync("github.com/philipreese/baton");
+        var liveWho = Assert.Single(store, e => e.Text == "who we are");
+        var olderWho = Assert.Single(store, e => e.Text == "the older who");
+        Assert.Equal([olderWho.Id], liveWho.Supersedes);
+        Assert.Equal([liveWho.Id], olderWho.SupersededBy);
+
+        var livePlan = Assert.Single(store, e => e.Text == "the plan");
+        Assert.Null(livePlan.Supersedes);
+        Assert.DoesNotContain(store, e => e.Text == "the older plan");
+
+        // And replaying the link undo a second time reports incomplete because the link is already gone.
+        var (againCode, againText) = await RunRawAsync("--undo", manifestWithLink);
+        Assert.Equal(1, againCode);
+        Assert.Contains("INCOMPLETE", againText, StringComparison.Ordinal);
+        Assert.Contains("expected 1 link(s), removed 0", againText, StringComparison.Ordinal);
+    }
+
+    /// <summary>
     /// Two spellings of one repository asserted across two roots produce ONE store file, because the
     /// asserted identity goes through the same canonicalization a git probe's answer does.
     /// </summary>
