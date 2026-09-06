@@ -438,7 +438,7 @@ ALLOWLIST: dict[str, str] = {
     "vendor-verify-selftest": "pure synthetic selftest running each local vendor-verify check against a faithful fixture that must PASS and a mutated one that must NOT, plus the sqlite temp-copy location/loud-cleanup and pbtxt parser-limitation arms and #1928's agy tool-classification arms over synthetic catalogues; refuses a local check with no fixture registered, and fails closed if either suite fails",
     "ledger-derived-check": "paired scratch-copy selftest invokes the exact --check entry point and proves edited, missing and absent-input derived outputs exit non-zero",
     "ledger-derived-check-selftest": "scratch-copy selftest checks the fixture derivation against hand-computed answers, then drives production --check through edited/missing/no-input arms without touching the committed exports",
-    "deepswe-refresh-selftest": "synthetic selftest covers selection, display-cost parsing, numeric validation, removal refusal, derivation, and idempotence in temporary directories",
+    "deepswe-refresh-selftest": "synthetic selftest covers selection, dataset-scoped display-cost parsing with duplicate refusal, displayed-vs-artifact cost reconciliation in both polarities, missing/mismatched provider refusal, numeric validation, removal refusal, derivation, and index/docs-allowlist publication (create, curated-row, and repair paths) in temporary directories",
 }
 
 

@@ -8,8 +8,15 @@ later refresh rather than editing this one.
 ## Provenance
 
 - Source: [https://deepswe.datacurve.ai/artifacts/v1.1/leaderboard-live.json](https://deepswe.datacurve.ai/artifacts/v1.1/leaderboard-live.json)
-- Displayed-cost source: [https://deepswe.datacurve.ai/](https://deepswe.datacurve.ai/) (the artifact can retain launch-price costs
-  after the canonical page applies announced price changes).
+- Cost source: displayed costs from [https://deepswe.datacurve.ai/](https://deepswe.datacurve.ai/)
+  (the artifact can retain launch-price costs after the canonical page applies announced price
+  changes). **Not reconciled.** This snapshot was recorded by the collector before it verified a
+  displayed cost against the artifact's own cost, so each cost here was taken from the page and
+  written without comparison. It has not been regenerated through the reconciling path: doing so
+  needs a live fetch, which the session that added the reconciliation could not make. The next
+  refresh reconciles from upstream and does not inherit these values.
+- Provider cross-check: recorded before a missing upstream `provider` failed the run closed, so a
+  row upstream reported no provider for would have been accepted here on the model prefix alone.
 - Upstream generation time: `2026-09-03T22:24:37.984682+00:00`
 - Benchmark: DeepSWE v1.1, using the upstream leaderboard's shared harness/configuration data.
 - Selection: 41 configurations matched the model-family rules in

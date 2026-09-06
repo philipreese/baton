@@ -1,6 +1,7 @@
 {
   "source_url": "https://deepswe.datacurve.ai/artifacts/v1.1/leaderboard-live.json",
   "display_url": "https://deepswe.datacurve.ai/",
+  "dataset": "deep-swe",
   "benchmark_version": "v1.1",
   "model_patterns": [
     "^gpt-5-6-(?:sol|terra|luna)$",
