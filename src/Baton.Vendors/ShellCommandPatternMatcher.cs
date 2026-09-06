@@ -1,5 +1,6 @@
 using System.Linq;
 using System.Text.Json;
+using Baton.Domain;
 
 namespace Baton.Vendors;
 
@@ -429,6 +430,26 @@ public static class ShellCommandPatternMatcher
     /// <param name="Reason">A denial reason a person can act on; <see langword="null"/> when allowed.</param>
     public readonly record struct ScopedShellResult(ScopedShellVerdict Verdict, string? Segment, string? Reason)
     {
+        /// <summary>
+        /// A denial reason a person can act on, carrying <see cref="GrantRefusal.Marker"/> — this
+        /// matcher is one of #1921's producing sites, and every reason it emits ends up in a tool
+        /// RESULT: through <c>CodexDynamicToolResult.Denied</c> on the codex path, and wrapped inside
+        /// the claude/agy hook commands' own sentences on the other two.
+        /// <para>
+        /// <b>Stamped HERE, in the record, rather than at each <c>return</c>.</b> There are five refusal
+        /// texts in this file and nothing would fail if a sixth were added without the marker — which is
+        /// exactly the escape #1921 exists to close. A property initializer on the record cannot be
+        /// forgotten by a new construction site. <see cref="GrantRefusal.Stamp"/> is idempotent, so the
+        /// hook commands re-stamping the composed sentence adds nothing.
+        /// </para>
+        /// Null when allowed, and never stamped then: a marker on an allowed command's (absent) reason
+        /// would be counted as a refusal by every reader downstream.
+        /// </summary>
+        public string? Reason { get; init; } =
+            Verdict != ScopedShellVerdict.Allowed && Reason is { Length: > 0 }
+                ? GrantRefusal.Stamp(Reason)
+                : Reason;
+
         public bool IsAllowed => Verdict == ScopedShellVerdict.Allowed;
     }
 

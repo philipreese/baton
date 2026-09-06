@@ -2,6 +2,7 @@ using System.Diagnostics;
 using System.Text;
 using System.Text.Json;
 using System.Text.Json.Nodes;
+using Baton.Domain;
 
 namespace Baton.Vendors;
 
@@ -619,8 +620,29 @@ public sealed class CodexDynamicToolPolicy
         OperatingSystem.IsWindows() ? StringComparer.OrdinalIgnoreCase : StringComparer.Ordinal;
 }
 
+/// <summary>
+/// One dynamic-tool call's answer, as <c>CodexAppServerBroker</c> hands it back to codex and copies it
+/// into the room's captured stream.
+/// </summary>
 public sealed record CodexDynamicToolResult(bool Success, string Text)
 {
     public static CodexDynamicToolResult Allowed(string text) => new(true, text);
-    public static CodexDynamicToolResult Denied(string text) => new(false, text);
+
+    /// <summary>
+    /// A refusal, carrying <see cref="GrantRefusal.Marker"/> (#1921).
+    /// <para>
+    /// <b>The single funnel for every refusal on the codex path</b> — the read-text and search-text
+    /// handlers, the list and write handlers, the "not in this role grant" fallthrough, and
+    /// <c>ExecuteAsync</c>'s mapping of the path-escape exceptions ("outside this Baton's readable
+    /// roots", "outside this Baton's workspace root", "crosses a symbolic link"). Stamping here rather
+    /// than at each of those thirteen call sites is what makes a fourteenth impossible to add without
+    /// the marker.
+    /// </para>
+    /// <para>
+    /// Idempotent through <see cref="GrantRefusal.Stamp"/>, which matters for the one text that arrives
+    /// already stamped: <c>ShellCommandPatternMatcher</c>'s own reason, passed through by the run-command
+    /// handler.
+    /// </para>
+    /// </summary>
+    public static CodexDynamicToolResult Denied(string text) => new(false, GrantRefusal.Stamp(text));
 }

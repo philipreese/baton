@@ -338,7 +338,22 @@ public static class CodexAppServerBroker
         await EmitAsync(batonOutput, new JsonObject
         {
             ["type"] = "item.started",
-            ["item"] = new JsonObject { ["type"] = "mcp_tool_call", ["tool"] = tool },
+            ["item"] = new JsonObject
+            {
+                ["type"] = "mcp_tool_call",
+                ["tool"] = tool,
+                // #1921: what makes "this lane re-issued a call it had already made" countable on codex.
+                // Codex's own item.started names the tool and never its arguments, so without this the
+                // repeat count has nothing to key on and CodexUsageParser.ToolInvocationKeys reports
+                // none -- which is what it still does for a stream captured before this landed.
+                //
+                // A DIGEST rather than the arguments: a write_text call's arguments carry a whole file,
+                // and a repeat count only ever asks two keys whether they are equal. Emitting the
+                // arguments themselves would put a file's contents into the captured stream a second
+                // time to answer a question 16 hex characters answer, and every byte of .stdout.log is
+                // a byte the projector re-reads at settle and the rollover threshold counts.
+                [CodexUsageParser.ArgumentsDigestField] = ArgumentsDigest(argumentsDocument.RootElement),
+            },
         }).ConfigureAwait(false);
         var result = await policy.ExecuteAsync(tool, argumentsDocument.RootElement, cancellationToken)
             .ConfigureAwait(false);
@@ -366,6 +381,28 @@ public static class CodexAppServerBroker
                 ["aggregated_output"] = result.Text,
             },
         }).ConfigureAwait(false);
+    }
+
+    /// <summary>
+    /// #1921: a short, stable fingerprint of one dynamic-tool call's arguments, as codex serialized
+    /// them. Not a security boundary and not reversible-by-design — it exists only so two calls can be
+    /// compared for equality without carrying their payloads through the stream. SHA-256 truncated to
+    /// 16 hex characters: a collision would merge two distinct calls into one repeat, which costs an
+    /// over-count of at most one on a diagnostic figure, and 64 bits makes that not worth the wider
+    /// field.
+    /// <para>
+    /// Property ORDER is part of the fingerprint, the same caveat
+    /// <c>ClaudeUsageParser.ToolInvocationKeys</c> states for its own key — the raw text is hashed
+    /// rather than a canonical re-serialization, so a semantically identical call whose arguments codex
+    /// ordered differently reads as two keys. That direction under-counts repeats, which is the safe
+    /// direction for a figure that accuses a lane of waste.
+    /// </para>
+    /// </summary>
+    private static string ArgumentsDigest(JsonElement arguments)
+    {
+        var bytes = System.Security.Cryptography.SHA256.HashData(
+            System.Text.Encoding.UTF8.GetBytes(arguments.GetRawText()));
+        return Convert.ToHexStringLower(bytes)[..16];
     }
 
     private static async Task EmitCompletedItemAsync(JsonObject message, TextWriter output)

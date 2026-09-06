@@ -1,4 +1,5 @@
 using System.Text.Json;
+using Baton.Domain;
 
 namespace Baton.Cli;
 
@@ -127,9 +128,9 @@ public static class HookCheckCommand
             // claude reads as an allow.
             try
             {
-                stderr.WriteLine(
+                stderr.WriteLine(GrantRefusal.Stamp(
                     $"AER: the permission gate failed internally ({ex.GetType().Name}) and denied this " +
-                    "call rather than allowing it unchecked.");
+                    "call rather than allowing it unchecked."));
             }
             catch
             {
@@ -165,7 +166,10 @@ public static class HookCheckCommand
         {
             // #600: absent, or another vendor's list. Either way this gate cannot say what is
             // withheld, and the old behaviour — allow — made a broken channel look like a working one.
-            return DeniedExitCode;
+            // #1921: it now says so. This was the one refusal path that denied in silence, which cost
+            // the model any explanation and cost the count a refusal it could not see.
+            return Refuse(stderr, "AER: the permission gate received no list of withheld tools for this " +
+                                  "vendor and denied this call rather than allowing it unchecked.");
         }
 
         // #679 removed the early allow that used to sit here for an empty list. It read the empty
@@ -243,16 +247,14 @@ public static class HookCheckCommand
             // cause -- AER emitting a relative path at all.
             if (outboxDirectory is not null && !Path.IsPathRooted(outboxDirectory))
             {
-                stderr.WriteLine(
+                return Refuse(stderr,
                     $"AER: the '{toolName}' tool is withheld, and its outbox exemption is unavailable " +
                     $"because BATON_OUTPUT_DIR ('{outboxDirectory}') is not an absolute path — this gate " +
                     "cannot tell where the outbox is. Re-run with an absolute --room-dir (#668).");
-                return DeniedExitCode;
             }
 
-            stderr.WriteLine(
+            return Refuse(stderr,
                 $"AER: the '{toolName}' tool is withheld by this session's permission grant.");
-            return DeniedExitCode;
         }
 
         // #679: the tool is granted, which decides WHETHER it may write, never WHERE. Until this
@@ -269,12 +271,11 @@ public static class HookCheckCommand
             // Reached with a null writeTarget too, and that is the intended reading: a write-family
             // tool whose target this gate could not find is a write it cannot bound. Denying is what
             // keeps a future payload change loud instead of silently unbounded.
-            stderr.WriteLine(
+            return Refuse(stderr,
                 $"AER: the '{toolName}' tool is granted, but its target " +
                 $"({writeTarget ?? "unreadable from the payload"}) resolves outside both this " +
                 "worker's workspace and its outbox. A grant decides whether a worker may write, not " +
                 "where.");
-            return DeniedExitCode;
         }
 
         // #1459: the second enforcement layer for a scoped shell grant. Bash's own presence/absence
@@ -325,10 +326,11 @@ public static class HookCheckCommand
                     var alternative = shellPatternList.Patterns.Count > 0
                         ? Baton.Vendors.GrantedReadToolHint.ForClaude(denied.Contains)
                         : null;
-                    stderr.WriteLine($"AER: the 'Bash' command is denied under this session's shell " +
-                                     $"grant — {result.Reason}." +
-                                     (alternative is null ? string.Empty : $" To proceed, {alternative}."));
-                    return DeniedExitCode;
+                    // #1921: result.Reason already carries the marker (ScopedShellResult stamps every
+                    // refusal it produces), so Refuse's own Stamp is a no-op here by design.
+                    return Refuse(stderr, $"AER: the 'Bash' command is denied under this session's shell " +
+                                          $"grant — {result.Reason}." +
+                                          (alternative is null ? string.Empty : $" To proceed, {alternative}."));
                 }
             }
 
@@ -347,11 +349,10 @@ public static class HookCheckCommand
                 Baton.Vendors.ShellCommandPatternMatcher.IsDeniedByOptionToken(
                     shellCommandLine, deniedOptionTokenList.Patterns))
             {
-                stderr.WriteLine(
+                return Refuse(stderr,
                     "AER: the 'Bash' command carries an option this session's grant denies outright " +
                     "(a standing option-token 'never', matched anywhere on the line rather than at " +
                     "its start) and was refused.");
-                return DeniedExitCode;
             }
         }
 
@@ -363,10 +364,26 @@ public static class HookCheckCommand
     /// the argument that <c>--disallowedTools</c> independently covered the same tool names — which
     /// #649 made false for writes by moving them off that flag onto this hook alone.
     /// </summary>
-    private static int Deny(TextWriter stderr, string what)
+    private static int Deny(TextWriter stderr, string what) =>
+        Refuse(stderr, $"AER: the permission gate {what} and denied this call rather than " +
+                       "allowing it unchecked.");
+
+    /// <summary>
+    /// <b>The single writer of every refusal this gate emits</b> (#1921), and the reason it exists as a
+    /// method at all: this file refuses on eight distinct paths, and a ninth added without the marker
+    /// would go uncounted with nothing failing. Claude Code copies this hook's stderr into the blocked
+    /// call's <c>tool_result</c> text — measured on <c>dispatch-implement-00c359a5</c>'s captured stream
+    /// — which is how the marker reaches <c>ClaudeUsageParser.CountRefusedToolSteps</c> at settle.
+    /// <para>
+    /// The exit code is returned rather than written by the caller, so "wrote a refusal" and "denied"
+    /// cannot come apart. The one refusal NOT routed through here is the internal-failure catch, which
+    /// must be able to return <see cref="DeniedExitCode"/> even when the write itself throws; it stamps
+    /// the marker inline for the same reason and its own comment says why the write is guarded.
+    /// </para>
+    /// </summary>
+    private static int Refuse(TextWriter stderr, string reason)
     {
-        stderr.WriteLine($"AER: the permission gate {what} and denied this call rather than " +
-                         "allowing it unchecked.");
+        stderr.WriteLine(GrantRefusal.Stamp(reason));
         return DeniedExitCode;
     }
 

@@ -73,6 +73,120 @@ public sealed class CodexUsageParser : IWorkerUsageParser
 
     public int CountToolSteps(string rawLine) => TryParseToolName(rawLine) is null ? 0 : 1;
 
+    /// <summary>
+    /// #1921. Codex announces a call on <c>item.started</c> and reports its result on
+    /// <c>item.completed</c>, so a refusal is counted on a DIFFERENT line from the one
+    /// <see cref="CountToolSteps"/> counts — that asymmetry is
+    /// <see cref="IWorkerUsageParser.CountRefusedToolSteps"/>'s general contract, and codex is where it
+    /// is most visible. The payload is <c>item.aggregated_output</c>, which is
+    /// <c>CodexDynamicToolResult.Text</c> verbatim (<c>Baton.Vendors.CodexAppServerBroker</c> copies it
+    /// there), so the marker arrives unwrapped on this vendor.
+    /// </summary>
+    public int CountRefusedToolSteps(string rawLine) =>
+        TryReadCompletedToolItem(rawLine, out var item)
+            && GrantRefusal.IsRefusal(ReadString(item, "aggregated_output"))
+                ? 1
+                : 0;
+
+    /// <summary>
+    /// #1921. The same completed item with an <c>aggregated_output</c> that is present and blank. A
+    /// <c>"status":"failed"</c> item is not an empty result — its payload is its reason — and a refusal
+    /// is a failed item by construction, so neither is counted here.
+    /// </summary>
+    public int CountEmptyToolResults(string rawLine) =>
+        TryReadCompletedToolItem(rawLine, out var item)
+            && ReadString(item, "status") != "failed"
+            && item.TryGetProperty("aggregated_output", out var output)
+            && output.ValueKind == JsonValueKind.String
+            && string.IsNullOrWhiteSpace(output.GetString())
+                ? 1
+                : 0;
+
+    /// <summary>
+    /// #1921. <c>tool</c> plus the <c>argumentsDigest</c> Baton's own broker stamps on the
+    /// <c>item.started</c> envelope (<c>Baton.Vendors.CodexAppServerBroker</c> — that method's comment
+    /// states why a digest rather than the arguments themselves).
+    /// <para>
+    /// <b>No digest, no key</b>, and the two cases that produces are both real: a stream captured before
+    /// the digest landed, and any codex tool call that did not go through Baton's dynamic-tool broker.
+    /// Codex's native <c>command_execution</c>/<c>file_change</c> items are not keyed for that reason —
+    /// Baton grants codex no native shell or file tool at all (<c>CodexDynamicToolPolicy</c>), so such an
+    /// item cannot occur in a Baton-driven stream, and inventing a key for one would be a shape nothing
+    /// here has measured. Contributing nothing is the documented alternative to keying on the tool name
+    /// alone, which would report two reads of two different files as one file read twice.
+    /// </para>
+    /// </summary>
+    public IReadOnlyList<string> ToolInvocationKeys(string rawLine)
+    {
+        if (string.IsNullOrWhiteSpace(rawLine))
+        {
+            return [];
+        }
+
+        try
+        {
+            using var document = JsonDocument.Parse(rawLine);
+            var root = document.RootElement;
+            if (root.ValueKind != JsonValueKind.Object
+                || !root.TryGetProperty("type", out var eventType) || eventType.GetString() != "item.started"
+                || !root.TryGetProperty("item", out var item) || item.ValueKind != JsonValueKind.Object
+                || ReadString(item, "type") != "mcp_tool_call"
+                || ReadString(item, "tool") is not { Length: > 0 } tool
+                || ReadString(item, ArgumentsDigestField) is not { Length: > 0 } digest)
+            {
+                return [];
+            }
+
+            return [tool + " " + digest];
+        }
+        catch (JsonException)
+        {
+            return [];
+        }
+    }
+
+    /// <summary>
+    /// The <c>item.started</c> field <c>Baton.Vendors.CodexAppServerBroker</c> writes and
+    /// <see cref="ToolInvocationKeys"/> reads — named once here because those two are in different
+    /// projects (<c>Baton.Vendors</c> → <c>Baton</c>, never the reverse), so this is the only symbol
+    /// both can see. A rename that reached one and not the other would silently stop the repeat count.
+    /// </summary>
+    public const string ArgumentsDigestField = "argumentsDigest";
+
+    /// <summary>
+    /// A completed dynamic-tool item — the one anchor <see cref="CountRefusedToolSteps"/> and
+    /// <see cref="CountEmptyToolResults"/> share.
+    /// </summary>
+    /// <remarks>The node is cloned out so it outlives the parsed document's <c>using</c>.</remarks>
+    private static bool TryReadCompletedToolItem(string rawLine, out JsonElement item)
+    {
+        item = default;
+        if (string.IsNullOrWhiteSpace(rawLine))
+        {
+            return false;
+        }
+
+        try
+        {
+            using var document = JsonDocument.Parse(rawLine);
+            var root = document.RootElement;
+            if (root.ValueKind != JsonValueKind.Object
+                || !root.TryGetProperty("type", out var eventType) || eventType.GetString() != "item.completed"
+                || !root.TryGetProperty("item", out var candidate) || candidate.ValueKind != JsonValueKind.Object
+                || ReadString(candidate, "type") is not ("mcp_tool_call" or "command_execution"))
+            {
+                return false;
+            }
+
+            item = candidate.Clone();
+            return true;
+        }
+        catch (JsonException)
+        {
+            return false;
+        }
+    }
+
     private static bool TryParse(string rawLine, out WorkerUsage? usage)
     {
         usage = null;
