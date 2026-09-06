@@ -14,7 +14,7 @@ namespace Baton.Memory;
 /// <param name="SourceMtimeUtc">Its last-write time at import time.</param>
 /// <param name="SizeBytes">Its length at import time.</param>
 /// <param name="SourceVendor">Which vendor's root it sat in.</param>
-/// <param name="SourceScope">Whether that root is the vendor's own or Baton-managed.</param>
+/// <param name="SourceScope">That root's <see cref="VendorMemoryScope"/>.</param>
 /// <param name="EntryId">The <see cref="MemoryEntry.Id"/> it produced.</param>
 /// <param name="Repository">The subject it was filed under.</param>
 /// <param name="EntriesFilePath">The store file the entry was appended to.</param>

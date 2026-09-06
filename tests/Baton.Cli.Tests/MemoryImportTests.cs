@@ -196,8 +196,8 @@ public sealed class MemoryImportTests : IDisposable
         Assert.Contains($"appended: 0", second, StringComparison.Ordinal);
         Assert.Contains($"already present: {afterFirst.Count}", second, StringComparison.Ordinal);
 
-        // Polarity: an EDITED source file is a new entry rather than a silent overwrite, so the
-        // no-op above is a statement about unchanged content and not about the store being closed.
+        // Polarity: editing a source produces one more row, so the no-op above is a statement about
+        // unchanged content rather than about a store that has stopped accepting anything.
         File.WriteAllText(
             Path.Combine(ClaudeHome, "projects", "C--baton", "memory", "user_who.md"), "edited");
         await RunAsync();

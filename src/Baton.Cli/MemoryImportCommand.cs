@@ -226,14 +226,11 @@ public static class MemoryImportCommand
     /// subject-versus-origin question.
     /// </para>
     /// <para>
-    /// <b>The fallback tries two keys, and the second is the one that makes the archive importable.</b>
-    /// An archived root has no session transcript and its name is a flattening of the memory directory
-    /// rather than of a checkout (<c>c--Users-…-repos-baton-memory</c>), so no reading of it is a work
-    /// tree's own root and the resolution carries no checkout path at all — an alias keyed on a
-    /// checkout could never match one. The root's OWN directory is always known and never ambiguous, so
-    /// an assertion may be keyed on it directly: "the memories in this directory belong to this
-    /// repository", which is the fact an operator actually has about an archive their own migration
-    /// created.
+    /// <b>The fallback tries two keys — the checkout, then the root's own directory.</b> The second is
+    /// what makes an archived root reachable at all: it has no session transcript and its name flattens
+    /// the memory directory rather than a checkout (<c>c--Users-…-repos-baton-memory</c>), so the
+    /// resolution carries no checkout path for an alias to match on. <see cref="MemoryAliasStore"/>'s
+    /// own remarks state why the root directory is a legitimate key rather than a second-best one.
     /// </para>
     /// </remarks>
     private static async Task<MemoryImportSource> ResolveClaudeRootAsync(
