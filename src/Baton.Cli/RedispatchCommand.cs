@@ -266,15 +266,8 @@ public static class RedispatchCommand
         ArgumentNullException.ThrowIfNull(parentEntry);
         ArgumentNullException.ThrowIfNull(options);
 
-        // Normalized exactly as RoleDispatch.ToBinding normalizes its winner — the registry lookup is
-        // case-sensitive, so an unnormalized "Claude" would fail at resolve time, after the room's
-        // files were already written.
-        var adapter = (options.Adapter ?? parentEntry.Adapter).Trim().ToLowerInvariant();
-
-        // RoleDispatch.ToBinding's own vendor-swap axis rule, applied here too (#1082, spec/baton.md §2).
-        var vendorSwapped = !string.Equals(adapter, parentEntry.Adapter.Trim().ToLowerInvariant(), StringComparison.Ordinal);
-        var model = options.Model ?? (vendorSwapped ? null : parentEntry.Model);
-        var effort = options.Effort ?? (vendorSwapped ? null : parentEntry.Effort);
+        var adapter = InheritedAdapter(parentEntry, options);
+        var (model, effort) = InheritedAxes(parentEntry, options);
 
         var workingDirectory = parentEntry.WorkingDirectory;
         var worktree = parentEntry.Worktree;
@@ -293,7 +286,7 @@ public static class RedispatchCommand
             }
         }
 
-        return parentEntry with
+        return WithResolvedStamps(parentEntry with
         {
             Adapter = adapter,
             Model = model,
@@ -319,6 +312,83 @@ public static class RedispatchCommand
             // A redispatch is a fresh worker turn, never a continuation of the parent's own session.
             SessionId = null,
             ResumeSession = false,
+        }, parentEntry, options);
+    }
+
+    /// <summary>
+    /// The normalized adapter this redispatch binds onto — <c>--adapter</c> if given, else the
+    /// parent's. Normalized exactly as <see cref="RoleDispatch.ToBinding"/> normalizes its winner: the
+    /// registry lookup is case-sensitive, so an unnormalized "Claude" would fail at resolve time, after
+    /// the room's files were already written.
+    /// </summary>
+    internal static string InheritedAdapter(WorkerBindingConfigEntry parentEntry, RedispatchOptions options) =>
+        (options.Adapter ?? parentEntry.Adapter).Trim().ToLowerInvariant();
+
+    /// <summary>
+    /// <see cref="RoleDispatch.ToBinding"/>'s vendor-swap axis rule (#1082, spec/baton.md §2), as one
+    /// predicate BOTH redispatch paths cross: an explicit <c>--model</c>/<c>--effort</c> wins, and with
+    /// none, swapping the vendor drops the parent's rather than carrying it across.
+    /// <para>
+    /// #1927 review HIGH, sub-note: the amended-spec path used to apply the <c>??</c> half without this
+    /// one, passing the parent's model into <see cref="RoleDispatch.ToBinding"/> as an explicit
+    /// <c>modelOverride</c> — which outranks that method's own copy of the rule, so the swap leaked the
+    /// previous vendor's model into the child's argv. Applying the rule in one shared place is what
+    /// #1686 review F2's one-path fix already cost this command once.
+    /// </para>
+    /// </summary>
+    internal static (string? Model, string? Effort) InheritedAxes(
+        WorkerBindingConfigEntry parentEntry, RedispatchOptions options)
+    {
+        var vendorSwapped = IsVendorSwap(parentEntry, options);
+        return (
+            options.Model ?? (vendorSwapped ? null : parentEntry.Model),
+            options.Effort ?? (vendorSwapped ? null : parentEntry.Effort));
+    }
+
+    private static bool IsVendorSwap(WorkerBindingConfigEntry parentEntry, RedispatchOptions options) =>
+        !string.Equals(
+            InheritedAdapter(parentEntry, options),
+            parentEntry.Adapter.Trim().ToLowerInvariant(),
+            StringComparison.Ordinal);
+
+    /// <summary>
+    /// #1927 review HIGH: re-resolves the four DISPLAY stamps for the redispatched entry, on both
+    /// paths. They are adapter-derived exactly like <see cref="WorkerBindingConfigEntry.StreamJson"/>
+    /// above, so carrying them verbatim across a vendor swap made a redispatched agy room display
+    /// (<c>FleetStatusTool</c>), stamp (<c>RoomBindingStamps</c>) and ledger (<c>CostLedgerStore</c>)
+    /// the parent's <c>opus</c> — precisely because the axis rule nulls <c>Model</c> on a swap and
+    /// every one of those readers falls back to <c>ModelResolved</c> when it is null.
+    /// <para>
+    /// Keyed PER AXIS, and only on the axes that actually moved: on the same vendor with no override
+    /// the parent's stamps are still true, and re-resolving them there could only downgrade a
+    /// <see cref="BindingValueSource.Requested"/> source to
+    /// <see cref="BindingValueSource.ResolvedDefault"/> — the child inherited the value, it did not
+    /// fall back to it.
+    /// </para>
+    /// Public for the same reason <see cref="InheritBinding"/> is: unit-testable against a hand-built
+    /// entry, without a room on disk.
+    /// </summary>
+    public static WorkerBindingConfigEntry WithResolvedStamps(
+        WorkerBindingConfigEntry entry, WorkerBindingConfigEntry parentEntry, RedispatchOptions options)
+    {
+        ArgumentNullException.ThrowIfNull(entry);
+        ArgumentNullException.ThrowIfNull(parentEntry);
+        ArgumentNullException.ThrowIfNull(options);
+
+        var vendorSwapped = IsVendorSwap(parentEntry, options);
+        var (modelResolved, modelSource) = options.Model is null && !vendorSwapped
+            ? (parentEntry.ModelResolved, parentEntry.ModelSource)
+            : RoleDispatch.ResolveModelStamp(entry.Adapter, options.Model, entry.Model);
+        var (effortResolved, effortSource) = options.Effort is null && !vendorSwapped
+            ? (parentEntry.EffortResolved, parentEntry.EffortSource)
+            : RoleDispatch.ResolveEffortStamp(entry.Adapter, options.Effort, entry.Effort, modelResolved);
+
+        return entry with
+        {
+            ModelResolved = modelResolved,
+            ModelSource = modelSource,
+            EffortResolved = effortResolved,
+            EffortSource = effortSource,
         };
     }
 
@@ -349,16 +419,20 @@ public static class RedispatchCommand
             var role = WorkerRoleCatalog.For(workerName);
             var spec = await File.ReadAllTextAsync(options.SpecFilePath!, cancellationToken).ConfigureAwait(false);
             var workspace = options.WorkspaceDirectory ?? parentEntry.WorkingDirectory ?? parentEntry.Worktree?.Repository;
+            // #1927 review HIGH, sub-note: the SAME vendor-swap axis rule the no-spec path applies.
+            // These reach ToBinding as explicit overrides, which outrank its own copy of the rule --
+            // so without this the swap hands the new vendor the previous one's model as real argv.
+            var (inheritedModel, inheritedEffort) = InheritedAxes(parentEntry, options);
 
             // #1576: the same seam DispatchCommand's role path uses -- --attach validation and the
             // spec/grant lint (#1500) now apply here too, rather than the amended-spec path skipping
             // both by calling RoleDispatch.Materialize directly.
             var (definition, bindings) = RoleSpecMaterializer.Materialize(
                 role, spec,
-                adapterOverride: options.Adapter ?? parentEntry.Adapter,
+                adapterOverride: InheritedAdapter(parentEntry, options),
                 workingDirectory: workspace,
-                modelOverride: options.Model ?? parentEntry.Model,
-                effortOverride: options.Effort ?? parentEntry.Effort,
+                modelOverride: inheritedModel,
+                effortOverride: inheritedEffort,
                 outputOverride: options.OutputPath,
                 timeoutOverride: options.Timeout ?? parentEntry.Timeout,
                 attachments: options.Attachments,
@@ -375,7 +449,10 @@ public static class RedispatchCommand
                 // refuses here rather than dispatching without it.
                 skills: ResolveSkills(parentEntry, options));
 
-            return (definition, bindings[role.Id]);
+            // #1927 review HIGH: both paths re-resolve the display stamps through the same rule --
+            // ToBinding stamped them from the inherited axes above, which reach it as overrides and so
+            // read as "requested" even when the child merely inherited them.
+            return (definition, WithResolvedStamps(bindings[role.Id], parentEntry, options));
         }
         catch (Exception ex) when (ex is FileNotFoundException or JsonException or InvalidOperationException or KeyNotFoundException)
         {

@@ -149,6 +149,53 @@ public sealed class RedispatchCommandEndToEndTests : IDisposable
     }
 
     /// <summary>
+    /// #1927 review HIGH, sub-note — the half a display assertion cannot catch. The amended-spec path
+    /// passed <c>options.Model ?? parentEntry.Model</c> into <c>RoleDispatch.ToBinding</c> as an
+    /// explicit override, and an explicit override outranks that method's own vendor-swap axis rule —
+    /// so a redispatch onto a DIFFERENT vendor wrote the parent's model into the child's
+    /// <c>bindings.json</c> as real argv, which is the measured #1082 failure (the claude CLI handed a
+    /// gemini id) in mirror image. Asserted on <c>Model</c>, the dispatch input, not on the #1927
+    /// display stamps.
+    /// </summary>
+    [Fact]
+    public async Task An_amended_spec_redispatch_onto_another_vendor_drops_the_parents_model_and_effort()
+    {
+        var testRoot = Path.Combine(Path.GetTempPath(), $"redispatch-e2e-{Guid.NewGuid():N}");
+        try
+        {
+            var parentRoom = await DispatchTerminalParentAsync(testRoot, "Weigh the options for X.", model: "opus");
+            var amendedSpecPath = Path.Combine(testRoot, "amended.md");
+            await File.WriteAllTextAsync(amendedSpecPath, "Weigh the options for Y instead.", TestContext.Current.CancellationToken);
+
+            async Task<WorkerBindingConfigEntry> RedispatchOntoAsync(string childName, string adapter)
+            {
+                var childRoom = Path.Combine(testRoot, childName);
+                await RedispatchCommand.ExecuteAsync(
+                    new RedispatchOptions(parentRoom, childRoom, SpecFilePath: amendedSpecPath, Adapter: adapter),
+                    Adapters, TestContext.Current.CancellationToken);
+                var bindings = await WorkerBindingConfigParser.LoadFromFileAsync(
+                    Path.Combine(childRoom, "bindings.json"), TestContext.Current.CancellationToken);
+                return bindings["advise"];
+            }
+
+            var swapped = await RedispatchOntoAsync("child-swapped", "fake-noop");
+            Assert.Null(swapped.Model);
+            // Neither vendor here has a measured CLI default, so the display stamp is absent too —
+            // never the parent's "opus", which is what carrying the stamps verbatim produced.
+            Assert.Null(swapped.ModelResolved);
+
+            // The control: the same amended-spec path on the SAME vendor still inherits the model, so
+            // the arm above is about the swap rather than about the axis never surviving a redispatch.
+            var kept = await RedispatchOntoAsync("child-same", "fake");
+            Assert.Equal("opus", kept.Model);
+        }
+        finally
+        {
+            DirectoryCleanup.DeleteRecursively(testRoot);
+        }
+    }
+
+    /// <summary>
     /// #1499: the amended-spec path rebuilds through <c>RoleDispatch.Materialize</c>, which knows
     /// nothing of the parent's label -- <c>RedispatchCommand.ExecuteAsync</c> stamps the
     /// inherit-unless-overridden rule on afterward. This is the one inheritance path
@@ -981,12 +1028,12 @@ public sealed class RedispatchCommandEndToEndTests : IDisposable
 
     private static async Task<string> DispatchTerminalParentAsync(
         string testRoot, string spec, string adapter = "fake", TimeSpan? timeout = null, string? label = null,
-        string? workstream = null, IReadOnlyList<string>? skills = null)
+        string? workstream = null, IReadOnlyList<string>? skills = null, string? model = null)
     {
         var specPath = await WriteSpecAsync(testRoot, spec);
         var roomDirectory = Path.Combine(testRoot, "parent");
         var options = new DispatchOptions(
-            "advise", specPath, roomDirectory, Adapter: adapter, Timeout: timeout, Label: label,
+            "advise", specPath, roomDirectory, Adapter: adapter, Model: model, Timeout: timeout, Label: label,
             Workstream: workstream, Skills: skills);
 
         var result = await DispatchCommand.ExecuteAsync(options, Adapters, TestContext.Current.CancellationToken);

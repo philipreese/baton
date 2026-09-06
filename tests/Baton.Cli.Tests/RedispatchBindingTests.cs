@@ -256,4 +256,100 @@ public class RedispatchBindingTests
         Assert.Equal(400_000, RedispatchCommand.InheritBinding(
             parent, new RedispatchOptions("parent-room", "new-room", BilledRateLimit: 400_000)).BilledRateLimit);
     }
+
+    /// <summary>
+    /// #1927 review HIGH: the four display stamps are adapter-derived exactly like
+    /// <see cref="WorkerBindingConfigEntry.StreamJson"/>, so a vendor swap must RE-resolve them.
+    /// Carrying them verbatim made a redispatched agy room display, stamp and ledger the parent's
+    /// <c>opus</c> — the vendor-swap axis rule two tests above nulls <c>Model</c>, and every reader
+    /// (<c>FleetStatusTool</c>, <c>RoomBindingStamps</c>, <c>CostLedgerStore</c>) then falls back to
+    /// the stale <c>ModelResolved</c> precisely because it is null.
+    /// </summary>
+    [Fact]
+    public void A_vendor_swap_re_resolves_the_display_stamps_rather_than_carrying_the_parents_across()
+    {
+        var parent = ParentEntry(adapter: "claude", model: "opus", effort: "careful") with
+        {
+            ModelResolved = "opus",
+            ModelSource = BindingValueSource.Requested,
+            EffortResolved = "careful",
+            EffortSource = BindingValueSource.Requested,
+        };
+
+        var entry = RedispatchCommand.InheritBinding(
+            parent, new RedispatchOptions("parent-room", "new-room", Adapter: "agy"));
+
+        // The agy CLI default (Baton.Domain.AdapterDefaultModels), not the parent's opus.
+        Assert.Equal(AdapterDefaultModels.For("agy"), entry.ModelResolved);
+        Assert.Equal(BindingValueSource.ResolvedDefault, entry.ModelSource);
+        // And #1927's third rung: agy's effort is the model id's own suffix.
+        Assert.Equal("high", entry.EffortResolved);
+        Assert.Equal(BindingValueSource.ResolvedDefault, entry.EffortSource);
+    }
+
+    /// <summary>
+    /// The polarity arm for the test above, and the reason the re-resolution is keyed per axis rather
+    /// than run unconditionally: on the same vendor with no override the parent's stamps are still
+    /// true, and re-resolving would downgrade a <c>requested</c> source to <c>resolved-default</c>.
+    /// </summary>
+    [Fact]
+    public void Same_vendor_with_no_override_keeps_the_parents_display_stamps_including_their_source()
+    {
+        var parent = ParentEntry(adapter: "claude", model: "opus", effort: "careful") with
+        {
+            ModelResolved = "opus",
+            ModelSource = BindingValueSource.Requested,
+            EffortResolved = "careful",
+            EffortSource = BindingValueSource.Requested,
+        };
+
+        var entry = RedispatchCommand.InheritBinding(parent, new RedispatchOptions("parent-room", "new-room"));
+
+        Assert.Equal("opus", entry.ModelResolved);
+        Assert.Equal(BindingValueSource.Requested, entry.ModelSource);
+        Assert.Equal("careful", entry.EffortResolved);
+        Assert.Equal(BindingValueSource.Requested, entry.EffortSource);
+    }
+
+    /// <summary>An explicit <c>--model</c> restamps the axis as requested, on either vendor.</summary>
+    [Fact]
+    public void An_explicit_model_override_restamps_the_axis_as_requested()
+    {
+        var parent = ParentEntry(adapter: "claude", model: "opus") with
+        {
+            ModelResolved = "opus",
+            ModelSource = BindingValueSource.ResolvedDefault,
+        };
+
+        var entry = RedispatchCommand.InheritBinding(
+            parent, new RedispatchOptions("parent-room", "new-room", Model: "gemini-3.8-flash-low"));
+
+        Assert.Equal("gemini-3.8-flash-low", entry.ModelResolved);
+        Assert.Equal(BindingValueSource.Requested, entry.ModelSource);
+    }
+
+    /// <summary>
+    /// #1927 review HIGH, sub-note: the <c>--spec</c> path passed <c>options.Model ?? parentEntry.Model</c>
+    /// straight into <see cref="RoleDispatch.ToBinding"/> as an explicit override, which does NOT apply
+    /// the vendor-swap axis rule to it — so an amended-spec redispatch onto agy handed the vendor CLI
+    /// the literal string <c>opus</c> as real argv, the #1082 failure in mirror image. Asserted on the
+    /// shared predicate both paths now cross, since the amended-spec path itself needs a room on disk.
+    /// </summary>
+    [Fact]
+    public void The_inherited_axes_both_redispatch_paths_share_drop_model_and_effort_on_a_vendor_swap()
+    {
+        var parent = ParentEntry(adapter: "claude", model: "opus", effort: "xhigh");
+
+        var swapped = RedispatchCommand.InheritedAxes(
+            parent, new RedispatchOptions("parent-room", "new-room", SpecFilePath: "amended.md", Adapter: "agy"));
+        Assert.Null(swapped.Model);
+        Assert.Null(swapped.Effort);
+
+        // The control: on the SAME vendor the very same predicate still inherits both, so the arm
+        // above is about the swap rather than about the axes never being carried at all.
+        var kept = RedispatchCommand.InheritedAxes(
+            parent, new RedispatchOptions("parent-room", "new-room", SpecFilePath: "amended.md"));
+        Assert.Equal("opus", kept.Model);
+        Assert.Equal("xhigh", kept.Effort);
+    }
 }
