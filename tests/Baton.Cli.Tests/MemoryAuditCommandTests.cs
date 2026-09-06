@@ -63,11 +63,27 @@ public sealed class MemoryAuditCommandTests : IDisposable
         }
     }
 
-    private static async Task<string> RunAsync(MemoryAuditOptions options, string claudeHome)
+    /// <summary>
+    /// The fixture user home the non-Claude roots (#1852 phase A2) are read from. Supplied on EVERY
+    /// run, never defaulted: without it these tests would walk the operator's real <c>~/.gemini</c>,
+    /// which is neither hermetic nor cheap — see <c>VendorMemoryFamily</c>'s remarks for the size of
+    /// the tree that would be walked, and <c>docs/vendor-doc-audit.md</c> §"#1852 phase A2" for the
+    /// measurement itself.
+    /// </summary>
+    private string UserHome => Path.Combine(_root, "home");
+
+    /// <summary>
+    /// The fixture Baton root. Passed alongside <see cref="UserHome"/> on every run, because
+    /// <c>BATON_HOME</c> makes the two independent directories and overriding only the first would
+    /// leave these tests reading the operator's real <c>~/.baton/codex-home</c>.
+    /// </summary>
+    private string BatonRoot => Path.Combine(_root, "baton-root");
+
+    private async Task<string> RunAsync(MemoryAuditOptions options, string claudeHome)
     {
         var writer = new StringWriter();
         var exitCode = await MemoryAuditCommand.ExecuteAsync(
-            options, writer, claudeHome, TestContext.Current.CancellationToken);
+            options, writer, claudeHome, TestContext.Current.CancellationToken, UserHome, BatonRoot);
 
         Assert.Equal(0, exitCode);
         return writer.ToString();
@@ -93,6 +109,50 @@ public sealed class MemoryAuditCommandTests : IDisposable
         Assert.Contains("[duplicate]", text, StringComparison.Ordinal);
         Assert.Contains("[orphan]", text, StringComparison.Ordinal);
         Assert.Contains("[no-provenance]", text, StringComparison.Ordinal);
+    }
+
+    /// <summary>
+    /// #1852 phase A2: the non-Claude roots reach both views, and reach them as a SEPARATE population.
+    /// The polarity that matters is the second half — a Codex sqlite store in the fixture user home
+    /// must not appear among <c>roots</c> nor be added into <c>counts</c>, because every finding kind
+    /// there is a claim about a repository mapping a per-machine root does not have.
+    /// </summary>
+    [Fact]
+    public async Task Vendor_roots_are_reported_beside_the_claude_roots_and_never_merged_into_them()
+    {
+        await BuildFixtureAsync();
+
+        var codexHome = Path.Combine(UserHome, ".codex");
+        Directory.CreateDirectory(codexHome);
+        File.WriteAllText(Path.Combine(codexHome, "memories_1.sqlite"), "synthetic-not-a-database");
+
+        var json = await RunAsync(new MemoryAuditOptions(MemoryAuditOutputFormat.Json), ClaudeHome);
+        using var document = JsonDocument.Parse(json);
+        var view = document.RootElement;
+
+        Assert.Equal(UserHome, view.GetProperty("userHome").GetString());
+
+        var codex = view.GetProperty("vendorRoots").EnumerateArray()
+            .Single(r => r.GetProperty("directoryPath").GetString() == codexHome);
+        Assert.Equal("codex-sqlite", codex.GetProperty("family").GetString());
+        Assert.Equal("codex", codex.GetProperty("sourceVendor").GetString());
+        Assert.Equal("vendor", codex.GetProperty("sourceScope").GetString());
+        Assert.Equal("populated", codex.GetProperty("presence").GetString());
+        Assert.Equal(1, codex.GetProperty("fileCount").GetInt32());
+
+        // The separation, both directions. The four Claude roots and their five files are what the
+        // sibling tests pin; adding a vendor root must move neither number, and the vendor root must
+        // not appear among them.
+        Assert.Equal(4, view.GetProperty("roots").GetArrayLength());
+        Assert.Equal(4, view.GetProperty("counts").GetProperty("roots").GetInt32());
+        Assert.Equal(5, view.GetProperty("counts").GetProperty("files").GetInt32());
+        Assert.DoesNotContain(
+            view.GetProperty("roots").EnumerateArray(),
+            r => r.GetProperty("root").GetString() == codexHome);
+
+        var text = await RunAsync(new MemoryAuditOptions(), ClaudeHome);
+        Assert.Contains("Non-Claude memory roots", text, StringComparison.Ordinal);
+        Assert.Contains("family=codex-sqlite vendor=codex scope=vendor presence=populated", text, StringComparison.Ordinal);
     }
 
     [Fact]
@@ -219,6 +279,42 @@ public sealed class MemoryAuditCommandTests : IDisposable
         // the token side too, so the entry that matched is the one the detector actually reads.
         Assert.True(MemorySubjectVocabulary.Default.IdentityByToken.ContainsKey("baton"));
     }
+
+    /// <summary>
+    /// The <c>files=</c> line for a capped row names the bound that actually stopped the walk. A
+    /// budget-stopped row printed as "capped at 50000 entries" is a number the walk never reached,
+    /// read by an operator as a measurement of their directory and as a ceiling worth raising.
+    /// </summary>
+    /// <remarks>
+    /// All three uncounted branches are asserted together, in both directions: each names its own
+    /// bound and must NOT name the other's. Asserting only the budget line would pass on an
+    /// implementation that printed both numbers on every capped row.
+    /// </remarks>
+    [Fact]
+    public void A_capped_row_names_the_bound_that_stopped_the_walk_and_not_the_other_one()
+    {
+        var byEntries = Uncounted(VendorMemoryPresence.Capped, cappedAtEntries: 50_000);
+        Assert.Contains("capped at 50000 entries", byEntries, StringComparison.Ordinal);
+        Assert.DoesNotContain("time budget", byEntries, StringComparison.Ordinal);
+
+        var byBudget = Uncounted(
+            VendorMemoryPresence.Capped, cappedAfter: TimeSpan.FromSeconds(30));
+        Assert.Contains("ran out of its 30s time budget", byBudget, StringComparison.Ordinal);
+        Assert.DoesNotContain("entries", byBudget, StringComparison.Ordinal);
+        Assert.DoesNotContain("50000", byBudget, StringComparison.Ordinal);
+
+        var unreadable = Uncounted(VendorMemoryPresence.Unreadable);
+        Assert.Contains("could not be read", unreadable, StringComparison.Ordinal);
+        Assert.DoesNotContain("capped", unreadable, StringComparison.Ordinal);
+    }
+
+    private static string Uncounted(
+        VendorMemoryPresence presence, int? cappedAtEntries = null, TimeSpan? cappedAfter = null) =>
+        MemoryAuditCommand.DescribeUncountedRow(new VendorMemoryRoot(
+            "antigravity-brain", "antigravity", VendorMemoryScope.Vendor,
+            @"C:\home\.gemini\antigravity-cli\brain", presence,
+            FileCount: null, TotalBytes: null, NewestModifiedUtc: null,
+            Files: [], Inventoried: false, cappedAtEntries, cappedAfter));
 
     private static string FindRepoRoot()
     {

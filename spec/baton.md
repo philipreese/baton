@@ -5171,17 +5171,60 @@ pre-empt that: both candidates on the row, neither selected. `MemorySubjectVocab
 constraint that makes the read reproducible (its own remarks say why it is a fixed table and what
 that costs).
 
-**What phase A does not do**, so a reader's prior does not fill the gap: it inventories Claude roots
-only (Codex and Antigravity — third-party surfaces whose formats nothing here has yet opened — are
-phase A2's probe), it writes no canonical store, it projects nothing, and it deletes nothing anywhere,
-ever.
+**What phase A does not do**, so a reader's prior does not fill the gap: it writes no canonical store,
+it projects nothing, and it deletes nothing anywhere, ever.
+
+**The non-Claude roots are enumerated, and they are a separate population — phase A2, shipped.**
+`VendorMemoryRootTable.Families` is the enumeration and this list is its gloss, not a second copy of
+it: **Codex markdown** (`~/.codex/memories`), **Codex sqlite** (`memories_*.sqlite`, in the vendor's
+own home *and* in `~/.baton/codex-home`), **Antigravity `brain`** and **Antigravity `knowledge`**
+(under both `~/.gemini/antigravity` and `~/.gemini/antigravity-cli`), and **Antigravity `.pbtxt`**
+(`annotations/*.pbtxt`, under both). Each row carries a `sourceVendor` and a `sourceScope`, and every
+family gets a row even when its directory is absent.
+
+Three rulings the register owns here, all of them things a reader would otherwise get wrong:
+
+- **They are reported beside the Claude roots and never merged into them**, and **no finding kind
+  attaches to them.** Every kind above is a claim about a root's mapping to a repository; these roots
+  are per-machine and encode no checkout, so passing them through would emit `no-provenance` for each
+  — definitionally true, and therefore saying nothing.
+- **A root's presence is a five-valued reading, and it is the only field that says whether the walk
+  finished.** Three values describe a completed walk — absent, present-and-empty, populated — and the
+  middle one is never inferred from a file count of zero. The other two describe a walk that did not
+  finish: `capped` (it hit one of its own two bounds) and `unreadable` (a listing failed). **A row in
+  either of those states carries no file count, no byte total and no newest mtime at all** — a
+  partially gathered count reads exactly like a complete one, and an unreadable directory reported as
+  `empty` says the selector matched nothing about a tree nothing could be read from. **A `capped` row
+  also says WHICH bound stopped it** — the entry ceiling or the wall-clock budget, never both — because
+  a time-stopped walk reported as ceiling-stopped tells an operator their tree is enormous when it is
+  merely slow to reach, and sends them to raise the bound that was never hit. Phase C's scope turns on
+  this field; `VendorMemoryPresence`'s remarks carry the live cases each value was written from.
+- **The selector is per-family and narrow, one family is counted rather than opened, and every walk
+  is bounded, interruptible and refuses to follow a reparse point.** These directories sit inside
+  whole vendor homes holding hundred-megabyte databases and five-figure file counts; an audit that
+  walked them would digest all of that every run, a junction planted under one would be descended
+  into forever, and a walk already running could not be cancelled. **Interruptible covers the digest
+  too**, not only the directory enumeration: the SHA-256 pass over the selected files is the expensive
+  half and is where a Ctrl-C most often lands, so the token is observed per file there as well as per
+  entry in the walk. `VendorMemoryFamily`'s remarks carry the measurements behind the selector bounds
+  and `VendorRootWalkLimits`' carry the walk's.
+
+The phase-A contract is unchanged for them: path, size, mtime, SHA-256, and **nothing opened for
+what it says**. A `.sqlite` is digested as bytes exactly as a `.md` is; what those bytes *mean* was
+established by a separate one-time probe whose four findings live in `docs/vendor-doc-audit.md`
+(§"#1852 phase A2"), each with a re-runnable check in `tools/vendor-verify/verify.py` — the first
+checks there that drive no vendor CLI and spend nothing, and so the first that `--selftest` can
+exercise. That selftest is a **gate member** (`vendor-verify-selftest`, `tools/gates/gates.py`
+OVERLAP): a free control that only runs when someone remembers it is a control that degrades
+silently, which is the failure the gate list exists to stop.
 
 **`~/.baton/codex-home` is not a vendor surface**, however much its `memories_1.sqlite` looks like
-one. Q5 (operator, 2026-09-05) ruled it **Baton's own first beta** of this memory system, so it does
-not belong with the third-party roots A2 probes: its memories are part of **phase B's import
-population** and must be preserved into the canonical store. Phase A does not read it — a store keyed
-by repository identity is the thing phase B builds, and importing into one that does not exist yet is
-not a read.
+one. Q5 (operator, 2026-09-05) ruled it **Baton's own first beta** of this memory system: A2
+inventories it as `sourceVendor: codex`, `sourceScope: baton-managed` — kept beside the third-party
+Codex store rather than merged with it, because the two diverged and collapsing them destroys the
+evidence of how — and its memories are part of **phase B's import population**, to be preserved into
+the canonical store. One thing phase B must not assume: **on the machine A2 measured, that store held
+no memories at all.** The ruling stands regardless; the expectation does not.
 
 ---
 

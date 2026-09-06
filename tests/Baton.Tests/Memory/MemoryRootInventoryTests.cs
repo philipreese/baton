@@ -38,7 +38,7 @@ public sealed class MemoryRootInventoryTests : IDisposable
         // without which "walks projects/*" would pass on a walk of every project directory.
         Directory.CreateDirectory(Path.Combine(_home, "projects", "c--Users-pbree-source-repos-specimen"));
 
-        var roots = MemoryRootInventory.Scan(_home);
+        var roots = MemoryRootInventory.Scan(_home, TestContext.Current.CancellationToken);
 
         Assert.Equal(3, roots.Count);
 
@@ -63,7 +63,7 @@ public sealed class MemoryRootInventoryTests : IDisposable
         const string Content = "one durable fact";
         WriteMemoryFile("projects/C--x/memory/feedback_a.md", Content);
 
-        var file = Assert.Single(Assert.Single(MemoryRootInventory.Scan(_home)).Files);
+        var file = Assert.Single(Assert.Single(MemoryRootInventory.Scan(_home, TestContext.Current.CancellationToken)).Files);
 
         Assert.Equal(Encoding.UTF8.GetByteCount(Content), file.SizeBytes);
         Assert.Equal(
@@ -75,7 +75,9 @@ public sealed class MemoryRootInventoryTests : IDisposable
         // The control on the digest: different bytes, different hash. Without it the assertion above
         // passes on a hash of the PATH, which is constant per file and would look identical here.
         WriteMemoryFile("projects/C--y/memory/feedback_a.md", "a different durable fact");
-        var other = MemoryRootInventory.Scan(_home).Single(r => r.DirectoryName == "C--y").Files.Single();
+        var other = MemoryRootInventory
+            .Scan(_home, TestContext.Current.CancellationToken)
+            .Single(r => r.DirectoryName == "C--y").Files.Single();
         Assert.NotEqual(file.Sha256, other.Sha256);
     }
 
@@ -84,11 +86,12 @@ public sealed class MemoryRootInventoryTests : IDisposable
     {
         WriteMemoryFile("projects/C--x/memory/nested/deeper/reference_r.md", "r");
 
-        var file = Assert.Single(Assert.Single(MemoryRootInventory.Scan(_home)).Files);
+        var file = Assert.Single(Assert.Single(MemoryRootInventory.Scan(_home, TestContext.Current.CancellationToken)).Files);
         Assert.Equal("nested/deeper/reference_r.md", file.RelativePath);
     }
 
     [Fact]
     public void A_claude_home_that_does_not_exist_is_an_empty_inventory_not_a_throw()
-        => Assert.Empty(MemoryRootInventory.Scan(Path.Combine(_home, "never-created")));
+        => Assert.Empty(MemoryRootInventory.Scan(
+            Path.Combine(_home, "never-created"), TestContext.Current.CancellationToken));
 }

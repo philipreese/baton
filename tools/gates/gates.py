@@ -90,6 +90,17 @@ OVERLAP = [
     # same production check against a temporary snapshot copy with one derived cell edited.
     "deepswe-derived-check",
     "deepswe-derived-check-selftest",
+    # #1852 phase A2 (2026-09-05 review): verify.py's own selftest -- pure python over synthetic
+    # fixture trees under a temp scratch root, plus one temp sqlite file it creates itself. `--selftest`
+    # returns from verify.py's main() BEFORE anything reads or sweeps the operator's ~/.claude, drives
+    # no vendor CLI and spends nothing, so it has the same overlap-safety shape as buildlock-selftest
+    # above. The paid `vendor-verify` run stays unwired and unwirable.
+    # ONE ENVIRONMENTAL DEPENDENCY, unlike its neighbours: the sqlite arm copies its fixture store to
+    # a scratch directory OUTSIDE the user home (verify.py's `_scratch_root`, system-drive root by
+    # default, `BATON_VENDOR_VERIFY_TMP` to move it). A host where that cannot be created makes this
+    # member go RED, not skip -- deliberately, since the alternative is a copy of a memory store back
+    # under ~/. The scratch directory itself persists between runs; only its per-run children go.
+    "vendor-verify-selftest",
 ]
 
 # The MSBuild owners, strictly sequential: one MSBuild at a time.

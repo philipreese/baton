@@ -435,6 +435,7 @@ ALLOWLIST: dict[str, str] = {
     "launcher-selftest": "pure synthetic selftest exercising fail-closed pointer arms plus real argv-forwarding/exit-code/pointer-flip discrimination (#1670 F2) against a compiled mock exe fixture under a temp BATON_HOME",
     "deepswe-derived-check": "paired scratch-copy selftest invokes the exact --check-all entry point and proves edited and missing derived outputs exit non-zero",
     "deepswe-derived-check-selftest": "scratch-copy selftest exercises every current snapshot through production --check-all without touching the benchmark tree",
+    "vendor-verify-selftest": "pure synthetic selftest running each local vendor-verify check against a faithful fixture that must PASS and a mutated one that must NOT, plus the sqlite temp-copy location/loud-cleanup and pbtxt parser-limitation arms and #1928's agy tool-classification arms over synthetic catalogues; refuses a local check with no fixture registered, and fails closed if either suite fails",
 }
 
 
