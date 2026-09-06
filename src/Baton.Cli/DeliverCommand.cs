@@ -69,12 +69,28 @@ public static class DeliverCommand
             File.WriteAllText(bindingsPath, stubBindings, Utf8NoBom);
         }
 
-        await RoomRegistryStore.AppendAsync(
-            roomDir,
-            BatonPaths.Root,
-            BatonPaths.RoomRegistryFile,
-            explicitRegister: true,
-            cancellationToken: cancellationToken).ConfigureAwait(false);
+        // Found while fixing #1942, and fixed with it: this registration was the one registry write in
+        // the tree that did NOT honour the store's fail-open contract (RoomRegistryStore's own remarks:
+        // the registry only ever *adds* fleet_status coverage and must never be the reason a command
+        // fails). An IOException here — a sibling process holding the registry lock past the whole wait
+        // budget — propagated to Program.cs and failed the whole delivery, so the file the conductor
+        // was delivering never got copied. Caught in the same shape RunCommand.RegisterRoomAsync
+        // already uses: report on stderr, then deliver anyway.
+        try
+        {
+            await RoomRegistryStore.AppendAsync(
+                roomDir,
+                BatonPaths.Root,
+                BatonPaths.RoomRegistryFile,
+                explicitRegister: true,
+                cancellationToken: cancellationToken).ConfigureAwait(false);
+        }
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or WaitHandleCannotBeOpenedException)
+        {
+            Console.Error.WriteLine(
+                $"Could not update the room registry at '{BatonPaths.RoomRegistryFile}': {ex.Message}. "
+                + "The delivery itself still lands in the room's artifacts.");
+        }
 
         // F1 (2026-09-02 review): the destination filename must be unique per source_path, not just
         // per basename — two sources named 'notes.md' under different projects would otherwise

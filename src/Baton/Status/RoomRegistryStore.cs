@@ -73,13 +73,28 @@ public static class RoomRegistryStore
     private static readonly JsonSerializerOptions SerializerOptions = new() { WriteIndented = false };
 
     /// <summary>
-    /// How long a caller waits for another process to finish its own registry access before giving up.
-    /// Generous on purpose: every critical section under the lock is one small file append or one
-    /// whole-file read, never a long-running operation, so contention this long means something else
-    /// is genuinely wrong (not a normal fleet-wide race) and the caller's own fail-open handling
-    /// (an <see cref="IOException"/>) is the right outcome.
+    /// How a caller waits for another process to finish its own registry access before giving up
+    /// (#1942) — the one place this store's wait budget is stated; spec/baton.md §8 describes the shape
+    /// and points here for the numbers rather than transcribing them.
     /// </summary>
-    private static readonly TimeSpan LockTimeout = TimeSpan.FromSeconds(30);
+    /// <remarks>
+    /// Each critical section here is one small append or one whole-file read, so a single wait was
+    /// originally set at a flat 30 s on the reasoning that contention past it meant something was
+    /// genuinely wrong. Six or more live rooms falsified that: a lane's teardown write and a
+    /// <c>baton resolve</c>'s read both hit the 30 s ceiling while the holder was doing ordinary work,
+    /// and the same access succeeded ~20 s later — so the timeout was reporting a *transient queue*, not
+    /// a wedged one, and turned a finished lane into a runner "timed out" line an operator had to
+    /// resolve by hand. The budget is now three waits rather than one, which keeps every attempt long
+    /// relative to the critical sections it guards while taking the total past 30 s, and the jittered
+    /// gap between them desynchronizes a group of processes that arrived together
+    /// (<see cref="LockWaitPolicy"/>'s own remarks carry why that gap is not equivalent to one longer
+    /// wait). It stays bounded: an access that genuinely cannot be had still fails open, on this store's
+    /// unchanged contract, roughly a minute in rather than never.
+    /// </remarks>
+    private static readonly LockWaitPolicy WaitPolicy = new(
+        AttemptTimeout: TimeSpan.FromSeconds(20),
+        MaxAttempts: 3,
+        BackoffBase: TimeSpan.FromMilliseconds(100));
 
     /// <summary>
     /// Appends one registration line to <paramref name="registryFilePath"/>, creating the file and its
@@ -97,9 +112,9 @@ public static class RoomRegistryStore
     /// most deliberate <c>baton run --room-dir</c> invocations) is never skipped regardless of this flag.
     /// </param>
     /// <exception cref="IOException">
-    /// Another process held the registry lock for longer than <see cref="LockTimeout"/>. Callers (see
-    /// <c>RunCommand.RegisterRoomAsync</c>) treat this the same as any other registry write failure:
-    /// log and swallow, never fail the run.
+    /// Another process held the registry lock for the whole of <see cref="WaitPolicy"/>'s budget, every
+    /// retry included. Callers (see <c>RunCommand.RegisterRoomAsync</c>, <c>DeliverCommand</c>) treat
+    /// this the same as any other registry write failure: log and swallow, never fail the run.
     /// </exception>
     /// <exception cref="WaitHandleCannotBeOpenedException">
     /// A non-mutex kernel object already holds the lock's name — vanishingly unlikely (the name is a
@@ -111,7 +126,22 @@ public static class RoomRegistryStore
         string projectRoot,
         string registryFilePath,
         bool explicitRegister = false,
-        CancellationToken cancellationToken = default)
+        CancellationToken cancellationToken = default) =>
+        AppendAsync(roomPath, projectRoot, registryFilePath, explicitRegister, WaitPolicy, cancellationToken);
+
+    /// <summary>
+    /// Test-only seam (Baton.Vendors.Tests, via <c>InternalsVisibleTo</c>): the same append against an
+    /// explicit <paramref name="waitPolicy"/>, so the contended-lock behaviour can be driven in
+    /// milliseconds rather than by sleeping out the real <see cref="WaitPolicy"/> budget. No production
+    /// caller passes one — the store has exactly one wait policy, stated above.
+    /// </summary>
+    internal static Task AppendAsync(
+        string roomPath,
+        string projectRoot,
+        string registryFilePath,
+        bool explicitRegister,
+        LockWaitPolicy waitPolicy,
+        CancellationToken cancellationToken)
     {
         ArgumentException.ThrowIfNullOrEmpty(roomPath);
         ArgumentException.ThrowIfNullOrEmpty(projectRoot);
@@ -138,7 +168,7 @@ public static class RoomRegistryStore
         return Task.Run(
             () =>
             {
-                RunUnderLock(registryFilePath, () =>
+                RunUnderLock(registryFilePath, waitPolicy, () =>
                 {
                     // #1657: a bare `baton run` re-registering an unchanged room on every call through
                     // the pump (see the type remarks) would otherwise write an identical line every
@@ -247,7 +277,16 @@ public static class RoomRegistryStore
     /// adds coverage, could not be read.
     /// </summary>
     public static Task<IReadOnlyList<RoomRegistryEntry>> ReadDistinctByRoomAsync(
-        string registryFilePath, CancellationToken cancellationToken = default)
+        string registryFilePath, CancellationToken cancellationToken = default) =>
+        ReadDistinctByRoomAsync(registryFilePath, WaitPolicy, cancellationToken);
+
+    /// <summary>
+    /// Test-only seam (Baton.Vendors.Tests, via <c>InternalsVisibleTo</c>): the read counterpart of the
+    /// <paramref name="waitPolicy"/>-taking <see cref="AppendAsync(string,string,string,bool,LockWaitPolicy,CancellationToken)"/>,
+    /// for the same reason.
+    /// </summary>
+    internal static Task<IReadOnlyList<RoomRegistryEntry>> ReadDistinctByRoomAsync(
+        string registryFilePath, LockWaitPolicy waitPolicy, CancellationToken cancellationToken)
     {
         ArgumentException.ThrowIfNullOrEmpty(registryFilePath);
 
@@ -262,7 +301,7 @@ public static class RoomRegistryStore
                 string text;
                 try
                 {
-                    text = RunUnderLock(registryFilePath, () =>
+                    text = RunUnderLock(registryFilePath, waitPolicy, () =>
                     {
                         using var stream = new FileStream(registryFilePath, FileMode.Open, FileAccess.Read, FileShare.Read);
                         using var reader = new StreamReader(stream, Encoding.UTF8);
@@ -492,10 +531,15 @@ public static class RoomRegistryStore
     /// or writer — serializes against every other one. <see cref="MutexGuardedFileLock"/> (#1570) is
     /// the mechanism itself, shared with <see cref="QuotaLedgerStore"/> — this store's own remarks on
     /// why every critical section must stay synchronous, and on the digest, moved there with it.
+    /// <paramref name="waitPolicy"/> is <see cref="WaitPolicy"/> for every production caller; the
+    /// parameter exists so the two internal test seams above can reach the contended path cheaply.
     /// </summary>
-    private static T RunUnderLock<T>(string registryFilePath, Func<T> action) =>
-        MutexGuardedFileLock.RunUnderLock(registryFilePath, LockNamePrefix, LockTimeout, action);
+    private static T RunUnderLock<T>(string registryFilePath, LockWaitPolicy waitPolicy, Func<T> action) =>
+        MutexGuardedFileLock.RunUnderLock(registryFilePath, LockNamePrefix, waitPolicy, action);
 
-    private static void RunUnderLock(string registryFilePath, Action action) =>
-        MutexGuardedFileLock.RunUnderLock(registryFilePath, LockNamePrefix, LockTimeout, action);
+    private static void RunUnderLock(string registryFilePath, LockWaitPolicy waitPolicy, Action action) =>
+        MutexGuardedFileLock.RunUnderLock(registryFilePath, LockNamePrefix, waitPolicy, action);
+
+    private static T RunUnderLock<T>(string registryFilePath, Func<T> action) =>
+        RunUnderLock(registryFilePath, WaitPolicy, action);
 }
