@@ -67,6 +67,91 @@ public sealed class QueueLauncherTests : IDisposable
         }
     }
 
+    [Fact]
+    public async Task A_held_ledger_is_projected_after_its_holder_releases_it()
+    {
+        var root = CreateTempRoot();
+        try
+        {
+            var room = await RunTwoStepRoomAsync(root);
+            var ledgerPath = Path.Combine(room, BatonPaths.FlowLogFileName);
+            using var holder = new FileStream(ledgerPath, FileMode.Open, FileAccess.Read, FileShare.None);
+
+            var recording = QueueLauncher.RecordPostLaunchFaultAsync("held", room, "the pump threw BatonFlowException");
+
+            // The held path has started but must not degrade while its bounded retry is pending. The
+            // pre-#1951 implementation completed here with a bare sentinel.
+            await Task.Delay(TimeSpan.FromMilliseconds(150), Ct);
+            Assert.False(recording.IsCompleted);
+
+            holder.Dispose();
+            await recording;
+
+            var sentinel = await TerminalSentinelWriter.TryReadAsync(room, Ct);
+            Assert.NotNull(sentinel);
+            Assert.DoesNotContain("bare sentinel", sentinel.Error!, StringComparison.Ordinal);
+            Assert.Equal(["a", "b"], sentinel.Steps.Select(step => step.Id).Order().ToArray());
+        }
+        finally
+        {
+            DirectoryCleanup.DeleteRecursively(root);
+        }
+    }
+
+    [Fact]
+    public async Task A_corrupt_ledger_leaves_a_bare_sentinel_that_names_the_projection_failure()
+    {
+        var root = CreateTempRoot();
+        try
+        {
+            var room = await RunTwoStepRoomAsync(root);
+            await File.WriteAllTextAsync(
+                Path.Combine(room, BatonPaths.FlowLogFileName), "{ corrupt jsonl\n", Ct);
+
+            await QueueLauncher.RecordPostLaunchFaultAsync("corrupt", room, "the pump threw BatonFlowException");
+
+            var sentinel = await TerminalSentinelWriter.TryReadAsync(room, Ct);
+            Assert.NotNull(sentinel);
+            Assert.Empty(sentinel.Steps);
+            Assert.Contains("bare sentinel: ledger projection failed: Malformed line in the ledger", sentinel.Error!, StringComparison.Ordinal);
+
+            await QueueStore.MutateAsync(
+                BatonPaths.QueueFile,
+                queue => queue with
+                {
+                    Items =
+                    [
+                        new QueueItem
+                        {
+                            Tag = "corrupt",
+                            Role = "implement",
+                            Workspace = root,
+                            SpecFile = Path.Combine(root, "workflow.json"),
+                            State = QueueItemState.Launched,
+                            RoomDirectory = room,
+                        },
+                    ],
+                },
+                Ct);
+
+            var scheduler = new QueueSchedulerService(
+                (_, _) => Task.FromResult(new QueueLaunchOutcome(null)),
+                _ => Task.FromResult(0d),
+                () => null,
+                () => DateTimeOffset.UtcNow);
+            await scheduler.ResolveFinishedItemsAsync(Ct);
+
+            var fact = Assert.Single(await QueueDecisionLedgerStore.ReadAllAsync(
+                BatonPaths.QueueDecisionLedgerFile, Ct));
+            Assert.Equal(QueueDecisionEntry.Failed, fact.Decision);
+            Assert.Equal(sentinel.Error, fact.Reason);
+        }
+        finally
+        {
+            DirectoryCleanup.DeleteRecursively(root);
+        }
+    }
+
     /// <summary>
     /// Round 2's MEDIUM, at the property spec/baton.md §13's post-launch bullet states: this sentinel
     /// carries the room's own projected record, because <c>fleet_status</c> returns the file verbatim

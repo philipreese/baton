@@ -354,6 +354,19 @@ public sealed class QueueSchedulerService : BackgroundService
                     : i)
                 .ToList(),
         }, cancellationToken).ConfigureAwait(false);
+
+        // A launched fact says only that dispatch started. A later failed sentinel is a distinct,
+        // durable queue decision, so its error (including a bare-sentinel projection reason) reaches
+        // queue.jsonl rather than surviving only in terminal.json.
+        foreach (var (tag, outcome) in resolved.Where(entry => entry.Value.State == QueueItemState.Failed))
+        {
+            var room = snapshot.Items.Single(item => item.Tag == tag).RoomDirectory;
+            await RecordAsync(
+                new QueueDecisionEntry(
+                    _now(), tag, QueueDecisionEntry.Failed, outcome.Error,
+                    LiveWeight: 0, FreeGb: null, FloorGb: 0, Room: room),
+                CancellationToken.None).ConfigureAwait(false);
+        }
     }
 
     /// <summary>
