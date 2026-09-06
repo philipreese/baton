@@ -5576,11 +5576,35 @@ records decisions, and reading a room that finished is not one.
 **No item stays launched with nothing to read.** Two paths would otherwise leave one there forever,
 and each is closed where the fact exists:
 
-- A lane that **faults after launch** never reaches Terminal, so nothing writes its `terminal.json`.
-  The launcher's own continuation writes the room a `Failed` sentinel instead, and done detection
-  resolves it like any other settled room. It never creates a room the dispatch never provisioned —
-  that would put a lane in `fleet_status` that never ran — and never overwrites a refusal the
-  dispatch already recorded, which carries the `try` line a person acts on.
+- A lane that **faults or is cancelled after launch** never reaches Terminal, so nothing writes its
+  `terminal.json`. The launcher's own continuation writes the room a `Failed` sentinel instead, and
+  done detection resolves it like any other settled room. Both non-success shapes are covered, not
+  only the throw: a pump whose `OperationCanceledException` escapes ends its task *cancelled* rather
+  than *faulted*, and a fault-only gate left that one settling nothing at all. It never creates a room
+  the dispatch never provisioned — that would put a lane in `fleet_status` that never ran — and never
+  overwrites a refusal the dispatch already recorded, which carries the `try` line a person acts on.
+
+  **That sentinel is projected from the room's own ledger, never fabricated.** The path is reached
+  only by a lane that got past provisioning, so the room normally has a real `flow.jsonl`; a
+  hand-built `Failed`/no-steps/no-outputs view erased which steps ran and what they produced for the
+  one reader that returns a sentinel verbatim (`fleet_status`'s sentinel-first path re-projects
+  nothing). It is the same "a room with a real ledger must not be overwritten by a fabricated
+  sentinel" rule §3 states for the pre-ledger refusal, applied at the other end of the lane. Three
+  consequences, each deliberate: the outcome word is always `Failed` whatever the projection reads,
+  because nothing will ever carry this room to a recorded settle and only that word resolves the item;
+  the fault is the terminal `error`, with the room's own last recorded failure folded in beside it
+  rather than replacing it; and each step's live `liveness` probe is dropped, since a value read at
+  projection time would be frozen into a file read long after that engine exited. A room with no
+  ledger, no bound snapshot, or an unreadable one still gets the bare sentinel — the write is
+  unconditional, because an unprojectable room is exactly the one that would otherwise wedge its item
+  in `launched` forever.
+
+  Keeping a mid-lane `Running` step is safe at both readers that key on one, and each for its own
+  reason. The live-weight tally behind `MaxLiveWeight` skips any room carrying a sentinel at all
+  (`includeTerminal: false`), so a settled lane cannot hold the queue's own cap open. The fleet
+  projection does attach its per-step diagnostics — `processAlive`, `elapsed` — to such a room, which
+  is exactly the case §6 says those fields exist to report; the `live` block itself stays withheld,
+  gated on the room's displayed state being `Running`, which a settled room's never is.
 - A launch whose **room was never created** can produce no sentinel at all. The scheduler's own sweep
   fails it once the room is still absent a grace period after the launch (the refusal window plus
   slack for a slow pre-provision `git` spawn). Items carrying no room *at all* — the imported ones,

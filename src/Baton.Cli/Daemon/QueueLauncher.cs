@@ -1,5 +1,9 @@
+using Baton.Domain;
+using Baton.Projection;
 using Baton.Queue;
 using Baton.Status;
+using Baton.Store;
+using Baton.Templates;
 using Baton.Vendors;
 
 namespace Baton.Cli.Daemon;
@@ -124,26 +128,7 @@ public static class QueueLauncher
         // terminal.json and ledger rows a `baton dispatch` from a terminal would (TerminalSettleRecorder
         // is that block, shared rather than copied).
         _ = pump.ContinueWith(
-            async completed =>
-            {
-                if (completed.IsFaulted)
-                {
-                    var reason = completed.Exception?.GetBaseException().Message ?? "the lane faulted after launch";
-                    Console.Error.WriteLine(
-                        $"QueueLauncher: lane '{item.Tag}' in '{roomDirectory}' failed after launch: {reason}");
-                    await RecordPostLaunchFaultAsync(item.Tag, roomDirectory, reason).ConfigureAwait(false);
-                    return;
-                }
-
-                try
-                {
-                    await TerminalSettleRecorder.RecordAsync(completed.Result, CancellationToken.None).ConfigureAwait(false);
-                }
-                catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
-                {
-                    Console.Error.WriteLine($"QueueLauncher: could not record the settle for '{item.Tag}': {ex.Message}");
-                }
-            },
+            completed => SettleFinishedPumpAsync(completed, item.Tag, roomDirectory),
             CancellationToken.None,
             TaskContinuationOptions.None,
             TaskScheduler.Default);
@@ -152,8 +137,56 @@ public static class QueueLauncher
     }
 
     /// <summary>
-    /// The verdict a lane that faulted <em>after</em> launch would otherwise never leave behind
-    /// (#1939 review). A dispatch that throws twenty minutes in reaches no Terminal state, so
+    /// What the detached continuation does when the pump above finally finishes: record the settle a
+    /// pump that reached Terminal produced, or — for one that did not — the room's own post-launch
+    /// failure record (<see cref="RecordPostLaunchFaultAsync"/>).
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// Split out of the continuation lambda purely as a test seam (#1939 review round 2): the pump is
+    /// built inside <see cref="LaunchAsync"/> from <see cref="DispatchCommand.ExecuteAsync"/>, so a
+    /// faulted or cancelled one is not otherwise drivable, and the cancel arm below shipped
+    /// unexercised because of it.
+    /// </para>
+    /// <para>
+    /// <b>Gated on <c>!IsCompletedSuccessfully</c>, not <c>IsFaulted</c>.</b> An
+    /// <see cref="OperationCanceledException"/> escaping the pump leaves the task
+    /// <see cref="TaskStatus.Canceled"/>, NOT faulted, so an <c>IsFaulted</c>-only test dropped such a
+    /// pump into the settle branch, where <c>completed.Result</c> throws an
+    /// <see cref="AggregateException"/> the <see cref="IOException"/>-only catch there does not cover —
+    /// unobserved, inside a discarded continuation, leaving the item in
+    /// <see cref="QueueItemState.Launched"/> with nothing on disk to resolve it.
+    /// <see cref="Task.Exception"/> is null for a cancelled task, which is why the reason falls back per
+    /// state rather than dereferencing it.
+    /// </para>
+    /// </remarks>
+    internal static async Task SettleFinishedPumpAsync(Task<CommandResult> completed, string tag, string roomDirectory)
+    {
+        ArgumentNullException.ThrowIfNull(completed);
+
+        if (!completed.IsCompletedSuccessfully)
+        {
+            var reason = completed.Exception?.GetBaseException().Message
+                ?? (completed.IsCanceled ? "the lane was cancelled after launch" : "the lane faulted after launch");
+            Console.Error.WriteLine(
+                $"QueueLauncher: lane '{tag}' in '{roomDirectory}' did not complete after launch: {reason}");
+            await RecordPostLaunchFaultAsync(tag, roomDirectory, reason).ConfigureAwait(false);
+            return;
+        }
+
+        try
+        {
+            await TerminalSettleRecorder.RecordAsync(completed.Result, CancellationToken.None).ConfigureAwait(false);
+        }
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
+        {
+            Console.Error.WriteLine($"QueueLauncher: could not record the settle for '{tag}': {ex.Message}");
+        }
+    }
+
+    /// <summary>
+    /// The verdict a lane that faulted — or was cancelled — <em>after</em> launch would otherwise never
+    /// leave behind (#1939 review). A dispatch that throws twenty minutes in reaches no Terminal state, so
     /// <see cref="TerminalSettleRecorder"/> never runs and the room carries no <c>terminal.json</c> —
     /// and <c>QueueSchedulerService.ResolveFinishedItemsAsync</c>, which reads exactly that file,
     /// leaves the item <see cref="QueueItemState.Launched"/> forever. This writes the room's own
@@ -161,10 +194,21 @@ public static class QueueLauncher
     /// not through a second channel.
     /// </summary>
     /// <remarks>
+    /// <para>
     /// Two things it deliberately does NOT do — both rulings, stated in spec/baton.md §13 with the
     /// argument for each: it never creates the room directory (the scheduler's own sweep is what
     /// resolves an item whose room was never provisioned), and it never replaces a sentinel the room
     /// already carries.
+    /// </para>
+    /// <para>
+    /// <b>What it writes is the room's own record, not a fabricated blank</b> (#1939 review round 2) —
+    /// spec/baton.md §13's post-launch bullet has the argument, and the three consequences it states
+    /// (the outcome word is always <c>Failed</c>, the fault is the terminal reason with the room's own
+    /// recorded failure folded in beside it, and liveness is dropped) are what the code below and
+    /// <see cref="TryProjectRoomAsync"/> implement. The one mechanical thing worth pointing at from
+    /// here: the write below is unconditional, taken even when the projection comes back null — the
+    /// register says why that room in particular cannot be skipped.
+    /// </para>
     /// </remarks>
     internal static async Task RecordPostLaunchFaultAsync(string tag, string roomDirectory, string reason)
     {
@@ -177,17 +221,88 @@ public static class QueueLauncher
                 return;
             }
 
-            await TerminalSentinelWriter.WriteAsync(
-                roomDirectory,
-                new WorkflowStatusView(
-                    WorkflowOutcome.Failed, [], [],
-                    $"the queue-launched lane '{tag}' faulted after launch: {reason}"),
-                CancellationToken.None).ConfigureAwait(false);
+            var projected = await TryProjectRoomAsync(roomDirectory).ConfigureAwait(false);
+
+            var error = $"the queue-launched lane '{tag}' did not complete after launch: {reason}";
+            if (projected?.Error is { Length: > 0 } recordedFailure)
+            {
+                error += $" — the room's own last recorded failure: {recordedFailure}";
+            }
+
+            var view = (projected ?? new WorkflowStatusView(WorkflowOutcome.Failed, [], [], null)) with
+            {
+                State = WorkflowOutcome.Failed,
+                Error = error,
+            };
+
+            await TerminalSentinelWriter.WriteAsync(roomDirectory, view, CancellationToken.None).ConfigureAwait(false);
         }
         catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
         {
             Console.Error.WriteLine(
                 $"QueueLauncher: could not record the post-launch fault for '{tag}' in '{roomDirectory}': {ex.Message}");
+        }
+    }
+
+    /// <summary>
+    /// The room's <em>actual</em> state, projected the way <see cref="TerminalSettleRecorder"/> and
+    /// <c>StatusCommand</c> already project one: bound snapshot + <c>flow.jsonl</c> +
+    /// <c>ProjectionCheckpointStore</c>, through the same <c>StateProjector</c>/
+    /// <see cref="WorkflowStatusProjector"/> pair, so the steps and outputs a post-launch fault freezes
+    /// are the room's own and never a second derivation of what an event log means. Inlined here rather
+    /// than shared with <c>FleetStatusTool.ProcessRoomAsync</c>'s identical block, which is a seam worth
+    /// extracting on its own rather than inside this fix.
+    /// <para>
+    /// Returns null — never throws — for a room this cannot project: no real ledger yet
+    /// (<see cref="RoomLedgerProbe"/>, which is also why the ledger-less room in
+    /// <c>QueueLauncherTests</c> still gets the bare view), no bound snapshot, or a read/parse failure.
+    /// The caller writes the bare <c>Failed</c> sentinel in that case: a degraded record still resolves
+    /// the item, where a throw out of the discarded continuation this runs in would resolve nothing.
+    /// </para>
+    /// <para>
+    /// <b><see cref="WorkflowStatusStepView.Liveness"/> is dropped from every step</b>, while each
+    /// step's recorded <c>state</c> is kept as projected, a mid-lane <c>Running</c> included —
+    /// spec/baton.md §13's post-launch bullet has why the two are treated differently.
+    /// </para>
+    /// </summary>
+    private static async Task<WorkflowStatusView?> TryProjectRoomAsync(string roomDirectory)
+    {
+        var snapshotPath = Path.Combine(roomDirectory, BatonPaths.SnapshotFileName);
+        if (!RoomLedgerProbe.HasLedger(roomDirectory) || !File.Exists(snapshotPath))
+        {
+            return null;
+        }
+
+        try
+        {
+            var snapshot = await SnapshotBinder.LoadFromFileAsync(snapshotPath, CancellationToken.None).ConfigureAwait(false);
+            var entries = await new FlowEventLogReader(Path.Combine(roomDirectory, BatonPaths.FlowLogFileName))
+                .ReadAllEntriesWithTimestampsAsync(CancellationToken.None).ConfigureAwait(false);
+
+            var events = new List<FlowEvent>(entries.Count);
+            foreach (var entry in entries)
+            {
+                if (entry is LogEntry.FlowLogEntry flowLogEntry)
+                {
+                    events.Add(flowLogEntry.Event);
+                }
+            }
+
+            var state = StateProjector.Project(events, snapshot, ProjectionCheckpointStore.Load(roomDirectory));
+            var view = WorkflowStatusProjector.Project(
+                state, snapshot, roomDirectory, entries, WorkerAdapterRegistry.Default);
+
+            return view with { Steps = [.. view.Steps.Select(step => step with { Liveness = null })] };
+        }
+        catch (Exception ex) when (ex is BatonFlowException or IOException or UnauthorizedAccessException)
+        {
+            // SnapshotLoadException and FlowEventLogReadException are both BatonFlowException. Named
+            // rather than swallowed: the sentinel this degrades to says the lane failed but not what it
+            // had done, and the difference is otherwise invisible.
+            Console.Error.WriteLine(
+                $"QueueLauncher: could not project '{roomDirectory}' for its post-launch fault record, "
+                + $"so its sentinel carries no steps or outputs: {ex.Message}");
+            return null;
         }
     }
 
