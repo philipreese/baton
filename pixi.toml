@@ -302,11 +302,21 @@ gates-fast = { cmd = "python -u tools/gates/gates.py --fast" }
 gates-quiet = { cmd = "python -u tools/gates/gates.py --quiet" }
 gates-fast-quiet = { cmd = "python -u tools/gates/gates.py --fast --quiet" }
 gates-selftest = { cmd = "python -u tools/gates/gates.py --selftest" }
+# #1910 (spec/baton.md C-12, ruling C): the completion pass. Runs only the fast members this tree
+# has no per-member receipt for, so a lane that already paid for `lint`/`fmt-check` finishes covering
+# the fast set with the cheap audits and its push then skips. Writes per-member receipts only --
+# never a whole-run one, which would claim it ran every member.
+gates-fast-cover = { cmd = "python -u tools/gates/gates.py --fast --skip-covered" }
+gates-fast-cover-quiet = { cmd = "python -u tools/gates/gates.py --fast --skip-covered --quiet" }
 # #1676: what .github/workflows/ci.yml's own required job runs (see that job's own comment for why).
 gates-ci-quiet = { cmd = "python -u tools/gates/gates.py --ci --quiet" }
 gate-sabotage = { cmd = "python -u tools/gates/sabotage.py" }
 # #1636 (spec/baton.md C-12): what .githooks/pre-push runs before deciding whether to skip.
-gates-check-receipt = { cmd = "python -u tools/gates/gates.py --check-receipt" }
+# #1910: through buildlock.py's read-only priority class, not unwrapped -- it is pure git and file
+# reads, so it runs immediately instead of queueing behind a lane's `dotnet test`, and the class's
+# own guard (buildlock.py's `starts_msbuild`) is what keeps that declaration honest if this line
+# ever grows a build. Enforced rather than left to the accident of an unwrapped task line.
+gates-check-receipt = { cmd = "python -u tools/buildlock.py --class readonly python -u tools/gates/gates.py --check-receipt" }
 
 # One-time per clone: point git at the committed hooks. .git/hooks is not version-controlled, so a
 # pre-push gate left there binds one machine and silently protects nobody else.

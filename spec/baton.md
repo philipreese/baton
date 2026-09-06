@@ -4950,6 +4950,29 @@ diff HEAD` cannot see. A clean tree gaining any file `git status --porcelain` re
 untracked) is still caught, because that flips the dirty bool itself -- a `.gitignore`d file is not
 reported by `--porcelain` either, so it is not caught by that path or any other.
 
+**Ruling C, operator, 2026-09-05 (#1910): a lane's own component runs can stand as the receipt, for
+the gates-fast subset only.** Measured that day: the receipt above is written by a whole `gates`
+run and by nothing else, so a lane that had already run `dotnet build -warnaserror`, its tests,
+`dotnet format --verify-no-changes` and `audit-completeness` still re-ran every one of them at push
+time, behind whatever held the build lock — the largest single source of post-push lane time-outs.
+`tools/gates/gates.py` now also writes a PER-MEMBER receipt for each member that exits 0 (the store,
+its per-git-dir HMAC and what that authentication does and does not buy are `tools/gates/
+member_receipt.py`'s own docstring), and `--check-receipt` skips when EITHER the whole-run receipt
+holds as before, OR the union of per-member receipts covers the whole fast member set at the same
+tree identity and inside the same six-hour ceiling. **The covering rule is stated once, in
+`gates.py`, and the union has to cover the whole set** — nothing narrower is accepted, which is what
+makes the skip honest rather than a widening of the hook. `pixi run gates-fast-cover` is what makes
+it reachable: it runs only the fast members this tree has no receipt for, so the expensive MSBuild
+legs a lane already paid for are not paid twice, and it writes per-member receipts only — a partial
+run never mints a whole-run receipt. The hook, the exit-code contract above, and the ban on
+`--no-verify`, environment-variable and per-worktree-`hooksPath` bypasses are all unchanged; CI still
+runs everything and is never skipped by any receipt. Two supporting changes ship with it:
+`tools/buildlock.py` gains a **read-only priority class** (`--class readonly`, refused for any
+command whose argv starts an MSBuild) that `gates-check-receipt` runs under, so a push's receipt
+check never queues behind a lane's test run; and `.githooks/pre-push` appends one line per push to
+`push-timing.jsonl` in the running execution's artifact directory, which the settle site reads into
+the cost ledger's `pushWaitMs`/`prePushGateMs` (§7) so the effect is measured rather than asserted.
+
 **Measured 2026-09-02 (#1648):** git exports `GIT_DIR`/`GIT_INDEX_FILE`/etc. to every hook, and
 `gates.py`'s own selftest fixture spawned `git init` in a temp dir without scrubbing them, so a
 push under `.githooks/pre-push` re-initialized the pushing repo itself instead of the fixture's

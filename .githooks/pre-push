@@ -8,17 +8,58 @@
 # never restated here, and so does why the line is drawn there. CI still runs everything on its one
 # (Windows) platform; this only stops the failures that were already knowable here.
 #
-# Receipt skip (#1636, spec/baton.md C-12 for the why): `gates.py` writes a receipt on every PASS
-# and `--check-receipt` is the only place that decides whether it still holds for the tree being
-# pushed. The exit code remains the whole contract -- a receipt only ever skips a run that would
-# have passed anyway, never suppresses one that would not have.
+# Receipt skip (#1636/#1910, spec/baton.md C-12 for the why): `gates.py` writes a receipt on every
+# PASS -- one for a whole run, and one per member for every member it ran -- and `--check-receipt`
+# is the only place that decides whether either still holds for the tree being pushed. THE COVERING
+# RULE (which members a union has to hold for the skip to be honest) is stated once, in gates.py;
+# it is not restated here, and this hook is not where it can be widened. The exit code remains the
+# whole contract -- a receipt only ever skips a run that would have passed anyway, never suppresses
+# one that would not have.
 #
 # GIT_* scrubbed here: git exports these to every hook, and a gate whose fixture spawns `git init`
 # in a temp dir honours the inherited GIT_DIR over its own path argument -- re-initializing THIS
 # repository instead (#1648, spec/baton.md C-12).
 unset GIT_DIR GIT_WORK_TREE GIT_INDEX_FILE GIT_PREFIX GIT_COMMON_DIR GIT_OBJECT_DIRECTORY GIT_ALTERNATE_OBJECT_DIRECTORIES
 
+# #1910 item 3: what this push spent in the gate, appended one line per push to the running
+# execution's own artifact directory, for the cost ledger to read at settle
+# (Baton.Accounting.CostLedgerStore.PushTimingOutputName is where that file name is decided; this
+# is `sh` and compiles against nothing, so it spells the name itself). Timing is measurement only:
+# every step of it is failure-tolerant, and none of it may change the exit code below.
+gate_start_ms=$(date +%s%3N 2>/dev/null) || gate_start_ms=""
+wait_log=$(mktemp 2>/dev/null) || wait_log=""
+if [ -n "$wait_log" ]; then
+    # Only this hook sets it, which is what makes the number attributable to the PUSH rather than
+    # to the lane's own builds -- see tools/buildlock.py's "Wait accounting" header note.
+    BATON_BUILDLOCK_WAIT_LOG="$wait_log"
+    export BATON_BUILDLOCK_WAIT_LOG
+fi
+
+record_push_timing() {
+    if [ -n "$wait_log" ]; then
+        wait_ms=$(awk '{ s += $1 } END { printf "%d", s + 0 }' "$wait_log" 2>/dev/null) || wait_ms=0
+        rm -f "$wait_log"
+    else
+        wait_ms=0
+    fi
+    if [ -n "$gate_start_ms" ] && [ -n "$BATON_OUTPUT_DIR" ] && [ -d "$BATON_OUTPUT_DIR" ]; then
+        gate_end_ms=$(date +%s%3N 2>/dev/null) || return 0
+        printf '{"pushWaitMs":%s,"prePushGateMs":%s}\n' \
+            "${wait_ms:-0}" "$((gate_end_ms - gate_start_ms))" \
+            >> "$BATON_OUTPUT_DIR/push-timing.jsonl" 2>/dev/null || return 0
+    fi
+    return 0
+}
+
 if pixi run gates-check-receipt; then
+    record_push_timing
     exit 0
 fi
-exec pixi run gates-fast
+
+# NOT `exec`: the timing line above has to be written after the run, so the status is captured and
+# re-raised by hand. gates-fast's own exit code is still the only thing this hook exits with --
+# tools/gates/gates.py's selftest runs this hook against a stub that exits 7 and asserts on 7.
+pixi run gates-fast
+status=$?
+record_push_timing
+exit $status
