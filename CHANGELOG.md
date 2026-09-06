@@ -7,6 +7,45 @@ and `src/Baton.Vendors/CHANGELOG.md`, kept as history. New entries are prepended
 `vX.Y.Z`. See `release-please-config.json`. Everything below this line predates the split: the
 repo's single shared version through `0.14.0`.
 
+## [0.35.0](https://github.com/philipreese/baton/compare/v0.34.0...v0.35.0) (2026-09-06)
+
+
+### Features
+
+* **accounting:** Backfill settled rooms and merged PRs into the cost ledger and stamp dispatch labels on rows ([#1931](https://github.com/philipreese/baton/issues/1931)) ([20dc565](https://github.com/philipreese/baton/commit/20dc56525e1a54e07c7c3cc30323fb88559e2a0a))
+* **accounting:** Export the cost ledger under benchmarks/ledger with a committed baseline and the medians the comparator reads ([#1938](https://github.com/philipreese/baton/issues/1938)) ([5d793c2](https://github.com/philipreese/baton/commit/5d793c2bd91f75d498af044464256b40d569827e))
+* **accounting:** Record issue, PR, review verdict, diff shape and conductor resolutions on cost-ledger rows ([#1913](https://github.com/philipreese/baton/issues/1913)) ([1de43a0](https://github.com/philipreese/baton/commit/1de43a0ce8f2c908006b3c725e2ecd1869dbaddb))
+* **benchmarks:** Automate DeepSWE benchmark snapshot refreshes ([#1937](https://github.com/philipreese/baton/issues/1937)) ([4c85dbc](https://github.com/philipreese/baton/commit/4c85dbc1366df334852c5ad60e7300e6b61e8acc))
+* **cli:** Record every arrest outcome on the room and write the terminal fact when a worker dies outside baton ([#1916](https://github.com/philipreese/baton/issues/1916)) ([88a97b7](https://github.com/philipreese/baton/commit/88a97b7cf423b1b1b9033973e76588261a382b13))
+* **dispatch:** Record runway admission decisions and reserve headroom across concurrent dispatches ([#1932](https://github.com/philipreese/baton/issues/1932)) ([9d10a8b](https://github.com/philipreese/baton/commit/9d10a8b4810653b12cbddda8a1f7e282e86c169a))
+* **gates:** Accept a lane's own component receipts for the pre-push gates-fast set and give receipt checks lock priority ([#1936](https://github.com/philipreese/baton/issues/1936)) ([f547d29](https://github.com/philipreese/baton/commit/f547d2980ecb617ba8a1c53bd5c9f60823cdcd15))
+* **glass:** Read the daemon's projection file by default and keep the pusher's own derivation as the stale fallback ([#1905](https://github.com/philipreese/baton/issues/1905)) ([517382d](https://github.com/philipreese/baton/commit/517382d4863555c0c83ef504d1da9f05be547db8))
+* **memory:** Add the canonical per-repository memory store with a reversible non-destructive import ([#1940](https://github.com/philipreese/baton/issues/1940)) ([9df7735](https://github.com/philipreese/baton/commit/9df77358456fa0c221ac13f2a75f6037c81338a9))
+* **memory:** Add the memory audit verb that inventories Claude memory roots against repository identity ([#1908](https://github.com/philipreese/baton/issues/1908)) ([a94bfdb](https://github.com/philipreese/baton/commit/a94bfdb23ea2b10e9fe2080493a606998c5b1078))
+* **memory:** Inventory Codex and Antigravity memory roots content-blind and record their formats ([#1930](https://github.com/philipreese/baton/issues/1930)) ([f40aeae](https://github.com/philipreese/baton/commit/f40aeae8f44160533a7defd3e0791e503f812b2a))
+* **queue:** Host the conductor's dispatch queue and scheduler in the daemon with a recorded decision per launch ([#1939](https://github.com/philipreese/baton/issues/1939)) ([1e63a17](https://github.com/philipreese/baton/commit/1e63a17534bb184b27ec3bd1eda15904d053765a))
+* **skills:** Add the canonical skill manifest, resolver, lint, requirement check and --skill dispatch surface ([#1941](https://github.com/philipreese/baton/issues/1941)) ([bdee980](https://github.com/philipreese/baton/commit/bdee980599040330007603586f74494dc1100489))
+* **usage:** Harvest a derived Codex plan-usage snapshot for the runway hold and the glass ([#1926](https://github.com/philipreese/baton/issues/1926)) ([f63fe61](https://github.com/philipreese/baton/commit/f63fe61e7ce712ec206b4587ee110a017aff9549))
+* **vendors:** Realize canonical skill packages per vendor as the floor slice of [#1151](https://github.com/philipreese/baton/issues/1151) ([#1929](https://github.com/philipreese/baton/issues/1929)) ([61cbec3](https://github.com/philipreese/baton/commit/61cbec3e83f1c08b58554efd20d62098ce74b623))
+
+
+### Bug Fixes
+
+* **glass:** Project a Codex execution's live tool calls, turns and billed tokens instead of a zero ([#1907](https://github.com/philipreese/baton/issues/1907)) ([2e140ca](https://github.com/philipreese/baton/commit/2e140ca8df753525232340ab2b785da283173b0f))
+* **review:** Refuse a finding with no status instead of binding it to the enum default ([#1922](https://github.com/philipreese/baton/issues/1922)) ([9649990](https://github.com/philipreese/baton/commit/96499906838e6ab5a9c3e166c575bd1420c186a1))
+* **review:** Stamp instruments on a redispatched review and drop the inherited verify paragraph ([#1906](https://github.com/philipreese/baton/issues/1906)) ([cb6a157](https://github.com/philipreese/baton/commit/cb6a1579d14c84ccdfd4121cd99fb3bb13509e86))
+
+
+### Documentation
+
+* **vendors:** Place agy's model catalogue into the canonical purpose tiers from the 2026-09-05 measurement ([#1925](https://github.com/philipreese/baton/issues/1925)) ([9e47c59](https://github.com/philipreese/baton/commit/9e47c5964c95628d9c50b73779371a4af5e720a0))
+
+
+### Tests
+
+* **cli:** Widen the live-cancel in-flight window so the arrest lands before the step completes ([#1924](https://github.com/philipreese/baton/issues/1924)) ([c2b1f71](https://github.com/philipreese/baton/commit/c2b1f71ecb3515c4e77ff0b199c19a49064027bc))
+* **vendor-verify:** Pin agy's tool-name lists to the CLI's live tool catalogue ([#1928](https://github.com/philipreese/baton/issues/1928)) ([42064b3](https://github.com/philipreese/baton/commit/42064b38db3c8eeb928f627903a2564f56ae731a))
+
 ## [0.34.0](https://github.com/philipreese/baton/compare/v0.33.0...v0.34.0) (2026-09-05)
 
 
