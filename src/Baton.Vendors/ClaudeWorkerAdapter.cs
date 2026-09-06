@@ -128,7 +128,7 @@ public sealed partial class ClaudeWorkerAdapter : IWorkerAdapter, IPermissionGra
         // AER to write into, from a command that dispatched nothing. This is the same shape agy's
         // realization already has: the skill content rides on the returned target rather than being a
         // side effect of resolving it.
-        var skillProjection = PlanSkillProjection(invocation.WorkingDirectory);
+        var skillProjection = PlanSkillProjection(invocation.WorkingDirectory, invocation.Skills);
         var skillSeedCopies = ToSeedCopies(skillProjection);
         AnnounceSkillProjection(skillProjection);
 
@@ -1265,14 +1265,30 @@ public sealed partial class ClaudeWorkerAdapter : IWorkerAdapter, IPermissionGra
     /// Reads only — the placement itself happens at dispatch time, through
     /// <see cref="CoreDispatchTarget.SeedCopies"/>.
     /// </summary>
-    public static SkillProjectionPlan PlanSkillProjection(string? workingDirectory)
+    /// <param name="workingDirectory">
+    /// Where the projection LANDS (<c>&lt;workingDirectory&gt;/.claude/skills/</c>), and — only when
+    /// <paramref name="declaredSkills"/> is empty — also where packages are discovered.
+    /// </param>
+    /// <param name="declaredSkills">
+    /// #1151: the packages the binding itself named, already resolved through
+    /// <see cref="SkillPackageResolver"/>'s rung ladder. Non-empty REPLACES the working-directory scan,
+    /// so a package that lives only under <c>BATON_SKILLS_PATH</c> or the account-wide library is
+    /// realized here even though nothing in the repository mentions it — which is the whole point of the
+    /// resolver, and the thing that would otherwise make <c>--skill</c> a name that resolves and
+    /// realizes nothing. Null or empty keeps #1929's behaviour: discover <c>&lt;workspace&gt;/skills/</c>.
+    /// </param>
+    public static SkillProjectionPlan PlanSkillProjection(
+        string? workingDirectory, IReadOnlyList<SkillPackage>? declaredSkills = null)
     {
         if (string.IsNullOrWhiteSpace(workingDirectory) || !Directory.Exists(workingDirectory))
         {
             return new SkillProjectionPlan(string.Empty, Array.Empty<SkillProjectionEntry>());
         }
 
-        return SkillProjection.Plan(workingDirectory, SkillProjectionDirectory(workingDirectory));
+        var target = SkillProjectionDirectory(workingDirectory);
+        return declaredSkills is { Count: > 0 }
+            ? SkillProjection.PlanFor(declaredSkills, target)
+            : SkillProjection.Plan(workingDirectory, target);
     }
 
     private static IReadOnlyList<CoreDispatchSeedCopy>? ToSeedCopies(SkillProjectionPlan plan) =>

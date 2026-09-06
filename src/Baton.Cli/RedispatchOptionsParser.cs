@@ -14,7 +14,7 @@ public static class RedispatchOptionsParser
     public const string Usage =
         "Usage: baton redispatch <room-dir> [--spec <amended-brief>] [--attach <file>] [--adapter <name>] "
         + "[--model <name>] [--effort <name>] [--workspace <dir>] [--output <path>] [--timeout <minutes>] "
-        + "[--token-budget <n>] [--max-tool-steps <n>] [--billed-rate-limit <n>] [--verify <cmd>] [--label <text>] [--workstream <slug>]";
+        + "[--token-budget <n>] [--max-tool-steps <n>] [--billed-rate-limit <n>] [--verify <cmd>] [--skill <name>] [--label <text>] [--workstream <slug>]";
 
     public static RedispatchOptions Parse(IReadOnlyList<string> args)
     {
@@ -35,6 +35,8 @@ public static class RedispatchOptionsParser
         string? workstream = null;
         var workstreamSpecified = false;
         var attachments = new List<string>();
+        var skills = new List<string>();
+        var skillsSpecified = false;
 
         var i = 0;
         while (i < args.Count)
@@ -47,6 +49,14 @@ public static class RedispatchOptionsParser
                     break;
                 case "--attach":
                     attachments.Add(RequireValue(args, ref i, arg));
+                    break;
+                case "--skill":
+                    // #1151: the flag APPEARING is what distinguishes "replace/clear" from "inherit the
+                    // parent's list" -- mirroring --label/--workstream's own *Specified flags, and for
+                    // the identical reason: an empty accumulated list is otherwise indistinguishable
+                    // from the flag never being passed, so `--skill ""` could not clear anything.
+                    skills.Add(RequireValue(args, ref i, arg));
+                    skillsSpecified = true;
                     break;
                 case "--adapter":
                     adapter = RequireValue(args, ref i, arg);
@@ -124,7 +134,8 @@ public static class RedispatchOptionsParser
             workspaceDirectory is null ? null : Path.GetFullPath(workspaceDirectory),
             outputPath is null ? null : Path.GetFullPath(outputPath),
             timeout, label, labelSpecified, tokenBudget, workstream, workstreamSpecified,
-            attachments.Count > 0 ? attachments : null, maxToolSteps, billedRateLimit, verifyCommand);
+            attachments.Count > 0 ? attachments : null, maxToolSteps, billedRateLimit, verifyCommand,
+            DispatchOptionsParser.NormalizeSkills(skills), skillsSpecified);
     }
 
     /// <summary>Same shape and rationale as <see cref="DispatchOptionsParser"/>'s own <c>--token-budget</c> (#1623).</summary>

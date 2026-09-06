@@ -30,6 +30,12 @@ namespace Baton.Cli;
 /// F2 found in <see cref="MaxToolSteps"/>'s own threading and this field is deliberately not repeating.
 /// </param>
 /// <param name="VerifyCommand">The <c>--verify</c> override (#1702). Null keeps the parent's.</param>
+/// <param name="Skills">
+/// The repeatable <c>--skill</c> override (#1151) — see spec/baton.md §9 for the
+/// inheritance/clear/replace contract, which mirrors <see cref="Label"/>'s own except that a supplied
+/// list replaces the parent's <b>wholesale</b> rather than appending.
+/// </param>
+/// <param name="SkillsSpecified">True when <c>--skill</c> was explicitly provided, even if blank — mirrors <see cref="LabelSpecified"/>.</param>
 public sealed record RedispatchOptions(
     string ParentRoomDirectoryPath,
     string RoomDirectoryPath,
@@ -48,4 +54,6 @@ public sealed record RedispatchOptions(
     IReadOnlyList<string>? Attachments = null,
     int? MaxToolSteps = null,
     long? BilledRateLimit = null,
-    string? VerifyCommand = null);
+    string? VerifyCommand = null,
+    IReadOnlyList<string>? Skills = null,
+    bool SkillsSpecified = false);

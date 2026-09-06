@@ -178,6 +178,16 @@ public static class WorkerBindingResolver
         }
 
         var workingDirectory = ResolveWorkingDirectory(workerName, entry.WorkingDirectory, profiles);
+
+        // #1151: names become packages HERE, at the one seam `baton run` and `baton dispatch` both
+        // cross -- so a harness-authored bindings.json naming skills is honoured rather than silently
+        // ignored, which is the failure class the whole feature exists to remove (spec/baton.md §9).
+        // Both refusals below are the same ones RoleDispatch.ToBinding already raised for a dispatch;
+        // that one fires before a room directory exists and is the ergonomic check, this one is the
+        // load-bearing one because it is the only check the run path reaches.
+        var skills = SkillPackageResolver.ResolveAll(entry.Skills, workingDirectory);
+        RefuseIfASkillRequiresMoreThanTheGrant(workerName, skills, entry.PermissionGrant);
+
         var invocation = new WorkerInvocation(
             entry.PromptTemplate, entry.Model, entry.PermissionScope, entry.PermissionGrant,
             workingDirectory, bindingsFileDirectory, entry.SessionId, entry.ResumeSession,
@@ -190,7 +200,8 @@ public static class WorkerBindingResolver
             // #1166 review finding A: forwarded so ProjectCeilingGate keys the ceiling on the stable
             // source repository rather than the ephemeral, room-scoped worktree path above.
             WorktreeSourceRepository: entry.WorktreeSourceRepository,
-            AllowsSubagents: entry.AllowsSubagents);
+            AllowsSubagents: entry.AllowsSubagents,
+            Skills: skills);
         var target = adapter.Resolve(invocation, entry.Contract);
 
         if (onWorkerStdoutLine is not null)
@@ -206,6 +217,25 @@ public static class WorkerBindingResolver
             entry.DeliversBranch, entry.ExpectPr);
     }
 
+
+    /// <summary>
+    /// #1151 §4.5: a package's declared <c>requires</c> is <b>checked, never applied</b>. The grant is
+    /// not widened to satisfy a skill and the skill is not silently dropped — the bind refuses, naming
+    /// the skill and the missing categories. Shared with <see cref="RoleDispatch.ToBinding"/>, which
+    /// runs the identical predicate earlier so a bad <c>--skill</c> fails before a room directory
+    /// exists; internal rather than private so there is one predicate, not two that can drift.
+    /// </summary>
+    internal static void RefuseIfASkillRequiresMoreThanTheGrant(
+        string workerName, IReadOnlyList<SkillPackage> skills, PermissionGrant? grant)
+    {
+        foreach (var skill in skills)
+        {
+            if (skill.Requires.MissingFrom(grant) is { Count: > 0 } missing)
+            {
+                throw new SkillRequirementUnsatisfiedException(workerName, skill.Name, missing);
+            }
+        }
+    }
 
     /// <summary>
     /// #529, refused at the execution choke point. The rule itself lives on

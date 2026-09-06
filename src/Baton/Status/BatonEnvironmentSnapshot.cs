@@ -73,7 +73,8 @@ public sealed record BatonEnvironmentSnapshot(
     string? WatchReaperRetentionHoursOverride = null,
     string? FleetProjectionIntervalSecondsOverride = null,
     string? ExecutionProgressIntervalSecondsOverride = null,
-    string? DeliveryPollIntervalSecondsOverride = null)
+    string? DeliveryPollIntervalSecondsOverride = null,
+    string? SkillsPathOverride = null)
 {
     private static readonly Lazy<BatonEnvironmentSnapshot> ProcessSnapshot = new(CaptureFromEnvironment);
 
@@ -114,7 +115,8 @@ public sealed record BatonEnvironmentSnapshot(
         WatchReaperRetentionHoursOverride: null,
         FleetProjectionIntervalSecondsOverride: null,
         ExecutionProgressIntervalSecondsOverride: null,
-        DeliveryPollIntervalSecondsOverride: null);
+        DeliveryPollIntervalSecondsOverride: null,
+        SkillsPathOverride: null);
 
     /// <summary>
     /// The snapshot every reader resolves against: an explicit <see cref="BeginScope"/> override on
@@ -167,7 +169,11 @@ public sealed record BatonEnvironmentSnapshot(
         ExecutionProgressIntervalSecondsOverride: Environment.GetEnvironmentVariable("BATON_EXECUTION_PROGRESS_INTERVAL_SECONDS"),
         // "BATON_DELIVERY_POLL_INTERVAL_SECONDS" -- #734's delivery poll cadence,
         // Baton.Cli.Daemon.DeliveryPoller.IntervalSecondsEnvironmentVariable.
-        DeliveryPollIntervalSecondsOverride: Environment.GetEnvironmentVariable("BATON_DELIVERY_POLL_INTERVAL_SECONDS"));
+        DeliveryPollIntervalSecondsOverride: Environment.GetEnvironmentVariable("BATON_DELIVERY_POLL_INTERVAL_SECONDS"),
+        // "BATON_SKILLS_PATH" -- #1151's canonical skill package resolver, rung 1
+        // (Baton.Vendors.SkillPackageResolver.SkillsPathEnvironmentVariable). Same duplicated-literal
+        // reason as every field above it: this project is the base of the dependency graph.
+        SkillsPathOverride: Environment.GetEnvironmentVariable("BATON_SKILLS_PATH"));
 
     /// <summary>
     /// Test-only seam (via <c>InternalsVisibleTo</c>): makes <paramref name="snapshot"/> the ambient

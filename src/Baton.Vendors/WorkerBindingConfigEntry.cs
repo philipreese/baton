@@ -152,6 +152,21 @@ namespace Baton.Vendors;
 /// cref="RoleDispatch.ToBinding"/> is the one caller that overrides this from the catalog role's own
 /// value for every role dispatched through the front door.
 /// </param>
+/// <param name="Skills">
+/// #1151 (contract: <c>spec/baton.md</c> §9, "Canonical skill packages" — not restated here): the
+/// canonical skill package names attached to this worker, alongside <paramref name="Timeout"/> (#1442)
+/// and <paramref name="Label"/> (#1499) as a binding-level fact chosen at dispatch and constant for
+/// every execution of the binding. Written by <c>--skill</c> on <c>baton dispatch</c>/<c>redispatch</c>,
+/// and readable by a harness authoring <c>bindings.json</c> for <c>baton run</c> — which is the point:
+/// each name is resolved through <see cref="SkillPackageResolver"/> at
+/// <see cref="WorkerBindingResolver.Resolve"/>, the one seam BOTH verbs cross, so a name a harness
+/// writes here is realized rather than silently ignored. Null or empty attaches nothing.
+/// <para>
+/// This field is why a <c>redispatch</c> does not drop a lane's skills: it is on the entry the parent
+/// room recorded, so the child inherits it (<c>RedispatchCommand.InheritBinding</c>). Without it, the
+/// fix for #1512 would reintroduce #1512 one verb over.
+/// </para>
+/// </param>
 /// <param name="FallbackOnExhaustion">
 /// #802 (S6, the design ratified on that issue): a declared vendor to rebind this role onto when its own dispatch
 /// parks on a vendor-quota <see cref="Domain.FailureClassification.ExhaustedUntil"/> outcome, rather
@@ -201,7 +216,11 @@ public sealed record WorkerBindingConfigEntry(
     // #1896, stamped on every entry at dispatch rather than only on an override. What it holds, why it
     // sits beside RunwayOverride instead of inside it, and why the type lives in the engine layer: its
     // own remarks (Baton.Runway.RunwayAdmission).
-    RunwayAdmission? RunwayAdmission = null);
+    RunwayAdmission? RunwayAdmission = null,
+    // #1151: appended last, and null (never an empty list standing in for "no skills") is the default,
+    // so every entry authored before this field existed round-trips through
+    // WorkerBindingConfigParser/Writer unchanged.
+    IReadOnlyList<string>? Skills = null);
 
 /// <summary>
 /// #1848: the audit record a <c>--override-runway "&lt;reason&gt;"</c> dispatch leaves on the room's

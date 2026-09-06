@@ -947,6 +947,18 @@ public static class DispatchCommand
                 "remove the --attach flag, or dispatch a single role instead of a template.");
         }
 
+        // #1151: refused rather than silently dropped, the same shape as --attach immediately above. A
+        // template binds one worker per phase, and a single flag naming no phase cannot say which of
+        // them the skill is for -- attaching it to all of them would be a guess. Role-catalog skills
+        // (#1151 S6) are the shape that answers this for a template, and they are not this slice.
+        if (options.Skills is { Count: > 0 })
+        {
+            throw new CliArgumentException(
+                $"'{options.Name}' is a workflow template — it binds one worker per phase, so a single "
+                + "--skill names no phase to attach to. Pass --skill only when dispatching a role.",
+                "remove the --skill flag, or dispatch a single role instead of a template.");
+        }
+
         // R5 (#1354/#1380, finding 7): a template's steps each declare their own output — there is no
         // one "primary output" for --output to rename, and the prior behaviour renamed whichever step
         // happened to be first regardless of what kind of step that was (a capture step, say), silently.
@@ -1116,7 +1128,10 @@ public static class DispatchCommand
             tokenBudgetOverride: options.TokenBudget, maxToolStepsOverride: options.MaxToolSteps,
             billedRateLimitOverride: options.BilledRateLimit,
             verifyCommandOverride: options.VerifyCommand, expectPrOverride: options.ExpectPr,
-            verifyResultsPath: VerifyResultsPath(options));
+            verifyResultsPath: VerifyResultsPath(options),
+            // #1151: resolved and requirement-checked inside ToBinding, which runs before
+            // Directory.CreateDirectory below -- so an unknown --skill leaves no room behind.
+            skills: options.Skills);
     }
 
     /// <summary>

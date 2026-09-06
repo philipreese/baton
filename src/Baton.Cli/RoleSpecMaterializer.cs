@@ -36,7 +36,8 @@ internal static class RoleSpecMaterializer
         long? billedRateLimitOverride,
         string? verifyCommandOverride,
         bool? expectPrOverride = null,
-        string? verifyResultsPath = null)
+        string? verifyResultsPath = null,
+        IReadOnlyList<string>? skills = null)
     {
         ValidateAttachments(attachments);
 
@@ -71,7 +72,7 @@ internal static class RoleSpecMaterializer
             tokenBudgetOverride: tokenBudgetOverride, maxToolStepsOverride: maxToolStepsOverride,
             billedRateLimitOverride: billedRateLimitOverride,
             verifyCommandOverride: verifyCommandOverride, expectPrOverride: expectPrOverride,
-            verifyResultsPath: verifyResultsPath);
+            verifyResultsPath: verifyResultsPath, skills: skills);
     }
 
     /// <summary>
