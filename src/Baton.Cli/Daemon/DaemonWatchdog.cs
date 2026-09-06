@@ -1,3 +1,4 @@
+using System.Diagnostics;
 using Baton.Status;
 using Microsoft.Extensions.Hosting;
 
@@ -24,11 +25,14 @@ namespace Baton.Cli.Daemon;
 /// covers instead: it keys on the projection file's own <c>derived_at</c>, at three ticks.
 /// </para>
 /// <para>
-/// <b>Its own loop runs on a dedicated foreground-created <see cref="Thread"/> with
-/// <see cref="Thread.Sleep(TimeSpan)"/>, not a <c>BackgroundService</c> with <c>Task.Delay</c>.</b> The
+/// <b>Its own loop runs on a dedicated <see cref="Thread"/> waiting on a
+/// <see cref="WaitHandle"/>, not a <c>BackgroundService</c> with <c>Task.Delay</c>.</b> The
 /// incident's signature — four services stopping in the same second, a paged-out working set — is at
 /// least as consistent with a wedged thread pool as with any one slow room walk, and a watchdog whose
 /// next wake-up is a pool continuation would be frozen by exactly the condition it exists to catch.
+/// The same reasoning is why the trip sequence in <see cref="CheckOnce"/> arms its
+/// <see cref="Process.Kill()"/> fallback on a second dedicated thread: <see cref="HungExitCode"/>
+/// records what is and is not measured about the orderly exit under a wedged pool.
 /// </para>
 /// </summary>
 internal sealed class DaemonWatchdog : IHostedService
@@ -43,14 +47,25 @@ internal sealed class DaemonWatchdog : IHostedService
     /// Non-zero, and specifically not 1: an exit code an operator finds in the scheduled task's Last
     /// Run Result should name which self-diagnosis fired. 70 is <c>EX_SOFTWARE</c>.
     /// <para>
-    /// <b>That the OS actually sees 70 is measured, not assumed</b> (2026-09-06, .NET 10, Windows):
+    /// <b>That the OS sees 70 is measured — for one population, which is narrower than the case this
+    /// watchdog was built for</b> (2026-09-06, .NET 10, Windows).
     /// <see cref="Environment.Exit(int)"/> runs <c>ProcessExit</c> handlers, and the Generic Host's
     /// console lifetime hooks that event to stop the application — so the open question was whether
     /// the host's shutdown either zeroes the code or blocks on the very services that stopped
     /// ticking. A throwaway probe (a Generic Host whose hosted service's <c>StopAsync</c> never
     /// completes, killed from a second thread) exited <b>70</b>, promptly, in exactly that shape.
-    /// <see cref="Process.Kill()"/> was the alternative — immune to any handler, but its Windows exit
-    /// code is not one an operator can read as a diagnosis, and the measurement says it is not needed.
+    /// </para>
+    /// <para>
+    /// <b>What that probe did NOT cover (2026-09-06 review, finding E):</b> it ran on a HEALTHY thread
+    /// pool. The wedged-pool case — the incident's own leading hypothesis, and the whole reason this
+    /// class owns a dedicated thread — is <b>unmeasured</b>: nothing here establishes what
+    /// <c>Environment.Exit</c> does when its handler chain has no pool thread to run a shutdown
+    /// continuation on. So the exit is no longer the only way out. <see cref="CheckOnce"/> arms
+    /// <see cref="LastResortKillAfter"/> of grace on a second dedicated thread and then calls
+    /// <see cref="Process.Kill()"/>, which is immune to the handler chain. Its Windows exit code is
+    /// deliberately NOT 70 (<c>Kill()</c> does not get to choose one), and that difference is itself
+    /// readable: 70 in Last Run Result means the orderly path worked, anything else beside a fresh
+    /// <see cref="BatonPaths.FleetWatchdogVerdictFile"/> means the orderly path did not come back.
     /// </para>
     /// <para>
     /// The scheduled task's action must end in <c>; exit $LASTEXITCODE</c> for this to reach the
@@ -59,35 +74,49 @@ internal sealed class DaemonWatchdog : IHostedService
     /// </summary>
     internal const int HungExitCode = 70;
 
+    /// <summary>How long the orderly <see cref="Environment.Exit(int)"/> path gets before
+    /// <see cref="Process.Kill()"/> takes the process down regardless. Ten seconds: the measured
+    /// orderly exit was prompt, so anything near this bound already means the shutdown is stuck, and
+    /// a daemon that is going to die anyway loses nothing by dying ten seconds later.</summary>
+    internal static readonly TimeSpan LastResortKillAfter = TimeSpan.FromSeconds(10);
+
     private readonly DaemonTickLedger _ledger;
     private readonly Func<DateTimeOffset> _clock;
     private readonly Func<TimeSpan> _interval;
     private readonly Action<string> _log;
     private readonly Action<int> _exit;
+    private readonly Action<string> _writeVerdictFile;
+    private readonly Action _armLastResortKill;
     private readonly CancellationTokenSource _stopping = new();
     private Thread? _thread;
 
     public DaemonWatchdog()
         : this(DaemonTickLedger.Instance, () => DateTimeOffset.UtcNow, FleetProjectionWriter.GetInterval,
-               Console.Error.WriteLine, Environment.Exit)
+               Console.Error.WriteLine, Environment.Exit, WriteVerdictFile, ArmLastResortKill)
     {
     }
 
     /// <summary>Test-only seam (Baton.Cli.Tests, via <c>InternalsVisibleTo</c>): a fixture clock and a
     /// captured exit, so both polarities can be driven without waiting real minutes or killing the
-    /// test host.</summary>
+    /// test host. The last two default to no-ops precisely so a test can never get the real
+    /// <see cref="Process.Kill()"/> timer or write into a real <c>~/.baton</c>; a test that wants to
+    /// observe the ordering passes recorders.</summary>
     internal DaemonWatchdog(
         DaemonTickLedger ledger,
         Func<DateTimeOffset> clock,
         Func<TimeSpan> interval,
         Action<string> log,
-        Action<int> exit)
+        Action<int> exit,
+        Action<string>? writeVerdictFile = null,
+        Action? armLastResortKill = null)
     {
         _ledger = ledger;
         _clock = clock;
         _interval = interval;
         _log = log;
         _exit = exit;
+        _writeVerdictFile = writeVerdictFile ?? (_ => { });
+        _armLastResortKill = armLastResortKill ?? (() => { });
     }
 
     public Task StartAsync(CancellationToken cancellationToken)
@@ -125,8 +154,20 @@ internal sealed class DaemonWatchdog : IHostedService
         }
     }
 
-    /// <summary>One supervision pass. Returns true when it tripped (and therefore called the exit
-    /// action) — the return value is what the tests read; production's exit action does not come back.</summary>
+    /// <summary>
+    /// One supervision pass. Returns true when it tripped (and therefore ran the trip sequence) — the
+    /// return value is what the tests read; production's exit action does not come back.
+    /// <para>
+    /// <b>The order of the four steps below is the finding, not an accident</b> (2026-09-06 review,
+    /// finding D). The fault this watchdog exists for silenced the daemon's console — and since the
+    /// same PR routed every console write in the process through one <c>TimestampedLineWriter</c>
+    /// lock, a thread stuck mid-write now blocks <see cref="_log"/> too. So the kill timer is armed
+    /// FIRST (it covers everything after it, including the file write, which can block on the same
+    /// filesystem), the durable diagnosis is written SECOND, and only then does anything go near the
+    /// stream that went quiet. The console line is the nice-to-have; the exit code and the verdict
+    /// file are the diagnosis.
+    /// </para>
+    /// </summary>
     internal bool CheckOnce()
     {
         var now = _clock();
@@ -137,9 +178,66 @@ internal sealed class DaemonWatchdog : IHostedService
             return false;
         }
 
+        _armLastResortKill();
+        _writeVerdictFile(verdict);
         _log(verdict);
         _exit(HungExitCode);
         return true;
+    }
+
+    /// <summary>
+    /// The production <see cref="_writeVerdictFile"/>: one line into
+    /// <see cref="BatonPaths.FleetWatchdogVerdictFile"/>, which owns why it is a file of its own.
+    /// Best-effort — a diagnosis that cannot be written must not stop the exit that recovers the
+    /// daemon, and the log line and exit code below it are the other two copies.
+    /// </summary>
+    private static void WriteVerdictFile(string verdict)
+    {
+        var path = BatonPaths.FleetWatchdogVerdictFile;
+        try
+        {
+            Directory.CreateDirectory(Path.GetDirectoryName(path)!);
+            File.WriteAllText(path, $"{DateTimeOffset.UtcNow:O} {verdict}{Environment.NewLine}");
+        }
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or ArgumentException)
+        {
+            Console.Error.WriteLine($"DaemonWatchdog: could not write {path}: {ex.Message}");
+        }
+    }
+
+    /// <summary>
+    /// The production <see cref="_armLastResortKill"/>: a second dedicated thread that gives the
+    /// orderly exit <see cref="LastResortKillAfter"/> and then terminates the process outright. A
+    /// <see cref="Thread"/> and <see cref="Thread.Sleep(TimeSpan)"/> for the same reason the
+    /// supervision loop uses one — a timer callback is a thread-pool continuation, and a wedged pool
+    /// is the state this is the fallback for. Background, so it can never hold up a daemon that is
+    /// shutting down normally.
+    /// </summary>
+    private static void ArmLastResortKill()
+    {
+        var killer = new Thread(() =>
+        {
+            Thread.Sleep(LastResortKillAfter);
+            try
+            {
+                // Reached only when Environment.Exit did not come back within the grace period, so
+                // the process is by definition still here to kill.
+                Process.GetCurrentProcess().Kill();
+            }
+            catch (Exception ex)
+            {
+                // Handled, not swallowed: there is nothing above this to rethrow to (an unhandled
+                // exception here would take the process down with an exit code that says less than
+                // this line does), and a hung daemon that cannot even be killed is the one fact left
+                // worth recording.
+                Console.Error.WriteLine($"DaemonWatchdog: last-resort Kill() failed: {ex.Message}");
+            }
+        })
+        {
+            IsBackground = true,
+            Name = "baton-daemon-watchdog-kill",
+        };
+        killer.Start();
     }
 
     /// <summary>

@@ -83,6 +83,57 @@ public class DaemonWatchdogTests
         Assert.Empty(log);
     }
 
+    /// <summary>
+    /// 2026-09-06 review, finding D: the trip sequence's ORDER, which is the whole finding — why that
+    /// order and not another is on <see cref="DaemonWatchdog.CheckOnce"/>, not restated here. Asserted
+    /// as a sequence rather than four presence checks, because an assertion that each step merely
+    /// happened cannot discriminate the defect.
+    /// </summary>
+    [Fact]
+    public void TheTripSequence_ArmsTheKillFallbackAndWritesTheVerdictFile_BeforeTouchingTheConsole()
+    {
+        var clock = new FixtureClock(T0);
+        var ledger = new DaemonTickLedger(() => clock.Now);
+        var order = new List<string>();
+        var watchdog = new DaemonWatchdog(
+            ledger, () => clock.Now, () => Interval,
+            line => order.Add($"log:{line[..12]}"),
+            code => order.Add($"exit:{code}"),
+            verdict => order.Add($"file:{verdict[..12]}"),
+            () => order.Add("arm"));
+
+        clock.Advance(Interval * (DaemonWatchdog.MissedTickAllowance + 1));
+        Assert.True(watchdog.CheckOnce());
+
+        Assert.Equal(
+            ["arm", "file:DaemonWatchd", "log:DaemonWatchd", $"exit:{DaemonWatchdog.HungExitCode}"],
+            order);
+    }
+
+    /// <summary>The control for the arm above: a healthy daemon arms no killer and writes no verdict
+    /// file. Without it, a watchdog that armed a 10-second <c>Process.Kill()</c> on every pass would
+    /// pass the ordering test and take the daemon down forever.</summary>
+    [Fact]
+    public void AHealthyDaemon_ArmsNoKiller_AndWritesNoVerdictFile()
+    {
+        var clock = new FixtureClock(T0);
+        var ledger = new DaemonTickLedger(() => clock.Now);
+        var order = new List<string>();
+        var watchdog = new DaemonWatchdog(
+            ledger, () => clock.Now, () => Interval,
+            _ => order.Add("log"), code => order.Add($"exit:{code}"),
+            _ => order.Add("file"), () => order.Add("arm"));
+
+        for (var i = 0; i < 20; i++)
+        {
+            clock.Advance(Interval);
+            ledger.RecordTick(nameof(FleetProjectionWriter), TimeSpan.FromSeconds(1), Interval);
+            Assert.False(watchdog.CheckOnce());
+        }
+
+        Assert.Empty(order);
+    }
+
     /// <summary>A daemon that wedges before any service has completed a first tick still trips —
     /// measured from process start, so "nothing has ever ticked" is a hang, not a grace period.</summary>
     [Fact]

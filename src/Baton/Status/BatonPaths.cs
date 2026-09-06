@@ -335,6 +335,24 @@ public static class BatonPaths
     public const string FleetHeartbeatFileName = "heartbeat.json";
 
     /// <summary>
+    /// <c>{Root}/fleet/watchdog.txt</c> — the one line <c>DaemonWatchdog</c> writes when it declares
+    /// the daemon hung, and the reason it is a file of its own rather than another field in
+    /// <see cref="FleetHeartbeatFile"/> beside it: the heartbeat is rewritten by the next healthy
+    /// projection tick, so the restarted daemon would erase its own predecessor's diagnosis within
+    /// thirty seconds. This survives until the NEXT trip, which is what an operator reading exit code
+    /// 70 out of the scheduled task's Last Run Result needs to be able to open.
+    /// <para>
+    /// Written before the watchdog logs anything (2026-09-06 review, finding D): the stall this exists
+    /// for silenced the daemon's console stream, so a diagnosis that only ever goes to
+    /// <c>daemon.log</c> is a diagnosis routed through the thing that broke.
+    /// </para>
+    /// </summary>
+    public static string FleetWatchdogVerdictFile => Path.Combine(Root, FleetDirectoryName, FleetWatchdogVerdictFileName);
+
+    /// <summary>Filename of <see cref="FleetWatchdogVerdictFile"/> relative to <see cref="FleetDirectoryName"/>.</summary>
+    public const string FleetWatchdogVerdictFileName = "watchdog.txt";
+
+    /// <summary>
     /// <c>{Root}/fleet/queue.jsonl</c> — the conductor queue's append-only decision ledger (#1934
     /// slice 1, spec/baton.md §13): one line per scheduler evaluation whose verdict changed, plus
     /// every launch and every failure. Under <see cref="FleetDirectoryName"/> rather than the root,
