@@ -41,6 +41,18 @@ public static class OnDemandRunwayHarvest
     /// that is wedged must cost a refusal quickly rather than a 45-second stall. Exceeding it is a
     /// harvest failure like any other, and holds.
     /// </summary>
+    /// <remarks>
+    /// <b>Two ways a source reports that the bound fired</b>, and both reach the operator with the same
+    /// wording. The shipped sources kill the CLI on cancellation and fold the result into a null —
+    /// <c>BatonProcessRunner</c> throws <c>BatonCancelException</c>, which is a <c>BatonException</c>
+    /// and not an <see cref="OperationCanceledException"/>, and
+    /// <c>VendorUsageCommandRun.CaptureStdoutOrNullAsync</c> catches it and returns null — so the null
+    /// path below, not the cancellation catch, is the arm both gated vendors actually take. A source
+    /// that instead honours the token by throwing, which <see cref="IVendorUsageSource.ReadAsync"/>'s
+    /// contract equally permits, lands in the catch. Neither arm may be dropped: without the catch a
+    /// bound-fired cancellation would escape into the caller's blocking wait and crash the dispatch
+    /// rather than holding it.
+    /// </remarks>
     public static readonly TimeSpan Bound = TimeSpan.FromSeconds(10);
 
     /// <summary>
@@ -53,10 +65,24 @@ public static class OnDemandRunwayHarvest
     /// Whether the vendor already has a readable persisted snapshot. Passed in rather than re-read
     /// here so the caller reads the file exactly once per decision.
     /// </param>
-    public static async Task<RunwayHarvestAttempt?> TryHarvestAsync(
+    public static Task<RunwayHarvestAttempt?> TryHarvestAsync(
         string vendor,
         bool snapshotExists,
         IReadOnlyList<IVendorUsageSource> sources,
+        CancellationToken cancellationToken) =>
+        TryHarvestAsync(vendor, snapshotExists, sources, Bound, cancellationToken);
+
+    /// <summary>
+    /// Test-only seam (Baton.Cli.Tests, via <c>InternalsVisibleTo</c>): the same harvest over a
+    /// <paramref name="bound"/> a test can make small, so the bound-fired arms are driven in
+    /// milliseconds rather than by waiting out <see cref="Bound"/>. Production always passes
+    /// <see cref="Bound"/>, which is the value spec/baton.md §7 states.
+    /// </summary>
+    internal static async Task<RunwayHarvestAttempt?> TryHarvestAsync(
+        string vendor,
+        bool snapshotExists,
+        IReadOnlyList<IVendorUsageSource> sources,
+        TimeSpan bound,
         CancellationToken cancellationToken)
     {
         ArgumentException.ThrowIfNullOrEmpty(vendor);
@@ -74,19 +100,22 @@ public static class OnDemandRunwayHarvest
         }
 
         using var bounded = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
-        bounded.CancelAfter(Bound);
+        bounded.CancelAfter(bound);
 
         try
         {
             var snapshot = await source.ReadAsync(bounded.Token).ConfigureAwait(false);
             if (snapshot is null)
             {
-                // IVendorUsageSource.ReadAsync's own contract for null: not spawned, non-zero exit, or
-                // no output at all. The source has already written the specifics to stderr; what the
-                // refusal needs is that a harvest ran and produced nothing.
+                // Null is IVendorUsageSource.ReadAsync's contract for not spawned, non-zero exit, no
+                // output at all -- AND, for the shipped sources, a run this bound killed (see Bound's
+                // own remarks). The token is what tells those apart: the source has already written
+                // the specifics to stderr, and what the refusal needs is which of the two it was.
                 return new RunwayHarvestAttempt(
                     DateTimeOffset.Now,
-                    $"the '{vendor}' CLI did not produce a readable usage report");
+                    bounded.IsCancellationRequested && !cancellationToken.IsCancellationRequested
+                        ? TimedOutReason(vendor, bound)
+                        : $"the '{vendor}' CLI did not produce a readable usage report");
             }
 
             VendorUsageHarvester.Persist(vendor, snapshot);
@@ -94,9 +123,7 @@ public static class OnDemandRunwayHarvest
         }
         catch (OperationCanceledException) when (!cancellationToken.IsCancellationRequested)
         {
-            return new RunwayHarvestAttempt(
-                DateTimeOffset.Now,
-                $"the '{vendor}' usage command did not finish within {Bound.TotalSeconds:0}s");
+            return new RunwayHarvestAttempt(DateTimeOffset.Now, TimedOutReason(vendor, bound));
         }
         catch (Exception ex) when (ex is not OperationCanceledException)
         {
@@ -107,4 +134,9 @@ public static class OnDemandRunwayHarvest
             return new RunwayHarvestAttempt(DateTimeOffset.Now, ex.Message);
         }
     }
+
+    /// <summary>The one wording for "the bound fired", shared by both arms that can reach it so the two
+    /// cannot drift into two different messages for one outcome.</summary>
+    private static string TimedOutReason(string vendor, TimeSpan bound) =>
+        $"the '{vendor}' usage command did not finish within {bound.TotalSeconds:0}s";
 }

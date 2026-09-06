@@ -156,8 +156,29 @@ public sealed class VendorUsageHarvester : BackgroundService
     /// the previous rings and fails OPEN when it cannot read them -- an unreadable or pre-#1746 file
     /// costs the history (rate absent until two fresh samples land), never the harvest itself.
     /// </para>
+    /// <para>
+    /// #1923 review: that read-modify-write is <b>serialized</b>, because this stopped being called only
+    /// by the single-threaded daemon tick -- <c>OnDemandRunwayHarvest</c> now calls it from the runway
+    /// hold, and <c>QueueLauncher</c> can evaluate that hold for two queued items at once in one
+    /// process. <b>What the lock covers:</b> callers inside this process, which is where both new
+    /// callers live. <b>What it does not:</b> two separate <c>baton</c> processes, which no in-process
+    /// lock can. The residual there is bounded by the atomic <see cref="File.Move(string, string, bool)"/>
+    /// below -- a reader never sees a torn file, and the worst outcome is one ring sample lost, which
+    /// delays a burn rate rather than corrupting one. The hold decision reads windows, not rings, so it
+    /// is unaffected either way.
+    /// </para>
     /// </summary>
     internal static void Persist(string vendor, VendorUsageSnapshot snapshot)
+    {
+        lock (PersistLock)
+        {
+            PersistCore(vendor, snapshot);
+        }
+    }
+
+    private static readonly object PersistLock = new();
+
+    private static void PersistCore(string vendor, VendorUsageSnapshot snapshot)
     {
         try
         {

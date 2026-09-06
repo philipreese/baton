@@ -320,7 +320,16 @@ public static class QueueLauncher
 
     /// <summary>How long to wait for a pre-provision refusal before reporting the lane launched.
     /// Every refusal happens before the room directory is created, so this is a backstop, not the
-    /// mechanism.</summary>
+    /// mechanism.
+    /// <para>
+    /// <b>Coupled to <see cref="OnDemandRunwayHarvest.Bound"/> since #1923</b>, which is why that is
+    /// named here rather than left for the next reader to find: the runway hold's inline harvest runs
+    /// inside this same pre-provision phase, once per gated vendor with no snapshot, so a cold
+    /// mixed-vendor dispatch can spend that bound twice before anything else in the phase starts. The
+    /// headroom this window leaves the rest of pre-provision is therefore this value minus up to two
+    /// bounds, not the whole of it. Changing either constant is a change to both.
+    /// </para>
+    /// </summary>
     public static readonly TimeSpan RefusalWindow = TimeSpan.FromSeconds(30);
 
     private static readonly TimeSpan RefusalPollInterval = TimeSpan.FromMilliseconds(200);

@@ -3684,7 +3684,7 @@ the first lane of a reset window unlaunchable — no lane, so no snapshot; no sn
 **A failed harvest still holds**, and says so: the refusal reads `harvest attempted at HH:MM and
 failed: <reason>` rather than `no readable usage snapshot`, because "never harvested" is a bootstrap
 state and "harvested and it failed" is a fault to look at. Harvesting a *stale* snapshot on demand is
-not this, and is not shipped.
+not this, and is not shipped — tracked, with the daemon-tick half of #1923, in #1966.
 
 **Hold new admissions; never arrest for fleet reasons** (operator ruling, 2026-09-04). A dispatch that
 would start new vendor spend is refused before the room is provisioned; work already running always

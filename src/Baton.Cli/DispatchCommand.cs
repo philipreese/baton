@@ -791,12 +791,26 @@ public static class DispatchCommand
     /// scope of a sync delegate, and the time bound is what makes that safe rather than unbounded.
     /// </para>
     /// </remarks>
-    private static Func<string, RunwayDecision> CreateDiskRunwayEvaluator(DaemonSettings settings) =>
+    /// <param name="harvest">
+    /// Bound only by <c>Baton.Cli.Tests</c>, in the shape of <see cref="ExecuteAsync"/>'s own
+    /// <c>evaluateRunway</c> parameter: null means the real
+    /// <see cref="OnDemandRunwayHarvest.TryHarvestAsync"/> over <see cref="VendorUsageSources.Default"/>,
+    /// which is what every production caller passes. It exists because that default spawns a vendor
+    /// CLI, so without it no test can drive this composition at all — and the composition, not
+    /// <see cref="OnDemandRunwayHarvest"/> in isolation, is what makes #1923's fix reach the queue.
+    /// It takes no cancellation token deliberately: the delegate below is synchronous and has none in
+    /// scope, and the time bound rather than a token is what keeps the wait finite (see the remarks).
+    /// </param>
+    internal static Func<string, RunwayDecision> CreateDiskRunwayEvaluator(
+        DaemonSettings settings,
+        Func<string, bool, Task<RunwayHarvestAttempt?>>? harvest = null) =>
         vendor =>
         {
+            var harvestOnce = harvest ?? ((v, exists) => OnDemandRunwayHarvest
+                .TryHarvestAsync(v, exists, VendorUsageSources.Default, CancellationToken.None));
+
             var snapshot = RunwaySnapshotReader.Read(vendor);
-            var attempt = OnDemandRunwayHarvest
-                .TryHarvestAsync(vendor, snapshot is not null, VendorUsageSources.Default, CancellationToken.None)
+            var attempt = harvestOnce(vendor, snapshot is not null)
                 .GetAwaiter()
                 .GetResult();
 
