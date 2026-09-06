@@ -49,8 +49,8 @@ public static class AuditLanesOptionsParser
         "A refusal is counted by ONE marker Baton stamps where the refusal is produced, so a new",
         "refusal phrasing cannot escape the count. The cost, stated plainly: a room captured before",
         "that marker shipped carries real refusals and reports 'refused 0'. A room reporting no",
-        "counts at all (--), and that --vendor did not exclude, is one whose stream carried no tool",
-        "activity this reader could parse -- never a claim that the lane ran no tools.",
+        "counts at all (--), other than one --vendor excluded entirely, is one whose stream carried",
+        "no tool activity this reader could parse -- never a claim that the lane ran no tools.",
     ];
 
     public static AuditLanesOptions Parse(IReadOnlyList<string> args)

@@ -121,7 +121,12 @@ public sealed class CodexDynamicToolPolicy
                     RequiredString(arguments, "path"), RequiredString(arguments, "content")),
                 RunCommandTool => await RunCommandAsync(
                     RequiredString(arguments, "command"), cancellationToken).ConfigureAwait(false),
-                _ => CodexDynamicToolResult.Refused(DescribeUnknownTool(toolName)),
+                // Not a refusal (#1921 re-review): each of the six implemented names has its own case
+                // above and does its own grant check there, so a tool a grant WITHHELD never reaches
+                // here. What reaches here is a name Baton implements nowhere — a hallucinated or stale
+                // one — which is a malformed call, the same population as an empty search query. No
+                // grant declined it because no grant offers it.
+                _ => CodexDynamicToolResult.Failed(DescribeUnknownTool(toolName)),
             };
         }
         catch (CodexGrantRefusedException ex)
@@ -681,8 +686,8 @@ public sealed record CodexDynamicToolResult(bool Success, string Text)
     /// <see cref="GrantRefusal"/> states and this file does not restate.
     /// <para>
     /// <b>The single funnel for every refusal on the codex path</b> — the six "this Baton role does not
-    /// grant …" arms, the command matcher's own verdict and the denied option token, the "not in this
-    /// role grant" fallthrough, and <c>ExecuteAsync</c>'s mapping of
+    /// grant …" arms, the command matcher's own verdict and the denied option token, and
+    /// <c>ExecuteAsync</c>'s mapping of
     /// <see cref="CodexGrantRefusedException"/> (outside the readable roots, outside the workspace root,
     /// escaping an output root, crossing a reparse point). Stamping here rather than at each of those
     /// call sites is what makes the next one impossible to add without the marker.
@@ -696,10 +701,12 @@ public sealed record CodexDynamicToolResult(bool Success, string Text)
     public static CodexDynamicToolResult Refused(string text) => new(false, GrantRefusal.Stamp(text));
 
     /// <summary>
-    /// A tool call the grant ALLOWED that did not succeed: a non-zero exit, the command timeout, a
-    /// missing file or directory, a malformed argument, an output name outside the worker contract, an
-    /// I/O error. Unsuccessful and <b>unmarked</b> — its payload is its reason, so it is neither a
-    /// refusal nor an empty result, and it must not be counted as either.
+    /// A tool call no grant decision answered, and that did not succeed: a non-zero exit, the command
+    /// timeout, a missing file or directory, a malformed argument, an output name outside the worker
+    /// contract, an I/O error, and the unknown-tool fallthrough — a name Baton implements nowhere, so
+    /// there is no grant that could have offered or withheld it. Unsuccessful and <b>unmarked</b> — its
+    /// payload is its reason, so it is neither a refusal nor an empty result, and it must not be counted
+    /// as either.
     /// </summary>
     public static CodexDynamicToolResult Failed(string text) => new(false, text);
 }

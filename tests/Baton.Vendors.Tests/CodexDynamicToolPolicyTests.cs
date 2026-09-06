@@ -279,6 +279,32 @@ public sealed class CodexDynamicToolPolicyTests
     }
 
     /// <summary>
+    /// The last arm of the funnel the refused/failed split did not re-examine (#1921 re-review): a tool
+    /// name Baton implements NOWHERE. Every implemented name has its own case with its own grant check,
+    /// so a tool a grant withheld never reaches the fallthrough — what reaches it is a hallucinated or
+    /// stale name, a malformed call rather than a decision any grant took. Paired with the withheld
+    /// <c>baton_write_text</c> on the same role, which is a real refusal, because an assertion that the
+    /// unknown tool is unmarked passes just as well on a build that stopped marking anything.
+    /// </summary>
+    [Fact]
+    public async Task An_unimplemented_tool_name_is_a_failure_and_a_withheld_implemented_one_is_a_refusal()
+    {
+        using var fixture = new PolicyFixture(new PermissionGrant(ReadFiles: true), ["report.md"]);
+
+        var unknown = await fixture.ExecuteAsync("apply_patch", new { path = "src/a.cs", content = "x" });
+        var withheld = await fixture.ExecuteAsync(
+            CodexDynamicToolPolicy.WriteTextTool, new { path = "src/a.cs", content = "x" });
+
+        Assert.False(unknown.Success);
+        Assert.DoesNotContain(GrantRefusal.Marker, unknown.Text);
+        Assert.Equal(0, RefusedStepsCountedFor(unknown));
+
+        Assert.False(withheld.Success);
+        Assert.Contains(GrantRefusal.Marker, withheld.Text);
+        Assert.Equal(1, RefusedStepsCountedFor(withheld));
+    }
+
+    /// <summary>
     /// The <c>item.completed</c> envelope <c>CodexAppServerBroker</c> writes for one result, counted by
     /// the parser a settle and <c>baton audit lanes</c> both read through.
     /// </summary>

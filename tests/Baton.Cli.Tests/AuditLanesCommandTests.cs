@@ -50,6 +50,17 @@ public sealed class AuditLanesCommandTests : IDisposable
     ];
 
     /// <summary>
+    /// A settled claude execution that ran no tool at all. Hand count: 0 steps, and NOT four zeros —
+    /// the all-four-or-none gate leaves every count null, which is the shape both uncounted-room
+    /// buckets are reached through.
+    /// </summary>
+    private static readonly string[] ProseOnlyStream =
+    [
+        """{"type":"assistant","message":{"content":[{"type":"text","text":"thinking"}]}}""",
+        """{"type":"result","subtype":"success","num_turns":1,"usage":{"input_tokens":9,"output_tokens":4}}""",
+    ];
+
+    /// <summary>
     /// agy room. Hand count: 2 terminal tool step_updates => 2 steps (the ACTIVE heartbeat is not one);
     /// 1 carrying the marker => 1 refused; two different parameter sets => 0 repeats; 0 empty.
     /// </summary>
@@ -146,6 +157,35 @@ public sealed class AuditLanesCommandTests : IDisposable
     }
 
     [Fact]
+    public async Task A_room_the_vendor_filter_only_partly_excluded_is_not_reported_as_excluded()
+    {
+        // The mixed room #1921's re-review named: a dispatch room running two vendors, where --vendor
+        // removed one execution and ADMITTED the other, whose stream carried nothing this reader could
+        // parse. The filter is not the explanation for this room -- an admitted execution was read and
+        // yielded nothing -- so it must not land in a bucket whose sentence says no execution was
+        // admitted. Routing it there told the operator to widen a filter that was never the cause.
+        await WriteRoomAsync(
+            "room-mixed", [("claude", ProseOnlyStream), ("codex", CodexStream)]);
+
+        var report = await BuildAsync(new AuditLanesOptions(Vendor: "claude", RoomsRoot: RoomsRoot));
+
+        Assert.Equal(1, report.RoomsWalked);
+        Assert.Empty(report.Rooms);
+        Assert.Equal(0, report.RoomsExcludedByVendor);
+        Assert.Equal(1, report.RoomsWithoutCounts);
+
+        // ...and the text view says the true cause rather than the filter.
+        using var output = new StringWriter();
+        await AuditLanesCommand.ExecuteAsync(
+            new AuditLanesOptions(Vendor: "claude", RoomsRoot: RoomsRoot), output,
+            cancellationToken: TestContext.Current.CancellationToken);
+
+        var text = output.ToString();
+        Assert.Contains("carried no tool activity this reader could parse", text);
+        Assert.DoesNotContain("ran no execution --vendor claude admitted", text);
+    }
+
+    [Fact]
     public async Task The_since_window_excludes_a_room_whose_journal_predates_it()
     {
         await WriteRoomAsync("room-old", "claude", ClaudeStream);
@@ -167,11 +207,7 @@ public sealed class AuditLanesCommandTests : IDisposable
     {
         // The polarity control for the whole report: a lane that only ever wrote prose must not appear
         // as a lane that ran zero tools, because that is the reading a zeroed row would support.
-        await WriteRoomAsync("room-prose", "claude",
-        [
-            """{"type":"assistant","message":{"content":[{"type":"text","text":"thinking"}]}}""",
-            """{"type":"result","subtype":"success","num_turns":1,"usage":{"input_tokens":9,"output_tokens":4}}""",
-        ]);
+        await WriteRoomAsync("room-prose", "claude", ProseOnlyStream);
 
         var report = await BuildAsync(new AuditLanesOptions(RoomsRoot: RoomsRoot));
 
@@ -219,40 +255,57 @@ public sealed class AuditLanesCommandTests : IDisposable
     private Task<AuditLanesReport> BuildAsync(AuditLanesOptions options) =>
         AuditLanesCommand.BuildReportAsync(options, DateTime.UtcNow, TestContext.Current.CancellationToken);
 
-    private async Task WriteRoomAsync(string roomName, string adapter, IReadOnlyList<string> streamLines)
+    private Task WriteRoomAsync(string roomName, string adapter, IReadOnlyList<string> streamLines) =>
+        WriteRoomAsync(roomName, [(adapter, streamLines)]);
+
+    /// <summary>
+    /// One room, one settled execution per entry — a real <c>flow.jsonl</c> and a real captured
+    /// <c>.stdout.log</c> each. More than one entry is how the mixed-vendor room is built: the two
+    /// executions share a journal, which is what makes <c>--vendor</c> a per-execution filter inside a
+    /// single walked room rather than a filter on rooms.
+    /// </summary>
+    private async Task WriteRoomAsync(
+        string roomName, IReadOnlyList<(string Adapter, IReadOnlyList<string> Stream)> executions)
     {
         var roomDirectoryPath = Path.Combine(RoomsRoot, roomName);
         Directory.CreateDirectory(roomDirectoryPath);
 
-        var id = new ExecutionId(Guid.NewGuid().ToString("N"));
+        var ids = executions.Select(_ => new ExecutionId(Guid.NewGuid().ToString("N"))).ToArray();
         await using (var writer = new FlowEventLogWriter(Path.Combine(roomDirectoryPath, BatonPaths.FlowLogFileName)))
         {
-            await writer.AppendAsync(
-                new FlowEvent.ExecutionRequestAccepted(new ExecutionRequest(
-                    id,
-                    new WorkflowId("wf-audit"),
-                    new StepId("implement"),
-                    "implement",
-                    Inputs: [],
-                    Outputs: [],
-                    Timeout: TimeSpan.FromSeconds(30),
-                    Environment: [],
-                    UpstreamExecutionIds: new Dictionary<StepId, ExecutionId>(),
-                    Adapter: adapter,
-                    Model: "m")),
-                TestContext.Current.CancellationToken);
-            await writer.AppendAsync(new CoreEvent.ExecutionStarted(id, Pid: 1), TestContext.Current.CancellationToken);
-            await writer.AppendAsync(
-                new CoreEvent.ExecutionExited(id, 0, CoreExitReason.Natural), TestContext.Current.CancellationToken);
-            await writer.AppendAsync(new FlowEvent.ExecutionSucceeded(id), TestContext.Current.CancellationToken);
+            for (var index = 0; index < executions.Count; index++)
+            {
+                var id = ids[index];
+                await writer.AppendAsync(
+                    new FlowEvent.ExecutionRequestAccepted(new ExecutionRequest(
+                        id,
+                        new WorkflowId("wf-audit"),
+                        new StepId($"implement-{index}"),
+                        "implement",
+                        Inputs: [],
+                        Outputs: [],
+                        Timeout: TimeSpan.FromSeconds(30),
+                        Environment: [],
+                        UpstreamExecutionIds: new Dictionary<StepId, ExecutionId>(),
+                        Adapter: executions[index].Adapter,
+                        Model: "m")),
+                    TestContext.Current.CancellationToken);
+                await writer.AppendAsync(new CoreEvent.ExecutionStarted(id, Pid: 1), TestContext.Current.CancellationToken);
+                await writer.AppendAsync(
+                    new CoreEvent.ExecutionExited(id, 0, CoreExitReason.Natural), TestContext.Current.CancellationToken);
+                await writer.AppendAsync(new FlowEvent.ExecutionSucceeded(id), TestContext.Current.CancellationToken);
+            }
         }
 
-        var outputDirectory = ArtifactManager.ResolveOutputDirectory(
-            Path.Combine(roomDirectoryPath, ArtifactManager.ArtifactsDirectoryName), id);
-        Directory.CreateDirectory(outputDirectory);
-        await File.WriteAllTextAsync(
-            Path.Combine(outputDirectory, ExecutionStreamLogger.StdoutLogFileName),
-            string.Join("\n", streamLines) + "\n",
-            TestContext.Current.CancellationToken);
+        for (var index = 0; index < executions.Count; index++)
+        {
+            var outputDirectory = ArtifactManager.ResolveOutputDirectory(
+                Path.Combine(roomDirectoryPath, ArtifactManager.ArtifactsDirectoryName), ids[index]);
+            Directory.CreateDirectory(outputDirectory);
+            await File.WriteAllTextAsync(
+                Path.Combine(outputDirectory, ExecutionStreamLogger.StdoutLogFileName),
+                string.Join("\n", executions[index].Stream) + "\n",
+                TestContext.Current.CancellationToken);
+        }
     }
 }

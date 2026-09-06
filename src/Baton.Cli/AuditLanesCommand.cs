@@ -45,17 +45,19 @@ public sealed record AuditLanesVendorTotal(
 /// fleet that shrank.
 /// </param>
 /// <param name="RoomsWithoutCounts">
-/// Rooms walked whose streams carried no tool activity this reader could parse — the honest denominator
-/// for <see cref="Rooms"/>, and never a claim that those lanes ran no tools.
+/// Rooms walked whose streams carried no tool activity this reader could parse, and never a claim that
+/// those lanes ran no tools. With <see cref="RoomsExcludedByVendor"/> it is the pair that accounts for
+/// the walk: every walked room is in <see cref="Rooms"/> or in exactly one of these two.
 /// </param>
 /// <param name="RoomsExcludedByVendor">
 /// Rooms walked that are absent from <see cref="Rooms"/> because <see cref="AuditLanesOptions.Vendor"/>
-/// removed their executions — the operator's own filter, not a stream this reader could not parse. Its
-/// own bucket because the two have opposite readings: this one says nothing about the room's stream, and
-/// counting it under <see cref="RoomsWithoutCounts"/> made the disclosure sentence false of every room a
-/// narrow <c>--vendor</c> excluded (#1921 review). A room some of whose executions the filter removed and
-/// the rest of whose executions carried no readable activity is counted HERE, because the filter is the
-/// explanation the operator can act on.
+/// removed <b>every</b> execution they had — the operator's own filter, not a stream this reader could
+/// not parse. Its own bucket because the two have opposite readings: this one says nothing about the
+/// room's stream, and counting it under <see cref="RoomsWithoutCounts"/> made the disclosure sentence
+/// false of every room a narrow <c>--vendor</c> excluded (#1921 review). A room the filter only PARTLY
+/// excluded is counted under <see cref="RoomsWithoutCounts"/> instead: the filter admitted an execution
+/// there, that execution's stream was read and yielded nothing, and so the filter is not the cause the
+/// operator can act on (#1921 re-review).
 /// </param>
 public sealed record AuditLanesReport(
     [property: JsonPropertyName("roomsWalked")] int RoomsWalked,
@@ -192,6 +194,7 @@ public static class AuditLanesCommand
             var repeated = 0;
             var emptyResults = 0;
             var excludedByVendor = 0;
+            var admittedByVendor = 0;
 
             foreach (var (executionId, usage) in usageByExecutionId)
             {
@@ -202,6 +205,8 @@ public static class AuditLanesCommand
                     excludedByVendor++;
                     continue;
                 }
+
+                admittedByVendor++;
 
                 // The all-four-or-none gate, read once. An execution whose stream carried no readable
                 // tool activity contributes nothing rather than four zeros, so a room's totals are a sum
@@ -224,10 +229,13 @@ public static class AuditLanesCommand
 
             if (executions == 0)
             {
-                // Which of the two buckets: the operator's filter is the explanation whenever it
-                // removed anything here, and only a room it removed nothing from is a room this reader
-                // found nothing in.
-                if (excludedByVendor > 0)
+                // Which of the two buckets: the filter is the explanation only for a room it removed
+                // EVERY execution from. A room it also admitted one from is a room whose admitted
+                // stream was read and yielded nothing — routing that here said the filter was the
+                // cause and pointed the operator at widening a filter that was never it (#1921
+                // re-review). The condition is "did the filter admit anything", not "did it remove
+                // anything", because the excluded bucket's disclosure claims the former.
+                if (excludedByVendor > 0 && admittedByVendor == 0)
                 {
                     roomsExcludedByVendor++;
                 }
@@ -390,8 +398,8 @@ public static class AuditLanesCommand
             output.WriteLine();
             output.WriteLine(
                 $"{Number(report.RoomsExcludedByVendor)} walked room(s) ran no execution --vendor "
-                + $"{options.Vendor} admitted. Nothing was read about those rooms' streams, and this is "
-                + "not a claim that they carried no tool activity.");
+                + $"{options.Vendor} admitted, so nothing above is a reading of their tool activity. "
+                + "Not a claim that they carried none.");
         }
     }
 

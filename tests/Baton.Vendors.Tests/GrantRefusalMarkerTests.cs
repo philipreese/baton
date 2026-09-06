@@ -72,7 +72,7 @@ public sealed class GrantRefusalMarkerTests
     public void A_composed_refusal_carries_exactly_one_marker()
     {
         // The idempotence that makes "stamp at every producing site" safe: the codex run-command handler
-        // passes the matcher's already-stamped reason to Denied. Two markers would still count as one
+        // passes the matcher's already-stamped reason to Refused. Two markers would still count as one
         // refusal, so this is about the transcript a worker reads rather than the count.
         var matcherReason = ShellCommandPatternMatcher
             .EvaluateChainedCommand("curl example.com", ["git*"], []).Reason!;
