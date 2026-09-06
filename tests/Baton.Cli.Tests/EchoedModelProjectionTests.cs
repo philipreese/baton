@@ -37,11 +37,10 @@ public sealed class EchoedModelProjectionTests
     [Fact]
     public void Claude_system_init_is_not_read_as_an_echo_because_it_only_repeats_the_request()
     {
-        // The polarity arm for the one discrimination this feature exists on. `system:init` echoes the
-        // --model string VERBATIM even for an id that then fails to run (docs/vendor-doc-audit.md §5),
-        // so a reader that accepted it would report a model that never ran -- the exact substitution
-        // this field is supposed to expose. Same stream shape as the arm above minus the two events
-        // that DO carry a resolution: the field must be absent, not "claude-bogus-nonexistent-zzz".
+        // The polarity arm for the one discrimination this feature exists on --
+        // ClaudeUsageParser.TryParseEchoedModel states why init is refused. Same stream shape as the
+        // arm above minus the two events that DO carry a resolution, and the id here is a bogus one:
+        // the field must come back absent, never "claude-bogus-nonexistent-zzz".
         var view = ProjectSingle(
             "claude",
             """{"type":"system","subtype":"init","session_id":"s-1","model":"claude-bogus-nonexistent-zzz"}""",
@@ -54,8 +53,8 @@ public sealed class EchoedModelProjectionTests
     [Fact]
     public void Codex_turn_completed_model_outranks_the_threads_opening_claim()
     {
-        // Both events are read, and the LAST one wins -- a substitution announced on the terminal event
-        // is the reading worth having, so it must not be shadowed by what the thread opened with.
+        // Both events are read; the projector's last-wins scan is what makes the terminal answer beat
+        // the opening one, and this arm is what would catch that scan being reversed.
         var view = ProjectSingle(
             "codex",
             """{"type":"thread.started","thread_id":"t-1","model":"gpt-6-astra"}""",
@@ -68,8 +67,8 @@ public sealed class EchoedModelProjectionTests
     [Fact]
     public void Agy_streams_leave_the_echoed_model_absent_from_the_serialized_view_rather_than_blank()
     {
-        // agy's stream carries no `model` key on any event (measured, #1927), so this vendor has
-        // nothing to echo. Asserted on the SERIALIZED shape rather than only on the property: the
+        // This vendor has nothing to echo -- AgyUsageParser's own doc has the measurement. Asserted on
+        // the SERIALIZED shape rather than only on the property: the
         // acceptance wording is "absent, not blank", and only the wire form discriminates an omitted
         // key from an empty string a consumer would render as a model.
         var view = ProjectSingle(
