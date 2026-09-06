@@ -22,9 +22,9 @@ public sealed record ProjectionTarget(
 /// than a gap: <c>MemoryRootPath</c>'s remarks show the encoding is lossy in the decode direction
 /// (<c>\</c> and <c>-</c> both become <c>-</c>), which means minting one would be asserting a mapping
 /// nothing on the machine can confirm. What <c>baton memory sync</c> does instead is run the same
-/// discovery <c>baton memory audit</c> runs, keep the roots that resolve to the repository being
-/// synced, and write into those. What happens when that search comes back empty — and why it is not a
-/// case for constructing one — is spec/baton.md §12's ruling.
+/// discovery <c>baton memory audit</c> runs and keep whichever of its answers already belong to the
+/// subject in hand. What happens when that search comes back empty — and why it is not a case for
+/// constructing one — is spec/baton.md §12's ruling.
 /// </para>
 /// <para>
 /// <b>One file, owned outright, and not the vendor's index.</b> Baton writes exactly
