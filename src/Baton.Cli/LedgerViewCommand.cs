@@ -319,7 +319,19 @@ public static class LedgerViewCommand
         var builder = new StringBuilder();
         builder.Append(row.EndedAt is { } endedAt ? Instant(endedAt) : "(no endedAt)".PadRight(20));
         builder.Append("  ").Append(row.Adapter ?? LedgerRollup.UnknownVendor);
+        // #1927: what was asked for, and -- only when they DISAGREE -- what the vendor said it ran.
+        // A mismatch is a substitution or a quota-driven downgrade, and it is invisible in either
+        // field alone; printing the echo unconditionally would bury the one reading worth spotting
+        // under a duplicate on every other row. `-> <echo>` renders when the two differ, and when the
+        // requested model is absent altogether but an echo exists (a room dispatched with no --model
+        // against a binding too old to carry a resolved stamp).
         builder.Append("  ").Append(row.Model ?? "-");
+        if (row.ModelEchoed is { Length: > 0 } echoed
+            && !string.Equals(echoed, row.Model, StringComparison.OrdinalIgnoreCase))
+        {
+            builder.Append(" -> ").Append(echoed);
+        }
+
         builder.Append("  ").Append(row.Role ?? "-");
         builder.Append("  ").Append(row.Outcome ?? "-");
         builder.Append("  in ").Append(Tokens(row.TokensIn));

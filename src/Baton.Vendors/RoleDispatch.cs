@@ -186,6 +186,30 @@ public static class RoleDispatch
             : vendorSwapped ? null
             : role.Effort;
 
+        // #1927: what this binding will actually run on, for the render surfaces -- NOT for the CLI.
+        // `model`/`effort` above are the dispatch inputs and are deliberately untouched here: the
+        // measured gap was a room showing a bare "AGY" on the glass, which is a display problem, and
+        // stamping a default onto `model` would instead change which argv the vendor is handed.
+        //
+        // The rungs, model: what was asked for, then the role's tier, then the vendor's measured CLI
+        // default. A vendor swap drops the tier's model above (that comment states why), which is
+        // exactly the dispatch shape -- `--adapter agy` with no `--model` -- that produced the bare
+        // vendor, so the adapter-default rung is what closes it. All three silent means null, never a
+        // guess.
+        var (modelResolved, modelSource) =
+            !string.IsNullOrWhiteSpace(modelOverride) ? (modelOverride, BindingValueSource.Requested)
+            : model is { Length: > 0 } ? (model, BindingValueSource.ResolvedDefault)
+            : Domain.AdapterDefaultModels.For(adapter) is { Length: > 0 } adapterDefault
+                ? (adapterDefault, BindingValueSource.ResolvedDefault)
+                : ((string?)null, (string?)null);
+
+        // Effort has no adapter-default rung -- see EffortResolved's own doc for why nothing here
+        // invents one.
+        var (effortResolved, effortSource) =
+            !string.IsNullOrWhiteSpace(effortOverride) ? (effortOverride, BindingValueSource.Requested)
+            : effort is { Length: > 0 } ? (effort, BindingValueSource.ResolvedDefault)
+            : ((string?)null, (string?)null);
+
         var grant = role.Grant;
         var grantAuditMode = GrantAuditMode.Enforced;
 
@@ -253,7 +277,12 @@ public static class RoleDispatch
             // #1802: purely catalog-controlled, like DeliversBranch -- no dispatch-time override exists.
             AllowsSubagents: role.AllowsSubagents,
             // #1151: the NAMES, already proven resolvable and grant-satisfiable above.
-            Skills: resolvedSkills.Count == 0 ? null : resolvedSkills.Select(s => s.Name).ToList());
+            Skills: resolvedSkills.Count == 0 ? null : resolvedSkills.Select(s => s.Name).ToList(),
+            // #1927: display-only, resolved just above.
+            ModelResolved: modelResolved,
+            ModelSource: modelSource,
+            EffortResolved: effortResolved,
+            EffortSource: effortSource);
     }
 
     /// <summary>

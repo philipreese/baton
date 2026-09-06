@@ -91,6 +91,14 @@ public static partial class CostLedgerStore
     /// a guessed source would be indistinguishable from a measured one, and
     /// <see cref="CostLedgerEntry.IdentitySource"/>'s own doc states what an absent value means.
     /// </param>
+    /// <param name="modelResolvedByWorker">
+    /// #1927: worker name to the model dispatch RESOLVED for that worker when the dispatcher named
+    /// none, off the same <c>bindings.json</c> parse <paramref name="labelByWorker"/> comes from
+    /// (<c>Baton.Cli.RoomBindingStamps</c>). Consulted only where the accepted request carried no
+    /// model — a requested model always wins, so this can never restate a row's intent as something
+    /// else. Null everywhere but the settle site, which leaves such a row's <c>model</c> absent exactly
+    /// as it was before.
+    /// </param>
     public static IReadOnlyList<CostLedgerEntry> BuildEntries(
         IReadOnlyList<LogEntry> entries,
         string roomDirectoryPath,
@@ -100,7 +108,8 @@ public static partial class CostLedgerStore
         IReadOnlyDictionary<string, string>? runwayOverrideReasonByWorker = null,
         IReadOnlyDictionary<string, WorkspaceDelivery>? deliveryByWorker = null,
         IReadOnlyDictionary<string, string>? labelByWorker = null,
-        RepositoryIdentitySource? identitySource = null)
+        RepositoryIdentitySource? identitySource = null,
+        IReadOnlyDictionary<string, string>? modelResolvedByWorker = null)
     {
         ArgumentNullException.ThrowIfNull(entries);
         ArgumentException.ThrowIfNullOrEmpty(roomDirectoryPath);
@@ -189,8 +198,19 @@ public static partial class CostLedgerStore
                 CacheCreation: usage.CacheCreationTokens,
                 Thinking: usage.ThinkingTokens);
 
+            // #1927: the requested model, else what dispatch resolved for this row's worker. The
+            // fallback is reached ONLY when the accepted request named none, so intent is never
+            // overwritten -- and it is applied before pricing on purpose: a resolved model is the model
+            // the tokens were actually billed at, so withholding it from Estimate would keep pricing a
+            // room the vendor could price.
+            var resolvedModel = binding.Model
+                ?? (request?.Worker is { } modelWorker && modelResolvedByWorker is not null
+                    && modelResolvedByWorker.TryGetValue(modelWorker, out var stampedModel)
+                        ? stampedModel
+                        : null);
+
             var (apiUsd, apiStatus, planUsd, planStatus, estimateReason) =
-                Estimate(catalog, planFactors, binding.Adapter, binding.Model, tokens, usage.ModelsObserved, pricedAt);
+                Estimate(catalog, planFactors, binding.Adapter, resolvedModel, tokens, usage.ModelsObserved, pricedAt);
 
             var unavailableReason = usage.BilledReconciliationUnavailable;
             var completeness = ResolveCompleteness(unavailableReason, usage.BilledTokens);
@@ -222,7 +242,7 @@ public static partial class CostLedgerStore
                 Execution: executionId,
                 Role: request?.Worker,
                 Adapter: binding.Adapter,
-                Model: binding.Model,
+                Model: resolvedModel,
                 // #1927: what the vendor said it RAN, beside what was asked for. The two are recorded
                 // separately and never merged -- a row where they differ is a substitution or a
                 // quota-driven downgrade, and collapsing them would erase exactly that reading.

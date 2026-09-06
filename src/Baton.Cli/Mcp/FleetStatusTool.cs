@@ -304,8 +304,7 @@ public sealed class FleetStatusTool : IMcpTool
             // already covered the label alone.
             var terminalBindings = await TryLoadBindingsAsync(roomDir, cancellationToken).ConfigureAwait(false);
             var terminalBinding = ConductorRoomDetector.TryResolveSoleBinding(terminalBindings);
-            var (terminalRole, terminalAdapter, terminalModel, terminalEffort, terminalTimeoutMs) =
-                ProjectBindingFields(terminalBinding);
+            var terminalFields = ProjectBindingFields(terminalBinding);
             var terminalLineage = await TryReadLineageAsync(roomDir, cancellationToken).ConfigureAwait(false);
 
             return new FleetRoomStatusView(
@@ -318,11 +317,13 @@ public sealed class FleetStatusTool : IMcpTool
                 Try: sentinel.Try,
                 Rejected: sentinel.Rejected,
                 ResolvedBy: sentinel.ResolvedBy,
-                Role: terminalRole,
-                Adapter: terminalAdapter,
-                Model: terminalModel,
-                Effort: terminalEffort,
-                TimeoutMs: terminalTimeoutMs,
+                Role: terminalFields.Role,
+                Adapter: terminalFields.Adapter,
+                Model: terminalFields.Model,
+                Effort: terminalFields.Effort,
+                TimeoutMs: terminalFields.TimeoutMs,
+                ModelSource: terminalFields.ModelSource,
+                EffortSource: terminalFields.EffortSource,
                 Label: ExtractRoomLabel(terminalBindings),
                 Workstream: ExtractRoomWorkstream(terminalBindings),
                 ParentRoomPath: terminalLineage.ParentRoomDirectoryPath,
@@ -339,7 +340,7 @@ public sealed class FleetStatusTool : IMcpTool
         {
             var bindings = await TryLoadBindingsAsync(roomDir, cancellationToken).ConfigureAwait(false);
             var soleBinding = ConductorRoomDetector.TryResolveSoleBinding(bindings);
-            var (role, adapter, model, effort, timeoutMs) = ProjectBindingFields(soleBinding);
+            var (role, adapter, model, effort, timeoutMs, modelSource, effortSource) = ProjectBindingFields(soleBinding);
             if (string.Equals(role, "conductor", StringComparison.OrdinalIgnoreCase) ||
                 string.Equals(roomName, "conductor", StringComparison.OrdinalIgnoreCase))
             {
@@ -351,6 +352,8 @@ public sealed class FleetStatusTool : IMcpTool
                     Model: model,
                     Effort: effort,
                     TimeoutMs: timeoutMs,
+                    ModelSource: modelSource,
+                    EffortSource: effortSource,
                     Label: ExtractRoomLabel(bindings),
                     Workstream: ExtractRoomWorkstream(bindings),
                     Runway: ExtractRoomRunway(bindings));
@@ -445,7 +448,7 @@ public sealed class FleetStatusTool : IMcpTool
 
             var bindings = await TryLoadBindingsAsync(roomDir, cancellationToken).ConfigureAwait(false);
             var binding = TryResolveRunningBinding(bindings, steps, events);
-            var (role, adapter, model, effort, timeoutMs) = ProjectBindingFields(binding);
+            var (role, adapter, model, effort, timeoutMs, modelSource, effortSource) = ProjectBindingFields(binding);
             var lineage = await TryReadLineageAsync(roomDir, cancellationToken).ConfigureAwait(false);
 
             // #1513: the ledger's own `Running` (WorkflowOutcome.Describe/DeriveWorkflowStatus) means
@@ -476,6 +479,8 @@ public sealed class FleetStatusTool : IMcpTool
                 Model: model,
                 Effort: effort,
                 TimeoutMs: timeoutMs,
+                ModelSource: modelSource,
+                EffortSource: effortSource,
                 Label: ExtractRoomLabel(bindings),
                 Workstream: ExtractRoomWorkstream(bindings),
                 ParentRoomPath: lineage.ParentRoomDirectoryPath,
@@ -643,22 +648,44 @@ public sealed class FleetStatusTool : IMcpTool
     /// request to prefer, so its Adapter/Model always come from the pair itself (spec/baton.md §6
     /// schema).
     /// </summary>
-    private static (string? Role, string? Adapter, string? Model, string? Effort, long? TimeoutMs) ProjectBindingFields(
+    private static BindingFields ProjectBindingFields(
         (string Role, WorkerBindingConfigEntry Entry)? binding,
         ExecutionRequest? recordedRequest = null) =>
         binding is { } resolved
-            ? (resolved.Role,
+            ? new BindingFields(
+               resolved.Role,
                recordedRequest?.Adapter ?? resolved.Entry.Adapter,
-               recordedRequest?.Model ?? resolved.Entry.Model,
-               resolved.Entry.Effort,
-               (long?)resolved.Entry.Timeout.TotalMilliseconds)
-            : (null, null, null, null, null);
+               // #1927: the requested model still wins -- what an operator asked for is what they
+               // should see. ModelResolved is the LAST rung, reached only when nobody asked, which is
+               // precisely the dispatch that used to render a bare vendor here.
+               recordedRequest?.Model ?? resolved.Entry.Model ?? resolved.Entry.ModelResolved,
+               resolved.Entry.Effort ?? resolved.Entry.EffortResolved,
+               (long?)resolved.Entry.Timeout.TotalMilliseconds,
+               // The stamp travels verbatim, absent and all: a hand-authored bindings.json (baton
+               // run/resume) carries no source, and a surface must render "no mark" for that rather
+               // than asserting the value was requested.
+               resolved.Entry.ModelSource,
+               resolved.Entry.EffortSource)
+            : new BindingFields(null, null, null, null, null, null, null);
 
-    private static (string? Role, string? Adapter, string? Model, string? Effort, long? TimeoutMs) ProjectBindingFields(
+    private static BindingFields ProjectBindingFields(
         (string Role, WorkerBindingConfigEntry Entry, ExecutionRequest Request)? binding) =>
         binding is { } resolved
             ? ProjectBindingFields((resolved.Role, resolved.Entry), resolved.Request)
-            : (null, null, null, null, null);
+            : new BindingFields(null, null, null, null, null, null, null);
+
+    /// <summary>
+    /// What <see cref="ProjectBindingFields"/> yields — a named record rather than a tuple since #1927
+    /// took it past five members, where positional destructuring stops being readable at the call site.
+    /// </summary>
+    private sealed record BindingFields(
+        string? Role,
+        string? Adapter,
+        string? Model,
+        string? Effort,
+        long? TimeoutMs,
+        string? ModelSource,
+        string? EffortSource);
 
     /// <summary>
     /// Extracts a room's <c>--label</c> (#1499) off its loaded <c>bindings.json</c> dictionary.
@@ -790,7 +817,19 @@ public sealed record FleetRoomStatusView(
     // projection (#1557) serializes through this same record, which is how the glass gets it.
     [property: JsonPropertyName("runway")]
     [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
-    IReadOnlyList<RunwayAdmissionView>? Runway = null);
+    IReadOnlyList<RunwayAdmissionView>? Runway = null,
+    // #1927: which rung produced `model`/`effort` above -- WorkerBindingConfigEntry.ModelSource /
+    // EffortSource, carried verbatim off the same bindings.json read. Two values only
+    // (Baton.Vendors.BindingValueSource); a render surface marks `resolved-default` so an operator can
+    // tell what they asked for from what the room fell back to. ABSENT means the binding recorded no
+    // source -- a hand-authored bindings.json, or a room dispatched before this shipped -- and a
+    // surface renders no mark for that rather than asserting the value was requested.
+    [property: JsonPropertyName("modelSource")]
+    [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    string? ModelSource = null,
+    [property: JsonPropertyName("effortSource")]
+    [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    string? EffortSource = null);
 
 /// <summary>
 /// Status of a single workflow step within a fleet room status report.

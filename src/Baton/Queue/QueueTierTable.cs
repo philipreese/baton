@@ -41,13 +41,14 @@ public static class QueueTierTable
             ["review-docs"] = new() { Adapter = "codex", Model = "gpt-5.6-sol", Effort = "high" },
         };
 
-    /// <summary>The shipped per-adapter fallback model — today just agy's, which has no model in any
-    /// tier above because no tier routes to it by default.</summary>
-    public static readonly IReadOnlyDictionary<string, string> ShippedAdapterDefaultModels =
-        new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase)
-        {
-            ["agy"] = "gemini-3.8-flash-high",
-        };
+    /// <summary>
+    /// The shipped per-adapter fallback model, for an item whose tier names none. Since #1927 this is
+    /// <see cref="Domain.AdapterDefaultModels.Shipped"/> itself rather than a second copy of it — the
+    /// bind-time resolution needs the same answer, and the value sat in two places for exactly as long
+    /// as it took someone to look. That type's own doc carries each entry's provenance and why an
+    /// unmeasured adapter is absent rather than guessed.
+    /// </summary>
+    public static IReadOnlyDictionary<string, string> ShippedAdapterDefaultModels => Domain.AdapterDefaultModels.Shipped;
 
     /// <summary>The review role, whose tier keys carry the <c>review-</c> prefix and whose live
     /// weight is zero (<see cref="QueueWeights"/>).</summary>
