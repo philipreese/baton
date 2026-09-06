@@ -5867,6 +5867,18 @@ and each is closed where the fact exists:
   unconditional, because an unprojectable room is exactly the one that would otherwise wedge its item
   in `launched` forever.
 
+  **A ledger that is HELD is not one that is corrupt (#1951).** The two arrive at this path as the
+  same failed read and have opposite remedies: a sharing violation means somebody else has the file
+  open *right now* — usually a sibling command mid-append — and the room becomes projectable the
+  moment they let go, while a truncated ledger or a malformed snapshot reads the same a minute later
+  as it does now. So the held case is re-read on a **short bounded backoff** before it degrades, and
+  the corrupt or absent case degrades on sight; either way the bare sentinel's `error` names **which
+  of the two** produced it, because "no steps or outputs" with no reason beside it is the one record
+  an operator cannot act on. This is a re-read inside one fault record, bounded in seconds and taken
+  once — not the item-level retry this section rules out above, which stays an operator verb. The
+  bound is deliberately short: a live `baton run` engine holds its room's ledger for the whole run,
+  and no bound here outwaits that. Resolving the item is what matters, and it resolves either way.
+
   Keeping a mid-lane `Running` step is safe at both readers that key on one, and each for its own
   reason. The live-weight tally behind `MaxLiveWeight` skips any room carrying a sentinel at all
   (`includeTerminal: false`), so a settled lane cannot hold the queue's own cap open. The fleet

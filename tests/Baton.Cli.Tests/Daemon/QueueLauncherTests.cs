@@ -199,6 +199,162 @@ public sealed class QueueLauncherTests : IDisposable
     }
 
     /// <summary>
+    /// #1951, the arm the retry exists for: a ledger held only for a moment — a sibling command
+    /// mid-append — is projected once the holder lets go, rather than degrading to a bare sentinel that
+    /// erases what the lane did. Its polarity arm is the never-released test below; alone, this one
+    /// would pass with no retry at all if the release happened to land first, which is why the two are
+    /// read together.
+    /// <para>
+    /// The hold is a Windows <see cref="FileShare"/> fact — see <see cref="FlowJournalHeldException"/>'s
+    /// own doc for why it is not one on Unix — and this suite runs only there (#1405), the same reason
+    /// <c>TerminalSentinelEndToEndTests</c>' held arm is unconditional.
+    /// </para>
+    /// </summary>
+    [Fact]
+    public async Task A_lane_whose_ledger_is_momentarily_held_is_projected_once_the_holder_releases()
+    {
+        var root = CreateTempRoot();
+        try
+        {
+            var room = await RunTwoStepRoomAsync(root);
+            var ledgerPath = Path.Combine(room, "flow.jsonl");
+            var holder = new FileStream(ledgerPath, FileMode.Open, FileAccess.ReadWrite, FileShare.None);
+            try
+            {
+                // The control that makes the assertions below about THIS hold: while the handle is open,
+                // the read the projection makes is the one that fails, and fails as held.
+                await Assert.ThrowsAsync<FlowJournalHeldException>(
+                    () => new FlowEventLogReader(ledgerPath).ReadAllEntriesWithTimestampsAsync(Ct));
+
+                var release = Task.Run(
+                    async () =>
+                    {
+                        await Task.Delay(TimeSpan.FromMilliseconds(250), Ct);
+                        await holder.DisposeAsync();
+                    },
+                    Ct);
+
+                // A bound of its own rather than the production one: the release lands on the machine's
+                // timing, so the wait has to outlast it by a margin no default needs to carry.
+                await QueueLauncher.RecordPostLaunchFaultAsync(
+                    "t6", room, "the pump threw BatonFlowException",
+                    heldAttempts: 60, heldRetryDelay: TimeSpan.FromMilliseconds(100));
+                await release;
+            }
+            finally
+            {
+                await holder.DisposeAsync();
+            }
+
+            var sentinel = await TerminalSentinelWriter.TryReadAsync(room, Ct);
+            Assert.NotNull(sentinel);
+            Assert.Equal(WorkflowOutcome.Failed, sentinel.State);
+
+            // The room's own record survived the hold: this is the projected sentinel, not the bare one.
+            Assert.Equal(["a", "b"], sentinel.Steps.Select(step => step.Id).Order().ToArray());
+            Assert.DoesNotContain("carries no steps or outputs", sentinel.Error!, StringComparison.Ordinal);
+            Assert.DoesNotContain("held open", sentinel.Error!, StringComparison.Ordinal);
+        }
+        finally
+        {
+            DirectoryCleanup.DeleteRecursively(root);
+        }
+    }
+
+    /// <summary>
+    /// #1951's polarity arm: a ledger nobody releases — a live <c>baton run</c> engine holding it for
+    /// its whole run — degrades after the bound rather than retrying forever, and the bare sentinel says
+    /// the hold is what produced it. Without this arm the test above proves nothing about the retry.
+    /// </summary>
+    [Fact]
+    public async Task A_lane_whose_ledger_stays_held_degrades_to_a_bare_sentinel_that_names_the_hold()
+    {
+        var root = CreateTempRoot();
+        try
+        {
+            var room = await RunTwoStepRoomAsync(root);
+            using var holder = new FileStream(
+                Path.Combine(room, "flow.jsonl"), FileMode.Open, FileAccess.ReadWrite, FileShare.None);
+
+            var elapsed = System.Diagnostics.Stopwatch.StartNew();
+            await QueueLauncher.RecordPostLaunchFaultAsync(
+                "t7", room, "the pump threw BatonFlowException",
+                heldAttempts: 3, heldRetryDelay: TimeSpan.FromMilliseconds(120));
+            elapsed.Stop();
+
+            // Three attempts means two pauses were actually taken — a single attempt would return in
+            // milliseconds, so this is what says the held case was retried rather than degraded on sight.
+            Assert.True(
+                elapsed.Elapsed >= TimeSpan.FromMilliseconds(200),
+                $"the held projection returned in {elapsed.ElapsedMilliseconds}ms, too fast to have retried");
+
+            var sentinel = await TerminalSentinelWriter.TryReadAsync(room, Ct);
+            Assert.NotNull(sentinel);
+            Assert.Equal(WorkflowOutcome.Failed, sentinel.State);
+            Assert.Empty(sentinel.Steps);
+
+            // Which of the two degradations produced this record, on the record itself.
+            Assert.Contains("held open by another process", sentinel.Error!, StringComparison.Ordinal);
+            Assert.Contains("still held after 3 attempt", sentinel.Error!, StringComparison.Ordinal);
+
+            // Degraded is still resolved: the item does not stay launched because the ledger was busy.
+            Assert.Equal(QueueItemState.Failed, QueueSchedulerService.ClassifyTerminal(sentinel, room).State);
+        }
+        finally
+        {
+            DirectoryCleanup.DeleteRecursively(root);
+        }
+    }
+
+    /// <summary>
+    /// #1951's other half: a room whose snapshot is corrupt is not something waiting helps, so it
+    /// degrades on the first read — and the reason reaches the file a reader actually gets, both the
+    /// sentinel bytes <c>fleet_status</c> returns verbatim and the item error the queue records.
+    /// </summary>
+    [Fact]
+    public async Task A_room_with_a_corrupt_snapshot_degrades_without_retrying_and_the_record_on_disk_says_why()
+    {
+        var root = CreateTempRoot();
+        try
+        {
+            var room = await RunTwoStepRoomAsync(root);
+            await File.WriteAllTextAsync(Path.Combine(room, "snapshot.json"), "{ this is not a snapshot", Ct);
+
+            // A retry bound no corrupt room may pay: retried even once, this call would take five
+            // seconds, and all three attempts would take fifteen.
+            var elapsed = System.Diagnostics.Stopwatch.StartNew();
+            await QueueLauncher.RecordPostLaunchFaultAsync(
+                "t8", room, "the pump threw BatonFlowException",
+                heldAttempts: 3, heldRetryDelay: TimeSpan.FromSeconds(5));
+            elapsed.Stop();
+            Assert.True(
+                elapsed.Elapsed < TimeSpan.FromSeconds(4),
+                $"the corrupt room took {elapsed.ElapsedMilliseconds}ms, so it was retried like a held one");
+
+            var sentinel = await TerminalSentinelWriter.TryReadAsync(room, Ct);
+            Assert.NotNull(sentinel);
+            Assert.Equal(WorkflowOutcome.Failed, sentinel.State);
+            Assert.Empty(sentinel.Steps);
+            Assert.Contains("could not be read", sentinel.Error!, StringComparison.Ordinal);
+            Assert.DoesNotContain("held open", sentinel.Error!, StringComparison.Ordinal);
+
+            // Read back off the bytes, not just the parse: fleet_status's fast path returns this file.
+            var onDisk = JsonSerializer.Deserialize<WorkflowStatusView>(
+                await File.ReadAllTextAsync(Path.Combine(room, "terminal.json"), Ct));
+            Assert.Contains("could not be read", onDisk!.Error!, StringComparison.Ordinal);
+
+            // ...and it survives the classifier, so the reason lands on the queued item too.
+            var classified = QueueSchedulerService.ClassifyTerminal(onDisk, room);
+            Assert.Equal(QueueItemState.Failed, classified.State);
+            Assert.Contains("could not be read", classified.Error!, StringComparison.Ordinal);
+        }
+        finally
+        {
+            DirectoryCleanup.DeleteRecursively(root);
+        }
+    }
+
+    /// <summary>
     /// Round 2's LOW: a pump whose <see cref="OperationCanceledException"/> escapes ends
     /// <see cref="TaskStatus.Canceled"/>, not faulted. The old <c>IsFaulted</c>-only gate sent it to the
     /// settle branch, where <c>completed.Result</c> throws unobserved and the item wedges in
