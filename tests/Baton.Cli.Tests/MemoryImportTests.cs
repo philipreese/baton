@@ -133,10 +133,22 @@ public sealed class MemoryImportTests : IDisposable
         !Directory.Exists(directory)
             ? new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase)
             : Directory.EnumerateFiles(directory, "*", SearchOption.AllDirectories)
-            .ToDictionary(
-                p => p,
-                p => Convert.ToHexString(SHA256.HashData(File.ReadAllBytes(p))),
-                StringComparer.OrdinalIgnoreCase);
+            .ToDictionary(p => p, Digest, StringComparer.OrdinalIgnoreCase);
+
+    /// <summary>One file's SHA-256, for the arms whose claim is about a single file's bytes.</summary>
+    private static string Digest(string filePath) =>
+        Convert.ToHexString(SHA256.HashData(File.ReadAllBytes(filePath)));
+
+    /// <summary>
+    /// The manifest a run wrote, read out of the run's own report rather than by listing the imports
+    /// directory: manifest file names are stamped to the millisecond, so picking "the newest file"
+    /// would silently pair an undo with the wrong import if two runs ever landed in one tick.
+    /// </summary>
+    private static string ManifestPathFrom(string output) =>
+        output
+            .Split('\n')
+            .Single(line => line.StartsWith("Manifest: ", StringComparison.Ordinal))["Manifest: ".Length..]
+            .Trim();
 
     // ---------------------------------------------------------------------------------------------
     // The acceptance lines.
@@ -489,6 +501,106 @@ public sealed class MemoryImportTests : IDisposable
         Assert.Equal(1, againCode);
         Assert.Contains("INCOMPLETE", againText, StringComparison.Ordinal);
         Assert.Contains("expected 3, removed 0", againText, StringComparison.Ordinal);
+    }
+
+    /// <summary>
+    /// #1947: an undo removes exactly the supersession rows ITS import appended — an earlier import's
+    /// link survives it — and a manifest that appended no link at all leaves <c>links.jsonl</c>
+    /// byte-identical.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// The discriminating shape is a links file holding TWO rows recorded by two different imports,
+    /// undone through the manifest of the second. Run 2 is deliberately unfiltered so its manifest
+    /// carries the earlier link as <c>alreadyPresent</c> beside the one it appended: that is what makes
+    /// <c>ImportManifest.AppendedLinks</c>'s filter load-bearing, and an undo iterating <c>Links</c>
+    /// instead would tear out an earlier import's link while still passing any single-link test. The
+    /// manifest's own shape is asserted first, because without that already-present row the removal
+    /// arm below would be measuring nothing.
+    /// </para>
+    /// <para>
+    /// The control is the other polarity, and carries a positive control of its own: the run appends
+    /// entries and no link, its undo exits 0 with no INCOMPLETE line, and the entries it appended are
+    /// gone from the store afterwards — so "<c>links.jsonl</c> is byte-identical" is a statement about
+    /// a real undo rather than about one that did nothing. It runs while the links file already holds
+    /// a row, because a digest of an absent file compared to an absent file asserts nothing.
+    /// </para>
+    /// </remarks>
+    [Fact]
+    public async Task An_undo_removes_only_the_supersession_links_its_own_import_appended()
+    {
+        const string repository = "github.com/philipreese/baton";
+        await BuildStandardFixtureAsync();
+        var archivedWho = WriteArchivedRoot("c--baton-memory", ("user_who.md", "the older who"));
+        var archivedPlan = WriteArchivedRoot("c--plan-memory", ("project_plan.md", "an older plan"));
+
+        // Run 1: the live roots plus the first archive -- link A, from an import that is never undone.
+        var first = await RunAsync(
+            "--assert", $"{archivedWho}={repository}", "--asserted-by", "the-test");
+        Assert.Contains("Supersession links: 1   recorded: 1", first, StringComparison.Ordinal);
+        var linkA = Assert.Single(await LinksAsync(repository));
+
+        // Run 2: the second archive as well. Unfiltered, so link A is recomputed and lands in this
+        // manifest marked already-present -- the row the undo must leave alone.
+        var second = await RunAsync(
+            "--assert", $"{archivedWho}={repository}",
+            "--assert", $"{archivedPlan}={repository}",
+            "--asserted-by", "the-test");
+        Assert.Contains(
+            "Supersession links: 2   recorded: 1   already recorded: 1", second, StringComparison.Ordinal);
+
+        var manifestPath = ManifestPathFrom(second);
+        var manifest = ImportManifest.Read(manifestPath);
+        Assert.Equal(2, (manifest.Links ?? []).Count);
+        Assert.Equal(linkA.Id, Assert.Single(manifest.Links!, l => l.AlreadyPresent).LinkId);
+        var linkB = Assert.Single(manifest.AppendedLinks);
+        Assert.Equal(2, (await LinksAsync(repository)).Count);
+
+        var undone = await RunAsync("--undo", manifestPath);
+        Assert.DoesNotContain("INCOMPLETE", undone, StringComparison.Ordinal);
+
+        // Exactly one row removed, and it is link B: link A is still there, whole and unchanged. The
+        // file is read before the report line is, so this is what goes red on an undo that removed the
+        // wrong row rather than a report that miscounted a correct one.
+        var remaining = Assert.Single(await LinksAsync(repository));
+        Assert.Equal(linkA.Id, remaining.Id);
+        Assert.Equal(linkA.SupersedingId, remaining.SupersedingId);
+        Assert.Equal(linkA.SupersededId, remaining.SupersededId);
+        Assert.NotEqual(linkB.LinkId, remaining.Id);
+        Assert.Contains("1 supersession link(s)", undone, StringComparison.Ordinal);
+
+        // And link A still resolves on both sides, which is what "removed nothing else" has to mean
+        // for a reader of the store rather than for a reader of the links file.
+        var store = await StoreAsync(repository);
+        var note = Assert.Single(store, e => e.Text == "the older who");
+        var live = Assert.Single(store, e => e.Text == "who we are");
+        Assert.Equal([live.Id], note.SupersededBy);
+        Assert.Equal([note.Id], live.Supersedes);
+        Assert.DoesNotContain(store, e => e.Text == "an older plan");
+
+        // ---- The control: an import that appended no link leaves links.jsonl byte-identical. ----
+        var linksFile = BatonPaths.MemoryLinksFile(RepositoryIdentity.FileSlugFor(repository));
+        var linksBefore = Digest(linksFile);
+
+        var archivedNotes = WriteArchivedRoot("c--extra-memory", ("notes_extra.md", "no live counterpart"));
+        var third = await RunAsync(
+            "--root", archivedNotes, "--assert", $"{archivedNotes}={repository}", "--asserted-by", "the-test");
+        var controlManifest = ImportManifest.Read(ManifestPathFrom(third));
+        Assert.Empty(controlManifest.AppendedLinks);
+        var appendedIds = controlManifest.Appended.Select(r => r.EntryId).ToList();
+        Assert.NotEmpty(appendedIds);
+
+        var (controlCode, controlText) = await RunRawAsync("--undo", ManifestPathFrom(third));
+        Assert.Equal(0, controlCode);
+        Assert.DoesNotContain("INCOMPLETE", controlText, StringComparison.Ordinal);
+        Assert.Contains("0 supersession link(s)", controlText, StringComparison.Ordinal);
+
+        // The positive control: that undo really did remove its entries...
+        Assert.DoesNotContain(
+            await StoreAsync(repository), e => appendedIds.Contains(e.Id, StringComparer.Ordinal));
+
+        // ...and the links file it had no business touching is unchanged, byte for byte.
+        Assert.Equal(linksBefore, Digest(linksFile));
     }
 
     /// <summary>
