@@ -83,7 +83,8 @@ unrelated command a scoped shell doesn't actually cover.
 
 ### The engine-run verify step (#1623)
 
-`implement` declares an engine-run verify command (`pixi run gates-quiet`) — the ENGINE runs it once,
+`implement` declares an engine-run verify command (`pixi run gates-quiet`; in Baton's own repo a
+committed `.baton/verify` outranks it, #1958 — spec/baton.md §3) — the ENGINE runs it once,
 never itself holding a lock across the run (`spec/baton.md` §3 states the actual locking mechanism),
 after the worker's own process exits 0 with its output contract satisfied; the worker itself is never
 asked to run gates or tests and never sees the command. `review`/`advise` and

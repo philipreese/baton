@@ -1,0 +1,13 @@
+# Baton's own engine-run verify command (#1958). Grammar and precedence: spec/baton.md §3, "Verify
+# command resolution" -- first non-blank, non-`#` line wins, and this file beats the `implement`
+# role's `verify_pixi_task` default (`gates-quiet`, the FULL set) without changing it for any other
+# workspace. Read from the REVIEWED tree at dispatch time, so editing it on a lane branch grades
+# nothing until it is merged.
+#
+# WHY THE FAST-COVER PASS AND NOT `gates-quiet`: the tree the engine verifies here has already been
+# through the lane's own build/test and the pre-push hook's `gates-fast`, and CI runs every member
+# on the push regardless (spec/baton.md C-12: CI is the independent run). `--skip-covered` drops the
+# members this exact tree already holds a per-member receipt for, and `--fast` drops `test-no-build`
+# -- so a room can now settle Verified with the test suite unrun locally, and CI is what catches a
+# broken one. That is the trade C-12's #1958 paragraph states; it is not a silent narrowing.
+pixi run gates-fast-cover-quiet
