@@ -97,7 +97,7 @@ public sealed record RunwayThresholds(
 /// <c>Baton.Cli.OnDemandRunwayHarvest</c>, before this method is called, and reaches it only as a
 /// <see cref="RunwayHarvestAttempt"/> value. What is no longer true of the gate as a whole is that a
 /// check costs no subscription usage: the first check for a vendor with no snapshot spends one
-/// <c>/usage</c> call. spec/baton.md §7's "Runway hold (#1848)" is the register for that bound.
+/// <c>/usage</c> call. That bound is stated in spec/baton.md §7.
 /// </summary>
 /// <remarks>
 /// <para>

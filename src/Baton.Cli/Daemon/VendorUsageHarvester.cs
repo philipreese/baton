@@ -13,11 +13,11 @@ namespace Baton.Cli.Daemon;
 /// the restart-survival reasoning. Advisory only — nothing here gates dispatch (#1848 owns that);
 /// this type only ever reads and writes, never blocks a worker.
 /// <para>
-/// It is not the only caller of <see cref="Persist"/> since #1923: the runway hold harvests a gated
-/// vendor once inline when this service has never produced a snapshot for it
-/// (<c>OnDemandRunwayHarvest</c>, which writes through this same method for the same reason there is
-/// one snapshot format). Both read <see cref="VendorUsageSources.Default"/>, so neither can be
-/// harvesting a vendor the other has never heard of.
+/// It is not the only caller of <see cref="Persist"/> since #1923 — <c>OnDemandRunwayHarvest</c>
+/// writes through this same method, for the same reason there is one snapshot format, when this
+/// service has never produced a file for a vendor being dispatched to. Both read
+/// <see cref="VendorUsageSources.Default"/>, so neither can be reading a vendor the other has never
+/// heard of.
 /// </para>
 /// </summary>
 /// <remarks>

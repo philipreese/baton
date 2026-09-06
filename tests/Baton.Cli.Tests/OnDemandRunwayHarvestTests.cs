@@ -4,8 +4,8 @@ using Baton.Vendors;
 namespace Baton.Cli.Tests;
 
 /// <summary>
-/// #1923's bootstrap: the runway hold harvests a gated vendor once inline rather than refusing a
-/// vendor that was never harvested. The measured failure — agy's weekly window had just reset, no agy
+/// #1923's bootstrap arm — the hold reads a vendor's counters for itself rather than refusing one
+/// nothing has ever read. The measured failure — agy's weekly window had just reset, no agy
 /// lane was live, so the daemon's harvester never fired, so every agy dispatch was refused for "no
 /// readable usage snapshot" and the first lane of the window could never start.
 /// </summary>
@@ -91,9 +91,9 @@ public sealed class OnDemandRunwayHarvestTests : IDisposable
     }
 
     /// <summary>
-    /// The other half of "attempted and failed": a source that returns null (not spawned, non-zero
-    /// exit, or no output — <see cref="IVendorUsageSource.ReadAsync"/>'s own contract) writes nothing
-    /// and still holds, named as a harvest failure rather than as never having been harvested.
+    /// The other half of "attempted and failed": a source returning null — every case
+    /// <see cref="IVendorUsageSource.ReadAsync"/>'s own contract folds into that value — writes
+    /// nothing and still holds, named as a harvest failure rather than as never having been harvested.
     /// </summary>
     [Fact]
     public async Task A_source_that_produces_nothing_still_holds_and_is_named_as_an_attempt()
