@@ -2,10 +2,12 @@
 
 **One release train again, named `baton`, from `0.32.0` on (#1835).** Between `0.14.0` and
 `0.31.0` the repo shipped as three release-please components bumped in lock-step (`flow-v*`,
-`vendors-v*`, `cli-v*`); those entries live in `src/Baton.Cli/CHANGELOG.md`, `src/Baton/CHANGELOG.md`
-and `src/Baton.Vendors/CHANGELOG.md`, kept as history. New entries are prepended here, tagged
-`vX.Y.Z`. See `release-please-config.json`. Everything below this line predates the split: the
-repo's single shared version through `0.14.0`.
+`vendors-v*`, `cli-v*`); those entries lived in per-project `CHANGELOG.md` files under `src/`,
+removed in #1953 once release-please stopped writing them — read them from git at the last commit
+that carried them: `git show v0.35.0:src/Baton.Cli/CHANGELOG.md` (likewise `src/Baton/` and
+`src/Baton.Vendors/`). New entries are prepended here, tagged `vX.Y.Z`. See
+`release-please-config.json`. Everything below this line predates the split: the repo's single
+shared version through `0.14.0`.
 
 ## [0.35.0](https://github.com/philipreese/baton/compare/v0.34.0...v0.35.0) (2026-09-06)
 
