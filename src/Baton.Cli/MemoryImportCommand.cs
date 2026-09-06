@@ -90,8 +90,7 @@ public static class MemoryImportCommand
         var userHome = userHomeOverride ?? MemoryRootInventory.DefaultUserHome;
         var batonRoot = BatonPaths.Root;
 
-        var aliases = await MemoryAliasStore
-            .ReadAllAsync(BatonPaths.MemoryAliasFile, cancellationToken).ConfigureAwait(false);
+        var aliases = await ResolveAliasesAsync(options, cancellationToken).ConfigureAwait(false);
 
         var sources = new List<MemoryImportSource>();
         var machinery = new List<ImportSkippedRow>();
@@ -181,16 +180,61 @@ public static class MemoryImportCommand
     }
 
     /// <summary>
+    /// The alias store as this run sees it: what is already recorded, plus anything <c>--assert</c>
+    /// added. The new rows are persisted first (so a later run reuses them without the flag) and
+    /// returned either way — under <c>--dry-run</c> they apply to the computed plan and are not
+    /// written, which is what makes a dry run a preview of the real thing rather than a preview of a
+    /// different one.
+    /// </summary>
+    private static async Task<IReadOnlyList<MemoryAliasEntry>> ResolveAliasesAsync(
+        MemoryImportOptions options, CancellationToken cancellationToken)
+    {
+        var recorded = await MemoryAliasStore
+            .ReadAllAsync(BatonPaths.MemoryAliasFile, cancellationToken).ConfigureAwait(false);
+
+        if (options.Assertions.Count == 0)
+        {
+            return recorded;
+        }
+
+        var assertedBy = options.AssertedBy is { Length: > 0 } who ? who : Environment.UserName;
+        var asserted = options.Assertions
+            .Select(a => new MemoryAliasEntry(
+                BatonPaths.RecordKey(a.Path), a.Repository, assertedBy, DateTime.UtcNow))
+            .ToList();
+
+        if (!options.DryRun)
+        {
+            await MemoryAliasStore
+                .AppendAsync(asserted, BatonPaths.MemoryAliasFile, cancellationToken).ConfigureAwait(false);
+        }
+
+        return [.. recorded, .. asserted];
+    }
+
+    /// <summary>
     /// One Claude root's subject: the git probe at its resolved checkout, then an operator assertion
     /// for a path git cannot answer for, then nothing.
     /// </summary>
     /// <remarks>
+    /// <para>
     /// The path resolution is <see cref="MemoryAuditCommand"/>'s, unchanged and for the same reasons —
     /// session <c>cwd</c> is ground truth, the decoder's tie-break is offered only fully-qualified
     /// readings that are a work tree's own root. What is added here is the alias fallback, which fires
     /// only where the probe produced nothing: <see cref="MemoryAliasStore"/>'s own remarks state why an
     /// assertion may never displace a measurement, and why this is not the mechanism for the
     /// subject-versus-origin question.
+    /// </para>
+    /// <para>
+    /// <b>The fallback tries two keys, and the second is the one that makes the archive importable.</b>
+    /// An archived root has no session transcript and its name is a flattening of the memory directory
+    /// rather than of a checkout (<c>c--Users-…-repos-baton-memory</c>), so no reading of it is a work
+    /// tree's own root and the resolution carries no checkout path at all — an alias keyed on a
+    /// checkout could never match one. The root's OWN directory is always known and never ambiguous, so
+    /// an assertion may be keyed on it directly: "the memories in this directory belong to this
+    /// repository", which is the fact an operator actually has about an archive their own migration
+    /// created.
+    /// </para>
     /// </remarks>
     private static async Task<MemoryImportSource> ResolveClaudeRootAsync(
         MemoryRoot root, IReadOnlyList<MemoryAliasEntry> aliases, CancellationToken cancellationToken)
@@ -206,7 +250,10 @@ public static class MemoryImportCommand
                 .TryResolveAsync(resolution.CheckoutPath!, cancellationToken).ConfigureAwait(false))?.Value
             : null;
 
-        var asserted = repository is null ? MemoryAliasStore.Resolve(aliases, resolution.CheckoutPath) : null;
+        var asserted = repository is null
+            ? MemoryAliasStore.Resolve(aliases, resolution.CheckoutPath)
+                ?? MemoryAliasStore.Resolve(aliases, root.DirectoryPath)
+            : null;
 
         return new MemoryImportSource(
             root.DirectoryPath,
@@ -218,16 +265,21 @@ public static class MemoryImportCommand
             root.Files.Select(f => new MemoryImportFile(f.Path, Path.GetFileName(f.Path), string.Empty, f.Sha256, f.ModifiedUtc, f.SizeBytes)).ToList());
     }
 
-    /// <summary>Why a Claude root produced no subject, in the operator's terms.</summary>
+    /// <summary>
+    /// Why a Claude root produced no subject, in the operator's terms — and, in every branch, the
+    /// exact flag that resolves it. A reason with no remedy reads as a refusal rather than as the
+    /// question it is.
+    /// </summary>
     private static string DescribeUnresolvedClaudeRoot(MemoryRootPathResolution resolution, bool checkoutExists) =>
         resolution.CheckoutPath is not { Length: > 0 } checkoutPath
             ? $"the root's name decodes to no single checkout path ({MemoryJsonNames.Of(resolution.Source)}), " +
-              $"so no repository could be probed. Assert one in {BatonPaths.MemoryAliasFileName} to import it."
+              "so no repository could be probed. Assert one with " +
+              "'--assert <this root>=<repository>' to import it."
             : checkoutExists
                 ? $"'{checkoutPath}' exists but yields no repository identity, so there is no store to file " +
-                  $"this under. Assert one in {BatonPaths.MemoryAliasFileName} to import it."
+                  "this under. Assert one with '--assert <this root>=<repository>' to import it."
                 : $"the checkout this memory belongs to is gone ('{checkoutPath}'), so nothing can be probed. " +
-                  $"Assert its repository in {BatonPaths.MemoryAliasFileName} to import it.";
+                  "Assert its repository with '--assert <this root>=<repository>' to import it.";
 
     /// <summary>
     /// One non-Claude root's subject. These are <b>per-machine</b> roots — they encode no checkout, so
@@ -245,7 +297,7 @@ public static class MemoryImportCommand
             MemoryAliasStore.Resolve(aliases, root.DirectoryPath),
             UnfiledReason:
                 $"'{root.DirectoryPath}' is a per-machine root: it encodes no checkout, so no repository " +
-                $"can be derived from it. Assert one in {BatonPaths.MemoryAliasFileName} to import it.",
+                "can be derived from it. Assert one with '--assert <this root>=<repository>' to import it.",
             root.Files.Select(f => new MemoryImportFile(
                 f.Path, Path.GetFileName(f.Path), string.Empty, f.Sha256, f.ModifiedUtc, f.SizeBytes)).ToList());
 

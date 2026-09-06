@@ -7,7 +7,10 @@ namespace Baton.Memory;
 /// One operator assertion that a checkout path belongs to a repository — the fallback for a path git
 /// can no longer answer for.
 /// </summary>
-/// <param name="Path">A <c>BatonPaths.RecordKey</c>, matched with <c>BatonPaths.RecordKeyComparer</c>.</param>
+/// <param name="Path">
+/// A <c>BatonPaths.RecordKey</c>, matched with <c>BatonPaths.RecordKeyComparer</c>. Either a checkout
+/// directory or a memory root's own directory — see the store's remarks for why both are keys.
+/// </param>
 /// <param name="Repository">The canonical <c>RepositoryIdentity.Value</c> the operator asserts for it.</param>
 /// <param name="AssertedBy">Who asserted it. Non-empty by construction: an unattributed assertion is indistinguishable from a measurement.</param>
 /// <param name="AssertedAtUtc">When.</param>
@@ -40,14 +43,22 @@ public sealed record MemoryAliasEntry(
 /// unfileable.
 /// </para>
 /// <para>
+/// <b>Two kinds of path are keys, and the second is what makes an archived root importable.</b> A
+/// checkout directory is the obvious one. A memory ROOT's own directory is the other: an archived root
+/// carries no session transcript and its flattened name decodes to no work tree, so it resolves to no
+/// checkout path at all and an assertion keyed on a checkout could never reach it. The root directory
+/// is always known and never ambiguous, and "the memories in this directory belong to this repository"
+/// is the fact an operator actually holds about an archive their own migration created.
+/// </para>
+/// <para>
 /// <b>It is deliberately NOT the subject-adjudication mechanism.</b> Q1 (operator, 2026-09-05) keeps
 /// an entry's subject separate from its provenance, and that separation lives on
 /// <see cref="MemoryEntry"/>'s own fields rather than here — this store answers "which repository is
 /// at this PATH", never "whose memory is this FILE". The <c>alpaca-agent-bot</c> shape (a checkout
 /// whose origin is one repository and whose memory names another) is therefore imported under the
-/// derived identity, and phase B ships no writer for an adjudication that would change it. Stated
-/// rather than left to inference: an operator wanting that today edits nothing here, because there is
-/// nothing here that would do it.
+/// derived identity, and no assertion can change that: an alias is consulted only where the probe
+/// produced nothing, and that root's probe produces an answer. Adjudicating a subject per entry needs
+/// the entries' text, and phase B ships no mechanism for it — stated rather than left to inference.
 /// </para>
 /// <para>
 /// Machine-wide rather than per-repository, and so it sits at the storage root rather than inside one

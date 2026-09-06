@@ -10,7 +10,8 @@ namespace Baton.Cli;
 public static class MemoryImportOptionsParser
 {
     public const string Usage =
-        "Usage: baton memory import [--dry-run] [--root <dir>]... | baton memory import --undo <manifest> [--help]";
+        "Usage: baton memory import [--dry-run] [--root <dir>]... [--assert <path>=<repository>]... " +
+        "[--asserted-by <who>] | baton memory import --undo <manifest> [--help]";
 
     /// <summary>
     /// What <c>--help</c> prints under <see cref="Usage"/>. Every line is a place a reader's prior
@@ -39,6 +40,14 @@ public static class MemoryImportOptionsParser
         "  --root <dir>        Import only this discovered root; repeatable. It SELECTS from what discovery",
         "                      found and cannot add a directory discovery did not; an unmatched path is an",
         "                      error rather than a new root.",
+        "  --assert <path>=<repository>",
+        "                      Assert which repository a root belongs to, when git cannot answer -- an",
+        "                      archived root, a root whose checkout is gone, a per-machine vendor root.",
+        "                      Repeatable. <path> is the memory root directory or the checkout it came",
+        $"                      from; the assertion is appended to {BatonPaths.MemoryAliasFileName} and reused by",
+        "                      later runs. It is CONSULTED ONLY where the probe produced nothing and can",
+        "                      never override a repository git actually answered for.",
+        "  --asserted-by <who> Who is asserting. Defaults to this machine's user name.",
         "  --undo <manifest>   Remove exactly the entries a previous run appended, per its manifest. Source",
         "                      files are untouched, because the import never touched them either. Entries an",
         "                      EARLIER import had already written are not removed.",
@@ -48,11 +57,12 @@ public static class MemoryImportOptionsParser
         "from an archived root are historical notes whatever they declare, and are linked to the live entry",
         "that supersedes them when the two share a repository and a filename and differ in content.",
         "",
-        "What this verb cannot do: it will not guess a subject. A root whose checkout is gone, and a",
-        "per-machine root like ~/.codex/memories that encodes no checkout at all, are reported UNFILED and",
-        $"imported nowhere until an operator asserts their repository in {BatonPaths.MemoryAliasFileName}.",
-        "This phase ships no writer for that file -- an assertion is added by hand, and is never inferred",
-        "from a filename or allowed to override a repository git actually answered for.",
+        "What this verb cannot do: it will not guess a subject. A root whose checkout is gone, an archived",
+        "root whose flattened name decodes to no checkout, and a per-machine root like ~/.codex/memories",
+        "that encodes no checkout at all are all reported UNFILED and imported nowhere until an operator",
+        "asserts their repository with --assert. A subject is never inferred from a filename: a checkout",
+        "whose origin names one repository while its memory files are named after another is imported under",
+        "the repository GIT answered for, and adjudicating it per entry would need the entries' text.",
     ];
 
     public static MemoryImportOptions Parse(IReadOnlyList<string> args)
@@ -62,7 +72,9 @@ public static class MemoryImportOptionsParser
         var dryRun = false;
         var help = false;
         string? undo = null;
+        string? assertedBy = null;
         var roots = new List<string>();
+        var assertions = new List<MemoryImportAssertion>();
 
         var i = 0;
         while (i < args.Count)
@@ -83,6 +95,14 @@ public static class MemoryImportOptionsParser
                     roots.Add(RequireValue(args, i));
                     i += 2;
                     break;
+                case "--assert":
+                    assertions.Add(ParseAssertion(RequireValue(args, i)));
+                    i += 2;
+                    break;
+                case "--asserted-by":
+                    assertedBy = RequireValue(args, i).Trim();
+                    i += 2;
+                    break;
                 case "--undo":
                     undo = RequireValue(args, i);
                     i += 2;
@@ -98,14 +118,39 @@ public static class MemoryImportOptionsParser
         // Refused rather than quietly ordered, because both readings of the combination are plausible
         // and they are opposites: "undo, but only the roots I name" is a partial reversal this verb
         // does not offer, and "show me what the undo would do" is a mode it does not have either.
-        if (undo is { Length: > 0 } && (dryRun || roots.Count > 0))
+        if (undo is { Length: > 0 } && (dryRun || roots.Count > 0 || assertions.Count > 0 || assertedBy is not null))
         {
             throw new CliArgumentException(
                 $"'--undo' takes no other options: it replays one manifest in full. {Usage}",
                 "run '--undo <manifest>' on its own.");
         }
 
-        return new MemoryImportOptions(dryRun, roots, undo, help);
+        if (assertedBy is { Length: 0 })
+        {
+            throw new CliArgumentException(
+                $"'--asserted-by' cannot be empty: an unattributed assertion is indistinguishable from a " +
+                $"measurement. {Usage}");
+        }
+
+        return new MemoryImportOptions(dryRun, roots, assertions, assertedBy, undo, help);
+    }
+
+    /// <summary>
+    /// Splits <c>&lt;path&gt;=&lt;repository&gt;</c> at its LAST <c>=</c>. A repository identity never
+    /// contains one, and a Windows path can — so splitting at the first would break a path that holds
+    /// one, and the last separator is the one that always divides the pair correctly.
+    /// </summary>
+    private static MemoryImportAssertion ParseAssertion(string value)
+    {
+        var separator = value.LastIndexOf('=');
+        if (separator <= 0 || separator == value.Length - 1)
+        {
+            throw new CliArgumentException(
+                $"'--assert {value}' is not a '<path>=<repository>' pair. {Usage}",
+                "for example: --assert \"C:\\Users\\me\\.codex\\memories=github.com/owner/repo\".");
+        }
+
+        return new MemoryImportAssertion(value[..separator].Trim(), value[(separator + 1)..].Trim());
     }
 
     private static string RequireValue(IReadOnlyList<string> args, int index)
