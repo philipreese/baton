@@ -80,7 +80,16 @@ public sealed record CoreDispatchTarget(
     // #1151: files copied verbatim into place when this execution starts, never clobbering a differing
     // existing file — see CoreDispatchSeedCopy for why this is not a CoreDispatchSeedFile carrying the
     // text. Appended last so no positional caller of the parameters above shifts.
-    IReadOnlyList<CoreDispatchSeedCopy>? SeedCopies = null)
+    IReadOnlyList<CoreDispatchSeedCopy>? SeedCopies = null,
+    // #1929 review round 3 (LOW): raised — and AWAITED — the moment SeedCopies above have been placed
+    // and BEFORE the worker is spawned, so the caller can make the placement durable while no process
+    // exists yet. MutationInterface wires it to the FlowEvent.EngineFilesPlaced append; journaling that
+    // fact after DispatchAsync returned instead left a window in which a crash between the durable
+    // CoreEvent.ExecutionExited and the append reached the recovery classifier with no fact, counting
+    // AER's own copies as the worker's. Same seam and same composition rule as OnStdoutLine above: the
+    // dispatcher supplies the fact and never interprets it (Architecture Rule 1). Null on every path
+    // with no journal to write to (tests, CommandWorkerAdapter), which simply records nothing.
+    Func<IReadOnlyList<EnginePlacedFile>, IReadOnlyList<string>, Task>? OnEngineFilesPlaced = null)
 {
     /// <summary>
     /// #1373: returns this target with <paramref name="preamble"/> prepended to the instructional text
@@ -222,18 +231,16 @@ public sealed record CoreDispatchResult(
     // is the register entry for why OutcomeClassifier's dead-worker predicate reads this field rather
     // than TerminalSuccessObserved.
     bool TerminalResultObserved = false,
-    // #1929 review HIGH: the absolute paths this dispatch's own SeedCopies actually placed inside the
-    // worker's working directory, so the workspace readers can subtract AER's writes from what they
-    // attribute to the worker. What was WRITTEN, not what was planned — see CoreDispatchSeedCopy and
-    // WorktreeProvisioner.ChangedPathsExcludingEnginePlaced. On the crash-recovery path, which rebuilds
-    // a result from a recorded exit, MutationInterface refills this from the journaled
-    // FlowEvent.EngineFilesPlaced through the projection (#1933) — unlike StderrTail/StdoutTail above,
-    // it does survive a crash. Null only when no such fact was recorded, which counts the paths.
-    IReadOnlyList<string>? EnginePlacedPaths = null,
-    // The adapter's own labels for what those paths belong to (CoreDispatchSeedCopy.Group), for the
-    // room fact's benefit. Echoed, never interpreted — Architecture Rule 1. Stays null on the
-    // crash-recovery path: nothing downstream of a rebuilt result reads it (#1933).
-    IReadOnlyList<string>? EnginePlacedGroups = null);
+    // #1929 review HIGH: the files this dispatch's own SeedCopies actually placed inside the worker's
+    // working directory (EnginePlacedFile carries what each element records and why), so the workspace
+    // readers can subtract AER's writes from what they attribute to the worker, and only while those
+    // writes are still AER's. What was WRITTEN, not what was planned — see
+    // CoreDispatchSeedCopy and WorktreeProvisioner.ChangedPathsExcludingEnginePlaced. On the
+    // crash-recovery path, which rebuilds a result from a recorded exit, MutationInterface refills this
+    // from the journaled FlowEvent.EngineFilesPlaced through the projection (#1933) — unlike
+    // StderrTail/StdoutTail above, it does survive a crash. Null only when no such fact was recorded,
+    // which counts the paths.
+    IReadOnlyList<EnginePlacedFile>? EnginePlacedFiles = null);
 
 
 /// <summary>
@@ -803,12 +810,12 @@ public sealed class CoreDispatcher(ICoreEventLogWriter coreEventLogWriter, IStre
         // CoreDispatchSeedCopy. Never clobbers a differing destination, never prunes, and never fails
         // the dispatch: an unreadable source or a locked destination costs that one file and says so,
         // rather than throwing out of a path whose whole point is that it runs before every execution.
-        // #1929 review HIGH: the paths this dispatch actually placed, so the workspace readers can
+        // #1929 review HIGH: the files this dispatch actually placed, so the workspace readers can
         // subtract AER's own writes from what they attribute to the worker. Collected here because
         // this is the only place that knows which copies were MADE rather than merely planned -- a
         // destination holding different bytes is skipped below, and must not be excluded from the
         // evidence, since AER did not write it.
-        var enginePlacedPaths = new List<string>();
+        var enginePlacedFiles = new List<EnginePlacedFile>();
         var placedGroups = new List<string>();
         if (target.SeedCopies is { Count: > 0 } seedCopies)
         {
@@ -829,7 +836,11 @@ public sealed class CoreDispatcher(ICoreEventLogWriter coreEventLogWriter, IStre
                     }
 
                     File.Copy(copy.SourcePath, destinationPath, overwrite: true);
-                    enginePlacedPaths.Add(destinationPath);
+                    // Digested from the DESTINATION after the copy, never from the source: what the
+                    // readers later compare against is the bytes that are actually sitting in the
+                    // worker's tree. A digest that cannot be taken is recorded as null, which makes the
+                    // path unsubtractable rather than wrongly subtractable (EnginePlacedFile.Sha256).
+                    enginePlacedFiles.Add(new EnginePlacedFile(destinationPath, EnginePlacedFile.TryDigest(destinationPath)));
                     if (copy.Group is { Length: > 0 } group && !placedGroups.Contains(group))
                     {
                         placedGroups.Add(group);
@@ -846,13 +857,21 @@ public sealed class CoreDispatcher(ICoreEventLogWriter coreEventLogWriter, IStre
             // placed ... when a dispatch of this binding runs") and a plan can be declared and then
             // placed zero times. This is the record of the ACT, written after the loop so its count is
             // what was copied, not what was intended. The room-visible half is
-            // FlowEvent.SkillPackagesProjected, appended by MutationInterface from the same list.
+            // FlowEvent.EngineFilesPlaced, appended by the callback below from the same list.
             var groups = placedGroups.Count > 0 ? $" ({string.Join(", ", placedGroups)})" : string.Empty;
-            var root = CommonDirectory(enginePlacedPaths);
+            var root = CommonDirectory([.. enginePlacedFiles.Select(f => f.Path)]);
             var where = root is null ? string.Empty : $" into '{root}'";
             Console.Error.WriteLine(
-                $"Placed {enginePlacedPaths.Count} of {seedCopies.Count} declared file(s){groups}{where} "
+                $"Placed {enginePlacedFiles.Count} of {seedCopies.Count} declared file(s){groups}{where} "
                 + "for this execution.");
+        }
+
+        // #1929 review round 3 (LOW): the durable half, raised HERE — after the copies exist on disk and
+        // before anything below can spawn a process. See CoreDispatchTarget.OnEngineFilesPlaced for the
+        // crash window this ordering closes, and FlowEvent.EngineFilesPlaced for the fact itself.
+        if (enginePlacedFiles.Count > 0 && target.OnEngineFilesPlaced is { } onEngineFilesPlaced)
+        {
+            await onEngineFilesPlaced(enginePlacedFiles, placedGroups).ConfigureAwait(false);
         }
 
         // #598: measured here, on the expanded arguments, because this is the only place the real
@@ -1183,7 +1202,7 @@ public sealed class CoreDispatcher(ICoreEventLogWriter coreEventLogWriter, IStre
 
         return new CoreDispatchResult(
             exitCode, reason, capturedStderr, terminalSuccessLatched, capturedStdoutTail, terminalResultLatched,
-            enginePlacedPaths, placedGroups);
+            enginePlacedFiles);
 
     }
 

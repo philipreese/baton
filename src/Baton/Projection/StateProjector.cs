@@ -408,7 +408,11 @@ public static class StateProjector
                 // FlowEvent.EngineFilesPlaced's own remarks). It still changes no StepState: it is
                 // per-execution evidence a classifier reads, the same shape
                 // WorkspaceHeadShaAtStartByExecutionId above already has.
-                state.EnginePlacedPathsByExecutionId[enginePlaced.ExecutionId] = [.. enginePlaced.Paths];
+                //
+                // A null Files is a journal line predating the digest-carrying shape: projected as an
+                // empty list, which subtracts nothing and so counts everything -- the direction
+                // WorktreeProvisioner.ChangedPathsExcludingEnginePlaced's remarks name.
+                state.EnginePlacedFilesByExecutionId[enginePlaced.ExecutionId] = [.. enginePlaced.Files ?? []];
                 break;
 
             case FlowEvent.ExecutionRequestRejected:

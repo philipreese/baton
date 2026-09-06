@@ -409,6 +409,73 @@ public class CoreDispatcherTests
     }
 
     /// <summary>
+    /// #1929 review round 3 (LOW): the placement callback is raised — and awaited — BEFORE the worker
+    /// process runs, which is what lets a caller make the fact durable while no process exists yet.
+    /// </summary>
+    /// <remarks>
+    /// Ordering, measured against the worker's own first stdout line rather than asserted from the
+    /// source: the discriminator is that the child really ran (a non-zero <c>firstLineOrder</c>) and the
+    /// callback still came first. Raised after <c>DispatchAsync</c> returned — the shape this replaced —
+    /// the callback would not fire during the dispatch at all and <c>placementOrder</c> stays 0.
+    /// </remarks>
+    [Fact]
+    public async Task The_seed_copy_placement_is_announced_before_the_worker_runs()
+    {
+        var artifactsRoot = Path.Combine(Path.GetTempPath(), $"artifacts-{Guid.NewGuid():N}");
+        var sourceRoot = Path.Combine(Path.GetTempPath(), $"seedcopy-src-{Guid.NewGuid():N}");
+        var destinationRoot = Path.Combine(Path.GetTempPath(), $"seedcopy-dst-{Guid.NewGuid():N}");
+        var logPath = Path.Combine(Path.GetTempPath(), $"flow-{Guid.NewGuid():N}.jsonl");
+        try
+        {
+            Directory.CreateDirectory(sourceRoot);
+            var source = Path.Combine(sourceRoot, "SKILL.md");
+            await File.WriteAllTextAsync(source, "package content", TestContext.Current.CancellationToken);
+            var destination = Path.Combine(destinationRoot, "skills", "audit-tool", "SKILL.md");
+
+            var outputDirectory = ArtifactManager.AllocateOutputDirectory(artifactsRoot, ExecutionId);
+            var request = MakeRequest(ArtifactManager.BuildEnvironment([], outputDirectory, artifactsRoot));
+
+            var sequence = 0;
+            var placementOrder = 0;
+            var firstLineOrder = 0;
+            var target = new CoreDispatchTarget("cmd", ["/c", "echo ran"]) with
+            {
+                SeedCopies = [new CoreDispatchSeedCopy(destination, source, "audit-tool")],
+                OnEngineFilesPlaced = (_, _) =>
+                {
+                    placementOrder = Interlocked.Increment(ref sequence);
+                    return Task.CompletedTask;
+                },
+                OnStdoutLine = _ =>
+                {
+                    if (firstLineOrder == 0)
+                    {
+                        firstLineOrder = Interlocked.Increment(ref sequence);
+                    }
+                },
+            };
+
+            await using var writer = new FlowEventLogWriter(logPath);
+            var result = await new CoreDispatcher(writer, writer)
+                .DispatchAsync(request, target, TestContext.Current.CancellationToken);
+
+            Assert.Equal(0, result.ExitCode);
+            // The control: the worker really produced output, so "the callback came first" is an
+            // ordering and not an artefact of the process never having run.
+            Assert.True(firstLineOrder > 0, "the worker produced no stdout, so this test measured nothing");
+            Assert.True(placementOrder > 0, "the placement callback never fired");
+            Assert.True(placementOrder < firstLineOrder);
+        }
+        finally
+        {
+            DirectoryCleanup.DeleteRecursively(artifactsRoot);
+            DirectoryCleanup.DeleteRecursively(sourceRoot);
+            DirectoryCleanup.DeleteRecursively(destinationRoot);
+            FileCleanup.Delete(logPath);
+        }
+    }
+
+    /// <summary>
     /// #1151/#1929 review HIGH: drives the actual seed-COPY path — the seam that replaced a write
     /// performed while a binding was merely being resolved. Both polarities in one dispatch: an absent
     /// destination is placed verbatim, and a destination already holding different bytes is left exactly
@@ -438,6 +505,8 @@ public class CoreDispatcherTests
 
             var outputDirectory = ArtifactManager.AllocateOutputDirectory(artifactsRoot, ExecutionId);
             var request = MakeRequest(ArtifactManager.BuildEnvironment([], outputDirectory, artifactsRoot));
+            List<EnginePlacedFile> observedPlacement = [];
+            List<string> observedGroups = [];
             var target = new CoreDispatchTarget("cmd", ["/c", "exit 0"]) with
             {
                 SeedCopies =
@@ -445,6 +514,12 @@ public class CoreDispatcherTests
                     new CoreDispatchSeedCopy(placedDestination, placedSource, "placed-package"),
                     new CoreDispatchSeedCopy(keptDestination, keptSource, "kept-package"),
                 ],
+                OnEngineFilesPlaced = (files, groups) =>
+                {
+                    observedPlacement.AddRange(files);
+                    observedGroups.AddRange(groups);
+                    return Task.CompletedTask;
+                },
             };
 
             await using var writer = new FlowEventLogWriter(logPath);
@@ -463,8 +538,18 @@ public class CoreDispatcherTests
             // readers subtract and what the room fact records. The kept destination must NOT appear —
             // AER did not write it, so excluding it from the work-product evidence would suppress a path
             // the operator (or an earlier run) put there.
-            Assert.Equal([placedDestination], result.EnginePlacedPaths);
-            Assert.Equal(["placed-package"], result.EnginePlacedGroups);
+            var placedFile = Assert.Single(result.EnginePlacedFiles!);
+            Assert.Equal(placedDestination, placedFile.Path);
+
+            // Round 3: the digest is of the DESTINATION's bytes after the copy, and it is what makes the
+            // subtraction conditional. Recomputed here rather than transcribed, so the assertion cannot
+            // pin a digest of the wrong file.
+            Assert.Equal(EnginePlacedFile.TryDigest(placedDestination), placedFile.Sha256);
+            Assert.NotNull(placedFile.Sha256);
+
+            // The room fact, appended by the dispatcher's own placement callback BEFORE the spawn.
+            Assert.Equal([placedDestination], observedPlacement.Select(f => f.Path));
+            Assert.Equal(["placed-package"], observedGroups);
         }
         finally
         {

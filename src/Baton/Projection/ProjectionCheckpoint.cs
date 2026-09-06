@@ -84,7 +84,7 @@ public sealed record ProjectionCheckpointState(
     Dictionary<StepId, string?>? VerifyNotRunReasonByStepId = null,
     HashSet<StepId>? ConductorRejectedStepIds = null,
     Dictionary<ExecutionId, string>? WorkspaceHeadShaAtStartByExecutionId = null,
-    Dictionary<ExecutionId, List<string>>? EnginePlacedPathsByExecutionId = null)
+    Dictionary<ExecutionId, List<EnginePlacedFile>>? EnginePlacedFilesByExecutionId = null)
 {
     public Dictionary<StepId, int> ExecutionCountByStepId { get; init; } = ExecutionCountByStepId ?? new();
 
@@ -211,7 +211,9 @@ public sealed record ProjectionCheckpointState(
 
     /// <summary>
     /// #1933: the durable half of <see cref="FlowEvent.EngineFilesPlaced"/> — see that event's own
-    /// remarks for what these paths are and which reader needs them back. Same trailing-optional
+    /// remarks for what these are and which reader needs them back, and
+    /// <see cref="EnginePlacedFile"/> for why each carries a digest rather than being a bare path.
+    /// Same trailing-optional
     /// replay-safety shape as
     /// <see cref="RetryForeclosedStepIds"/> above, and the same <see cref="DeepCopy"/> load-bearing
     /// note applies — with the list value deep-copied per entry, the way
@@ -225,7 +227,7 @@ public sealed record ProjectionCheckpointState(
     /// stale answer to re-derive.
     /// </para>
     /// </summary>
-    public Dictionary<ExecutionId, List<string>> EnginePlacedPathsByExecutionId { get; init; } = EnginePlacedPathsByExecutionId ?? new();
+    public Dictionary<ExecutionId, List<EnginePlacedFile>> EnginePlacedFilesByExecutionId { get; init; } = EnginePlacedFilesByExecutionId ?? new();
 
     public static ProjectionCheckpointState CreateEmpty() => new(
         new Dictionary<StepId, ExecutionId>(),
@@ -297,5 +299,5 @@ public sealed record ProjectionCheckpointState(
         new Dictionary<StepId, string?>(VerifyNotRunReasonByStepId),
         new HashSet<StepId>(ConductorRejectedStepIds),
         new Dictionary<ExecutionId, string>(WorkspaceHeadShaAtStartByExecutionId),
-        EnginePlacedPathsByExecutionId.ToDictionary(kvp => kvp.Key, kvp => new List<string>(kvp.Value)));
+        EnginePlacedFilesByExecutionId.ToDictionary(kvp => kvp.Key, kvp => new List<EnginePlacedFile>(kvp.Value)));
 }

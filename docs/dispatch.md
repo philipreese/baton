@@ -251,9 +251,11 @@ There is no AER-owned alternative to move it to, and the reasons are measured ra
 - `--add-dir` loads no configuration at all — measured, `gate.add-dir-loads-no-config`.
 
 Because those files are AER's and not the worker's, the engine subtracts them from its own work-product
-evidence and from its timeout-retry guard, on the live dispatch path and on crash recovery alike (#1933).
-The rule and what it still counts are stated once, in `spec/baton.md` §3's #1373 paragraph; the mechanism
-is `WorktreeProvisioner.ChangedPathsExcludingEnginePlaced`.
+evidence and from its timeout-retry guard, on the live dispatch path and on crash recovery alike (#1933)
+— but only while they still hold the bytes AER placed: edit one and it is your work again. The rule and
+what it still counts are stated once, in `spec/baton.md` §3's #1373 paragraph; the mechanism is
+`WorktreeProvisioner.ChangedPathsExcludingEnginePlaced`, whose remarks list every reader that subtracts
+and the one (`WorktreeProvisioner.Audit`) that says in its own refusal that it does not.
 
 **Precedence, written down here because nothing has ratified it.** A canonical package shadows a
 same-named native skill under `<workspace>/.claude/skills/` (that is where the projection lands) and

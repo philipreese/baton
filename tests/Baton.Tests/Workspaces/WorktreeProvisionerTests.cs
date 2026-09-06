@@ -1,4 +1,5 @@
 using System.Diagnostics;
+using Baton.Domain;
 using Baton.Workspaces;
 using Baton.Tests.Shared;
 
@@ -417,18 +418,32 @@ public sealed class WorktreeProvisionerTests : IDisposable
     }
 
     /// <summary>
+    /// Builds the <see cref="EnginePlacedFile"/> facts a dispatch would have journaled for
+    /// <paramref name="paths"/> as they currently stand on disk — digest included, exactly the way
+    /// <c>CoreDispatcher</c> takes it after the copy.
+    /// </summary>
+    private static EnginePlacedFile[] PlacedFacts(params string[] paths) =>
+        [.. paths.Select(p => new EnginePlacedFile(p, EnginePlacedFile.TryDigest(p)))];
+
+    /// <summary>
     /// #1929 review HIGH: a dispatch's own skill projection lands untracked in the worker's working
-    /// directory, and both readers must attribute it to AER rather than to the worker. Against a real
+    /// directory, and every reader must attribute it to AER rather than to the worker. Against a real
     /// git tree, in the exact shape the claude adapter produces
     /// (<c>&lt;workspace&gt;/.claude/skills/&lt;name&gt;/</c>).
     /// </summary>
     /// <remarks>
-    /// Three arms, and the two controls are the point. WITHOUT the list both readers must answer
-    /// "changed" — that is the defect, and an exclusion that passed only because the tree was already
-    /// clean would fail here. WITH a non-projected untracked file present alongside they must answer
-    /// "changed" again — an exclusion that suppressed everything (or that matched the collapsed
-    /// <c>?? .claude/</c> line <c>--untracked-files=normal</c> used to emit, and so swallowed the whole
-    /// directory) passes the first arm and fails this one.
+    /// The controls are the point. WITHOUT the list every reader must answer "changed" — that is the
+    /// defect, and an exclusion that passed only because the tree was already clean would fail here.
+    /// WITH a non-projected untracked file present alongside they must answer "changed" again — an
+    /// exclusion that suppressed everything (or that matched the collapsed <c>?? .claude/</c> line
+    /// <c>--untracked-files=normal</c> used to emit, and so swallowed the whole directory) passes the
+    /// first arm and fails this one.
+    /// <para>
+    /// The round-3 arms carry the narrowing: a fact whose bytes no longer match, and a fact carrying no
+    /// digest at all, must both COUNT. Their control is the arm above them, where the identical fact
+    /// with matching bytes is subtracted — without it, a predicate that simply stopped subtracting
+    /// would pass.
+    /// </para>
     /// </remarks>
     [Fact]
     public void Both_workspace_readers_subtract_paths_AER_itself_placed()
@@ -444,29 +459,38 @@ public sealed class WorktreeProvisionerTests : IDisposable
 
         var projectedDirectory = Path.Combine(workspace, ".claude", "skills", "audit-tool");
         Directory.CreateDirectory(projectedDirectory);
-        var projected = new[]
+        var projectedPaths = new[]
         {
             Path.Combine(projectedDirectory, "SKILL.md"),
             Path.Combine(projectedDirectory, "reference", "notes.md"),
         };
-        Directory.CreateDirectory(Path.GetDirectoryName(projected[1])!);
-        foreach (var path in projected)
+        Directory.CreateDirectory(Path.GetDirectoryName(projectedPaths[1])!);
+        foreach (var path in projectedPaths)
         {
             File.WriteAllText(path, "projected content");
         }
+
+        var projected = PlacedFacts(projectedPaths);
 
         // Control 1: the same tree, read the way it was read before this fix.
         Assert.True(WorktreeProvisioner.TryReadWorkspaceChanged(workspace, baseSha, out var changedWithoutList));
         Assert.True(changedWithoutList);
         Assert.True(WorktreeProvisioner.ReadWorkspaceMutation(workspace, baseSha)!.Mutated);
+        Assert.False(WorktreeProvisioner.IsWorkspaceUntouched(workspace, baseSha));
+        Assert.Contains("SKILL.md", WorktreeProvisioner.DescribeWorkspaceEvidence(workspace, baseSha));
 
-        // The claim: AER's own copies are not the worker's work product.
+        // The claim: AER's own copies are not the worker's work product. All four readers, one predicate.
         Assert.True(WorktreeProvisioner.TryReadWorkspaceChanged(workspace, baseSha, out var changed, projected));
         Assert.False(changed);
 
         var reading = WorktreeProvisioner.ReadWorkspaceMutation(workspace, baseSha, projected)!;
         Assert.False(reading.Mutated);
         Assert.Equal(0, reading.ChangedPathCount);
+
+        // #1929 review round 3 (MEDIUM): the retry decision, which read the tree unsubtracted.
+        Assert.True(WorktreeProvisioner.IsWorkspaceUntouched(workspace, baseSha, projected));
+        // ... and the conductor-facing reason text over the same tree.
+        Assert.Null(WorktreeProvisioner.DescribeWorkspaceEvidence(workspace, baseSha, projected));
 
         // Control 2: one path AER did not place, alongside the ones it did.
         File.WriteAllText(Path.Combine(workspace, "worker-output.txt"), "the worker's own work");
@@ -476,6 +500,96 @@ public sealed class WorktreeProvisionerTests : IDisposable
         var readingWithWorkerFile = WorktreeProvisioner.ReadWorkspaceMutation(workspace, baseSha, projected)!;
         Assert.True(readingWithWorkerFile.Mutated);
         Assert.Equal(1, readingWithWorkerFile.ChangedPathCount);
+
+        Assert.False(WorktreeProvisioner.IsWorkspaceUntouched(workspace, baseSha, projected));
+        var evidenceWithWorkerFile = WorktreeProvisioner.DescribeWorkspaceEvidence(workspace, baseSha, projected);
+        Assert.Contains("worker-output.txt", evidenceWithWorkerFile);
+        Assert.DoesNotContain("SKILL.md", evidenceWithWorkerFile);
+    }
+
+    /// <summary>
+    /// #1929 review round 3 (MEDIUM): a worker's own edit to a file AER projected is the WORKER's work
+    /// product, and subtracting by path alone erased it — attributing it to AER, pinning
+    /// <c>workspaceChanged: false</c> on a lane that did change the tree, and letting the #1373
+    /// timeout-retry guard run a fresh worker over uncommitted work it measured as absent.
+    /// </summary>
+    /// <remarks>
+    /// The discriminating control is the first block: the SAME path, the SAME fact, unedited, IS
+    /// subtracted. A predicate that stopped subtracting altogether would pass the second block and fail
+    /// the first. Both polarities on all four readers, one condition apart — the worker's edit.
+    /// </remarks>
+    [Fact]
+    public void A_worker_edit_to_a_projected_file_counts_as_the_workers_own_work()
+    {
+        var (repo, reference) = CreateRepoWithBranch("committed.txt");
+        var workspace = Path.Combine(NewDir("task"), "workspace");
+        WorktreeProvisioner.Provision(workspace, repo, reference);
+        var baseSha = RunGitCapture(repo, "rev-parse", "HEAD").Trim();
+
+        var projectedDirectory = Path.Combine(workspace, ".claude", "skills", "audit-tool");
+        Directory.CreateDirectory(projectedDirectory);
+        var projectedPath = Path.Combine(projectedDirectory, "SKILL.md");
+        File.WriteAllText(projectedPath, "projected content");
+
+        // The fact as the dispatcher journals it: path plus the digest of the bytes it placed.
+        var placed = PlacedFacts(projectedPath);
+
+        // Control: untouched by the worker, so AER's to subtract — all four readers.
+        Assert.True(WorktreeProvisioner.TryReadWorkspaceChanged(workspace, baseSha, out var changedUnedited, placed));
+        Assert.False(changedUnedited);
+        Assert.False(WorktreeProvisioner.ReadWorkspaceMutation(workspace, baseSha, placed)!.Mutated);
+        Assert.True(WorktreeProvisioner.IsWorkspaceUntouched(workspace, baseSha, placed));
+        Assert.Null(WorktreeProvisioner.DescribeWorkspaceEvidence(workspace, baseSha, placed));
+
+        // The claim: one condition apart — the worker edits that same projected file and nothing else.
+        File.WriteAllText(projectedPath, "projected content, then the worker's own edit");
+
+        Assert.True(WorktreeProvisioner.TryReadWorkspaceChanged(workspace, baseSha, out var changedAfterEdit, placed));
+        Assert.True(changedAfterEdit);
+
+        var readingAfterEdit = WorktreeProvisioner.ReadWorkspaceMutation(workspace, baseSha, placed)!;
+        Assert.True(readingAfterEdit.Mutated);
+        Assert.Equal(1, readingAfterEdit.ChangedPathCount);
+
+        Assert.False(WorktreeProvisioner.IsWorkspaceUntouched(workspace, baseSha, placed));
+        Assert.Contains("SKILL.md", WorktreeProvisioner.DescribeWorkspaceEvidence(workspace, baseSha, placed));
+    }
+
+    /// <summary>
+    /// #1929 review round 3 (MEDIUM): a placement fact whose <see cref="EnginePlacedFile.Sha256"/> is
+    /// null is not AER's to subtract, so its path COUNTS — see that property for the two ways a fact
+    /// ends up in that state.
+    /// </summary>
+    /// <remarks>
+    /// Control: the identical path with its real digest, over the identical tree, IS subtracted. The two
+    /// arms differ only in whether <see cref="EnginePlacedFile.Sha256"/> is null.
+    /// </remarks>
+    [Fact]
+    public void A_placement_fact_with_no_digest_subtracts_nothing()
+    {
+        var (repo, reference) = CreateRepoWithBranch("committed.txt");
+        var workspace = Path.Combine(NewDir("task"), "workspace");
+        WorktreeProvisioner.Provision(workspace, repo, reference);
+        var baseSha = RunGitCapture(repo, "rev-parse", "HEAD").Trim();
+
+        var projectedDirectory = Path.Combine(workspace, ".claude", "skills", "audit-tool");
+        Directory.CreateDirectory(projectedDirectory);
+        var projectedPath = Path.Combine(projectedDirectory, "SKILL.md");
+        File.WriteAllText(projectedPath, "projected content");
+
+        // Control: with the digest, subtracted.
+        Assert.True(WorktreeProvisioner.TryReadWorkspaceChanged(
+            workspace, baseSha, out var changedWithDigest, PlacedFacts(projectedPath)));
+        Assert.False(changedWithDigest);
+        Assert.True(WorktreeProvisioner.IsWorkspaceUntouched(workspace, baseSha, PlacedFacts(projectedPath)));
+
+        // The claim: the same path, no digest recorded.
+        EnginePlacedFile[] withoutDigest = [new(projectedPath, null)];
+        Assert.True(WorktreeProvisioner.TryReadWorkspaceChanged(workspace, baseSha, out var changed, withoutDigest));
+        Assert.True(changed);
+        Assert.Equal(1, WorktreeProvisioner.ReadWorkspaceMutation(workspace, baseSha, withoutDigest)!.ChangedPathCount);
+        Assert.False(WorktreeProvisioner.IsWorkspaceUntouched(workspace, baseSha, withoutDigest));
+        Assert.Contains("SKILL.md", WorktreeProvisioner.DescribeWorkspaceEvidence(workspace, baseSha, withoutDigest));
     }
 
     // #1373: ReadWorkspaceMutation, against real git trees for the reason this class's own summary

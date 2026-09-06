@@ -373,7 +373,7 @@ public abstract record FlowEvent
     /// canonical-skill projection (#1151). The room's durable answer to "what did AER put in my
     /// repository during this lane", which before this event existed only as terminal scrollback.
     /// <para>
-    /// It is also the record the HIGH's fix rests on: those exact paths are subtracted from
+    /// It is also the record the HIGH's fix rests on: those exact files are subtracted from
     /// <c>workspaceChanged</c> and from the #1373 timeout-retry guard
     /// (<c>WorktreeProvisioner.ChangedPathsExcludingEnginePlaced</c>), so an auditor can see which
     /// paths the engine excluded from its own work-product evidence rather than take the subtraction on
@@ -381,9 +381,18 @@ public abstract record FlowEvent
     /// appends nothing, which is exactly the distinction the MEDIUM was about.
     /// </para>
     /// <para>
+    /// <b>Appended before the spawn, not after the exit</b> (#1929 review round 3, LOW). The dispatcher
+    /// raises <c>CoreDispatchTarget.OnEngineFilesPlaced</c> the moment the copies are made and awaits the
+    /// append, so the fact is durable before the worker process exists. Journaling it after
+    /// <c>DispatchAsync</c> returned left an interval — between the durable
+    /// <c>CoreEvent.ExecutionExited</c> and the append — in which a crash produced exactly the
+    /// crash-recovery classification below with no fact to read, i.e. the defect this event closed. Same
+    /// ordering as <see cref="ExecutionAttemptStarted"/>, and now the same durability ordering too.
+    /// </para>
+    /// <para>
     /// It changes no StepState and no FlowState, but it is <b>not</b> reader-less the way the
     /// <c>Verify*</c> facts above are: <c>StateProjector</c> projects it into
-    /// <c>ProjectionCheckpointState.EnginePlacedPathsByExecutionId</c> (#1933), which is what the
+    /// <c>ProjectionCheckpointState.EnginePlacedFilesByExecutionId</c> (#1933), which is what the
     /// crash-recovery path — where <c>CoreDispatchResult</c> is rebuilt from a recorded exit and would
     /// otherwise carry no placement list — reads to make the same subtraction the live path makes. Both
     /// paths therefore judge the worker's work product on the worker's own writes;
@@ -391,14 +400,19 @@ public abstract record FlowEvent
     /// carrying no such fact then reads as.
     /// </para>
     /// </summary>
-    /// <param name="Paths">The absolute destination paths actually written, in the order placed.</param>
+    /// <param name="Files">
+    /// The destination paths actually written, in the order placed, each with the digest of the bytes
+    /// placed there — see <see cref="EnginePlacedFile"/> for why the digest is not optional to the
+    /// design. <see langword="null"/> only on a journal line predating this shape, which subtracts
+    /// nothing.
+    /// </param>
     /// <param name="Groups">
     /// The adapter's own labels for what was placed (<c>CoreDispatchSeedCopy.Group</c> — the canonical
     /// skill package names, for claude). Echoed, never interpreted (Architecture Rule 1).
     /// </param>
     public sealed record EngineFilesPlaced(
         ExecutionId ExecutionId,
-        IReadOnlyList<string> Paths,
+        IReadOnlyList<EnginePlacedFile>? Files,
         IReadOnlyList<string> Groups) : FlowEvent;
 
     /// <summary>

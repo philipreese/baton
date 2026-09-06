@@ -53,7 +53,8 @@ public class FlowEventLogJsonTests
         new FlowEvent.VerifyNotRun(ExecutionId, "task absent: gates-quiet"),
         new FlowEvent.VerifyDeclarationIgnored(ExecutionId, "0f2b", "9ac1"),
         new FlowEvent.VerifyDeclarationUnreviewed(ExecutionId, "0f2b"),
-        new FlowEvent.EngineFilesPlaced(ExecutionId, [@"C:\repo\.claude\skills\audit-tool\SKILL.md"], ["audit-tool"]),
+        new FlowEvent.EngineFilesPlaced(
+            ExecutionId, [new EnginePlacedFile(@"C:\repo\.claude\skills\audit-tool\SKILL.md", "9f2b1c")], ["audit-tool"]),
         new FlowEvent.ExecutionArrested(ExecutionId, new WorkerUsage(TokensIn: 500_000, TokensOut: 120_000), ["manage_task"]),
         new FlowEvent.StepRebound(StepId, ExecutionId, "agy", "gemini-3-pro", "claude", "sonnet", "Vendor failover"),
         new FlowEvent.ExecutionIndeterminate(ExecutionId, "reason", ".captured-response.md", ["advice.md"]),

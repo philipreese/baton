@@ -27,6 +27,17 @@ internal sealed class StubCoreDispatcher : ICoreDispatcher
     public ExecutionRequest? LastDispatchedRequest { get; private set; }
 
     /// <summary>
+    /// #1929 review round 3: when set, this stub raises <c>CoreDispatchTarget.OnEngineFilesPlaced</c>
+    /// with these files BEFORE it completes — standing in for the real dispatcher's placement loop,
+    /// which raises the same callback before spawning. Left null, the stub places nothing and raises
+    /// nothing, which is what every other test's dispatch does.
+    /// </summary>
+    public IReadOnlyList<Baton.Domain.EnginePlacedFile>? RaisePlacementOnDispatch { get; set; }
+
+    /// <summary>The group labels raised alongside <see cref="RaisePlacementOnDispatch"/>.</summary>
+    public IReadOnlyList<string> RaisePlacementGroups { get; set; } = [];
+
+    /// <summary>
     /// Arms the next <see cref="DispatchAsync"/> call for <paramref name="stepId"/> to await the
     /// returned <see cref="TaskCompletionSource{TResult}"/> instead of completing immediately — the
     /// test decides when (and with what result) that dispatch finishes.
@@ -72,6 +83,11 @@ internal sealed class StubCoreDispatcher : ICoreDispatcher
         }
 
         _dispatchStarted.Writer.TryWrite(stepId);
+
+        if (RaisePlacementOnDispatch is { Count: > 0 } placed && target.OnEngineFilesPlaced is { } onPlaced)
+        {
+            await onPlaced(placed, RaisePlacementGroups).ConfigureAwait(false);
+        }
 
         // Mirrors CoreDispatcher's real contract (M10 Phase 2): a cancelled dispatch token never
         // throws, it resolves to a Cancelled result, exactly like BatonCancelException does for a real

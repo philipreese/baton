@@ -1214,16 +1214,18 @@ public static class MutationInterface
                         var workspaceHeadShaAtStart =
                             latestCheckpoint.State.WorkspaceHeadShaAtStartByExecutionId.GetValueOrDefault(executionId);
 
-                        // #1933: the same recorded-facts-alone shape one line up, for AER's own
-                        // dispatch-time writes -- FlowEvent.EngineFilesPlaced's own remarks are the
-                        // canonical description, and WorktreeProvisioner.ChangedPathsExcludingEnginePlaced
-                        // states what the absent case reads as. Groups stay null: nothing reads them
-                        // here, and the room already carries the event, so recovery never re-appends it.
-                        var enginePlacedPaths =
-                            latestCheckpoint.State.EnginePlacedPathsByExecutionId.GetValueOrDefault(executionId);
+                        // #1933: the same recorded-facts-alone shape one line up, and now with the same
+                        // durability ordering -- FlowEvent.EngineFilesPlaced is appended before its
+                        // execution's spawn (that event's own remarks are the canonical description), so
+                        // an execution that reached a recorded exit reached this fact first. The absent
+                        // case (a journal line predating the event, or a dispatch that placed nothing)
+                        // still reads as WorktreeProvisioner.ChangedPathsExcludingEnginePlaced states.
+                        // The room already carries the event, so recovery never re-appends it.
+                        var enginePlacedFiles =
+                            latestCheckpoint.State.EnginePlacedFilesByExecutionId.GetValueOrDefault(executionId);
                         var classification = OutcomeClassifier.Classify(
                             new CoreDispatchResult(
-                                exit.ExitCode, exit.Reason, exit.StderrTail, EnginePlacedPaths: enginePlacedPaths),
+                                exit.ExitCode, exit.Reason, exit.StderrTail, EnginePlacedFiles: enginePlacedFiles),
                             contract, outputDirectory,
                             grantAuditMode: grantAuditMode, worktreePath: worktreePath, responseParser: responseParser,
                             usageParser: usageParser, worktreeBaseRef: worktreeBaseRef, changesTree: changesTree,
@@ -2094,6 +2096,29 @@ public static class MutationInterface
                     .ConfigureAwait(false);
             }
 
+            // #1929 review MEDIUM: the room's own record of what AER placed in the worker's working
+            // directory before spawning it, and (the HIGH's escape clause) of which exact files the
+            // classification below therefore excludes from its work-product evidence. Wired as the
+            // dispatcher's own placement callback rather than read off the returned result, so the fact
+            // is durable BEFORE the spawn — #1929 review round 3's LOW, and the same durability ordering
+            // FlowEvent.ExecutionAttemptStarted above already has. Composed the way OnStdoutLine is,
+            // never replacing a callback a caller already wired.
+            var innerOnEngineFilesPlaced = target.OnEngineFilesPlaced;
+            target = target with
+            {
+                OnEngineFilesPlaced = async (files, groups) =>
+                {
+                    await eventLogWriter.AppendAsync(
+                            new FlowEvent.EngineFilesPlaced(prepared.Request.ExecutionId, files, groups),
+                            CancellationToken.None)
+                        .ConfigureAwait(false);
+                    if (innerOnEngineFilesPlaced is not null)
+                    {
+                        await innerOnEngineFilesPlaced(files, groups).ConfigureAwait(false);
+                    }
+                },
+            };
+
             // Rests on ICoreDispatcher's contract that cancellation via its token argument comes back
             // as a normal CoreDispatchResult (CoreExitReason.CancelRequested), never as
             // OperationCanceledException — CoreDispatcher converts BatonCancelException two layers
@@ -2104,19 +2129,6 @@ public static class MutationInterface
             // into a fabricated outcome.
             var dispatchResult = await dispatcher.DispatchAsync(prepared.Request, target, effectiveCancellationToken)
                 .ConfigureAwait(false);
-
-            // #1929 review MEDIUM: the room's own record of what AER placed in the worker's working
-            // directory before spawning it, and (the HIGH's escape clause) of which exact paths the
-            // classification below therefore excludes from its work-product evidence. Appended from what
-            // was WRITTEN, never from the plan — see FlowEvent.EngineFilesPlaced's own doc.
-            if (dispatchResult.EnginePlacedPaths is { Count: > 0 } placedPaths)
-            {
-                await eventLogWriter.AppendAsync(
-                        new FlowEvent.EngineFilesPlaced(
-                            prepared.Request.ExecutionId, placedPaths, dispatchResult.EnginePlacedGroups ?? []),
-                        CancellationToken.None)
-                    .ConfigureAwait(false);
-            }
 
             if (budgetMonitor is { Arrested: true })
             {

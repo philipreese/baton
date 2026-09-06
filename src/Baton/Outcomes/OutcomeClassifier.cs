@@ -230,7 +230,7 @@ public static class OutcomeClassifier
             if (result.TerminalSuccessObserved && ContractValidator.IsSatisfied(contract, outputDirectory))
             {
                 return BuildSucceededClassification(
-                    contract, changesTreeWorkingDirectory, worktreeBaseRef, changesTree, result.EnginePlacedPaths);
+                    contract, changesTreeWorkingDirectory, worktreeBaseRef, changesTree, result.EnginePlacedFiles);
             }
 
             // #1373: a timeout kill stays retryable only over an empty workspace. The ruling, the
@@ -256,7 +256,7 @@ public static class OutcomeClassifier
                 // the delegate, so an injected test double keeps its two-argument shape.
                 var probe = workspaceMutationProbe
                     ?? ((path, since) => Workspaces.WorktreeProvisioner.ReadWorkspaceMutation(
-                        path, since, result.EnginePlacedPaths));
+                        path, since, result.EnginePlacedFiles));
                 var reading = probe(mutationProbePath, workspaceHeadShaAtStart ?? worktreeBaseRef);
                 if (reading is { Mutated: true })
                 {
@@ -360,15 +360,19 @@ public static class OutcomeClassifier
                 //
                 // #1929 review HIGH, correcting that premise rather than restating it: since #1151 an
                 // adapter MAY place files inside the worker's working directory before spawn (the claude
-                // adapter's canonical-skill projection), and Audit -- unlike the two readers above -- does
-                // not subtract them. Not reachable through `baton dispatch --role` for claude, whose
-                // WithheldWritesReachTheOutbox is true, so RoleDispatch never auto-provisions the audited
-                // worktree; it IS reachable from a hand-written binding pairing claude with Worktree +
-                // AuditedNotEnforced, where the projection would be audited as a stray path. Left as-is
-                // deliberately: Audit's own read is `--untracked-files` default, whose collapsed
-                // untracked-directory line an exact-path list cannot match (see
-                // WorktreeProvisioner.UntrackedFilesArgument), so closing it is a change to Audit's
-                // message shape, not a one-line filter.
+                // adapter's canonical-skill projection), and Audit -- alone among the readers of this
+                // tree -- does not subtract them. The list of the ones that DO is on
+                // WorktreeProvisioner.ChangedPathsExcludingEnginePlaced, which is where this exception is
+                // recorded rather than here. Not reachable through `baton dispatch --role` for claude,
+                // whose WithheldWritesReachTheOutbox is true, so RoleDispatch never auto-provisions the
+                // audited worktree; it IS reachable from a hand-written binding pairing claude with
+                // Worktree + AuditedNotEnforced, where the projection is audited as a stray path and
+                // this call settles Failed/Permanent on it.
+                //
+                // #1929 review round 3 (MEDIUM) did not close that -- why it cannot be closed with a
+                // filter is stated once, on ChangedPathsExcludingEnginePlaced. What changed is that the
+                // refusal Audit composes now SAYS it did not subtract, so an operator reading it can
+                // tell the engine's own writes from a worker's real grant violation.
                 var audit = Workspaces.WorktreeProvisioner.Audit(worktreePath);
                 if (!audit.IsClean)
                 {
@@ -452,15 +456,20 @@ public static class OutcomeClassifier
             }
 
             return BuildSucceededClassification(
-                contract, changesTreeWorkingDirectory, worktreeBaseRef, changesTree, result.EnginePlacedPaths);
+                contract, changesTreeWorkingDirectory, worktreeBaseRef, changesTree, result.EnginePlacedFiles);
         }
 
         // #1593: Natural exit 0 with unsatisfied contract settles Indeterminate (spec/baton.md §3 Producers).
         // #1622: A dead streaming worker retains the retryable Failed path when untouched (WorktreeProvisioner.IsWorkspaceUntouched).
         // F6 (#1593 review): keys on CoreDispatchResult.TerminalResultObserved, not TerminalSuccessObserved.
         // Register entry: spec/baton.md §3 F6.
+        // #1929 review round 3 (MEDIUM): result.EnginePlacedFiles is threaded through here and into
+        // DescribeWorkspaceEvidence below for the same reason the two readers above already take it --
+        // AER's own pre-spawn writes are not the worker's work. One predicate, every reader:
+        // WorktreeProvisioner.ChangedPathsExcludingEnginePlaced names the full set once.
         var isDeadWorkerWithoutResult = responseParser is not null && !result.TerminalResultObserved;
-        if (isDeadWorkerWithoutResult && Workspaces.WorktreeProvisioner.IsWorkspaceUntouched(worktreePath, worktreeBaseRef))
+        if (isDeadWorkerWithoutResult && Workspaces.WorktreeProvisioner.IsWorkspaceUntouched(
+                worktreePath, worktreeBaseRef, result.EnginePlacedFiles))
         {
             var (contractClassification, contractRetryNotBefore) = ReadOrClassifyFailure(contract, outputDirectory, result, failureClassifier, timeProvider);
             return new OutcomeClassification(
@@ -477,7 +486,8 @@ public static class OutcomeClassifier
         // an overflowing output list does.
         // Null (no worktree, or nothing to report) leaves the reason unchanged — the byte-pinned
         // no-worktree case in Classify_leaves_the_reason_byte_for_byte_unchanged_when_the_worker_wrote_no_stderr.
-        var workspaceEvidence = Workspaces.WorktreeProvisioner.DescribeWorkspaceEvidence(worktreePath, worktreeBaseRef);
+        var workspaceEvidence = Workspaces.WorktreeProvisioner.DescribeWorkspaceEvidence(
+            worktreePath, worktreeBaseRef, result.EnginePlacedFiles);
         var boundedWorkspaceEvidence = workspaceEvidence is null
             ? null
             : Truncate(workspaceEvidence, MaxWorkspaceEvidenceLength);
@@ -721,7 +731,7 @@ public static class OutcomeClassifier
     /// </summary>
     private static OutcomeClassification BuildSucceededClassification(
         WorkerContract contract, string? changesTreeWorkingDirectory, string? worktreeBaseRef, bool changesTree,
-        IReadOnlyList<string>? enginePlacedPaths)
+        IReadOnlyList<Domain.EnginePlacedFile>? enginePlacedFiles)
     {
         if (!changesTree)
         {
@@ -737,7 +747,7 @@ public static class OutcomeClassifier
         // manufactured. Refilled from the journaled room fact on the crash-recovery path too (#1933) —
         // WorktreeProvisioner's ChangedPathsExcludingEnginePlaced states the scope once.
         if (!Workspaces.WorktreeProvisioner.TryReadWorkspaceChanged(
-                changesTreeWorkingDirectory, worktreeBaseRef, out var workspaceChanged, enginePlacedPaths))
+                changesTreeWorkingDirectory, worktreeBaseRef, out var workspaceChanged, enginePlacedFiles))
         {
             return new OutcomeClassification(OutcomeVerdict.Succeeded);
         }

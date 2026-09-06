@@ -90,15 +90,19 @@ public class CrashRecoveredEnginePlacedPathsTests
         // under <workspace>/.claude/skills/<name>/, ABSOLUTE paths in the journaled fact (#1151).
         var projectedDirectory = Path.Combine(workspace, ".claude", "skills", "x");
         Directory.CreateDirectory(Path.Combine(projectedDirectory, "reference"));
-        var placed = new[]
+        var placedPaths = new[]
         {
             Path.Combine(projectedDirectory, "SKILL.md"),
             Path.Combine(projectedDirectory, "reference", "notes.md"),
         };
-        foreach (var path in placed)
+        foreach (var path in placedPaths)
         {
             File.WriteAllText(path, "projected content");
         }
+
+        // Each fact carries the digest of the bytes as placed, exactly as CoreDispatcher journals it —
+        // subtraction is conditional on the file still holding them (EnginePlacedFile).
+        EnginePlacedFile[] placed = [.. placedPaths.Select(p => new EnginePlacedFile(p, EnginePlacedFile.TryDigest(p)))];
 
         var workflowId = new WorkflowId("wf-1933");
         var snapshot = new WorkflowDefinitionSnapshot(
@@ -126,6 +130,11 @@ public class CrashRecoveredEnginePlacedPathsTests
         {
             executionId = await AcceptRequestAsync(writer, workflowId, artifactsRoot, Implement);
 
+            // Before CoreEvent.ExecutionStarted below, which is the ordering production now produces:
+            // CoreDispatcher raises CoreDispatchTarget.OnEngineFilesPlaced at placement time and awaits
+            // the append before spawning (#1929 review round 3, LOW). Pinned as an ordering by
+            // MutationInterfaceEngineFilesPlacedOrderingTests, not asserted here — this fixture is about
+            // the reader, which is order-independent.
             if (journalPlacement)
             {
                 await writer.AppendAsync(

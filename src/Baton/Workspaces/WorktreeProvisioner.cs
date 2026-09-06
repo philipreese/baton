@@ -1,6 +1,7 @@
 using System.ComponentModel;
 using System.Diagnostics;
 using System.Linq;
+using Baton.Domain;
 
 namespace Baton.Workspaces;
 
@@ -231,13 +232,26 @@ public static class WorktreeProvisioner
                     FailureReason: $"Grant audit failed: git status --porcelain failed (exit code {exitCode}): {stderr.Trim()}");
             }
 
-            var strayPaths = DescribeStrayPaths(stdout);
+            var strayPaths = DescribeStrayPaths(SplitPorcelainLines(stdout));
             if (strayPaths is null)
             {
                 return new WorktreeAuditResult(IsClean: true, FailureReason: null);
             }
 
-            return new WorktreeAuditResult(IsClean: false, FailureReason: $"Grant audit failed: worktree {strayPaths} outside declared outputs.");
+            // #1929 review round 3 (MEDIUM): the ONE reader in the list on
+            // ChangedPathsExcludingEnginePlaced that does not subtract AER's own dispatch-time writes,
+            // and it says so here rather than counting them silently. Not a closed gap — a grant-audited
+            // worktree binding for claude still settles Failed/Permanent on the engine's own projected
+            // skill files; what this sentence buys is that the operator reading the refusal can tell
+            // that from a worker actually writing outside its grant. Closing it is a change to this
+            // message's shape, not a filter: Audit's own read is `--untracked-files` default, whose
+            // collapsed untracked-directory line an exact-path list cannot match (see
+            // UntrackedFilesArgument).
+            return new WorktreeAuditResult(
+                IsClean: false,
+                FailureReason: $"Grant audit failed: worktree {strayPaths} outside declared outputs. "
+                    + "(This audit does not subtract files AER itself placed before the spawn — see "
+                    + "FlowEvent.EngineFilesPlaced for what the engine wrote.)");
         }
         catch (Exception ex)
         {
@@ -251,22 +265,28 @@ public static class WorktreeProvisioner
     /// The bounded "carries N uncommitted/stray path(s): …" fragment <see cref="Audit"/> composes its
     /// own message from — factored out so F2 (#1593 review) can reuse the identical git-status read and
     /// formatting for a different audience (a room fact for a human, not a grant-enforcement refusal)
-    /// without duplicating the bounding logic. Null when <paramref name="porcelainOutput"/> names no
+    /// without duplicating the bounding logic. Null when <paramref name="porcelainLines"/> names no
     /// stray paths. Lists up to 10 paths, with the remaining count summarised as <c>(+N more)</c> —
     /// same cap <see cref="Audit"/> already used before this refactor.
+    /// <para>
+    /// Takes <b>already-split, untrimmed</b> porcelain lines (<see cref="SplitPorcelainLines"/>) rather
+    /// than the raw output, so a caller can run <see cref="ChangedPathsExcludingEnginePlaced"/> over
+    /// them first. Untrimmed matters: that filter reads the two-character status field positionally, and
+    /// a leading-space line (<c>" M path"</c>) trimmed before it reaches the filter silently matches
+    /// nothing. Trimming happens here instead, after any subtraction.
+    /// </para>
     /// </summary>
-    private static string? DescribeStrayPaths(string porcelainOutput)
+    private static string? DescribeStrayPaths(IReadOnlyList<string> porcelainLines)
     {
-        var lines = porcelainOutput.Split(['\r', '\n'], StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries);
-        if (lines.Length == 0)
+        if (porcelainLines.Count == 0)
         {
             return null;
         }
 
         const int maxListed = 10;
-        var totalCount = lines.Length;
-        var strayPaths = lines
-            .Select(l => l.Length > 3 ? l[3..].Trim() : l)
+        var totalCount = porcelainLines.Count;
+        var strayPaths = porcelainLines
+            .Select(l => l.Length > 3 ? l[3..].Trim() : l.Trim())
             .Take(maxListed)
             // N1 (#1664 re-review): bounded by COUNT above, not by LENGTH — a real repo-relative path
             // is unbounded, and ten of them past this point used to be able to blow the 500-char
@@ -293,7 +313,13 @@ public static class WorktreeProvisioner
     /// Combines <see cref="DescribeStrayPaths"/> with a commits-over-<paramref name="baseRef"/> count.
     /// Null when the workspace is null/missing, or genuinely has nothing to report.
     /// </summary>
-    public static string? DescribeWorkspaceEvidence(string? worktreePath, string? baseRef)
+    /// <param name="enginePlacedFiles">
+    /// #1929 review round 3 (MEDIUM) — one of the four readers listed on
+    /// <see cref="ChangedPathsExcludingEnginePlaced"/>. Without it this string named AER's own projected
+    /// skill files back to the conductor as the worker's stray paths.
+    /// </param>
+    public static string? DescribeWorkspaceEvidence(
+        string? worktreePath, string? baseRef, IReadOnlyCollection<EnginePlacedFile>? enginePlacedFiles = null)
     {
         if (string.IsNullOrWhiteSpace(worktreePath) || !Directory.Exists(worktreePath))
         {
@@ -302,8 +328,11 @@ public static class WorktreeProvisioner
 
         try
         {
-            var (statusCode, statusOut, _) = RunGit(worktreePath, "status", "--porcelain");
-            var strayPaths = statusCode == 0 ? DescribeStrayPaths(statusOut) : "carries an unreadable git status";
+            var (statusCode, statusOut, _) = RunGit(worktreePath, "status", "--porcelain", UntrackedFilesArgument);
+            var strayPaths = statusCode == 0
+                ? DescribeStrayPaths(ChangedPathsExcludingEnginePlaced(
+                    SplitPorcelainLines(statusOut), worktreePath, enginePlacedFiles))
+                : "carries an unreadable git status";
 
             string? commitsOverBase = null;
             if (!string.IsNullOrWhiteSpace(baseRef) && IsWorktree(worktreePath))
@@ -345,7 +374,14 @@ public static class WorktreeProvisioner
     /// directory — the same "no ref to compare against" case F5 renamed from fail-OPEN to fail-closed:
     /// an unset upstream is the normal state of a locally-created branch, not evidence nothing happened.
     /// </param>
-    public static bool IsWorkspaceUntouched(string? worktreePath, string? baseRef = null)
+    /// <param name="enginePlacedFiles">
+    /// #1929 review round 3 (MEDIUM) — one of the four readers listed on
+    /// <see cref="ChangedPathsExcludingEnginePlaced"/>, and the one where the omission cost most: this
+    /// is a RETRY decision, and AER's own projected skill files in the tree made it answer "touched",
+    /// skipping the #1622 retryable-Failed carve-out on evidence the engine created.
+    /// </param>
+    public static bool IsWorkspaceUntouched(
+        string? worktreePath, string? baseRef = null, IReadOnlyCollection<EnginePlacedFile>? enginePlacedFiles = null)
     {
         if (string.IsNullOrWhiteSpace(worktreePath) || !Directory.Exists(worktreePath))
         {
@@ -354,11 +390,19 @@ public static class WorktreeProvisioner
 
         try
         {
-            // --untracked-files=normal is explicit rather than left to the ambient default: a host or
-            // repo config carrying `status.showUntrackedFiles = no` would otherwise make an
-            // untracked-only work product invisible to this probe (#1720 review Finding B).
-            var (statusCode, statusOut, _) = RunGit(worktreePath, "status", "--porcelain", "--untracked-files=normal");
-            if (statusCode != 0 || !string.IsNullOrWhiteSpace(statusOut))
+            // UntrackedFilesArgument rather than the ambient default, for both reasons that argument's
+            // own remarks give: a host or repo config carrying `status.showUntrackedFiles = no` must not
+            // make an untracked-only work product invisible to this probe (#1720 review Finding B), and
+            // an exact-path exclusion list cannot match a collapsed untracked-directory line. `=all` is
+            // strictly more untracked visibility than `=normal`, so the #1720 property is preserved.
+            var (statusCode, statusOut, _) = RunGit(worktreePath, "status", "--porcelain", UntrackedFilesArgument);
+            if (statusCode != 0)
+            {
+                return false;
+            }
+
+            if (ChangedPathsExcludingEnginePlaced(
+                    SplitPorcelainLines(statusOut), worktreePath, enginePlacedFiles).Count > 0)
             {
                 return false;
             }
@@ -442,12 +486,12 @@ public static class WorktreeProvisioner
     /// happened, not how many — <see cref="WorkspaceMutationReading.NewCommitCount"/> stays null there
     /// rather than being fabricated.
     /// </param>
-    /// <param name="enginePlacedPaths">
+    /// <param name="enginePlacedFiles">
     /// #1929 review HIGH — see <see cref="ChangedPathsExcludingEnginePlaced"/> for what these are, what
     /// subtracting them buys, and what it deliberately does not.
     /// </param>
     public static WorkspaceMutationReading? ReadWorkspaceMutation(
-        string? workspacePath, string? sinceRef, IReadOnlyCollection<string>? enginePlacedPaths = null)
+        string? workspacePath, string? sinceRef, IReadOnlyCollection<EnginePlacedFile>? enginePlacedFiles = null)
     {
         if (string.IsNullOrWhiteSpace(workspacePath) || !Directory.Exists(workspacePath))
         {
@@ -462,8 +506,8 @@ public static class WorktreeProvisioner
                 return WorkspaceMutationReading.Unmeasurable;
             }
 
-            var changedPathCount =
-                ChangedPathsExcludingEnginePlaced(statusOut, workspacePath, enginePlacedPaths).Count;
+            var changedPathCount = ChangedPathsExcludingEnginePlaced(
+                SplitPorcelainLines(statusOut), workspacePath, enginePlacedFiles).Count;
 
             if (!string.IsNullOrWhiteSpace(sinceRef))
             {
@@ -509,11 +553,11 @@ public static class WorktreeProvisioner
     /// so two entry points; the git reads themselves are the same ones, kept in the same order.
     /// </para>
     /// </summary>
-    /// <param name="enginePlacedPaths">
+    /// <param name="enginePlacedFiles">
     /// #1929 review HIGH — see <see cref="ChangedPathsExcludingEnginePlaced"/>.
     /// </param>
     public static bool TryReadWorkspaceChanged(
-        string? worktreePath, string? baseRef, out bool changed, IReadOnlyCollection<string>? enginePlacedPaths = null)
+        string? worktreePath, string? baseRef, out bool changed, IReadOnlyCollection<EnginePlacedFile>? enginePlacedFiles = null)
     {
         changed = false;
 
@@ -534,7 +578,8 @@ public static class WorktreeProvisioner
                 return false;
             }
 
-            if (ChangedPathsExcludingEnginePlaced(statusOut, worktreePath, enginePlacedPaths).Count > 0)
+            if (ChangedPathsExcludingEnginePlaced(
+                    SplitPorcelainLines(statusOut), worktreePath, enginePlacedFiles).Count > 0)
             {
                 // Uncommitted changes are conclusive on their own — no ref to compare against is
                 // needed, so this arm measures cleanly even where the commit probes below cannot.
@@ -592,8 +637,8 @@ public static class WorktreeProvisioner
     }
 
     /// <summary>
-    /// <c>--untracked-files=all</c> for the two readers that subtract engine-placed paths
-    /// (<see cref="ReadWorkspaceMutation"/>, <see cref="TryReadWorkspaceChanged"/>).
+    /// <c>--untracked-files=all</c> for every reader that subtracts engine-placed files — the list is
+    /// on <see cref="ChangedPathsExcludingEnginePlaced"/>, which is the one place it is written down.
     /// </summary>
     /// <remarks>
     /// <b>Not a widening of what counts as changed, and not <c>=no</c>.</b> It was <c>=normal</c>, which
@@ -615,8 +660,21 @@ public static class WorktreeProvisioner
     private const string UntrackedFilesArgument = "--untracked-files=all";
 
     /// <summary>
-    /// The <c>git status --porcelain</c> lines of <paramref name="statusOut"/> minus the ones naming a
-    /// path AER itself placed in the workspace before the worker was spawned (#1929 review HIGH).
+    /// Splits raw <c>git status --porcelain</c> output into its lines, <b>untrimmed</b> — the leading
+    /// space of a worktree-modified line (<c>" M path"</c>) is part of the two-character status field
+    /// every consumer here reads positionally. See <see cref="PorcelainFullPath"/>.
+    /// </summary>
+    private static List<string> SplitPorcelainLines(string statusOut) =>
+    [
+        .. statusOut
+            .Split(['\r', '\n'], StringSplitOptions.RemoveEmptyEntries)
+            .Where(line => !string.IsNullOrWhiteSpace(line))
+    ];
+
+    /// <summary>
+    /// The <c>git status --porcelain</c> lines of <paramref name="porcelainLines"/> minus the ones naming
+    /// a file AER itself placed in the workspace before the worker was spawned <b>and still holding the
+    /// bytes AER placed</b> (#1929 review HIGH, narrowed by its round-3 MEDIUM).
     /// </summary>
     /// <remarks>
     /// The engine's work-product evidence (<c>workspaceChanged</c>/<c>hollow</c>) and the #1373
@@ -626,15 +684,35 @@ public static class WorktreeProvisioner
     /// <see cref="TryReadWorkspaceChanged"/>'s own remarks exist to prevent from the other direction.
     /// The claude adapter's canonical-skill projection (#1151) is the first writer of that shape.
     /// <para>
-    /// <b>Exact paths only, and it fails toward counting.</b> A line whose path cannot be attributed with
-    /// certainty — a rename/copy (<c>old -&gt; new</c>), or a path git quoted because it carries special
-    /// characters — is KEPT, never dropped: over-counting costs a fabricated positive of the kind that was
-    /// already possible, where over-excluding would suppress the worker's real work product, which is the
-    /// evidence this whole path exists to preserve. AER's own destinations are composed from package
-    /// directory names and are neither renames nor, in practice, quoted.
+    /// <b>One predicate, every reader.</b> This is the only subtraction in the file, and the list of
+    /// callers is written here rather than restated at each: <see cref="ReadWorkspaceMutation"/> (the
+    /// #1373 retry guard), <see cref="TryReadWorkspaceChanged"/> (#1622/#1390's <c>workspaceChanged</c>),
+    /// <see cref="IsWorkspaceUntouched"/> (#1593/#1622's dead-worker retry carve-out) and
+    /// <see cref="DescribeWorkspaceEvidence"/> (the conductor-facing reason text). <see cref="Audit"/> is
+    /// the deliberate non-caller: its own read is <c>--untracked-files</c> default, whose collapsed
+    /// untracked-directory line an exact-path list cannot match, so instead of subtracting silently
+    /// wrongly it SAYS in its refusal that it did not subtract (#1929 review round 3, MEDIUM).
     /// </para>
     /// <para>
-    /// <b>Both dispatch paths, on the same evidence.</b> The live path passes the paths the dispatcher
+    /// <b>Content, not just path, and it fails toward counting.</b> A placed path is dropped only while
+    /// <see cref="EnginePlacedFile.StillMatchesPlacedBytes"/>; spec/baton.md §3's #1373 paragraph states
+    /// what that buys and prices the failure it prevents. A fact with a null
+    /// <see cref="EnginePlacedFile.Sha256"/> subtracts nothing. Neither does a line
+    /// whose path cannot be attributed with certainty — a rename/copy (<c>old -&gt; new</c>), or a path
+    /// git quoted because it carries special characters: over-counting costs a fabricated positive of the
+    /// kind that was already possible, where over-excluding would suppress the worker's real work
+    /// product, which is the evidence this whole path exists to preserve. AER's own destinations are
+    /// composed from package directory names and are neither renames nor, in practice, quoted.
+    /// </para>
+    /// <para>
+    /// <b>What the digest does NOT narrow</b>, stated rather than left for a reader to assume: a file
+    /// that was already untracked in the tree before the dispatch, and whose bytes happen to be identical
+    /// to what AER places, is copied and recorded as a placement (<c>CoreDispatcher.DispatchAsync</c>'s
+    /// identical-bytes branch) and is therefore subtracted here. Narrowing that needs a pre-spawn
+    /// baseline of the tree, which the #1373 ruling explicitly does not take.
+    /// </para>
+    /// <para>
+    /// <b>Both dispatch paths, on the same evidence.</b> The live path passes the files the dispatcher
     /// just wrote; the crash-recovery path, which rebuilds <c>CoreDispatchResult</c> from a recorded
     /// exit, refills them from the journaled <c>FlowEvent.EngineFilesPlaced</c> read back through the
     /// projection (#1933). An execution with no such fact recorded subtracts nothing and so counts
@@ -642,30 +720,26 @@ public static class WorktreeProvisioner
     /// </para>
     /// </remarks>
     private static IReadOnlyList<string> ChangedPathsExcludingEnginePlaced(
-        string statusOut, string workspacePath, IReadOnlyCollection<string>? enginePlacedPaths)
+        IReadOnlyList<string> porcelainLines, string workspacePath, IReadOnlyCollection<EnginePlacedFile>? enginePlacedFiles)
     {
-        var lines = statusOut
-            .Split(['\r', '\n'], StringSplitOptions.RemoveEmptyEntries)
-            .Where(line => !string.IsNullOrWhiteSpace(line))
-            .ToList();
-
-        if (enginePlacedPaths is null || enginePlacedPaths.Count == 0 || lines.Count == 0)
+        if (enginePlacedFiles is null || enginePlacedFiles.Count == 0 || porcelainLines.Count == 0)
         {
-            return lines;
+            return porcelainLines;
         }
 
         var comparer = OperatingSystem.IsWindows() ? StringComparer.OrdinalIgnoreCase : StringComparer.Ordinal;
-        var placed = new HashSet<string>(comparer);
-        foreach (var path in enginePlacedPaths)
+        var subtractable = new HashSet<string>(comparer);
+        foreach (var file in enginePlacedFiles)
         {
-            if (string.IsNullOrWhiteSpace(path))
+            if (file is null || string.IsNullOrWhiteSpace(file.Path) || !file.StillMatchesPlacedBytes())
             {
+                // No digest recorded, the file gone, or its bytes no longer AER's: not AER's to subtract.
                 continue;
             }
 
             try
             {
-                placed.Add(Path.GetFullPath(path));
+                subtractable.Add(Path.GetFullPath(file.Path));
             }
             catch (Exception ex) when (ex is ArgumentException or NotSupportedException or PathTooLongException)
             {
@@ -673,7 +747,11 @@ public static class WorktreeProvisioner
             }
         }
 
-        return [.. lines.Where(line => PorcelainFullPath(workspacePath, line) is not { } full || !placed.Contains(full))];
+        return
+        [
+            .. porcelainLines.Where(line =>
+                PorcelainFullPath(workspacePath, line) is not { } full || !subtractable.Contains(full))
+        ];
     }
 
     /// <summary>
