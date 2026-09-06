@@ -455,33 +455,34 @@ public sealed class RoomDetailTool : IMcpTool
         var timeline = new List<RoomTimelineEntryView>(totalEntries - startIndex);
         for (var i = startIndex; i < totalEntries; i++)
         {
-            var (type, timestamp, stepId, exitCode) = DescribeEntry(entries[i]);
-            timeline.Add(new RoomTimelineEntryView(type, timestamp, stepId, exitCode));
+            timeline.Add(DescribeEntry(entries[i]));
         }
 
         return new RoomTimelineView(timeline, Truncated: startIndex > 0, TotalEntries: totalEntries);
     }
 
-    private static (string Type, string? Timestamp, string? StepId, int? ExitCode) DescribeEntry(LogEntry entry)
+    // Internal so FleetProjectionWriter can emit the exact same event vocabulary and scalar fields
+    // as room_detail, without a second type-tag map that can drift from the tool's wire contract.
+    internal static RoomTimelineEntryView DescribeEntry(LogEntry entry)
     {
         return entry switch
         {
             LogEntry.FlowLogEntry flowEntry => (
-                $"flow.{EventTypeTag(flowEntry.Event, FlowEventTags)}",
-                flowEntry.WriterUtcTimestamp?.ToString("O"),
-                FlowEventStepId(flowEntry.Event),
-                null),
+                new RoomTimelineEntryView(
+                    $"flow.{EventTypeTag(flowEntry.Event, FlowEventTags)}",
+                    flowEntry.WriterUtcTimestamp?.ToString("O"),
+                    FlowEventStepId(flowEntry.Event))),
             LogEntry.CoreLogEntry coreEntry => (
-                $"core.{EventTypeTag(coreEntry.Event, CoreEventTags)}",
-                coreEntry.WriterUtcTimestamp?.ToString("O"),
-                null,
-                coreEntry.Event is CoreEvent.ExecutionExited exited ? exited.ExitCode : null),
+                new RoomTimelineEntryView(
+                    $"core.{EventTypeTag(coreEntry.Event, CoreEventTags)}",
+                    coreEntry.WriterUtcTimestamp?.ToString("O"),
+                    ExitCode: coreEntry.Event is CoreEvent.ExecutionExited exited ? exited.ExitCode : null)),
             LogEntry.RoomLogEntry roomEntry => (
-                $"room.{EventTypeTag(roomEntry.Event, RoomEventTags)}",
-                roomEntry.WriterUtcTimestamp?.ToString("O"),
-                roomEntry.Event is RoomEvent.RuntimePermissionAsked asked ? asked.StepId.Value : null,
-                null),
-            _ => ("unknown", null, null, null),
+                new RoomTimelineEntryView(
+                    $"room.{EventTypeTag(roomEntry.Event, RoomEventTags)}",
+                    roomEntry.WriterUtcTimestamp?.ToString("O"),
+                    roomEntry.Event is RoomEvent.RuntimePermissionAsked asked ? asked.StepId.Value : null)),
+            _ => new RoomTimelineEntryView("unknown"),
         };
     }
 

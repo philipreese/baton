@@ -96,6 +96,106 @@ public sealed class FleetProjectionWriterTests : IDisposable
         Assert.Null(readerException);
     }
 
+    [Fact]
+    public async Task BuildProjectionJson_WritesRunningAndTerminalTimelines_AndCachesTerminalTimeline()
+    {
+        var runningIdentity = (
+            Environment.ProcessId,
+            new DateTimeOffset(System.Diagnostics.Process.GetCurrentProcess().StartTime).ToUniversalTime());
+        var (runningRoom, _) = await CreateRunningRoomAsync("timeline-running-room", runningIdentity);
+        var terminalRoom = Path.Combine(_tempHome, BatonPaths.RoomsDirectoryName, "timeline-terminal-room");
+        Directory.CreateDirectory(terminalRoom);
+        await TerminalSentinelWriter.WriteAsync(
+            terminalRoom,
+            new WorkflowStatusView("Succeeded", [], [], null, null),
+            TestContext.Current.CancellationToken);
+
+        var terminalExecution = new ExecutionId("exec-timeline-terminal");
+        await using (var writer = new FlowEventLogWriter(Path.Combine(terminalRoom, BatonPaths.FlowLogFileName)))
+        {
+            await writer.AppendAsync(
+                new CoreEvent.ExecutionStarted(terminalExecution, Pid: 1234),
+                TestContext.Current.CancellationToken);
+            await writer.AppendAsync(
+                new CoreEvent.ExecutionExited(terminalExecution, ExitCode: 7, CoreExitReason.Natural),
+                TestContext.Current.CancellationToken);
+        }
+
+        var projectionWriter = new FleetProjectionWriter();
+        var firstRoot = JsonNode.Parse(
+            await projectionWriter.BuildProjectionJsonAsync(TestContext.Current.CancellationToken))!.AsObject();
+        var timelines = firstRoot["timelines"]!.AsObject();
+
+        var runningTimeline = timelines[runningRoom]!.AsArray();
+        var runningEntry = Assert.Single(runningTimeline)!.AsObject();
+        Assert.Equal("flow.executionRequestAccepted", runningEntry["type"]!.GetValue<string>());
+        Assert.Equal("step-a", runningEntry["stepId"]!.GetValue<string>());
+        Assert.NotNull(runningEntry["timestamp"]);
+
+        var terminalTimeline = timelines[terminalRoom]!.AsArray();
+        Assert.Equal(2, terminalTimeline.Count);
+        Assert.Equal("core.executionStarted", terminalTimeline[0]!["type"]!.GetValue<string>());
+        Assert.Equal("core.executionExited", terminalTimeline[1]!["type"]!.GetValue<string>());
+        Assert.Equal(7, terminalTimeline[1]!["exitCode"]!.GetValue<int>());
+
+        await using (var writer = new FlowEventLogWriter(Path.Combine(terminalRoom, BatonPaths.FlowLogFileName)))
+        {
+            await writer.AppendAsync(
+                new CoreEvent.ExecutionStarted(new ExecutionId("exec-after-terminal-cache"), Pid: 1235),
+                TestContext.Current.CancellationToken);
+        }
+
+        var secondRoot = JsonNode.Parse(
+            await projectionWriter.BuildProjectionJsonAsync(TestContext.Current.CancellationToken))!.AsObject();
+        Assert.Equal(2, secondRoot["timelines"]![terminalRoom]!.AsArray().Count);
+
+    }
+
+    [Fact]
+    public async Task BuildProjectionJson_TimelineCapKeepsNewestTail()
+    {
+        var (room, _) = await CreateRunningRoomAsync("timeline-cap-room", DeadProcessIdentity());
+        await using (var writer = new FlowEventLogWriter(Path.Combine(room, BatonPaths.FlowLogFileName)))
+        {
+            for (var i = 0; i < 31; i++)
+            {
+                await writer.AppendAsync(
+                    new CoreEvent.ExecutionStarted(new ExecutionId($"exec-timeline-cap-{i}"), Pid: (uint)i),
+                    TestContext.Current.CancellationToken);
+            }
+        }
+
+        var root = JsonNode.Parse(
+            await new FleetProjectionWriter().BuildProjectionJsonAsync(TestContext.Current.CancellationToken))!.AsObject();
+        var timeline = root["timelines"]![room]!.AsArray();
+
+        Assert.Equal(30, timeline.Count);
+        Assert.All(timeline, entry => Assert.Equal("core.executionStarted", entry!["type"]!.GetValue<string>()));
+    }
+
+    [Fact]
+    public async Task BuildProjectionJson_UnreadableTimeline_OmitsTheRoomInsteadOfThrowing()
+    {
+        var room = Path.Combine(_tempHome, BatonPaths.RoomsDirectoryName, "unreadable-timeline-room");
+        Directory.CreateDirectory(room);
+        await TerminalSentinelWriter.WriteAsync(
+            room,
+            new WorkflowStatusView("Succeeded", [], [], null, null),
+            TestContext.Current.CancellationToken);
+
+        var flowPath = Path.Combine(room, BatonPaths.FlowLogFileName);
+        await File.WriteAllTextAsync(flowPath, string.Empty, TestContext.Current.CancellationToken);
+        await using var hold = new FileStream(flowPath, FileMode.Open, FileAccess.ReadWrite, FileShare.None);
+
+        string? json = null;
+        var exception = await Record.ExceptionAsync(async () =>
+            json = await new FleetProjectionWriter().BuildProjectionJsonAsync(TestContext.Current.CancellationToken));
+
+        Assert.Null(exception);
+        var root = JsonNode.Parse(json!)!.AsObject();
+        Assert.False(root["timelines"]!.AsObject().ContainsKey(room));
+    }
+
     /// <summary>#1782: a reader that opens the file with <see cref="FileShare.Read"/> only (the
     /// hostile case -- e.g. a naive poller that did not opt into <see cref="FileShare.Delete"/>) holds
     /// the target open across a write. The writer's retry must either land once the reader closes, or

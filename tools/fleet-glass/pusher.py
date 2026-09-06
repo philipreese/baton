@@ -6418,8 +6418,8 @@ def _selftest() -> int:
                  "steps": [{"id": "s1", "state": "Succeeded", "timestamp": "2026-09-05T00:00:00Z"}]},
             ]
             ident_underhood = [{"k": "v"}]
-            # What `derive_snapshot_and_timelines` would return from its per-room `room_detail`
-            # calls -- the file has no counterpart, which is the whole point of the exclusion below.
+            # What `derive_snapshot_and_timelines` returns from its per-room `room_detail` calls.
+            # The daemon now writes this exact content-free projection into projection.json too.
             ident_timelines = {str(ident_run_room): [{"type": "executionStarted",
                                                        "timestamp": "2026-09-05T00:00:00Z"}]}
 
@@ -6430,9 +6430,7 @@ def _selftest() -> int:
             derive_wrapped, _, _, _, _, _ = assemble_wrapped(
                 derive_rooms, ident_underhood, ident_timelines, 0)
             derive_post_body = json.loads(snapshot_post_body(derive_wrapped, derive_derived_at))
-            # A distinct, fresh daemon sample makes the source-dependent timestamp difference
-            # deterministic, even on clocks whose resolution could make two now() calls equal.
-            file_derived_at = (datetime.fromisoformat(derive_derived_at) - timedelta(seconds=30)).isoformat()
+            file_derived_at = derive_derived_at
 
             file_rooms = json.loads(json.dumps(ident_base))
             file_rooms[0]["live"] = {
@@ -6452,6 +6450,7 @@ def _selftest() -> int:
             ident_projection.write_text(json.dumps({
                 "derived_at": file_derived_at,
                 "rooms": file_rooms,
+                "timelines": ident_timelines,
             }), encoding="utf-8")
             ident_data, ident_staleness = read_projection_file(ident_projection, time.time())
             check("#1557 PR-B2 identity arm: the fixture projection file reads fresh (no fallback)",
@@ -6463,16 +6462,15 @@ def _selftest() -> int:
 
             file_post_body = json.loads(snapshot_post_body(file_wrapped, ident_data["derived_at"]))
             identity_diffs = snapshot_identity_diffs(derive_post_body, file_post_body)
-            check("#1557 PR-B2 acceptance: the full posted bodies differ only in source-dependent "
-                  "`derived_at` and missing file `timelines`. "
+            check("#1902 acceptance: the full posted bodies are identical between file and derive. "
                   f"Actual diff: {identity_diffs}",
-                  identity_diffs == ["derived_at", "timelines"])
-            check("#1557 PR-B2 acceptance: each posted body carries its source's derived_at",
+                  identity_diffs == [])
+            check("#1902 acceptance: each posted body carries the same derived_at",
                   derive_post_body["derived_at"] == derive_derived_at
                   and file_post_body["derived_at"] == file_derived_at)
-            check("#1557 PR-B2 acceptance: and the `timelines` difference is exactly 'derive has "
-                  "entries, file has none' -- not two different sets of entries",
-                  derive_wrapped["timelines"] == ident_timelines and file_wrapped["timelines"] == {})
+            check("#1902 acceptance: file timelines exactly match derive timelines",
+                  derive_wrapped["timelines"] == ident_timelines
+                  and file_wrapped["timelines"] == ident_timelines)
 
             # CONTROL, read before trusting the green above: the comparator must RED on a real
             # derivation difference. Without this the arm certifies the harness, not the change.

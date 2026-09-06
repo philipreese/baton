@@ -3,6 +3,7 @@ using System.Text;
 using System.Text.Json;
 using System.Text.Json.Nodes;
 using System.Text.RegularExpressions;
+using Baton;
 using Baton.Artifacts;
 using Baton.Cli.Mcp;
 using Baton.Dispatch;
@@ -55,8 +56,12 @@ public sealed class FleetProjectionWriter : BackgroundService
     // spec/baton.md §6 (#1155): newest N pruned execution dirs surfaced per room.
     private const int PrunedItemsCap = 20;
 
+    // pusher.py's TIMELINE_CAP: the glass only retains this many content-free event entries per room.
+    private const int TimelineCap = 30;
+
     private readonly Dictionary<string, ExecutionLiveState> _liveCache = new(StringComparer.Ordinal);
     private readonly Dictionary<string, PrunedCacheEntry> _prunedCache = new(StringComparer.Ordinal);
+    private readonly Dictionary<string, TimelineReadResult> _terminalTimelineCache = new(StringComparer.Ordinal);
     private bool _loggedMissingSecretPatterns;
 
     public static TimeSpan GetInterval()
@@ -116,6 +121,7 @@ public sealed class FleetProjectionWriter : BackgroundService
         diagnostics ??= Console.Error;
         var discovered = await FleetStatusTool.DiscoverRoomsAsync([], cancellationToken).ConfigureAwait(false);
         var roomsArray = new JsonArray();
+        var timelines = new JsonObject();
         var liveKeysThisTick = new HashSet<string>(StringComparer.Ordinal);
         var liveLanesByVendor = new Dictionary<string, int>(StringComparer.Ordinal);
 
@@ -177,6 +183,12 @@ public sealed class FleetProjectionWriter : BackgroundService
                 liveLanesByVendor[adapter] = liveLanesByVendor.GetValueOrDefault(adapter) + 1;
             }
 
+            var timeline = await ReadTimelineAsync(view.Path, cancellationToken).ConfigureAwait(false);
+            if (timeline.Entries.Count > 0)
+            {
+                timelines[view.Path] = JsonSerializer.SerializeToNode(timeline.Entries, FleetStatusTool.SerializerOptions);
+            }
+
             roomsArray.Add(node);
         }
 
@@ -187,6 +199,7 @@ public sealed class FleetProjectionWriter : BackgroundService
         {
             ["derived_at"] = DateTimeOffset.UtcNow.ToString("O"),
             ["rooms"] = roomsArray,
+            ["timelines"] = timelines,
         };
 
         // #1391: same vendors[] block fleet_status returns, using the liveLanesByVendor tally this
@@ -198,6 +211,54 @@ public sealed class FleetProjectionWriter : BackgroundService
         }
 
         return root.ToJsonString(FleetStatusTool.SerializerOptions);
+    }
+
+    /// <summary>
+    /// pusher.py's <c>extract_timeline</c> counterpart: the entries retain only room_detail's
+    /// <c>type</c>/<c>timestamp</c>/<c>stepId</c>/<c>exitCode</c> projection, capped to its tail.
+    /// A terminal ledger is immutable, so its first outcome (including unreadable or absent) stays
+    /// in this daemon-lifetime cache rather than needlessly re-reading it every projection tick.
+    /// </summary>
+    private async Task<TimelineReadResult> ReadTimelineAsync(string roomPath, CancellationToken cancellationToken)
+    {
+        var isTerminal = File.Exists(Path.Combine(roomPath, TerminalSentinelWriter.TerminalSentinelFileName));
+        if (isTerminal && _terminalTimelineCache.TryGetValue(roomPath, out var cached))
+        {
+            return cached;
+        }
+
+        TimelineReadResult result;
+        var logPath = Path.Combine(roomPath, BatonPaths.FlowLogFileName);
+        if (!File.Exists(logPath))
+        {
+            result = new TimelineReadResult([]);
+        }
+        else
+        {
+            try
+            {
+                var entries = await new FlowEventLogReader(logPath)
+                    .ReadAllEntriesWithTimestampsAsync(cancellationToken)
+                    .ConfigureAwait(false);
+                result = new TimelineReadResult(entries
+                    .TakeLast(TimelineCap)
+                    .Select(RoomDetailTool.DescribeEntry)
+                    .ToArray());
+            }
+            catch (Exception ex) when (ex is BatonFlowException or IOException or UnauthorizedAccessException)
+            {
+                // Unlike room_detail, the fleet projection has no diagnostic payload channel. Omit
+                // this room entirely so a held or malformed ledger cannot sink the daemon tick.
+                result = new TimelineReadResult([]);
+            }
+        }
+
+        if (isTerminal)
+        {
+            _terminalTimelineCache[roomPath] = result;
+        }
+
+        return result;
     }
 
     /// <summary>
@@ -692,6 +753,8 @@ public sealed class FleetProjectionWriter : BackgroundService
         public long RolloverOffset;
         public TokenBudgetMonitor? Monitor;
     }
+
+    private sealed record TimelineReadResult(IReadOnlyList<RoomTimelineEntryView> Entries);
 
     private sealed record PrunedCacheEntry(DateTime DirMtimeUtc, int ChildCount, JsonObject? Result);
 }
