@@ -103,10 +103,13 @@ public sealed record RepositoryIdentity
     /// (<c>https://github.com/Owner/Repo.git</c>, <c>git@github.com:Owner/Repo.git</c>) canonicalizes,
     /// and then behind an <c>https://</c> so the bare <c>host/owner/repo</c> spelling an operator
     /// actually types is read as the host-and-path it is. That second attempt <b>supplies a scheme and
-    /// nothing else</b>: it does not invent a host, so <c>owner/repo</c> canonicalizes to
-    /// <c>owner/repo</c> (host <c>owner</c>, path <c>repo</c>) and never to
-    /// <c>github.com/owner/repo</c> — guessing a forge would file a repository under an identity no
-    /// probe could ever reproduce.
+    /// nothing else</b>: it does not invent a host, so a bare <c>owner/repo</c> is <b>refused</b>
+    /// (#1949) rather than canonicalized either to <c>owner/repo</c> — an identity whose host is a
+    /// repository owner, which no probe can ever answer — or to <c>github.com/owner/repo</c>, which
+    /// would guess a forge. Both readings file a repository under an identity nothing else derives, so
+    /// the schemeless reading requires a host that is spelled like one (a dotted label). An operator
+    /// who means a single-label intranet host says so with the scheme —
+    /// <c>https://intranet/owner/repo</c> parses on the first attempt and is unaffected.
     /// </para>
     /// <para>
     /// <b>Null is a refusal, not a fallback.</b> A caller that cannot canonicalize an operator's string
@@ -126,7 +129,23 @@ public sealed record RepositoryIdentity
 
         return raw.StartsWith(GitDirectoryPrefix, StringComparison.OrdinalIgnoreCase)
             ? From(originUrl: null, gitCommonDirectoryPath: raw[GitDirectoryPrefix.Length..])?.Value
-            : TryNormalizeRemote(raw) ?? TryNormalizeRemote("https://" + raw);
+            : TryNormalizeRemote(raw) ?? TryNormalizeSchemeless(raw);
+    }
+
+    /// <summary>
+    /// The schemeless <c>host/owner/repo</c> reading — see <see cref="TryCanonicalize"/>'s remarks for
+    /// why it demands a dotted host label and what it refuses by demanding one.
+    /// </summary>
+    private static string? TryNormalizeSchemeless(string raw)
+    {
+        if (TryNormalizeRemote("https://" + raw) is not { } normalized)
+        {
+            return null;
+        }
+
+        // TryNormalizeRemote always answers "host/path", so the first slash is where the host ends.
+        var slash = normalized.IndexOf('/');
+        return slash > 0 && normalized.AsSpan(..slash).Contains('.') ? normalized : null;
     }
 
     /// <summary>

@@ -159,8 +159,8 @@ public static class MemorySyncOptionsParser
         RepositoryIdentity.TryCanonicalize(value) is { Length: > 0 } canonical
             ? canonical
             : throw new CliArgumentException(
-                $"'{value.Trim()}' is not a repository identity: it has no host-and-path to " +
-                $"canonicalize, so no store file could be named for it. {Usage}",
+                $"'{value.Trim()}' is not a repository identity: it names no host to canonicalize " +
+                $"under, so no store file could be named for it. {Usage}",
                 "pass a canonical identity, for example 'github.com/owner/repo' — a clone URL " +
                 "('https://github.com/owner/repo.git', 'git@github.com:owner/repo.git') is accepted " +
                 "and normalised to one.");

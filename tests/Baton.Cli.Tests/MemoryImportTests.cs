@@ -891,10 +891,10 @@ public sealed class MemoryImportTests : IDisposable
 
         // Control: the well-formed spellings parse, so the arms above are keyed on what they claim.
         var ok = MemoryImportOptionsParser.Parse(
-            ["--dry-run", "--root", "r", "--assert", @"C:\a=b/c", "--asserted-by", "me"]);
+            ["--dry-run", "--root", "r", "--assert", @"C:\a=host.example/b/c", "--asserted-by", "me"]);
         Assert.True(ok.DryRun);
         Assert.Equal(["r"], ok.Roots);
-        Assert.Equal(new MemoryImportAssertion(@"C:\a", "b/c"), Assert.Single(ok.Assertions));
+        Assert.Equal(new MemoryImportAssertion(@"C:\a", "host.example/b/c"), Assert.Single(ok.Assertions));
         Assert.Equal("me", ok.AssertedBy);
 
         Assert.Throws<CliArgumentException>(() => MemoryImportOptionsParser.Parse(["--frobnicate"]));
@@ -916,6 +916,29 @@ public sealed class MemoryImportTests : IDisposable
         var parsed = MemoryImportOptionsParser.Parse(["--assert", $@"C:\root={spelling}"]);
 
         Assert.Equal("github.com/owner/repo", Assert.Single(parsed.Assertions).Repository);
+    }
+
+    /// <summary>
+    /// A bare <c>owner/repo</c> is refused (#1949). Read as a schemeless URL it looks like a
+    /// host-and-path — host <c>owner</c>, path <c>repo</c> — so it used to be stored as the identity
+    /// <c>owner/repo</c>, which no git probe can ever answer: the store it named could only ever hold
+    /// asserted entries, and the repository's probed entries would sit in a second file. The control
+    /// arms are the two spellings that must survive the refusal — a full identity, and a single-label
+    /// host an operator spelled out with a scheme, which is a real intranet remote rather than a guess.
+    /// </summary>
+    [Fact]
+    public void A_bare_owner_and_repository_with_no_host_is_refused()
+    {
+        var refused = Assert.Throws<CliArgumentException>(
+            () => MemoryImportOptionsParser.Parse(["--assert", @"C:\root=owner/repo"]));
+        Assert.Contains("is not a repository identity", refused.Message, StringComparison.Ordinal);
+        Assert.Contains("github.com/owner/repo", refused.TryInvocation ?? string.Empty, StringComparison.Ordinal);
+
+        var full = MemoryImportOptionsParser.Parse(["--assert", @"C:\root=github.com/owner/repo"]);
+        Assert.Equal("github.com/owner/repo", Assert.Single(full.Assertions).Repository);
+
+        var intranet = MemoryImportOptionsParser.Parse(["--assert", @"C:\root=https://intranet/owner/repo"]);
+        Assert.Equal("intranet/owner/repo", Assert.Single(intranet.Assertions).Repository);
     }
 
     [Fact]
