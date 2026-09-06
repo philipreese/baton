@@ -31,6 +31,7 @@ tests/fixtures/* text eol=lf
 # Derived benchmark tables (#1867): `derive_scores.py --check` compares the committed file byte-for-byte
 # against a fresh LF derivation, so a CRLF checkout on Windows would read as stale on a correct file.
 benchmarks/deepswe/*/derived-scores.csv text eol=lf
+benchmarks/deepswe/*/selected-configurations.csv text eol=lf
 
 # Committed cost-ledger exports and their derivation (#1901 C3). Same reason one line up, twice over:
 # `baton ledger export` writes LF explicitly (LedgerCsv's own promise, so the same query compares

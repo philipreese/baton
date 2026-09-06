@@ -8,6 +8,7 @@ capture, so a directory each would be a directory per week holding one file.
 
 | Snapshot | What it holds | Feeds |
 |---|---|---|
+| [`deepswe/2026-09-05`](deepswe/2026-09-05/README.md) | 41 selected vendor/model/effort configurations from the DeepSWE v1.1 live artifact. | Routing evidence |
 | [`deepswe/2026-09-04`](deepswe/2026-09-04/README.md) | 36 vendor/model/effort configurations from the DeepSWE v1.1 selector: pass@1, API-cost proxy, output tokens, agent steps. | Tier pins (#1861, #1863) |
 | [`subscription-usage/2026-09-04`](subscription-usage/2026-09-04/README.md) | Baton-launched versus native Claude Code sessions, 2026-08-31 to 09-04: responses, output, cache-read, implement-room outcomes. | #1848, #1849, #1391 |
 | [`ledger`](ledger/README.md) | Weekly `baton ledger export` snapshots of the cost ledger (`spec/baton.md` §7), one dated CSV per export, plus the per-model / per-vendor / per-arm medians `derive.py` computes from them. | #1901, #1903, #1863 |
@@ -25,6 +26,15 @@ written into the column header, and `--sweep` prints the top rows under several 
 can be had with the table in front of you. `--check` exits 1 if one committed derived file differs from
 a fresh derivation. The normal gates run `pixi run deepswe-derived-check`, which checks every dated
 snapshot with a raw input and fails when its derived output is stale or missing.
+
+[`deepswe/refresh_snapshot.py`](deepswe/refresh_snapshot.py) fetches DeepSWE's public live JSON,
+applies the model-family rules in [`deepswe/selection.json`](deepswe/selection.json), and creates a
+new dated raw snapshot, derived scores, provenance README, and index row. Run `pixi run
+deepswe-refresh-dry-run` to inspect the delta, then `pixi run deepswe-refresh` to record it. It exits
+without writing when the selected upstream data has not changed and refuses to overwrite a dated
+snapshot. Extending the tracked families is a regex edit in `selection.json`; the current Claude 5
+rule intentionally also matches patch generations such as a future `claude-fable-5-1`. A missing
+configuration fails closed; after inspection, `--allow-removals` records an intentional removal.
 
 The file is sorted with `on_vendor_frontier` rows first, then by utility, then by quality — so a row a
 same-vendor sibling dominates (Opus xhigh, 73 at 89 steps, behind Opus high's 73 at 73) sorts below

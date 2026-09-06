@@ -1,0 +1,11 @@
+{
+  "source_url": "https://deepswe.datacurve.ai/artifacts/v1.1/leaderboard-live.json",
+  "display_url": "https://deepswe.datacurve.ai/",
+  "benchmark_version": "v1.1",
+  "model_patterns": [
+    "^gpt-5-6-(?:sol|terra|luna)$",
+    "^gpt-6-astra$",
+    "^claude-(?:fable|opus|sonnet)-5(?:-[0-9]+)?$",
+    "^gemini-3-(?:1-pro-preview|7-flash|8-flash)$"
+  ]
+}

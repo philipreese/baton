@@ -107,6 +107,9 @@ OVERLAP = [
     # run on a machine that has never run Baton behaves the same as one on the operator's.
     "ledger-derived-check",
     "ledger-derived-check-selftest",
+    # #1935: pure Python against synthetic payloads and temporary snapshot trees. It protects the
+    # live collector's selection, validation, removal refusal, and idempotence without networking.
+    "deepswe-refresh-selftest",
 ]
 
 # The MSBuild owners, strictly sequential: one MSBuild at a time.
