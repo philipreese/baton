@@ -282,6 +282,16 @@ own work looks clean and nothing checked it" — read the field before reporting
 your own workspace (`.baton/verify`, which must be **committed** to take effect), and for the
 `--verify <cmd>` override.
 
+**A repo whose CI already runs everything should declare the cheaper command, not the fuller one
+(#1958).** The engine verify runs *after* the worker's own build/test and after whatever its push
+hook did, so on a repo with CI it is routinely the third run of the same members over the same tree.
+Baton's own `.baton/verify` is the worked example — it declares `pixi run gates-fast-cover-quiet`,
+which runs only the gate members that tree holds no per-member receipt for. Two things a foreign
+workspace has to supply for that shape to mean anything: a gate runner that can be told to skip
+members already proven on this exact tree, and a lane that records them. What it costs — a room
+settling `Verified` on a set narrower than CI's — is spec/baton.md C-12's `#1958` paragraph, and it is
+only a fair trade where CI is genuinely the authority.
+
 **Giving a review lane real instruments instead of prose (`--verify-cmd`, #1882).** A `review`
 worker's shell grant is a read-only `git`/`gh` allowlist, so every runtime claim it might make ("3765
 passed", "selftest exit 0") otherwise reaches it as prose in a PR body. `baton dispatch review …

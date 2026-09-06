@@ -1352,9 +1352,12 @@ and settled `Indeterminate` even though the worker's own exit and output contrac
    **stdout only**, so a warning git writes to stderr can never be taken for the declaration's own first
    non-comment line. `Baton.Mutation.VerifyCommandResolver`'s single hardened-spawn helper is where all
    of that is applied; there is no second, unhardened path to this value.
-3. `WorkerRole.VerifyPixiTask` (`implement` → `gates-quiet`; every other shipped role → none) — today's
-   only source, run as `pixi run <task>`, unchanged. Baton's own repo keeps working unchanged under
-   this arm: no `.baton/verify` file here and no `--verify` on baton's own dispatches.
+3. `WorkerRole.VerifyPixiTask` (`implement` → `gates-quiet`; every other shipped role → none) — run as
+   `pixi run <task>`, unchanged, and still the arm every workspace that declares nothing lands on.
+   **Baton's own repo no longer lands there (#1958):** it commits a `.baton/verify` declaring
+   `pixi run gates-fast-cover-quiet`, so arm 2 wins here. What that changes about a room's verdict —
+   including that the engine verify no longer runs the test suite — is C-12's `#1958` paragraph, not
+   restated here. No `--verify` on baton's own dispatches; arm 1 stays unused here.
 
 An override/repo-declared command line runs through the platform shell (`cmd.exe /d /c <line>`, this
 project ships Windows-only per #1405) rather than hand-tokenized; the role default stays a direct
@@ -5231,6 +5234,27 @@ nothing, however close it looks: `dotnet build -warnaserror` is not `lint`, whos
 `--no-incremental`. `gates.py`'s `record_member` holds the rule and the failure it closes. The
 ruling's own words — a lane's component runs standing as the receipt — are unchanged: the front door
 is how a lane makes such a run count.
+
+**The engine verify stops being the third full run (#1958).** Measured 2026-09-06 from the cost
+ledger's own `prePushGateMs`/`pushWaitMs` (§7), 23 pushes in one day: median 369.2s in the pre-push
+gate, median 160.2s of that queued on the build lock, and only 2 of the 23 skipped on a receipt. The
+engine's post-exit verify then ran `pixi run gates-quiet` — the FULL set, the `implement` role's
+`verify_pixi_task` in `src/Baton.Vendors/WorkerRoles.json` — over the same tree a third time. Baton's own repo now
+commits a `.baton/verify` (§3's arm 2) declaring `pixi run gates-fast-cover-quiet`
+(`gates.py --fast --skip-covered --quiet`), so the engine verify runs only the fast members this exact
+tree holds no per-member receipt for; the covering rule and the "a partial run never mints a whole-run
+receipt" rule are gates.py's, unchanged and unwidened. The role default stays `gates-quiet` for every
+other workspace, which is the point of putting this in a repo-level declaration rather than in the
+role.
+
+**What that costs, stated rather than discovered later.** `--fast` is `AFTER_BUILD_FAST`, which
+excludes `test-no-build`: **the engine verify no longer runs the test suite**, so a lane that breaks
+tests can settle its room `Verified` and be caught only by CI. That is the trade this ruling's own
+first paragraph already takes — CI is the independent run, and it is never skipped by any receipt —
+but it changes what a `Verified` room asserts, and it is a deliberate narrowing rather than a
+side effect. A repo that wants the receipts' saving *without* dropping the test leg declares
+`gates.py --skip-covered` with no `--fast`; Baton's own repo does not, pending the operator ruling on
+the residual local set (#1958 step 3).
 
 **Measured 2026-09-02 (#1648):** git exports `GIT_DIR`/`GIT_INDEX_FILE`/etc. to every hook, and
 `gates.py`'s own selftest fixture spawned `git init` in a temp dir without scrubbing them, so a
