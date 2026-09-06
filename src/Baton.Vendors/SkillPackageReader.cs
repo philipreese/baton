@@ -3,7 +3,7 @@ using System.Text.Json;
 namespace Baton.Vendors;
 
 /// <summary>
-/// Reader for one canonical skill package directory (#1151 §3): the typed <c>skill.json</c> manifest
+/// Reader for one canonical skill package directory (#1151): the typed <c>skill.json</c> manifest
 /// when present, the SKILL.md-compatible instructions file beside it, and the format lint over both.
 /// No YAML parser: the manifest is JSON, and the instructions file is markdown this type copies or
 /// inlines but never interprets.
@@ -13,7 +13,7 @@ namespace Baton.Vendors;
 /// <list type="bullet">
 /// <item><see cref="LoadPackage"/> is strict: a malformed manifest or a lint violation throws
 ///   <see cref="SkillPackageFormatException"/>. Used when an operator named this package
-///   (<c>--skill &lt;name&gt;</c>), where #1151 §4.6's rule is fail-fast on identity and format — a
+///   (<c>--skill &lt;name&gt;</c>), where #1151's rule is fail-fast on identity and format — a
 ///   typo, or a package that does not parse, must never produce a run that silently lacks the
 ///   capability.</item>
 /// <item><see cref="ReadPackage"/>/<see cref="DiscoverPackages"/> are tolerant: they scan a directory

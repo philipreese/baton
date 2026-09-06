@@ -4,7 +4,7 @@ namespace Baton.Vendors;
 
 /// <summary>
 /// A canonical skill package's declared <c>requires</c> names a capability the worker's resolved grant
-/// withholds (#1151 §4.5, decision 0033, spec/baton.md §9). <b>The grant is never widened to satisfy a
+/// withholds (#1151, decision 0033, spec/baton.md §9). <b>The grant is never widened to satisfy a
 /// skill</b> — attaching one can only refuse, which is the property that lets an operator attach a
 /// package without re-reading what it might quietly turn on.
 /// </summary>

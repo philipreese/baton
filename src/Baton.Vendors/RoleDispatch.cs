@@ -139,7 +139,7 @@ public static class RoleDispatch
         ArgumentNullException.ThrowIfNull(role);
         ArgumentNullException.ThrowIfNull(spec);
 
-        // #1151 §4.5/§4.6, the ergonomic half: resolve and check before anything is provisioned. The
+        // #1151 (spec/baton.md §9), the ergonomic half: resolve and check before anything is provisioned. The
         // load-bearing copy of both refusals lives in WorkerBindingResolver.Resolve, the seam the
         // `baton run` path also crosses -- this one exists so a typo'd --skill costs nothing.
         var resolvedSkills = SkillPackageResolver.ResolveAll(skills, workingDirectory);

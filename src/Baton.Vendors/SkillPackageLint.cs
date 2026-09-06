@@ -1,7 +1,7 @@
 namespace Baton.Vendors;
 
 /// <summary>
-/// The canonical skill package format lint (#1151 §3.3/§4.5) — three rules, each closing a hazard whose
+/// The canonical skill package format lint (#1151, spec/baton.md §9) — three rules, each closing a hazard whose
 /// alternative is silent. Run over a package's own bytes, before any realization exists, so a refusal
 /// costs nothing but an edit.
 /// </summary>

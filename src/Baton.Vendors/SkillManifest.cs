@@ -1,7 +1,7 @@
 namespace Baton.Vendors;
 
 /// <summary>
-/// How a canonical skill package asks to be realized (#1151 §3.2/§4.4).
+/// How a canonical skill package asks to be realized (#1151's design comment, sections 3.2 and 4.4).
 /// </summary>
 /// <remarks>
 /// <b>Both values behave identically today, and this is the one place in the CODE that says so.</b>
@@ -30,7 +30,7 @@ public enum SkillRealization
 /// <summary>
 /// What a canonical skill package declares it needs, in Baton's OWN grant vocabulary — field for field
 /// the <see cref="PermissionGrant"/> categories plus its scoped-shell pattern list, so the bind-time
-/// check is a comparison rather than a translation (#1151 §3.2).
+/// check is a comparison rather than a translation (#1151's design comment, section 3.2).
 /// </summary>
 /// <remarks>
 /// <b>Every field is nullable, and null means "not declared" rather than "declared false".</b> That
@@ -98,7 +98,7 @@ public sealed record SkillRequirements(
 
 /// <summary>
 /// The typed <c>skill.json</c> manifest — <b>the only file in a canonical skill package Baton parses</b>
-/// (#1151 §3.2, operator ruling Q1 2026-09-01). spec/baton.md §9 states what that buys.
+/// (operator ruling Q1 on #1151, 2026-09-01). spec/baton.md §9 states what that buys.
 /// </summary>
 /// <param name="Name">
 /// Advisory only. The package's identity is its DIRECTORY name, matching claude's own rule that a

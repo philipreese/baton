@@ -3,7 +3,7 @@ using Baton.Status;
 namespace Baton.Vendors;
 
 /// <summary>
-/// Where a canonical skill package NAME becomes a package (#1151 §3.4, operator ruling Q3 2026-09-01).
+/// Where a canonical skill package NAME becomes a package (operator ruling Q3 on #1151, 2026-09-01).
 /// The precedence is stated here and nowhere else; spec/baton.md §9 cites this type rather than
 /// restating the ladder.
 /// </summary>
@@ -69,7 +69,7 @@ public static class SkillPackageResolver
     /// A rung holds a directory with that name that is not a valid package. Fail fast rather than fall
     /// through to a lower rung: an operator who authored a broken package meant that one, and silently
     /// resolving a same-named package from somewhere else is the substitution this whole feature exists
-    /// to make impossible (#1151 §4.6).
+    /// to make impossible (#1151).
     /// </exception>
     public static SkillPackage Resolve(string name, string? workspaceDirectory)
     {

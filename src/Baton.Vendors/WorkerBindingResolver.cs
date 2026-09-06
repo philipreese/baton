@@ -219,7 +219,7 @@ public static class WorkerBindingResolver
 
 
     /// <summary>
-    /// #1151 §4.5: a package's declared <c>requires</c> is <b>checked, never applied</b>. The grant is
+    /// #1151 (spec/baton.md §9): a package's declared <c>requires</c> is <b>checked, never applied</b>. The grant is
     /// not widened to satisfy a skill and the skill is not silently dropped — the bind refuses, naming
     /// the skill and the missing categories. Shared with <see cref="RoleDispatch.ToBinding"/>, which
     /// runs the identical predicate earlier so a bad <c>--skill</c> fails before a room directory
