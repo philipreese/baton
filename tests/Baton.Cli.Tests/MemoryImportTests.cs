@@ -937,7 +937,7 @@ public sealed class MemoryImportTests : IDisposable
         var refused = Assert.Throws<CliArgumentException>(
             () => MemoryImportOptionsParser.Parse(["--assert", @"C:\root=owner/repo"]));
 
-        Assert.Contains("github.com/owner/repo", refused.Message, StringComparison.Ordinal);
+        Assert.Contains("github.com/owner/repo", refused.TryInvocation, StringComparison.Ordinal);
     }
 
     /// <summary>
