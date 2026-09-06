@@ -80,7 +80,7 @@ public sealed class DeliveryPoller : BackgroundService
                 Console.Error.WriteLine($"DeliveryPoller: sweep iteration failed: {ex.Message}");
             }
 
-            // #1981: see DaemonTickLedger for why every service reports its tick here.
+            // #1981: DaemonTickLedger owns what this report is for.
             DaemonTickLedger.Instance.RecordTick(
                 nameof(DeliveryPoller), Stopwatch.GetElapsedTime(started), GetInterval());
 

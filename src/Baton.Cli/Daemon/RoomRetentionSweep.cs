@@ -431,8 +431,8 @@ public sealed class RoomRetentionSweep : BackgroundService
                 }
             }
 
-            // #1981: see DaemonTickLedger for why every service reports its tick here. A pass with
-            // both halves disabled still reports — the loop turning over is what this measures.
+            // #1981 (rules: DaemonTickLedger). A pass with both halves of this sweep disabled still
+            // reports — the loop turning over is what the watchdog measures, not the work it did.
             DaemonTickLedger.Instance.RecordTick(
                 nameof(RoomRetentionSweep), Stopwatch.GetElapsedTime(started), GetInterval());
 

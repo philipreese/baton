@@ -36,12 +36,14 @@ internal sealed class DaemonTickLedger
     internal static DaemonTickLedger Instance { get; } = new(() => DateTimeOffset.UtcNow);
 
     private readonly Func<DateTimeOffset> _clock;
+    private readonly Action<string> _log;
     private readonly ConcurrentDictionary<string, ServiceTick> _ticks = new(StringComparer.Ordinal);
     private readonly DateTimeOffset _startedAt;
 
-    internal DaemonTickLedger(Func<DateTimeOffset> clock)
+    internal DaemonTickLedger(Func<DateTimeOffset> clock, Action<string>? log = null)
     {
         _clock = clock;
+        _log = log ?? Console.Error.WriteLine;
         _startedAt = clock();
     }
 
@@ -58,6 +60,17 @@ internal sealed class DaemonTickLedger
     {
         var completedAt = _clock();
         _ticks[service] = new ServiceTick(completedAt, elapsed, interval);
+
+        // #1981's third item: a tick that outruns its own interval is the growth the 2026-09-06 stall
+        // left no trace of -- `daemon.log` could not say whether the room walk had been getting slower
+        // for an hour or seized in one second. Logged only when it EXCEEDS the interval, so a healthy
+        // daemon adds no lines at all: a service that ticks inside its cadence is the normal case and
+        // logging it every pass would bury the signal in exactly the file that has to stay readable.
+        if (interval > TimeSpan.Zero && elapsed > interval)
+        {
+            _log($"{service}: tick took {elapsed.TotalSeconds:F1}s, longer than its own "
+                 + $"{interval.TotalSeconds:F0}s interval");
+        }
     }
 
     /// <summary>Every service's last completed tick, newest first. A snapshot — the watchdog reasons

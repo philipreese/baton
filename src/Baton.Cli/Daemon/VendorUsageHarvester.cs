@@ -80,9 +80,9 @@ public sealed class VendorUsageHarvester : BackgroundService
                 Console.Error.WriteLine($"VendorUsageHarvester: iteration failed: {ex.Message}");
             }
 
-            // #1981: see DaemonTickLedger for why every service reports its tick here. This is the
-            // service whose child spawn was timing out under load in the minutes before the
-            // 2026-09-06 stall, so its per-tick duration is the first thing the next one should show.
+            // #1981 (rules: DaemonTickLedger). This is the service whose child spawn was timing out
+            // under load in the minutes before the 2026-09-06 stall, so its per-tick duration is the
+            // first figure the next stall should be read against.
             DaemonTickLedger.Instance.RecordTick(
                 nameof(VendorUsageHarvester), Stopwatch.GetElapsedTime(started), TickInterval);
 

@@ -114,6 +114,25 @@ public class DaemonWatchdogTests
         Assert.NotNull(DaemonWatchdog.Evaluate(ledger, clock.Now, TimeSpan.FromSeconds(30)));
     }
 
+    /// <summary>Both polarities of the over-interval line <see cref="DaemonTickLedger.RecordTick"/>
+    /// emits (#1981) — the quiet half is the control that keeps `daemon.log` worth reading.</summary>
+    [Fact]
+    public void ATickLongerThanItsInterval_IsLogged_AndAFastOneIsNot()
+    {
+        var clock = new FixtureClock(T0);
+        var lines = new List<string>();
+        var ledger = new DaemonTickLedger(() => clock.Now, lines.Add);
+
+        ledger.RecordTick(nameof(FleetProjectionWriter), TimeSpan.FromSeconds(29), Interval);
+        Assert.Empty(lines);
+
+        ledger.RecordTick(nameof(FleetProjectionWriter), TimeSpan.FromSeconds(47.5), Interval);
+        var line = Assert.Single(lines);
+        Assert.Contains(nameof(FleetProjectionWriter), line);
+        Assert.Contains("47.5s", line);
+        Assert.Contains("30s interval", line);
+    }
+
     [Fact]
     public void TheHeartbeatBody_CarriesTickCompletedAt_AndEveryServicesLastDuration()
     {
@@ -127,8 +146,8 @@ public class DaemonWatchdogTests
 
         var root = JsonNode.Parse(ledger.RenderHeartbeatJson())!.AsObject();
 
-        // tickCompletedAt is the NEWEST completion across services -- what an outside reader needs to
-        // answer "is this daemon still turning over" without knowing the service list.
+        // tickCompletedAt is the NEWEST completion across services, so a reader needs no knowledge of
+        // which services exist (DaemonTickLedger's doc has why that field is shaped that way).
         Assert.Equal(T0.AddSeconds(15).ToString("O"), root["tickCompletedAt"]!.GetValue<string>());
         Assert.Equal(T0.ToString("O"), root["startedAt"]!.GetValue<string>());
 

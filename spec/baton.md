@@ -3211,9 +3211,8 @@ and the `staleness` field above never fired because 900s had not elapsed. Two fi
 transcribed:
 - **`fleet_status` gains `projectionAgeSeconds` (omitted when unknown) and `stale` (serialized only
   when true)** — seconds since the projection file's own `derived_at`, read at call time by
-  `Baton.Cli.Mcp.FleetProjectionStaleness`, whose doc comment owns the fail-closed rules (absent,
-  unreadable, or unparseable reads stale with no age, the same posture `read_projection_file` already
-  takes). They describe the **daemon**, never the response's own `rooms[]`, which that tool re-scans
+  `Baton.Cli.Mcp.FleetProjectionStaleness`, whose doc comment owns the fail-closed rules for a file it
+  cannot read — the same posture `read_projection_file` above already takes. They describe the **daemon**, never the response's own `rooms[]`, which that tool re-scans
   live on every call — a conductor reading the tool programmatically sees the same fact the operator's
   banner does. Off the pushed body by construction: `build_wrapped` copies named keys only, so neither
   field reaches `pusher.py`'s change-gate hash.
@@ -3707,8 +3706,9 @@ trigger is not registrable by a standard user and is not used (#1770).
   service above reports each completed pass to `DaemonTickLedger` (duration, and its own interval);
   `FleetProjectionWriter` renders that ledger to `BatonPaths.FleetHeartbeatFile`
   (`{Root}/fleet/heartbeat.json` — `tickCompletedAt` plus per-service last-tick durations) at the end
-  of every projection tick, and `DaemonWatchdog` exits the process **70** when no service has completed
-  a tick in five projection intervals, so the scheduled task's restart policy brings the daemon back.
+  of every projection tick, and `DaemonWatchdog` kills the process with a non-zero code once the
+  daemon has gone silent for the bound that type states, so the scheduled task's restart policy brings
+  it back.
   Those types' own doc comments carry the rules — what the watchdog deliberately does not catch (one
   wedged service beside healthy ones; §6's projection-staleness reading covers that), and why its loop
   runs on a dedicated thread rather than the thread pool. **The scheduled task's action has to end in

@@ -51,6 +51,29 @@ public static class DaemonHost
             }
         }
 
+        // #1981: from here on, every line this process writes to either console stream reaches
+        // `daemon.log` with a UTC timestamp in front of it -- see TimestampedLineWriter for why this
+        // is one seam over Console rather than a prefix at each call site. Installed AFTER the
+        // second-instance refusal above, so a refused instance leaves the process streams untouched,
+        // and restored in the finally below: in production the process exits either way, but a test
+        // driving this method must not leave the whole test host's console wrapped behind it.
+        var originalOut = Console.Out;
+        var originalError = Console.Error;
+        Console.SetOut(new TimestampedLineWriter(originalOut));
+        Console.SetError(new TimestampedLineWriter(originalError));
+        try
+        {
+            await RunHostAsync(args, onHostBuilt, mutex).ConfigureAwait(false);
+        }
+        finally
+        {
+            Console.SetOut(originalOut);
+            Console.SetError(originalError);
+        }
+    }
+
+    private static async Task RunHostAsync(string[] args, Action<IHost>? onHostBuilt, Mutex? mutex)
+    {
         // Setup local data directory ~/.baton
         var batonDir = BatonPaths.Root;
         Directory.CreateDirectory(batonDir);

@@ -81,8 +81,7 @@ public sealed class WatchSweep : BackgroundService
                 Console.Error.WriteLine($"WatchSweep: sweep iteration failed: {ex.Message}");
             }
 
-            // #1981: DaemonTickLedger's own doc has why every service reports here, and why it reports
-            // a tick that threw as well as one that succeeded.
+            // #1981 (rules: DaemonTickLedger), including why a tick that threw reports too.
             DaemonTickLedger.Instance.RecordTick(nameof(WatchSweep), Stopwatch.GetElapsedTime(started), Interval);
 
             try
