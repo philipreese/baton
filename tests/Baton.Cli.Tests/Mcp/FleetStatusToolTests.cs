@@ -6,6 +6,7 @@ using Baton.Domain;
 using Baton.Status;
 using Baton.Store;
 using Baton.Templates;
+using Baton.Cli.Daemon;
 using Baton.Cli.Mcp;
 using static Baton.Cli.Tests.TestSupport.ProcessIdentityFixture;
 
@@ -2381,5 +2382,18 @@ public sealed class FleetStatusToolTests : IDisposable
         var result = await tool.CallAsync(Parse("{}"), TestContext.Current.CancellationToken);
 
         Assert.DoesNotContain("\"vendors\"", result.Text);
+    }
+
+    /// <summary>The description a conductor reads is the tool's only account of what `stale` means, so
+    /// the tick count in it has to be the one the daemon actually uses -- hard-coded, it would lie the
+    /// day that constant changed. The second assertion is the control: it fails if the number were
+    /// spelled out in words or transcribed rather than interpolated.</summary>
+    [Fact]
+    public void Description_InterpolatesTheStalenessThreshold_RatherThanSpellingItOut()
+    {
+        var description = new FleetStatusTool().Description;
+
+        Assert.Contains($"{FleetProjectionWriter.StaleAfterTicks} of its tick intervals", description);
+        Assert.DoesNotContain("three of its tick intervals", description);
     }
 }
