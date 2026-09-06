@@ -359,10 +359,70 @@ public class WorkflowOutcomeAndExitCodeTests
         // Adding a member? Sweep: RunExitCodeResolver.Resolve, RedispatchCommand's parent gate,
         // StatusCommand, FleetStatusTool, QueueSchedulerService.ClassifyTerminal (#1934 — it decides a
         // queue item's fate from this word, and fails the item closed on one it does not know),
-        // glass.html chipsHtml + render buckets, spec/baton.md §3's table. #1608 review finding 10: this is a WorkflowOutcome sweep only -- adding a new
+        // glass.html chipsHtml + render buckets (that last one is no longer only prose -- the arm
+        // below reads the file), spec/baton.md §3's table. #1608 review finding 10: this is a WorkflowOutcome sweep only -- adding a new
         // FlowEvent is a DIFFERENT, unlisted population with its own two display sites (glass.html's
         // EVENT_NAMES map, RoomDetailTool.FlowEventStepId) that this list does not cover and no test
         // enumerates; check both by hand when a FlowEvent variant is added.
+    }
+
+    // #1945 review HIGH 2: the sweep list in the test above is a COMMENT, and "glass.html's render
+    // buckets" is the half of it that was read and skipped -- a FinishedDuringTeardown room matched no
+    // bucket, is truthy so it missed the `other` catch-all, and rendered in no column at all. That is
+    // the third time the same hole was measured (Stalled #1582, Indeterminate #1586 S1, Cancelled
+    // #1698, "29 of 72 live rooms were Cancelled and none rendered"), so the list stops being prose
+    // for this member: this arm reads the real file and fails if a word the vocabulary carries is
+    // absent from render()'s bucketing block. Substring-level on purpose -- it pins that the word was
+    // CONSIDERED there, not which bucket it landed in, which is a judgment (Cancelled rides Failed,
+    // FinishedDuringTeardown rides Succeeded) no assertion should freeze.
+    [Fact]
+    public void Every_room_facing_WorkflowOutcome_member_is_named_in_glass_htmls_render_buckets()
+    {
+        var glassPath = Path.Combine(RepoRoot(), "tools", "fleet-glass", "glass.html");
+        Assert.True(File.Exists(glassPath), $"glass.html must exist at {glassPath}");
+
+        var html = File.ReadAllText(glassPath);
+        var bucketsStart = html.IndexOf("function render(", StringComparison.Ordinal);
+        Assert.True(bucketsStart >= 0, "glass.html must still define a render() function to bucket rooms in.");
+        var bucketsEnd = html.IndexOf("const other", bucketsStart, StringComparison.Ordinal);
+        Assert.True(bucketsEnd > bucketsStart, "render()'s bucketing block must still end at the `other` catch-all.");
+        var buckets = html[bucketsStart..bucketsEnd];
+
+        // "Paused" is excluded, and only it: glass has no Paused bucket today and never had one --
+        // pre-existing, its own population, not this pin's to invent. An eighth member is NOT
+        // excluded by default; it lands in the required set and forces a decision here.
+        var unswept = typeof(WorkflowOutcome)
+            .GetFields(BindingFlags.Public | BindingFlags.Static)
+            .Where(f => f.IsLiteral)
+            .Select(f => (string)f.GetRawConstantValue()!)
+            .Where(word => word != WorkflowOutcome.Paused)
+            .Where(word => !buckets.Contains($"\"{word}\"", StringComparison.Ordinal))
+            .OrderBy(word => word, StringComparer.Ordinal)
+            .ToArray();
+
+        Assert.True(
+            unswept.Length == 0,
+            "tools/fleet-glass/glass.html's render() buckets name no arm for: " + string.Join(", ", unswept) +
+            ". A room carrying such a state renders in NO column (it matches no exact-match bucket and " +
+            "is truthy, so it misses `other` too). Give it a bucket, then also sweep primaryStateChip, " +
+            "roomDetailHtml's `terminal` predicate, and the dismissall section map.");
+    }
+
+    private static string RepoRoot()
+    {
+        var dir = new DirectoryInfo(AppContext.BaseDirectory);
+        while (dir is not null)
+        {
+            if (File.Exists(Path.Combine(dir.FullName, "Baton.slnx")))
+            {
+                return dir.FullName;
+            }
+
+            dir = dir.Parent;
+        }
+
+        throw new FileNotFoundException(
+            "Could not locate the repo root (Baton.slnx) by walking up from " + AppContext.BaseDirectory);
     }
 
     private static FlowState TerminalState(IReadOnlyList<StepState> steps) =>
