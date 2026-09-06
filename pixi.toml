@@ -215,7 +215,9 @@ vendor-verify = { cmd = "python -u tools/vendor-verify/verify.py" }
 
 # #1852 phase A2 (2026-09-05 review): the control arm for verify.py's `local=True` checks -- the only
 # checks in that file that drive no vendor CLI and spend nothing. Each runs against a faithful fixture
-# tree that must PASS and a mutated one that must NOT, plus the sqlite temp-copy and pbtxt-parser arms.
+# tree that must PASS and a mutated one that must NOT, plus the sqlite temp-copy and pbtxt-parser arms,
+# and (since #1928 merged) agy's tool-classification arms over synthetic catalogues. Both suites run on
+# every invocation and either one failing fails the task.
 # GATED (tools/gates/gates.py OVERLAP), unlike `vendor-verify` above, precisely because it is free:
 # without it, widening PBTXT_ANNOTATION_FIELDS or drifting a fixture degrades a control silently and
 # nothing red ever appears. Not wrapped in buildlock.py -- pure python over temp fixtures, no MSBuild.

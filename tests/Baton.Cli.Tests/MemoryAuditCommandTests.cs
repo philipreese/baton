@@ -280,6 +280,42 @@ public sealed class MemoryAuditCommandTests : IDisposable
         Assert.True(MemorySubjectVocabulary.Default.IdentityByToken.ContainsKey("baton"));
     }
 
+    /// <summary>
+    /// The <c>files=</c> line for a capped row names the bound that actually stopped the walk. A
+    /// budget-stopped row printed as "capped at 50000 entries" is a number the walk never reached,
+    /// read by an operator as a measurement of their directory and as a ceiling worth raising.
+    /// </summary>
+    /// <remarks>
+    /// All three uncounted branches are asserted together, in both directions: each names its own
+    /// bound and must NOT name the other's. Asserting only the budget line would pass on an
+    /// implementation that printed both numbers on every capped row.
+    /// </remarks>
+    [Fact]
+    public void A_capped_row_names_the_bound_that_stopped_the_walk_and_not_the_other_one()
+    {
+        var byEntries = Uncounted(VendorMemoryPresence.Capped, cappedAtEntries: 50_000);
+        Assert.Contains("capped at 50000 entries", byEntries, StringComparison.Ordinal);
+        Assert.DoesNotContain("time budget", byEntries, StringComparison.Ordinal);
+
+        var byBudget = Uncounted(
+            VendorMemoryPresence.Capped, cappedAfter: TimeSpan.FromSeconds(30));
+        Assert.Contains("ran out of its 30s time budget", byBudget, StringComparison.Ordinal);
+        Assert.DoesNotContain("entries", byBudget, StringComparison.Ordinal);
+        Assert.DoesNotContain("50000", byBudget, StringComparison.Ordinal);
+
+        var unreadable = Uncounted(VendorMemoryPresence.Unreadable);
+        Assert.Contains("could not be read", unreadable, StringComparison.Ordinal);
+        Assert.DoesNotContain("capped", unreadable, StringComparison.Ordinal);
+    }
+
+    private static string Uncounted(
+        VendorMemoryPresence presence, int? cappedAtEntries = null, TimeSpan? cappedAfter = null) =>
+        MemoryAuditCommand.DescribeUncountedRow(new VendorMemoryRoot(
+            "antigravity-brain", "antigravity", VendorMemoryScope.Vendor,
+            @"C:\home\.gemini\antigravity-cli\brain", presence,
+            FileCount: null, TotalBytes: null, NewestModifiedUtc: null,
+            Files: [], Inventoried: false, cappedAtEntries, cappedAfter));
+
     private static string FindRepoRoot()
     {
         var directory = new DirectoryInfo(AppContext.BaseDirectory);

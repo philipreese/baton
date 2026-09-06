@@ -142,10 +142,20 @@ public sealed record VendorMemoryFamily(
 /// </param>
 /// <param name="Inventoried">Whether <paramref name="Files"/> was populated at all.</param>
 /// <param name="CappedAtEntries">
-/// The ceiling the walk was abandoned at, on a <see cref="VendorMemoryPresence.Capped"/> row and
-/// nowhere else. It is a fact about the LIMIT, never about the directory: "capped at 50,000 entries"
-/// says how far the walk got to go, and says nothing about how many files are actually there. Absent
-/// on every other row, so it can never be mistaken for one.
+/// The ceiling the walk was abandoned at, on a <see cref="VendorMemoryPresence.Capped"/> row whose
+/// <see cref="VendorRootWalkLimits.EntryCeiling"/> is what stopped it, and nowhere else. It is a fact
+/// about the LIMIT, never about the directory: "capped at 50,000 entries" says how far the walk got
+/// to go, and says nothing about how many files are actually there.
+/// <b>Null on a capped row stopped by the time budget</b> — see <paramref name="CappedAfter"/>, and
+/// <see cref="VendorRootWalkLimits"/> for why the two bounds are independent. Stamping the ceiling on
+/// a budget-stopped row would report a number the walk never came close to as the reason it stopped.
+/// </param>
+/// <param name="CappedAfter">
+/// The wall-clock budget the walk exhausted, on a <see cref="VendorMemoryPresence.Capped"/> row whose
+/// <see cref="VendorRootWalkLimits.Budget"/> is what stopped it, and nowhere else. Like
+/// <paramref name="CappedAtEntries"/> it is the LIMIT, not a measurement: it says how long the walk
+/// was allowed, not how long the directory would have taken. Exactly one of the two is non-null on a
+/// capped row, and both are null on every other row.
 /// </param>
 public sealed record VendorMemoryRoot(
     string Family,
@@ -158,7 +168,8 @@ public sealed record VendorMemoryRoot(
     DateTime? NewestModifiedUtc,
     IReadOnlyList<MemoryFile> Files,
     bool Inventoried,
-    int? CappedAtEntries = null);
+    int? CappedAtEntries = null,
+    TimeSpan? CappedAfter = null);
 
 /// <summary>
 /// What bounds one family's directory walk. A vendor tree is not this tool's to trust: it is written
@@ -170,7 +181,11 @@ public sealed record VendorMemoryRoot(
 /// <b>Two independent bounds, because a walk fails slowly in two different ways.</b>
 /// <see cref="EntryCeiling"/> catches a tree that is merely enormous; <see cref="Budget"/> catches
 /// one whose entries are cheap to count and expensive to reach (a network path, a filter driver, a
-/// disk under load). Either one hit reports <see cref="VendorMemoryPresence.Capped"/>.
+/// disk under load). Either one hit reports <see cref="VendorMemoryPresence.Capped"/> — but WHICH one
+/// hit is carried out of the walk and onto the row (<see cref="VendorMemoryRoot.CappedAtEntries"/> /
+/// <see cref="VendorMemoryRoot.CappedAfter"/>), because they are independent: a walk stopped after
+/// nine hundred entries by a slow disk is not evidence that the tree holds fifty thousand, and telling
+/// an operator otherwise sends them to raise the wrong bound.
 /// </para>
 /// <para>
 /// <b>Cycles need no visited-set here.</b> The walk never descends into a reparse point (junction or

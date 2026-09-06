@@ -92,7 +92,7 @@ public static class MemoryAuditCommand
         }
 
         var claudeHome = claudeHomeOverride ?? MemoryRootInventory.DefaultClaudeHome;
-        var roots = MemoryRootInventory.Scan(claudeHome);
+        var roots = MemoryRootInventory.Scan(claudeHome, cancellationToken);
 
         var resolutions = new List<MemoryRootResolution>(roots.Count);
         foreach (var root in roots)
@@ -253,12 +253,7 @@ public static class MemoryAuditCommand
                 $"presence={MemoryJsonNames.Of(root.Presence)}");
             if (root.FileCount is not { } fileCount || root.TotalBytes is not { } totalBytes)
             {
-                output.WriteLine(
-                    root.Presence == VendorMemoryPresence.Capped
-                        ? $"    files=(not counted -- the walk was capped at {root.CappedAtEntries} " +
-                          "entries and abandoned there; that is the LIMIT, not a count of this directory)"
-                        : "    files=(not counted -- this directory could not be read, which is not " +
-                          "the same as it holding nothing)");
+                output.WriteLine(DescribeUncountedRow(root));
                 continue;
             }
 
@@ -267,5 +262,42 @@ public static class MemoryAuditCommand
                 (root.NewestModifiedUtc is { } newest ? $" newest={newest:O}" : " newest=(none)") +
                 (root.Inventoried ? string.Empty : "  [counted only -- no file here was opened]"));
         }
+    }
+
+    /// <summary>
+    /// The <c>files=</c> line for a row that carries no count, naming WHICH bound stopped the walk.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// A capped walk has two independent causes (<see cref="VendorRootWalkLimits"/>), and printing the
+    /// entry ceiling for both is what tells an operator whose <c>brain</c> directory sits behind a
+    /// filter driver that the tree holds fifty thousand entries and the ceiling is what to raise. It
+    /// held nine hundred and the clock is what to raise. Both branches state the number as the LIMIT,
+    /// because that is all either of them is.
+    /// </para>
+    /// <para>
+    /// Extracted from <see cref="WriteVendorRoots"/> so both capped branches and the unreadable one
+    /// can be asserted directly: the command's own seam takes no walk limits, so a budget-stopped walk
+    /// is not reachable end-to-end from a test.
+    /// </para>
+    /// </remarks>
+    internal static string DescribeUncountedRow(VendorMemoryRoot root)
+    {
+        if (root.Presence != VendorMemoryPresence.Capped)
+        {
+            return "    files=(not counted -- this directory could not be read, which is not the " +
+                   "same as it holding nothing)";
+        }
+
+        if (root.CappedAfter is { } budget)
+        {
+            return $"    files=(not counted -- the walk ran out of its " +
+                   $"{budget.TotalSeconds.ToString("0.###", CultureInfo.InvariantCulture)}s time " +
+                   "budget and was abandoned there; that is the LIMIT, and it says nothing about how " +
+                   "many files this directory holds)";
+        }
+
+        return $"    files=(not counted -- the walk was capped at {root.CappedAtEntries} entries and " +
+               "abandoned there; that is the LIMIT, not a count of this directory)";
     }
 }

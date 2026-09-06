@@ -282,6 +282,38 @@ public sealed class VendorMemoryRootTests : IDisposable
         // default here would misreport every row measured under custom limits, this one included.
         Assert.Equal(2, capped.CappedAtEntries);
         Assert.Null(complete.CappedAtEntries);
+
+        // The other bound was NOT hit, so it is absent. Without this arm a row that stamped both
+        // would pass, and "which limit stopped this walk" is the whole point of carrying either.
+        Assert.Null(capped.CappedAfter);
+    }
+
+    /// <summary>
+    /// A walk stopped by its WALL-CLOCK budget reports the budget, never the entry ceiling. The two
+    /// bounds are independent (<see cref="VendorRootWalkLimits"/>), and a row that reported the
+    /// ceiling for a time-stopped walk would tell an operator the tree holds 50,000 entries and that
+    /// raising the ceiling is the fix, when the walk visited one entry and the cause was the clock.
+    /// </summary>
+    /// <remarks>
+    /// <c>Budget: TimeSpan.Zero</c> needs no slow disk: the budget is already exhausted when the first
+    /// entry is evaluated, while the ceiling stays at its production value and is nowhere near hit.
+    /// The polarity arm is the ceiling test above, which asserts the mirror image.
+    /// </remarks>
+    [Fact]
+    public void A_walk_stopped_by_its_time_budget_reports_the_budget_and_not_the_entry_ceiling()
+    {
+        Write(".codex/memories/fact.md", "synthetic");
+
+        var capped = Assert.Single(
+            Scan(limits: new VendorRootWalkLimits(EntryCeiling: 50_000, Budget: TimeSpan.Zero)),
+            r => r.Family == "codex-markdown" && r.DirectoryPath == UnderHome(".codex/memories"));
+
+        Assert.Equal(VendorMemoryPresence.Capped, capped.Presence);
+        Assert.Null(capped.FileCount);
+        Assert.Null(capped.TotalBytes);
+
+        Assert.Equal(TimeSpan.Zero, capped.CappedAfter);
+        Assert.Null(capped.CappedAtEntries);
     }
 
     /// <summary>
@@ -345,5 +377,48 @@ public sealed class VendorMemoryRootTests : IDisposable
         Assert.ThrowsAny<OperationCanceledException>(() =>
             MemoryRootInventory.ScanVendorRoots(_home, BatonRoot, limits: null, listEntries: null,
                 cancelled.Token));
+    }
+
+    /// <summary>
+    /// A walk ALREADY IN PROGRESS is interruptible, not merely a scan that refuses to start.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// The arm above cancels before the call, so the check at the top of the family loop fires and the
+    /// walk is never entered — delete both checks inside the walk and it still passes green. This one
+    /// cancels from INSIDE the <c>listEntries</c> callback, on the first listing.
+    /// </para>
+    /// <para>
+    /// <b>The throw alone does not discriminate</b> and asserting it would repeat the arm above: the
+    /// check at the top of the family loop still fires on the NEXT family, so a scan with both in-walk
+    /// checks deleted throws just the same. The LISTING COUNT is what separates them. The fixture nests
+    /// a subdirectory, so this family's walk needs two listings to finish; with the per-listing or
+    /// per-entry check in place it never reaches the second. Delete both and the count is 2, which is
+    /// this arm's control — verified by running it against exactly that mutation.
+    /// </para>
+    /// </remarks>
+    [Fact]
+    public void A_walk_already_in_progress_is_interrupted_rather_than_running_to_completion()
+    {
+        Write(".codex/memories/fact.md", "a fact");
+        Write(".codex/memories/nested/deeper.md", "another fact");
+
+        using var cancelInFlight = new CancellationTokenSource();
+        var listings = 0;
+
+        Assert.ThrowsAny<OperationCanceledException>(() =>
+            MemoryRootInventory.ScanVendorRoots(
+                _home, BatonRoot, limits: null,
+                listEntries: path =>
+                {
+                    listings++;
+                    cancelInFlight.Cancel();
+                    return Directory.GetFileSystemEntries(path);
+                },
+                cancelInFlight.Token));
+
+        // Exactly one listing: the callback ran (so the scan really started), and the walk was stopped
+        // before it reached the nested directory it would otherwise have listed second.
+        Assert.Equal(1, listings);
     }
 }

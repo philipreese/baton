@@ -28,7 +28,7 @@ USAGE
     pixi run vendor-verify                 # every check that needs no special authorisation
     pixi run vendor-verify -- --list       # names and what each one costs
     pixi run vendor-verify -- --only gate  # one group, see --list for the full set
-    pixi run vendor-verify -- --selftest   # the local (filesystem) checks only; spends nothing
+    pixi run vendor-verify -- --selftest   # every selftest suite; drives no vendor CLI, spends nothing
     pixi run vendor-verify-selftest        # the same thing, and what `pixi run gates` runs
 
 SAFETY
@@ -46,9 +46,12 @@ Every check that drives a vendor CLI spends real subscription usage, so a full r
 CI -- same rule as `pixi run vendor-probe` and the live smoke tests. The `local=True` checks are the
 exception and are the reason to read this paragraph rather than assume the older, simpler rule: they
 read the filesystem, drive nothing, spend nothing, and `--selftest` exercises them against fixture
-trees. That selftest IS gated (`vendor-verify-selftest`, a `tools/gates/gates.py` OVERLAP member), so
-a control that stopped discriminating is caught by a normal `pixi run gates` rather than by whoever
-next remembers this file exists.
+trees. `--selftest` runs TWO suites -- those fixture arms, and #1928's agy tool-classification arms,
+which parse `AgyWorkerAdapter.cs` and drive the classifier over synthetic catalogues without ever
+running `agy tools`. Both run on every invocation and either one failing fails the flag. That
+selftest IS gated (`vendor-verify-selftest`, a `tools/gates/gates.py` OVERLAP member), so a control
+that stopped discriminating is caught by a normal `pixi run gates` rather than by whoever next
+remembers this file exists.
 
 A temp COPY of a vendor sqlite store is made outside the user's home and removed loudly -- see
 `_scratch_root` for why both halves of that sentence are load-bearing.
@@ -118,9 +121,12 @@ def check(name, group, claim, safety="safe", sentinel=False, local=False):
 
     `local=True` marks a check that reads the FILESYSTEM rather than driving a vendor CLI (#1852
     phase A2). It spends no subscription usage, starts no model, and is the only kind of check in
-    this file that can be exercised deterministically -- which is what `--selftest` does. Everything
-    else here needs an authenticated CLI and real money to run at all, so it is outside that
-    population; `--selftest` passing says nothing whatever about the vendor-CLI checks.
+    this file that can be exercised deterministically end to end -- which is what `--selftest`'s
+    `local-checks` suite does. Everything else here needs an authenticated CLI and real money to run
+    at all, so it is outside that population; `--selftest` passing says nothing whatever about the
+    vendor-CLI checks. (`--selftest`'s other suite, `agy-tool-classification`, exercises one
+    vendor-CLI check's classifier over synthetic catalogues -- not the check itself, which still
+    needs `agy tools`.)
 
     A local check takes an optional `home` argument so `--selftest` can point it at a fixture tree.
     Called with no argument -- which is what the runner does -- it reads the operator's real home.
@@ -4507,12 +4513,10 @@ SELFTEST_FIXTURES = {
 }
 
 
-def selftest() -> int:
+def _selftest_local_checks() -> int:
     """Exercise every local check against a faithful fixture and a broken one. Costs nothing."""
     local = sorted(n for n, c in CHECKS.items() if c["local"])
-    print("vendor-verify --selftest: the local (filesystem) checks only.")
-    print("Every other check here drives an authenticated vendor CLI and spends real subscription")
-    print("usage, so none of them is exercised and this says NOTHING about them.")
+    print("suite: local-checks -- the local (filesystem) checks, against fixture trees.")
     print("=" * 78)
 
     failures = []
@@ -4556,11 +4560,11 @@ def selftest() -> int:
 
     print("\n" + "=" * 78)
     if failures:
-        print(f"{len(failures)} problem(s) across {len(local)} local check(s).")
+        print(f"FAIL  local-checks: {len(failures)} problem(s) across {len(local)} local check(s).")
         return 1
-    print(f"All {len(local)} local check(s) pass on a faithful fixture and refuse a broken one, "
-          "the sqlite temp copy lands outside the user home and reports a failed cleanup, and the "
-          "pbtxt parser's one convention-dependent case is pinned.")
+    print(f"PASS  local-checks: all {len(local)} local check(s) pass on a faithful fixture and "
+          "refuse a broken one, the sqlite temp copy lands outside the user home and reports a "
+          "failed cleanup, and the pbtxt parser's one convention-dependent case is pinned.")
     return 0
 
 
@@ -4660,6 +4664,90 @@ def _selftest_pbtxt_limitation():
     return failures
 
 
+def _selftest_agy_tool_classification() -> int:
+    """#1928's arms for `agy.tools-classified`: known tools PASS, an unknown tool FAILs and is NAMED,
+    a tool appearing in two lists FAILs as multiply classified.
+
+    Local in the same sense as the fixture suite above: it parses AgyWorkerAdapter.cs and drives the
+    classifier over synthetic catalogues. It never runs `agy tools`, so it spends nothing.
+    """
+    print("suite: agy-tool-classification -- AgyWorkerAdapter.cs's tool lists vs the classifier.")
+    print("=" * 78)
+    try:
+        tool_lists = load_agy_adapter_tool_lists()
+        expected_lists = {"ReadTools", "WriteTools", "ShellTools", "SubagentAndTaskTools", "NetworkTools"}
+        if not expected_lists.issubset(set(tool_lists.keys())):
+            print(f"FAIL  agy-tool-classification: missing expected lists in AgyWorkerAdapter.cs: "
+                  f"{expected_lists - set(tool_lists.keys())}")
+            return 1
+
+        fixture_known = [
+            "view_file", "list_dir", "find_by_name", "grep_search",
+            "write_to_file", "replace_file_content", "multi_replace_file_content", "generate_image",
+            "run_command", "manage_task", "invoke_subagent", "define_subagent", "manage_subagents",
+            "search_web", "read_url_content", "browser_click", "browser_navigate",
+        ]
+        st, msg = _agy_tools_classified(fixture_known, tool_lists=tool_lists)
+        if st != PASS:
+            print(f"FAIL  agy-tool-classification: known tools failed classification: {st} -- {msg}")
+            return 1
+        print("   OK  a catalogue of known tools classifies clean")
+
+        fixture_unknown = ["view_file", "__unknown_test_tool__"]
+        st_unk, msg_unk = _agy_tools_classified(fixture_unknown, tool_lists=tool_lists)
+        if st_unk != FAIL or "__unknown_test_tool__" not in msg_unk:
+            print(f"FAIL  agy-tool-classification: unknown tool in fixture was not caught as "
+                  f"unclassified: {st_unk} -- {msg_unk}")
+            return 1
+        print("   OK  an unknown tool is rejected, and named in the failure message")
+
+        duplicate_lists = {k: list(v) for k, v in tool_lists.items()}
+        duplicate_lists["ReadTools"].append("run_command")
+        st_dup, msg_dup = _agy_tools_classified(fixture_known, tool_lists=duplicate_lists)
+        if st_dup != FAIL or "multiply classified" not in msg_dup:
+            print(f"FAIL  agy-tool-classification: duplicate tool was not caught as multiply "
+                  f"classified: {st_dup} -- {msg_dup}")
+            return 1
+        print("   OK  a tool in two lists is rejected as multiply classified")
+    except Exception as exc:                                       # noqa: BLE001
+        print(f"FAIL  agy-tool-classification: raised: {exc!r}")
+        return 1
+
+    print("\n" + "=" * 78)
+    print("PASS  agy-tool-classification: 3 arms (known PASS, unknown FAIL naming it, duplicate FAIL).")
+    return 0
+
+
+# Every suite runs, whatever the ones before it returned: a suite that never ran cannot be
+# distinguished from one that passed, and `--selftest`'s whole job is to say which half broke.
+SELFTEST_SUITES = (
+    ("local-checks", _selftest_local_checks),
+    ("agy-tool-classification", _selftest_agy_tool_classification),
+)
+
+
+def selftest() -> int:
+    """Run every selftest suite and fail closed if ANY of them fails.
+
+    Spends nothing and drives no vendor CLI -- and therefore says nothing whatever about the
+    vendor-CLI checks, which cannot be run without an authenticated CLI and real usage.
+    """
+    failed = []
+    for i, (name, fn) in enumerate(SELFTEST_SUITES):
+        if i:
+            print()
+        if fn() != 0:
+            failed.append(name)
+
+    print("\n" + "=" * 78)
+    if failed:
+        print(f"--selftest FAILED: {', '.join(failed)} "
+              f"({len(failed)} of {len(SELFTEST_SUITES)} suite(s)).")
+        return 1
+    print(f"--selftest: all {len(SELFTEST_SUITES)} suite(s) pass.")
+    return 0
+
+
 def project_slug_root():
     """Claude records a transcript per working directory under the config root.
 
@@ -4706,56 +4794,17 @@ def main() -> int:
                          "conclusions live in docs/decisions and need no re-confirmation.")
     ap.add_argument("--allow-config-writes", action="store_true",
                     help="also run checks that touch the operator's real settings files")
-    ap.add_argument("--selftest", action="store_true",
-                    help="run internal selftests of verify.py parsers and classification controls")
     ap.add_argument("--full-model", action="store_true",
                     help="run every check on the vendor's DEFAULT model instead of the cheapest "
                          "one. Costs far more; use when a cheap-model result looks wrong and you "
                          "need to know whether the model or the vendor changed.")
     ap.add_argument("--selftest", action="store_true",
-                    help="exercise the LOCAL (filesystem) checks against fixture trees, each with "
-                         "the fault it exists to catch. Spends nothing and drives no vendor CLI -- "
-                         "and therefore says nothing about the vendor-CLI checks, which cannot be "
-                         "run without an authenticated CLI and real usage.")
+                    help="run every selftest suite -- the LOCAL (filesystem) checks against fixture "
+                         "trees, each with the fault it exists to catch, and agy's tool "
+                         "classification against synthetic catalogues. Spends nothing and drives no "
+                         "vendor CLI -- and therefore says nothing about the vendor-CLI checks, "
+                         "which cannot be run without an authenticated CLI and real usage.")
     args = ap.parse_args()
-
-    if args.selftest:
-        try:
-            tool_lists = load_agy_adapter_tool_lists()
-            expected_lists = {"ReadTools", "WriteTools", "ShellTools", "SubagentAndTaskTools", "NetworkTools"}
-            if not expected_lists.issubset(set(tool_lists.keys())):
-                print(f"selftest FAIL: missing expected lists in AgyWorkerAdapter.cs: {expected_lists - set(tool_lists.keys())}", file=sys.stderr)
-                return 1
-
-            fixture_known = [
-                "view_file", "list_dir", "find_by_name", "grep_search",
-                "write_to_file", "replace_file_content", "multi_replace_file_content", "generate_image",
-                "run_command", "manage_task", "invoke_subagent", "define_subagent", "manage_subagents",
-                "search_web", "read_url_content", "browser_click", "browser_navigate",
-            ]
-            st, msg = _agy_tools_classified(fixture_known, tool_lists=tool_lists)
-            if st != PASS:
-                print(f"selftest FAIL: known tools failed classification: {st} -- {msg}", file=sys.stderr)
-                return 1
-
-            fixture_unknown = ["view_file", "__unknown_test_tool__"]
-            st_unk, msg_unk = _agy_tools_classified(fixture_unknown, tool_lists=tool_lists)
-            if st_unk != FAIL or "__unknown_test_tool__" not in msg_unk:
-                print(f"selftest FAIL: unknown tool in fixture was not caught as unclassified: {st_unk} -- {msg_unk}", file=sys.stderr)
-                return 1
-
-            duplicate_lists = {k: list(v) for k, v in tool_lists.items()}
-            duplicate_lists["ReadTools"].append("run_command")
-            st_dup, msg_dup = _agy_tools_classified(fixture_known, tool_lists=duplicate_lists)
-            if st_dup != FAIL or "multiply classified" not in msg_dup:
-                print(f"selftest FAIL: duplicate tool was not caught as multiply classified: {st_dup} -- {msg_dup}", file=sys.stderr)
-                return 1
-
-            print("verify.py selftest: PASS")
-            return 0
-        except Exception as exc:
-            print(f"selftest FAIL: {exc!r}", file=sys.stderr)
-            return 1
 
     global _FULL_MODEL, _CURRENT
     _FULL_MODEL = args.full_model

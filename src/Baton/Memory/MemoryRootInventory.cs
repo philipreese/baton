@@ -121,7 +121,13 @@ public static class MemoryRootInventory
     /// A missing Claude home, or a missing half of the population, is an empty result rather than a
     /// throw — a machine that has never run Claude Code has no memory roots, which is an answer.
     /// </remarks>
-    public static IReadOnlyList<MemoryRoot> Scan(string claudeHomePath)
+    /// <param name="cancellationToken">
+    /// Observed per root AND per file digested. The digest is the expensive phase — a SHA-256 over
+    /// every file under every root — so a token checked only between roots leaves the phase an
+    /// operator would actually want to interrupt uninterruptible.
+    /// </param>
+    public static IReadOnlyList<MemoryRoot> Scan(
+        string claudeHomePath, CancellationToken cancellationToken = default)
     {
         ArgumentException.ThrowIfNullOrEmpty(claudeHomePath);
 
@@ -132,6 +138,8 @@ public static class MemoryRootInventory
         {
             foreach (var projectDirectory in Directory.GetDirectories(projectsPath).OrderBy(p => p, StringComparer.Ordinal))
             {
+                cancellationToken.ThrowIfCancellationRequested();
+
                 var memoryDirectory = Path.Combine(projectDirectory, MemoryDirectoryName);
                 if (!Directory.Exists(memoryDirectory))
                 {
@@ -144,7 +152,7 @@ public static class MemoryRootInventory
                     MemoryRootKind.Live,
                     ArchiveLabel: null,
                     SessionDirectoryPath: projectDirectory,
-                    ReadFiles(memoryDirectory)));
+                    ReadFiles(memoryDirectory, cancellationToken)));
             }
         }
 
@@ -155,13 +163,15 @@ public static class MemoryRootInventory
             {
                 foreach (var archivedRoot in Directory.GetDirectories(generation).OrderBy(p => p, StringComparer.Ordinal))
                 {
+                    cancellationToken.ThrowIfCancellationRequested();
+
                     roots.Add(new MemoryRoot(
                         archivedRoot,
                         Path.GetFileName(archivedRoot),
                         MemoryRootKind.Archive,
                         ArchiveLabel: Path.GetFileName(generation),
                         SessionDirectoryPath: null,
-                        ReadFiles(archivedRoot)));
+                        ReadFiles(archivedRoot, cancellationToken)));
                 }
             }
         }
@@ -271,16 +281,18 @@ public static class MemoryRootInventory
                     family.Family, family.SourceVendor, family.SourceScope, directory,
                     walk.Outcome, FileCount: null, TotalBytes: null, NewestModifiedUtc: null,
                     Files: [], family.Inventoried,
-                    // The ceiling this walk was given, not the one a later reader's defaults would
-                    // have: a row measured under custom limits must report the limit it actually hit.
-                    CappedAtEntries: walk.Outcome == VendorMemoryPresence.Capped
-                        ? bounds.EntryCeiling
-                        : null));
+                    // The bound this walk was given AND actually tripped, not whichever one is easier
+                    // to reach for: a row measured under custom limits must report the limit it hit,
+                    // and a row stopped by the clock must not report the entry ceiling as its reason.
+                    CappedAtEntries: walk.CappedBy == WalkBound.EntryCeiling ? bounds.EntryCeiling : null,
+                    CappedAfter: walk.CappedBy == WalkBound.Budget ? bounds.Budget : null));
                 continue;
             }
 
             var selected = walk.Files;
-            var files = family.Inventoried ? ReadFiles(directory, selected) : [];
+            var files = family.Inventoried
+                ? ReadFiles(directory, selected, cancellationToken)
+                : [];
 
             roots.Add(new VendorMemoryRoot(
                 family.Family,
@@ -306,7 +318,21 @@ public static class MemoryRootInventory
     /// finished walk that matched nothing to <see cref="VendorMemoryPresence.Empty"/>. An unfinished
     /// walk's partial gather is deliberately not handed back.
     /// </summary>
-    private sealed record VendorRootWalk(VendorMemoryPresence Outcome, IReadOnlyList<FileInfo> Files);
+    /// <param name="CappedBy">
+    /// Which of <see cref="VendorRootWalkLimits"/>' two independent bounds stopped the walk, on a
+    /// <see cref="VendorMemoryPresence.Capped"/> outcome and nowhere else. Carried out rather than
+    /// re-derived by the caller, because from the outside the two are indistinguishable and guessing
+    /// wrong tells an operator to raise the bound that was never hit.
+    /// </param>
+    private sealed record VendorRootWalk(
+        VendorMemoryPresence Outcome, IReadOnlyList<FileInfo> Files, WalkBound? CappedBy = null);
+
+    /// <summary>Which bound of <see cref="VendorRootWalkLimits"/> a capped walk actually tripped.</summary>
+    private enum WalkBound
+    {
+        EntryCeiling,
+        Budget,
+    }
 
     /// <summary>
     /// The files a family's selector matches, as <see cref="FileInfo"/> — size and mtime only, so a
@@ -323,7 +349,7 @@ public static class MemoryRootInventory
     /// </para>
     /// <para>
     /// A file that vanishes between the listing and the stat is skipped, for the reason
-    /// <see cref="ReadFiles(string, IReadOnlyList{FileInfo})"/> gives — one lost row, in a walk that
+    /// <see cref="ReadFiles(string, IReadOnlyList{FileInfo}, CancellationToken)"/> gives — one lost row, in a walk that
     /// otherwise finished. A whole LISTING that fails is the opposite case and is reported as
     /// <see cref="VendorMemoryPresence.Unreadable"/>: it is not known what is in that directory, and
     /// an empty selection would have said the selector matched nothing.
@@ -362,9 +388,17 @@ public static class MemoryRootInventory
             {
                 cancellationToken.ThrowIfCancellationRequested();
 
-                if (++visited > limits.EntryCeiling || started.Elapsed > limits.Budget)
+                // Two bounds, evaluated separately so the row can say which one stopped the walk.
+                // Collapsing them into one predicate is how a walk abandoned after nine hundred
+                // entries on a slow disk ends up reporting a fifty-thousand-entry ceiling as fact.
+                if (++visited > limits.EntryCeiling)
                 {
-                    return new VendorRootWalk(VendorMemoryPresence.Capped, []);
+                    return new VendorRootWalk(VendorMemoryPresence.Capped, [], WalkBound.EntryCeiling);
+                }
+
+                if (started.Elapsed > limits.Budget)
+                {
+                    return new VendorRootWalk(VendorMemoryPresence.Capped, [], WalkBound.Budget);
                 }
 
                 FileAttributes attributes;
@@ -421,12 +455,20 @@ public static class MemoryRootInventory
     /// an inventory of a live directory races whatever else is writing there, and losing one row is a
     /// smaller loss than losing the whole report.
     /// </summary>
-    private static IReadOnlyList<MemoryFile> ReadFiles(string rootDirectoryPath)
+    /// <remarks>
+    /// The token is checked PER FILE, not per root: this method streams a SHA-256 over every file it
+    /// finds, so it is the phase a Ctrl-C is most likely to land in and the one where a check only at
+    /// the boundary would leave the interruption unhonoured for the length of a large root.
+    /// </remarks>
+    private static IReadOnlyList<MemoryFile> ReadFiles(
+        string rootDirectoryPath, CancellationToken cancellationToken)
     {
         var files = new List<MemoryFile>();
 
         foreach (var path in Directory.EnumerateFiles(rootDirectoryPath, "*", SearchOption.AllDirectories))
         {
+            cancellationToken.ThrowIfCancellationRequested();
+
             try
             {
                 var info = new FileInfo(path);
@@ -447,16 +489,22 @@ public static class MemoryRootInventory
     }
 
     /// <summary>
-    /// The same rows as <see cref="ReadFiles(string)"/>, but over an already-selected set rather than
-    /// a whole directory walk — the bound <see cref="VendorMemoryFamily"/> exists to impose.
+    /// The same rows as <see cref="ReadFiles(string, CancellationToken)"/>, but over an
+    /// already-selected set rather than a whole directory walk — the bound
+    /// <see cref="VendorMemoryFamily"/> exists to impose. The token is checked per file for the same
+    /// reason: the selection is bounded, the digest of it is still the expensive half.
     /// </summary>
     private static IReadOnlyList<MemoryFile> ReadFiles(
-        string rootDirectoryPath, IReadOnlyList<FileInfo> selected)
+        string rootDirectoryPath,
+        IReadOnlyList<FileInfo> selected,
+        CancellationToken cancellationToken)
     {
         var files = new List<MemoryFile>(selected.Count);
 
         foreach (var info in selected)
         {
+            cancellationToken.ThrowIfCancellationRequested();
+
             try
             {
                 files.Add(new MemoryFile(

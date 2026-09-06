@@ -4991,17 +4991,23 @@ Three rulings the register owns here, all of them things a reader would otherwis
 - **A root's presence is a five-valued reading, and it is the only field that says whether the walk
   finished.** Three values describe a completed walk — absent, present-and-empty, populated — and the
   middle one is never inferred from a file count of zero. The other two describe a walk that did not
-  finish: `capped` (it hit its own ceiling) and `unreadable` (a listing failed). **A row in either of
-  those states carries no file count, no byte total and no newest mtime at all** — a partially
-  gathered count reads exactly like a complete one, and an unreadable directory reported as `empty`
-  says the selector matched nothing about a tree nothing could be read from. Phase C's scope turns on
+  finish: `capped` (it hit one of its own two bounds) and `unreadable` (a listing failed). **A row in
+  either of those states carries no file count, no byte total and no newest mtime at all** — a
+  partially gathered count reads exactly like a complete one, and an unreadable directory reported as
+  `empty` says the selector matched nothing about a tree nothing could be read from. **A `capped` row
+  also says WHICH bound stopped it** — the entry ceiling or the wall-clock budget, never both — because
+  a time-stopped walk reported as ceiling-stopped tells an operator their tree is enormous when it is
+  merely slow to reach, and sends them to raise the bound that was never hit. Phase C's scope turns on
   this field; `VendorMemoryPresence`'s remarks carry the live cases each value was written from.
 - **The selector is per-family and narrow, one family is counted rather than opened, and every walk
   is bounded, interruptible and refuses to follow a reparse point.** These directories sit inside
   whole vendor homes holding hundred-megabyte databases and five-figure file counts; an audit that
   walked them would digest all of that every run, a junction planted under one would be descended
-  into forever, and a walk already running could not be cancelled. `VendorMemoryFamily`'s remarks
-  carry the measurements behind the selector bounds and `VendorRootWalkLimits`' carry the walk's.
+  into forever, and a walk already running could not be cancelled. **Interruptible covers the digest
+  too**, not only the directory enumeration: the SHA-256 pass over the selected files is the expensive
+  half and is where a Ctrl-C most often lands, so the token is observed per file there as well as per
+  entry in the walk. `VendorMemoryFamily`'s remarks carry the measurements behind the selector bounds
+  and `VendorRootWalkLimits`' carry the walk's.
 
 The phase-A contract is unchanged for them: path, size, mtime, SHA-256, and **nothing opened for
 what it says**. A `.sqlite` is digested as bytes exactly as a `.md` is; what those bytes *mean* was
