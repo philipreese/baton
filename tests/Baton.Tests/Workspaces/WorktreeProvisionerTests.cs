@@ -736,6 +736,94 @@ public sealed class WorktreeProvisionerTests : IDisposable
         Assert.True(reading.Mutated);
     }
 
+    // #1945: CommitsAheadOfRemote / FinishedAndPushed, against a real clone with a real upstream —
+    // the same "a double cannot answer a git question" split the block above states.
+
+    [Fact]
+    public void ReadWorkspaceMutation_reads_a_committed_but_unpushed_workspace_as_ahead_of_the_remote()
+    {
+        var (clone, _) = CreateCloneWithUpstream();
+        var startSha = RunGitCapture(clone, "rev-parse", "HEAD").Trim();
+
+        File.WriteAllText(Path.Combine(clone, "work.txt"), "the worker's finished work");
+        RunGit(clone, "add", ".");
+        RunGit(clone, "commit", "-m", "worker commit");
+
+        var reading = WorktreeProvisioner.ReadWorkspaceMutation(clone, startSha);
+
+        Assert.NotNull(reading);
+        Assert.True(reading.Mutated);
+        Assert.Equal(1, reading.CommitsAheadOfRemote);
+        // The conductor still has to push this one by hand, so it must NOT read as finished.
+        Assert.False(reading.FinishedAndPushed);
+    }
+
+    [Fact]
+    public void ReadWorkspaceMutation_reads_a_committed_and_pushed_workspace_as_finished_and_pushed()
+    {
+        var (clone, _) = CreateCloneWithUpstream();
+        var startSha = RunGitCapture(clone, "rev-parse", "HEAD").Trim();
+
+        File.WriteAllText(Path.Combine(clone, "work.txt"), "the worker's finished work");
+        RunGit(clone, "add", ".");
+        RunGit(clone, "commit", "-m", "worker commit");
+        RunGit(clone, "push");
+
+        var reading = WorktreeProvisioner.ReadWorkspaceMutation(clone, startSha);
+
+        // Polarity against the arm above: same clone, same commit, only the push differs — which is
+        // the exact discrimination #1945 rests on, and the reason no `git fetch` is needed (the push
+        // itself is what moves the tracking ref).
+        Assert.NotNull(reading);
+        Assert.True(reading.Mutated);
+        Assert.Equal(0, reading.CommitsAheadOfRemote);
+        Assert.Equal(0, reading.ChangedPathCount);
+        Assert.True(reading.FinishedAndPushed);
+    }
+
+    [Fact]
+    public void ReadWorkspaceMutation_leaves_the_upstream_count_null_when_there_is_no_upstream()
+    {
+        var (repo, reference) = CreateRepoWithBranch("committed.txt");
+        var worktree = Path.Combine(NewDir("task"), "workspace");
+        WorktreeProvisioner.Provision(worktree, repo, reference);
+        var startSha = RunGitCapture(worktree, "rev-parse", "HEAD").Trim();
+
+        File.WriteAllText(Path.Combine(worktree, "work.txt"), "the worker's finished work");
+        RunGit(worktree, "add", ".");
+        RunGit(worktree, "commit", "-m", "worker commit");
+
+        var reading = WorktreeProvisioner.ReadWorkspaceMutation(worktree, startSha);
+
+        // Null, never a fabricated 0: an unpushable workspace must not read as pushed. The rest of
+        // the reading still stands — no upstream is an ordinary shape here, not a failed read.
+        Assert.NotNull(reading);
+        Assert.True(reading.Measured);
+        Assert.Null(reading.CommitsAheadOfRemote);
+        Assert.False(reading.FinishedAndPushed);
+        Assert.Equal(1, reading.NewCommitCount);
+    }
+
+    /// <summary>
+    /// A real bare "remote" plus a real clone of it, so <c>@{upstream}</c> resolves the way it does on
+    /// a lane's own branch. <see cref="CreateRepoWithBranch"/>'s provisioned worktrees deliberately
+    /// have no upstream, which is what the null arm above pins.
+    /// </summary>
+    private (string Clone, string Origin) CreateCloneWithUpstream()
+    {
+        var (seed, _) = CreateRepoWithBranch("committed.txt");
+        var origin = NewDir("origin");
+        RunGit(origin, "init", "--bare");
+        RunGit(seed, "remote", "add", "origin", origin);
+        RunGit(seed, "push", "--set-upstream", "origin", "HEAD");
+
+        var clone = Path.Combine(NewDir("lane"), "workspace");
+        RunGit(_root, "clone", origin, clone);
+        RunGit(clone, "config", "user.email", "test@example.com");
+        RunGit(clone, "config", "user.name", "Test");
+        return (clone, origin);
+    }
+
     [Fact]
     public void ReadWorkspaceMutation_reads_an_unresolvable_start_ref_as_mutated()
     {

@@ -515,6 +515,10 @@ function primaryStateChip(room){
     // (spec/baton.md §6's room schema).
     : st === "Failed" && room.resolvedBy ? ["CLOSED","c-warn"]
     : st === "Succeeded" ? ["SUCCEEDED","c-ok"]
+    // #1945: a succeeded-shaped word -- the lane finished and pushed inside its box and the timeout
+    // kill only caught the pre-push hook. Same "done, nobody needs to act" green as SUCCEEDED, never
+    // the generic fallback's idle grey; a distinct label so the room still says why.
+    : st === "FinishedDuringTeardown" ? ["FINISHED (TEARDOWN)","c-ok"]
     : st === "Failed" ? ["FAILED","c-bad"]
     // #1582: Stalled means a scheduled retry with no scheduler left to fire it -- nothing moves
     // it without a person, so it gets the "needs you" colour, never the idle grey the generic

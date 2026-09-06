@@ -24,6 +24,41 @@ public class WorkflowOutcomeAndExitCodeTests
         Assert.Equal(RunExitCode.Succeeded, RunExitCodeResolver.Resolve(Result(state)));
     }
 
+    /// <summary>
+    /// #1945: the second succeeded-shaped word must exit 0, or the fix has only moved the bug — a
+    /// lane whose work is committed and on the remote would still report failure to every caller
+    /// branching on <c>$?</c>. The Succeeded case above is the control: same call, same shape, one
+    /// flag apart.
+    /// </summary>
+    [Fact]
+    public void A_room_that_finished_during_teardown_resolves_to_that_word_and_exit_0()
+    {
+        var state = TerminalState([
+            Step("a", StepStatus.Succeeded),
+            Step("b", StepStatus.Succeeded) with { FinishedDuringTeardown = true },
+        ]);
+
+        Assert.Equal(WorkflowOutcome.FinishedDuringTeardown, WorkflowOutcome.Describe(state));
+        Assert.Equal(RunExitCode.Succeeded, RunExitCodeResolver.Resolve(Result(state)));
+    }
+
+    /// <summary>
+    /// The polarity control for the arm above: the flag alone decides, and it only decides when every
+    /// step succeeded. A failed sibling keeps the room Failed — a lane that finished ONE step during
+    /// teardown and broke on another has not finished.
+    /// </summary>
+    [Fact]
+    public void The_teardown_word_never_overrides_a_failed_sibling_step()
+    {
+        var state = TerminalState([
+            Step("a", StepStatus.Succeeded) with { FinishedDuringTeardown = true },
+            Step("b", StepStatus.Failed, reason: "Worker exited with non-zero code 1."),
+        ]);
+
+        Assert.Equal(WorkflowOutcome.Failed, WorkflowOutcome.Describe(state));
+        Assert.Equal(RunExitCode.Failed, RunExitCodeResolver.Resolve(Result(state)));
+    }
+
     [Fact]
     public void A_zero_step_terminal_workflow_resolves_to_Succeeded_vacuously_matching_pre_1356_behaviour()
     {
@@ -316,7 +351,9 @@ public class WorkflowOutcomeAndExitCodeTests
 
         Assert.Equal(
             [
-                "Cancelled", "Failed", "Indeterminate", "Paused", "Running", "Succeeded",
+                // #1945 added FinishedDuringTeardown; the sweep below was walked for it.
+                "Cancelled", "Failed", "FinishedDuringTeardown", "Indeterminate", "Paused", "Running",
+                "Succeeded",
             ],
             members);
         // Adding a member? Sweep: RunExitCodeResolver.Resolve, RedispatchCommand's parent gate,

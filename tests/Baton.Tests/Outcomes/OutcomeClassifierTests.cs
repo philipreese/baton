@@ -2279,6 +2279,123 @@ public class OutcomeClassifierTests
         }
     }
 
+    // #1945: the three arms below are one condition apart and are read together — the polarity is the
+    // point. Same call, same worktree path, same TimedOut result; only CommitsAheadOfRemote moves.
+
+    [Fact]
+    public void Classify_settles_a_timeout_FinishedDuringTeardown_when_the_workspace_is_clean_and_pushed()
+    {
+        var directory = CreateTempDirectory();
+        try
+        {
+            var contract = new WorkerContract("worker", [], [], []);
+
+            var classification = OutcomeClassifier.Classify(
+                new CoreDispatchResult(0, CoreExitReason.TimedOut),
+                contract,
+                directory,
+                worktreePath: "C:/rooms/room/workspaces/implement",
+                workspaceMutationProbe: ProbeReturning(WorkspaceMutationReading.FromCounts(
+                    changedPathCount: 0, newCommitCount: 1, commitsAheadOfRemote: 0)));
+
+            // Succeeded-shaped, flagged: the lane committed and pushed inside its box and the kill
+            // landed in the pre-push hook. Nothing for a conductor to resolve.
+            Assert.Equal(OutcomeVerdict.Succeeded, classification.Verdict);
+            Assert.True(classification.FinishedDuringTeardown);
+            Assert.Null(classification.Reason);
+            Assert.Null(classification.FailureClassification);
+        }
+        finally
+        {
+            DirectoryCleanup.DeleteRecursively(directory);
+        }
+    }
+
+    [Fact]
+    public void Classify_keeps_the_timeout_Indeterminate_when_the_workspace_is_ahead_of_the_remote()
+    {
+        var directory = CreateTempDirectory();
+        try
+        {
+            var contract = new WorkerContract("worker", [], [], []);
+
+            var classification = OutcomeClassifier.Classify(
+                new CoreDispatchResult(0, CoreExitReason.TimedOut),
+                contract,
+                directory,
+                worktreePath: "C:/rooms/room/workspaces/implement",
+                workspaceMutationProbe: ProbeReturning(WorkspaceMutationReading.FromCounts(
+                    changedPathCount: 0, newCommitCount: 1, commitsAheadOfRemote: 1)));
+
+            // The discriminating control for the arm above: identical but for the one unpushed commit.
+            // Committed-but-not-pushed work is exactly what a conductor still has to push by hand, so
+            // today's timed-out reading is the correct one.
+            Assert.Equal(OutcomeVerdict.Indeterminate, classification.Verdict);
+            Assert.False(classification.FinishedDuringTeardown);
+            Assert.StartsWith("Execution timed out.", classification.Reason!, StringComparison.Ordinal);
+        }
+        finally
+        {
+            DirectoryCleanup.DeleteRecursively(directory);
+        }
+    }
+
+    [Fact]
+    public void Classify_keeps_the_timeout_Indeterminate_when_the_upstream_count_could_not_be_read()
+    {
+        var directory = CreateTempDirectory();
+        try
+        {
+            var contract = new WorkerContract("worker", [], [], []);
+
+            var classification = OutcomeClassifier.Classify(
+                new CoreDispatchResult(0, CoreExitReason.TimedOut),
+                contract,
+                directory,
+                worktreePath: "C:/rooms/room/workspaces/implement",
+                // No upstream configured, a detached HEAD, a git failure: null, never a fabricated 0.
+                workspaceMutationProbe: ProbeReturning(WorkspaceMutationReading.FromCounts(
+                    changedPathCount: 0, newCommitCount: 1, commitsAheadOfRemote: null)));
+
+            // Fails closed: unmeasured is not "pushed".
+            Assert.Equal(OutcomeVerdict.Indeterminate, classification.Verdict);
+            Assert.False(classification.FinishedDuringTeardown);
+        }
+        finally
+        {
+            DirectoryCleanup.DeleteRecursively(directory);
+        }
+    }
+
+    [Fact]
+    public void Classify_never_reads_a_timeout_on_an_untouched_workspace_as_finished_during_teardown()
+    {
+        var directory = CreateTempDirectory();
+        try
+        {
+            var contract = new WorkerContract("worker", [], [], []);
+
+            var classification = OutcomeClassifier.Classify(
+                new CoreDispatchResult(0, CoreExitReason.TimedOut),
+                contract,
+                directory,
+                worktreePath: "C:/rooms/room/workspaces/implement",
+                // A lane that did nothing at all is ALSO clean with HEAD == remote. The new arm sits
+                // inside Mutated's, so this one never reaches it — pinned here because that nesting is
+                // the only thing keeping "stalled from the first second" out of the finished word.
+                workspaceMutationProbe: ProbeReturning(WorkspaceMutationReading.FromCounts(
+                    changedPathCount: 0, newCommitCount: 0, commitsAheadOfRemote: 0)));
+
+            Assert.Equal(OutcomeVerdict.Failed, classification.Verdict);
+            Assert.False(classification.FinishedDuringTeardown);
+            Assert.Equal("Execution timed out.", classification.Reason);
+        }
+        finally
+        {
+            DirectoryCleanup.DeleteRecursively(directory);
+        }
+    }
+
     [Fact]
     public void Classify_settles_a_timeout_Indeterminate_when_the_workspace_could_not_be_read()
     {

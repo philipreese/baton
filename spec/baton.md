@@ -791,6 +791,7 @@ per `MaxParkWaitChunk` re-arm); `liveness`'s engine-identity read (`WorkflowStat
 | `Failed` | At least one step failed or was rejected, and the room did not settle any other terminal way |
 | `Cancelled` | At least one step was cancelled and nothing failed |
 | `Indeterminate` | Journal facts alone could not decide success vs failure — see below |
+| `FinishedDuringTeardown` | #1945. Every step succeeded, and at least one did so on the arm below: Flow's own dispatch timeout killed the execution, but its workspace was clean with `HEAD` already on the remote — the lane finished inside its box and the kill landed in teardown, which for this repo means the pre-push hook's `gates-fast`. **A SUCCEEDED-shaped word**: every consumer that asks "did this room finish?" accepts it exactly where it accepts `Succeeded` (exit 0, queue `Done`, no redispatch warning). It is a separate word rather than a bare `Succeeded` so the room states why a timeout kill still settled clean — the fact a conductor previously reconstructed by hand. The predicate, why it is nested inside the #1373 mutated arm, and why no `git fetch` is needed are on `Workspaces.WorkspaceMutationReading` |
 
 **The two-predicate model.** A room's completion has always actually been two separate questions:
 *execution outcome* (did the worker's process finish, crash, or get cancelled — `OutcomeVerdict` /
