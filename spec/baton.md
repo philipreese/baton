@@ -5602,8 +5602,9 @@ and each is closed where the fact exists:
   Keeping a mid-lane `Running` step is safe at both readers that key on one, and each for its own
   reason. The live-weight tally behind `MaxLiveWeight` skips any room carrying a sentinel at all
   (`includeTerminal: false`), so a settled lane cannot hold the queue's own cap open. The fleet
-  projection does attach its per-step diagnostics — `processAlive`, `elapsed` — to such a room, which
-  is exactly the case §6 says those fields exist to report; the `live` block itself stays withheld,
+  projection does attach its per-step `processAlive` diagnostic to such a room, which is exactly the
+  case §6 says that field exists to report (`elapsed` needs the liveness record a sentinel-frozen step
+  never wrote, so §6's rule withholds it); the `live` block itself stays withheld,
   gated on the room's displayed state being `Running`, which a settled room's never is.
 - A launch whose **room was never created** can produce no sentinel at all. The scheduler's own sweep
   fails it once the room is still absent a grace period after the launch (the refusal window plus
