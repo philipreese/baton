@@ -576,9 +576,10 @@ public static class ExecutionUsageProjector
     /// <see cref="ToolStepTally"/>. Doubling that was judged affordable because the memo below is what
     /// the polling path actually pays, and a completed room re-reads nothing. #1927's echoed-model scan
     /// is a SEVENTH parse of a line, but not of every line: <see cref="ScanEchoedModel"/> runs backwards
-    /// and stops at the first line naming a model — the terminal event on a whole claude stream — and on
-    /// a vendor that overrides nothing it parses no line at all, the interface default answering without
-    /// touching the JSON. Before
+    /// and stops at the first line naming a model, and on a vendor that overrides nothing it parses no
+    /// line at all — the interface default answers without touching the JSON. Which rung answers, and
+    /// which of them is measured, is <c>ClaudeUsageParser.TryParseEchoedModel</c>'s own statement and not
+    /// restated here. Before
     /// #1706 this projector parsed exactly one line per execution. Bounded by the stream logger's own
     /// 8 MiB-plus-one-rollover retention BOUND rather than by anything here, and measured at ~9 MB for
     /// the largest room on the machine this was developed against. That bound is retention, NOT a
@@ -605,7 +606,9 @@ public static class ExecutionUsageProjector
     /// reading and the live Σ are kept together here. Null on every early return above: a stream this
     /// method refused to read whole must not report a step count derived from part of it, which is the
     /// fabricated under-read the rollover comment in that method is about. Not the same rule as
-    /// <paramref name="ModelEchoed"/> beside it, which those returns deliberately DO carry.
+    /// <paramref name="ModelEchoed"/> beside it, which the three marker returns deliberately DO carry —
+    /// the merge with #1927 is what put the two opposite rules side by side. The one earlier return the
+    /// scan itself sits below (no captured stream at all, so nothing to scan) carries neither.
     /// </param>
     private sealed record UsageReading(
         WorkerUsage? Terminal,
