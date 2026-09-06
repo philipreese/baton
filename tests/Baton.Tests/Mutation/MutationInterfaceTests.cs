@@ -354,7 +354,7 @@ public class MutationInterfaceTests
             {
                 ["architect"] = new WorkerBinding.Process(
                     new WorkerContract("architect", [], [new ProducedOutput("plan")], []),
-                    WriteFile("plan", "architect") with { WorkingDirectory = RepoRoot() },
+                    WriteFile("plan", "architect") with { WorkingDirectory = RoleDefaultVerifyWorkspace() },
                     TimeSpan.FromSeconds(30),
                     VerifyPixiTask: "buildlock-selftest"),
             };
@@ -406,7 +406,7 @@ public class MutationInterfaceTests
             {
                 ["architect"] = new WorkerBinding.Process(
                     new WorkerContract("architect", [], [new ProducedOutput("plan")], []),
-                    WriteFile("plan", "architect") with { WorkingDirectory = RepoRoot() },
+                    WriteFile("plan", "architect") with { WorkingDirectory = RoleDefaultVerifyWorkspace() },
                     TimeSpan.FromSeconds(30),
                     VerifyPixiTask: "this-task-definitely-does-not-exist"),
             };
@@ -686,7 +686,7 @@ public class MutationInterfaceTests
             {
                 ["architect"] = new WorkerBinding.Process(
                     new WorkerContract("architect", [], [new ProducedOutput("plan")], []),
-                    WriteFile("plan", "architect") with { WorkingDirectory = RepoRoot() },
+                    WriteFile("plan", "architect") with { WorkingDirectory = RoleDefaultVerifyWorkspace() },
                     TimeSpan.FromSeconds(30),
                     VerifyPixiTask: "buildlock-selftest",
                     VerifyCommandOverride: "python -c \"import sys; sys.exit(1)\""),
@@ -744,7 +744,7 @@ public class MutationInterfaceTests
             {
                 ["architect"] = new WorkerBinding.Process(
                     new WorkerContract("architect", [], [new ProducedOutput("plan")], []),
-                    ExitWithFailureCode() with { WorkingDirectory = RepoRoot() },
+                    ExitWithFailureCode() with { WorkingDirectory = RoleDefaultVerifyWorkspace() },
                     TimeSpan.FromSeconds(30),
                     VerifyPixiTask: "buildlock-selftest"),
             };
@@ -840,7 +840,7 @@ public class MutationInterfaceTests
             {
                 ["architect"] = new WorkerBinding.Process(
                     new WorkerContract("architect", [], [new ProducedOutput("plan")], []),
-                    WriteFile("plan", "architect") with { WorkingDirectory = RepoRoot() },
+                    WriteFile("plan", "architect") with { WorkingDirectory = RoleDefaultVerifyWorkspace() },
                     TimeSpan.FromSeconds(30),
                     VerifyPixiTask: "buildlock-selftest"),
             };
@@ -879,6 +879,42 @@ public class MutationInterfaceTests
         }
 
         return dir?.FullName ?? throw new InvalidOperationException("Could not locate pixi.toml above " + AppContext.BaseDirectory);
+    }
+
+    /// <summary>
+    /// The working directory every verify test in this class dispatches against: a committed
+    /// SUBDIRECTORY of the repo, never the repo root.
+    /// <para>
+    /// #1958 gave this repo its own <c>.baton/verify</c>, and a repo declaration outranks the role's
+    /// <c>VerifyPixiTask</c> (spec/baton.md §3, "Verify command resolution"). A test dispatched at the
+    /// repo ROOT therefore no longer exercises the role-default arm it was written for — it resolves
+    /// the repo declaration and runs Baton's own gate set inside the test process. That is what turned
+    /// the two role-default tests below red on CI, where <c>origin/main</c> does not resolve
+    /// (<c>actions/checkout</c> at its default depth) and
+    /// <see cref="VerifyCommandResolver.ReadCommittedRepoDeclarationAsync"/> falls back to <c>HEAD</c>,
+    /// which carries the declaration. Locally the merge-base predates it, so the arm silently differs
+    /// between the two environments — which is why the premise below is asserted rather than assumed.
+    /// </para>
+    /// <para>
+    /// A subdirectory is what makes the role default resolve again: that read resolves the path against
+    /// the WORKSPACE (the load-bearing <c>./</c> in its <c>git show</c> revision), so <c>tools</c>
+    /// carries no declaration of its own, while pixi's ancestor walk still finds the repo manifest — so
+    /// <c>pixi task list</c> and <c>pixi run &lt;task&gt;</c> both behave exactly as they did at the root.
+    /// </para>
+    /// </summary>
+    private static string RoleDefaultVerifyWorkspace()
+    {
+        var root = RepoRoot();
+        var workspace = Path.Combine(root, "tools");
+
+        // Read first, and in both directions: the root really does declare one (or this fixture is
+        // guarding against nothing), and this workspace really does not (or it is the root's case
+        // again, under another name). A `tools/.baton/verify` added later fails HERE, in milliseconds,
+        // rather than by quietly spending minutes running the fast gate set inside a unit test.
+        Assert.NotNull(VerifyCommandResolver.ReadWorkingTreeRepoDeclaration(root));
+        Assert.Null(VerifyCommandResolver.ReadWorkingTreeRepoDeclaration(workspace));
+
+        return workspace;
     }
 
     [Fact]
