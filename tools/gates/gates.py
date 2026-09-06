@@ -448,9 +448,8 @@ def delete_receipt(cwd=None):
 #   than RECEIPT_MAX_AGE_S, means no skip: the hook falls through to a real `gates --fast` run.
 #
 # Nothing narrower is accepted. The union has to cover the whole fast set, which is what makes the
-# skip honest -- the ruling's "names the same member set". `--fast --skip-covered` is what makes it
-# REACHABLE: it runs the fast members this tree has no receipt for and leaves the ones a lane
-# already paid for (`lint`, `fmt-check`) alone.
+# skip honest -- the ruling's "names the same member set". `--fast --skip-covered` (pixi's
+# `gates-fast-cover`) is what makes reaching that union affordable rather than a second full run.
 # ---------------------------------------------------------------------------------------------
 
 
@@ -986,8 +985,8 @@ def selftest():
                   f"matched -- {sorted(aged)}")
             ok = False
 
-        # Forgery 1: a hand-made file with the right SHAPE and the right tree hash, no MAC. Written
-        # by hand on purpose -- this is the file a lane could trivially produce to skip a gate.
+        # Forgery 1, member_receipt.py's own docstring: written by hand here on purpose, since this
+        # is the file a lane could trivially produce for itself to skip a gate that never ran.
         with open(os.path.join(member_receipt.member_dir(git_dir), f"{fast[0]}.json"),
                   "w", encoding="utf-8") as f:
             json.dump({"member": fast[0], **identity, "written_epoch": int(time.time())}, f)
