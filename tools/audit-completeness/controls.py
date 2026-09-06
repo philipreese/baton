@@ -36,6 +36,7 @@ import re
 import sys
 import tempfile
 from pathlib import Path
+from types import SimpleNamespace
 
 ROOT = Path(__file__).resolve().parents[2]
 sys.dont_write_bytecode = True
@@ -44,6 +45,14 @@ import selfcheck  # noqa: E402
 
 CONTROLS: dict[str, list] = {}
 FAILURES: list[str] = []
+
+
+class ControlSetupError(Exception):
+    """A control could not APPLY its fault, so the arm that follows it compared nothing.
+
+    Distinct from the check raising: that means the sabotage landed and the check saw it. This means
+    the sabotage never landed, and treating the two alike is what #1943 fixed -- see `run_arms`.
+    """
 
 
 def control(check_name: str, describe: str):
@@ -299,10 +308,16 @@ def replacing(mod, name, value):
     `audit-controls` caught it, one layer up, which is the only reason it is not still there.
 
     Bare `setattr` cannot tell a rename from a working control, and neither can a reader. This can.
+
+    Raises `ControlSetupError` rather than asserting, because `_loading_recordonce_as` defers the
+    mutation until the check itself calls `selfcheck.load`: the raise surfaces from INSIDE
+    `checks[name]()`, where a bare exception is indistinguishable from the check noticing the fault.
+    The type is what lets `run_arms` tell those apart wherever the un-applied sabotage surfaces.
     """
-    assert hasattr(mod, name), (
-        f"control tried to replace {mod.__name__}.{name}, which does not exist -- renamed? "
-        "A mutation of an attribute nothing reads is not a control.")
+    if not hasattr(mod, name):
+        raise ControlSetupError(
+            f"control tried to replace {mod.__name__}.{name}, which does not exist -- renamed? "
+            "A mutation of an attribute nothing reads is not a control.")
     setattr(mod, name, value)
 
 
@@ -536,9 +551,198 @@ def _agy_tools_message_omits_name():
         yield
 
 
-def main() -> int:
+def _setup_failed(name: str, describe: str, exc: BaseException, phase: str,
+                  failures: list[str], emit) -> None:
+    failures.append(f"{name}: control {phase} RAISED under {describe} "
+                    f"({type(exc).__name__}: {exc})")
+    emit(f"   !!  control {phase} RAISED under: {describe}")
+    emit(f"       {type(exc).__name__}: {exc}")
+    emit("       the fault was never applied, so this arm compared nothing")
+
+
+def run_arms(name: str, check, arms, failures: list[str], emit=print) -> int:
+    """Run one check's control arms, appending to `failures`. Returns how many arms were exercised.
+
+    THE DISTINCTION THIS FUNCTION EXISTS TO MAKE (#1943). An arm is `with fault(): check()`, and
+    both halves can raise. Only one of them means anything: the CHECK raising is the check noticing
+    the sabotage. The FAULT raising -- in `__enter__`, before the sabotage is applied, or deferred
+    into the check itself via `replacing` -- means no sabotage was applied at all, so the check just
+    ran against an unmutated tree. A single `try/except` around the whole `with` reads the second as
+    the first and prints `OK red under <control>` over an arm that compared nothing, which is the
+    same "green means nothing" failure this whole file exists to catch, in the harness that catches
+    it. So the fault's setup is entered separately, and its failures are named and counted red.
+
+    Shared with `_selftest` rather than copied, because a fixture proving a copy of this logic would
+    prove nothing about the copy that runs.
+    """
+    total = 0
+    for describe, fault in arms:
+        total += 1
+        cm = fault()
+        try:
+            cm.__enter__()
+        except Exception as e:  # noqa: BLE001 -- classified and re-reported, never swallowed
+            _setup_failed(name, describe, e, "SETUP", failures, emit)
+            continue
+
+        try:
+            try:
+                check()
+            except ControlSetupError as e:
+                # A mutation deferred into the check (see `replacing`): still an unapplied fault.
+                _setup_failed(name, describe, e, "SETUP", failures, emit)
+            except Exception:  # noqa: BLE001 -- any other raise means the check noticed
+                emit(f"   OK  red under: {describe}")
+            else:
+                failures.append(f"{name}: STAYED GREEN under {describe}")
+                emit(f"   !!  STAYED GREEN under: {describe}")
+                emit("       the check does not discriminate against the defect it names")
+        finally:
+            # Every fault here is `try: yield finally: restore`, so a plain exit restores whether or
+            # not the check raised. A raise from teardown is a harness failure like a setup raise --
+            # the next arm now runs against a tree this one failed to put back -- so it is reported
+            # rather than suppressed, and rather than left to propagate and cancel the arms after it.
+            try:
+                cm.__exit__(None, None, None)
+            except Exception as e:  # noqa: BLE001
+                failures.append(f"{name}: control TEARDOWN RAISED under {describe} "
+                                f"({type(e).__name__}: {e})")
+                emit(f"   !!  control TEARDOWN RAISED under: {describe}")
+                emit(f"       {type(e).__name__}: {e}")
+    return total
+
+
+# A stand-in for a mutated module, so the selftest drives `run_arms` without touching the tree.
+# `__name__` is what `replacing` reports on, and `hook` is where a real check's `selfcheck.load` call
+# sits -- the callback a deferred mutation rides in on.
+_Fixture = SimpleNamespace(__name__="fixture", sabotaged=False, hook=lambda: None)
+
+
+def _selftest() -> int:
+    """Prove `run_arms` tells a control that never applied from a check that noticed the fault.
+
+    Synthetic throughout: no subprocess, no temp tree, nothing read from the repo. The arms below are
+    the four outcomes `run_arms` distinguishes, and each is asserted on the FAILURE TEXT rather than
+    on the exit code alone -- an exit code cannot say whether the arm was named, and a harness that
+    fails without naming the arm is what #1943 was filed about.
+    """
+    failures: list[str] = []
+    out: list[str] = []
+
+    def fixture_check():
+        _Fixture.hook()
+        if _Fixture.sabotaged:
+            raise AssertionError("fixture check noticed the sabotage")
+
+    @contextlib.contextmanager
+    def applies_the_fault():
+        with swap(_Fixture, "sabotaged", True):
+            yield
+
+    @contextlib.contextmanager
+    def applies_nothing():
+        yield
+
+    @contextlib.contextmanager
+    def setup_raises():
+        raise ValueError("fixture setup could not build its fault")
+        yield  # unreachable, and what keeps this a generator function
+
+    @contextlib.contextmanager
+    def setup_raises_inside_the_check():
+        # `_loading_recordonce_as`' shape: the mutation is deferred until the check calls back, so
+        # the ControlSetupError surfaces from inside `check()` rather than from `__enter__`. Also
+        # sabotages the fixture, so an arm that reported this as red would be indistinguishable from
+        # the working arm above -- which is exactly how a renamed attribute stayed invisible.
+        def deferred():
+            replacing(_Fixture, "renamed_away", True)
+
+        with swap(_Fixture, "hook", deferred), swap(_Fixture, "sabotaged", True):
+            yield
+
+    @contextlib.contextmanager
+    def teardown_raises():
+        # Applies its fault, so the arm itself is a genuine red: the teardown failure has to be
+        # reported ALONGSIDE that red rather than instead of it, and must not cancel the arms after.
+        with swap(_Fixture, "sabotaged", True):
+            yield
+        raise RuntimeError("fixture teardown could not restore")
+
+    arms = [
+        ("a fault the check sees", applies_the_fault),
+        ("a fault the check misses", applies_nothing),
+        ("a setup that raises", setup_raises),
+        ("a setup that raises inside the check", setup_raises_inside_the_check),
+        ("a teardown that raises", teardown_raises),
+    ]
+    total = run_arms("fixture check", fixture_check, arms, failures, out.append)
+
+    problems = []
+    if total != len(arms):
+        problems.append(f"counted {total} arms, expected {len(arms)}")
+
+    text = "\n".join(out)
+    joined = "\n".join(failures)
+
+    def wants(fragment: str, where: str, blob: str):
+        if fragment not in blob:
+            problems.append(f"{where} does not mention {fragment!r}")
+
+    # The red arm and the green arm, unchanged: one reads OK, the other is a failure that says why.
+    if "OK  red under: a fault the check sees" not in text:
+        problems.append("a fault the check sees was not reported as red")
+    if any("a fault the check sees" in f for f in failures):
+        problems.append("a discriminating arm was reported as a failure")
+    wants("STAYED GREEN under a fault the check misses", "the failure list", joined)
+
+    # The three harness failures: each names its arm, and neither prints as an OK nor stays silent.
+    for arm, kind, detail in (
+        ("a setup that raises", "SETUP", "ValueError: fixture setup could not build its fault"),
+        ("a setup that raises inside the check", "SETUP", "ControlSetupError: "),
+        ("a teardown that raises", "TEARDOWN", "RuntimeError: fixture teardown could not restore"),
+    ):
+        entry = next((f for f in failures if arm in f and kind in f), None)
+        if entry is None:
+            problems.append(f"{arm!r} was not reported as a {kind} failure")
+            continue
+        wants(detail.rstrip(": "), f"the failure for {arm!r}", entry)
+        # An unapplied fault must never read as an arm that discriminated. (The teardown arm DID
+        # discriminate -- its fault was applied -- so its OK line is correct and stays.)
+        if kind == "SETUP" and f"OK  red under: {arm}" in text:
+            problems.append(f"{arm!r} printed as a discriminating arm")
+        if f"{kind} RAISED under: {arm}" not in text:
+            problems.append(f"{arm!r} was not named on stdout as a {kind} failure")
+        if detail not in text and detail.rstrip(": ") not in text:
+            problems.append(f"the exception detail for {arm!r} was not printed")
+
+    # The un-applied faults must not have left the fixture mutated for whoever runs next.
+    if _Fixture.sabotaged:
+        problems.append("a fault was left applied after its arm finished")
+
+    if problems:
+        print(" !! controls selftest FAILED:")
+        for p in problems:
+            print(f"  {p}")
+        return 1
+    print(f"controls: selftest OK ({len(arms)} fixture arms)")
+    return 0
+
+
+def main(argv: list[str] | None = None) -> int:
+    argv = sys.argv[1:] if argv is None else argv
+    if "--selftest" in argv:
+        return _selftest()
+
     print(__doc__.strip().splitlines()[0])
     print("=" * 78)
+
+    # The selftest runs here rather than as a gate task of its own: `audit-controls` is already in
+    # `gates.py`'s AFTER_BUILD_FAST, and its fixtures are pure and in-process, so this is the cheapest
+    # place that actually runs on every push. A harness that cannot tell an unapplied fault from a
+    # working arm makes every line below it meaningless, so it is a precondition, not a sibling.
+    if _selftest() != 0:
+        print(" !! the arm runner does not distinguish an unapplied fault; arms below mean nothing")
+        return 1
 
     names = [n for n, _ in selfcheck.CHECKS]
     checks = dict(selfcheck.CHECKS)
@@ -564,17 +768,7 @@ def main() -> int:
             print(f"   !! baseline is not green, so no arm below can mean anything: {e}")
             continue
 
-        for describe, fault in arms:
-            total += 1
-            try:
-                with fault():
-                    checks[name]()
-            except Exception:  # noqa: BLE001 -- any raise means the check noticed
-                print(f"   OK  red under: {describe}")
-            else:
-                FAILURES.append(f"{name}: STAYED GREEN under {describe}")
-                print(f"   !!  STAYED GREEN under: {describe}")
-                print("       the check does not discriminate against the defect it names")
+        total += run_arms(name, checks[name], arms, FAILURES)
 
     print("\n" + "=" * 78)
     for name in uncontrolled:
