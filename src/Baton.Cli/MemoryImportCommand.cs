@@ -428,13 +428,19 @@ public static class MemoryImportCommand
     /// </summary>
     /// <remarks>
     /// <para>
-    /// <b>One read, so digest and text describe the same file.</b> The inventory walk digests every
-    /// file it finds, minutes or milliseconds before this runs; taking the digest from there and the
-    /// text from here means a file edited in between is stored with text that does not match its
-    /// recorded <see cref="MemoryEntry.Sha256"/>, under an id derived from a version of it nobody kept.
-    /// Re-hashing the bytes in hand costs one pass over a file already in memory and removes the window
-    /// entirely. The inventory's digest still stands for the rows this never reads — unfiled files and
-    /// the machinery rows, neither of which is opened.
+    /// <b>One read, so digest, size, mtime and text all describe the same file.</b> The inventory walk
+    /// digests and stats every file it finds, minutes or milliseconds before this runs; taking any of
+    /// those from there and the text from here means a file edited in between is stored with text that
+    /// does not match its recorded <see cref="MemoryEntry.Sha256"/>, under an id derived from a version
+    /// of it nobody kept — or, for the mtime, with a
+    /// <see cref="MemoryEntry.SourceMtimeUtc"/> that dates a version the digest is not of. Re-hashing
+    /// the bytes in hand costs one pass over a file already in memory and removes the window entirely;
+    /// the mtime comes off <b>the same open handle</b> rather than a second <c>stat</c> of the path, so
+    /// a path swapped between the read and the stat cannot reopen the window at a narrower width. It is
+    /// taken after the copy: for the case this closes the two are identical, and after is the
+    /// conservative side of the during-read race <see cref="FileShare.ReadWrite"/> still permits. The
+    /// inventory's digest and mtime still stand for the rows this never reads — unfiled files and the
+    /// machinery rows, neither of which is opened.
     /// </para>
     /// <para>
     /// <b>The text is a UTF-8 decode, not the bytes</b>, and <see cref="MemoryEntry"/>'s own doc says so
@@ -450,7 +456,13 @@ public static class MemoryImportCommand
     /// entry nor a manifest row, so the import's own accounting shows it was not carried.
     /// </para>
     /// </remarks>
-    private static IReadOnlyList<MemoryImportFile> ReadSourceFiles(MemoryImportSource source)
+    /// <remarks>
+    /// Internal rather than private as a test-only seam (Baton.Cli.Tests, via
+    /// <c>InternalsVisibleTo</c>): the window this closes opens between <see cref="MemoryRootInventory"/>
+    /// and this method, and nothing between the two can be interposed on from the verb's own entry
+    /// point, so the arm that proves it hands this a row carrying a stale walk's values directly.
+    /// </remarks>
+    internal static IReadOnlyList<MemoryImportFile> ReadSourceFiles(MemoryImportSource source)
     {
         var files = new List<MemoryImportFile>(source.Files.Count);
         foreach (var file in source.Files)
@@ -458,11 +470,13 @@ public static class MemoryImportCommand
             try
             {
                 byte[] bytes;
+                DateTime modifiedUtc;
                 using (var stream = new FileStream(file.Path, FileMode.Open, FileAccess.Read, FileShare.ReadWrite))
                 using (var buffer = new MemoryStream())
                 {
                     stream.CopyTo(buffer);
                     bytes = buffer.ToArray();
+                    modifiedUtc = File.GetLastWriteTimeUtc(stream.SafeFileHandle);
                 }
 
                 using var reader = new StreamReader(
@@ -472,6 +486,7 @@ public static class MemoryImportCommand
                 {
                     Text = reader.ReadToEnd(),
                     Sha256 = Convert.ToHexString(System.Security.Cryptography.SHA256.HashData(bytes)).ToLowerInvariant(),
+                    ModifiedUtc = modifiedUtc,
                     SizeBytes = bytes.Length,
                 });
             }

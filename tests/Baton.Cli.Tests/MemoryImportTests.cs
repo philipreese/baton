@@ -870,6 +870,66 @@ public sealed class MemoryImportTests : IDisposable
     }
 
     /// <summary>
+    /// #1948: a source rewritten between the inventory walk and the read is recorded as ONE consistent
+    /// (mtime, digest, size) triple describing the bytes that were actually read — never a digest of
+    /// the new version carrying the old version's last-write time.
+    /// </summary>
+    /// <remarks>
+    /// The rewrite is staged by handing <c>ReadSourceFiles</c> a row that already carries a stale
+    /// walk's values, because nothing between <c>MemoryRootInventory.Scan</c> and that read can be
+    /// interposed on from the verb's entry point. Each of the three stale values is a distinct
+    /// sentinel and is asserted absent as well as asserted correct: an arm that only compared the
+    /// mtime against the file's own could pass by coincidence on a fixture written this second.
+    /// </remarks>
+    [Fact]
+    public void A_source_rewritten_between_inventory_and_read_yields_one_consistent_triple()
+    {
+        var directory = Path.Combine(_root, "rewritten");
+        Directory.CreateDirectory(directory);
+        var path = Path.Combine(directory, "user_who.md");
+
+        // What the walk saw.
+        File.WriteAllText(path, "the old text");
+        var staleMtime = new DateTime(2000, 1, 1, 0, 0, 0, DateTimeKind.Utc);
+        File.SetLastWriteTimeUtc(path, staleMtime);
+        var staleSha = Convert.ToHexString(SHA256.HashData(File.ReadAllBytes(path))).ToLowerInvariant();
+        var staleSize = new FileInfo(path).Length;
+
+        var source = new MemoryImportSource(
+            directory,
+            MemoryRootInventory.ClaudeVendor,
+            VendorMemoryScope.Vendor,
+            Archived: false,
+            "github.com/philipreese/baton",
+            UnfiledReason: null,
+            [new MemoryImportFile(path, "user_who.md", string.Empty, staleSha, staleMtime, staleSize)]);
+
+        // The rewrite, after the walk and before the read.
+        var rewritten = "the new text, which is a different length entirely"u8.ToArray();
+        File.WriteAllBytes(path, rewritten);
+        var freshMtime = new DateTime(2026, 3, 4, 5, 6, 7, DateTimeKind.Utc);
+        File.SetLastWriteTimeUtc(path, freshMtime);
+
+        var read = Assert.Single(MemoryImportCommand.ReadSourceFiles(source));
+
+        // The triple describes the bytes that were read, computed independently of the code under test.
+        Assert.Equal(Convert.ToHexString(SHA256.HashData(rewritten)).ToLowerInvariant(), read.Sha256);
+        Assert.Equal(rewritten.Length, read.SizeBytes);
+        Assert.Equal(freshMtime, read.ModifiedUtc);
+        Assert.Equal(DateTimeKind.Utc, read.ModifiedUtc.Kind);
+
+        // And none of the three is the walk's value -- the sentinel each would hold if it lagged.
+        Assert.NotEqual(staleSha, read.Sha256);
+        Assert.NotEqual(staleSize, read.SizeBytes);
+        Assert.NotEqual(staleMtime, read.ModifiedUtc);
+
+        // The entry built from it therefore dates the very bytes its digest is over.
+        var entry = Assert.Single(MemoryImportPlan.Build([source with { Files = [read] }], DateTime.UtcNow).Entries);
+        Assert.Equal(read.Sha256, entry.Sha256);
+        Assert.Equal(freshMtime, entry.SourceMtimeUtc);
+    }
+
+    /// <summary>
     /// Two Claude roots resolving to one repository through a real worktree, plus a live entry the
     /// archive tests supersede. Three files, all under <c>github.com/philipreese/baton</c>.
     /// </summary>

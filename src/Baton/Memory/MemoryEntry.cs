@@ -123,7 +123,11 @@ public enum MemoryKindSource
 /// <param name="SourcePath">The absolute path the text was read from.</param>
 /// <param name="SourceVendor">Which vendor's root it sat in (<c>claude</c>, <c>codex</c>).</param>
 /// <param name="SourceScope">Whether that root is the vendor's own or Baton-managed.</param>
-/// <param name="SourceMtimeUtc">The source file's last-write time when it was read.</param>
+/// <param name="SourceMtimeUtc">
+/// The source file's last-write time, taken from <b>the same read</b> that produced
+/// <paramref name="Text"/> and <paramref name="Sha256"/> — off that read's own open handle, not from
+/// the earlier inventory walk, so this cannot date a version of the file the digest is not of.
+/// </param>
 /// <param name="ImportedAtUtc">When this row was built. Deliberately NOT part of <paramref name="Id"/>.</param>
 /// <param name="Supersedes">
 /// Ids this entry replaces — the live-over-archived link Q2 asks for. Absent when it replaces nothing;
