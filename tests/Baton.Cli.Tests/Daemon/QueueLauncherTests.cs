@@ -311,6 +311,58 @@ public sealed class QueueLauncherTests : IDisposable
     }
 
     /// <summary>
+    /// The window the retry opens, closed (#1951, found in review): the "does this room already carry a
+    /// verdict" guard used to sit next to the write with one synchronous projection between them, and
+    /// the backoff put seconds there instead — in the one case where a live writer is known to exist,
+    /// since the holder is usually the room's own engine, which records its settle and THEN releases the
+    /// ledger. Without the re-read per attempt this path overwrites that settle with a `Failed` one.
+    /// The static shape of the same rule is
+    /// <see cref="A_room_that_already_recorded_its_own_verdict_keeps_it"/>; this is it mid-backoff.
+    /// </summary>
+    [Fact]
+    public async Task A_verdict_that_lands_while_the_ledger_is_held_is_kept_rather_than_overwritten()
+    {
+        var root = CreateTempRoot();
+        try
+        {
+            var room = await RunTwoStepRoomAsync(root);
+            var holder = new FileStream(
+                Path.Combine(room, "flow.jsonl"), FileMode.Open, FileAccess.ReadWrite, FileShare.None);
+            try
+            {
+                var settle = Task.Run(
+                    async () =>
+                    {
+                        // wait-ok: the moment the racing writer lands, not a wait on one.
+                        await Task.Delay(TimeSpan.FromMilliseconds(200), Ct);
+                        await TerminalSentinelWriter.WriteValidationRefusedAsync(
+                            room, "the engine's own verdict", Ct, tryInvocation: "read this room");
+                        await holder.DisposeAsync();
+                    },
+                    Ct);
+
+                await QueueLauncher.RecordPostLaunchFaultAsync(
+                    "t9", room, "the pump threw BatonFlowException",
+                    heldAttempts: 60, heldRetryDelay: TimeSpan.FromMilliseconds(100));
+                await settle;
+            }
+            finally
+            {
+                await holder.DisposeAsync();
+            }
+
+            // The room's own record survives untouched — both fields, as in the static arm.
+            var sentinel = await TerminalSentinelWriter.TryReadAsync(room, Ct);
+            Assert.Equal("the engine's own verdict", sentinel!.Error);
+            Assert.Equal("read this room", sentinel.Try);
+        }
+        finally
+        {
+            DirectoryCleanup.DeleteRecursively(root);
+        }
+    }
+
+    /// <summary>
     /// #1951's other half: a room whose snapshot is corrupt is not something waiting helps, so it
     /// degrades on the first read — and the reason reaches the file a reader actually gets, both the
     /// sentinel bytes <c>fleet_status</c> returns verbatim and the item error the queue records.

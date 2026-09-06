@@ -250,6 +250,19 @@ public static class QueueLauncher
             for (var remaining = heldAttempts - 1; attempt.Failure == RoomProjectionFailure.Held && remaining > 0; remaining--)
             {
                 await Task.Delay(delay).ConfigureAwait(false);
+
+                // The guard above is no longer adjacent to the write, and this loop waits on a holder
+                // that is USUALLY the room's own live engine (FlowJournalHeldException's message names
+                // it) — which records this room's settle and only then lets the ledger go. Re-reading
+                // per attempt is what keeps a verdict landing mid-backoff instead of overwriting it
+                // with a Failed one, spec/baton.md §13's never-replace rule at a window this retry
+                // opened.
+                if (await TerminalSentinelWriter.TryReadAsync(roomDirectory, CancellationToken.None)
+                        .ConfigureAwait(false) is not null)
+                {
+                    return;
+                }
+
                 attempt = await TryProjectRoomAsync(roomDirectory).ConfigureAwait(false);
             }
 
