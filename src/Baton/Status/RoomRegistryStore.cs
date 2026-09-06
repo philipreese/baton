@@ -63,9 +63,16 @@ public sealed record RoomRegistryEntry(
 /// <para>
 /// <b>Fails open, never gates.</b> The registry only ever <em>adds</em> coverage to
 /// <c>fleet_status</c>'s existing directory scan (spec/baton.md §8) — it must never be the reason a
-/// dispatch fails or a room goes unreported. A write failure, including a lock-acquire timeout, is the
-/// caller's concern to log and swallow, not this type's to throw past; a malformed or missing file on
+/// dispatch fails or a room goes unreported. An <see cref="AppendAsync"/> failure, lock-acquire
+/// timeout included, is the caller's concern to log and swallow, not this type's to throw past;
+/// <see cref="ReadDistinctByRoomAsync"/> does its own swallowing, and a malformed or missing file on
 /// read resolves to whatever valid lines could still be parsed (or none), never an exception.
+/// <b>The three registry-maintenance entry points are not covered by that</b> —
+/// <see cref="RemoveByRoomPathAsync"/>, <see cref="CompactAsync(string,CancellationToken)"/> and
+/// <see cref="PreviewCompactionAsync"/> each let a lock-acquire timeout reach the command that called
+/// it, and <c>baton room delete</c>/<c>baton rooms prune</c> fail with it. Nothing about that gates a
+/// dispatch: they are operator-typed verbs whose entire subject is the registry, where reporting a
+/// rewrite as done when it never happened would be the worse outcome.
 /// </para>
 /// </remarks>
 public static class RoomRegistryStore

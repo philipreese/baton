@@ -4340,11 +4340,14 @@ created-at.
   (`src/Baton/Status/MutexGuardedFileLock.cs`) carries what the gap between attempts buys and what it
   does not. **Every access's own failure contract is unchanged**, only deferred: one that still cannot
   be had after the whole budget fails exactly the way it failed after a single wait. Which failure that
-  is depends on the access, and the fail-open swallow does not cover all of them: every read resolves
-  to no entries, and an `AppendAsync` write is reported on stderr and swallowed by its caller (`baton
-  run`/`dispatch` registration, `baton deliver`). The two whole-file rewrites are the exception —
-  `RemoveByRoomPathAsync` (`baton room delete`) and `CompactAsync` (`baton rooms prune --yes`) surface
-  the timeout to their verb, which fails with it. No path here can fail a dispatch. The cost, stated
+  is depends on the access, and the fail-open swallow does not cover all of them: `ReadDistinctByRoomAsync`
+  — the read behind `fleet_status`, the daemon's readers and `baton ledger` — resolves to no entries and
+  one stderr line, and an `AppendAsync` write is reported on stderr and swallowed by its caller (`baton
+  run`/`dispatch` registration, `baton deliver`). The registry-maintenance entry points are the
+  exception, stated once on `RoomRegistryStore` itself: `RemoveByRoomPathAsync` (`baton room delete`,
+  and each room `baton rooms prune --yes` deletes), `CompactAsync` (`baton rooms prune --yes`) and
+  `PreviewCompactionAsync` (`baton rooms prune`'s default dry-run listing) surface the timeout to their
+  verb, which fails with it. No path here can fail a dispatch. The cost, stated
   rather than left emergent: an access contending with a wedged holder now blocks for the whole budget
   before it degrades, instead of giving up after one wait — a `fleet_status` call before falling back
   to its directory scan, a `baton run`/`dispatch` start before its registration falls back to stderr,
