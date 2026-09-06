@@ -590,6 +590,47 @@ public sealed class MemoryImportTests : IDisposable
     }
 
     /// <summary>
+    /// The marker is a test on CONTENT: a projection carrying an ordinary memory's filename is skipped
+    /// all the same. Nothing else in either suite discriminates this from a filename comparison, since
+    /// every other fixture writes the projection under
+    /// <see cref="ClaudeProjectionTarget.ProjectionFileName"/> — so a rewrite of
+    /// <see cref="MemoryProjection.IsProjectedFile"/> into a name test would pass them and fail here.
+    /// </summary>
+    /// <remarks>
+    /// The case is not hypothetical: an operator who copies or renames a projection (or a backup tool
+    /// that does) reintroduces the feedback loop under any name-based rule, and the rule's own remarks
+    /// claim this coverage in three places.
+    /// </remarks>
+    [Fact]
+    public async Task A_projection_under_an_ordinary_filename_is_skipped_on_its_marker()
+    {
+        WriteClaudeRoot(
+            "C--renamed", Checkout("renamed"),
+            ("user_real.md", "a memory a person wrote"),
+            ("notes.md", MemoryProjection.FormatMarker + "\n# a cache someone renamed\n"));
+        var rootDirectory = Path.Combine(ClaudeHome, "projects", "C--renamed", "memory");
+
+        var text = await RunAsync(
+            "--assert", $"{rootDirectory}=github.com/philipreese/renamed", "--asserted-by", "the-test");
+
+        Assert.Contains("projection-skipped: 1", text, StringComparison.Ordinal);
+
+        var manifest = ImportManifest.Read(
+            Directory.GetFiles(Path.Combine(BatonPaths.Root, BatonPaths.MemoryImportsDirectoryName)).Single());
+
+        var skipped = Assert.Single(manifest.ProjectionsSkipped!);
+        Assert.EndsWith("notes.md", skipped.SourcePath, StringComparison.Ordinal);
+        Assert.DoesNotContain(
+            manifest.Entries, e => e.SourcePath.EndsWith("notes.md", StringComparison.Ordinal));
+
+        // The control, without which "no entry from notes.md" is indistinguishable from an import that
+        // read nothing at all: the ordinary memory in the SAME root did import.
+        Assert.Equal(
+            "a memory a person wrote",
+            Assert.Single(await StoreAsync("github.com/philipreese/renamed")).Text);
+    }
+
+    /// <summary>
     /// A root with no derivable repository is reported unfiled and imported nowhere — and the same
     /// root WITH an assertion imports, which is what makes the first half a refusal rather than a
     /// blind spot.

@@ -1,4 +1,5 @@
 using System.Security.Cryptography;
+using System.Text;
 using System.Text.Json.Serialization;
 
 namespace Baton.Memory;
@@ -16,22 +17,35 @@ public enum MemoryRootKind
 
 /// <summary>
 /// One file inside a memory root, recorded by <b>measurement only</b>: path, size, modification time,
-/// and a content digest. <see cref="Sha256"/> is computed by streaming the bytes, but the bytes
-/// themselves are never retained, returned, or printed anywhere — <c>baton memory audit</c> reports
-/// counts and paths, and the digest exists so two copies of one file can be recognised as one fact
-/// without anything having to read either of them.
+/// a content digest, and whether Baton wrote it itself. <see cref="Sha256"/> is computed by streaming
+/// the bytes, but the bytes themselves are never retained, returned, or printed anywhere —
+/// <c>baton memory audit</c> reports counts and paths, and the digest exists so two copies of one file
+/// can be recognised as one fact without anything having to read either of them. The one exception is
+/// <see cref="IsBatonProjection"/>, and it is bounded: a prefix the length of
+/// <see cref="MemoryProjection.FormatMarker"/> is decoded and reduced to a <see langword="bool"/> here,
+/// so no memory text survives this record either.
 /// </summary>
 /// <param name="Path">Absolute path of the file.</param>
 /// <param name="RelativePath">Path relative to the root's own directory, forward-slash separated.</param>
 /// <param name="SizeBytes">Length in bytes.</param>
 /// <param name="ModifiedUtc">Last write time, in UTC.</param>
 /// <param name="Sha256">Lower-case hex SHA-256 of the file's bytes.</param>
+/// <param name="IsBatonProjection">
+/// Whether this is a cache <c>baton memory sync</c> wrote, decided by
+/// <see cref="MemoryProjection.IsProjectedFile"/> — the SAME predicate <c>baton memory import</c> uses,
+/// so the two verbs cannot come to disagree about what a projection is, and so the recognition stays a
+/// test on <b>content</b> rather than on a filename. <see cref="MemoryAuditReport"/> is what acts on it:
+/// a file Baton wrote is not evidence about whose memory a root holds. Required rather than defaulted —
+/// <see langword="false"/> is the value that manufactures the finding this exists to remove, so a new
+/// construction site should not be able to fall into it silently.
+/// </param>
 public sealed record MemoryFile(
     string Path,
     string RelativePath,
     long SizeBytes,
     DateTime ModifiedUtc,
-    string Sha256);
+    string Sha256,
+    bool IsBatonProjection);
 
 /// <summary>
 /// One memory root and every file under it.
@@ -479,12 +493,14 @@ public static class MemoryRootInventory
             try
             {
                 var info = new FileInfo(path);
+                var (digest, isProjection) = MeasureFile(path);
                 files.Add(new MemoryFile(
                     path,
                     Path.GetRelativePath(rootDirectoryPath, path).Replace('\\', '/'),
                     info.Length,
                     info.LastWriteTimeUtc,
-                    HashFile(path)));
+                    digest,
+                    isProjection));
             }
             catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
             {
@@ -514,12 +530,14 @@ public static class MemoryRootInventory
 
             try
             {
+                var (digest, isProjection) = MeasureFile(info.FullName);
                 files.Add(new MemoryFile(
                     info.FullName,
                     Path.GetRelativePath(rootDirectoryPath, info.FullName).Replace('\\', '/'),
                     info.Length,
                     info.LastWriteTimeUtc,
-                    HashFile(info.FullName)));
+                    digest,
+                    isProjection));
             }
             catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
             {
@@ -531,12 +549,38 @@ public static class MemoryRootInventory
     }
 
     /// <summary>
-    /// Lower-case hex SHA-256 of a file, streamed. The only place in this namespace that opens a
-    /// memory file's bytes, and the bytes leave this method only as a digest.
+    /// Lower-case hex SHA-256 of a file, streamed, together with whether it is one
+    /// <c>baton memory sync</c> wrote. The only place in this namespace that opens a memory file's
+    /// bytes, and they leave this method only as a digest and a <see langword="bool"/>.
     /// </summary>
-    private static string HashFile(string path)
+    /// <remarks>
+    /// <para>
+    /// <b>One open for both</b>, so the digest and the flag are measurements of the same bytes rather
+    /// than of two reads a concurrent writer could have separated.
+    /// </para>
+    /// <para>
+    /// The prefix is exactly <see cref="MemoryProjection.FormatMarker"/>'s length because
+    /// <see cref="MemoryProjection.IsProjectedFile"/> is a <c>StartsWith</c> over it — a predicate
+    /// that looked past the first line would need more read here — and it is decoded the way
+    /// <c>baton memory import</c> decodes the same file (UTF-8, BOM detection left on), because a
+    /// marker the two verbs decode differently is the feedback loop back open on one of them.
+    /// </para>
+    /// </remarks>
+    private static (string Sha256, bool IsProjection) MeasureFile(string path)
     {
         using var stream = new FileStream(path, FileMode.Open, FileAccess.Read, FileShare.ReadWrite);
-        return Convert.ToHexString(SHA256.HashData(stream)).ToLowerInvariant();
+
+        var prefix = new char[MemoryProjection.FormatMarker.Length];
+        int read;
+        using (var reader = new StreamReader(
+                   stream, Encoding.UTF8, detectEncodingFromByteOrderMarks: true, leaveOpen: true))
+        {
+            read = reader.ReadBlock(prefix, 0, prefix.Length);
+        }
+
+        var isProjection = MemoryProjection.IsProjectedFile(new string(prefix, 0, read));
+
+        stream.Position = 0;
+        return (Convert.ToHexString(SHA256.HashData(stream)).ToLowerInvariant(), isProjection);
     }
 }
