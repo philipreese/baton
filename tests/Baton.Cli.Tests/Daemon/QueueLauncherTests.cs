@@ -144,7 +144,7 @@ public sealed class QueueLauncherTests : IDisposable
             var fact = Assert.Single(await QueueDecisionLedgerStore.ReadAllAsync(
                 BatonPaths.QueueDecisionLedgerFile, Ct));
             Assert.Equal(QueueDecisionEntry.Failed, fact.Decision);
-            Assert.Equal(sentinel.Error, fact.Reason);
+            Assert.Contains(sentinel.Error!, fact.Reason!, StringComparison.Ordinal);
         }
         finally
         {

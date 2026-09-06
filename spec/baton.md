@@ -5863,9 +5863,12 @@ and each is closed where the fact exists:
   rather than replacing it; and each step's live `liveness` probe is dropped (the one exception to
   §3's step-presence rule), since a value read at projection time would be frozen into a file read
   long after that engine exited. A room with no
-  ledger, no bound snapshot, or an unreadable one still gets the bare sentinel — the write is
+  ledger, no bound snapshot, or a corrupt one still gets the bare sentinel — the write is
   unconditional, because an unprojectable room is exactly the one that would otherwise wedge its item
-  in `launched` forever.
+  in `launched` forever. A sharing-violation ledger is different from corruption: its ordinary
+  live-writer tail gets three projection attempts with a short bounded backoff before the same
+  degradation. The bare sentinel's `error` names whether the input was missing, corrupt, or remained
+  held, and the failed resolution fact in `~/.baton/fleet/queue.jsonl` carries that error too.
 
   Keeping a mid-lane `Running` step is safe at both readers that key on one, and each for its own
   reason. The live-weight tally behind `MaxLiveWeight` skips any room carrying a sentinel at all
