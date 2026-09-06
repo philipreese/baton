@@ -173,10 +173,10 @@ public static class MemoryProjection
     /// <b>The marker, not the filename.</b> A name test would have to know two spellings —
     /// <see cref="ClaudeProjectionTarget.ProjectionFileName"/> and the
     /// <c>baton-projection.md.&lt;guid&gt;.tmp</c> a crashed write leaves behind — and would miss a
-    /// projection an operator copied under another name. The negative a reader would otherwise assume:
-    /// a <c>.tmp</c> truncated before its first line finished carries no marker and is NOT recognised,
-    /// because the staging write is not atomic. Such a file imports as an ordinary memory; the marker is
-    /// a test on content, never a guarantee about a partial file.
+    /// projection an operator copied under another name;
+    /// <c>MemoryImportTests.A_projection_under_an_ordinary_filename_is_skipped_on_its_marker</c> is the
+    /// arm that makes that a measurement rather than an intention. What this predicate does NOT promise
+    /// about a partially written file is stated once in spec/baton.md §12, with the loop above.
     /// </para>
     /// </remarks>
     public static bool IsProjectedFile(string? text) =>

@@ -34,8 +34,8 @@ public enum MemoryRootKind
 /// Whether this is a cache <c>baton memory sync</c> wrote, decided by
 /// <see cref="MemoryProjection.IsProjectedFile"/> — the SAME predicate <c>baton memory import</c> uses,
 /// so the two verbs cannot come to disagree about what a projection is, and so the recognition stays a
-/// test on <b>content</b> rather than on a filename. <see cref="MemoryAuditReport"/> is what acts on it:
-/// a file Baton wrote is not evidence about whose memory a root holds. Required rather than defaulted —
+/// test on <b>content</b> rather than on a filename. <see cref="MemoryAuditReport"/> is what acts on it,
+/// and its remarks are where the reason lives. Required rather than defaulted —
 /// <see langword="false"/> is the value that manufactures the finding this exists to remove, so a new
 /// construction site should not be able to fall into it silently.
 /// </param>

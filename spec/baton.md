@@ -5422,6 +5422,14 @@ reported as `projection-skipped` and never as `unfiled` — the two mean differe
 guarantee about a partial file: the staging write is not atomic, so a `.tmp` truncated before its first
 line completed carries no marker and imports as an ordinary memory.
 
+**`audit` skips a projection too, on the same predicate — out of its FINDINGS only.** A cache Baton
+wrote is not evidence about whose memory a root holds, so it is excluded from the subject and duplicate
+rules and kept everywhere else: it is still walked, digested, listed in the root's row and added into
+the counts. `MemoryAuditReport`'s remarks carry the derivation — which two findings it would otherwise
+mint about the tool's own write, and why the exclusion stops at the findings — and
+`MemoryFile.IsBatonProjection` is where the inventory records the same content test rather than a
+second one.
+
 **An archived-origin entry (`historical-note`) is projected and labelled, never dropped** — the
 projector's remarks carry the derivation; the register's part is that labelling rather than hiding is
 the ruling, on the same reasoning every other omission on this surface is named rather than counted.
