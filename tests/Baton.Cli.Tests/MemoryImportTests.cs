@@ -891,10 +891,10 @@ public sealed class MemoryImportTests : IDisposable
 
         // Control: the well-formed spellings parse, so the arms above are keyed on what they claim.
         var ok = MemoryImportOptionsParser.Parse(
-            ["--dry-run", "--root", "r", "--assert", @"C:\a=b/c", "--asserted-by", "me"]);
+            ["--dry-run", "--root", "r", "--assert", @"C:\a=github.com/b/c", "--asserted-by", "me"]);
         Assert.True(ok.DryRun);
         Assert.Equal(["r"], ok.Roots);
-        Assert.Equal(new MemoryImportAssertion(@"C:\a", "b/c"), Assert.Single(ok.Assertions));
+        Assert.Equal(new MemoryImportAssertion(@"C:\a", "github.com/b/c"), Assert.Single(ok.Assertions));
         Assert.Equal("me", ok.AssertedBy);
 
         Assert.Throws<CliArgumentException>(() => MemoryImportOptionsParser.Parse(["--frobnicate"]));
@@ -916,6 +916,18 @@ public sealed class MemoryImportTests : IDisposable
         var parsed = MemoryImportOptionsParser.Parse(["--assert", $@"C:\root={spelling}"]);
 
         Assert.Equal("github.com/owner/repo", Assert.Single(parsed.Assertions).Repository);
+    }
+
+    [Theory]
+    [InlineData("owner/repo")]
+    [InlineData("b/c")]
+    [InlineData("aer-works/baton")]
+    public void An_asserted_repository_with_bare_owner_repo_is_refused(string bare)
+    {
+        var refused = Assert.Throws<CliArgumentException>(
+            () => MemoryImportOptionsParser.Parse(["--assert", $@"C:\root={bare}"]));
+        Assert.Contains("is not a repository identity", refused.Message, StringComparison.Ordinal);
+        Assert.Contains("it has no host-and-path", refused.Message, StringComparison.Ordinal);
     }
 
     [Fact]
