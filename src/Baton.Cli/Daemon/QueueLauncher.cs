@@ -221,15 +221,20 @@ public static class QueueLauncher
                 return;
             }
 
-            var projected = await TryProjectRoomAsync(roomDirectory).ConfigureAwait(false);
+            var projection = await TryProjectRoomAsync(roomDirectory).ConfigureAwait(false);
 
             var error = $"the queue-launched lane '{tag}' did not complete after launch: {reason}";
-            if (projected?.Error is { Length: > 0 } recordedFailure)
+            if (projection.View?.Error is { Length: > 0 } recordedFailure)
             {
                 error += $" — the room's own last recorded failure: {recordedFailure}";
             }
 
-            var view = (projected ?? new WorkflowStatusView(WorkflowOutcome.Failed, [], [], null)) with
+            if (projection.BareSentinelReason is { Length: > 0 } bareSentinelReason)
+            {
+                error += $" — bare sentinel: {bareSentinelReason}";
+            }
+
+            var view = (projection.View ?? new WorkflowStatusView(WorkflowOutcome.Failed, [], [], null)) with
             {
                 State = WorkflowOutcome.Failed,
                 Error = error,
@@ -249,62 +254,79 @@ public static class QueueLauncher
     /// <c>StatusCommand</c> already project one: bound snapshot + <c>flow.jsonl</c> +
     /// <c>ProjectionCheckpointStore</c>, through the same <c>StateProjector</c>/
     /// <see cref="WorkflowStatusProjector"/> pair, so the steps and outputs a post-launch fault freezes
-    /// are the room's own and never a second derivation of what an event log means. Inlined here rather
-    /// than shared with <c>FleetStatusTool.ProcessRoomAsync</c>'s identical block, which is a seam worth
-    /// extracting on its own rather than inside this fix.
-    /// <para>
-    /// Returns null — never throws — for a room this cannot project: no real ledger yet
-    /// (<see cref="RoomLedgerProbe"/>, which is also why the ledger-less room in
-    /// <c>QueueLauncherTests</c> still gets the bare view), no bound snapshot, or a read/parse failure.
-    /// The caller writes the bare <c>Failed</c> sentinel in that case: a degraded record still resolves
-    /// the item, where a throw out of the discarded continuation this runs in would resolve nothing.
-    /// </para>
-    /// <para>
-    /// <b><see cref="WorkflowStatusStepView.Liveness"/> is dropped from every step</b>, while each
-    /// step's recorded <c>state</c> is kept as projected, a mid-lane <c>Running</c> included —
-    /// spec/baton.md §13's post-launch bullet has why the two are treated differently.
-    /// </para>
+    /// are the room's own and never a second derivation of what an event log means.
     /// </summary>
-    private static async Task<WorkflowStatusView?> TryProjectRoomAsync(string roomDirectory)
+    /// <remarks>
+    /// The held-ledger retry and the bare-sentinel reason are specified in spec/baton.md §13. A held
+    /// journal gets a short, bounded retry because the live writer's final handle release is routine;
+    /// missing, corrupt, or still-held input degrades only after that attempt and names the case in
+    /// <see cref="ProjectionAttempt.BareSentinelReason"/>.
+    /// </remarks>
+    private static async Task<ProjectionAttempt> TryProjectRoomAsync(string roomDirectory)
     {
         var snapshotPath = Path.Combine(roomDirectory, BatonPaths.SnapshotFileName);
-        if (!RoomLedgerProbe.HasLedger(roomDirectory) || !File.Exists(snapshotPath))
+        if (!RoomLedgerProbe.HasLedger(roomDirectory))
         {
-            return null;
+            return new ProjectionAttempt(null, "ledger is missing");
         }
 
-        try
+        if (!File.Exists(snapshotPath))
         {
-            var snapshot = await SnapshotBinder.LoadFromFileAsync(snapshotPath, CancellationToken.None).ConfigureAwait(false);
-            var entries = await new FlowEventLogReader(Path.Combine(roomDirectory, BatonPaths.FlowLogFileName))
-                .ReadAllEntriesWithTimestampsAsync(CancellationToken.None).ConfigureAwait(false);
+            return new ProjectionAttempt(null, "bound snapshot is missing");
+        }
 
-            var events = new List<FlowEvent>(entries.Count);
-            foreach (var entry in entries)
+        for (var attempt = 1; attempt <= HeldLedgerProjectionAttempts; attempt++)
+        {
+            try
             {
-                if (entry is LogEntry.FlowLogEntry flowLogEntry)
+                var snapshot = await SnapshotBinder.LoadFromFileAsync(snapshotPath, CancellationToken.None).ConfigureAwait(false);
+                var entries = await new FlowEventLogReader(Path.Combine(roomDirectory, BatonPaths.FlowLogFileName))
+                    .ReadAllEntriesWithTimestampsAsync(CancellationToken.None).ConfigureAwait(false);
+
+                var events = new List<FlowEvent>(entries.Count);
+                foreach (var entry in entries)
                 {
-                    events.Add(flowLogEntry.Event);
+                    if (entry is LogEntry.FlowLogEntry flowLogEntry)
+                    {
+                        events.Add(flowLogEntry.Event);
+                    }
                 }
+
+                var state = StateProjector.Project(events, snapshot, ProjectionCheckpointStore.Load(roomDirectory));
+                var view = WorkflowStatusProjector.Project(
+                    state, snapshot, roomDirectory, entries, WorkerAdapterRegistry.Default);
+
+                return new ProjectionAttempt(
+                    view with { Steps = [.. view.Steps.Select(step => step with { Liveness = null })] },
+                    null);
             }
-
-            var state = StateProjector.Project(events, snapshot, ProjectionCheckpointStore.Load(roomDirectory));
-            var view = WorkflowStatusProjector.Project(
-                state, snapshot, roomDirectory, entries, WorkerAdapterRegistry.Default);
-
-            return view with { Steps = [.. view.Steps.Select(step => step with { Liveness = null })] };
+            catch (FlowJournalHeldException ex) when (attempt < HeldLedgerProjectionAttempts)
+            {
+                Console.Error.WriteLine(
+                    $"QueueLauncher: ledger for '{roomDirectory}' was held while projecting its post-launch fault "
+                    + $"record; retrying ({attempt}/{HeldLedgerProjectionAttempts}): {ex.Message}");
+                await Task.Delay(HeldLedgerProjectionBackoff).ConfigureAwait(false);
+            }
+            catch (FlowJournalHeldException ex)
+            {
+                return new ProjectionAttempt(
+                    null,
+                    $"ledger remained held after {HeldLedgerProjectionAttempts} bounded projection attempts: {ex.Message}");
+            }
+            catch (Exception ex) when (ex is BatonFlowException or IOException or UnauthorizedAccessException)
+            {
+                return new ProjectionAttempt(null, $"ledger projection failed: {ex.Message}");
+            }
         }
-        catch (Exception ex) when (ex is BatonFlowException or IOException or UnauthorizedAccessException)
-        {
-            // SnapshotLoadException and FlowEventLogReadException are both BatonFlowException. Named
-            // rather than swallowed: the sentinel this degrades to says the lane failed but not what it
-            // had done, and the difference is otherwise invisible.
-            Console.Error.WriteLine(
-                $"QueueLauncher: could not project '{roomDirectory}' for its post-launch fault record, "
-                + $"so its sentinel carries no steps or outputs: {ex.Message}");
-            return null;
-        }
+
+        throw new InvalidOperationException("The bounded held-ledger projection loop did not return.");
     }
+
+    private sealed record ProjectionAttempt(WorkflowStatusView? View, string? BareSentinelReason);
+
+    private const int HeldLedgerProjectionAttempts = 3;
+
+    private static readonly TimeSpan HeldLedgerProjectionBackoff = TimeSpan.FromMilliseconds(100);
 
     /// <summary>
     /// The room a queued item dispatches into: <c>queue-&lt;tag&gt;-&lt;8 hex&gt;</c> under
