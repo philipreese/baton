@@ -82,9 +82,9 @@ public sealed record LedgerEstimateStatusCounts(
 /// <para>
 /// <b><see cref="CostSourceKind.GithubBackfill"/> rows are excluded, and that is this field's own
 /// definition being honoured rather than an arithmetic preference</b> (#1931 review MEDIUM): nothing
-/// ran behind a merged PR, so "nothing was read for it" is a false statement about it, and one
-/// backfill run put 235 of them into a bucket that reads as 235 attempts whose usage was lost. They
-/// are counted in <paramref name="PullRequests"/> instead.
+/// ran behind a merged PR, so the sentence above is false about one. They are counted in
+/// <paramref name="PullRequests"/> instead; spec/baton.md §7 carries the measurement that forced it
+/// and what the rest of a reading still counts them into.
 /// </para>
 /// </param>
 /// <param name="Executions">

@@ -477,11 +477,11 @@ public sealed class LedgerBackfillCommandTests : IDisposable
     }
 
     /// <summary>
-    /// #1931 review LOW: the <c>merged:&lt;=</c> cursor is only sound while <c>gh</c> answers
-    /// newest-merge-first, and GitHub's search API offers no merge-time sort to pin it with (its sorts
-    /// are comments/reactions/interactions/created/updated). So the walk CHECKS instead: a page that
-    /// comes back out of merge order stops it, with the reason, rather than advancing a cursor that
-    /// would exclude every PR merged after that page's oldest entry.
+    /// #1931 review LOW: the <c>merged:&lt;=</c> cursor rests on an ordering nothing can pin
+    /// (spec/baton.md §7 has why), so the walk checks it — a page that comes back out of order stops
+    /// the walk with a reason. Without the check the cursor advances off such a page's newest entry
+    /// and every PR merged after it is excluded from the run permanently, which is why the second
+    /// scripted page here would otherwise be fetched at all.
     /// </summary>
     [Fact]
     public async Task A_page_that_comes_back_out_of_merge_order_stops_the_walk_and_says_why()

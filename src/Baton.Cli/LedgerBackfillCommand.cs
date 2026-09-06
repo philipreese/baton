@@ -464,14 +464,10 @@ public static class LedgerBackfillCommand
             }
 
             // A FOURTH stop, and the one that is about someone else's behaviour rather than this
-            // loop's: the cursor advance below is only sound if each page is the newest of what
-            // remains, i.e. if gh returns merged-descending. GitHub's search API cannot be asked for
-            // that -- `gh search prs --help` enumerates its sorts as
-            // comments/reactions/interactions/created/updated (default best-match) and none of them is
-            // merge time, so `sort:updated-desc` would pin an order that drags the cursor BACKWARDS
-            // past unseen PRs rather than fixing anything. What can be done is to notice: if a page
-            // comes back out of merge order, the assumption has failed, and the walk stops and says so
-            // instead of silently excluding every PR merged after this page's oldest entry.
+            // loop's: the cursor advance below is only sound while each page is the newest of what
+            // remains. spec/baton.md §7's backfill section has why that cannot be pinned with a
+            // `sort:` qualifier and is checked here instead; what this code owns is that a page which
+            // fails the assumption stops the walk rather than advancing a cursor past PRs it never saw.
             if (FirstOutOfMergeOrder(page.Items) is { } outOfOrder)
             {
                 report.GithubIncompleteReason =

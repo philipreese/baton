@@ -123,7 +123,7 @@ public enum RepositoryIdentitySource
 {
     /// <summary>
     /// The room's own recorded project root (its <c>RoomRegistryEntry.ProjectRoot</c>) resolved to a
-    /// repository. The row is keyed to the repository the work was actually done in.
+    /// repository — the one fact that keys a room to where its work happened.
     /// </summary>
     [JsonStringEnumMemberName("recorded-root")] RecordedRoot,
 
