@@ -2380,9 +2380,8 @@ public class OutcomeClassifierTests
                 contract,
                 directory,
                 worktreePath: "C:/rooms/room/workspaces/implement",
-                // A lane that did nothing at all is ALSO clean with HEAD == remote. The new arm sits
-                // inside Mutated's, so this one never reaches it — pinned here because that nesting is
-                // the only thing keeping "stalled from the first second" out of the finished word.
+                // The reading Classify's own #1945 remark says the nesting exists to exclude — pinned
+                // here because nothing else would notice if that nesting were flattened.
                 workspaceMutationProbe: ProbeReturning(WorkspaceMutationReading.FromCounts(
                     changedPathCount: 0, newCommitCount: 0, commitsAheadOfRemote: 0)));
 

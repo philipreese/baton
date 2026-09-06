@@ -66,8 +66,8 @@ public sealed record WorkspaceMutationReading(
     /// #1945: whether this workspace's work is already committed AND already on the remote — the
     /// signature of a lane that finished inside its box and was killed while the pre-push hook's
     /// <c>gates-fast</c> was still running. Read only from inside <see cref="Mutated"/>'s arm in
-    /// <see cref="Outcomes.OutcomeClassifier"/>, so "the worker did nothing at all" (clean, no
-    /// commits) can never reach it and be read as finished.
+    /// <see cref="Outcomes.OutcomeClassifier"/> — that nesting is what the population this predicate
+    /// must never see turns on, and the classifier's own #1945 remark states it.
     /// <para>
     /// Fails closed exactly as <see cref="Mutated"/> does: an unmeasured workspace, or one whose
     /// upstream count git could not produce, is false — a lane is only called finished on positive
