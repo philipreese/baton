@@ -195,8 +195,8 @@ public static class MemoryImportOptionsParser
         if (RepositoryIdentity.TryCanonicalize(repository) is not { Length: > 0 } canonical)
         {
             throw new CliArgumentException(
-                $"'{repository.Trim()}' is not a repository identity: it has no host-and-path to " +
-                $"canonicalize, so nothing could name a store file for it. {Usage}",
+                $"'{repository.Trim()}' is not a repository identity: expected " +
+                $"'<host>/<owner>/<repository>' or a clone URL, so nothing could name a store file for it. {Usage}",
                 "assert '<host>/<owner>/<repository>', for example 'github.com/owner/repo' — a clone URL " +
                 "('https://github.com/owner/repo.git', 'git@github.com:owner/repo.git') is accepted " +
                 "and normalised to one.");
