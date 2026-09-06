@@ -891,10 +891,11 @@ public sealed class MemoryImportTests : IDisposable
 
         // Control: the well-formed spellings parse, so the arms above are keyed on what they claim.
         var ok = MemoryImportOptionsParser.Parse(
-            ["--dry-run", "--root", "r", "--assert", @"C:\a=b/c", "--asserted-by", "me"]);
+            ["--dry-run", "--root", "r", "--assert", @"C:\a=h/b/c", "--asserted-by", "me"]);
         Assert.True(ok.DryRun);
         Assert.Equal(["r"], ok.Roots);
-        Assert.Equal(new MemoryImportAssertion(@"C:\a", "b/c"), Assert.Single(ok.Assertions));
+        // The path half keeps its drive colon: this control also proves the split is at the LAST '='.
+        Assert.Equal(new MemoryImportAssertion(@"C:\a", "h/b/c"), Assert.Single(ok.Assertions));
         Assert.Equal("me", ok.AssertedBy);
 
         Assert.Throws<CliArgumentException>(() => MemoryImportOptionsParser.Parse(["--frobnicate"]));
@@ -924,6 +925,13 @@ public sealed class MemoryImportTests : IDisposable
         var refused = Assert.Throws<CliArgumentException>(
             () => MemoryImportOptionsParser.Parse(["--assert", @"C:\root=hello world"]));
         Assert.Contains("is not a repository identity", refused.Message, StringComparison.Ordinal);
+
+        // A bare 'owner/repo' is the same refusal, and the one the help text already promised: it has
+        // no host in it, so no git probe could ever answer with the identity it would be filed under.
+        var hostless = Assert.Throws<CliArgumentException>(
+            () => MemoryImportOptionsParser.Parse(["--assert", @"C:\root=owner/repo"]));
+        Assert.Contains("is not a repository identity", hostless.Message, StringComparison.Ordinal);
+        Assert.Contains("github.com/owner/repo", hostless.TryInvocation!, StringComparison.Ordinal);
 
         // The gitdir: derivation is a canonical identity too, and its own colon must not be read as an
         // scp separator -- 'gitdir/c:/...' would be a second store for a repository with no remote.

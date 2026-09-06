@@ -116,6 +116,51 @@ public sealed class RepositoryIdentityTests
         }
     }
 
+    /// <summary>
+    /// The bare, scheme-less spelling an operator types is only an identity when it carries three
+    /// components — <c>host/owner/repo</c>. With two, the first is not a host at all, and reading
+    /// <c>owner/repo</c> as host <c>owner</c> files a store under a string no git probe can produce.
+    /// </summary>
+    [Theory]
+    [InlineData("owner/repo")]
+    [InlineData("aer-works/baton")]
+    [InlineData("aer-works/baton.git")]
+    [InlineData(" owner/repo/ ")]
+    [InlineData("owner")]
+    [InlineData("hello world")]
+    public void A_bare_spelling_with_no_host_canonicalizes_to_nothing(string typed) =>
+        Assert.Null(RepositoryIdentity.TryCanonicalize(typed));
+
+    /// <summary>
+    /// The control for the refusal above: the three-component bare spelling, which is the one the
+    /// <c>--assert</c> help names, still canonicalizes. A refusal that also swallowed this would make
+    /// the flag unusable rather than strict.
+    /// </summary>
+    [Theory]
+    [InlineData("github.com/aer-works/baton")]
+    [InlineData("GitHub.com/AER-Works/Baton.git")]
+    [InlineData(" github.com/aer-works/baton/ ")]
+    [InlineData("https://GitHub.com/AER-Works/Baton.git")]
+    [InlineData("git@github.com:AER-Works/Baton.git")]
+    public void A_typed_identity_that_carries_a_host_canonicalizes_unchanged(string typed) =>
+        Assert.Equal(Canonical, RepositoryIdentity.TryCanonicalize(typed));
+
+    /// <summary>
+    /// The second control: the three-component rule is on the BARE spelling only. A remote that states
+    /// its host explicitly — scheme or scp — is taken at its word, so a two-component identity from a
+    /// host-rooted server survives, and <see cref="RepositoryIdentity.From"/>'s derivation from such a
+    /// remote is untouched.
+    /// </summary>
+    [Theory]
+    [InlineData("https://internal/repo")]
+    [InlineData("ssh://git@internal/repo.git")]
+    [InlineData("git@internal:repo.git")]
+    public void An_explicit_host_needs_no_third_component(string typed)
+    {
+        Assert.Equal("internal/repo", RepositoryIdentity.TryCanonicalize(typed));
+        Assert.Equal("internal/repo", RepositoryIdentity.From(typed, gitCommonDirectoryPath: null)?.Value);
+    }
+
     [Fact]
     public void The_file_slug_is_stable_for_one_identity()
     {
