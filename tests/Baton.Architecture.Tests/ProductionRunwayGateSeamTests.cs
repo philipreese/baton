@@ -14,9 +14,11 @@ namespace Baton.Architecture.Tests;
 /// <remarks>
 /// <para>
 /// Pure file reading over <c>src/</c>, no project references, matching <see cref="VendorSpawnGateTests"/>
-/// and <see cref="ReferenceDirectionTests"/>. The allowlist is empty today and is meant to stay that
-/// way: a production caller that genuinely needs its own evaluator is a change to the gate's contract
-/// (spec/baton.md §7, "Runway hold (#1848)"), not a line added here in passing.
+/// and <see cref="ReferenceDirectionTests"/>. The allowlist holds exactly ONE entry — #1934's queue
+/// launcher, for the <c>evaluateRunway</c> seam only, on a contract stated in spec/baton.md §13 before
+/// any code was written. The bar for a second is unchanged and is the one that kept it empty until now:
+/// a production caller that genuinely needs its own evaluator or policy is a change to the gate's
+/// contract (spec/baton.md §7, "Runway hold (#1848)"), not a line added here in passing.
 /// </para>
 /// <para>
 /// <b>Its false negatives, named rather than left for someone to discover</b> — the same disclosure
