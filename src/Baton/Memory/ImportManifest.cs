@@ -11,8 +11,11 @@ namespace Baton.Memory;
 /// </summary>
 /// <param name="SourcePath">Absolute path of the file that was read.</param>
 /// <param name="Sha256">Lower-case hex SHA-256 of its bytes at import time.</param>
-/// <param name="SourceMtimeUtc">Its last-write time at import time.</param>
-/// <param name="SizeBytes">Its length at import time.</param>
+/// <param name="SourceMtimeUtc">
+/// Its last-write time at import time — the entry's own, so see <see cref="MemoryEntry.SourceMtimeUtc"/>
+/// for which read it comes from.
+/// </param>
+/// <param name="SizeBytes">Its length at import time, from that same read.</param>
 /// <param name="SourceVendor">Which vendor's root it sat in.</param>
 /// <param name="SourceScope">That root's <see cref="VendorMemoryScope"/>.</param>
 /// <param name="EntryId">The <see cref="MemoryEntry.Id"/> it produced.</param>
@@ -61,8 +64,12 @@ public sealed record ImportLinkRow(
 /// </summary>
 /// <param name="SourcePath">Absolute path of the file.</param>
 /// <param name="Sha256">Its digest — recorded even here, because provenance is the point of the row.</param>
-/// <param name="SourceMtimeUtc">Its last-write time.</param>
-/// <param name="SizeBytes">Its length.</param>
+/// <param name="SourceMtimeUtc">
+/// Its last-write time. Which read the digest and this came from differs by population: an unfiled file
+/// was opened like any other, so both are from that read (see <see cref="MemoryEntry.SourceMtimeUtc"/>);
+/// a machinery file is never opened at all, so both are the inventory walk's.
+/// </param>
+/// <param name="SizeBytes">Its length, from whichever of the two the digest came from.</param>
 /// <param name="Reason">Why it produced no entry, in one clause.</param>
 public sealed record ImportSkippedRow(
     [property: JsonPropertyName("sourcePath")] string SourcePath,
