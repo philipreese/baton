@@ -365,7 +365,7 @@ public static class BatonPaths
     /// </summary>
     /// <param name="tag">
     /// The item's tag. Already constrained to a filename-safe slug by
-    /// <c>Baton.Queue.QueueTag.Validate</c> — this method does not re-check it, so callers that did
+    /// <c>Baton.Queue.QueueTag.IsValid</c> — this method does not re-check it, so callers that did
     /// not come through the parser must.
     /// </param>
     public static string QueueSpecFile(string tag)

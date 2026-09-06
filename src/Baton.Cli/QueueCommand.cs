@@ -50,6 +50,16 @@ public static class QueueCommand
                 "pass an existing file to --spec; the queue copies it, so the original may be deleted afterwards.");
         }
 
+        // The launched-tag refusal is raised HERE, before the spec copy and before any worktree is
+        // provisioned — not only inside the mutate below (#1939 review). File.Copy(overwrite: true)
+        // would otherwise already have replaced the running lane's brief by the time the refusal was
+        // raised, which is the exact record that refusal exists to protect. This read is the early
+        // half; the mutate re-checks under the file lock, which is where the authority stays.
+        RefuseIfLaunched(
+            (await QueueStore.LoadAsync(BatonPaths.QueueFile, cancellationToken).ConfigureAwait(false))
+                .Items.FirstOrDefault(i => string.Equals(i.Tag, tag, StringComparison.Ordinal)),
+            tag);
+
         // Provisioning first, before anything is written to the queue: a `gh issue develop` that fails
         // must leave no half-added item behind, the same pre-provision-refusal placement
         // DispatchCommand's own drain/continue checks use.
@@ -103,13 +113,7 @@ public static class QueueCommand
             // operator is editing their list); re-adding one that has LAUNCHED is refused, because the
             // running lane's own record would be overwritten.
             var existing = snapshot.Items.FirstOrDefault(i => string.Equals(i.Tag, tag, StringComparison.Ordinal));
-            if (existing is { State: QueueItemState.Launched })
-            {
-                throw new CliArgumentException(
-                    $"Item '{tag}' is already launched into room '{existing.RoomDirectory}'. Re-adding it would "
-                    + "overwrite that lane's record.",
-                    "pick a different tag, or wait for the lane to settle.");
-            }
+            RefuseIfLaunched(existing, tag);
 
             replaced = existing is not null;
             var items = snapshot.Items.Where(i => !string.Equals(i.Tag, tag, StringComparison.Ordinal)).ToList();
@@ -130,6 +134,21 @@ public static class QueueCommand
         return 0;
     }
 
+    /// <summary>
+    /// The one refusal `add` makes twice — once before it touches anything, once under the file lock.
+    /// One method so the two can never word it differently.
+    /// </summary>
+    private static void RefuseIfLaunched(QueueItem? existing, string tag)
+    {
+        if (existing is { State: QueueItemState.Launched })
+        {
+            throw new CliArgumentException(
+                $"Item '{tag}' is already launched into room '{existing.RoomDirectory}'. Re-adding it would "
+                + "overwrite that lane's record.",
+                "pick a different tag, or wait for the lane to settle.");
+        }
+    }
+
     private static async Task<int> ListAsync(TextWriter output, CancellationToken cancellationToken)
     {
         var snapshot = await QueueStore.LoadAsync(BatonPaths.QueueFile, cancellationToken).ConfigureAwait(false);
@@ -137,6 +156,8 @@ public static class QueueCommand
         {
             output.WriteLine("Queue is HELD — no new launches until 'baton queue resume'. Live lanes are unaffected.");
         }
+
+        await PrintWaitAsync(output, cancellationToken).ConfigureAwait(false);
 
         if (snapshot.Items.Count == 0)
         {
@@ -222,19 +243,49 @@ public static class QueueCommand
         return string.Join(" / ", parts) + (tier.IsOverride ? " (overridden)" : string.Empty);
     }
 
-    /// <summary>Formats a decision the way the ledger's <c>reason</c> field carries it — used by the
-    /// daemon's service and kept here so the queue's verbs and its scheduler word a wait identically.</summary>
-    public static string DescribeWait(QueueWaitReason reason, double liveWeight, double? freeGb, double floorGb) =>
-        reason switch
+    /// <summary>
+    /// "Is it still waiting, and on what" — the question spec/baton.md §13 sends the reader here to
+    /// ask, and the reason the decision ledger is allowed to collapse a repeated verdict to one row
+    /// instead of writing a per-tick heartbeat.
+    /// </summary>
+    /// <remarks>
+    /// Read off the ledger's LAST row rather than recomputed: this verb must not take a second memory
+    /// reading or re-tally the live rooms, because a number that disagreed with the scheduler's own
+    /// would be worse than no number. Printed only when that last row is a wait — after a launch or a
+    /// failure the queue is not waiting on anything, and the row's own <c>at</c> is when the wait
+    /// began, since an unchanged verdict is not re-appended. It is a QUEUE-level line, never folded
+    /// into an item's: a row that names a tag names the CANDIDATE the scheduler looked at, which is
+    /// not the same claim as "this item is waiting", and some rows name no tag at all.
+    /// </remarks>
+    private static async Task PrintWaitAsync(TextWriter output, CancellationToken cancellationToken)
+    {
+        var ledger = await QueueDecisionLedgerStore
+            .ReadAllAsync(BatonPaths.QueueDecisionLedgerFile, cancellationToken).ConfigureAwait(false);
+        if (ledger.Count == 0 || ledger[^1] is not { Decision: QueueDecisionEntry.Waited } wait)
         {
-            QueueWaitReason.Slots => FormattableString.Invariant(
-                $"slots (live weight {liveWeight:0.##})"),
-            QueueWaitReason.Memory => FormattableString.Invariant(
-                $"memory (free {freeGb ?? 0:0.##} GiB below the {floorGb:0.##} GiB floor)"),
-            _ => QueueWaitReasons.Token(reason),
-        };
+            return;
+        }
 
-    /// <summary>Renders a count the same way everywhere. Invariant culture on purpose: this string
-    /// reaches a JSONL ledger a script parses, not only a terminal.</summary>
+        // Two of the six tokens say nothing this listing does not already say better, so they are
+        // suppressed rather than printed: 'no-items' would sit above "Queue is empty." announcing that
+        // the queue is waiting on being empty (and an idle fleet's steady state is exactly that row),
+        // and 'hold' would repeat the HELD line immediately above it. Compared against
+        // QueueWaitReasons.Token rather than a literal, so renaming a token cannot silently switch
+        // either line back on.
+        if (wait.Reason == QueueWaitReasons.Token(QueueWaitReason.NoItems)
+            || wait.Reason == QueueWaitReasons.Token(QueueWaitReason.Hold))
+        {
+            return;
+        }
+
+        var counters = wait.FreeGb is { } free
+            ? $"live weight {Number(wait.LiveWeight)}, free {Number(free)} GiB against a {Number(wait.FloorGb)} GiB floor"
+            : $"live weight {Number(wait.LiveWeight)}, free memory unmeasured";
+        var candidate = wait.Tag is { Length: > 0 } tag ? $", candidate '{tag}'" : string.Empty;
+        output.WriteLine($"Waiting on {wait.Reason} since {wait.At:u} ({counters}{candidate}).");
+    }
+
+    /// <summary>Renders a count the same way everywhere. Invariant culture on purpose: a queue whose
+    /// numbers change shape with the host's locale is one nobody can grep two machines of.</summary>
     internal static string Number(double value) => value.ToString("0.##", CultureInfo.InvariantCulture);
 }

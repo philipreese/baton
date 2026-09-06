@@ -109,6 +109,38 @@ public sealed class QueueImportTests
     }
 
     [Fact]
+    public void A_tag_listed_twice_refuses_the_whole_import_and_names_it()
+    {
+        const string json = """
+        [
+          { "tag": "1934b", "role": "implement", "workspace": "C:\\repos\\w1" },
+          { "tag": "1934b", "role": "review", "workspace": "C:\\repos\\w2" }
+        ]
+        """;
+
+        // Both rows would resolve to one spec path, so they would launch two lanes off one brief —
+        // the same tag-as-identity collision `baton queue add` refuses. The file is hand-edited,
+        // which is how the duplicate gets there.
+        var ex = Assert.Throws<QueueStoreException>(() => QueueImport.Parse(json, SpecFor, Now));
+        Assert.Contains("1934b", ex.Message, StringComparison.Ordinal);
+        Assert.Contains("more than once", ex.Message, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void Two_distinct_tags_are_not_mistaken_for_a_duplicate()
+    {
+        // The control for the refusal above: two rows, two tags, both imported.
+        const string json = """
+        [
+          { "tag": "1934b", "role": "implement", "workspace": "C:\\repos\\w1" },
+          { "tag": "1934c", "role": "implement", "workspace": "C:\\repos\\w2" }
+        ]
+        """;
+
+        Assert.Equal(2, QueueImport.Parse(json, SpecFor, Now).Count);
+    }
+
+    [Fact]
     public void A_file_that_is_not_the_runners_shape_is_refused_with_a_sentence()
     {
         var ex = Assert.Throws<QueueStoreException>(() => QueueImport.Parse("""{"queue": 3}""", SpecFor, Now));

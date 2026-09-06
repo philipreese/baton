@@ -5457,7 +5457,15 @@ assumed. The `all` ceiling is a real widening and is stated rather than left to 
 adapter, maxToolSteps, tokenBudget, overrideRunway, reason, pinModel, external}`) for Q7's cutover. A
 **launched tag comes in launched** — resetting it would re-dispatch a lane the operator already has
 running. The import refuses as a whole rather than importing the readable subset: a partial import at
-cutover looks like a successful one.
+cutover looks like a successful one. The file is also checked **against itself**: a tag listed twice
+is refused, because a tag is an identity that names one spec file, so the two rows would launch two
+lanes off one brief.
+
+`list` prints each item and, when the queue's last recorded decision was a wait, one queue-level line
+saying what it is waiting on and since when — read off the ledger, never recomputed, so it cannot
+disagree with the scheduler's own reading. `add` raises its refusals — a launched tag above all —
+**before** it copies the spec or provisions a worktree: the copy overwrites, and the launched-tag
+refusal exists precisely to keep the brief a running lane was queued with.
 
 ### The policy, and where its numbers live
 
@@ -5556,9 +5564,27 @@ that, a queue-launched room would carry no `terminal.json` (invisible to `fleet_
 sentinel-first path) and no cost-ledger row, which is indistinguishable from a lane that spent nothing.
 
 An item is **done** when its room reaches a terminal state, read from the room itself — no `.done`
-sentinel files, so a restarted daemon resolves an item it never launched. A room that settled
-Indeterminate, timed out, or carries an error is **failed, with the room id**. Resolving and
-redispatching stay operator verbs in slice 1: nothing here retries.
+sentinel files, so a restarted daemon resolves an item it never launched. **The fate comes from the
+room's own outcome word**, the one `WorkflowOutcome` writes into the sentinel (§3): only `Succeeded`
+is done, and Cancelled / Failed / Indeterminate — and any word this reader does not know, including a
+sentinel carrying none — are **failed, with the room id and that word**. Not from the sentinel's
+step list or its error field: a cancelled lane has no failed step and a rejected one carries no
+failure reason, so both read as a clean completion under either. Resolving and redispatching stay
+operator verbs in slice 1: nothing here retries. A resolution is recorded on the *item*; the ledger
+records decisions, and reading a room that finished is not one.
+
+**No item stays launched with nothing to read.** Two paths would otherwise leave one there forever,
+and each is closed where the fact exists:
+
+- A lane that **faults after launch** never reaches Terminal, so nothing writes its `terminal.json`.
+  The launcher's own continuation writes the room a `Failed` sentinel instead, and done detection
+  resolves it like any other settled room. It never creates a room the dispatch never provisioned —
+  that would put a lane in `fleet_status` that never ran — and never overwrites a refusal the
+  dispatch already recorded, which carries the `try` line a person acts on.
+- A launch whose **room was never created** can produce no sentinel at all. The scheduler's own sweep
+  fails it once the room is still absent a grace period after the launch (the refusal window plus
+  slack for a slow pre-provision `git` spawn). Items carrying no room *at all* — the imported ones,
+  which the runner never recorded one for — are excluded, not swept.
 
 **Shutdown does not arrest a launched lane.** The dispatch runs on a detached task with
 `CancellationToken.None`, deliberately not the host's stopping token — stopping the daemon must not
@@ -5566,6 +5592,23 @@ kill lanes it started. The cost, stated rather than left emergent: a daemon that
 orphans that lane's *supervision*. The room's own record and the worker keep going, and nothing marks
 the item done until a daemon comes back and re-reads the room, which is precisely why done detection
 reads from disk.
+
+**The launch is recorded before it is started, under the same token it runs on.** The item is marked
+launched — with the room the scheduler picks and hands to the dispatch — *before* the dispatch
+begins, and that write, like the dispatch, takes `CancellationToken.None`. Recorded afterwards on the
+stopping token, a daemon stopped in that window left a worker running in the item's worktree against
+an item still `queued`, and the next daemon start dispatched a **second worker into the same
+workspace**. The item's state is the anti-relaunch record, so it is written first; the *ledger* row
+still waits for the outcome, because a `launched` line for a lane the runway then held would be a
+false fact in the file this queue exists to make auditable. A hold undoes the mark and returns the
+item to `queued`.
+
+**Every evaluation writes a fact, including the ones that fail.** A throw that reaches no decision
+arm — a malformed `settings.json`, an unreadable queue file — is recorded as `failed` with a reason
+saying its counters were never read (`freeGb` absent, never a fabricated zero), and a throw out of
+the launcher that is not modelled as an outcome fails the *item* with the room id rather than
+unwinding into the loop's catch-all. The ledger's collapse rule keeps a failure repeating every tick
+to one line.
 
 ---
 

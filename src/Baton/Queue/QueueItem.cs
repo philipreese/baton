@@ -16,7 +16,7 @@ public sealed record QueueItem
 {
     /// <summary>The operator's own name for this piece of work — also the spec filename under
     /// <c>BatonPaths.QueueSpecsDirectory</c> and the room label, so it is constrained to a slug by
-    /// <see cref="QueueTag.Validate"/>.</summary>
+    /// <see cref="QueueTag.IsValid"/> (<see cref="QueueTag.Rule"/> is that rule in words).</summary>
     public required string Tag { get; init; }
 
     /// <summary>The worker role to dispatch (<c>implement</c>, <c>review</c>, …) — resolved against

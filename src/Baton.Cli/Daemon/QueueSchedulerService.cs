@@ -97,7 +97,33 @@ public sealed class QueueSchedulerService : BackgroundService
     /// One evaluation: resolve anything that finished, decide, launch if the decision says so, and
     /// record the fact. Returns the interval until the next tick.
     /// </summary>
+    /// <remarks>
+    /// <b>No evaluation leaves the ledger silent</b> — spec/baton.md §13 has that ruling. Each arm of
+    /// <see cref="EvaluateAsync"/> records its own decision; this wrapper covers a throw that reaches
+    /// none of them. The row's <c>liveWeight</c>/<c>floorGb</c> read zero only because nothing ever
+    /// read them, which is what its reason says out loud, and <c>freeGb</c> is absent for the same
+    /// reason rather than fabricated. The collapse on
+    /// <see cref="QueueDecisionEntry.VerdictKey"/> keeps a tick-after-tick repeat to one line.
+    /// </remarks>
     internal async Task<TimeSpan> TickOnceAsync(CancellationToken cancellationToken)
+    {
+        try
+        {
+            return await EvaluateAsync(cancellationToken).ConfigureAwait(false);
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException || !cancellationToken.IsCancellationRequested)
+        {
+            await RecordAsync(
+                new QueueDecisionEntry(
+                    _now(), null, QueueDecisionEntry.Failed,
+                    $"the evaluation itself failed and recorded no counters: {ex.Message}",
+                    LiveWeight: 0, FreeGb: null, FloorGb: 0),
+                CancellationToken.None).ConfigureAwait(false);
+            throw;
+        }
+    }
+
+    private async Task<TimeSpan> EvaluateAsync(CancellationToken cancellationToken)
     {
         var settings = (await DaemonSettingsStore.LoadAsync(BatonPaths.SettingsFile, cancellationToken)
             .ConfigureAwait(false)).Queue;
@@ -138,14 +164,62 @@ public sealed class QueueSchedulerService : BackgroundService
             return interval;
         }
 
-        var outcome = await _launch(new QueueLaunchRequest(item, tier), cancellationToken).ConfigureAwait(false);
+        // The launch is RECORDED BEFORE IT IS STARTED, and started under the same token it was recorded
+        // under -- spec/baton.md §13 states that ruling and the duplicate-worker failure it closes.
+        // What belongs here rather than there: the two writes are deliberately asymmetric. The ITEM is
+        // written first, because it is what the next daemon reads to pick candidates; the LEDGER row
+        // waits for the outcome, below.
+        var roomDirectory = QueueLauncher.RoomDirectoryFor(item);
+        _lastLaunchAt = now;
+        await MarkAsync(item.Tag, existing => existing with
+        {
+            State = QueueItemState.Launched,
+            RoomDirectory = roomDirectory,
+            LaunchedAt = now,
+            Error = null,
+        }).ConfigureAwait(false);
+
+        QueueLaunchOutcome outcome;
+        try
+        {
+            outcome = await _launch(new QueueLaunchRequest(item, tier, roomDirectory), CancellationToken.None)
+                .ConfigureAwait(false);
+        }
+        catch (OperationCanceledException)
+        {
+            // Nothing in the launch takes a cancellable token any more, so this is the belt to that
+            // braces. `failed`, not left launched: the queue has lost track of whether a lane started,
+            // and the room id on the item is how an operator finds out.
+            await FailAsync(
+                item, $"the daemon shut down while launching into room '{roomDirectory}'; check that room before "
+                + "re-adding this item, because the lane may have started", roomDirectory, now, decision, tier,
+                CancellationToken.None).ConfigureAwait(false);
+            return interval;
+        }
+        catch (Exception ex) when (ex is not OutOfMemoryException and not StackOverflowException)
+        {
+            // A throw the launcher does not model as a QueueLaunchOutcome -- an IO failure inside
+            // TerminalSettleRecorder, say. Mapped to the item's own Failed state and one recorded fact
+            // rather than unwound into the loop's catch-all, which would leave the item launched with
+            // nothing said about why (#1939 review).
+            await FailAsync(
+                item, $"the launch into room '{roomDirectory}' threw {ex.GetType().Name}: {ex.Message}",
+                Directory.Exists(roomDirectory) ? roomDirectory : null, now, decision, tier,
+                CancellationToken.None).ConfigureAwait(false);
+            return interval;
+        }
 
         if (outcome.RunwayHeld)
         {
-            // No state change: the item is untouched and will be the candidate again next tick. But
-            // _lastLaunchAt IS advanced, so the gap paces the retry -- a held vendor must not be
-            // re-asked every TickSeconds.
-            _lastLaunchAt = now;
+            // The item goes back to QUEUED, undoing the pre-launch mark above: nothing was dispatched,
+            // so it must be the candidate again next tick (Q5's arm). _lastLaunchAt stays advanced, so
+            // the gap paces the retry -- a held vendor must not be re-asked every TickSeconds.
+            await MarkAsync(item.Tag, existing => existing with
+            {
+                State = QueueItemState.Queued,
+                RoomDirectory = null,
+                LaunchedAt = null,
+            }).ConfigureAwait(false);
             await RecordAsync(
                 new QueueDecisionEntry(
                     now, item.Tag, QueueDecisionEntry.Waited,
@@ -158,32 +232,37 @@ public sealed class QueueSchedulerService : BackgroundService
 
         if (outcome.Error is { Length: > 0 } error)
         {
-            await FailAsync(item, error, outcome.RoomDirectory, now, decision, tier, cancellationToken).ConfigureAwait(false);
+            // outcome.RoomDirectory, not the path above: the launcher reports it only when the dispatch
+            // actually provisioned the room, and a refusal that never got that far must leave the item
+            // pointing at nothing rather than at a directory that does not exist.
+            await FailAsync(item, error, outcome.RoomDirectory, now, decision, tier, CancellationToken.None)
+                .ConfigureAwait(false);
             return interval;
         }
 
-        _lastLaunchAt = now;
-        await QueueStore.MutateAsync(BatonPaths.QueueFile, s => s with
-        {
-            Items = Replace(s.Items, item.Tag, existing => existing with
-            {
-                State = QueueItemState.Launched,
-                RoomDirectory = outcome.RoomDirectory,
-                LaunchedAt = now,
-                Error = null,
-            }),
-        }, cancellationToken).ConfigureAwait(false);
-
+        // The item is already marked launched, above. All that is left is the fact.
         await RecordAsync(
             new QueueDecisionEntry(
                 now, item.Tag, QueueDecisionEntry.Launched, null,
                 decision.LiveWeight, decision.FreeGb, decision.FloorGb,
                 tier.TierKey, tier.Adapter, tier.Model, tier.Effort, tier.IsOverride, tier.OverrideReason,
-                outcome.RoomDirectory),
-            cancellationToken).ConfigureAwait(false);
+                outcome.RoomDirectory ?? roomDirectory),
+            CancellationToken.None).ConfigureAwait(false);
 
         return interval;
     }
+
+    /// <summary>
+    /// One item's state change, on <see cref="CancellationToken.None"/> deliberately: these writes
+    /// record a launch that runs on that same token, and
+    /// <see cref="QueueStore.MutateAsync"/> on an already-cancelled token never runs its delegate at
+    /// all — which is how a shutdown mid-launch used to lose the launch entirely.
+    /// </summary>
+    private static Task MarkAsync(string tag, Func<QueueItem, QueueItem> update) =>
+        QueueStore.MutateAsync(
+            BatonPaths.QueueFile,
+            s => s with { Items = Replace(s.Items, tag, update) },
+            CancellationToken.None);
 
     private async Task FailAsync(
         QueueItem item,
@@ -194,15 +273,15 @@ public sealed class QueueSchedulerService : BackgroundService
         QueueTierResolution tier,
         CancellationToken cancellationToken)
     {
-        await QueueStore.MutateAsync(BatonPaths.QueueFile, s => s with
+        // RoomDirectory is assigned, never merged with what the item already carried: the pre-launch
+        // mark writes the room the dispatch was GOING to use, and a refusal that never provisioned it
+        // must not leave that path behind as if a room existed to go and read.
+        await MarkAsync(item.Tag, existing => existing with
         {
-            Items = Replace(s.Items, item.Tag, existing => existing with
-            {
-                State = QueueItemState.Failed,
-                Error = error,
-                RoomDirectory = room ?? existing.RoomDirectory,
-            }),
-        }, cancellationToken).ConfigureAwait(false);
+            State = QueueItemState.Failed,
+            Error = error,
+            RoomDirectory = room,
+        }).ConfigureAwait(false);
 
         await RecordAsync(
             new QueueDecisionEntry(
@@ -223,6 +302,15 @@ public sealed class QueueSchedulerService : BackgroundService
     /// An item whose room is not terminal yet is untouched, which is also what happens to one whose
     /// sentinel is momentarily unreadable — <c>TryReadAsync</c>'s "no answer yet" is indistinguishable
     /// from "not finished", and treating it as either kind of verdict would be a guess.
+    /// <para>
+    /// The one case where a missing sentinel IS a verdict is <see cref="IsRoomlessPastGrace"/>: a room
+    /// that does not exist long after the launch was recorded can never produce one.
+    /// </para>
+    /// <para>
+    /// An item carrying no room at all is skipped entirely by the filter above — that is the imported
+    /// launched item <c>QueueImport</c>'s own remarks say the operator clears by hand, and it must not
+    /// be swept as if the queue had launched it.
+    /// </para>
     /// </remarks>
     internal async Task ResolveFinishedItemsAsync(CancellationToken cancellationToken)
     {
@@ -239,12 +327,18 @@ public sealed class QueueSchedulerService : BackgroundService
         foreach (var item in launched)
         {
             var sentinel = await TerminalSentinelWriter.TryReadAsync(item.RoomDirectory!, cancellationToken).ConfigureAwait(false);
-            if (sentinel is null)
+            if (sentinel is not null)
             {
+                resolved[item.Tag] = ClassifyTerminal(sentinel, item.RoomDirectory!);
                 continue;
             }
 
-            resolved[item.Tag] = ClassifyTerminal(sentinel, item.RoomDirectory!);
+            if (IsRoomlessPastGrace(item))
+            {
+                resolved[item.Tag] = (QueueItemState.Failed,
+                    $"room {item.RoomDirectory} was never created — the dispatch refused or faulted before it "
+                    + "provisioned the room, so nothing ran; re-add the item once you know why");
+            }
         }
 
         if (resolved.Count == 0)
@@ -263,15 +357,55 @@ public sealed class QueueSchedulerService : BackgroundService
     }
 
     /// <summary>
+    /// The other half of "no item stays <see cref="QueueItemState.Launched"/> forever" (#1939 review):
+    /// a launch whose room was never created at all. A dispatch that refuses or faults <em>before</em>
+    /// provisioning leaves nothing to read — no room, so no sentinel for
+    /// <see cref="ResolveFinishedItemsAsync"/> to classify and no
+    /// <c>QueueLauncher.RecordPostLaunchFaultAsync</c> write either, since that one deliberately never
+    /// manufactures a room.
+    /// </summary>
+    /// <remarks>
+    /// Gated on a grace period rather than read the instant the room is missing: the item is marked
+    /// launched before the dispatch starts, so "the room does not exist yet" is the ordinary reading
+    /// for the first seconds. <see cref="QueueLauncher.RefusalWindow"/> bounds the dispatch's own
+    /// pre-provision phase; the five minutes on top are slack for a slow <c>git</c> spawn (which
+    /// happens before the room is created) and a coarse tick. The trade it accepts, said out loud: a
+    /// dispatch still stuck in a pre-provision spawn after that long is called failed here, and if it
+    /// later recovers, its lane runs against an item already marked failed — the room id on the item
+    /// is what makes that findable.
+    /// </remarks>
+    internal static readonly TimeSpan NoRoomGrace = QueueLauncher.RefusalWindow + TimeSpan.FromMinutes(5);
+
+    private bool IsRoomlessPastGrace(QueueItem item) =>
+        !Directory.Exists(item.RoomDirectory!)
+        && item.LaunchedAt is { } launchedAt
+        && _now() - launchedAt > NoRoomGrace;
+
+    /// <summary>
     /// Which state a settled room puts its item in — split out from the I/O above because this is the
     /// part worth a test.
     /// </summary>
     /// <remarks>
-    /// The indeterminate reading comes from the sentinel's own step states, not a second taxonomy:
-    /// <c>StepStatus.IndeterminateAwaitingResolution</c> is what the engine records for a worker that
-    /// neither succeeded nor failed usefully, and a timeout settles there too. Matched as a substring
-    /// of the token rather than against the enum, because this assembly reads the projected view's
-    /// string; if that token is ever renamed, this predicate silently stops matching.
+    /// <para>
+    /// <b>The room's own outcome word decides, in the same vocabulary the projector emits</b> —
+    /// <see cref="WorkflowOutcome"/>'s constants, which <c>WorkflowStatusProjector</c> and
+    /// <see cref="TerminalSentinelWriter.WriteValidationRefusedAsync"/> are the only producers of.
+    /// Only <see cref="WorkflowOutcome.Succeeded"/> is <see cref="QueueItemState.Done"/>; every other
+    /// word is a failure carrying that word. spec/baton.md §13 has the ruling and what reading the
+    /// step list or <see cref="WorkflowStatusView.Error"/> instead cost.
+    /// </para>
+    /// <para>
+    /// <b>Fails closed on a word this assembly does not know</b>, including the null a hand-written
+    /// <c>terminal.json</c> with no <c>state</c> field deserializes to: an unreadable verdict is not a
+    /// clean settle. <see cref="WorkflowStatusView.Error"/> is detail on the message, never the
+    /// verdict.
+    /// </para>
+    /// <para>
+    /// Indeterminate keeps a sentence of its own because it is the one outcome with a remedy
+    /// (<c>baton resolve</c>). It is read at the ROOM level, never off a step: the #1608
+    /// single-added-enum-value ruling leaves an indeterminate step projecting as
+    /// <c>StepStatus.Failed</c>, so no step state ever carries the word.
+    /// </para>
     /// <para>
     /// The failure message names the room, because a marked item with nowhere to look is not
     /// investigable.
@@ -281,21 +415,20 @@ public sealed class QueueSchedulerService : BackgroundService
     {
         ArgumentNullException.ThrowIfNull(sentinel);
 
-        var indeterminate = sentinel.Steps?.Any(
-            s => s.State.Contains("Indeterminate", StringComparison.OrdinalIgnoreCase)) ?? false;
-        if (indeterminate)
+        var detail = sentinel.Error is { Length: > 0 } error ? $": {error}" : string.Empty;
+        return sentinel.State switch
         {
-            return (QueueItemState.Failed,
-                $"room {roomDirectory} settled indeterminate — resolve it with 'baton resolve' and redispatch if you want it redone");
-        }
-
-        if (sentinel.Error is { Length: > 0 } error)
-        {
-            return (QueueItemState.Failed, $"room {roomDirectory} settled with an error: {error}");
-        }
-
-        return (QueueItemState.Done, null);
+            WorkflowOutcome.Succeeded => (QueueItemState.Done, null),
+            WorkflowOutcome.Indeterminate => (QueueItemState.Failed,
+                $"room {roomDirectory} settled indeterminate{detail} — resolve it with 'baton resolve' and "
+                + "redispatch if you want it redone"),
+            _ => (QueueItemState.Failed, $"room {roomDirectory} settled {DescribeOutcome(sentinel.State)}{detail}"),
+        };
     }
+
+    /// <summary>The outcome word verbatim, or a sentence for the sentinel that carries none.</summary>
+    private static string DescribeOutcome(string? state) =>
+        string.IsNullOrWhiteSpace(state) ? "with no outcome word" : state;
 
     private async Task RecordAsync(QueueDecisionEntry entry, CancellationToken cancellationToken)
     {

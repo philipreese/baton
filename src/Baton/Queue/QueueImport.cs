@@ -83,6 +83,7 @@ public static class QueueImport
         }
 
         var items = new List<QueueItem>();
+        var tags = new HashSet<string>(StringComparer.Ordinal);
         foreach (var entry in raw ?? [])
         {
             if (entry is null)
@@ -95,6 +96,18 @@ public static class QueueImport
                 throw new QueueStoreException(
                     $"Import refused: '{entry.Tag}' is not a usable tag ({QueueTag.Rule}). Fix it in the file "
                     + "being imported and re-run — importing the rest would silently drop this item.");
+            }
+
+            // The file is checked against ITSELF, not only against what is already queued: a tag is an
+            // identity, so two rows sharing one point at one spec file under the queue's specs
+            // directory and would launch as two lanes off one brief — the same collision `baton queue
+            // add` refuses. The runner's file was hand-edited eight times in one evening (#1934 body),
+            // which is exactly how a tag ends up in it twice.
+            if (!tags.Add(entry.Tag!))
+            {
+                throw new QueueStoreException(
+                    $"Import refused: the file lists the tag '{entry.Tag}' more than once. A tag names one spec "
+                    + "file, so the two rows would share a brief. Rename one and re-run.");
             }
 
             if (string.IsNullOrWhiteSpace(entry.Role))

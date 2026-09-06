@@ -7,7 +7,13 @@ namespace Baton.Cli.Daemon;
 /// <summary>What the scheduler asks the launcher to start.</summary>
 /// <param name="Item">The queued item.</param>
 /// <param name="Tier">Its resolved adapter/model/effort — <see cref="QueueTierTable.Resolve"/>'s answer, never re-derived here.</param>
-public sealed record QueueLaunchRequest(QueueItem Item, QueueTierResolution Tier);
+/// <param name="RoomDirectory">
+/// The room to dispatch into — <see cref="QueueLauncher.RoomDirectoryFor"/>'s answer, chosen by the
+/// scheduler rather than here because the scheduler writes it onto the item BEFORE the launch starts
+/// (<c>QueueSchedulerService.EvaluateAsync</c> states why). Passed rather than re-derived: two
+/// generators would put the item's recorded room and the dispatch's actual room one GUID apart.
+/// </param>
+public sealed record QueueLaunchRequest(QueueItem Item, QueueTierResolution Tier, string RoomDirectory);
 
 /// <summary>
 /// How a launch attempt ended.
@@ -49,6 +55,13 @@ public static class QueueLauncher
     /// Starts <paramref name="request"/> and returns as soon as the outcome is known: a refusal
     /// (hold or error) or a provisioned room whose pump is now running detached.
     /// </summary>
+    /// <param name="cancellationToken">
+    /// Bounds only the work BEFORE the outcome is known — the evaluator read and the refusal poll. The
+    /// scheduler hands in <see cref="CancellationToken.None"/> (#1939 review): the dispatch below runs
+    /// on that token by design, and cancelling the observation of a launch that is still starting is
+    /// what left an item recorded as not-launched while its worker ran. The poll has its own deadline,
+    /// so nothing here is unbounded.
+    /// </param>
     public static async Task<QueueLaunchOutcome> LaunchAsync(QueueLaunchRequest request, CancellationToken cancellationToken)
     {
         ArgumentNullException.ThrowIfNull(request);
@@ -59,8 +72,8 @@ public static class QueueLauncher
             return new QueueLaunchOutcome(null, Error: $"spec file '{item.SpecFile}' is gone");
         }
 
-        var roomDirectory = Path.Combine(BatonPaths.Rooms, $"queue-{item.Tag}-{Guid.NewGuid().ToString("N")[..8]}");
-        var options = BuildOptions(request, roomDirectory);
+        var roomDirectory = request.RoomDirectory;
+        var options = BuildOptions(request);
 
         var held = false;
         var evaluator = await DispatchCommand.CreateDiskRunwayEvaluatorAsync(cancellationToken).ConfigureAwait(false);
@@ -115,9 +128,10 @@ public static class QueueLauncher
             {
                 if (completed.IsFaulted)
                 {
+                    var reason = completed.Exception?.GetBaseException().Message ?? "the lane faulted after launch";
                     Console.Error.WriteLine(
-                        $"QueueLauncher: lane '{item.Tag}' in '{roomDirectory}' failed after launch: "
-                        + $"{completed.Exception?.GetBaseException().Message}");
+                        $"QueueLauncher: lane '{item.Tag}' in '{roomDirectory}' failed after launch: {reason}");
+                    await RecordPostLaunchFaultAsync(item.Tag, roomDirectory, reason).ConfigureAwait(false);
                     return;
                 }
 
@@ -137,6 +151,58 @@ public static class QueueLauncher
         return new QueueLaunchOutcome(roomDirectory);
     }
 
+    /// <summary>
+    /// The verdict a lane that faulted <em>after</em> launch would otherwise never leave behind
+    /// (#1939 review). A dispatch that throws twenty minutes in reaches no Terminal state, so
+    /// <see cref="TerminalSettleRecorder"/> never runs and the room carries no <c>terminal.json</c> —
+    /// and <c>QueueSchedulerService.ResolveFinishedItemsAsync</c>, which reads exactly that file,
+    /// leaves the item <see cref="QueueItemState.Launched"/> forever. This writes the room's own
+    /// failure so the item resolves the same way every other settled room does: through the sentinel,
+    /// not through a second channel.
+    /// </summary>
+    /// <remarks>
+    /// Two things it deliberately does NOT do — both rulings, stated in spec/baton.md §13 with the
+    /// argument for each: it never creates the room directory (the scheduler's own sweep is what
+    /// resolves an item whose room was never provisioned), and it never replaces a sentinel the room
+    /// already carries.
+    /// </remarks>
+    internal static async Task RecordPostLaunchFaultAsync(string tag, string roomDirectory, string reason)
+    {
+        try
+        {
+            if (!Directory.Exists(roomDirectory)
+                || await TerminalSentinelWriter.TryReadAsync(roomDirectory, CancellationToken.None)
+                    .ConfigureAwait(false) is not null)
+            {
+                return;
+            }
+
+            await TerminalSentinelWriter.WriteAsync(
+                roomDirectory,
+                new WorkflowStatusView(
+                    WorkflowOutcome.Failed, [], [],
+                    $"the queue-launched lane '{tag}' faulted after launch: {reason}"),
+                CancellationToken.None).ConfigureAwait(false);
+        }
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
+        {
+            Console.Error.WriteLine(
+                $"QueueLauncher: could not record the post-launch fault for '{tag}' in '{roomDirectory}': {ex.Message}");
+        }
+    }
+
+    /// <summary>
+    /// The room a queued item dispatches into: <c>queue-&lt;tag&gt;-&lt;8 hex&gt;</c> under
+    /// <see cref="BatonPaths.Rooms"/>. Here rather than in the scheduler that calls it because the
+    /// naming is this launcher's convention — the tag leads so a room is traceable to its item by
+    /// eye, and the suffix keeps a re-added tag from colliding with its own earlier room.
+    /// </summary>
+    internal static string RoomDirectoryFor(QueueItem item)
+    {
+        ArgumentNullException.ThrowIfNull(item);
+        return Path.Combine(BatonPaths.Rooms, $"queue-{item.Tag}-{Guid.NewGuid().ToString("N")[..8]}");
+    }
+
     /// <summary>How long to wait for a pre-provision refusal before reporting the lane launched.
     /// Every refusal happens before the room directory is created, so this is a backstop, not the
     /// mechanism.</summary>
@@ -149,7 +215,7 @@ public static class QueueLauncher
     /// <see cref="LaunchAsync"/> so a test can assert what the queue forwards without running a
     /// dispatch.
     /// </summary>
-    internal static DispatchOptions BuildOptions(QueueLaunchRequest request, string roomDirectory)
+    internal static DispatchOptions BuildOptions(QueueLaunchRequest request)
     {
         ArgumentNullException.ThrowIfNull(request);
         var item = request.Item;
@@ -158,7 +224,7 @@ public static class QueueLauncher
         return new DispatchOptions(
             Name: item.Role,
             SpecFilePath: item.SpecFile,
-            RoomDirectoryPath: roomDirectory,
+            RoomDirectoryPath: request.RoomDirectory,
             Adapter: tier.Adapter,
             WorkspaceDirectory: item.Workspace,
             Model: tier.Model,
