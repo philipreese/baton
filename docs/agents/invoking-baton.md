@@ -377,14 +377,13 @@ baton memory sync [--repository <id>] [--apply] [--format text|json] [--reposito
 ```
 
 Without `--apply` it writes **nothing** — no file, and no directory either — and reports what would
-change. Each target root receives exactly one Baton-owned file, overwritten in full; no vendor file,
-`MEMORY.md` included, is touched. **The output carries no timestamp on purpose**: an unchanged store
-projects byte-identical bytes, so any diff means the store changed, and the header carries a content
-hash where a generated-at stamp would be. Targets are **discovered, never constructed** — a repository
-with no matching root is reported as having no target rather than having one created for it — and they
-are markdown only: Codex's `memories_*.sqlite` and every Antigravity store are inventoried and never
+change. One generated file per root and nothing else in it: the vendor's own memories and its
+`MEMORY.md` index are left alone. **The output carries no timestamp on purpose**, so a diff means the
+store changed and not that time passed. Targets are **discovered, never constructed**, and they are
+markdown only — Codex's `memories_*.sqlite` and every Antigravity store are inventoried and never
 written. A superseded entry, one the projection budget could not fit, and a vendor fact a checked-in
-repository fact outranks are each **named with their canonical id** in the report, never counted. See
+repository fact outranks are each **named with their canonical id** in the report, never counted. The
+rulings behind each of those, and what a repository with nowhere to project into gets instead, are in
 `spec/baton.md` §12.
 
 ---

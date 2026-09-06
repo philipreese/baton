@@ -244,9 +244,9 @@ public sealed class MemoryProjectionTests : IDisposable
 
     /// <summary>
     /// The control pair the acceptance line rests on. Without <c>--apply</c> the target file does not
-    /// exist AND no directory was created; with it, the file exists and holds exactly the projected
-    /// bytes. A dry run that prepared its output directory would still be a write, so the directory is
-    /// asserted too.
+    /// exist AND the root holds no Baton file at all; with it, the file exists and holds exactly the
+    /// projected bytes. Preparing output on disk counts as writing, so the arm inspects the directory
+    /// rather than only the one filename.
     /// </summary>
     [Fact]
     public async Task Sync_writes_nothing_without_apply_and_writes_the_projection_with_it()
@@ -326,9 +326,9 @@ public sealed class MemoryProjectionTests : IDisposable
     }
 
     /// <summary>
-    /// A repository whose store holds memories but whose machine holds no matching root is reported as
-    /// having NO TARGET, and nothing is created for it. The counterpart to the arm above: the same
-    /// store, minus the alias that made the root resolvable.
+    /// Nothing is invented when there is nowhere to write: the report says NO TARGET and the projects
+    /// directory is still empty afterwards. The counterpart to the arm above — the same store, minus
+    /// the alias that made the root resolvable.
     /// </summary>
     [Fact]
     public async Task A_repository_with_no_discovered_root_is_reported_rather_than_given_one()

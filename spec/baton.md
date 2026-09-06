@@ -5403,8 +5403,9 @@ that is the mechanism rather than a stylistic choice** — a generated-at stamp 
 hash** of the body in its place. `MemoryProjection` is a pure function of `(entries, budget)` and its
 remarks carry the other three properties that hold the byte-identity up (a total `(repository, kind,
 id)` order, pinned `\n`/UTF-8/no-BOM, invariant-culture numbers) and why the hash covers the body and
-not the header. Without `--apply` **nothing is written and no directory is created** — not "no memory
-changed": a dry run that prepared its output directory would still be a write.
+not the header. **`--apply` is the only thing that puts a byte on disk**, and short of it the verb has
+no filesystem effect whatever — `MemorySyncCommand`'s remarks carry why that has to be said as a
+negative rather than left as "it only reports".
 
 **A superseded entry is omitted from the projection and named in the report** — the projector's own
 remarks carry the derivation; the register's part is that omitting is the ruling, since a cache is the
