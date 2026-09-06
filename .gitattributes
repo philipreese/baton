@@ -32,3 +32,11 @@ tests/fixtures/* text eol=lf
 # against a fresh LF derivation, so a CRLF checkout on Windows would read as stale on a correct file.
 benchmarks/deepswe/*/derived-scores.csv text eol=lf
 
+# Committed cost-ledger exports and their derivation (#1901 C3). Same reason one line up, twice over:
+# `baton ledger export` writes LF explicitly (LedgerCsv's own promise, so the same query compares
+# byte-equal across machines) and `derive.py --check` compares its committed outputs byte-for-byte
+# against a fresh LF derivation.
+benchmarks/ledger/*.csv text eol=lf
+benchmarks/ledger/medians.json text eol=lf
+benchmarks/ledger/medians.md text eol=lf
+
