@@ -103,8 +103,8 @@ public sealed record RepositoryIdentity
     /// (<c>https://github.com/Owner/Repo.git</c>, <c>git@github.com:Owner/Repo.git</c>) canonicalizes,
     /// and then behind an <c>https://</c> so the bare <c>host/owner/repo</c> spelling an operator
     /// actually types is read as the host-and-path it is. That second attempt <b>supplies a scheme and
-    /// nothing else</b>: it does not invent a host, so <c>owner/repo</c> canonicalizes to
-    /// <c>owner/repo</c> (host <c>owner</c>, path <c>repo</c>) and never to
+    /// nothing else</b>: it does not invent a host, so <c>owner/repo</c> has no host plus
+    /// owner-and-repository path and is refused rather than becoming
     /// <c>github.com/owner/repo</c> — guessing a forge would file a repository under an identity no
     /// probe could ever reproduce.
     /// </para>
@@ -124,9 +124,13 @@ public sealed record RepositoryIdentity
 
         var raw = assertedValue.Trim();
 
-        return raw.StartsWith(GitDirectoryPrefix, StringComparison.OrdinalIgnoreCase)
-            ? From(originUrl: null, gitCommonDirectoryPath: raw[GitDirectoryPrefix.Length..])?.Value
-            : TryNormalizeRemote(raw) ?? TryNormalizeRemote("https://" + raw);
+        if (raw.StartsWith(GitDirectoryPrefix, StringComparison.OrdinalIgnoreCase))
+        {
+            return From(originUrl: null, gitCommonDirectoryPath: raw[GitDirectoryPrefix.Length..])?.Value;
+        }
+
+        var canonical = TryNormalizeRemote(raw) ?? TryNormalizeRemote("https://" + raw);
+        return canonical?.Count(c => c == '/') >= 2 ? canonical : null;
     }
 
     /// <summary>
