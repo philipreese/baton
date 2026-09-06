@@ -82,6 +82,11 @@ public class ExecutionOutputDirectoryListingTests
             "EnumerateFiles lists a ~/.claude memory root (live or archived), not an execution output directory",
         ["Baton/Memory/MemoryRootPath.cs"] =
             "EnumerateFiles lists a Claude project directory's session transcripts, not an execution output directory",
+        // #1151: walks a canonical skill package directory (<workspace>/skills/<name>/) to plan which of
+        // its files a vendor realization would place. The workspace a binding dispatches into is never a
+        // room's artifacts root, so an execution's output directory is unreachable from here.
+        ["Baton.Vendors/SkillProjection.cs"] =
+            "GetFiles walks a canonical skill package directory under the dispatch workspace, not an execution output directory",
         // #496: lists artifacts/.versions/ (a named artifact's own version-history sidecar, one
         // index.jsonl per name), never an execution's own output directory.
         ["Baton/Artifacts/RoomArtifacts.cs"] =
