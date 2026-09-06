@@ -212,7 +212,9 @@ public sealed class SkillBindingRealizationTests : IDisposable
             Adapter: "claude", Contract: Contract, PromptTemplate: "Do the work.",
             Timeout: TimeSpan.FromMinutes(5), Skills: ["alpha", "beta"]);
 
-        var json = System.Text.Json.JsonSerializer.Serialize(
+        // Through the production writer, not a bare JsonSerializer call: the writer owns its own
+        // JsonSerializerOptions, so a raw serialize would assert a shape no dispatch actually emits.
+        var json = WorkerBindingConfigWriter.Serialize(
             new Dictionary<string, WorkerBindingConfigEntry> { ["worker"] = entry });
         var parsed = WorkerBindingConfigParser.Parse(json);
 

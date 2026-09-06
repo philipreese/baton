@@ -12,7 +12,9 @@ namespace Baton.Vendors;
 /// <remarks>
 /// Thrown before a room directory is created (<c>RoleDispatch.ToBinding</c>, ahead of
 /// <c>DispatchCommand</c>'s own <c>Directory.CreateDirectory</c>), so a typo in <c>--skill</c> costs
-/// nothing and leaves nothing behind. #1151's rule: fail fast on identity.
+/// nothing and leaves nothing behind. #1151's rule: fail fast on identity. Scoped to the account-wide
+/// rungs — spec/baton.md §9 records why the bottom rung can instead refuse from
+/// <see cref="WorkerBindingResolver"/>, after the room exists.
 /// </remarks>
 public sealed class UnknownSkillPackageException : BatonFlowException
 {

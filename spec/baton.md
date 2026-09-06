@@ -4850,6 +4850,15 @@ source, so it is kept as the bottom rung where retiring it later removes behavio
 changing what an existing name resolves to. Whether to retire or ratify it is open on #1151. Second,
 **a name found on one rung is used whole**, never merged with a same-named package on a lower one.
 
+**The repo-local rung is not stable across the two check sites, and the account-wide rungs are.** A
+role that dispatches into an auto-provisioned worktree (§3's audited-not-enforced path) is checked in
+`RoleDispatch.ToBinding` against the operator's checkout, and resolved later in
+`WorkerBindingResolver.Resolve` against the provisioned tree at `HEAD` — so for that role a bottom-rung
+name that is untracked, or locally modified, is not the same package at the two points, and an
+untracked one refuses *after* the room directory exists rather than before it. Nothing here changes for
+the three account-wide rungs, which are identical at both sites and are what Q3 ratified. This is a
+second input to retiring or ratifying the rung, not a defect in a rung the ruling settled.
+
 **The format lint refuses three shapes**, each closing a hazard whose alternative is silent —
 `vendor-placeholder` (a `${CLAUDE_*}`/`${GEMINI_*}` substitution only one vendor performs, so the
 literal text reaches the model on the other; `${BATON_SKILL_DIR}` is the portable spelling),
@@ -4868,6 +4877,11 @@ already states, applied to operator-authored content. An omitted key declares no
 declaring false, which is why every manifest-less package keeps working. The check runs twice on
 purpose: in `RoleDispatch.ToBinding`, before a room directory exists, so a typo'd `--skill` costs
 nothing; and in `WorkerBindingResolver.Resolve`, which is the only copy the `baton run` path reaches.
+Both read the binding's **own** grant, which is upstream of the project ceiling's cap: `ProjectCeilingGate`
+runs later, inside the adapter, and a ceiling that closes a category the role's grant carries is
+therefore not caught by either check. A package can pass and still meet a capped grant at the worker.
+That is the safe direction — the check only ever refuses — but it is not a guarantee that a package
+whose requirements are satisfied will find those capabilities open.
 
 **Amendment to decision 0010 (operator ruling Q2, 2026-09-01): the floor is the default realization,
 and native is opt-in per package via `"realization": "native-preferred"`.** 0010 assigned native

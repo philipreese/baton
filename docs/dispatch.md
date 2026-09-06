@@ -261,7 +261,8 @@ and the one (`WorktreeProvisioner.Audit`) that says in its own refusal that it d
 A named package is resolved through the four-rung ladder `spec/baton.md` §9 states (env override →
 account-wide → shipped-beside-the-assembly → the repo-local overlay, **lowest**), then format-linted
 and requirement-checked as that section describes — all of it before a room directory is created, so a
-typo costs nothing. The names land on the binding's `Skills` field, which is what a
+typo costs nothing. That last property holds for the three account-wide rungs; §9 states the one case
+where a bottom-rung name behaves differently. The names land on the binding's `Skills` field, which is what a
 `redispatch` inherits and what a harness authoring `bindings.json` for `baton run` can set itself.
 **A binding that names skills gets exactly those**: the declared set replaces the `<workspace>/skills/`
 scan rather than adding to it, so a lane cannot silently also pick up whatever is checked into the
