@@ -30,7 +30,8 @@ public sealed record MemoryAliasEntry(
 
 /// <summary>
 /// The append-only <c>aliases.jsonl</c> beside the canonical stores: paths whose repository identity
-/// git cannot produce, mapped to one an operator asserted (#1852's plan §1).
+/// git cannot produce, mapped to one an operator asserted (the repository-identity section of
+/// #1852's ratified plan).
 /// </summary>
 /// <remarks>
 /// <para>

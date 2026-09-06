@@ -119,7 +119,8 @@ public enum MemoryKindSource
 /// </param>
 /// <param name="SupersededBy">The mirror of <paramref name="Supersedes"/>, on the archived side.</param>
 /// <param name="Evidence">
-/// Back-pointers into the append-only ledgers (§7) for an entry derived from execution evidence.
+/// Back-pointers into the append-only ledgers (spec/baton.md §7) for an entry derived from execution
+/// evidence.
 /// <b>Always absent on an imported entry</b> — an import has no execution behind it — and present here
 /// so a later phase's writer does not need a schema change to say what it always was.
 /// </param>

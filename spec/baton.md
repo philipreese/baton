@@ -376,7 +376,7 @@ through `RoleDispatch.Materialize` against the real role catalog.
 | `keep` | `baton keep <room-dir>` | `KeepOptionsParser.cs` |
 | `unkeep` | `baton unkeep <room-dir>` | `UnkeepOptionsParser.cs` |
 | `memory` | `baton memory audit [--format text\|json] [--help]` | `MemoryAuditOptionsParser.cs` |
-| `memory` | `baton memory import [--dry-run] [--root <dir>]... [--assert <path>=<repository>]... [--asserted-by <who>] \| --undo <manifest>` | `MemoryImportOptionsParser.cs` |
+| `memory` | `baton memory import [--dry-run] [--root <dir>]... [--assert <path>=<repository>]... [--asserted-by <who>] \| --undo <manifest> [--help]` | `MemoryImportOptionsParser.cs` |
 
 `templates` narrows to the built-in catalog only (`Baton.Vendors`'s `BuiltInWorkflowTemplates`) —
 there is no authoring UI to browse a saved-template library visually against (Appendix, R7 in the

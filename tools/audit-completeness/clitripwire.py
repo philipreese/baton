@@ -61,7 +61,15 @@ DOC = ROOT / "docs" / "agents" / "invoking-baton.md"
 FLAG_RE = re.compile(r"--[a-z][a-z0-9-]*")
 BRACKET_RE = re.compile(r"\[[^\[\]]*\]")
 PAREN_RE = re.compile(r"\([^()]*\)")
-VERB_RE = re.compile(r"\bbaton\s+([a-z][a-z0-9-]*)")
+VERB_RE = re.compile(r"\bbaton\s+([a-z][a-z0-9-]*)(?:\s+([a-z][a-z0-9-]*))?")
+
+# Noun-first verb GROUPS -- `baton memory audit`, `baton ledger backfill`, `baton room delete`.
+# For these the sub-verb is part of the verb's identity, because two parsers can sit under one noun
+# and keying them by the noun alone silently drops one: when `MemoryImportOptionsParser` landed
+# (#1852 phase B) it evicted `MemoryAuditOptionsParser` from the extraction, and the spec row naming
+# that parser then reported as citing one that does not exist. A FIXED set rather than "treat any
+# second word as a sub-verb", because a second word is usually a positional argument.
+VERB_GROUPS = frozenset({"ledger", "memory", "room", "rooms"})
 
 USAGE_CONST_RE = re.compile(
     r'const\s+string\s+Usage\s*=\s*((?:"(?:[^"\\]|\\.)*"\s*\+?\s*)+);')
@@ -113,13 +121,25 @@ class DocInvocation:
         self.raw = raw
 
 
+def verb_key(match) -> str | None:
+    """The verb a `VERB_RE` match names -- two words for a noun-first group, one otherwise."""
+    if match is None:
+        return None
+    head, tail = match.group(1), match.group(2)
+    return f"{head} {tail}" if head in VERB_GROUPS and tail else head
+
+
+def root_verb(verb: str) -> str:
+    """The `knownSubcommands` token a (possibly two-word) verb belongs to."""
+    return verb.split(" ", 1)[0]
+
+
 def parse_usage_text(usage_text: str):
     """(verb, all_flags, required_flags, or_groups) from one parser's `Usage:` string.
 
     Pure text -> data, so `_selftest` can drive it with fixtures instead of real parser files.
     """
-    verb_match = VERB_RE.search(usage_text)
-    verb = verb_match.group(1) if verb_match else None
+    verb = verb_key(VERB_RE.search(usage_text))
     all_flags = set(FLAG_RE.findall(usage_text))
 
     without_optional = BRACKET_RE.sub(" ", usage_text)
@@ -174,7 +194,7 @@ def parse_help_lines(program_cs_text: str) -> list[GrammarStatement]:
             continue
         line = program_cs_text.count("\n", 0, m.start()) + 1
         statements.append(GrammarStatement(
-            "src/Baton.Cli/Program.cs", line, verb_match.group(1),
+            "src/Baton.Cli/Program.cs", line, verb_key(verb_match),
             set(FLAG_RE.findall(text)), text.strip()))
     return statements
 
@@ -187,8 +207,11 @@ def parse_spec_table(spec_text: str) -> list[GrammarStatement]:
         if not source_cell.lower().endswith("optionsparser.cs"):
             continue  # `templates` is spelled in Program.cs and owns no parser
         line = spec_text.count("\n", 0, m.start()) + 1
+        # The row's own first cell is the noun (`memory`); its usage cell names the sub-verb, which
+        # is what identifies the parser under a noun-first group. The cell is only the fallback.
         statements.append(GrammarStatement(
-            "spec/baton.md", line, verb, set(FLAG_RE.findall(usage_cell)), usage_cell.strip(),
+            "spec/baton.md", line, verb_key(VERB_RE.search(usage_cell)) or verb,
+            set(FLAG_RE.findall(usage_cell)), usage_cell.strip(),
             parser_class=source_cell[:-3]))
     return statements
 
@@ -260,7 +283,7 @@ def parse_doc(text: str) -> list[DocInvocation]:
         verb_match = VERB_RE.search(block)
         if verb_match is None:
             continue
-        invocations.append(DocInvocation(line, verb_match.group(1), set(FLAG_RE.findall(block)), block.strip()))
+        invocations.append(DocInvocation(line, verb_key(verb_match), set(FLAG_RE.findall(block)), block.strip()))
 
     # Inline spans are searched over the doc with every fenced block blanked out (same line count
     # preserved, so line numbers below still line up) -- otherwise a single-backtick match starting
@@ -272,7 +295,7 @@ def parse_doc(text: str) -> list[DocInvocation]:
         verb_match = VERB_RE.match(span)
         if verb_match is None:
             continue
-        invocations.append(DocInvocation(line, verb_match.group(1), set(FLAG_RE.findall(span)), span.strip()))
+        invocations.append(DocInvocation(line, verb_key(verb_match), set(FLAG_RE.findall(span)), span.strip()))
 
     return invocations
 
@@ -283,7 +306,7 @@ def find_drift(parsers: dict[str, ParserContract], known_verbs: set[str],
     problems = []
 
     for inv in invocations:
-        if inv.verb not in known_verbs:
+        if root_verb(inv.verb) not in known_verbs:
             problems.append(
                 f"docs/agents/invoking-baton.md:{inv.line}: `baton {inv.verb}` -- not a known "
                 f"subcommand (Program.cs's knownSubcommands). Invocation: `{inv.raw}`")
