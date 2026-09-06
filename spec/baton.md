@@ -3103,7 +3103,11 @@ new surface, not a relocation of anything above.** `BatonPaths.FleetProjectionFi
 (`{Root}/fleet/projection.json`, §7) wraps the same per-room shape this section already describes —
 `fleet_status`'s own fields, plus `live`/`pruned` gated exactly as above — under one more top-level
 `derived_at` (the daemon's own wall-clock at successful write completion; unrelated to the
-mailbox-payload `derived_at` above, which is the pusher's cycle time). Per room, alongside `live`,
+mailbox-payload `derived_at` above, which is the pusher's cycle time). Since #1902 there is a second
+top-level key, `timelines` (room path → the same projected entries, `{}` when no room has a readable
+one). It does **not** bump the four-field count: the count is of fields the mailbox payload lacks,
+and the payload has always carried `timelines` — what changed is that the FILE can now supply it,
+which is the PR-B2/PR-C thread below, not new payload surface. Per room, alongside `live`,
 whenever that room's steps carry a Running execution (present even when #1513 has downgraded the
 room's own displayed `state` to `"Stalled"` — these three exist specifically to diagnose that case,
 so gating them on `state == "Running"` the way `live` itself is gated would hide them from exactly
@@ -3200,16 +3204,32 @@ this section states rather than leaves to be discovered:
 - **`rooms[].live`/`rooms[].pruned`/`vendors` come from the file verbatim in `file` mode** — never
   recomputed by `pusher.py`, which is the per-cycle duplicate work the switch exists to remove
   (#1886 is the standing reason a second arithmetic is not merely redundant but can be *wrong*).
-- **`timelines` is the one field the file cannot supply yet**, so `file` mode pushes `timelines: {}`
-  until `FleetProjectionWriter` writes per-room timeline entries (#1902). This is also what blocks
-  PR-C: a non-terminal room's timeline needs a `room_detail` call per cycle, i.e. the very `dotnet
-  mcp` spawn PR-C exists to delete. `glass.html` accumulates timelines in `localStorage` across
-  pushes, so entries already seen persist; a room first seen after the cutover shows none.
+- **`timelines` was the one field the file could not supply, and #1902 closed that gap** — the
+  projection file now carries the top-level `timelines` map (room path → entries) that the pushed
+  body consumes, so `file` mode no longer pushes `timelines: {}`. PR-C's removal condition and what
+  the closure unblocks stay canonical on `derive_snapshot_and_timelines`'s own docstring, and the
+  daemon-side policy (terminal-room caching, its eviction, and the content projection) on
+  `FleetProjectionWriter.ResolveTimelineAsync`/`ProjectTimeline`'s — neither is restated here.
+  `glass.html` accumulates timelines in `localStorage` across pushes, so entries already seen
+  persist; a room first seen after the cutover shows none.
+- **One deliberate divergence between the two implementations, and it is load-bearing for PR-C.** A
+  room whose `flow.jsonl` this tick could not read gets `RoomDetailTool.ReadTimelineAsync`'s
+  synthetic `unreadable` marker; `extract_timeline` KEEPS that marker as a type-only entry, while
+  `FleetProjectionWriter.ProjectTimeline` omits the room from `timelines` entirely — that method's
+  own remarks carry why, not restated here. So "both sources carry the same timelines" is
+  true for every readable room and **not universally true**: on a room mid-read, `derive` shows a
+  marker row and `file` shows nothing. PR-C deletes the side that still shows the marker, which
+  makes this a behaviour change PR-C has to state, not an invisible cleanup.
 `pusher.py --selftest` carries the acceptance instrument — `snapshot_identity_diffs` compares the
-finished pushed snapshot from both sources over one frozen fixture and asserts `timelines` is the
-only difference, with a planted-difference control on each side. It is a different instrument from
-`--compare-projection` above (frozen fixture vs. two live samples, whole snapshot vs. one room);
-that function's own comment says why both exist.
+finished pushed snapshot from both sources over one frozen fixture and asserts `derived_at` is the
+only difference (it was `timelines` too before #1902), with a planted-difference control on each
+side, including one for the `timelines` field specifically. Because both sides of that arm are fed
+one hand-written entry dict, it cannot prove the two CONTENT projections agree; that is a separate
+arm asserting the shared fixture `tests/fixtures/timeline-projection-sample.json`, which
+`extract_timeline` and (in `Baton.Cli.Tests`) `FleetProjectionWriter.ProjectTimeline` both project
+to byte-for-byte — the same shared-fixture-not-shared-implementation pattern `doingNow` uses above.
+It is a different instrument from `--compare-projection` above (frozen fixture vs. two live samples,
+whole snapshot vs. one room); that function's own comment says why both exist.
 
 **Board + detail-pane IA (#1678, operator ruling 2026-09-02, Combo C+E).** `glass.html`'s Fleet tab
 is a three-column state board — Needs You (the conductor pinned first, then Stalled + Indeterminate
