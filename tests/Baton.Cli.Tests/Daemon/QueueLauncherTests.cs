@@ -81,6 +81,8 @@ public sealed class QueueLauncherTests : IDisposable
 
             // The held path has started but must not degrade while its bounded retry is pending. The
             // pre-#1951 implementation completed here with a bare sentinel.
+            // wait-ok: this is a readiness observation for the 100ms bounded projection backoff, not
+            // an operator-facing recovery wait.
             await Task.Delay(TimeSpan.FromMilliseconds(150), Ct);
             Assert.False(recording.IsCompleted);
 
