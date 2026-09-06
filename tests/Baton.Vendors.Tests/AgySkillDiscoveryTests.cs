@@ -21,7 +21,7 @@ public sealed class AgySkillDiscoveryTests
                 cancellationToken: TestContext.Current.CancellationToken);
 
             Assert.Equal("agy", caps.Vendor);
-            Assert.Contains(caps.Items, i => i.Name == "agy-test-skill (inlined)" && i.Kind == "skill" && i.Description == "Agy skill in workspace");
+            Assert.Contains(caps.Items, i => i.Name == "agy-test-skill (inlined, 35 B)" && i.Kind == "skill" && i.Description == "Agy skill in workspace");
             Assert.Contains(caps.Items, i => i.Name == "/compact" && i.Kind == "command");
         }
         finally

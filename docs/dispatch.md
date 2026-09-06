@@ -183,14 +183,14 @@ Skills: none discovered
 or, when skills exist in the worker's environment (e.g. `~/.claude/skills/` or `<workspace>/.claude/skills/`
 for Claude — also `<CLAUDE_CONFIG_DIR>/skills` when `BATON_CLAUDE_CONFIG_ROOT` is set, replacing the
 `~/.claude` arm rather than adding to it — or canonical skill packages `<workspace>/skills/<name>/SKILL.md`
-realized per-vendor as projected for Claude and inlined for agy, #1151):
+realized per vendor, #1151):
 
 ```
-Skills: artifact-design (projected), run-checks (projected)
+Skills: artifact-design (projected), run-checks (projected, 1 file(s) kept)
 ```
 or for agy:
 ```
-Skills: artifact-design (inlined), run-checks (inlined)
+Skills: artifact-design (inlined, 2.4 KB), run-checks (inlined, 380 B)
 ```
 
 For a worktree-provisioned binding (an audited role), the roster scans the source repository rather
@@ -199,10 +199,50 @@ than the worker's not-yet-provisioned worktree, and says so —
 finds there may not survive into the worker's actual checkout. Full rationale on the exclusion above
 and this line: `src/Baton.Cli/DispatchCommand.cs`'s skill-roster block.
 
-**Vendor coverage, honestly scoped.** The `<workspace>/.claude/skills` and personal-arm paths reflect
-Claude Code's own documented `SKILL.md` convention; canonical packages under `skills/<name>/SKILL.md` are
-realized per vendor (#1151) — projected into `.claude/skills/` for Claude, inlined into the dispatch prompt
-for agy (since #1572 measured that agy does not read `.agents/skills` on its own).
+### Canonical skill packages: the floor realization only
+
+**This is the floor slice of #1151, not its ratified slice 1.** A canonical package is a directory
+`<workspace>/skills/<name>/` holding a `SKILL.md`; each vendor gets it in whatever shape that vendor
+can actually consume, and nothing else about #1151 ships yet:
+
+| vendor | realization | what the roster says |
+|---|---|---|
+| claude | the package's files are **projected** into `<workspace>/.claude/skills/<name>/`, where the CLI reads project skills | `<name> (projected)` |
+| agy | the `SKILL.md` body is **inlined** into the dispatch prompt under a `# Skill: <name>` header AER emits, since #1572 measured that agy does not read `.agents/skills` on its own | `<name> (inlined, <size>)` |
+| codex | **none.** No codex path reads a canonical package, so a codex binding in a repository carrying `skills/` reports `Skills: none discovered` and receives nothing — a realization for it is unbuilt work under #1151, not an omission this doc glosses over | — |
+
+**When the projection happens, and what it will not do.** Nothing is written while a binding is merely
+resolved: `baton decide`, `run` and `resume` all resolve bindings that may never dispatch, and the
+working directory carries the constraint `ClaudeWorkerAdapter.Resolve` already states for launch config.
+The files are placed by the dispatcher when an execution actually starts, and:
+
+- **an existing file that does not already match the package is never overwritten.** It is kept and
+  counted, and the roster says so: `<name> (projected, N file(s) kept)`. The count is a snapshot taken
+  when the roster is printed; the dispatcher re-measures the same predicate immediately before each copy,
+  so the guarantee holds even when the number is stale.
+- **nothing is ever pruned.** Renaming `skills/foo` to `skills/bar` leaves `.claude/skills/foo` on disk,
+  where the CLI still loads it. Removing it is the operator's call.
+- the projection is announced on stderr as one line naming the destination and the packages.
+
+**Precedence, written down here because nothing has ratified it.** A canonical package shadows a
+same-named native skill under `<workspace>/.claude/skills/` (that is where the projection lands) and
+under `~/.claude/skills/` (project beats user). The one exception runs the other way: under
+`BATON_CLAUDE_CONFIG_ROOT`, #1575 measured that the CLI resolves a collision to the **config-root** copy
+and the project copy does not surface at all — so the config-root entry is reported unsuppressed and the
+canonical one reads `<name> (projected, shadowed by the config root)`. This rule is a consequence of what
+ships, not an operator ruling; #1151's Q3 deferred the precedence question along with the repo-local
+overlay, and this floor slice reopened it by keying on the working directory.
+
+**What slice 1 still owes, all of it tracked by #1151.** Read this list before assuming a named skill
+does anything: there is no `skill.json` manifest, no `realization: native-preferred` field, and no
+format lint. The three ratified resolver rungs (`BATON_SKILLS_PATH`, `{BatonPaths.Root}/skills/`, a
+shipped default beside the assembly) do not exist — what ships reads `<workspace>/skills/` only, which is
+the **repo-local overlay Q3 explicitly deferred**, not any of the rungs. There is no `--skill` flag on
+`dispatch`/`redispatch`, no `Skills` field on `WorkerBindingConfigEntry` and so no requirement check at
+bind time and no inheritance across a redispatch, no `spec/baton.md` §9 entry, and no amendment to
+decision 0010. Activation — whether either vendor's model actually *invokes* a skill under `-p` — is
+unmeasured on both vendors; #1151's S2 is the measurement, and the roster's `(projected)`/`(inlined)`
+is a claim about **placement**, never about activation.
 
 **Rule for briefs:** Dispatched workers run in their own process and do not inherit the conducting session's loaded skills. Briefs must inline what they need; a named skill only works if the worker's roster shows it. Skill forwarding is not performed by dispatch.
 

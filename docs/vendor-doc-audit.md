@@ -258,7 +258,8 @@ settings values, not command-line flags.
 | `/context` | "context usage visualization panel" |
 | `/permissions` | "interactive tool permissions manager panel" |
 | `/diff` | "Interactive Diff Viewer to view changes, turns, and commits" |
-| `/skills` | Documented/reserved; negative measurement 2026-09-05 (room `dispatch-implement-3a5d0756`): agy does NOT read `.agents/skills/*/SKILL.md` on its own |
+| `/planning` | "multi-turn plan generation mode" |
+| `/skills` | Documented/reserved — measured NOT to read `.agents/skills`; the measurement is this file's "agy `.agents/skills/*/SKILL.md` is NOT read by the vendor on its own (#1572)" section |
 | `/hooks`, `/mcp`, `/model`, `/statusline`, `/keybindings`, `/artifact` | — |
 
 Two land directly on open work:

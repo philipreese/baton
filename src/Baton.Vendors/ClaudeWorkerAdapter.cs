@@ -119,7 +119,19 @@ public sealed partial class ClaudeWorkerAdapter : IWorkerAdapter, IPermissionGra
         invocation = ProjectCeilingGate.Apply(invocation, contract, WithheldWritesReachTheOutbox);
 
         var isWindows = OperatingSystem.IsWindows();
-        ProjectSkills(invocation.WorkingDirectory);
+
+        // #1151/#1929 review: PLAN the canonical-skill projection here (a read of two directory trees)
+        // and hand the copies to the dispatcher, which places them when an execution actually starts.
+        // Resolve is called once per worker-binding config entry and NOT per execution (IWorkerAdapter's
+        // own contract) -- `baton decide`/`run`/`resume` all reach it for bindings that may never
+        // dispatch, so a write here would land untracked files in a repository the operator did not ask
+        // AER to write into, from a command that dispatched nothing. This is the same shape agy's
+        // realization already has: the skill content rides on the returned target rather than being a
+        // side effect of resolving it.
+        var skillProjection = PlanSkillProjection(invocation.WorkingDirectory);
+        var skillSeedCopies = ToSeedCopies(skillProjection);
+        AnnounceSkillProjection(skillProjection);
+
         var prompt = BuildPrompt(invocation.PromptTemplate, contract, isWindows);
         var permissionScope = ResolvePermissionScope(invocation);
         var artifactsRoot = EnvironmentReference("BATON_ARTIFACTS_ROOT", isWindows);
@@ -315,7 +327,8 @@ public sealed partial class ClaudeWorkerAdapter : IWorkerAdapter, IPermissionGra
         // required (#1468).
         return new CoreDispatchTarget(
             "claude", [.. args], invocation.WorkingDirectory, PromptText: prompt,
-            Environment: [.. environment], OversizePromptWrapper: OversizePromptWrapperText);
+            Environment: [.. environment], OversizePromptWrapper: OversizePromptWrapperText,
+            SeedCopies: skillSeedCopies);
     }
 
     /// <summary>
@@ -1240,47 +1253,64 @@ public sealed partial class ClaudeWorkerAdapter : IWorkerAdapter, IPermissionGra
         WorkerEnvironmentReference.For(name, isWindows);
 
     /// <summary>
-    /// Projects canonical skill packages from <c>skills/&lt;name&gt;/SKILL.md</c> into the location Claude CLI
-    /// reads (<c>.claude/skills/&lt;name&gt;/</c>) under the working directory (#1151).
-    /// Copies all files in the package directory preserving layout.
-    /// Returns the list of projected file paths, or an empty list if no canonical skill packages exist.
+    /// Where this vendor's CLI reads ad-hoc project skills from, for a given working directory:
+    /// <c>&lt;workingDirectory&gt;/.claude/skills/</c>.
     /// </summary>
-    public static IReadOnlyList<string> ProjectSkills(string? workingDirectory)
+    public static string SkillProjectionDirectory(string workingDirectory) =>
+        Path.Combine(workingDirectory, ".claude", "skills");
+
+    /// <summary>
+    /// What projecting the working directory's canonical skill packages (<c>skills/&lt;name&gt;/SKILL.md</c>)
+    /// into <see cref="SkillProjectionDirectory"/> would place, and what it would leave alone (#1151).
+    /// Reads only — the placement itself happens at dispatch time, through
+    /// <see cref="CoreDispatchTarget.SeedCopies"/>.
+    /// </summary>
+    public static SkillProjectionPlan PlanSkillProjection(string? workingDirectory)
     {
         if (string.IsNullOrWhiteSpace(workingDirectory) || !Directory.Exists(workingDirectory))
         {
-            return Array.Empty<string>();
+            return new SkillProjectionPlan(string.Empty, Array.Empty<SkillProjectionEntry>());
         }
 
-        var packages = SkillPackageReader.DiscoverPackages(workingDirectory);
-        if (packages.Count == 0)
+        return SkillProjection.Plan(workingDirectory, SkillProjectionDirectory(workingDirectory));
+    }
+
+    private static IReadOnlyList<CoreDispatchSeedCopy>? ToSeedCopies(SkillProjectionPlan plan) =>
+        plan.Entries.Count == 0
+            ? null
+            : [.. plan.Entries
+                .SelectMany(entry => entry.Files)
+                // The destination is an absolute path already, and CoreDispatcher expands %NAME%/$NAME
+                // tokens in a path template -- a repository directory literally containing a
+                // BATON_-prefixed token would otherwise be rewritten. None of AER's computed names can
+                // appear here by construction (they are all BATON_* and a path segment carrying one
+                // would have to be named for it), so the raw path IS the template.
+                .Select(file => new CoreDispatchSeedCopy(file.DestinationPath, file.SourcePath))];
+
+    /// <summary>
+    /// Records the projection this binding declares: one line naming the destination, the packages, and
+    /// how many pre-existing files would be kept rather than overwritten (#1929 review HIGH). The
+    /// room-visible half is the dispatch preamble's own skill roster, which carries the same kept-count
+    /// per package (<c>docs/dispatch.md</c>).
+    /// </summary>
+    /// <remarks>
+    /// Worded for every caller of <c>Resolve</c>, not only the dispatching ones: <c>baton decide</c>
+    /// resolves bindings that never dispatch, so this must not announce a write as though it had
+    /// happened — which is the defect the finding was about, one layer up.
+    /// </remarks>
+    private static void AnnounceSkillProjection(SkillProjectionPlan plan)
+    {
+        if (plan.Entries.Count == 0)
         {
-            return Array.Empty<string>();
+            return;
         }
 
-        var targetBase = Path.Combine(workingDirectory, ".claude", "skills");
-        var projectedPaths = new List<string>();
-
-        foreach (var package in packages)
-        {
-            var targetDir = Path.Combine(targetBase, package.Name);
-            Directory.CreateDirectory(targetDir);
-
-            foreach (var file in Directory.GetFiles(package.DirectoryPath, "*", SearchOption.AllDirectories))
-            {
-                var relPath = Path.GetRelativePath(package.DirectoryPath, file);
-                var destFile = Path.Combine(targetDir, relPath);
-                var destDir = Path.GetDirectoryName(destFile);
-                if (!string.IsNullOrEmpty(destDir))
-                {
-                    Directory.CreateDirectory(destDir);
-                }
-                File.Copy(file, destFile, overwrite: true);
-                projectedPaths.Add(destFile);
-            }
-        }
-
-        return projectedPaths;
+        var packages = string.Join(", ", plan.Entries.Select(entry => entry.Package.Name));
+        var kept = plan.Entries.Sum(entry => entry.KeptFileCount);
+        var keptClause = kept > 0 ? $"; {kept} pre-existing file(s) will be kept unchanged" : string.Empty;
+        Console.Error.WriteLine(
+            $"Skills: {packages} will be placed in '{plan.TargetBaseDirectory}' when a dispatch of this "
+            + $"binding runs{keptClause}.");
     }
 
     /// <summary>
@@ -1401,26 +1431,41 @@ public sealed partial class ClaudeWorkerAdapter : IWorkerAdapter, IPermissionGra
         // load alongside project ones. docs/vendor-doc-audit.md's #1575 entry pins the precedence
         // this relies on, scoped to a BATON_CLAUDE_CONFIG_ROOT-redirected root specifically: on a
         // name collision there, the CLI resolves to the config-root copy, not the project copy -- so
-        // config-root skills are scanned first, ahead of project, making the GroupBy(...).First()
-        // dedup below keep that copy. The plain ~/.claude fallback (no config root set) was never
+        // config-root skills are scanned first, ahead of project, and the dedup below never suppresses
+        // one. The plain ~/.claude fallback (no config root set) was never
         // part of that measurement, so it keeps its prior project-over-user ordering (L3) rather
         // than being changed on an assumption.
-        // Canonical skill packages realization: discovered from skills/<name>/SKILL.md and reported as projected (#1151)
-        var canonicalNames = new HashSet<string>(StringComparer.Ordinal);
-        if (!string.IsNullOrWhiteSpace(workingDirectory) && Directory.Exists(workingDirectory))
+        var configRootSkills = configRootSkillDirs.SelectMany(SkillScanner.DiscoverSkills).ToList();
+        var configRootNames = new HashSet<string>(configRootSkills.Select(skill => skill.Name), StringComparer.Ordinal);
+
+        // Canonical skill packages (#1151): discovered from skills/<name>/SKILL.md and reported with the
+        // realization this vendor gets -- a projection into .claude/skills/, placed at dispatch time.
+        // The kept-count comes from the SAME plan Resolve turns into seed copies, so the roster cannot
+        // promise a placement the write path then declines to make.
+        var plan = PlanSkillProjection(workingDirectory);
+        var canonicalNames = new HashSet<string>(plan.Entries.Select(entry => entry.Package.Name), StringComparer.Ordinal);
+        foreach (var entry in plan.Entries)
         {
-            var canonicalSkills = SkillPackageReader.DiscoverPackages(workingDirectory);
-            foreach (var package in canonicalSkills)
-            {
-                canonicalNames.Add(package.Name);
-                items.Add(new WorkerCapabilityItem($"{package.Name} (projected)", "skill", package.Description));
-            }
+            // #1929 review MEDIUM: a canonical package colliding with a config-root skill is projected
+            // and then shadowed, per the #1575 precedence pinned above -- so the roster says both halves
+            // rather than reporting the copy the CLI does not read.
+            var kept = entry.KeptFileCount > 0 ? $", {entry.KeptFileCount} file(s) kept" : string.Empty;
+            var shadowed = configRootNames.Contains(entry.Package.Name)
+                ? ", shadowed by the config root"
+                : string.Empty;
+            items.Add(new WorkerCapabilityItem(
+                $"{entry.Package.Name} (projected{kept}{shadowed})", "skill", entry.Package.Description));
         }
 
-        foreach (var skillsDir in configRootSkillDirs.Concat(projectSkillDirs).Concat(userHomeSkillDirs))
+        // Config-root skills are never deduped away by a canonical package of the same name: on this arm
+        // the config-root copy is the one the CLI loads (above).
+        items.AddRange(configRootSkills);
+
+        // The project arm IS where the projection lands, and the user-home arm loses to it (L3), so a
+        // canonical package of the same name would only be reported twice -- deduped.
+        foreach (var skillsDir in projectSkillDirs.Concat(userHomeSkillDirs))
         {
-            var nativeSkills = SkillScanner.DiscoverSkills(skillsDir);
-            foreach (var skill in nativeSkills)
+            foreach (var skill in SkillScanner.DiscoverSkills(skillsDir))
             {
                 if (!canonicalNames.Contains(skill.Name))
                 {

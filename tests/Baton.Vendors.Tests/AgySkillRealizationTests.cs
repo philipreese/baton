@@ -38,6 +38,12 @@ public sealed class AgySkillRealizationTests
             Assert.Contains("First skill body.", inlined);
             Assert.Contains("\n\n# Skill: second-skill\n", inlined);
             Assert.Contains("Second skill body.", inlined);
+
+            // #1929 review LOW: the realizer emits the header it controls; the operator's YAML front
+            // matter never reaches the prompt as instructions. Both polarities, one condition apart --
+            // first-skill has a fence and loses it, second-skill has none and keeps its whole body.
+            Assert.DoesNotContain("description: First skill", inlined);
+            Assert.DoesNotContain("---", inlined);
         }
         finally
         {
@@ -79,7 +85,39 @@ public sealed class AgySkillRealizationTests
                 workingDirectory: tempWorkspace,
                 cancellationToken: TestContext.Current.CancellationToken);
 
-            Assert.Contains(caps.Items, i => i.Name == "summarizer (inlined)" && i.Kind == "skill" && i.Description == "Summarize changes");
+            // #1929 review LOW: inlining is uncapped, so the roster discloses what each package costs
+            // the worker's context. Measured on the inlined body (front matter stripped), not the file.
+            Assert.Contains(caps.Items, i => i.Name == "summarizer (inlined, 30 B)" && i.Kind == "skill" && i.Description == "Summarize changes");
+        }
+        finally
+        {
+            DirectoryCleanup.DeleteRecursively(tempWorkspace);
+        }
+    }
+
+    /// <summary>
+    /// The size the roster prints is the size the prompt actually gains — measured on the same string
+    /// <see cref="AgyWorkerAdapter.InlineSkills"/> appends, so front matter cannot inflate it.
+    /// </summary>
+    [Fact]
+    public async Task DiscoverCapabilities_SizeExcludesTheStrippedFrontmatter()
+    {
+        var tempWorkspace = Path.Combine(Path.GetTempPath(), $"agy-disc-size-{Guid.NewGuid():N}");
+        var skillDir = Path.Combine(tempWorkspace, "skills", "summarizer");
+        Directory.CreateDirectory(skillDir);
+        try
+        {
+            await File.WriteAllTextAsync(
+                Path.Combine(skillDir, "SKILL.md"),
+                "---\ndescription: Summarize changes\n---\nSummarize changes.",
+                TestContext.Current.CancellationToken);
+
+            var caps = await new AgyWorkerAdapter().DiscoverCapabilitiesAsync(
+                workingDirectory: tempWorkspace,
+                cancellationToken: TestContext.Current.CancellationToken);
+
+            // "Summarize changes." is 18 bytes; the 40-byte file is not what gets inlined.
+            Assert.Contains(caps.Items, i => i.Name == "summarizer (inlined, 18 B)");
         }
         finally
         {

@@ -1,7 +1,9 @@
+using System.Text.RegularExpressions;
 using Baton.Cli;
 using Baton.Cli.Tests.TestSupport;
 using Baton.Dispatch;
 using Baton.Domain;
+using Baton.Status;
 using Baton.Vendors;
 using Xunit;
 
@@ -27,12 +29,59 @@ public sealed class DispatchCommandSkillRosterTests
         }
     }
 
+    private const string SkillLinePrefix = "Skills: ";
+
+    /// <summary>The payload of the roster line in <paramref name="output"/>.</summary>
+    private static string SkillLine(string output) =>
+        output
+            .Split('\n')
+            .Select(l => l.TrimEnd('\r'))
+            .First(l => l.StartsWith(SkillLinePrefix, StringComparison.Ordinal))[SkillLinePrefix.Length..]
+            .Trim();
+
+    /// <summary>
+    /// Each realized entry on a roster line, split into its package name and its realization suffix.
+    /// Parsed with a pattern rather than a comma split because a suffix may itself carry a comma
+    /// (<c>(projected, 1 file(s) kept)</c>, <c>(inlined, 30 B)</c>).
+    /// </summary>
+    private static IReadOnlyList<(string Name, string Realization)> RealizedSkills(string output) =>
+    [
+        .. RealizedEntry.Matches(SkillLine(output))
+            .Select(m => (m.Groups["name"].Value, m.Groups["realization"].Value))
+    ];
+
+    private static readonly Regex RealizedEntry = new(
+        @"(?:^|,\s*)(?<name>[^,()]+?)\s*\((?<realization>projected|inlined)[^)]*\)",
+        RegexOptions.Compiled);
+
+    private static IReadOnlyList<string> SkillNames(string output) =>
+        [.. RealizedSkills(output).Select(entry => entry.Name)];
+
+    /// <summary>
+    /// #1929 review MEDIUM: this used to make two independent <c>Assert.Contains</c> calls against two
+    /// separate outputs, so the "same package list for both vendors" in its own name was never checked —
+    /// a real asymmetry between the rosters would have passed. It now compares the two lists.
+    /// </summary>
+    /// <remarks>
+    /// <c>DispatchCommand</c> calls the two-argument <c>DiscoverCapabilitiesAsync</c>, so the claude arm
+    /// would otherwise scan the running machine's real <c>~/.claude/skills</c> and a developer's personal
+    /// skill would break an equality assertion for a reason having nothing to do with the claim. An empty
+    /// <c>BATON_CLAUDE_CONFIG_ROOT</c> replaces that arm wholesale (#1512 M3), which is what makes the
+    /// comparison safe. The scope is per-async-flow, not a process mutation, so no serialized-environment
+    /// enrollment is needed. Both arms of the config-root <em>collision</em> rule live in
+    /// <c>ClaudeSkillRealizationTests</c>, deliberately not here: an extra shadowed entry would break this
+    /// equality for an unrelated reason.
+    /// </remarks>
     [Fact]
     public async Task Dispatch_PrintsSameSkillListForBothVendorsWithRespectiveRealization()
     {
         var testRoot = Path.Combine(Path.GetTempPath(), $"dispatch-roster-{Guid.NewGuid():N}");
         Directory.CreateDirectory(testRoot);
         var originalOut = Console.Out;
+        var emptyConfigRoot = Path.Combine(testRoot, "claude-config-root");
+        Directory.CreateDirectory(emptyConfigRoot);
+        using var environmentScope = BatonEnvironmentSnapshot.BeginScope(
+            BatonEnvironmentSnapshot.Current with { ClaudeConfigRootOverride = emptyConfigRoot });
         try
         {
             var workspace = Path.Combine(testRoot, "workspace");
@@ -62,7 +111,7 @@ public sealed class DispatchCommandSkillRosterTests
             Console.SetOut(originalOut);
 
             var claudeText = claudeOutput.ToString();
-            Assert.Contains("Skills: alpha-skill (projected), beta-skill (projected)", claudeText);
+            Assert.Equal("alpha-skill (projected), beta-skill (projected)", SkillLine(claudeText));
 
             // 2. Agy dispatch
             var agyRoom = Path.Combine(testRoot, "room-agy");
@@ -78,7 +127,12 @@ public sealed class DispatchCommandSkillRosterTests
             Console.SetOut(originalOut);
 
             var agyText = agyOutput.ToString();
-            Assert.Contains("Skills: alpha-skill (inlined), beta-skill (inlined)", agyText);
+
+            // The claim in this test's name, actually checked: one package list, two realizations.
+            Assert.Equal(SkillNames(claudeText), SkillNames(agyText));
+            Assert.Equal(["alpha-skill", "beta-skill"], SkillNames(claudeText));
+            Assert.All(RealizedSkills(claudeText), entry => Assert.Equal("projected", entry.Realization));
+            Assert.All(RealizedSkills(agyText), entry => Assert.Equal("inlined", entry.Realization));
         }
         finally
         {

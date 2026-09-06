@@ -138,4 +138,81 @@ public sealed class SkillPackageReaderTests
             DirectoryCleanup.DeleteRecursively(tempDir);
         }
     }
+
+    /// <summary>
+    /// #1929 review LOW: <see cref="SkillPackageReader.ReadPackage"/> is public over a caller-supplied
+    /// directory, and the guard beside <c>IsUsablePackageName</c> says why the name matters. A directory
+    /// reached as <c>&lt;skills&gt;/..</c> names itself <c>..</c>, which must be refused by the reader
+    /// rather than by the accident of today's single call site enumerating real subdirectories.
+    /// </summary>
+    [Fact]
+    public void ReadPackage_TraversalPackageName_ReturnsNull()
+    {
+        var tempDir = Path.Combine(Path.GetTempPath(), $"traversal-{Guid.NewGuid():N}");
+        var nested = Path.Combine(tempDir, "skills");
+        Directory.CreateDirectory(nested);
+        try
+        {
+            // The parent holds a real SKILL.md, so the ONLY thing standing between this call and a
+            // package named ".." is the name guard.
+            File.WriteAllText(Path.Combine(tempDir, "SKILL.md"), "description: Reachable by traversal");
+
+            Assert.Null(SkillPackageReader.ReadPackage(Path.Combine(nested, "..")));
+        }
+        finally
+        {
+            DirectoryCleanup.DeleteRecursively(tempDir);
+        }
+    }
+
+    /// <summary>
+    /// The control that makes the arm above about the NAME rather than about the fixture: the identical
+    /// directory, named normally, reads back as a package.
+    /// </summary>
+    [Fact]
+    public void ReadPackage_Control_SameDirectoryNamedNormally_ReadsBack()
+    {
+        var tempDir = Path.Combine(Path.GetTempPath(), $"traversal-control-{Guid.NewGuid():N}");
+        Directory.CreateDirectory(tempDir);
+        try
+        {
+            File.WriteAllText(Path.Combine(tempDir, "SKILL.md"), "description: Reachable by traversal");
+
+            var pkg = SkillPackageReader.ReadPackage(tempDir);
+
+            Assert.NotNull(pkg);
+            Assert.Equal("Reachable by traversal", pkg.Description);
+        }
+        finally
+        {
+            DirectoryCleanup.DeleteRecursively(tempDir);
+        }
+    }
+
+    /// <summary>
+    /// #1929 review LOW (e): one unreadable or malformed package must cost only itself. A subdirectory
+    /// with no <c>SKILL.md</c> sits alphabetically before a valid one; discovery must still return the
+    /// later package rather than stopping at the first entry it cannot read.
+    /// </summary>
+    [Fact]
+    public void DiscoverPackages_UnreadableEntry_DoesNotHideAlphabeticallyLaterPackages()
+    {
+        var root = Path.Combine(Path.GetTempPath(), $"skill-partial-{Guid.NewGuid():N}");
+        try
+        {
+            Directory.CreateDirectory(Path.Combine(root, "skills", "aaa-not-a-package"));
+            var valid = Path.Combine(root, "skills", "zzz-valid");
+            Directory.CreateDirectory(valid);
+            File.WriteAllText(Path.Combine(valid, "SKILL.md"), "description: Still discovered");
+
+            var packages = SkillPackageReader.DiscoverPackages(root);
+
+            var only = Assert.Single(packages);
+            Assert.Equal("zzz-valid", only.Name);
+        }
+        finally
+        {
+            DirectoryCleanup.DeleteRecursively(root);
+        }
+    }
 }

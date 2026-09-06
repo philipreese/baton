@@ -409,6 +409,66 @@ public class CoreDispatcherTests
     }
 
     /// <summary>
+    /// #1151/#1929 review HIGH: drives the actual seed-COPY path — the seam that replaced a write
+    /// performed while a binding was merely being resolved. Both polarities in one dispatch: an absent
+    /// destination is placed verbatim, and a destination already holding different bytes is left exactly
+    /// as it was. Nothing is pruned.
+    /// </summary>
+    [Fact]
+    public async Task DispatchAsync_places_a_declared_seed_copy_and_keeps_a_differing_existing_file()
+    {
+        var artifactsRoot = Path.Combine(Path.GetTempPath(), $"artifacts-{Guid.NewGuid():N}");
+        var sourceRoot = Path.Combine(Path.GetTempPath(), $"seedcopy-src-{Guid.NewGuid():N}");
+        var destinationRoot = Path.Combine(Path.GetTempPath(), $"seedcopy-dst-{Guid.NewGuid():N}");
+        var logPath = Path.Combine(Path.GetTempPath(), $"flow-{Guid.NewGuid():N}.jsonl");
+        try
+        {
+            Directory.CreateDirectory(sourceRoot);
+            var placedSource = Path.Combine(sourceRoot, "placed.md");
+            var keptSource = Path.Combine(sourceRoot, "kept.md");
+            await File.WriteAllTextAsync(placedSource, "package content", TestContext.Current.CancellationToken);
+            await File.WriteAllTextAsync(keptSource, "package content", TestContext.Current.CancellationToken);
+
+            // The destination for the kept file exists already, under a directory the copy loop would
+            // otherwise create, and holds content AER did not author.
+            Directory.CreateDirectory(destinationRoot);
+            var keptDestination = Path.Combine(destinationRoot, "kept.md");
+            await File.WriteAllTextAsync(keptDestination, "the operator's own content", TestContext.Current.CancellationToken);
+            var placedDestination = Path.Combine(destinationRoot, "nested", "placed.md");
+
+            var outputDirectory = ArtifactManager.AllocateOutputDirectory(artifactsRoot, ExecutionId);
+            var request = MakeRequest(ArtifactManager.BuildEnvironment([], outputDirectory, artifactsRoot));
+            var target = new CoreDispatchTarget("cmd", ["/c", "exit 0"]) with
+            {
+                SeedCopies =
+                [
+                    new CoreDispatchSeedCopy(placedDestination, placedSource),
+                    new CoreDispatchSeedCopy(keptDestination, keptSource),
+                ],
+            };
+
+            await using var writer = new FlowEventLogWriter(logPath);
+            var result = await new CoreDispatcher(writer, writer)
+                .DispatchAsync(request, target, TestContext.Current.CancellationToken);
+
+            Assert.Equal(0, result.ExitCode);
+            Assert.Equal(
+                "package content",
+                await File.ReadAllTextAsync(placedDestination, TestContext.Current.CancellationToken));
+            Assert.Equal(
+                "the operator's own content",
+                await File.ReadAllTextAsync(keptDestination, TestContext.Current.CancellationToken));
+        }
+        finally
+        {
+            DirectoryCleanup.DeleteRecursively(artifactsRoot);
+            DirectoryCleanup.DeleteRecursively(sourceRoot);
+            DirectoryCleanup.DeleteRecursively(destinationRoot);
+            FileCleanup.Delete(logPath);
+        }
+    }
+
+    /// <summary>
     /// #1885: the wiring, end to end on a real dispatch. The obstruction is reproduced the way this
     /// file's own #1525 arm above already does — a DIRECTORY where the stream file has to go, so the
     /// logger's eager create throws and it declares both streams lost — extended with directories at

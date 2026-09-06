@@ -76,7 +76,11 @@ public sealed record CoreDispatchTarget(
     // record the arming fact durably (ExecutionRequest.HookVerdictLedgerFileName) rather than only
     // holding a delegate that cannot survive a journal round-trip. Non-null exactly when
     // CountHookVerdicts is non-null -- same gate, same reason.
-    string? HookVerdictLedgerFileName = null)
+    string? HookVerdictLedgerFileName = null,
+    // #1151: files copied verbatim into place when this execution starts, never clobbering a differing
+    // existing file — see CoreDispatchSeedCopy for why this is not a CoreDispatchSeedFile carrying the
+    // text. Appended last so no positional caller of the parameters above shifts.
+    IReadOnlyList<CoreDispatchSeedCopy>? SeedCopies = null)
 {
     /// <summary>
     /// #1373: returns this target with <paramref name="preamble"/> prepended to the instructional text
@@ -135,6 +139,30 @@ public sealed record CoreDispatchTarget(
 /// adapter owns what the file says (Adapter Isolation), the dispatcher only writes it.
 /// </summary>
 public sealed record CoreDispatchSeedFile(string PathTemplate, string Content);
+
+/// <summary>
+/// A file an adapter needs copied <em>verbatim</em> into place when an execution starts — the same
+/// dispatch-time seam as <see cref="CoreDispatchSeedFile"/>, for content AER did not author and must not
+/// rewrite. <paramref name="PathTemplate"/> takes the usual <c>%NAME%</c>/<c>$NAME</c> placeholder
+/// grammar; the bytes at <paramref name="SourcePath"/> are copied unchanged, with no variable expansion
+/// (#1929 review, HIGH at <c>ClaudeWorkerAdapter.Resolve</c>).
+/// </summary>
+/// <remarks>
+/// <para>
+/// <b>Never clobbers.</b> An existing destination whose bytes differ from the source is left exactly as
+/// it is and the copy is skipped — the guarantee is in the type rather than in a flag, because the first
+/// user copies into the operator's own working directory, where a differing file is by definition
+/// content AER did not put there. Identical bytes are rewritten harmlessly; nothing is ever pruned.
+/// </para>
+/// <para>
+/// Deliberately byte-verbatim rather than a <see cref="CoreDispatchSeedFile"/> carrying the text: a seed
+/// body is expanded by <see cref="CoreDispatcher.RenderSeedContent"/>, so a package file mentioning
+/// <c>$BATON_OUTPUT_DIR</c> would land differing from its source, and any reader that predicts the
+/// skip-vs-write outcome from the source bytes (the dispatch roster does) would then disagree with what
+/// this loop actually did. One set of bytes, one predicate, two readers.
+/// </para>
+/// </remarks>
+public sealed record CoreDispatchSeedCopy(string PathTemplate, string SourcePath);
 
 /// <summary>
 /// The raw, unclassified facts of a completed dispatch (<c>NaturalExit</c> |
@@ -752,6 +780,38 @@ public sealed class CoreDispatcher(ICoreEventLogWriter coreEventLogWriter, IStre
             }
         }
 
+        // #1151: verbatim copies, same dispatch-time seam, different guarantee — see
+        // CoreDispatchSeedCopy. Never clobbers a differing destination, never prunes, and never fails
+        // the dispatch: an unreadable source or a locked destination costs that one file and says so,
+        // rather than throwing out of a path whose whole point is that it runs before every execution.
+        if (target.SeedCopies is { Count: > 0 } seedCopies)
+        {
+            foreach (var copy in seedCopies)
+            {
+                var destinationPath = ExpandVariables(copy.PathTemplate, pathVariables);
+                try
+                {
+                    if (File.Exists(destinationPath) && !FilesHaveIdenticalBytes(copy.SourcePath, destinationPath))
+                    {
+                        continue;
+                    }
+
+                    var destinationDirectory = Path.GetDirectoryName(destinationPath);
+                    if (!string.IsNullOrEmpty(destinationDirectory))
+                    {
+                        Directory.CreateDirectory(destinationDirectory);
+                    }
+
+                    File.Copy(copy.SourcePath, destinationPath, overwrite: true);
+                }
+                catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or System.Security.SecurityException)
+                {
+                    Console.Error.WriteLine(
+                        $"Warning: could not place '{destinationPath}' from '{copy.SourcePath}': {ex.Message}");
+                }
+            }
+        }
+
         // #598: measured here, on the expanded arguments, because this is the only place the real
         // command line exists — an adapter builds `%BATON_OUTPUT_DIR%`, not the absolute path that
         // placeholder becomes above, so a guard living in an adapter would measure the wrong string.
@@ -1145,4 +1205,53 @@ public sealed class CoreDispatcher(ICoreEventLogWriter coreEventLogWriter, IStre
     /// </summary>
     internal static string RenderSeedContent(string content, Dictionary<string, string> pathVariables) =>
         ExpandVariables(content, pathVariables.ToDictionary(kv => kv.Key, kv => kv.Value.Replace('\\', '/')));
+
+    /// <summary>
+    /// Whether two files hold the same bytes — the single predicate deciding whether a
+    /// <see cref="CoreDispatchSeedCopy"/> is written or the existing file is kept (#1151).
+    /// </summary>
+    /// <remarks>
+    /// Public, and deliberately so: an adapter that reports ahead of time how many files a projection
+    /// will keep must answer that question with <em>this</em> function rather than one of its own, or the
+    /// two answers can disagree — the roster stating something the write path then contradicts. Compares
+    /// length first, then content, streaming rather than loading both files whole. A file that cannot be
+    /// read answers <see langword="false"/> (treated as differing), so the fail direction is "keep what
+    /// is already there".
+    /// </remarks>
+    public static bool FilesHaveIdenticalBytes(string leftPath, string rightPath)
+    {
+        try
+        {
+            var left = new FileInfo(leftPath);
+            var right = new FileInfo(rightPath);
+            if (!left.Exists || !right.Exists || left.Length != right.Length)
+            {
+                return false;
+            }
+
+            using var leftStream = File.OpenRead(leftPath);
+            using var rightStream = File.OpenRead(rightPath);
+            var leftBuffer = new byte[4096];
+            var rightBuffer = new byte[4096];
+            while (true)
+            {
+                var leftRead = leftStream.ReadAtLeast(leftBuffer, leftBuffer.Length, throwOnEndOfStream: false);
+                var rightRead = rightStream.ReadAtLeast(rightBuffer, rightBuffer.Length, throwOnEndOfStream: false);
+                if (leftRead != rightRead
+                    || !leftBuffer.AsSpan(0, leftRead).SequenceEqual(rightBuffer.AsSpan(0, rightRead)))
+                {
+                    return false;
+                }
+
+                if (leftRead == 0)
+                {
+                    return true;
+                }
+            }
+        }
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or System.Security.SecurityException)
+        {
+            return false;
+        }
+    }
 }

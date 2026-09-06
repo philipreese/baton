@@ -1,9 +1,11 @@
 namespace Baton.Vendors;
 
 /// <summary>
-/// A canonical skill package (<c>skills/&lt;name&gt;/SKILL.md</c> at the repo root, citing operator
-/// ruling Q1 on #1151 settling on canonical-first, SKILL.md-compatible package shape, with no persona layer
-/// per decision 0033).
+/// A canonical skill package — <c>skills/&lt;name&gt;/SKILL.md</c> under the working directory the binding
+/// dispatches into, per operator ruling Q1 on #1151 settling on a canonical-first, SKILL.md-compatible
+/// package shape, with no persona layer per decision 0033. See
+/// <see cref="SkillPackageReader"/>'s own remarks for why that location is the deferred repo-local
+/// overlay rather than any of slice 1's ratified resolver rungs.
 /// </summary>
 /// <param name="Name">The skill name (the directory name under <c>skills/</c>).</param>
 /// <param name="Description">The skill description extracted from <c>SKILL.md</c> frontmatter, or fallback.</param>
