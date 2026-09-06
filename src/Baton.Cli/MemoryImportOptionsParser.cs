@@ -62,7 +62,8 @@ public static class MemoryImportOptionsParser
         "                      never override a repository git actually answered for. <repository> is",
         "                      canonicalized the same way a git probe's answer is, so 'GitHub.com/Owner/Repo',",
         "                      'github.com/owner/repo' and 'https://github.com/Owner/Repo.git' are ONE store;",
-        "                      a string with no host-and-path in it is refused rather than made into a store.",
+        "                      a bare owner/repo is refused: use host/owner/repo or a clone URL rather than",
+        "                      making a store under a guessed forge.",
         "  --asserted-by <who> Who is asserting. Defaults to this machine's user name.",
         "  --undo <manifest>   Remove exactly the entries a previous run appended, per its manifest. Source",
         "                      files are untouched, because the import never touched them either. Entries an",
@@ -196,7 +197,7 @@ public static class MemoryImportOptionsParser
             throw new CliArgumentException(
                 $"'{repository.Trim()}' is not a repository identity: it has no host-and-path to " +
                 $"canonicalize, so nothing could name a store file for it. {Usage}",
-                "assert a canonical identity, for example 'github.com/owner/repo' — a clone URL " +
+                "assert '<host>/<owner>/<repository>', for example 'github.com/owner/repo' — a clone URL " +
                 "('https://github.com/owner/repo.git', 'git@github.com:owner/repo.git') is accepted " +
                 "and normalised to one.");
         }

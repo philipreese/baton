@@ -103,10 +103,9 @@ public sealed record RepositoryIdentity
     /// (<c>https://github.com/Owner/Repo.git</c>, <c>git@github.com:Owner/Repo.git</c>) canonicalizes,
     /// and then behind an <c>https://</c> so the bare <c>host/owner/repo</c> spelling an operator
     /// actually types is read as the host-and-path it is. That second attempt <b>supplies a scheme and
-    /// nothing else</b>: it does not invent a host, so <c>owner/repo</c> canonicalizes to
-    /// <c>owner/repo</c> (host <c>owner</c>, path <c>repo</c>) and never to
-    /// <c>github.com/owner/repo</c> — guessing a forge would file a repository under an identity no
-    /// probe could ever reproduce.
+    /// nothing else</b>: it does not invent a host, so <c>owner/repo</c> is refused. Only a bare
+    /// <c>host/owner/repo</c> (or a clone URL) reaches the remote parser — guessing a forge would
+    /// file a repository under an identity no probe could ever reproduce.
     /// </para>
     /// <para>
     /// <b>Null is a refusal, not a fallback.</b> A caller that cannot canonicalize an operator's string
@@ -124,9 +123,21 @@ public sealed record RepositoryIdentity
 
         var raw = assertedValue.Trim();
 
-        return raw.StartsWith(GitDirectoryPrefix, StringComparison.OrdinalIgnoreCase)
-            ? From(originUrl: null, gitCommonDirectoryPath: raw[GitDirectoryPrefix.Length..])?.Value
-            : TryNormalizeRemote(raw) ?? TryNormalizeRemote("https://" + raw);
+        if (raw.StartsWith(GitDirectoryPrefix, StringComparison.OrdinalIgnoreCase))
+        {
+            return From(originUrl: null, gitCommonDirectoryPath: raw[GitDirectoryPrefix.Length..])?.Value;
+        }
+
+        if (TryNormalizeRemote(raw) is { } canonical)
+        {
+            return canonical;
+        }
+
+        // A scheme-less assertion needs a host plus a repository path. Without this guard,
+        // "owner/repo" is parsed as host "owner" and path "repo" after adding https://.
+        return raw.Split('/', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries).Length < 3
+            ? null
+            : TryNormalizeRemote("https://" + raw);
     }
 
     /// <summary>
