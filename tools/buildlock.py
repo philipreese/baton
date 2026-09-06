@@ -15,7 +15,24 @@ file in the machine's temp directory. The kernel releases it the instant the hol
 dies, however it dies -- so there is no stale-lock file to detect, no PID-liveness check, and no
 steal logic. A crashed holder frees the lock by crashing.
 
-Usage:            python tools/buildlock.py <command> [args...]
+Usage:            python tools/buildlock.py [--class build|readonly] <command> [args...]
+Priority classes: TWO, and the whole difference is whether the command can start an MSBuild (#1910).
+                  `build` (the default, and what every pixi task that runs `dotnet` uses) queues for
+                  the exclusive lock exactly as described above. `readonly` declares that the command
+                  starts no MSBuild and therefore has nothing to serialize against: it runs
+                  IMMEDIATELY, never queueing behind a build or a test run. That is a priority, not a
+                  bypass -- a `readonly` command whose argv looks MSBuild-owning (`starts_msbuild`
+                  below) is REFUSED with exit 2 rather than run outside the exclusion, so the class
+                  cannot be used to smuggle a build past the lock. `pixi run gates-check-receipt` is
+                  the caller this exists for: a push's receipt check is pure git and file reads, and
+                  making it wait behind a lane's `dotnet test` was the largest single source of push
+                  latency measured on 2026-09-05 (spec/baton.md C-12, ruling C).
+Wait accounting:  BATON_BUILDLOCK_WAIT_LOG -- when set, a `build`-class run that actually WAITED
+                  appends the milliseconds it waited, one integer per line, to that path. Unset by
+                  default and read by nothing else. `.githooks/pre-push` is the only intended setter,
+                  and the attribution is only honest because of that: this wrapper runs for every
+                  `dotnet` invocation in a lane, so a shell that exports this variable globally
+                  accumulates the lane's own build waits into whatever is reading the file.
 Diagnostics:      a sidecar .info file (never locked) names the holder -- PID, command, start
                   time -- so the wait message can say WHO it is waiting on.
 Nesting:          a wrapped command that itself runs wrapped tasks would deadlock on its own
@@ -56,6 +73,50 @@ POLL_S = 2.0
 PROGRESS_EVERY_S = 10.0
 # #1796: see the module docstring's Timeout section for why this is distinct from a plain 1.
 BUILDLOCK_BLOCKED_EXIT = 75
+
+# #1910: the two priority classes, spelled once here and described once in the module docstring.
+CLASS_BUILD = "build"
+CLASS_READONLY = "readonly"
+CLASSES = (CLASS_BUILD, CLASS_READONLY)
+WAIT_LOG_VAR = "BATON_BUILDLOCK_WAIT_LOG"
+
+# The verbs that make a `dotnet` invocation start an MSBuild, plus msbuild itself. Deliberately a
+# denylist of verbs rather than an allowlist of safe commands: the readonly class is for python and
+# git, and anything shaped like a build must fail closed into the exclusive class. `dotnet
+# build-server` is not here on purpose -- it SHUTS DOWN build servers and starts no project build.
+MSBUILD_VERBS = frozenset({"build", "test", "format", "run", "pack", "publish", "restore", "msbuild", "clean"})
+
+
+def starts_msbuild(command: list[str]) -> bool:
+    """Whether `command`'s argv looks like it starts an MSBuild -- the readonly class's guard.
+
+    Pure and fixture-tested (selftest arm below) so the refusal cannot rot into a rubber stamp: a
+    readonly caller that names a build verb is refused rather than run outside the exclusion.
+    """
+    for index, token in enumerate(command):
+        name = os.path.basename(token).lower()
+        if name in ("msbuild", "msbuild.exe"):
+            return True
+        if name in ("dotnet", "dotnet.exe"):
+            rest = command[index + 1:]
+            return bool(rest) and rest[0].lower() in MSBUILD_VERBS
+    return False
+
+
+def record_wait(waited_s: float) -> None:
+    """Append the milliseconds this run spent queued to BATON_BUILDLOCK_WAIT_LOG, if it is set.
+
+    Best-effort like write_holder_info: a wait log that cannot be written is a lost measurement,
+    never a reason to fail the build the caller is waiting on.
+    """
+    path = os.environ.get(WAIT_LOG_VAR)
+    if not path:
+        return
+    try:
+        with open(path, "a", encoding="utf-8") as f:
+            f.write(f"{int(waited_s * 1000)}\n")
+    except OSError:
+        pass
 
 
 def lock_path() -> str:
@@ -111,18 +172,26 @@ def acquire(path: str, command: list[str], timeout_s: float) -> BinaryIO:
     import msvcrt
 
     handle = open(path, "a+b")  # noqa: SIM115 -- held for the process lifetime, see above
-    deadline = time.monotonic() + timeout_s
+    started = time.monotonic()
+    deadline = started + timeout_s
     last_progress = 0.0
     while True:
         try:
             handle.seek(0)
             msvcrt.locking(handle.fileno(), msvcrt.LK_NBLCK, 1)
             write_holder_info(path, command)
+            # #1910: the queue time, recorded only when there WAS one -- the loop below sleeps
+            # POLL_S between attempts, so an uncontended acquire returns here at ~0 elapsed and
+            # logs nothing. A reader summing the file is summing contention, not runs.
+            waited = time.monotonic() - started
+            if waited >= POLL_S:
+                record_wait(waited)
             return handle
         except OSError:
             now = time.monotonic()
             if now >= deadline:
                 handle.close()
+                record_wait(now - started)
                 # #1796: BLOCKED, exit BUILDLOCK_BLOCKED_EXIT -- distinct from a real gate failure so
                 # tools/gates/gates.py (and, through it, the engine's verify step) can tell "the build
                 # lock was busy" from "the gate broke". BLOCKED is the leading word on this line
@@ -146,11 +215,39 @@ def acquire(path: str, command: list[str], timeout_s: float) -> BinaryIO:
             time.sleep(POLL_S)
 
 
+def split_class(argv: list[str]) -> tuple[str, list[str]]:
+    """`(priority_class, command)` from an argv -- `--class <name>` / `--class=<name>` or the default.
+
+    Only leading, and only once: everything after the class is the command verbatim, so a wrapped
+    command carrying its own `--class` flag is untouched.
+    """
+    if argv and argv[0].startswith("--class"):
+        if argv[0] == "--class":
+            return (argv[1] if len(argv) > 1 else ""), argv[2:]
+        return argv[0].split("=", 1)[1], argv[1:]
+    return CLASS_BUILD, argv
+
+
 def main() -> int:
-    command = sys.argv[1:]
-    if not command:
-        print("buildlock: no command given -- usage: python tools/buildlock.py <command> [args...]")
+    priority_class, command = split_class(sys.argv[1:])
+    if priority_class not in CLASSES:
+        print(f"buildlock: unknown priority class {priority_class!r} -- one of {', '.join(CLASSES)}")
         return 2
+    if not command:
+        print("buildlock: no command given -- usage: python tools/buildlock.py "
+              "[--class build|readonly] <command> [args...]")
+        return 2
+
+    if priority_class == CLASS_READONLY:
+        # #1910: declared to start no MSBuild, so there is nothing to serialize -- run now rather
+        # than queue. Refused, never silently promoted, when the argv says otherwise: a readonly
+        # class that ran a build outside the exclusion would be the mutual-kill failure this whole
+        # file exists to stop, wearing a flag.
+        if starts_msbuild(command):
+            print(f"buildlock: refusing --class {CLASS_READONLY} for a command that starts an "
+                  f"MSBuild ({' '.join(command)}) -- run it in the default {CLASS_BUILD} class")
+            return 2
+        return subprocess.run(command, check=False).returncode
 
     env = dict(os.environ)
     if env.get(HELD_MARKER):
@@ -332,6 +429,117 @@ def selftest() -> int:
                 f"trusted the marker instead of taking the free lock"
             )
             ok = False
+
+        # 5. #1910, the priority classes, against a REAL lock holder: a readonly command must run
+        #    while the lock is held, and a build-class command must not. Both arms in one window
+        #    against the same holder -- the readonly arm alone would pass on a machine where the
+        #    holder never acquired, and the build arm is what proves the lock was genuinely held.
+        env.pop(HELD_MARKER, None)
+        holder = _spawn_selftest_child(_CHILD_ACQUIRE_AND_SLEEP, lock_file)
+        if not _wait_for_holder(lock_file, holder.pid, ceiling_s=10.0):
+            print("  control FAILED: holder never signaled lock acquisition within 10s "
+                  "(priority-class arm)")
+            ok = False
+            holder.communicate(timeout=30)
+        else:
+            env["BATON_BUILDLOCK_TIMEOUT_S"] = "20"
+            started = time.monotonic()
+            readonly = subprocess.run(
+                [sys.executable, os.path.abspath(__file__), "--class", CLASS_READONLY,
+                 sys.executable, "-c", "pass"],
+                env=env, capture_output=True, text=True, check=False, timeout=30,
+            )
+            readonly_s = time.monotonic() - started
+
+            env["BATON_BUILDLOCK_TIMEOUT_S"] = "1"
+            queued = subprocess.run(
+                [sys.executable, os.path.abspath(__file__), sys.executable, "-c", "pass"],
+                env=env, capture_output=True, text=True, check=False, timeout=30,
+            )
+            holder.communicate(timeout=30)
+
+            if readonly.returncode != 0 or readonly_s >= 2.0:
+                print(
+                    f"  control FAILED: a readonly command queued behind the held lock -- exit "
+                    f"{readonly.returncode} after {readonly_s:.2f}s (want exit 0, well under the "
+                    f"holder's 3s hold)"
+                )
+                ok = False
+            if queued.returncode != BUILDLOCK_BLOCKED_EXIT:
+                print(
+                    f"  control FAILED: the default build class did not queue behind the same "
+                    f"holder -- exit {queued.returncode}, want {BUILDLOCK_BLOCKED_EXIT}"
+                )
+                ok = False
+
+        # 6. #1910: readonly is a priority, not a bypass -- an MSBuild-shaped command is refused.
+        #    Fixture-driven both ways, so a guard that matched everything (or nothing) fails here.
+        for argv, want in (
+            ([sys.executable, "-c", "pass"], False),
+            (["git", "status", "--porcelain"], False),
+            (["dotnet", "build-server", "shutdown"], False),
+            (["dotnet", "build", "-warnaserror"], True),
+            ([r"C:\Program Files\dotnet\dotnet.exe", "test", "--no-build"], True),
+            (["msbuild", "Baton.slnx"], True),
+        ):
+            if starts_msbuild(argv) != want:
+                print(f"  control FAILED: starts_msbuild({argv}) != {want}")
+                ok = False
+
+        refused = subprocess.run(
+            [sys.executable, os.path.abspath(__file__), "--class", CLASS_READONLY,
+             "dotnet", "build"],
+            env=env, capture_output=True, text=True, check=False, timeout=30,
+        )
+        if refused.returncode != 2 or "refusing" not in refused.stdout:
+            print(
+                f"  control FAILED: --class readonly ran an MSBuild command instead of refusing "
+                f"it -- exit {refused.returncode}, stdout {refused.stdout!r}"
+            )
+            ok = False
+
+        # 7. #1910: the wait log records a run that WAITED and stays silent for one that did not.
+        #    Both polarities: a log written unconditionally would make every uncontended build look
+        #    like contention on the row the ledger reads.
+        wait_log = os.path.join(td, "wait.log")
+        env["BATON_BUILDLOCK_WAIT_LOG"] = wait_log
+        env["BATON_BUILDLOCK_TIMEOUT_S"] = "20"
+        env.pop(HELD_MARKER, None)
+        uncontended = subprocess.run(
+            [sys.executable, os.path.abspath(__file__), sys.executable, "-c", "pass"],
+            env=env, capture_output=True, text=True, check=False, timeout=30,
+        )
+        if uncontended.returncode != 0 or os.path.exists(wait_log):
+            print(
+                f"  control FAILED: an uncontended acquire wrote a wait log -- exit "
+                f"{uncontended.returncode}, log present: {os.path.exists(wait_log)}"
+            )
+            ok = False
+
+        holder = _spawn_selftest_child(_CHILD_ACQUIRE_AND_SLEEP, lock_file)
+        if not _wait_for_holder(lock_file, holder.pid, ceiling_s=10.0):
+            print("  control FAILED: holder never signaled lock acquisition within 10s (wait-log arm)")
+            ok = False
+            holder.communicate(timeout=30)
+        else:
+            contended = subprocess.run(
+                [sys.executable, os.path.abspath(__file__), sys.executable, "-c", "pass"],
+                env=env, capture_output=True, text=True, check=False, timeout=60,
+            )
+            holder.communicate(timeout=30)
+            waits = []
+            try:
+                with open(wait_log, encoding="utf-8") as f:
+                    waits = [int(line) for line in f.read().split()]
+            except (OSError, ValueError):
+                pass
+            if contended.returncode != 0 or not waits or waits[0] < int(POLL_S * 1000):
+                print(
+                    f"  control FAILED: a contended acquire did not record its wait -- exit "
+                    f"{contended.returncode}, log {waits}"
+                )
+                ok = False
+        env.pop("BATON_BUILDLOCK_WAIT_LOG", None)
 
     print("selftest: pass" if ok else "selftest: FAIL")
     return 0 if ok else 1
