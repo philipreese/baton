@@ -347,7 +347,7 @@ public static class RoleDispatch
             promptBuilder.Append($"\n\n{VerifyResultsParagraph(verifyResultsPath)}");
         }
 
-        promptBuilder.Append($"\n\nRequired outputs:\n{instructions}\n\n{OneShotContract}");
+        promptBuilder.Append($"\n\n{RequiredOutputsHeading}\n{instructions}\n\n{OneShotContract}");
         return promptBuilder.ToString();
     }
 
@@ -377,6 +377,16 @@ public static class RoleDispatch
         "Before your first turn the engine ran a set of allowlisted commands for you";
 
     /// <summary>
+    /// The outputs block's opening line, shared by <see cref="BuildPrompt"/> and
+    /// <see cref="WithoutVerifyResultsParagraph"/>. It is what makes the verify paragraph's POSITION
+    /// recognizable (#1911): the builder appends that paragraph immediately before this block and
+    /// nothing else ever goes between them, so "the block before the outputs block" identifies the
+    /// engine's own paragraph without having to trust its text — which the operator's brief may also
+    /// contain.
+    /// </summary>
+    private const string RequiredOutputsHeading = "Required outputs:";
+
+    /// <summary>
     /// #1895: the same prompt with <see cref="VerifyResultsParagraph"/> removed, or unchanged when it
     /// carries none. Its one caller is <c>RedispatchCommand.InheritBinding</c>, and spec/baton.md §9
     /// is the register for why a redispatched review must not inherit it — not restated here.
@@ -384,6 +394,20 @@ public static class RoleDispatch
     /// Matched on the opening clause and removed whole, paragraph-wise, because the sentence that
     /// carries the path is the second one — a path-substring match would leave the "the engine ran a
     /// set of allowlisted commands for you" claim standing with the citation requirement attached.
+    /// </para>
+    /// <para>
+    /// #1911: ANCHORED BY POSITION, not by text alone. The earlier version removed every block
+    /// opening with that clause, so a brief quoting the paragraph — the operator's own words, the
+    /// first block of the same prompt — lost it silently on redispatch. The engine appends its
+    /// paragraph in exactly one place, immediately before the <see cref="RequiredOutputsHeading"/>
+    /// block, so only that one block is a candidate and the brief is untouched byte-for-byte.
+    /// Position rather than a written marker because <c>RedispatchCommand</c> reads prompts off
+    /// rooms already on disk, none of which would carry a marker introduced today.
+    /// </para>
+    /// <para>
+    /// A prompt with no outputs block was not written by <see cref="BuildPrompt"/> at all, and is
+    /// returned unchanged rather than guessed at: there is no position to anchor to, and mangling an
+    /// operator's hand-written prompt is the worse of the two failures.
     /// </para>
     /// </summary>
     public static string WithoutVerifyResultsParagraph(string promptTemplate)
@@ -396,10 +420,23 @@ public static class RoleDispatch
         }
 
         // The same "\n\n" BuildPrompt joins its blocks with -- this only ever reads a prompt that
-        // builder wrote, so there is no other separator to consider.
-        var paragraphs = promptTemplate
-            .Split("\n\n")
-            .Where(paragraph => !paragraph.TrimStart().StartsWith(VerifyResultsParagraphOpening, StringComparison.Ordinal));
+        // builder wrote, so there is no other separator to consider. Removing exactly one element
+        // from the split removes exactly one separator, so every other byte round-trips unchanged.
+        var paragraphs = promptTemplate.Split("\n\n").ToList();
+        var outputsIndex = paragraphs.FindLastIndex(
+            paragraph => paragraph.StartsWith(RequiredOutputsHeading, StringComparison.Ordinal));
+        if (outputsIndex <= 0)
+        {
+            return promptTemplate;
+        }
+
+        var candidateIndex = outputsIndex - 1;
+        if (!paragraphs[candidateIndex].TrimStart().StartsWith(VerifyResultsParagraphOpening, StringComparison.Ordinal))
+        {
+            return promptTemplate;
+        }
+
+        paragraphs.RemoveAt(candidateIndex);
         return string.Join("\n\n", paragraphs);
     }
 

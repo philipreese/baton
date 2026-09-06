@@ -4547,10 +4547,14 @@ commands before the worker's first turn, sequentially, and the contract is:
   which is what the field's own doc, `docs/agents/invoking-baton.md` and this bullet all already say.
   Skipping the stamp when no step ran is what made the field a claim rather than a record on the
   majority of review lanes: nothing removed a model-written array, and `--notify` carries
-  `verdict.json` verbatim off disk. **`baton redispatch` stamps too (#1895)**, always on the removal
-  arm: no verify step can run on that path — `--verify-cmd` is a `DispatchOptions` field with no
+  `verdict.json` verbatim off disk. **`baton redispatch`, `baton resume` and `baton supply` stamp too
+  (#1895, #1911)** — every verb that can put a `verdict.json` into a room — always on the removal
+  arm: no verify step can run on any of those paths — `--verify-cmd` is a `DispatchOptions` field with no
   binding to inherit, so a redispatched review has no instruments of its own and the key is removed
-  rather than left carrying whatever the model wrote. (Not `--verify`, the post-exit flag, which *is*
+  rather than left carrying whatever the model wrote. A resumed turn and a supplied file are the same
+  case: neither has a verify outcome of its own behind it, so removal is the only honest engine record
+  even where a prior `dispatch --verify-cmd` stamped true rows onto that same verdict — losing those
+  is the accepted cost of failing closed. (Not `--verify`, the post-exit flag, which *is*
   inherited as `WorkerBindingConfigEntry.VerifyCommandOverride` — §3's "Verify command resolution";
   conflating the two is what the earlier wording of this sentence did.) The prompt half of the same
   door is closed with it: the bare (`--spec`-less) redispatch reuses the parent's already-built
@@ -4559,6 +4563,10 @@ commands before the worker's first turn, sequentially, and the contract is:
   overridable on redispatch. It is stripped from the inherited prompt
   (`RoleDispatch.WithoutVerifyResultsParagraph`, applied in `RedispatchCommand.InheritBinding`), which
   is the same rule as "the prompt says nothing at all when no step ran" rather than an exception to it.
+  **The strip is anchored to the engine's own block, not to its text (#1911):** the paragraph is
+  removed only where the builder writes it — immediately before the `Required outputs:` block — so an
+  operator's brief that quotes the clause survives redispatch byte for byte. Anchored by position
+  rather than by a written marker because rooms already on disk carry no marker to find.
 - **The role's shell grant is unchanged**, and `WorkerRoles.json` is untouched. `--verify-cmd` is
   accepted only for a verdict-producing role (today, `review` alone) and refused for a workflow
   template. It is **not** `--verify`, which overrides the *post-exit* verify command a mutating role

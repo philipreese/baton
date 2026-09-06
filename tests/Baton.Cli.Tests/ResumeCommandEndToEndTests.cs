@@ -110,6 +110,88 @@ public class ResumeCommandEndToEndTests : IDisposable
     }
 
     [Fact]
+    public async Task A_resumed_reviews_verdict_has_its_model_written_instruments_stripped()
+    {
+        // #1911 low 1: `baton resume` puts a fresh worker turn into a bound room, and a resumed review
+        // writes a verdict like any other -- one nothing stamped, so a fabricated `instruments` rode
+        // into `--notify` payloads unchallenged. This verb runs no verify step, so removal is the whole
+        // arm (VerdictInstrumentStamp's doc has why removal is right even over an earlier true stamp).
+        var testRoot = Path.Combine(Path.GetTempPath(), $"cli-resume-verdict-{Guid.NewGuid():N}");
+        var roomDirectory = Path.Combine(testRoot, "task");
+        try
+        {
+            var fixturePath = await ModelWrittenVerdictFixture.WriteAsync(
+                Path.Combine(testRoot, "worker-verdict.json"), TestContext.Current.CancellationToken);
+            var adapters = new Dictionary<string, IWorkerAdapter>(StringComparer.Ordinal)
+            {
+                ["fake"] = new ContractOutputWorkerAdapter(
+                    satisfyOutputs: true,
+                    outputFixtures: new Dictionary<string, string>(StringComparer.Ordinal) { ["verdict.json"] = fixturePath }),
+            };
+
+            var workflowFilePath = await WriteVerdictProducingWorkflowAsync(testRoot);
+            var bindingsFilePath = await WriteVerdictProducingBindingsAsync(testRoot);
+
+            var runOptions = new RunOptions(workflowFilePath, bindingsFilePath, roomDirectory);
+            var runResult = await RunCommand.ExecuteAsync(runOptions, adapters, cancellationToken: TestContext.Current.CancellationToken);
+            var firstExecutionId = runResult.State.Steps.Single().LatestExecutionId!.Value;
+
+            var resumeResult = await ResumeCommand.ExecuteAsync(
+                new ResumeOptions(roomDirectory, "reviewer", "another pass", null, bindingsFilePath),
+                adapters, TestContext.Current.CancellationToken);
+
+            var resumedExecutionId = resumeResult.State.Steps.Single().LatestExecutionId!.Value;
+            Assert.NotEqual(firstExecutionId, resumedExecutionId);
+
+            var resumed = ReadVerdict(roomDirectory, resumedExecutionId);
+            Assert.False(resumed.TryGetProperty("instruments", out _));
+            // The rest of the worker's verdict is untouched -- a field is removed, the review is not
+            // rewritten -- which doubles as the control that the file was read and rewritten at all.
+            Assert.Equal("all good", resumed.GetProperty("summary").GetString());
+
+            // Discriminating control: `baton run` stamps nothing, so the execution the resume linked
+            // FROM still carries the model's array. Without this, "no instruments" could be a fake
+            // worker that never wrote one.
+            Assert.True(ReadVerdict(roomDirectory, firstExecutionId).TryGetProperty("instruments", out _));
+        }
+        finally
+        {
+            DirectoryCleanup.DeleteRecursively(testRoot);
+        }
+    }
+
+    private static JsonElement ReadVerdict(string roomDirectory, ExecutionId executionId) =>
+        JsonDocument.Parse(File.ReadAllBytes(Path.Combine(
+            roomDirectory, "artifacts", $"execution_{executionId}", "verdict.json"))).RootElement;
+
+    private static async Task<string> WriteVerdictProducingWorkflowAsync(string directory)
+    {
+        Directory.CreateDirectory(directory);
+        var definition = new WorkflowDefinition(
+            new WorkflowTemplateId("one-step-review"), 1,
+            [new WorkflowStepDefinition(new StepId("solo"), "reviewer", [], ["verdict.json"], [], new RetryPolicy(1))]);
+
+        var path = Path.Combine(directory, "workflow.json");
+        await File.WriteAllTextAsync(path, JsonSerializer.Serialize(definition));
+        return path;
+    }
+
+    private static async Task<string> WriteVerdictProducingBindingsAsync(string directory)
+    {
+        Directory.CreateDirectory(directory);
+        var config = new Dictionary<string, WorkerBindingConfigEntry>
+        {
+            ["reviewer"] = new WorkerBindingConfigEntry(
+                "fake", new WorkerContract("reviewer", [], [new ProducedOutput("verdict.json")], []),
+                "review the branch", TimeSpan.FromSeconds(30), SessionId: "sess-verdict"),
+        };
+
+        var path = Path.Combine(directory, "bindings.json");
+        await File.WriteAllTextAsync(path, JsonSerializer.Serialize(config));
+        return path;
+    }
+
+    [Fact]
     public async Task Resuming_from_a_message_file_reads_its_full_contents_as_the_message()
     {
         var testRoot = Path.Combine(Path.GetTempPath(), $"cli-resume-msgfile-{Guid.NewGuid():N}");

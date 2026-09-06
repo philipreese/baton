@@ -121,6 +121,48 @@ public class SupplyCommandEndToEndTests
     }
 
     [Fact]
+    public async Task A_supplied_verdict_has_its_model_written_instruments_stripped()
+    {
+        // #1911 low 1, supply's half: a verdict handed in through this verb lands on disk exactly like
+        // a dispatched review's, and `baton watch` reads it the same way -- so an `instruments` array
+        // in it must be the engine's record or absent. No verify step can have run for a file the
+        // operator supplied, so absent is the only honest answer.
+        var testRoot = Path.Combine(Path.GetTempPath(), $"cli-supply-{Guid.NewGuid():N}");
+        var roomDirectory = Path.Combine(testRoot, "task");
+        try
+        {
+            var workflowFilePath = await WriteSingleStepWorkflowAsync(testRoot);
+            var bindingsFilePath = await WriteSingleStepBindingsAsync(testRoot);
+            var runOptions = new RunOptions(workflowFilePath, bindingsFilePath, roomDirectory);
+            await RunCommand.ExecuteAsync(runOptions, Adapters, cancellationToken: TestContext.Current.CancellationToken);
+
+            var sourceFilePath = await ModelWrittenVerdictFixture.WriteAsync(
+                Path.Combine(testRoot, "supplied-verdict.json"), TestContext.Current.CancellationToken);
+            var supplyOptions = new SupplyOptions(roomDirectory, "human", "verdict.json", sourceFilePath, bindingsFilePath);
+
+            var result = await SupplyCommand.ExecuteAsync(supplyOptions, Adapters, TestContext.Current.CancellationToken);
+
+            // The supplementary execution hangs off no step, so this also pins that the stamp reaches
+            // an execution `State.Steps` never names.
+            var suppliedPath = Path.Combine(roomDirectory, "artifacts", $"execution_{result.ExecutionId}", "verdict.json");
+            var supplied = JsonDocument.Parse(
+                await File.ReadAllBytesAsync(suppliedPath, TestContext.Current.CancellationToken)).RootElement;
+            Assert.False(supplied.TryGetProperty("instruments", out _));
+            Assert.Equal("all good", supplied.GetProperty("summary").GetString());
+
+            // Control, in two directions: the source the operator handed in is not rewritten in place,
+            // and it demonstrably carried the field -- so "absent" is a removal, not an empty fixture.
+            var source = JsonDocument.Parse(
+                await File.ReadAllBytesAsync(sourceFilePath, TestContext.Current.CancellationToken)).RootElement;
+            Assert.True(source.TryGetProperty("instruments", out _));
+        }
+        finally
+        {
+            DirectoryCleanup.DeleteRecursively(testRoot);
+        }
+    }
+
+    [Fact]
     public async Task A_missing_source_file_throws_before_minting_anything()
     {
         var testRoot = Path.Combine(Path.GetTempPath(), $"cli-supply-{Guid.NewGuid():N}");

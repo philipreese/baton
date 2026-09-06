@@ -116,7 +116,15 @@ public static class SupplyCommand
 
         var worktreeTeardowns = WorktreeProvisioner.TeardownIfTerminal(settledState.Status, provisionedWorktrees);
 
-        return new SupplyResult(executionId, new CommandResult(settledState, snapshot, RoomDirectoryPath: options.RoomDirectoryPath, WorktreeTeardowns: worktreeTeardowns));
+        var command = new CommandResult(settledState, snapshot, RoomDirectoryPath: options.RoomDirectoryPath, WorktreeTeardowns: worktreeTeardowns);
+
+        // #1911: same removal arm, plus the supplementary execution itself — it hangs off no step, so
+        // the walk over State.Steps would miss the very file this verb just copied in.
+        await VerdictInstrumentStamp
+            .ApplyAsync(options.RoomDirectoryPath, command, verifyStep: null, stepLessExecutionId: executionId)
+            .ConfigureAwait(false);
+
+        return new SupplyResult(executionId, command);
     }
 }
 

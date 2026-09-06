@@ -17,15 +17,10 @@ namespace Baton.Cli.Tests;
 public sealed class DispatchVerifyStepTests : IDisposable
 {
     /// <summary>
-    /// A model-written verdict, complete with an <c>instruments</c> array it invented for itself —
-    /// the fabricated test run the engine's stamp exists to remove. Fed to the fake worker as a
-    /// fixture so no JSON is assembled through a shell echo.
+    /// The shared fixture (#1911) — see <see cref="ModelWrittenVerdictFixture"/> for what it is and
+    /// why it is not spelled out per test class.
     /// </summary>
-    private const string ModelWrittenVerdict =
-        """
-        {"reviewedRef": "1882-lane", "summary": "all good", "findings": [],
-         "instruments": [{"command": "dotnet test", "exitCode": 0, "wallClockMs": 91002}]}
-        """;
+    private const string ModelWrittenVerdict = ModelWrittenVerdictFixture.Json;
 
     private readonly IsolatedBatonHome _batonHome = new();
     private readonly IDisposable _catalogScope;
@@ -287,7 +282,7 @@ public sealed class DispatchVerifyStepTests : IDisposable
     /// </summary>
     private static async Task<(WorkerBindingConfigEntry Parent, WorkerBindingConfigEntry Child,
         string ChildRoom, CommandResult ChildResult)> DispatchThenRedispatchReviewAsync(
-        string testRoot, string? amendedSpecPath = null)
+        string testRoot, string? amendedSpecPath = null, string briefText = "review the branch")
     {
         var specPath = Path.Combine(testRoot, "spec.md");
         var fixturePath = Path.Combine(testRoot, "worker-verdict.json");
@@ -295,7 +290,7 @@ public sealed class DispatchVerifyStepTests : IDisposable
         var parentRoom = Path.Combine(testRoot, "parent");
         var childRoom = Path.Combine(testRoot, "child");
         Directory.CreateDirectory(workspace);
-        await File.WriteAllTextAsync(specPath, "review the branch", TestContext.Current.CancellationToken);
+        await File.WriteAllTextAsync(specPath, briefText, TestContext.Current.CancellationToken);
         await File.WriteAllTextAsync(fixturePath, ModelWrittenVerdict, TestContext.Current.CancellationToken);
 
         var adapters = new Dictionary<string, IWorkerAdapter>(StringComparer.Ordinal)
@@ -391,6 +386,89 @@ public sealed class DispatchVerifyStepTests : IDisposable
         {
             DirectoryCleanup.DeleteRecursively(testRoot);
         }
+    }
+
+    /// <summary>
+    /// A brief whose OWN second block opens with the verify-results clause — the operator quoting the
+    /// engine's paragraph back at the reviewer. Byte-for-byte what #1911's control arm says must
+    /// survive a redispatch; it opens the block (rather than sitting mid-sentence) because that is the
+    /// shape the pre-#1911 text-only strip removed.
+    /// </summary>
+    private const string BriefQuotingTheClause =
+        "review the branch\n\n"
+        + "Before your first turn the engine ran a set of allowlisted commands for you — that sentence "
+        + "is the one the operator wants kept, verbatim, in every rerun of this lane.\n\n"
+        + "Check the diff.";
+
+    [Fact]
+    public async Task A_brief_that_quotes_the_verify_clause_survives_redispatch_while_the_engines_own_paragraph_goes()
+    {
+        // #1911 low 2: the strip used to remove ANY block opening with the clause, so an operator who
+        // quoted the paragraph in the brief lost it silently on every redispatch. Both directions in
+        // one arm: the quoted block is still there afterwards AND the engine's own is not.
+        var testRoot = Path.Combine(Path.GetTempPath(), $"redispatch-verify-{Guid.NewGuid():N}");
+        try
+        {
+            Directory.CreateDirectory(testRoot);
+            var (parent, child, _, _) = await DispatchThenRedispatchReviewAsync(
+                testRoot, briefText: BriefQuotingTheClause);
+
+            // Control: the parent really does carry both -- the brief's copy and the engine's own.
+            Assert.Equal(2, CountOccurrences(parent.PromptTemplate, VerifyClauseOpening));
+            Assert.Contains("verify-results.md", parent.PromptTemplate, StringComparison.Ordinal);
+
+            // Exactly one goes, and it is the engine's: the path-carrying sentence is gone, the
+            // operator's brief arrives byte-for-byte as written.
+            Assert.Equal(1, CountOccurrences(child.PromptTemplate, VerifyClauseOpening));
+            Assert.DoesNotContain("verify-results.md", child.PromptTemplate, StringComparison.Ordinal);
+            Assert.DoesNotContain("must cite that file", child.PromptTemplate, StringComparison.Ordinal);
+            Assert.StartsWith(BriefQuotingTheClause, child.PromptTemplate, StringComparison.Ordinal);
+        }
+        finally
+        {
+            DirectoryCleanup.DeleteRecursively(testRoot);
+        }
+    }
+
+    [Fact]
+    public async Task A_prompt_carrying_only_the_briefs_own_copy_of_the_clause_is_returned_unchanged()
+    {
+        // The idempotence half of the same fix, on a REAL engine-built prompt rather than a hand-rolled
+        // string: the child above has no engine paragraph left and still quotes the clause in its brief,
+        // so a second strip must be a byte-for-byte no-op. This is the arm that was red before #1911 --
+        // the old text-only filter took the operator's block on the second pass.
+        var testRoot = Path.Combine(Path.GetTempPath(), $"redispatch-verify-{Guid.NewGuid():N}");
+        try
+        {
+            Directory.CreateDirectory(testRoot);
+            var (_, child, _, _) = await DispatchThenRedispatchReviewAsync(
+                testRoot, briefText: BriefQuotingTheClause);
+
+            // Control: without this the equality below would hold for any prompt with no clause at all.
+            Assert.Contains(VerifyClauseOpening, child.PromptTemplate, StringComparison.Ordinal);
+
+            Assert.Equal(child.PromptTemplate, RoleDispatch.WithoutVerifyResultsParagraph(child.PromptTemplate));
+        }
+        finally
+        {
+            DirectoryCleanup.DeleteRecursively(testRoot);
+        }
+    }
+
+    /// <summary>The clause both arms count, spelled once here rather than in each assertion.</summary>
+    private const string VerifyClauseOpening =
+        "Before your first turn the engine ran a set of allowlisted commands for you";
+
+    private static int CountOccurrences(string haystack, string needle)
+    {
+        var count = 0;
+        for (var i = haystack.IndexOf(needle, StringComparison.Ordinal); i >= 0;
+             i = haystack.IndexOf(needle, i + needle.Length, StringComparison.Ordinal))
+        {
+            count++;
+        }
+
+        return count;
     }
 
     [Fact]

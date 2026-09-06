@@ -15,6 +15,16 @@ namespace Baton.Cli;
 /// between).
 /// </para>
 /// <para>
+/// #1911 added the two remaining verbs that put a verdict on disk, so the callers are now four:
+/// <see cref="DispatchCommand"/> (both arms), <see cref="RedispatchCommand"/>,
+/// <see cref="ResumeCommand"/> and <see cref="SupplyCommand"/>. The last three are removal-arm only.
+/// <b>Removal is deliberate even when a prior <c>dispatch --verify-cmd</c> stamped true rows onto
+/// that same verdict:</b> a resumed turn and a supplied file each have no verify outcome of their
+/// own behind them, so absent is the only honest thing the engine can say about the verdict as it
+/// now stands. Losing an earlier run's genuine rows is the accepted cost of failing closed — the
+/// failure being priced is a fabricated <c>instruments</c> array read back as an engine record.
+/// </para>
+/// <para>
 /// Called after the run rather than from inside the engine's contract check, for the same reason
 /// <see cref="DispatchCommand.CopyPrimaryOutputToOverride"/> is: the execution-scoped artifact
 /// directory is not known until the run has produced one. Every step with an execution is visited,
@@ -36,16 +46,29 @@ internal static class VerdictInstrumentStamp
     internal const string VerdictOutputName = Baton.Accounting.CostLedgerStore.VerdictOutputName;
 
     /// <param name="verifyStep">Null when no verify step ran for this room.</param>
+    /// <param name="stepLessExecutionId">
+    /// #1911: an execution to visit that no step points at. <c>baton supply</c>'s supplementary
+    /// execution is minted with <c>StepId: null</c>
+    /// (<see cref="Baton.Mutation.MutationInterface.RecordSupplementaryExecutionAsync"/>), so walking
+    /// <c>State.Steps</c> alone never reaches the artifact it just copied in — and a
+    /// <c>--output-name verdict.json</c> supply is exactly the case where an operator-provided
+    /// <c>instruments</c> array would otherwise ride into a <c>--notify</c> payload unchallenged.
+    /// Null for every other verb, whose executions all hang off a step.
+    /// </param>
     internal static async Task ApplyAsync(
-        string roomDirectoryPath, CommandResult result, Baton.Mutation.VerifyStep.Outcome? verifyStep)
+        string roomDirectoryPath,
+        CommandResult result,
+        Baton.Mutation.VerifyStep.Outcome? verifyStep,
+        Baton.Domain.ExecutionId? stepLessExecutionId = null)
     {
-        foreach (var step in result.State.Steps)
-        {
-            if (step.LatestExecutionId is not { } execId)
-            {
-                continue;
-            }
+        var executionIds = result.State.Steps
+            .Select(step => step.LatestExecutionId)
+            .Append(stepLessExecutionId)
+            .OfType<Baton.Domain.ExecutionId>()
+            .Distinct();
 
+        foreach (var execId in executionIds)
+        {
             var verdictPath = Path.Combine(
                 roomDirectoryPath,
                 Baton.Artifacts.ArtifactManager.ArtifactsDirectoryName,
