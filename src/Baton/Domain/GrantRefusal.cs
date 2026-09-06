@@ -10,6 +10,13 @@ namespace Baton.Domain;
 /// step is spent; what it bought is the boundary's location.
 /// </para>
 /// <para>
+/// <b>What it is not</b>, stated because the vendors' own error prose does not distinguish them: a call
+/// the grant ALLOWED that then failed — a non-zero exit, a timeout, a missing file, a malformed
+/// argument — is unmarked, because its output is the information the step bought. Nor is a call naming
+/// a tool <b>Baton implements nowhere</b>: "withheld from the role" above means a tool a grant could
+/// have offered and did not, and no grant offers a name that exists in no build.
+/// </para>
+/// <para>
 /// <b>Why a marker rather than a list of phrasings.</b> Before this constant existed, counting refusals
 /// meant matching five different sentences produced at four sites, and a sixth phrasing added anywhere
 /// would have gone uncounted with nothing failing. The count is now a substring test for
