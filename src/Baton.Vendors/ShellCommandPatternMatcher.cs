@@ -444,6 +444,12 @@ public static class ShellCommandPatternMatcher
         /// </para>
         /// Null when allowed, and never stamped then: a marker on an allowed command's (absent) reason
         /// would be counted as a refusal by every reader downstream.
+        /// <para>
+        /// <b>The one way past this initializer is a <c>with</c> expression</b> — an <c>init</c> setter
+        /// assigned through an object initializer runs the assignment, not this default. No caller does
+        /// (every construction in the tree goes through the primary constructor); one that did would
+        /// produce an unstamped, and therefore uncounted, refusal.
+        /// </para>
         /// </summary>
         public string? Reason { get; init; } =
             Verdict != ScopedShellVerdict.Allowed && Reason is { Length: > 0 }

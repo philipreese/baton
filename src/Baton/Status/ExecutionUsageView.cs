@@ -571,7 +571,10 @@ public static class ExecutionUsageProjector
     /// question.
     /// <para>
     /// Cost, since <c>fleet_status</c> polls this: the replay hands every captured line to the vendor
-    /// parser, which parses it up to three times (tool name, tool-step count, incremental usage). Before
+    /// parser, which parses it up to SIX times — tool name, tool-step count and incremental usage for the
+    /// budget monitor, plus #1921's refused-step count, empty-result count and invocation keys for
+    /// <see cref="ToolStepTally"/>. Doubling that was judged affordable because the memo below is what
+    /// the polling path actually pays, and a completed room re-reads nothing. Before
     /// #1706 this projector parsed exactly one line per execution. Bounded by the stream logger's own
     /// 8 MiB-plus-one-rollover retention BOUND rather than by anything here, and measured at ~9 MB for
     /// the largest room on the machine this was developed against. That bound is retention, NOT a

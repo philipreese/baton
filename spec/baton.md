@@ -2247,9 +2247,14 @@ where `ExecutionUsageView` is
   "billedTokens"?: number, "liveBilledTokens"?: number, "billedUnderReadTokens"?: number,
   "billedReconciliationUnavailable"?: string, "peakBilledInWindow"?: number,
   "modelsObserved"?: string[], "modelEchoed"?: string,
-  "verifyStepMs"?: number, "verifyResultsBytes"?: number }
+  "verifyStepMs"?: number, "verifyResultsBytes"?: number,
+  "toolSteps"?: number, "refusedToolSteps"?: number, "repeatedToolSteps"?: number,
+  "emptyToolResults"?: number }
 ```
-(`src/Baton/Status/ExecutionUsageView.cs` declares the C# record; `WorkflowStatusView.cs` projects it). `wallClockMs` is
+(`src/Baton/Status/ExecutionUsageView.cs` declares the C# record; `WorkflowStatusView.cs` projects it). The four
+#1921 added are the step-budget axis, present or absent as a set of four (`Status.ToolStepTally.Snapshot`
+decides once); §7's ledger table states what each counts and which zeros are not measurements, and names
+`emptyToolResults` as the one the cost-ledger row deliberately does not carry. `wallClockMs` is
 always present when the object is present at all — derived from recorded start/exit timestamps. The
 three added by #1569 follow one vendor's own field split, not a Baton-invented one: `cacheReadTokens` is a
 real field on both measured vendors' envelopes (claude: `cache_read_input_tokens`; agy:
