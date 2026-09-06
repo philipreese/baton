@@ -21,15 +21,10 @@ namespace Baton.Vendors;
 /// <item><c>{AppContext.BaseDirectory}/skills/</c> — packages shipped next to the assembly. Nothing
 ///   ships there today; the rung exists so a future starter library has a home that needs no operator
 ///   setup;</item>
-/// <item><c>{workspace}/skills/</c> — <b>the repo-local overlay, and it is the LOWEST rung, not the
-///   highest.</b> State the negative, because a reader's prior runs the other way: everywhere else in
-///   this ecosystem project scope beats user scope (claude's own project-beats-personal skills rule,
-///   for one), and here it does not. The reason is that this rung is not ratified at all — #1929 shipped
-///   it as the floor realization's only source, and Q3 explicitly DEFERRED the repo-local overlay along
-///   with its precedence question. Keeping it lowest means the account-wide library Q3 did ratify can
-///   never be shadowed by whatever happens to sit in a checked-out repository, and retiring the rung
-///   later removes behaviour rather than changing what a name resolves to. Whether to retire or ratify
-///   it is an open operator question on #1151.</item>
+/// <item><c>{workspace}/skills/</c> — <b>the repo-local overlay, and it is the LOWEST rung.</b> That
+///   inverts the prior a reader brings, so spec/baton.md §9 states the negative and the reason; the one
+///   consequence for a caller here is that a package in the account library is never shadowed by
+///   whatever sits in a checked-out repository.</item>
 /// </list>
 /// <para>
 /// Mirrors <see cref="WorkerRoleCatalog"/>'s own three-rung shape rather than inventing a fourth

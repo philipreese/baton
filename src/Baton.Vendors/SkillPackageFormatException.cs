@@ -8,11 +8,8 @@ namespace Baton.Vendors;
 /// action is to edit that file and nothing else in the package tells them which one.
 /// </summary>
 /// <remarks>
-/// <b>Identity and format faults fail fast</b> (#1151 §4.6): a package named by <c>--skill</c> that
-/// does not parse must never produce a run that silently lacks the capability. The tolerant discovery
-/// path (<see cref="SkillPackageReader.DiscoverPackages"/>, which scans a directory nobody named)
-/// catches this and skips the package with a stderr warning instead — see that method for why the
-/// two paths differ.
+/// Raised by the strict load path and caught by the tolerant discovery one;
+/// <see cref="SkillPackageReader"/> is the register for which is which and why they differ.
 /// </remarks>
 public sealed class SkillPackageFormatException : BatonFlowException
 {

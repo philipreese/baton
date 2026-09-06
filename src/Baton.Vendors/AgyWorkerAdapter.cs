@@ -1244,12 +1244,11 @@ public sealed partial class AgyWorkerAdapter : IWorkerAdapter, IPermissionGrantT
     /// with the manifest #1151's slice 1 still owes, not here.
     /// </remarks>
     /// <param name="declaredSkills">
-    /// #1151: the packages the binding itself named, already resolved through
-    /// <see cref="SkillPackageResolver"/>. Non-empty REPLACES the working-directory scan — see
-    /// <see cref="WorkerInvocation.Skills"/> for why a declared set is not merged with whatever the
-    /// repository happens to carry. Null or empty keeps #1929's discovery behaviour, including the
-    /// working-directory precondition below, which a declared set does not need: those packages may
-    /// come from the account-wide library and are inlined into a prompt rather than written anywhere.
+    /// #1151: the binding's own declared skill set — <see cref="WorkerInvocation.Skills"/> is the
+    /// register for what it is and why it replaces rather than augments the scan. Null or empty keeps
+    /// #1929's discovery behaviour, including the working-directory precondition below, which a declared
+    /// set does not need: those packages may come from the account-wide library, and inlining writes
+    /// nothing anywhere.
     /// </param>
     public static string InlineSkills(
         string prompt, string? workingDirectory, IReadOnlyList<SkillPackage>? declaredSkills = null)

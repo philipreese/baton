@@ -10,8 +10,8 @@ namespace Baton.Vendors;
 /// <param name="Name">The skill name — the directory name, which is the package's identity.</param>
 /// <param name="Description">
 /// The manifest's <c>description</c> when there is a manifest, otherwise the <c>description:</c> line
-/// scraped from the instructions file's front matter, otherwise a fallback. This is what a model reads
-/// to judge relevance on both vendors, and what a roster renders.
+/// scraped from the instructions file's front matter, otherwise a fallback. See
+/// <see cref="SkillManifest"/>'s own <c>Description</c> for what this field is FOR.
 /// </param>
 /// <param name="DirectoryPath">The absolute path to the skill package directory.</param>
 /// <param name="SkillFilePath">The absolute path to the instructions file inside the package (<c>SKILL.md</c> unless the manifest names another).</param>

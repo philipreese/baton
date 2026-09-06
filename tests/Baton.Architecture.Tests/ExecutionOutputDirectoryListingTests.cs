@@ -87,6 +87,13 @@ public class ExecutionOutputDirectoryListingTests
         // room's artifacts root, so an execution's output directory is unreachable from here.
         ["Baton.Vendors/SkillProjection.cs"] =
             "GetFiles walks a canonical skill package directory under the dispatch workspace, not an execution output directory",
+        // #1151 S1: the same population as SkillProjection above, read for a different reason — the
+        // executable-asset lint enumerates one canonical skill package's own files to decide whether it
+        // bundles a script. A package directory resolves through SkillPackageResolver's rungs (an env
+        // override, {BatonPaths.Root}/skills, beside the assembly, or <workspace>/skills), none of which
+        // is a room's artifacts root, so an execution output directory is unreachable from here.
+        ["Baton.Vendors/SkillPackageLint.cs"] =
+            "GetFiles enumerates one resolved skill package's own assets, not an execution output directory",
         // #496: lists artifacts/.versions/ (a named artifact's own version-history sidecar, one
         // index.jsonl per name), never an execution's own output directory.
         ["Baton/Artifacts/RoomArtifacts.cs"] =

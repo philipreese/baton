@@ -76,8 +76,7 @@ public static class SkillPackageLint
 
     /// <summary>
     /// <see cref="Refuse"/>'s non-throwing form: the exception a lint failure WOULD raise, or null when
-    /// the package is clean. The tolerant discovery path uses this so one bad package in a scanned
-    /// directory warns and is skipped rather than refusing an unrelated dispatch.
+    /// the package is clean — for a caller that wants the verdict without the control flow.
     /// </summary>
     public static SkillPackageFormatException? Check(SkillPackage package)
     {

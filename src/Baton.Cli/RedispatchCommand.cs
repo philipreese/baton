@@ -323,11 +323,10 @@ public static class RedispatchCommand
     }
 
     /// <summary>
-    /// #1151's inheritance rule, one predicate used by BOTH redispatch paths (spec/baton.md §9):
-    /// <c>--skill</c> absent inherits the parent's recorded list; <c>--skill ""</c> clears it; any
-    /// <c>--skill &lt;name&gt;</c> replaces it <b>wholesale</b> rather than appending. Replace-not-append
-    /// because append has no removal syntax, and a lane whose skill set can only grow across
-    /// redispatches is a worse default than one the operator restates.
+    /// #1151's inheritance rule, one predicate used by BOTH redispatch paths. spec/baton.md §9 is the
+    /// register for the rule and for why replace-not-append is the right default; in short,
+    /// <c>--skill</c> absent inherits, <c>--skill ""</c> clears, any <c>--skill &lt;name&gt;</c> replaces
+    /// wholesale.
     /// <para>
     /// Keyed on <see cref="RedispatchOptions.SkillsSpecified"/>, not on the list being non-empty: those
     /// two differ in exactly the case the clear token exists for.

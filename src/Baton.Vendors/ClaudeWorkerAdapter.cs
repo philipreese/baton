@@ -1270,12 +1270,9 @@ public sealed partial class ClaudeWorkerAdapter : IWorkerAdapter, IPermissionGra
     /// <paramref name="declaredSkills"/> is empty — also where packages are discovered.
     /// </param>
     /// <param name="declaredSkills">
-    /// #1151: the packages the binding itself named, already resolved through
-    /// <see cref="SkillPackageResolver"/>'s rung ladder. Non-empty REPLACES the working-directory scan,
-    /// so a package that lives only under <c>BATON_SKILLS_PATH</c> or the account-wide library is
-    /// realized here even though nothing in the repository mentions it — which is the whole point of the
-    /// resolver, and the thing that would otherwise make <c>--skill</c> a name that resolves and
-    /// realizes nothing. Null or empty keeps #1929's behaviour: discover <c>&lt;workspace&gt;/skills/</c>.
+    /// #1151: the binding's own declared skill set — see <see cref="WorkerInvocation.Skills"/> for what
+    /// it is and why a non-empty one replaces the working-directory scan rather than adding to it. Null
+    /// or empty keeps #1929's behaviour: discover <c>&lt;workspace&gt;/skills/</c>.
     /// </param>
     public static SkillProjectionPlan PlanSkillProjection(
         string? workingDirectory, IReadOnlyList<SkillPackage>? declaredSkills = null)

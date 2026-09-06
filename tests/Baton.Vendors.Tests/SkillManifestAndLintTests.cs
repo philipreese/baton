@@ -11,19 +11,8 @@ public sealed class SkillManifestAndLintTests : IDisposable
 
     public SkillManifestAndLintTests() => Directory.CreateDirectory(_root);
 
-    public void Dispose()
-    {
-        try
-        {
-            if (Directory.Exists(_root))
-            {
-                Directory.Delete(_root, recursive: true);
-            }
-        }
-        catch (IOException)
-        {
-        }
-    }
+    // #438/#295: routed through DirectoryCleanup, never a raw recursive delete.
+    public void Dispose() => Baton.Tests.Shared.DirectoryCleanup.DeleteRecursively(_root);
 
     private string Package(string name, string instructions, string? manifest = null, string? assetRelativePath = null)
     {

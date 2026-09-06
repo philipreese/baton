@@ -12,20 +12,9 @@ public sealed class SkillPackageResolverTests : IDisposable
 {
     private readonly string _root = Path.Combine(Path.GetTempPath(), $"skill-resolver-{Guid.NewGuid():N}");
 
-    public void Dispose()
-    {
-        try
-        {
-            if (Directory.Exists(_root))
-            {
-                Directory.Delete(_root, recursive: true);
-            }
-        }
-        catch (IOException)
-        {
-            // A leaked temp directory is not worth failing a test over.
-        }
-    }
+    // #438/#295: routed through DirectoryCleanup rather than a raw recursive delete, which flakes on
+    // Windows when Defender or the indexer holds a transient handle.
+    public void Dispose() => Baton.Tests.Shared.DirectoryCleanup.DeleteRecursively(_root);
 
     private string WritePackage(string skillsDirectory, string name, string body = "# Do the thing", string? manifest = null)
     {
@@ -144,9 +133,7 @@ public sealed class SkillPackageResolverTests : IDisposable
     [Fact]
     public void A_broken_package_on_a_higher_rung_refuses_rather_than_falling_through_to_a_lower_one()
     {
-        // The substitution this feature exists to make impossible: an operator who authored a broken
-        // package meant THAT one, and silently resolving a same-named package from elsewhere would
-        // hand the worker content nobody asked for.
+        // The substitution SkillPackageResolver.Resolve's own <exception> doc names.
         var home = NewDirectory("home");
         var homeSkills = Path.Combine(home, "skills");
         Directory.CreateDirectory(homeSkills);

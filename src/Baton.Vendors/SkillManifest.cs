@@ -41,9 +41,7 @@ public enum SkillRealization
 /// <para>
 /// <b>Requirements are checked, never applied.</b> Nothing here can widen a grant: the only outcomes
 /// are "the grant already carries this" and <see cref="SkillRequirementUnsatisfiedException"/>. There
-/// is deliberately no <c>allowed-tools</c> equivalent — claude's frontmatter field of that name is a
-/// pre-approval, and a canonical package carrying one could widen a grant the operator narrowed
-/// (decision 0033, spec/baton.md §9).
+/// is deliberately no <c>allowed-tools</c> equivalent; spec/baton.md §9 states why, citing decision 0033.
 /// </para>
 /// </remarks>
 public sealed record SkillRequirements(
