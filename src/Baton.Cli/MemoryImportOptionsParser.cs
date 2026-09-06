@@ -191,7 +191,8 @@ public static class MemoryImportOptionsParser
         }
 
         var repository = value[(separator + 1)..];
-        if (RepositoryIdentity.TryCanonicalize(repository) is not { Length: > 0 } canonical)
+        if (RepositoryIdentity.TryCanonicalize(repository) is not { Length: > 0 } canonical ||
+            !HasHostAndPath(canonical))
         {
             throw new CliArgumentException(
                 $"'{repository.Trim()}' is not a repository identity: it has no host-and-path to " +
@@ -202,6 +203,25 @@ public static class MemoryImportOptionsParser
         }
 
         return new MemoryImportAssertion(value[..separator].Trim(), canonical);
+    }
+
+    private static bool HasHostAndPath(string canonical)
+    {
+        if (canonical.StartsWith("gitdir:", StringComparison.OrdinalIgnoreCase))
+        {
+            return true;
+        }
+
+        var slash = canonical.IndexOf('/');
+        if (slash < 0)
+        {
+            return false;
+        }
+
+        var host = canonical[..slash];
+        var path = canonical[(slash + 1)..];
+
+        return host.Contains('.') || path.Contains('/');
     }
 
     private static string RequireValue(IReadOnlyList<string> args, int index)
