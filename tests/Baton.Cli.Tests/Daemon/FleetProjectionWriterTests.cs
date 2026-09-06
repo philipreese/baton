@@ -215,6 +215,90 @@ public sealed class FleetProjectionWriterTests : IDisposable
         Assert.Equal(800, prunedItem!["bytes"]!.GetValue<long>());
     }
 
+    /// <summary>
+    /// #1902: the fleet file owns the same content-only, bounded timeline projection pusher.py used
+    /// to derive per room. Terminal ledgers are frozen, so the daemon reads one only once and serves
+    /// that first result from its per-process cache on later ticks.
+    /// </summary>
+    [Fact]
+    public async Task BuildProjectionJson_ProjectsRunningAndTerminalTimelines_WithTerminalCacheAndCap()
+    {
+        var identity = (Environment.ProcessId, new DateTimeOffset(System.Diagnostics.Process.GetCurrentProcess().StartTime).ToUniversalTime());
+        var (runningRoom, _) = await CreateRunningRoomAsync("timeline-running", identity);
+
+        var terminalRoom = Path.Combine(_tempHome, BatonPaths.RoomsDirectoryName, "timeline-terminal");
+        Directory.CreateDirectory(terminalRoom);
+        var terminalExecution = new ExecutionId("exec-timeline-terminal");
+        await using (var logWriter = new FlowEventLogWriter(Path.Combine(terminalRoom, BatonPaths.FlowLogFileName)))
+        {
+            for (var i = 0; i < 29; i++)
+            {
+                await logWriter.AppendAsync(
+                    new CoreEvent.ExecutionStarted(new ExecutionId($"exec-timeline-{i}"), Pid: (uint)i),
+                    TestContext.Current.CancellationToken);
+            }
+
+            var request = new ExecutionRequest(
+                terminalExecution, new WorkflowId("wf"), new StepId("publish"), "worker", [], [],
+                TimeSpan.FromMinutes(5), [], new Dictionary<StepId, ExecutionId>());
+            await logWriter.AppendAsync(new FlowEvent.ExecutionRequestAccepted(request), TestContext.Current.CancellationToken);
+            await logWriter.AppendAsync(
+                new CoreEvent.ExecutionExited(terminalExecution, ExitCode: 7, CoreExitReason.Natural),
+                TestContext.Current.CancellationToken);
+        }
+
+        await TerminalSentinelWriter.WriteAsync(
+            terminalRoom, new WorkflowStatusView("Succeeded", [], [], null, null), TestContext.Current.CancellationToken);
+
+        var projectionWriter = new FleetProjectionWriter();
+        var first = JsonNode.Parse(await projectionWriter.BuildProjectionJsonAsync(TestContext.Current.CancellationToken))!.AsObject();
+        var timelines = first["timelines"]!.AsObject();
+
+        var running = timelines[runningRoom]!.AsArray();
+        var runningEntry = Assert.Single(running)!.AsObject();
+        Assert.Equal("flow.executionRequestAccepted", runningEntry["type"]!.GetValue<string>());
+        Assert.Equal("step-a", runningEntry["stepId"]!.GetValue<string>());
+        Assert.Equal(new[] { "stepId", "timestamp", "type" }, runningEntry.Select(pair => pair.Key).Order().ToArray());
+
+        var terminal = timelines[terminalRoom]!.AsArray();
+        Assert.Equal(30, terminal.Count);
+        Assert.Equal(
+            Enumerable.Repeat("core.executionStarted", 28)
+                .Append("flow.executionRequestAccepted")
+                .Append("core.executionExited"),
+            terminal.Select(entry => entry!["type"]!.GetValue<string>()));
+        Assert.Equal("publish", terminal[^2]!["stepId"]!.GetValue<string>());
+        var terminalExit = terminal[^1]!.AsObject();
+        Assert.Equal("core.executionExited", terminalExit["type"]!.GetValue<string>());
+        Assert.Equal(7, terminalExit["exitCode"]!.GetValue<int>());
+        Assert.Equal(new[] { "exitCode", "timestamp", "type" }, terminalExit.Select(pair => pair.Key).Order().ToArray());
+
+        await using (var changedLedger = new FlowEventLogWriter(Path.Combine(terminalRoom, BatonPaths.FlowLogFileName)))
+        {
+            await changedLedger.AppendAsync(
+                new CoreEvent.ExecutionStarted(new ExecutionId("exec-after-terminal"), Pid: 30),
+                TestContext.Current.CancellationToken);
+        }
+
+        var second = JsonNode.Parse(await projectionWriter.BuildProjectionJsonAsync(TestContext.Current.CancellationToken))!.AsObject();
+        Assert.Equal(terminal.ToJsonString(), second["timelines"]![terminalRoom]!.ToJsonString());
+    }
+
+    [Fact]
+    public async Task BuildProjectionJson_UnreadableFlowLedger_OmitsTimelineInsteadOfThrowing()
+    {
+        var room = Path.Combine(_tempHome, BatonPaths.RoomsDirectoryName, "unreadable-timeline");
+        Directory.CreateDirectory(room);
+        await File.WriteAllTextAsync(
+            Path.Combine(room, BatonPaths.FlowLogFileName), "not a baton ledger\n", TestContext.Current.CancellationToken);
+
+        var writer = new FleetProjectionWriter();
+        var json = await writer.BuildProjectionJsonAsync(TestContext.Current.CancellationToken);
+
+        var timelines = JsonNode.Parse(json)!["timelines"]!.AsObject();
+        Assert.False(timelines.ContainsKey(room));
+    }
+
     /// <summary>Pins the `live`-vs-diagnostics gating split <see cref="FleetProjectionWriter.BuildProjectionJsonAsync"/>'s
     /// own remarks state -- see that method for why.</summary>
     [Fact]

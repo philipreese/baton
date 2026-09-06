@@ -55,8 +55,12 @@ public sealed class FleetProjectionWriter : BackgroundService
     // spec/baton.md §6 (#1155): newest N pruned execution dirs surfaced per room.
     private const int PrunedItemsCap = 20;
 
+    // Same bounded content projection pusher.py's extract_timeline applies to room_detail results.
+    private const int TimelineCap = 30;
+
     private readonly Dictionary<string, ExecutionLiveState> _liveCache = new(StringComparer.Ordinal);
     private readonly Dictionary<string, PrunedCacheEntry> _prunedCache = new(StringComparer.Ordinal);
+    private readonly Dictionary<string, IReadOnlyList<RoomTimelineEntryView>?> _terminalTimelineCache = new(StringComparer.Ordinal);
     private bool _loggedMissingSecretPatterns;
 
     public static TimeSpan GetInterval()
@@ -116,6 +120,7 @@ public sealed class FleetProjectionWriter : BackgroundService
         diagnostics ??= Console.Error;
         var discovered = await FleetStatusTool.DiscoverRoomsAsync([], cancellationToken).ConfigureAwait(false);
         var roomsArray = new JsonArray();
+        var timelines = new JsonObject();
         var liveKeysThisTick = new HashSet<string>(StringComparer.Ordinal);
         var liveLanesByVendor = new Dictionary<string, int>(StringComparer.Ordinal);
 
@@ -177,6 +182,12 @@ public sealed class FleetProjectionWriter : BackgroundService
                 liveLanesByVendor[adapter] = liveLanesByVendor.GetValueOrDefault(adapter) + 1;
             }
 
+            var timeline = await ResolveTimelineAsync(view.Path, cancellationToken).ConfigureAwait(false);
+            if (timeline is not null && timeline.Count > 0)
+            {
+                timelines[view.Path] = ProjectTimeline(timeline);
+            }
+
             roomsArray.Add(node);
         }
 
@@ -187,6 +198,7 @@ public sealed class FleetProjectionWriter : BackgroundService
         {
             ["derived_at"] = DateTimeOffset.UtcNow.ToString("O"),
             ["rooms"] = roomsArray,
+            ["timelines"] = timelines,
         };
 
         // #1391: same vendors[] block fleet_status returns, using the liveLanesByVendor tally this
@@ -198,6 +210,64 @@ public sealed class FleetProjectionWriter : BackgroundService
         }
 
         return root.ToJsonString(FleetStatusTool.SerializerOptions);
+    }
+
+    /// <summary>
+    /// The daemon equivalent of pusher.py's terminal timeline policy: a non-terminal room's ledger
+    /// is read each tick, while a room with <c>terminal.json</c> is read once for this writer's
+    /// lifetime because its ledger is frozen. An unreadable ledger deliberately produces no entry:
+    /// <see cref="RoomDetailTool"/> keeps its diagnostic as free text, which this content-only fleet
+    /// projection must not carry.
+    /// </summary>
+    private async Task<IReadOnlyList<RoomTimelineEntryView>?> ResolveTimelineAsync(
+        string roomDir,
+        CancellationToken cancellationToken)
+    {
+        var isTerminal = File.Exists(Path.Combine(roomDir, TerminalSentinelWriter.TerminalSentinelFileName));
+        if (isTerminal && _terminalTimelineCache.TryGetValue(roomDir, out var cached))
+        {
+            return cached;
+        }
+
+        var detailTimeline = await RoomDetailTool.ReadTimelineAsync(roomDir, cancellationToken).ConfigureAwait(false);
+        IReadOnlyList<RoomTimelineEntryView>? projected = detailTimeline is null ||
+            detailTimeline.Entries.Any(entry => entry.Type == "unreadable")
+            ? null
+            : detailTimeline.Entries.TakeLast(TimelineCap).ToList();
+
+        if (isTerminal)
+        {
+            _terminalTimelineCache[roomDir] = projected;
+        }
+
+        return projected;
+    }
+
+    private static JsonArray ProjectTimeline(IReadOnlyList<RoomTimelineEntryView> entries)
+    {
+        var projected = new JsonArray();
+        foreach (var entry in entries)
+        {
+            var node = new JsonObject { ["type"] = entry.Type };
+            if (entry.Timestamp is not null)
+            {
+                node["timestamp"] = entry.Timestamp;
+            }
+
+            if (entry.StepId is not null)
+            {
+                node["stepId"] = entry.StepId;
+            }
+
+            if (entry.ExitCode is not null)
+            {
+                node["exitCode"] = entry.ExitCode;
+            }
+
+            projected.Add(node);
+        }
+
+        return projected;
     }
 
     /// <summary>

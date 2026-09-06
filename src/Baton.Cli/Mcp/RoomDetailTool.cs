@@ -424,7 +424,12 @@ public sealed class RoomDetailTool : IMcpTool
             : null;
     }
 
-    private static async Task<RoomTimelineView?> ReadTimelineAsync(string roomDir, CancellationToken cancellationToken)
+    /// <summary>
+    /// Reads the room-detail timeline projection for the daemon's fleet projection too, so both
+    /// surfaces retain one event-to-wire translation. Callers that cannot carry the detail tool's
+    /// unreadable marker can omit that room rather than publishing its exception text.
+    /// </summary>
+    internal static async Task<RoomTimelineView?> ReadTimelineAsync(string roomDir, CancellationToken cancellationToken)
     {
         var logPath = Path.Combine(roomDir, BatonPaths.FlowLogFileName);
         if (!File.Exists(logPath))
