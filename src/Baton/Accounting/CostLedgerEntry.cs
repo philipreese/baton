@@ -111,7 +111,9 @@ public enum ConductorResolution
 /// than an inference from the run that wrote it (#1931 review HIGH, operator ruling 2026-09-05).
 /// </summary>
 /// <remarks>
-/// Written by <c>baton ledger backfill</c> and by no other writer today. <b>Absence therefore means
+/// Written by <c>baton ledger backfill</c>, and copied onto a correcting row from the row it corrects
+/// (<see cref="CostLedgerStore.BuildResolutionRow"/>, so <c>baton resolve</c> can emit one too).
+/// <b>Absence therefore means
 /// "the writer of this row recorded no source", never <see cref="RecordedRoot"/></b>: every settle-site
 /// row is absent, because <c>Baton.Cli.RepositoryIdentityResolver.TryResolveForRoomAsync</c> resolves
 /// the recorded project root and the working directory through one call and cannot report which of the

@@ -86,6 +86,12 @@ public sealed record LedgerEstimateStatusCounts(
 /// <paramref name="PullRequests"/> instead; spec/baton.md §7 carries the measurement that forced it
 /// and what the rest of a reading still counts them into.
 /// </para>
+/// <para>
+/// <b>A CORRECTING row is knowingly left counted here</b>, though the same sentence is equally false
+/// about it: spec/baton.md §7 discloses that case and names <c>--resolution none</c> as its remedy,
+/// and #1931's ruling was scoped to the merged-PR population. The asymmetry is a decision, not an
+/// oversight — closing it means amending that disclosure, not editing this line alone.
+/// </para>
 /// </param>
 /// <param name="Executions">
 /// How many of <paramref name="Attempts"/> are about something Baton ran — every row that is not a
