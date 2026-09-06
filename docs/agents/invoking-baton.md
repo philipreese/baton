@@ -369,6 +369,24 @@ an `ambiguous` root prints both candidates and picks neither, because deciding w
 needs the entries' text. `--format json` is the machine contract: one object
 `{claudeHome, roots, findings, counts}`. See `spec/baton.md` §12.
 
+**Pushing the canonical store back out as a cache (`baton memory sync`).** Projects Baton's canonical
+memory into the markdown vendor memory roots that already exist:
+
+```
+baton memory sync [--repository <id>] [--apply] [--format text|json] [--repository-facts <dir>] [--help]
+```
+
+Without `--apply` it writes **nothing** — no file, and no directory either — and reports what would
+change. Each target root receives exactly one Baton-owned file, overwritten in full; no vendor file,
+`MEMORY.md` included, is touched. **The output carries no timestamp on purpose**: an unchanged store
+projects byte-identical bytes, so any diff means the store changed, and the header carries a content
+hash where a generated-at stamp would be. Targets are **discovered, never constructed** — a repository
+with no matching root is reported as having no target rather than having one created for it — and they
+are markdown only: Codex's `memories_*.sqlite` and every Antigravity store are inventoried and never
+written. A superseded entry, one the projection budget could not fit, and a vendor fact a checked-in
+repository fact outranks are each **named with their canonical id** in the report, never counted. See
+`spec/baton.md` §12.
+
 ---
 
 ## 4. Adapter notes
