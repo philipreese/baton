@@ -214,7 +214,7 @@ public static class RoleDispatch
         return new WorkerBindingConfigEntry(
             Adapter: adapter,
             Contract: contract,
-            PromptTemplate: BuildPrompt(role, spec, outputs, attachments, attachmentsDirectory, verifyResultsPath),
+            PromptTemplate: BuildPrompt(role, adapter, spec, outputs, attachments, attachmentsDirectory, verifyResultsPath),
             Timeout: timeoutOverride ?? role.Timeout,
             Model: model,
             PermissionGrant: grant,
@@ -319,7 +319,7 @@ public static class RoleDispatch
     /// enforces it at load), so the header is never emitted without lines under it.
     /// </summary>
     private static string BuildPrompt(
-        WorkerRole role, string spec, IReadOnlyList<WorkerRoleOutput>? outputs = null,
+        WorkerRole role, string adapter, string spec, IReadOnlyList<WorkerRoleOutput>? outputs = null,
         IReadOnlyList<string>? attachments = null, string? attachmentsDirectory = null,
         string? verifyResultsPath = null)
     {
@@ -332,6 +332,13 @@ public static class RoleDispatch
 
         var promptBuilder = new System.Text.StringBuilder();
         promptBuilder.Append(spec.TrimEnd());
+
+        // #1920: the review role is the one whose shell grant is scoped tightly enough that a reviewer
+        // discovers its edges by refusal; implement/janitor run unscoped and lose no steps to this.
+        if (role.Id == "review" && ReviewToolGuidance(adapter) is { } reviewToolGuidance)
+        {
+            promptBuilder.Append($"\n\n{reviewToolGuidance}");
+        }
 
         if (attachments is { Count: > 0 } && !string.IsNullOrEmpty(attachmentsDirectory))
         {
@@ -350,6 +357,44 @@ public static class RoleDispatch
         promptBuilder.Append($"\n\nRequired outputs:\n{instructions}\n\n{OneShotContract}");
         return promptBuilder.ToString();
     }
+
+    /// <summary>
+    /// #1920's ask, verbatim: the one line a codex review prompt carries so the granted read path is
+    /// known before the first turn rather than found by refusal. Measured on the issue's room: `rg` was
+    /// re-issued four times, and two more steps went to a Windows backslash path, before the model
+    /// reached <c>baton_search_text</c>. Both halves are true of the codex channel — the dynamic tools
+    /// are what read and search there, and <c>CodexDynamicToolPolicy</c> routes every shell line
+    /// through the matcher that refuses a backslash (<c>ShellCommandPatternMatcher</c>) and declares no
+    /// <c>rg</c> tool.
+    /// </summary>
+    private const string CodexReviewToolGuidance =
+        "search with baton_search_text, read with baton_read_text; rg and backslash paths are not granted";
+
+    /// <summary>
+    /// #1920, claude half. Written from the CLAUDE measurement in the issue's audit comment (46 of 97
+    /// refusals on that vendor), not transposed from the codex one: what a claude reviewer actually
+    /// loses steps to is <c>cd</c>, <c>cat</c>, <c>head</c>, <c>echo</c> and <c>git grep</c>, plus every
+    /// compound line that carries one of them, because a scoped grant judges each segment on its own
+    /// (<see cref="ShellCommandPatternMatcher.EvaluateChainedCommand"/>). It deliberately says nothing
+    /// about backslash paths: that rule is a property of the shell channel alone, and claude's own Read
+    /// and Grep take Windows paths.
+    /// </summary>
+    private const string ClaudeReviewToolGuidance =
+        "read with Read, search with Grep; the Bash grant is a read-only git/gh allowlist, so cd, cat, "
+        + "head, echo and git grep are refused, and a chained command (&&, |) is refused whole unless "
+        + "every segment is itself granted";
+
+    /// <summary>
+    /// #1920: vendor-specific because the tool names are. An adapter with no measured line returns
+    /// <see langword="null"/> and the prompt gains nothing rather than a guessed one — agy's own
+    /// measured friction in the same audit is repeat reads, not refusals, and is tracked at #1921.
+    /// </summary>
+    private static string? ReviewToolGuidance(string adapter) => adapter switch
+    {
+        "codex" => CodexReviewToolGuidance,
+        "claude" => ClaudeReviewToolGuidance,
+        _ => null,
+    };
 
     /// <summary>
     /// #1882: the one paragraph a review prompt gains when the engine ran a pre-turn verify step. It

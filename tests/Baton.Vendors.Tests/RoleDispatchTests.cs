@@ -52,6 +52,39 @@ public class RoleDispatchTests
         }
     }
 
+    // #1920: each vendor's line is written from that vendor's own measured refusals — codex's is the
+    // issue's Ask verbatim, claude's names what the audit comment measured on claude (cd/cat/head/
+    // echo/git grep and compound lines), never rg, which is not a claude refusal.
+    [Theory]
+    [InlineData("codex", "search with baton_search_text, read with baton_read_text; rg and backslash paths are not granted")]
+    [InlineData("claude", "read with Read, search with Grep; the Bash grant is a read-only git/gh allowlist, so cd, cat, head, echo and git grep are refused, and a chained command (&&, |) is refused whole unless every segment is itself granted")]
+    public void Review_prompt_names_the_vendor_specific_granted_read_tools_once(
+        string adapter, string expectedGuidance)
+    {
+        var prompt = RoleDispatch.ToBinding(
+            Review, "Review the change.", adapterOverride: adapter).PromptTemplate;
+
+        Assert.Contains(expectedGuidance, prompt, StringComparison.Ordinal);
+        Assert.Equal(1, prompt.Split(expectedGuidance, StringSplitOptions.None).Length - 1);
+    }
+
+    // The two false arms of the same predicate (`role.Id == "review"` and the adapter switch, whose
+    // default returns null): without these the feature could fire on every role and every vendor and
+    // the theory above would still pass.
+    [Fact]
+    public void No_review_tool_guidance_reaches_another_role_or_an_unmeasured_adapter()
+    {
+        var implementPrompt = RoleDispatch.ToBinding(
+            WorkerRoleCatalog.For("implement"), "Make the change.", adapterOverride: "claude").PromptTemplate;
+        var agyReviewPrompt = RoleDispatch.ToBinding(
+            Review, "Review the change.", adapterOverride: "agy").PromptTemplate;
+
+        Assert.DoesNotContain("read with Read, search with Grep", implementPrompt, StringComparison.Ordinal);
+        Assert.DoesNotContain("baton_search_text", implementPrompt, StringComparison.Ordinal);
+        Assert.DoesNotContain("read with Read, search with Grep", agyReviewPrompt, StringComparison.Ordinal);
+        Assert.DoesNotContain("baton_search_text", agyReviewPrompt, StringComparison.Ordinal);
+    }
+
     /// <summary>
     /// #1095: the dispatch prompt carries the one-shot execution contract (its rationale lives on
     /// <see cref="RoleDispatch"/>'s <c>OneShotContract</c>) — a dispatched worker's turn is never
