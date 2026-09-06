@@ -61,7 +61,8 @@ public static class LedgerViewCommand
         }
 
         var ledgerFilePath = ledgerFilePathOverride
-            ?? await ResolveLedgerFilePathAsync(options, cancellationToken).ConfigureAwait(false);
+            ?? await ResolveLedgerFilePathAsync(
+                options.RepositoryIdentityKey, options.RoomDirectoryPath, cancellationToken).ConfigureAwait(false);
 
         var entries = await CostLedgerStore.ReadAllAsync(ledgerFilePath, cancellationToken).ConfigureAwait(false);
 
@@ -103,11 +104,16 @@ public static class LedgerViewCommand
     /// A directory with no repository identity is a <see cref="CliArgumentException"/> naming
     /// <c>--repo-identity</c>, rather than an empty rollup: "no rows" and "you asked the wrong
     /// question" must not print the same thing.
+    /// <para>
+    /// <c>internal</c> rather than private so <see cref="LedgerExportCommand"/> reaches the same
+    /// resolution instead of growing a second one — an export that opened a different file from the
+    /// reading it claims to reproduce would be the exact drift this method's rules exist to prevent.
+    /// </para>
     /// </summary>
-    private static async Task<string> ResolveLedgerFilePathAsync(
-        LedgerViewOptions options, CancellationToken cancellationToken)
+    internal static async Task<string> ResolveLedgerFilePathAsync(
+        string? repositoryIdentityKey, string? roomDirectoryPath, CancellationToken cancellationToken)
     {
-        if (options.RepositoryIdentityKey is { Length: > 0 } key)
+        if (repositoryIdentityKey is { Length: > 0 } key)
         {
             var trimmed = key.Trim();
             var byFileStem = Path.Combine(BatonPaths.Root, BatonPaths.CostLedgerDirectoryName, $"{trimmed}.jsonl");
@@ -116,18 +122,18 @@ public static class LedgerViewCommand
                 : BatonPaths.CostLedgerFile(RepositoryIdentity.FileSlugFor(trimmed.ToLowerInvariant()));
         }
 
-        var repository = options.RoomDirectoryPath is { Length: > 0 } roomDirectoryPath
+        var repository = roomDirectoryPath is { Length: > 0 } room
             // A read, not a write: the source says how a ROW was keyed, and this call is only choosing
             // which file to open, so it is discarded rather than surfaced.
-            ? (await RepositoryIdentityResolver.TryResolveForRoomAsync(roomDirectoryPath, cancellationToken).ConfigureAwait(false)).Identity
+            ? (await RepositoryIdentityResolver.TryResolveForRoomAsync(room, cancellationToken).ConfigureAwait(false)).Identity
             : await RepositoryIdentityResolver.TryResolveAsync(Environment.CurrentDirectory, cancellationToken).ConfigureAwait(false);
 
         if (repository is null)
         {
             throw new CliArgumentException(
                 "No repository identity here: git reported neither an 'origin' remote nor a repository for "
-                + (options.RoomDirectoryPath is { Length: > 0 } room
-                    ? $"room '{room}' (its recorded project root, or this working directory when it has no registry entry). "
+                + (roomDirectoryPath is { Length: > 0 } named
+                    ? $"room '{named}' (its recorded project root, or this working directory when it has no registry entry). "
                     : $"'{Environment.CurrentDirectory}'. ")
                 + "The cost ledger is keyed by repository, so there is no file to read. Name one explicitly.",
                 "baton ledger --repo-identity github.com/owner/repo");
