@@ -2386,10 +2386,19 @@ public sealed class FleetStatusToolTests : IDisposable
 
     /// <summary>The description a conductor reads is the tool's only account of what `stale` means, so
     /// the tick count in it has to be the one the daemon actually uses -- hard-coded, it would lie the
-    /// day that constant changed. The second assertion is the control: it fails if the number were
-    /// spelled out in words or transcribed rather than interpolated.</summary>
+    /// day that constant changed.
+    /// <para>
+    /// What this pins, stated exactly (2026-09-06 round-3 review corrected an overclaim here):
+    /// <see cref="FleetProjectionWriter.StaleAfterTicks"/> is a <c>public const int</c>, so the
+    /// interpolation resolves at compile time and the assembly carries the same literal either way --
+    /// this CANNOT tell an interpolated form from a hand-typed digit. It does catch the two failures
+    /// that actually reach a reader: a DRIFTED transcription (the constant changes and the description
+    /// keeps the old number, first assertion) and the number spelled out in words, which no future
+    /// change to the constant could ever correct (second assertion, the control).
+    /// </para>
+    /// </summary>
     [Fact]
-    public void Description_InterpolatesTheStalenessThreshold_RatherThanSpellingItOut()
+    public void Description_CarriesTheCurrentStalenessThreshold_AsADigit()
     {
         var description = new FleetStatusTool().Description;
 

@@ -57,9 +57,9 @@ public class FleetGlassStaleMarkerTests
     /// <summary>
     /// #1981 (2026-09-06 round-3 review): the <c>projection</c> banner must stay ranked BELOW the two
     /// other <c>derived_at</c>-keyed rows of <c>glass.html</c>'s banner chain — row 8 (the #1829
-    /// neutral "cadence has widened" line) and row 9 ("derivation may be stuck"). The projection arm
-    /// (a) fires at 90s on exactly the state those two need at ten minutes, so any higher rung makes
-    /// both of them dead code and re-promotes the #1829 false positive that was deliberately demoted.
+    /// neutral "cadence has widened" line) and row 9 ("derivation may be stuck"). Why that ranking is
+    /// forced is recorded once, in spec/baton.md §6 and in the chain's own precedence table; in short,
+    /// a higher rung leaves both of those rows unreachable.
     /// <para>
     /// This property has been lost three times — #1613, #1829, and once inside #1981 itself — and it
     /// is silent until an operator misreads a fault mid-incident, so it gets a check that runs and

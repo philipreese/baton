@@ -190,8 +190,15 @@ internal sealed class DaemonWatchdog : IHostedService
     /// <see cref="BatonPaths.FleetWatchdogVerdictFile"/>, which owns why it is a file of its own.
     /// Best-effort — a diagnosis that cannot be written must not stop the exit that recovers the
     /// daemon, and the log line and exit code below it are the other two copies.
+    /// <para>
+    /// <c>internal</c> rather than private so a test can drive the real writer against a temp
+    /// <see cref="BatonPaths.Root"/> (2026-09-06 round-3 review): the internal constructor defaults
+    /// this seam to a no-op, which is the right default and also meant path resolution, the
+    /// directory create and the line content were unexercised — and a silently broken writer inverts
+    /// the read-out rule in this type's own remarks into the wrong diagnosis.
+    /// </para>
     /// </summary>
-    private static void WriteVerdictFile(string verdict)
+    internal static void WriteVerdictFile(string verdict)
     {
         var path = BatonPaths.FleetWatchdogVerdictFile;
         try

@@ -1,5 +1,6 @@
 using System.Text.Json.Nodes;
 using Baton.Cli.Daemon;
+using Baton.Status;
 
 namespace Baton.Cli.Tests.Daemon;
 
@@ -222,5 +223,73 @@ public class DaemonWatchdogTests
         var root = JsonNode.Parse(ledger.RenderHeartbeatJson())!.AsObject();
         Assert.Equal(T0.ToString("O"), root["tickCompletedAt"]!.GetValue<string>());
         Assert.Empty(root["services"]!.AsObject());
+    }
+
+    /// <summary>2026-09-06 round-3 review: the PRODUCTION verdict writer, driven against a temp
+    /// <c>BATON_HOME</c> — every arm above passes a recorder for that seam instead, and
+    /// <see cref="DaemonWatchdog.WriteVerdictFile"/>'s own doc has what that left uncovered and why it
+    /// matters. This arm is the covering one: given a home, the verdict lands under it.</summary>
+    [Fact]
+    public void TheProductionVerdictWriter_LandsUnderTheFleetDirectoryOfTheHomeItIsGiven()
+    {
+        var tempHome = CreateTempHome();
+        using var scope = BatonEnvironmentSnapshot.BeginScope(
+            BatonEnvironmentSnapshot.Blank with { HomeOverride = tempHome });
+        try
+        {
+            // No directory pre-created on purpose: on a fresh machine the watchdog trips before
+            // anything else has made {Root}/fleet, so the writer's own CreateDirectory is load-bearing.
+            var expected = Path.Combine(
+                tempHome, BatonPaths.FleetDirectoryName, BatonPaths.FleetWatchdogVerdictFileName);
+            Assert.False(File.Exists(expected));
+
+            DaemonWatchdog.WriteVerdictFile("FleetProjectionWriter has not completed a tick");
+
+            Assert.True(File.Exists(expected), $"the verdict must land at {expected}");
+            var line = Assert.Single(File.ReadAllLines(expected));
+            // Timestamped and naming the loop: an undated line, or one that only says "hung", is what
+            // the console already effectively said on 2026-09-06.
+            Assert.Contains("FleetProjectionWriter has not completed a tick", line);
+            Assert.True(DateTimeOffset.TryParse(line.Split(' ')[0], out _),
+                $"the verdict line must open with a parseable timestamp, not: {line}");
+        }
+        finally
+        {
+            DirectoryCleanup.DeleteRecursively(tempHome);
+        }
+    }
+
+    /// <summary>The other polarity, and the reason the writer is best-effort: a write that cannot
+    /// land must not throw. It runs on the watchdog's own dedicated thread, between arming the kill
+    /// timer and calling Exit — an escaping exception there would take out the recovery it is part
+    /// of. A directory sitting where the file goes is the cheapest real failure to stage.</summary>
+    [Fact]
+    public void TheProductionVerdictWriter_DoesNotThrow_WhenTheFileCannotBeWritten()
+    {
+        var tempHome = CreateTempHome();
+        using var scope = BatonEnvironmentSnapshot.BeginScope(
+            BatonEnvironmentSnapshot.Blank with { HomeOverride = tempHome });
+        try
+        {
+            var blocked = Path.Combine(
+                tempHome, BatonPaths.FleetDirectoryName, BatonPaths.FleetWatchdogVerdictFileName);
+            Directory.CreateDirectory(blocked);
+
+            DaemonWatchdog.WriteVerdictFile("FleetProjectionWriter has not completed a tick");
+
+            Assert.True(Directory.Exists(blocked));
+        }
+        finally
+        {
+            DirectoryCleanup.DeleteRecursively(tempHome);
+        }
+    }
+
+    private static string CreateTempHome()
+    {
+        var tempHome = Path.Combine(
+            Path.GetTempPath(), "baton_daemon_watchdog_test_" + Guid.NewGuid().ToString("n"));
+        Directory.CreateDirectory(tempHome);
+        return tempHome;
     }
 }
