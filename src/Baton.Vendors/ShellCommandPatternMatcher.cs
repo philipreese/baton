@@ -508,9 +508,14 @@ public static class ShellCommandPatternMatcher
 
                 if (segmentDenied)
                 {
+                    // #1920: a deny is standing, so the useful thing to say is that retrying a
+                    // variant of the same family cannot work — the measured lane spent a step on
+                    // `git remote -v` and had nothing to go on afterwards.
                     return new ScopedShellResult(
                         ScopedShellVerdict.DeniedSegment, segment,
-                        $"segment '{segment}' matches this session's standing deny list");
+                        $"segment '{segment}' matches this session's standing deny list, which is "
+                        + "permanently closed for this role — a variant of the same command will be "
+                        + $"denied too{RenderGrantedPatternSuffix(allowedPatterns)}");
                 }
             }
 
@@ -518,12 +523,40 @@ public static class ShellCommandPatternMatcher
             {
                 return new ScopedShellResult(
                     ScopedShellVerdict.DeniedSegment, segment,
-                    $"segment '{segment}' does not match any pattern this session's grant allows");
+                    $"segment '{segment}' does not match any pattern this session's grant allows"
+                    + RenderGrantedPatternSuffix(allowedPatterns));
             }
         }
 
         return new ScopedShellResult(ScopedShellVerdict.Allowed, null, null);
     }
+
+    /// <summary>
+    /// #1920: the granted allow list, rendered whole and in catalog order. Deliberately NOT ranked or
+    /// filtered by similarity to the refused segment — nothing here computes such a ranking, and a
+    /// message calling three of thirteen patterns the "closest" ones taught the model that the grant
+    /// was those three. The cap exists only so a pathologically long list cannot swamp the refusal,
+    /// and it says so when it bites rather than truncating silently. Empty on an unscoped grant,
+    /// where there is no allow list to name.
+    /// </summary>
+    private static string RenderGrantedPatternSuffix(IReadOnlyList<string>? allowedPatterns)
+    {
+        var patterns = (allowedPatterns ?? [])
+            .Where(pattern => !string.IsNullOrWhiteSpace(pattern))
+            .ToArray();
+        if (patterns.Length == 0)
+        {
+            return string.Empty;
+        }
+
+        return patterns.Length <= MaxRenderedGrantedPatterns
+            ? $"; this session's granted shell patterns are: {string.Join(", ", patterns)}"
+            : $"; this session's granted shell patterns include: "
+              + $"{string.Join(", ", patterns.Take(MaxRenderedGrantedPatterns))} "
+              + $"({MaxRenderedGrantedPatterns} of {patterns.Length} shown)";
+    }
+
+    private const int MaxRenderedGrantedPatterns = 24;
 
     /// <summary>
     /// The unscoped-grant deny match (#1731): compares a deny pattern's whitespace-tokenized head
@@ -705,7 +738,9 @@ public static class ShellCommandPatternMatcher
                     current.Append(c);
                     continue;
                 case '`' or '$' or '<' or '>' or '(' or ')' or '\\':
-                    unparseableReason = $"unparseable under scoped grant (unsupported character '{c}')";
+                    unparseableReason = c == '\\'
+                        ? "unparseable under scoped grant (unsupported character '\\'); use forward slashes"
+                        : $"unparseable under scoped grant (unsupported character '{c}')";
                     return false;
                 case '\n' or '\r' when permissiveMetacharacters:
                     // #1748 F1: an unquoted top-level newline IS a command separator in bash, so on

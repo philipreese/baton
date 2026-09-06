@@ -194,6 +194,50 @@ public class HookCheckCommandTests
         Assert.Contains("git push", stderr.ToString(), StringComparison.Ordinal);
     }
 
+    // #1920: the claude half of naming the granted alternative, appended here because the matcher is
+    // vendor-agnostic. Both arms, because the clause is conditional — GrantedReadToolHint carries why.
+    [Fact]
+    public void A_denied_shell_command_names_claudes_read_tools_only_when_reads_are_granted()
+    {
+        using var readsGranted = new StringWriter();
+        using var readsWithheld = new StringWriter();
+
+        // Same refused command both times; only the withheld-tool list differs.
+        RunBashWithDeniedTools("cat report.md", "claude:Edit", readsGranted);
+        RunBashWithDeniedTools("cat report.md", "claude:Read", readsWithheld);
+
+        Assert.Contains("read files with Read and search them with Grep",
+            readsGranted.ToString(), StringComparison.Ordinal);
+        Assert.DoesNotContain("Grep", readsWithheld.ToString(), StringComparison.Ordinal);
+    }
+
+    // The other false arm, whose reasoning lives beside the condition in HookCheckCommand: a denied
+    // `git push --force` under implement's unscoped grant is told nothing about reading.
+    [Fact]
+    public void An_unscoped_grants_standing_deny_is_not_answered_with_the_read_tools()
+    {
+        using var stderr = new StringWriter();
+
+        var exitCode = RunBashWithDeniedTools(
+            "git push --force", "claude:Edit", stderr, shellPatternsRaw: "claude:",
+            deniedShellPatternsRaw: "claude:git push*");
+
+        Assert.Equal(HookCheckCommand.DeniedExitCode, exitCode);
+        Assert.DoesNotContain("Grep", stderr.ToString(), StringComparison.Ordinal);
+    }
+
+    private static int RunBashWithDeniedTools(
+        string command, string deniedToolsRaw, TextWriter stderr,
+        string? shellPatternsRaw = "claude:git diff*", string? deniedShellPatternsRaw = null)
+    {
+        var payload = """{"tool_name": "Bash", "tool_input": {"command": COMMAND_JSON}}"""
+            .Replace("COMMAND_JSON", System.Text.Json.JsonSerializer.Serialize(command));
+        using var stdin = new StringReader(payload);
+        return HookCheckCommand.Execute(
+            stdin, stderr, deniedToolsRaw, shellPatternsRaw: shellPatternsRaw,
+            deniedShellPatternsRaw: deniedShellPatternsRaw);
+    }
+
     [Theory]
     [InlineData("git diff $(whoami)")]
     [InlineData("git diff `whoami`")]

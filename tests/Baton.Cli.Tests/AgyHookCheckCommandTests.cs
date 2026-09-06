@@ -73,6 +73,36 @@ public class AgyHookCheckCommandTests
         Assert.Equal("deny", Decide(payload, "agy:", shellPatterns: "agy:git *"));
     }
 
+    // #1920: agy's copy of the same append the claude hook gained — the refused command is told which
+    // tools DO read here. Both arms, since the clause is suppressed when the read tools are withheld;
+    // without the second arm a hardcoded clause would pass the first.
+    [Fact]
+    public void A_denied_run_command_names_agys_read_tools_only_when_they_are_granted()
+    {
+        var readsGranted = DenyReason(Payload("run_command"), "agy:", shellPatterns: "agy:git *");
+        var readsWithheld = DenyReason(
+            Payload("run_command"), "agy:view_file,grep_search,list_dir,find_by_name",
+            shellPatterns: "agy:git *");
+
+        Assert.Contains("read files with view_file and search them with grep_search",
+            readsGranted, StringComparison.Ordinal);
+        Assert.DoesNotContain("grep_search", readsWithheld, StringComparison.Ordinal);
+    }
+
+    private static string DenyReason(string stdinText, string? denied, string? shellPatterns)
+    {
+        using var stdin = new StringReader(stdinText);
+        using var stdout = new StringWriter();
+
+        AgyHookCheckCommand.Execute(
+            stdin, stdout, denied, shellPatternsRaw: shellPatterns,
+            deniedShellPatternsRaw: "agy:", deniedShellOptionTokensRaw: "agy:");
+
+        using var doc = JsonDocument.Parse(stdout.ToString());
+        Assert.Equal("deny", doc.RootElement.GetProperty("decision").GetString());
+        return doc.RootElement.GetProperty("reason").GetString()!;
+    }
+
     [Fact]
     public void A_non_run_command_tool_is_unaffected_by_shell_patterns()
     {

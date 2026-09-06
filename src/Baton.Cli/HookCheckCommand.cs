@@ -313,8 +313,21 @@ public static class HookCheckCommand
                 {
                     // "scoped" would misstate this for implement/janitor (#1731): this rung now also
                     // engages on an unscoped grant that carries a deny list, not only a scoped allow.
+                    //
+                    // #1920: the matcher is vendor-agnostic and cannot name a claude tool, so the
+                    // granted read path is named here, from this session's own withheld-tool list —
+                    // the measured claude review lane spent 46 refusals rediscovering Read/Grep.
+                    //
+                    // Scoped grants only, which is the population #1920 measured. On an UNSCOPED
+                    // grant this rung fires for a standing deny (implement/janitor: git push*,
+                    // git commit*, git rebase*), and answering a write-shaped attempt with two read
+                    // tools is the same non-responsive guidance this issue exists to remove.
+                    var alternative = shellPatternList.Patterns.Count > 0
+                        ? Baton.Vendors.GrantedReadToolHint.ForClaude(denied.Contains)
+                        : null;
                     stderr.WriteLine($"AER: the 'Bash' command is denied under this session's shell " +
-                                     $"grant — {result.Reason}.");
+                                     $"grant — {result.Reason}." +
+                                     (alternative is null ? string.Empty : $" To proceed, {alternative}."));
                     return DeniedExitCode;
                 }
             }
