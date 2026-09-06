@@ -243,6 +243,59 @@ public sealed class RunwayReservationDispatchTests : IDisposable
         }
     }
 
+    /// <summary>
+    /// A composed template binds two vendors (<c>implement-review</c> runs its janitor on the cheap tier,
+    /// which is <c>agy</c>, and the rest on <c>claude</c>) and the refusal is all-or-nothing. When one of
+    /// them holds, the other's row must not read as spend that happened: the dispatch it belongs to never
+    /// ran, so it reserves nothing against the <b>next</b> dispatch on that vendor. Both halves are
+    /// asserted, and the second is what the control arm below discriminates against.
+    /// </summary>
+    [Fact]
+    public async Task A_vendor_admitted_beside_a_held_sibling_reserves_nothing_against_the_next_dispatch()
+    {
+        var testRoot = Path.Combine(Path.GetTempPath(), $"runway-reserve-sibling-{Guid.NewGuid():N}");
+        try
+        {
+            var harvestedAt = DateTimeOffset.UtcNow.AddMinutes(-1);
+            var policy = new FixedReservationPolicy(HeadroomPoints);
+
+            // A template carries its phases' own instructions, so it takes no --spec.
+            Directory.CreateDirectory(testRoot);
+            var composed = new DispatchOptions(
+                "implement-review", SpecFilePath: null, Path.Combine(testRoot, "composed"));
+            var refusal = await Assert.ThrowsAsync<CliArgumentException>(() => DispatchCommand.ExecuteAsync(
+                composed,
+                MixedVendorAdapters,
+                TestContext.Current.CancellationToken,
+                evaluateRunway: vendor => vendor == "agy"
+                    ? new RunwayDecision(vendor, RunwayDisposition.Hold, "'week (all models)' is at 91% (holds at 85%)", At84Percent)
+                    : AdmitAt84(vendor, harvestedAt),
+                reservationPolicy: policy));
+            Assert.Contains("Runway hold", refusal.Message, StringComparison.Ordinal);
+
+            var refused = await ReadLedgerAsync();
+            var admitted = Assert.Single(refused, row => row.Vendor == "claude");
+            Assert.Equal(RunwayAdmissionDecisions.Admitted, admitted.Decision);
+            Assert.False(admitted.Dispatched);
+
+            // The next dispatch on claude sees one point of headroom and nothing legitimately outstanding.
+            var next = await DispatchAsync(testRoot, "next", harvestedAt, policy, adapter: "claude");
+            Assert.Equal(WorkflowStatus.Terminal, next.State.Status);
+            Assert.Equal(0, (await ReadLedgerAsync())[^1].OutstandingReservationPoints);
+        }
+        finally
+        {
+            DirectoryCleanup.DeleteRecursively(testRoot);
+        }
+    }
+
+    private static readonly IReadOnlyDictionary<string, IWorkerAdapter> MixedVendorAdapters =
+        new Dictionary<string, IWorkerAdapter>
+        {
+            ["claude"] = new ContractOutputWorkerAdapter(satisfyOutputs: true),
+            ["agy"] = new ContractOutputWorkerAdapter(satisfyOutputs: true),
+        };
+
     private static RunwayDecision AdmitAt84(string vendor, DateTimeOffset harvestedAt) =>
         new(vendor, RunwayDisposition.Admit, Reason: null, At84Percent, HeadroomPoints, harvestedAt);
 
@@ -251,20 +304,24 @@ public sealed class RunwayReservationDispatchTests : IDisposable
             BatonPaths.RunwayAdmissionLedgerFile, TestContext.Current.CancellationToken);
 
     private static async Task<CommandResult> DispatchAsync(
-        string testRoot, string room, DateTimeOffset harvestedAt, IRunwayReservationPolicy policy) =>
+        string testRoot, string room, DateTimeOffset harvestedAt, IRunwayReservationPolicy policy,
+        string? adapter = null) =>
         await DispatchCommand.ExecuteAsync(
-            await BuildDispatchAsync(testRoot, room),
-            Adapters,
+            await BuildDispatchAsync(testRoot, room, adapter),
+            adapter is null ? Adapters : MixedVendorAdapters,
             TestContext.Current.CancellationToken,
             evaluateRunway: vendor => AdmitAt84(vendor, harvestedAt),
             reservationPolicy: policy);
 
-    private static async Task<DispatchOptions> BuildDispatchAsync(string testRoot, string room)
+    private static async Task<DispatchOptions> BuildDispatchAsync(
+        string testRoot, string room, string? adapter = null) =>
+        new("advise", await WriteSpecAsync(testRoot), Path.Combine(testRoot, room), Adapter: adapter ?? "fake");
+
+    private static async Task<string> WriteSpecAsync(string testRoot)
     {
         Directory.CreateDirectory(testRoot);
         var specPath = Path.Combine(testRoot, "spec.md");
         await File.WriteAllTextAsync(specPath, "Weigh the options for X.", TestContext.Current.CancellationToken);
-
-        return new DispatchOptions("advise", specPath, Path.Combine(testRoot, room), Adapter: "fake");
+        return specPath;
     }
 }

@@ -57,6 +57,12 @@ namespace Baton.Runway;
 /// reservation arithmetic ran.
 /// </param>
 /// <param name="EstimatedBurnPoints">What <see cref="IRunwayReservationPolicy"/> estimated this dispatch would burn.</param>
+/// <param name="Dispatched">
+/// <c>false</c> when this evaluation's decision was overtaken by the dispatch as a whole being refused.
+/// Absent means the dispatch proceeded, which is what every row written before this field existed means
+/// too. spec/baton.md §7 states why one dispatch is one all-or-nothing admission decision and what this
+/// field costs to omit; the mechanics are in <see cref="RunwayAdmissionLedgerStore.Decide"/>.
+/// </param>
 /// <param name="EstimateSource">
 /// Which arm of the policy produced <see cref="EstimatedBurnPoints"/> — <c>flat-default</c>,
 /// <c>ledger-median</c>, <c>off</c>. A number with no provenance cannot be tuned, so the provenance is
@@ -105,7 +111,10 @@ public sealed record RunwayAdmissionEntry(
     double? EstimatedBurnPoints = null,
     [property: JsonPropertyName("estimateSource")]
     [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
-    string? EstimateSource = null);
+    string? EstimateSource = null,
+    [property: JsonPropertyName("dispatched")]
+    [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    bool? Dispatched = null);
 
 /// <summary>
 /// The closed set of <see cref="RunwayAdmissionEntry.Decision"/> tokens (#1896's own wording). Strings
@@ -115,7 +124,8 @@ public sealed record RunwayAdmissionEntry(
 /// </summary>
 public static class RunwayAdmissionDecisions
 {
-    /// <summary>New spend was let through.</summary>
+    /// <summary>This vendor's own gate let new spend through — see <see cref="RunwayAdmissionEntry.Dispatched"/>
+    /// for the case where the surrounding dispatch was refused anyway.</summary>
     public const string Admitted = "admitted";
 
     /// <summary>New spend was refused, and the dispatch exited non-zero.</summary>

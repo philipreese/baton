@@ -82,20 +82,29 @@ public static class RunwayAdmissionLedgerStore
         new("baton-runway-admissions", "runway admission ledger", _ => null);
 
     /// <summary>
-    /// Decides this dispatch's admission against everything already reserved on the same vendor, appends
-    /// the resulting fact, and returns it — all inside one lock acquisition.
+    /// Decides one dispatch's admissions — <b>all its vendors at once</b> — against everything already
+    /// reserved on each of them, appends the resulting facts, and returns them, all inside one lock
+    /// acquisition.
     /// </summary>
     /// <remarks>
+    /// <para>
     /// <b>The reservation arm can only ever turn an Admit into a Hold, and only when the counters were
     /// readable.</b> A gate Hold is recorded as it stands, and an
     /// <see cref="RunwayAdmissionRequest.Unmeasured"/> vendor is never touched by the arithmetic at all —
     /// spec/baton.md §7 states why those two are excluded and what excluding them protects.
+    /// </para>
+    /// <para>
+    /// <b>The whole dispatch is one batch</b> because its outcome is all-or-nothing: a composed template
+    /// binding two vendors runs on both or on neither. Deciding them together is what lets a sibling's
+    /// hold be reflected in the admitted rows before they are ever written — see
+    /// <see cref="RunwayAdmissionEntry.Dispatched"/>.
+    /// </para>
     /// </remarks>
     /// <exception cref="IOException">Propagated, exactly as the other two ledgers do — the caller logs and swallows.</exception>
-    public static Task<RunwayAdmissionEntry> ReserveAndRecordAsync(
-        RunwayAdmissionRequest request, string ledgerFilePath, CancellationToken cancellationToken = default)
+    public static Task<IReadOnlyList<RunwayAdmissionEntry>> ReserveAndRecordAsync(
+        IReadOnlyList<RunwayAdmissionRequest> requests, string ledgerFilePath, CancellationToken cancellationToken = default)
     {
-        ArgumentNullException.ThrowIfNull(request);
+        ArgumentNullException.ThrowIfNull(requests);
         ArgumentException.ThrowIfNullOrEmpty(ledgerFilePath);
 
         JsonLinesLedger<RunwayAdmissionEntry>.EnsureParentDirectory(ledgerFilePath);
@@ -104,9 +113,13 @@ public static class RunwayAdmissionLedgerStore
             ledgerFilePath,
             () =>
             {
-                var entry = Decide(request, Ledger.ReadAllUnlocked(ledgerFilePath));
-                Append(entry, ledgerFilePath);
-                return entry;
+                var entries = Decide(requests, Ledger.ReadAllUnlocked(ledgerFilePath));
+                foreach (var entry in entries)
+                {
+                    Append(entry, ledgerFilePath);
+                }
+
+                return entries;
             },
             cancellationToken);
     }
@@ -119,12 +132,30 @@ public static class RunwayAdmissionLedgerStore
     /// <summary>
     /// The pure decision half — <paramref name="existingRows"/> is the ledger as already written, and
     /// nothing here touches a file. Public because it has a production caller besides
-    /// <see cref="ReserveAndRecordAsync"/>: the dispatch path's fail-open arm builds the same fact from an
+    /// <see cref="ReserveAndRecordAsync"/>: the dispatch path's fail-open arm builds the same facts from an
     /// empty row list when the ledger could not be written at all, so a fleet with an unwritable ledger
     /// still gets the counters' own verdict rather than a crash. It is also what lets the reconciliation
     /// rule be pinned by a test without a file lock.
     /// </summary>
-    public static RunwayAdmissionEntry Decide(
+    public static IReadOnlyList<RunwayAdmissionEntry> Decide(
+        IReadOnlyList<RunwayAdmissionRequest> requests, IReadOnlyList<RunwayAdmissionEntry> existingRows)
+    {
+        ArgumentNullException.ThrowIfNull(requests);
+
+        var entries = requests.Select(request => DecideOne(request, existingRows)).ToList();
+
+        // A plain Held token exists only when no --override-runway reason was passed, so one of them here
+        // means the caller is about to refuse the dispatch outright. Nothing runs, on any vendor, so no
+        // row in this batch may reserve headroom or read as spend that happened.
+        if (!entries.Any(entry => entry.Decision == RunwayAdmissionDecisions.Held))
+        {
+            return entries;
+        }
+
+        return entries.Select(entry => entry with { Dispatched = false }).ToList();
+    }
+
+    private static RunwayAdmissionEntry DecideOne(
         RunwayAdmissionRequest request, IReadOnlyList<RunwayAdmissionEntry> existingRows)
     {
         var baseEntry = new RunwayAdmissionEntry(
@@ -190,8 +221,9 @@ public static class RunwayAdmissionLedgerStore
     /// The spend on <paramref name="vendor"/> that the snapshot harvested at <paramref name="harvestedAt"/>
     /// cannot have counted: every row recorded at or after that instant whose work actually proceeded.
     /// A plain <see cref="RunwayAdmissionDecisions.Held"/> row is excluded because that dispatch never
-    /// ran, and an <see cref="RunwayAdmissionDecisions.Unmeasured"/> one because it is on a vendor with no
-    /// counters to reserve against.
+    /// ran, an <see cref="RunwayAdmissionDecisions.Unmeasured"/> one because it is on a vendor with no
+    /// counters to reserve against, and a <c>Dispatched = false</c> one because a sibling vendor's hold
+    /// stopped it.
     /// </summary>
     private static double OutstandingPoints(
         IReadOnlyList<RunwayAdmissionEntry> rows, string vendor, DateTimeOffset harvestedAt)
@@ -201,6 +233,7 @@ public static class RunwayAdmissionLedgerStore
         {
             if (!string.Equals(row.Vendor, vendor, StringComparison.OrdinalIgnoreCase)
                 || row.At < harvestedAt
+                || row.Dispatched is false
                 || row.EstimatedBurnPoints is not { } points
                 || points <= 0)
             {

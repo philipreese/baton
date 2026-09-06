@@ -3724,6 +3724,14 @@ harvest boundary. `RunwayAdmissionLedgerStore`'s own remarks state the rule and 
 ruling here is only that a `held` row reserves nothing (that dispatch never ran) while an `admitted` or
 `held-overridden` one does.
 
+**A dispatch is one admission decision, not one per vendor.** The gate's verdicts stay per-vendor — a
+claude hold never holds an agy dispatch, per the ruling above — but the *refusal* is all-or-nothing:
+when a composed template binds two vendors and either one holds, nothing runs, on either. So the whole
+dispatch's rows are decided and written in one call, and a vendor admitted beside a held sibling is
+recorded with `dispatched: false`. Without that it would read as spend that happened and would reserve
+headroom against the next dispatch on that vendor until the following harvest cleared it — a phantom
+reservation, in the file the policy is meant to be retuned from.
+
 **The arithmetic is a pluggable policy, never a constant.** `IRunwayReservationPolicy`, selected by
 `DaemonSettings.RunwayHold.ReservationPolicy` through `RunwayReservationPolicies.Resolve` — fleet-wide
 only, because two vendors' reservations priced in different units would not be comparable. Three ship:

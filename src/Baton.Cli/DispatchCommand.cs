@@ -180,7 +180,7 @@ public static class DispatchCommand
         // for the same reason the drain refusal is the first: a refusal here must leave no
         // half-provisioned room behind (Program's typed boundary still lands a ValidationRefused
         // terminal.json in the room it creates, the same shape every other pre-run refusal has).
-        bindings = await ApplyRunwayGateAsync(options, bindings, evaluateRunway, reservationPolicy, cancellationToken)
+        bindings = await ApplyRunwayGateAsync(options, bindings, workspace, evaluateRunway, reservationPolicy, cancellationToken)
             .ConfigureAwait(false);
 
         Directory.CreateDirectory(options.RoomDirectoryPath);
@@ -512,6 +512,7 @@ public static class DispatchCommand
     private static async Task<IReadOnlyDictionary<string, WorkerBindingConfigEntry>> ApplyRunwayGateAsync(
         DispatchOptions options,
         IReadOnlyDictionary<string, WorkerBindingConfigEntry> bindings,
+        string workspace,
         Func<string, RunwayDecision>? evaluateRunway,
         IRunwayReservationPolicy? reservationPolicy,
         CancellationToken cancellationToken)
@@ -528,13 +529,6 @@ public static class DispatchCommand
         var evaluate = evaluateRunway ?? CreateDiskRunwayEvaluator(settings);
         var policy = reservationPolicy ?? RunwayReservationPolicies.Resolve(settings.RunwayHold.ReservationPolicy);
 
-        // Read OUTSIDE the ledger's critical section, deliberately: the lock body below must stay
-        // synchronous (Mutex ownership is thread-affine), and this can spawn git to resolve a
-        // repository identity. A policy that never reads the ledger pays neither cost.
-        var ledgerRows = policy.UsesCostLedger
-            ? await TryReadCostLedgerAsync(options, cancellationToken).ConfigureAwait(false)
-            : [];
-
         var decisions = new Dictionary<string, RunwayDecision>(StringComparer.Ordinal);
         foreach (var vendor in bindings.Values
             .Select(b => b.Adapter)
@@ -545,15 +539,23 @@ public static class DispatchCommand
             decisions[vendor] = evaluate(vendor);
         }
 
+        // Read OUTSIDE the ledger's critical section, deliberately: the lock body below must stay
+        // synchronous (Mutex ownership is thread-affine), and this spawns git to resolve a repository
+        // identity. Skipped entirely when no vendor reached the reservation arm — a policy that never
+        // reads the ledger, and a dispatch every one of whose vendors was already held or is unmeasured,
+        // both pay nothing, because an estimate cannot change any of those outcomes.
+        var ledgerRows = policy.UsesCostLedger && decisions.Values.Any(d => d.HeadroomPoints is not null)
+            ? await TryReadCostLedgerAsync(options, workspace, cancellationToken).ConfigureAwait(false)
+            : [];
+
         var now = DateTimeOffset.UtcNow;
-        var admissions = new Dictionary<string, RunwayAdmission>(StringComparer.Ordinal);
+        var requests = new List<RunwayAdmissionRequest>();
         foreach (var (vendor, decision) in decisions)
         {
             var thresholds = settings.RunwayHold.For(vendor);
-            var estimate = policy.Estimate(
-                new RunwayEstimateContext(vendor, ResolveSoleRoleFor(bindings, vendor), ledgerRows));
+            var role = ResolveSoleRoleFor(bindings, vendor);
 
-            var request = new RunwayAdmissionRequest(
+            requests.Add(new RunwayAdmissionRequest(
                 Vendor: vendor,
                 GateHeld: decision.IsHold,
                 Unmeasured: decision.Reason == RunwayGate.UnmeasuredReason,
@@ -564,15 +566,17 @@ public static class DispatchCommand
                 MaxSnapshotAgeHours: thresholds.EffectiveMaxSnapshotAge.TotalHours,
                 SnapshotHarvestedAt: decision.SnapshotHarvestedAt,
                 HeadroomPoints: decision.HeadroomPoints,
-                Estimate: estimate,
+                Estimate: policy.Estimate(new RunwayEstimateContext(vendor, role, ledgerRows)),
                 Room: BatonPaths.RecordKey(options.RoomDirectoryPath),
-                Role: ResolveSoleRoleFor(bindings, vendor),
+                Role: role,
                 OverrideReason: options.OverrideRunwayReason,
-                At: now);
-
-            admissions[vendor] = ToBindingRecord(
-                await RecordAdmissionAsync(request, cancellationToken).ConfigureAwait(false));
+                At: now));
         }
+
+        // One call for the whole dispatch, not one per vendor: the refusal below is all-or-nothing, and
+        // the store has to know that before it writes any row (RunwayAdmissionEntry.Dispatched).
+        var admissions = (await RecordAdmissionsAsync(requests, cancellationToken).ConfigureAwait(false))
+            .ToDictionary(entry => entry.Vendor, ToBindingRecord, StringComparer.Ordinal);
 
         var holds = admissions.Values
             .Where(a => a.Decision is RunwayAdmissionDecisions.Held or RunwayAdmissionDecisions.HeldOverridden)
@@ -595,7 +599,7 @@ public static class DispatchCommand
         if (holds.Count > 0 && options.OverrideRunwayReason is null)
         {
             var detail = string.Join(
-                "; ", holds.Select(h => $"{h.Vendor}: {h.Reason} [{DescribeCounters(h)}]"));
+                "; ", holds.Select(h => $"{h.Vendor}: {h.Reason} [{decisions[h.Vendor].DescribeCounters()}]"));
             throw new CliArgumentException(
                 $"Runway hold — not dispatching new work on {string.Join(", ", holds.Select(h => h.Vendor))}. {detail}. "
                 + "Work already running is unaffected.",
@@ -633,26 +637,28 @@ public static class DispatchCommand
     }
 
     /// <summary>
-    /// Appends the fact and returns it. <b>Fails open</b> — spec/baton.md §7 states that posture and what
-    /// it costs, and this comment does not restate it. The mechanics here: the fallback is built from an
-    /// empty row list with the headroom cleared, so it carries the counters' own verdict and no
-    /// <see cref="RunwayAdmissionEntry.OutstandingReservationPoints"/>.
+    /// Appends this dispatch's facts and returns them. <b>Fails open</b> — spec/baton.md §7 states that
+    /// posture and what it costs, and this comment does not restate it. The mechanics here: the fallback
+    /// is built from an empty row list with the headroom cleared, so it carries the counters' own verdict
+    /// and no <see cref="RunwayAdmissionEntry.OutstandingReservationPoints"/>.
     /// </summary>
-    private static async Task<RunwayAdmissionEntry> RecordAdmissionAsync(
-        RunwayAdmissionRequest request, CancellationToken cancellationToken)
+    private static async Task<IReadOnlyList<RunwayAdmissionEntry>> RecordAdmissionsAsync(
+        IReadOnlyList<RunwayAdmissionRequest> requests, CancellationToken cancellationToken)
     {
         try
         {
             return await RunwayAdmissionLedgerStore
-                .ReserveAndRecordAsync(request, BatonPaths.RunwayAdmissionLedgerFile, cancellationToken)
+                .ReserveAndRecordAsync(requests, BatonPaths.RunwayAdmissionLedgerFile, cancellationToken)
                 .ConfigureAwait(false);
         }
         catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or WaitHandleCannotBeOpenedException)
         {
             Console.Error.WriteLine(
-                $"Could not record the runway admission decision for '{request.Vendor}': {ex.Message} "
+                $"Could not record the runway admission decision(s) for "
+                + $"'{string.Join("', '", requests.Select(r => r.Vendor))}': {ex.Message} "
                 + "The counters' own verdict still applies; no headroom was reserved across dispatches.");
-            return RunwayAdmissionLedgerStore.Decide(request with { HeadroomPoints = null }, []);
+            return RunwayAdmissionLedgerStore.Decide(
+                [.. requests.Select(r => r with { HeadroomPoints = null })], []);
         }
     }
 
@@ -670,13 +676,6 @@ public static class DispatchCommand
             entry.OutstandingReservationPoints,
             entry.EstimatedBurnPoints,
             entry.EstimateSource);
-
-    /// <summary>Same one-line rendering <c>RunwayDecision.DescribeCounters</c> produces, for the refusal
-    /// text now built from the recorded admission rather than the raw decision.</summary>
-    private static string DescribeCounters(RunwayAdmission admission) =>
-        admission.Counters is not { Count: > 0 } counters
-            ? "no counters readable"
-            : string.Join(", ", counters.Select(c => c.PercentUsed is { } pct ? $"{c.Window} {pct}%" : $"{c.Window} unknown"));
 
     /// <summary>
     /// The one worker role bound to <paramref name="vendor"/>, or null when a composed template bound
@@ -711,11 +710,18 @@ public static class DispatchCommand
     /// ledger, or an unreadable one all resolve to no evidence, which the policy reads as "use the flat
     /// default" — the same fail-open posture <see cref="RepositoryIdentityResolver"/> itself documents.
     /// </summary>
+    /// <remarks>
+    /// Falls back to <paramref name="workspace"/>, never to the process's current directory, for the case
+    /// <see cref="RepositoryIdentityResolver"/>'s own remarks name: a session sitting in one checkout
+    /// while dispatching work into another. Estimating a burn from an unrelated repository's cost rows
+    /// would be quietly wrong rather than loudly absent, which is the failure this whole ledger exists to
+    /// stop producing.
+    /// </remarks>
     private static async Task<IReadOnlyList<CostLedgerEntry>> TryReadCostLedgerAsync(
-        DispatchOptions options, CancellationToken cancellationToken)
+        DispatchOptions options, string workspace, CancellationToken cancellationToken)
     {
         var identity = await RepositoryIdentityResolver
-            .TryResolveAsync(options.RepoPath ?? Directory.GetCurrentDirectory(), cancellationToken)
+            .TryResolveAsync(options.RepoPath ?? workspace, cancellationToken)
             .ConfigureAwait(false);
         return identity is null
             ? []

@@ -12,7 +12,15 @@ public sealed class RunwayAdmissionLedgerStoreTests
 {
     private static readonly DateTimeOffset HarvestedAt = new(2026, 9, 5, 12, 0, 0, TimeSpan.Zero);
 
+    /// <summary>The store decides a whole dispatch at once; every arm below but
+    /// <see cref="A_sibling_vendors_hold_stops_the_admitted_vendor_reserving_anything"/> is about a
+    /// one-vendor dispatch, so it unwraps here rather than at fourteen call sites.</summary>
+    private static RunwayAdmissionEntry Decide(
+        RunwayAdmissionRequest request, IReadOnlyList<RunwayAdmissionEntry> existingRows) =>
+        RunwayAdmissionLedgerStore.Decide([request], existingRows).Single();
+
     private static RunwayAdmissionRequest Request(
+        string vendor = "claude",
         double estimatePoints = 1.0,
         double? headroomPoints = 1.0,
         bool gateHeld = false,
@@ -20,7 +28,7 @@ public sealed class RunwayAdmissionLedgerStoreTests
         string? overrideReason = null,
         DateTimeOffset? snapshotHarvestedAt = null,
         DateTimeOffset? at = null) =>
-        new(Vendor: "claude",
+        new(Vendor: vendor,
             GateHeld: gateHeld,
             Unmeasured: unmeasured,
             GateReason: gateHeld ? "'week (all models)' is at 87% (holds at 85%)" : null,
@@ -37,12 +45,12 @@ public sealed class RunwayAdmissionLedgerStoreTests
             At: at ?? HarvestedAt.AddMinutes(1));
 
     private static RunwayAdmissionEntry AdmittedRow(double points, DateTimeOffset at) =>
-        RunwayAdmissionLedgerStore.Decide(Request(estimatePoints: points, at: at), []);
+        Decide(Request(estimatePoints: points, at: at), []);
 
     [Fact]
     public void An_empty_ledger_admits_a_dispatch_that_fits_the_headroom()
     {
-        var entry = RunwayAdmissionLedgerStore.Decide(Request(estimatePoints: 1.0, headroomPoints: 1.0), []);
+        var entry = Decide(Request(estimatePoints: 1.0, headroomPoints: 1.0), []);
 
         Assert.Equal(RunwayAdmissionDecisions.Admitted, entry.Decision);
         Assert.Equal(RunwayAdmissionDecidedBy.Counters, entry.DecidedBy);
@@ -54,7 +62,7 @@ public sealed class RunwayAdmissionLedgerStoreTests
     {
         var existing = new[] { AdmittedRow(1.0, HarvestedAt.AddMinutes(1)) };
 
-        var entry = RunwayAdmissionLedgerStore.Decide(Request(estimatePoints: 1.0, headroomPoints: 1.0), existing);
+        var entry = Decide(Request(estimatePoints: 1.0, headroomPoints: 1.0), existing);
 
         Assert.Equal(RunwayAdmissionDecisions.Held, entry.Decision);
         Assert.Equal(RunwayAdmissionDecidedBy.Reservation, entry.DecidedBy);
@@ -69,7 +77,7 @@ public sealed class RunwayAdmissionLedgerStoreTests
     {
         var existing = new[] { AdmittedRow(1.0, HarvestedAt.AddMinutes(-30)) };
 
-        var entry = RunwayAdmissionLedgerStore.Decide(Request(estimatePoints: 1.0, headroomPoints: 1.0), existing);
+        var entry = Decide(Request(estimatePoints: 1.0, headroomPoints: 1.0), existing);
 
         Assert.Equal(RunwayAdmissionDecisions.Admitted, entry.Decision);
         Assert.Equal(0, entry.OutstandingReservationPoints);
@@ -80,21 +88,19 @@ public sealed class RunwayAdmissionLedgerStoreTests
     [Fact]
     public void A_held_row_reserves_nothing_while_an_overridden_one_does()
     {
-        var held = RunwayAdmissionLedgerStore.Decide(
-            Request(estimatePoints: 5.0, headroomPoints: 1.0, at: HarvestedAt.AddMinutes(1)), []);
+        var held = Decide(Request(estimatePoints: 5.0, headroomPoints: 1.0, at: HarvestedAt.AddMinutes(1)), []);
         Assert.Equal(RunwayAdmissionDecisions.Held, held.Decision);
 
-        var afterHeld = RunwayAdmissionLedgerStore.Decide(Request(estimatePoints: 1.0, headroomPoints: 1.0), [held]);
+        var afterHeld = Decide(Request(estimatePoints: 1.0, headroomPoints: 1.0), [held]);
         Assert.Equal(RunwayAdmissionDecisions.Admitted, afterHeld.Decision);
         Assert.Equal(0, afterHeld.OutstandingReservationPoints);
 
-        var overridden = RunwayAdmissionLedgerStore.Decide(
+        var overridden = Decide(
             Request(estimatePoints: 5.0, headroomPoints: 1.0, overrideReason: "conductor lane", at: HarvestedAt.AddMinutes(1)),
             []);
         Assert.Equal(RunwayAdmissionDecisions.HeldOverridden, overridden.Decision);
 
-        var afterOverride = RunwayAdmissionLedgerStore.Decide(
-            Request(estimatePoints: 1.0, headroomPoints: 1.0), [overridden]);
+        var afterOverride = Decide(Request(estimatePoints: 1.0, headroomPoints: 1.0), [overridden]);
         Assert.Equal(RunwayAdmissionDecisions.Held, afterOverride.Decision);
         Assert.Equal(5.0, afterOverride.OutstandingReservationPoints);
     }
@@ -109,8 +115,7 @@ public sealed class RunwayAdmissionLedgerStoreTests
     {
         var existing = new[] { AdmittedRow(1000, HarvestedAt.AddMinutes(1)) };
 
-        var entry = RunwayAdmissionLedgerStore.Decide(
-            Request(estimatePoints: 1000, gateHeld: gateHeld, unmeasured: unmeasured), existing);
+        var entry = Decide(Request(estimatePoints: 1000, gateHeld: gateHeld, unmeasured: unmeasured), existing);
 
         Assert.Equal(expectedDecision, entry.Decision);
         Assert.Equal(expectedDecidedBy, entry.DecidedBy);
@@ -124,17 +129,64 @@ public sealed class RunwayAdmissionLedgerStoreTests
     {
         var existing = new[] { AdmittedRow(1000, HarvestedAt.AddMinutes(1)) };
 
-        var entry = RunwayAdmissionLedgerStore.Decide(Request(headroomPoints: null), existing);
+        var entry = Decide(Request(headroomPoints: null), existing);
 
         Assert.Equal(RunwayAdmissionDecisions.Admitted, entry.Decision);
         Assert.Null(entry.OutstandingReservationPoints);
     }
 
     /// <summary>
-    /// The race the issue was filed for. Reserving and recording share ONE
-    /// <c>MutexGuardedFileLock</c> acquisition, so of two writers starting against an empty ledger at the
-    /// same instant exactly one can see nothing outstanding. Two lock acquisitions — read then append —
-    /// would let both admit, which is the shape this arm discriminates against.
+    /// Two vendors, one held: the whole dispatch is refused, so the admitted vendor's row must say the
+    /// work did not happen and must reserve nothing afterwards — the phantom reservation spec/baton.md §7
+    /// names. Both halves are asserted; the polarity arm below is the same pairing with no sibling hold.
+    /// </summary>
+    [Fact]
+    public void A_sibling_vendors_hold_stops_the_admitted_vendor_reserving_anything()
+    {
+        var refused = RunwayAdmissionLedgerStore.Decide(
+            [
+                Request(vendor: "claude", estimatePoints: 1.0, headroomPoints: 40.0),
+                Request(vendor: "agy", gateHeld: true),
+            ],
+            []);
+
+        var admitted = refused.Single(e => e.Vendor == "claude");
+        Assert.Equal(RunwayAdmissionDecisions.Admitted, admitted.Decision);
+        Assert.False(admitted.Dispatched);
+
+        // ... and it reserves nothing against the next dispatch on its own vendor.
+        var next = Decide(Request(vendor: "claude", estimatePoints: 1.0, headroomPoints: 1.0), refused);
+        Assert.Equal(RunwayAdmissionDecisions.Admitted, next.Decision);
+        Assert.Equal(0, next.OutstandingReservationPoints);
+    }
+
+    /// <summary>The control arm for the pairing above: same two vendors, neither held, so the dispatch
+    /// proceeded and the admitted row reserves as usual. Without this, the assertions above would also
+    /// pass against an implementation that never reserved anything at all.</summary>
+    [Fact]
+    public void Two_vendors_that_both_admit_leave_the_dispatch_marked_as_run()
+    {
+        var proceeded = RunwayAdmissionLedgerStore.Decide(
+            [
+                Request(vendor: "claude", estimatePoints: 1.0, headroomPoints: 40.0),
+                Request(vendor: "agy", estimatePoints: 1.0, headroomPoints: 40.0),
+            ],
+            []);
+
+        Assert.All(proceeded, e => Assert.Null(e.Dispatched));
+
+        var next = Decide(Request(vendor: "claude", estimatePoints: 1.0, headroomPoints: 1.0), proceeded);
+        Assert.Equal(RunwayAdmissionDecisions.Held, next.Decision);
+        Assert.Equal(1.0, next.OutstandingReservationPoints);
+    }
+
+    /// <summary>
+    /// The race the issue was filed for, driven through the real lock. What it pins is that both writers'
+    /// rows land and the arithmetic they land with is consistent — exactly one sees an empty ledger. Note
+    /// what it does <b>not</b> do: the critical section is one small read plus one append, so two tasks
+    /// will often serialize by luck, and this arm would frequently pass against a read-then-append
+    /// implementation too. The rule itself is pinned by the pure arms above; this one is here because a
+    /// lock that deadlocks or double-writes under real contention would show up nowhere else.
     /// </summary>
     [Fact]
     public async Task Two_concurrent_writers_never_both_see_an_empty_ledger()
@@ -142,10 +194,12 @@ public sealed class RunwayAdmissionLedgerStoreTests
         var path = Path.Combine(Path.GetTempPath(), $"runway-ledger-{Guid.NewGuid():N}", "runway-admissions.jsonl");
         try
         {
-            var both = await Task.WhenAll(
+            var both = (await Task.WhenAll(
                 Enumerable.Range(0, 2).Select(_ => Task.Run(() =>
                     RunwayAdmissionLedgerStore.ReserveAndRecordAsync(
-                        Request(estimatePoints: 1.0, headroomPoints: 1.0), path, TestContext.Current.CancellationToken))));
+                        [Request(estimatePoints: 1.0, headroomPoints: 1.0)], path, TestContext.Current.CancellationToken)))))
+                .SelectMany(entries => entries)
+                .ToList();
 
             Assert.Equal(1, both.Count(e => e.Decision == RunwayAdmissionDecisions.Admitted));
             Assert.Equal(1, both.Count(e => e.DecidedBy == RunwayAdmissionDecidedBy.Reservation));
