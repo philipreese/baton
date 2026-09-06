@@ -2044,17 +2044,61 @@ def snapshot_post_body(wrapped: dict, derived_at: str | None) -> str:
     return json.dumps({**wrapped, "derived_at": derived_at})
 
 
-def heartbeat_ping_payload(derived_at: str | None, ping_interval_s: float,
+def heartbeat_ping_payload(derived_at: str | None, ping_interval_s: float | None,
                            pending_push_age_s: float | None) -> dict:
     """The `/heartbeat` ping body (#1486 heartbeat, #1613 derived_at, #1981 derived_ping_interval_s).
     A function rather than a dict literal inside main() so `--selftest` can exercise the contract the
     Worker reads: `pending_push_age_s` is OMITTED when nothing is pending (absent, never 0 -- 0 is a
-    meaningful "waiting since this instant"), and the cadence is always present, because a reader
-    with no cadence has to leave its staleness arm unarmed (worker.core.mjs)."""
-    payload = {"derived_at": derived_at, "derived_ping_interval_s": round(ping_interval_s, 1)}
+    meaningful "waiting since this instant").
+
+    The cadence is present whenever the pusher knows it. A `ping_interval_s` of None means it does
+    NOT -- the only such case today is a live-429 cap whose `resets_at` did not parse (see
+    `reported_ping_interval_s`) -- and the field is then omitted rather than guessed, which leaves the
+    reader's second staleness arm unarmed (worker.core.mjs) instead of armed on a wrong number."""
+    payload: dict = {"derived_at": derived_at}
+    if ping_interval_s is not None:
+        payload["derived_ping_interval_s"] = round(ping_interval_s, 1)
     if pending_push_age_s is not None:
         payload["pending_push_age_s"] = pending_push_age_s
     return payload
+
+
+def reported_ping_interval_s(ledger: dict, ping_interval_s: float, now_ts: float) -> float | None:
+    """#1981 (2026-09-06 round-3 review, finding 3): the cadence a ping REPORTS, which is not always
+    the cadence it was paced to. The reader's arm (b) marks the projection unreachable at 3x whatever
+    this says, so this has to answer "how long until another `derived_at` can reach the mailbox", not
+    "how long until this loop would next like to send one".
+
+    Those differ only after a live 429. `adaptive_producer_interval_s` widens smoothly as the
+    heartbeat sub-budget is spent, so on the GRACEFUL path the last cadence reported before the gate
+    closes is already most of the remaining day and arm (b) self-disarms. `mark_kv_write_cap_exhausted`
+    closes the same gate in ONE step, with the last reported cadence still narrow (300s at the floor,
+    ~1440s typically) -- so a reader would call a healthy daemon unreachable 15 to 72 minutes later.
+    Against that, the honest cadence is the whole cap window: nothing is going out until `resets_at`.
+
+    Returns None when the ledger says the cap is live but `resets_at` is missing or unparseable: the
+    interval is then genuinely unknown, and the payload omits the field (see `heartbeat_ping_payload`)
+    so the reader fails quiet rather than arming on the pre-cap number.
+
+    **Reachability, stated because it is the honest half of this fix (round-3 review).** During a live
+    cap the widened value cannot actually reach the wire: `mark_kv_write_cap_exhausted` pins the
+    heartbeat sub-budget in the same call that stores `resets_at`, so `heartbeat_allowed` is False for
+    every cycle in which the key exists, and Cloudflare is refusing the write anyway -- the same reason
+    #1829's one final exhaustion-notice snapshot may never land. What this closes is the CONTRACT (the
+    cadence the pusher reports is never one it cannot honour) and the overclaiming comment on
+    worker.core.mjs's PROJECTION_UNREACHABLE_CADENCE_MULTIPLE. The residual stands and is recorded
+    there: for the length of a hard-429 cap window, arm (b) can report `unreachable` about a healthy
+    daemon through `fleet_status`."""
+    resets_at = ledger.get("kv_write_cap_resets_at")
+    if not (isinstance(resets_at, str) and resets_at):
+        return ping_interval_s
+    try:
+        resets_dt = datetime.fromisoformat(resets_at.replace("Z", "+00:00"))
+    except (TypeError, ValueError):
+        return None
+    if resets_dt.tzinfo is None:
+        resets_dt = resets_dt.replace(tzinfo=timezone.utc)
+    return max(ping_interval_s, resets_dt.timestamp() - now_ts)
 
 
 def snapshot_hash(wrapped: dict) -> str:
@@ -4095,8 +4139,14 @@ def main() -> None:
                         # decidable -- the cadence is adaptive (adaptive_producer_interval_s), so a
                         # reader holding DERIVED_PING_INTERVAL_SECONDS holds the floor, not the
                         # cadence, and alarms through most of every healthy cycle.
+                        # Round-3 review, finding 3: what gets REPORTED is not always what this ping
+                        # was paced to -- after a live 429 the honest cadence is the rest of the cap
+                        # window, and an unknown one is omitted. reported_ping_interval_s owns why.
                         payload = json.dumps(
-                            heartbeat_ping_payload(last_derived_at, ping_interval, pending_push_age))
+                            heartbeat_ping_payload(
+                                last_derived_at,
+                                reported_ping_interval_s(hb_ledger, ping_interval, now_ts),
+                                pending_push_age))
                         extra_state = {DERIVED_PING_STATE_KEY: now_ts} if derived_ping_due else None
                         # F3(b): charge before the POST -- send_heartbeat_and_record's own
                         # POST-then-record ordering (for HEARTBEAT_STATE_KEY/DERIVED_PING_STATE_KEY)
@@ -4545,6 +4595,40 @@ def _selftest() -> int:
     check("(#1981) pending_push_age_s stays omitted when nothing is pending, and 0 is not 'nothing'",
           "pending_push_age_s" not in heartbeat_ping_payload("x", 300.0, None)
           and heartbeat_ping_payload("x", 300.0, 0)["pending_push_age_s"] == 0)
+
+    # -- #1981 (2026-09-06 ROUND-3 review, finding 3): the graceful-depletion argument above does not
+    # cover a hard 429. mark_kv_write_cap_exhausted slams the heartbeat gate shut in one step, so the
+    # cadence last reported is still the narrow one and a reader would call a healthy daemon
+    # unreachable partway through the cap window. reported_ping_interval_s widens it to the window
+    # itself; the discriminating control is the third arm, where the SAME ledger without a live 429
+    # keeps reporting the narrow adaptive cadence (a widen-everything implementation fails it).
+    _cap_now_ts = datetime(2026, 9, 6, 9, 0, 0, tzinfo=timezone.utc).timestamp()
+    _cap_resets_at = "2026-09-07T00:00:00+00:00"
+    _cap_window_s = datetime.fromisoformat(_cap_resets_at).timestamp() - _cap_now_ts
+    _cap_state: dict = {}
+    _cap_ledger = mark_kv_write_cap_exhausted(_cap_state, _cap_now_ts, _cap_resets_at)
+    _paced = adaptive_heartbeat_interval_s(_fresh_ledger, _day_start_ts)
+    _cap_reported = reported_ping_interval_s(_cap_ledger, _paced, _cap_now_ts)
+    check("(#1981 round 3) after a hard 429 the reported cadence covers the whole cap window, not the "
+          "cadence this ping was paced to",
+          _cap_reported is not None and _cap_reported >= _cap_window_s > _paced)
+    check("(#1981 round 3) so arm (b) stays quiet for the length of that window: the reader marks "
+          "unreachable at 3x the reported cadence, and even the last instant before the cap resets is "
+          "inside that bound",
+          _cap_window_s <= 3 * _cap_reported
+          and heartbeat_ping_payload("2026-09-06T09:00:00Z", _cap_reported, None)
+          ["derived_ping_interval_s"] == round(_cap_reported, 1))
+    check("(control, #1981 round 3) a ledger with NO live 429 reports the paced cadence unchanged -- "
+          "proves the widening keys on the cap and does not simply inflate every ping",
+          reported_ping_interval_s(_fresh_ledger, _paced, _day_start_ts) == _paced
+          and reported_ping_interval_s(
+              load_budget_ledger({}, _cap_now_ts), _paced, _cap_now_ts) == _paced)
+    check("(control, other direction, #1981 round 3) a live 429 whose resets_at is unparseable leaves "
+          "the interval UNKNOWN, so the field is omitted and the reader's arm stays unarmed rather "
+          "than arming on the pre-cap number",
+          reported_ping_interval_s({"kv_write_cap_resets_at": "not-a-timestamp"}, _paced, _cap_now_ts)
+          is None
+          and "derived_ping_interval_s" not in heartbeat_ping_payload("x", None, None))
     check("a prior PING (not just a push) also resets the interval",
           should_send_derived_ping({DERIVED_PING_STATE_KEY: 10_000.0}, 10_000.0 + 60) is False)
     check("whichever landed MORE RECENTLY wins -- a fresher ping beats a stale push",

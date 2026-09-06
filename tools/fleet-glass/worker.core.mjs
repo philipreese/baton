@@ -107,22 +107,37 @@ export const PROJECTION_STALE_AFTER_MS = 90 * 1000;
 // minutes: the exact false-fire #1613 pulled the old pushed_at-keyed banner out for, and #1829
 // demoted its successor to a neutral line for.
 //
-// So the pusher now reports the interval it actually coalesced to (`derived_ping_interval_s`, the
-// same value its "interval now Ns" log line carries) in the ping body, worker.js stores it beside
-// `derived_at`, and this arm marks stale at 3x it. Three, matching FleetProjectionWriter's own
-// StaleAfterTicks: one missed delivery is ordinary, three in a row is not.
+// So the pusher now reports the interval it actually coalesced to (`derived_ping_interval_s`) in the
+// ping body, worker.js stores it beside `derived_at`, and this arm marks stale at 3x it. Three,
+// matching FleetProjectionWriter's own StaleAfterTicks: one missed delivery is ordinary, three in a
+// row is not. The reported value is `reported_ping_interval_s(adaptive_heartbeat_interval_s(...))` in
+// pusher.py -- NOT any number in pusher.log: every "interval now Ns" line there carries the snapshot
+// or deliver cadence (paced against SNAPSHOT_DAILY_WRITES / DELIVER_DAILY_WRITES), and the ping's own
+// cadence has no log line at all, so the two differ ~288s vs ~1440s at the start of a UTC day.
 //
-// Two consequences worth stating rather than leaving a reader to infer:
+// Three consequences worth stating rather than leaving a reader to infer:
 //  - No reported cadence, no arm. An unredeployed pusher sends no `derived_ping_interval_s`, and this
 //    fails QUIET (arm (a) still covers the incident this exists for) rather than falling back to a
 //    guessed number, which is the guess that produced the defect above.
-//  - The bound self-widens as the budget depletes. `adaptive_producer_interval_s` returns
+//  - On GRACEFUL depletion the bound self-widens. `adaptive_producer_interval_s` returns
 //    `seconds_left_in_day / writes_left`, so the last cadence the pusher reports before its heartbeat
 //    sub-budget runs out is already most of the remaining day -- and once it is out, `heartbeat_
 //    allowed` stops the ping entirely and no fresher cadence arrives. Arm (b) is therefore effectively
 //    off for the rest of that day instead of alarming about a pusher that is rationing writes on
 //    purpose; a pusher that has genuinely died is what glass.html's HEARTBEAT_DEAD_MS banner owns,
 //    and it ranks above this one.
+//  - On a HARD 429 that argument does not hold, and this is the round-3 review's finding 3. A live
+//    Cloudflare cap makes `mark_kv_write_cap_exhausted` pin all three sub-budgets in ONE step, so the
+//    gate closes with the last reported cadence still narrow (300s at the floor, ~1440s typically).
+//    `reported_ping_interval_s` is the pusher-side half of the fix -- a ping sent while the ledger
+//    carries a live `resets_at` reports the whole remaining cap window, or omits the field when that
+//    reset time is unknown -- but it can only report on a ping it is allowed to send, and during a
+//    live cap it is allowed none. So the RESIDUAL, stated rather than papered over: between roughly
+//    15 and 72 minutes after a hard 429, and until the cap resets, this arm can report `unreachable`
+//    about a healthy daemon. glass.html shadows it (its row 8 catches that state first -- see the
+//    precedence table there); `fleet_status` has no chain and serves it, so a conductor reading
+//    `reason: "unreachable"` during a known cap window should read it as "no write has landed",
+//    which is what it measures, and not as the hung daemon its own wording suggests.
 export const PROJECTION_UNREACHABLE_CADENCE_MULTIPLE = 3;
 
 // Two arms, one verdict, because neither covers the other:
