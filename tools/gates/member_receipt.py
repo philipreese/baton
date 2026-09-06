@@ -25,6 +25,12 @@ the two forgeries that are otherwise indistinguishable from a real run:
 
 A missing or unreadable key file makes every member receipt invalid -- fail closed, so a lost key
 costs one `gates --fast` run rather than granting a skip.
+
+**The store is append-only, and stale entries are INERT rather than leaked.** A receipt is overwritten
+in place when its member runs again, so the directory holds at most one file per member name, whatever
+identity it was last written at; a receipt for a tree that no longer exists simply never matches and
+is never counted. There is deliberately no sweeper: nothing to reclaim (a bounded, tiny directory),
+and a sweeper would have to race the overlap phase, where a dozen members record concurrently.
 """
 import hashlib
 import hmac
