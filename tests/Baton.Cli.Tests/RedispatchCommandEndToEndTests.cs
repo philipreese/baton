@@ -185,7 +185,7 @@ public sealed class RedispatchCommandEndToEndTests : IDisposable
             Assert.Null(swapped.ModelResolved);
 
             // The control: the same amended-spec path on the SAME vendor still inherits the model, so
-            // the arm above is about the swap rather than about the axis never surviving a redispatch.
+            // what the assertions above catch is the swap and not an axis that never survives at all.
             var kept = await RedispatchOntoAsync("child-same", "fake");
             Assert.Equal("opus", kept.Model);
         }

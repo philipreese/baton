@@ -289,8 +289,7 @@ public class RedispatchBindingTests
 
     /// <summary>
     /// The polarity arm for the test above, and the reason the re-resolution is keyed per axis rather
-    /// than run unconditionally: on the same vendor with no override the parent's stamps are still
-    /// true, and re-resolving would downgrade a <c>requested</c> source to <c>resolved-default</c>.
+    /// than run unconditionally — <see cref="RedispatchCommand.WithResolvedStamps"/>'s own doc has it.
     /// </summary>
     [Fact]
     public void Same_vendor_with_no_override_keeps_the_parents_display_stamps_including_their_source()

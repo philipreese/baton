@@ -60,13 +60,10 @@ public sealed class EchoedModelProjectionTests
 
     /// <summary>
     /// The terminal <c>result</c> event's own top-level <c>model</c> is read FIRST when present, and
-    /// that rung is <b>unmeasured</b>: the repository's only captured claude result lines
-    /// (<c>tests/Baton.Vendors.Tests/Fixtures/claude-weekly-limit-result.captured.jsonl</c>) are both
-    /// error results and carry no top-level <c>model</c> at all, and neither vendor register records a
-    /// successful one that does. The line below is therefore hand-written to a shape no in-tree capture
-    /// confirms; it is kept because claude answers through the measured <c>assistant</c> fallback
-    /// either way, so the rung costs nothing if the vendor never populates it. Capturing one successful
-    /// result line into <c>docs/vendor-doc-audit.md</c> is what would close it.
+    /// that rung is <b>unmeasured</b> — <c>ClaudeUsageParser.TryParseEchoedModel</c>'s own doc names the
+    /// captured file and says why it settles nothing. The line below is therefore hand-written to a
+    /// shape no in-tree capture confirms; it is kept because claude answers through the measured
+    /// <c>assistant</c> fallback either way, so the rung costs nothing if the vendor never populates it.
     /// </summary>
     [Fact]
     public void A_result_events_own_model_is_read_when_the_vendor_does_supply_one()

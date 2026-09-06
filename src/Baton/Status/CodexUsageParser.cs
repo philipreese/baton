@@ -16,8 +16,9 @@ namespace Baton.Status;
 /// else, <c>turn.completed</c> a usage object and nothing else — so a parser reading either would be
 /// reading Baton's own two keys back. The emitter is in-tree, which makes this deterministic rather
 /// than a sample; the captured stream agrees (<c>tests/Baton.Cli.Tests/Fixtures/codex-live-stream.jsonl</c>,
-/// 261 lines, no <c>model</c> key on any of them), and neither does the app-server event grammar
-/// recorded in <c>docs/vendor-codex-probe-2026-09-04.md</c> name one. So <c>modelEchoed</c> is ABSENT
+/// 261 lines, no <c>model</c> key on any of them), and neither does the recorded app-server event
+/// grammar name one — the probe document is the one <c>WorkerBindingConfigEntry.EffortResolved</c>
+/// already cites by path. So <c>modelEchoed</c> is ABSENT
 /// on every codex row and the fact is UNMEASURED rather than measured-negative: stamping the broker's
 /// own <c>configuration.Model</c> onto its <c>thread.started</c> would echo Baton's INTENT, which is
 /// exactly what claude's <c>system:init</c> is refused for (<see cref="ClaudeUsageParser"/>). Closing

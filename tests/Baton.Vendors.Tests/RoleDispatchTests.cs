@@ -485,7 +485,7 @@ public class RoleDispatchTests
 
         Assert.Equal("gemini-3.8-flash-high", binding.ModelResolved);
         Assert.Equal("high", binding.EffortResolved);
-        // Not "requested": the dispatcher named no effort, Baton read it back off the model id.
+        // Not "requested" -- ResolveEffortStamp's own doc says why this rung resolves rather than asks.
         Assert.Equal(BindingValueSource.ResolvedDefault, binding.EffortSource);
 
         // The same rung on an explicitly requested suffixed id, so the arm is about the suffix rather
