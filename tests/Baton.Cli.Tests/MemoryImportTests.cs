@@ -492,6 +492,120 @@ public sealed class MemoryImportTests : IDisposable
     }
 
     /// <summary>
+    /// #1947: an undo over a manifest that appended a supersession link removes exactly that row from
+    /// <c>links.jsonl</c> and nothing else — with a control, in the same fixture, that a manifest which
+    /// appended no link leaves the same file byte-identical.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// <b>The instrument is the file's bytes, because the claim is about a row rather than a count.</b>
+    /// <c>Assert.Single</c> over the surviving links passes just as happily on an undo that removed the
+    /// wrong one of two, so the removal arm compares <c>links.jsonl</c> against the snapshot taken when
+    /// it held link A alone, and names the survivor's two ids as well. Byte-identity is a fair claim
+    /// here and not an overreach: <see cref="MemoryStore.RemoveAsync"/>'s own remarks state that a
+    /// rewritten file's bytes stay indistinguishable from an appended one's.
+    /// </para>
+    /// <para>
+    /// <b>The control runs first, over a two-row file.</b> "A manifest with no links leaves links.jsonl
+    /// alone" is trivially true against an empty or absent file — the removal loop has nothing to
+    /// iterate either way — so it is only a control while the file exists and is non-empty, which is
+    /// asserted before the comparison. That it holds over BOTH rows, while an undo carrying one link
+    /// removes exactly one of them, is what separates "the undo touches its own rows" from "the undo
+    /// does not rewrite this file at all".
+    /// </para>
+    /// <para>
+    /// <b>The undo has to read <c>AppendedLinks</c>, not <c>Links</c>, and only the removal arm can say
+    /// so.</b> Manifest B carries two link rows — B's, appended, and A's, already present — so an undo
+    /// built on <c>Links</c> removes both, exits 0, and reports the plausible "2 supersession link(s)".
+    /// The control cannot catch that: the live manifest's two collections are both empty, and every
+    /// mutant of the loop reads the same nothing.
+    /// </para>
+    /// <para>
+    /// Manifests are identified by set difference against the directory listing taken before each run,
+    /// not by sort order: the filename scheme is not this test's to depend on, and a run that reused an
+    /// earlier name would otherwise pass while undoing the wrong import.
+    /// </para>
+    /// </remarks>
+    [Fact]
+    public async Task An_undo_removes_only_its_own_supersession_link_and_a_link_less_manifest_removes_none()
+    {
+        await BuildStandardFixtureAsync();
+        var archiveA = WriteArchivedRoot("c--baton-memory", ("user_who.md", "the older who"));
+        var archiveB = WriteArchivedRoot("c--baton-other-memory", ("project_plan.md", "the older plan"));
+
+        // Run 1: the live roots only. Both archives are unfiled, so this manifest appends no link.
+        var liveManifest = await RunCapturingManifestAsync();
+        Assert.Empty(await LinksAsync("github.com/philipreese/baton"));
+
+        // Runs 2 and 3: one archive each. Run 3 recomputes link A as well as link B -- LinkSupersession
+        // runs over the stored entries plus the planned ones, not over the --root filter's slice -- so
+        // manifest B holds two link rows and only B's is APPENDED. That is deliberate, and asserted on
+        // below: it is what makes this arm fail an undo that read manifest.Links instead.
+        await RunCapturingManifestAsync(
+            "--root", archiveA, "--assert", $"{archiveA}=github.com/philipreese/baton",
+            "--asserted-by", "the-test");
+        var afterLinkA = File.ReadAllBytes(LinksFile("github.com/philipreese/baton"));
+
+        var manifestB = await RunCapturingManifestAsync(
+            "--root", archiveB, "--assert", $"{archiveB}=github.com/philipreese/baton",
+            "--asserted-by", "the-test");
+
+        // The premise, read off the object the undo consumes rather than off the report text: manifest B
+        // appended exactly one link, and the live manifest appended none.
+        var appendedByB = Assert.Single(ImportManifest.Read(manifestB).AppendedLinks);
+        Assert.Empty(ImportManifest.Read(liveManifest).AppendedLinks);
+
+        // And manifest B's Links is WIDER than its AppendedLinks, which is the property the arm below
+        // rests on. Pinned here rather than left implicit: a later fixture that dropped run 2's link
+        // would leave the two collections equal, and the arm would quietly stop discriminating between
+        // an undo that reads AppendedLinks and one that reads Links, with nothing going red.
+        Assert.Equal(2, (ImportManifest.Read(manifestB).Links ?? []).Count);
+
+        var linkA = Assert.Single(
+            await LinksAsync("github.com/philipreese/baton"), l => l.Id != appendedByB.LinkId);
+        var bothRows = File.ReadAllBytes(LinksFile("github.com/philipreese/baton"));
+        Assert.Equal(2, (await LinksAsync("github.com/philipreese/baton")).Count);
+        Assert.NotEmpty(bothRows); // the control below is vacuous over an empty file
+
+        // Control, first and over both rows: a manifest that appended no link removes none, even while
+        // it removes the canonical entries those links point at.
+        var (controlCode, _) = await RunRawAsync("--undo", liveManifest);
+        Assert.Equal(0, controlCode);
+        Assert.Equal(bothRows, File.ReadAllBytes(LinksFile("github.com/philipreese/baton")));
+
+        // The arm: undoing manifest B removes B's row and leaves A's bytes exactly as they were written.
+        var (undoCode, undoText) = await RunRawAsync("--undo", manifestB);
+        Assert.Equal(0, undoCode);
+        Assert.DoesNotContain("INCOMPLETE", undoText, StringComparison.Ordinal);
+        Assert.Contains("1 supersession link(s)", undoText, StringComparison.Ordinal);
+
+        Assert.Equal(afterLinkA, File.ReadAllBytes(LinksFile("github.com/philipreese/baton")));
+        var survivor = Assert.Single(await LinksAsync("github.com/philipreese/baton"));
+        Assert.Equal(linkA.Id, survivor.Id);
+        Assert.Equal(linkA.SupersedingId, survivor.SupersedingId);
+        Assert.Equal(linkA.SupersededId, survivor.SupersededId);
+    }
+
+    private static string LinksFile(string repository) =>
+        BatonPaths.MemoryLinksFile(RepositoryIdentity.FileSlugFor(repository));
+
+    /// <summary>
+    /// One import run, answering the path of the manifest it wrote — found by set difference against the
+    /// listing taken first, so nothing here rests on the manifest filename scheme.
+    /// </summary>
+    private async Task<string> RunCapturingManifestAsync(params string[] args)
+    {
+        var directory = Path.Combine(BatonPaths.Root, BatonPaths.MemoryImportsDirectoryName);
+        var before = Directory.Exists(directory)
+            ? Directory.GetFiles(directory).ToHashSet(StringComparer.OrdinalIgnoreCase)
+            : new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+
+        await RunAsync(args);
+
+        return Assert.Single(Directory.GetFiles(directory), p => !before.Contains(p));
+    }
+
+    /// <summary>
     /// Two spellings of one repository asserted across two roots produce ONE store file, because the
     /// asserted identity goes through the same canonicalization a git probe's answer does.
     /// </summary>
