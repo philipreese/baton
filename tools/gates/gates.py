@@ -1098,6 +1098,18 @@ def selftest():
                   f"{supplied.returncode}, the command ran: {os.path.exists(marker)}")
             ok = False
 
+        # #1936 re-review: the empty name is a name, and main() has to dispatch on the flag being
+        # PRESENT rather than on its value being truthy -- a falsy value that fell through ran the
+        # whole gate suite instead of the refusal. Exit 2 plus the refusal line is what discriminates:
+        # a fall-through would exit 0 or 1, minutes later, with the members' own output.
+        empty_name = subprocess.run(
+            [sys.executable, os.path.abspath(__file__), "--record-member", ""],
+            cwd=repo, capture_output=True, text=True, check=False)
+        if empty_name.returncode != 2 or "is not a gate member" not in empty_name.stdout:
+            print(f"  control FAILED: `--record-member ''` did not refuse -- exit "
+                  f"{empty_name.returncode} stdout={empty_name.stdout[:200]!r}")
+            ok = False
+
         # The identity is computed ONCE for a whole run, which is what record_run_members' docstring
         # claims -- it used to recompute it per member, ~4 git processes each across ~30 members.
         # Counted through an injected wrapper, so the arm reads the property rather than the timing.
@@ -1301,31 +1313,49 @@ def selftest():
                       f"exit={union_miss.returncode} stdout={union_miss.stdout!r}")
                 ok = False
 
-            # #1936 review: the hook's millisecond clock (`date +%s%3N`) is a GNU extension. A
-            # `date` without %N returns a non-numeric string, which before the hook's numeric guard
-            # reached `$((...))` as an arithmetic error -- fatal under a POSIX sh, aborting an
-            # otherwise-good push. With a stub `date` ahead of everything on PATH the hook must
-            # still take its decision, print its skip line, write NO timing line, and say nothing on
-            # stderr. Asserting the exit code alone would not discriminate: bash (which is `sh`
-            # under git-bash) reports an arithmetic error and carries on where dash dies, so the
-            # empty-stderr and no-new-timing-line halves are what catch the guard being removed.
-            date_dir = os.path.join(td, "nodate")
-            os.makedirs(date_dir)
-            date_stub = os.path.join(date_dir, "date")
-            with open(date_stub, "w", encoding="utf-8", newline="\n") as f:
-                f.write("#!/bin/sh\nprintf '1757181234%%3N\\n'\n")
-            os.chmod(date_stub, 0o755)
+            # #1936 review: a millisecond clock that returns a non-number reaches the hook's
+            # `$((...))` as an arithmetic error -- fatal under a POSIX sh, aborting an otherwise-good
+            # push -- unless the hook's numeric guard catches it first. With a stub clock ahead of
+            # everything on PATH the hook must still take its decision, print its skip line, write NO
+            # timing line, and say nothing on stderr. Asserting the exit code alone would not
+            # discriminate: bash (which is `sh` under git-bash) reports an arithmetic error and
+            # carries on where dash dies, so the empty-stderr and no-new-timing-line halves are what
+            # catch the guard being removed.
+            #
+            # The stub shadows `python`, which is what the hook reads its clock through and why --
+            # stated once, next to now_ms() in .githooks/pre-push. The probe below asserts the shadow
+            # is IN EFFECT before this arm concludes anything from the hook's behaviour, and what it
+            # buys is a LEGIBLE failure rather than a missing one: where the double is unreachable the
+            # real clock runs, the hook writes its line, and the assertion below fires anyway -- a red
+            # blaming the hook for a fault the harness never managed to inject. That is exactly what
+            # the `date` version of this arm did on CI. The probe names it as the harness's failure
+            # instead. The other direction -- a clock that resolves nowhere, so this arm would pass
+            # for the wrong reason -- is held by the one-well-formed-line-per-push arm above, which
+            # is what fails if the hook stops recording timing at all.
+            clock_dir = os.path.join(td, "noclock")
+            os.makedirs(clock_dir)
+            clock_stub = os.path.join(clock_dir, "python")
+            with open(clock_stub, "w", encoding="utf-8", newline="\n") as f:
+                f.write("#!/bin/sh\nprintf 'not-a-number\\n'\n")
+            os.chmod(clock_stub, 0o755)
             broken_clock_env = dict(env)
-            broken_clock_env["PATH"] = date_dir + os.pathsep + env["PATH"]
+            broken_clock_env["PATH"] = clock_dir + os.pathsep + env["PATH"]
+            probe = subprocess.run(
+                [sh, "-c", "python -c 'import time; print(int(time.time() * 1000))'"],
+                cwd=repo, env=broken_clock_env, capture_output=True, text=True, check=False)
+            if probe.stdout.strip() != "not-a-number":
+                print(f"  control FAILED: the broken-clock stub is not in effect under {sh!r}, so "
+                      f"the arm below would prove nothing -- probe stdout={probe.stdout!r}")
+                ok = False
             write_receipt("fast", cwd=repo)
             before_timings = len(_timing_lines())
-            no_date = subprocess.run([sh, hook], cwd=repo, env=broken_clock_env,
-                                     capture_output=True, text=True, check=False)
-            if (no_date.returncode != 0 or "-- skipping" not in no_date.stdout
-                    or no_date.stderr.strip() or len(_timing_lines()) != before_timings):
-                print(f"  control FAILED: the hook did not survive a `date` with no %N -- "
-                      f"exit={no_date.returncode} stdout={no_date.stdout!r} "
-                      f"stderr={no_date.stderr!r} timing lines {before_timings} -> "
+            no_clock = subprocess.run([sh, hook], cwd=repo, env=broken_clock_env,
+                                      capture_output=True, text=True, check=False)
+            if (no_clock.returncode != 0 or "-- skipping" not in no_clock.stdout
+                    or no_clock.stderr.strip() or len(_timing_lines()) != before_timings):
+                print(f"  control FAILED: the hook did not survive a clock that returns a "
+                      f"non-number -- exit={no_clock.returncode} stdout={no_clock.stdout!r} "
+                      f"stderr={no_clock.stderr!r} timing lines {before_timings} -> "
                       f"{len(_timing_lines())}")
                 ok = False
             delete_receipt(cwd=repo)
@@ -1644,7 +1674,11 @@ def main():
     # so trailing argv (`--record-member lint -- dotnet build`) is refused for free as unrecognised
     # arguments, exit 2 -- the hand-rolled pre-argparse dispatch this replaces existed only to pass
     # a caller's command through uninterpreted, which is the thing `record_member` no longer accepts.
-    if args.record_member:
+    # `is not None`, not truthiness (#1936 re-review): `--record-member ""` is a member name this
+    # file cannot run, and record_member says so and exits 2. Dispatching on truthiness dropped it
+    # through to a FULL gate run instead -- the same surprise build_parser's docstring above exists
+    # to stop, in the same file.
+    if args.record_member is not None:
         return record_member(args.record_member)
     if args.selftest:
         return selftest()

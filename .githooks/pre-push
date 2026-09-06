@@ -28,14 +28,24 @@ unset GIT_DIR GIT_WORK_TREE GIT_INDEX_FILE GIT_PREFIX GIT_COMMON_DIR GIT_OBJECT_
 # exit code below. WHICH queueing `pushWaitMs` reports, on each of the two paths this hook can take,
 # is stated once in spec/baton.md §7's `pushWaitMs` row and not restated here.
 #
-# `date +%s%3N` is a GNU extension (#1936 review). No supported host lacks it -- this repo is
-# Windows-only and git-bash ships GNU coreutils -- but a `date` without %N returns something that is
-# not a number, and feeding that to the `$((...))` below is an arithmetic error: on a POSIX sh fatal
-# to the whole hook, aborting a push that was otherwise fine. So the clock is read through now_ms(),
-# which yields the empty string for anything that is not all digits, and every reader of it is
-# guarded: no usable clock, no timing line, push unaffected.
+# The millisecond clock is read through now_ms(), which yields the empty string for anything that
+# is not all digits, and every reader of it is guarded: no usable clock, no timing line, push
+# unaffected -- never a garbage one. The guard is there because a clock that returns a non-number
+# reaches the `$((...))` below as an arithmetic error: on a POSIX sh fatal to the whole hook,
+# aborting a push that was otherwise fine.
+#
+# The SOURCE is `python`, not `date +%s%3N` as it was through #1936's first round, and that is a
+# testability constraint rather than a taste one. %N is a GNU extension, so the guard above needs a
+# control that breaks the clock -- and git-bash's `C:\Program Files\Git\bin\sh.exe` PREPENDS
+# /usr/bin to PATH, so no stub the selftest puts ahead of everything else can shadow a /usr/bin
+# command there. `date` stayed the real one, this hook did the right thing with it, and the arm
+# failed anyway for a reason that was about the harness: green on a host whose `sh` resolves to
+# Git\usr\bin (the operator's), red on CI, which resolves the wrapper. `python` is not in /usr/bin,
+# and every pixi task this hook runs already requires it on PATH, so one stub shadows it identically
+# on both hosts. tools/gates/gates.py's arm is what pins that, and what it does when a host stops
+# honouring the shadow is stated there rather than here.
 now_ms() {
-    ms=$(date +%s%3N 2>/dev/null) || ms=""
+    ms=$(python -c 'import time; print(int(time.time() * 1000))' 2>/dev/null) || ms=""
     case "$ms" in
         '' | *[!0-9]*) ms="" ;;
     esac

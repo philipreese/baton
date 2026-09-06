@@ -349,7 +349,9 @@ def _selftest_env(**overrides: str) -> dict[str, str]:
     WAIT_LOG_VAR (#1936 review): `.githooks/pre-push` exports it for a whole `gates --fast` run, and
     `buildlock-selftest` is one of that run's members -- so its children's DELIBERATE contention
     (arm 1's loser waiting out a POLL_S tick, arms 3 and 5 timing out on purpose) was appended to the
-    push's own log, about 4s of fabricated queueing against a temp lock file. It landed on the
+    push's own log: 2015 + 2000 + 2000 ms, ~6s of fabricated queueing against a temp lock file. That
+    is the measurement (the sabotage transcript in #1936's PR comment), not the ~4s first estimated
+    from the arms' nominal sleeps, and this docstring is where the figure lives. It landed on the
     fallback path only, which is one half of exactly the before/after comparison C-12's ruling C
     exists to drive. Arm 7 sets its own log path explicitly on top of this.
     """
@@ -660,7 +662,8 @@ def selftest() -> int:
 
         # The inherited-log sentinel set at the top: every child spawned above ran with
         # BATON_BUILDLOCK_WAIT_LOG pointing here, and none of their fabricated waits may have
-        # reached it. Red before the fix at ~4s across three arms.
+        # reached it -- red before the fix, with every one of those waits in this file (how much,
+        # measured, is stated once in _selftest_env's docstring).
         if prior_wait_log is None:
             os.environ.pop(WAIT_LOG_VAR, None)
         else:
