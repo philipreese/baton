@@ -329,6 +329,29 @@ public sealed record CostLedgerEntry(
     long? WallClockMs = null,
 
     /// <summary>
+    /// #1921's three step-budget figures, carried through verbatim from
+    /// <c>Status.ExecutionUsageView.ToolSteps</c>/<c>RefusedToolSteps</c>/<c>RepeatedToolSteps</c> under
+    /// the same names — what each counts, and what a <c>0</c> on each does and does not say, are those
+    /// members' own contracts and spec/baton.md §7's table row, not restated here. What belongs on the
+    /// LEDGER side and nowhere else: none of the three is a token figure, none enters either estimate (a
+    /// refusal costs a step and a turn, not a rate), and all three are present or all three absent, so a
+    /// reader may treat their joint absence as one fact rather than three.
+    /// </summary>
+    [property: JsonPropertyName("toolSteps")]
+    [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    int? ToolSteps = null,
+
+    /// <summary>See <see cref="ToolSteps"/> — the three are one contract.</summary>
+    [property: JsonPropertyName("refusedToolSteps")]
+    [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    int? RefusedToolSteps = null,
+
+    /// <summary>See <see cref="ToolSteps"/> — the three are one contract.</summary>
+    [property: JsonPropertyName("repeatedToolSteps")]
+    [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    int? RepeatedToolSteps = null,
+
+    /// <summary>
     /// #1882's two non-token dimensions, carried through from <c>ExecutionUsageView</c> under the same
     /// names: the wall clock of the room's zero-token pre-turn verify step, and the size of the
     /// <c>verify-results.md</c> the reviewer then reads. Neither is a token figure and neither enters

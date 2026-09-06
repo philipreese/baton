@@ -389,6 +389,27 @@ the marker on its first line and reports it as `projection-skipped` rather than 
 behind each of those, and what a repository with nowhere to project into gets instead, are in
 `spec/baton.md` §12.
 
+**How much of a lane's step budget bought nothing (`baton audit lanes`).** The per-room read behind
+the cost-ledger fields `spec/baton.md` §7 defines, over the same captured room streams:
+
+```
+baton audit lanes [--since <duration>] [--vendor <name>] [--rooms-root <dir>] [--format text|json] [--help]
+```
+
+Per room and per vendor: tool calls, calls Baton's own permission grant **refused**, calls that
+**repeated** a tool+arguments pair the same execution had already issued, and calls that returned an
+**empty** payload. It never writes, which is why it has **no `--dry-run`**. `--since` is a *duration*
+(`90m`, `36h`, `7d`), not `baton ledger --since`'s instant, and it selects on a room's flow-log
+last-write time.
+
+Three readings the output does **not** support, each of which a reader's prior will otherwise supply.
+A room reporting **no counts at all** did not necessarily run zero tools — its stream may simply carry
+no tool activity this reader can parse, or `--vendor` may have excluded every execution it had, which
+the output discloses as its own count rather than as an unreadable stream. A **`refused 0`** is not evidence of a well-behaved lane on a
+room captured before this shipped: `spec/baton.md` §7 states which zero is false and why. And a
+**`repeated 0`** does not always mean distinct calls — on a vendor whose stream omits arguments there
+was nothing to compare, which is what the per-vendor breakdown exists to show.
+
 ---
 
 ## 4. Adapter notes

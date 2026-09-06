@@ -135,7 +135,42 @@ public sealed record ExecutionUsageView(
     /// </summary>
     [property: JsonPropertyName("verifyResultsBytes")]
     [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
-    long? VerifyResultsBytes = null)
+    long? VerifyResultsBytes = null,
+    /// <summary>
+    /// #1921: <see cref="ToolStepCounts.ToolSteps"/> over this execution's whole captured stream — how
+    /// many real tool calls it made, in the unit <c>MaxToolSteps</c> caps.
+    /// <b>Present exactly when the next three are</b>, which <see cref="ToolStepTally.Snapshot"/> decides
+    /// for all four at once — including why a stream with no readable tool activity is absent here
+    /// rather than zero.
+    /// </summary>
+    [property: JsonPropertyName("toolSteps")]
+    [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    int? ToolSteps = null,
+    /// <summary>
+    /// #1921: <see cref="ToolStepCounts.Refused"/> — steps whose result carried
+    /// <see cref="Domain.GrantRefusal.Marker"/>. <see cref="ToolStepTally"/>'s remarks state the one
+    /// conclusion this figure does not support on an older room.
+    /// </summary>
+    [property: JsonPropertyName("refusedToolSteps")]
+    [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    int? RefusedToolSteps = null,
+    /// <summary>
+    /// #1921: <see cref="ToolStepCounts.Repeated"/> — occurrences beyond the first of an identical
+    /// tool+arguments pair. That field's own doc states the arithmetic and the two different things a 0
+    /// can mean.
+    /// </summary>
+    [property: JsonPropertyName("repeatedToolSteps")]
+    [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    int? RepeatedToolSteps = null,
+    /// <summary>
+    /// #1921: <see cref="ToolStepCounts.EmptyResults"/>. Reported by <c>baton audit lanes</c> and
+    /// deliberately not carried onto the cost-ledger row —
+    /// <see cref="IWorkerUsageParser.CountEmptyToolResults"/> states why the two are not the same kind of
+    /// waste.
+    /// </summary>
+    [property: JsonPropertyName("emptyToolResults")]
+    [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    int? EmptyToolResults = null)
 {
     /// <summary>The capture is provably not the whole stream — <see cref="Dispatch.ExecutionStreamLogger.StdoutTruncationMarkerFileName"/>.</summary>
     public const string StreamTruncatedByRolloverReason = "stream-truncated-by-rollover";
@@ -415,7 +450,14 @@ public static class ExecutionUsageProjector
                 reading?.ModelEchoed,
                 // #1882: both figures together or neither -- see VerifyStepMs's own remarks.
                 string.Equals(executionId, verifyStepExecutionId, StringComparison.Ordinal) ? verifyStep!.TotalWallClockMs : null,
-                string.Equals(executionId, verifyStepExecutionId, StringComparison.Ordinal) ? verifyStep!.ResultsBytes : null);
+                string.Equals(executionId, verifyStepExecutionId, StringComparison.Ordinal) ? verifyStep!.ResultsBytes : null,
+                // #1921: all four together or all four absent. Read off the ONE nullable struct rather
+                // than four independent coalesces, so a row can never carry three measured counts and a
+                // fourth that silently defaulted -- ToolStepTally.Snapshot is the decision point.
+                reading?.ToolStepCounts?.ToolSteps,
+                reading?.ToolStepCounts?.Refused,
+                reading?.ToolStepCounts?.Repeated,
+                reading?.ToolStepCounts?.EmptyResults);
         }
 
         return result;
@@ -529,7 +571,15 @@ public static class ExecutionUsageProjector
     /// question.
     /// <para>
     /// Cost, since <c>fleet_status</c> polls this: the replay hands every captured line to the vendor
-    /// parser, which parses it up to three times (tool name, tool-step count, incremental usage). Before
+    /// parser, which parses it up to SIX times — tool name, tool-step count and incremental usage for the
+    /// budget monitor, plus #1921's refused-step count, empty-result count and invocation keys for
+    /// <see cref="ToolStepTally"/>. Doubling that was judged affordable because the memo below is what
+    /// the polling path actually pays, and a completed room re-reads nothing. #1927's echoed-model scan
+    /// is a SEVENTH parse of a line, but not of every line: <see cref="ScanEchoedModel"/> runs backwards
+    /// and stops at the first line naming a model, and on a vendor that overrides nothing it parses no
+    /// line at all — the interface default answers without touching the JSON. Which rung answers, and
+    /// which of them is measured, is <c>ClaudeUsageParser.TryParseEchoedModel</c>'s own statement and not
+    /// restated here. Before
     /// #1706 this projector parsed exactly one line per execution. Bounded by the stream logger's own
     /// 8 MiB-plus-one-rollover retention BOUND rather than by anything here, and measured at ~9 MB for
     /// the largest room on the machine this was developed against. That bound is retention, NOT a
@@ -550,11 +600,22 @@ public static class ExecutionUsageProjector
     /// well as the current file. Null when this vendor echoes none — which for agy and codex is
     /// structural, not a read failure.
     /// </param>
+    /// <param name="ToolStepCounts">
+    /// #1921: what <see cref="ToolStepTally"/> accumulated over the same replay that produced
+    /// <paramref name="LiveBilled"/> — same pass over the same bytes, for the same reason the terminal
+    /// reading and the live Σ are kept together here. Null on every early return above: a stream this
+    /// method refused to read whole must not report a step count derived from part of it, which is the
+    /// fabricated under-read the rollover comment in that method is about. Not the same rule as
+    /// <paramref name="ModelEchoed"/> beside it, which the three marker returns deliberately DO carry —
+    /// the merge with #1927 is what put the two opposite rules side by side. The one earlier return the
+    /// scan itself sits below (no captured stream at all, so nothing to scan) carries neither.
+    /// </param>
     private sealed record UsageReading(
         WorkerUsage? Terminal,
         long? LiveBilled,
         string? LiveUnavailableReason = null,
-        string? ModelEchoed = null);
+        string? ModelEchoed = null,
+        ToolStepCounts? ToolStepCounts = null);
 
     /// <summary>
     /// The memo behind <see cref="UsageReading"/>'s L3 note. Concurrent because both readers above are
@@ -790,17 +851,29 @@ public static class ExecutionUsageProjector
         // #1691 merge: billedRateLimit is null here for the same reason budget/maxToolSteps are -- a
         // replay must not be able to arrest anything; it only reads.
         var replayMonitor = new TokenBudgetMonitor(budget: null, maxToolSteps: null, billedRateLimit: null, replayParser);
+        // #1921: fed from the same loops, off the same parser, so the step count and the billed Σ are
+        // always over identical bytes. A separate object rather than another counter on the monitor
+        // because that monitor's job is to arrest a LIVE execution and this one only ever reads --
+        // ToolStepTally's own remarks state why they are not merged.
+        var toolStepTally = new ToolStepTally(replayParser);
         foreach (var line in rolledLines)
         {
             replayMonitor.OnStdoutLine(line);
+            toolStepTally.OnStdoutLine(line);
         }
 
         foreach (var line in lines)
         {
             replayMonitor.OnStdoutLine(line);
+            toolStepTally.OnStdoutLine(line);
         }
 
-        return Memoize(cacheKey, new UsageReading(terminal, replayMonitor.SnapshotUsage().BilledTokens, null, modelEchoed));
+        return Memoize(cacheKey, new UsageReading(
+            terminal,
+            replayMonitor.SnapshotUsage().BilledTokens,
+            null,
+            modelEchoed,
+            toolStepTally.Snapshot()));
     }
 
     /// <summary>

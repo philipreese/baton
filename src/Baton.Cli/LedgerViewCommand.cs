@@ -339,6 +339,21 @@ public static class LedgerViewCommand
         builder.Append(" cache-read ").Append(Tokens(row.CacheReadTokens));
         builder.Append(" cache-creation ").Append(Tokens(row.CacheCreationTokens));
         builder.Append(" thinking ").Append(Tokens(row.ThinkingTokens));
+
+        // #1921: the step-budget axis, beside the token axis. Rendered only when the stream reader
+        // actually counted -- the digest omits most columns by design, and a row whose stream carried no
+        // readable tool activity would otherwise gain three '-' columns saying nothing. The tuple
+        // pattern is the invariant made structural: these three are written together or not at all
+        // (CostLedgerEntry.ToolSteps), so a row carrying some of them is a bug rather than a case to
+        // render around.
+        if ((row.ToolSteps, row.RefusedToolSteps, row.RepeatedToolSteps)
+            is ({ } toolSteps, { } refusedToolSteps, { } repeatedToolSteps))
+        {
+            builder.Append("  steps ").Append(Number(toolSteps));
+            builder.Append(" refused ").Append(Number(refusedToolSteps));
+            builder.Append(" repeated ").Append(Number(repeatedToolSteps));
+        }
+
         builder.Append("  api ").Append(Money(row.ApiEquivalentUsd));
         builder.Append(" plan ").Append(Money(row.PlanMeterEstimateUsd));
         builder.Append("  ").Append(row.Execution ?? "(no execution id)");

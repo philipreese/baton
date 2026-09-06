@@ -457,6 +457,68 @@ public sealed class LedgerViewCommandTests : IDisposable
     }
 
     /// <summary>
+    /// #1921 review MEDIUM, the two surfaces a person and a spreadsheet read the step-budget figures
+    /// from. Over a ledger of its own so the shared fixture's counts stay what every other test asserts.
+    /// <para>
+    /// <b>The measured row carries <c>refusedToolSteps: 0</c></b> — the reading #1920's acceptance is
+    /// taken from, and the one this pins as a <c>0</c> in the CSV cell and a <c>refused 0</c> in the
+    /// digest. The control row carries none of the three: its cells are EMPTY, not <c>0</c>, and its
+    /// digest line omits the fragment entirely. A build that null-coalesced any of the three passes
+    /// neither half, and one that dropped them passes only the control.
+    /// </para>
+    /// <para>
+    /// The CSV cells are read at the index <see cref="LedgerCsv.Columns"/> reports for each name, not by
+    /// searching the line: three columns inserted mid-header land in the next columns' cells otherwise,
+    /// and a substring assertion cannot see that.
+    /// </para>
+    /// </summary>
+    [Fact]
+    public async Task The_tool_step_figures_reach_the_csv_and_the_digest_as_zeros_when_measured_and_empty_when_absent()
+    {
+        var ledgerPath = Path.Combine(Path.GetDirectoryName(_ledgerFilePath)!, "tool-steps.jsonl");
+        await CostLedgerStore.AppendAsync(
+            [
+                new CostLedgerEntry(
+                    CostSourceKind.BatonExecution,
+                    Room: _roomA,
+                    Execution: "counted",
+                    Adapter: "claude",
+                    EndedAt: Sep4.AddHours(10),
+                    ToolSteps: 12,
+                    RefusedToolSteps: 0,
+                    RepeatedToolSteps: 3),
+                new CostLedgerEntry(
+                    CostSourceKind.BatonExecution,
+                    Room: _roomA,
+                    Execution: "unread",
+                    Adapter: "claude",
+                    EndedAt: Sep4.AddHours(11)),
+            ],
+            ledgerPath,
+            TestContext.Current.CancellationToken);
+
+        var lines = (await RunOverAsync(ledgerPath, "--format", "csv"))
+            .Split('\n', StringSplitOptions.RemoveEmptyEntries);
+        var columns = LedgerCsv.Columns.ToList();
+        var counted = lines[1].Split(',');
+        var unread = lines[2].Split(',');
+        foreach (var (name, expected) in new[]
+        {
+            ("toolSteps", "12"), ("refusedToolSteps", "0"), ("repeatedToolSteps", "3"),
+        })
+        {
+            var column = columns.IndexOf(name);
+            Assert.True(column >= 0, $"{name} is not a CSV column");
+            Assert.Equal(expected, counted[column]);
+            Assert.Equal(string.Empty, unread[column]);
+        }
+
+        var text = await RunOverAsync(ledgerPath, "--format", "text", "--drill");
+        Assert.Contains("steps 12 refused 0 repeated 3", text, StringComparison.Ordinal);
+        Assert.Equal(1, text.Split(" refused ").Length - 1);
+    }
+
+    /// <summary>
     /// #1931 review MEDIUM, the two halves at the surface an operator reads: a <c>github-backfill</c>
     /// row is not counted as an attempt nor as one "with no usage read" on the default screen, and it
     /// is MARKED in the drill digest — <c>LedgerViewCommand.DescribeRow</c>'s own comment states what

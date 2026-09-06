@@ -462,6 +462,155 @@ public sealed class ClaudeUsageParser : IWorkerUsageParser
         && model.GetString() is { Length: > 0 } name
             ? name
             : null;
+
+    /// <summary>
+    /// #1921. claude reports a tool result as a <c>"type":"user"</c> envelope whose
+    /// <c>message.content</c> array carries <c>tool_result</c> blocks — measured on a real refused room
+    /// (<c>dispatch-implement-00c359a5</c>), where the hook's stderr arrives inside that block's text
+    /// wrapped in Claude Code's own <c>PreToolUse:&lt;tool&gt; hook error:</c> prose. The marker is
+    /// therefore matched as a SUBSTRING of the block's text rather than as a prefix; the vendor owns
+    /// the wrapper and has no contract with us about it.
+    /// </summary>
+    public int CountRefusedToolSteps(string rawLine) =>
+        CountToolResults(rawLine, static text => GrantRefusal.IsRefusal(text));
+
+    /// <summary>#1921. Same anchor as <see cref="CountRefusedToolSteps"/>; the block's text is empty or whitespace.</summary>
+    public int CountEmptyToolResults(string rawLine) =>
+        CountToolResults(rawLine, static text => string.IsNullOrWhiteSpace(text));
+
+    /// <summary>
+    /// #1921. One key per <c>tool_use</c> block of an assistant turn — the same blocks
+    /// <see cref="CountToolSteps"/> counts, so on this vendor the repeat count is measured over exactly
+    /// the population the step count reports.
+    /// <para>
+    /// <b>The key is <c>name</c> plus BYTE-IDENTICAL arguments as the vendor serialized them</b> — the
+    /// block's <c>input</c> raw text, with <b>no normalisation applied</b>, here or on the other two
+    /// vendors. Two calls that differ only in property order, in inter-token whitespace, or (on Windows)
+    /// in the case of a path argument are two keys and read as no repeat. Every one of those undercounts,
+    /// which is the safe direction for a figure that accuses a lane of waste, and all three are stable
+    /// within a single vendor's own stream — the only place keys are ever compared. Not canonicalised,
+    /// because each normalisation is a second reading of the vendor's shape that would have to be kept
+    /// true as that shape moves, to remove an undercount nobody has measured.
+    /// </para>
+    /// </summary>
+    public IReadOnlyList<string> ToolInvocationKeys(string rawLine)
+    {
+        if (string.IsNullOrWhiteSpace(rawLine))
+        {
+            return [];
+        }
+
+        try
+        {
+            using var doc = JsonDocument.Parse(rawLine);
+            var root = doc.RootElement;
+            if (root.ValueKind != JsonValueKind.Object
+                || !root.TryGetProperty("type", out var typeProp) || typeProp.GetString() != "assistant"
+                || !root.TryGetProperty("message", out var message) || message.ValueKind != JsonValueKind.Object
+                || !message.TryGetProperty("content", out var content) || content.ValueKind != JsonValueKind.Array)
+            {
+                return [];
+            }
+
+            List<string> keys = [];
+            foreach (var block in content.EnumerateArray())
+            {
+                if (block.ValueKind == JsonValueKind.Object
+                    && block.TryGetProperty("type", out var blockType) && blockType.GetString() == "tool_use"
+                    && block.TryGetProperty("name", out var nameProp) && nameProp.GetString() is { Length: > 0 } name)
+                {
+                    var input = block.TryGetProperty("input", out var inputProp) ? inputProp.GetRawText() : string.Empty;
+                    keys.Add(name + " " + input);
+                }
+            }
+
+            return keys;
+        }
+        catch (JsonException)
+        {
+            return [];
+        }
+    }
+
+    /// <summary>
+    /// The one reader of claude's tool-result envelope, so the refusal count and the empty-result count
+    /// cannot come to disagree about which blocks are results. <paramref name="matches"/> is applied to
+    /// each block's text.
+    /// </summary>
+    private static int CountToolResults(string rawLine, Func<string, bool> matches)
+    {
+        if (string.IsNullOrWhiteSpace(rawLine))
+        {
+            return 0;
+        }
+
+        try
+        {
+            using var doc = JsonDocument.Parse(rawLine);
+            var root = doc.RootElement;
+            if (root.ValueKind != JsonValueKind.Object
+                || !root.TryGetProperty("type", out var typeProp) || typeProp.GetString() != "user"
+                || !root.TryGetProperty("message", out var message) || message.ValueKind != JsonValueKind.Object
+                || !message.TryGetProperty("content", out var content) || content.ValueKind != JsonValueKind.Array)
+            {
+                return 0;
+            }
+
+            var count = 0;
+            foreach (var block in content.EnumerateArray())
+            {
+                if (block.ValueKind == JsonValueKind.Object
+                    && block.TryGetProperty("type", out var blockType) && blockType.GetString() == "tool_result"
+                    && matches(ReadToolResultText(block)))
+                {
+                    count++;
+                }
+            }
+
+            return count;
+        }
+        catch (JsonException)
+        {
+            return 0;
+        }
+    }
+
+    /// <summary>
+    /// A <c>tool_result</c> block's payload as text. <c>content</c> is a bare string on the shape
+    /// measured in the rooms on disk and an array of <c>{type,text}</c> blocks in the vendor's own
+    /// documented alternative — both are read, because a reader that understood only one would count
+    /// every result of the other shape as empty. Absent <c>content</c> reads as empty, which is what it
+    /// is.
+    /// </summary>
+    private static string ReadToolResultText(JsonElement block)
+    {
+        if (!block.TryGetProperty("content", out var content))
+        {
+            return string.Empty;
+        }
+
+        if (content.ValueKind == JsonValueKind.String)
+        {
+            return content.GetString() ?? string.Empty;
+        }
+
+        if (content.ValueKind != JsonValueKind.Array)
+        {
+            return string.Empty;
+        }
+
+        var text = new System.Text.StringBuilder();
+        foreach (var part in content.EnumerateArray())
+        {
+            if (part.ValueKind == JsonValueKind.Object
+                && part.TryGetProperty("text", out var textProp) && textProp.ValueKind == JsonValueKind.String)
+            {
+                text.Append(textProp.GetString());
+            }
+        }
+
+        return text.ToString();
+    }
 }
 
 /// <summary>
@@ -681,6 +830,101 @@ public sealed class AgyUsageParser : IWorkerUsageParser
         catch (JsonException)
         {
             return 0;
+        }
+    }
+
+    /// <summary>
+    /// #1921. agy delivers a denied tool's reason inside the SAME terminal <c>step_update</c> that
+    /// <see cref="CountToolSteps"/> counts, under <c>tool_info.error.message</c> — measured on a real
+    /// refused room (<c>dispatch-implement-05550343</c>), where agy prefixes our text with its own
+    /// <c>tool call denied by pre-tool hook:</c>. The anchor is that terminal step_update's
+    /// <c>tool_info</c> node; within it the marker is matched against the raw JSON rather than one named
+    /// field, for the reason <c>AgyHookCheckCommand.WriteToolTargetFields</c> already records about this
+    /// vendor: it has renamed payload fields before, and a refusal that stopped being counted because
+    /// <c>error.message</c> became <c>failure.detail</c> would be silent. Widening the match to the whole
+    /// node widens it to that node's <c>parameters</c> too, which is where
+    /// <see cref="GrantRefusal.Marker"/>'s anchoring rule — stated there, not restated here — is what
+    /// bounds the false positives.
+    /// </summary>
+    public int CountRefusedToolSteps(string rawLine) =>
+        TryReadTerminalToolInfo(rawLine, out var toolInfo) && GrantRefusal.IsRefusal(toolInfo.GetRawText())
+            ? 1
+            : 0;
+
+    /// <summary>
+    /// #1921. The same terminal step_update, with an <c>output</c> that is present and blank. A step
+    /// that ERRORed is not an empty result — it is a failure, and its reason is its payload — so an
+    /// absent <c>output</c> reads as no measurement rather than as emptiness.
+    /// </summary>
+    public int CountEmptyToolResults(string rawLine) =>
+        TryReadTerminalToolInfo(rawLine, out var toolInfo)
+            && !GrantRefusal.IsRefusal(toolInfo.GetRawText())
+            && toolInfo.TryGetProperty("output", out var output)
+            && output.ValueKind == JsonValueKind.String
+            && string.IsNullOrWhiteSpace(output.GetString())
+                ? 1
+                : 0;
+
+    /// <summary>
+    /// #1921. <c>tool_name</c> plus <c>tool_info.parameters</c> as agy serialized them, off the same
+    /// terminal step_update — one key, since agy reports one tool call per step_update. Carries the same
+    /// no-normalisation caveat <see cref="ClaudeUsageParser.ToolInvocationKeys"/> states once; a step
+    /// whose <c>parameters</c> agy omitted yields no key rather than one keyed on the name alone, which
+    /// would report two different reads as one file read twice.
+    /// </summary>
+    public IReadOnlyList<string> ToolInvocationKeys(string rawLine)
+    {
+        if (!TryReadTerminalToolInfo(rawLine, out var toolInfo)
+            || !toolInfo.TryGetProperty("name", out var nameProp)
+            || nameProp.GetString() is not { Length: > 0 } name
+            || !toolInfo.TryGetProperty("parameters", out var parameters))
+        {
+            return [];
+        }
+
+        return [name + " " + parameters.GetRawText()];
+    }
+
+    /// <summary>
+    /// The <c>tool_info</c> node of a terminal (<c>DONE</c>/<c>ERROR</c>) tool step_update — the one
+    /// anchor all three #1921 reads above share, so they cannot come to disagree about which lines are
+    /// tool steps. Same gate <see cref="CountToolSteps"/> applies, deliberately re-stated in code rather
+    /// than delegated: that method returns a count and this one needs the node.
+    /// </summary>
+    /// <remarks>
+    /// The returned element is only valid while the parsed document is alive, so the document is cloned
+    /// out — <see cref="JsonElement.Clone"/> is what makes the node outlive the <c>using</c> here.
+    /// </remarks>
+    private static bool TryReadTerminalToolInfo(string rawLine, out JsonElement toolInfo)
+    {
+        toolInfo = default;
+        if (string.IsNullOrWhiteSpace(rawLine))
+        {
+            return false;
+        }
+
+        try
+        {
+            using var doc = JsonDocument.Parse(rawLine);
+            var root = doc.RootElement;
+            if (root.ValueKind != JsonValueKind.Object
+                || !root.TryGetProperty("event", out var eventProp) || eventProp.GetString() != "step_update"
+                || !root.TryGetProperty("step_update", out var stepUpdate) || stepUpdate.ValueKind != JsonValueKind.Object
+                || !stepUpdate.TryGetProperty("step_type", out var stepTypeProp) || stepTypeProp.GetString() != "tool"
+                || !stepUpdate.TryGetProperty("state", out var stateProp)
+                || stateProp.GetString() is not ("DONE" or "ERROR")
+                || !stepUpdate.TryGetProperty("tool_info", out var info)
+                || info.ValueKind != JsonValueKind.Object)
+            {
+                return false;
+            }
+
+            toolInfo = info.Clone();
+            return true;
+        }
+        catch (JsonException)
+        {
+            return false;
         }
     }
 }

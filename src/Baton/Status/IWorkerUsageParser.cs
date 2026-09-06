@@ -78,4 +78,51 @@ public interface IWorkerUsageParser
     /// </para>
     /// </summary>
     string? TryParseEchoedModel(string rawLine) => null;
+
+    /// <summary>
+    /// #1921: how many tool RESULTS <paramref name="rawLine"/> reports that carry
+    /// <see cref="Baton.Domain.GrantRefusal.Marker"/> — steps that bought the location of Baton's grant
+    /// boundary and no information. <b>A different line from the one
+    /// <see cref="CountToolSteps"/> counts on every vendor</b>: a step is counted where the CALL is
+    /// announced and a refusal where the RESULT comes back, so the two are summed independently over
+    /// the same stream rather than one being a filter over the other.
+    /// <para>
+    /// <b>It counts this build's marker, not refusals in general.</b> A stream captured before the
+    /// marker landed carries the same refusals and reports 0 here — <see cref="ToolStepTally"/> states
+    /// what that costs a historical reading and why the alternative (a list of phrasings) is the defect
+    /// #1921 exists to remove.
+    /// </para>
+    /// Default 0, for the same reason <see cref="CountToolSteps"/>'s is.
+    /// </summary>
+    int CountRefusedToolSteps(string rawLine) => 0;
+
+    /// <summary>
+    /// #1921: how many tool RESULTS <paramref name="rawLine"/> reports whose payload is empty or
+    /// whitespace — the other information-free step shape, and the one no grant refused: a search that
+    /// matched nothing, a listing of an empty directory, a command that printed nothing. Reported by
+    /// <c>baton audit lanes</c> beside the refusals and deliberately NOT on the cost-ledger row: an
+    /// empty result is often the honest answer to a well-formed question, where a refusal never is
+    /// (spec/baton.md §7 states that split once).
+    /// <para>
+    /// Never overlaps <see cref="CountRefusedToolSteps"/>: a refusal's payload is its reason, which is
+    /// non-empty by construction.
+    /// </para>
+    /// Default 0.
+    /// </summary>
+    int CountEmptyToolResults(string rawLine) => 0;
+
+    /// <summary>
+    /// #1921: the canonical <c>tool + arguments</c> keys <paramref name="rawLine"/> reports, for
+    /// <see cref="ToolStepTally"/>'s repeat count. One entry per tool call the line announces (claude's
+    /// multi-tool turn reports several); <b>empty when the vendor's stream does not carry the
+    /// arguments</b>, which is a real gap rather than a shrug — codex names the <c>tool</c> of an
+    /// <c>mcp_tool_call</c> and never its arguments, so keying those on the name alone would report two
+    /// different reads of two different files as one file read twice. A vendor that cannot answer
+    /// contributes nothing to the repeat count rather than a fabricated one.
+    /// <para>
+    /// The key is opaque and comparison is ordinal: only equality is ever asked of it, never its shape.
+    /// </para>
+    /// Default empty.
+    /// </summary>
+    IReadOnlyList<string> ToolInvocationKeys(string rawLine) => [];
 }

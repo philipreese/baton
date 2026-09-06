@@ -1,4 +1,6 @@
 using System.Text.Json;
+using Baton.Domain;
+using Baton.Status;
 using Baton.Tests.Shared;
 
 namespace Baton.Vendors.Tests;
@@ -201,6 +203,124 @@ public sealed class CodexDynamicToolPolicyTests
         Assert.False(deniedChain.Success);
     }
 
+    /// <summary>
+    /// #1921 review HIGH: the marker separates "the grant declined this" from "this ran and failed".
+    /// Both arms in one test because the pair is the discrimination — an assertion that a refusal is
+    /// marked passes just as well on the build that marked every failure, which is how the over-count
+    /// shipped. The count is taken through the same parser a settle runs, over the envelope
+    /// <c>CodexAppServerBroker</c> writes, rather than by re-testing for the marker a second way.
+    /// </summary>
+    [Fact]
+    public async Task An_allowed_command_that_exits_non_zero_is_a_failure_and_a_denied_one_is_a_refusal()
+    {
+        var grant = new PermissionGrant(
+            RunShellCommands: true, ShellCommandPatterns: ["exit*"], ShellCommandsAreReadOnly: true);
+        using var fixture = new PolicyFixture(grant, ["report.md"]);
+
+        // `exit 1` is a builtin of both shells this policy starts (cmd /d /s /c, /bin/sh -c).
+        var failed = await fixture.ExecuteAsync(
+            CodexDynamicToolPolicy.RunCommandTool, new { command = "exit 1" });
+        var refused = await fixture.ExecuteAsync(
+            CodexDynamicToolPolicy.RunCommandTool, new { command = "curl https://example.com" });
+
+        Assert.False(failed.Success);
+        Assert.Contains("Command exited 1", failed.Text, StringComparison.Ordinal);
+        Assert.DoesNotContain(GrantRefusal.Marker, failed.Text);
+        Assert.Equal(0, RefusedStepsCountedFor(failed));
+
+        Assert.False(refused.Success);
+        Assert.Contains(GrantRefusal.Marker, refused.Text);
+        Assert.Equal(1, RefusedStepsCountedFor(refused));
+    }
+
+    /// <summary>
+    /// The third outcome the funnel used to mark: a command the grant ALLOWED that Baton then killed for
+    /// exceeding its tool limit. Run against a 150ms limit rather than the shipped five minutes — the
+    /// timeout is a constructor parameter for exactly this reason.
+    /// </summary>
+    [Fact]
+    public async Task A_command_killed_at_the_tool_limit_is_a_failure_and_carries_no_refusal_marker()
+    {
+        var sleep = OperatingSystem.IsWindows() ? "ping -n 30 127.0.0.1" : "sleep 30";
+        var grant = new PermissionGrant(
+            RunShellCommands: true, ShellCommandPatterns: ["ping*", "sleep*"], ShellCommandsAreReadOnly: true);
+        using var fixture = new PolicyFixture(
+            grant, ["report.md"], commandTimeout: TimeSpan.FromMilliseconds(150));
+
+        var result = await fixture.ExecuteAsync(
+            CodexDynamicToolPolicy.RunCommandTool, new { command = sleep });
+
+        Assert.False(result.Success);
+        Assert.Contains("tool limit", result.Text, StringComparison.Ordinal);
+        Assert.DoesNotContain(GrantRefusal.Marker, result.Text);
+        Assert.Equal(0, RefusedStepsCountedFor(result));
+    }
+
+    /// <summary>
+    /// A read of a path the grant ALLOWS that simply is not there — unsuccessful, unmarked, uncounted.
+    /// The polarity partner is <see cref="Contract_input_is_readable_even_when_general_workspace_reads_are_withheld"/>'s
+    /// second arm, where the same tool is refused because the path is outside the readable roots.
+    /// </summary>
+    [Fact]
+    public async Task A_missing_file_inside_the_granted_roots_is_a_failure_and_a_path_outside_them_is_a_refusal()
+    {
+        using var fixture = new PolicyFixture(new PermissionGrant(ReadFiles: true), ["report.md"]);
+
+        var missing = await fixture.ExecuteAsync(
+            CodexDynamicToolPolicy.ReadTextTool, new { path = Path.Combine(fixture.Workspace, "absent.txt") });
+        var outside = await fixture.ExecuteAsync(
+            CodexDynamicToolPolicy.ReadTextTool,
+            new { path = Path.Combine(Path.GetDirectoryName(fixture.Workspace)!, "outside.txt") });
+
+        Assert.False(missing.Success);
+        Assert.DoesNotContain(GrantRefusal.Marker, missing.Text);
+        Assert.False(outside.Success);
+        Assert.Contains(GrantRefusal.Marker, outside.Text);
+    }
+
+    /// <summary>
+    /// The last arm of the funnel the refused/failed split did not re-examine (#1921 re-review): a tool
+    /// name Baton implements NOWHERE. Every implemented name has its own case with its own grant check,
+    /// so a tool a grant withheld never reaches the fallthrough — what reaches it is a hallucinated or
+    /// stale name, a malformed call rather than a decision any grant took. Paired with the withheld
+    /// <c>baton_write_text</c> on the same role, which is a real refusal, because an assertion that the
+    /// unknown tool is unmarked passes just as well on a build that stopped marking anything.
+    /// </summary>
+    [Fact]
+    public async Task An_unimplemented_tool_name_is_a_failure_and_a_withheld_implemented_one_is_a_refusal()
+    {
+        using var fixture = new PolicyFixture(new PermissionGrant(ReadFiles: true), ["report.md"]);
+
+        var unknown = await fixture.ExecuteAsync("apply_patch", new { path = "src/a.cs", content = "x" });
+        var withheld = await fixture.ExecuteAsync(
+            CodexDynamicToolPolicy.WriteTextTool, new { path = "src/a.cs", content = "x" });
+
+        Assert.False(unknown.Success);
+        Assert.DoesNotContain(GrantRefusal.Marker, unknown.Text);
+        Assert.Equal(0, RefusedStepsCountedFor(unknown));
+
+        Assert.False(withheld.Success);
+        Assert.Contains(GrantRefusal.Marker, withheld.Text);
+        Assert.Equal(1, RefusedStepsCountedFor(withheld));
+    }
+
+    /// <summary>
+    /// The <c>item.completed</c> envelope <c>CodexAppServerBroker</c> writes for one result, counted by
+    /// the parser a settle and <c>baton audit lanes</c> both read through.
+    /// </summary>
+    private static int RefusedStepsCountedFor(CodexDynamicToolResult result) =>
+        new CodexUsageParser().CountRefusedToolSteps(JsonSerializer.Serialize(new
+        {
+            type = "item.completed",
+            item = new
+            {
+                type = "mcp_tool_call",
+                tool = "baton_run_command",
+                status = result.Success ? "completed" : "failed",
+                aggregated_output = result.Text,
+            },
+        }));
+
     [Fact]
     public async Task Reparse_point_escape_is_denied_when_the_platform_can_create_one()
     {
@@ -271,7 +391,11 @@ public sealed class CodexDynamicToolPolicyTests
 
     private sealed class PolicyFixture : IDisposable
     {
-        public PolicyFixture(PermissionGrant grant, IReadOnlyList<string> outputs, bool createInput = false)
+        public PolicyFixture(
+            PermissionGrant grant,
+            IReadOnlyList<string> outputs,
+            bool createInput = false,
+            TimeSpan? commandTimeout = null)
         {
             Root = Path.Combine(Path.GetTempPath(), $"baton-codex-policy-{Guid.NewGuid():N}");
             Workspace = Path.Combine(Root, "workspace");
@@ -285,7 +409,7 @@ public sealed class CodexDynamicToolPolicyTests
                 File.WriteAllText(Input, "input");
             }
             Policy = new CodexDynamicToolPolicy(
-                grant, Workspace, Output, createInput ? [Input] : [], outputs);
+                grant, Workspace, Output, createInput ? [Input] : [], outputs, commandTimeout);
         }
 
         public string Root { get; }
