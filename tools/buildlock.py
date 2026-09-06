@@ -389,13 +389,22 @@ def selftest() -> int:
         #    holder that sleeps well past it. Ordering is proven by the holder's .info sidecar
         #    (written only once its msvcrt lock acquisition succeeds), not a fixed sleep guessing
         #    how long acquisition takes -- a fixed sleep loses the race under host load (#1627).
-        holder = _spawn_selftest_child(_CHILD_ACQUIRE_AND_SLEEP, lock_file)
+        #    The hold is 60s, not the 3s this arm used before #1910: `_wait_for_holder` proves the
+        #    holder ACQUIRED, and nothing bounded how long the waiter's own python startup then took
+        #    against a 3s hold -- on a loaded host (measured 2026-09-06, this arm red inside a
+        #    `gates` run overlapping lint's full rebuild) the waiter started after the holder had
+        #    already released, acquired the free lock, and exited 0 where 75 was wanted. A hold that
+        #    outlasts any plausible startup removes that race without weakening the assertion: the
+        #    waiter must still BLOCK on its 1s budget. Terminated below, so the long hold costs no
+        #    wall clock.
+        holder = _spawn_selftest_child(_CHILD_ACQUIRE_AND_SLEEP, lock_file, hold_s="60")
         if not _wait_for_holder(lock_file, holder.pid, ceiling_s=10.0):
             print(
                 "  control FAILED: holder never signaled lock acquisition within 10s "
                 "(distinct from the timeout-path assertion below)"
             )
             ok = False
+            holder.terminate()
             holder.communicate(timeout=30)
         else:
             env["BATON_BUILDLOCK_TIMEOUT_S"] = "1"
@@ -403,6 +412,7 @@ def selftest() -> int:
                 [sys.executable, os.path.abspath(__file__), sys.executable, "-c", "pass"],
                 env=env, capture_output=True, text=True, check=False, timeout=30,
             )
+            holder.terminate()
             holder.communicate(timeout=30)
             if waiter.returncode != BUILDLOCK_BLOCKED_EXIT or "buildlock: BLOCKED" not in waiter.stdout:
                 print(
@@ -524,15 +534,22 @@ def selftest() -> int:
             )
             ok = False
 
-        holder = _spawn_selftest_child(_CHILD_ACQUIRE_AND_SLEEP, lock_file)
+        #    A 10s hold, unlike the arms above: this waiter has to QUEUE and then ACQUIRE, so the
+        #    holder must still hold when it starts (or it records no wait) and must let go before
+        #    the waiter's own budget expires (or it BLOCKs instead of acquiring). 10s is the margin
+        #    against the startup-under-load race that took arm 3 red on 2026-09-06; the waiter's
+        #    budget is far wider still.
+        holder = _spawn_selftest_child(_CHILD_ACQUIRE_AND_SLEEP, lock_file, hold_s="10")
         if not _wait_for_holder(lock_file, holder.pid, ceiling_s=10.0):
             print("  control FAILED: holder never signaled lock acquisition within 10s (wait-log arm)")
             ok = False
+            holder.terminate()
             holder.communicate(timeout=30)
         else:
+            env["BATON_BUILDLOCK_TIMEOUT_S"] = "60"
             contended = subprocess.run(
                 [sys.executable, os.path.abspath(__file__), sys.executable, "-c", "pass"],
-                env=env, capture_output=True, text=True, check=False, timeout=60,
+                env=env, capture_output=True, text=True, check=False, timeout=90,
             )
             holder.communicate(timeout=30)
             waits = []
