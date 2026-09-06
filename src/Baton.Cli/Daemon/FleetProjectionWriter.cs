@@ -1,3 +1,4 @@
+using System.Diagnostics;
 using System.Globalization;
 using System.Text;
 using System.Text.Json;
@@ -112,6 +113,7 @@ public sealed class FleetProjectionWriter : BackgroundService
     {
         while (!stoppingToken.IsCancellationRequested)
         {
+            var started = Stopwatch.GetTimestamp();
             try
             {
                 await WriteOnceAsync(stoppingToken).ConfigureAwait(false);
@@ -125,6 +127,15 @@ public sealed class FleetProjectionWriter : BackgroundService
                 Console.Error.WriteLine($"FleetProjectionWriter: iteration failed: {ex.Message}");
             }
 
+            // #1981: recorded even when the tick above threw -- what the watchdog measures is whether
+            // the LOOP is still turning over, and a tick that fails loudly every 30s is a different
+            // fault from one that never comes back. The heartbeat file is written from here, at the end
+            // of the projection tick, because this is the daemon's fastest-cadence full pass over the
+            // rooms: DaemonTickLedger and BatonPaths.FleetHeartbeatFile carry the rest of the rules.
+            DaemonTickLedger.Instance.RecordTick(
+                nameof(FleetProjectionWriter), Stopwatch.GetElapsedTime(started), GetInterval());
+            WriteHeartbeat();
+
             try
             {
                 await Task.Delay(GetInterval(), stoppingToken).ConfigureAwait(false);
@@ -133,6 +144,26 @@ public sealed class FleetProjectionWriter : BackgroundService
             {
                 return;
             }
+        }
+    }
+
+    /// <summary>
+    /// #1981 — <see cref="BatonPaths.FleetHeartbeatFile"/>, rewritten at the end of every projection
+    /// tick from whatever every service has most recently reported. Best-effort by construction: a
+    /// heartbeat that cannot be written must never take down the tick that produced it (the same
+    /// posture <see cref="WriteAtomic"/> already takes for the projection itself), and the in-process
+    /// watchdog reads the ledger rather than this file, so a failed write costs an outside reader its
+    /// view and costs the self-check nothing.
+    /// </summary>
+    private static void WriteHeartbeat()
+    {
+        try
+        {
+            WriteAtomic(BatonPaths.FleetHeartbeatFile, DaemonTickLedger.Instance.RenderHeartbeatJson());
+        }
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
+        {
+            Console.Error.WriteLine($"FleetProjectionWriter: heartbeat write failed: {ex.Message}");
         }
     }
 

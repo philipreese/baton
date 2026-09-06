@@ -1,3 +1,4 @@
+using System.Diagnostics;
 using System.Text.Json;
 using Baton.Cli.Mcp;
 using Baton.Status;
@@ -65,6 +66,7 @@ public sealed class VendorUsageHarvester : BackgroundService
     {
         while (!stoppingToken.IsCancellationRequested)
         {
+            var started = Stopwatch.GetTimestamp();
             try
             {
                 await TickOnceAsync(DateTimeOffset.UtcNow, stoppingToken).ConfigureAwait(false);
@@ -77,6 +79,12 @@ public sealed class VendorUsageHarvester : BackgroundService
             {
                 Console.Error.WriteLine($"VendorUsageHarvester: iteration failed: {ex.Message}");
             }
+
+            // #1981: see DaemonTickLedger for why every service reports its tick here. This is the
+            // service whose child spawn was timing out under load in the minutes before the
+            // 2026-09-06 stall, so its per-tick duration is the first thing the next one should show.
+            DaemonTickLedger.Instance.RecordTick(
+                nameof(VendorUsageHarvester), Stopwatch.GetElapsedTime(started), TickInterval);
 
             try
             {

@@ -318,6 +318,23 @@ public static class BatonPaths
     public const string FleetProjectionFileName = "projection.json";
 
     /// <summary>
+    /// <c>{Root}/fleet/heartbeat.json</c> — the daemon's own liveness record (#1981), rewritten at the
+    /// end of every projection tick: when the last tick completed, and how long each hosted service's
+    /// most recent tick took. <c>Baton.Cli.Daemon.DaemonTickLedger</c> owns the shape and the rules.
+    /// <para>
+    /// Distinct from <see cref="FleetProjectionFile"/> beside it, and the distinction is the point: the
+    /// projection answers "what is the fleet doing", this answers "is the process that writes it still
+    /// running its loops". On 2026-09-06 the answer to the second was no while the first still looked
+    /// like a plausible fleet — which is why an outside reader needs it as its own file rather than as
+    /// an inference from the projection's <c>derived_at</c>.
+    /// </para>
+    /// </summary>
+    public static string FleetHeartbeatFile => Path.Combine(Root, FleetDirectoryName, FleetHeartbeatFileName);
+
+    /// <summary>Filename of <see cref="FleetHeartbeatFile"/> relative to <see cref="FleetDirectoryName"/>.</summary>
+    public const string FleetHeartbeatFileName = "heartbeat.json";
+
+    /// <summary>
     /// <c>{Root}/fleet/queue.jsonl</c> — the conductor queue's append-only decision ledger (#1934
     /// slice 1, spec/baton.md §13): one line per scheduler evaluation whose verdict changed, plus
     /// every launch and every failure. Under <see cref="FleetDirectoryName"/> rather than the root,

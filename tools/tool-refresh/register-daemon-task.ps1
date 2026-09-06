@@ -22,8 +22,16 @@ $batonHome = if ($env:BATON_HOME) { $env:BATON_HOME } else { Join-Path $HOME ".b
 # through `powershell.exe -WindowStyle Hidden` so no console window appears, and `*>>` all output
 # streams to `daemon.log` under the working directory so the daemon's own output survives a
 # session with nobody watching it.
+#
+# `; exit $LASTEXITCODE` (#1981) is load-bearing, not tidiness: measured on this machine (PowerShell
+# 5.1, 2026-09-06), `powershell.exe -Command "& { <thing that exits 70> *>> 'x.log' }"` itself exits
+# 0 -- the script block's redirect swallows the code -- while the same command with the trailing
+# `exit $LASTEXITCODE` exits 70. Task Scheduler's restart-on-failure below keys on the task's exit
+# code, so without this the daemon's own watchdog (DaemonWatchdog, which exits 70 when no service has
+# completed a tick in five intervals) would kill a hung daemon and leave it dead: strictly worse than
+# the hang it is curing. An existing registration keeps the old action until this script is re-run.
 $action = New-ScheduledTaskAction -Execute "powershell.exe" `
-    -Argument '-NoProfile -WindowStyle Hidden -Command "& { baton daemon *>> ''daemon.log'' }"' `
+    -Argument '-NoProfile -WindowStyle Hidden -Command "& { baton daemon *>> ''daemon.log'' }; exit $LASTEXITCODE"' `
     -WorkingDirectory $batonHome
 
 # This script registers unelevated, as the operator (#1770): a boot (`-AtStartup`) trigger runs
@@ -35,8 +43,11 @@ $triggerLogon = New-ScheduledTaskTrigger -AtLogOn -User "$env:USERDOMAIN\$env:US
 
 # Same shape as fleet-glass-pusher's settings (deploy.ps1 step 5): IgnoreNew means a due trigger
 # is skipped outright while a launched instance is still alive, so a healthy daemon never sees a
-# second launch; RestartCount/RestartInterval is the self-heal against a daemon that exited (crash
-# or an operator's `taskkill`) without a fresh trigger due yet.
+# second launch; RestartCount/RestartInterval is the self-heal against a daemon that exited (crash,
+# an operator's `taskkill`, or -- since #1981 -- its own watchdog) without a fresh trigger due yet.
+# Three restarts, five minutes apart: a daemon that hangs again immediately after each restart is
+# down for good after ~15 minutes rather than looping forever, and that is the intended trade -- a
+# repeat hang is a bug to look at, not a condition to paper over.
 $taskSettings = New-ScheduledTaskSettingsSet `
     -MultipleInstances IgnoreNew `
     -RestartCount 3 -RestartInterval (New-TimeSpan -Minutes 5) -StartWhenAvailable `

@@ -90,6 +90,11 @@ public static class DaemonHost
         // a policy change (a floor, the cap, the tier table) takes effect without a daemon restart.
         builder.Services.AddHostedService<QueueSchedulerService>();
 
+        // #1981: the self-watchdog, registered LAST so its supervision thread starts after every
+        // service it watches has had its StartAsync run -- DaemonWatchdog's own doc comment carries
+        // what it trips on, what it deliberately does not, and why it does not run on the thread pool.
+        builder.Services.AddHostedService<DaemonWatchdog>();
+
         var host = builder.Build();
         onHostBuilt?.Invoke(host);
         await host.RunAsync();

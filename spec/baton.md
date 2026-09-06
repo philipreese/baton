@@ -3703,6 +3703,22 @@ trigger is not registrable by a standard user and is not used (#1770).
   heartbeat entry (§2) already gives for its own field, at at most four transitions per room's entire
   lifetime. Polling for a room stops the moment its own journal already carries a `DeliveryMerged` fact.
 - **The singleton mutex is per-home, not per-user** — `DaemonHost.MutexName` (#1773) owns why.
+- **The daemon watches itself, and dies loudly rather than hanging quietly (#1981).** Every hosted
+  service above reports each completed pass to `DaemonTickLedger` (duration, and its own interval);
+  `FleetProjectionWriter` renders that ledger to `BatonPaths.FleetHeartbeatFile`
+  (`{Root}/fleet/heartbeat.json` — `tickCompletedAt` plus per-service last-tick durations) at the end
+  of every projection tick, and `DaemonWatchdog` exits the process **70** when no service has completed
+  a tick in five projection intervals, so the scheduled task's restart policy brings the daemon back.
+  Those types' own doc comments carry the rules — what the watchdog deliberately does not catch (one
+  wedged service beside healthy ones; §6's projection-staleness reading covers that), and why its loop
+  runs on a dedicated thread rather than the thread pool. **The scheduled task's action has to end in
+  `; exit $LASTEXITCODE`** for any of this to reach the scheduler: a `powershell.exe -Command "& { …
+  *>> 'daemon.log' }"` swallows the exit code (measured, PowerShell 5.1, 2026-09-06), which would leave
+  a watchdog-killed daemon dead instead of restarted — `register-daemon-task.ps1` sets it, and an
+  existing registration keeps the old action until an operator re-runs that script.
+  Occasioned by a thirteen-minute silent hang on 2026-09-06 (#1981): process alive, task Running,
+  every consumer serving a frozen picture, noticed by a person. The root cause of that hang is not
+  addressed by any of this — the instrumentation is what makes the next one diagnosable.
 
 Explicitly **not** kept: pairing (`PairedClientsStore`), WebSocket broadcast (`/api/ws`,
 `/api/ws/progress`), sidecar/Tailscale supervision, a desktop-owner-only auth tier, template-picker

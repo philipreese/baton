@@ -1,3 +1,4 @@
+using System.Diagnostics;
 using Baton.Vendors;
 using Baton.Artifacts;
 using Baton.Cli;
@@ -401,6 +402,7 @@ public sealed class RoomRetentionSweep : BackgroundService
     {
         while (!stoppingToken.IsCancellationRequested)
         {
+            var started = Stopwatch.GetTimestamp();
             if (IsEnabled() || IsPruneEnabled())
             {
                 try
@@ -428,6 +430,11 @@ public sealed class RoomRetentionSweep : BackgroundService
                     return;
                 }
             }
+
+            // #1981: see DaemonTickLedger for why every service reports its tick here. A pass with
+            // both halves disabled still reports — the loop turning over is what this measures.
+            DaemonTickLedger.Instance.RecordTick(
+                nameof(RoomRetentionSweep), Stopwatch.GetElapsedTime(started), GetInterval());
 
             try
             {

@@ -1,3 +1,4 @@
+using System.Diagnostics;
 using System.Globalization;
 using Baton.Status;
 using Microsoft.Extensions.Hosting;
@@ -65,6 +66,7 @@ public sealed class WatchSweep : BackgroundService
     {
         while (!stoppingToken.IsCancellationRequested)
         {
+            var started = Stopwatch.GetTimestamp();
             try
             {
                 await WatchFireService.SweepAsync(BatonPaths.Watches, _notifier, stoppingToken).ConfigureAwait(false);
@@ -78,6 +80,10 @@ public sealed class WatchSweep : BackgroundService
             {
                 Console.Error.WriteLine($"WatchSweep: sweep iteration failed: {ex.Message}");
             }
+
+            // #1981: DaemonTickLedger's own doc has why every service reports here, and why it reports
+            // a tick that threw as well as one that succeeded.
+            DaemonTickLedger.Instance.RecordTick(nameof(WatchSweep), Stopwatch.GetElapsedTime(started), Interval);
 
             try
             {
