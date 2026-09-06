@@ -184,11 +184,11 @@ public static class MemoryImportOptionsParser
     /// </para>
     /// <para>
     /// <b>A bare <c>owner/repo</c> is refused as well, and it is a SECOND refusal</b> because it
-    /// canonicalizes fine: <see cref="RepositoryIdentity.TryCanonicalize"/> supplies a scheme and never
-    /// a host (its own remarks say why), so <c>owner/repo</c> becomes the identity <c>owner/repo</c> —
-    /// host <c>owner</c>, path <c>repo</c> — which no git probe can ever answer. Storing it would give
-    /// the operator a store that looks right, that the probe path never reaches, and that no error ever
-    /// mentions again. See <see cref="RequireAHostThatAProbeCouldAnswer"/> for the discriminator.
+    /// canonicalizes fine — <see cref="RepositoryIdentity.TryCanonicalize"/> supplies no host, as its
+    /// own remarks explain, so <c>owner/repo</c> becomes an identity no git probe can ever answer.
+    /// Storing it would give the operator a store that looks right, that the probe path never reaches,
+    /// and that no error ever mentions again. See <see cref="RequireAHostThatAProbeCouldAnswer"/> for
+    /// the discriminator.
     /// </para>
     /// </remarks>
     private static MemoryImportAssertion ParseAssertion(string value)
@@ -223,12 +223,19 @@ public static class MemoryImportOptionsParser
     /// </summary>
     /// <remarks>
     /// <para>
-    /// <b>The test is only applied to a string the operator wrote schemelessly</b>: a value carrying a
-    /// <c>:</c> has already said where its host is — a scheme (<c>https://internal/repo</c>), an scp
-    /// remote (<c>git@internal:owner/repo</c>), or the <c>gitdir:</c> tag — and a dotless host is a real
-    /// answer there, so refusing it would make an intranet remote unassertable. Only the schemeless
-    /// spelling is ambiguous, and only there is <c>owner</c>-as-host a reading the operator did not ask
-    /// for.
+    /// <b>The test is applied only where the operator did not say where the host is.</b> A value whose
+    /// FIRST path separator is preceded by a <c>:</c> has declared one — a scheme
+    /// (<c>https://internal/repo</c>), an scp remote (<c>git@internal:owner/repo</c>), or the
+    /// <c>gitdir:</c> tag — as has a UNC authority (<c>\\server\share\repo.git</c>), and a dotless host
+    /// is a real answer in all of those, so refusing them would make an intranet remote unassertable.
+    /// It is the position of the colon rather than its presence that decides: <c>owner/repo:main</c>
+    /// carries one and still declares no host, and reading presence alone would let that spelling
+    /// through.
+    /// </para>
+    /// <para>
+    /// A dot in the host is a heuristic and is knowingly one — a schemeless <c>my.group/repo</c> passes
+    /// it. It is sized to the failure: what this refuses is the ONE spelling an operator reaches for by
+    /// habit and Baton cannot mean, not every identity that could be wrong.
     /// </para>
     /// <para>
     /// It deliberately does NOT live in <see cref="RepositoryIdentity"/>: that type canonicalizes what a
@@ -240,7 +247,7 @@ public static class MemoryImportOptionsParser
     private static void RequireAHostThatAProbeCouldAnswer(string repository, string canonical)
     {
         var raw = repository.Trim();
-        if (raw.Contains(':', StringComparison.Ordinal))
+        if (DeclaresWhereItsHostIs(raw))
         {
             return;
         }
@@ -256,6 +263,28 @@ public static class MemoryImportOptionsParser
             $"forge, so that store is one no git probe could ever reach. {Usage}",
             $"name the host too, as 'github.com/{raw}' — or write a scheme " +
             "('https://internal/owner/repo') for a host with no dot in it.");
+    }
+
+    /// <summary>
+    /// Whether <paramref name="raw"/> says where its host is, per the positional rule in
+    /// <see cref="RequireAHostThatAProbeCouldAnswer"/>'s remarks: a <c>:</c> before the first path
+    /// separator, or a UNC authority.
+    /// </summary>
+    private static bool DeclaresWhereItsHostIs(string raw)
+    {
+        if (raw.StartsWith(@"\\", StringComparison.Ordinal) || raw.StartsWith("//", StringComparison.Ordinal))
+        {
+            return true;
+        }
+
+        var colon = raw.IndexOf(':');
+        if (colon < 0)
+        {
+            return false;
+        }
+
+        var separator = raw.AsSpan().IndexOfAny('/', '\\');
+        return separator < 0 || colon < separator;
     }
 
     private static string RequireValue(IReadOnlyList<string> args, int index)

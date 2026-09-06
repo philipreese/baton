@@ -941,6 +941,12 @@ public sealed class MemoryImportTests : IDisposable
     [InlineData("owner/repo")]
     [InlineData("philipreese/baton")]
     [InlineData("Owner/Repo/extra")]
+    // The polarity pair for the arm below: this identity is accepted the moment a scheme states that
+    // 'internal' is the host, so the scheme is the operative condition rather than the dotless host.
+    [InlineData("internal/owner/repo")]
+    // A colon that arrives AFTER the first separator declares no host, so presence of ':' cannot be
+    // what exempts a value -- reading it that way let this spelling through.
+    [InlineData("owner/repo:main")]
     public void A_bare_owner_repo_with_no_forge_host_is_refused(string spelling)
     {
         var refused = Assert.Throws<CliArgumentException>(
@@ -959,6 +965,9 @@ public sealed class MemoryImportTests : IDisposable
     [InlineData("github.com/owner/repo", "github.com/owner/repo")]
     [InlineData("https://internal/owner/repo", "internal/owner/repo")]
     [InlineData("git@internal:owner/repo.git", "internal/owner/repo")]
+    // A UNC remote states its host in an authority rather than a scheme, and Windows is the only
+    // platform this ships on (#1405), so the refusal must not swallow one.
+    [InlineData(@"\\server\share\repo.git", "server/share/repo")]
     public void A_repository_that_names_its_host_is_accepted_unchanged(string spelling, string expected)
     {
         var parsed = MemoryImportOptionsParser.Parse(["--assert", $@"C:\root={spelling}"]);
