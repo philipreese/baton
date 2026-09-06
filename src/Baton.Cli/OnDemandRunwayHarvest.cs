@@ -85,17 +85,17 @@ public static class OnDemandRunwayHarvest
                 // no output at all. The source has already written the specifics to stderr; what the
                 // refusal needs is that a harvest ran and produced nothing.
                 return new RunwayHarvestAttempt(
-                    DateTimeOffset.UtcNow,
+                    DateTimeOffset.Now,
                     $"the '{vendor}' CLI did not produce a readable usage report");
             }
 
             VendorUsageHarvester.Persist(vendor, snapshot);
-            return new RunwayHarvestAttempt(DateTimeOffset.UtcNow, FailureReason: null);
+            return new RunwayHarvestAttempt(DateTimeOffset.Now, FailureReason: null);
         }
         catch (OperationCanceledException) when (!cancellationToken.IsCancellationRequested)
         {
             return new RunwayHarvestAttempt(
-                DateTimeOffset.UtcNow,
+                DateTimeOffset.Now,
                 $"the '{vendor}' usage command did not finish within {Bound.TotalSeconds:0}s");
         }
         catch (Exception ex) when (ex is not OperationCanceledException)
@@ -104,7 +104,7 @@ public static class OnDemandRunwayHarvest
             // operator's refusal text, which is the one place it is needed. Rethrowing would turn a
             // failed measurement into a crashed dispatch, and the fail-closed Hold below is already the
             // correct outcome for "the counters could not be read".
-            return new RunwayHarvestAttempt(DateTimeOffset.UtcNow, ex.Message);
+            return new RunwayHarvestAttempt(DateTimeOffset.Now, ex.Message);
         }
     }
 }

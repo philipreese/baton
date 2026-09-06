@@ -55,7 +55,11 @@ public sealed record RunwayDecision(
 /// they have to look at. #1923 measured the cost of collapsing them — an agy window that had just
 /// reset read as "no readable usage snapshot" and refused every dispatch.
 /// </summary>
-/// <param name="At">When the attempt was made — rendered into the refusal text.</param>
+/// <param name="At">
+/// When the attempt was made, in the offset the refusal should print it in. Callers pass a LOCAL
+/// instant: an operator reads this beside a reset time their vendor quoted in their own zone, and a
+/// bare unlabelled <c>HH:MM</c> in UTC is a true sentence they would draw the wrong conclusion from.
+/// </param>
 /// <param name="FailureReason">
 /// Why the harvest produced no usable snapshot, or null when it produced one. A non-null value here
 /// with a null snapshot is the "attempted and failed" arm; null with a null snapshot means the
