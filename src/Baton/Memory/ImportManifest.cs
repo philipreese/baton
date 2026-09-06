@@ -36,6 +36,25 @@ public sealed record ImportManifestRow(
     [property: JsonPropertyName("alreadyPresent")] bool AlreadyPresent = false);
 
 /// <summary>
+/// One supersession link the import recorded — the same reversal accounting
+/// <see cref="ImportManifestRow"/> carries, for the second file a store is made of.
+/// </summary>
+/// <param name="LinkId">The <see cref="MemorySupersessionLink.Id"/> — the ordered pair of entry ids.</param>
+/// <param name="Repository">The subject both linked entries are filed under.</param>
+/// <param name="LinksFilePath">The links file the row was appended to.</param>
+/// <param name="AlreadyPresent">
+/// <see langword="true"/> when the link was already recorded, so this import appended nothing for it.
+/// <b>An undo does not remove one of these</b>, for the reason
+/// <see cref="ImportManifestRow.AlreadyPresent"/> gives: an earlier run recorded it, and a link that
+/// still describes two entries that are still present is still true.
+/// </param>
+public sealed record ImportLinkRow(
+    [property: JsonPropertyName("linkId")] string LinkId,
+    [property: JsonPropertyName("repository")] string Repository,
+    [property: JsonPropertyName("linksFile")] string LinksFilePath,
+    [property: JsonPropertyName("alreadyPresent")] bool AlreadyPresent = false);
+
+/// <summary>
 /// A file the import saw and did not turn into an entry, and why. Two populations land here and they
 /// mean different things — see <see cref="ImportManifest.Unfiled"/> and
 /// <see cref="ImportManifest.Machinery"/>.
@@ -65,9 +84,16 @@ public sealed record ImportSkippedRow(
 /// </para>
 /// <para>
 /// <b>Undo is a replay of this file, not a guess.</b> <see cref="Entries"/> names the exact ids to
-/// remove from the exact store files, and the rows marked <see cref="ImportManifestRow.AlreadyPresent"/>
-/// are excluded from it — undoing an import must not delete entries an earlier import wrote. Nothing
-/// in an undo touches a source file, because nothing in an import did.
+/// remove from the exact store files and <see cref="Links"/> does the same for the supersession rows,
+/// and the rows marked <see cref="ImportManifestRow.AlreadyPresent"/> are excluded from both — undoing
+/// an import must not delete entries an earlier import wrote. Nothing in an undo touches a source
+/// file, because nothing in an import did.
+/// </para>
+/// <para>
+/// <b><see cref="BatonRoot"/> is read, not merely recorded.</b> Every path in here is absolute under
+/// the root the import ran against, so replaying a manifest under a different <c>BATON_HOME</c> would
+/// find no store file, remove nothing, and — before this was checked — report success.
+/// <c>MemoryImportCommand</c>'s undo refuses that case outright.
 /// </para>
 /// </remarks>
 /// <param name="Version">Schema version of this manifest, so a future reader can refuse an unknown one rather than half-read it.</param>
@@ -86,15 +112,32 @@ public sealed record ImportSkippedRow(
 /// markdown memories rather than a store of them. Path, digest, mtime and size; not a byte of their
 /// contents.
 /// </param>
+/// <param name="Links">
+/// One row per Q2 supersession link this import computed, so an undo reverses <b>both</b> files a
+/// store is made of. Absent (null) on a manifest written before the field existed; see
+/// <see cref="CurrentVersion"/> for why that did not need a version bump.
+/// </param>
 public sealed record ImportManifest(
     [property: JsonPropertyName("version")] int Version,
     [property: JsonPropertyName("importedAtUtc")] DateTime ImportedAtUtc,
     [property: JsonPropertyName("batonRoot")] string BatonRoot,
     [property: JsonPropertyName("entries")] IReadOnlyList<ImportManifestRow> Entries,
     [property: JsonPropertyName("unfiled")] IReadOnlyList<ImportSkippedRow> Unfiled,
-    [property: JsonPropertyName("machinery")] IReadOnlyList<ImportSkippedRow> Machinery)
+    [property: JsonPropertyName("machinery")] IReadOnlyList<ImportSkippedRow> Machinery,
+    [property: JsonPropertyName("links")]
+    [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    IReadOnlyList<ImportLinkRow>? Links = null)
 {
-    /// <summary>The only version this build writes, and the only one <see cref="Read"/> accepts.</summary>
+    /// <summary>
+    /// The only version this build writes, and the only one <see cref="Read"/> accepts.
+    /// <para>
+    /// <b>Not bumped when <see cref="Links"/> was added</b> (#1940 review round): the verb has never
+    /// shipped, so no version-1 manifest written by any released build exists to be misread, and the
+    /// field is optional in both directions — an older manifest reads back with no links and undoes its
+    /// entries exactly as before. The next change to this schema after the verb ships is a bump,
+    /// because from then on a reader could genuinely meet a manifest an older build wrote.
+    /// </para>
+    /// </summary>
     public const int CurrentVersion = 1;
 
     /// <summary>
@@ -109,6 +152,9 @@ public sealed record ImportManifest(
 
     /// <summary>The rows an undo removes: everything this import actually appended.</summary>
     public IEnumerable<ImportManifestRow> Appended => Entries.Where(e => !e.AlreadyPresent);
+
+    /// <summary>The link rows an undo removes. Empty on a manifest written before <see cref="Links"/> existed.</summary>
+    public IEnumerable<ImportLinkRow> AppendedLinks => (Links ?? []).Where(l => !l.AlreadyPresent);
 
     /// <summary>
     /// Writes the manifest to <paramref name="manifestFilePath"/>, creating its directory. UTF-8
@@ -174,12 +220,16 @@ public sealed record ImportManifest(
 /// cannot proceed. Typed rather than an <see cref="InvalidOperationException"/> so a caller can tell
 /// this subsystem's refusals from a bug (CLAUDE.md, "Error handling rules").
 /// </summary>
-public sealed class BatonMemoryException : Exception
+/// <remarks>
+/// <b>A <see cref="BatonFlowException"/>, so it surfaces as a message rather than a stack trace.</b>
+/// <c>Program</c>'s typed-exception boundary catches that base and turns it into a clean CLI failure
+/// with exit code 1; a subsystem exception deriving straight from <see cref="Exception"/> would fall
+/// past it, and "the manifest you named does not exist" would reach an operator as an unhandled crash
+/// — the same success-shaped-or-crashing undo the refusals in <c>MemoryImportCommand</c> exist to
+/// remove.
+/// </remarks>
+public sealed class BatonMemoryException : BatonFlowException
 {
-    public BatonMemoryException()
-    {
-    }
-
     public BatonMemoryException(string message)
         : base(message)
     {

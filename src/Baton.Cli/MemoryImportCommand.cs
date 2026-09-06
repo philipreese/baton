@@ -93,7 +93,7 @@ public static class MemoryImportCommand
         var aliases = await ResolveAliasesAsync(options, cancellationToken).ConfigureAwait(false);
 
         var sources = new List<MemoryImportSource>();
-        var machinery = new List<ImportSkippedRow>();
+        var machineryRoots = new List<MachineryRoot>();
 
         foreach (var root in MemoryRootInventory.Scan(claudeHome, cancellationToken))
         {
@@ -113,20 +113,28 @@ public static class MemoryImportCommand
                 // holding memories, so reading it as a memory source would import the machinery's
                 // intermediate state as though it were durable fact. Its bytes are digested (by the
                 // inventory) and never opened here.
-                machinery.AddRange(root.Files.Select(f => new ImportSkippedRow(
-                    f.Path, f.Sha256, f.ModifiedUtc, f.SizeBytes,
-                    "Codex sqlite store: the pipeline that produces the markdown memories, not a memory " +
-                    "source. Recorded for provenance; nothing was read out of it.")));
+                machineryRoots.Add(new MachineryRoot(
+                    root.DirectoryPath,
+                    root.Files.Select(f => new ImportSkippedRow(
+                        f.Path, f.Sha256, f.ModifiedUtc, f.SizeBytes,
+                        "Codex sqlite store: the pipeline that produces the markdown memories, not a memory " +
+                        "source. Recorded for provenance; nothing was read out of it.")).ToList()));
             }
         }
 
-        sources = ApplyRootFilter(sources, options.Roots);
+        var selection = ApplyRootFilter(sources, machineryRoots, options.Roots);
+        sources = selection.Sources;
+
+        // Filtered by the SAME selection, so a manifest accounts for the roots this run looked at and
+        // no others: `--root <one Claude root>` used to record every Codex sqlite file on the machine.
+        var machinery = selection.MachineryRoots.SelectMany(m => m.Rows).ToList();
 
         var withFiles = sources
             .Select(source => source with { Files = ReadSourceFiles(source) })
             .ToList();
 
-        var plan = MemoryImportPlan.Build(withFiles, DateTime.UtcNow);
+        var importedAtUtc = DateTime.UtcNow;
+        var plan = MemoryImportPlan.Build(withFiles, importedAtUtc);
 
         var sizeByPath = withFiles
             .SelectMany(s => s.Files)
@@ -134,21 +142,34 @@ public static class MemoryImportCommand
             .ToDictionary(g => g.Key, g => g.First().SizeBytes, StringComparer.OrdinalIgnoreCase);
 
         var rows = new List<ImportManifestRow>();
+        var linkRows = new List<ImportLinkRow>();
         foreach (var group in plan.Entries.GroupBy(e => e.Repository, StringComparer.OrdinalIgnoreCase))
         {
-            var entriesFile = BatonPaths.MemoryEntriesFile(RepositoryIdentity.FileSlugFor(group.Key));
+            var slug = RepositoryIdentity.FileSlugFor(group.Key);
+            var entriesFile = BatonPaths.MemoryEntriesFile(slug);
+            var linksFile = BatonPaths.MemoryLinksFile(slug);
             var entries = group.ToList();
 
             // Read first so the manifest can say which rows THIS run appended: an undo must not remove
             // an entry an earlier import wrote. The append itself re-checks under its own lock, so this
             // read is a report input and never the thing that keeps the file free of duplicates.
-            var existing = (await MemoryStore.ReadAllAsync(entriesFile, cancellationToken).ConfigureAwait(false))
-                .Select(e => e.Id)
+            var stored = await MemoryStore.ReadAllAsync(entriesFile, cancellationToken).ConfigureAwait(false);
+            var existing = stored.Select(e => e.Id).ToHashSet(StringComparer.Ordinal);
+
+            // The link population is the STORE plus this run, never this run alone — MemoryImportPlan
+            // .LinkSupersession's own remarks carry why, and it is the whole of the incremental-import
+            // defect: importing the live roots and the archive in separate runs used to land no link at
+            // all, because each run could only see its own half of every pair.
+            var links = MemoryImportPlan.LinkSupersession(
+                [.. stored, .. entries.Where(e => !existing.Contains(e.Id))], importedAtUtc);
+            var existingLinks = (await MemoryStore.ReadLinksAsync(linksFile, cancellationToken).ConfigureAwait(false))
+                .Select(l => l.Id)
                 .ToHashSet(StringComparer.Ordinal);
 
             if (!options.DryRun)
             {
                 await MemoryStore.AppendAsync(entries, entriesFile, cancellationToken).ConfigureAwait(false);
+                await MemoryStore.AppendLinksAsync(links, linksFile, cancellationToken).ConfigureAwait(false);
             }
 
             rows.AddRange(entries.Select(e => new ImportManifestRow(
@@ -156,6 +177,9 @@ public static class MemoryImportCommand
                 sizeByPath.TryGetValue(e.SourcePath, out var size) ? size : 0,
                 e.SourceVendor, e.SourceScope, e.Id, e.Repository, entriesFile,
                 AlreadyPresent: existing.Contains(e.Id))));
+
+            linkRows.AddRange(links.Select(l => new ImportLinkRow(
+                l.Id, l.Repository, linksFile, AlreadyPresent: existingLinks.Contains(l.Id))));
         }
 
         var manifest = new ImportManifest(
@@ -165,7 +189,9 @@ public static class MemoryImportCommand
             rows.OrderBy(r => r.EntriesFilePath, StringComparer.OrdinalIgnoreCase)
                 .ThenBy(r => r.SourcePath, StringComparer.OrdinalIgnoreCase).ToList(),
             plan.Unfiled,
-            machinery);
+            machinery,
+            linkRows.OrderBy(l => l.LinksFilePath, StringComparer.OrdinalIgnoreCase)
+                .ThenBy(l => l.LinkId, StringComparer.Ordinal).ToList());
 
         string? manifestPath = null;
         if (!options.DryRun)
@@ -200,7 +226,10 @@ public static class MemoryImportCommand
         var assertedBy = options.AssertedBy is { Length: > 0 } who ? who : Environment.UserName;
         var asserted = options.Assertions
             .Select(a => new MemoryAliasEntry(
-                BatonPaths.RecordKey(a.Path), a.Repository, assertedBy, DateTime.UtcNow))
+                RequirePathKey(a.Path, $"--assert {a.Path}={a.Repository}"),
+                a.Repository,
+                assertedBy,
+                DateTime.UtcNow))
             .ToList();
 
         if (!options.DryRun)
@@ -218,12 +247,12 @@ public static class MemoryImportCommand
     /// </summary>
     /// <remarks>
     /// <para>
-    /// The path resolution is <see cref="MemoryAuditCommand"/>'s, unchanged and for the same reasons —
-    /// session <c>cwd</c> is ground truth, the decoder's tie-break is offered only fully-qualified
-    /// readings that are a work tree's own root. What is added here is the alias fallback, which fires
-    /// only where the probe produced nothing: <see cref="MemoryAliasStore"/>'s own remarks state why an
-    /// assertion may never displace a measurement, and why this is not the mechanism for the
-    /// subject-versus-origin question.
+    /// The path resolution is <see cref="ClaudeMemoryRootResolver"/>'s — literally the same method
+    /// <see cref="MemoryAuditCommand"/> calls, which is what makes "the audit is a preview of what the
+    /// import will do" a property of the code rather than a claim in two doc comments. What is added
+    /// here is the alias fallback, which fires only where the probe produced nothing:
+    /// <see cref="MemoryAliasStore"/>'s own remarks state why an assertion may never displace a
+    /// measurement, and why this is not the mechanism for the subject-versus-origin question.
     /// </para>
     /// <para>
     /// <b>The fallback tries two keys — the checkout, then the root's own directory.</b> The second is
@@ -236,19 +265,11 @@ public static class MemoryImportCommand
     private static async Task<MemoryImportSource> ResolveClaudeRootAsync(
         MemoryRoot root, IReadOnlyList<MemoryAliasEntry> aliases, CancellationToken cancellationToken)
     {
-        var resolution = MemoryRootPath.Resolve(
-            root.DirectoryName,
-            MemoryRootPath.ReadSessionWorkingDirectories(root.SessionDirectoryPath),
-            RepositoryIdentityResolver.IsWorkTreeRoot);
-
-        var checkoutExists = resolution.CheckoutPath is { Length: > 0 } path && Directory.Exists(path);
-        var repository = checkoutExists
-            ? (await RepositoryIdentityResolver
-                .TryResolveAsync(resolution.CheckoutPath!, cancellationToken).ConfigureAwait(false))?.Value
-            : null;
+        var resolved = await ClaudeMemoryRootResolver.ResolveAsync(root, cancellationToken).ConfigureAwait(false);
+        var repository = resolved.RepositoryValue;
 
         var asserted = repository is null
-            ? MemoryAliasStore.Resolve(aliases, resolution.CheckoutPath)
+            ? MemoryAliasStore.Resolve(aliases, resolved.Path.CheckoutPath)
                 ?? MemoryAliasStore.Resolve(aliases, root.DirectoryPath)
             : null;
 
@@ -258,7 +279,7 @@ public static class MemoryImportCommand
             VendorMemoryScope.Vendor,
             root.Kind == MemoryRootKind.Archive,
             repository ?? asserted,
-            UnfiledReason: DescribeUnresolvedClaudeRoot(resolution, checkoutExists),
+            UnfiledReason: DescribeUnresolvedClaudeRoot(resolved.Path, resolved.CheckoutExists),
             root.Files.Select(f => new MemoryImportFile(f.Path, Path.GetFileName(f.Path), string.Empty, f.Sha256, f.ModifiedUtc, f.SizeBytes)).ToList());
     }
 
@@ -299,53 +320,135 @@ public static class MemoryImportCommand
                 f.Path, Path.GetFileName(f.Path), string.Empty, f.Sha256, f.ModifiedUtc, f.SizeBytes)).ToList());
 
     /// <summary>
-    /// <paramref name="sources"/> narrowed to <paramref name="roots"/>, or all of them when none was
-    /// named. A named path that matches no discovered root throws rather than being ignored: the
-    /// operator asked for something that is not there, and an import that silently did less than it
-    /// was asked would look identical to one that found nothing to do.
+    /// One machinery root's rows, kept with the directory they came from so <c>--root</c> can narrow
+    /// them the same way it narrows the importable sources.
     /// </summary>
-    private static List<MemoryImportSource> ApplyRootFilter(
-        List<MemoryImportSource> sources, IReadOnlyList<string> roots)
+    private sealed record MachineryRoot(string RootDirectoryPath, IReadOnlyList<ImportSkippedRow> Rows);
+
+    /// <summary>What survived <see cref="ApplyRootFilter"/>: both populations, narrowed together.</summary>
+    private sealed record RootSelection(List<MemoryImportSource> Sources, List<MachineryRoot> MachineryRoots);
+
+    /// <summary>
+    /// Both populations narrowed to <paramref name="roots"/>, or all of them when none was named.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// <b>Machinery is narrowed too.</b> Its rows are collected during discovery, before this runs, so
+    /// leaving them unfiltered made <c>--root &lt;one Claude root&gt;</c> write every Codex sqlite file
+    /// on the machine into that run's manifest — files the run was not asked to look at, accounted for
+    /// as though it had.
+    /// </para>
+    /// <para>
+    /// <b>A named path that matches neither population throws rather than being ignored</b>: the
+    /// operator asked for something that is not there, and an import that silently did less than it was
+    /// asked would look identical to one that found nothing to do. The refusal names the two families
+    /// that <c>baton memory audit</c> reports and this verb cannot select — the audit's population is
+    /// deliberately the larger of the two, and pointing an operator at a listing that includes rows
+    /// this option rejects is what made the old message a dead end.
+    /// </para>
+    /// </remarks>
+    private static RootSelection ApplyRootFilter(
+        List<MemoryImportSource> sources, List<MachineryRoot> machineryRoots, IReadOnlyList<string> roots)
     {
         if (roots.Count == 0)
         {
-            return sources;
+            return new RootSelection(sources, machineryRoots);
         }
 
-        var selected = new List<MemoryImportSource>();
+        var selectedSources = new List<MemoryImportSource>();
+        var selectedMachinery = new List<MachineryRoot>();
         foreach (var requested in roots)
         {
-            var key = BatonPaths.RecordKey(requested);
-            var match = sources.FirstOrDefault(
-                s => BatonPaths.RecordKeyComparer.Equals(BatonPaths.RecordKey(s.RootDirectoryPath), key));
+            var key = RequirePathKey(requested, $"--root {requested}");
 
-            if (match is null)
+            var source = sources.FirstOrDefault(
+                s => BatonPaths.RecordKeyComparer.Equals(BatonPaths.RecordKey(s.RootDirectoryPath), key));
+            if (source is not null)
             {
-                throw new CliArgumentException(
-                    $"'--root {requested}' matches no discovered memory root. This option selects from " +
-                    "what discovery found; it cannot add a directory. Run 'baton memory audit' to see " +
-                    "the roots that exist.");
+                if (!selectedSources.Contains(source))
+                {
+                    selectedSources.Add(source);
+                }
+
+                continue;
             }
 
-            if (!selected.Contains(match))
+            var machinery = machineryRoots.FirstOrDefault(
+                m => BatonPaths.RecordKeyComparer.Equals(BatonPaths.RecordKey(m.RootDirectoryPath), key));
+            if (machinery is null)
             {
-                selected.Add(match);
+                throw new CliArgumentException(
+                    $"'--root {requested}' matches no memory root this verb can import. This option " +
+                    "selects from what discovery found; it cannot add a directory. Run 'baton memory " +
+                    "audit' to see the roots that exist -- and note that its listing is WIDER than what " +
+                    "can be named here: an Antigravity root is audited but never imported and cannot be " +
+                    "selected at all.");
+            }
+
+            if (!selectedMachinery.Contains(machinery))
+            {
+                selectedMachinery.Add(machinery);
             }
         }
 
-        return selected;
+        return new RootSelection(selectedSources, selectedMachinery);
     }
 
     /// <summary>
-    /// The same file rows with their text read in. <b>The one place a memory's contents are read</b>,
-    /// and they are read for copying rather than for meaning — opened with
-    /// <see cref="FileAccess.Read"/>, and never written back.
+    /// <c>BatonPaths.RecordKey</c> for an operator-supplied path, with an unusable one surfaced as this
+    /// verb's own refusal.
     /// </summary>
     /// <remarks>
+    /// <c>RecordKey</c> is <c>Path.GetFullPath</c> underneath, which throws a bare
+    /// <see cref="ArgumentException"/> on a path holding an invalid character.
+    /// <c>MemoryImportOptionsParser</c> states that every malformed invocation of this verb produces a
+    /// <see cref="CliArgumentException"/>, and <c>MemoryAliasStore.Resolve</c> guards the identical call
+    /// for the identical reason; without this, <c>--assert</c> and <c>--root</c> were the two ways to
+    /// get a stack trace out of a typo.
+    /// </remarks>
+    private static string RequirePathKey(string path, string option)
+    {
+        try
+        {
+            return BatonPaths.RecordKey(path);
+        }
+        catch (Exception ex) when (ex is ArgumentException or NotSupportedException or PathTooLongException)
+        {
+            throw new CliArgumentException(
+                $"'{option}' does not name a usable path: {ex.Message} {MemoryImportOptionsParser.Usage}",
+                "check the path for invalid characters.");
+        }
+    }
+
+    /// <summary>
+    /// The same file rows with their text read in, and <b>re-digested from the very bytes that text was
+    /// decoded from</b>. <b>The one place a memory's contents are read</b>, and they are read for
+    /// copying rather than for meaning — opened with <see cref="FileAccess.Read"/>, and never written
+    /// back.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// <b>One read, so digest and text describe the same file.</b> The inventory walk digests every
+    /// file it finds, minutes or milliseconds before this runs; taking the digest from there and the
+    /// text from here means a file edited in between is stored with text that does not match its
+    /// recorded <see cref="MemoryEntry.Sha256"/>, under an id derived from a version of it nobody kept.
+    /// Re-hashing the bytes in hand costs one pass over a file already in memory and removes the window
+    /// entirely. The inventory's digest still stands for the rows this never reads — unfiled files and
+    /// the machinery rows, neither of which is opened.
+    /// </para>
+    /// <para>
+    /// <b>The text is a UTF-8 decode, not the bytes</b>, and <see cref="MemoryEntry"/>'s own doc says so
+    /// rather than claiming otherwise: BOM detection is left ON (as it was) because
+    /// <see cref="MemoryKindInference"/> reads front-matter anchored at the start of the text, and a
+    /// U+FEFF preserved there would silently demote a declared kind to an inferred one. The digest
+    /// beside it is over the bytes and is the authority on what the file held.
+    /// </para>
+    /// <para>
     /// A file that vanished or became unreadable between the inventory and this read is dropped rather
     /// than throwing, matching the inventory's own posture: one lost row in a walk that otherwise
     /// finished. It cannot silently become an empty entry — a dropped file contributes neither an
     /// entry nor a manifest row, so the import's own accounting shows it was not carried.
+    /// </para>
     /// </remarks>
     private static IReadOnlyList<MemoryImportFile> ReadSourceFiles(MemoryImportSource source)
     {
@@ -354,9 +457,23 @@ public static class MemoryImportCommand
         {
             try
             {
-                using var stream = new FileStream(file.Path, FileMode.Open, FileAccess.Read, FileShare.ReadWrite);
-                using var reader = new StreamReader(stream, System.Text.Encoding.UTF8);
-                files.Add(file with { Text = reader.ReadToEnd() });
+                byte[] bytes;
+                using (var stream = new FileStream(file.Path, FileMode.Open, FileAccess.Read, FileShare.ReadWrite))
+                using (var buffer = new MemoryStream())
+                {
+                    stream.CopyTo(buffer);
+                    bytes = buffer.ToArray();
+                }
+
+                using var reader = new StreamReader(
+                    new MemoryStream(bytes), System.Text.Encoding.UTF8, detectEncodingFromByteOrderMarks: true);
+
+                files.Add(file with
+                {
+                    Text = reader.ReadToEnd(),
+                    Sha256 = Convert.ToHexString(System.Security.Cryptography.SHA256.HashData(bytes)).ToLowerInvariant(),
+                    SizeBytes = bytes.Length,
+                });
             }
             catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
             {
@@ -372,32 +489,117 @@ public static class MemoryImportCommand
     /// appended, from exactly the store files it wrote them to.
     /// </summary>
     /// <remarks>
+    /// <para>
     /// <b>It touches no source file, because the import touched none either.</b> "Undo" here means the
     /// canonical store returns to what it held before the import — there is nothing to restore on the
     /// vendor's side, which is the whole point of a non-destructive import and is stated in the output
     /// so an operator does not go looking for a restore that would have no work to do.
+    /// </para>
+    /// <para>
+    /// <b>It exits non-zero unless it removed exactly what the manifest says the import appended.</b>
+    /// <see cref="MemoryStore.RemoveAsync"/> answers 0 rather than throwing for a store file that is
+    /// not there, which is right for it — a partially-undone import must be re-undoable — and wrong for
+    /// the report built on top: "Removed 0 canonical entries" printed with exit 0 told an operator the
+    /// undo had run when nothing had been reversed at all. The count is compared per store file, so the
+    /// report names which one came up short rather than only that a total did.
+    /// </para>
+    /// <para>
+    /// <b>And it refuses a manifest written under a different storage root outright.</b> Every path in
+    /// a manifest is absolute under <see cref="ImportManifest.BatonRoot"/>, so replaying one after
+    /// <c>BATON_HOME</c> moved would look for store files that do not exist here and — even with the
+    /// count check above — could only report a failure it cannot explain. The root is the explanation,
+    /// and it was being written on every manifest and read by nothing.
+    /// </para>
     /// </remarks>
     private static async Task<int> UndoAsync(
         string manifestPath, TextWriter output, CancellationToken cancellationToken)
     {
         var manifest = ImportManifest.Read(manifestPath);
 
+        output.WriteLine($"baton memory import --undo {manifestPath}");
+
+        var currentRoot = BatonPaths.Root;
+        if (!IsSameRoot(manifest.BatonRoot, currentRoot))
+        {
+            output.WriteLine(
+                $"REFUSED -- this manifest was written against the storage root '{manifest.BatonRoot}', " +
+                $"and this process is using '{currentRoot}'. Every store path in the manifest is " +
+                "absolute under the first one, so replaying it here would remove nothing and report " +
+                "having done so. Nothing was changed.");
+            output.WriteLine(
+                $"Set BATON_HOME to '{manifest.BatonRoot}' and run the same command again.");
+            return 1;
+        }
+
+        var shortfalls = new List<string>();
         var removed = 0;
         foreach (var group in manifest.Appended.GroupBy(r => r.EntriesFilePath, StringComparer.OrdinalIgnoreCase))
         {
-            removed += await MemoryStore
-                .RemoveAsync(group.Select(r => r.EntryId).ToList(), group.Key, cancellationToken)
-                .ConfigureAwait(false);
+            var expected = group.Select(r => r.EntryId).Distinct(StringComparer.Ordinal).ToList();
+            var count = await MemoryStore.RemoveAsync(expected, group.Key, cancellationToken).ConfigureAwait(false);
+            removed += count;
+
+            if (count != expected.Count)
+            {
+                shortfalls.Add($"  {group.Key}: expected {expected.Count}, removed {count}");
+            }
         }
 
-        output.WriteLine($"baton memory import --undo {manifestPath}");
+        var removedLinks = 0;
+        foreach (var group in manifest.AppendedLinks.GroupBy(l => l.LinksFilePath, StringComparer.OrdinalIgnoreCase))
+        {
+            var expected = group.Select(l => l.LinkId).Distinct(StringComparer.Ordinal).ToList();
+            var count = await MemoryStore.RemoveLinksAsync(expected, group.Key, cancellationToken).ConfigureAwait(false);
+            removedLinks += count;
+
+            if (count != expected.Count)
+            {
+                shortfalls.Add($"  {group.Key}: expected {expected.Count} link(s), removed {count}");
+            }
+        }
+
         output.WriteLine(
-            $"Removed {removed} canonical entr{(removed == 1 ? "y" : "ies")} across " +
+            $"Removed {removed} canonical entr{(removed == 1 ? "y" : "ies")} and {removedLinks} " +
+            $"supersession link(s) across " +
             $"{manifest.Appended.Select(r => r.EntriesFilePath).Distinct(StringComparer.OrdinalIgnoreCase).Count()} store file(s).");
         output.WriteLine(
             "No source memory file was touched -- the import never wrote to one, so there is nothing on " +
             "the vendors' side to restore.");
-        return 0;
+
+        if (shortfalls.Count == 0)
+        {
+            return 0;
+        }
+
+        output.WriteLine();
+        output.WriteLine(
+            "INCOMPLETE -- the undo removed less than this manifest says the import appended. A store " +
+            "file that is missing, moved, or already partly undone reads exactly like this; nothing " +
+            "here was removed twice, and re-running this undo is safe.");
+        foreach (var shortfall in shortfalls)
+        {
+            output.WriteLine(shortfall);
+        }
+
+        return 1;
+    }
+
+    /// <summary>
+    /// Whether two storage-root spellings name one directory. A manifest root that is not a usable path
+    /// at all answers <see langword="false"/> — it certainly is not this process's root, and the undo's
+    /// refusal is the right outcome for a manifest that cannot be trusted about where it wrote.
+    /// </summary>
+    private static bool IsSameRoot(string manifestRoot, string currentRoot)
+    {
+        try
+        {
+            return BatonPaths.RecordKeyComparer.Equals(
+                BatonPaths.RecordKey(manifestRoot), BatonPaths.RecordKey(currentRoot));
+        }
+        catch (Exception ex) when (ex is ArgumentException or NotSupportedException or PathTooLongException)
+        {
+            return false;
+        }
     }
 
     private static void WriteReport(
@@ -414,6 +616,12 @@ public static class MemoryImportCommand
             $"Entries: {manifest.Entries.Count}   {(options.DryRun ? "would append" : "appended")}: {appended}   " +
             $"already present: {manifest.Entries.Count - appended}");
         output.WriteLine($"Unfiled: {manifest.Unfiled.Count}   machinery recorded: {manifest.Machinery.Count}");
+
+        var links = manifest.Links ?? [];
+        var appendedLinks = manifest.AppendedLinks.Count();
+        output.WriteLine(
+            $"Supersession links: {links.Count}   {(options.DryRun ? "would record" : "recorded")}: " +
+            $"{appendedLinks}   already recorded: {links.Count - appendedLinks}");
 
         foreach (var group in manifest.Entries
                      .GroupBy(r => r.EntriesFilePath, StringComparer.OrdinalIgnoreCase)

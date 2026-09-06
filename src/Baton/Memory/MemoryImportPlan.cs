@@ -108,12 +108,18 @@ public sealed record MemoryImportPlan(
             }
         }
 
-        return new MemoryImportPlan(LinkSupersession(entries), unfiled);
+        return new MemoryImportPlan(
+            entries
+                .OrderBy(e => e.Repository, StringComparer.OrdinalIgnoreCase)
+                .ThenBy(e => e.SourcePath, StringComparer.OrdinalIgnoreCase)
+                .ToList(),
+            unfiled);
     }
 
     /// <summary>
-    /// Adds the Q2 supersession links: an entry from a live root supersedes one from an archived root
-    /// when the two share a <b>subject</b> and a <b>file name</b> and their digests differ.
+    /// The Q2 supersession links over a population: an entry from a live root supersedes one from an
+    /// archived root when the two share a <b>subject</b> and a <b>file name</b> and their digests
+    /// differ.
     /// </summary>
     /// <remarks>
     /// <para>
@@ -134,19 +140,34 @@ public sealed record MemoryImportPlan(
     /// nothing here knows which is newer, and mtime is a property of the file rather than of the fact.
     /// </para>
     /// <para>
-    /// The link is written on both entries: an archived entry read on its own says it was superseded,
-    /// without the reader having to scan every other entry to find out.
+    /// <b>The population is what the caller hands in, and it must be the STORE's, not one run's.</b>
+    /// A link is a fact about a pair, and the two halves of a pair routinely arrive in different
+    /// imports — the live roots first, the archive later under an <c>--assert</c>, or one
+    /// <c>--root</c> run each. Computing this over a single run's plan would silently produce no link
+    /// in every one of those orders. <c>MemoryImportCommand</c> therefore passes the union of the
+    /// store's existing entries and the run's new ones; <see cref="MemorySupersessionLink"/> says why
+    /// the result is recorded as its own row rather than written onto an entry.
+    /// </para>
+    /// <para>
+    /// <b>Pure and idempotent.</b> Recomputing over a superset yields the same links plus any new
+    /// ones, and the link's id is its pair — so the store's append skips what it already holds and a
+    /// re-import writes nothing.
     /// </para>
     /// </remarks>
-    private static IReadOnlyList<MemoryEntry> LinkSupersession(List<MemoryEntry> entries)
+    /// <param name="entries">Every entry the links may relate — one repository's store plus the incoming run.</param>
+    /// <param name="recordedAtUtc">Stamped on every link. Deliberately not part of any link's id.</param>
+    public static IReadOnlyList<MemorySupersessionLink> LinkSupersession(
+        IReadOnlyList<MemoryEntry> entries, DateTime recordedAtUtc)
     {
-        var supersedes = new Dictionary<string, List<string>>(StringComparer.Ordinal);
-        var supersededBy = new Dictionary<string, List<string>>(StringComparer.Ordinal);
+        ArgumentNullException.ThrowIfNull(entries);
+
+        var archivedEntries = entries.Where(e => e.KindSource == MemoryKindSource.InferredFromArchive).ToList();
+        var links = new List<MemorySupersessionLink>();
 
         foreach (var live in entries.Where(e => e.KindSource != MemoryKindSource.InferredFromArchive))
         {
             var liveName = Path.GetFileName(live.SourcePath);
-            foreach (var archived in entries.Where(e => e.KindSource == MemoryKindSource.InferredFromArchive))
+            foreach (var archived in archivedEntries)
             {
                 if (!string.Equals(live.Repository, archived.Repository, StringComparison.OrdinalIgnoreCase) ||
                     !string.Equals(liveName, Path.GetFileName(archived.SourcePath), StringComparison.OrdinalIgnoreCase) ||
@@ -155,35 +176,13 @@ public sealed record MemoryImportPlan(
                     continue;
                 }
 
-                Add(supersedes, live.Id, archived.Id);
-                Add(supersededBy, archived.Id, live.Id);
+                links.Add(MemorySupersessionLink.Create(live.Id, archived.Id, live.Repository, recordedAtUtc));
             }
         }
 
-        return entries
-            .Select(entry => entry with
-            {
-                Supersedes = Ordered(supersedes, entry.Id),
-                SupersededBy = Ordered(supersededBy, entry.Id),
-            })
-            .OrderBy(e => e.Repository, StringComparer.OrdinalIgnoreCase)
-            .ThenBy(e => e.SourcePath, StringComparer.OrdinalIgnoreCase)
+        return links
+            .DistinctBy(l => l.Id, StringComparer.Ordinal)
+            .OrderBy(l => l.Id, StringComparer.Ordinal)
             .ToList();
-
-        static void Add(Dictionary<string, List<string>> map, string key, string value)
-        {
-            if (!map.TryGetValue(key, out var list))
-            {
-                list = [];
-                map[key] = list;
-            }
-
-            list.Add(value);
-        }
-
-        // Null rather than an empty list: MemoryEntry's own doc states why "supersedes nothing" must
-        // be an absent field rather than a present empty one.
-        static IReadOnlyList<string>? Ordered(Dictionary<string, List<string>> map, string key) =>
-            map.TryGetValue(key, out var list) ? list.Order(StringComparer.Ordinal).ToList() : null;
     }
 }

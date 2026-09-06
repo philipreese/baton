@@ -249,6 +249,20 @@ public static class BatonPaths
     public const string MemoryEntriesFileName = "entries.jsonl";
 
     /// <summary>
+    /// <c>{Root}/&lt;repository-slug&gt;/memory/links.jsonl</c> — one repository's append-only
+    /// supersession links (#1852 phase B, Q2). <b>A second file rather than a field on an entry</b>
+    /// because <see cref="MemoryEntriesFile"/> is append-only with no overwrite and an entry's id is
+    /// derived from facts supersession does not change: a link discovered by a LATER import can never
+    /// be written onto a row an earlier one already wrote. See <c>Baton.Memory.MemoryStore</c> for how
+    /// a reader puts the two back together.
+    /// </summary>
+    public static string MemoryLinksFile(string repositorySlug) =>
+        Path.Combine(MemoryDirectory(repositorySlug), MemoryLinksFileName);
+
+    /// <summary>Filename of <see cref="MemoryLinksFile"/> relative to <see cref="MemoryDirectory"/>.</summary>
+    public const string MemoryLinksFileName = "links.jsonl";
+
+    /// <summary>
     /// <c>{Root}/memory-aliases.jsonl</c> — see <c>Baton.Memory.MemoryAliasStore</c> for what it holds
     /// and when it is consulted. <b>Machine-wide, so deliberately not inside a repository directory</b>:
     /// it maps a checkout path to the repository it belongs to, and filing it under that answer would

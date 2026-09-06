@@ -1,3 +1,4 @@
+using Baton.Accounting;
 using Baton.Status;
 
 namespace Baton.Cli;
@@ -27,9 +28,9 @@ public static class MemoryImportOptionsParser
         "a vendor's file. It writes in exactly two places, both under Baton's storage root -- the",
         "per-repository store and one import manifest -- and nowhere else on the machine.",
         "",
-        "The store is per repository IDENTITY, not per checkout: {BATON_HOME}/<repo-slug>/memory/entries.jsonl.",
-        "Two worktrees of one repository therefore import into one store, and two unrelated repositories",
-        "that merely share a folder name do not.",
+        "The store is per repository IDENTITY, not per checkout: {BATON_HOME}/<repo-slug>/memory/entries.jsonl,",
+        "plus links.jsonl beside it for supersession. Two worktrees of one repository therefore import into",
+        "one store, and two unrelated repositories that merely share a folder name do not.",
         "",
         "Population: every root 'baton memory audit' inventories -- the live Claude roots, the archived",
         "roots, and the Codex MARKDOWN memories. Codex's memories_*.sqlite stores are NOT a memory source:",
@@ -39,14 +40,22 @@ public static class MemoryImportOptionsParser
         "  --dry-run           Compute everything and write NOTHING -- no entries, and no manifest either.",
         "  --root <dir>        Import only this discovered root; repeatable. It SELECTS from what discovery",
         "                      found and cannot add a directory discovery did not; an unmatched path is an",
-        "                      error rather than a new root.",
+        "                      error rather than a new root. It narrows the manifest's machinery rows too,",
+        "                      so a filtered run accounts for the roots it looked at and no others.",
+        "                      It selects IMPORTABLE roots only, which is a SMALLER set than the one",
+        "                      'baton memory audit' reports: a Codex memories_*.sqlite root and every",
+        "                      Antigravity root are audited but never imported, and naming one here is an",
+        "                      error rather than a no-op run.",
         "  --assert <path>=<repository>",
         "                      Assert which repository a root belongs to, when git cannot answer -- an",
         "                      archived root, a root whose checkout is gone, a per-machine vendor root.",
         "                      Repeatable. <path> is the memory root directory or the checkout it came",
         $"                      from; the assertion is appended to {BatonPaths.MemoryAliasFileName} and reused by",
         "                      later runs. It is CONSULTED ONLY where the probe produced nothing and can",
-        "                      never override a repository git actually answered for.",
+        "                      never override a repository git actually answered for. <repository> is",
+        "                      canonicalized the same way a git probe's answer is, so 'GitHub.com/Owner/Repo',",
+        "                      'github.com/owner/repo' and 'https://github.com/Owner/Repo.git' are ONE store;",
+        "                      a string with no host-and-path in it is refused rather than made into a store.",
         "  --asserted-by <who> Who is asserting. Defaults to this machine's user name.",
         "  --undo <manifest>   Remove exactly the entries a previous run appended, per its manifest. Source",
         "                      files are untouched, because the import never touched them either. Entries an",
@@ -55,7 +64,9 @@ public static class MemoryImportOptionsParser
         "An entry's kind is declared by the file's own front-matter, else inferred from its filename prefix",
         "and recorded as inferred, else 'unknown'. It is NEVER inferred from what the memory says. Entries",
         "from an archived root are historical notes whatever they declare, and are linked to the live entry",
-        "that supersedes them when the two share a repository and a filename and differ in content.",
+        "that supersedes them when the two share a repository and a filename and differ in content. That link",
+        "is its own row in links.jsonl rather than a field on an entry, so it lands whichever run discovers",
+        "it -- importing the live roots today and the archive tomorrow gives the same links as one run would.",
         "",
         "What this verb cannot do: it will not guess a subject. A root whose checkout is gone, an archived",
         "root whose flattened name decodes to no checkout, and a per-machine root like ~/.codex/memories",
@@ -136,10 +147,32 @@ public static class MemoryImportOptionsParser
     }
 
     /// <summary>
-    /// Splits <c>&lt;path&gt;=&lt;repository&gt;</c> at its LAST <c>=</c>. A repository identity never
-    /// contains one, and a Windows path can — so splitting at the first would break a path that holds
-    /// one, and the last separator is the one that always divides the pair correctly.
+    /// Splits <c>&lt;path&gt;=&lt;repository&gt;</c> at its LAST <c>=</c>, and canonicalizes the
+    /// repository half through <see cref="RepositoryIdentity.TryCanonicalize"/>.
     /// </summary>
+    /// <remarks>
+    /// <para>
+    /// <b>The split is at the last <c>=</c></b> because a repository identity never contains one and a
+    /// Windows path can — splitting at the first would break a path that holds one, and the last
+    /// separator is the one that always divides the pair correctly.
+    /// </para>
+    /// <para>
+    /// <b>The repository half is canonicalized here, on the write path, and nowhere else.</b> An
+    /// assertion is stored and then slugged into a store filename
+    /// (<see cref="RepositoryIdentity.FileSlugFor"/>), so <c>GitHub.com/Owner/Repo</c> left as typed is
+    /// a second store file for a repository git derives as <c>github.com/owner/repo</c> — one
+    /// repository, two <c>entries.jsonl</c>, every entry in both, no error. Canonicalizing at the point
+    /// the operator's string enters the system is what makes "one repository, one store file" a
+    /// property rather than a convention. It is deliberately NOT also done when the alias file is read
+    /// back: that file is append-only and hand-editable, this verb has never shipped, so no
+    /// non-canonical row can exist in the wild, and a read-time rewrite would silently change what a
+    /// row an operator can see says.
+    /// </para>
+    /// <para>
+    /// A value that canonicalizes to nothing is refused rather than stored raw — the refusal is what
+    /// keeps a store called <c>hello-world-&lt;digest&gt;</c> from existing.
+    /// </para>
+    /// </remarks>
     private static MemoryImportAssertion ParseAssertion(string value)
     {
         var separator = value.LastIndexOf('=');
@@ -150,7 +183,18 @@ public static class MemoryImportOptionsParser
                 "for example: --assert \"C:\\Users\\me\\.codex\\memories=github.com/owner/repo\".");
         }
 
-        return new MemoryImportAssertion(value[..separator].Trim(), value[(separator + 1)..].Trim());
+        var repository = value[(separator + 1)..];
+        if (RepositoryIdentity.TryCanonicalize(repository) is not { Length: > 0 } canonical)
+        {
+            throw new CliArgumentException(
+                $"'{repository.Trim()}' is not a repository identity: it has no host-and-path to " +
+                $"canonicalize, so nothing could name a store file for it. {Usage}",
+                "assert a canonical identity, for example 'github.com/owner/repo' — a clone URL " +
+                "('https://github.com/owner/repo.git', 'git@github.com:owner/repo.git') is accepted " +
+                "and normalised to one.");
+        }
+
+        return new MemoryImportAssertion(value[..separator].Trim(), canonical);
     }
 
     private static string RequireValue(IReadOnlyList<string> args, int index)

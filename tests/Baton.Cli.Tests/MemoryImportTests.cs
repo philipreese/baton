@@ -50,6 +50,19 @@ public sealed class MemoryImportTests : IDisposable
 
     private async Task<string> RunAsync(params string[] args)
     {
+        var (exitCode, text) = await RunRawAsync(args);
+
+        Assert.Equal(0, exitCode);
+        return text;
+    }
+
+    /// <summary>
+    /// The same run without the exit-code assertion, for the arms whose claim IS the exit code. Kept
+    /// separate so every other test still fails loudly on a non-zero one rather than reading its output
+    /// and never noticing.
+    /// </summary>
+    private async Task<(int ExitCode, string Output)> RunRawAsync(params string[] args)
+    {
         var writer = new StringWriter();
         var exitCode = await MemoryImportCommand.ExecuteAsync(
             MemoryImportOptionsParser.Parse(args),
@@ -58,14 +71,26 @@ public sealed class MemoryImportTests : IDisposable
             TestContext.Current.CancellationToken,
             UserHome);
 
-        Assert.Equal(0, exitCode);
-        return writer.ToString();
+        return (exitCode, writer.ToString());
     }
 
-    /// <summary>Every entry in one repository's canonical store.</summary>
-    private static Task<IReadOnlyList<MemoryEntry>> StoreAsync(string repository) =>
-        MemoryStore.ReadAllAsync(
-            BatonPaths.MemoryEntriesFile(RepositoryIdentity.FileSlugFor(repository)),
+    /// <summary>
+    /// Every entry in one repository's canonical store, with supersession resolved from its links file
+    /// — the read a consumer of a memory performs.
+    /// </summary>
+    private static Task<IReadOnlyList<MemoryEntry>> StoreAsync(string repository)
+    {
+        var slug = RepositoryIdentity.FileSlugFor(repository);
+        return MemoryStore.ReadResolvedAsync(
+            BatonPaths.MemoryEntriesFile(slug),
+            BatonPaths.MemoryLinksFile(slug),
+            TestContext.Current.CancellationToken);
+    }
+
+    /// <summary>The raw supersession rows, for the arms that are about the link file itself.</summary>
+    private static Task<IReadOnlyList<MemorySupersessionLink>> LinksAsync(string repository) =>
+        MemoryStore.ReadLinksAsync(
+            BatonPaths.MemoryLinksFile(RepositoryIdentity.FileSlugFor(repository)),
             TestContext.Current.CancellationToken);
 
     private void WriteClaudeRoot(string projectDirectoryName, string? cwd, params (string Name, string Content)[] files)
@@ -163,21 +188,45 @@ public sealed class MemoryImportTests : IDisposable
     /// #1852: "Migration leaves every original memory file intact." Hashed before and after, over the
     /// whole fixture Claude home and user home — not just the files that produced entries.
     /// </summary>
+    /// <remarks>
+    /// <b>The population is the point, and it is four kinds of file on purpose.</b> Live Claude roots
+    /// (imported), an ARCHIVED root (imported, under an assertion, as historical notes), Codex markdown
+    /// (imported from the other home), and a Codex <c>memories_*.sqlite</c> — the last being exactly
+    /// where "located, digested, never opened" is the load-bearing claim, and the one an earlier
+    /// version of this test did not cover at all. Both homes are asserted non-empty before the
+    /// comparison, because comparing an empty dictionary to an empty dictionary asserts nothing and is
+    /// what the vendor-home arm was previously doing.
+    /// </remarks>
     [Fact]
     public async Task Every_source_file_is_byte_identical_after_an_import()
     {
         await BuildStandardFixtureAsync();
+        var archived = WriteArchivedRoot("c--baton-memory", ("user_who.md", "the older who"));
+
+        var memories = Path.Combine(UserHome, ".codex", "memories");
+        Directory.CreateDirectory(memories);
+        File.WriteAllText(Path.Combine(memories, "raw_memories.md"), "a codex memory");
+        File.WriteAllText(Path.Combine(UserHome, ".codex", "memories_1.sqlite"), "synthetic-not-a-database");
 
         var claudeBefore = DigestTree(ClaudeHome);
         var homeBefore = DigestTree(UserHome);
+        Assert.NotEmpty(claudeBefore);
+        Assert.NotEmpty(homeBefore);
+        Assert.Contains(homeBefore.Keys, p => p.EndsWith("memories_1.sqlite", StringComparison.Ordinal));
 
-        await RunAsync();
+        await RunAsync(
+            "--assert", $"{archived}=github.com/philipreese/baton",
+            "--assert", $"{memories}=github.com/philipreese/baton",
+            "--asserted-by", "the-test");
 
         Assert.Equal(claudeBefore, DigestTree(ClaudeHome));
         Assert.Equal(homeBefore, DigestTree(UserHome));
 
-        // The control: the run must actually have done something, or the assertion above is vacuous.
-        Assert.NotEmpty(await StoreAsync("github.com/philipreese/baton"));
+        // The controls: the run must actually have carried the archived root and the Codex markdown,
+        // or the assertions above are a statement about an import that did nothing.
+        var store = await StoreAsync("github.com/philipreese/baton");
+        Assert.Contains(store, e => e.Kind == MemoryKind.HistoricalNote);
+        Assert.Contains(store, e => e.SourceVendor == "codex");
     }
 
     /// <summary>#1852: re-running the import over an unchanged tree appends nothing.</summary>
@@ -316,6 +365,128 @@ public sealed class MemoryImportTests : IDisposable
     }
 
     /// <summary>
+    /// Q2's link lands when the two halves arrive in SEPARATE imports — the shape the PR body itself
+    /// prescribes (import, see the archived roots reported unfiled, then re-run with <c>--assert</c>).
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// The discriminating shape is two <c>RunAsync</c> calls, not one. A single combined run passes on
+    /// an implementation that computes links over one run's plan and writes them onto the entry rows:
+    /// the live entry's id does not change when it supersedes something, so an append-only store skips
+    /// the recomputed row and the live half of the link is discarded forever. Both directions are
+    /// asserted, because the archived half lands in run 2 either way and only the live half is lost.
+    /// </para>
+    /// <para>
+    /// The third run is the idempotence arm: recomputing an already-recorded link must append no second
+    /// row, which is the property the link's id (the pair) buys and the one a naive append would fail.
+    /// </para>
+    /// </remarks>
+    [Fact]
+    public async Task A_supersession_link_lands_when_the_live_root_and_the_archive_are_imported_in_separate_runs()
+    {
+        await BuildStandardFixtureAsync();
+        var archived = WriteArchivedRoot("c--baton-memory", ("user_who.md", "the older who"));
+
+        // Run 1: the live roots only. The archive has no derivable subject yet, so it is unfiled.
+        var first = await RunAsync();
+        Assert.Contains("Unfiled: 1", first, StringComparison.Ordinal);
+        Assert.Empty(await LinksAsync("github.com/philipreese/baton"));
+
+        // Run 2: the archive, under an assertion. The live entries are already in the store and are
+        // skipped by the append -- which is exactly why the link cannot live on their rows.
+        var second = await RunAsync(
+            "--assert", $"{archived}=github.com/philipreese/baton", "--asserted-by", "the-test");
+        Assert.Contains("Supersession links: 1   recorded: 1", second, StringComparison.Ordinal);
+
+        var store = await StoreAsync("github.com/philipreese/baton");
+        var note = Assert.Single(store, e => e.Text == "the older who");
+        var live = Assert.Single(store, e => e.Text == "who we are");
+        Assert.Equal([live.Id], note.SupersededBy);
+        Assert.Equal([note.Id], live.Supersedes);
+
+        // Run 3: re-importing everything recomputes the same link and appends nothing.
+        var third = await RunAsync();
+        Assert.Contains("Supersession links: 1   recorded: 0   already recorded: 1", third, StringComparison.Ordinal);
+        var link = Assert.Single(await LinksAsync("github.com/philipreese/baton"));
+        Assert.Equal(live.Id, link.SupersedingId);
+        Assert.Equal(note.Id, link.SupersededId);
+
+        // Polarity, on the same store: the archived file with no live counterpart is linked to nothing,
+        // so the assertions above are about a matched pair rather than about every archived entry.
+        Assert.All(
+            store.Where(e => e.Kind == MemoryKind.HistoricalNote && e.Text != "the older who"),
+            e => Assert.Null(e.SupersededBy));
+    }
+
+    /// <summary>
+    /// An undo that removed nothing exits non-zero and says so, and one replayed against a different
+    /// storage root refuses before touching anything.
+    /// </summary>
+    /// <remarks>
+    /// Both arms carry a control in the same fixture: the undo that DOES reverse its import exits 0
+    /// with no INCOMPLETE line, so neither refusal is a command that has simply stopped succeeding.
+    /// </remarks>
+    [Fact]
+    public async Task An_undo_that_reversed_nothing_fails_and_one_against_a_different_storage_root_refuses()
+    {
+        await BuildStandardFixtureAsync();
+        await RunAsync();
+
+        var manifestPath = Assert.Single(
+            Directory.GetFiles(Path.Combine(BatonPaths.Root, BatonPaths.MemoryImportsDirectoryName)));
+
+        // Arm 1: the manifest says it was written under another storage root. Every store path in it is
+        // absolute under that root, so replaying it here could only remove nothing and report success.
+        var elsewhere = Path.Combine(_root, "some-other-baton-root");
+        var moved = ImportManifest.Read(manifestPath) with { BatonRoot = elsewhere };
+        moved.Write(manifestPath + ".moved.json");
+
+        var (refusedCode, refusedText) = await RunRawAsync("--undo", manifestPath + ".moved.json");
+        Assert.Equal(1, refusedCode);
+        Assert.Contains("REFUSED", refusedText, StringComparison.Ordinal);
+        Assert.Contains(elsewhere, refusedText, StringComparison.Ordinal);
+        Assert.Equal(3, (await StoreAsync("github.com/philipreese/baton")).Count);
+
+        // Arm 2 (control): the real manifest, against the root it was written under, reverses in full.
+        var (okCode, okText) = await RunRawAsync("--undo", manifestPath);
+        Assert.Equal(0, okCode);
+        Assert.DoesNotContain("INCOMPLETE", okText, StringComparison.Ordinal);
+        Assert.Empty(await StoreAsync("github.com/philipreese/baton"));
+
+        // Arm 3: replaying the same manifest a second time now removes nothing -- the store file is
+        // still there and simply no longer holds those rows. Success-shaped output with exit 0 is what
+        // this used to print.
+        var (againCode, againText) = await RunRawAsync("--undo", manifestPath);
+        Assert.Equal(1, againCode);
+        Assert.Contains("INCOMPLETE", againText, StringComparison.Ordinal);
+        Assert.Contains("expected 3, removed 0", againText, StringComparison.Ordinal);
+    }
+
+    /// <summary>
+    /// Two spellings of one repository asserted across two roots produce ONE store file, because the
+    /// asserted identity goes through the same canonicalization a git probe's answer does.
+    /// </summary>
+    [Fact]
+    public async Task Two_spellings_of_one_asserted_repository_resolve_to_one_store()
+    {
+        var first = WriteArchivedRoot("c--one-memory", ("user_who.md", "from the first root"));
+        var second = WriteArchivedRoot("c--two-memory", ("project_plan.md", "from the second root"));
+
+        await RunAsync(
+            "--assert", $"{first}=GitHub.com/PhilipReese/Widget",
+            "--assert", $"{second}=https://github.com/philipreese/widget.git",
+            "--asserted-by", "the-test");
+
+        Assert.Equal(2, (await StoreAsync("github.com/philipreese/widget")).Count);
+
+        // The negative, as bytes on disk: one repository directory under the storage root, not two.
+        var stores = Directory
+            .EnumerateFiles(BatonPaths.Root, BatonPaths.MemoryEntriesFileName, SearchOption.AllDirectories)
+            .ToList();
+        Assert.Single(stores);
+    }
+
+    /// <summary>
     /// The evening ruling of 2026-09-05: the Codex family imported is the MARKDOWN memories directory;
     /// the sqlite store is machinery, recorded for provenance and never read as a memory source.
     /// </summary>
@@ -360,7 +531,11 @@ public sealed class MemoryImportTests : IDisposable
         Assert.Contains("Unfiled: 1", text, StringComparison.Ordinal);
         Assert.Contains("the checkout this memory belongs to is gone", text, StringComparison.Ordinal);
         Assert.Contains("--assert", text, StringComparison.Ordinal);
-        Assert.False(Directory.Exists(Path.Combine(BatonPaths.Root, "github.com-philipreese-rescued")));
+
+        // "Imported nowhere", stated as the store itself. The earlier spelling of this control asserted
+        // a directory path with no digest suffix, which no slug can ever produce (RepositoryIdentity
+        // .BuildFileSlug), so it could not have gone red on a wrong import either.
+        Assert.Empty(await StoreAsync("github.com/philipreese/rescued"));
 
         await RunAsync("--assert", $"{rootDirectory}=github.com/philipreese/rescued", "--asserted-by", "the-test");
 
@@ -436,15 +611,34 @@ public sealed class MemoryImportTests : IDisposable
     public async Task Root_selects_a_discovered_root_and_refuses_an_undiscovered_directory()
     {
         await BuildStandardFixtureAsync();
+        Directory.CreateDirectory(Path.Combine(UserHome, ".codex"));
+        File.WriteAllText(Path.Combine(UserHome, ".codex", "memories_1.sqlite"), "synthetic-not-a-database");
         var selected = Path.Combine(ClaudeHome, "projects", "C--baton", "memory");
 
         await RunAsync("--root", selected);
         Assert.Equal(2, (await StoreAsync("github.com/philipreese/baton")).Count);
 
+        // The filter narrows the manifest's MACHINERY rows too. Unfiltered, a run asked to look at one
+        // Claude root recorded every Codex sqlite file on the machine as though it had looked at those.
+        var manifest = ImportManifest.Read(Assert.Single(
+            Directory.GetFiles(Path.Combine(BatonPaths.Root, BatonPaths.MemoryImportsDirectoryName))));
+        Assert.Empty(manifest.Machinery);
+
+        // Control: the same fixture, unfiltered, does record it -- so the assertion above is about the
+        // filter rather than about a machinery row that never existed.
+        await RunAsync();
+        var unfiltered = Directory
+            .GetFiles(Path.Combine(BatonPaths.Root, BatonPaths.MemoryImportsDirectoryName))
+            .Order(StringComparer.Ordinal)
+            .Select(ImportManifest.Read)
+            .Last();
+        Assert.Single(unfiltered.Machinery);
+
         var undiscovered = Path.Combine(_root, "not-a-root");
         Directory.CreateDirectory(undiscovered);
         var refused = await Assert.ThrowsAsync<CliArgumentException>(() => RunAsync("--root", undiscovered));
-        Assert.Contains("matches no discovered memory root", refused.Message, StringComparison.Ordinal);
+        Assert.Contains("matches no memory root this verb can import", refused.Message, StringComparison.Ordinal);
+        Assert.Contains("Antigravity", refused.Message, StringComparison.Ordinal);
     }
 
     [Fact]
@@ -479,6 +673,59 @@ public sealed class MemoryImportTests : IDisposable
 
         Assert.Throws<CliArgumentException>(() => MemoryImportOptionsParser.Parse(["--frobnicate"]));
         Assert.Throws<CliArgumentException>(() => MemoryImportOptionsParser.Parse(["--root"]));
+    }
+
+    /// <summary>
+    /// An asserted repository is canonicalized at the parser, so every spelling of one repository is
+    /// one identity — and a string with no identity in it is refused rather than made into a store.
+    /// </summary>
+    [Theory]
+    [InlineData("github.com/owner/repo")]
+    [InlineData("GitHub.com/Owner/Repo")]
+    [InlineData("https://GitHub.com/Owner/Repo.git")]
+    [InlineData("git@github.com:Owner/Repo.git")]
+    [InlineData(" github.com/owner/repo/ ")]
+    public void An_asserted_repository_is_canonicalized_to_one_identity(string spelling)
+    {
+        var parsed = MemoryImportOptionsParser.Parse(["--assert", $@"C:\root={spelling}"]);
+
+        Assert.Equal("github.com/owner/repo", Assert.Single(parsed.Assertions).Repository);
+    }
+
+    [Fact]
+    public void An_asserted_repository_that_canonicalizes_to_nothing_is_refused()
+    {
+        var refused = Assert.Throws<CliArgumentException>(
+            () => MemoryImportOptionsParser.Parse(["--assert", @"C:\root=hello world"]));
+        Assert.Contains("is not a repository identity", refused.Message, StringComparison.Ordinal);
+
+        // The gitdir: derivation is a canonical identity too, and its own colon must not be read as an
+        // scp separator -- 'gitdir/c:/...' would be a second store for a repository with no remote.
+        var gitdir = MemoryImportOptionsParser.Parse(["--assert", @"C:\root=gitdir:C:\repos\x\.git"]);
+        Assert.Equal("gitdir:c:/repos/x/.git", Assert.Single(gitdir.Assertions).Repository);
+    }
+
+    /// <summary>
+    /// An operator path that <c>Path.GetFullPath</c> cannot take surfaces as this verb's own refusal,
+    /// not as a bare <see cref="ArgumentException"/> — for both flags that take one.
+    /// </summary>
+    [Fact]
+    public async Task An_unusable_assert_or_root_path_is_a_cli_argument_exception()
+    {
+        var badPath = "bad\0path";
+
+        var asserted = await Assert.ThrowsAsync<CliArgumentException>(
+            () => RunAsync("--assert", $"{badPath}=github.com/owner/repo", "--asserted-by", "the-test"));
+        Assert.Contains("does not name a usable path", asserted.Message, StringComparison.Ordinal);
+
+        var rooted = await Assert.ThrowsAsync<CliArgumentException>(() => RunAsync("--root", badPath));
+        Assert.Contains("does not name a usable path", rooted.Message, StringComparison.Ordinal);
+
+        // Control: a well-formed path of each reaches the verb's own refusal instead, so the arms above
+        // are about the path being unusable rather than about the flags refusing everything.
+        var undiscovered = Path.Combine(_root, "not-a-root");
+        var refused = await Assert.ThrowsAsync<CliArgumentException>(() => RunAsync("--root", undiscovered));
+        Assert.Contains("matches no memory root this verb can import", refused.Message, StringComparison.Ordinal);
     }
 
     /// <summary>

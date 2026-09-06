@@ -97,17 +97,29 @@ public enum MemoryKindSource
 /// facts go into it and, more importantly, which deliberately do not.
 /// </para>
 /// <para>
-/// <b>The text is stored verbatim.</b> The store is a copy, never a move: the import opens every
-/// source read-only and leaves it byte-identical (<c>ImportManifest</c> is what makes the copy
-/// reversible).
+/// <b>The store is a copy, never a move</b>: the import opens every source read-only and leaves it
+/// byte-identical (<c>ImportManifest</c> is what makes the copy reversible). What is stored is the
+/// file's <b>whole</b> text — front-matter included, nothing parsed out, nothing summarised — but it
+/// is a UTF-8 <i>decode</i> of the bytes rather than the bytes themselves; see <paramref name="Text"/>
+/// and <paramref name="Sha256"/> for which of the two is the authority.
 /// </para>
 /// </remarks>
 /// <param name="Id">See <see cref="Derive"/>. The store's dedupe key.</param>
 /// <param name="Repository">The subject: a <c>RepositoryIdentity.Value</c>, never a checkout path.</param>
 /// <param name="Kind">What this entry is.</param>
 /// <param name="KindSource">How <paramref name="Kind"/> was arrived at.</param>
-/// <param name="Text">The source file's text, verbatim and whole — front-matter included.</param>
-/// <param name="Sha256">Lower-case hex SHA-256 of the source file's BYTES, as the inventory measured it.</param>
+/// <param name="Text">
+/// The source file's whole text — front-matter included, nothing parsed out — as <b>decoded UTF-8</b>,
+/// with a leading byte-order mark consumed and any byte sequence that is not valid UTF-8 replaced by
+/// U+FFFD. It is therefore not guaranteed to reproduce <paramref name="Sha256"/>: for a BOM-prefixed
+/// or non-UTF-8 source it provably will not. <paramref name="Sha256"/> is the authority on what the
+/// file held; this is the readable copy of it.
+/// </param>
+/// <param name="Sha256">
+/// Lower-case hex SHA-256 of the source file's BYTES, taken from <b>the same read</b> that produced
+/// <paramref name="Text"/> — not from the earlier inventory walk, so a file edited between the two
+/// cannot be stored under a digest that describes a version of it nobody kept.
+/// </param>
 /// <param name="SourcePath">The absolute path the text was read from.</param>
 /// <param name="SourceVendor">Which vendor's root it sat in (<c>claude</c>, <c>codex</c>).</param>
 /// <param name="SourceScope">Whether that root is the vendor's own or Baton-managed.</param>
@@ -116,8 +128,11 @@ public enum MemoryKindSource
 /// <param name="Supersedes">
 /// Ids this entry replaces — the live-over-archived link Q2 asks for. Absent when it replaces nothing;
 /// never an empty array, so "supersedes nothing" and "supersedes an unknown set" cannot be confused.
+/// <b>A projection, not a stored field</b>: <c>MemoryStore.ReadResolvedAsync</c> fills it in from
+/// <c>links.jsonl</c>, and a row on disk never carries it. <see cref="MemorySupersessionLink"/> states
+/// why an append-only row with a derived id cannot hold a link that a later import discovers.
 /// </param>
-/// <param name="SupersededBy">The mirror of <paramref name="Supersedes"/>, on the archived side.</param>
+/// <param name="SupersededBy">The mirror of <paramref name="Supersedes"/>, on the archived side, and equally a projection.</param>
 /// <param name="Evidence">
 /// Back-pointers into the append-only ledgers (spec/baton.md §7) for an entry derived from execution
 /// evidence.
