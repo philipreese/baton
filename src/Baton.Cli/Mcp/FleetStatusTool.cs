@@ -34,9 +34,10 @@ public sealed class FleetStatusTool : IMcpTool
     private const string StalledDisplayState = "Stalled";
 
     // #1513: confirms EVERY step whose liveness this projection probes reads "dead" -- not merely
-    // "none alive". Liveness is only ever populated (WorkflowStatusProjector.Project) for the exact
-    // steps keeping the workflow un-terminal (a Running step, or a Failed step still carrying a
-    // RetryNotBefore at all, expired or not -- see spec/baton.md §3), so this is already scoped to
+    // "none alive". Liveness is only ever populated (WorkflowStatusProjector.Project) for steps
+    // keeping the workflow un-terminal (a Running step, or a Failed step still carrying a
+    // RetryNotBefore at all, expired or not -- see spec/baton.md §3; a sentinel-frozen Running step
+    // carries none, §13, and so cannot count as "dead" here), so this is already scoped to
     // the steps whose promise this room's Running reading rests on. Requiring "all dead" rather than
     // "none alive" matters for a multi-step DAG: a sibling step whose own liveness probe comes back
     // "unknown" (a pre-#1375 ledger with no recorded identity, or a Win32Exception probing a PID this
@@ -850,8 +851,8 @@ public sealed record FleetStepStatusView(
     ExecutionUsageView? LinkedFromUsage = null,
     // spec/baton.md §3/§6: the same WorkflowStatusStepView.Liveness FleetStatusTool already reads
     // off the shared projection (sentinel step's Liveness / stepView.Liveness) -- copied, never a
-    // second EngineLivenessProbe call. Present exactly when WorkflowStatusProjector.Project itself
-    // populates it -- spec/baton.md §3 states which steps that is and why.
+    // second EngineLivenessProbe call. Present per WorkflowStatusProjector.Project, except for
+    // sentinel-frozen steps — see spec/baton.md §3 for the presence rule and its sentinel exception.
     [property: JsonPropertyName("liveness")]
     [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
     string? Liveness = null,

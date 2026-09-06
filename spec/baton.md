@@ -2113,7 +2113,7 @@ code is the only signal a lane is even still going, and it is unreliable for tha
       "linkedFrom"?: string,           // set when this step's latest execution is an `baton resume`
       "usage"?: ExecutionUsageView,
       "linkedFromUsage"?: ExecutionUsageView,
-      "liveness"?: "alive" | "dead" | "unknown",  // #1375/#1513: present while this step reads "Running", or "Failed" with a RetryNotBefore still pending
+      "liveness"?: "alive" | "dead" | "unknown",  // #1375/#1513: present while this step reads "Running" (unless frozen by a room-level sentinel; §13), or "Failed" with a RetryNotBefore still pending
       "exhaustedUntil"?: string,  // #1551: the ExhaustedUntil park's reset instant (ISO-8601, UTC) -- gating rule at §6 schema below
       "verifyTail"?: string,      // #1701: the failing gate member(s)' OWN captured output for a VerifyFailed Indeterminate -- see "Engine-run verify" below. Distinct from "verify"/"verifyReason": that pair says verify never ran, this says it ran and went red.
       "resolvedByConductor"?: boolean,  // #1622 (c)/(d): true iff this step's terminal state was set by an explicit, non-accepting `baton resolve` ruling (--reject or --close); omitted when false
@@ -2480,11 +2480,13 @@ values `status --json` would report for the same room (`FleetStatusTool.cs`; the
 path copies `sentinel.Liveness`/`sentinel.Rejected`/`sentinel.ResolvedBy` since the sentinel already **is** a
 `WorkflowStatusView`). A fleet_status caller can now tell a dead engine or a rejection apart from an
 ordinary `Failed`/`Running` room without a second `status --json` call per room.
-`liveness` is present on a step this same projection calls `"Running"`, and (#1513) a `"Failed"` step
-still carrying a `RetryNotBefore` — the identical gate `StatusCommand.FormatStepStatus` uses before
-probing (a `Paused` step's engine has legitimately exited; a step with no execution yet has nothing
-to probe; a `Failed` step with no pending retry has no future engine action to question) — so its
-mere presence in the JSON already answers "does liveness apply here" before a caller reads its value.
+`liveness` is present on a step this same projection calls `"Running"` (a step frozen by a
+room-level sentinel — #1934 slice 1 / §13 — is the one exception carrying none), and (#1513)
+a `"Failed"` step still carrying a `RetryNotBefore` — the identical gate
+`StatusCommand.FormatStepStatus` uses before probing (a `Paused` step's engine has legitimately
+exited; a step with no execution yet has nothing to probe; a `Failed` step with no pending retry
+has no future engine action to question) — so its mere presence in the JSON already answers
+"does liveness apply here" before a caller reads its value.
 `fleet_status` invents no `reason` field beside `rejected`, on either of the two branches §3's
 `rejected` entry enumerates; which step rejected, if that
 matters, is `steps[].state == "Rejected"` — already a token distinct from `"Failed"`.
@@ -5851,8 +5853,9 @@ and each is closed where the fact exists:
   consequences, each deliberate: the outcome word is always `Failed` whatever the projection reads,
   because nothing will ever carry this room to a recorded settle and only that word resolves the item;
   the fault is the terminal `error`, with the room's own last recorded failure folded in beside it
-  rather than replacing it; and each step's live `liveness` probe is dropped, since a value read at
-  projection time would be frozen into a file read long after that engine exited. A room with no
+  rather than replacing it; and each step's live `liveness` probe is dropped (the one exception to
+  §3's step-presence rule), since a value read at projection time would be frozen into a file read
+  long after that engine exited. A room with no
   ledger, no bound snapshot, or an unreadable one still gets the bare sentinel — the write is
   unconditional, because an unprojectable room is exactly the one that would otherwise wedge its item
   in `launched` forever.
