@@ -1673,9 +1673,10 @@ def derive_snapshot_and_timelines(dll: str, roots: list, terminal_timeline_cache
       1. one full release has run with `file` in effect and NO
          "projection file stale or absent ... falling back to derive" line in pusher.log, and
       2. the projection file carries per-room `timelines`.
-    (2) is not satisfiable today and is not a nicety: `timelines` for a non-terminal room needs a
-    `room_detail` call per cycle, which is this subprocess, so PR-C cannot delete this path while
-    the file omits them -- see the `timelines` gap issue named in PR-B2's body. (1) is measurable
+    (2) HOLDS as of #1902: `FleetProjectionWriter` writes the same per-room `timelines` map, under
+    the same content projection and cap `extract_timeline` applies. It was the blocking half -- a
+    non-terminal room's timeline needs a `room_detail` call per cycle, which is this subprocess, so
+    PR-C could not delete this path while the file omitted them. (1) is measurable
     now that the `baton-daemon` scheduled task runs on the operator's machine (#1905 made the file
     the default on that basis): the fallback below is the edge case, and the log line it emits on
     a stale cycle is the honest signal that the daemon is down or behind.
@@ -3429,9 +3430,9 @@ def _identity_normalize_room(room: dict) -> dict:
 def snapshot_identity_diffs(derive_wrapped: dict, file_wrapped: dict) -> list[str]:
     """Sorted top-level keys of the pushed snapshot that differ between the two projection sources,
     after `_SNAPSHOT_IDENTITY_EXCLUSIONS`. `[]` means the two sources produced the same pushed body.
-    `["derived_at", "timelines"]` names the intentional source-dependent differences: file mode
-    preserves the daemon timestamp, while derive mints a new one; the daemon also carries no
-    per-room timelines yet (see `derive_snapshot_and_timelines`'s removal condition)."""
+    `["derived_at"]` names the one intentional source-dependent difference: file mode preserves the
+    daemon timestamp, while derive mints a new one. `timelines` used to be the second (the daemon
+    wrote none) and is not any more -- #1902 made the projection file carry them."""
     def prepare(wrapped: dict) -> dict:
         prepared = dict(wrapped)
         for key in ("rooms", "terminal_archive"):
@@ -6452,6 +6453,11 @@ def _selftest() -> int:
             ident_projection.write_text(json.dumps({
                 "derived_at": file_derived_at,
                 "rooms": file_rooms,
+                # #1902: the daemon now writes per-room `timelines` too, so the file side carries the
+                # same entries the derive side builds from its per-room `room_detail` calls. Written
+                # as the SAME object the derive arm uses -- the arm below asserts the two sources'
+                # posted bodies now differ in nothing but `derived_at`.
+                "timelines": ident_timelines,
             }), encoding="utf-8")
             ident_data, ident_staleness = read_projection_file(ident_projection, time.time())
             check("#1557 PR-B2 identity arm: the fixture projection file reads fresh (no fallback)",
@@ -6464,26 +6470,41 @@ def _selftest() -> int:
             file_post_body = json.loads(snapshot_post_body(file_wrapped, ident_data["derived_at"]))
             identity_diffs = snapshot_identity_diffs(derive_post_body, file_post_body)
             check("#1557 PR-B2 acceptance: the full posted bodies differ only in source-dependent "
-                  "`derived_at` and missing file `timelines`. "
+                  "`derived_at` -- #1902 closed the `timelines` gap that was the other difference. "
                   f"Actual diff: {identity_diffs}",
-                  identity_diffs == ["derived_at", "timelines"])
+                  identity_diffs == ["derived_at"])
             check("#1557 PR-B2 acceptance: each posted body carries its source's derived_at",
                   derive_post_body["derived_at"] == derive_derived_at
                   and file_post_body["derived_at"] == file_derived_at)
-            check("#1557 PR-B2 acceptance: and the `timelines` difference is exactly 'derive has "
-                  "entries, file has none' -- not two different sets of entries",
-                  derive_wrapped["timelines"] == ident_timelines and file_wrapped["timelines"] == {})
+            check("#1902: both sources carry the SAME per-room timelines -- not 'derive has entries, "
+                  "file has none' (the pre-#1902 shape), and not two different sets of entries",
+                  derive_wrapped["timelines"] == ident_timelines
+                  and file_wrapped["timelines"] == ident_timelines)
 
             # CONTROL, read before trusting the green above: the comparator must RED on a real
             # derivation difference. Without this the arm certifies the harness, not the change.
             control_rooms = json.loads(json.dumps(ident_data["rooms"]))
             control_rooms[0]["live"]["billedTokens"] = ident_gate_case["expectedBilledTokens"] + 1
-            control_wrapped, _, _, _, _, _ = assemble_wrapped(control_rooms, ident_underhood, {}, 0)
+            control_wrapped, _, _, _, _, _ = assemble_wrapped(
+                control_rooms, ident_underhood, ident_timelines, 0)
             control_post_body = json.loads(snapshot_post_body(control_wrapped, ident_data["derived_at"]))
             check("(control) #1557 PR-B2 acceptance: a one-token `live.billedTokens` difference on "
                   "the file side IS reported -- the identity arm above discriminates, it is not "
                   "green because everything volatile was excluded",
                   "rooms" in snapshot_identity_diffs(derive_post_body, control_post_body))
+
+            # CONTROL for the `timelines` half specifically (#1902): the empty diff above must be
+            # earned by the two sources agreeing on the entries, not by `timelines` having become a
+            # key the comparator no longer sees. A one-entry difference on the file side IS reported.
+            tl_control_timelines = {p: [*e, {"type": "flow.executionSucceeded"}]
+                                    for p, e in ident_timelines.items()}
+            tl_control_wrapped, _, _, _, _, _ = assemble_wrapped(
+                json.loads(json.dumps(ident_data["rooms"])), ident_underhood, tl_control_timelines, 0)
+            tl_control_post_body = json.loads(
+                snapshot_post_body(tl_control_wrapped, ident_data["derived_at"]))
+            check("(control) #1902: a one-entry `timelines` difference on the file side IS reported "
+                  "-- the empty diff above discriminates on this field, it is not excluded",
+                  "timelines" in snapshot_identity_diffs(derive_post_body, tl_control_post_body))
             # -- #1557 PR-B2 found-while-fixing: drop_stale_rooms runs on the room list BEFORE the
             # live/pruned attach, so in `derive` mode `newest_timestamp` never sees those blocks --
             # `attach_live_telemetry`'s own doc calls that deliberate. In `file` mode the daemon has

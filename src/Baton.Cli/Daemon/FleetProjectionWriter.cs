@@ -35,6 +35,11 @@ namespace Baton.Cli.Daemon;
 /// slicing):</b> pending-outputs status — grepped <see cref="Status.StepOutputResolver"/> first, per
 /// spec/baton.md §6's own remark on why that grep came up empty.
 /// </para>
+/// <para>
+/// <b>#1902</b> added the top-level <c>timelines</c> map (room path → entries), the last field the
+/// <c>file</c> source was missing relative to <c>derive</c> — <see cref="ResolveTimelineAsync"/> and
+/// <see cref="ProjectTimeline"/> carry the policy and the content projection.
+/// </para>
 /// </remarks>
 public sealed class FleetProjectionWriter : BackgroundService
 {
@@ -55,8 +60,21 @@ public sealed class FleetProjectionWriter : BackgroundService
     // spec/baton.md §6 (#1155): newest N pruned execution dirs surfaced per room.
     private const int PrunedItemsCap = 20;
 
+    // #1902: `TIMELINE_CAP` in pusher.py -- the newest N timeline entries kept per room. Named here
+    // rather than repeated as a literal for the same reason LastActivityBucketSeconds is: the two
+    // implementations project the same field and a silent divergence is invisible in the pushed body.
+    private const int TimelineCap = 30;
+
     private readonly Dictionary<string, ExecutionLiveState> _liveCache = new(StringComparer.Ordinal);
     private readonly Dictionary<string, PrunedCacheEntry> _prunedCache = new(StringComparer.Ordinal);
+
+    // #1902: the terminal-room cache ResolveTimelineAsync's own remarks describe -- pusher.py's
+    // `terminal_timeline_cache` is its counterpart. In-memory only: a restart self-heals. Plain CLR
+    // entries, not JsonNode: a JsonNode has a single parent, so a cached node re-attached on the next
+    // tick would throw (ComputePrunedInfo's DeepClone is the other way out of the same trap).
+    private readonly Dictionary<string, IReadOnlyList<ProjectedTimelineEntry>> _terminalTimelineCache =
+        new(StringComparer.Ordinal);
+
     private bool _loggedMissingSecretPatterns;
 
     public static TimeSpan GetInterval()
@@ -116,6 +134,7 @@ public sealed class FleetProjectionWriter : BackgroundService
         diagnostics ??= Console.Error;
         var discovered = await FleetStatusTool.DiscoverRoomsAsync([], cancellationToken).ConfigureAwait(false);
         var roomsArray = new JsonArray();
+        var timelines = new JsonObject();
         var liveKeysThisTick = new HashSet<string>(StringComparer.Ordinal);
         var liveLanesByVendor = new Dictionary<string, int>(StringComparer.Ordinal);
 
@@ -177,16 +196,30 @@ public sealed class FleetProjectionWriter : BackgroundService
                 liveLanesByVendor[adapter] = liveLanesByVendor.GetValueOrDefault(adapter) + 1;
             }
 
+            var timelineEntries = await ResolveTimelineAsync(view.Path, diagnostics, cancellationToken)
+                .ConfigureAwait(false);
+            if (timelineEntries.Count > 0)
+            {
+                timelines[view.Path] = RenderTimeline(timelineEntries);
+            }
+
             roomsArray.Add(node);
         }
 
         PruneLiveCache(liveKeysThisTick);
         PrunePrunedCache(discovered);
+        PruneTerminalTimelineCache(discovered);
 
         var root = new JsonObject
         {
             ["derived_at"] = DateTimeOffset.UtcNow.ToString("O"),
             ["rooms"] = roomsArray,
+
+            // #1902: room path -> timeline entries, the field pusher.py's `file` path reads straight
+            // through (`projection_data["timelines"]`) instead of spending a `room_detail` MCP call per
+            // room per cycle. Always present, `{}` when no room has a readable timeline -- the absent
+            // key is what the pre-#1902 file looked like, and the pusher treats the two the same.
+            ["timelines"] = timelines,
         };
 
         // #1391: same vendors[] block fleet_status returns, using the liveLanesByVendor tally this
@@ -363,6 +396,124 @@ public sealed class FleetProjectionWriter : BackgroundService
         {
             _prunedCache.Remove(staleKey);
         }
+    }
+
+    private void PruneTerminalTimelineCache(IReadOnlyList<FleetStatusTool.DiscoveredRoom> discovered)
+    {
+        var roomPaths = new HashSet<string>(discovered.Select(r => r.RoomDir), StringComparer.Ordinal);
+        foreach (var staleKey in _terminalTimelineCache.Keys.Where(k => !roomPaths.Contains(k)).ToList())
+        {
+            _terminalTimelineCache.Remove(staleKey);
+        }
+    }
+
+    /// <summary>
+    /// #1902 — one room's timeline entries for this tick, the daemon-side counterpart of pusher.py's
+    /// <c>resolve_room_timeline</c>. A room is terminal once its <c>terminal.json</c> exists (the same
+    /// sentinel pusher's <c>is_terminal_room</c> keys on, not the displayed state): a terminal room's
+    /// ledger is frozen, so it is read once and served from <see cref="_terminalTimelineCache"/>
+    /// afterwards, while a non-terminal room's still-growing timeline is re-read every tick.
+    /// <para>
+    /// Empty for a room with no <c>flow.jsonl</c>, none it could read, or no projectable entry — the
+    /// caller then writes no <c>timelines</c> key for it at all, matching derive's own <c>if entries:</c>.
+    /// <b>Deliberate divergence from <c>extract_timeline</c>:</b> that function keeps
+    /// <see cref="RoomDetailTool.ReadTimelineAsync"/>'s synthetic <c>unreadable</c> marker as a
+    /// type-only "something is wrong here" entry; the daemon omits the room instead. The projection
+    /// file is a cache of facts read off disk, and the fail-closed answer for a fact this tick could
+    /// not read is to say nothing rather than to publish a marker that would then persist in
+    /// <c>glass.html</c>'s localStorage long after the transient lock that produced it cleared.
+    /// </para>
+    /// </summary>
+    private async Task<IReadOnlyList<ProjectedTimelineEntry>> ResolveTimelineAsync(
+        string roomPath, TextWriter diagnostics, CancellationToken cancellationToken)
+    {
+        var isTerminal = File.Exists(Path.Combine(roomPath, TerminalSentinelWriter.TerminalSentinelFileName));
+        if (isTerminal && _terminalTimelineCache.TryGetValue(roomPath, out var cached))
+        {
+            return cached;
+        }
+
+        IReadOnlyList<ProjectedTimelineEntry> entries;
+        try
+        {
+            entries = ProjectTimeline(await RoomDetailTool.ReadTimelineAsync(roomPath, cancellationToken)
+                .ConfigureAwait(false));
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException)
+        {
+            // One room's timeline must never sink the tick -- the same per-room guard derive keeps
+            // around its own room_detail call. ReadTimelineAsync already absorbs the expected read
+            // failures into its `unreadable` marker, so reaching here means something unforeseen.
+            diagnostics.WriteLine($"FleetProjectionWriter: timeline read failed for {roomPath}: {ex.Message}");
+            return [];
+        }
+
+        if (isTerminal && entries.Count > 0)
+        {
+            _terminalTimelineCache[roomPath] = entries;
+        }
+
+        return entries;
+    }
+
+    /// <summary>
+    /// pusher.py's <c>extract_timeline</c> content projection, in C#: KEEP ONLY <c>type</c>,
+    /// <c>timestamp</c>, <c>stepId</c> and <c>exitCode</c> off each entry, capped at the newest
+    /// <see cref="TimelineCap"/>. Like that function it enumerates what it KEEPS rather than what it
+    /// drops, so a future <see cref="RoomTimelineEntryView"/> field cannot leak into the projection by
+    /// this code failing to name it — which is also why the view is projected by hand here instead of
+    /// serialized, since serializing it would carry <c>detail</c> (an exception message) straight out.
+    /// No event type is filtered, deliberately (#1537): the vocabulary is whatever the engine journals.
+    /// </summary>
+    private static IReadOnlyList<ProjectedTimelineEntry> ProjectTimeline(RoomTimelineView? timeline)
+    {
+        if (timeline is null)
+        {
+            return [];
+        }
+
+        var projected = new List<ProjectedTimelineEntry>(timeline.Entries.Count);
+        foreach (var entry in timeline.Entries)
+        {
+            if (entry.Type == "unreadable")
+            {
+                // See ResolveTimelineAsync's remarks: the marker is dropped rather than published.
+                return [];
+            }
+
+            projected.Add(new ProjectedTimelineEntry(entry.Type, entry.Timestamp, entry.StepId, entry.ExitCode));
+        }
+
+        return projected.Count > TimelineCap
+            ? projected.GetRange(projected.Count - TimelineCap, TimelineCap)
+            : projected;
+    }
+
+    private static JsonArray RenderTimeline(IReadOnlyList<ProjectedTimelineEntry> entries)
+    {
+        var array = new JsonArray();
+        foreach (var entry in entries)
+        {
+            var node = new JsonObject { ["type"] = entry.Type };
+            if (entry.Timestamp is not null)
+            {
+                node["timestamp"] = entry.Timestamp;
+            }
+
+            if (entry.StepId is not null)
+            {
+                node["stepId"] = entry.StepId;
+            }
+
+            if (entry.ExitCode is { } exitCode)
+            {
+                node["exitCode"] = exitCode;
+            }
+
+            array.Add(node);
+        }
+
+        return array;
     }
 
     /// <summary>
@@ -694,4 +845,7 @@ public sealed class FleetProjectionWriter : BackgroundService
     }
 
     private sealed record PrunedCacheEntry(DateTime DirMtimeUtc, int ChildCount, JsonObject? Result);
+
+    /// <summary>One timeline entry, already reduced to the four fields the projection publishes.</summary>
+    private sealed record ProjectedTimelineEntry(string Type, string? Timestamp, string? StepId, int? ExitCode);
 }

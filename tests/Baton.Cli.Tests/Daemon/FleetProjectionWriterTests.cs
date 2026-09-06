@@ -631,4 +631,141 @@ public sealed class FleetProjectionWriterTests : IDisposable
         var root = JsonNode.Parse(json)!.AsObject();
         Assert.False(root.ContainsKey("vendors"));
     }
+
+    /// <summary>
+    /// #1902: the `timelines` map the `file` projection source was missing relative to `derive`. Both
+    /// room kinds in one arm because the policy differs by kind (a non-terminal room is re-read every
+    /// tick, a terminal one is cached) while the CONTENT projection must be identical for both — and
+    /// because a map keyed by room path is only meaningfully asserted with more than one key in it.
+    /// The entries are pinned field by field: `type`, `timestamp` and `stepId` present, and no
+    /// `detail` — <c>RoomTimelineEntryView</c> carries one, and publishing it would put a raw exception
+    /// message into the pushed body that pusher.py's own `extract_timeline` is careful to drop.
+    /// </summary>
+    [Fact]
+    public async Task BuildProjectionJson_WritesTimelines_ForARunningAndATerminalRoom()
+    {
+        var liveIdentity = (Environment.ProcessId, new DateTimeOffset(System.Diagnostics.Process.GetCurrentProcess().StartTime).ToUniversalTime());
+        var (runningRoom, _) = await CreateRunningRoomAsync("timeline-running-room", liveIdentity);
+        var terminalRoom = await CreateTerminalRoomWithFlowLogAsync("timeline-terminal-room", stepCount: 2);
+
+        var writer = new FleetProjectionWriter();
+        var json = await writer.BuildProjectionJsonAsync(TestContext.Current.CancellationToken);
+
+        var timelines = JsonNode.Parse(json)!["timelines"]!.AsObject();
+        Assert.Equal(2, timelines.Count);
+
+        var runningEntry = Assert.Single(timelines[runningRoom]!.AsArray())!.AsObject();
+        Assert.Equal("flow.executionRequestAccepted", runningEntry["type"]!.GetValue<string>());
+        Assert.Equal("step-a", runningEntry["stepId"]!.GetValue<string>());
+        Assert.True(runningEntry.ContainsKey("timestamp"));
+        Assert.False(runningEntry.ContainsKey("detail"));
+
+        var terminalEntries = timelines[terminalRoom]!.AsArray();
+        Assert.Equal(2, terminalEntries.Count);
+        Assert.Equal(
+            ["step-00", "step-01"],
+            terminalEntries.Select(e => e!["stepId"]!.GetValue<string>()).ToArray());
+        Assert.All(terminalEntries, e => Assert.Equal("flow.executionRequestAccepted", e!["type"]!.GetValue<string>()));
+    }
+
+    /// <summary>#1902: capped at the newest <c>TimelineCap</c> (30) entries, the same tail pusher.py's
+    /// `TIMELINE_CAP` keeps — newest kept, oldest dropped, never the other way round.</summary>
+    [Fact]
+    public async Task BuildProjectionJson_CapsATimelineAtTheNewestThirtyEntries()
+    {
+        var room = await CreateTerminalRoomWithFlowLogAsync("timeline-cap-room", stepCount: 35);
+
+        var writer = new FleetProjectionWriter();
+        var json = await writer.BuildProjectionJsonAsync(TestContext.Current.CancellationToken);
+
+        var entries = JsonNode.Parse(json)!["timelines"]![room]!.AsArray();
+        Assert.Equal(30, entries.Count);
+        Assert.Equal("step-05", entries[0]!["stepId"]!.GetValue<string>());
+        Assert.Equal("step-34", entries[^1]!["stepId"]!.GetValue<string>());
+    }
+
+    /// <summary>
+    /// #1902: a room whose <c>flow.jsonl</c> cannot be read this tick (here: another handle holds it
+    /// with <see cref="FileShare.None"/>) gets NO `timelines` entry, and the tick still completes —
+    /// the room itself is still projected, so this is "the timeline is missing", not "the room fell out
+    /// of the fleet". Deliberately divergent from pusher.py's `extract_timeline`, which keeps
+    /// <c>RoomDetailTool</c>'s synthetic `unreadable` marker; <c>ResolveTimelineAsync</c>'s own remarks
+    /// carry why the daemon omits instead.
+    /// </summary>
+    [Fact]
+    public async Task BuildProjectionJson_UnreadableFlowLog_YieldsNoTimelineEntryAndDoesNotThrow()
+    {
+        var room = await CreateTerminalRoomWithFlowLogAsync("timeline-unreadable-room", stepCount: 2);
+
+        using (new FileStream(
+                   Path.Combine(room, BatonPaths.FlowLogFileName), FileMode.Open, FileAccess.Read, FileShare.None))
+        {
+            var writer = new FleetProjectionWriter();
+            var json = await writer.BuildProjectionJsonAsync(TestContext.Current.CancellationToken);
+
+            var root = JsonNode.Parse(json)!.AsObject();
+            Assert.Single(root["rooms"]!.AsArray());
+            Assert.False(root["timelines"]!.AsObject().ContainsKey(room));
+        }
+    }
+
+    /// <summary>
+    /// #1902: the terminal-room caching policy <c>FleetProjectionWriter.ResolveTimelineAsync</c>'s own
+    /// remarks state. The second tick is what this arm exists for: the cached entries must
+    /// still render identically (a cached <c>JsonNode</c> re-parented onto a second tick's root would
+    /// throw, which a single-tick test cannot see), and they must still be served once the underlying
+    /// ledger is gone — which is also what proves the cache was consulted rather than the file re-read.
+    /// </summary>
+    [Fact]
+    public async Task BuildProjectionJson_SecondTick_ServesATerminalRoomsTimelineFromCache()
+    {
+        var room = await CreateTerminalRoomWithFlowLogAsync("timeline-cached-room", stepCount: 3);
+
+        var writer = new FleetProjectionWriter();
+        var first = await writer.BuildProjectionJsonAsync(TestContext.Current.CancellationToken);
+        var firstEntries = JsonNode.Parse(first)!["timelines"]![room]!.ToJsonString();
+
+        File.Delete(Path.Combine(room, BatonPaths.FlowLogFileName));
+
+        var second = await writer.BuildProjectionJsonAsync(TestContext.Current.CancellationToken);
+        var secondEntries = JsonNode.Parse(second)!["timelines"]![room]!.ToJsonString();
+
+        Assert.Equal(firstEntries, secondEntries);
+
+        // Control: a NON-terminal room is never cached, so the same deletion takes its timeline away.
+        // Without this the arm above would pass equally on a writer that cached every room forever.
+        var liveIdentity = (Environment.ProcessId, new DateTimeOffset(System.Diagnostics.Process.GetCurrentProcess().StartTime).ToUniversalTime());
+        var (runningRoom, _) = await CreateRunningRoomAsync("timeline-uncached-room", liveIdentity);
+        var uncachedWriter = new FleetProjectionWriter();
+        Assert.True(JsonNode.Parse(await uncachedWriter.BuildProjectionJsonAsync(TestContext.Current.CancellationToken))!
+            ["timelines"]!.AsObject().ContainsKey(runningRoom));
+        File.Delete(Path.Combine(runningRoom, BatonPaths.FlowLogFileName));
+        Assert.False(JsonNode.Parse(await uncachedWriter.BuildProjectionJsonAsync(TestContext.Current.CancellationToken))!
+            ["timelines"]!.AsObject().ContainsKey(runningRoom));
+    }
+
+    /// <summary>A settled room (<c>terminal.json</c>) whose <c>flow.jsonl</c> carries
+    /// <paramref name="stepCount"/> <c>ExecutionRequestAccepted</c> events, each naming a distinct step
+    /// id so a timeline's ORDER and TAIL are both assertable by name rather than by count alone.</summary>
+    private async Task<string> CreateTerminalRoomWithFlowLogAsync(string roomName, int stepCount)
+    {
+        var room = Path.Combine(_tempHome, BatonPaths.RoomsDirectoryName, roomName);
+        Directory.CreateDirectory(room);
+        await TerminalSentinelWriter.WriteAsync(
+            room, new WorkflowStatusView("Succeeded", [], [], null, null), TestContext.Current.CancellationToken);
+
+        var logWriter = new FlowEventLogWriter(Path.Combine(room, BatonPaths.FlowLogFileName));
+        for (var i = 0; i < stepCount; i++)
+        {
+            var request = new ExecutionRequest(
+                new ExecutionId($"exec-{i:D2}"), new WorkflowId("wf"), new StepId($"step-{i:D2}"), "architect",
+                [], [], TimeSpan.FromMinutes(5), [], new Dictionary<StepId, ExecutionId>(), Adapter: "claude");
+            await logWriter.AppendAsync(
+                new FlowEvent.ExecutionRequestAccepted(request, EnginePid: null, EngineStartTime: null),
+                TestContext.Current.CancellationToken);
+        }
+
+        await logWriter.DisposeAsync();
+        return room;
+    }
 }
