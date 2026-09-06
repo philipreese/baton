@@ -2183,6 +2183,85 @@ public class StateProjectorTests
     }
 
     [Fact]
+    public void A_FinishedDuringTeardown_step_survives_an_incremental_checkpoint_resume()
+    {
+        // #1945 review MEDIUM 5: FinishedDuringTeardownStepIds is a fourth trailing member added the
+        // same way as RetryForeclosedStepIds / IndeterminateReasonByStepId / IndeterminateVerifyTail
+        // above -- relying on its own `?? new()` init default, with DeepCopy constructing
+        // positionally. Dropped there, the room silently downgrades to plain Succeeded on the next
+        // incremental resume: a wrong answer that looks exactly like a right one, which is why this
+        // member gets the same fresh-vs-resumed proof every prior one did.
+        var executionId = new ExecutionId("exec-1");
+        var events = new List<FlowEvent>
+        {
+            new FlowEvent.ExecutionRequestAccepted(MakeRequest(executionId, Architect)),
+            new FlowEvent.ExecutionSucceeded(executionId, FinishedDuringTeardown: true),
+        };
+
+        var (freshState, checkpoint) = StateProjector.ProjectAndCheckpoint(events, TwoStepSnapshot());
+        Assert.True(StepFor(freshState, Architect).FinishedDuringTeardown);
+
+        var resumedState = StateProjector.Project(events, TwoStepSnapshot(), checkpoint);
+        Assert.True(StepFor(resumedState, Architect).FinishedDuringTeardown);
+    }
+
+    [Fact]
+    public void A_fresh_dispatch_clears_a_prior_attempts_FinishedDuringTeardown()
+    {
+        // The accept-side clear (StateProjector's #1945 line among the other fresh-dispatch clears):
+        // asserted while the new attempt is still in flight, so nothing but that clear can be what
+        // moved the flag -- the new execution has not settled either way yet.
+        var events = new List<FlowEvent>
+        {
+            new FlowEvent.ExecutionRequestAccepted(MakeRequest(new ExecutionId("exec-1"), Architect)),
+            new FlowEvent.ExecutionSucceeded(new ExecutionId("exec-1"), FinishedDuringTeardown: true),
+            new FlowEvent.ExecutionRequestAccepted(MakeRequest(new ExecutionId("exec-2"), Architect)),
+        };
+
+        var state = StateProjector.Project(events, TwoStepSnapshot());
+
+        Assert.False(StepFor(state, Architect).FinishedDuringTeardown);
+    }
+
+    [Fact]
+    public void A_retry_that_succeeds_normally_leaves_no_FinishedDuringTeardown_behind()
+    {
+        // Set-or-clear, never set-only: the latest execution speaks. Without this the room would keep
+        // reporting the old word after an attempt that finished ordinarily.
+        var events = new List<FlowEvent>
+        {
+            new FlowEvent.ExecutionRequestAccepted(MakeRequest(new ExecutionId("exec-1"), Architect)),
+            new FlowEvent.ExecutionSucceeded(new ExecutionId("exec-1"), FinishedDuringTeardown: true),
+            new FlowEvent.ExecutionRequestAccepted(MakeRequest(new ExecutionId("exec-2"), Architect)),
+            new FlowEvent.ExecutionSucceeded(new ExecutionId("exec-2")),
+        };
+
+        var state = StateProjector.Project(events, TwoStepSnapshot());
+
+        Assert.Equal(StepStatus.Succeeded, StepFor(state, Architect).Status);
+        Assert.False(StepFor(state, Architect).FinishedDuringTeardown);
+    }
+
+    [Fact]
+    public void A_retry_that_itself_finishes_during_teardown_still_carries_the_word()
+    {
+        // The discriminating control for the two arms above: the identical event shape with the
+        // SECOND attempt flagged. Without it, a projector that simply never set the flag on a retried
+        // step would pass both of them.
+        var events = new List<FlowEvent>
+        {
+            new FlowEvent.ExecutionRequestAccepted(MakeRequest(new ExecutionId("exec-1"), Architect)),
+            new FlowEvent.ExecutionSucceeded(new ExecutionId("exec-1")),
+            new FlowEvent.ExecutionRequestAccepted(MakeRequest(new ExecutionId("exec-2"), Architect)),
+            new FlowEvent.ExecutionSucceeded(new ExecutionId("exec-2"), FinishedDuringTeardown: true),
+        };
+
+        var state = StateProjector.Project(events, TwoStepSnapshot());
+
+        Assert.True(StepFor(state, Architect).FinishedDuringTeardown);
+    }
+
+    [Fact]
     public void An_Indeterminate_step_reaches_workflow_Terminal()
     {
         var executionId = new ExecutionId("exec-1");
