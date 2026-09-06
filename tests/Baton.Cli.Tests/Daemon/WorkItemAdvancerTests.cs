@@ -85,6 +85,7 @@ public sealed class WorkItemAdvancerTests
             Round = round,
             State = state,
             RoomDirectory = room,
+            Instructions = "Build the lifecycle.",
         };
 
         await QueueStore.MutateAsync(BatonPaths.QueueFile, s => s with { Items = [item] }, Ct);
@@ -160,7 +161,6 @@ public sealed class WorkItemAdvancerTests
             // room path is recorded on the ITEM instead, asserted above — which is also the control
             // that this assertion is not passing because the room path is nowhere at all.
             Assert.DoesNotContain(room, brief, StringComparison.OrdinalIgnoreCase);
-            Assert.DoesNotContain("rooms", brief, StringComparison.OrdinalIgnoreCase);
 
             Assert.Contains("review → fix", Assert.Single(facts).Reason!, StringComparison.Ordinal);
         }
@@ -232,6 +232,50 @@ public sealed class WorkItemAdvancerTests
             var brief = await File.ReadAllTextAsync(item.SpecFile, Ct);
             Assert.Contains("Continue the work", brief, StringComparison.Ordinal);
             Assert.Contains("Build the lifecycle.", brief, StringComparison.Ordinal);
+        }
+        finally
+        {
+            DirectoryCleanup.DeleteRecursively(home);
+        }
+    }
+
+    [Fact]
+    public async Task The_issues_own_instructions_survive_a_round_that_rewrote_the_brief()
+    {
+        var home = CreateTempHome();
+        using var scope = BatonEnvironmentSnapshot.BeginScope(BatonEnvironmentSnapshot.Blank with { HomeOverride = home });
+        try
+        {
+            // Round 1: the review blocks, so the spec file is REWRITTEN as a fix brief whose own
+            // "## Do" section is "address each finding above". Round 2 must still hand a continuation
+            // the ISSUE's instructions — which is only true because they live on the item rather than
+            // being parsed back out of a file that mutates every round.
+            var reviewRoom = await WriteSettledRoomAsync(home, WorkflowOutcome.Succeeded, BlockingVerdict);
+            await SeedAsync(home, WorkStage.Review, reviewRoom);
+            var advancer = new WorkItemAdvancer(
+                new FakeGh(PrJson(77, PushedSha)), (_, _) => Task.FromResult<string?>(PushedSha));
+            await advancer.AdvanceAsync(Now, Ct);
+
+            var fixBrief = await File.ReadAllTextAsync((await ReadBackAsync()).SpecFile, Ct);
+            Assert.DoesNotContain("Build the lifecycle.", fixBrief, StringComparison.Ordinal);
+
+            // Round 2: that fix lane stalls without pushing.
+            var fixRoom = await WriteSettledRoomAsync(home, WorkflowOutcome.Failed, verdictJson: null);
+            await QueueStore.MutateAsync(
+                BatonPaths.QueueFile,
+                s => s with
+                {
+                    Items = [s.Items.Single() with { State = QueueItemState.Failed, RoomDirectory = fixRoom }],
+                },
+                Ct);
+
+            await new WorkItemAdvancer(
+                new FakeGh(PrJson(77, PushedSha)), (_, _) => Task.FromResult<string?>("ffff0000ffff0000"))
+                .AdvanceAsync(Now.AddMinutes(5), Ct);
+
+            var item = await ReadBackAsync();
+            Assert.Equal(WorkStage.Continue, item.Stage);
+            Assert.Contains("Build the lifecycle.", await File.ReadAllTextAsync(item.SpecFile, Ct), StringComparison.Ordinal);
         }
         finally
         {

@@ -90,6 +90,19 @@ public sealed record QueueItem
     /// what a brief's header and the transition fact count.</summary>
     public int Round { get; init; }
 
+    /// <summary>
+    /// The issue's own instructions — the text that became the implement brief's "## Do" section,
+    /// captured once at add time.
+    /// </summary>
+    /// <remarks>
+    /// <b>Kept on the item rather than re-read from the brief.</b> <see cref="SpecFile"/> is REWRITTEN
+    /// every round, so parsing "## Do" back out of it returns the fix brief's own instructions from
+    /// round 2 onward — the issue's would survive exactly one round, and a continuation would be handed
+    /// "address each finding above" as if it were the work. Absent on an imported item and on every
+    /// item added before this field existed; a continuation renders without it rather than failing.
+    /// </remarks>
+    public string? Instructions { get; init; }
+
     /// <summary>The directory the worker runs in. Always set by the time an item is queued — an
     /// <c>--issue</c> item gets it from the worktree provisioned at add time.</summary>
     public required string Workspace { get; init; }

@@ -98,7 +98,7 @@ public sealed class WorkItemAdvancer
         // never having been created (its own roomless sweep). "Failed with no outcome word" is exactly
         // what the lifecycle's not-succeeded arm reads, so the item still advances rather than sticking.
         var outcome = sentinel?.State ?? WorkflowOutcome.Failed;
-        var verdictPath = FindVerdict(sentinel, room);
+        var verdictPath = FindVerdict(sentinel);
         var verdict = verdictPath is null ? null : TryReadVerdict(verdictPath);
 
         var pr = await ReadPullRequestAsync(item, cancellationToken).ConfigureAwait(false);
@@ -111,9 +111,9 @@ public sealed class WorkItemAdvancer
         {
             WorkItemTransitionKind.None => null,
             WorkItemTransitionKind.NeedsOperator =>
-                await FailAsync(item, stage, transition, now, room, cancellationToken).ConfigureAwait(false),
+                await FailAsync(item, stage, transition, now, room).ConfigureAwait(false),
             WorkItemTransitionKind.Stop =>
-                await StopAsync(item, stage, transition, pr, verdictPath, now, room, cancellationToken).ConfigureAwait(false),
+                await StopAsync(item, stage, transition, pr, verdictPath, now, room).ConfigureAwait(false),
             WorkItemTransitionKind.Dispatch =>
                 await QueueNextRoundAsync(item, stage, transition, pr, verdict, verdictPath, now, room, cancellationToken)
                     .ConfigureAwait(false),
@@ -143,12 +143,12 @@ public sealed class WorkItemAdvancer
         // have the mechanism and spec/baton.md §13 the ruling.
         var findings = verdict is null ? null : QueueBriefTemplates.RenderFindings(verdict);
 
-        // The previous brief carries the issue's own instructions, which a continuation still needs.
-        var previousDo = await ReadPreviousDoAsync(item, cancellationToken).ConfigureAwait(false);
-
+        // The issue's own instructions, which a continuation still needs — read off the ITEM, because
+        // the brief file this would otherwise be parsed out of is rewritten every round
+        // (QueueItem.Instructions' remarks).
         var brief = QueueBriefTemplates.Compose(next, item, new QueueBriefTemplates.BriefContext(
             Title: $"Implement #{item.Issue}",
-            Do: previousDo,
+            Do: item.Instructions ?? string.Empty,
             PullRequest: pr.Number ?? item.PullRequest,
             HeadSha: pr.HeadSha,
             Round: transition.Round,
@@ -180,10 +180,8 @@ public sealed class WorkItemAdvancer
         (int? Number, string? HeadSha) pr,
         string? verdictPath,
         DateTimeOffset now,
-        string room,
-        CancellationToken cancellationToken)
+        string room)
     {
-        _ = cancellationToken;
         await MarkAsync(item.Tag, existing => existing with
         {
             Stage = WorkStage.Ready,
@@ -203,11 +201,8 @@ public sealed class WorkItemAdvancer
         WorkStage from,
         WorkItemTransition transition,
         DateTimeOffset now,
-        string room,
-        CancellationToken cancellationToken)
+        string room)
     {
-        _ = cancellationToken;
-
         // Failed, not silently left: every arm that reaches here is one where the queue would have to
         // guess, and a guess dispatches a lane against evidence nobody checked. The reason is on the
         // item, so `baton queue list` is where the operator finds it.
@@ -245,43 +240,6 @@ public sealed class WorkItemAdvancer
                     .ToList(),
             },
             CancellationToken.None);
-
-    /// <summary>
-    /// The "## Do" section the next brief re-states: read back out of the brief this item last ran, so
-    /// the issue's own instructions survive every round without being fetched from <c>gh</c> again.
-    /// Absent or unreadable yields empty — a fix brief's instructions are its findings, so a missing
-    /// section costs a continuation its context and nothing else its correctness.
-    /// </summary>
-    private static async Task<string> ReadPreviousDoAsync(QueueItem item, CancellationToken cancellationToken)
-    {
-        if (!File.Exists(item.SpecFile))
-        {
-            return string.Empty;
-        }
-
-        try
-        {
-            var text = await File.ReadAllTextAsync(item.SpecFile, cancellationToken).ConfigureAwait(false);
-            var start = text.IndexOf("## Do", StringComparison.Ordinal);
-            if (start < 0)
-            {
-                return string.Empty;
-            }
-
-            start = text.IndexOf('\n', start);
-            if (start < 0)
-            {
-                return string.Empty;
-            }
-
-            var end = text.IndexOf("\n## ", start, StringComparison.Ordinal);
-            return (end < 0 ? text[start..] : text[start..end]).Trim();
-        }
-        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
-        {
-            return string.Empty;
-        }
-    }
 
     /// <summary>
     /// <c>gh pr view &lt;branch&gt; --json number,headRefOid,mergeStateStatus</c>, run in the item's own
@@ -328,9 +286,8 @@ public sealed class WorkItemAdvancer
     /// <c>verdict.json</c>, exactly as <c>WatchFireService.BuildPayload</c> does — the engine already
     /// owns that path, so nothing here re-derives an artifacts directory.
     /// </summary>
-    private static string? FindVerdict(WorkflowStatusView? sentinel, string room)
+    private static string? FindVerdict(WorkflowStatusView? sentinel)
     {
-        _ = room;
         return sentinel?.Outputs.FirstOrDefault(p => string.Equals(
             Path.GetFileName(p), CostLedgerStore.VerdictOutputName, StringComparison.OrdinalIgnoreCase));
     }
@@ -365,8 +322,4 @@ public sealed class WorkItemAdvancer
             return null;
         }
     }
-
-    /// <summary>Invariant-culture formatting for anything this writes into a fact. Same rule
-    /// <c>QueueCommand.Number</c> states: a record two machines cannot grep alike is not a record.</summary>
-    internal static string Number(int value) => value.ToString(CultureInfo.InvariantCulture);
 }

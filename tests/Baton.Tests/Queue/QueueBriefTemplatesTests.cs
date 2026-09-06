@@ -47,8 +47,11 @@ public sealed class QueueBriefTemplatesTests
         Assert.Contains("src/Baton.Cli/QueueCommand.cs:87", brief, StringComparison.Ordinal);
 
         // Why the findings are inlined at all: QueueBriefTemplates' own remarks, and spec/baton.md §13.
+        // Asserted on the storage root, not the bare word "rooms": the standing-rules block is prose
+        // that may legitimately grow a sentence containing that word, and a failure for THAT reason
+        // would be reporting nothing about the findings. WorkItemAdvancerTests asserts the same rule
+        // against the actual seeded room path, which is the load-bearing form of it.
         Assert.DoesNotContain(".baton", brief, StringComparison.OrdinalIgnoreCase);
-        Assert.DoesNotContain("rooms", brief, StringComparison.OrdinalIgnoreCase);
     }
 
     [Fact]
