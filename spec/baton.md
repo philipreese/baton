@@ -255,7 +255,22 @@ A harness invokes work two ways, both in `src/Baton.Cli/Program.cs`:
   Persisted onto every entry of that
   room's own `bindings.json` (`WorkerBindingConfigEntry.Label`) rather than a new file, since bindings
   already exists for every room regardless of terminal state — see §6 schema for how `fleet_status`
-  reads it back. `--token-budget` (#1623) overrides the dispatched role's own default per-execution
+  reads it back.
+
+  **A dispatch that omits `--model` still records what it will run on (#1927).** `RoleDispatch.ToBinding`
+  resolves the effective model in one order — the dispatcher's own `--model`, then the role's tier
+  (`WorkerTiers.json`), then the vendor's measured CLI default (`Baton.Domain.AdapterDefaultModels`) —
+  and stamps `modelResolved` plus `modelSource` (`requested` | `resolved-default`) on every entry of the
+  room's `bindings.json`, with `effortResolved`/`effortSource` beside them for the same axis minus the
+  CLI-default rung. **They are display-only, and that is load-bearing**: `Model`/`Effort` are what become
+  the vendor CLI's own flags, so stamping a resolved default onto them would start passing `--model` to a
+  vendor Baton previously let choose for itself — a dispatch change, where the measured defect (a room
+  rendering a bare `agy`) is a display one. All three rungs silent leaves the stamp ABSENT rather than
+  guessing, the same no-fallback rule `DepthTierMapping` keeps: an adapter whose CLI default nobody has
+  measured (claude, which ships no model-list subcommand) is simply not in that table. §6's schema states
+  how the render surfaces read the pair back and what an absent source means there.
+
+  `--token-budget` (#1623) overrides the dispatched role's own default per-execution
   token ceiling — §3's "Engine-run verify and the token budget" subsection is the full contract; this
   entry only names the flag. `--workstream` (#1619, rung 1 of #1614's ruling) is a **grouping key, not a title** —
   a room keeps its generated hex identity on disk; the slug only makes several rooms (e.g. an
@@ -2279,8 +2294,7 @@ behaviour turns on it. `peakBilledInWindow` (#1709) was already on the record an
 above; both are listed now.
 
 **`modelEchoed` (#1927) is a different fact from `modelsObserved` beside it**, and the two are not
-substitutes: this names the one model the vendor reported the MAIN conversation as having run, where
-`modelsObserved` names every model the whole execution tree billed against. It is read at settle by the
+substitutes — `CostLedgerEntry.ModelEchoed`'s own doc draws the distinction. It is read at settle by the
 same reader that derives the token dimensions, over the same captured bytes, and is deliberately
 computed BEFORE the truncation guards — a stream whose reconciliation is unavailable is exactly the
 stream whose model is still worth naming. §7's ledger row states which event each vendor's answer comes
@@ -2609,8 +2623,10 @@ anticipated this shape):
   "resolvedBy"?: string,  // F10 (#1720 review): the room-level WorkflowStatusView.ResolvedBy, copied like `rejected`. The glass's only signal for a conductor `baton resolve --close`, which sets this WITHOUT setting `rejected` (§3)
   "role"?: string,        // bindings.json's own key for the Running step's worker
   "adapter"?: string,     // that role's WorkerBindingConfigEntry.Adapter
-  "model"?: string,       // that role's WorkerBindingConfigEntry.Model
-  "effort"?: string,      // that role's WorkerBindingConfigEntry.Effort
+  "model"?: string,       // that role's WorkerBindingConfigEntry.Model, falling back (#1927) to its ModelResolved when the dispatcher named none -- so a room dispatched without --model shows a model rather than a bare vendor
+  "effort"?: string,      // that role's WorkerBindingConfigEntry.Effort, with the same #1927 fallback to EffortResolved
+  "modelSource"?: string, // #1927: which rung produced `model` -- "requested" (the dispatcher named it) or "resolved-default" (Baton filled it in, from the role's tier or the vendor's measured CLI default). ABSENT means the binding recorded no source at all -- a hand-authored bindings.json, or a room dispatched before this shipped -- and a render surface must show no mark for that rather than asserting the value was requested. Fleet Glass marks a resolved value with a trailing "~"
+  "effortSource"?: string, // #1927: the same for `effort`, same two values and same absence rule
   "timeoutMs"?: number,   // that role's WorkerBindingConfigEntry.Timeout, in milliseconds
   "label"?: string,       // #1499: the room's --label, WorkerBindingConfigEntry.Label
   "workstream"?: string,  // #1619: the room's --workstream, WorkerBindingConfigEntry.Workstream

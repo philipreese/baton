@@ -415,5 +415,78 @@ public class RoleDispatchTests
         // Even an adapter the map has no entry for is never consulted once an override is supplied.
         Assert.Equal(3, RoleDispatch.ToBinding(mapRole, "spec", adapterOverride: "agy", tokenBudgetOverride: 3).TokenBudget);
     }
+
+    /// <summary>
+    /// #1927: a dispatch that names no <c>--model</c> still records what it will run on, for each of
+    /// the three adapters, and records which rung answered. The measured symptom was a room dispatched
+    /// <c>--adapter agy</c> with no model rendering a bare vendor everywhere.
+    /// </summary>
+    [Theory]
+    // No override at all: the role's own tier (frontier -> claude/opus) answers.
+    [InlineData(null, "opus")]
+    // A vendor swap drops the tier's model, so the vendor's own measured CLI default answers -- the
+    // exact dispatch shape that produced the bare vendor.
+    [InlineData("agy", "gemini-3.8-flash-high")]
+    [InlineData("codex", "gpt-6-astra")]
+    public void A_dispatch_with_no_model_records_the_model_it_resolved_and_says_it_was_resolved(
+        string? adapterOverride, string expectedModel)
+    {
+        var binding = RoleDispatch.ToBinding(Review, "spec", adapterOverride: adapterOverride);
+
+        Assert.Equal(expectedModel, binding.ModelResolved);
+        Assert.Equal(BindingValueSource.ResolvedDefault, binding.ModelSource);
+    }
+
+    /// <summary>
+    /// #1927, the polarity arm: an explicitly requested model is recorded as REQUESTED, so a render
+    /// surface never marks an operator's own choice as a fallback.
+    /// </summary>
+    [Fact]
+    public void A_dispatch_that_names_a_model_records_it_as_requested_rather_than_resolved()
+    {
+        var binding = RoleDispatch.ToBinding(Review, "spec", modelOverride: "haiku", effortOverride: "low");
+
+        Assert.Equal("haiku", binding.ModelResolved);
+        Assert.Equal(BindingValueSource.Requested, binding.ModelSource);
+        Assert.Equal("low", binding.EffortResolved);
+        Assert.Equal(BindingValueSource.Requested, binding.EffortSource);
+    }
+
+    /// <summary>
+    /// #1927: the stamps are DISPLAY-ONLY. <c>Model</c>/<c>Effort</c> are what become the vendor CLI's
+    /// own flags, so a resolved default must not reach them — stamping one would start passing
+    /// <c>--model</c> to a vendor Baton previously let choose for itself, which is a live dispatch
+    /// change rather than the display fix this is. The agy swap is where the two diverge most visibly:
+    /// the stamp names a model and the dispatch input stays null.
+    /// </summary>
+    [Fact]
+    public void Resolving_a_default_model_never_changes_what_is_passed_to_the_vendor_cli()
+    {
+        var swapped = RoleDispatch.ToBinding(Review, "spec", adapterOverride: "agy");
+
+        Assert.Null(swapped.Model);
+        Assert.Null(swapped.Effort);
+        Assert.Equal("gemini-3.8-flash-high", swapped.ModelResolved);
+        // Effort has no adapter-default rung, so a swap that drops the tier's effort leaves it
+        // unresolved rather than inventing one.
+        Assert.Null(swapped.EffortResolved);
+        Assert.Null(swapped.EffortSource);
+    }
+
+    /// <summary>
+    /// #1927: an adapter with no measured CLI default and a tier that names no model leaves the stamp
+    /// ABSENT rather than guessing — the same no-fallback rule <c>DepthTierMapping</c> keeps. claude
+    /// ships no model-list subcommand, so its default is the operator's account and nothing here has
+    /// measured it; <c>orchestrate</c> is the shipped role whose tier names no model.
+    /// </summary>
+    [Fact]
+    public void An_unmeasured_adapter_default_leaves_the_resolved_model_absent()
+    {
+        var binding = RoleDispatch.ToBinding(WorkerRoleCatalog.For("orchestrate"), "spec");
+
+        Assert.Equal("claude", binding.Adapter);
+        Assert.Null(binding.ModelResolved);
+        Assert.Null(binding.ModelSource);
+    }
 }
 

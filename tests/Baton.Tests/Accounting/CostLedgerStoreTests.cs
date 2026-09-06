@@ -223,6 +223,10 @@ public sealed class CostLedgerStoreTests
             Assert.Null(row.Effort);
             Assert.Null(row.Attempt);
             Assert.Null(row.Raw);
+
+            // #1927: ModelEchoed HAS a writer now, and is absent here for a different reason -- this
+            // fixture's stream carries no event naming a model, which is the agy shape. Kept out of the
+            // reserved list above so a reader cannot conclude from it that the field is unwritten.
             Assert.Null(row.ModelEchoed);
         }
         finally

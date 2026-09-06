@@ -92,12 +92,10 @@ public static partial class CostLedgerStore
     /// <see cref="CostLedgerEntry.IdentitySource"/>'s own doc states what an absent value means.
     /// </param>
     /// <param name="modelResolvedByWorker">
-    /// #1927: worker name to the model dispatch RESOLVED for that worker when the dispatcher named
-    /// none, off the same <c>bindings.json</c> parse <paramref name="labelByWorker"/> comes from
-    /// (<c>Baton.Cli.RoomBindingStamps</c>). Consulted only where the accepted request carried no
-    /// model — a requested model always wins, so this can never restate a row's intent as something
-    /// else. Null everywhere but the settle site, which leaves such a row's <c>model</c> absent exactly
-    /// as it was before.
+    /// #1927. Supplied by the settle site off the same <c>bindings.json</c> parse
+    /// <paramref name="labelByWorker"/> comes from; <c>Baton.Cli.RoomBindingStamps</c>'s own doc states
+    /// what it holds and when it is consulted. Null everywhere else, which leaves such a row's
+    /// <c>model</c> absent exactly as it was before.
     /// </param>
     public static IReadOnlyList<CostLedgerEntry> BuildEntries(
         IReadOnlyList<LogEntry> entries,
@@ -198,11 +196,9 @@ public static partial class CostLedgerStore
                 CacheCreation: usage.CacheCreationTokens,
                 Thinking: usage.ThinkingTokens);
 
-            // #1927: the requested model, else what dispatch resolved for this row's worker. The
-            // fallback is reached ONLY when the accepted request named none, so intent is never
-            // overwritten -- and it is applied before pricing on purpose: a resolved model is the model
-            // the tokens were actually billed at, so withholding it from Estimate would keep pricing a
-            // room the vendor could price.
+            // #1927: the requested model, else this worker's stamp (RoomBindingStamps.ModelResolvedByWorker
+            // states the precedence and why intent always wins). Applied before pricing on purpose:
+            // withholding it from Estimate would keep refusing to price a room whose model is known.
             var resolvedModel = binding.Model
                 ?? (request?.Worker is { } modelWorker && modelResolvedByWorker is not null
                     && modelResolvedByWorker.TryGetValue(modelWorker, out var stampedModel)
@@ -243,9 +239,7 @@ public static partial class CostLedgerStore
                 Role: request?.Worker,
                 Adapter: binding.Adapter,
                 Model: resolvedModel,
-                // #1927: what the vendor said it RAN, beside what was asked for. The two are recorded
-                // separately and never merged -- a row where they differ is a substitution or a
-                // quota-driven downgrade, and collapsing them would erase exactly that reading.
+                // #1927: recorded beside Model rather than merged into it -- see CostLedgerEntry.ModelEchoed.
                 ModelEchoed: usage.ModelEchoed,
                 ModelsObserved: usage.ModelsObserved,
                 Outcome: outcome,

@@ -112,8 +112,8 @@ public sealed record ExecutionUsageView(
     /// that was requested</b> — that is the binding's, and a substitution or quota-driven downgrade is
     /// visible only as a difference between the two. Absent when the vendor echoes none, which on agy
     /// is structural (its stream carries no <c>model</c> key at all) and never "blank".
-    /// <see cref="ModelsObserved"/> is a different fact: it names every model the execution TREE billed
-    /// against, where this names the one the main conversation ran on.
+    /// <see cref="ModelsObserved"/> is a different fact and not a substitute —
+    /// <c>Accounting.CostLedgerEntry.ModelEchoed</c>, which this feeds, states the distinction.
     /// </summary>
     [property: JsonPropertyName("modelEchoed")]
     [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
