@@ -545,7 +545,8 @@ counters themselves have not moved yet. The refusal names what is outstanding an
 `--override-runway "<reason>"` is the bypass, and the next harvest reconciles the reservations away.
 Every evaluation, admitted or refused, is recorded in `~/.baton/fleet/runway-admissions.jsonl`, and an
 admitted room carries the decision on its own `bindings.json`, in `baton status` and in `fleet_status`
-under `runway`. Contract for both halves: `spec/baton.md` §7, "Runway hold (#1848)".
+under `runway` — a list, one entry per vendor the dispatch gated. Contract for both halves:
+`spec/baton.md` §7, "Runway hold (#1848)".
 
 A quick read-only scoping question doesn't need a brief file at all: `--spec-text <text>` (or
 `--spec -` to pipe the prompt in over stdin) is a drop-in alternative to `--spec <spec-file>` — same

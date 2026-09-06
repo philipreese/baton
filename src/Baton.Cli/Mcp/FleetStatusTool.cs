@@ -675,15 +675,16 @@ public sealed class FleetStatusTool : IMcpTool
         bindings?.Values.Select(entry => entry.Workstream).FirstOrDefault(workstream => workstream is not null);
 
     /// <summary>
-    /// Extracts a room's runway admission (#1896) off its loaded <c>bindings.json</c> — same shape as
-    /// <see cref="ExtractRoomLabel"/>, because the stamp is applied to every entry at dispatch. A composed
-    /// template spanning two vendors carries one record per binding and this reports the first; WHICH
-    /// vendor decided what, per phase, is a one-room <c>baton status</c> question, the same split
-    /// <see cref="FleetRoomStatusView.Rejected"/>'s own note draws.
+    /// Extracts a room's runway admissions (#1896) off its loaded <c>bindings.json</c> — read the same way
+    /// <see cref="ExtractRoomLabel"/> reads its own room-level stamp, but kept as a LIST: unlike a label,
+    /// this is decided per vendor, so a composed template spanning two of them has two answers and
+    /// reporting either one alone is wrong in precisely the case the batch decision exists for (#1932
+    /// review). <c>baton status</c> shows the same list off the same field — it is not a surface with a
+    /// finer answer to defer to. <see cref="RunwayAdmissionView.AllFrom"/> owns the dedupe and ordering.
     /// </summary>
-    private static RunwayAdmissionView? ExtractRoomRunway(IReadOnlyDictionary<string, WorkerBindingConfigEntry>? bindings) =>
-        RunwayAdmissionView.From(
-            bindings?.Values.Select(entry => entry.RunwayAdmission).FirstOrDefault(admission => admission is not null));
+    private static IReadOnlyList<RunwayAdmissionView>? ExtractRoomRunway(
+        IReadOnlyDictionary<string, WorkerBindingConfigEntry>? bindings) =>
+        RunwayAdmissionView.AllFrom(bindings?.Values.Select(entry => entry.RunwayAdmission));
 }
 
 /// <summary>
@@ -784,11 +785,12 @@ public sealed record FleetRoomStatusView(
     IReadOnlyList<ArrestLedgerEntryView>? Arrests = null,
     // #1896's RunwayAdmission (its own remarks are the register), read off this room's bindings.json
     // exactly the way Label/Workstream above are -- so it costs no extra file read here, and is absent by
-    // construction on a room dispatched before it shipped. The daemon's fleet projection (#1557)
-    // serializes through this same record, which is how the glass gets it.
+    // construction on a room dispatched before it shipped. One entry per vendor the dispatch gated
+    // (#1932 review), matching WorkflowStatusView.Runway element for element. The daemon's fleet
+    // projection (#1557) serializes through this same record, which is how the glass gets it.
     [property: JsonPropertyName("runway")]
     [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
-    RunwayAdmissionView? Runway = null);
+    IReadOnlyList<RunwayAdmissionView>? Runway = null);
 
 /// <summary>
 /// Status of a single workflow step within a fleet room status report.

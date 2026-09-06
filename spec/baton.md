@@ -3748,12 +3748,21 @@ converted to a Hold here. Holding a vendor Baton has never been able to read wou
 counters say nothing about and would make #1923's bootstrap hole worse rather than better. The ledger
 itself **fails open**, the posture the burn and cost ledgers already take: a write that throws is logged
 on stderr and swallowed, and the dispatch proceeds on the counters' own verdict with nothing reserved.
+**An admission that proceeded unrecorded is not silent** (#1932 review): the posture is unchanged, but
+because nothing was reserved, that dispatch and every concurrent one are back to the race #1896 closed,
+so the reason is stamped on every binding as `RunwayAdmission.UnrecordedReason` and printed by
+`baton status` as `runway admission unrecorded: <reason>`. A stderr line a conductor lane's log swallows
+is not an audit trail.
 
 **Surfacing.** Every binding carries `"RunwayAdmission"` on the room's `bindings.json` — PascalCase, for
 the reason `RunwayOverride` is, and beside that record rather than folded into it (`RunwayAdmission`'s
 own remarks say why). `baton status` prints it and carries it on `--json` as `runway`; `fleet_status`
 and the daemon's fleet projection carry the same `RunwayAdmissionView` under the same `runway` key,
-absent-safe, so a room dispatched before #1896 and the glass rendering it are unchanged. **A refused
+absent-safe, so a room dispatched before #1896 and the glass rendering it are unchanged. **Both surfaces
+carry every vendor's record, one per vendor, never one arbitrary binding's** (#1932 review): a composed
+template's vendors are decided separately, so showing whichever the dictionary yielded first hid the
+hold that caused an override in exactly the case the batch decision above exists for. The list is
+ordered by vendor and absent — never empty — for a room carrying none. **A refused
 dispatch provisions no room**, so no room-scoped surface can ever show a `held` decision — the refusals
 live only in the admission ledger, which is what that file is for.
 

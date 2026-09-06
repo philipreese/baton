@@ -198,6 +198,10 @@ public sealed class RunwayReservationDispatchTests : IDisposable
             Assert.Equal(RunwayAdmissionDecisions.Admitted, admission.Decision);
             Assert.Equal(0.25, admission.EstimatedBurnPoints);
             Assert.Contains(admission.Counters!, c => c.Window == "week (all models)" && c.PercentUsed == 84);
+
+            // The other polarity of the arm below: a ledger that WAS written leaves no marker, so the
+            // marker cannot be something every room carries.
+            Assert.Null(admission.UnrecordedReason);
         }
         finally
         {
@@ -282,6 +286,49 @@ public sealed class RunwayReservationDispatchTests : IDisposable
             var next = await DispatchAsync(testRoot, "next", harvestedAt, policy, adapter: "claude");
             Assert.Equal(WorkflowStatus.Terminal, next.State.Status);
             Assert.Equal(0, (await ReadLedgerAsync())[^1].OutstandingReservationPoints);
+        }
+        finally
+        {
+            DirectoryCleanup.DeleteRecursively(testRoot);
+        }
+    }
+
+    /// <summary>
+    /// #1932 review, the fail-open arm nothing drove: the fleet ledger cannot be written at all, the
+    /// dispatch proceeds anyway (spec/baton.md §7 is the register for that posture and for what it costs),
+    /// and the binding carries <c>RunwayAdmission.UnrecordedReason</c>. The empty ledger is what
+    /// discriminates this from the happy path above, which asserts the same field is null.
+    /// </summary>
+    [Fact]
+    public async Task An_unwritable_ledger_admits_the_dispatch_and_records_the_gap_on_the_room()
+    {
+        var testRoot = Path.Combine(Path.GetTempPath(), $"runway-reserve-unwritable-{Guid.NewGuid():N}");
+        try
+        {
+            // A DIRECTORY where the ledger file belongs: every write to it throws, for as long as it is
+            // there, which is the persistent per-machine condition the finding describes.
+            Directory.CreateDirectory(BatonPaths.RunwayAdmissionLedgerFile);
+
+            var options = await BuildDispatchAsync(testRoot, "only");
+            var result = await DispatchCommand.ExecuteAsync(
+                options,
+                Adapters,
+                TestContext.Current.CancellationToken,
+                evaluateRunway: vendor => AdmitAt84(vendor, DateTimeOffset.UtcNow.AddMinutes(-1)),
+                reservationPolicy: new FixedReservationPolicy(HeadroomPoints));
+
+            Assert.Equal(WorkflowStatus.Terminal, result.State.Status);
+
+            var bindings = await WorkerBindingConfigParser.LoadFromFileAsync(
+                Path.Combine(options.RoomDirectoryPath, "bindings.json"), TestContext.Current.CancellationToken);
+            var admission = Assert.IsType<RunwayAdmission>(bindings.Values.Single().RunwayAdmission);
+            Assert.Equal(RunwayAdmissionDecisions.Admitted, admission.Decision);
+            Assert.NotNull(admission.UnrecordedReason);
+            Assert.Contains(BatonPaths.RunwayAdmissionLedgerFileName, admission.UnrecordedReason, StringComparison.Ordinal);
+
+            // Nothing was reserved and nothing recorded — the fail-open arm ran, not the happy path.
+            Assert.Null(admission.OutstandingReservationPoints);
+            Assert.Empty(Directory.EnumerateFileSystemEntries(BatonPaths.RunwayAdmissionLedgerFile));
         }
         finally
         {

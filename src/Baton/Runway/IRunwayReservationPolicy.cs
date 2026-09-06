@@ -93,9 +93,10 @@ public sealed class LedgerMedianRunwayReservationPolicy : IRunwayReservationPoli
     /// The anchor: what one admission is assumed to burn, in percentage points of the gated window,
     /// before any ledger evidence exists. One point — deliberately small, because this arm can only ever
     /// refuse work, and a fleet whose first dispatch of the day is held by an invented number is worse
-    /// off than one that races a little. It is large enough to bite: at the shipped week threshold of 85
-    /// a snapshot reading 84 % has exactly one point of headroom, so the second concurrent dispatch
-    /// against it is held.
+    /// off than one that races a little. It is large enough to bite: a snapshot one point under the week
+    /// threshold in force (<c>RunwayThresholds.DefaultWeekHoldPct</c> is where the shipped value is
+    /// declared, and an operator may retune it) has exactly one point of headroom, so the second
+    /// concurrent dispatch against it is held.
     /// </summary>
     public const double FlatDefaultPoints = 1.0;
 

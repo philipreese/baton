@@ -575,8 +575,9 @@ public static class DispatchCommand
 
         // One call for the whole dispatch, not one per vendor: the refusal below is all-or-nothing, and
         // the store has to know that before it writes any row (RunwayAdmissionEntry.Dispatched).
-        var admissions = (await RecordAdmissionsAsync(requests, cancellationToken).ConfigureAwait(false))
-            .ToDictionary(entry => entry.Vendor, ToBindingRecord, StringComparer.Ordinal);
+        var (recorded, unrecordedReason) = await RecordAdmissionsAsync(requests, cancellationToken).ConfigureAwait(false);
+        var admissions = recorded.ToDictionary(
+            entry => entry.Vendor, entry => ToBindingRecord(entry, unrecordedReason), StringComparer.Ordinal);
 
         var holds = admissions.Values
             .Where(a => a.Decision is RunwayAdmissionDecisions.Held or RunwayAdmissionDecisions.HeldOverridden)
@@ -637,34 +638,45 @@ public static class DispatchCommand
     }
 
     /// <summary>
-    /// Appends this dispatch's facts and returns them. <b>Fails open</b> — spec/baton.md §7 states that
-    /// posture and what it costs, and this comment does not restate it. The mechanics here: the fallback
-    /// is built from an empty row list with the headroom cleared, so it carries the counters' own verdict
-    /// and no <see cref="RunwayAdmissionEntry.OutstandingReservationPoints"/>.
+    /// Appends this dispatch's facts and returns them, with the reason the ledger could not be written
+    /// when it could not. <b>Fails open</b> — spec/baton.md §7 states that posture and what it costs, and
+    /// this comment does not restate it. The mechanics here: the fallback is built from an empty row list
+    /// with the headroom cleared, so it carries the counters' own verdict and no
+    /// <see cref="RunwayAdmissionEntry.OutstandingReservationPoints"/>.
     /// </summary>
-    private static async Task<IReadOnlyList<RunwayAdmissionEntry>> RecordAdmissionsAsync(
+    /// <remarks>
+    /// #1932 review: spec/baton.md §7 states what an unrecorded admission costs and why it is surfaced
+    /// rather than only logged. The mechanics here are just that the reason is returned alongside the
+    /// facts and stamped onto every binding's <see cref="RunwayAdmission.UnrecordedReason"/>, which is
+    /// what puts it in <c>baton status</c> (text and <c>--json</c>) and <c>fleet_status</c>.
+    /// </remarks>
+    private static async Task<(IReadOnlyList<RunwayAdmissionEntry> Entries, string? UnrecordedReason)> RecordAdmissionsAsync(
         IReadOnlyList<RunwayAdmissionRequest> requests, CancellationToken cancellationToken)
     {
         try
         {
-            return await RunwayAdmissionLedgerStore
+            return (await RunwayAdmissionLedgerStore
                 .ReserveAndRecordAsync(requests, BatonPaths.RunwayAdmissionLedgerFile, cancellationToken)
-                .ConfigureAwait(false);
+                .ConfigureAwait(false), null);
         }
         catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or WaitHandleCannotBeOpenedException)
         {
+            var reason = $"{BatonPaths.RunwayAdmissionLedgerFile} could not be written: {ex.Message}";
             Console.Error.WriteLine(
-                $"Could not record the runway admission decision(s) for "
+                $"Warning: could not record the runway admission decision(s) for "
                 + $"'{string.Join("', '", requests.Select(r => r.Vendor))}': {ex.Message} "
-                + "The counters' own verdict still applies; no headroom was reserved across dispatches.");
-            return RunwayAdmissionLedgerStore.Decide(
-                [.. requests.Select(r => r with { HeadroomPoints = null })], []);
+                + "The counters' own verdict still applies; no headroom was reserved across dispatches, "
+                + "so concurrent dispatches on this machine are deciding against the same snapshot "
+                + "unaware of each other. Recorded on the room as 'runway admission unrecorded'.");
+            return (RunwayAdmissionLedgerStore.Decide(
+                [.. requests.Select(r => r with { HeadroomPoints = null })], []), reason);
         }
     }
 
     /// <summary>The binding-facing projection of one recorded fact — the same values, minus the ledger-only
-    /// bookkeeping (timestamp, room, role) a room already knows about itself.</summary>
-    private static RunwayAdmission ToBindingRecord(RunwayAdmissionEntry entry) =>
+    /// bookkeeping (timestamp, room, role) a room already knows about itself, plus
+    /// <paramref name="unrecordedReason"/>, which exists only when the fact was never recorded at all.</summary>
+    private static RunwayAdmission ToBindingRecord(RunwayAdmissionEntry entry, string? unrecordedReason) =>
         new(entry.Vendor,
             entry.Decision,
             entry.DecidedBy,
@@ -675,7 +687,8 @@ public static class DispatchCommand
             entry.HeadroomPoints,
             entry.OutstandingReservationPoints,
             entry.EstimatedBurnPoints,
-            entry.EstimateSource);
+            entry.EstimateSource,
+            unrecordedReason);
 
     /// <summary>
     /// The one worker role bound to <paramref name="vendor"/>, or null when a composed template bound

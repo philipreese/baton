@@ -58,9 +58,11 @@ namespace Baton.Runway;
 /// </param>
 /// <param name="EstimatedBurnPoints">What <see cref="IRunwayReservationPolicy"/> estimated this dispatch would burn.</param>
 /// <param name="Dispatched">
-/// <c>false</c> when this evaluation's decision was overtaken by the dispatch as a whole being refused.
-/// Absent means the dispatch proceeded, which is what every row written before this field existed means
-/// too. spec/baton.md §7 states why one dispatch is one all-or-nothing admission decision and what this
+/// <c>false</c> when the dispatch this row belongs to did not run — which covers the row's OWN refusal as
+/// much as a sibling vendor's, since the decision is one all-or-nothing batch and every entry in a refused
+/// batch carries it. It is not a marker for "overtaken by someone else": an ordinary single-vendor counters
+/// hold is its own refusal and reads <c>false</c> too. Absent means the dispatch proceeded, which is what
+/// every row written before this field existed means too. spec/baton.md §7 states why one dispatch is one all-or-nothing admission decision and what this
 /// field costs to omit; the mechanics are in <see cref="RunwayAdmissionLedgerStore.Decide"/>.
 /// </param>
 /// <param name="EstimateSource">
