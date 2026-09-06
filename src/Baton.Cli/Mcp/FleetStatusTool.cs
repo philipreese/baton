@@ -62,7 +62,10 @@ public sealed class FleetStatusTool : IMcpTool
     public string Name => "fleet_status";
 
     public string Description =>
-        "Read-only snapshot of room statuses across the fleet, including state, timestamps, usage, and outputs.";
+        "Read-only snapshot of room statuses across the fleet, including state, timestamps, usage, and outputs. "
+        + "projectionAgeSeconds/stale describe the daemon's own fleet projection file, not the rooms below "
+        + "(those are re-scanned on every call): stale means the daemon has not written a projection in "
+        + "three of its tick intervals and may be hung, so anything reading that file is showing an old picture.";
 
     public string? AnnotationsJson => """{"readOnlyHint": true}""";
 
@@ -130,7 +133,14 @@ public sealed class FleetStatusTool : IMcpTool
         var liveLanesByVendor = VendorUsageProjectionReader.CountLiveLanesByVendor(results);
         var vendors = VendorUsageProjectionReader.ReadAll(liveLanesByVendor);
 
-        var json = JsonSerializer.Serialize(new FleetStatusResponse(results, vendors), SerializerOptions);
+        // #1981: how old the daemon's projection file is, read at call time -- a hung daemon is
+        // invisible in rooms[] (this tool re-scans them live), so a conductor reading fleet_status
+        // programmatically gets the same "the projection stopped moving" fact the glass banner shows.
+        var staleness = FleetProjectionStaleness.Read(DateTimeOffset.UtcNow);
+
+        var json = JsonSerializer.Serialize(
+            new FleetStatusResponse(results, vendors, staleness.AgeSeconds, staleness.Stale),
+            SerializerOptions);
         return new McpToolCallResult(json);
     }
 

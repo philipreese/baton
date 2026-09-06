@@ -46,6 +46,14 @@
   stale or absent, falling back to its own derivation for that cycle -- checked right after the
   write-budget banner above (both are the pusher explaining a self-diagnosed source problem, not a
   KV/heartbeat symptom).
+
+  `projection` (#1981, same absent-safe convention) is `{stale, reason, ageMs}`, computed by
+  worker.js at read time from `projectionStaleness` in worker.core.mjs -- the DAEMON's own staleness,
+  not the pusher's. It is the finer-grained sibling of `staleness` above: that one only rides in once
+  the projection file is 900s old and the pusher has already fallen back to deriving the snapshot
+  itself, whereas this fires at three of the daemon's own tick intervals, which is what #1981's
+  thirteen-minute silent hang needed. The two thresholds and the reason codes are documented on
+  `projectionStaleness` itself; this file only renders the verdict.
 -->
 <title>Fleet Glass</title>
 <link rel="preconnect" href="https://fonts.googleapis.com">
@@ -2017,6 +2025,13 @@ window.addEventListener("hashchange", applyRoute);
         // are the pusher explaining a self-diagnosed source problem, not a downstream KV/heartbeat
         // symptom the banners below would otherwise misdiagnose.
         const staleness = snap.staleness && typeof snap.staleness === "object" ? snap.staleness : null;
+        // #1981: `projection` is computed by worker.js from projectionStaleness() in
+        // worker.core.mjs (which worker.selftest.mjs exercises), never here -- this page is an
+        // artifact and cannot import that module, so re-deriving the thresholds inline would be a
+        // second implementation nothing tests. Absent-safe like every other optional field: a
+        // Worker not yet redeployed for #1981 simply never sends it.
+        const projection = snap.projection && typeof snap.projection === "object" && snap.projection.stale
+          ? snap.projection : null;
         if(kvWriteCapResetsAt){
           banner(`<b>The worker is refusing writes</b> (Cloudflare's daily KV write cap, confirmed by a live 429; writes resume ${esc(kvWriteCapResetsAt)}). Data below is from the last push before the cap hit.`);
         } else if(budgetExhaustedUntil){
@@ -2034,6 +2049,20 @@ window.addEventListener("hashchange", applyRoute);
           // #1613 posts no derived_at at all, and that used to fall through to a silently clean
           // banner, disabling the "derivation may be stuck" check below with no indication why.
           banner("<b>No derivation timestamp yet.</b> derived_at is unset — redeploy pusher.py for #1613, or the mailbox hasn't received one yet.");
+        } else if(projection){
+          // #1981: the daemon hung for 13 minutes on 2026-09-06 with its process alive, its
+          // scheduled task reporting Running, and this page showing the frozen picture as if it
+          // were current -- the operator noticed from the board, nothing in baton did. Ranked here
+          // deliberately: below the pusher-liveness checks above (a dead pusher explains a frozen
+          // derived_at without any daemon fault, and saying "the daemon may be hung" then would be
+          // a wrong diagnosis), above the derivation/push banners below (in the default
+          // FLEET_GLASS_PROJECTION_SOURCE=file mode derived_at IS the daemon's own write timestamp,
+          // so this names the actual process to look at; in `derive` mode the "Snapshot derivation
+          // may be stuck" banner below still covers the pusher's own derivation).
+          const detail = projection.reason === "hung"
+            ? "the fleet machine was already serving that frozen projection when it last reported in"
+            : "nothing fresher has reached this page at all — the fleet machine, the pusher, or the daemon";
+          banner(`<b>Projection is ${esc(dur(projection.ageMs) || "?")} stale — the daemon may be hung.</b> ${esc(detail)}. Every room below is that old picture; check <span class='mono'>~/.baton/daemon.log</span> and the <span class='mono'>baton-daemon</span> scheduled task.`);
         } else if(pendingPushMs != null && isFinite(pendingPushMs) && pendingPushMs > PUSH_FAILING_MS){
           banner(`<b>Push failing.</b> The pusher has had a snapshot waiting to go out for ${esc(dur(pendingPushMs))} even though derivation is healthy (derived_at ${esc(age(snap.derived_at))} ago) — check pusher.log for POST errors (413 from the 1 MB cap, 5xx, network). Data below may be stale.`);
         } else if(isFinite(hbMs) && isFinite(derivedMs) && hbMs > RUNNING_SUSPICION_MS && derivedMs > RUNNING_SUSPICION_MS

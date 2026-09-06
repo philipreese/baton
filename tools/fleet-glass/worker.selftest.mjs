@@ -15,6 +15,9 @@ import {
   deliverableReadOutcome,
   isValidFleetStatusPage,
   maxIsoOrNull,
+  projectionStaleness,
+  PROJECTION_STALE_AFTER_MS,
+  PROJECTION_UNREACHABLE_AFTER_MS,
   classifyKvError,
   nextUtcMidnightIso,
 } from "./worker.core.mjs";
@@ -174,6 +177,59 @@ check("no heartbeat recorded yet, but a push has landed: the push time is still 
       maxIsoOrNull(null, "2026-09-02T07:34:00Z") === "2026-09-02T07:34:00Z");
 check("neither heartbeat nor push recorded yet: stays absent, never fabricated",
       maxIsoOrNull(null, null) === null);
+
+// -- #1981: the daemon-hung banner condition, both arms and both polarities --
+{
+  const iso = (ms) => new Date(ms).toISOString();
+  const now = Date.UTC(2026, 8, 6, 19, 0, 0);
+
+  // (a) HUNG: the projection was already 5 minutes old when the fleet machine last reported in.
+  // This is the 2026-09-06 incident's own shape -- the pusher kept pinging, the daemon did not
+  // write. Measured contact-to-derivation, so it fires at 90s without waiting for a delivery.
+  const hung = projectionStaleness(iso(now - 6 * 60_000), iso(now - 60_000), now);
+  check("(#1981 arm a) a projection already stale at the fleet machine's last contact reads stale",
+        hung.stale === true && hung.reason === "hung");
+  check("(#1981 arm a) the reported age is the contact-to-derivation gap, not now-to-derivation",
+        hung.ageMs === 5 * 60_000);
+
+  // (a control) THE FALSE-FIRE THIS ARM EXISTS TO AVOID: a healthy daemon on a quiet fleet, whose
+  // derived_at is 4 minutes old only because pusher.py's 300s ping cadence hasn't delivered a
+  // fresher one yet. The gap AT CONTACT is one tick, so nothing fires -- a now-keyed 90s threshold
+  // would have lit this up permanently (the #1613 false-fire, repeated).
+  const quietButHealthy = projectionStaleness(iso(now - 4 * 60_000), iso(now - 4 * 60_000 + 30_000), now);
+  check("(#1981 arm a control) a healthy daemon whose derived_at is merely UNDELIVERED does not fire",
+        quietButHealthy.stale === false && quietButHealthy.reason === null);
+
+  // (a boundary, both sides of the 3-tick threshold)
+  check("(#1981 arm a) exactly at the 3-tick threshold is not yet stale (strictly greater fires)",
+        projectionStaleness(iso(now - 60_000), iso(now - 60_000 + PROJECTION_STALE_AFTER_MS), now).stale === false);
+  check("(#1981 arm a) one millisecond past the 3-tick threshold fires",
+        projectionStaleness(iso(now - 60_000), iso(now - 60_000 + PROJECTION_STALE_AFTER_MS + 1), now).reason === "hung");
+
+  // (b) UNREACHABLE: nothing fresh has arrived at all -- the pusher died alongside the daemon, so
+  // arm (a) is frozen at whatever gap it last saw and would stay quiet forever.
+  const bothDead = projectionStaleness(iso(now - 30 * 60_000), iso(now - 30 * 60_000 + 5_000), now);
+  check("(#1981 arm b) a frozen contact AND a frozen derivation still reads stale",
+        bothDead.stale === true && bothDead.reason === "unreachable");
+  check("(#1981 arm b) its age is measured against the reader's own clock", bothDead.ageMs === 30 * 60_000);
+
+  // (b control) under the ping cadence + slop, a delivery that simply hasn't happened yet is quiet.
+  check("(#1981 arm b control) a derived_at younger than the ping cadence + slop does not fire",
+        projectionStaleness(iso(now - (PROJECTION_UNREACHABLE_AFTER_MS - 1)), null, now).stale === false);
+  check("(#1981 arm b) past the ping cadence + slop it fires even with no contact timestamp at all",
+        projectionStaleness(iso(now - (PROJECTION_UNREACHABLE_AFTER_MS + 1)), null, now).reason === "unreachable");
+
+  // Never a fabricated verdict: an absent/unparseable derived_at has its own banner already.
+  check("(#1981) a missing derived_at yields no verdict at all, never stale:false",
+        projectionStaleness(null, iso(now), now) === null
+        && projectionStaleness("not-a-date", iso(now), now) === null
+        && projectionStaleness(undefined, iso(now), now) === null);
+  check("(#1981) an unparseable CONTACT timestamp degrades to arm (b) alone, never throws",
+        projectionStaleness(iso(now - 60_000), "not-a-date", now).stale === false
+        && projectionStaleness(iso(now - 30 * 60_000), "not-a-date", now).reason === "unreachable");
+  check("(#1981) a derived_at stamped slightly ahead of the reader's clock floors at 0, never negative",
+        projectionStaleness(iso(now + 2_000), iso(now + 1_000), now).ageMs === 0);
+}
 
 // -- #1690 item 2: deliver batching folds K items into ONE inbox:batch:<id> blob + the index --
 {

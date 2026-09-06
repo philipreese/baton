@@ -3202,6 +3202,30 @@ line; on that fallback cycle only, the pushed body carries one more optional top
 `staleness: {daemon_derived_at, age_s, stale}` (absent on every ordinary push, same convention as
 `pusher.writeBudgetExhaustedUntil`), and `glass.html` renders it as one more absent-safe banner,
 checked at the same priority rung as the write-budget one, never a new banner mechanism.
+**#1981 — a hung daemon is a first-class reading, on both surfaces, well before that 900s fallback.**
+On 2026-09-06 the daemon stopped writing the projection for thirteen minutes with its process alive
+and its scheduled task reporting Running; every consumer kept serving the frozen picture as current,
+and the `staleness` field above never fired because 900s had not elapsed. Two fields, one threshold —
+**three ticks of `FleetProjectionWriter.GetInterval()`**, stated once as
+`FleetProjectionWriter.StaleAfterTicks` and derived from there by both consumers rather than
+transcribed:
+- **`fleet_status` gains `projectionAgeSeconds` (omitted when unknown) and `stale` (serialized only
+  when true)** — seconds since the projection file's own `derived_at`, read at call time by
+  `Baton.Cli.Mcp.FleetProjectionStaleness`, whose doc comment owns the fail-closed rules (absent,
+  unreadable, or unparseable reads stale with no age, the same posture `read_projection_file` already
+  takes). They describe the **daemon**, never the response's own `rooms[]`, which that tool re-scans
+  live on every call — a conductor reading the tool programmatically sees the same fact the operator's
+  banner does. Off the pushed body by construction: `build_wrapped` copies named keys only, so neither
+  field reaches `pusher.py`'s change-gate hash.
+- **The pushed snapshot gains `projection: {stale, reason, ageMs}`**, merged in by `worker.js` at read
+  time (like `heartbeat_at`/`derived_at`/`pending_push_age_s`, and for the same change-gate reason)
+  from `projectionStaleness` in `worker.core.mjs` — that function's own comment is the canonical record
+  of why there are **two** arms and why their thresholds differ, and `worker.selftest.mjs` holds both
+  polarities of each. `glass.html` renders it as a banner above the fleet table, ranked below the
+  pusher-liveness banners (a dead pusher explains a frozen `derived_at` with no daemon fault) and above
+  the derivation/push ones. It is computed in the Worker, not the page, because the page is an artifact
+  that cannot import that module and a copy there would be a second implementation nothing tests.
+
 `python pusher.py --compare-projection` runs BOTH sources once against the live rooms and diffs them
 field-by-field after canonical (sorted-keys) JSON serialization, exiting 0 identical / 1 with the
 diff printed on mismatch — `derived_at` (differs by construction), `rooms[].live.lastActivityAt`

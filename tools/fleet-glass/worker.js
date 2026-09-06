@@ -83,6 +83,7 @@ import {
   deliverableReadOutcome,
   isValidFleetStatusPage,
   maxIsoOrNull,
+  projectionStaleness,
   classifyKvError,
   nextUtcMidnightIso,
 } from "./worker.core.mjs";
@@ -93,7 +94,7 @@ const TOOLS = [
   {
     name: "fleet_status",
     description:
-      "Read-only snapshot of room statuses across the operator's baton fleet, as last pushed by the fleet machine. Includes pushed_at for snapshot staleness, heartbeat_at for pusher liveness, derived_at for snapshot-derivation health, and pending_push_age_s for push-delivery health -- these are independent (#1486, #1613 item 2, 2026-09-01 review): a quiet fleet lets pushed_at go stale on purpose (heartbeat_at tells that apart from a dead pusher), a fleet whose derivation keeps failing lets derived_at go stale even while heartbeat_at stays fresh, and a fleet whose PUSHES keep failing (derivation healthy) grows pending_push_age_s even while derived_at stays fresh. With no arguments, `rooms` carries every non-terminal room plus only the newest N terminal ones (terminal_total names the full terminal count) -- pass `page` (0-based) and optionally `limit` (default 50, max 200) to page through the REST of the terminal archive instead; a paged call's response carries rooms/page/limit/terminal_total/next_page (null once exhausted) and omits every other top-level field.",
+      "Read-only snapshot of room statuses across the operator's baton fleet, as last pushed by the fleet machine. Includes pushed_at for snapshot staleness, heartbeat_at for pusher liveness, derived_at for snapshot-derivation health, and pending_push_age_s for push-delivery health -- these are independent (#1486, #1613 item 2, 2026-09-01 review): a quiet fleet lets pushed_at go stale on purpose (heartbeat_at tells that apart from a dead pusher), a fleet whose derivation keeps failing lets derived_at go stale even while heartbeat_at stays fresh, and a fleet whose PUSHES keep failing (derivation healthy) grows pending_push_age_s even while derived_at stays fresh. With no arguments, `rooms` carries every non-terminal room plus only the newest N terminal ones (terminal_total names the full terminal count) -- pass `page` (0-based) and optionally `limit` (default 50, max 200) to page through the REST of the terminal archive instead; a paged call's response carries rooms/page/limit/terminal_total/next_page (null once exhausted) and omits every other top-level field. `projection` (#1981, absent when derived_at is unknown) is `{stale, reason, ageMs}` for the DAEMON's own projection file: `stale` with reason `hung` means the fleet machine was already serving a frozen projection when it last reported in, and `unreachable` means nothing fresh has arrived here at all -- in either case the rooms below are an old picture.",
     inputSchema: {
       type: "object",
       properties: {
@@ -328,7 +329,14 @@ async function handleMcp(request, env) {
       // heartbeat_at/derived_at/pending_push_age_s are merged in at read time, never written into
       // the "snapshot" value itself -- that keeps them out of pusher.py's change-gate hash (see
       // this file's header).
+      // #1981: computed HERE, not in glass.html, so the two thresholds and the arithmetic live in
+      // one place (worker.core.mjs, exercised by worker.selftest.mjs) -- the page is an artifact
+      // that cannot import a module, so a copy over there would be a second implementation nothing
+      // tests. Merged in at read time like the three fields above, for the same reason: it must not
+      // enter pusher.py's change-gate hash. Absent when derived_at is missing/unparseable.
+      const projection = projectionStaleness(derivedAt, heartbeatDisplayAt, Date.now());
       const snapshot = { ...restSnapshot, heartbeat_at: heartbeatDisplayAt, derived_at: derivedAt, pending_push_age_s: pendingPushAgeS };
+      if (projection) snapshot.projection = projection;
       return json(rpcResult(id, toolText(JSON.stringify(snapshot))));
     }
     if (name === "deliverables_list") {

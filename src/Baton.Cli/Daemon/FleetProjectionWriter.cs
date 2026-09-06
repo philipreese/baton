@@ -47,6 +47,18 @@ public sealed class FleetProjectionWriter : BackgroundService
 
     public static readonly TimeSpan DefaultInterval = TimeSpan.FromSeconds(30);
 
+    /// <summary>
+    /// #1981: how many missed ticks make the projection "stale" — the one place that multiple is
+    /// stated. Three, not one: a single tick that runs long (a room walk under IO contention) is
+    /// ordinary, and a reader that shouted on every one of those would be the false-firing banner
+    /// #1613 already had to pull out of <c>glass.html</c> once. Every consumer derives its own
+    /// threshold from <see cref="StaleAfter"/> rather than transcribing 90 seconds:
+    /// <c>FleetStatusTool</c>'s <c>stale</c> flag, and — across the language boundary, where a
+    /// literal is unavoidable — <c>PROJECTION_STALE_AFTER_MS</c> in
+    /// <c>tools/fleet-glass/worker.core.mjs</c>, which names this symbol as its source.
+    /// </summary>
+    public const int StaleAfterTicks = 3;
+
     // Same reasoning as RoomRetentionSweep.MinInterval/MaxInterval: bounded so a pathological env value
     // can neither overflow TimeSpan.FromSeconds nor hot-loop ExecuteAsync.
     public static readonly TimeSpan MinInterval = TimeSpan.FromSeconds(1);
@@ -89,6 +101,12 @@ public sealed class FleetProjectionWriter : BackgroundService
 
         return DefaultInterval;
     }
+
+    /// <summary>#1981: the age past which <see cref="BatonPaths.FleetProjectionFile"/> is stale —
+    /// <see cref="StaleAfterTicks"/> ticks of whatever interval is actually in effect, so an operator
+    /// who widens <see cref="IntervalSecondsEnvironmentVariable"/> widens the staleness threshold with
+    /// it instead of arming a permanent alarm.</summary>
+    public static TimeSpan StaleAfter() => GetInterval() * StaleAfterTicks;
 
     protected override async Task ExecuteAsync(CancellationToken stoppingToken)
     {

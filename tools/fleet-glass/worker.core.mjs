@@ -86,6 +86,62 @@ export function maxIsoOrNull(a, b) {
   return null;
 }
 
+// #1981: the daemon can hang with its process alive -- on 2026-09-06 it stopped writing its fleet
+// projection for thirteen minutes while the scheduled task still reported Running, and this page kept
+// rendering the frozen picture as if it were current. `derived_at` (in the default
+// FLEET_GLASS_PROJECTION_SOURCE=file mode, the DAEMON's own write timestamp -- spec/baton.md §6) is
+// the signal; the two thresholds below are what make reading it honest.
+//
+// PROJECTION_STALE_AFTER_MS is FleetProjectionWriter.StaleAfterTicks (3) x its default 30s tick --
+// that C# symbol is the source, and this literal is the cross-language transcription the
+// `stdoutTail`/`doingNow` port pairs already accept (there is no shared module across the boundary).
+// A daemon run with a widened BATON_FLEET_PROJECTION_INTERVAL_SECONDS would need this widened too.
+export const PROJECTION_STALE_AFTER_MS = 90 * 1000;
+// The second arm's threshold is NOT the same number, deliberately: it is measured against the
+// reader's own clock, and `derived_at` only REACHES the mailbox on pusher.py's
+// DERIVED_PING_INTERVAL_SECONDS (300s) cadence when the change-gate is suppressing pushes. Anything
+// at or under that cadence would light on a healthy, quiet fleet -- the exact false-fire #1613 had
+// to pull the old pushed_at-keyed banner out for. 7 minutes = the ping interval plus two minutes of
+// slop for a cycle that lands late.
+export const PROJECTION_UNREACHABLE_AFTER_MS = 7 * 60 * 1000;
+
+// Two arms, one verdict, because neither covers the other:
+//
+//  (a) "hung"        -- `lastContactAt - derivedAt`: how stale the projection ALREADY WAS at the
+//      moment the fleet machine last spoke to the mailbox. Both timestamps travel in the same POST,
+//      so delivery lag cancels out and this can be sensitive (90s) without false-firing on a quiet
+//      fleet. This is the arm that would have caught 2026-09-06 while the pusher kept pinging.
+//  (b) "unreachable" -- `now - derivedAt`: fires when nothing fresh has arrived at all, which is
+//      what (a) cannot see -- if the pusher dies alongside the daemon, `lastContactAt` freezes too
+//      and (a) stays quiet forever at whatever gap it last saw.
+//
+// Clock note: `derivedAt` is stamped by the fleet machine, `lastContactAt` by the Worker (worker.js
+// re-stamps pushed_at / heartbeat_at on arrival), so arm (a) carries one clock-skew term between two
+// NTP-disciplined hosts -- seconds against a 90s threshold, and arm (b) compares the reader's clock
+// against the same fleet-machine stamp. Neither is exact enough to shave; both thresholds are chosen
+// with room for that.
+//
+// Returns null -- never a fabricated verdict -- when `derivedAt` is missing or unparseable; that case
+// is already its own banner ("No derivation timestamp yet"), and a `stale: true` here would double it.
+export function projectionStaleness(derivedAt, lastContactAt, nowMs,
+                                    staleAfterMs = PROJECTION_STALE_AFTER_MS,
+                                    unreachableAfterMs = PROJECTION_UNREACHABLE_AFTER_MS) {
+  const derivedMs = typeof derivedAt === "string" && derivedAt ? Date.parse(derivedAt) : NaN;
+  if (!Number.isFinite(derivedMs)) return null;
+  const contactMs = typeof lastContactAt === "string" && lastContactAt ? Date.parse(lastContactAt) : NaN;
+  // Floored at 0: a projection stamped slightly ahead of the comparison instant is clock skew, not
+  // negative staleness, and either way it is not stale.
+  const ageAtContactMs = Number.isFinite(contactMs) ? Math.max(0, contactMs - derivedMs) : null;
+  const ageMs = Math.max(0, nowMs - derivedMs);
+  if (ageAtContactMs !== null && ageAtContactMs > staleAfterMs) {
+    return { stale: true, reason: "hung", ageMs: ageAtContactMs };
+  }
+  if (ageMs > unreachableAfterMs) {
+    return { stale: true, reason: "unreachable", ageMs };
+  }
+  return { stale: false, reason: null, ageMs };
+}
+
 // #1690 item 2: the pure core of handleDeliver's batching -- given the existing inbox index and the
 // items in one /deliver POST, returns the updated index (each stored item stamped with the batch id
 // it lives in), the single content blob to write under `inbox:batch:<batchId>`, and any INBOX_CAP
