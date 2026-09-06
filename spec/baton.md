@@ -258,17 +258,13 @@ A harness invokes work two ways, both in `src/Baton.Cli/Program.cs`:
   reads it back.
 
   **A dispatch that omits `--model` still records what it will run on (#1927).** `RoleDispatch.ToBinding`
-  resolves the effective model in one order — the dispatcher's own `--model`, then the role's tier
-  (`WorkerTiers.json`), then the vendor's measured CLI default (`Baton.Domain.AdapterDefaultModels`) —
-  and stamps `modelResolved` plus `modelSource` (`requested` | `resolved-default`) on every entry of the
-  room's `bindings.json`, with `effortResolved`/`effortSource` beside them for the same axis minus the
-  CLI-default rung. **They are display-only, and that is load-bearing**: `Model`/`Effort` are what become
-  the vendor CLI's own flags, so stamping a resolved default onto them would start passing `--model` to a
-  vendor Baton previously let choose for itself — a dispatch change, where the measured defect (a room
-  rendering a bare `agy`) is a display one. All three rungs silent leaves the stamp ABSENT rather than
-  guessing, the same no-fallback rule `DepthTierMapping` keeps: an adapter whose CLI default nobody has
-  measured (claude, which ships no model-list subcommand) is simply not in that table. §6's schema states
-  how the render surfaces read the pair back and what an absent source means there.
+  stamps `modelResolved`/`modelSource` — and `effortResolved`/`effortSource` — onto every entry of the
+  room's `bindings.json`; `WorkerBindingConfigEntry`'s own doc carries the precedence, the two source
+  values, and why an unmeasured rung yields an absent stamp instead of a guess. **Ruled here, because it
+  is the constraint the design rests on: those four are DISPLAY fields and may never feed dispatch.** The
+  measured defect (#1927: a room rendering a bare `agy`) is a rendering one, and repairing it by writing a
+  default into the fields that become the vendor's argv would silence a class of vendor-chosen behaviour
+  the operator never asked to change. §6's schema states how the render surfaces read the pair back.
 
   `--token-budget` (#1623) overrides the dispatched role's own default per-execution
   token ceiling — §3's "Engine-run verify and the token budget" subsection is the full contract; this
@@ -2625,7 +2621,7 @@ anticipated this shape):
   "adapter"?: string,     // that role's WorkerBindingConfigEntry.Adapter
   "model"?: string,       // that role's WorkerBindingConfigEntry.Model, falling back (#1927) to its ModelResolved when the dispatcher named none -- so a room dispatched without --model shows a model rather than a bare vendor
   "effort"?: string,      // that role's WorkerBindingConfigEntry.Effort, with the same #1927 fallback to EffortResolved
-  "modelSource"?: string, // #1927: which rung produced `model` -- "requested" (the dispatcher named it) or "resolved-default" (Baton filled it in, from the role's tier or the vendor's measured CLI default). ABSENT means the binding recorded no source at all -- a hand-authored bindings.json, or a room dispatched before this shipped -- and a render surface must show no mark for that rather than asserting the value was requested. Fleet Glass marks a resolved value with a trailing "~"
+  "modelSource"?: string, // #1927: which rung produced `model` -- WorkerBindingConfigEntry.ModelSource carried verbatim, including what its absence means. Fleet Glass marks a "resolved-default" value with a trailing "~"
   "effortSource"?: string, // #1927: the same for `effort`, same two values and same absence rule
   "timeoutMs"?: number,   // that role's WorkerBindingConfigEntry.Timeout, in milliseconds
   "label"?: string,       // #1499: the room's --label, WorkerBindingConfigEntry.Label

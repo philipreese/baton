@@ -818,12 +818,8 @@ public sealed record FleetRoomStatusView(
     [property: JsonPropertyName("runway")]
     [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
     IReadOnlyList<RunwayAdmissionView>? Runway = null,
-    // #1927: which rung produced `model`/`effort` above -- WorkerBindingConfigEntry.ModelSource /
-    // EffortSource, carried verbatim off the same bindings.json read. Two values only
-    // (Baton.Vendors.BindingValueSource); a render surface marks `resolved-default` so an operator can
-    // tell what they asked for from what the room fell back to. ABSENT means the binding recorded no
-    // source -- a hand-authored bindings.json, or a room dispatched before this shipped -- and a
-    // surface renders no mark for that rather than asserting the value was requested.
+    // #1927: WorkerBindingConfigEntry.ModelSource/EffortSource, carried verbatim off the same
+    // bindings.json read -- that field's own doc states the vocabulary and what an absent value means.
     [property: JsonPropertyName("modelSource")]
     [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
     string? ModelSource = null,

@@ -502,10 +502,9 @@ public sealed class LedgerViewCommandTests : IDisposable
     }
 
     /// <summary>
-    /// #1927: a row where the vendor ran something other than what was requested is visible in the
-    /// text drill, and one where the two agree is not cluttered with a duplicate. Both arms are needed:
-    /// printing <c>modelEchoed</c> unconditionally would bury the one reading worth spotting under a
-    /// restatement on every other row, and printing it never would hide the substitution entirely.
+    /// #1927: a row where the vendor ran something other than what was requested is visible in the text
+    /// drill, and one where the two agree is not. Both arms are needed —
+    /// <c>LedgerViewCommand.DescribeRow</c>'s own comment states why the clause is conditional.
     /// </summary>
     [Fact]
     public async Task A_requested_and_echoed_model_that_disagree_are_both_visible_in_the_text_drill()

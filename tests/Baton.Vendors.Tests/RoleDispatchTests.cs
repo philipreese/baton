@@ -453,11 +453,9 @@ public class RoleDispatchTests
     }
 
     /// <summary>
-    /// #1927: the stamps are DISPLAY-ONLY. <c>Model</c>/<c>Effort</c> are what become the vendor CLI's
-    /// own flags, so a resolved default must not reach them — stamping one would start passing
-    /// <c>--model</c> to a vendor Baton previously let choose for itself, which is a live dispatch
-    /// change rather than the display fix this is. The agy swap is where the two diverge most visibly:
-    /// the stamp names a model and the dispatch input stays null.
+    /// #1927: the invariant spec/baton.md §2 rules — a stamp may never reach the fields that become the
+    /// vendor's argv. The agy swap is where the two diverge most visibly: the stamp names a model and
+    /// the dispatch input stays null.
     /// </summary>
     [Fact]
     public void Resolving_a_default_model_never_changes_what_is_passed_to_the_vendor_cli()
@@ -474,10 +472,9 @@ public class RoleDispatchTests
     }
 
     /// <summary>
-    /// #1927: an adapter with no measured CLI default and a tier that names no model leaves the stamp
-    /// ABSENT rather than guessing — the same no-fallback rule <c>DepthTierMapping</c> keeps. claude
-    /// ships no model-list subcommand, so its default is the operator's account and nothing here has
-    /// measured it; <c>orchestrate</c> is the shipped role whose tier names no model.
+    /// #1927: every rung silent yields no stamp at all — see <c>AdapterDefaultModels</c> for why claude
+    /// carries no entry. <c>orchestrate</c> is the shipped role whose tier names no model, so this
+    /// exercises the case through the real catalog rather than a fabricated role.
     /// </summary>
     [Fact]
     public void An_unmeasured_adapter_default_leaves_the_resolved_model_absent()
