@@ -24,7 +24,7 @@ narrowed daemon, and bindings/permissions. If this README and the spec disagree,
 
 | Verb | What it does |
 |---|---|
-| `baton run` / `baton dispatch` / `baton redispatch` | Start a workflow room, or rerun a terminal one with an amended brief. |
+| `baton run` / `baton dispatch` / `baton redispatch` | Start a workflow room, or rerun a terminal one with an amended brief. Both dispatch verbs take a repeatable `--skill <name>`, attaching a canonical skill package resolved through the rungs `spec/baton.md` §9 states — checked against the worker's grant, never widening it. |
 | `baton cancel` / `baton decide` / `baton resolve` / `baton resume` / `baton supply` | Mutate an already-started room — cancel a lane, record a pause decision, resolve a captured response, resume a stalled pump, supply a supplementary output. |
 | `baton status` | Read-only projection of a room's current state. |
 | `baton keep` / `baton unkeep` | Mark/unmark a room exempt from `RoomRetentionSweep`'s artifact pruning. |

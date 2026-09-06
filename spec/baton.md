@@ -4819,6 +4819,79 @@ adapter — onto the production path itself (`RoleDispatch.ToBinding` /
 `WorkerBindingResolver`, `tests/Baton.Vendors.Tests/TemplateDispatchabilityTests.cs`), so there is now
 exactly one implementation of this rule rather than two kept in step by hand.
 
+### Canonical skill packages (#1151)
+
+A **canonical skill package** is a directory whose name is its identity, holding an optional typed
+`skill.json` manifest beside a SKILL.md-compatible instructions file and any bundled assets. The
+manifest is the only file Baton parses; the instructions file is markdown Baton copies or inlines and
+never interprets, which is what keeps a YAML parser out of this tree. Operator ruling Q1 (2026-09-01)
+ratified this canonical-first, SKILL.md-compatible shape; decision 0033 already ruled that a skill is
+instructions plus tool *requirements*, with no persona layer.
+
+**`Skills` on `WorkerBindingConfigEntry` is harness-facing contract** (operator ruling Q5,
+2026-09-01). A harness authoring a `bindings.json` for `baton run` may name canonical packages there,
+not only via `baton dispatch --skill`, and they are realized rather than recorded-and-ignored: names
+become packages in `WorkerBindingResolver.Resolve`, the one seam `run` and `dispatch` both cross, and
+the resolved packages ride to the adapter on `WorkerInvocation.Skills`. `baton redispatch` inherits
+the parent's list; `--skill ""` clears it; any `--skill <name>` replaces it **wholesale** rather than
+appending — append has no removal syntax, and a lane whose skill set can only grow across redispatches
+is a worse default than one the operator restates. A workflow template refuses `--skill` outright: it
+binds one worker per phase, so a single flag names no phase to attach to (role-carried skills are
+#1151's S6, unbuilt).
+
+**Where a name resolves.** Four rungs, highest precedence first, first match by name wins:
+`BATON_SKILLS_PATH` → `{BatonPaths.Root}/skills/` → `{AppContext.BaseDirectory}/skills/` →
+`<workspace>/skills/`. `SkillPackageResolver`'s own remarks are the register for the ladder; this
+paragraph states the two things a reader gets wrong from outside the code. First, **the
+repo-local rung is the LOWEST, not the highest** — everywhere else in this ecosystem project scope
+beats user scope, and here it does not, because Q3 ratified only the account-wide rungs and explicitly
+*deferred* the repo-local overlay; #1929 shipped that overlay anyway as the floor realization's only
+source, so it is kept as the bottom rung where retiring it later removes behaviour rather than
+changing what an existing name resolves to. Whether to retire or ratify it is open on #1151. Second,
+**a name found on one rung is used whole**, never merged with a same-named package on a lower one.
+
+**The format lint refuses three shapes**, each closing a hazard whose alternative is silent —
+`vendor-placeholder` (a `${CLAUDE_*}`/`${GEMINI_*}` substitution only one vendor performs, so the
+literal text reaches the model on the other; `${BATON_SKILL_DIR}` is the portable spelling),
+`bash-injection` (``!`…` `` in the instructions body, a plausible path around the §5 gate that no
+measurement has closed), and `executable-asset-without-shell` (a bundled script beside a manifest
+declaring `"run_shell_commands": false`). `SkillPackageLint` is the register for what each rule is and
+why. The lint refuses a package an operator NAMED, and skips-with-a-warning a package merely
+discovered by a directory scan — stated on `SkillPackageReader`, which owns that split. There is
+deliberately no `allowed-tools` field: claude's frontmatter field of that name is a pre-approval, and
+a canonical package carrying one could widen a grant the operator narrowed.
+
+**Requirements are checked, never applied.** A manifest declares what it needs in Baton's own
+`PermissionGrant` vocabulary; attaching the package compares that against the worker's grant and can
+only *refuse* (`SkillRequirementUnsatisfiedException`), never widen — the narrowing rule this section
+already states, applied to operator-authored content. An omitted key declares nothing rather than
+declaring false, which is why every manifest-less package keeps working. The check runs twice on
+purpose: in `RoleDispatch.ToBinding`, before a room directory exists, so a typo'd `--skill` costs
+nothing; and in `WorkerBindingResolver.Resolve`, which is the only copy the `baton run` path reaches.
+
+**Amendment to decision 0010 (operator ruling Q2, 2026-09-01): the floor is the default realization,
+and native is opt-in per package via `"realization": "native-preferred"`.** 0010 assigned native
+realization per vendor with prompt-injection as the graceful floor — the fallback for a vendor that
+*cannot* load an ad-hoc skill. This amends that assignment. The argument is silent capability loss: a
+dispatched lane is one-shot and was dispatched *because* the skill applies, so native realization's
+progressive disclosure — name and description in the registry, body loaded only if the model judges it
+relevant — is the wrong trade here. Under native realization a non-activating skill looks configured
+and does nothing; under the floor the instructions are unconditionally in the brief. Whether either
+vendor's model activates a skill at all under `-p` is **unmeasured on both vendors** (#1151's S2 is
+that measurement), which is what turns the loss from a risk into the default case. Determinism beats
+progressive disclosure until a lane's brief is large enough that context pressure binds — a measurable
+threshold, and nothing shipped needs to guess it. 0010 itself is not among the records #1431 restored,
+so this amendment lands here rather than beside it: §11 forbids reaching backward to reconstruct that
+numbering, and this document is the register either way.
+
+**What is recorded but does not act yet.** `"realization": "native-preferred"` is read off the
+manifest and carried on the package; it behaves exactly as `floor` until #1151's S3 (claude) and S4
+(agy) land the native realizations, each gated on its own S2 measurement. `SkillRealization` is the
+one place that is stated. The floor itself is per-vendor and already shipped (#1929): claude gets the
+package's files projected into `<workspace>/.claude/skills/<name>/` at dispatch time, agy gets the
+instructions inlined into the prompt, codex gets nothing. `docs/dispatch.md` is where those three
+realizations and the projection's consequences are described for an operator.
+
 ---
 
 ## §10 What is explicitly out of scope
