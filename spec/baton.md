@@ -3844,8 +3844,10 @@ only ever ADD rows.
   another checkout keys those rows to the wrong repository — so the run reports how many rooms took the
   fallback, and `--dry-run` is where that is seen first.
 - **Merged PRs.** One `github-backfill` row per merged pull request `gh pr list --state merged
-  --search "merged:>=<since>"` reports, through the `IGhCliRunner` seam #734 already owns, capped at
-  200 PRs in total. `--since` unset means the 2026-08-28 reset #1901 names, because `gh` needs a date to
+  --search "merged:>=<since>"` reports, through the `IGhCliRunner` seam #734 already owns, **bounded at
+  200 PRs — checked at each page boundary, so a run ends holding at most one page more** rather than
+  exactly 200 (`LedgerBackfillCommand.MaxPullRequests`' own doc states why the last page is kept whole,
+  and the run's report says "at or past the cap" for the same reason). `--since` unset means the 2026-08-28 reset #1901 names, because `gh` needs a date to
   search from; the ROOM half has no such need and walks everything on disk when `--since` is unset.
   **The walk pages, and the page size is a measured ceiling rather than a taste.** `commits` costs
   GitHub's GraphQL layer roughly 10,300 possible nodes per PR — it traverses each commit's authors

@@ -359,6 +359,32 @@ public sealed class LedgerBackfillCommandTests : IDisposable
     }
 
     /// <summary>
+    /// The cap stops the walk, and the walk stops AT A PAGE BOUNDARY rather than mid-page — which is
+    /// why the run's own report says "at or past" the cap rather than naming it as a limit. Six full
+    /// pages are scripted and only five are asked for.
+    /// <para>
+    /// The paging test above cannot see this: two pages never reach
+    /// <see cref="LedgerBackfillCommand.MaxPullRequests"/>, so an edit to the loop's bound — <c>&lt;=</c>
+    /// instead of <c>&lt;</c>, or the check moved after the fetch — would leave it green while the walk
+    /// ran on forever against a busy repository.
+    /// </para>
+    /// </summary>
+    [Fact]
+    public async Task The_merged_pr_walk_stops_at_the_first_page_boundary_past_the_cap()
+    {
+        var pageCount = (LedgerBackfillCommand.MaxPullRequests / LedgerBackfillCommand.PullRequestPageSize) + 1;
+        var gh = new ScriptedGh(
+            [.. Enumerable.Range(0, pageCount).Select(page => Page(
+                Enumerable.Range(0, LedgerBackfillCommand.PullRequestPageSize)
+                    .Select(i => 1000 - ((page * LedgerBackfillCommand.PullRequestPageSize) + i))))]);
+
+        await RunAsync(gh: gh);
+
+        Assert.Equal(pageCount - 1, gh.Calls.Count);
+        Assert.Equal(LedgerBackfillCommand.MaxPullRequests, (await ReadLedgerAsync()).Count);
+    }
+
+    /// <summary>
     /// One page of merged PRs, numbered as given and merged one hour apart descending — so the oldest
     /// entry of a page is a real, distinct <c>mergedAt</c> the cursor can advance to.
     /// </summary>

@@ -50,10 +50,18 @@ public static class LedgerBackfillCommand
     public static readonly DateTime DefaultGithubSince = new(2026, 8, 28, 0, 0, 0, DateTimeKind.Utc);
 
     /// <summary>
-    /// How many merged PRs one run will collect in total, across every page. Bounded because this is a
+    /// The count at which one run stops asking <c>gh</c> for more merged PRs. Bounded because this is a
     /// network call whose answer grows without limit as the repository ages: an unbounded walk would
     /// page through years of history to write rows a <c>--since</c> window then discards. A run that
     /// hits the cap says so on stdout rather than silently reporting a partial answer as a complete one.
+    /// <para>
+    /// <b>Not a total, and the difference is up to a page.</b> The check is at the top of
+    /// <see cref="CollectMergedPullRequestsAsync"/>'s loop, i.e. at a page boundary, so a run ends
+    /// holding as many as <c>MaxPullRequests + PullRequestPageSize - 1</c> — the last page is kept
+    /// whole rather than truncated, since dropping part of a page would lose PRs the walk has already
+    /// paid for. "At or past the cap" is what the report says for that reason, and pinned by
+    /// <c>LedgerBackfillCommandTests.The_merged_pr_walk_stops_at_the_first_page_boundary_past_the_cap</c>.
+    /// </para>
     /// </summary>
     internal const int MaxPullRequests = 200;
 
