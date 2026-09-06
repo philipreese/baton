@@ -207,6 +207,89 @@ public static class BatonPaths
     public const string CostLedgerDirectoryName = "ledger";
 
     /// <summary>
+    /// <c>{Root}/&lt;repository-slug&gt;</c> — the per-repository directory (#1852 phase B). Q3
+    /// (operator, 2026-09-05) made the repository directory the unit, so anything filed per repository
+    /// from here on lives <b>inside</b> one of these rather than under a per-concern directory keyed by
+    /// slug. <see cref="CostLedgerFile"/> is the one existing exception and stays where it is: moving
+    /// it is a later phase's work with a reader that accepts both paths during the transition
+    /// (spec/baton.md §12).
+    /// </summary>
+    /// <param name="repositorySlug"><c>RepositoryIdentity.FileSlug</c> — never a raw identity or a checkout path.</param>
+    public static string RepositoryDirectory(string repositorySlug)
+    {
+        ArgumentException.ThrowIfNullOrEmpty(repositorySlug);
+        return Path.Combine(Root, repositorySlug);
+    }
+
+    /// <summary>
+    /// <c>{Root}/&lt;repository-slug&gt;/memory</c> — the canonical memory store for one repository
+    /// (#1852 phase B, spec/baton.md §12). See <c>Baton.Memory.MemoryStore</c> for what it holds.
+    /// </summary>
+    public static string MemoryDirectory(string repositorySlug) =>
+        Path.Combine(RepositoryDirectory(repositorySlug), MemoryDirectoryName);
+
+    /// <summary>
+    /// Directory name of <see cref="MemoryDirectory"/> relative to a repository directory.
+    /// <b>Not <c>MemoryRootInventory.MemoryDirectoryName</c></b>, which happens to have the same value
+    /// and names a different thing entirely: that one is the <c>memory</c> subdirectory of a
+    /// <i>Claude project</i> directory, i.e. a vendor's root that this store imports FROM. Two
+    /// constants rather than one shared one, because a rename of either must not silently move the
+    /// other.
+    /// </summary>
+    public const string MemoryDirectoryName = "memory";
+
+    /// <summary>
+    /// <c>{Root}/&lt;repository-slug&gt;/memory/entries.jsonl</c> — one repository's append-only
+    /// canonical memory entries.
+    /// </summary>
+    public static string MemoryEntriesFile(string repositorySlug) =>
+        Path.Combine(MemoryDirectory(repositorySlug), MemoryEntriesFileName);
+
+    /// <summary>Filename of <see cref="MemoryEntriesFile"/> relative to <see cref="MemoryDirectory"/>.</summary>
+    public const string MemoryEntriesFileName = "entries.jsonl";
+
+    /// <summary>
+    /// <c>{Root}/&lt;repository-slug&gt;/memory/links.jsonl</c> — one repository's append-only
+    /// supersession links (#1852 phase B, Q2). <b>A second file rather than a field on an entry</b>
+    /// because <see cref="MemoryEntriesFile"/> is append-only with no overwrite and an entry's id is
+    /// derived from facts supersession does not change: a link discovered by a LATER import can never
+    /// be written onto a row an earlier one already wrote. See <c>Baton.Memory.MemoryStore</c> for how
+    /// a reader puts the two back together.
+    /// </summary>
+    public static string MemoryLinksFile(string repositorySlug) =>
+        Path.Combine(MemoryDirectory(repositorySlug), MemoryLinksFileName);
+
+    /// <summary>Filename of <see cref="MemoryLinksFile"/> relative to <see cref="MemoryDirectory"/>.</summary>
+    public const string MemoryLinksFileName = "links.jsonl";
+
+    /// <summary>
+    /// <c>{Root}/memory-aliases.jsonl</c> — see <c>Baton.Memory.MemoryAliasStore</c> for what it holds
+    /// and when it is consulted. <b>Machine-wide, so deliberately not inside a repository directory</b>:
+    /// it maps a checkout path to the repository it belongs to, and filing it under that answer would
+    /// require knowing the answer in order to find the file.
+    /// </summary>
+    public static string MemoryAliasFile => Path.Combine(Root, MemoryAliasFileName);
+
+    /// <summary>Filename of <see cref="MemoryAliasFile"/> relative to a root.</summary>
+    public const string MemoryAliasFileName = "memory-aliases.jsonl";
+
+    /// <summary>
+    /// <c>{Root}/memory-imports/&lt;stamp&gt;.json</c> — one <c>Baton.Memory.ImportManifest</c> per
+    /// <c>baton memory import</c> run. Machine-wide for the same reason as
+    /// <see cref="MemoryAliasFile"/> and one of its own: a single import can write into several
+    /// repositories' stores, so the manifest that reverses it belongs to none of them.
+    /// </summary>
+    /// <param name="stamp">A run identifier, already filename-safe — see <c>MemoryImportCommand</c> for what it is derived from.</param>
+    public static string MemoryImportManifestFile(string stamp)
+    {
+        ArgumentException.ThrowIfNullOrEmpty(stamp);
+        return Path.Combine(Root, MemoryImportsDirectoryName, $"{stamp}.json");
+    }
+
+    /// <summary>Directory name <see cref="MemoryImportManifestFile"/> lives under, relative to a root.</summary>
+    public const string MemoryImportsDirectoryName = "memory-imports";
+
+    /// <summary>
     /// <c>{Root}/fleet/projection.json</c> — the daemon-written fleet projection file (#1557,
     /// spec/baton.md §7's fourth kept responsibility): the same <c>fleet_status</c> room array
     /// (spec/baton.md §6) plus per-room <c>live</c>/<c>pruned</c> and the top-level <c>derived_at</c>,

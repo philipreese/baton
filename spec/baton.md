@@ -376,6 +376,7 @@ through `RoleDispatch.Materialize` against the real role catalog.
 | `keep` | `baton keep <room-dir>` | `KeepOptionsParser.cs` |
 | `unkeep` | `baton unkeep <room-dir>` | `UnkeepOptionsParser.cs` |
 | `memory` | `baton memory audit [--format text\|json] [--help]` | `MemoryAuditOptionsParser.cs` |
+| `memory` | `baton memory import [--dry-run] [--root <dir>]... [--assert <path>=<repository>]... [--asserted-by <who>] \| --undo <manifest> [--help]` | `MemoryImportOptionsParser.cs` |
 
 `templates` narrows to the built-in catalog only (`Baton.Vendors`'s `BuiltInWorkflowTemplates`) —
 there is no authoring UI to browse a saved-template library visually against (Appendix, R7 in the
@@ -5216,13 +5217,84 @@ store is keyed by `RepositoryIdentity`, not by a checkout path.** That is the sa
 ledger already files under, reused rather than re-derived — see the "Canonical repository identity"
 paragraph there for the derivation and the worktree-convergence property it buys.
 
-**The store's layout is ruled and unbuilt.** Q3 (operator, 2026-09-05) settled per-repository
+**The store's layout is ruled and built — phase B.** Q3 (operator, 2026-09-05) settled per-repository
 directories with the memory store **inside** each — `~/.baton/<repo-slug>/memory/…`, explicitly *not*
 `~/.baton/memory/<repo-slug>` — because the repository directory is the unit the operator intends to
-work in. Phase B builds it; **phase A writes no canonical store at all**, so nothing under `~/.baton`
-has this shape today. The same ruling carries a follow-up for the cost ledger's own path (§7) — moving
-under the same per-repo root, with a reader that accepts both during the transition — which is a later
-phase's work, not a correction to what §7 states now.
+work in. `BatonPaths.MemoryEntriesFile` is the one spelling of it (`<repo-slug>/memory/entries.jsonl`),
+`BatonPaths.MemoryLinksFile` of the `links.jsonl` beside it, and `MemoryStore` is what writes both:
+append-only JSONL through the same `JsonLinesLedger` + `MutexGuardedFileLock` the two ledgers use, each
+file under its own lock, rather than a third concurrency mechanism. **Phase A wrote no canonical store at all**, and still writes none. The same ruling carries a
+follow-up for the cost ledger's own path (§7) — moving under the same per-repo root, with a reader that
+accepts both during the transition — which is a later phase's work, not a correction to what §7 states
+now.
+
+**An entry's subject and its provenance are two fields, not one** (Q1, operator 2026-09-05).
+`MemoryEntry.Repository` is whose memory it is; `sourcePath`/`sourceVendor`/`sourceScope`/
+`sourceMtimeUtc`/`sha256` are where the file it came from lived. **`id` is derived, not minted** — a
+digest of subject, source path and content, and no clock — which is the whole mechanism behind the
+idempotence below; `MemoryEntry.Derive` states what each of the three facts buys and what excluding
+the clock protects.
+
+**Kind is declared, then inferred from a filename prefix and labelled as inferred, then `unknown`.**
+Never read out of the body — that is the "silently promote an inference to truth" failure #1852 names,
+and it is why two of the five kinds (`hypothesis`, `execution-derived-summary`) are never written by
+the import: `MemoryKind`'s own remarks carry which two, why the observed vocabulary reaches neither,
+and why completing the table for symmetry's sake would be the same failure. Entries from an
+**archived** root are
+`historical-note` whatever they declare (Q2), and are linked to the live entry that supersedes them —
+on **same subject + same filename + different digest**, all three, because a name match alone fires on
+the `MEMORY.md` every root carries and a cross-subject link would reintroduce the leak the
+per-repository layout exists to make impossible.
+
+**A supersession link is its own appended fact, not a field on an entry** (#1940 review round). The
+ruling the register owns is that one sentence; `MemorySupersessionLink` carries the derivation, and it
+is the mechanism the layout above exists to accommodate. What it buys, stated as the failure it
+removes: an import that filed the live roots in one run and the archive in the next used to record only
+the archived side of each pair, and two `--root` runs recorded neither side. The links are computed
+over **the store plus the incoming run**, never over one run's plan alone, and
+`MemoryStore.ReadResolvedAsync` projects them back onto `supersedes`/`supersededBy` for a reader,
+dropping any whose endpoints are not both in the store it is reading.
+
+**`baton memory import` — phase B, shipped. Non-destructive by construction, and reversible.** Every
+source is opened read-only and left byte-identical; the verb writes in exactly two places, both under
+Baton's own root: the per-repository store and one `ImportManifest`. What an entry carries is a UTF-8
+**decode** of the source's bytes with the byte digest beside it, both taken from **one** read — the
+digest is the authority on what the file held, and taking it from the earlier inventory walk instead
+would let a file edited in between be stored under a digest describing a version nobody kept. The
+manifest accounts for **every file the import looked at** — imported, unfiled, or recorded as
+machinery — because a manifest listing only successes is what the undocumented
+`memory-archive/2026-09-03` migration already demonstrated the cost of. `--undo <manifest>` removes
+exactly the entries and links that run appended and no others; rows an earlier import had already
+written are excluded, so an undo cannot reverse work its manifest did not do. **An undo that reversed
+less than its manifest claims exits non-zero and names the store files that came up short, and one
+whose `batonRoot` is not this process's root refuses before touching anything** (#1940 review round):
+`MemoryStore.RemoveAsync` answering 0 for an absent file is right for it and wrong for the report built
+on top, which used to print "Removed 0 canonical entries" and exit 0. `--dry-run` writes **nothing at
+all**, manifest included: a manifest for an import that did not happen would replay to nothing.
+`--root` is a filter over the discovered population and never an addition to it, so
+`MemoryRootInventory` stays the single definition of "a memory root" and `audit` stays a preview of
+what `import` will do — a claim made structural in the #1940 round by giving the two verbs one
+`ClaudeMemoryRootResolver` instead of a copy each, and made honest by narrowing the manifest's
+machinery rows with the same selection. The population it selects from is the **importable** one,
+which is narrower than what `audit` reports; the help text and the refusal both name what falls
+outside it.
+
+**An `--assert`ed repository is canonicalized at the parser, through
+`RepositoryIdentity.TryCanonicalize`** (#1940 review round), which is what makes "one repository, one
+store file" hold for an operator's typing as well as for a probe's answer. That method's own doc
+carries the derivation and the refusal; the register's part is where it runs — on the **write** path
+only, because the alias file is append-only and an operator can read it.
+
+**It will not guess a subject, and that is the whole of what it refuses.** A root whose checkout is
+gone, an archived root whose flattened name decodes to no work tree, and a per-machine root
+(`~/.codex/memories`) that encodes no checkout are all reported **unfiled** — read, digested, accounted
+for in the manifest, and imported nowhere — until an operator asserts their repository with `--assert
+<path>=<repository>`, which `MemoryAliasStore` records with an `assertedBy`. An assertion is consulted
+**only where the git probe produced nothing** and can never displace a repository git answered for, so
+a row's `repository` stays readable as a measurement. #1852's live subject-ambiguity case, which
+phase A reports and refuses to resolve, is therefore imported under the **derived** identity. Q1's per-entry adjudication is not built here and is not reachable by
+assertion either; `MemoryAliasStore`'s remarks state what it would require and why this store is not
+it.
 
 **`baton memory audit [--format text|json]` — phase A, shipped.** Read-only, and read-only *by
 construction* rather than by flag: nothing on the path opens a file for writing, so there is
@@ -5272,7 +5344,9 @@ it projects nothing, and it deletes nothing anywhere, ever.
 
 **The non-Claude roots are enumerated, and they are a separate population — phase A2, shipped.**
 `VendorMemoryRootTable.Families` is the enumeration and this list is its gloss, not a second copy of
-it: **Codex markdown** (`~/.codex/memories`), **Codex sqlite** (`memories_*.sqlite`, in the vendor's
+it: **Codex markdown** (`~/.codex/memories`, and — added by phase B — `~/.baton/codex-home/memories`,
+derived by mirroring the vendor row under `CODEX_HOME` rather than by a probe of its own, which the
+row itself says), **Codex sqlite** (`memories_*.sqlite`, in the vendor's
 own home *and* in `~/.baton/codex-home`), **Antigravity `brain`** and **Antigravity `knowledge`**
 (under both `~/.gemini/antigravity` and `~/.gemini/antigravity-cli`), and **Antigravity `.pbtxt`**
 (`annotations/*.pbtxt`, under both). Each row carries a `sourceVendor` and a `sourceScope`, and every
@@ -5321,6 +5395,15 @@ Codex store rather than merged with it, because the two diverged and collapsing 
 evidence of how — and its memories are part of **phase B's import population**, to be preserved into
 the canonical store. One thing phase B must not assume: **on the machine A2 measured, that store held
 no memories at all.** The ruling stands regardless; the expectation does not.
+
+**What phase B did with that ruling, and the seam it exposed.** The evening ruling of 2026-09-05 makes
+the **markdown** directory the memory source and the sqlite store machinery — so the ruled-in
+population was, until phase B, unreachable: the table had a Baton-managed sqlite row and no
+Baton-managed markdown row, and the sqlite is never read as a memory. Phase B added the mirrored
+markdown row above, so the store's memories import if it ever fills and report `absent` while it does
+not. Both Codex sqlite rows are recorded in the import manifest as **machinery** — path, size, mtime,
+digest, no entry, nothing opened — which is what "read only for provenance, never as the memory
+source" looks like on disk rather than as a promise.
 
 ---
 

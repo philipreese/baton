@@ -99,6 +99,13 @@ public static class MemoryRootInventory
     public const string ArchiveDirectoryName = "memory-archive";
 
     /// <summary>
+    /// The <c>sourceVendor</c> every root <see cref="Scan"/> returns belongs to. Named here rather
+    /// than spelled at the importer, alongside <see cref="VendorMemoryRootTable"/>'s own family slugs,
+    /// so one vocabulary describes both populations.
+    /// </summary>
+    public const string ClaudeVendor = "claude";
+
+    /// <summary>
     /// <c>{UserProfile}/.claude</c> — where Claude Code keeps its projects and memory. Resolved fresh
     /// rather than captured, and never written to by anything in this namespace.
     /// </summary>

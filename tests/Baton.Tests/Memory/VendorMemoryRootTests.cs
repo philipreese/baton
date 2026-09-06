@@ -102,12 +102,18 @@ public sealed class VendorMemoryRootTests : IDisposable
         Assert.Equal("codex", managed.SourceVendor);
         Assert.NotEqual(vendor.Files.Single().Sha256, managed.Files.Single().Sha256);
 
-        // The decoy is in no row at all: exactly one Baton-managed root exists, and it is the one
-        // the supplied Baton root names.
+        // The decoy is in no row at all: every Baton-managed root sits under the supplied Baton root,
+        // and the two that exist are the sqlite store and the markdown directory beside it (#1852
+        // phase B added the second, mirroring the vendor-scoped markdown family under CODEX_HOME).
         var managedRows = Scan()
             .Where(r => r.SourceScope == VendorMemoryScope.BatonManaged)
             .ToList();
-        Assert.Equal([UnderBatonRoot("codex-home")], managedRows.Select(r => r.DirectoryPath));
+        Assert.Equal(
+            [UnderBatonRoot("codex-home"), UnderBatonRoot(Path.Combine("codex-home", "memories"))],
+            managedRows.Select(r => r.DirectoryPath).Order(StringComparer.OrdinalIgnoreCase));
+        Assert.DoesNotContain(
+            managedRows,
+            r => r.DirectoryPath.Contains(Path.Combine(".baton", "codex-home"), StringComparison.OrdinalIgnoreCase));
     }
 
     /// <summary>

@@ -97,7 +97,7 @@ public static class MemoryAuditCommand
         var resolutions = new List<MemoryRootResolution>(roots.Count);
         foreach (var root in roots)
         {
-            resolutions.Add(await ResolveAsync(root, cancellationToken).ConfigureAwait(false));
+            resolutions.Add(await ClaudeMemoryRootResolver.ResolveAsync(root, cancellationToken).ConfigureAwait(false));
         }
 
         var report = MemoryAuditReport.Build(resolutions, MemorySubjectVocabulary.Default);
@@ -121,37 +121,6 @@ public static class MemoryAuditCommand
         WriteText(output, claudeHome, report);
         WriteVendorRoots(output, vendorRoots);
         return 0;
-    }
-
-    /// <summary>
-    /// One root's checkout and repository. Session <c>cwd</c> is consulted first and the git probe runs
-    /// only against a path that exists — a probe of a vanished directory answers nothing, and running
-    /// one anyway would spend a process per gone root to learn that.
-    /// </summary>
-    /// <remarks>
-    /// The decoder's tie-break is handed <see cref="RepositoryIdentityResolver.IsWorkTreeRoot"/> rather
-    /// than <see cref="Directory.Exists(string)"/> — <see cref="MemoryRootPath.Resolve"/>'s own comment
-    /// states what each weaker predicate got wrong. The part only visible from this site is the
-    /// asymmetry: a session <c>cwd</c> is deliberately NOT filtered that way. It is the value the
-    /// directory name was derived from, so a session run from inside a checkout belongs to that
-    /// checkout; the narrow predicate is for a GUESSED reading, not a recorded one.
-    /// </remarks>
-    private static async Task<MemoryRootResolution> ResolveAsync(
-        MemoryRoot root, CancellationToken cancellationToken)
-    {
-        var resolution = MemoryRootPath.Resolve(
-            root.DirectoryName,
-            MemoryRootPath.ReadSessionWorkingDirectories(root.SessionDirectoryPath),
-            RepositoryIdentityResolver.IsWorkTreeRoot);
-
-        var checkoutExists = resolution.CheckoutPath is { Length: > 0 } path && Directory.Exists(path);
-
-        var repository = checkoutExists
-            ? await RepositoryIdentityResolver
-                .TryResolveAsync(resolution.CheckoutPath!, cancellationToken).ConfigureAwait(false)
-            : null;
-
-        return new MemoryRootResolution(root, resolution, checkoutExists, repository?.Value);
     }
 
     /// <summary>

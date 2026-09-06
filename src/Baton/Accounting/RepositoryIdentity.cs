@@ -78,11 +78,64 @@ public sealed record RepositoryIdentity
             // Case-folded for the same reason BatonPaths.RecordKeyComparer is: two casings of one
             // directory must not become two ledgers. Slashes forward-normalized so a path spelled
             // with either separator hashes to one slug.
-            return new RepositoryIdentity("gitdir:" + full.Replace('\\', '/').ToLowerInvariant());
+            return new RepositoryIdentity(GitDirectoryPrefix + full.Replace('\\', '/').ToLowerInvariant());
         }
 
         return null;
     }
+
+    /// <summary>
+    /// The canonical <see cref="Value"/> spelling of an identity an <b>operator typed</b>, or
+    /// <see langword="null"/> when the string canonicalizes to nothing at all.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// <b>Deliberately a function returning a string, not a second constructor</b>, exactly as
+    /// <see cref="FileSlugFor"/> is: <see cref="From"/> stays the only way to make a
+    /// <see cref="RepositoryIdentity"/>, so nothing can fabricate a half-parsed identity into a row's
+    /// <c>repository</c> field. What this produces is the canonical string, which is then stored or
+    /// slugged like any other.
+    /// </para>
+    /// <para>
+    /// <b>It runs the same two normalisations <see cref="From"/> does, and adds no third.</b> A
+    /// <c>gitdir:</c> value goes through the common-directory branch; anything else goes through
+    /// <see cref="TryNormalizeRemote"/> — first as typed, so a pasted clone URL
+    /// (<c>https://github.com/Owner/Repo.git</c>, <c>git@github.com:Owner/Repo.git</c>) canonicalizes,
+    /// and then behind an <c>https://</c> so the bare <c>host/owner/repo</c> spelling an operator
+    /// actually types is read as the host-and-path it is. That second attempt <b>supplies a scheme and
+    /// nothing else</b>: it does not invent a host, so <c>owner/repo</c> canonicalizes to
+    /// <c>owner/repo</c> (host <c>owner</c>, path <c>repo</c>) and never to
+    /// <c>github.com/owner/repo</c> — guessing a forge would file a repository under an identity no
+    /// probe could ever reproduce.
+    /// </para>
+    /// <para>
+    /// <b>Null is a refusal, not a fallback.</b> A caller that cannot canonicalize an operator's string
+    /// must reject it rather than store it raw: a raw value differing from the probe's answer only in
+    /// case or in a <c>.git</c> suffix is a SECOND store file for one repository, with every entry
+    /// duplicated across the two and no error anywhere.
+    /// </para>
+    /// </remarks>
+    public static string? TryCanonicalize(string? assertedValue)
+    {
+        if (string.IsNullOrWhiteSpace(assertedValue))
+        {
+            return null;
+        }
+
+        var raw = assertedValue.Trim();
+
+        return raw.StartsWith(GitDirectoryPrefix, StringComparison.OrdinalIgnoreCase)
+            ? From(originUrl: null, gitCommonDirectoryPath: raw[GitDirectoryPrefix.Length..])?.Value
+            : TryNormalizeRemote(raw) ?? TryNormalizeRemote("https://" + raw);
+    }
+
+    /// <summary>
+    /// The tag <see cref="From"/>'s common-directory branch writes, and the one prefix
+    /// <see cref="TryCanonicalize"/> must recognise before trying to read a value as a remote — the
+    /// scp-like reading would otherwise take the tag's own colon for the separator and turn
+    /// <c>gitdir:c:/repos/x</c> into <c>gitdir/c:/repos/x</c>.
+    /// </summary>
+    private const string GitDirectoryPrefix = "gitdir:";
 
     /// <summary>
     /// <c>host/owner/repo</c> from any of the remote spellings git accepts —

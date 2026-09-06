@@ -197,6 +197,70 @@ public sealed class MemoryAuditCommandTests : IDisposable
         Assert.Equal(new[] { "github.com/philipreese/basis", "github.com/philipreese/baton" }, candidates);
     }
 
+    /// <summary>
+    /// #1908 re-review low 2: the injected work-tree predicate at <see cref="MemoryAuditCommand"/>'s
+    /// resolve site is <b>reached</b>, and swapping it back to <see cref="Directory.Exists(string)"/>
+    /// changes the answer.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// Every other fixture root here supplies a session <c>cwd</c>, which short-circuits the decoder
+    /// entirely — so the seam was never exercised and reverting it failed no test. This root is the
+    /// shape that reaches it: <b>no transcript at all</b> (an archived root, which by construction has
+    /// none) and a name that decodes to several readings, exactly one of which is a directory that
+    /// exists and is <b>not a work tree's own root</b> — a <c>memory</c> directory inside a checkout,
+    /// which is precisely the real archive's shape.
+    /// </para>
+    /// <para>
+    /// The discrimination: under <see cref="Directory.Exists(string)"/> that single reading wins the
+    /// tie-break, the root reports <c>decoded-existing</c>, and the git probe — which walks UP — files
+    /// it confidently under the enclosing checkout's repository. Under
+    /// <see cref="RepositoryIdentityResolver.IsWorkTreeRoot"/> no reading qualifies and the root
+    /// degrades to <c>ambiguous</c> with no repository, which is the direction the seam exists to
+    /// protect. Both halves are asserted, so this cannot pass on a root that was simply unresolvable
+    /// for some other reason.
+    /// </para>
+    /// </remarks>
+    [Fact]
+    public async Task An_archived_root_whose_only_existing_reading_is_not_a_work_tree_root_stays_ambiguous()
+    {
+        await InitGitRepoAsync(Checkout("baton"), "https://github.com/philipreese/baton.git");
+
+        // The decoy the predicate must refuse: a real directory, inside a real checkout, that the
+        // decoder can reach and git would happily answer for.
+        var insideCheckout = Path.Combine(Checkout("baton"), "memory");
+        Directory.CreateDirectory(insideCheckout);
+
+        var encoded = EncodeAsProjectDirectoryName(insideCheckout);
+        var archived = Path.Combine(ClaudeHome, "memory-archive", "2026-09-03", encoded);
+        Directory.CreateDirectory(archived);
+        File.WriteAllText(Path.Combine(archived, "user_who.md"), "archived");
+
+        // Control arm: the name really is ambiguous by decoding alone. Without this, the assertions
+        // below would also pass on a name that decodes to nothing at all, which tests the decoder
+        // rather than the tie-break.
+        Assert.True(MemoryRootPath.IsAmbiguousByName(encoded));
+        Assert.True(Directory.Exists(insideCheckout));
+        Assert.False(RepositoryIdentityResolver.IsWorkTreeRoot(insideCheckout));
+
+        var json = await RunAsync(new MemoryAuditOptions(MemoryAuditOutputFormat.Json), ClaudeHome);
+        using var document = JsonDocument.Parse(json);
+        var row = document.RootElement.GetProperty("roots").EnumerateArray()
+            .Single(r => r.GetProperty("root").GetString() == archived);
+
+        Assert.Equal("ambiguous", row.GetProperty("pathSource").GetString());
+        Assert.False(row.TryGetProperty("checkoutPath", out _));
+        Assert.False(row.TryGetProperty("repository", out _));
+    }
+
+    /// <summary>
+    /// <paramref name="path"/> flattened the way Claude Code names a project directory — drive letter,
+    /// then every separator as <c>-</c>. Derived rather than hard-coded because the fixture root is a
+    /// fresh temp path per run.
+    /// </summary>
+    private static string EncodeAsProjectDirectoryName(string path) =>
+        $"{path[0]}--{path[3..].Replace(Path.DirectorySeparatorChar, '-')}";
+
     [Fact]
     public async Task An_empty_claude_home_reports_no_roots_rather_than_failing()
     {
