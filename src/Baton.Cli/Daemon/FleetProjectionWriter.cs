@@ -55,8 +55,12 @@ public sealed class FleetProjectionWriter : BackgroundService
     // spec/baton.md §6 (#1155): newest N pruned execution dirs surfaced per room.
     private const int PrunedItemsCap = 20;
 
+    // #1902: last N timeline entries kept per room, matching pusher.py's TIMELINE_CAP.
+    private const int TimelineCap = 30;
+
     private readonly Dictionary<string, ExecutionLiveState> _liveCache = new(StringComparer.Ordinal);
     private readonly Dictionary<string, PrunedCacheEntry> _prunedCache = new(StringComparer.Ordinal);
+    private readonly Dictionary<string, JsonArray> _terminalTimelineCache = new(StringComparer.Ordinal);
     private bool _loggedMissingSecretPatterns;
 
     public static TimeSpan GetInterval()
@@ -116,6 +120,7 @@ public sealed class FleetProjectionWriter : BackgroundService
         diagnostics ??= Console.Error;
         var discovered = await FleetStatusTool.DiscoverRoomsAsync([], cancellationToken).ConfigureAwait(false);
         var roomsArray = new JsonArray();
+        var timelinesNode = new JsonObject();
         var liveKeysThisTick = new HashSet<string>(StringComparer.Ordinal);
         var liveLanesByVendor = new Dictionary<string, int>(StringComparer.Ordinal);
 
@@ -177,16 +182,47 @@ public sealed class FleetProjectionWriter : BackgroundService
                 liveLanesByVendor[adapter] = liveLanesByVendor.GetValueOrDefault(adapter) + 1;
             }
 
+            // #1902: per-room event timeline, content-free (type/timestamp/stepId/exitCode only),
+            // capped at TimelineCap (30) entries. Terminal rooms are read once and served from memory.
+            var isTerminal = File.Exists(Path.Combine(room.RoomDir, TerminalSentinelWriter.TerminalSentinelFileName));
+            JsonArray? timeline = null;
+            if (isTerminal)
+            {
+                if (_terminalTimelineCache.TryGetValue(room.RoomDir, out var cached))
+                {
+                    timeline = (JsonArray)cached.DeepClone();
+                }
+                else
+                {
+                    timeline = await ReadTimelineAsync(room.RoomDir, cancellationToken).ConfigureAwait(false);
+                    if (timeline is not null && timeline.Count > 0)
+                    {
+                        _terminalTimelineCache[room.RoomDir] = (JsonArray)timeline.DeepClone();
+                    }
+                }
+            }
+            else
+            {
+                timeline = await ReadTimelineAsync(room.RoomDir, cancellationToken).ConfigureAwait(false);
+            }
+
+            if (timeline is not null && timeline.Count > 0)
+            {
+                timelinesNode[view.Path] = timeline;
+            }
+
             roomsArray.Add(node);
         }
 
         PruneLiveCache(liveKeysThisTick);
         PrunePrunedCache(discovered);
+        PruneTerminalTimelineCache(discovered);
 
         var root = new JsonObject
         {
             ["derived_at"] = DateTimeOffset.UtcNow.ToString("O"),
             ["rooms"] = roomsArray,
+            ["timelines"] = timelinesNode,
         };
 
         // #1391: same vendors[] block fleet_status returns, using the liveLanesByVendor tally this
@@ -365,6 +401,15 @@ public sealed class FleetProjectionWriter : BackgroundService
         }
     }
 
+    private void PruneTerminalTimelineCache(IReadOnlyList<FleetStatusTool.DiscoveredRoom> discovered)
+    {
+        var roomPaths = new HashSet<string>(discovered.Select(r => r.RoomDir), StringComparer.Ordinal);
+        foreach (var staleKey in _terminalTimelineCache.Keys.Where(k => !roomPaths.Contains(k)).ToList())
+        {
+            _terminalTimelineCache.Remove(staleKey);
+        }
+    }
+
     /// <summary>
     /// Two-location fallback for a Running execution's own captured stream — the SAME addressing
     /// <c>ExecutionUsageProjector</c>'s terminal-usage read already uses
@@ -534,6 +579,68 @@ public sealed class FleetProjectionWriter : BackgroundService
         }
 
         return (null, null);
+    }
+
+    /// <summary>
+    /// #1902: writes the same content projection pusher.py's <c>extract_timeline</c> applies:
+    /// <c>type</c>/<c>timestamp</c>/<c>stepId</c>/<c>exitCode</c> only (spec/baton.md §6 content
+    /// ruling), capped at the pusher's <see cref="TimelineCap"/> (30) entries, newest tail kept.
+    /// Degrades to null (no timelines entry in the projection map) on missing or unreadable flow.jsonl
+    /// rather than throwing out of the daemon loop.
+    /// </summary>
+    private static async Task<JsonArray?> ReadTimelineAsync(string roomDir, CancellationToken cancellationToken)
+    {
+        var logPath = Path.Combine(roomDir, BatonPaths.FlowLogFileName);
+        if (!File.Exists(logPath))
+        {
+            return null;
+        }
+
+        IReadOnlyList<LogEntry> entries;
+        try
+        {
+            var reader = new FlowEventLogReader(logPath);
+            entries = await reader.ReadAllEntriesWithTimestampsAsync(cancellationToken).ConfigureAwait(false);
+        }
+        catch (Exception ex) when (ex is BatonFlowException or IOException or UnauthorizedAccessException or JsonException)
+        {
+            return null;
+        }
+
+        if (entries.Count == 0)
+        {
+            return null;
+        }
+
+        var startIndex = Math.Max(0, entries.Count - TimelineCap);
+        var array = new JsonArray();
+        for (var i = startIndex; i < entries.Count; i++)
+        {
+            var (type, timestamp, stepId, exitCode) = RoomDetailTool.DescribeEntry(entries[i]);
+            var node = new JsonObject
+            {
+                ["type"] = type,
+            };
+
+            if (timestamp is not null)
+            {
+                node["timestamp"] = timestamp;
+            }
+
+            if (stepId is not null)
+            {
+                node["stepId"] = stepId;
+            }
+
+            if (exitCode is not null)
+            {
+                node["exitCode"] = exitCode.Value;
+            }
+
+            array.Add(node);
+        }
+
+        return array.Count > 0 ? array : null;
     }
 
     /// <summary>

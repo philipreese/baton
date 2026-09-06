@@ -462,7 +462,7 @@ public sealed class RoomDetailTool : IMcpTool
         return new RoomTimelineView(timeline, Truncated: startIndex > 0, TotalEntries: totalEntries);
     }
 
-    private static (string Type, string? Timestamp, string? StepId, int? ExitCode) DescribeEntry(LogEntry entry)
+    internal static (string Type, string? Timestamp, string? StepId, int? ExitCode) DescribeEntry(LogEntry entry)
     {
         return entry switch
         {
