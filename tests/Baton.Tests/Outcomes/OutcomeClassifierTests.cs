@@ -2279,8 +2279,9 @@ public class OutcomeClassifierTests
         }
     }
 
-    // #1945: the three arms below are one condition apart and are read together — the polarity is the
-    // point. Same call, same worktree path, same TimedOut result; only CommitsAheadOfRemote moves.
+    // #1945: the arms below are one condition apart and are read together — the polarity is the
+    // point. Same call, same worktree path, same TimedOut result; only CommitsAheadOfRemote moves
+    // across the first group, and only whether the declared output exists across the second.
 
     [Fact]
     public void Classify_settles_a_timeout_FinishedDuringTeardown_when_the_workspace_is_clean_and_pushed()
@@ -2304,6 +2305,67 @@ public class OutcomeClassifierTests
             Assert.True(classification.FinishedDuringTeardown);
             Assert.Null(classification.Reason);
             Assert.Null(classification.FailureClassification);
+        }
+        finally
+        {
+            DirectoryCleanup.DeleteRecursively(directory);
+        }
+    }
+
+    [Fact]
+    public void Classify_never_settles_FinishedDuringTeardown_when_a_declared_output_is_missing()
+    {
+        var directory = CreateTempDirectory();
+        try
+        {
+            // #1945 review HIGH 1's control, and the discriminating half of the pair below: identical
+            // to the arm above but for a contract that declares an output nobody wrote. The kill
+            // landed after the push and before report.md existed -- the workspace probe cannot see
+            // that, because declared outputs are written to the ARTIFACTS directory, not the worktree.
+            var contract = new WorkerContract("worker", [], [new ProducedOutput("report.md")], []);
+
+            var classification = OutcomeClassifier.Classify(
+                new CoreDispatchResult(0, CoreExitReason.TimedOut),
+                contract,
+                directory,
+                worktreePath: "C:/rooms/room/workspaces/implement",
+                workspaceMutationProbe: ProbeReturning(WorkspaceMutationReading.FromCounts(
+                    changedPathCount: 0, newCommitCount: 1, commitsAheadOfRemote: 0)));
+
+            Assert.NotEqual(OutcomeVerdict.Succeeded, classification.Verdict);
+            Assert.False(classification.FinishedDuringTeardown);
+            // Settles as the #1089 arm's own miss does: falls through to the mutated-workspace
+            // Indeterminate, so a conductor looks rather than the room reporting done.
+            Assert.Equal(OutcomeVerdict.Indeterminate, classification.Verdict);
+        }
+        finally
+        {
+            DirectoryCleanup.DeleteRecursively(directory);
+        }
+    }
+
+    [Fact]
+    public void Classify_settles_FinishedDuringTeardown_when_the_declared_output_is_present()
+    {
+        var directory = CreateTempDirectory();
+        try
+        {
+            // The positive arm for the control above -- same contract, same reading, the one declared
+            // output actually written. Without this pair, the contract check could be satisfied by a
+            // classifier that simply never returns the word.
+            File.WriteAllText(Path.Combine(directory, "report.md"), "content");
+            var contract = new WorkerContract("worker", [], [new ProducedOutput("report.md")], []);
+
+            var classification = OutcomeClassifier.Classify(
+                new CoreDispatchResult(0, CoreExitReason.TimedOut),
+                contract,
+                directory,
+                worktreePath: "C:/rooms/room/workspaces/implement",
+                workspaceMutationProbe: ProbeReturning(WorkspaceMutationReading.FromCounts(
+                    changedPathCount: 0, newCommitCount: 1, commitsAheadOfRemote: 0)));
+
+            Assert.Equal(OutcomeVerdict.Succeeded, classification.Verdict);
+            Assert.True(classification.FinishedDuringTeardown);
         }
         finally
         {
