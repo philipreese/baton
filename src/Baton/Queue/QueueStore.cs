@@ -30,7 +30,7 @@ public sealed record QueueSnapshot(
 /// <para>
 /// <b>Unlike the ledgers, this store does not fail open.</b> A quota-ledger write that fails costs a
 /// row; a queue write that fails and is swallowed costs the operator's actual work list. So every
-/// failure here raises <see cref="QueueStoreException"/> — with one exception, stated in §13: an
+/// failure here raises <see cref="QueueStoreException"/> — with one exception, stated in spec/baton.md §13: an
 /// absent file is a legitimate empty queue, a malformed one is not.
 /// </para>
 /// </remarks>

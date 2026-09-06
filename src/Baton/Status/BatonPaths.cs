@@ -319,7 +319,7 @@ public static class BatonPaths
 
     /// <summary>
     /// <c>{Root}/fleet/queue.jsonl</c> — the conductor queue's append-only decision ledger (#1934
-    /// slice 1, spec/baton.md §12): one line per scheduler evaluation whose verdict changed, plus
+    /// slice 1, spec/baton.md §13): one line per scheduler evaluation whose verdict changed, plus
     /// every launch and every failure. Under <see cref="FleetDirectoryName"/> rather than the root,
     /// because it is a fleet-level record like <see cref="FleetProjectionFile"/> beside it and not a
     /// per-execution one like <see cref="QuotaLedgerFile"/>. What a row holds is

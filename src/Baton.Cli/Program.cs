@@ -136,7 +136,7 @@ if (args.Length == 0 || !knownSubcommands.Contains(args[0]))
     Console.Error.WriteLine($"       {MemoryAuditOptionsParser.Usage[7..]}");
     Console.Error.WriteLine($"       {QueueOptionsParser.Usage[7..]}");
     // #1934: the one thing the grammar does not say — the queue does not launch anything; the daemon
-    // does, on its own schedule, and records why (spec/baton.md §12).
+    // does, on its own schedule, and records why (spec/baton.md §13).
     Console.Error.WriteLine(
         "              (adding an item queues it; the running daemon is what launches it, and 'baton queue hold' " +
         "pauses launches without stopping the daemon)");

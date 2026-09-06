@@ -14,7 +14,7 @@ namespace Baton.Queue;
 /// </para>
 /// <para>
 /// <b>The <c>Effective*</c> properties are what anything reads</b> — never the raw fields, which carry
-/// whatever an operator typed. <c>RunwayHoldSettings</c> established that shape; §13 has the argument
+/// whatever an operator typed. <c>RunwayHoldSettings</c> established that shape; spec/baton.md §13 has the argument
 /// for preferring it to clamping.
 /// </para>
 /// </remarks>
