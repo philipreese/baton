@@ -60,16 +60,4 @@ public class ClaudeCliVocabularyTests
 
         Assert.Equal(PinnedLiterals.Keys.OrderBy(name => name, StringComparer.Ordinal), declared);
     }
-
-    /// <summary>
-    /// The offset <c>TryExtractBalancedBashClauseInner</c> starts its scan at: the paren that opens a
-    /// grant clause sits at exactly <see cref="ClaudeCliVocabulary.BashToolName"/>'s length, which is
-    /// one less than the grant prefix's — start a character later and depth never reaches 1.
-    /// </summary>
-    [Fact]
-    public void GrantPrefixPutsTheOpeningParenAtTheToolNameLength()
-    {
-        Assert.Equal('(', ClaudeCliVocabulary.BashGrantPrefix[ClaudeCliVocabulary.BashToolName.Length]);
-        Assert.Equal(ClaudeCliVocabulary.BashToolName.Length + 1, ClaudeCliVocabulary.BashGrantPrefix.Length);
-    }
 }

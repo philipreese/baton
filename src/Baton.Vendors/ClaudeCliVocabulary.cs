@@ -63,9 +63,8 @@ public static class ClaudeCliVocabulary
     public const string SubagentToolNames = $"{AgentToolName},{TaskToolName}";
 
     /// <summary>
-    /// The flag that <em>pre-approves</em> tools so they don't prompt. Not a sandbox and not a
-    /// ceiling — an omitted tool stays in the model's reach, which is why
-    /// <see cref="DisallowedToolsFlag"/> is what actually enforces a denial (#331).
+    /// The flag that <em>pre-approves</em> tools so they don't prompt — not a ceiling; see
+    /// <see cref="ClaudeWorkerAdapter"/>'s class doc for what that does and does not withhold (#331).
     /// </summary>
     public const string AllowedToolsFlag = "--allowedTools";
 

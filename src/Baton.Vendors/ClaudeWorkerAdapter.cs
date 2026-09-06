@@ -996,9 +996,12 @@ public sealed partial class ClaudeWorkerAdapter : IWorkerAdapter, IPermissionGra
     private static bool TryExtractBalancedBashClauseInner(string clause, out string inner)
     {
         var depth = 0;
+        // Both offsets in this method are the same vendor string measured to different ends, so both
+        // are expressed as a constant rather than a literal: rename BashToolName and both move.
         // The loop starts ON the '(' that opens the grant -- that first iteration is what takes depth
         // to 1. A clause is the tool name followed immediately by that paren, so the paren sits at
-        // exactly index BashToolName.Length (the tool name's own length, not the grant prefix's).
+        // exactly index BashToolName.Length (the tool name's own length, not the grant prefix's),
+        // while the interior begins one character further on, at BashGrantPrefix.Length.
         for (var i = ClaudeCliVocabulary.BashToolName.Length; i < clause.Length; i++)
         {
             switch (clause[i])
@@ -1016,7 +1019,7 @@ public sealed partial class ClaudeWorkerAdapter : IWorkerAdapter, IPermissionGra
                             return false;
                         }
 
-                        inner = clause[5..i];
+                        inner = clause[ClaudeCliVocabulary.BashGrantPrefix.Length..i];
                         return true;
                     }
 

@@ -947,6 +947,48 @@ public class ClaudeWorkerAdapterTests
     }
 
     /// <summary>
+    /// The named pin for <c>TryExtractBalancedBashClauseInner</c>'s two paren offsets (PR #1952
+    /// re-review): it drives the parser and reads the extracted pattern back off the channel, so it
+    /// goes red on either mutation — starting the depth scan at <c>BashGrantPrefix.Length</c> (depth
+    /// never reaches 1, so <c>Resolve</c> throws instead of granting) or slicing the interior from
+    /// <c>BashToolName.Length</c> (the channel carries a leading <c>'('</c>). Not new coverage:
+    /// <see cref="Interior_whitespace_inside_a_single_Bash_clause_is_trimmed_from_the_channel"/>
+    /// already fails on the second mutation. What it buys is a test that names the invariant, in
+    /// place of one that asserted <c>BashGrantPrefix</c>'s own definition back to itself.
+    /// </summary>
+    [Fact]
+    public void A_Bash_clause_reaches_the_channel_as_exactly_its_interior_text()
+    {
+        var target = new ClaudeWorkerAdapter().Resolve(
+            new WorkerInvocation("Draft a plan.", PermissionScope: "Bash(git status --porcelain)"),
+            ArchitectContract);
+
+        Assert.NotNull(target.Environment);
+        Assert.Contains(
+            (ClaudeWorkerAdapter.ShellPatternsVariable, "claude:git status --porcelain"),
+            target.Environment);
+    }
+
+    /// <summary>
+    /// The polarity twin of the arm above: the same interior text with the opening paren one
+    /// character later is not a grant clause at all, so it must never reach the channel. The vendor
+    /// half of that (claude honors <c>Bash (pattern)</c>, so this refuses rather than drops) is
+    /// measured once at
+    /// <see cref="A_Bash_clause_with_a_space_before_the_paren_makes_Resolve_throw"/>; this arm
+    /// asserts only the offset polarity — one index of paren placement separates the two outcomes.
+    /// </summary>
+    [Fact]
+    public void The_same_interior_with_the_paren_one_character_later_never_reaches_the_channel()
+    {
+        var exception = Assert.Throws<PermissionGrantUnsupportedException>(() =>
+            new ClaudeWorkerAdapter().Resolve(
+                new WorkerInvocation("Draft a plan.", PermissionScope: "Bash (git status --porcelain)"),
+                ArchitectContract));
+
+        Assert.Equal("claude", exception.AdapterName);
+    }
+
+    /// <summary>
     /// The canonical no-whitespace form must keep parsing normally alongside the new whitespace refusal
     /// -- this is #1506's original comma-list-refusal test re-asserted here to pin that the #1515 fix
     /// did not disturb it.
