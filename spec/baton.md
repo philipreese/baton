@@ -3688,11 +3688,23 @@ code path. Both vendors participate in the ledger.
 ### Runway hold (#1848) — shipped
 
 The **enforcement** half of the runway work, and the only place in the tree that gates on a vendor's
-own `/usage` counters. It consumes the per-vendor projection #1391/#1869 already persists and adds no
-second harvest path: the daemon harvests, `baton dispatch` reads the persisted snapshot
-(`BatonPaths.VendorUsageSnapshotFile`). A gate check therefore spends no subscription usage and can
-never itself be what exhausts the runway it protects. The harvester's own `/usage` call is exempt from
-everything below — it is how the counters are measured.
+own `/usage` counters. It consumes the per-vendor projection #1391/#1869 already persists: the daemon
+harvests, `baton dispatch` reads the persisted snapshot (`BatonPaths.VendorUsageSnapshotFile`). The
+harvester's own `/usage` call is exempt from everything below — it is how the counters are measured.
+
+**On demand, once, when there is nothing to read (#1923).** When a gated vendor has a usage source but
+no persisted snapshot at all, the hold runs that source once inline — bounded at 10 s, written through
+the harvester's own writer, no second snapshot format and no second source list
+(`VendorUsageSources.Default`) — and then decides. This is the one case in which a gate check spends
+subscription usage, and it is bounded to one `/usage` call per such vendor per dispatch: a vendor whose
+snapshot already exists, fresh or stale, is never harvested here, so the common path still spends
+nothing and the gate still cannot be what exhausts the runway it protects. It exists because the
+daemon's harvester only fires while a lane of that vendor is live (or 60 s after one exits), which made
+the first lane of a reset window unlaunchable — no lane, so no snapshot; no snapshot, so no lane.
+**A failed harvest still holds**, and says so: the refusal reads `harvest attempted at HH:MM and
+failed: <reason>` rather than `no readable usage snapshot`, because "never harvested" is a bootstrap
+state and "harvested and it failed" is a fault to look at. Harvesting a *stale* snapshot on demand is
+not this, and is not shipped — tracked, with the daemon-tick half of #1923, in #1966.
 
 **Hold new admissions; never arrest for fleet reasons** (operator ruling, 2026-09-04). A dispatch that
 would start new vendor spend is refused before the room is provisioned; work already running always
@@ -3734,11 +3746,13 @@ table would route every ceiling-less codex dispatch down the "recognised window,
 arm — holding the newest vendor on the fleet for the same absence this paragraph chose to admit.
 Gating on the derived counters is a separate decision, not a consequence of the source existing.
 
-**The harvest is a prerequisite, and its absence is a Hold.** On a machine where the daemon has never
-run (or has not harvested within `maxSnapshotAgeHours`), every `claude` and `agy` dispatch is refused
-until one harvests or the operator passes `--override-runway`. That is the ruling's own consequence,
-not an oversight: unreadable holds, and "no snapshot yet" is the most common way counters are
-unreadable. A vendor with no usage source at all is unaffected — it is admitted as unmeasured.
+**The harvest is a prerequisite, and its absence is a Hold.** On a machine where the daemon has not
+harvested within `maxSnapshotAgeHours`, every `claude` and `agy` dispatch is refused until one harvests
+or the operator passes `--override-runway`. That is the ruling's own consequence, not an oversight:
+unreadable holds, and a stale snapshot is unreadable for this purpose. The narrower case of *no
+snapshot at all* is what #1923's on-demand harvest above resolves before deciding — and still a Hold
+when that harvest fails. A vendor with no usage source at all is unaffected — it is admitted as
+unmeasured.
 
 **Thresholds are operator config**, in the settings file baton already has —
 `{BatonPaths.Root}/settings.json`, `DaemonSettings.RunwayHold` — fleet-wide with per-vendor overrides

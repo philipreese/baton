@@ -12,6 +12,13 @@ namespace Baton.Cli.Daemon;
 /// vendor to <see cref="BatonPaths.VendorUsageSnapshotFile"/> — that property's own doc comment has
 /// the restart-survival reasoning. Advisory only — nothing here gates dispatch (#1848 owns that);
 /// this type only ever reads and writes, never blocks a worker.
+/// <para>
+/// It is not the only caller of <see cref="Persist"/> since #1923 — <c>OnDemandRunwayHarvest</c>
+/// writes through this same method, for the same reason there is one snapshot format, when this
+/// service has never produced a file for a vendor being dispatched to. Both read
+/// <see cref="VendorUsageSources.Default"/>, so neither can be reading a vendor the other has never
+/// heard of.
+/// </para>
 /// </summary>
 /// <remarks>
 /// Live-lane counts are read from the SAME room scan <see cref="FleetStatusTool.DiscoverRoomsAsync"/>/
@@ -33,7 +40,7 @@ public sealed class VendorUsageHarvester : BackgroundService
     private readonly Func<CancellationToken, Task<Dictionary<string, int>>> _countLiveLanes;
 
     public VendorUsageHarvester()
-        : this([new ClaudeUsageSlashCommandSource(), new AgyUsageSlashCommandSource(), new CodexUsageSource()])
+        : this(VendorUsageSources.Default)
     {
     }
 
@@ -149,8 +156,29 @@ public sealed class VendorUsageHarvester : BackgroundService
     /// the previous rings and fails OPEN when it cannot read them -- an unreadable or pre-#1746 file
     /// costs the history (rate absent until two fresh samples land), never the harvest itself.
     /// </para>
+    /// <para>
+    /// #1923 review: that read-modify-write is <b>serialized</b>, because this stopped being called only
+    /// by the single-threaded daemon tick -- <c>OnDemandRunwayHarvest</c> now calls it from the runway
+    /// hold, and <c>QueueLauncher</c> can evaluate that hold for two queued items at once in one
+    /// process. <b>What the lock covers:</b> callers inside this process, which is where both new
+    /// callers live. <b>What it does not:</b> two separate <c>baton</c> processes, which no in-process
+    /// lock can. The residual there is bounded by the atomic <see cref="File.Move(string, string, bool)"/>
+    /// below -- a reader never sees a torn file, and the worst outcome is one ring sample lost, which
+    /// delays a burn rate rather than corrupting one. The hold decision reads windows, not rings, so it
+    /// is unaffected either way.
+    /// </para>
     /// </summary>
     internal static void Persist(string vendor, VendorUsageSnapshot snapshot)
+    {
+        lock (PersistLock)
+        {
+            PersistCore(vendor, snapshot);
+        }
+    }
+
+    private static readonly object PersistLock = new();
+
+    private static void PersistCore(string vendor, VendorUsageSnapshot snapshot)
     {
         try
         {
