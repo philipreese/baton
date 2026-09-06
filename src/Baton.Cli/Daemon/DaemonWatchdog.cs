@@ -39,8 +39,24 @@ internal sealed class DaemonWatchdog : IHostedService
     /// restart, so the bar sits well above ordinary slowness.</summary>
     internal const int MissedTickAllowance = 5;
 
-    /// <summary>Non-zero, and specifically not 1: an exit code an operator finds in the scheduled
-    /// task's Last Run Result should name which self-diagnosis fired. 70 is <c>EX_SOFTWARE</c>.</summary>
+    /// <summary>
+    /// Non-zero, and specifically not 1: an exit code an operator finds in the scheduled task's Last
+    /// Run Result should name which self-diagnosis fired. 70 is <c>EX_SOFTWARE</c>.
+    /// <para>
+    /// <b>That the OS actually sees 70 is measured, not assumed</b> (2026-09-06, .NET 10, Windows):
+    /// <see cref="Environment.Exit(int)"/> runs <c>ProcessExit</c> handlers, and the Generic Host's
+    /// console lifetime hooks that event to stop the application — so the open question was whether
+    /// the host's shutdown either zeroes the code or blocks on the very services that stopped
+    /// ticking. A throwaway probe (a Generic Host whose hosted service's <c>StopAsync</c> never
+    /// completes, killed from a second thread) exited <b>70</b>, promptly, in exactly that shape.
+    /// <see cref="Process.Kill()"/> was the alternative — immune to any handler, but its Windows exit
+    /// code is not one an operator can read as a diagnosis, and the measurement says it is not needed.
+    /// </para>
+    /// <para>
+    /// The scheduled task's action must end in <c>; exit $LASTEXITCODE</c> for this to reach the
+    /// scheduler at all — <c>tools/tool-refresh/register-daemon-task.ps1</c> carries that measurement.
+    /// </para>
+    /// </summary>
     internal const int HungExitCode = 70;
 
     private readonly DaemonTickLedger _ledger;

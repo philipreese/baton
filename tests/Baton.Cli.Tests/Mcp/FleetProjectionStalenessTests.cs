@@ -104,6 +104,30 @@ public sealed class FleetProjectionStalenessTests : IDisposable
         }
     }
 
+    /// <summary>
+    /// A read taken WHILE the daemon holds the file open for writing still reads it, and does not
+    /// block that write — spec/baton.md §7's <c>FileShare.ReadWrite | FileShare.Delete</c> rule
+    /// (#1782). Without it a conductor polling <c>fleet_status</c> would intermittently report a hang
+    /// on a perfectly healthy daemon, and would itself be the sharing violation
+    /// <c>WriteAtomic</c>'s retry loop exists to absorb — both on the same tick, and neither visible
+    /// to an arm that writes the file with nothing else holding it.
+    /// </summary>
+    [Fact]
+    public void AReadWhileTheDaemonHoldsTheFileOpen_StillReadsIt()
+    {
+        var now = DateTimeOffset.UtcNow;
+        var path = WriteProjection(now.AddSeconds(-5));
+
+        using (var heldByTheDaemon = new FileStream(
+                   path, FileMode.Open, FileAccess.ReadWrite, FileShare.ReadWrite | FileShare.Delete))
+        {
+            var reading = FleetProjectionStaleness.Read(path, now, ThreeTicks);
+
+            Assert.False(reading.Stale);
+            Assert.NotNull(reading.AgeSeconds);
+        }
+    }
+
     /// <summary>The threshold tracks whatever interval the daemon is actually running at, rather than
     /// pinning 90 seconds: widening the tick must widen the staleness bound with it.</summary>
     [Fact]

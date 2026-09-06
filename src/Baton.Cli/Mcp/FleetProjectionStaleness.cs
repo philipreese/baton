@@ -41,7 +41,16 @@ internal static class FleetProjectionStaleness
         string text;
         try
         {
-            text = File.ReadAllText(path);
+            // FileShare.ReadWrite | FileShare.Delete, never File.ReadAllText (spec/baton.md §7, #1782):
+            // the daemon rewrites this file by writing a temp and MOVING it over the target, and a
+            // reader holding it with the default FileShare.Read makes that move throw a sharing
+            // violation. Two failures at once if this got it wrong -- a healthy daemon's own write
+            // would be blocked by the very tool asking whether it is healthy, and the IOException on
+            // this side would then be reported below as a hang.
+            using var stream = new FileStream(path, FileMode.Open, FileAccess.Read,
+                FileShare.ReadWrite | FileShare.Delete);
+            using var reader = new StreamReader(stream);
+            text = reader.ReadToEnd();
         }
         catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
         {
