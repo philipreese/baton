@@ -136,7 +136,7 @@ public sealed record MemoryProjectionResult(
 /// repository side is projected, the vendor side goes to
 /// <see cref="MemoryProjectionResult.Overridden"/> with the reason naming which of the two it was, and
 /// nothing is combined. Comparing anything beyond the digest would mean reading what the memories say,
-/// which Architecture Rule 1 and §12's "never inferred from the body" both forbid; an identical digest
+/// which Architecture Rule 1 and spec/baton.md §12's "never inferred from the body" both forbid; an identical digest
 /// is reported as a duplicate rather than passed over, because a vendor copy that vanished from the
 /// cache without a word reads to an operator exactly like one that was never there.
 /// </para>
