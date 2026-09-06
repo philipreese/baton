@@ -1,3 +1,4 @@
+using Baton.Runway;
 using Baton.Vendors.Tests.TestSupport;
 
 namespace Baton.Vendors.Tests;
@@ -84,6 +85,47 @@ public class RunwayHoldSettingsTests
             Assert.Equal(50, claude.WeekHoldPct);
             Assert.Equal(65, claude.SessionHoldPct);
             Assert.Equal(TimeSpan.FromHours(2), claude.EffectiveMaxSnapshotAge);
+        }
+        finally
+        {
+            FileCleanup.Delete(path);
+        }
+    }
+
+    /// <summary>
+    /// #1932 review: the #1896 policy knob, end to end from a hand-written <c>settings.json</c> through
+    /// the store to the policy object dispatch actually runs — the one step no other test covered, since
+    /// every arm elsewhere injects a policy directly. Both directions in one arm: the operator's <c>off</c>
+    /// disables the arithmetic (a zero estimate reserves nothing), and a file with no key at all resolves
+    /// to the shipped default, which is what makes the first half a result about the key rather than about
+    /// <c>Resolve</c>'s fallback.
+    /// </summary>
+    [Fact]
+    public async Task The_reservation_policy_key_survives_the_settings_file_round_trip()
+    {
+        var path = TempPath();
+        try
+        {
+            await File.WriteAllTextAsync(
+                path,
+                """{ "RunwayHold": { "ReservationPolicy": "off" } }""",
+                TestContext.Current.CancellationToken);
+
+            var loaded = await DaemonSettingsStore.LoadAsync(path, TestContext.Current.CancellationToken);
+            Assert.Equal("off", loaded.RunwayHold.ReservationPolicy);
+
+            var policy = RunwayReservationPolicies.Resolve(loaded.RunwayHold.ReservationPolicy);
+            Assert.Equal(NoReservationRunwayReservationPolicy.PolicyName, policy.Name);
+            Assert.Equal(0, policy.Estimate(new RunwayEstimateContext("claude", "advise", [])).Points);
+
+            await File.WriteAllTextAsync(
+                path, """{ "RunwayHold": { "WeekHoldPct": 60 } }""", TestContext.Current.CancellationToken);
+            var withoutKey = await DaemonSettingsStore.LoadAsync(path, TestContext.Current.CancellationToken);
+
+            Assert.Null(withoutKey.RunwayHold.ReservationPolicy);
+            Assert.Equal(
+                LedgerMedianRunwayReservationPolicy.PolicyName,
+                RunwayReservationPolicies.Resolve(withoutKey.RunwayHold.ReservationPolicy).Name);
         }
         finally
         {

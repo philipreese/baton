@@ -1,6 +1,8 @@
 using System.Text.Json;
+using Baton.Accounting;
 using Baton.Vendors;
 using Baton.Domain;
+using Baton.Runway;
 using Baton.Status;
 using Baton.Templates;
 
@@ -39,12 +41,18 @@ public static class DispatchCommand
     /// <c>settings.json</c> and each vendor's latest harvested snapshot off disk; a test passes its own
     /// so the gate's arms are drivable without a <c>~/.baton</c> snapshot or a vendor CLI.
     /// </param>
+    /// <param name="reservationPolicy">
+    /// #1896's cross-dispatch reservation policy. Null (production) resolves the one named in
+    /// <c>settings.json</c> through <see cref="RunwayReservationPolicies.Resolve"/>; a test passes its
+    /// own, which is what makes the policy swappable without retuning the shipped constants.
+    /// </param>
     public static async Task<CommandResult> ExecuteAsync(
         DispatchOptions options,
         IReadOnlyDictionary<string, IWorkerAdapter> adapters,
         CancellationToken cancellationToken = default,
         string? workspaceDirectory = null,
-        Func<string, RunwayDecision>? evaluateRunway = null)
+        Func<string, RunwayDecision>? evaluateRunway = null,
+        IRunwayReservationPolicy? reservationPolicy = null)
     {
         ArgumentNullException.ThrowIfNull(options);
         ArgumentNullException.ThrowIfNull(adapters);
@@ -172,7 +180,8 @@ public static class DispatchCommand
         // for the same reason the drain refusal is the first: a refusal here must leave no
         // half-provisioned room behind (Program's typed boundary still lands a ValidationRefused
         // terminal.json in the room it creates, the same shape every other pre-run refusal has).
-        bindings = await ApplyRunwayGateAsync(options, bindings, evaluateRunway, cancellationToken).ConfigureAwait(false);
+        bindings = await ApplyRunwayGateAsync(options, bindings, workspace, evaluateRunway, reservationPolicy, cancellationToken)
+            .ConfigureAwait(false);
 
         Directory.CreateDirectory(options.RoomDirectoryPath);
 
@@ -490,15 +499,22 @@ public static class DispatchCommand
     /// for that list; this comment does not restate it.
     /// </para>
     /// <para>
-    /// <b>Nothing here journals.</b> A refusal happens before the room has a ledger to write to, so
-    /// what carries each decision instead — and why — is settled in spec/baton.md §7, under "Runway
-    /// hold (#1848)": stdout, plus <see cref="WorkerBindingConfigEntry.RunwayOverride"/> for an override.
+    /// <b>Every evaluation journals, since #1896</b> — one append-only row per vendor per dispatch in
+    /// <see cref="BatonPaths.RunwayAdmissionLedgerFile"/>, admitted or refused, written before the
+    /// refusal below throws. That ledger is also where the cross-dispatch reservation arithmetic reads
+    /// its outstanding reservations from, in the same critical section it writes this row in
+    /// (<see cref="RunwayAdmissionLedgerStore"/>). The room-facing half is
+    /// <see cref="WorkerBindingConfigEntry.RunwayAdmission"/>, stamped below on every binding, next to
+    /// <see cref="WorkerBindingConfigEntry.RunwayOverride"/>'s narrower override record. spec/baton.md §7,
+    /// "Runway hold (#1848)", is the register for all three surfaces.
     /// </para>
     /// </remarks>
     private static async Task<IReadOnlyDictionary<string, WorkerBindingConfigEntry>> ApplyRunwayGateAsync(
         DispatchOptions options,
         IReadOnlyDictionary<string, WorkerBindingConfigEntry> bindings,
+        string workspace,
         Func<string, RunwayDecision>? evaluateRunway,
+        IRunwayReservationPolicy? reservationPolicy,
         CancellationToken cancellationToken)
     {
         if (options.ContinueFromRoomDirectoryPath is not null)
@@ -509,7 +525,9 @@ public static class DispatchCommand
             return bindings;
         }
 
-        var evaluate = evaluateRunway ?? await CreateDiskRunwayEvaluatorAsync(cancellationToken).ConfigureAwait(false);
+        var settings = await DaemonSettingsStore.LoadAsync(BatonPaths.SettingsFile, cancellationToken).ConfigureAwait(false);
+        var evaluate = evaluateRunway ?? CreateDiskRunwayEvaluator(settings);
+        var policy = reservationPolicy ?? RunwayReservationPolicies.Resolve(settings.RunwayHold.ReservationPolicy);
 
         var decisions = new Dictionary<string, RunwayDecision>(StringComparer.Ordinal);
         foreach (var vendor in bindings.Values
@@ -521,62 +539,217 @@ public static class DispatchCommand
             decisions[vendor] = evaluate(vendor);
         }
 
-        var holds = decisions.Values.Where(d => d.IsHold).ToList();
-        foreach (var decision in decisions.Values)
+        // Read OUTSIDE the ledger's critical section, deliberately: the lock body below must stay
+        // synchronous (Mutex ownership is thread-affine), and this spawns git to resolve a repository
+        // identity. Skipped entirely when no vendor reached the reservation arm — a policy that never
+        // reads the ledger, and a dispatch every one of whose vendors was already held or is unmeasured,
+        // both pay nothing, because an estimate cannot change any of those outcomes.
+        var ledgerRows = policy.UsesCostLedger && decisions.Values.Any(d => d.HeadroomPoints is not null)
+            ? await TryReadCostLedgerAsync(options, workspace, cancellationToken).ConfigureAwait(false)
+            : [];
+
+        var now = DateTimeOffset.UtcNow;
+        var requests = new List<RunwayAdmissionRequest>();
+        foreach (var (vendor, decision) in decisions)
         {
-            var verdict = decision switch
+            var thresholds = settings.RunwayHold.For(vendor);
+            var role = ResolveSoleRoleFor(bindings, vendor);
+
+            requests.Add(new RunwayAdmissionRequest(
+                Vendor: vendor,
+                GateHeld: decision.IsHold,
+                Unmeasured: decision.Reason == RunwayGate.UnmeasuredReason,
+                GateReason: decision.Reason,
+                Counters: decision.Counters,
+                WeekHoldPct: thresholds.WeekHoldPct,
+                SessionHoldPct: thresholds.SessionHoldPct,
+                MaxSnapshotAgeHours: thresholds.EffectiveMaxSnapshotAge.TotalHours,
+                SnapshotHarvestedAt: decision.SnapshotHarvestedAt,
+                HeadroomPoints: decision.HeadroomPoints,
+                Estimate: policy.Estimate(new RunwayEstimateContext(vendor, role, ledgerRows)),
+                Room: BatonPaths.RecordKey(options.RoomDirectoryPath),
+                Role: role,
+                OverrideReason: options.OverrideRunwayReason,
+                At: now));
+        }
+
+        // One call for the whole dispatch, not one per vendor: the refusal below is all-or-nothing, and
+        // the store has to know that before it writes any row (RunwayAdmissionEntry.Dispatched).
+        var (recorded, unrecordedReason) = await RecordAdmissionsAsync(requests, cancellationToken).ConfigureAwait(false);
+        var admissions = recorded.ToDictionary(
+            entry => entry.Vendor, entry => ToBindingRecord(entry, unrecordedReason), StringComparer.Ordinal);
+
+        var holds = admissions.Values
+            .Where(a => a.Decision is RunwayAdmissionDecisions.Held or RunwayAdmissionDecisions.HeldOverridden)
+            .ToList();
+
+        foreach (var (vendor, admission) in admissions)
+        {
+            var verdict = admission.Decision switch
             {
-                { IsHold: true } when options.OverrideRunwayReason is not null => "HELD, OVERRIDDEN",
-                { IsHold: true } => "HELD",
-                { Reason: RunwayGate.UnmeasuredReason } => "admit (unmeasured)",
+                RunwayAdmissionDecisions.HeldOverridden => "HELD, OVERRIDDEN",
+                RunwayAdmissionDecisions.Held => "HELD",
+                RunwayAdmissionDecisions.Unmeasured => "admit (unmeasured)",
                 _ => "admit",
             };
-            var because = decision.Reason is { } reason ? $" — {reason}" : string.Empty;
-            Console.Out.WriteLine($"Runway ({decision.Vendor}): {verdict}{because} [{decision.DescribeCounters()}]");
+            var because = admission.Reason is { } reason ? $" — {reason}" : string.Empty;
+            Console.Out.WriteLine(
+                $"Runway ({vendor}): {verdict}{because} [{decisions[vendor].DescribeCounters()}]");
         }
 
         if (holds.Count > 0 && options.OverrideRunwayReason is null)
         {
             var detail = string.Join(
-                "; ", holds.Select(h => $"{h.Vendor}: {h.Reason} [{h.DescribeCounters()}]"));
+                "; ", holds.Select(h => $"{h.Vendor}: {h.Reason} [{decisions[h.Vendor].DescribeCounters()}]"));
             throw new CliArgumentException(
                 $"Runway hold — not dispatching new work on {string.Join(", ", holds.Select(h => h.Vendor))}. {detail}. "
                 + "Work already running is unaffected.",
                 $"""dispatch it anyway with --override-runway "<reason>" (the reason is recorded on the room), or wait for the vendor's window to reset.""");
         }
 
-        if (options.OverrideRunwayReason is not { } overrideReason)
-        {
-            return bindings;
-        }
-
         // Stamped per binding, off that binding's OWN vendor decision — the same stamp-onto-every-entry
-        // shape Label/Workstream/ToolSha above already use. Used=false is the recorded "the flag was
+        // shape Label/Workstream/ToolSha above already use. RunwayAdmission goes on every binding;
+        // RunwayOverride only when the flag was passed, with Used=false as the recorded "the flag was
         // passed and nothing needed bypassing" case the issue asks for by name.
         return bindings.ToDictionary(
             pair => pair.Key,
-            pair => decisions.TryGetValue(pair.Value.Adapter, out var decision)
-                ? pair.Value with
+            pair =>
+            {
+                if (!decisions.TryGetValue(pair.Value.Adapter, out var decision))
                 {
-                    RunwayOverride = new RunwayOverride(
-                        decision.Vendor, overrideReason, decision.IsHold, decision.Counters,
-                        decision.IsHold ? decision.Reason : null),
+                    return pair.Value;
                 }
-                : pair.Value,
+
+                var admission = admissions[pair.Value.Adapter];
+                var stamped = pair.Value with { RunwayAdmission = admission };
+                return options.OverrideRunwayReason is { } overrideReason
+                    ? stamped with
+                    {
+                        RunwayOverride = new RunwayOverride(
+                            decision.Vendor,
+                            overrideReason,
+                            admission.Decision == RunwayAdmissionDecisions.HeldOverridden,
+                            decision.Counters,
+                            admission.Decision == RunwayAdmissionDecisions.HeldOverridden ? admission.Reason : null),
+                    }
+                    : stamped;
+            },
             StringComparer.Ordinal);
     }
 
     /// <summary>
-    /// The production evaluator: the operator's thresholds from <c>settings.json</c>, loaded once per
-    /// dispatch, closed over each vendor's latest PERSISTED snapshot. Never spawns a vendor CLI — the
-    /// daemon harvests, dispatch reads (<see cref="RunwaySnapshotReader"/>).
+    /// Appends this dispatch's facts and returns them, with the reason the ledger could not be written
+    /// when it could not. <b>Fails open</b> — spec/baton.md §7 states that posture and what it costs, and
+    /// this comment does not restate it. The mechanics here: the fallback is built from an empty row list
+    /// with the headroom cleared, so it carries the counters' own verdict and no
+    /// <see cref="RunwayAdmissionEntry.OutstandingReservationPoints"/>.
     /// </summary>
-    private static async Task<Func<string, RunwayDecision>> CreateDiskRunwayEvaluatorAsync(CancellationToken cancellationToken)
+    /// <remarks>
+    /// #1932 review: spec/baton.md §7 states what an unrecorded admission costs and why it is surfaced
+    /// rather than only logged. The mechanics here are just that the reason is returned alongside the
+    /// facts and stamped onto every binding's <see cref="RunwayAdmission.UnrecordedReason"/>, which is
+    /// what puts it in <c>baton status</c> (text and <c>--json</c>) and <c>fleet_status</c>.
+    /// </remarks>
+    private static async Task<(IReadOnlyList<RunwayAdmissionEntry> Entries, string? UnrecordedReason)> RecordAdmissionsAsync(
+        IReadOnlyList<RunwayAdmissionRequest> requests, CancellationToken cancellationToken)
     {
-        var settings = await DaemonSettingsStore.LoadAsync(BatonPaths.SettingsFile, cancellationToken).ConfigureAwait(false);
-        return vendor => RunwayGate.Evaluate(
-            vendor, RunwaySnapshotReader.Read(vendor), settings.RunwayHold.For(vendor), DateTimeOffset.UtcNow);
+        try
+        {
+            return (await RunwayAdmissionLedgerStore
+                .ReserveAndRecordAsync(requests, BatonPaths.RunwayAdmissionLedgerFile, cancellationToken)
+                .ConfigureAwait(false), null);
+        }
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or WaitHandleCannotBeOpenedException)
+        {
+            var reason = $"{BatonPaths.RunwayAdmissionLedgerFile} could not be written: {ex.Message}";
+            Console.Error.WriteLine(
+                $"Warning: could not record the runway admission decision(s) for "
+                + $"'{string.Join("', '", requests.Select(r => r.Vendor))}': {ex.Message} "
+                + "The counters' own verdict still applies; no headroom was reserved across dispatches, "
+                + "so concurrent dispatches on this machine are deciding against the same snapshot "
+                + "unaware of each other. Recorded on the room as 'Runway admission unrecorded'.");
+            return (RunwayAdmissionLedgerStore.Decide(
+                [.. requests.Select(r => r with { HeadroomPoints = null })], []), reason);
+        }
     }
+
+    /// <summary>The binding-facing projection of one recorded fact — the same values, minus the ledger-only
+    /// bookkeeping (timestamp, room, role) a room already knows about itself, plus
+    /// <paramref name="unrecordedReason"/>, which exists only when the fact was never recorded at all.</summary>
+    private static RunwayAdmission ToBindingRecord(RunwayAdmissionEntry entry, string? unrecordedReason) =>
+        new(entry.Vendor,
+            entry.Decision,
+            entry.DecidedBy,
+            entry.Reason,
+            entry.Counters,
+            entry.WeekHoldPct,
+            entry.SessionHoldPct,
+            entry.HeadroomPoints,
+            entry.OutstandingReservationPoints,
+            entry.EstimatedBurnPoints,
+            entry.EstimateSource,
+            unrecordedReason);
+
+    /// <summary>
+    /// The one worker role bound to <paramref name="vendor"/>, or null when a composed template bound
+    /// several to it. Null is not a failure: the reservation policy's own contract is that an
+    /// unattributable dispatch falls back to the flat default rather than borrowing another role's median.
+    /// </summary>
+    private static string? ResolveSoleRoleFor(
+        IReadOnlyDictionary<string, WorkerBindingConfigEntry> bindings, string vendor)
+    {
+        string? sole = null;
+        foreach (var (worker, entry) in bindings)
+        {
+            if (!string.Equals(entry.Adapter, vendor, StringComparison.Ordinal))
+            {
+                continue;
+            }
+
+            if (sole is not null)
+            {
+                return null;
+            }
+
+            sole = worker;
+        }
+
+        return sole;
+    }
+
+    /// <summary>
+    /// This repository's cost-ledger rows for the reservation policy, or empty when there are none to be
+    /// had. Never throws and never blocks a dispatch: an unresolvable repository identity, an absent
+    /// ledger, or an unreadable one all resolve to no evidence, which the policy reads as "use the flat
+    /// default" — the same fail-open posture <see cref="RepositoryIdentityResolver"/> itself documents.
+    /// </summary>
+    /// <remarks>
+    /// Falls back to <paramref name="workspace"/>, never to the process's current directory, for the case
+    /// <see cref="RepositoryIdentityResolver"/>'s own remarks name: a session sitting in one checkout
+    /// while dispatching work into another. Estimating a burn from an unrelated repository's cost rows
+    /// would be quietly wrong rather than loudly absent, which is the failure this whole ledger exists to
+    /// stop producing.
+    /// </remarks>
+    private static async Task<IReadOnlyList<CostLedgerEntry>> TryReadCostLedgerAsync(
+        DispatchOptions options, string workspace, CancellationToken cancellationToken)
+    {
+        var identity = await RepositoryIdentityResolver
+            .TryResolveAsync(options.RepoPath ?? workspace, cancellationToken)
+            .ConfigureAwait(false);
+        return identity is null
+            ? []
+            : await CostLedgerStore
+                .ReadAllAsync(BatonPaths.CostLedgerFile(identity.FileSlug), cancellationToken).ConfigureAwait(false);
+    }
+
+    /// <summary>
+    /// The production evaluator, over the settings the caller already loaded once for this dispatch,
+    /// closed over each vendor's latest PERSISTED snapshot. Never spawns a vendor CLI — the daemon
+    /// harvests, dispatch reads (<see cref="RunwaySnapshotReader"/>).
+    /// </summary>
+    private static Func<string, RunwayDecision> CreateDiskRunwayEvaluator(DaemonSettings settings) =>
+        vendor => RunwayGate.Evaluate(
+            vendor, RunwaySnapshotReader.Read(vendor), settings.RunwayHold.For(vendor), DateTimeOffset.UtcNow);
 
     /// <summary>
     /// #1841: persists ids already recovered from live worker stdout by

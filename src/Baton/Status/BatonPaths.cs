@@ -218,6 +218,19 @@ public static class BatonPaths
     /// <summary>Directory name <see cref="FleetProjectionFile"/> lives under, relative to a root.</summary>
     public const string FleetDirectoryName = "fleet";
 
+    /// <summary>
+    /// <c>{Root}/fleet/runway-admissions.jsonl</c> — the #1896 admission ledger.
+    /// <c>Baton.Runway.RunwayAdmissionLedgerStore</c> is the register for what it holds and how it is
+    /// written. What belongs here is only the PATH's own rationale: fleet-wide rather than
+    /// per-repository — unlike <see cref="CostLedgerFile"/> — because the runway it protects is the
+    /// vendor subscription, which every repository on the machine spends from.
+    /// </summary>
+    public static string RunwayAdmissionLedgerFile =>
+        Path.Combine(Root, FleetDirectoryName, RunwayAdmissionLedgerFileName);
+
+    /// <summary>Filename of <see cref="RunwayAdmissionLedgerFile"/> relative to <see cref="FleetDirectoryName"/>.</summary>
+    public const string RunwayAdmissionLedgerFileName = "runway-admissions.jsonl";
+
     /// <summary>Filename of <see cref="FleetProjectionFile"/> relative to <see cref="FleetDirectoryName"/>.</summary>
     public const string FleetProjectionFileName = "projection.json";
 

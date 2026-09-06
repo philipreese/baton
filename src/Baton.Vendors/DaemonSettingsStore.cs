@@ -86,6 +86,15 @@ public sealed record RunwayHoldSettings
     public int SessionHoldPct { get; init; } = RunwayThresholds.DefaultSessionHoldPct;
     public int MaxSnapshotAgeHours { get; init; } = RunwayThresholds.DefaultMaxSnapshotAgeHours;
 
+    /// <summary>
+    /// #1896: which <c>Baton.Runway.IRunwayReservationPolicy</c> the cross-dispatch reservation arm runs.
+    /// Fleet-wide only — a per-vendor override would let two vendors' reservations be priced in
+    /// incomparable units. Null, absent, or unrecognised resolves to the shipped default;
+    /// <c>Baton.Runway.RunwayReservationPolicies.Resolve</c> is the one place the token becomes a policy,
+    /// and the policy types are where the default and its row threshold are declared.
+    /// </summary>
+    public string? ReservationPolicy { get; init; }
+
     /// <summary>Per-adapter-tag overrides; any field a vendor entry leaves null keeps the fleet-wide value above.</summary>
     public IReadOnlyDictionary<string, RunwayVendorHoldSettings>? Vendors { get; init; }
 

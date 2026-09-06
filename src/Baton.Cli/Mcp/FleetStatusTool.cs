@@ -3,6 +3,7 @@ using System.Text.Json.Serialization;
 using Baton.Vendors;
 using Baton.Domain;
 using Baton.Projection;
+using Baton.Runway;
 using Baton.Status;
 using Baton.Store;
 using Baton.Templates;
@@ -328,7 +329,8 @@ public sealed class FleetStatusTool : IMcpTool
                 ParentExecutionId: terminalLineage.ParentExecutionId,
                 ContinuedSessionId: terminalLineage.ContinuedSessionId,
                 TerminalAt: sentinel.TerminalAt,
-                Delivery: await TryResolveDeliveryAsync(roomDir, sentinel.Outputs, cancellationToken).ConfigureAwait(false));
+                Delivery: await TryResolveDeliveryAsync(roomDir, sentinel.Outputs, cancellationToken).ConfigureAwait(false),
+                Runway: ExtractRoomRunway(terminalBindings));
         }
 
         // 2. Active room: load snapshot + flow events and project
@@ -350,7 +352,8 @@ public sealed class FleetStatusTool : IMcpTool
                     Effort: effort,
                     TimeoutMs: timeoutMs,
                     Label: ExtractRoomLabel(bindings),
-                    Workstream: ExtractRoomWorkstream(bindings));
+                    Workstream: ExtractRoomWorkstream(bindings),
+                    Runway: ExtractRoomRunway(bindings));
             }
 
             return new FleetRoomStatusView(
@@ -484,7 +487,8 @@ public sealed class FleetStatusTool : IMcpTool
                 // which never turns a terminal room into a Running one.
                 TerminalAt: view.TerminalAt,
                 Delivery: await TryResolveDeliveryAsync(roomDir, view.Outputs, cancellationToken).ConfigureAwait(false),
-                Arrests: view.Arrests);
+                Arrests: view.Arrests,
+                Runway: ExtractRoomRunway(bindings));
         }
         catch (Exception ex) when (ex is not OperationCanceledException)
         {
@@ -669,6 +673,18 @@ public sealed class FleetStatusTool : IMcpTool
     /// </summary>
     private static string? ExtractRoomWorkstream(IReadOnlyDictionary<string, WorkerBindingConfigEntry>? bindings) =>
         bindings?.Values.Select(entry => entry.Workstream).FirstOrDefault(workstream => workstream is not null);
+
+    /// <summary>
+    /// Extracts a room's runway admissions (#1896) off its loaded <c>bindings.json</c> — read the same way
+    /// <see cref="ExtractRoomLabel"/> reads its own room-level stamp, but kept as a LIST: unlike a label,
+    /// this is decided per vendor, so a composed template spanning two of them has two answers and
+    /// reporting either one alone is wrong in precisely the case the batch decision exists for (#1932
+    /// review). <c>baton status</c> shows the same list off the same field — it is not a surface with a
+    /// finer answer to defer to. <see cref="RunwayAdmissionView.AllFrom"/> owns the dedupe and ordering.
+    /// </summary>
+    private static IReadOnlyList<RunwayAdmissionView>? ExtractRoomRunway(
+        IReadOnlyDictionary<string, WorkerBindingConfigEntry>? bindings) =>
+        RunwayAdmissionView.AllFrom(bindings?.Values.Select(entry => entry.RunwayAdmission));
 }
 
 /// <summary>
@@ -766,7 +782,15 @@ public sealed record FleetRoomStatusView(
     // render a room with no cancel.request history exactly as it does today.
     [property: JsonPropertyName("arrests")]
     [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
-    IReadOnlyList<ArrestLedgerEntryView>? Arrests = null);
+    IReadOnlyList<ArrestLedgerEntryView>? Arrests = null,
+    // #1896's RunwayAdmission (its own remarks are the register), read off this room's bindings.json
+    // exactly the way Label/Workstream above are -- so it costs no extra file read here, and is absent by
+    // construction on a room dispatched before it shipped. One entry per vendor the dispatch gated
+    // (#1932 review), matching WorkflowStatusView.Runway element for element. The daemon's fleet
+    // projection (#1557) serializes through this same record, which is how the glass gets it.
+    [property: JsonPropertyName("runway")]
+    [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    IReadOnlyList<RunwayAdmissionView>? Runway = null);
 
 /// <summary>
 /// Status of a single workflow step within a fleet room status report.
