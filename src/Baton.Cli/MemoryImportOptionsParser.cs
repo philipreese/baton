@@ -63,6 +63,9 @@ public static class MemoryImportOptionsParser
         "                      canonicalized the same way a git probe's answer is, so 'GitHub.com/Owner/Repo',",
         "                      'github.com/owner/repo' and 'https://github.com/Owner/Repo.git' are ONE store;",
         "                      a string with no host-and-path in it is refused rather than made into a store.",
+        "                      NAME THE FORGE HOST: a bare 'owner/repo' is refused too, because no default",
+        "                      host is assumed for it. Write a scheme ('https://internal/repo') or an scp",
+        "                      remote ('git@internal:owner/repo') to assert a host that carries no dot.",
         "  --asserted-by <who> Who is asserting. Defaults to this machine's user name.",
         "  --undo <manifest>   Remove exactly the entries a previous run appended, per its manifest. Source",
         "                      files are untouched, because the import never touched them either. Entries an",
@@ -179,6 +182,14 @@ public static class MemoryImportOptionsParser
     /// A value that canonicalizes to nothing is refused rather than stored raw — the refusal is what
     /// keeps a store called <c>hello-world-&lt;digest&gt;</c> from existing.
     /// </para>
+    /// <para>
+    /// <b>A bare <c>owner/repo</c> is refused as well, and it is a SECOND refusal</b> because it
+    /// canonicalizes fine: <see cref="RepositoryIdentity.TryCanonicalize"/> supplies a scheme and never
+    /// a host (its own remarks say why), so <c>owner/repo</c> becomes the identity <c>owner/repo</c> —
+    /// host <c>owner</c>, path <c>repo</c> — which no git probe can ever answer. Storing it would give
+    /// the operator a store that looks right, that the probe path never reaches, and that no error ever
+    /// mentions again. See <see cref="RequireAHostThatAProbeCouldAnswer"/> for the discriminator.
+    /// </para>
     /// </remarks>
     private static MemoryImportAssertion ParseAssertion(string value)
     {
@@ -201,7 +212,50 @@ public static class MemoryImportOptionsParser
                 "and normalised to one.");
         }
 
+        RequireAHostThatAProbeCouldAnswer(repository, canonical);
+
         return new MemoryImportAssertion(value[..separator].Trim(), canonical);
+    }
+
+    /// <summary>
+    /// Refuses a schemeless repository whose host half names no host — <c>owner/repo</c>, which
+    /// canonicalizes to a well-formed identity that git can never produce.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// <b>The test is only applied to a string the operator wrote schemelessly</b>: a value carrying a
+    /// <c>:</c> has already said where its host is — a scheme (<c>https://internal/repo</c>), an scp
+    /// remote (<c>git@internal:owner/repo</c>), or the <c>gitdir:</c> tag — and a dotless host is a real
+    /// answer there, so refusing it would make an intranet remote unassertable. Only the schemeless
+    /// spelling is ambiguous, and only there is <c>owner</c>-as-host a reading the operator did not ask
+    /// for.
+    /// </para>
+    /// <para>
+    /// It deliberately does NOT live in <see cref="RepositoryIdentity"/>: that type canonicalizes what a
+    /// <i>probe</i> answered as well as what an operator typed, and a probe reading
+    /// <c>git@internal:repo</c> legitimately yields the dotless <c>internal/repo</c>. The ambiguity is a
+    /// property of operator input, so the refusal belongs on the operator's entry path.
+    /// </para>
+    /// </remarks>
+    private static void RequireAHostThatAProbeCouldAnswer(string repository, string canonical)
+    {
+        var raw = repository.Trim();
+        if (raw.Contains(':', StringComparison.Ordinal))
+        {
+            return;
+        }
+
+        var host = canonical[..canonical.IndexOf('/')];
+        if (host.Contains('.', StringComparison.Ordinal))
+        {
+            return;
+        }
+
+        throw new CliArgumentException(
+            $"'{raw}' names no host: it canonicalizes to '{canonical}', and Baton assumes no default " +
+            $"forge, so that store is one no git probe could ever reach. {Usage}",
+            $"name the host too, as 'github.com/{raw}' — or write a scheme " +
+            "('https://internal/owner/repo') for a host with no dot in it.");
     }
 
     private static string RequireValue(IReadOnlyList<string> args, int index)

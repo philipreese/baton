@@ -891,10 +891,10 @@ public sealed class MemoryImportTests : IDisposable
 
         // Control: the well-formed spellings parse, so the arms above are keyed on what they claim.
         var ok = MemoryImportOptionsParser.Parse(
-            ["--dry-run", "--root", "r", "--assert", @"C:\a=b/c", "--asserted-by", "me"]);
+            ["--dry-run", "--root", "r", "--assert", @"C:\a=github.com/b/c", "--asserted-by", "me"]);
         Assert.True(ok.DryRun);
         Assert.Equal(["r"], ok.Roots);
-        Assert.Equal(new MemoryImportAssertion(@"C:\a", "b/c"), Assert.Single(ok.Assertions));
+        Assert.Equal(new MemoryImportAssertion(@"C:\a", "github.com/b/c"), Assert.Single(ok.Assertions));
         Assert.Equal("me", ok.AssertedBy);
 
         Assert.Throws<CliArgumentException>(() => MemoryImportOptionsParser.Parse(["--frobnicate"]));
@@ -929,6 +929,49 @@ public sealed class MemoryImportTests : IDisposable
         // scp separator -- 'gitdir/c:/...' would be a second store for a repository with no remote.
         var gitdir = MemoryImportOptionsParser.Parse(["--assert", @"C:\root=gitdir:C:\repos\x\.git"]);
         Assert.Equal("gitdir:c:/repos/x/.git", Assert.Single(gitdir.Assertions).Repository);
+    }
+
+    /// <summary>
+    /// A bare <c>owner/repo</c> is refused (#1949). It is a SEPARATE arm from the one above because it
+    /// does not canonicalize to nothing — it canonicalizes to the well-formed <c>owner/repo</c>, host
+    /// <c>owner</c>, which is exactly why the earlier refusal never fired on it: no default forge host
+    /// is assumed, so storing it would name a store the git probe can never reach.
+    /// </summary>
+    [Theory]
+    [InlineData("owner/repo")]
+    [InlineData("philipreese/baton")]
+    [InlineData("Owner/Repo/extra")]
+    public void A_bare_owner_repo_with_no_forge_host_is_refused(string spelling)
+    {
+        var refused = Assert.Throws<CliArgumentException>(
+            () => MemoryImportOptionsParser.Parse(["--assert", $@"C:\root={spelling}"]));
+
+        Assert.Contains("names no host", refused.Message, StringComparison.Ordinal);
+        Assert.Contains("github.com/", refused.TryInvocation ?? "", StringComparison.Ordinal);
+    }
+
+    /// <summary>
+    /// The control arm for the refusal above, in both directions: a full identity is UNCHANGED by it,
+    /// and a dotless host stays assertable when the operator spelled the host out — otherwise the
+    /// refusal would be a ban on intranet remotes rather than on a missing host.
+    /// </summary>
+    [Theory]
+    [InlineData("github.com/owner/repo", "github.com/owner/repo")]
+    [InlineData("https://internal/owner/repo", "internal/owner/repo")]
+    [InlineData("git@internal:owner/repo.git", "internal/owner/repo")]
+    public void A_repository_that_names_its_host_is_accepted_unchanged(string spelling, string expected)
+    {
+        var parsed = MemoryImportOptionsParser.Parse(["--assert", $@"C:\root={spelling}"]);
+
+        Assert.Equal(expected, Assert.Single(parsed.Assertions).Repository);
+    }
+
+    [Fact]
+    public async Task Help_states_that_no_default_forge_host_is_assumed()
+    {
+        var text = await RunAsync("--help");
+
+        Assert.Contains("NAME THE FORGE HOST", text, StringComparison.Ordinal);
     }
 
     /// <summary>
