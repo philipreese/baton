@@ -37,6 +37,7 @@ public sealed class QueueSchedulerService : BackgroundService
     private readonly Func<CancellationToken, Task<double>> _liveWeight;
     private readonly Func<double?> _freeGb;
     private readonly Func<DateTimeOffset> _now;
+    private readonly WorkItemAdvancer _advancer;
 
     private DateTimeOffset? _lastLaunchAt;
     private string? _lastVerdictKey;
@@ -55,12 +56,14 @@ public sealed class QueueSchedulerService : BackgroundService
         Func<QueueLaunchRequest, CancellationToken, Task<QueueLaunchOutcome>>? launch,
         Func<CancellationToken, Task<double>>? liveWeight,
         Func<double?>? freeGb,
-        Func<DateTimeOffset>? now)
+        Func<DateTimeOffset>? now,
+        WorkItemAdvancer? advancer = null)
     {
         _launch = launch ?? QueueLauncher.LaunchAsync;
         _liveWeight = liveWeight ?? CountLiveWeightAsync;
         _freeGb = freeGb ?? FreePhysicalMemory.TryReadGiB;
         _now = now ?? (() => DateTimeOffset.UtcNow);
+        _advancer = advancer ?? new WorkItemAdvancer();
     }
 
     protected override async Task ExecuteAsync(CancellationToken stoppingToken)
@@ -130,6 +133,12 @@ public sealed class QueueSchedulerService : BackgroundService
         var interval = TimeSpan.FromSeconds(settings.EffectiveTickSeconds);
 
         await ResolveFinishedItemsAsync(cancellationToken).ConfigureAwait(false);
+
+        // The lifecycle advance runs BETWEEN done detection and the launch decision, and both
+        // orderings matter (#1934 slice 2). After resolve, because it acts on items resolve has just
+        // moved out of `launched`; before Decide, because an item it queues for its next round is a
+        // candidate this same tick rather than one tick later.
+        await AdvanceWorkItemsAsync(cancellationToken).ConfigureAwait(false);
 
         var snapshot = await QueueStore.LoadAsync(BatonPaths.QueueFile, cancellationToken).ConfigureAwait(false);
         var now = _now();
@@ -250,6 +259,40 @@ public sealed class QueueSchedulerService : BackgroundService
             CancellationToken.None).ConfigureAwait(false);
 
         return interval;
+    }
+
+    /// <summary>
+    /// Advances every settled work item one stage (#1934 slice 2) and records one fact per transition.
+    /// </summary>
+    /// <remarks>
+    /// <b>A failure here does not stop the tick.</b> The advance reads <c>gh</c> and a worktree — two
+    /// things that can be missing on a machine whose queue is otherwise fine — and letting that unwind
+    /// into <see cref="TickOnceAsync"/>'s catch-all would stop the scheduler launching anything at all.
+    /// Logged and recorded as a failed decision, never swallowed silently.
+    /// </remarks>
+    internal async Task AdvanceWorkItemsAsync(CancellationToken cancellationToken)
+    {
+        IReadOnlyList<QueueDecisionEntry> facts;
+        try
+        {
+            facts = await _advancer.AdvanceAsync(_now(), cancellationToken).ConfigureAwait(false);
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException || !cancellationToken.IsCancellationRequested)
+        {
+            Console.Error.WriteLine($"QueueSchedulerService: advancing work items failed: {ex.Message}");
+            await RecordAsync(
+                new QueueDecisionEntry(
+                    _now(), null, QueueDecisionEntry.Failed,
+                    $"the work-item advance failed, so no item changed stage this tick: {ex.Message}",
+                    LiveWeight: 0, FreeGb: null, FloorGb: 0),
+                CancellationToken.None).ConfigureAwait(false);
+            return;
+        }
+
+        foreach (var fact in facts)
+        {
+            await RecordAsync(fact, cancellationToken).ConfigureAwait(false);
+        }
     }
 
     /// <summary>
