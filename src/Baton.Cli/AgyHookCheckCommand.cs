@@ -599,9 +599,9 @@ public static class AgyHookCheckCommand
     /// <remarks>
     /// #1921: the reason carries <see cref="GrantRefusal.Marker"/>, stamped here because this is the
     /// single funnel for every one of this gate's fourteen refusal paths — a fifteenth cannot be added
-    /// without it. agy delivers this reason back inside the denied step's own tool payload;
-    /// <c>Status.AgyUsageParser.CountRefusedToolSteps</c> is the reader on the other end of that path and
-    /// states the exact shape and the room it was measured on. <see cref="GrantRefusal.Stamp"/> is
+    /// without it. agy delivers this reason back inside the denied step's own tool payload, where
+    /// <c>Status.AgyUsageParser.CountRefusedToolSteps</c> reads it — that member names the exact shape
+    /// and the room it was measured on. <see cref="GrantRefusal.Stamp"/> is
     /// idempotent, so a composed reason already carrying <c>ShellCommandPatternMatcher</c>'s marker is
     /// left alone.
     /// </remarks>

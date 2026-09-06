@@ -139,9 +139,9 @@ public sealed record ExecutionUsageView(
     /// <summary>
     /// #1921: <see cref="ToolStepCounts.ToolSteps"/> over this execution's whole captured stream — how
     /// many real tool calls it made, in the unit <c>MaxToolSteps</c> caps.
-    /// <b>Present exactly when the next three are</b>: <see cref="ToolStepTally.Snapshot"/> is the one
-    /// decision point and its doc states the three states, including why a stream with no readable tool
-    /// activity is absent here rather than zero.
+    /// <b>Present exactly when the next three are</b>, which <see cref="ToolStepTally.Snapshot"/> decides
+    /// for all four at once — including why a stream with no readable tool activity is absent here
+    /// rather than zero.
     /// </summary>
     [property: JsonPropertyName("toolSteps")]
     [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
