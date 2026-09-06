@@ -147,6 +147,35 @@ public sealed class CostLedgerStoreTests
         }
         """);
 
+    /// <summary>
+    /// #1945: the ledger row names the new word rather than flattening it to "Succeeded". This row
+    /// carries <c>prePushGateMs</c>, so it is where a conductor reconciles a lane's hook spend against
+    /// its outcome — the two fields would otherwise disagree about the same lane. The test above is the
+    /// control: the identical fixture with the flag off still reads "Succeeded".
+    /// </summary>
+    [Fact]
+    public void An_execution_that_finished_during_teardown_names_that_word_on_its_ledger_row()
+    {
+        var room = NewRoom();
+        try
+        {
+            var executionId = new ExecutionId("exec-claude");
+            WriteCapturedStream(room, executionId, ClaudeTerminalLine);
+
+            var entries = SettledExecution(executionId, "claude", "claude-opus-5", Start);
+            entries[^1] = new LogEntry.FlowLogEntry(
+                new FlowEvent.ExecutionSucceeded(executionId, FinishedDuringTeardown: true));
+
+            var row = Assert.Single(CostLedgerStore.BuildEntries(entries, room, Repository));
+
+            Assert.Equal(WorkflowOutcome.FinishedDuringTeardown, row.Outcome);
+        }
+        finally
+        {
+            DirectoryCleanup.DeleteRecursively(room);
+        }
+    }
+
     [Fact]
     public void A_claude_shaped_attempt_becomes_one_labelled_row_with_every_reported_dimension()
     {
