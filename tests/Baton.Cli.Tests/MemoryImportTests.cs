@@ -241,6 +241,54 @@ public sealed class MemoryImportTests : IDisposable
         Assert.Contains(store, e => e.SourceVendor == "codex");
     }
 
+    /// <summary>
+    /// A source rewritten after inventory but before import is recorded wholly as the rewritten
+    /// version: its mtime, digest, and size come from the same read rather than mixing inventory
+    /// metadata with the bytes copied into the store.
+    /// </summary>
+    [Fact]
+    public async Task A_source_rewritten_between_inventory_and_read_has_a_consistent_provenance_triple()
+    {
+        WriteClaudeRoot("C--rewritten", Checkout("gone"), ("user_who.md", "old"));
+        var rootDirectory = Path.Combine(ClaudeHome, "projects", "C--rewritten", "memory");
+        var sourcePath = Path.Combine(rootDirectory, "user_who.md");
+        var rewrittenBytes = "the rewritten memory is longer"u8.ToArray();
+        var requestedMtime = new DateTime(2030, 1, 2, 3, 4, 5, DateTimeKind.Utc);
+        var observedMtime = default(DateTime);
+        var writer = new StringWriter();
+
+        var exitCode = await MemoryImportCommand.ExecuteAsync(
+            MemoryImportOptionsParser.Parse(
+                ["--assert", $"{rootDirectory}=github.com/philipreese/rewritten", "--asserted-by", "the-test"]),
+            writer,
+            ClaudeHome,
+            TestContext.Current.CancellationToken,
+            UserHome,
+            afterInventory: () =>
+            {
+                File.WriteAllBytes(sourcePath, rewrittenBytes);
+                File.SetLastWriteTimeUtc(sourcePath, requestedMtime);
+                observedMtime = File.GetLastWriteTimeUtc(sourcePath);
+            });
+
+        Assert.Equal(0, exitCode);
+        Assert.NotEqual(default, observedMtime);
+        var expectedDigest = Convert.ToHexString(SHA256.HashData(rewrittenBytes)).ToLowerInvariant();
+
+        var imported = Assert.Single(await StoreAsync("github.com/philipreese/rewritten"));
+        Assert.Equal("the rewritten memory is longer", imported.Text);
+        Assert.Equal(observedMtime, imported.SourceMtimeUtc);
+        Assert.Equal(expectedDigest, imported.Sha256);
+
+        var manifest = ImportManifest.Read(
+            Assert.Single(Directory.GetFiles(
+                Path.Combine(BatonPaths.Root, BatonPaths.MemoryImportsDirectoryName))));
+        var row = Assert.Single(manifest.Entries);
+        Assert.Equal(observedMtime, row.SourceMtimeUtc);
+        Assert.Equal(expectedDigest, row.Sha256);
+        Assert.Equal(rewrittenBytes.LongLength, row.SizeBytes);
+    }
+
     /// <summary>#1852: re-running the import over an unchanged tree appends nothing.</summary>
     [Fact]
     public async Task Re_importing_an_unchanged_tree_is_a_no_op()

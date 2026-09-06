@@ -46,6 +46,11 @@ public static class MemoryImportCommand
     /// Test seam for the third-party vendor roots, separate from <paramref name="claudeHomeOverride"/>
     /// for the reason <see cref="MemoryAuditCommand"/>'s own parameter states.
     /// </param>
+    /// <param name="afterInventory">
+    /// Test seam invoked after the inventory walk and before any importable source is read. Production
+    /// callers omit it; the import test uses it to reproduce a source rewrite in the otherwise
+    /// unobservable interval between discovery and reading.
+    /// </param>
     /// <remarks>
     /// There is deliberately no override for Baton's own root: both the store this writes and the
     /// Baton-managed vendor family hang off <see cref="BatonPaths.Root"/>, and a test isolates them
@@ -57,7 +62,8 @@ public static class MemoryImportCommand
         TextWriter output,
         string? claudeHomeOverride = null,
         CancellationToken cancellationToken = default,
-        string? userHomeOverride = null)
+        string? userHomeOverride = null,
+        Action? afterInventory = null)
     {
         ArgumentNullException.ThrowIfNull(options);
         ArgumentNullException.ThrowIfNull(output);
@@ -75,7 +81,7 @@ public static class MemoryImportCommand
 
         return options.UndoManifestPath is { Length: > 0 } manifestPath
             ? await UndoAsync(manifestPath, output, cancellationToken).ConfigureAwait(false)
-            : await ImportAsync(options, output, claudeHomeOverride, userHomeOverride, cancellationToken)
+            : await ImportAsync(options, output, claudeHomeOverride, userHomeOverride, cancellationToken, afterInventory)
                 .ConfigureAwait(false);
     }
 
@@ -84,7 +90,8 @@ public static class MemoryImportCommand
         TextWriter output,
         string? claudeHomeOverride,
         string? userHomeOverride,
-        CancellationToken cancellationToken)
+        CancellationToken cancellationToken,
+        Action? afterInventory)
     {
         var claudeHome = claudeHomeOverride ?? MemoryRootInventory.DefaultClaudeHome;
         var userHome = userHomeOverride ?? MemoryRootInventory.DefaultUserHome;
@@ -128,6 +135,8 @@ public static class MemoryImportCommand
         // Filtered by the SAME selection, so a manifest accounts for the roots this run looked at and
         // no others: `--root <one Claude root>` used to record every Codex sqlite file on the machine.
         var machinery = selection.MachineryRoots.SelectMany(m => m.Rows).ToList();
+
+        afterInventory?.Invoke();
 
         var withFiles = sources
             .Select(source => source with { Files = ReadSourceFiles(source) })
@@ -459,11 +468,13 @@ public static class MemoryImportCommand
             try
             {
                 byte[] bytes;
+                var sourceInfo = new FileInfo(file.Path);
                 using (var stream = new FileStream(file.Path, FileMode.Open, FileAccess.Read, FileShare.ReadWrite))
                 using (var buffer = new MemoryStream())
                 {
                     stream.CopyTo(buffer);
                     bytes = buffer.ToArray();
+                    sourceInfo.Refresh();
                 }
 
                 using var reader = new StreamReader(
@@ -473,7 +484,8 @@ public static class MemoryImportCommand
                 {
                     Text = reader.ReadToEnd(),
                     Sha256 = Convert.ToHexString(System.Security.Cryptography.SHA256.HashData(bytes)).ToLowerInvariant(),
-                    SizeBytes = bytes.Length,
+                    ModifiedUtc = sourceInfo.LastWriteTimeUtc,
+                    SizeBytes = sourceInfo.Length,
                 });
             }
             catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
