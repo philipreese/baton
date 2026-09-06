@@ -84,6 +84,12 @@ public static class DaemonHost
         // acts on what it observes).
         builder.Services.AddHostedService<DeliveryPoller>();
 
+        // #1934 slice 1: the conductor queue's scheduler -- the only thing that launches a queued item,
+        // hosted here beside the usage harvester and the projection writer (Q1 answer (b)). Reads
+        // settings.json's `Queue` block on every tick rather than the daemonSettings captured above, so
+        // a policy change (a floor, the cap, the tier table) takes effect without a daemon restart.
+        builder.Services.AddHostedService<QueueSchedulerService>();
+
         var host = builder.Build();
         onHostBuilt?.Invoke(host);
         await host.RunAsync();
