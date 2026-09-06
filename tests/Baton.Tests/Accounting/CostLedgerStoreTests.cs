@@ -1074,6 +1074,83 @@ public sealed class CostLedgerStoreTests
     }
 
     /// <summary>
+    /// #1921's three tool-step figures reach the row from the settle-time stream read, and the two
+    /// readings a reader must never confuse are pinned as separate arms:
+    /// <list type="bullet">
+    /// <item><b>refused</b> — a stream carrying a marked refusal reports <c>refusedToolSteps: 1</c>.</item>
+    /// <item><b>zero</b> — a stream with tool activity and no refusal reports <c>0</c>, ON THE WIRE. This
+    /// is the arm the row exists for (spec/baton.md §7: "0 is a measurement"), and the one a
+    /// <c>WhenWritingDefault</c> or a null-coalesce would silently delete.</item>
+    /// <item><b>absent</b> — a prose-only stream carries no <c>toolSteps</c> property at all, rather than
+    /// three zeros claiming the attempt ran no tools.</item>
+    /// </list>
+    /// Written as one theory so the zero and the absence are compared against the same serializer: a
+    /// present-only test passes on a build that writes <c>0</c> for both.
+    /// </summary>
+    [Theory]
+    [InlineData("refused", 3, 1, 1)]
+    [InlineData("clean", 1, 0, 0)]
+    [InlineData("prose", null, null, null)]
+    public void The_tool_step_figures_reach_the_row_as_counted_and_stay_absent_rather_than_zero_when_unread(
+        string shape, int? expectedSteps, int? expectedRefused, int? expectedRepeated)
+    {
+        var room = NewRoom();
+        try
+        {
+            var executionId = new ExecutionId($"exec-tool-steps-{shape}");
+            var stream = shape switch
+            {
+                // Hand count: 3 tool_use blocks => 3 steps; `Read a.cs` issued twice => 1 repeat; one
+                // result carrying the marker => 1 refused.
+                "refused" =>
+                    """{"type":"assistant","message":{"content":[{"type":"tool_use","name":"Read","input":{"file_path":"a.cs"}}]}}"""
+                    + "\n" + """{"type":"user","message":{"content":[{"type":"tool_result","content":"using System;"}]}}"""
+                    + "\n" + """{"type":"assistant","message":{"content":[{"type":"tool_use","name":"Read","input":{"file_path":"a.cs"}}]}}"""
+                    + "\n" + """{"type":"user","message":{"content":[{"type":"tool_result","content":"using System;"}]}}"""
+                    + "\n" + """{"type":"assistant","message":{"content":[{"type":"tool_use","name":"Bash","input":{"command":"gh api repos/x/y"}}]}}"""
+                    + "\n" + $$$"""{"type":"user","message":{"content":[{"type":"tool_result","content":"hook error: {{{GrantRefusal.Marker}}} AER: denied.","is_error":true}]}}""",
+                // One tool call, answered. Steps 1, refused 0, repeated 0 — three measured figures.
+                "clean" =>
+                    """{"type":"assistant","message":{"content":[{"type":"tool_use","name":"Read","input":{"file_path":"a.cs"}}]}}"""
+                    + "\n" + """{"type":"user","message":{"content":[{"type":"tool_result","content":"using System;"}]}}""",
+                // A worker that only ever wrote prose: no tool activity to count, so nothing to report.
+                _ => """{"type":"assistant","message":{"content":[{"type":"text","text":"thinking"}]}}""",
+            };
+
+            WriteCapturedStream(room, executionId, ClaudeTerminalLine, liveUsageLine: stream);
+
+            var row = Assert.Single(CostLedgerStore.BuildEntries(
+                SettledExecution(executionId, "claude", "claude-opus-5", Start), room, Repository));
+
+            Assert.Equal(expectedSteps, row.ToolSteps);
+            Assert.Equal(expectedRefused, row.RefusedToolSteps);
+            Assert.Equal(expectedRepeated, row.RepeatedToolSteps);
+
+            var json = JsonSerializer.Serialize(row);
+            if (expectedSteps is { } steps)
+            {
+                Assert.Contains($"\"toolSteps\":{steps}", json, StringComparison.Ordinal);
+                Assert.Contains($"\"refusedToolSteps\":{expectedRefused}", json, StringComparison.Ordinal);
+                Assert.Contains($"\"repeatedToolSteps\":{expectedRepeated}", json, StringComparison.Ordinal);
+            }
+            else
+            {
+                Assert.DoesNotContain("\"toolSteps\"", json, StringComparison.Ordinal);
+                Assert.DoesNotContain("\"refusedToolSteps\"", json, StringComparison.Ordinal);
+                Assert.DoesNotContain("\"repeatedToolSteps\"", json, StringComparison.Ordinal);
+            }
+
+            // The round trip, because a JSON name a reader cannot read back is half a contract.
+            var readBack = JsonSerializer.Deserialize<CostLedgerEntry>(json)!;
+            Assert.Equal(expectedRefused, readBack.RefusedToolSteps);
+        }
+        finally
+        {
+            DirectoryCleanup.DeleteRecursively(room);
+        }
+    }
+
+    /// <summary>
     /// #1882's two non-token dimensions reach the ledger row, and are absent — not zero — on a room
     /// that ran no verify step. Both polarities in one arm on purpose: a copy that hard-coded zero, or
     /// one that dropped the fields entirely, would pass a present-only test. The projector owns the

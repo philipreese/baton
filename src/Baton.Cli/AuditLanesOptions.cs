@@ -28,7 +28,8 @@ public enum AuditLanesOutputFormat
 /// Only executions whose resolved adapter matches, ordinal case-insensitive. Absent = every vendor. A
 /// room whose executions are all filtered out is absent from the report rather than reported at zero,
 /// for the reason every count here follows: this verb never substitutes a zero for a thing it did not
-/// look at.
+/// look at. It is disclosed under <see cref="AuditLanesReport.RoomsExcludedByVendor"/>, which states why
+/// that is a separate bucket from the unreadable-stream one.
 /// </param>
 /// <param name="RoomsRoot">Walk this directory's immediate children instead of <c>~/.baton/rooms</c>.</param>
 /// <param name="Format">Text for a person, JSON for a program.</param>

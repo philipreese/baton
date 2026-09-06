@@ -41,14 +41,16 @@ public static class AuditLanesOptionsParser
         "             (e.g. '36h'). A DURATION, not 'baton ledger --since's instant, and it reads a",
         "             file's last-write time rather than any recorded endedAt.",
         "  --vendor   One adapter name (claude, agy, codex), matched case-insensitively. A room whose",
-        "             executions are all filtered out is absent, never reported at zero.",
+        "             executions are all filtered out is absent, never reported at zero, and is",
+        "             disclosed under its own excluded-by---vendor count rather than as a room whose",
+        "             stream could not be read.",
         "  --rooms-root  Walk this directory's immediate children instead of ~/.baton/rooms.",
         "",
         "A refusal is counted by ONE marker Baton stamps where the refusal is produced, so a new",
         "refusal phrasing cannot escape the count. The cost, stated plainly: a room captured before",
         "that marker shipped carries real refusals and reports 'refused 0'. A room reporting no",
-        "counts at all (--) is one whose stream carried no tool activity this reader could parse --",
-        "never a claim that the lane ran no tools.",
+        "counts at all (--), and that --vendor did not exclude, is one whose stream carried no tool",
+        "activity this reader could parse -- never a claim that the lane ran no tools.",
     ];
 
     public static AuditLanesOptions Parse(IReadOnlyList<string> args)

@@ -119,7 +119,30 @@ public sealed class AuditLanesCommandTests : IDisposable
         // one whose executions all filtered out is ABSENT, not present at zero.
         Assert.Equal(2, report.RoomsWalked);
         Assert.Equal("room-agy", Assert.Single(report.Rooms).Room);
-        Assert.Equal(1, report.RoomsWithoutCounts);
+
+        // ...and it is the operator's filter that excluded it, NOT a stream this reader could not parse.
+        // The claude room's stream parses fine, which is what makes counting it under
+        // roomsWithoutCounts a false statement rather than an imprecise one (#1921 review MEDIUM).
+        Assert.Equal(0, report.RoomsWithoutCounts);
+        Assert.Equal(1, report.RoomsExcludedByVendor);
+    }
+
+    [Fact]
+    public async Task A_vendor_no_walked_room_ran_says_so_rather_than_blaming_the_rooms_streams()
+    {
+        // The narrow-filter case, which empties the report entirely and so takes a different branch of
+        // the text view from the mixed case above.
+        await WriteRoomAsync("room-claude", "claude", ClaudeStream);
+        await WriteRoomAsync("room-agy", "agy", AgyStream);
+
+        using var output = new StringWriter();
+        await AuditLanesCommand.ExecuteAsync(
+            new AuditLanesOptions(Vendor: "codex", RoomsRoot: RoomsRoot), output,
+            cancellationToken: TestContext.Current.CancellationToken);
+
+        var text = output.ToString();
+        Assert.Contains("2 walked room(s) ran no execution --vendor codex admitted", text);
+        Assert.DoesNotContain("carried no tool activity this reader could parse", text);
     }
 
     [Fact]
@@ -155,6 +178,10 @@ public sealed class AuditLanesCommandTests : IDisposable
         Assert.Equal(1, report.RoomsWalked);
         Assert.Empty(report.Rooms);
         Assert.Equal(1, report.RoomsWithoutCounts);
+
+        // The polarity partner of the vendor arm above: no filter was given, so nothing may land in the
+        // excluded bucket. Without this, a fix that moved every uncounted room into that bucket passes.
+        Assert.Equal(0, report.RoomsExcludedByVendor);
     }
 
     [Fact]

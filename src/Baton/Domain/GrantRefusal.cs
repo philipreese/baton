@@ -29,9 +29,20 @@ namespace Baton.Domain;
 public static class GrantRefusal
 {
     /// <summary>
-    /// The literal. Bracketed and namespaced so it cannot plausibly occur in a file a worker read, a
-    /// command it ran, or a vendor's own error text — this string is matched against whole captured
-    /// streams, where a common word would count file contents as refusals.
+    /// The literal. Bracketed and namespaced so it cannot plausibly occur in a vendor's own error text
+    /// or in a repository other than this one — a common word would count ordinary tool output as
+    /// refusals.
+    /// <para>
+    /// <b>The anchoring rule, which is what actually bounds the false positives.</b> The count is never a
+    /// search of the whole captured stream: each parser matches this literal only inside the vendor's
+    /// tool-RESULT node (claude a <c>tool_result</c> block's text, agy a terminal step_update's
+    /// <c>tool_info</c>, codex an <c>item.completed</c>'s <c>aggregated_output</c>), so nothing a worker
+    /// merely wrote or reasoned about is counted. What that still admits, stated because it is true of
+    /// exactly the lanes this project measures: a worker reading, grepping or diffing <b>Baton's own
+    /// tree</b> gets this literal back inside a tool result — this file, the hook commands, the tests —
+    /// and that result is counted as a refusal. It is not a claim this cannot happen in a file a worker
+    /// read; it is bounded to Baton's own repository and accepted there.
+    /// </para>
     /// </summary>
     public const string Marker = "[baton:grant-refused]";
 

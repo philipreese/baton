@@ -391,11 +391,9 @@ public static class CodexAppServerBroker
     /// over-count of at most one on a diagnostic figure, and 64 bits makes that not worth the wider
     /// field.
     /// <para>
-    /// Property ORDER is part of the fingerprint, the same caveat
-    /// <c>ClaudeUsageParser.ToolInvocationKeys</c> states for its own key — the raw text is hashed
-    /// rather than a canonical re-serialization, so a semantically identical call whose arguments codex
-    /// ordered differently reads as two keys. That direction under-counts repeats, which is the safe
-    /// direction for a figure that accuses a lane of waste.
+    /// The RAW text is hashed rather than a canonical re-serialization, so this fingerprint carries the
+    /// same no-normalisation caveat <c>Status.ClaudeUsageParser.ToolInvocationKeys</c> states once for
+    /// every vendor's key — that comment names what goes uncounted and why none of it is normalised.
     /// </para>
     /// </summary>
     private static string ArgumentsDigest(JsonElement arguments)

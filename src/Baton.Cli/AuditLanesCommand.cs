@@ -48,9 +48,19 @@ public sealed record AuditLanesVendorTotal(
 /// Rooms walked whose streams carried no tool activity this reader could parse — the honest denominator
 /// for <see cref="Rooms"/>, and never a claim that those lanes ran no tools.
 /// </param>
+/// <param name="RoomsExcludedByVendor">
+/// Rooms walked that are absent from <see cref="Rooms"/> because <see cref="AuditLanesOptions.Vendor"/>
+/// removed their executions — the operator's own filter, not a stream this reader could not parse. Its
+/// own bucket because the two have opposite readings: this one says nothing about the room's stream, and
+/// counting it under <see cref="RoomsWithoutCounts"/> made the disclosure sentence false of every room a
+/// narrow <c>--vendor</c> excluded (#1921 review). A room some of whose executions the filter removed and
+/// the rest of whose executions carried no readable activity is counted HERE, because the filter is the
+/// explanation the operator can act on.
+/// </param>
 public sealed record AuditLanesReport(
     [property: JsonPropertyName("roomsWalked")] int RoomsWalked,
     [property: JsonPropertyName("roomsWithoutCounts")] int RoomsWithoutCounts,
+    [property: JsonPropertyName("roomsExcludedByVendor")] int RoomsExcludedByVendor,
     [property: JsonPropertyName("rooms")] IReadOnlyList<AuditLanesRoom> Rooms,
     [property: JsonPropertyName("byVendor")] IReadOnlyList<AuditLanesVendorTotal> ByVendor);
 
@@ -127,6 +137,7 @@ public static class AuditLanesCommand
         List<AuditLanesRoom> rooms = [];
         var roomsWalked = 0;
         var roomsWithoutCounts = 0;
+        var roomsExcludedByVendor = 0;
 
         foreach (var roomDirectoryPath in EnumerateRoomDirectories(roomsRoot))
         {
@@ -180,6 +191,7 @@ public static class AuditLanesCommand
             var refused = 0;
             var repeated = 0;
             var emptyResults = 0;
+            var excludedByVendor = 0;
 
             foreach (var (executionId, usage) in usageByExecutionId)
             {
@@ -187,6 +199,7 @@ public static class AuditLanesCommand
                 if (options.Vendor is { Length: > 0 } wanted
                     && !string.Equals(binding.Adapter, wanted, StringComparison.OrdinalIgnoreCase))
                 {
+                    excludedByVendor++;
                     continue;
                 }
 
@@ -211,7 +224,18 @@ public static class AuditLanesCommand
 
             if (executions == 0)
             {
-                roomsWithoutCounts++;
+                // Which of the two buckets: the operator's filter is the explanation whenever it
+                // removed anything here, and only a room it removed nothing from is a room this reader
+                // found nothing in.
+                if (excludedByVendor > 0)
+                {
+                    roomsExcludedByVendor++;
+                }
+                else
+                {
+                    roomsWithoutCounts++;
+                }
+
                 continue;
             }
 
@@ -241,7 +265,8 @@ public static class AuditLanesCommand
             return byRepeated != 0 ? byRepeated : string.CompareOrdinal(left.Room, right.Room);
         });
 
-        return new AuditLanesReport(roomsWalked, roomsWithoutCounts, rooms, BuildVendorTotals(rooms));
+        return new AuditLanesReport(
+            roomsWalked, roomsWithoutCounts, roomsExcludedByVendor, rooms, BuildVendorTotals(rooms));
     }
 
     /// <summary>
@@ -305,9 +330,15 @@ public static class AuditLanesCommand
 
         if (report.Rooms.Count == 0)
         {
-            output.WriteLine(
-                "  no room carried tool activity this reader could parse. That is not a claim that no "
-                + "lane ran tools.");
+            // The narrow-filter case reaches HERE, not the disclosure at the bottom: `--vendor` naming
+            // an adapter no walked room ran empties the report entirely, and saying "no room carried
+            // tool activity" of rooms nobody looked inside is the false reading this verb exists to
+            // prevent.
+            output.WriteLine(report.RoomsExcludedByVendor > 0
+                ? $"  no room reported counts under --vendor {options.Vendor}."
+                : "  no room carried tool activity this reader could parse. That is not a claim that no "
+                    + "lane ran tools.");
+            WriteUncountedDisclosure(report, options, output);
             return;
         }
 
@@ -334,6 +365,17 @@ public static class AuditLanesCommand
                 + $"  empty {Number(total.EmptyResults)}");
         }
 
+        WriteUncountedDisclosure(report, options, output);
+    }
+
+    /// <summary>
+    /// Why a walked room is absent from the table, one sentence per cause and never one sentence for
+    /// both: a stream this reader could not read is a fact about the room, and a <c>--vendor</c>
+    /// exclusion is a fact about the invocation.
+    /// </summary>
+    private static void WriteUncountedDisclosure(
+        AuditLanesReport report, AuditLanesOptions options, TextWriter output)
+    {
         if (report.RoomsWithoutCounts > 0)
         {
             output.WriteLine();
@@ -341,6 +383,15 @@ public static class AuditLanesCommand
                 $"{Number(report.RoomsWithoutCounts)} walked room(s) reported no counts — their streams "
                 + "carried no tool activity this reader could parse, were never captured, or were not "
                 + "whole. Not a measurement of zero tools.");
+        }
+
+        if (report.RoomsExcludedByVendor > 0)
+        {
+            output.WriteLine();
+            output.WriteLine(
+                $"{Number(report.RoomsExcludedByVendor)} walked room(s) ran no execution --vendor "
+                + $"{options.Vendor} admitted. Nothing was read about those rooms' streams, and this is "
+                + "not a claim that they carried no tool activity.");
         }
     }
 
