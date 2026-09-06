@@ -621,8 +621,8 @@ _Fixture = SimpleNamespace(__name__="fixture", sabotaged=False, hook=lambda: Non
 def _selftest() -> int:
     """Prove `run_arms` tells a control that never applied from a check that noticed the fault.
 
-    Synthetic throughout: no subprocess, no temp tree, nothing read from the repo. The arms below are
-    the four outcomes `run_arms` distinguishes, and each is asserted on the FAILURE TEXT rather than
+    Synthetic throughout: no subprocess, no temp tree, nothing read from the repo. The arms below
+    cover every outcome `run_arms` distinguishes, and each is asserted on the FAILURE TEXT rather than
     on the exit code alone -- an exit code cannot say whether the arm was named, and a harness that
     fails without naming the arm is what #1943 was filed about.
     """
