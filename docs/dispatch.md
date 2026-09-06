@@ -193,6 +193,13 @@ or for agy:
 Skills: artifact-design (inlined, 2.4 KB), run-checks (inlined, 380 B)
 ```
 
+A binding that **names** its skills is reported from the names it declared, not from a scan of the
+workspace, because the declared set replaces that scan (below):
+
+```
+Skills (declared): house-style, thorough-review
+```
+
 For a worktree-provisioned binding (an audited role), the roster scans the source repository rather
 than the worker's not-yet-provisioned worktree, and says so —
 `Skills (from <repo>; the worker runs in a fresh worktree at HEAD): …` — since an untracked skill it
@@ -209,7 +216,7 @@ can actually consume, and nothing else about #1151 ships yet:
 |---|---|---|
 | claude | the package's files are **projected** into `<workspace>/.claude/skills/<name>/`, where the CLI reads project skills — **inside the operator's own checkout**, see "Where the projection lands" below | `<name> (to be projected)` |
 | agy | the `SKILL.md` body is **inlined** into the dispatch prompt under a `# Skill: <name>` header AER emits, since #1572 measured that agy does not read `.agents/skills` on its own | `<name> (inlined, <size>)` |
-| codex | **none.** No codex path reads a canonical package, so a codex binding in a repository carrying `skills/` reports `Skills: none discovered` and receives nothing — a realization for it is unbuilt work under #1151, not an omission this doc glosses over | — |
+| codex | **none.** No codex path reads a canonical package, so a codex binding in a repository carrying `skills/` reports `Skills: none discovered` and receives nothing — a realization for it is unbuilt work under #1151, not an omission this doc glosses over. A codex binding that *names* skills says so on stderr when it resolves (`Skills: codex has no skill realization …`) rather than accepting the names in silence | — |
 
 **Both realizations are predictions at roster time**, and only claude's is written in the future tense.
 Neither has happened when the line is printed: the projection is placed later, by the dispatcher, and
@@ -258,8 +265,9 @@ what it still counts are stated once, in `spec/baton.md` §3's #1373 paragraph; 
 and the one (`WorktreeProvisioner.Audit`) that says in its own refusal that it does not.
 
 **Naming skills explicitly: `--skill <name>`, repeatable on `baton dispatch` and `baton redispatch`.**
-A named package is resolved through the four-rung ladder `spec/baton.md` §9 states (env override →
-account-wide → shipped-beside-the-assembly → the repo-local overlay, **lowest**), then format-linted
+A named package is resolved through a four-rung ladder — `SkillPackageResolver`'s own remarks state its
+order and paths, and the one thing to carry away from outside the code is that the repo-local overlay
+is the **lowest** rung, not the highest (`spec/baton.md` §9 for why) — then format-linted
 and requirement-checked as that section describes — all of it before a room directory is created, so a
 typo costs nothing. That last property holds for the three account-wide rungs; §9 states the one case
 where a bottom-rung name behaves differently. The names land on the binding's `Skills` field, which is what a

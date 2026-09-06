@@ -56,8 +56,10 @@ public sealed record SkillRequirements(
 
     /// <summary>
     /// The categories this package requires that <paramref name="grant"/> withholds, named exactly as
-    /// <see cref="PermissionGrant"/>'s own members are so an error message can be acted on. Empty when
-    /// every declared requirement is satisfied — including the case where nothing is declared.
+    /// <see cref="PermissionGrant"/>'s own members are so an error message can be acted on — except
+    /// <see cref="ShellCommandPatterns"/>, which appends the specific unsatisfied patterns in
+    /// parentheses, because the member name alone would not tell an operator which pattern to add.
+    /// Empty when every declared requirement is satisfied — including the case where nothing is declared.
     /// </summary>
     /// <remarks>
     /// A null <paramref name="grant"/> is the raw <c>PermissionScope</c> escape hatch: there is no
@@ -92,7 +94,65 @@ public sealed record SkillRequirements(
             missing.Add(nameof(PermissionGrant.NetworkAccess));
         }
 
+        if (UnsatisfiedShellPatterns(grant) is { Count: > 0 } unsatisfiedPatterns)
+        {
+            missing.Add(
+                $"{nameof(PermissionGrant.ShellCommandPatterns)} ({string.Join(", ", unsatisfiedPatterns)})");
+        }
+
         return missing;
+    }
+
+    /// <summary>
+    /// The declared shell patterns <paramref name="grant"/> does not carry (#1941 review MEDIUM — the
+    /// field parsed and documented as part of the comparison while nothing read it, which reads as
+    /// checked and is not).
+    /// </summary>
+    /// <remarks>
+    /// <b>Exact membership, not subsumption.</b> A required pattern is satisfied only when the grant
+    /// lists that same string, compared <see cref="StringComparison.Ordinal"/> — the comparison
+    /// <see cref="ShellCommandPatternMatcher"/> itself uses, so this check can never be laxer than the
+    /// gate that enforces the grant at runtime. There is no pattern-covers-pattern predicate anywhere in
+    /// the tree (the matcher's <c>IsAllowed</c>/<c>IsDenied</c> take a command LINE, not a pattern), so
+    /// the cost is a false refusal in the covered case — a grant carrying <c>gh:*</c> refuses a package
+    /// requiring <c>gh pr:*</c>. That direction is the safe one: it is an error message naming both
+    /// strings, not a skill that passes the check and is then denied mid-lane.
+    /// <para>
+    /// Three rules, in the order they fire:
+    /// </para>
+    /// <list type="number">
+    /// <item>no shell at all in the grant — every declared pattern is unsatisfied. A manifest declaring
+    ///   patterns while omitting <c>run_shell_commands</c> is asking for a scoped shell it never named
+    ///   (<see cref="PermissionGrant.ShellCommandPatterns"/>: patterns are "only meaningful when
+    ///   RunShellCommands is set"), so it refuses here rather than passing on a technicality;</item>
+    /// <item>an UNSCOPED granted shell (<see cref="PermissionGrant.ShellCommandPatterns"/> null or
+    ///   empty) means "any command", so every declared pattern is satisfied by it;</item>
+    /// <item>a pattern the grant lists in <see cref="PermissionGrant.DeniedShellCommandPatterns"/> is
+    ///   unsatisfied even when the allowlist also carries it — deny-over-allow is that field's own rule,
+    ///   and a package requiring a standing "never" must not bind.</item>
+    /// </list>
+    /// </remarks>
+    private IReadOnlyList<string> UnsatisfiedShellPatterns(PermissionGrant grant)
+    {
+        if (ShellCommandPatterns is not { Count: > 0 } required)
+        {
+            return Array.Empty<string>();
+        }
+
+        var granted = grant.ShellCommandPatterns ?? Array.Empty<string>();
+        var denied = grant.DeniedShellCommandPatterns ?? Array.Empty<string>();
+        var unsatisfied = new List<string>();
+        foreach (var pattern in required)
+        {
+            var allowed = grant.RunShellCommands
+                && (granted.Count == 0 || granted.Contains(pattern, StringComparer.Ordinal));
+            if (!allowed || denied.Contains(pattern, StringComparer.Ordinal))
+            {
+                unsatisfied.Add(pattern);
+            }
+        }
+
+        return unsatisfied;
     }
 }
 

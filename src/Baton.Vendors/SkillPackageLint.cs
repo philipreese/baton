@@ -10,8 +10,16 @@ namespace Baton.Vendors;
 /// <list type="number">
 /// <item><c>vendor-placeholder</c> — <c>${CLAUDE_SKILL_DIR}</c>/<c>${CLAUDE_PROJECT_DIR}</c> and their
 ///   agy equivalents are substituted by ONE vendor. A canonical package carrying one is portable in
-///   name only: on the other vendor the literal text reaches the model. Baton's own
-///   <c>${BATON_SKILL_DIR}</c> is the portable spelling, and the refusal names it.</item>
+///   name only: on the other vendor the literal text reaches the model. <b>No placeholder is a
+///   substitute for it today.</b> <see cref="BatonSkillDirectoryPlaceholder"/> is RESERVED for that
+///   portable substitution and <b>no realization performs it</b> — claude copies the package's files
+///   byte-for-byte (<see cref="SkillProjection"/>) and agy inlines the body verbatim
+///   (<c>AgyWorkerAdapter.InlinedSkillBody</c>), so a package carrying it ships the literal token to
+///   the model exactly as the vendor-native one would. Substituting it is #1151's S3/S4 work
+///   (spec/baton.md §9's "recorded but does not act yet"); until then the refusal's remedy is prose,
+///   not a token, which is what it says (#1941 review HIGH — the remedy previously promised a
+///   substitution that exists nowhere in the tree, so following it reproduced the very defect the rule
+///   refuses, with a passing lint).</item>
 /// <item><c>bash-injection</c> — claude documents a skill body carrying <c>!`command`</c> whose command
 ///   is pre-approved by the same skill's <c>allowed-tools</c> rule, and <c>/skillname</c> is documented
 ///   to bypass <c>PreToolUse</c> — the gate decision 0029 makes mandatory. Whether an injected command
@@ -36,7 +44,12 @@ public static class SkillPackageLint
     public const string BashInjectionRule = "bash-injection";
     public const string ExecutableAssetWithoutShellRule = "executable-asset-without-shell";
 
-    /// <summary>The one portable placeholder a canonical package may use for its own realized directory.</summary>
+    /// <summary>
+    /// The spelling RESERVED for a portable "this package's own realized directory" substitution, and
+    /// the one <c>${…}</c> token this lint deliberately does not refuse. <b>Nothing substitutes it
+    /// yet</b> — see this class's remarks and spec/baton.md §9; it is accepted so a package written
+    /// against a future realization is not refused today, not because it works today.
+    /// </summary>
     public const string BatonSkillDirectoryPlaceholder = "${BATON_SKILL_DIR}";
 
     /// <summary>
@@ -108,7 +121,10 @@ public static class SkillPackageLint
                 package.SkillFilePath,
                 $"it carries the vendor-native placeholder '{token}', which only one vendor substitutes — "
                 + "on the other, the literal text reaches the model.",
-                $"replace it with '{BatonSkillDirectoryPlaceholder}', which every realization substitutes with this package's own realized directory.");
+                "name the file in prose, relative to this skill's own directory (\"the checklist.md "
+                + $"beside this file\") — no placeholder is substituted today. '{BatonSkillDirectoryPlaceholder}' "
+                + "is reserved for that substitution and no realization performs it yet, so it would reach "
+                + "the model as literal text just like this one.");
         }
     }
 

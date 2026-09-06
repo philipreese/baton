@@ -262,6 +262,20 @@ public static class DispatchCommand
         {
             var boundAdapter = adapters[binding.Adapter];
 
+            // #1941 review MEDIUM: a binding that declares its own skill set gets exactly that set --
+            // WorkerInvocation.Skills REPLACES the workspace scan -- so printing the scan here would
+            // name packages the worker will not receive and omit the ones it will, on the one dispatch
+            // where the operator was most explicit about what they wanted. The names are what the
+            // binding carries and what a redispatch inherits, so the names are what this reports;
+            // resolution already happened (RoleDispatch.ToBinding refused an unknown or unsatisfiable
+            // one before this room existed), which is why no rung or realization suffix is added.
+            if (binding.Skills is { Count: > 0 } declaredSkills)
+            {
+                var declaredLabel = multipleSkillWorkers ? $"Skills ({workerName}, declared)" : "Skills (declared)";
+                Console.Out.WriteLine($"{declaredLabel}: {string.Join(", ", declaredSkills)}");
+                continue;
+            }
+
             // H1 (#1512 second-reader finding): for a worktree-provisioned binding, WorkingDirectory
             // is null at this point (WorktreeWorkspaces.cs refuses a binding that sets both) and the
             // worktree the worker will actually run in does not exist yet — it is provisioned later,

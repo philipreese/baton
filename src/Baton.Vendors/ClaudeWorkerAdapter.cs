@@ -1274,18 +1274,37 @@ public sealed partial class ClaudeWorkerAdapter : IWorkerAdapter, IPermissionGra
     /// it is and why a non-empty one replaces the working-directory scan rather than adding to it. Null
     /// or empty keeps #1929's behaviour: discover <c>&lt;workspace&gt;/skills/</c>.
     /// </param>
+    /// <exception cref="SkillProjectionUnplaceableException">
+    /// #1941 review HIGH: <paramref name="declaredSkills"/> is non-empty and <paramref
+    /// name="workingDirectory"/> is missing or absent from disk, so the projection has no destination.
+    /// The declared set is consulted BEFORE the working-directory precondition on purpose — the other
+    /// order returns an empty plan, which <c>ToSeedCopies</c> turns into no seed copies and
+    /// <c>AnnounceSkillProjection</c> reports as nothing, i.e. a silent drop. <c>AgyWorkerAdapter</c>'s
+    /// <c>InlineSkills</c> already orders its branches this way, for the sibling reason that its
+    /// realization needs no directory at all.
+    /// </exception>
     public static SkillProjectionPlan PlanSkillProjection(
         string? workingDirectory, IReadOnlyList<SkillPackage>? declaredSkills = null)
     {
-        if (string.IsNullOrWhiteSpace(workingDirectory) || !Directory.Exists(workingDirectory))
+        var workingDirectoryIsUsable =
+            !string.IsNullOrWhiteSpace(workingDirectory) && Directory.Exists(workingDirectory);
+
+        if (declaredSkills is { Count: > 0 })
         {
-            return new SkillProjectionPlan(string.Empty, Array.Empty<SkillProjectionEntry>());
+            if (!workingDirectoryIsUsable)
+            {
+                throw new SkillProjectionUnplaceableException(
+                    [.. declaredSkills.Select(package => package.Name)], workingDirectory);
+            }
+
+            return SkillProjection.PlanFor(declaredSkills, SkillProjectionDirectory(workingDirectory!));
         }
 
-        var target = SkillProjectionDirectory(workingDirectory);
-        return declaredSkills is { Count: > 0 }
-            ? SkillProjection.PlanFor(declaredSkills, target)
-            : SkillProjection.Plan(workingDirectory, target);
+        // Nothing declared: no working directory means no workspace scan, which is #1929's behaviour and
+        // discards nothing an operator asked for.
+        return workingDirectoryIsUsable
+            ? SkillProjection.Plan(workingDirectory, SkillProjectionDirectory(workingDirectory!))
+            : new SkillProjectionPlan(string.Empty, Array.Empty<SkillProjectionEntry>());
     }
 
     private static IReadOnlyList<CoreDispatchSeedCopy>? ToSeedCopies(SkillProjectionPlan plan) =>
@@ -1458,8 +1477,16 @@ public sealed partial class ClaudeWorkerAdapter : IWorkerAdapter, IPermissionGra
 
         // Canonical skill packages (#1151): discovered from skills/<name>/SKILL.md and reported with the
         // realization this vendor gets -- a projection into .claude/skills/, placed at dispatch time.
-        // The kept-count comes from the SAME plan Resolve turns into seed copies, so the roster cannot
-        // promise a placement the write path then declines to make.
+        //
+        // #1941 review MEDIUM: this is the WORKSPACE SCAN and only the workspace scan. A capability
+        // roster is asked for a directory, not for a binding, so a binding's declared skill set
+        // (WorkerInvocation.Skills) -- which REPLACES the scan on the dispatch path -- cannot be seen
+        // from here. DispatchCommand, which holds the declared names, prints those instead of calling
+        // this when a binding declares any; the comment previously here claimed this plan was the same
+        // one Resolve turns into seed copies, which stopped being true the moment a declared set could
+        // replace it. The kept-count below is still measured by the same predicate the write path uses
+        // (SkillProjection), so for a scan-derived roster the count cannot promise a placement the write
+        // path then declines to make.
         var plan = PlanSkillProjection(workingDirectory);
         var canonicalNames = new HashSet<string>(plan.Entries.Select(entry => entry.Package.Name), StringComparer.Ordinal);
         foreach (var entry in plan.Entries)

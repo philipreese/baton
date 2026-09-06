@@ -4839,10 +4839,10 @@ is a worse default than one the operator restates. A workflow template refuses `
 binds one worker per phase, so a single flag names no phase to attach to (role-carried skills are
 #1151's S6, unbuilt).
 
-**Where a name resolves.** Four rungs, highest precedence first, first match by name wins:
-`BATON_SKILLS_PATH` → `{BatonPaths.Root}/skills/` → `{AppContext.BaseDirectory}/skills/` →
-`<workspace>/skills/`. `SkillPackageResolver`'s own remarks are the register for the ladder; this
-paragraph states the two things a reader gets wrong from outside the code. First, **the
+**Where a name resolves.** Four rungs, first match by name wins. `SkillPackageResolver`'s own remarks
+are the register for the ladder — its order and its literal paths are stated there and nowhere else,
+so changing the order is one edit rather than three kept in step by hand. This paragraph states only
+the two things a reader gets wrong from outside the code. First, **the
 repo-local rung is the LOWEST, not the highest** — everywhere else in this ecosystem project scope
 beats user scope, and here it does not, because Q3 ratified only the account-wide rungs and explicitly
 *deferred* the repo-local overlay; #1929 shipped that overlay anyway as the floor realization's only
@@ -4861,7 +4861,9 @@ second input to retiring or ratifying the rung, not a defect in a rung the rulin
 
 **The format lint refuses three shapes**, each closing a hazard whose alternative is silent —
 `vendor-placeholder` (a `${CLAUDE_*}`/`${GEMINI_*}` substitution only one vendor performs, so the
-literal text reaches the model on the other; `${BATON_SKILL_DIR}` is the portable spelling),
+literal text reaches the model on the other; `${BATON_SKILL_DIR}` is the *reserved* portable spelling
+and nothing substitutes it yet — see "recorded but does not act yet" below, and the remedy the rule
+actually prints),
 `bash-injection` (``!`…` `` in the instructions body, a plausible path around the §5 gate that no
 measurement has closed), and `executable-asset-without-shell` (a bundled script beside a manifest
 declaring `"run_shell_commands": false`). `SkillPackageLint` is the register for what each rule is and
@@ -4903,8 +4905,16 @@ manifest and carried on the package; it behaves exactly as `floor` until #1151's
 (agy) land the native realizations, each gated on its own S2 measurement. `SkillRealization` is the
 one place that is stated. The floor itself is per-vendor and already shipped (#1929): claude gets the
 package's files projected into `<workspace>/.claude/skills/<name>/` at dispatch time, agy gets the
-instructions inlined into the prompt, codex gets nothing. `docs/dispatch.md` is where those three
-realizations and the projection's consequences are described for an operator.
+instructions inlined into the prompt, codex gets nothing — and says so on stderr at dispatch rather
+than dropping a declared set in silence. `docs/dispatch.md` is where those three realizations and the
+projection's consequences are described for an operator.
+
+`${BATON_SKILL_DIR}` is the second recorded-but-inert thing here (#1941 review HIGH). The lint
+reserves the token — it is the one `${…}` spelling `vendor-placeholder` does not refuse — but **no
+realization substitutes it**: claude copies package files byte-for-byte and agy inlines the body
+verbatim, so today it reaches the model as literal text exactly as a vendor-native placeholder would.
+Performing the substitution is S3/S4 work alongside the native realizations. Until then the rule's
+remedy is prose naming the file, and `SkillPackageLint` is the register for both halves.
 
 ---
 
