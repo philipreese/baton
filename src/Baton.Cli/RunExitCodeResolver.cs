@@ -76,9 +76,9 @@ public static class RunExitCodeResolver
         {
             WorkflowOutcome.Succeeded => RunExitCode.Succeeded,
             // #1945: exit 0, beside Succeeded. The room finished and its work is on the remote; the
-            // dispatch timeout only caught the teardown. Anything else would move the bug rather than
-            // fix it — WorkflowOutcome.FinishedDuringTeardown's own remarks list every consumer that
-            // owes it this reading.
+            // dispatch timeout landed after that push. Anything else would move the bug rather than
+            // fix it — spec/baton.md §3's terminal-vocabulary row lists every consumer that owes it
+            // this reading, and WorkflowOutcome.FinishedDuringTeardown glosses the word itself.
             WorkflowOutcome.FinishedDuringTeardown => RunExitCode.Succeeded,
             WorkflowOutcome.Cancelled => RunExitCode.Cancelled,
             WorkflowOutcome.Failed => ResolveFailed(result.State.Steps),

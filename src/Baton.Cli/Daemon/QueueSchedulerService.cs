@@ -420,8 +420,8 @@ public sealed class QueueSchedulerService : BackgroundService
         return sentinel.State switch
         {
             WorkflowOutcome.Succeeded => (QueueItemState.Done, null),
-            // #1945: Done, beside Succeeded — the room finished inside its box and the timeout kill
-            // only caught the pre-push hook. Failing it here would leave the conductor doing exactly
+            // #1945: Done, beside Succeeded — the room finished inside its box, its work is on the
+            // remote, and the timeout kill landed after that push. Failing it here would leave the conductor doing exactly
             // the manual worktree-and-remote inspection the new word exists to remove.
             WorkflowOutcome.FinishedDuringTeardown => (QueueItemState.Done, null),
             WorkflowOutcome.Indeterminate => (QueueItemState.Failed,

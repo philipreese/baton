@@ -64,8 +64,11 @@ public sealed record WorkspaceMutationReading(
 
     /// <summary>
     /// #1945: whether this workspace's work is already committed AND already on the remote — the
-    /// signature of a lane that finished inside its box and was killed while the pre-push hook's
-    /// <c>gates-fast</c> was still running. Read only from inside <see cref="Mutated"/>'s arm in
+    /// signature of a lane that finished inside its box and was killed AFTER its push landed, with
+    /// nothing left to push. A kill landing <i>inside</i> this repo's pre-push hook is a kill before
+    /// the transfer and reads &gt; 0 here, as <see cref="CommitsAheadOfRemote"/>'s own remark states —
+    /// the hook is one thing that runs before the push, never what this predicate detects. Read only
+    /// from inside <see cref="Mutated"/>'s arm in
     /// <see cref="Outcomes.OutcomeClassifier"/> — that nesting is what the population this predicate
     /// must never see turns on, and the classifier's own #1945 remark states it.
     /// <para>

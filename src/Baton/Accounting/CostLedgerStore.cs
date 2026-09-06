@@ -156,7 +156,7 @@ public static partial class CostLedgerStore
                     // #1945: the flagged execution names its own word here rather than flattening to
                     // "Succeeded". This row is where a conductor reconciles a lane's spend against its
                     // outcome, and it is the row carrying prePushGateMs (spec/baton.md §7) — so a lane
-                    // killed inside the pre-push hook saying "Succeeded" while its terminal.json says
+                    // killed after its push saying "Succeeded" while its terminal.json says
                     // FinishedDuringTeardown would put the divergence in exactly the two fields anyone
                     // reading this question reads together. The vocabulary is WorkflowOutcome's; see
                     // WorkflowOutcome.FinishedDuringTeardown for what the word means.
