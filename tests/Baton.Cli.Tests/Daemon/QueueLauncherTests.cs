@@ -229,6 +229,10 @@ public sealed class QueueLauncherTests : IDisposable
                 var release = Task.Run(
                     async () =>
                     {
+                        // This is not a wait for anything: it IS the holder's lifetime, the stimulus
+                        // under test. The retry bound above (60 x 100ms) is what waits, and it is
+                        // twenty-four times this.
+                        // wait-ok: the hold's duration, not a wait on it — the 6s retry bound is the wait.
                         await Task.Delay(TimeSpan.FromMilliseconds(250), Ct);
                         await holder.DisposeAsync();
                     },

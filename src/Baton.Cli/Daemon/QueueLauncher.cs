@@ -216,7 +216,7 @@ public static class QueueLauncher
     /// <see cref="RoomProjectionFailure.Held"/>, and whichever answer it ends on is appended to the
     /// sentinel's <c>error</c> — so a bare sentinel says which of the two produced it rather than
     /// leaving a reader to guess. The retry is a re-READ inside one fault record, not the item-level
-    /// retry §13 rules out.
+    /// retry spec/baton.md §13 rules out.
     /// </para>
     /// </remarks>
     /// <param name="tag">The queued item's tag.</param>
