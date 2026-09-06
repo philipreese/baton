@@ -220,6 +220,59 @@ public sealed class DispatchAuditedWorktreeAcceptanceTests : IDisposable
         }
     }
 
+    /// <summary>
+    /// #1941 re-review LOW. The test above pins the SCAN-derived form of H1's worktree disclosure; the
+    /// declared-set branch (<c>DispatchCommand</c>'s skill-roster block) prints its own copy and nothing
+    /// asserted it, so deleting the clause was a silent regression once already. The polarity partner is
+    /// <c>DispatchCommandSkillRosterTests</c>' plain <c>"Skills (declared): house-style"</c> arm, which
+    /// runs on a binding the registry never widens and so never gives a worktree.
+    /// </summary>
+    [Fact]
+    public async Task Dispatching_an_audited_role_with_a_declared_skill_discloses_the_worktree_on_the_declared_roster_line()
+    {
+        var testRoot = Path.Combine(Path.GetTempPath(), $"dispatch-agy-declared-skill-{Guid.NewGuid():N}");
+        var originalOut = Console.Out;
+        try
+        {
+            var workspace = Path.Combine(testRoot, "workspace");
+            await InitGitRepoAsync(workspace);
+
+            var library = Path.Combine(testRoot, "library");
+            var declaredPackage = Path.Combine(library, "house-style");
+            Directory.CreateDirectory(declaredPackage);
+            await File.WriteAllTextAsync(
+                Path.Combine(declaredPackage, "SKILL.md"), "description: House style",
+                TestContext.Current.CancellationToken);
+
+            using var skillsScope = BatonEnvironmentSnapshot.BeginScope(
+                BatonEnvironmentSnapshot.Current with { SkillsPathOverride = library });
+
+            var specPath = await WriteSpecAsync(testRoot, "Confirm the facts.");
+            var roomDirectory = Path.Combine(testRoot, "task");
+            var adapters = new Dictionary<string, IWorkerAdapter> { ["agy"] = new ContractOutputWorkerAdapter(satisfyOutputs: true) };
+
+            var options = new DispatchOptions(
+                "fact-check", specPath, roomDirectory, Adapter: "agy", WorkspaceDirectory: workspace,
+                Skills: ["house-style"]);
+
+            using var consoleOutput = new StringWriter();
+            Console.SetOut(consoleOutput);
+            await DispatchCommand.ExecuteAsync(options, adapters, TestContext.Current.CancellationToken, evaluateRunway: RunwayTestGate.Admit);
+            Console.SetOut(originalOut);
+
+            var output = consoleOutput.ToString();
+            Assert.Contains(
+                "Skills (declared; a <workspace>/skills/ name re-resolves in the worker's fresh worktree at HEAD): house-style",
+                output,
+                StringComparison.Ordinal);
+        }
+        finally
+        {
+            Console.SetOut(originalOut);
+            DirectoryCleanup.DeleteRecursively(testRoot);
+        }
+    }
+
     /// <param name="translatesGrants">
     /// F2/F3: the printed-grant-line test needs the bound "agy" adapter to actually consume a grant
     /// (<see cref="IPermissionGrantTranslator"/>) or <see cref="DispatchCommand"/> now prints nothing

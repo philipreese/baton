@@ -101,6 +101,24 @@ public static class RoleDispatch
     /// right here as <c>expectPrOverride ?? role.DeliversBranch</c> rather than left null; spec/baton.md
     /// §3's "Post-exit delivery check" entry states why this one resolves early instead of downstream.
     /// </param>
+    /// <param name="skills">
+    /// #1151: the canonical skill package names the operator attached with <c>--skill</c>, repeatable.
+    /// Each is resolved here through <see cref="SkillPackageResolver"/> and its declared
+    /// <c>requires</c> checked against the ROLE's own catalog grant — so an unknown name
+    /// (<see cref="UnknownSkillPackageException"/>), an unparseable package
+    /// (<see cref="SkillPackageFormatException"/>) or an unsatisfiable requirement
+    /// (<see cref="SkillRequirementUnsatisfiedException"/>) refuses before <c>DispatchCommand</c> creates
+    /// a room directory. The names, not the resolved packages, are what lands on
+    /// <see cref="WorkerBindingConfigEntry.Skills"/>: a package is content that can change between the
+    /// dispatch and the redispatch, and the binding records what was ASKED for.
+    /// <para>
+    /// Checked against <see cref="WorkerRole.Grant"/> rather than the possibly-widened local grant
+    /// below, for the same reason <see cref="WorkerBindingConfigEntry.ChangesTree"/> is: that widening
+    /// is an audited compensation for an adapter that cannot otherwise reach the outbox, not a
+    /// capability the room actually granted, and letting a skill's requirement be satisfied by it would
+    /// let operator-authored content ride a carve-out made for a vendor mechanism.
+    /// </para>
+    /// </param>
     /// <param name="verifyResultsPath">
     /// #1882: where the engine's pre-turn verify step wrote its results, when one ran for this dispatch.
     /// Non-null adds a single paragraph to the prompt pointing the reviewer at that file and requiring
@@ -115,10 +133,18 @@ public static class RoleDispatch
         IReadOnlyList<string>? attachments = null, string? attachmentsDirectory = null,
         long? tokenBudgetOverride = null, int? maxToolStepsOverride = null,
         long? billedRateLimitOverride = null, string? verifyCommandOverride = null,
-        bool? expectPrOverride = null, string? verifyResultsPath = null)
+        bool? expectPrOverride = null, string? verifyResultsPath = null,
+        IReadOnlyList<string>? skills = null)
     {
         ArgumentNullException.ThrowIfNull(role);
         ArgumentNullException.ThrowIfNull(spec);
+
+        // #1151 (spec/baton.md §9), the ergonomic half: resolve and check before anything is provisioned. The
+        // load-bearing copy of both refusals lives in WorkerBindingResolver.Resolve, the seam the
+        // `baton run` path also crosses -- this one exists so a typo'd --skill costs nothing.
+        var resolvedSkills = SkillPackageResolver.ResolveAll(skills, workingDirectory);
+        WorkerBindingResolver.RefuseIfASkillRequiresMoreThanTheGrant(
+            string.IsNullOrWhiteSpace(workerName) ? role.Id : workerName, resolvedSkills, role.Grant);
 
         var outputs = role.Outputs.ToList();
         if (!string.IsNullOrWhiteSpace(outputOverride) && outputs.Count > 0)
@@ -225,7 +251,9 @@ public static class RoleDispatch
             DeliversBranch: role.DeliversBranch,
             ExpectPr: expectPrOverride ?? role.DeliversBranch,
             // #1802: purely catalog-controlled, like DeliversBranch -- no dispatch-time override exists.
-            AllowsSubagents: role.AllowsSubagents);
+            AllowsSubagents: role.AllowsSubagents,
+            // #1151: the NAMES, already proven resolvable and grant-satisfiable above.
+            Skills: resolvedSkills.Count == 0 ? null : resolvedSkills.Select(s => s.Name).ToList());
     }
 
     /// <summary>
@@ -251,7 +279,7 @@ public static class RoleDispatch
         TimeSpan? timeoutOverride = null, IReadOnlyList<string>? attachments = null,
         string? attachmentsDirectory = null, long? tokenBudgetOverride = null, int? maxToolStepsOverride = null,
         long? billedRateLimitOverride = null, string? verifyCommandOverride = null, bool? expectPrOverride = null,
-        string? verifyResultsPath = null)
+        string? verifyResultsPath = null, IReadOnlyList<string>? skills = null)
     {
         ArgumentNullException.ThrowIfNull(role);
 
@@ -262,7 +290,7 @@ public static class RoleDispatch
             tokenBudgetOverride: tokenBudgetOverride, maxToolStepsOverride: maxToolStepsOverride,
             billedRateLimitOverride: billedRateLimitOverride,
             verifyCommandOverride: verifyCommandOverride, expectPrOverride: expectPrOverride,
-            verifyResultsPath: verifyResultsPath);
+            verifyResultsPath: verifyResultsPath, skills: skills);
 
         var stepOutputs = binding.Contract.ProducedOutputs.Select(o => o.Name).ToList();
 

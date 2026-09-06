@@ -53,11 +53,20 @@ public sealed record SkillProjectionPlan(string TargetBaseDirectory, IReadOnlyLi
 /// </remarks>
 public static class SkillProjection
 {
-    public static SkillProjectionPlan Plan(string? workingDirectory, string targetBaseDirectory)
+    public static SkillProjectionPlan Plan(string? workingDirectory, string targetBaseDirectory) =>
+        PlanFor(SkillPackageReader.DiscoverPackages(workingDirectory), targetBaseDirectory);
+
+    /// <summary>
+    /// The same plan over an ALREADY-RESOLVED package set (#1151 S1) rather than over whatever a
+    /// directory scan turns up. This is the form a binding that named its skills goes through: the
+    /// resolver has already decided which rung each name came from, so this method never asks where a
+    /// package lives.
+    /// </summary>
+    public static SkillProjectionPlan PlanFor(IReadOnlyList<SkillPackage> packages, string targetBaseDirectory)
     {
+        ArgumentNullException.ThrowIfNull(packages);
         ArgumentException.ThrowIfNullOrWhiteSpace(targetBaseDirectory);
 
-        var packages = SkillPackageReader.DiscoverPackages(workingDirectory);
         if (packages.Count == 0)
         {
             return new SkillProjectionPlan(targetBaseDirectory, Array.Empty<SkillProjectionEntry>());

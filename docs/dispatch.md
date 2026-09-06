@@ -193,6 +193,13 @@ or for agy:
 Skills: artifact-design (inlined, 2.4 KB), run-checks (inlined, 380 B)
 ```
 
+A binding that **names** its skills is reported from the names it declared, not from a scan of the
+workspace, because the declared set replaces that scan (below):
+
+```
+Skills (declared): house-style, thorough-review
+```
+
 For a worktree-provisioned binding (an audited role), the roster scans the source repository rather
 than the worker's not-yet-provisioned worktree, and says so —
 `Skills (from <repo>; the worker runs in a fresh worktree at HEAD): …` — since an untracked skill it
@@ -209,7 +216,7 @@ can actually consume, and nothing else about #1151 ships yet:
 |---|---|---|
 | claude | the package's files are **projected** into `<workspace>/.claude/skills/<name>/`, where the CLI reads project skills — **inside the operator's own checkout**, see "Where the projection lands" below | `<name> (to be projected)` |
 | agy | the `SKILL.md` body is **inlined** into the dispatch prompt under a `# Skill: <name>` header AER emits, since #1572 measured that agy does not read `.agents/skills` on its own | `<name> (inlined, <size>)` |
-| codex | **none.** No codex path reads a canonical package, so a codex binding in a repository carrying `skills/` reports `Skills: none discovered` and receives nothing — a realization for it is unbuilt work under #1151, not an omission this doc glosses over | — |
+| codex | **none.** No codex path reads a canonical package, so a codex binding in a repository carrying `skills/` reports `Skills: none discovered` and receives nothing — a realization for it is unbuilt work under #1151, not an omission this doc glosses over. A codex binding that *names* skills says so on stderr when it resolves (`Skills: codex has no skill realization …`) rather than accepting the names in silence | — |
 
 **Both realizations are predictions at roster time**, and only claude's is written in the future tense.
 Neither has happened when the line is printed: the projection is placed later, by the dispatcher, and
@@ -257,25 +264,44 @@ what it still counts are stated once, in `spec/baton.md` §3's #1373 paragraph; 
 `WorktreeProvisioner.ChangedPathsExcludingEnginePlaced`, whose remarks list every reader that subtracts
 and the one (`WorktreeProvisioner.Audit`) that says in its own refusal that it does not.
 
-**Precedence, written down here because nothing has ratified it.** A canonical package shadows a
-same-named native skill under `<workspace>/.claude/skills/` (that is where the projection lands) and
-under `~/.claude/skills/` (project beats user). The one exception runs the other way: under
-`BATON_CLAUDE_CONFIG_ROOT`, #1575 measured that the CLI resolves a collision to the **config-root** copy
-and the project copy does not surface at all — so the config-root entry is reported unsuppressed and the
-canonical one reads `<name> (to be projected, shadowed by the config root)`. This rule is a consequence of what
-ships, not an operator ruling; #1151's Q3 deferred the precedence question along with the repo-local
-overlay, and this floor slice reopened it by keying on the working directory.
+**Naming skills explicitly: `--skill <name>`, repeatable on `baton dispatch` and `baton redispatch`.**
+A named package is resolved through a four-rung ladder — `SkillPackageResolver`'s own remarks state its
+order and paths, and the one thing to carry away from outside the code is that the repo-local overlay
+is the **lowest** rung, not the highest (`spec/baton.md` §9 for why) — then format-linted
+and requirement-checked as that section describes — all of it before a room directory is created, so a
+typo costs nothing. That last property holds for the three account-wide rungs; §9 states the one case
+where a bottom-rung name behaves differently. The names land on the binding's `Skills` field, which is what a
+`redispatch` inherits and what a harness authoring `bindings.json` for `baton run` can set itself.
+**A binding that names skills gets exactly those**: the declared set replaces the `<workspace>/skills/`
+scan rather than adding to it, so a lane cannot silently also pick up whatever is checked into the
+repository it was pointed at. A binding that names none keeps the scan, unchanged.
 
-**What slice 1 still owes, all of it tracked by #1151.** Read this list before assuming a named skill
-does anything: there is no `skill.json` manifest, no `realization: native-preferred` field, and no
-format lint. The three ratified resolver rungs (`BATON_SKILLS_PATH`, `{BatonPaths.Root}/skills/`, a
-shipped default beside the assembly) do not exist — what ships reads `<workspace>/skills/` only, which is
-the **repo-local overlay Q3 explicitly deferred**, not any of the rungs. There is no `--skill` flag on
-`dispatch`/`redispatch`, no `Skills` field on `WorkerBindingConfigEntry` and so no requirement check at
-bind time and no inheritance across a redispatch, no `spec/baton.md` §9 entry, and no amendment to
-decision 0010. Activation — whether either vendor's model actually *invokes* a skill under `-p` — is
-unmeasured on both vendors; #1151's S2 is the measurement, and the roster's
-`(to be projected)`/`(inlined)` is a claim about **placement**, never about activation.
+```
+baton dispatch review --spec brief.md --skill thorough-review --skill house-style
+baton redispatch <room-dir>                      # inherits the parent's skills
+baton redispatch <room-dir> --skill house-style  # replaces them wholesale
+baton redispatch <room-dir> --skill ""           # clears them
+```
+
+**Precedence against a vendor's own native skills, written down here because nothing has ratified it.**
+A canonical package shadows a same-named native skill under `<workspace>/.claude/skills/` (that is
+where the projection lands) and under `~/.claude/skills/` (project beats user). The one exception runs
+the other way: under `BATON_CLAUDE_CONFIG_ROOT`, #1575 measured that the CLI resolves a collision to
+the **config-root** copy and the project copy does not surface at all — so the config-root entry is
+reported unsuppressed and the canonical one reads
+`<name> (to be projected, shadowed by the config root)`. This is a consequence of what ships, not an
+operator ruling. It is a different question from precedence *among Baton's own rungs*, which
+`spec/baton.md` §9 does now settle.
+
+**What #1151 still owes after this slice.** Read this before assuming a named skill does more than it
+does. `"realization": "native-preferred"` parses and is recorded, but **behaves exactly as `floor`** —
+the native realizations are S3 (claude) and S4 (agy), each gated on the S2 measurement. Activation —
+whether either vendor's model actually *invokes* a skill under `-p` — is unmeasured on both vendors;
+the roster's `(to be projected)`/`(inlined)` is a claim about **placement**, never about activation.
+There is no pass-through rung for an existing `SKILL.md` directory (S5) and no role-carried skill set
+(S6), so `--skill` is refused for a workflow template. codex still receives nothing. And the
+`<workspace>/skills/` rung itself is unratified: it is kept as the lowest rung pending an operator
+answer on whether to retire or ratify it.
 
 **Rule for briefs:** Dispatched workers run in their own process and do not inherit the conducting session's loaded skills. Briefs must inline what they need; a named skill only works if the worker's roster shows it. Skill forwarding is not performed by dispatch.
 

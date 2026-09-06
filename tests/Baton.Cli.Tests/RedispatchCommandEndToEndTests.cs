@@ -918,14 +918,76 @@ public sealed class RedispatchCommandEndToEndTests : IDisposable
         }
     }
 
+    /// <summary>
+    /// #1941 review MEDIUM: <c>ResolveSkills</c> is applied on both redispatch paths, but only the
+    /// inherit-binding one was tested — deleting <c>skills: ResolveSkills(...)</c> from the amended-spec
+    /// path (<c>RedispatchCommand.RebuildFromAmendedSpecAsync</c>) failed nothing, which is precisely
+    /// the hole #1686 review F2 found for <c>--max-tool-steps</c> and the reason the shared predicate
+    /// exists. All three arms of the rule run through the amended-spec path here: absent inherits, an
+    /// empty flag clears, a named one replaces wholesale.
+    /// </summary>
+    [Fact]
+    public async Task An_amended_spec_redispatch_inherits_clears_and_replaces_the_parents_skills()
+    {
+        var testRoot = Path.Combine(Path.GetTempPath(), $"redispatch-e2e-{Guid.NewGuid():N}");
+        try
+        {
+            var library = Path.Combine(testRoot, "library");
+            foreach (var name in new[] { "house-style", "thorough-review" })
+            {
+                Directory.CreateDirectory(Path.Combine(library, name));
+                await File.WriteAllTextAsync(
+                    Path.Combine(library, name, "SKILL.md"), $"description: {name}",
+                    TestContext.Current.CancellationToken);
+            }
+
+            using var skillsScope = BatonEnvironmentSnapshot.BeginScope(
+                BatonEnvironmentSnapshot.Current with { SkillsPathOverride = library });
+
+            var parentRoom = await DispatchTerminalParentAsync(
+                testRoot, "Weigh the options for X.", skills: ["house-style"]);
+            var amendedSpecPath = Path.Combine(testRoot, "amended.md");
+            await File.WriteAllTextAsync(
+                amendedSpecPath, "Weigh the options for Y instead.", TestContext.Current.CancellationToken);
+
+            async Task<IReadOnlyList<string>?> RedispatchSkillsAsync(
+                string childName, IReadOnlyList<string>? skills, bool skillsSpecified)
+            {
+                var childRoom = Path.Combine(testRoot, childName);
+                var options = new RedispatchOptions(
+                    parentRoom, childRoom, SpecFilePath: amendedSpecPath, Adapter: "fake",
+                    Skills: skills, SkillsSpecified: skillsSpecified);
+
+                await RedispatchCommand.ExecuteAsync(options, Adapters, TestContext.Current.CancellationToken);
+
+                var bindings = await WorkerBindingConfigParser.LoadFromFileAsync(
+                    Path.Combine(childRoom, "bindings.json"), TestContext.Current.CancellationToken);
+                return bindings["advise"].Skills;
+            }
+
+            Assert.Equal(
+                ["house-style"],
+                (await RedispatchSkillsAsync("child-inherit", null, skillsSpecified: false))!.ToArray());
+            Assert.Null(await RedispatchSkillsAsync("child-clear", null, skillsSpecified: true));
+            Assert.Equal(
+                ["thorough-review"],
+                (await RedispatchSkillsAsync("child-replace", ["thorough-review"], skillsSpecified: true))!.ToArray());
+        }
+        finally
+        {
+            DirectoryCleanup.DeleteRecursively(testRoot);
+        }
+    }
+
     private static async Task<string> DispatchTerminalParentAsync(
         string testRoot, string spec, string adapter = "fake", TimeSpan? timeout = null, string? label = null,
-        string? workstream = null)
+        string? workstream = null, IReadOnlyList<string>? skills = null)
     {
         var specPath = await WriteSpecAsync(testRoot, spec);
         var roomDirectory = Path.Combine(testRoot, "parent");
         var options = new DispatchOptions(
-            "advise", specPath, roomDirectory, Adapter: adapter, Timeout: timeout, Label: label, Workstream: workstream);
+            "advise", specPath, roomDirectory, Adapter: adapter, Timeout: timeout, Label: label,
+            Workstream: workstream, Skills: skills);
 
         var result = await DispatchCommand.ExecuteAsync(options, Adapters, TestContext.Current.CancellationToken);
 

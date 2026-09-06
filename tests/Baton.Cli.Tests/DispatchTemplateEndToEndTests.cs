@@ -256,6 +256,35 @@ public sealed class DispatchTemplateEndToEndTests : IDisposable
         }
     }
 
+    /// <summary>
+    /// #1941 review MEDIUM: the refusal shipped with the flag and had no arm. Why a template refuses
+    /// <c>--skill</c> rather than spreading it over the phases is stated at the refusal itself, in
+    /// <c>DispatchCommand.MaterializeTemplateAsync</c> (and spec/baton.md §9); this is its arm, alongside
+    /// the sibling ones for <c>--attach</c> and <c>--spec</c>.
+    /// </summary>
+    [Fact]
+    public async Task A_template_rejects_a_skill_because_a_single_flag_names_no_phase()
+    {
+        var testRoot = Path.Combine(Path.GetTempPath(), $"dispatch-tmpl-{Guid.NewGuid():N}");
+        try
+        {
+            Directory.CreateDirectory(testRoot);
+            var options = new DispatchOptions(
+                "implement-review", SpecFilePath: null, Path.Combine(testRoot, "task"),
+                Skills: ["house-style"]);
+
+            var ex = await Assert.ThrowsAsync<CliArgumentException>(() => DispatchCommand.ExecuteAsync(
+                options, WorkerAdapterRegistry.Default, TestContext.Current.CancellationToken));
+            // For the right reason: this options record trips no sibling template refusal (no spec, no
+            // attachment, no --output, no --timeout), so the message has to name --skill itself.
+            Assert.Contains("--skill", ex.Message, StringComparison.Ordinal);
+        }
+        finally
+        {
+            DirectoryCleanup.DeleteRecursively(testRoot);
+        }
+    }
+
     [Fact]
     public async Task A_role_requires_a_spec()
     {

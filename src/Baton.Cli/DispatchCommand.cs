@@ -262,6 +262,29 @@ public static class DispatchCommand
         {
             var boundAdapter = adapters[binding.Adapter];
 
+            // #1941 review MEDIUM: a binding that declares its own skill set gets exactly that set --
+            // WorkerInvocation.Skills REPLACES the workspace scan -- so printing the scan here would
+            // name packages the worker will not receive and omit the ones it will, on the one dispatch
+            // where the operator was most explicit about what they wanted. The names are what the
+            // binding carries and what a redispatch inherits, so the names are what this reports;
+            // resolution already happened (RoleDispatch.ToBinding refused an unknown or unsatisfiable
+            // one before this room existed), which is why no rung or realization suffix is added.
+            if (binding.Skills is { Count: > 0 } declaredSkills)
+            {
+                // H1's worktree disclosure is kept rather than dropped with the scan: a declared name
+                // is re-resolved at run time against the provisioned worktree, so a bottom-rung
+                // (<workspace>/skills/) name is not guaranteed to be the same package there -- the
+                // divergence spec/baton.md §9 records for that rung specifically.
+                var worktreeNote = binding.Worktree is not null
+                    ? "; a <workspace>/skills/ name re-resolves in the worker's fresh worktree at HEAD"
+                    : string.Empty;
+                var declaredLabel = multipleSkillWorkers
+                    ? $"Skills ({workerName}, declared{worktreeNote})"
+                    : $"Skills (declared{worktreeNote})";
+                Console.Out.WriteLine($"{declaredLabel}: {string.Join(", ", declaredSkills)}");
+                continue;
+            }
+
             // H1 (#1512 second-reader finding): for a worktree-provisioned binding, WorkingDirectory
             // is null at this point (WorktreeWorkspaces.cs refuses a binding that sets both) and the
             // worktree the worker will actually run in does not exist yet — it is provisioned later,
@@ -959,6 +982,18 @@ public static class DispatchCommand
                 "remove the --attach flag, or dispatch a single role instead of a template.");
         }
 
+        // #1151: refused rather than silently dropped, the same shape as --attach immediately above. A
+        // template binds one worker per phase, and a single flag naming no phase cannot say which of
+        // them the skill is for -- attaching it to all of them would be a guess. Role-catalog skills
+        // (#1151 S6) are the shape that answers this for a template, and they are not this slice.
+        if (options.Skills is { Count: > 0 })
+        {
+            throw new CliArgumentException(
+                $"'{options.Name}' is a workflow template — it binds one worker per phase, so a single "
+                + "--skill names no phase to attach to. Pass --skill only when dispatching a role.",
+                "remove the --skill flag, or dispatch a single role instead of a template.");
+        }
+
         // R5 (#1354/#1380, finding 7): a template's steps each declare their own output — there is no
         // one "primary output" for --output to rename, and the prior behaviour renamed whichever step
         // happened to be first regardless of what kind of step that was (a capture step, say), silently.
@@ -1128,7 +1163,10 @@ public static class DispatchCommand
             tokenBudgetOverride: options.TokenBudget, maxToolStepsOverride: options.MaxToolSteps,
             billedRateLimitOverride: options.BilledRateLimit,
             verifyCommandOverride: options.VerifyCommand, expectPrOverride: options.ExpectPr,
-            verifyResultsPath: VerifyResultsPath(options));
+            verifyResultsPath: VerifyResultsPath(options),
+            // #1151: resolved and requirement-checked inside ToBinding, which runs before
+            // Directory.CreateDirectory below -- so an unknown --skill leaves no room behind.
+            skills: options.Skills);
     }
 
     /// <summary>

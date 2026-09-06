@@ -74,10 +74,30 @@ public sealed class CodexWorkerAdapter : IWorkerAdapter, IPermissionGrantTransla
         return true;
     }
 
+    /// <summary>
+    /// What a codex binding is told when it declares skills this adapter has no realization for, or
+    /// null when it declares none (#1941 review LOW). <b>A skip, not a refusal</b>: "codex gets nothing"
+    /// is the shipped floor spec/baton.md §9 records, so refusing here would break a binding that is
+    /// merely using a capability codex does not have yet — but a register the operator has not read is
+    /// not a diagnostic, and the skills resolved, linted and requirement-checked all the way to this
+    /// point without one word about being dropped.
+    /// </summary>
+    internal static string? SkillSkipNotice(IReadOnlyList<SkillPackage>? skills) =>
+        skills is { Count: > 0 }
+            ? $"Skills: {string.Join(", ", skills.Select(skill => skill.Name))} will NOT reach this worker — "
+              + "codex has no skill realization (#1151, spec/baton.md §9). Dispatch on the claude or agy "
+              + "adapter to use them, or drop them from the binding."
+            : null;
+
     public CoreDispatchTarget Resolve(WorkerInvocation invocation, WorkerContract contract)
     {
         ArgumentNullException.ThrowIfNull(invocation);
         ArgumentNullException.ThrowIfNull(contract);
+
+        if (SkillSkipNotice(invocation.Skills) is { } skillSkipNotice)
+        {
+            Console.Error.WriteLine(skillSkipNotice);
+        }
 
         invocation = ProjectCeilingGate.Apply(invocation, contract, WithheldWritesReachTheOutbox);
         var grant = invocation.PermissionGrant;

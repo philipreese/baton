@@ -82,11 +82,26 @@ public class ExecutionOutputDirectoryListingTests
             "EnumerateFiles lists a ~/.claude memory root (live or archived), not an execution output directory",
         ["Baton/Memory/MemoryRootPath.cs"] =
             "EnumerateFiles lists a Claude project directory's session transcripts, not an execution output directory",
-        // #1151: walks a canonical skill package directory (<workspace>/skills/<name>/) to plan which of
-        // its files a vendor realization would place. The workspace a binding dispatches into is never a
-        // room's artifacts root, so an execution's output directory is unreachable from here.
+        // #1151: walks a canonical skill package directory to plan which of its files a vendor
+        // realization would place. Since S1 that directory is package.DirectoryPath — whichever
+        // SkillPackageResolver rung a declared name matched, not only <workspace>/skills/<name>/ — so
+        // this reads the same population as the lint entry below, and the caveat stated there about the
+        // operator-set rung applies here identically (#1941 review LOW: the justification here still
+        // said "under the dispatch workspace" after the change that broadened it).
         ["Baton.Vendors/SkillProjection.cs"] =
-            "GetFiles walks a canonical skill package directory under the dispatch workspace, not an execution output directory",
+            "GetFiles walks one resolved canonical skill package's own directory, not an execution output directory",
+        // #1151 S1: the same population as SkillProjection above, read for a different reason — the
+        // executable-asset lint enumerates one canonical skill package's own files to decide whether it
+        // bundles a script. Three of SkillPackageResolver's four rungs ({BatonPaths.Root}/skills, beside
+        // the assembly, <workspace>/skills) cannot be a room's artifacts root by construction. The
+        // fourth, the BATON_SKILLS_PATH override, is operator-set and unconstrained: an operator who
+        // pointed it inside a room could make this enumerate a path under one. What it still would not
+        // do is list an execution's OUTPUT directory as such — it walks a <name>/ package subdirectory
+        // it was handed and reports the files as package assets, never as a worker's outputs — so this
+        // allowlist entry is a claim about what is listed, not a guarantee about where the override may
+        // point (#1941 review LOW).
+        ["Baton.Vendors/SkillPackageLint.cs"] =
+            "GetFiles enumerates one resolved skill package's own assets, not an execution output directory",
         // #496: lists artifacts/.versions/ (a named artifact's own version-history sidecar, one
         // index.jsonl per name), never an execution's own output directory.
         ["Baton/Artifacts/RoomArtifacts.cs"] =

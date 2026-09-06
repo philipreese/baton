@@ -191,6 +191,11 @@ public static class RedispatchCommand
                 Label = (options.LabelSpecified || options.Label is not null) ? options.Label : parentEntry.Label,
                 Workstream = (options.WorkstreamSpecified || options.Workstream is not null) ? options.Workstream : parentEntry.Workstream,
                 ToolSha = BatonPaths.TryResolveCurrentToolSha() ?? parentEntry.ToolSha,
+                // #1151 is deliberately NOT restated here: RebuildFromAmendedSpecAsync hands the same
+                // ResolveSkills list to RoleSpecMaterializer, and RoleDispatch.ToBinding sets Skills from
+                // it (including the --skill "" clear, which resolves to an empty list and lands as null).
+                // Assigning it a second time here made the one that matters undeletable-by-test -- #1941
+                // review MEDIUM: either assignment alone satisfied every arm, so neither was discriminated.
             };
         }
 
@@ -303,6 +308,7 @@ public static class RedispatchCommand
             Label = (options.LabelSpecified || options.Label is not null) ? options.Label : parentEntry.Label, // #1499, spec/baton.md §2
             Workstream = (options.WorkstreamSpecified || options.Workstream is not null) ? options.Workstream : parentEntry.Workstream, // #1619, spec/baton.md §2
             ToolSha = BatonPaths.TryResolveCurrentToolSha() ?? parentEntry.ToolSha, // #1668
+            Skills = ResolveSkills(parentEntry, options), // #1151, spec/baton.md §9
             // Adapter-derived, not role-derived, so it CAN be recomputed here — carrying the parent's
             // value across a vendor swap would stream-json a claude/agy worker (or text-mode a non-streaming one).
             // Grant/GrantAuditMode/worktree intent stay inherited: spec/baton.md §2 states why.
@@ -315,6 +321,19 @@ public static class RedispatchCommand
             ResumeSession = false,
         };
     }
+
+    /// <summary>
+    /// #1151's inheritance rule, one predicate used by BOTH redispatch paths. spec/baton.md §9 is the
+    /// register for the rule and for why replace-not-append is the right default; in short,
+    /// <c>--skill</c> absent inherits, <c>--skill ""</c> clears, any <c>--skill &lt;name&gt;</c> replaces
+    /// wholesale.
+    /// <para>
+    /// Keyed on <see cref="RedispatchOptions.SkillsSpecified"/>, not on the list being non-empty: those
+    /// two differ in exactly the case the clear token exists for.
+    /// </para>
+    /// </summary>
+    internal static IReadOnlyList<string>? ResolveSkills(WorkerBindingConfigEntry parentEntry, RedispatchOptions options) =>
+        options.SkillsSpecified ? options.Skills : parentEntry.Skills;
 
     /// <summary>The <c>--spec</c>-given path: rebuilds through <see cref="RoleDispatch.Materialize"/>, spec/baton.md §2's named primitive.</summary>
     private static async Task<(WorkflowDefinition Definition, WorkerBindingConfigEntry Entry)> RebuildFromAmendedSpecAsync(
@@ -350,7 +369,11 @@ public static class RedispatchCommand
                 // found --max-tool-steps silently dropped. Both paths, or the override does not survive
                 // a redispatch.
                 billedRateLimitOverride: options.BilledRateLimit ?? parentEntry.BilledRateLimit,
-                verifyCommandOverride: options.VerifyCommand ?? parentEntry.VerifyCommandOverride);
+                verifyCommandOverride: options.VerifyCommand ?? parentEntry.VerifyCommandOverride,
+                // #1151: resolved and requirement-checked by RoleDispatch.ToBinding on this path too,
+                // so an amended-spec redispatch inheriting a parent's skill that has since been deleted
+                // refuses here rather than dispatching without it.
+                skills: ResolveSkills(parentEntry, options));
 
             return (definition, bindings[role.Id]);
         }

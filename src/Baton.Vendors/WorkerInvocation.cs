@@ -128,6 +128,21 @@ namespace Baton.Vendors;
 /// <see cref="WorkerBindingConfigEntry.AllowsSubagents"/> that itself defaults closed, or a caller
 /// that opts in explicitly, produces <see langword="true"/>.
 /// </param>
+/// <param name="Skills">
+/// #1151: the canonical skill packages this binding declared, ALREADY RESOLVED through
+/// <see cref="SkillPackageResolver"/>'s rung ladder by <see cref="WorkerBindingResolver.Resolve"/> —
+/// the adapters receive packages, never names, so no adapter re-implements resolution or precedence.
+/// Legal on a per-binding record for the reason the type remarks above give: a skill set is chosen at
+/// dispatch and is constant for every execution of the binding, exactly like
+/// <paramref name="Timeout"/>.
+/// <para>
+/// Null or empty means the binding declared none, and each adapter then falls back to discovering
+/// canonical packages under its working directory — the behaviour #1929 shipped, kept so a repository
+/// carrying <c>skills/</c> still realizes them for a binding that names nothing. A non-empty list is
+/// the declared set and REPLACES that scan: a binding that says which skills it wants must not silently
+/// also get whichever ones happen to be checked into the repository it was pointed at.
+/// </para>
+/// </param>
 public sealed record WorkerInvocation(
     string PromptTemplate,
     string? Model = null,
@@ -144,5 +159,7 @@ public sealed record WorkerInvocation(
     bool EnableMemoryProposalTool = false,
     string? WorktreeSourceRepository = null,
     // #1802 review: default-closed; only RoleDispatch.ToBinding (from the catalog) ever sets true.
-    bool AllowsSubagents = false);
+    bool AllowsSubagents = false,
+    // #1151: see the Skills doc above.
+    IReadOnlyList<SkillPackage>? Skills = null);
 

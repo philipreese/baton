@@ -462,7 +462,7 @@ public sealed partial class AgyWorkerAdapter : IWorkerAdapter, IPermissionGrantT
         invocation = ProjectCeilingGate.Apply(invocation, contract, ((IWorkerAdapter)this).WithheldWritesReachTheOutbox);
 
         var isWindows = OperatingSystem.IsWindows();
-        var prompt = BuildPrompt(invocation.PromptTemplate, contract, isWindows, invocation.WorkingDirectory);
+        var prompt = BuildPrompt(invocation.PromptTemplate, contract, isWindows, invocation.WorkingDirectory, invocation.Skills);
         var permissionScope = ResolvePermissionScope(invocation);
         var artifactsRoot = EnvironmentReference("BATON_ARTIFACTS_ROOT", isWindows);
         var agyWorkspace = EnsureAgyWorkspace();
@@ -1243,14 +1243,31 @@ public sealed partial class AgyWorkerAdapter : IWorkerAdapter, IPermissionGrantT
     /// discloses a per-package size in the dispatch roster instead of silently truncating. A cap belongs
     /// with the manifest #1151's slice 1 still owes, not here.
     /// </remarks>
-    public static string InlineSkills(string prompt, string? workingDirectory)
+    /// <param name="declaredSkills">
+    /// #1151: the binding's own declared skill set — <see cref="WorkerInvocation.Skills"/> is the
+    /// register for what it is and why it replaces rather than augments the scan. Null or empty keeps
+    /// #1929's discovery behaviour, including the working-directory precondition below, which a declared
+    /// set does not need: those packages may come from the account-wide library, and inlining writes
+    /// nothing anywhere.
+    /// </param>
+    public static string InlineSkills(
+        string prompt, string? workingDirectory, IReadOnlyList<SkillPackage>? declaredSkills = null)
     {
-        if (string.IsNullOrWhiteSpace(workingDirectory) || !Directory.Exists(workingDirectory))
+        IReadOnlyList<SkillPackage> packages;
+        if (declaredSkills is { Count: > 0 })
         {
-            return prompt;
+            packages = declaredSkills;
+        }
+        else
+        {
+            if (string.IsNullOrWhiteSpace(workingDirectory) || !Directory.Exists(workingDirectory))
+            {
+                return prompt;
+            }
+
+            packages = SkillPackageReader.DiscoverPackages(workingDirectory);
         }
 
-        var packages = SkillPackageReader.DiscoverPackages(workingDirectory);
         if (packages.Count == 0)
         {
             return prompt;
@@ -1264,9 +1281,11 @@ public sealed partial class AgyWorkerAdapter : IWorkerAdapter, IPermissionGrantT
         return sb.ToString();
     }
 
-    private static string BuildPrompt(string promptTemplate, WorkerContract contract, bool isWindows, string? workingDirectory)
+    private static string BuildPrompt(
+        string promptTemplate, WorkerContract contract, bool isWindows, string? workingDirectory,
+        IReadOnlyList<SkillPackage>? declaredSkills = null)
     {
-        var inlined = InlineSkills(promptTemplate, workingDirectory);
+        var inlined = InlineSkills(promptTemplate, workingDirectory, declaredSkills);
         var prompt = new StringBuilder(inlined);
 
         if (contract.RequiredInputs.Count > 0)

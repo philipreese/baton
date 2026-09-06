@@ -164,6 +164,37 @@ public sealed class ClaudeSkillRealizationTests
         }
     }
 
+    /// <summary>
+    /// #1941 review HIGH, the second unusable-destination shape: a working directory that is SET but
+    /// absent from disk. Same reasoning as an unset one — the projection has nowhere to land — and the
+    /// refusal says which of the two it hit, since the remedies differ.
+    /// </summary>
+    [Fact]
+    public void PlanSkillProjection_WithDeclaredSkillsAndAMissingWorkingDirectory_Refuses()
+    {
+        var packageRoot = MakeWorkspaceWithSkill("claude-plan-unplaceable", "house-style", "description: House style");
+        try
+        {
+            var package = SkillPackageReader.LoadPackage(Path.Combine(packageRoot, "skills", "house-style"));
+            var absent = Path.Combine(Path.GetTempPath(), $"claude-absent-{Guid.NewGuid():N}");
+
+            var ex = Assert.Throws<SkillProjectionUnplaceableException>(
+                () => ClaudeWorkerAdapter.PlanSkillProjection(absent, [package]));
+            Assert.Equal(["house-style"], ex.SkillNames.ToArray());
+            Assert.Contains(absent, ex.Message, StringComparison.Ordinal);
+
+            // Polarity: the SAME missing directory with nothing declared is not a refusal, it is simply
+            // no scan -- #1929's behaviour, which this fix must not turn into an error.
+            var plan = ClaudeWorkerAdapter.PlanSkillProjection(absent);
+            Assert.Empty(plan.Entries);
+            Assert.Empty(ClaudeWorkerAdapter.PlanSkillProjection(null).Entries);
+        }
+        finally
+        {
+            DirectoryCleanup.DeleteRecursively(packageRoot);
+        }
+    }
+
     [Fact]
     public async Task DiscoverCapabilities_WithCanonicalSkills_ReportsAsProjected()
     {

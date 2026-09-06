@@ -15,7 +15,7 @@ public static class DispatchOptionsParser
 {
     /// <summary>The one copy of <c>baton dispatch</c>'s usage line, printed here on error and by <c>Program</c>.</summary>
     public const string Usage =
-        "Usage: baton dispatch <name> [--spec <spec-file> | --spec - | --spec-text <text>] [--attach <file>] [--adapter <name>] [--model <name>] [--effort <name>] [--room-dir <dir>] [--workspace <dir>] [--workflow-id <id>] [--output <path>] [--timeout <minutes>] [--token-budget <n>] [--max-tool-steps <n>] [--billed-rate-limit <n>] [--verify <cmd>] [--verify-cmd <cmd>] [--verify-timeout <minutes>] [--expect-pr <true|false>] [--continue <room-dir>] [--override-runway <reason>] [--label <text>] [--workstream <slug>] [--repo <checkout-dir>] [--list-capabilities]";
+        "Usage: baton dispatch <name> [--spec <spec-file> | --spec - | --spec-text <text>] [--attach <file>] [--skill <name>] [--adapter <name>] [--model <name>] [--effort <name>] [--room-dir <dir>] [--workspace <dir>] [--workflow-id <id>] [--output <path>] [--timeout <minutes>] [--token-budget <n>] [--max-tool-steps <n>] [--billed-rate-limit <n>] [--verify <cmd>] [--verify-cmd <cmd>] [--verify-timeout <minutes>] [--expect-pr <true|false>] [--continue <room-dir>] [--override-runway <reason>] [--label <text>] [--workstream <slug>] [--repo <checkout-dir>] [--list-capabilities]";
 
     /// <summary>
     /// <c>--label</c>'s cap (#1499) — a Fleet Glass room title, not a description; long enough for "the
@@ -79,6 +79,7 @@ public static class DispatchOptionsParser
         string? continueFromRoomDirectoryPath = null;
         string? overrideRunwayReason = null;
         var attachments = new List<string>();
+        var skills = new List<string>();
         var listCapabilities = false;
 
         var i = 0;
@@ -115,6 +116,9 @@ public static class DispatchOptionsParser
                     break;
                 case "--attach":
                     attachments.Add(RequireValue(args, ref i, arg));
+                    break;
+                case "--skill":
+                    skills.Add(RequireValue(args, ref i, arg));
                     break;
                 case "--adapter":
                     adapter = RequireValue(args, ref i, arg);
@@ -268,7 +272,55 @@ public static class DispatchOptionsParser
             continueFromRoomDirectoryPath is null ? null : RoomDirectoryPath.Resolve(continueFromRoomDirectoryPath),
             verifyCommands.Count > 0 ? verifyCommands : null,
             verifyTimeout,
-            overrideRunwayReason);
+            overrideRunwayReason,
+            NormalizeSkills(skills));
+    }
+
+    /// <summary>
+    /// #1151: the repeatable <c>--skill</c> flag's shared normalization, used by this parser and by
+    /// <see cref="RedispatchOptionsParser"/> so the two verbs cannot diverge on what a value means.
+    /// <list type="bullet">
+    /// <item>a blank value is the <b>clear</b> token (<c>--skill ""</c>), which matters only on
+    ///   redispatch — there it discards the parent's list, and the caller distinguishes "cleared" from
+    ///   "never passed" by whether the flag appeared at all, not by this method's result;</item>
+    /// <item>mixing a blank with a real name is <b>refused</b>, not silently resolved. It is the same
+    ///   shape as passing two different spec sources: there is no reading of
+    ///   <c>--skill "" --skill review</c> that is more likely than the other, so guessing one would be
+    ///   the silent-wrong-capability failure this feature exists to remove;</item>
+    /// <item>duplicates collapse, order is preserved — the resolver would drop them anyway, and the
+    ///   binding should record what the operator meant rather than what they typed twice.</item>
+    /// </list>
+    /// Returns null when nothing usable was passed, which is exactly "attach no skills".
+    /// </summary>
+    internal static IReadOnlyList<string>? NormalizeSkills(IReadOnlyList<string> rawValues)
+    {
+        var named = new List<string>();
+        var seen = new HashSet<string>(StringComparer.Ordinal);
+        var sawBlank = false;
+        foreach (var value in rawValues)
+        {
+            var trimmed = value.Trim();
+            if (trimmed.Length == 0)
+            {
+                sawBlank = true;
+                continue;
+            }
+
+            if (seen.Add(trimmed))
+            {
+                named.Add(trimmed);
+            }
+        }
+
+        if (sawBlank && named.Count > 0)
+        {
+            throw new CliArgumentException(
+                "'--skill \"\"' clears the skill list, so passing it alongside a named skill "
+                + $"({string.Join(", ", named)}) says two contradictory things at once.",
+                "pass only the skills you want attached, or pass --skill \"\" alone to attach none.");
+        }
+
+        return named.Count > 0 ? named : null;
     }
 
     /// <summary>

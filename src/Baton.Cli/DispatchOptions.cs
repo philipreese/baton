@@ -140,6 +140,13 @@ namespace Baton.Cli;
 /// continuation consults no gate — there is nothing for it to bypass and no decision for its reason to
 /// annotate.
 /// </param>
+/// <param name="Skills">
+/// The repeatable <c>--skill &lt;name&gt;</c> flag (#1151) — canonical skill package names attached to
+/// this dispatch, resolved through <c>Baton.Vendors.SkillPackageResolver</c>'s rung ladder and
+/// persisted onto the binding. Role dispatch only, rejected for a workflow template the same way
+/// <paramref name="TokenBudget"/> is. Null keeps the dispatch skill-less; the contract is
+/// spec/baton.md §9.
+/// </param>
 public sealed record DispatchOptions(
     string Name,
     string? SpecFilePath,
@@ -166,4 +173,5 @@ public sealed record DispatchOptions(
     string? ContinueFromRoomDirectoryPath = null,
     IReadOnlyList<string>? VerifyCommands = null,
     TimeSpan? VerifyTimeout = null,
-    string? OverrideRunwayReason = null);
+    string? OverrideRunwayReason = null,
+    IReadOnlyList<string>? Skills = null);
