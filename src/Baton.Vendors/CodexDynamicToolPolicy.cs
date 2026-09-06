@@ -24,20 +24,28 @@ public sealed class CodexDynamicToolPolicy
     private const int MaxListedFiles = 1_000;
     private const int MaxSearchMatches = 500;
     private const int MaxCommandOutputCharacters = 200_000;
-    private static readonly TimeSpan CommandTimeout = TimeSpan.FromMinutes(5);
+    private static readonly TimeSpan DefaultCommandTimeout = TimeSpan.FromMinutes(5);
 
     private readonly PermissionGrant _grant;
     private readonly string? _workspaceRoot;
     private readonly string _outputRoot;
     private readonly IReadOnlyList<string> _inputRoots;
     private readonly HashSet<string> _declaredOutputs;
+    private readonly TimeSpan _commandTimeout;
 
+    /// <param name="commandTimeout">
+    /// How long one <c>baton_run_command</c> may run before Baton kills its process tree; null is
+    /// <see cref="DefaultCommandTimeout"/>. A parameter rather than a constant so the timeout arm is
+    /// exercisable in a second instead of five minutes — a test that cannot reach it is how the timeout
+    /// came to be reported as a grant refusal (#1921 review HIGH).
+    /// </param>
     public CodexDynamicToolPolicy(
         PermissionGrant grant,
         string? workingDirectory,
         string outputDirectory,
         IEnumerable<string> inputPaths,
-        IEnumerable<string> producedOutputNames)
+        IEnumerable<string> producedOutputNames,
+        TimeSpan? commandTimeout = null)
     {
         ArgumentNullException.ThrowIfNull(grant);
         ArgumentException.ThrowIfNullOrWhiteSpace(outputDirectory);
@@ -51,6 +59,7 @@ public sealed class CodexDynamicToolPolicy
             .Select(Path.GetFullPath).Distinct(PathComparer).ToArray();
         _declaredOutputs = producedOutputNames.Where(name => !string.IsNullOrWhiteSpace(name))
             .Select(NormalizeRelativeOutput).ToHashSet(PathComparer);
+        _commandTimeout = commandTimeout ?? DefaultCommandTimeout;
     }
 
     /// <summary>The exact dynamic-tool declarations supplied on <c>thread/start</c>.</summary>
@@ -112,13 +121,22 @@ public sealed class CodexDynamicToolPolicy
                     RequiredString(arguments, "path"), RequiredString(arguments, "content")),
                 RunCommandTool => await RunCommandAsync(
                     RequiredString(arguments, "command"), cancellationToken).ConfigureAwait(false),
-                _ => CodexDynamicToolResult.Denied(DescribeUnknownTool(toolName)),
+                _ => CodexDynamicToolResult.Refused(DescribeUnknownTool(toolName)),
             };
+        }
+        catch (CodexGrantRefusedException ex)
+        {
+            // The boundary decisions the path resolvers take — outside the readable roots, outside the
+            // workspace root, escaping an output root, crossing a reparse point. Its own type, and
+            // caught before the filter below, because that filter's members (an IOException from a
+            // locked file, an ArgumentException from a malformed tool argument) are FAILURES of an
+            // allowed call and must not be stamped as refusals.
+            return CodexDynamicToolResult.Refused(ex.Message);
         }
         catch (Exception ex) when (ex is ArgumentException or IOException or UnauthorizedAccessException
             or NotSupportedException or System.Security.SecurityException)
         {
-            return CodexDynamicToolResult.Denied(ex.Message);
+            return CodexDynamicToolResult.Failed(ex.Message);
         }
     }
 
@@ -197,13 +215,15 @@ public sealed class CodexDynamicToolPolicy
     {
         if (!_grant.ReadFiles && _inputRoots.Count == 0)
         {
-            return CodexDynamicToolResult.Denied("This Baton role does not grant file reads.");
+            return CodexDynamicToolResult.Refused("This Baton role does not grant file reads.");
         }
 
         var path = ResolveAllowedRead(requestedPath);
         if (!File.Exists(path))
         {
-            return CodexDynamicToolResult.Denied($"File '{requestedPath}' does not exist.");
+            // A missing file is a failure of an ALLOWED read, not a refusal: the grant let this path
+            // through and the workspace had nothing there. Same distinction at every Failed below.
+            return CodexDynamicToolResult.Failed($"File '{requestedPath}' does not exist.");
         }
 
         EnsureNoReparsePoint(path);
@@ -219,13 +239,13 @@ public sealed class CodexDynamicToolPolicy
     {
         if (!_grant.ReadFiles)
         {
-            return CodexDynamicToolResult.Denied("This Baton role does not grant workspace file listing.");
+            return CodexDynamicToolResult.Refused("This Baton role does not grant workspace file listing.");
         }
 
         var path = ResolveWithinWorkspace(requestedPath);
         if (!Directory.Exists(path))
         {
-            return CodexDynamicToolResult.Denied($"Directory '{requestedPath}' does not exist.");
+            return CodexDynamicToolResult.Failed($"Directory '{requestedPath}' does not exist.");
         }
 
         EnsureNoReparsePoint(path);
@@ -242,11 +262,11 @@ public sealed class CodexDynamicToolPolicy
     {
         if (!_grant.ReadFiles)
         {
-            return CodexDynamicToolResult.Denied("This Baton role does not grant workspace text search.");
+            return CodexDynamicToolResult.Refused("This Baton role does not grant workspace text search.");
         }
         if (query.Length == 0)
         {
-            return CodexDynamicToolResult.Denied("Search query must not be empty.");
+            return CodexDynamicToolResult.Failed("Search query must not be empty.");
         }
 
         var path = ResolveWithinWorkspace(requestedPath);
@@ -296,7 +316,10 @@ public sealed class CodexDynamicToolPolicy
         var normalized = NormalizeRelativeOutput(outputName);
         if (!_declaredOutputs.Contains(normalized))
         {
-            return CodexDynamicToolResult.Denied($"'{outputName}' is not a declared output for this Baton worker.");
+            // Not a refusal: the declared outputs come from the WORKER CONTRACT, not from
+            // PermissionGrant — a read-only role is offered this tool — so a name outside the list is
+            // a call that did not match the contract rather than one the grant declined.
+            return CodexDynamicToolResult.Failed($"'{outputName}' is not a declared output for this Baton worker.");
         }
 
         var path = ResolveWithinRoot(_outputRoot, normalized);
@@ -308,7 +331,7 @@ public sealed class CodexDynamicToolPolicy
     {
         if (!_grant.WriteFiles)
         {
-            return CodexDynamicToolResult.Denied("This Baton role does not grant workspace writes.");
+            return CodexDynamicToolResult.Refused("This Baton role does not grant workspace writes.");
         }
 
         var path = ResolveWithinWorkspace(requestedPath);
@@ -321,7 +344,7 @@ public sealed class CodexDynamicToolPolicy
     {
         if (!_grant.RunShellCommands)
         {
-            return CodexDynamicToolResult.Denied("This Baton role does not grant shell commands.");
+            return CodexDynamicToolResult.Refused("This Baton role does not grant shell commands.");
         }
 
         var decision = ShellCommandPatternMatcher.EvaluateChainedCommand(
@@ -340,12 +363,12 @@ public sealed class CodexDynamicToolPolicy
                     declared.Contains(ReadTextTool) ? ReadTextTool : null,
                     declared.Contains(SearchTextTool) ? SearchTextTool : null)
                 : null;
-            return CodexDynamicToolResult.Denied(
+            return CodexDynamicToolResult.Refused(
                 alternative is null ? reason : $"{reason}. {char.ToUpperInvariant(alternative[0])}{alternative[1..]}.");
         }
         if (ShellCommandPatternMatcher.IsDeniedByOptionToken(commandLine, _grant.DeniedShellOptionTokens))
         {
-            return CodexDynamicToolResult.Denied("The command contains an option token denied by this Baton role.");
+            return CodexDynamicToolResult.Refused("The command contains an option token denied by this Baton role.");
         }
 
         var startInfo = new ProcessStartInfo
@@ -375,7 +398,7 @@ public sealed class CodexDynamicToolPolicy
         using var process = Process.Start(startInfo)
             ?? throw new IOException("Baton could not start the granted command.");
         using var timeout = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
-        timeout.CancelAfter(CommandTimeout);
+        timeout.CancelAfter(_commandTimeout);
         var stdout = process.StandardOutput.ReadToEndAsync(timeout.Token);
         var stderr = process.StandardError.ReadToEndAsync(timeout.Token);
         try
@@ -386,7 +409,10 @@ public sealed class CodexDynamicToolPolicy
         {
             KillProcessTree(process);
             await DrainAfterKillAsync(stdout, stderr).ConfigureAwait(false);
-            return CodexDynamicToolResult.Denied($"Command exceeded Baton's {CommandTimeout.TotalMinutes:0}-minute tool limit.");
+            // A timeout is a failure of a command the grant ALLOWED and Baton RAN. It costs the step
+            // and reports no output, but nothing here declined it, so it carries no refusal marker.
+            return CodexDynamicToolResult.Failed(
+                $"Command exceeded Baton's {_commandTimeout.TotalMinutes:0.##}-minute tool limit.");
         }
         catch (OperationCanceledException)
         {
@@ -401,9 +427,13 @@ public sealed class CodexDynamicToolPolicy
             combined = combined[^MaxCommandOutputCharacters..] +
                 $"\n[leading output truncated by Baton at {MaxCommandOutputCharacters} characters]";
         }
+        // A non-zero exit is the command's own answer, carried back whole — `pixi run test` with three
+        // failing tests is the case that matters, and its output IS the information the step bought.
+        // Failed rather than Refused: stamping the refusal marker here counted every failing allowed
+        // command as budget the grant declined (#1921 review HIGH).
         return process.ExitCode == 0
             ? CodexDynamicToolResult.Allowed(combined)
-            : CodexDynamicToolResult.Denied($"Command exited {process.ExitCode}.\n{combined}");
+            : CodexDynamicToolResult.Failed($"Command exited {process.ExitCode}.\n{combined}");
     }
 
     private string ResolveAllowedRead(string requestedPath)
@@ -426,7 +456,7 @@ public sealed class CodexDynamicToolPolicy
         // #1920 (table row 1, the conductor-brief case): the refusal names the roots it checked and
         // the remedy, because the measured failure was a worker handed another room's path and left
         // to guess. Another Baton room is never readable from here, however the path was obtained.
-        throw new UnauthorizedAccessException(
+        throw new CodexGrantRefusedException(
             $"Path '{requestedPath}' is outside this Baton's readable roots. "
             + $"Readable here: {DescribeReadableRoots()}. Files under another Baton room are never "
             + "readable from this worker — if a brief pointed at one, ask for its content quoted "
@@ -453,12 +483,12 @@ public sealed class CodexDynamicToolPolicy
     {
         if (_workspaceRoot is null)
         {
-            throw new UnauthorizedAccessException("This Baton worker has no workspace root.");
+            throw new CodexGrantRefusedException("This Baton worker has no workspace root.");
         }
         var candidate = ResolveCandidate(requestedPath);
         if (!IsWithin(candidate, _workspaceRoot))
         {
-            throw new UnauthorizedAccessException($"Path '{requestedPath}' is outside this Baton's workspace root.");
+            throw new CodexGrantRefusedException($"Path '{requestedPath}' is outside this Baton's workspace root.");
         }
         return candidate;
     }
@@ -471,7 +501,7 @@ public sealed class CodexDynamicToolPolicy
         var candidate = Path.GetFullPath(Path.Combine(root, relativePath));
         if (!IsWithin(candidate, root))
         {
-            throw new UnauthorizedAccessException($"Path '{relativePath}' escapes its Baton root.");
+            throw new CodexGrantRefusedException($"Path '{relativePath}' escapes its Baton root.");
         }
         return candidate;
     }
@@ -530,7 +560,7 @@ public sealed class CodexDynamicToolPolicy
             if ((File.Exists(current) || Directory.Exists(current))
                 && File.GetAttributes(current).HasFlag(FileAttributes.ReparsePoint))
             {
-                throw new UnauthorizedAccessException($"Path '{path}' crosses a symbolic link or reparse point.");
+                throw new CodexGrantRefusedException($"Path '{path}' crosses a symbolic link or reparse point.");
             }
         }
     }
@@ -621,22 +651,41 @@ public sealed class CodexDynamicToolPolicy
 }
 
 /// <summary>
+/// A decision this policy's GRANT took, raised where a path is resolved so
+/// <see cref="CodexDynamicToolPolicy.ExecuteAsync"/> can map it to
+/// <see cref="CodexDynamicToolResult.Refused"/> while every other exception maps to
+/// <see cref="CodexDynamicToolResult.Failed"/>. Its own type rather than
+/// <see cref="UnauthorizedAccessException"/>, which the filesystem also throws for an allowed path this
+/// process simply cannot open — catching that as a refusal is the over-count this split exists to end.
+/// </summary>
+internal sealed class CodexGrantRefusedException(string message) : Exception(message);
+
+/// <summary>
 /// One dynamic-tool call's answer, as <c>CodexAppServerBroker</c> hands it back to codex and copies it
 /// into the room's captured stream.
+/// <para>
+/// <b>Three outcomes, two of them unsuccessful and only one of them a refusal</b> (#1921 review HIGH).
+/// <see cref="Success"/> answers "did the call produce what it was asked for"; the marker on
+/// <see cref="Refused"/> answers the different question "did Baton's grant decline it", which is the one
+/// <c>Status.CodexUsageParser.CountRefusedToolSteps</c> and the ledger's <c>refusedToolSteps</c> report.
+/// A single unsuccessful factory conflated the two and stamped every failing allowed command as budget
+/// the grant had declined.
+/// </para>
 /// </summary>
 public sealed record CodexDynamicToolResult(bool Success, string Text)
 {
     public static CodexDynamicToolResult Allowed(string text) => new(true, text);
 
     /// <summary>
-    /// A refusal, carrying <see cref="GrantRefusal.Marker"/> (#1921).
+    /// A GRANT REFUSAL, carrying <see cref="GrantRefusal.Marker"/> (#1921) — the definition
+    /// <see cref="GrantRefusal"/> states and this file does not restate.
     /// <para>
-    /// <b>The single funnel for every refusal on the codex path</b> — the read-text and search-text
-    /// handlers, the list and write handlers, the "not in this role grant" fallthrough, and
-    /// <c>ExecuteAsync</c>'s mapping of the path-escape exceptions ("outside this Baton's readable
-    /// roots", "outside this Baton's workspace root", "crosses a symbolic link"). Stamping here rather
-    /// than at each of those thirteen call sites is what makes a fourteenth impossible to add without
-    /// the marker.
+    /// <b>The single funnel for every refusal on the codex path</b> — the six "this Baton role does not
+    /// grant …" arms, the command matcher's own verdict and the denied option token, the "not in this
+    /// role grant" fallthrough, and <c>ExecuteAsync</c>'s mapping of
+    /// <see cref="CodexGrantRefusedException"/> (outside the readable roots, outside the workspace root,
+    /// escaping an output root, crossing a reparse point). Stamping here rather than at each of those
+    /// call sites is what makes the next one impossible to add without the marker.
     /// </para>
     /// <para>
     /// Idempotent through <see cref="GrantRefusal.Stamp"/>, which matters for the one text that arrives
@@ -644,5 +693,13 @@ public sealed record CodexDynamicToolResult(bool Success, string Text)
     /// handler.
     /// </para>
     /// </summary>
-    public static CodexDynamicToolResult Denied(string text) => new(false, GrantRefusal.Stamp(text));
+    public static CodexDynamicToolResult Refused(string text) => new(false, GrantRefusal.Stamp(text));
+
+    /// <summary>
+    /// A tool call the grant ALLOWED that did not succeed: a non-zero exit, the command timeout, a
+    /// missing file or directory, a malformed argument, an output name outside the worker contract, an
+    /// I/O error. Unsuccessful and <b>unmarked</b> — its payload is its reason, so it is neither a
+    /// refusal nor an empty result, and it must not be counted as either.
+    /// </summary>
+    public static CodexDynamicToolResult Failed(string text) => new(false, text);
 }

@@ -433,7 +433,7 @@ public static class ShellCommandPatternMatcher
         /// <summary>
         /// A denial reason a person can act on, carrying <see cref="GrantRefusal.Marker"/> — this
         /// matcher is one of #1921's producing sites, and every reason it emits ends up in a tool
-        /// RESULT: through <c>CodexDynamicToolResult.Denied</c> on the codex path, and wrapped inside
+        /// RESULT: through <c>CodexDynamicToolResult.Refused</c> on the codex path, and wrapped inside
         /// the claude/agy hook commands' own sentences on the other two.
         /// <para>
         /// <b>Stamped HERE, in the record, rather than at each <c>return</c>.</b> There are five refusal

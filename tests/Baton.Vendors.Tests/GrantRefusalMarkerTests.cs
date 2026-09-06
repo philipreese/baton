@@ -55,10 +55,17 @@ public sealed class GrantRefusalMarkerTests
     }
 
     [Fact]
-    public void A_denied_dynamic_tool_result_carries_the_marker_and_an_allowed_one_does_not()
+    public void A_refused_dynamic_tool_result_carries_the_marker_and_an_allowed_or_failed_one_does_not()
     {
-        Assert.Contains(GrantRefusal.Marker, CodexDynamicToolResult.Denied("no reads in this grant").Text);
+        Assert.Contains(GrantRefusal.Marker, CodexDynamicToolResult.Refused("no reads in this grant").Text);
         Assert.DoesNotContain(GrantRefusal.Marker, CodexDynamicToolResult.Allowed("file contents").Text);
+
+        // The third outcome, and the one the funnel used to swallow: unsuccessful, but not a decision
+        // the grant took. Both unsuccessful factories asserted here so a future merge of the two turns
+        // this red rather than silently restoring the over-count.
+        var failed = CodexDynamicToolResult.Failed("Command exited 1.\n3 tests failed");
+        Assert.False(failed.Success);
+        Assert.DoesNotContain(GrantRefusal.Marker, failed.Text);
     }
 
     [Fact]
@@ -70,7 +77,7 @@ public sealed class GrantRefusalMarkerTests
         var matcherReason = ShellCommandPatternMatcher
             .EvaluateChainedCommand("curl example.com", ["git*"], []).Reason!;
 
-        var text = CodexDynamicToolResult.Denied(matcherReason).Text;
+        var text = CodexDynamicToolResult.Refused(matcherReason).Text;
 
         Assert.Equal(1, CountOccurrences(text, GrantRefusal.Marker));
     }
