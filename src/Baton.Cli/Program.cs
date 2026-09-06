@@ -424,11 +424,10 @@ try
     // could reference is already on disk by the time the pump/decision call above returned.
     if (result.State.Status == WorkflowStatus.Terminal && result.RoomDirectoryPath is not null)
     {
-        // #1356 point 4 / #1570 / #1849 phase A: the terminal sentinel and both ledgers. Moved into
-        // TerminalSettleRecorder by #1934 slice 1, which gave this block a SECOND caller -- the
-        // daemon's queue scheduler dispatches in-process, so a queue-launched room reaches Terminal
-        // without this file's top-level code ever running. Every rule and every fail-open contract is
-        // stated there; hostStopSource.Token bounds only the delivery probe, per its parameter doc.
+        // #1356 point 4 / #1570 / #1849 phase A: the terminal sentinel and both ledgers, which #1934
+        // moved into TerminalSettleRecorder when they gained a caller outside this file. Every rule
+        // and fail-open contract is stated there; hostStopSource.Token bounds only the delivery probe,
+        // per that method's parameter doc.
         await TerminalSettleRecorder.RecordAsync(result, hostStopSource.Token).ConfigureAwait(false);
     }
     else if (args[0] == "resolve" && result.RoomDirectoryPath is { } resolvedNonTerminalRoomDirectoryPath)

@@ -16,9 +16,9 @@ namespace Baton.Queue;
 /// for <c>launched</c> — a launch has no reason beyond the counters beside it.
 /// </param>
 /// <param name="LiveWeight">The weighted tally over running rooms at evaluation time.</param>
-/// <param name="FreeGb">Free physical memory in GiB, or absent when it could not be measured — never a fabricated reading.</param>
+/// <param name="FreeGb">The reading the decision compared against; absent, never a stand-in number, when there was none.</param>
 /// <param name="FloorGb">The hour band's floor this evaluation compared against.</param>
-/// <param name="Tier">The <c>QueueTierTable.KeyFor</c> key used, or absent when the item named no scope class.</param>
+/// <param name="Tier"><c>QueueTierResolution.TierKey</c> verbatim; absent when that was null.</param>
 /// <param name="Adapter">The adapter resolved for the launch; absent for a wait.</param>
 /// <param name="Model">The model resolved for the launch; absent for a wait.</param>
 /// <param name="Effort">The effort resolved for the launch; absent for a wait.</param>
@@ -89,9 +89,9 @@ public sealed record QueueDecisionEntry(
 /// <see cref="JsonLinesLedger{TEntry}.AppendAsync"/> already documents as "always appended".
 /// </para>
 /// <para>
-/// <b>Fails open, never gates</b>, exactly as <c>QuotaLedgerStore</c> does: the append throws and the
-/// caller (the daemon's queue service) logs and swallows. A ledger write must never be the reason a
-/// lane that was going to launch does not.
+/// <b>Fails open, never gates</b>, exactly as <c>QuotaLedgerStore</c> does, and with the same split:
+/// this store throws, and the caller — the daemon's queue service — is where the log-and-swallow
+/// happens.
 /// </para>
 /// </remarks>
 public static class QueueDecisionLedgerStore
@@ -105,14 +105,13 @@ public static class QueueDecisionLedgerStore
     /// into the next evaluation.
     /// </summary>
     /// <remarks>
-    /// <b>What the collapse means, stated where it can be checked:</b> the ledger records every
-    /// transition, every launch and every failure, and does not re-record a verdict identical to the
-    /// one immediately before it. A queue that waits on memory for three hours writes one line, not
-    /// three hundred and sixty — and "is it still waiting, and on what" is
-    /// <c>baton queue list</c>'s question, not this file's. A launch and a failure never collapse in
-    /// practice, because each changes the item's state and so the next evaluation's verdict differs;
-    /// the guard is on the key alone rather than on the decision kind, so that stays a property of the
-    /// data rather than a rule stated twice.
+    /// spec/baton.md §13 states what the ledger does and does not contain. Two mechanical notes that
+    /// belong with the code rather than the spec: the guard is on
+    /// <see cref="QueueDecisionEntry.VerdictKey"/> alone, never on the decision kind, so "a launch is
+    /// always appended" is a consequence of a launch changing the item's state (and so the next
+    /// verdict) rather than a second rule; and the key is the CALLER's to carry across evaluations,
+    /// which is why it is returned rather than held in a field here — this store has no per-scheduler
+    /// state and two schedulers would need two keys.
     /// </remarks>
     public static async Task<string> AppendAsync(
         QueueDecisionEntry entry,

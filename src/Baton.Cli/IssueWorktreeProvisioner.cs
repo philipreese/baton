@@ -122,6 +122,11 @@ public static class IssueWorktreeProvisioner
             WorkingDirectory = workingDirectory,
             RedirectStandardOutput = true,
             RedirectStandardError = true,
+            // Pinned rather than inherited: the console code page decides otherwise, and a gh error
+            // message carrying a non-ASCII issue title would come back mojibake in the refusal the
+            // operator reads. RedirectedProcessEncodingTests is what makes this non-optional.
+            StandardOutputEncoding = System.Text.Encoding.UTF8,
+            StandardErrorEncoding = System.Text.Encoding.UTF8,
             UseShellExecute = false,
             CreateNoWindow = true,
         };

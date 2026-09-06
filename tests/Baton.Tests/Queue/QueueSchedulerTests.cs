@@ -185,8 +185,8 @@ public sealed class QueueSchedulerTests
     [Fact]
     public void The_hold_is_reported_ahead_of_every_other_closed_gate()
     {
-        // Held, over the cap, under the floor, and inside the gap all at once: an operator who held the
-        // queue must read `hold`, not whichever other gate happens to also be shut.
+        // Four gates shut at once — held, over the cap, under the floor, inside the gap. This is the
+        // arm that pins the ORDER rather than any one gate; it goes red if the ifs are rearranged.
         var decision = QueueScheduler.Decide(
             LocalAt(12), [Item()], liveWeight: 99, freeGb: 0.0, Defaults, LocalAt(12), held: true);
 
@@ -206,8 +206,9 @@ public sealed class QueueSchedulerTests
     [Fact]
     public void Out_of_range_settings_fall_back_to_the_shipped_defaults_rather_than_being_honoured()
     {
-        // A zero cap would hold every launch forever and a negative gap would disable the gap; neither
-        // is a setting anyone means, so both read as the default.
+        // Three plausible typos, each dangerous in a different direction (spec/baton.md §13). The
+        // assertions read the Effective* properties because those are the only accessors the
+        // scheduler uses; a raw-field read would report the typo back unchanged.
         var typo = new QueueSettings { MaxLiveWeight = 0, GapSeconds = -5, NightStartHour = 99 };
 
         Assert.Equal(QueueSettings.DefaultMaxLiveWeight, typo.EffectiveMaxLiveWeight);

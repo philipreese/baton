@@ -174,9 +174,9 @@ public static class QueueOptionsParser
                 + "refused rather than resolved to some other tier's model.");
         }
 
-        // #1934 Q3: an override carries a reason, and the reason lands on the room's bindings. Enforced
-        // only when there IS a tier to differ from -- an item with no scope class names its axes
-        // outright, and there is nothing for a reason to be a departure FROM.
+        // Q3's mandatory justification (spec/baton.md §13). Gated on `scope is not null` because
+        // without a tier there is no departure to justify -- an item that simply names its axes is
+        // not overriding anything.
         var overridesAnAxis = adapter is not null || model is not null || effort is not null;
         if (scope is not null && overridesAnAxis && string.IsNullOrWhiteSpace(reason))
         {

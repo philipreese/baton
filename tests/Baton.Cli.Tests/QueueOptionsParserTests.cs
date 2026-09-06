@@ -116,7 +116,8 @@ public sealed class QueueOptionsParserTests
     [Fact]
     public void An_axis_named_without_a_scope_class_needs_no_reason()
     {
-        // There is no tier to depart from, so there is nothing for a reason to be a departure FROM.
+        // The negative arm of the mandatory-justification rule: it is gated on the scope class, and
+        // this command has none.
         var options = QueueOptionsParser.Parse(
             ["add", "t", "--role", "implement", "--spec", "b.md", "--workspace", "C:\\x", "--model", "sonnet"]);
 

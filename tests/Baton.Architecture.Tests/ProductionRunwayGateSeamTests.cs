@@ -45,7 +45,10 @@ public class ProductionRunwayGateSeamTests
     /// with why. Empty by design — see the remarks above before adding one, including what the file-only
     /// key means.
     /// </summary>
-    private static readonly Dictionary<string, string> ApprovedEvaluatorOverrides = new();
+    private static readonly Dictionary<string, string> ApprovedEvaluatorOverrides = new()
+    {
+        ["src/Baton.Cli/Daemon/QueueLauncher.cs"] = "#1934 slice 1, and a contract change made first in spec/baton.md §13, not a line added in passing. It does NOT substitute an evaluator: it awaits DispatchCommand.CreateDiskRunwayEvaluatorAsync — the same production evaluator a null seam would have built — and passes a wrapper that calls it, returns its verdict unchanged, and only REMEMBERS whether any vendor came back IsHold. The gate's thresholds, snapshot and decision are the production ones in full; nothing is admitted that a null seam would have held. The observation is load-bearing for the queue: DispatchCommand raises CliArgumentException for a hold AND for a drain marker, a missing spec, an unknown role and a non-git workspace, so a scheduler branching on the exception type would leave a permanently-broken item retrying every gap forever with 'runway-held' falsely recorded as the reason. QueueLauncher's own remarks state the same thing at the call site.",
+    };
 
     private const string CallMarker = "DispatchCommand.ExecuteAsync(";
     private const string EvaluatorSeamMarker = "evaluateRunway";

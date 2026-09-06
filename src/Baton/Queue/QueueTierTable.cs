@@ -7,16 +7,14 @@ namespace Baton.Queue;
 /// </summary>
 /// <remarks>
 /// <para>
-/// <b>The key is role + scope class, flattened to one token</b> — <c>engine</c>, <c>tooling</c>,
-/// <c>docs</c> for the mutating roles, and <c>review-&lt;scope&gt;</c> for <c>review</c>. Flattened
-/// rather than nested because settings.json is hand-edited and a two-level table is two chances to
-/// mistype a key; <see cref="KeyFor"/> is the only thing that builds one.
+/// The key shape is spec/baton.md §13's. The invariant that matters here: <see cref="KeyFor"/> is the
+/// only thing in the tree that builds one, so a caller never spells a key itself.
 /// </para>
 /// <para>
-/// <b>Nothing here promotes a model.</b> An item that names <c>sonnet</c> gets <c>sonnet</c>, and
-/// <see cref="QueueTierResolution.IsOverride"/> says the tier was not what ran, so the launch fact
-/// records the substitution that did not happen. The rule exists because the scratchpad runner's
-/// per-vendor defaults silently upgraded a model the operator had chosen deliberately.
+/// <b>Nothing here promotes a model</b>, and the enforcement is structural rather than a check: no
+/// code path below ever assigns a model the item did not ask for, once it asked for one. What
+/// <see cref="QueueTierResolution.IsOverride"/> adds is that the departure is visible to the launch
+/// fact, so the choice is auditable as well as honoured.
 /// </para>
 /// </remarks>
 public static class QueueTierTable
@@ -73,11 +71,9 @@ public static class QueueTierTable
     /// was overridden away from its tier.
     /// </summary>
     /// <remarks>
-    /// Precedence, per axis independently (decision 0017's three axes stay three axes): the item's own
-    /// explicit value, then the tier entry's, then — for the model axis only — the adapter default.
-    /// An item that names no scope class and no explicit adapter/model/effort resolves to a tier of
-    /// nulls, which is not an error: it means "whatever the role's own <c>WorkerTiers.json</c> tier
-    /// says", exactly as a bare <c>baton dispatch</c> would.
+    /// Precedence runs per axis independently (decision 0017's three axes stay three): the item's own
+    /// value, then the tier entry's, then — model only — the adapter default. A resolution of all
+    /// nulls is a legitimate result, not a failure; spec/baton.md §13 says what a caller does with it.
     /// </remarks>
     public static QueueTierResolution Resolve(QueueItem item, QueueSettings settings)
     {

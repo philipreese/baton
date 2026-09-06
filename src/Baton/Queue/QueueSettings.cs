@@ -3,24 +3,19 @@ using System.Text.Json.Serialization;
 namespace Baton.Queue;
 
 /// <summary>
-/// The conductor queue's scheduling policy and tier table (#1934 slice 1), living under
-/// <c>Queue</c> in the settings file baton already has (<c>BatonPaths.SettingsFile</c>) rather than a
-/// second config file — the same placement <c>RunwayHoldSettings</c> took, for the same reason.
+/// The <c>Queue</c> block of <c>BatonPaths.SettingsFile</c> (#1934 slice 1) — one settings file, not a
+/// second config file, the same placement <c>RunwayHoldSettings</c> took.
 /// </summary>
 /// <remarks>
 /// <para>
-/// <b>Every shipped default is the operator's own 2026-09-05 number</b>, carried over from the
-/// PowerShell scratchpad runner this queue replaces (#1934 body, item 1). The values were doctrine in
-/// that loop's comments and nowhere in the product; they are data here so the comparator (#1903) and
-/// the glass (#1912) can read them. spec/baton.md §12 states them once — this file is the code that
-/// holds them, not a second register of what they are.
+/// Every shipped default is the operator's own 2026-09-05 number, carried over from the PowerShell
+/// runner this queue replaces. spec/baton.md §13's table is the register of what they are and why;
+/// this file is where they live as data.
 /// </para>
 /// <para>
-/// <b>An out-of-range value falls back to the default rather than being clamped or honoured</b>, the
-/// same posture <c>RunwayHoldSettings</c> takes and for the same reason: a zero
-/// <see cref="MaxLiveWeight"/> would hold every launch forever and a negative
-/// <see cref="GapSeconds"/> would disable the gap silently, and neither is a setting anyone means.
-/// The effective values are the <c>Effective*</c> properties; nothing reads the raw fields directly.
+/// <b>The <c>Effective*</c> properties are what anything reads</b> — never the raw fields, which carry
+/// whatever an operator typed. <c>RunwayHoldSettings</c> established that shape; §13 has the argument
+/// for preferring it to clamping.
 /// </para>
 /// </remarks>
 public sealed record QueueSettings
@@ -39,11 +34,8 @@ public sealed record QueueSettings
     /// operator is not also using the machine.</summary>
     public double FloorGbNight { get; init; } = DefaultFloorGbNight;
 
-    /// <summary>
-    /// First hour of the night band, in the operator's LOCAL wall clock — not UTC.
-    /// <see cref="IsNightBand"/> owns the comparison and its own remarks state why the distinction is
-    /// load-bearing.
-    /// </summary>
+    /// <summary>First hour of the night band, in LOCAL wall clock. <see cref="FloorGbAt"/>'s parameter
+    /// doc has why that qualifier matters.</summary>
     public int NightStartHour { get; init; } = DefaultNightStartHour;
 
     /// <summary>First hour of the day band, local wall clock — see <see cref="NightStartHour"/>.</summary>
@@ -74,11 +66,9 @@ public sealed record QueueSettings
     public IReadOnlyDictionary<string, string>? AdapterDefaultModels { get; init; }
 
     /// <summary>
-    /// Where <c>baton queue add --issue &lt;n&gt;</c> provisions its worktree: the directory
-    /// <c>w&lt;n&gt;</c> is created under. Null means "the parent directory of the checkout the verb
-    /// was invoked from", which is what the scratchpad runner did; naming it here is what lets an
-    /// operator whose repos are not siblings say so. Stated in spec/baton.md §12 as an assumption,
-    /// because the issue's own <c>&lt;repos&gt;</c> was never defined.
+    /// The directory <c>baton queue add --issue &lt;n&gt;</c> creates <c>w&lt;n&gt;</c> under. Null
+    /// resolves in <c>IssueWorktreeProvisioner</c>, whose doc states the fallback; spec/baton.md §13
+    /// records it as an assumption, since the issue never defined its own <c>&lt;repos&gt;</c>.
     /// </summary>
     public string? WorktreeRoot { get; init; }
 
@@ -107,12 +97,11 @@ public sealed record QueueSettings
     /// The free-memory floor in force at <paramref name="localNow"/>.
     /// </summary>
     /// <param name="localNow">
-    /// <b>The operator's local wall clock, not UTC.</b> "Night is 20:00–09:00" is a statement about
-    /// when a person is at the machine; computing the band in UTC would move it by the host's offset
-    /// (five hours, for the operator this default was measured on) and quietly apply the night floor
-    /// through the afternoon. <c>QueueScheduler</c> is handed a <see cref="DateTimeOffset"/> and calls
-    /// <c>.LocalDateTime</c> exactly once, at its own entry point, so this rule has one enforcement
-    /// site rather than one per caller.
+    /// <b>Local wall clock, not UTC</b> — spec/baton.md §13 has why the distinction is not cosmetic.
+    /// The enforcement is that <c>QueueScheduler</c> takes a <see cref="DateTimeOffset"/> and calls
+    /// <c>.LocalDateTime</c> exactly once at its entry point, so a caller cannot get this wrong
+    /// independently; this parameter's type (a bare <see cref="DateTime"/>) is what makes the
+    /// conversion someone else's already-made decision.
     /// </param>
     public double FloorGbAt(DateTime localNow) => IsNightBand(localNow) ? EffectiveFloorGbNight : EffectiveFloorGbDay;
 

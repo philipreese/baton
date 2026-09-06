@@ -12,11 +12,10 @@ namespace Baton.Core.Internal;
 /// </summary>
 /// <remarks>
 /// <para>
-/// <b>Never throws, and null is a real answer.</b> Off Windows there is no reading at all (this whole
-/// deployment is one Windows box, #1405), and on Windows the call can still fail. Either way the
-/// caller gets null and, per <c>QueueScheduler.Decide</c>'s <c>freeGb</c> contract, the floor is not
-/// applied and the ledger records the reading as absent rather than as zero — a fabricated zero would
-/// halt the queue permanently, and a fabricated large value would disable the gate silently.
+/// <b>Never throws, and null is a real answer</b> — this API does not exist off Windows (#1405), and
+/// where it does it can still fail. What a caller must do with null is
+/// <c>QueueScheduler.Decide</c>'s <c>freeGb</c> contract and spec/baton.md §13; what this type
+/// guarantees is only that it never invents a number to avoid returning one.
 /// </para>
 /// <para>
 /// The same reading <c>tools/gates/gates.py</c>'s <c>_free_physical_mb</c> takes, by the same API, for
@@ -28,7 +27,7 @@ public static class FreePhysicalMemory
 {
     private const double BytesPerGiB = 1024d * 1024d * 1024d;
 
-    /// <summary>Free physical RAM in GiB, or null when it could not be measured.</summary>
+    /// <summary>Free physical RAM in GiB; null when there is no answer. See the type remarks.</summary>
     public static double? TryReadGiB()
     {
         if (!OperatingSystem.IsWindows())

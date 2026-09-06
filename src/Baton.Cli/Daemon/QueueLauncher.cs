@@ -15,8 +15,7 @@ public sealed record QueueLaunchRequest(QueueItem Item, QueueTierResolution Tier
 /// <param name="RoomDirectory">The room the dispatch provisioned; present even for a failure that got that far.</param>
 /// <param name="RunwayHeld">
 /// True when <c>baton dispatch</c>'s runway gate refused. Distinct from <paramref name="Error"/>
-/// because the two have opposite consequences: a hold leaves the item QUEUED to retry after the gap,
-/// an error fails it out of the queue.
+/// because the two have opposite consequences for the item's state — spec/baton.md §13 names them.
 /// </param>
 /// <param name="Error">Why the launch failed, or null when it started.</param>
 public sealed record QueueLaunchOutcome(string? RoomDirectory, bool RunwayHeld = false, string? Error = null);
@@ -27,24 +26,21 @@ public sealed record QueueLaunchOutcome(string? RoomDirectory, bool RunwayHeld =
 /// </summary>
 /// <remarks>
 /// <para>
-/// <b>Why not a shell-out.</b> A spawned <c>baton dispatch</c> would be a new process-spawn site, its
-/// stdout would be nobody's, and its exit code cannot distinguish a runway hold from a bad spec.
-/// In-process, the launcher gets the typed refusal and the recorded runway decision.
+/// <b>Why not a shell-out</b> — spec/baton.md §13 has the argument. Concretely, in-process is what
+/// gives this method a typed exception and a live evaluator to observe, where a child process would
+/// have offered one integer.
 /// </para>
 /// <para>
-/// <b>A hold is read off the evaluator, never off the exception.</b>
-/// <see cref="DispatchCommand.ExecuteAsync"/> raises <see cref="CliArgumentException"/> for a hold AND
-/// for a drain marker, a missing spec, an unknown role and a non-git workspace. Branching on the type
-/// would leave a permanently-broken item retrying every gap forever with <c>runway-held</c> recorded
-/// as the reason — a queue that looks busy and is stuck. So the launcher wraps
-/// <see cref="DispatchCommand.CreateDiskRunwayEvaluatorAsync"/>, remembers whether any vendor came
-/// back <see cref="RunwayDecision.IsHold"/>, and branches on that.
+/// <b>A hold is read off the evaluator, never off the exception</b> — spec/baton.md §13 has the
+/// argument. Mechanically: this method wraps
+/// <see cref="DispatchCommand.CreateDiskRunwayEvaluatorAsync"/> in <c>Observe</c>, which returns each
+/// <see cref="RunwayDecision"/> unchanged and sets a local flag when one is
+/// <see cref="RunwayDecision.IsHold"/>; the two <c>catch</c> arms below then differ only by that flag.
 /// </para>
 /// <para>
-/// <b>The dispatch is awaited to its Terminal state, on a detached task.</b> The caller
-/// (<see cref="QueueSchedulerService"/>) does not await this to completion for the lane's whole life —
-/// it awaits only up to the point where the room exists and the pump has begun, then leaves the rest
-/// running. See that service's remarks for the shutdown posture that follows from it.
+/// <b>The lane is not awaited to completion.</b> This method returns as soon as the outcome is known;
+/// the pump keeps running on its own task. <see cref="QueueSchedulerService"/>'s remarks have the
+/// shutdown posture that follows.
 /// </para>
 /// </remarks>
 public static class QueueLauncher
@@ -168,12 +164,11 @@ public static class QueueLauncher
             Model: tier.Model,
             Effort: tier.Effort,
             Timeout: item.TimeoutMinutes is { } minutes ? TimeSpan.FromMinutes(minutes) : null,
-            // #1934 item 3: "an override carries --reason and the reason lands on the room's bindings".
-            // The label IS that bindings field (WorkerBindingConfigEntry.Label, stamped onto every entry
-            // by DispatchCommand), and it doubles as the tag→room trace, so one field carries both
-            // rather than a new bindings field carrying half of it. Sanitized through the same
+            // WorkerBindingConfigEntry.Label is the bindings field spec/baton.md §13 requires the
+            // override's justification to reach; it doubles as the tag-to-room trace, so one field
+            // carries both rather than a new one carrying half. Sanitized through the same
             // SanitizeLabel the CLI flag uses -- including its 60-character cap, which is why the tag
-            // leads: a truncated reason still leaves the room identifiable.
+            // leads: a truncated justification still leaves the room identifiable.
             Label: DispatchOptionsParser.SanitizeLabel(
                 tier.IsOverride && tier.OverrideReason is { Length: > 0 } reason
                     ? $"{item.Tag} — tier override: {reason}"

@@ -8,17 +8,14 @@ namespace Baton.Queue;
 /// </summary>
 /// <remarks>
 /// <para>
-/// <b>The gate order is the cheap-and-certain-first order</b>, and it is load-bearing for the recorded
-/// fact: hold, then no-items, then gap, then memory, then slots. An operator who has held the queue
-/// should read <c>hold</c> in the ledger, not <c>memory</c> — the hold is why nothing launched, and
-/// whichever gate happens to also be closed is not.
+/// <b>The order the gates are written in below is the order spec/baton.md §13 fixes</b>, and it is not
+/// an implementation detail: it decides which reason a caller records when more than one gate is shut,
+/// so reordering these <c>if</c>s changes the ledger.
 /// </para>
 /// <para>
-/// <b>The runway hold is not evaluated here.</b> Q5: the queue never reads <c>/usage</c>;
-/// <c>baton dispatch</c>'s own runway gate is the only one, so a hold is discovered by attempting the
-/// launch and is fed back as <see cref="QueueWaitReason.RunwayHeld"/> by the caller. This function
-/// therefore returns <see cref="QueueDecisionKind.Launch"/> for an item the vendor may still refuse;
-/// that is the design, not a gap.
+/// <b>The runway hold is not evaluated here (Q5).</b> This function can therefore return
+/// <see cref="QueueDecisionKind.Launch"/> for an item <c>baton dispatch</c> will still refuse; the
+/// caller feeds that back as <see cref="QueueWaitReason.RunwayHeld"/>. Designed, not missing.
 /// </para>
 /// </remarks>
 public static class QueueScheduler
@@ -35,11 +32,10 @@ public static class QueueScheduler
     /// non-<see cref="QueueItem.External"/> item is the candidate; nothing reorders or prioritizes.</param>
     /// <param name="liveWeight">The tally over rooms already running, built with <see cref="QueueWeights.For"/>.</param>
     /// <param name="freeGb">
-    /// Free physical memory in GiB, or null when it could not be measured. Null does NOT block: it is
-    /// recorded as unmeasured and the floor is not applied, the same posture <c>RunwayGate</c> already
-    /// takes for a vendor with no harvested snapshot. A gate that halts the whole queue on every
-    /// non-Windows host, where no reading exists at all, would be a worse failure than the one it
-    /// guards against.
+    /// Free physical memory in GiB. <b>Null does not block</b> — the floor is skipped and the null is
+    /// carried through to <see cref="QueueDecision.FreeGb"/> so the caller records it absent. The
+    /// posture and its justification are spec/baton.md §13's; <c>RunwayGate</c>'s unmeasured admission
+    /// is the precedent it follows.
     /// </param>
     /// <param name="lastLaunchAt">When the scheduler last launched, or null if it has not this process.</param>
     /// <param name="held">The <c>baton queue hold</c> flag.</param>
@@ -74,9 +70,9 @@ public static class QueueScheduler
             return QueueDecision.Wait(QueueWaitReason.Gap, candidate, liveWeight, freeGb, floorGb);
         }
 
-        // A review lane bypasses the memory floor for the same reason it bypasses the cap: it is not
-        // what consumes the memory the floor protects. Checked before the floor rather than folded
-        // into it so the two bypasses read as one rule with one predicate.
+        // One predicate for both bypasses (spec/baton.md §13), hoisted above the floor rather than
+        // repeated in each condition, so the two can never diverge into a lane that skips one gate and
+        // not the other.
         var bypasses = QueueWeights.BypassesCap(candidate.Role);
 
         if (!bypasses && freeGb is { } free && free < floorGb)

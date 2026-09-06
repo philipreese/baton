@@ -8,9 +8,8 @@ namespace Baton.Queue;
 /// <param name="Items">Every item, whatever its state. Nothing is pruned automatically — a done item
 /// stays visible to <c>baton queue list</c> until the operator clears it.</param>
 /// <param name="Held">
-/// <c>baton queue hold</c>'s flag. Pausing launches without stopping the daemon is the point: the
-/// usage harvester, the projection writer and the delivery poller keep running, and lanes already
-/// live are untouched.
+/// <c>baton queue hold</c>'s flag — read by the scheduler and by nothing else, which is what confines
+/// its effect to new launches (spec/baton.md §13).
 /// </param>
 public sealed record QueueSnapshot(
     [property: JsonPropertyName("items")] IReadOnlyList<QueueItem> Items,
@@ -24,26 +23,22 @@ public sealed record QueueSnapshot(
 /// </summary>
 /// <remarks>
 /// <para>
-/// <b>Every mutation is one read-modify-write inside one <see cref="MutexGuardedFileLock"/>
-/// acquisition</b>, the same shape and for the same reason <c>JsonLinesLedger.AppendAsync</c> uses:
-/// this file has two writers that are not in the same process — the CLI verbs the operator types and
-/// the daemon's scheduler tick — so a `baton queue add` landing between the tick's read and its write
-/// would be silently truncated away, or worse, would resurrect an item the tick had just marked
-/// launched into a second, duplicate room.
+/// The locking rule and the two-writer situation behind it are spec/baton.md §13's. What it means for
+/// this type's API: <see cref="MutateAsync"/> exists so that a caller CANNOT do a read and a write as
+/// two calls — there is no public write method to pair with <see cref="LoadAsync"/>.
 /// </para>
 /// <para>
 /// <b>Unlike the ledgers, this store does not fail open.</b> A quota-ledger write that fails costs a
-/// row; a queue write that fails and is swallowed costs the operator's actual work list. Read
-/// tolerance is asymmetric on purpose: an absent file reads as <see cref="QueueSnapshot.Empty"/>
-/// (there is genuinely no queue yet), but a malformed one throws — silently replacing a
-/// hand-mangled queue with an empty one would delete the queue.
+/// row; a queue write that fails and is swallowed costs the operator's actual work list. So every
+/// failure here raises <see cref="QueueStoreException"/> — with one exception, stated in §13: an
+/// absent file is a legitimate empty queue, a malformed one is not.
 /// </para>
 /// </remarks>
 public static class QueueStore
 {
-    /// <summary>This store's own <see cref="MutexGuardedFileLock"/> prefix. Distinct from every
-    /// ledger's, so the queue and an accounting append never contend; changing it would let an older
-    /// and a newer <c>baton</c> take two different mutexes against the same file.</summary>
+    /// <summary>This store's own <see cref="MutexGuardedFileLock"/> prefix — distinct from every
+    /// ledger's, so the queue and an accounting append never contend. What renaming it would cost is
+    /// on <see cref="MutexGuardedFileLock"/> itself; the same warning applies here.</summary>
     public const string LockNamePrefix = "baton-queue";
 
     private static readonly TimeSpan LockTimeout = TimeSpan.FromSeconds(30);

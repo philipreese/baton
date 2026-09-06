@@ -9,6 +9,8 @@ namespace Baton.Tests.Queue;
 /// </summary>
 public sealed class QueueStoreTests
 {
+    private static CancellationToken Ct => TestContext.Current.CancellationToken;
+
     private static string TempQueuePath() =>
         Path.Combine(Path.GetTempPath(), $"baton-queue-test-{Guid.NewGuid():N}", "queue.json");
 
@@ -25,7 +27,7 @@ public sealed class QueueStoreTests
     [Fact]
     public async Task An_absent_file_reads_as_an_empty_queue()
     {
-        var snapshot = await QueueStore.LoadAsync(TempQueuePath());
+        var snapshot = await QueueStore.LoadAsync(TempQueuePath(), Ct);
 
         Assert.Empty(snapshot.Items);
         Assert.False(snapshot.Held);
@@ -37,8 +39,8 @@ public sealed class QueueStoreTests
         var path = TempQueuePath();
         try
         {
-            await QueueStore.MutateAsync(path, s => s with { Items = [Item("a"), Item("b")], Held = true });
-            var read = await QueueStore.LoadAsync(path);
+            await QueueStore.MutateAsync(path, s => s with { Items = [Item("a"), Item("b")], Held = true }, Ct);
+            var read = await QueueStore.LoadAsync(path, Ct);
 
             Assert.Equal(["a", "b"], read.Items.Select(i => i.Tag));
             Assert.True(read.Held);
@@ -57,10 +59,10 @@ public sealed class QueueStoreTests
         var path = TempQueuePath();
         try
         {
-            await QueueStore.MutateAsync(path, s => s with { Items = [Item("a")] });
-            await QueueStore.MutateAsync(path, s => s with { Items = s.Items.Append(Item("b")).ToList() });
+            await QueueStore.MutateAsync(path, s => s with { Items = [Item("a")] }, Ct);
+            await QueueStore.MutateAsync(path, s => s with { Items = s.Items.Append(Item("b")).ToList() }, Ct);
 
-            var read = await QueueStore.LoadAsync(path);
+            var read = await QueueStore.LoadAsync(path, Ct);
             Assert.Equal(["a", "b"], read.Items.Select(i => i.Tag));
         }
         finally
@@ -74,12 +76,12 @@ public sealed class QueueStoreTests
     {
         var path = TempQueuePath();
         Directory.CreateDirectory(Path.GetDirectoryName(path)!);
-        await File.WriteAllTextAsync(path, "{ not json at all");
+        await File.WriteAllTextAsync(path, "{ not json at all", Ct);
         try
         {
             // The control arm is the absent-file test above: absent reads empty, malformed throws. If
             // both behaved the same, a hand-mangled queue would silently become an empty one.
-            await Assert.ThrowsAsync<QueueStoreException>(() => QueueStore.LoadAsync(path));
+            await Assert.ThrowsAsync<QueueStoreException>(() => QueueStore.LoadAsync(path, Ct));
         }
         finally
         {
@@ -90,20 +92,11 @@ public sealed class QueueStoreTests
     [Fact]
     public void The_lock_prefix_is_this_stores_own_and_not_a_ledgers()
     {
-        // Pinned literally: renaming it would let an older and a newer baton take two different
-        // mutexes against the same file, and sharing a ledger's would make the two contend.
+        // Pinned as a literal, not read back from the constant — the string itself is the contract
+        // with every other baton build on this machine, so an assertion against the constant would
+        // pass through any rename.
         Assert.Equal("baton-queue", QueueStore.LockNamePrefix);
     }
 
-    private static void Cleanup(string path)
-    {
-        try
-        {
-            Directory.Delete(Path.GetDirectoryName(path)!, recursive: true);
-        }
-        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
-        {
-            // A temp directory that will not delete is not this test's subject.
-        }
-    }
+    private static void Cleanup(string path) => DirectoryCleanup.DeleteRecursively(Path.GetDirectoryName(path)!);
 }

@@ -13,17 +13,15 @@ namespace Baton.Cli;
 /// </summary>
 /// <remarks>
 /// <para>
-/// <b>Why the extraction rather than a second copy.</b> Before it, a queue-launched room got no
-/// <c>terminal.json</c> at all — invisible to <c>FleetStatusTool</c>'s sentinel-first fast path, and
-/// with no cost-ledger row, which is indistinguishable from a lane that spent nothing. Re-implementing
-/// the block daemon-side would have made the accounting rules two places that must agree, which is
-/// the drift the record-once gate exists to stop.
+/// <b>Why the extraction rather than a second copy</b> — spec/baton.md §13 has what a queue-launched
+/// room lost without it. The rule for a future editor: this is now called from two places, so a
+/// change here changes what a <c>baton dispatch</c> from a terminal AND a daemon-launched lane both
+/// record.
 /// </para>
 /// <para>
-/// <b>Fail-open throughout, and unchanged from what <c>Program.cs</c> did.</b> Both ledger writes have
-/// their own <c>try</c> so a failure in one cannot lose the other, and neither is ever the reason a
-/// run that already reached Terminal reports as failed. Each individual rule's own <c>#</c> reference
-/// stays inline below; this doc comment states only what moved and why.
+/// <b>Moved verbatim.</b> Nothing about the behaviour changed; every individual rule's own <c>#</c>
+/// reference stays inline below, and the only edit is that the delivery probe's token arrives as a
+/// parameter instead of closing over <c>hostStopSource</c>.
 /// </para>
 /// </remarks>
 public static class TerminalSettleRecorder

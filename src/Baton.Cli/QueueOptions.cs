@@ -21,9 +21,8 @@ public enum QueueVerb
 /// <param name="Role">The worker role, for <see cref="QueueVerb.Add"/>.</param>
 /// <param name="SpecFilePath">The operator's spec file, copied into baton's own specs directory at add time.</param>
 /// <param name="Issue">
-/// <c>--issue &lt;n&gt;</c>: provision a worktree from this GitHub issue at ADD time, not at launch
-/// time. Deliberate — an operator queueing eight items at 23:00 finds out immediately that issue 1940
-/// does not exist, rather than at 04:00 when the scheduler reaches it. Mutually exclusive with
+/// <c>--issue &lt;n&gt;</c>: provision a worktree from this GitHub issue. See
+/// <see cref="IssueWorktreeProvisioner"/> for when that happens and why then. Mutually exclusive with
 /// <paramref name="WorkspaceDirectory"/>.
 /// </param>
 /// <param name="WorkspaceDirectory">An already-existing directory the worker runs in. Mutually exclusive with <paramref name="Issue"/>.</param>

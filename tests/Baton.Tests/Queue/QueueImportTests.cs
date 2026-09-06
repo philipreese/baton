@@ -68,9 +68,8 @@ public sealed class QueueImportTests
     {
         var items = QueueImport.Parse(RunnerFixture, SpecFor, Now);
 
-        // Both polarities from the SAME fixture: resetting a launched tag to queued would re-dispatch
-        // a lane the operator already has running, and leaving an unlaunched one launched would strand
-        // it forever.
+        // Both polarities from the SAME fixture, which is what makes this measure the flag rather than
+        // a constant: one row carries `launched`, the other omits it.
         Assert.Equal(QueueItemState.Launched, items[0].State);
         Assert.Equal(Now, items[0].LaunchedAt);
         Assert.Equal(QueueItemState.Queued, items[1].State);

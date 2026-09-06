@@ -19,24 +19,16 @@ namespace Baton.Cli.Daemon;
 /// testable without any of that.
 /// </para>
 /// <para>
-/// <b>Launch is detached, and shutdown does not arrest it.</b> A dispatched lane runs for tens of
-/// minutes; awaiting it inline would stop the queue evaluating for that whole time. So
-/// <see cref="LaunchAsync"/> starts the dispatch on its own task with
-/// <see cref="CancellationToken.None"/>, deliberately NOT the host's stopping token: stopping the
-/// daemon must not kill lanes it started, the same posture the runway hold takes ("work already
-/// running is unaffected"). The cost, stated rather than left emergent: a daemon that exits while a
-/// queue-launched lane is live orphans that lane's supervision — the room's own record and its
-/// worker keep going, but nothing marks the item done until a daemon comes back and re-reads the
-/// room, which <see cref="ResolveFinishedItemsAsync"/> does from disk precisely so that a restart
-/// recovers.
+/// <b>A dispatched lane outlives the tick that started it, and outlives this service too</b>
+/// (spec/baton.md §13 states the shutdown ruling and what it costs). Here that means one thing to
+/// hold on to: <see cref="ResolveFinishedItemsAsync"/> is what closes an item out, it reads the room
+/// off disk, and it therefore also closes out items some earlier daemon process started.
 /// </para>
 /// <para>
-/// <b>The runway hold is discovered, not predicted (Q5).</b> The queue never reads <c>/usage</c>.
-/// <see cref="LaunchAsync"/> hands <c>baton dispatch</c> a capturing wrapper around its own runway
-/// evaluator and branches on <em>what the wrapper recorded</em>, never on the exception type: a
-/// <see cref="CliArgumentException"/> is also what a missing spec file, an unknown role and a drain
-/// marker raise, and treating those as "held" would leave a permanently-broken item retrying every
-/// gap forever with a false reason in the ledger.
+/// <b>The runway hold is discovered, not predicted (Q5)</b> — <see cref="QueueLauncher"/> owns that
+/// mechanism. What this service does with it: a <see cref="QueueLaunchOutcome.RunwayHeld"/> outcome
+/// leaves the item's state untouched, where a <see cref="QueueLaunchOutcome.Error"/> moves it to
+/// <see cref="QueueItemState.Failed"/>.
 /// </para>
 /// </remarks>
 public sealed class QueueSchedulerService : BackgroundService
@@ -134,9 +126,9 @@ public sealed class QueueSchedulerService : BackgroundService
         var item = decision.Item!;
         var tier = QueueTierTable.Resolve(item, settings);
 
-        // Fail closed on a scope class with no tier: an item that named one and got nothing back would
-        // otherwise silently launch on the role's own default model, which is exactly the "silently ran
-        // on the wrong tier" failure the table exists to prevent.
+        // Fail closed, per spec/baton.md §13's tier-resolution ruling. Reachable only through a
+        // hand-edited queue file, since QueueOptionsParser already refuses the scope class -- which is
+        // why the daemon checks anyway rather than trusting the verb that wrote the item.
         if (item.ScopeClass is { Length: > 0 } scopeClass && tier.TierKey is not null
             && QueueTierTable.LookupTier(tier.TierKey, settings) is null)
         {
@@ -150,8 +142,9 @@ public sealed class QueueSchedulerService : BackgroundService
 
         if (outcome.RunwayHeld)
         {
-            // Q5: the item STAYS QUEUED and retries after the gap. The hold is a fleet condition, not a
-            // property of this item, so consuming a queue slot for it would be wrong.
+            // No state change: the item is untouched and will be the candidate again next tick. But
+            // _lastLaunchAt IS advanced, so the gap paces the retry -- a held vendor must not be
+            // re-asked every TickSeconds.
             _lastLaunchAt = now;
             await RecordAsync(
                 new QueueDecisionEntry(
@@ -220,15 +213,16 @@ public sealed class QueueSchedulerService : BackgroundService
     }
 
     /// <summary>
-    /// Item 5's done detection: a launched item whose room has reached a terminal state becomes
-    /// <see cref="QueueItemState.Done"/>, or <see cref="QueueItemState.Failed"/> when that terminal
-    /// state is Indeterminate or a timeout. Read from the ROOM, never from a sentinel file the queue
-    /// writes for itself — a restarted daemon resolves an item it never launched.
+    /// Done detection (spec/baton.md §13): every launched item whose room now carries a terminal
+    /// sentinel is moved out of <see cref="QueueItemState.Launched"/> by
+    /// <see cref="ClassifyTerminal"/>. One queue read, one write for the whole batch — a per-item
+    /// mutation would take the file lock once per launched item every tick.
     /// </summary>
     /// <remarks>
-    /// Resolving and redispatching stay operator verbs in slice 1: nothing here retries, resolves, or
-    /// composes a continuation. The item is marked and left alone, with its room id, which is what
-    /// makes the failure investigable.
+    /// Nothing here retries, resolves, or composes a continuation; the item is marked and left alone.
+    /// An item whose room is not terminal yet is untouched, which is also what happens to one whose
+    /// sentinel is momentarily unreadable — <c>TryReadAsync</c>'s "no answer yet" is indistinguishable
+    /// from "not finished", and treating it as either kind of verdict would be a guess.
     /// </remarks>
     internal async Task ResolveFinishedItemsAsync(CancellationToken cancellationToken)
     {
@@ -269,16 +263,19 @@ public sealed class QueueSchedulerService : BackgroundService
     }
 
     /// <summary>
-    /// Item 5's classification, split out because it is the part worth a test: a room that ended
-    /// Indeterminate or timed out is <see cref="QueueItemState.Failed"/> WITH the room id, everything
-    /// else terminal is <see cref="QueueItemState.Done"/>.
+    /// Which state a settled room puts its item in — split out from the I/O above because this is the
+    /// part worth a test.
     /// </summary>
     /// <remarks>
-    /// The Indeterminate reading comes from the sentinel's own step states, not from a second
-    /// taxonomy: <c>StepStatus.IndeterminateAwaitingResolution</c> is what the engine records for a
-    /// worker that neither succeeded nor failed usefully, and a timeout settles there too. A room
-    /// carrying an <c>Error</c> is a plain failure and is also not "done" — a done item is one nobody
-    /// needs to look at.
+    /// The indeterminate reading comes from the sentinel's own step states, not a second taxonomy:
+    /// <c>StepStatus.IndeterminateAwaitingResolution</c> is what the engine records for a worker that
+    /// neither succeeded nor failed usefully, and a timeout settles there too. Matched as a substring
+    /// of the token rather than against the enum, because this assembly reads the projected view's
+    /// string; if that token is ever renamed, this predicate silently stops matching.
+    /// <para>
+    /// The failure message names the room, because a marked item with nowhere to look is not
+    /// investigable.
+    /// </para>
     /// </remarks>
     internal static (QueueItemState State, string? Error) ClassifyTerminal(WorkflowStatusView sentinel, string roomDirectory)
     {

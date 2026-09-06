@@ -96,9 +96,9 @@ public sealed class QueueTierTableTests
     {
         var resolved = QueueTierTable.Resolve(Item(), new QueueSettings());
 
-        // Null means "whatever the role's own WorkerTiers.json tier says", which is what a bare
-        // `baton dispatch` does — not an error, and not an override, because there was no tier to
-        // depart from.
+        // Nulls are the legitimate "defer to the role" result, and IsOverride must stay false with
+        // them — an item flagged as departing from a tier it never consulted would put a fabricated
+        // override on the launch fact.
         Assert.Null(resolved.TierKey);
         Assert.Null(resolved.Adapter);
         Assert.Null(resolved.Model);

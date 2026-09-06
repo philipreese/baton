@@ -352,9 +352,8 @@ public static class BatonPaths
     public const string QueueFileName = "queue.json";
 
     /// <summary>
-    /// <c>{Root}/queue/specs</c> — baton's own copies of each item's spec (#1934 Q6). <c>baton queue
-    /// add</c> copies the operator's file in here at add time, so an item still launches correctly
-    /// after the operator's scratch file has been edited or deleted.
+    /// <c>{Root}/queue/specs</c> — the briefs baton owns rather than references (#1934 Q6;
+    /// spec/baton.md §13 has what that buys). One file per item, named by tag.
     /// </summary>
     public static string QueueSpecsDirectory => Path.Combine(Queue, QueueSpecsDirectoryName);
 

@@ -10,18 +10,16 @@ namespace Baton.Queue;
 /// </summary>
 /// <remarks>
 /// <para>
-/// The runner's shape is <c>{tag, role, model, effort, timeout, workspace|issue, adapter,
-/// maxToolSteps, tokenBudget, overrideRunway, reason, pinModel, external}</c>, either as a bare array
-/// or wrapped in an <c>items</c> object — both are accepted because the live file has been hand-edited
-/// eight times in one evening (#1934 body) and refusing the wrapper form at cutover time would be a
-/// refusal at the worst possible moment.
+/// Both a bare array and an <c>items</c>-wrapped object are accepted: the live file has been
+/// hand-edited eight times in one evening (#1934 body), and refusing a shape over its outermost
+/// bracket at cutover time would be a refusal at the worst possible moment. The refusals this DOES
+/// make, and why they are total rather than per-item, are spec/baton.md §13's.
 /// </para>
 /// <para>
-/// <b>A launched tag comes in launched.</b> The runner records a launch by stamping the item; an
-/// import that reset those to queued would re-dispatch every lane the operator already has running.
-/// The imported item carries no room directory, because the runner never recorded one — that absence
-/// is why an imported launched item can never be resolved to <c>done</c> by the daemon and must be
-/// cleared by the operator, and it is stated here rather than discovered later.
+/// <b>An imported item carries no room directory</b>, because the runner never recorded one. The
+/// consequence, said here rather than left to be discovered: a launched item imported this way can
+/// never be closed out by the daemon's done detection — which reads the room — so the operator clears
+/// it by hand.
 /// </para>
 /// </remarks>
 public static class QueueImport
@@ -44,9 +42,9 @@ public static class QueueImport
     /// </param>
     /// <param name="now">Stamped as each item's <c>AddedAt</c>; the runner recorded no add time.</param>
     /// <exception cref="QueueStoreException">
-    /// <paramref name="json"/> is not the runner's shape, or an item is missing a tag, a role, or both
-    /// a workspace and an issue. Refused as a whole rather than importing the readable subset: a
-    /// partial import at cutover would look like a successful one and leave lanes silently unqueued.
+    /// <paramref name="json"/> is not the runner's shape, or an item is missing a tag, a role, or a
+    /// workspace. Nothing is imported when this throws — see spec/baton.md §13 for why that is the
+    /// posture at cutover.
     /// </exception>
     public static IReadOnlyList<QueueItem> Parse(
         string json, Func<string, string> specFileResolver, DateTimeOffset now)

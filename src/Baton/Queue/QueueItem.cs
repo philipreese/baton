@@ -7,10 +7,10 @@ namespace Baton.Queue;
 /// parameters <c>baton dispatch</c> needs, and the state the scheduler has moved it through.
 /// </summary>
 /// <remarks>
-/// <b>Deliberately not an issue-anchored work item.</b> Slice 1 is the scratchpad runner's list made
-/// durable and nothing more — there is no lifecycle here (implement → review → fix round → merge), no
-/// verdict reading, and no automatic redispatch. Q2's answer is that those are slice 2, built on
-/// this; a field added here "for later" would be a lifecycle no code advances.
+/// <b>Deliberately not an issue-anchored work item</b> (Q2; spec/baton.md §13). The rule this puts on
+/// whoever edits this record: a field belongs here only if something in slice 1 reads or writes it.
+/// A field carrying a lifecycle no code advances reads to every consumer as a capability the product
+/// has.
 /// </remarks>
 public sealed record QueueItem
 {
@@ -104,8 +104,8 @@ public enum QueueItemState
     Done,
 
     /// <summary>
-    /// Either the dispatch itself refused, or the room settled Indeterminate/timed out. Resolving and
-    /// redispatching stay operator verbs in slice 1: nothing here retries a failed item.
+    /// Either the dispatch itself refused, or the room did not settle cleanly. A terminal state: no
+    /// code path moves an item out of it, so clearing one is an operator action.
     /// </summary>
     Failed,
 }

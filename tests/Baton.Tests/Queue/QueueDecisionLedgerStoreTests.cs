@@ -11,6 +11,8 @@ public sealed class QueueDecisionLedgerStoreTests
 {
     private static readonly DateTimeOffset At = new(2026, 9, 5, 23, 30, 0, TimeSpan.Zero);
 
+    private static CancellationToken Ct => TestContext.Current.CancellationToken;
+
     private static string TempLedgerPath() =>
         Path.Combine(Path.GetTempPath(), $"baton-queue-ledger-{Guid.NewGuid():N}.jsonl");
 
@@ -28,8 +30,8 @@ public sealed class QueueDecisionLedgerStoreTests
                 "engine", "claude", "sonnet", "high", TierOverride: true,
                 OverrideReason: "cheap sweep", Room: @"C:\baton\rooms\queue-1934-queue-abcd1234");
 
-            await QueueDecisionLedgerStore.AppendAsync(entry, null, path);
-            var read = await QueueDecisionLedgerStore.ReadAllAsync(path);
+            await QueueDecisionLedgerStore.AppendAsync(entry, null, path, Ct);
+            var read = await QueueDecisionLedgerStore.ReadAllAsync(path, Ct);
 
             var row = Assert.Single(read);
             Assert.Equal("launched", row.Decision);
@@ -52,15 +54,15 @@ public sealed class QueueDecisionLedgerStoreTests
         var path = TempLedgerPath();
         try
         {
-            var key = await QueueDecisionLedgerStore.AppendAsync(Wait("a", QueueWaitReason.Memory), null, path);
+            var key = await QueueDecisionLedgerStore.AppendAsync(Wait("a", QueueWaitReason.Memory), null, path, Ct);
             // Same verdict, different counters: still the same standing wait, so it collapses.
-            key = await QueueDecisionLedgerStore.AppendAsync(Wait("a", QueueWaitReason.Memory, liveWeight: 3.0), key, path);
-            Assert.Single(await QueueDecisionLedgerStore.ReadAllAsync(path));
+            key = await QueueDecisionLedgerStore.AppendAsync(Wait("a", QueueWaitReason.Memory, liveWeight: 3.0), key, path, Ct);
+            Assert.Single(await QueueDecisionLedgerStore.ReadAllAsync(path, Ct));
 
             // Control: a DIFFERENT reason for the same tag is a transition and does append. Without
             // this arm the test could not tell "collapsed" from "never writes anything".
-            await QueueDecisionLedgerStore.AppendAsync(Wait("a", QueueWaitReason.Slots), key, path);
-            Assert.Equal(2, (await QueueDecisionLedgerStore.ReadAllAsync(path)).Count);
+            await QueueDecisionLedgerStore.AppendAsync(Wait("a", QueueWaitReason.Slots), key, path, Ct);
+            Assert.Equal(2, (await QueueDecisionLedgerStore.ReadAllAsync(path, Ct)).Count);
         }
         finally
         {
@@ -74,10 +76,10 @@ public sealed class QueueDecisionLedgerStoreTests
         var path = TempLedgerPath();
         try
         {
-            var key = await QueueDecisionLedgerStore.AppendAsync(Wait("a", QueueWaitReason.Slots), null, path);
-            await QueueDecisionLedgerStore.AppendAsync(Wait("b", QueueWaitReason.Slots), key, path);
+            var key = await QueueDecisionLedgerStore.AppendAsync(Wait("a", QueueWaitReason.Slots), null, path, Ct);
+            await QueueDecisionLedgerStore.AppendAsync(Wait("b", QueueWaitReason.Slots), key, path, Ct);
 
-            Assert.Equal(2, (await QueueDecisionLedgerStore.ReadAllAsync(path)).Count);
+            Assert.Equal(2, (await QueueDecisionLedgerStore.ReadAllAsync(path, Ct)).Count);
         }
         finally
         {
@@ -92,9 +94,9 @@ public sealed class QueueDecisionLedgerStoreTests
         try
         {
             await QueueDecisionLedgerStore.AppendAsync(
-                new QueueDecisionEntry(At, "a", QueueDecisionEntry.Waited, "slots", 1.0, null, 2.0), null, path);
+                new QueueDecisionEntry(At, "a", QueueDecisionEntry.Waited, "slots", 1.0, null, 2.0), null, path, Ct);
 
-            var line = (await File.ReadAllLinesAsync(path))[0];
+            var line = (await File.ReadAllLinesAsync(path, Ct))[0];
             using var document = JsonDocument.Parse(line);
             // A fabricated 0 would read as "no memory free", which is the opposite of "unmeasured".
             Assert.False(document.RootElement.TryGetProperty("freeGb", out _));
@@ -116,15 +118,5 @@ public sealed class QueueDecisionLedgerStoreTests
     public void Every_wait_reason_has_the_ledger_token_the_issue_fixed(QueueWaitReason reason, string token) =>
         Assert.Equal(token, QueueWaitReasons.Token(reason));
 
-    private static void Delete(string path)
-    {
-        try
-        {
-            File.Delete(path);
-        }
-        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
-        {
-            // Not this test's subject.
-        }
-    }
+    private static void Delete(string path) => FileCleanup.Delete(path);
 }

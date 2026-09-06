@@ -12,10 +12,9 @@ namespace Baton.Cli;
 /// carve-out rather than the CommandResult/FlowStateReporter switch.
 /// </summary>
 /// <remarks>
-/// <b>Nothing here launches anything.</b> Adding an item is a durable request; the daemon decides when
-/// it runs, records why, and is the only thing that dispatches. That split is what makes the launch
-/// decision auditable — a verb that could also launch would leave two paths into a room and only one
-/// of them recorded.
+/// <b>Nothing here starts a lane</b> — spec/baton.md §13 states that split and why. What it means for
+/// this file specifically: every method below returns having written the queue file (and, for
+/// <c>add</c>, the spec copy and possibly a worktree), and never having touched a room.
 /// </remarks>
 public static class QueueCommand
 {

@@ -16,6 +16,8 @@ namespace Baton.Cli.Tests.Daemon;
 /// </remarks>
 public sealed class QueueSchedulerServiceTests
 {
+    private static CancellationToken Ct => TestContext.Current.CancellationToken;
+
     private static string CreateTempHome()
     {
         var home = Path.Combine(Path.GetTempPath(), "baton_queue_svc_" + Guid.NewGuid().ToString("n"));
@@ -46,7 +48,7 @@ public sealed class QueueSchedulerServiceTests
         using var scope = BatonEnvironmentSnapshot.BeginScope(BatonEnvironmentSnapshot.Blank with { HomeOverride = home });
         try
         {
-            await QueueStore.MutateAsync(BatonPaths.QueueFile, s => s with { Items = [Item()] });
+            await QueueStore.MutateAsync(BatonPaths.QueueFile, s => s with { Items = [Item()] }, Ct);
             QueueLaunchRequest? seen = null;
             var service = Service((request, _) =>
             {
@@ -54,9 +56,9 @@ public sealed class QueueSchedulerServiceTests
                 return Task.FromResult(new QueueLaunchOutcome(@"C:\rooms\queue-t1-abcd"));
             });
 
-            await service.TickOnceAsync(CancellationToken.None);
+            await service.TickOnceAsync(Ct);
 
-            var item = Assert.Single((await QueueStore.LoadAsync(BatonPaths.QueueFile)).Items);
+            var item = Assert.Single((await QueueStore.LoadAsync(BatonPaths.QueueFile, Ct)).Items);
             Assert.Equal(QueueItemState.Launched, item.State);
             Assert.Equal(@"C:\rooms\queue-t1-abcd", item.RoomDirectory);
             Assert.NotNull(item.LaunchedAt);
@@ -66,7 +68,7 @@ public sealed class QueueSchedulerServiceTests
             Assert.Equal("claude", seen!.Tier.Adapter);
             Assert.Equal("opus", seen.Tier.Model);
 
-            var fact = Assert.Single(await QueueDecisionLedgerStore.ReadAllAsync(BatonPaths.QueueDecisionLedgerFile));
+            var fact = Assert.Single(await QueueDecisionLedgerStore.ReadAllAsync(BatonPaths.QueueDecisionLedgerFile, Ct));
             Assert.Equal("launched", fact.Decision);
             Assert.Equal("t1", fact.Tag);
             Assert.Equal("engine", fact.Tier);
@@ -85,18 +87,17 @@ public sealed class QueueSchedulerServiceTests
         using var scope = BatonEnvironmentSnapshot.BeginScope(BatonEnvironmentSnapshot.Blank with { HomeOverride = home });
         try
         {
-            await QueueStore.MutateAsync(BatonPaths.QueueFile, s => s with { Items = [Item()] });
+            await QueueStore.MutateAsync(BatonPaths.QueueFile, s => s with { Items = [Item()] }, Ct);
             var service = Service((_, _) => Task.FromResult(new QueueLaunchOutcome(null, RunwayHeld: true)));
 
-            await service.TickOnceAsync(CancellationToken.None);
+            await service.TickOnceAsync(Ct);
 
-            // Q5: the hold is a fleet condition, not a property of this item, so the item must stay
-            // available for the next gap rather than being consumed.
-            var item = Assert.Single((await QueueStore.LoadAsync(BatonPaths.QueueFile)).Items);
+            // The whole point of Q5's arm: the item is unchanged, so the next tick considers it again.
+            var item = Assert.Single((await QueueStore.LoadAsync(BatonPaths.QueueFile, Ct)).Items);
             Assert.Equal(QueueItemState.Queued, item.State);
             Assert.Null(item.RoomDirectory);
 
-            var fact = Assert.Single(await QueueDecisionLedgerStore.ReadAllAsync(BatonPaths.QueueDecisionLedgerFile));
+            var fact = Assert.Single(await QueueDecisionLedgerStore.ReadAllAsync(BatonPaths.QueueDecisionLedgerFile, Ct));
             Assert.Equal("waited", fact.Decision);
             Assert.Equal("runway-held", fact.Reason);
         }
@@ -113,19 +114,19 @@ public sealed class QueueSchedulerServiceTests
         using var scope = BatonEnvironmentSnapshot.BeginScope(BatonEnvironmentSnapshot.Blank with { HomeOverride = home });
         try
         {
-            await QueueStore.MutateAsync(BatonPaths.QueueFile, s => s with { Items = [Item()] });
+            await QueueStore.MutateAsync(BatonPaths.QueueFile, s => s with { Items = [Item()] }, Ct);
             // A refusal that is NOT a hold — a missing spec, an unknown role, a drain marker. It must
             // fail the item OUT of the queue rather than retry it forever with a false reason, which is
             // exactly what branching on the exception type would have done.
             var service = Service((_, _) => Task.FromResult(new QueueLaunchOutcome(null, Error: "no such role 'implment'")));
 
-            await service.TickOnceAsync(CancellationToken.None);
+            await service.TickOnceAsync(Ct);
 
-            var item = Assert.Single((await QueueStore.LoadAsync(BatonPaths.QueueFile)).Items);
+            var item = Assert.Single((await QueueStore.LoadAsync(BatonPaths.QueueFile, Ct)).Items);
             Assert.Equal(QueueItemState.Failed, item.State);
             Assert.Contains("implment", item.Error!, StringComparison.Ordinal);
 
-            var fact = Assert.Single(await QueueDecisionLedgerStore.ReadAllAsync(BatonPaths.QueueDecisionLedgerFile));
+            var fact = Assert.Single(await QueueDecisionLedgerStore.ReadAllAsync(BatonPaths.QueueDecisionLedgerFile, Ct));
             Assert.Equal("failed", fact.Decision);
         }
         finally
@@ -141,11 +142,11 @@ public sealed class QueueSchedulerServiceTests
         using var scope = BatonEnvironmentSnapshot.BeginScope(BatonEnvironmentSnapshot.Blank with { HomeOverride = home });
         try
         {
-            // 'engine' is a valid scope class for implement but there is no 'review-engine'... there is.
-            // Use a role/scope pair whose key exists in neither the shipped table nor a configured one:
-            // a role of 'review' with a scope only reachable by hand-editing the queue file.
-            var item = Item(role: "review", scope: "infra");
-            await QueueStore.MutateAsync(BatonPaths.QueueFile, s => s with { Items = [item] });
+            // 'review' + 'infra' is a key in neither the shipped table nor a configured one. Written
+            // straight into the store here, bypassing the verb — which is the only way this state can
+            // arise, and therefore the only way the daemon's own check can be exercised at all.
+            await QueueStore.MutateAsync(
+                BatonPaths.QueueFile, s => s with { Items = [Item(role: "review", scope: "infra")] }, Ct);
             var launched = false;
             var service = Service((_, _) =>
             {
@@ -153,12 +154,14 @@ public sealed class QueueSchedulerServiceTests
                 return Task.FromResult(new QueueLaunchOutcome(@"C:\rooms\x"));
             });
 
-            await service.TickOnceAsync(CancellationToken.None);
+            await service.TickOnceAsync(Ct);
 
-            // Fail closed: silently launching on the role's own default model is the "ran on the wrong
-            // tier" failure the table exists to prevent.
+            // The launcher must not be reached at all — a refusal recorded after a dispatch started
+            // would be a lane already spending on some other tier's model.
             Assert.False(launched);
-            Assert.Equal(QueueItemState.Failed, Assert.Single((await QueueStore.LoadAsync(BatonPaths.QueueFile)).Items).State);
+            Assert.Equal(
+                QueueItemState.Failed,
+                Assert.Single((await QueueStore.LoadAsync(BatonPaths.QueueFile, Ct)).Items).State);
         }
         finally
         {
@@ -173,7 +176,7 @@ public sealed class QueueSchedulerServiceTests
         using var scope = BatonEnvironmentSnapshot.BeginScope(BatonEnvironmentSnapshot.Blank with { HomeOverride = home });
         try
         {
-            await QueueStore.MutateAsync(BatonPaths.QueueFile, s => s with { Items = [Item()], Held = true });
+            await QueueStore.MutateAsync(BatonPaths.QueueFile, s => s with { Items = [Item()], Held = true }, Ct);
             var launched = false;
             var service = Service((_, _) =>
             {
@@ -181,10 +184,12 @@ public sealed class QueueSchedulerServiceTests
                 return Task.FromResult(new QueueLaunchOutcome(@"C:\rooms\x"));
             });
 
-            await service.TickOnceAsync(CancellationToken.None);
+            await service.TickOnceAsync(Ct);
 
             Assert.False(launched);
-            Assert.Equal("hold", Assert.Single(await QueueDecisionLedgerStore.ReadAllAsync(BatonPaths.QueueDecisionLedgerFile)).Reason);
+            Assert.Equal(
+                "hold",
+                Assert.Single(await QueueDecisionLedgerStore.ReadAllAsync(BatonPaths.QueueDecisionLedgerFile, Ct)).Reason);
         }
         finally
         {
@@ -203,16 +208,17 @@ public sealed class QueueSchedulerServiceTests
             Directory.CreateDirectory(room);
             await File.WriteAllTextAsync(
                 Path.Combine(room, TerminalSentinelWriter.TerminalSentinelFileName),
-                """{"state":"Terminal","steps":[{"id":"implement","state":"Succeeded","execution":"e1"}],"outputs":[],"error":null}""");
+                """{"state":"Terminal","steps":[{"id":"implement","state":"Succeeded","execution":"e1"}],"outputs":[],"error":null}""",
+                Ct);
 
-            await QueueStore.MutateAsync(BatonPaths.QueueFile, s => s with
-            {
-                Items = [Item() with { State = QueueItemState.Launched, RoomDirectory = room }],
-            });
+            await QueueStore.MutateAsync(
+                BatonPaths.QueueFile,
+                s => s with { Items = [Item() with { State = QueueItemState.Launched, RoomDirectory = room }] },
+                Ct);
 
-            await Service((_, _) => Task.FromResult(new QueueLaunchOutcome(null))).ResolveFinishedItemsAsync(CancellationToken.None);
+            await Service((_, _) => Task.FromResult(new QueueLaunchOutcome(null))).ResolveFinishedItemsAsync(Ct);
 
-            var item = Assert.Single((await QueueStore.LoadAsync(BatonPaths.QueueFile)).Items);
+            var item = Assert.Single((await QueueStore.LoadAsync(BatonPaths.QueueFile, Ct)).Items);
             Assert.Equal(QueueItemState.Done, item.State);
             Assert.Null(item.Error);
         }
@@ -234,16 +240,16 @@ public sealed class QueueSchedulerServiceTests
             // detection from an unconditional mark.
             var room = Path.Combine(home, "rooms", "queue-t1-live");
             Directory.CreateDirectory(room);
-            await QueueStore.MutateAsync(BatonPaths.QueueFile, s => s with
-            {
-                Items = [Item() with { State = QueueItemState.Launched, RoomDirectory = room }],
-            });
+            await QueueStore.MutateAsync(
+                BatonPaths.QueueFile,
+                s => s with { Items = [Item() with { State = QueueItemState.Launched, RoomDirectory = room }] },
+                Ct);
 
-            await Service((_, _) => Task.FromResult(new QueueLaunchOutcome(null))).ResolveFinishedItemsAsync(CancellationToken.None);
+            await Service((_, _) => Task.FromResult(new QueueLaunchOutcome(null))).ResolveFinishedItemsAsync(Ct);
 
             Assert.Equal(
                 QueueItemState.Launched,
-                Assert.Single((await QueueStore.LoadAsync(BatonPaths.QueueFile)).Items).State);
+                Assert.Single((await QueueStore.LoadAsync(BatonPaths.QueueFile, Ct)).Items).State);
         }
         finally
         {
@@ -278,15 +284,5 @@ public sealed class QueueSchedulerServiceTests
         Assert.Equal(QueueItemState.Done, QueueSchedulerService.ClassifyTerminal(succeeded, "r").State);
     }
 
-    private static void Cleanup(string home)
-    {
-        try
-        {
-            Directory.Delete(home, recursive: true);
-        }
-        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
-        {
-            // A temp home that will not delete is not this test's subject.
-        }
-    }
+    private static void Cleanup(string home) => DirectoryCleanup.DeleteRecursively(home);
 }
