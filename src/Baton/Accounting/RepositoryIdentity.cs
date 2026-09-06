@@ -103,10 +103,12 @@ public sealed record RepositoryIdentity
     /// (<c>https://github.com/Owner/Repo.git</c>, <c>git@github.com:Owner/Repo.git</c>) canonicalizes,
     /// and then behind an <c>https://</c> so the bare <c>host/owner/repo</c> spelling an operator
     /// actually types is read as the host-and-path it is. That second attempt <b>supplies a scheme and
-    /// nothing else</b>: it does not invent a host, so <c>owner/repo</c> canonicalizes to
-    /// <c>owner/repo</c> (host <c>owner</c>, path <c>repo</c>) and never to
-    /// <c>github.com/owner/repo</c> — guessing a forge would file a repository under an identity no
-    /// probe could ever reproduce.
+    /// nothing else</b>: it does not invent a host. So a bare <c>owner/repo</c> is <b>refused</b>
+    /// rather than canonicalized — never to <c>github.com/owner/repo</c>, because guessing a forge
+    /// would file a repository under an identity no probe could ever reproduce, and not to
+    /// <c>owner/repo</c> either (host <c>owner</c>, path <c>repo</c>), which is the same unreproducible
+    /// identity with the guess left implicit. See <see cref="TryNormalizeBareHostAndPath"/> for the
+    /// rule that draws that line and for what it deliberately still admits.
     /// </para>
     /// <para>
     /// <b>Null is a refusal, not a fallback.</b> A caller that cannot canonicalize an operator's string
@@ -126,8 +128,27 @@ public sealed record RepositoryIdentity
 
         return raw.StartsWith(GitDirectoryPrefix, StringComparison.OrdinalIgnoreCase)
             ? From(originUrl: null, gitCommonDirectoryPath: raw[GitDirectoryPrefix.Length..])?.Value
-            : TryNormalizeRemote(raw) ?? TryNormalizeRemote("https://" + raw);
+            : TryNormalizeRemote(raw) ?? TryNormalizeBareHostAndPath(raw);
     }
+
+    /// <summary>
+    /// The scheme-less <c>host/owner/repo</c> spelling an operator types, or <see langword="null"/>
+    /// when what they typed carries no host.
+    /// </summary>
+    /// <remarks>
+    /// <b>Three components, and the rule applies to the BARE spelling only.</b> Read behind a supplied
+    /// <c>https://</c>, the first component becomes the host whether or not it is one, so
+    /// <c>owner/repo</c> would otherwise parse as host <c>owner</c> — see
+    /// <see cref="TryCanonicalize"/>'s remarks for why that identity is unreproducible. A remote that
+    /// states its host explicitly, by scheme or scp separator, never reaches here and is taken at its
+    /// word: <c>https://internal/repo</c> and <c>git@internal:repo.git</c> stay two-component
+    /// identities, which they must, because <see cref="From"/> derives exactly those from a git probe's
+    /// answer for a host-rooted server.
+    /// </remarks>
+    private static string? TryNormalizeBareHostAndPath(string raw) =>
+        TryNormalizeRemote("https://" + raw) is { } normalized && normalized.Split('/').Length >= 3
+            ? normalized
+            : null;
 
     /// <summary>
     /// The tag <see cref="From"/>'s common-directory branch writes, and the one prefix
