@@ -831,7 +831,7 @@ not `ContractFailure`'s. What writes it now:
 | `OutcomeClassifier.Classify`'s #1593 uncaptured contract-failure arm — declared outputs simply absent or failed validation, or a dead worker (stream-json ending without a `result` record) on a mutated workspace, with no response to capture; also #1680's first-verdict canary (a natural, contract-satisfied exit whose caller reports ≥1 tool call and zero agy `PreToolUse` hook verdicts — the hook may never have run, and this vendor reads that silence as an ALLOW rather than an error) | `FlowEvent.ExecutionIndeterminate` (null `CapturedResponseFile`) | `ContractFailure` | #1593, #1680 |
 | The role's engine-run verify command exited non-zero after a clean, contract-satisfied worker exit | `FlowEvent.VerifyFailed` | `VerifyFailed` | #1623 |
 | A live execution crossed its role's token budget and was arrested | `FlowEvent.ExecutionArrested` | `Arrested` | #1623 |
-| `OutcomeClassifier.Classify`'s #1373 timeout arm — Flow's own dispatch timeout killed the execution and the workspace it was killed in carries work (see the paragraph below) | `FlowEvent.ExecutionIndeterminate` (null `CapturedResponseFile`) | `ContractFailure` | #1373 |
+| `OutcomeClassifier.Classify`'s #1373 timeout arm — Flow's own dispatch timeout killed the execution and the workspace it was killed in carries work (see the paragraph below, including #1945's one carve-out) | `FlowEvent.ExecutionIndeterminate` (null `CapturedResponseFile`) | `ContractFailure` | #1373 |
 | Verify actually started, but its only failing member(s) were blocked on `tools/buildlock.py`'s build lock, not genuinely broken — contention, never a gate defect | `FlowEvent.VerifyNotRun` (`BuildLockBusy: true`) | `BuildLockBusy` | #1796 |
 
 Every other Failed/Cancelled/Succeeded path is unchanged. All six raise the **one** flag
@@ -925,6 +925,14 @@ finishing looks like). The reason text opens with `OutcomeClassifier.TimeoutSent
 `Status.WorkflowOutcome.IsTimeoutFailure` still reads a mutated timeout as a timeout. **Consequence
 for a surface:** such a room now describes `Indeterminate`, so `baton run` no longer exits
 `RunExitCode.Timeout` for it — that exit code stays for a timeout with nothing to salvage.
+
+**Narrowed once, by #1945.** Not every mutated workspace is one a conductor has to look at. A
+workspace that is *also* clean and level with its tracking branch, on an execution whose declared
+outputs are all present, settles the succeeded-shaped `FinishedDuringTeardown` instead — the kill
+landed after the push, so there is nothing left to resolve and nothing a redispatch would finish.
+That is the only carve-out; everything else in this ruling, including the fail-closed reading and the
+retry it forecloses, is unchanged. The word, its predicate and the consumers that owe it a
+succeeded reading are §3's `FinishedDuringTeardown` row above.
 
 **The per-attempt start sha is journaled, not only held in memory (#1373 follow-up).** The commit half
 of the reading above is a delta against the sha read immediately before Core is asked to run — durable

@@ -387,6 +387,11 @@ public class WorkflowOutcomeAndExitCodeTests
         var bucketsEnd = html.IndexOf("const other", bucketsStart, StringComparison.Ordinal);
         Assert.True(bucketsEnd > bucketsStart, "render()'s bucketing block must still end at the `other` catch-all.");
         var buckets = html[bucketsStart..bucketsEnd];
+        // A landmark RENAME fails the two asserts above; an INSERTION does not — any earlier
+        // `const other…` added inside render() would silently shrink this window and leave the check
+        // passing vacuously for every word declared past it. The first bucket is the window's own
+        // control: if "Running" is missing, the window is wrong, not the file.
+        Assert.Contains($"\"{WorkflowOutcome.Running}\"", buckets, StringComparison.Ordinal);
 
         // "Paused" is excluded, and only it: glass has no Paused bucket today and never had one --
         // pre-existing, its own population, not this pin's to invent. An eighth member is NOT
