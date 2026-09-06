@@ -57,6 +57,13 @@ public class ExecutionOutputDirectoryListingTests
         // root is never accepted by that method, even when the grant permits writing declared outputs.
         ["Baton.Vendors/CodexDynamicToolPolicy.cs"] =
             "lists only a ResolveWithinWorkspace-validated path for the broker's list/search tools, never the separate execution output root",
+        // #1901 C2: this one DOES walk a room's artifacts tree, execution output directories included,
+        // and the filter is not needed because the enumeration is by EXACT FILENAME --
+        // DeliveryReferenceOutputNames.Branch, a declared worker output. No stream log can match a name
+        // that is not its own, so there is nothing for IsStreamLogFileName to exclude; the same
+        // filename-matched read DeliveryReferenceResolver already does off resolved output paths.
+        ["Baton.Cli/LedgerBackfillCommand.cs"] =
+            "EnumerateFiles matches one exact declared-output filename (delivery-branch.txt) rather than listing a directory, so no stream log is reachable by it",
         // #1488: lists {BATON_HOME}/watches -- the baton watch registry directory -- never an
         // execution's own output directory.
         ["Baton.Cli/WatchStore.cs"] = "lists watchesDirectoryPath (the baton watch registry), not an execution output directory",

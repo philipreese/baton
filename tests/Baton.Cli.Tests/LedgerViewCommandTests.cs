@@ -58,12 +58,12 @@ public sealed class LedgerViewCommandTests : IDisposable
         // The unpriced codex row is counted as an attempt and disclosed as unpriced, not as $0.
         Assert.Contains("codex -- 1 attempt(s)", text, StringComparison.Ordinal);
         Assert.Contains(
-            "API-equivalent estimate: - (summed from 0 of 1 attempt(s); unpriced: 1)", text, StringComparison.Ordinal);
+            "API-equivalent estimate: - (summed from 0 of 1 row(s); unpriced: 1)", text, StringComparison.Ordinal);
 
         // ...and agy's plan meter says what the ROW says -- never measured for this vendor -- rather
         // than borrowing codex's word for a missing rate.
         Assert.Contains(
-            "plan-meter estimate: - (summed from 0 of 1 attempt(s); unmeasured: 1)", text, StringComparison.Ordinal);
+            "plan-meter estimate: - (summed from 0 of 1 row(s); unmeasured: 1)", text, StringComparison.Ordinal);
         Assert.DoesNotContain("unmeasured: 1, unpriced", text, StringComparison.Ordinal);
     }
 
@@ -409,6 +409,96 @@ public sealed class LedgerViewCommandTests : IDisposable
         Assert.False(attemptsOnly.RootElement.GetProperty("query").GetProperty("hasResolution").GetBoolean());
         Assert.True(interventions.RootElement.GetProperty("query").GetProperty("hasResolution").GetBoolean());
         Assert.Contains("resolution=none", await RunOverAsync(ledgerPath, "--resolution", "none"), StringComparison.Ordinal);
+    }
+
+    /// <summary>
+    /// #1901 C2: the dispatch <c>--label</c> survives the write, the JSON view and the CSV export — the
+    /// three surfaces #1903's comparator reads an arm off. Over a ledger of its own so the shared
+    /// fixture's counts stay what every other test here asserts.
+    /// <para>
+    /// The control is the second row, dispatched with no label: its <c>label</c> is ABSENT in the JSON
+    /// (not <c>null</c>, not <c>""</c>) and an empty cell in the CSV, so a writer that defaulted the
+    /// field to a string could not pass both halves.
+    /// </para>
+    /// </summary>
+    [Fact]
+    public async Task A_dispatch_label_round_trips_through_the_json_view_and_the_csv_export()
+    {
+        var ledgerPath = Path.Combine(Path.GetDirectoryName(_ledgerFilePath)!, "labels.jsonl");
+        await CostLedgerStore.AppendAsync(
+            [
+                new CostLedgerEntry(
+                    CostSourceKind.BatonExecution,
+                    Room: _roomA,
+                    Execution: "labelled",
+                    Adapter: "claude",
+                    EndedAt: Sep4.AddHours(10),
+                    Label: "arm-b"),
+                new CostLedgerEntry(
+                    CostSourceKind.BatonExecution,
+                    Room: _roomA,
+                    Execution: "unlabelled",
+                    Adapter: "claude",
+                    EndedAt: Sep4.AddHours(11)),
+            ],
+            ledgerPath,
+            TestContext.Current.CancellationToken);
+
+        using var json = JsonDocument.Parse(await RunOverAsync(ledgerPath, "--format", "json", "--drill"));
+        var rows = json.RootElement.GetProperty("rows").EnumerateArray().ToList();
+        Assert.Equal("arm-b", rows[0].GetProperty("label").GetString());
+        Assert.False(rows[1].TryGetProperty("label", out _));
+
+        var csv = await RunOverAsync(ledgerPath, "--format", "csv");
+        var lines = csv.Split('\n', StringSplitOptions.RemoveEmptyEntries);
+        var labelColumn = LedgerCsv.Columns.ToList().IndexOf("label");
+        Assert.Equal("arm-b", lines[1].Split(',')[labelColumn]);
+        Assert.Equal(string.Empty, lines[2].Split(',')[labelColumn]);
+    }
+
+    /// <summary>
+    /// #1931 review MEDIUM, the two halves at the surface an operator reads: a <c>github-backfill</c>
+    /// row is not counted as an attempt nor as one "with no usage read" on the default screen, and it
+    /// is MARKED in the drill digest — <c>LedgerViewCommand.DescribeRow</c>'s own comment states what
+    /// that clause is for, and it is the defect #1913 finding 6 fixed for the correcting row.
+    /// <para>
+    /// The control is the execution row beside it: it IS the one attempt, it IS the one unread row
+    /// (nothing was read for it), and it carries no marker — so a blanket exclusion or an
+    /// unconditionally printed clause fails here.
+    /// </para>
+    /// </summary>
+    [Fact]
+    public async Task A_merged_pr_row_is_not_an_attempt_on_the_default_screen_and_is_marked_in_the_drill_digest()
+    {
+        var ledgerPath = Path.Combine(Path.GetDirectoryName(_ledgerFilePath)!, "github-backfill.jsonl");
+        await CostLedgerStore.AppendAsync(
+            [
+                new CostLedgerEntry(
+                    CostSourceKind.BatonExecution,
+                    Room: _roomA,
+                    Execution: "unread-attempt",
+                    EndedAt: Sep4.AddHours(10)),
+                CostLedgerStore.BuildGithubBackfillRow(
+                    new MergedPullRequest(1913, "1901-lane", Sep4.AddHours(11), Commits: 2, ReviewCount: 1),
+                    null,
+                    RepositoryIdentitySource.WorkingDirectory),
+            ],
+            ledgerPath,
+            TestContext.Current.CancellationToken);
+
+        var text = await RunOverAsync(ledgerPath, "--format", "text", "--drill");
+
+        Assert.Contains("(unknown) -- 1 attempt(s) (1 with no usage read) + 1 merged-PR row(s)", text, StringComparison.Ordinal);
+        Assert.Contains("Rows: 2 matched", text, StringComparison.Ordinal);
+        Assert.Contains("merged-PR row (github-backfill): no execution behind it", text, StringComparison.Ordinal);
+        Assert.Equal(1, text.Split("merged-PR row (github-backfill)").Length - 1);
+
+        // ...and the CSV keeps the provenance stamp the backfill wrote (#1931 review HIGH).
+        var csv = await RunOverAsync(ledgerPath, "--format", "csv");
+        var lines = csv.Split('\n', StringSplitOptions.RemoveEmptyEntries);
+        var column = LedgerCsv.Columns.ToList().IndexOf("identitySource");
+        Assert.Equal(string.Empty, lines[1].Split(',')[column]);
+        Assert.Equal("working-directory", lines[2].Split(',')[column]);
     }
 
     private async Task<string> RunOverAsync(string ledgerFilePath, params string[] args)

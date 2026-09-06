@@ -196,6 +196,44 @@ public sealed class LedgerRollupTests
     }
 
     /// <summary>
+    /// #1931 review MEDIUM: a merged-PR row is counted apart from the attempts and is NOT in
+    /// <c>unread</c>, whose own definition (<see cref="LedgerSubtotal.Unread"/>) is a false statement
+    /// about a pull request.
+    /// <para>
+    /// Three arms, because the fix must not be a blanket exclusion: the row still counts into
+    /// <c>attempts</c> (the row count every surface's "Rows: n matched" is), it still takes its
+    /// unpriced status bucket (spec/baton.md §7's ruling for the correcting row it is modelled on), and
+    /// <see cref="Undated"/> — an execution row with no completeness label either — still IS unread.
+    /// </para>
+    /// </summary>
+    [Fact]
+    public void A_merged_pr_row_is_counted_apart_from_the_attempts_and_never_as_one_nothing_was_read_for()
+    {
+        var pullRequest = new CostLedgerEntry(
+            CostSourceKind.GithubBackfill,
+            Repository: "github.com/aer-works/baton",
+            Execution: CostLedgerStore.GithubBackfillExecutionId(1913),
+            PullRequest: "1913",
+            EndedAt: Sep4.AddHours(14));
+
+        var rollup = LedgerRollup.Build([.. Ledger, pullRequest], new LedgerQuery());
+
+        Assert.Equal(7, rollup.Total.Attempts);
+        Assert.Equal(6, rollup.Total.Executions);
+        Assert.Equal(1, rollup.Total.PullRequests);
+        Assert.Equal(rollup.Total.Attempts, rollup.Total.Executions + rollup.Total.PullRequests);
+
+        // The undated claude row is the one unread attempt; the PR row is not a second.
+        Assert.Equal(1, rollup.Total.Unread);
+        Assert.Equal(2, rollup.Total.ApiEquivalentByStatus.Unpriced);
+
+        var unknownVendor = rollup.Vendors.Single(v => v.Vendor == LedgerRollup.UnknownVendor);
+        Assert.Equal(0, unknownVendor.Executions);
+        Assert.Equal(1, unknownVendor.PullRequests);
+        Assert.Equal(0, unknownVendor.Unread);
+    }
+
+    /// <summary>
     /// #1893 review M2: the four <see cref="EstimateStatus"/> states are counted BY NAME, never
     /// collapsed into "has a dollar figure / does not". The discriminating pair is on the plan-meter
     /// half of this fixture, where two rows carry no figure for two different recorded reasons — agy's

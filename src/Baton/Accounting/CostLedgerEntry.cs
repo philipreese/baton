@@ -8,9 +8,14 @@ namespace Baton.Accounting;
 /// rather than an inference from which fields happen to be populated (#1849's own requirement).
 /// </summary>
 /// <remarks>
-/// Only <see cref="BatonExecution"/> has a writer today. The other three are phase C's importers of
-/// the vendors' own native session logs, present here from day one so a phase-A row is already
-/// labelled against them rather than needing a schema migration to say what it always was.
+/// <para>
+/// <b>Two have writers</b>: <see cref="BatonExecution"/> (the settle site, and #1901 C2's backfill of
+/// rooms still on disk — a recovered execution is the same KIND of fact as a settled one, so it keeps
+/// this label rather than earning a "recovered" one) and <see cref="GithubBackfill"/> (#1901 C2's
+/// GitHub half). The other three are phase C's importers of the vendors' own native session logs,
+/// present here from day one so a phase-A row is already labelled against them rather than needing a
+/// schema migration to say what it always was.
+/// </para>
 /// </remarks>
 [JsonConverter(typeof(JsonStringEnumConverter<CostSourceKind>))]
 public enum CostSourceKind
@@ -19,6 +24,15 @@ public enum CostSourceKind
     [JsonStringEnumMemberName("claude-code-session")] ClaudeCodeSession,
     [JsonStringEnumMemberName("codex-session")] CodexSession,
     [JsonStringEnumMemberName("antigravity-session")] AntigravitySession,
+
+    /// <summary>
+    /// #1901 C2: a merged pull request reconstructed from GitHub, not from anything Baton ran. It
+    /// carries a PR's shape and outcome and <b>no token dimension of any kind</b> — there is no
+    /// execution behind it, so an analysis that mixes it with <see cref="BatonExecution"/> rows is
+    /// counting two different populations. <c>baton ledger --source-kind baton-execution</c> is the
+    /// filter that separates them.
+    /// </summary>
+    [JsonStringEnumMemberName("github-backfill")] GithubBackfill,
 }
 
 /// <summary>
@@ -89,6 +103,45 @@ public enum ConductorResolution
 
     /// <summary><c>--close</c>: a settle shape <c>--reject</c> does not admit — no captured response ever existed to judge.</summary>
     [JsonStringEnumMemberName("close")] Close,
+}
+
+/// <summary>
+/// Which lookup produced a row's <see cref="CostLedgerEntry.Repository"/> — the join key every reading
+/// of this ledger groups on, so "how did we decide which repository this belongs to" is a field rather
+/// than an inference from the run that wrote it (#1931 review HIGH, operator ruling 2026-09-05).
+/// </summary>
+/// <remarks>
+/// Written by the settle site and by <c>baton ledger backfill</c> alike, and copied onto a correcting
+/// row from the row it corrects (<see cref="CostLedgerStore.BuildResolutionRow"/>, so <c>baton
+/// resolve</c> can emit one too). <b>Absence therefore means "this row was written before provenance was
+/// recorded", never <see cref="RecordedRoot"/></b>. What the exposure is, which rows it is true of, and
+/// the three conditions the backfill's wider fallback ships under, are in spec/baton.md §7 under
+/// `baton ledger backfill`.
+/// </remarks>
+[JsonConverter(typeof(JsonStringEnumConverter<RepositoryIdentitySource>))]
+public enum RepositoryIdentitySource
+{
+    /// <summary>
+    /// The room's own recorded project root (its <c>RoomRegistryEntry.ProjectRoot</c>) resolved to a
+    /// repository — the one fact that keys a room to where its work happened.
+    /// </summary>
+    [JsonStringEnumMemberName("recorded-root")] RecordedRoot,
+
+    /// <summary>
+    /// The identity came from the directory the run was invoked in rather than from a recorded project
+    /// root — either because the room recorded none, or through the wider fallback the register's
+    /// `baton ledger backfill` entry sets out (spec/baton.md §7), with the measurement behind it.
+    /// <b>On a row about a ROOM, a run invoked from the wrong checkout keys it to the
+    /// wrong repository</b>, and this value is what makes that visible after the fact — the ledger is
+    /// append-only, so the row cannot be repaired, only identified.
+    /// <para>
+    /// <b>Not a risk on a <c>github-backfill</c> row</b>, which carries this value by construction: those
+    /// PRs came from the repository <c>gh</c> was run in, so here it is a statement of fact and the
+    /// paragraph above is not true of it. <see cref="CostLedgerEntry.SourceKind"/> is what separates the
+    /// two populations for a reader triaging this field.
+    /// </para>
+    /// </summary>
+    [JsonStringEnumMemberName("working-directory")] WorkingDirectory,
 }
 
 /// <summary>
@@ -464,4 +517,58 @@ public sealed record CostLedgerEntry(
     /// </summary>
     [property: JsonPropertyName("resolutionReason")]
     [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
-    string? ResolutionReason = null);
+    string? ResolutionReason = null,
+
+    /// <summary>
+    /// #1901 C2: the operator's <c>baton dispatch --label</c> for the worker this row is about, read
+    /// back off the room's <c>bindings.json</c> (<c>WorkerBindingConfigEntry.Label</c>, spec/baton.md
+    /// §2/§6) — the arm key the comparator (#1903) filters on, so an A/B of two dispatch shapes is a
+    /// filter rather than a hand-kept list of room paths. Already sanitized when it was recorded
+    /// (<c>Baton.Cli.DispatchOptionsParser.SanitizeLabel</c>); carried through verbatim here.
+    /// <para>
+    /// <b>Absent means "no label was recorded for this worker"</b>, never "unlabelled work" — a
+    /// <c>baton run</c> against a hand-authored <c>bindings.json</c>, a dispatch that passed no
+    /// <c>--label</c>, and a room whose bindings file is gone by settle time all read the same way.
+    /// A <see cref="CostSourceKind.GithubBackfill"/> row never carries one: a merged PR has no worker
+    /// and therefore no binding to read it from.
+    /// </para>
+    /// </summary>
+    [property: JsonPropertyName("label")]
+    [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    string? Label = null,
+
+    /// <summary>
+    /// #1901 C2, <see cref="CostSourceKind.GithubBackfill"/> rows only: how many commits the merged PR
+    /// carried, as <c>gh</c> reports them. Absent on every execution row — a settle has no PR-level
+    /// commit count in hand, and the diff shape beside it is a workspace measurement rather than a
+    /// GitHub one.
+    /// </summary>
+    [property: JsonPropertyName("commits")]
+    [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    int? Commits = null,
+
+    /// <summary>
+    /// #1901 C2, <see cref="CostSourceKind.GithubBackfill"/> rows only: how many <b>reviews</b>
+    /// <c>gh</c> reports for the merged PR. <b>Not a review-comment count</b>, which #1901's phase-C2
+    /// text asks for: <c>gh pr list --json</c> exposes <c>reviews</c> (one entry per submitted review)
+    /// and <c>comments</c> (the PR's issue comments), and neither is the per-thread review-comment
+    /// count — so this records the one that was actually measured, under a name that says which.
+    /// <c>0</c> is a measurement (nobody reviewed it); absence means <c>gh</c> reported no
+    /// <c>reviews</c> array at all.
+    /// </summary>
+    [property: JsonPropertyName("reviewCount")]
+    [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    int? ReviewCount = null,
+
+    /// <summary>
+    /// #1931 review HIGH: which lookup produced <see cref="Repository"/> — see
+    /// <see cref="RepositoryIdentitySource"/> for the closed set, who writes it, and what its absence
+    /// does and does not mean. An EXECUTION row keyed by
+    /// <see cref="RepositoryIdentitySource.WorkingDirectory"/> is well-formed and may still be keyed to
+    /// the wrong repository; nothing else on the row can tell a reader that. On a
+    /// <see cref="CostSourceKind.GithubBackfill"/> row the same value carries no such risk — that
+    /// member's own doc says why.
+    /// </summary>
+    [property: JsonPropertyName("identitySource")]
+    [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    RepositoryIdentitySource? IdentitySource = null);

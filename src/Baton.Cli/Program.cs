@@ -129,8 +129,9 @@ if (args.Length == 0 || !knownSubcommands.Contains(args[0]))
     Console.Error.WriteLine($"       {RoomsPruneOptionsParser.Usage[7..]}");
     Console.Error.WriteLine($"       {LedgerCommand.Usage[7..]}");
     Console.Error.WriteLine($"       {LedgerViewOptionsParser.Usage[7..]}");
+    Console.Error.WriteLine($"       {LedgerBackfillOptionsParser.Usage[7..]}");
     Console.Error.WriteLine(
-        "              (the two 'ledger' forms read different files -- 'baton ledger --help' says which)");
+        "              ('ledger --rebuild' is a different FILE from the other two -- 'baton ledger --help' says which)");
     Console.Error.WriteLine($"       {MemoryAuditOptionsParser.Usage[7..]}");
     Console.Error.WriteLine(
         "       baton mcp [--capture-file <path>] [--memory-proposal-tool] [--fleet-status-tool] [--room-detail-tool]");
@@ -251,10 +252,18 @@ try
     // joins room/rooms above rather than the CommandResult/FlowStateReporter switch below.
     if (args[0] == "ledger")
     {
-        // Two commands under one verb, against two different files: `--rebuild` re-walks live rooms
-        // into the per-execution BURN ledger (#1570, quota-ledger.jsonl), everything else READS the
-        // repository-keyed COST ledger (#1849 phase B, ledger/<repo>.jsonl). Neither touches the
-        // other's file -- LedgerViewOptionsParser.HelpLines says so where an operator will see it.
+        // Three commands under one verb, against two different files: `--rebuild` re-walks live rooms
+        // into the per-execution BURN ledger (#1570, quota-ledger.jsonl), `backfill` recovers rows into
+        // the repository-keyed COST ledger (#1901 C2), and everything else READS that same cost ledger
+        // (#1849 phase B, ledger/<repo>.jsonl). `--rebuild` touches neither of the others' file --
+        // LedgerViewOptionsParser.HelpLines says so where an operator will see it.
+        if (args.Length >= 2 && args[1] == "backfill")
+        {
+            var backfillOptions = LedgerBackfillOptionsParser.Parse(args[2..]);
+            return await LedgerBackfillCommand
+                .ExecuteAsync(backfillOptions, Console.Out, hostStopSource.Token).ConfigureAwait(false);
+        }
+
         if (args.Length >= 2 && args[1] == "--rebuild")
         {
             if (args.Length > 2)
@@ -414,17 +423,18 @@ try
         // Same fail-open contract either way -- an accounting write never gates a settled run.
         try
         {
-            var repository = await RepositoryIdentityResolver
+            var (repository, identitySource) = await RepositoryIdentityResolver
                 .TryResolveForRoomAsync(terminalRoomDirectoryPath, CancellationToken.None).ConfigureAwait(false);
             if (repository is not null)
             {
                 var costLedgerPath = BatonPaths.CostLedgerFile(repository.FileSlug);
 
-                // #1848: the audited runway override, read back off this room's own bindings.json so a
-                // row that only exists because a hold was bypassed says so. Fail-open by construction
-                // (RunwayOverrideReasons' own doc) -- an unreadable bindings file costs the stamp, never
-                // the row.
-                var runwayOverrides = await RunwayOverrideReasons
+                // #1848's audited runway override and #1499's dispatch --label, both read back off this
+                // room's own bindings.json in ONE parse (RoomBindingStamps' own remarks say why one
+                // reader rather than two). Fail-open by construction -- an unreadable bindings file
+                // costs the stamps, never the row. A pure file read, so CancellationToken.None like the
+                // other local writes here rather than the delivery probe's token.
+                var stamps = await RoomBindingStamps
                     .ReadForRoomAsync(terminalRoomDirectoryPath, CancellationToken.None).ConfigureAwait(false);
 
                 // #1901 C1: the issue, PR and diff shape each worker's own workspace still holds. Read
@@ -443,10 +453,17 @@ try
                 // fields absent, which is the same absence a missing `gh` produces.
                 var delivery = await WorkspaceDeliveryProbe
                     .ReadForRoomAsync(terminalRoomDirectoryPath, hostStopSource.Token).ConfigureAwait(false);
+
+                // identitySource, from the resolver rather than assumed here (#1931 re-review MEDIUM):
+                // the settle site writes most of the ledger, so a field only the backfill stamped would
+                // partition the file by WRITER instead of by provenance -- which is the one question it
+                // exists to answer.
                 var costEntries = CostLedgerStore.BuildEntries(
                     terminalEntries, terminalRoomDirectoryPath, repository,
-                    runwayOverrideReasonByWorker: runwayOverrides,
-                    deliveryByWorker: delivery);
+                    runwayOverrideReasonByWorker: stamps.RunwayOverrideReasonByWorker,
+                    deliveryByWorker: delivery,
+                    labelByWorker: stamps.LabelByWorker,
+                    identitySource: identitySource);
                 await CostLedgerStore.AppendAsync(costEntries, costLedgerPath, CancellationToken.None).ConfigureAwait(false);
             }
             else
@@ -514,7 +531,10 @@ try
         // make must never report a resolution that is already durable in flow.jsonl as failed.
         try
         {
-            var repository = await RepositoryIdentityResolver
+            // The source is DISCARDED here, unlike at the settle site above: a correcting row copies
+            // provenance from the row it corrects (CostLedgerStore.BuildResolutionRow), so that two rows
+            // keyed to one repository never state different provenance. Re-resolving it now could.
+            var (repository, _) = await RepositoryIdentityResolver
                 .TryResolveForRoomAsync(resolvedRoomDirectoryPath, CancellationToken.None).ConfigureAwait(false);
             if (repository is not null)
             {

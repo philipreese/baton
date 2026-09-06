@@ -16,7 +16,7 @@ namespace Baton.Cli;
 /// <remarks>
 /// <para>
 /// <b>Lives here, not in <c>Baton.Accounting</c>, for the same two reasons
-/// <see cref="RunwayOverrideReasons"/> does:</b> the room's workspace is only knowable from a
+/// <see cref="RoomBindingStamps"/> does:</b> the room's workspace is only knowable from a
 /// <c>Baton.Vendors</c> bindings record the engine layer holds no reference to, and the engine stays
 /// git-agnostic. <see cref="WorkspaceDelivery"/> is the value type that crosses the boundary.
 /// </para>
