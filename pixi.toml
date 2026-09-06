@@ -302,10 +302,8 @@ gates-fast = { cmd = "python -u tools/gates/gates.py --fast" }
 gates-quiet = { cmd = "python -u tools/gates/gates.py --quiet" }
 gates-fast-quiet = { cmd = "python -u tools/gates/gates.py --fast --quiet" }
 gates-selftest = { cmd = "python -u tools/gates/gates.py --selftest" }
-# #1910 (spec/baton.md C-12, ruling C): the completion pass. Runs only the fast members this tree
-# has no per-member receipt for, so a lane that already paid for `lint`/`fmt-check` finishes covering
-# the fast set with the cheap audits and its push then skips. Writes per-member receipts only --
-# never a whole-run one, which would claim it ran every member.
+# #1910: the completion pass a lane runs before pushing -- what it skips, and why it writes no
+# whole-run receipt, are stated at tools/gates/gates.py's covering rule (spec/baton.md C-12 ruling C).
 gates-fast-cover = { cmd = "python -u tools/gates/gates.py --fast --skip-covered" }
 gates-fast-cover-quiet = { cmd = "python -u tools/gates/gates.py --fast --skip-covered --quiet" }
 # #1676: what .github/workflows/ci.yml's own required job runs (see that job's own comment for why).

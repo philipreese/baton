@@ -1,13 +1,9 @@
 """The per-member gate receipt store (#1910): one file per gate member that passed on one tree.
 
-WHY THIS EXISTS. `gates.py` writes ONE receipt for a whole `gates --fast` run, so a lane that had
-already run the expensive legs (`dotnet build -warnaserror`, `dotnet format --verify-no-changes`)
-still re-ran every one of them at push time. Operator ruling 2026-09-05, option C (spec/baton.md
-C-12): the pre-push hook may accept a receipt for the GATES-FAST subset only, when the receipt was
-written by baton itself against the exact tree being pushed and names the same member set. This file
-is the store those per-member receipts live in. **The covering rule -- which members must be present
-for a push to skip -- is stated once, in `gates.py`, not here**; this file only writes, reads and
-authenticates individual member receipts.
+WHY THIS EXISTS: spec/baton.md C-12's ruling C states the measurement and the ruling, and is not
+restated here. This file is only the STORE those per-member receipts live in. **The covering rule --
+which members must be present for a push to skip -- is stated once, in `gates.py`, not here**; this
+file writes, reads and authenticates individual receipts and decides nothing about a push.
 
 **One writer.** `write()` below is the only thing that creates one of these files, and `gates.py` is
 the only caller (through its `--record-member` front door, which is what a lane's component commands

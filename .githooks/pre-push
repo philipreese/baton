@@ -21,11 +21,11 @@
 # repository instead (#1648, spec/baton.md C-12).
 unset GIT_DIR GIT_WORK_TREE GIT_INDEX_FILE GIT_PREFIX GIT_COMMON_DIR GIT_OBJECT_DIRECTORY GIT_ALTERNATE_OBJECT_DIRECTORIES
 
-# #1910 item 3: what this push spent in the gate, appended one line per push to the running
-# execution's own artifact directory, for the cost ledger to read at settle
-# (Baton.Accounting.CostLedgerStore.PushTimingOutputName is where that file name is decided; this
-# is `sh` and compiles against nothing, so it spells the name itself). Timing is measurement only:
-# every step of it is failure-tolerant, and none of it may change the exit code below.
+# #1910: what this push spent in the gate, appended one line per push to the running execution's own
+# artifact directory for the cost ledger to read at settle. The file name below is decided by
+# Baton.Accounting.CostLedgerStore.PushTimingOutputName, which says why this file spells it too.
+# Timing is measurement only: every step of it is failure-tolerant, and none of it may change the
+# exit code below.
 gate_start_ms=$(date +%s%3N 2>/dev/null) || gate_start_ms=""
 wait_log=$(mktemp 2>/dev/null) || wait_log=""
 if [ -n "$wait_log" ]; then

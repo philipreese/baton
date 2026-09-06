@@ -677,9 +677,8 @@ def check_receipt():
 def record_member(member, command):
     """`--record-member <member> -- <command...>`: run the command, receipt it iff it exits 0.
 
-    The front door a lane's own component runs use (`dotnet build -warnaserror`, its tests,
-    `dotnet format --verify-no-changes`, `audit-completeness`), so the receipt records an exit code
-    THIS process watched rather than one the caller asserted. A member name that is not in the fast
+    The front door the component runs spec/baton.md C-12's ruling C names go through, so a receipt
+    records an exit code THIS process watched rather than one the caller asserted. A member name that is not in the fast
     set is still recorded and still covers nothing -- the covering rule reads `fast_member_set()`,
     so recording, say, the touched test classes a lane ran is a diagnostic, never a skip.
     """
@@ -996,8 +995,8 @@ def selftest():
             print("  control FAILED: an unsigned hand-made member receipt was accepted")
             ok = False
 
-        # Forgery 2: a GENUINE receipt copied onto another member's name -- the one an unsigned
-        # scheme cannot tell from the real thing, since the two files differ only in their filename.
+        # Forgery 2, member_receipt.py's own docstring: the copy an unsigned scheme cannot tell from
+        # the real thing, since the two files differ only in their filename.
         shutil.copyfile(
             os.path.join(member_receipt.member_dir(git_dir), f"{fast[1]}.json"),
             os.path.join(member_receipt.member_dir(git_dir), f"{fast[0]}.json"))

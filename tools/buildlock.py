@@ -301,7 +301,7 @@ delay = float(os.environ.get("BATON_BUILDLOCK_SELFTEST_HOLDER_DELAY_S", "0"))
 if delay:
     time.sleep(delay)
 handle = buildlock.acquire(buildlock.lock_path(), ["slow-holder"], 5.0)
-time.sleep(3)
+time.sleep(float(os.environ.get("BATON_BUILDLOCK_SELFTEST_HOLD_S", "3")))
 """
 
 
@@ -326,12 +326,14 @@ def _wait_for_holder(lock_file: str, holder_pid: int, ceiling_s: float = 10.0) -
     return False
 
 
-def _spawn_selftest_child(code: str, lock_file: str, *args: str) -> subprocess.Popen:
+def _spawn_selftest_child(code: str, lock_file: str, *args: str, hold_s: str | None = None) -> subprocess.Popen:
     env = dict(os.environ)
     env["BATON_BUILDLOCK_FILE"] = lock_file
     env["BATON_BUILDLOCK_TIMEOUT_S"] = "20"
     env.pop(HELD_MARKER, None)
     env["PYTHONPATH"] = os.path.dirname(os.path.abspath(__file__))
+    if hold_s is not None:
+        env["BATON_BUILDLOCK_SELFTEST_HOLD_S"] = hold_s
     return subprocess.Popen(
         [sys.executable, "-c", code, *args], env=env,
         stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
@@ -435,11 +437,16 @@ def selftest() -> int:
         #    against the same holder -- the readonly arm alone would pass on a machine where the
         #    holder never acquired, and the build arm is what proves the lock was genuinely held.
         env.pop(HELD_MARKER, None)
-        holder = _spawn_selftest_child(_CHILD_ACQUIRE_AND_SLEEP, lock_file)
+        # A 60s hold, not the 3s arm 3 uses: BOTH probes below have to run inside one hold, and a
+        # loaded host (three lanes building, which is the very condition this priority class exists
+        # for) can spend seconds just starting a python process. The holder is terminated the moment
+        # the probes are done, so the long hold costs no wall clock -- it only removes the race.
+        holder = _spawn_selftest_child(_CHILD_ACQUIRE_AND_SLEEP, lock_file, hold_s="60")
         if not _wait_for_holder(lock_file, holder.pid, ceiling_s=10.0):
             print("  control FAILED: holder never signaled lock acquisition within 10s "
                   "(priority-class arm)")
             ok = False
+            holder.terminate()
             holder.communicate(timeout=30)
         else:
             env["BATON_BUILDLOCK_TIMEOUT_S"] = "20"
@@ -456,13 +463,14 @@ def selftest() -> int:
                 [sys.executable, os.path.abspath(__file__), sys.executable, "-c", "pass"],
                 env=env, capture_output=True, text=True, check=False, timeout=30,
             )
+            holder.terminate()
             holder.communicate(timeout=30)
 
-            if readonly.returncode != 0 or readonly_s >= 2.0:
+            if readonly.returncode != 0 or readonly_s >= 5.0:
                 print(
                     f"  control FAILED: a readonly command queued behind the held lock -- exit "
-                    f"{readonly.returncode} after {readonly_s:.2f}s (want exit 0, well under the "
-                    f"holder's 3s hold)"
+                    f"{readonly.returncode} after {readonly_s:.2f}s (want exit 0, far under the "
+                    f"holder's hold)"
                 )
                 ok = False
             if queued.returncode != BUILDLOCK_BLOCKED_EXIT:
