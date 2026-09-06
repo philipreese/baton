@@ -4341,8 +4341,10 @@ created-at.
   same thing as one longer wait. **The fail-open contract is unchanged**, only deferred: an access that
   still cannot be had after the whole budget fails exactly as before — a write reported on stderr and
   swallowed, a read resolving to no entries — so nothing here can gate a dispatch. The cost, stated
-  rather than left emergent: a `fleet_status` call contending with a wedged holder now blocks for the
-  whole budget before degrading to its directory scan, instead of degrading after one wait.
+  rather than left emergent, at both ends: a `fleet_status` call contending with a wedged holder now
+  blocks for the whole budget before degrading to its directory scan, and a `baton run`/`dispatch`
+  start stalls for it before its registration falls back to stderr — each instead of giving up after
+  one wait.
 - **Reader.** `FleetStatusTool` unions the registry's entries with its existing `BatonPaths.Rooms` +
   caller `roots` scan. A registry entry whose room directory no longer exists is skipped (not pruned
   from the file yet — see below). Every room `fleet_status` returns, whether found by the scan or the
