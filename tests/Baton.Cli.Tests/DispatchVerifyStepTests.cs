@@ -455,6 +455,52 @@ public sealed class DispatchVerifyStepTests : IDisposable
         }
     }
 
+    /// <summary>
+    /// The same quoting brief with nothing after it, so the operator's clause block is the LAST one
+    /// before the outputs block — the adjacency the position anchor alone could not tell apart from
+    /// the engine's own paragraph (#1911 review, low). It carries no citation phrase, which is the
+    /// discriminator that now spares it.
+    /// </summary>
+    private const string BriefWhoseLastBlockQuotesTheClause =
+        "review the branch\n\n"
+        + "Before your first turn the engine ran a set of allowlisted commands for you — that sentence "
+        + "is the one the operator wants kept, verbatim, in every rerun of this lane.";
+
+    [Fact]
+    public async Task A_briefs_quoting_block_survives_redispatch_even_when_it_sits_last_before_the_outputs_block()
+    {
+        // #1911 review, low: position alone condemned whichever block preceded `Required outputs:`, so
+        // this brief -- identical to the arm above minus its trailing block -- lost the operator's
+        // sentence on the first redispatch. Two reachable shapes had it: a parent dispatched without
+        // --verify-cmd, and the second redispatch of a chain, where the child's brief has become
+        // adjacent because the engine's paragraph is already gone.
+        var testRoot = Path.Combine(Path.GetTempPath(), $"redispatch-verify-{Guid.NewGuid():N}");
+        try
+        {
+            Directory.CreateDirectory(testRoot);
+            var (parent, child, _, _) = await DispatchThenRedispatchReviewAsync(
+                testRoot, briefText: BriefWhoseLastBlockQuotesTheClause);
+
+            // Control: the parent carries both copies, and the engine's is the one between the brief
+            // and the outputs block -- so the brief's copy really is the adjacency-losing candidate
+            // once the engine's goes.
+            Assert.Equal(2, CountOccurrences(parent.PromptTemplate, VerifyClauseOpening));
+
+            Assert.StartsWith(BriefWhoseLastBlockQuotesTheClause, child.PromptTemplate, StringComparison.Ordinal);
+            Assert.Equal(1, CountOccurrences(child.PromptTemplate, VerifyClauseOpening));
+            Assert.DoesNotContain("verify-results.md", child.PromptTemplate, StringComparison.Ordinal);
+            Assert.DoesNotContain("must cite that file", child.PromptTemplate, StringComparison.Ordinal);
+
+            // And the second pass is a no-op on that same prompt: with the engine's paragraph gone the
+            // brief's block is now adjacent, which is exactly the chained-redispatch shape.
+            Assert.Equal(child.PromptTemplate, RoleDispatch.WithoutVerifyResultsParagraph(child.PromptTemplate));
+        }
+        finally
+        {
+            DirectoryCleanup.DeleteRecursively(testRoot);
+        }
+    }
+
     /// <summary>The clause both arms count, spelled once here rather than in each assertion.</summary>
     private const string VerifyClauseOpening =
         "Before your first turn the engine ran a set of allowlisted commands for you";
