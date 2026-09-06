@@ -111,14 +111,12 @@ public enum ConductorResolution
 /// than an inference from the run that wrote it (#1931 review HIGH, operator ruling 2026-09-05).
 /// </summary>
 /// <remarks>
-/// Written by <c>baton ledger backfill</c>, and copied onto a correcting row from the row it corrects
-/// (<see cref="CostLedgerStore.BuildResolutionRow"/>, so <c>baton resolve</c> can emit one too).
-/// <b>Absence therefore means
-/// "the writer of this row recorded no source", never <see cref="RecordedRoot"/></b>: every settle-site
-/// row is absent, because <c>Baton.Cli.RepositoryIdentityResolver.TryResolveForRoomAsync</c> resolves
-/// the recorded project root and the working directory through one call and cannot report which of the
-/// two answered. What the exposure is, and the three conditions it ships under, are in spec/baton.md
-/// §7 under `baton ledger backfill`.
+/// Written by the settle site and by <c>baton ledger backfill</c> alike, and copied onto a correcting
+/// row from the row it corrects (<see cref="CostLedgerStore.BuildResolutionRow"/>, so <c>baton
+/// resolve</c> can emit one too). <b>Absence therefore means "this row was written before provenance was
+/// recorded", never <see cref="RecordedRoot"/></b>. What the exposure is, which rows it is true of, and
+/// the three conditions the backfill's wider fallback ships under, are in spec/baton.md §7 under
+/// `baton ledger backfill`.
 /// </remarks>
 [JsonConverter(typeof(JsonStringEnumConverter<RepositoryIdentitySource>))]
 public enum RepositoryIdentitySource
@@ -130,11 +128,18 @@ public enum RepositoryIdentitySource
     [JsonStringEnumMemberName("recorded-root")] RecordedRoot,
 
     /// <summary>
-    /// The recorded project root resolved to nothing (an auto-provisioned worktree torn down on
-    /// Terminal is the ordinary case) and the identity came from the directory the run was invoked in
-    /// instead. <b>A run invoked from the wrong checkout keys such a row to the wrong repository</b>,
-    /// and this value is what makes that visible after the fact — the ledger is append-only, so the row
-    /// cannot be repaired, only identified.
+    /// The identity came from the directory the run was invoked in rather than from a recorded project
+    /// root — either because the room recorded none, or through the wider fallback the register's
+    /// `baton ledger backfill` entry sets out (spec/baton.md §7), with the measurement behind it.
+    /// <b>On a row about a ROOM, a run invoked from the wrong checkout keys it to the
+    /// wrong repository</b>, and this value is what makes that visible after the fact — the ledger is
+    /// append-only, so the row cannot be repaired, only identified.
+    /// <para>
+    /// <b>Not a risk on a <c>github-backfill</c> row</b>, which carries this value by construction: those
+    /// PRs came from the repository <c>gh</c> was run in, so here it is a statement of fact and the
+    /// paragraph above is not true of it. <see cref="CostLedgerEntry.SourceKind"/> is what separates the
+    /// two populations for a reader triaging this field.
+    /// </para>
     /// </summary>
     [JsonStringEnumMemberName("working-directory")] WorkingDirectory,
 }
@@ -558,9 +563,11 @@ public sealed record CostLedgerEntry(
     /// <summary>
     /// #1931 review HIGH: which lookup produced <see cref="Repository"/> — see
     /// <see cref="RepositoryIdentitySource"/> for the closed set, who writes it, and what its absence
-    /// does and does not mean. A row keyed by
+    /// does and does not mean. An EXECUTION row keyed by
     /// <see cref="RepositoryIdentitySource.WorkingDirectory"/> is well-formed and may still be keyed to
-    /// the wrong repository; nothing else on the row can tell a reader that.
+    /// the wrong repository; nothing else on the row can tell a reader that. On a
+    /// <see cref="CostSourceKind.GithubBackfill"/> row the same value carries no such risk — that
+    /// member's own doc says why.
     /// </summary>
     [property: JsonPropertyName("identitySource")]
     [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]

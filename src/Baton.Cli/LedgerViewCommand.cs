@@ -117,7 +117,9 @@ public static class LedgerViewCommand
         }
 
         var repository = options.RoomDirectoryPath is { Length: > 0 } roomDirectoryPath
-            ? await RepositoryIdentityResolver.TryResolveForRoomAsync(roomDirectoryPath, cancellationToken).ConfigureAwait(false)
+            // A read, not a write: the source says how a ROW was keyed, and this call is only choosing
+            // which file to open, so it is discarded rather than surfaced.
+            ? (await RepositoryIdentityResolver.TryResolveForRoomAsync(roomDirectoryPath, cancellationToken).ConfigureAwait(false)).Identity
             : await RepositoryIdentityResolver.TryResolveAsync(Environment.CurrentDirectory, cancellationToken).ConfigureAwait(false);
 
         if (repository is null)

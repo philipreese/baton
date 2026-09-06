@@ -1,5 +1,7 @@
 using System.Diagnostics;
 using Baton.Accounting;
+using Baton.Status;
+using Baton.Vendors;
 
 namespace Baton.Cli.Tests;
 
@@ -187,6 +189,84 @@ public sealed class RepositoryIdentityResolverTests
             Path.Combine(Path.GetTempPath(), $"absent-{Guid.NewGuid():N}"), TestContext.Current.CancellationToken));
         Assert.Null(await RepositoryIdentityResolver.TryResolveAsync("   ", TestContext.Current.CancellationToken));
     }
+
+    /// <summary>
+    /// #1931 re-review MEDIUM. <see cref="CostLedgerEntry.IdentitySource"/> can only answer "how was
+    /// this row keyed" if this resolver names the rung that answered — Program.cs's own comment at the
+    /// append says why that matters for the population it stamps. Both arms below, because the VALUE is
+    /// the discrimination: a resolver returning one constant would satisfy either arm alone.
+    /// </summary>
+    [Fact]
+    public async Task A_room_with_a_recorded_project_root_reports_recorded_root()
+    {
+        var probed = new List<string>();
+        var (identity, source) = await RepositoryIdentityResolver.TryResolveForRoomAsync(
+            RoomPath,
+            [new RoomRegistryEntry(BatonPaths.RecordKey(RoomPath), RecordedRoot, DateTime.UtcNow)],
+            (directory, _) =>
+            {
+                probed.Add(directory);
+                return Task.FromResult<RepositoryIdentity?>(RepositoryIdentity.From("https://github.com/o/r.git", null));
+            },
+            TestContext.Current.CancellationToken);
+
+        Assert.Equal(RepositoryIdentitySource.RecordedRoot, source);
+        Assert.Equal("github.com/o/r", identity!.Value);
+        Assert.Equal([RecordedRoot], probed);
+    }
+
+    /// <summary>
+    /// The other arm: a room with NO registry entry — reachable because registration is fail-open — is
+    /// keyed from wherever the process was started, which is the one case the settle site's (deliberately
+    /// narrow) fallback bites. That row is well-formed and may be keyed to the wrong repository, so it is
+    /// exactly the row the field has to mark.
+    /// </summary>
+    [Fact]
+    public async Task A_room_with_no_registry_entry_falls_back_to_the_working_directory_and_says_so()
+    {
+        var probed = new List<string>();
+        var (identity, source) = await RepositoryIdentityResolver.TryResolveForRoomAsync(
+            RoomPath,
+            [new RoomRegistryEntry(BatonPaths.RecordKey(Path.Combine(Path.GetTempPath(), "some-other-room")), RecordedRoot, DateTime.UtcNow)],
+            (directory, _) =>
+            {
+                probed.Add(directory);
+                return Task.FromResult<RepositoryIdentity?>(RepositoryIdentity.From("https://github.com/o/r.git", null));
+            },
+            TestContext.Current.CancellationToken);
+
+        Assert.Equal(RepositoryIdentitySource.WorkingDirectory, source);
+        Assert.NotNull(identity);
+        Assert.Equal([Environment.CurrentDirectory], probed);
+    }
+
+    /// <summary>
+    /// What pins the settle site's fallback at its narrower width, which this change deliberately did
+    /// not touch. The probe is asserted to have been called exactly once, against the recorded root: a
+    /// SECOND call, against the working directory, would BE the widening.
+    /// </summary>
+    [Fact]
+    public async Task A_recorded_root_that_no_longer_resolves_yields_no_identity_rather_than_falling_back()
+    {
+        var probed = new List<string>();
+        var (identity, source) = await RepositoryIdentityResolver.TryResolveForRoomAsync(
+            RoomPath,
+            [new RoomRegistryEntry(BatonPaths.RecordKey(RoomPath), RecordedRoot, DateTime.UtcNow)],
+            (directory, _) =>
+            {
+                probed.Add(directory);
+                return Task.FromResult<RepositoryIdentity?>(null);
+            },
+            TestContext.Current.CancellationToken);
+
+        Assert.Null(identity);
+        Assert.Equal(RepositoryIdentitySource.RecordedRoot, source);
+        Assert.Equal([RecordedRoot], probed);
+    }
+
+    private static readonly string RoomPath = Path.Combine(Path.GetTempPath(), "baton-identity-source-room");
+
+    private static readonly string RecordedRoot = Path.Combine(Path.GetTempPath(), "baton-identity-source-checkout");
 
     private static string NewTempDirectory()
     {

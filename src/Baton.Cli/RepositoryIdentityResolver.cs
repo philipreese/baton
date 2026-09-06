@@ -37,21 +37,57 @@ internal static class RepositoryIdentityResolver
     /// records the project root at registration time, per room, which is the fact this needs.
     /// Registration is itself fail-open (<c>RunCommand.RegisterRoomAsync</c>), so a room with no entry
     /// is reachable and falls back to the working directory rather than losing the row.
+    /// <para>
+    /// <b>The fallback is narrower here than in <c>LedgerBackfillCommand.ResolveRoomRepositoryAsync</c>,
+    /// on purpose</b>, and the two are deliberately not one method: this one reaches for the working
+    /// directory only when the room has NO recorded root at all. One that is recorded but unresolvable
+    /// stops here with no identity, so the settle costs itself a row rather than keying one to whatever
+    /// checkout the process happened to be started in. Why a backfill takes the opposite side of that
+    /// trade is on <see cref="RepositoryIdentitySource.WorkingDirectory"/> and in the register it cites.
+    /// </para>
+    /// <para>
+    /// <b>Returns which rung answered</b> (#1931 re-review MEDIUM), so the row this keys can carry
+    /// <see cref="CostLedgerEntry.IdentitySource"/> rather than leaving the ledger's dominant population
+    /// unable to state its own provenance. The <see cref="RepositoryIdentitySource"/> is what the lookup
+    /// USED, so it is meaningful even when the identity is <see langword="null"/> and no row follows.
+    /// </para>
     /// </remarks>
-    public static async Task<RepositoryIdentity?> TryResolveForRoomAsync(
+    public static async Task<(RepositoryIdentity? Identity, RepositoryIdentitySource Source)> TryResolveForRoomAsync(
         string roomDirectoryPath, CancellationToken cancellationToken = default)
     {
         ArgumentException.ThrowIfNullOrEmpty(roomDirectoryPath);
 
-        var recordedRoomPath = BatonPaths.RecordKey(roomDirectoryPath);
         var registrations = await RoomRegistryStore
             .ReadDistinctByRoomAsync(BatonPaths.RoomRegistryFile, cancellationToken).ConfigureAwait(false);
 
+        return await TryResolveForRoomAsync(roomDirectoryPath, registrations, TryResolveAsync, cancellationToken)
+            .ConfigureAwait(false);
+    }
+
+    /// <inheritdoc cref="TryResolveForRoomAsync(string, CancellationToken)"/>
+    /// <remarks>
+    /// The seam the public overload above is a thin wrapper over: it takes the registry rows and the git
+    /// probe as arguments so both rungs can be exercised without a registry file on disk or a git spawn
+    /// — the same reason <c>LedgerBackfillCommand</c> owns a <c>RepositoryProbe</c> delegate. A test that
+    /// stubbed only the probe would still read the operator's real registry.
+    /// </remarks>
+    internal static async Task<(RepositoryIdentity? Identity, RepositoryIdentitySource Source)> TryResolveForRoomAsync(
+        string roomDirectoryPath,
+        IReadOnlyList<RoomRegistryEntry> registrations,
+        Func<string, CancellationToken, Task<RepositoryIdentity?>> probe,
+        CancellationToken cancellationToken)
+    {
+        ArgumentException.ThrowIfNullOrEmpty(roomDirectoryPath);
+
+        var recordedRoomPath = BatonPaths.RecordKey(roomDirectoryPath);
         var projectRoot = registrations
             .FirstOrDefault(entry => BatonPaths.RecordKeyComparer.Equals(entry.RoomPath, recordedRoomPath))
             ?.ProjectRoot;
 
-        return await TryResolveAsync(projectRoot ?? Environment.CurrentDirectory, cancellationToken).ConfigureAwait(false);
+        return projectRoot is { Length: > 0 }
+            ? (await probe(projectRoot, cancellationToken).ConfigureAwait(false), RepositoryIdentitySource.RecordedRoot)
+            : (await probe(Environment.CurrentDirectory, cancellationToken).ConfigureAwait(false),
+                RepositoryIdentitySource.WorkingDirectory);
     }
 
     /// <summary>

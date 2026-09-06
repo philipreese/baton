@@ -137,12 +137,9 @@ public static class LedgerBackfillCommand
             .ConfigureAwait(false);
 
         // PLAN, then DISCLOSE, then WRITE -- and that order is the operator's ruling of 2026-09-05
-        // (#1931 review HIGH), not an implementation detail. The disclosure this report carries is
-        // "these rows were keyed to THIS working directory's repository, so run me from the right
-        // checkout": printed after the append, it describes a ledger that has already been written
-        // wrong, and this ledger is append-only, so a corrective run cannot repair it -- it writes into
-        // a DIFFERENT repository's file whose dedupe never sees the bad rows. Printed first, the same
-        // sentence is something the operator can still act on with Ctrl-C.
+        // (#1931 review HIGH), not an implementation detail. Why the order is load-bearing rather than
+        // arbitrary -- what an after-the-append disclosure would be describing, and why nothing can
+        // repair it -- is spec/baton.md §7's backfill section, under the working-directory fallback.
         var planned = await PlanAsync(pending, report, cancellationToken).ConfigureAwait(false);
 
         report.Print(output);
@@ -296,8 +293,9 @@ public static class LedgerBackfillCommand
     /// A room's repository identity: its recorded project root first (which is what
     /// <see cref="RepositoryIdentityResolver.TryResolveForRoomAsync"/> reads, and the only fact that
     /// keys a room to the repository the work was actually done in), falling back to the working
-    /// directory. Expressed here rather than called there so the <see cref="RepositoryProbe"/> seam
-    /// covers BOTH lookups — a test that stubbed only one would still spawn git for the other.
+    /// directory. Separate from that method rather than a call to it because the two fall back at
+    /// different widths, which its own remarks set out — this one also takes the fallback when a
+    /// recorded root RESOLVES to nothing, and a settle deliberately does not.
     /// <para>
     /// <b>The fallback is deliberately wider here than at a settle site</b>, and spec/baton.md §7's
     /// backfill section is the record of exactly how much wider, the measurement that forced it, and
@@ -466,8 +464,15 @@ public static class LedgerBackfillCommand
             // A FOURTH stop, and the one that is about someone else's behaviour rather than this
             // loop's: the cursor advance below is only sound while each page is the newest of what
             // remains. spec/baton.md §7's backfill section has why that cannot be pinned with a
-            // `sort:` qualifier and is checked here instead; what this code owns is that a page which
-            // fails the assumption stops the walk rather than advancing a cursor past PRs it never saw.
+            // `sort:` qualifier and is checked here instead.
+            //
+            // What this check DETECTS is narrower than that assumption, and saying so is the point
+            // (#1931 re-review LOW): it reads a page in isolation and can only see that the page is
+            // internally out of merge order. A page that is internally ordered but is not the newest of
+            // what remains passes here and still advances the cursor past PRs the walk never saw. It is
+            // a strong proxy rather than a proof -- any non-merge ordering shows up across 40 items --
+            // and the walk's other disclosure (`GithubIncompleteReason`) is what an operator reads when
+            // it fires.
             if (FirstOutOfMergeOrder(page.Items) is { } outOfOrder)
             {
                 report.GithubIncompleteReason =

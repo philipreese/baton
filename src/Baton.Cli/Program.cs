@@ -423,7 +423,7 @@ try
         // Same fail-open contract either way -- an accounting write never gates a settled run.
         try
         {
-            var repository = await RepositoryIdentityResolver
+            var (repository, identitySource) = await RepositoryIdentityResolver
                 .TryResolveForRoomAsync(terminalRoomDirectoryPath, CancellationToken.None).ConfigureAwait(false);
             if (repository is not null)
             {
@@ -454,11 +454,16 @@ try
                 var delivery = await WorkspaceDeliveryProbe
                     .ReadForRoomAsync(terminalRoomDirectoryPath, hostStopSource.Token).ConfigureAwait(false);
 
+                // identitySource, from the resolver rather than assumed here (#1931 re-review MEDIUM):
+                // the settle site writes most of the ledger, so a field only the backfill stamped would
+                // partition the file by WRITER instead of by provenance -- which is the one question it
+                // exists to answer.
                 var costEntries = CostLedgerStore.BuildEntries(
                     terminalEntries, terminalRoomDirectoryPath, repository,
                     runwayOverrideReasonByWorker: stamps.RunwayOverrideReasonByWorker,
                     deliveryByWorker: delivery,
-                    labelByWorker: stamps.LabelByWorker);
+                    labelByWorker: stamps.LabelByWorker,
+                    identitySource: identitySource);
                 await CostLedgerStore.AppendAsync(costEntries, costLedgerPath, CancellationToken.None).ConfigureAwait(false);
             }
             else
@@ -526,7 +531,10 @@ try
         // make must never report a resolution that is already durable in flow.jsonl as failed.
         try
         {
-            var repository = await RepositoryIdentityResolver
+            // The source is DISCARDED here, unlike at the settle site above: a correcting row copies
+            // provenance from the row it corrects (CostLedgerStore.BuildResolutionRow), so that two rows
+            // keyed to one repository never state different provenance. Re-resolving it now could.
+            var (repository, _) = await RepositoryIdentityResolver
                 .TryResolveForRoomAsync(resolvedRoomDirectoryPath, CancellationToken.None).ConfigureAwait(false);
             if (repository is not null)
             {

@@ -444,10 +444,11 @@ public sealed class CostLedgerStoreTests
     /// <summary>
     /// #1931 review HIGH: a row says WHICH lookup produced its repository key, and it survives the
     /// file. All three states in one test, because the field is only worth having if they are
-    /// distinguishable: <c>recorded-root</c>, <c>working-directory</c>, and the ABSENCE a writer that
-    /// cannot say leaves. Without that third arm a stamp defaulting to <c>recorded-root</c> on every
-    /// settle-site row would pass here, and <see cref="RepositoryIdentitySource"/>'s own doc is what
-    /// that absence has to keep meaning.
+    /// distinguishable: <c>recorded-root</c>, <c>working-directory</c>, and ABSENCE. Without that third
+    /// arm a builder quietly defaulting the field to <c>recorded-root</c> would pass here — and it is
+    /// the default that has to stay null, since every production caller now supplies a source
+    /// (#1931 re-review MEDIUM) and <see cref="RepositoryIdentitySource"/>'s own doc is what an absent
+    /// value has to keep meaning.
     /// </summary>
     [Fact]
     public async Task Which_lookup_keyed_a_row_to_its_repository_is_recorded_and_survives_the_file()
@@ -465,7 +466,7 @@ public sealed class CostLedgerStoreTests
                 Assert.Single(CostLedgerStore.BuildEntries(
                     events, room, Repository, identitySource: RepositoryIdentitySource.RecordedRoot)).IdentitySource);
 
-            // The absence: a writer that cannot say which lookup answered stamps nothing.
+            // The absence: an unsupplied source stamps nothing rather than defaulting to a value.
             Assert.Null(Assert.Single(CostLedgerStore.BuildEntries(events, room, Repository)).IdentitySource);
 
             await CostLedgerStore.AppendAsync(

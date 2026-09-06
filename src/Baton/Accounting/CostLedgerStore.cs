@@ -85,9 +85,10 @@ public static partial class CostLedgerStore
     /// <param name="identitySource">
     /// #1931 review HIGH: which lookup produced <paramref name="repository"/>, stamped verbatim on
     /// every row this call builds. Supplied by the caller because only the caller knows — this method
-    /// is handed an identity, not the probe that found one. <see langword="null"/> where the caller
-    /// cannot say which lookup answered, which is what
-    /// <see cref="CostLedgerEntry.IdentitySource"/>'s absence means.
+    /// is handed an identity, not the probe that found one. Every production caller supplies one
+    /// (#1931 re-review MEDIUM); the default stays <see langword="null"/> rather than a value, because
+    /// a guessed source would be indistinguishable from a measured one, and
+    /// <see cref="CostLedgerEntry.IdentitySource"/>'s own doc states what an absent value means.
     /// </param>
     public static IReadOnlyList<CostLedgerEntry> BuildEntries(
         IReadOnlyList<LogEntry> entries,
