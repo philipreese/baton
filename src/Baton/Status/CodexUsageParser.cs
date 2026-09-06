@@ -7,6 +7,24 @@ namespace Baton.Status;
 /// Parses the per-turn usage on Codex CLI JSONL <c>turn.completed</c> events (#1853). Codex reports
 /// <c>input_tokens</c> inclusive of <c>cached_input_tokens</c>; Baton's additive shape keeps those
 /// dimensions disjoint, so <see cref="WorkerUsage.TokensIn"/> is the non-cached remainder.
+/// <para>
+/// <b>No <see cref="IWorkerUsageParser.TryParseEchoedModel"/> override, because codex has no reachable
+/// source for one</b> (#1927 review HIGH). The absence is a DIFFERENT kind from agy's beside it: agy's
+/// vendor stream was measured to carry no <c>model</c> key, whereas codex never reaches Baton as a
+/// vendor stream at all. Both lifecycle events on this vendor's stdout are synthesized by
+/// <c>Baton.Vendors.CodexAppServerBroker</c> — <c>thread.started</c> carries a thread id and nothing
+/// else, <c>turn.completed</c> a usage object and nothing else — so a parser reading either would be
+/// reading Baton's own two keys back. The emitter is in-tree, which makes this deterministic rather
+/// than a sample; the captured stream agrees (<c>tests/Baton.Cli.Tests/Fixtures/codex-live-stream.jsonl</c>,
+/// 261 lines, no <c>model</c> key on any of them), and neither does the recorded app-server event
+/// grammar name one — the probe document is the one <c>WorkerBindingConfigEntry.EffortResolved</c>
+/// already cites by path. So <c>modelEchoed</c> is ABSENT
+/// on every codex row and the fact is UNMEASURED rather than measured-negative: stamping the broker's
+/// own <c>configuration.Model</c> onto its <c>thread.started</c> would echo Baton's INTENT, which is
+/// exactly what claude's <c>system:init</c> is refused for (<see cref="ClaudeUsageParser"/>). Closing
+/// it needs the app-server's own answer to <c>thread/start</c> inspected for a model field, which no
+/// in-tree recording carries. spec/baton.md §7's ledger row is the register.
+/// </para>
 /// </summary>
 public sealed class CodexUsageParser : IWorkerUsageParser
 {

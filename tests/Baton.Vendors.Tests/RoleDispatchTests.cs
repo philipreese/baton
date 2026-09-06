@@ -448,5 +448,117 @@ public class RoleDispatchTests
         // Even an adapter the map has no entry for is never consulted once an override is supplied.
         Assert.Equal(3, RoleDispatch.ToBinding(mapRole, "spec", adapterOverride: "agy", tokenBudgetOverride: 3).TokenBudget);
     }
+
+    /// <summary>
+    /// #1927: a dispatch that names no <c>--model</c> still records what it will run on, for each of
+    /// the three adapters, and records which rung answered. The measured symptom was a room dispatched
+    /// <c>--adapter agy</c> with no model rendering a bare vendor everywhere.
+    /// </summary>
+    [Theory]
+    // No override at all: the role's own tier (frontier -> claude/opus) answers.
+    [InlineData(null, "opus")]
+    // A vendor swap drops the tier's model, so the vendor's own measured CLI default answers -- the
+    // exact dispatch shape that produced the bare vendor.
+    [InlineData("agy", "gemini-3.8-flash-high")]
+    [InlineData("codex", "gpt-6-astra")]
+    public void A_dispatch_with_no_model_records_the_model_it_resolved_and_says_it_was_resolved(
+        string? adapterOverride, string expectedModel)
+    {
+        var binding = RoleDispatch.ToBinding(Review, "spec", adapterOverride: adapterOverride);
+
+        Assert.Equal(expectedModel, binding.ModelResolved);
+        Assert.Equal(BindingValueSource.ResolvedDefault, binding.ModelSource);
+    }
+
+    /// <summary>
+    /// #1927, the polarity arm: an explicitly requested model is recorded as REQUESTED, so a render
+    /// surface never marks an operator's own choice as a fallback.
+    /// </summary>
+    [Fact]
+    public void A_dispatch_that_names_a_model_records_it_as_requested_rather_than_resolved()
+    {
+        var binding = RoleDispatch.ToBinding(Review, "spec", modelOverride: "haiku", effortOverride: "low");
+
+        Assert.Equal("haiku", binding.ModelResolved);
+        Assert.Equal(BindingValueSource.Requested, binding.ModelSource);
+        Assert.Equal("low", binding.EffortResolved);
+        Assert.Equal(BindingValueSource.Requested, binding.EffortSource);
+    }
+
+    /// <summary>
+    /// #1927: the invariant spec/baton.md §2 rules — a stamp may never reach the fields that become the
+    /// vendor's argv. The agy swap is where the two diverge most visibly: the stamp names a model and
+    /// the dispatch input stays null.
+    /// </summary>
+    [Fact]
+    public void Resolving_a_default_model_never_changes_what_is_passed_to_the_vendor_cli()
+    {
+        var swapped = RoleDispatch.ToBinding(Review, "spec", adapterOverride: "agy");
+
+        Assert.Null(swapped.Model);
+        Assert.Null(swapped.Effort);
+        Assert.Equal("gemini-3.8-flash-high", swapped.ModelResolved);
+        // The same invariant on the effort axis, which since the review's MEDIUM does resolve here:
+        // the stamp names an effort and the dispatch input stays null.
+        Assert.Equal("high", swapped.EffortResolved);
+    }
+
+    /// <summary>
+    /// #1927 review MEDIUM — the issue's own stated mechanism, "agy's effort is the id suffix", which
+    /// went unimplemented and left <c>EffortResolved</c> an exact duplicate of <c>Effort</c> for every
+    /// input. Read off the RESOLVED model, not the tier's: the room the rung exists for is
+    /// <c>--adapter agy</c> with no <c>--model</c>, where the swap dropped the tier model and the
+    /// adapter default is what named one. Rests on <c>AgyWorkerAdapter.GeminiEffortSuffix</c>, the same
+    /// rule the adapter already enforces agreement against.
+    /// </summary>
+    [Fact]
+    public void An_agy_swap_resolves_the_effort_the_models_own_id_suffix_encodes()
+    {
+        var binding = RoleDispatch.ToBinding(Review, "spec", adapterOverride: "agy");
+
+        Assert.Equal("gemini-3.8-flash-high", binding.ModelResolved);
+        Assert.Equal("high", binding.EffortResolved);
+        // Not "requested" -- ResolveEffortStamp's own doc says why this rung resolves rather than asks.
+        Assert.Equal(BindingValueSource.ResolvedDefault, binding.EffortSource);
+
+        // The same rung on an explicitly requested suffixed id, so the arm is about the suffix rather
+        // than about the adapter default alone.
+        var low = RoleDispatch.ToBinding(Review, "spec", adapterOverride: "agy", modelOverride: "gemini-3.8-flash-low");
+        Assert.Equal("low", low.EffortResolved);
+        Assert.Equal(BindingValueSource.ResolvedDefault, low.EffortSource);
+    }
+
+    /// <summary>
+    /// The polarity arm for the rung above, both halves: a model id carrying no effort suffix resolves
+    /// no effort, and neither does a NON-agy vendor whose model id happens to end in one — the suffix
+    /// rule is agy's, and <c>gpt-oss-120b-medium</c>'s trailing <c>-medium</c> is part of a name rather
+    /// than an effort (<c>AgyWorkerAdapter.GeminiEffortSuffix</c>'s own claim-scope note).
+    /// </summary>
+    [Fact]
+    public void A_model_id_with_no_effort_suffix_resolves_no_effort()
+    {
+        var bare = RoleDispatch.ToBinding(Review, "spec", adapterOverride: "agy", modelOverride: "gpt-oss-120b-medium");
+        Assert.Null(bare.EffortResolved);
+        Assert.Null(bare.EffortSource);
+
+        var otherVendor = RoleDispatch.ToBinding(Review, "spec", adapterOverride: "codex", modelOverride: "gemini-3.8-flash-high");
+        Assert.Null(otherVendor.EffortResolved);
+        Assert.Null(otherVendor.EffortSource);
+    }
+
+    /// <summary>
+    /// #1927: every rung silent yields no stamp at all — see <c>AdapterDefaultModels</c> for why claude
+    /// carries no entry. <c>orchestrate</c> is the shipped role whose tier names no model, so this
+    /// exercises the case through the real catalog rather than a fabricated role.
+    /// </summary>
+    [Fact]
+    public void An_unmeasured_adapter_default_leaves_the_resolved_model_absent()
+    {
+        var binding = RoleDispatch.ToBinding(WorkerRoleCatalog.For("orchestrate"), "spec");
+
+        Assert.Equal("claude", binding.Adapter);
+        Assert.Null(binding.ModelResolved);
+        Assert.Null(binding.ModelSource);
+    }
 }
 

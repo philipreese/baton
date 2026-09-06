@@ -31,12 +31,20 @@ namespace Baton.Cli;
 /// of this row's spend. <c>CostLedgerEntry.RunwayOverrideReason</c>'s own doc states the same for its
 /// absence.
 /// </param>
+/// <param name="ModelResolvedByWorker">
+/// #1927: worker name to <see cref="WorkerBindingConfigEntry.ModelResolved"/> — the model dispatch
+/// resolved for it when the dispatcher named none. The ledger row's <c>model</c> falls back to this,
+/// so a room dispatched without <c>--model</c> stops writing a blank; it never OVERRIDES a requested
+/// model, which stays what <c>ExecutionBindingResolver</c> read off the accepted request.
+/// </param>
 public sealed record RoomBindingStamps(
     IReadOnlyDictionary<string, string> LabelByWorker,
-    IReadOnlyDictionary<string, string> RunwayOverrideReasonByWorker)
+    IReadOnlyDictionary<string, string> RunwayOverrideReasonByWorker,
+    IReadOnlyDictionary<string, string> ModelResolvedByWorker)
 {
-    /// <summary>What a room with no readable bindings yields: both projections empty, never null.</summary>
+    /// <summary>What a room with no readable bindings yields: every projection empty, never null.</summary>
     public static RoomBindingStamps None { get; } = new(
+        new Dictionary<string, string>(StringComparer.Ordinal),
         new Dictionary<string, string>(StringComparer.Ordinal),
         new Dictionary<string, string>(StringComparer.Ordinal));
 
@@ -71,13 +79,15 @@ public sealed record RoomBindingStamps(
             when (ex is IOException or UnauthorizedAccessException or BatonFlowException or OperationCanceledException)
         {
             Console.Error.WriteLine(
-                $"Could not read '{bindingsFilePath}' for label and runway-override attribution: {ex.Message} "
-                + "The cost ledger rows for this room carry neither a label nor a runwayOverrideReason.");
+                $"Could not read '{bindingsFilePath}' for label, runway-override and resolved-model attribution: {ex.Message} "
+                + "The cost ledger rows for this room carry no label, no runwayOverrideReason, and no "
+                + "fallback model for a worker dispatched without --model.");
             return None;
         }
 
         var labels = new Dictionary<string, string>(StringComparer.Ordinal);
         var reasons = new Dictionary<string, string>(StringComparer.Ordinal);
+        var resolvedModels = new Dictionary<string, string>(StringComparer.Ordinal);
         foreach (var (worker, entry) in bindings)
         {
             if (entry.Label is { Length: > 0 } label)
@@ -89,8 +99,13 @@ public sealed record RoomBindingStamps(
             {
                 reasons[worker] = reason;
             }
+
+            if (entry.ModelResolved is { Length: > 0 } modelResolved)
+            {
+                resolvedModels[worker] = modelResolved;
+            }
         }
 
-        return new RoomBindingStamps(labels, reasons);
+        return new RoomBindingStamps(labels, reasons, resolvedModels);
     }
 }

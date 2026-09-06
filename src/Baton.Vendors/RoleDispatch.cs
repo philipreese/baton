@@ -186,6 +186,19 @@ public static class RoleDispatch
             : vendorSwapped ? null
             : role.Effort;
 
+        // #1927: what this binding will actually run on, for the render surfaces -- NOT for the CLI.
+        // `model`/`effort` above are the dispatch inputs and are deliberately untouched here: the
+        // measured gap was a room showing a bare "AGY" on the glass, which is a display problem, and
+        // stamping a default onto `model` would instead change which argv the vendor is handed.
+        //
+        // The rungs, model: what was asked for, then the role's tier, then the vendor's measured CLI
+        // default. A vendor swap drops the tier's model above (that comment states why), which is
+        // exactly the dispatch shape -- `--adapter agy` with no `--model` -- that produced the bare
+        // vendor, so the adapter-default rung is what closes it. All three silent means null, never a
+        // guess.
+        var (modelResolved, modelSource) = ResolveModelStamp(adapter, modelOverride, model);
+        var (effortResolved, effortSource) = ResolveEffortStamp(adapter, effortOverride, effort, modelResolved);
+
         var grant = role.Grant;
         var grantAuditMode = GrantAuditMode.Enforced;
 
@@ -253,8 +266,52 @@ public static class RoleDispatch
             // #1802: purely catalog-controlled, like DeliversBranch -- no dispatch-time override exists.
             AllowsSubagents: role.AllowsSubagents,
             // #1151: the NAMES, already proven resolvable and grant-satisfiable above.
-            Skills: resolvedSkills.Count == 0 ? null : resolvedSkills.Select(s => s.Name).ToList());
+            Skills: resolvedSkills.Count == 0 ? null : resolvedSkills.Select(s => s.Name).ToList(),
+            // #1927: display-only, resolved just above.
+            ModelResolved: modelResolved,
+            ModelSource: modelSource,
+            EffortResolved: effortResolved,
+            EffortSource: effortSource);
     }
+
+    /// <summary>
+    /// #1927: the model rungs, as one function so <c>RedispatchCommand</c> re-runs the IDENTICAL
+    /// resolution on a vendor swap rather than a second copy of it. In order: what the dispatcher asked
+    /// for (<paramref name="requestedModel"/>, source <see cref="BindingValueSource.Requested"/>), then
+    /// the value the role's tier already produced (<paramref name="tierModel"/>), then the vendor's
+    /// measured CLI default (<see cref="Domain.AdapterDefaultModels"/>). All three silent means null,
+    /// never a guess — see <see cref="WorkerBindingConfigEntry.ModelResolved"/>.
+    /// </summary>
+    public static (string? Resolved, string? Source) ResolveModelStamp(
+        string adapter, string? requestedModel, string? tierModel) =>
+        !string.IsNullOrWhiteSpace(requestedModel) ? (requestedModel, BindingValueSource.Requested)
+        : tierModel is { Length: > 0 } ? (tierModel, BindingValueSource.ResolvedDefault)
+        : Domain.AdapterDefaultModels.For(adapter) is { Length: > 0 } adapterDefault
+            ? (adapterDefault, BindingValueSource.ResolvedDefault)
+            : ((string?)null, (string?)null);
+
+    /// <summary>
+    /// #1927: the effort rungs, the same shape as <see cref="ResolveModelStamp"/>. The third rung is
+    /// NOT an adapter-wide default effort (none is measured — <see cref="WorkerBindingConfigEntry.EffortResolved"/>
+    /// says why nothing here invents one): it is agy's own <b>model-id suffix</b>, where effort is not
+    /// a separate axis at all but part of the model name (<c>gemini-3.8-flash-high</c> IS effort
+    /// <c>high</c>, the measured rule <c>AgyWorkerAdapter</c> already enforces agreement against). Read
+    /// off <paramref name="modelResolved"/> rather than the raw tier model, because the room this rung
+    /// exists for — <c>--adapter agy</c> with no <c>--model</c> — has no tier model at all: the vendor
+    /// swap dropped it and the adapter default is what named one.
+    /// <para>
+    /// Source is <see cref="BindingValueSource.ResolvedDefault"/> for the suffix rung: the dispatcher
+    /// did not name an effort, Baton read it back off the model id.
+    /// </para>
+    /// </summary>
+    public static (string? Resolved, string? Source) ResolveEffortStamp(
+        string adapter, string? requestedEffort, string? tierEffort, string? modelResolved) =>
+        !string.IsNullOrWhiteSpace(requestedEffort) ? (requestedEffort, BindingValueSource.Requested)
+        : tierEffort is { Length: > 0 } ? (tierEffort, BindingValueSource.ResolvedDefault)
+        : string.Equals(adapter, "agy", StringComparison.OrdinalIgnoreCase)
+          && AgyWorkerAdapter.GeminiEffortSuffix(modelResolved) is { Length: > 0 } suffix
+            ? (suffix, BindingValueSource.ResolvedDefault)
+            : ((string?)null, (string?)null);
 
     /// <summary>
     /// Whether <paramref name="adapter"/> is one of the vendors that streams JSON on stdout

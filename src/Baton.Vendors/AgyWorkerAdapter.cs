@@ -1138,8 +1138,12 @@ public sealed partial class AgyWorkerAdapter : IWorkerAdapter, IPermissionGrantT
     /// The effort a gemini model name encodes as a trailing <c>-low|-medium|-high</c>, or null. Scoped
     /// to the measured gemini families: <c>gpt-oss-120b-medium</c>'s trailing <c>-medium</c> is part of
     /// the name and is not measured as an effort, so it is deliberately not treated as one (claim-scope).
+    /// <para>
+    /// <c>internal</c> rather than private since #1927: <see cref="RoleDispatch.ResolveEffortStamp"/>
+    /// reads the same suffix for the display stamp, and this is the one place that rule is written.
+    /// </para>
     /// </summary>
-    private static string? GeminiEffortSuffix(string? model)
+    internal static string? GeminiEffortSuffix(string? model)
     {
         if (model is null || !model.StartsWith("gemini-", StringComparison.OrdinalIgnoreCase))
         {

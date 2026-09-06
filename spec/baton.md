@@ -255,7 +255,24 @@ A harness invokes work two ways, both in `src/Baton.Cli/Program.cs`:
   Persisted onto every entry of that
   room's own `bindings.json` (`WorkerBindingConfigEntry.Label`) rather than a new file, since bindings
   already exists for every room regardless of terminal state — see §6 schema for how `fleet_status`
-  reads it back. `--token-budget` (#1623) overrides the dispatched role's own default per-execution
+  reads it back.
+
+  **A dispatch that omits `--model` still records what it will run on (#1927).** `RoleDispatch.ToBinding`
+  stamps `ModelResolved`/`ModelSource` — and `EffortResolved`/`EffortSource` — onto every entry of the
+  room's `bindings.json`; `WorkerBindingConfigEntry`'s own doc carries the precedence, the two source
+  values, and why an unmeasured rung yields an absent stamp instead of a guess. (PascalCase on purpose:
+  this file's `bindings.json` keys are what `WorkerBindingConfigWriter` actually serializes, and it
+  applies no naming policy. §6's camelCase spellings are the `fleet_status` projection's, which does
+  carry `[JsonPropertyName]`.) `baton redispatch` re-resolves the same four **per axis** whenever that
+  axis moved — a vendor swap, or an explicit `--model`/`--effort` — and inherits the parent's otherwise;
+  they are adapter-derived like `streamJson`, so carrying them across a swap made the child room
+  display and ledger the previous vendor's model. **Ruled here, because it
+  is the constraint the design rests on: those four are DISPLAY fields and may never feed dispatch.** The
+  measured defect (#1927: a room rendering a bare `agy`) is a rendering one, and repairing it by writing a
+  default into the fields that become the vendor's argv would silence a class of vendor-chosen behaviour
+  the operator never asked to change. §6's schema states how the render surfaces read the pair back.
+
+  `--token-budget` (#1623) overrides the dispatched role's own default per-execution
   token ceiling — §3's "Engine-run verify and the token budget" subsection is the full contract; this
   entry only names the flag. `--workstream` (#1619, rung 1 of #1614's ruling) is a **grouping key, not a title** —
   a room keeps its generated hex identity on disk; the slug only makes several rooms (e.g. an
@@ -2227,7 +2244,7 @@ where `ExecutionUsageView` is
   "cacheReadTokens"?: number, "cacheCreationTokens"?: number, "thinkingTokens"?: number,
   "billedTokens"?: number, "liveBilledTokens"?: number, "billedUnderReadTokens"?: number,
   "billedReconciliationUnavailable"?: string, "peakBilledInWindow"?: number,
-  "modelsObserved"?: string[],
+  "modelsObserved"?: string[], "modelEchoed"?: string,
   "verifyStepMs"?: number, "verifyResultsBytes"?: number }
 ```
 (`src/Baton/Status/ExecutionUsageView.cs` declares the C# record; `WorkflowStatusView.cs` projects it). `wallClockMs` is
@@ -2277,6 +2294,13 @@ models the whole-tree read summed over, rather than only the total. `WorkerUsage
 the field, including what its absence does and does not say; §7's cost ledger is the consumer whose
 behaviour turns on it. `peakBilledInWindow` (#1709) was already on the record and missing from the shape
 above; both are listed now.
+
+**`modelEchoed` (#1927) is a different fact from `modelsObserved` beside it**, and the two are not
+substitutes — `CostLedgerEntry.ModelEchoed`'s own doc draws the distinction. It is read at settle by the
+same reader that derives the token dimensions, over the same captured bytes, and is deliberately
+computed BEFORE the truncation guards — a stream whose reconciliation is unavailable is exactly the
+stream whose model is still worth naming. §7's ledger row states which event each vendor's answer comes
+from, which one may not be read, and what its absence means; that ruling is not restated here.
 
 **The two added by #1882 are not token figures at all, and are attributed to ONE execution.**
 `verifyStepMs` and `verifyResultsBytes` are the wall clock of the room's pre-turn verify step (the
@@ -2601,8 +2625,10 @@ anticipated this shape):
   "resolvedBy"?: string,  // F10 (#1720 review): the room-level WorkflowStatusView.ResolvedBy, copied like `rejected`. The glass's only signal for a conductor `baton resolve --close`, which sets this WITHOUT setting `rejected` (§3)
   "role"?: string,        // bindings.json's own key for the Running step's worker
   "adapter"?: string,     // that role's WorkerBindingConfigEntry.Adapter
-  "model"?: string,       // that role's WorkerBindingConfigEntry.Model
-  "effort"?: string,      // that role's WorkerBindingConfigEntry.Effort
+  "model"?: string,       // that role's WorkerBindingConfigEntry.Model, falling back (#1927) to its ModelResolved when the dispatcher named none -- so a room dispatched without --model shows a model rather than a bare vendor
+  "effort"?: string,      // that role's WorkerBindingConfigEntry.Effort, with the same #1927 fallback to EffortResolved
+  "modelSource"?: string, // #1927: which rung produced `model` -- WorkerBindingConfigEntry.ModelSource carried verbatim, including what its absence means. Fleet Glass marks a "resolved-default" value with a trailing "~"
+  "effortSource"?: string, // #1927: the same for `effort`, same two values and same absence rule
   "timeoutMs"?: number,   // that role's WorkerBindingConfigEntry.Timeout, in milliseconds
   "label"?: string,       // #1499: the room's --label, WorkerBindingConfigEntry.Label
   "workstream"?: string,  // #1619: the room's --workstream, WorkerBindingConfigEntry.Workstream
@@ -3925,9 +3951,9 @@ repeated-settle shapes, and what inflated totals that skip is buying, not restat
 | `sourceKind` | Closed set. **Two have writers**: `baton-execution` (a settle, and #1901 C2's backfill of a room still on disk — a recovered execution is the same KIND of fact as a settled one, so it keeps this label rather than earning a "recovered" one) and `github-backfill` (#1901 C2's merged-PR half, below). `claude-code-session`, `codex-session`, `antigravity-session` stay reserved for phase C. Makes "Baton-only rows" a filter, not an inference. |
 | `repository` | `RepositoryIdentity.Value` — see below. |
 | `room`, `workflow`, `step`, `execution`, `role` | Identity, off the accepted `ExecutionRequest`. `role` is Baton's worker name; Baton has no second role concept. |
-| `adapter`, `model`, `outcome`, `startedAt`, `endedAt` | Route and lifecycle. **`model` is the model the step was REQUESTED at** (`ExecutionBindingResolver`, i.e. the accepted request plus any `StepRebound`), never the model the CLI echoed back — a substitution or a quota-driven downgrade is invisible in it, so grouping rows by `model` groups by intent, not by what ran. |
+| `adapter`, `model`, `outcome`, `startedAt`, `endedAt` | Route and lifecycle. **`model` is the model the step was REQUESTED at** (`ExecutionBindingResolver`, i.e. the accepted request plus any `StepRebound`), falling back since #1927 to the binding's own `ModelResolved` when the dispatcher named none — so a room dispatched without `--model` no longer writes a blank here. Never the model the CLI echoed back: grouping rows by `model` groups by intent, not by what ran, and `modelEchoed` below is the other half. |
 | `modelsObserved` | The models this row's token dimensions were summed ACROSS, off the vendor's own per-model breakdown (§3). Absent = the vendor reported no breakdown, which is *unknown*, never *one model*. |
-| `modelEchoed` | **Reserved, no phase-A writer** — the model as the CLI itself echoed it, which is the one `model` is not. Named now so phase C fills it rather than inventing a competitor. |
+| `modelEchoed` | #1927. The model the vendor CLI itself reported having RUN, which is the one `model` is not — written at settle off the captured stream by the same reader that derives the token dimensions (`IWorkerUsageParser.TryParseEchoedModel`, last line naming one wins). **Which event, per vendor, is each parser's own statement; what is ruled here is which event may NOT be read**: claude's `system:init` echoes the requested `--model` string verbatim even for an id that then fails to run (`docs/vendor-doc-audit.md` §5), so reading it would make this field a second copy of `model` under a name promising the opposite. Only **claude** has a writer today, and only its `assistant`/`message.model` rung is measured — the `result` event's own top-level `model` is read first and is unmeasured, since the repository's only captured result lines are error results carrying none. **Absent means the vendor echoed nothing**, never "same as requested" — and the two vendors it is always absent for are absent for different reasons, which a reader must not collapse: agy's own stream was measured to carry no `model` key on any event, whereas **codex never reaches this reader as a vendor stream at all** — Baton's own `CodexAppServerBroker` synthesizes both `thread.started` and `turn.completed`, so there is nothing to echo and the fact is UNMEASURED rather than measured-negative (stamping Baton's own configured model onto them would echo intent, exactly what `system:init` is refused for). For both, the resolved-at-bind stamp (§2/§6) is what names a model instead. A row where `model` and `modelEchoed` differ is a substitution or a quota-driven downgrade; `baton ledger` shows the difference rather than either alone. |
 | `tokensIn`, `tokensOut`, `cacheRead`, `cacheCreation`, `thinking`, `turns`, `wallClockMs` | The dimensions `QuotaLedgerEntry` carries, same names and same nullability. Cache-read is first-class here, never folded into a billed figure. |
 | `verifyStepMs`, `verifyResultsBytes` | #1882's two non-token dimensions, carried through from `ExecutionUsageView` under the same names and by the same attribution — §3 above states which execution gets them and why they are present together or not at all. Neither enters either estimate: a zero-token step changes no price. |
 | `pushWaitMs`, `prePushGateMs` | #1910. What this attempt's own `git push`es spent in the pre-push gate, summed across every push it made: `prePushGateMs` is the hook's whole wall clock (receipt check, plus the fallback `gates --fast` when the receipt did not cover the tree), `pushWaitMs` the part of it spent QUEUED on the shared build lock rather than doing work — the figure C-12's ruling C exists to drive down. **Whose queueing, per path, since only two are reachable and the comparison is between them (#1936 review):** on the SKIP path it is 0 by construction, the receipt check running in `tools/buildlock.py`'s read-only class and queueing on nothing; on the FALLBACK path it is what that `gates --fast` run's own lock-taking members waited for. Nothing else in the hook's process tree may contribute — a gate member's selftest fabricating contention against a temp lock file is not this push waiting, and `tools/buildlock.py`'s `_selftest_env` is what keeps it out. Read at settle from `push-timing.jsonl` in the execution's own artifact directory, which `.githooks/pre-push` appends one line to per push. Present together or absent together — one file produces both. **Absent means "no push timing was recorded"**, never "the push was instant" and never "no push happened": an execution that never pushed, a hook that ran with no Baton-supplied `BATON_OUTPUT_DIR`, and an artifact directory gone by settle time all read the same way. `0` is a measurement — a push that waited on nothing. Neither enters either estimate. |
@@ -3944,7 +3970,7 @@ repeated-settle shapes, and what inflated totals that skip is buying, not restat
 | `label` | #1901 C2. The operator's `baton dispatch --label` for this row's worker, read back off the room's `bindings.json` (`WorkerBindingConfigEntry.Label`, §2/§6) at settle and again by the backfill — the arm key #1903's comparator filters on, so an A/B of two dispatch shapes is a filter rather than a hand-kept list of room paths. Already sanitized when it was recorded; carried through verbatim. Copied onto a correcting row for the same reason `issue`/`pr`/`role` are: it identifies the work, not the spend, and an arm reading would otherwise miss that arm's interventions. **Absent means "no label was recorded for this worker"**, never "unlabelled work" — a `baton run` against a hand-authored `bindings.json`, a dispatch that passed no `--label`, and a room whose bindings file is gone all read the same way. A `github-backfill` row never carries one: a merged PR has no worker and so no binding to read it from. |
 | `commits`, `reviewCount` | #1901 C2, `github-backfill` rows only. How many commits the merged PR carried and how many **reviews** `gh` reports for it. **`reviewCount` is not a review-comment count**, which #1901's C2 text asks for: `gh pr list --json` exposes `reviews` (one entry per submitted review) and `comments` (the PR's issue comments), and neither is the per-thread review-comment count — so the row records the one that was actually measured, under a name that says which. `0` is a measurement; absence means `gh` reported no such array at all. Both are absent on every execution row: a settle has no PR-level count in hand, and the diff shape beside it is a workspace measurement rather than a GitHub one. |
 | `identitySource` | #1931 review HIGH (operator ruling 2026-09-05). Which lookup produced this row's `repository` — `recorded-root` (the room's own recorded project root answered) or `working-directory` (it did not, or there was none, and the identity came from wherever the run was invoked). Closed set. Written by **every writer of a new row**: the settle site (#1931 re-review MEDIUM — `RepositoryIdentityResolver.TryResolveForRoomAsync` returns which rung answered alongside the identity, because the settle site writes most of the file and a field only the backfill stamped would partition the ledger by writer rather than by provenance), `baton ledger backfill` for both its halves, and a correcting row copying it from the row it corrects (so `baton resolve` never states different provenance from the row underneath it). **Absence therefore means "this row was written before provenance was recorded", never `recorded-root`.** On an execution row, `working-directory` is well-formed and may still be keyed to the WRONG repository — the exposure the fallback below accepts — and this field is the only thing on the row that can say so afterwards. It cannot repair one: the ledger is append-only, and a corrective run from the right checkout writes a different repository's file whose dedupe never sees the bad row. **On a `github-backfill` row the same value is a statement of fact, not a fallback, and carries no such risk**: those PRs came from the repository `gh` was run in by construction. The two populations separate on `sourceKind`, which is what a reader triaging this field filters on; a third enum value was rejected because it would change the schema every existing row is read under to record something `sourceKind` already says. |
-| `attempt`, `effort`, `parentRoom`, `workstream`, `raw` | **Reserved, no writer** — none is derivable from the events a settle has in hand (`modelEchoed`, above, is reserved for the same reason). Named now so a later phase fills a reserved field rather than inventing a competing one. |
+| `attempt`, `effort`, `parentRoom`, `workstream`, `raw` | **Reserved, no writer** — none is derivable from the events a settle has in hand. Named now so a later phase fills a reserved field rather than inventing a competing one. (`modelEchoed` was on this list until #1927 gave it a writer; it left the list rather than keeping a stale entry beside a populated field.) |
 
 **A `baton resolve` appends a correcting row; it never rewrites the row it corrects.** This ledger is
 append-only and its rows are immutable, which is what #1849's reproducibility guarantee rests on — so

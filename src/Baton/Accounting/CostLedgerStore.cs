@@ -91,6 +91,12 @@ public static partial class CostLedgerStore
     /// a guessed source would be indistinguishable from a measured one, and
     /// <see cref="CostLedgerEntry.IdentitySource"/>'s own doc states what an absent value means.
     /// </param>
+    /// <param name="modelResolvedByWorker">
+    /// #1927. Supplied by the settle site off the same <c>bindings.json</c> parse
+    /// <paramref name="labelByWorker"/> comes from; <c>Baton.Cli.RoomBindingStamps</c>'s own doc states
+    /// what it holds and when it is consulted. Null everywhere else, which leaves such a row's
+    /// <c>model</c> absent exactly as it was before.
+    /// </param>
     public static IReadOnlyList<CostLedgerEntry> BuildEntries(
         IReadOnlyList<LogEntry> entries,
         string roomDirectoryPath,
@@ -100,7 +106,8 @@ public static partial class CostLedgerStore
         IReadOnlyDictionary<string, string>? runwayOverrideReasonByWorker = null,
         IReadOnlyDictionary<string, WorkspaceDelivery>? deliveryByWorker = null,
         IReadOnlyDictionary<string, string>? labelByWorker = null,
-        RepositoryIdentitySource? identitySource = null)
+        RepositoryIdentitySource? identitySource = null,
+        IReadOnlyDictionary<string, string>? modelResolvedByWorker = null)
     {
         ArgumentNullException.ThrowIfNull(entries);
         ArgumentException.ThrowIfNullOrEmpty(roomDirectoryPath);
@@ -189,8 +196,17 @@ public static partial class CostLedgerStore
                 CacheCreation: usage.CacheCreationTokens,
                 Thinking: usage.ThinkingTokens);
 
+            // #1927: the requested model, else this worker's stamp (RoomBindingStamps.ModelResolvedByWorker
+            // states the precedence and why intent always wins). Applied before pricing on purpose:
+            // withholding it from Estimate would keep refusing to price a room whose model is known.
+            var resolvedModel = binding.Model
+                ?? (request?.Worker is { } modelWorker && modelResolvedByWorker is not null
+                    && modelResolvedByWorker.TryGetValue(modelWorker, out var stampedModel)
+                        ? stampedModel
+                        : null);
+
             var (apiUsd, apiStatus, planUsd, planStatus, estimateReason) =
-                Estimate(catalog, planFactors, binding.Adapter, binding.Model, tokens, usage.ModelsObserved, pricedAt);
+                Estimate(catalog, planFactors, binding.Adapter, resolvedModel, tokens, usage.ModelsObserved, pricedAt);
 
             var unavailableReason = usage.BilledReconciliationUnavailable;
             var completeness = ResolveCompleteness(unavailableReason, usage.BilledTokens);
@@ -222,7 +238,9 @@ public static partial class CostLedgerStore
                 Execution: executionId,
                 Role: request?.Worker,
                 Adapter: binding.Adapter,
-                Model: binding.Model,
+                Model: resolvedModel,
+                // #1927: recorded beside Model rather than merged into it -- see CostLedgerEntry.ModelEchoed.
+                ModelEchoed: usage.ModelEchoed,
                 ModelsObserved: usage.ModelsObserved,
                 Outcome: outcome,
                 Issue: delivery?.Issue,

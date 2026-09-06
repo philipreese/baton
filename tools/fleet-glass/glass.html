@@ -399,12 +399,19 @@ function lineageLineHtml(room, roomsByPath){
 // #1505 item 1: binding fields (role/adapter/model/effort, engine PR #1504) + client-derived
 // timebox remaining (timeoutMs - (now - the Running step's own timestamp), both absent-safe).
 // -----------------------------------------------------------------------------------------------
+// #1927: `model`/`effort` now carry a `modelSource`/`effortSource` beside them. A value Baton
+// resolved rather than the dispatcher requesting it gets a trailing "~" -- the room shows a model
+// either way (the reported symptom was a card reading just "agy"), and the mark is what keeps
+// "I asked for this" distinguishable from "this is the default it fell back to". Absent source =
+// no mark: a hand-authored binding records none, and inventing one here would assert a provenance
+// nothing measured.
+function resolvedMark(source){ return source === "resolved-default" ? "~" : ""; }
 function bindingLineHtml(room){
   const bits = [];
   if(room.role) bits.push(esc(room.role));
   if(room.adapter) bits.push(esc(room.adapter));
-  if(room.model) bits.push(esc(room.model));
-  if(room.effort) bits.push(esc(room.effort));
+  if(room.model) bits.push(esc(room.model) + resolvedMark(room.modelSource));
+  if(room.effort) bits.push(esc(room.effort) + resolvedMark(room.effortSource));
   return bits.length ? `<div class="ev mono">${bits.join(" · ")}</div>` : "";
 }
 function timeboxChip(room, running){

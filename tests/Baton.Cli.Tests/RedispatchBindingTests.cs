@@ -256,4 +256,157 @@ public class RedispatchBindingTests
         Assert.Equal(400_000, RedispatchCommand.InheritBinding(
             parent, new RedispatchOptions("parent-room", "new-room", BilledRateLimit: 400_000)).BilledRateLimit);
     }
+
+    /// <summary>
+    /// #1927 review HIGH: the four display stamps are adapter-derived exactly like
+    /// <see cref="WorkerBindingConfigEntry.StreamJson"/>, so a vendor swap must RE-resolve them.
+    /// Carrying them verbatim made a redispatched agy room display, stamp and ledger the parent's
+    /// <c>opus</c> — the vendor-swap axis rule two tests above nulls <c>Model</c>, and every reader
+    /// (<c>FleetStatusTool</c>, <c>RoomBindingStamps</c>, <c>CostLedgerStore</c>) then falls back to
+    /// the stale <c>ModelResolved</c> precisely because it is null.
+    /// </summary>
+    [Fact]
+    public void A_vendor_swap_re_resolves_the_display_stamps_rather_than_carrying_the_parents_across()
+    {
+        var parent = ParentEntry(adapter: "claude", model: "opus", effort: "careful") with
+        {
+            ModelResolved = "opus",
+            ModelSource = BindingValueSource.Requested,
+            EffortResolved = "careful",
+            EffortSource = BindingValueSource.Requested,
+        };
+
+        var entry = RedispatchCommand.InheritBinding(
+            parent, new RedispatchOptions("parent-room", "new-room", Adapter: "agy"));
+
+        // The agy CLI default (Baton.Domain.AdapterDefaultModels), not the parent's opus.
+        Assert.Equal(AdapterDefaultModels.For("agy"), entry.ModelResolved);
+        Assert.Equal(BindingValueSource.ResolvedDefault, entry.ModelSource);
+        // And #1927's third rung: agy's effort is the model id's own suffix.
+        Assert.Equal("high", entry.EffortResolved);
+        Assert.Equal(BindingValueSource.ResolvedDefault, entry.EffortSource);
+    }
+
+    /// <summary>
+    /// The polarity arm for the test above, and the reason the re-resolution is keyed per axis rather
+    /// than run unconditionally — <see cref="RedispatchCommand.WithResolvedStamps"/>'s own doc has it.
+    /// </summary>
+    [Fact]
+    public void Same_vendor_with_no_override_keeps_the_parents_display_stamps_including_their_source()
+    {
+        var parent = ParentEntry(adapter: "claude", model: "opus", effort: "careful") with
+        {
+            ModelResolved = "opus",
+            ModelSource = BindingValueSource.Requested,
+            EffortResolved = "careful",
+            EffortSource = BindingValueSource.Requested,
+        };
+
+        var entry = RedispatchCommand.InheritBinding(parent, new RedispatchOptions("parent-room", "new-room"));
+
+        Assert.Equal("opus", entry.ModelResolved);
+        Assert.Equal(BindingValueSource.Requested, entry.ModelSource);
+        Assert.Equal("careful", entry.EffortResolved);
+        Assert.Equal(BindingValueSource.Requested, entry.EffortSource);
+    }
+
+    /// <summary>An explicit <c>--model</c> restamps the axis as requested, on either vendor.</summary>
+    [Fact]
+    public void An_explicit_model_override_restamps_the_axis_as_requested()
+    {
+        var parent = ParentEntry(adapter: "claude", model: "opus") with
+        {
+            ModelResolved = "opus",
+            ModelSource = BindingValueSource.ResolvedDefault,
+        };
+
+        var entry = RedispatchCommand.InheritBinding(
+            parent, new RedispatchOptions("parent-room", "new-room", Model: "gemini-3.8-flash-low"));
+
+        Assert.Equal("gemini-3.8-flash-low", entry.ModelResolved);
+        Assert.Equal(BindingValueSource.Requested, entry.ModelSource);
+    }
+
+    /// <summary>
+    /// #1927 re-review MEDIUM: on agy the effort stamp is NOT an independent axis — it is read off the
+    /// resolved model id's own suffix (<see cref="RoleDispatch.ResolveEffortStamp"/>'s third rung) — so
+    /// a SAME-VENDOR <c>--model</c> moves the correct effort answer with it. The measured room is the
+    /// one #1927 exists for: <c>--adapter agy</c> with no <c>--model</c>/<c>--effort</c>, redispatched
+    /// onto a <c>-low</c> id. Inheriting the parent's stamp put <c>high</c> on the glass while the CLI
+    /// ran at <c>low</c>, and made redispatch disagree with <see cref="RoleDispatch.ToBinding"/> for
+    /// identical inputs.
+    /// </summary>
+    [Fact]
+    public void A_same_vendor_model_override_re_reads_agys_effort_off_the_new_model_id()
+    {
+        var parent = ParentEntry(adapter: "agy", model: null, effort: null) with
+        {
+            ModelResolved = AdapterDefaultModels.For("agy"),
+            ModelSource = BindingValueSource.ResolvedDefault,
+            EffortResolved = "high",
+            EffortSource = BindingValueSource.ResolvedDefault,
+        };
+
+        var entry = RedispatchCommand.InheritBinding(
+            parent, new RedispatchOptions("parent-room", "new-room", Model: "gemini-3.8-flash-low"));
+
+        Assert.Equal("gemini-3.8-flash-low", entry.ModelResolved);
+        Assert.Equal("low", entry.EffortResolved);
+        Assert.Equal(BindingValueSource.ResolvedDefault, entry.EffortSource);
+        // The control that this is the STAMP moving and not the axis: the dispatch input stays null,
+        // so the CLI is still handed no --effort of its own, exactly as ToBinding would leave it.
+        Assert.Null(entry.Effort);
+    }
+
+    /// <summary>
+    /// The polarity arm for the test above, and the reason its trigger is <c>--model</c> given AND a
+    /// parent that recorded no effort, rather than "the model stamp moved". A parent whose effort WAS
+    /// requested keeps both the value and the <see cref="BindingValueSource.Requested"/> source across
+    /// a same-vendor <c>--model</c>: re-resolving there would restamp it <c>resolved-default</c> and
+    /// claim the child fell back to a value it was actually given.
+    /// </summary>
+    [Fact]
+    public void A_same_vendor_model_override_does_not_demote_an_effort_the_parent_was_asked_for()
+    {
+        var parent = ParentEntry(adapter: "claude", model: "opus", effort: "careful") with
+        {
+            ModelResolved = "opus",
+            ModelSource = BindingValueSource.Requested,
+            EffortResolved = "careful",
+            EffortSource = BindingValueSource.Requested,
+        };
+
+        var entry = RedispatchCommand.InheritBinding(
+            parent, new RedispatchOptions("parent-room", "new-room", Model: "haiku"));
+
+        Assert.Equal("haiku", entry.ModelResolved);
+        Assert.Equal(BindingValueSource.Requested, entry.ModelSource);
+        Assert.Equal("careful", entry.EffortResolved);
+        Assert.Equal(BindingValueSource.Requested, entry.EffortSource);
+    }
+
+    /// <summary>
+    /// #1927 review HIGH, sub-note: the <c>--spec</c> path passed <c>options.Model ?? parentEntry.Model</c>
+    /// straight into <see cref="RoleDispatch.ToBinding"/> as an explicit override, which does NOT apply
+    /// the vendor-swap axis rule to it — so an amended-spec redispatch onto agy handed the vendor CLI
+    /// the literal string <c>opus</c> as real argv, the #1082 failure in mirror image. Asserted on the
+    /// shared predicate both paths now cross, since the amended-spec path itself needs a room on disk.
+    /// </summary>
+    [Fact]
+    public void The_inherited_axes_both_redispatch_paths_share_drop_model_and_effort_on_a_vendor_swap()
+    {
+        var parent = ParentEntry(adapter: "claude", model: "opus", effort: "xhigh");
+
+        var swapped = RedispatchCommand.InheritedAxes(
+            parent, new RedispatchOptions("parent-room", "new-room", SpecFilePath: "amended.md", Adapter: "agy"));
+        Assert.Null(swapped.Model);
+        Assert.Null(swapped.Effort);
+
+        // The control: on the SAME vendor the very same predicate still inherits both, so the arm
+        // above is about the swap rather than about the axes never being carried at all.
+        var kept = RedispatchCommand.InheritedAxes(
+            parent, new RedispatchOptions("parent-room", "new-room", SpecFilePath: "amended.md"));
+        Assert.Equal("opus", kept.Model);
+        Assert.Equal("xhigh", kept.Effort);
+    }
 }

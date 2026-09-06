@@ -117,7 +117,8 @@ public static class TerminalSettleRecorder
                     runwayOverrideReasonByWorker: stamps.RunwayOverrideReasonByWorker,
                     deliveryByWorker: delivery,
                     labelByWorker: stamps.LabelByWorker,
-                    identitySource: identitySource);
+                    identitySource: identitySource,
+                    modelResolvedByWorker: stamps.ModelResolvedByWorker);
                 await CostLedgerStore.AppendAsync(costEntries, costLedgerPath, CancellationToken.None).ConfigureAwait(false);
             }
             else

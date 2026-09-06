@@ -160,8 +160,8 @@ public enum RepositoryIdentitySource
 /// </para>
 /// <para>
 /// <b>Fields reserved with no writer.</b> <see cref="Attempt"/>, <see cref="Effort"/>,
-/// <see cref="ParentRoom"/>, <see cref="Workstream"/>,
-/// <see cref="ModelEchoed"/> and <see cref="Raw"/> are named here but never populated by <see cref="CostLedgerStore.BuildEntries"/>:
+/// <see cref="ParentRoom"/>, <see cref="Workstream"/>
+/// and <see cref="Raw"/> are named here but never populated by <see cref="CostLedgerStore.BuildEntries"/>:
 /// none of them is derivable from the events a settle already has in hand, and #1849's telemetry
 /// checklist wants the NAME pinned now so a later phase fills a reserved field rather than inventing
 /// a competing one. Absent for the same reason every other unavailable dimension is absent.
@@ -218,21 +218,30 @@ public sealed record CostLedgerEntry(
     string? Adapter = null,
     /// <summary>
     /// The model this attempt was REQUESTED at — the accepted <c>ExecutionRequest.Model</c> (plus any
-    /// <c>StepRebound</c> override), as <c>ExecutionBindingResolver</c> resolves it. <b>Not the model
-    /// the vendor CLI echoed back</b>, which Baton does not record anywhere yet: a substitution or a
-    /// quota-driven downgrade is invisible here, so grouping rows by this field groups by intent, not
-    /// by what ran (#1883 review F4). <see cref="ModelEchoed"/> is the reserved name for the other one.
+    /// <c>StepRebound</c> override), as <c>ExecutionBindingResolver</c> resolves it, falling back
+    /// (#1927) to the binding's own <c>ModelResolved</c> when the dispatcher named none. <b>Not the
+    /// model the vendor CLI echoed back</b>: grouping rows by this field groups by intent, not by what
+    /// ran (#1883 review F4). <see cref="ModelEchoed"/> is the other one, and a row where the two
+    /// differ is a substitution or a quota-driven downgrade made visible.
     /// </summary>
     [property: JsonPropertyName("model")]
     [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
     string? Model = null,
     /// <summary>
-    /// <b>Reserved, no phase-A writer.</b> The model as the vendor CLI itself echoed it (claude's
-    /// <c>system:init</c> line), which is what #1849's telemetry checklist asks for and what
-    /// <see cref="Model"/> above is not. Named now so phase C fills a reserved field rather than
-    /// inventing a competitor. <see cref="ModelsObserved"/> is a different fact and not a substitute:
-    /// it names every model the whole execution TREE billed against, where this names the one the main
-    /// conversation ran on.
+    /// The model as the vendor CLI itself reported having RUN, which is what #1849's telemetry
+    /// checklist asks for and what <see cref="Model"/> above is not. Written at settle since #1927,
+    /// off the captured stream (<c>Status.IWorkerUsageParser.TryParseEchoedModel</c>, whose
+    /// implementations state which event each vendor's answer comes from). <b>Not claude's
+    /// <c>system:init</c> line</b>, which was measured to echo the requested string verbatim even for
+    /// an id that then fails to run (<c>docs/vendor-doc-audit.md</c> §5) — reading it would make this a
+    /// second copy of <see cref="Model"/>.
+    /// <para>
+    /// <b>Absent means the vendor echoed nothing</b>, never "same as requested": agy's stream carries
+    /// no <c>model</c> key on any event, so every agy row omits this field, and #1927's resolved-at-bind
+    /// half is what names a model for that vendor instead. <see cref="ModelsObserved"/> is a different
+    /// fact and not a substitute: it names every model the whole execution TREE billed against, where
+    /// this names the one the main conversation ran on.
+    /// </para>
     /// </summary>
     [property: JsonPropertyName("modelEchoed")]
     [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]

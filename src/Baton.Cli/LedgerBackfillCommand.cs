@@ -270,7 +270,8 @@ public static class LedgerBackfillCommand
                     repository,
                     runwayOverrideReasonByWorker: stamps.RunwayOverrideReasonByWorker,
                     labelByWorker: stamps.LabelByWorker,
-                    identitySource: identitySource)
+                    identitySource: identitySource,
+                    modelResolvedByWorker: stamps.ModelResolvedByWorker)
                 .Where(window.TimeMatches)
                 .ToList();
 

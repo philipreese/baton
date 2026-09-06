@@ -91,6 +91,23 @@ public sealed class QueueTierTableTests
         Assert.Equal("gemini-3.8-flash-high", resolved.Model);
     }
 
+    /// <summary>
+    /// #1927: this table is a deliberate SUBSET of <c>AdapterDefaultModels.Shipped</c>, and the arm
+    /// that keeps it one. That type gained a codex entry so a room can DISPLAY what codex will run;
+    /// this table's value becomes the CLI's own <c>--model</c>, and naming codex's default here would
+    /// start passing a frozen 2026-09-04 reading as a flag — see <c>ShippedAdapterDefaultModels</c>'s
+    /// own remarks. The agy arm above is the control: the two adapters must NOT resolve alike here,
+    /// which is exactly what a future "just use the shared table" edit would make them do.
+    /// </summary>
+    [Fact]
+    public void A_codex_item_with_no_model_is_left_for_the_cli_to_decide_rather_than_given_a_frozen_default()
+    {
+        var resolved = QueueTierTable.Resolve(Item(adapter: "codex"), new QueueSettings());
+
+        Assert.Equal("codex", resolved.Adapter);
+        Assert.Null(resolved.Model);
+    }
+
     [Fact]
     public void An_item_with_no_scope_class_resolves_to_nulls_and_is_not_an_override()
     {

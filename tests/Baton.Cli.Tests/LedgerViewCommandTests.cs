@@ -501,6 +501,46 @@ public sealed class LedgerViewCommandTests : IDisposable
         Assert.Equal("working-directory", lines[2].Split(',')[column]);
     }
 
+    /// <summary>
+    /// #1927: a row where the vendor ran something other than what was requested is visible in the text
+    /// drill, and one where the two agree is not. Both arms are needed —
+    /// <c>LedgerViewCommand.DescribeRow</c>'s own comment states why the clause is conditional.
+    /// </summary>
+    [Fact]
+    public async Task A_requested_and_echoed_model_that_disagree_are_both_visible_in_the_text_drill()
+    {
+        var ledgerPath = Path.Combine(Path.GetDirectoryName(_ledgerFilePath)!, "echoed-model.jsonl");
+        await CostLedgerStore.AppendAsync(
+            [
+                new CostLedgerEntry(
+                    CostSourceKind.BatonExecution,
+                    Room: _roomA,
+                    Execution: "substituted",
+                    Adapter: "claude",
+                    Model: "opus",
+                    ModelEchoed: "haiku",
+                    EndedAt: Sep4.AddHours(10)),
+                new CostLedgerEntry(
+                    CostSourceKind.BatonExecution,
+                    Room: _roomA,
+                    Execution: "as-asked",
+                    Adapter: "claude",
+                    Model: "opus",
+                    ModelEchoed: "opus",
+                    EndedAt: Sep4.AddHours(11)),
+            ],
+            ledgerPath,
+            TestContext.Current.CancellationToken);
+
+        var text = await RunOverAsync(ledgerPath, "--format", "text", "--drill");
+
+        Assert.Contains("opus -> haiku", text, StringComparison.Ordinal);
+        // The control arm: the agreeing row still renders (so the assertion above is about the arrow,
+        // not about the row being present) and carries exactly one such marker across both rows.
+        Assert.Contains("as-asked", text, StringComparison.Ordinal);
+        Assert.Equal(1, text.Split(" -> ").Length - 1);
+    }
+
     private async Task<string> RunOverAsync(string ledgerFilePath, params string[] args)
     {
         var output = new StringWriter { NewLine = "\n" };

@@ -123,21 +123,68 @@ public static class WorkerBindingResolver
                 continue;
             }
 
-            var fallbackEntry = entry with
-            {
-                Adapter = fallback.Adapter,
-                Model = fallback.Model,
-                Effort = fallback.Effort,
-                // The fallback's OWN dispatch never declares a further fallback -- #802 rules
-                // undeclared/chained failover out permanently (operator ruling, 2026-09-01); a single
-                // declared hop is the whole feature.
-                FallbackOnExhaustion = null,
-            };
-
-            bindings[workerName] = ResolveEntry(workerName, fallbackEntry, adapters, profiles, bindingsFileDirectory, onWorkerStdoutLine);
+            bindings[workerName] = ResolveEntry(
+                workerName, ToFallbackEntry(entry, fallback), adapters, profiles, bindingsFileDirectory, onWorkerStdoutLine);
         }
 
         return bindings;
+    }
+
+    /// <summary>
+    /// #802's swap, as a named step so the display stamps it moves are testable without a
+    /// <c>WorkerBinding.Process</c> (which carries none of them) in the way.
+    /// <para>
+    /// #1927 re-review LOW: this is the THIRD path that builds a child binding out of a parent entry,
+    /// alongside <c>RedispatchCommand</c>'s two, and it moves the vendor the same way they do — so it
+    /// re-runs the same bind-time resolution, <see cref="RoleDispatch.ResolveModelStamp"/> and
+    /// <see cref="RoleDispatch.ResolveEffortStamp"/>, rather than carrying the primary's stamps onto
+    /// another vendor's dispatch. Copying them was harmless in memory and not on disk: a #802 failover
+    /// journals <c>StepRebound</c> with the fallback's model, which <c>ExecutionBindingResolver</c>
+    /// CLEARS when the fallback declares none, and <c>CostLedgerStore</c> then falls back to the
+    /// stamp <c>RoomBindingStamps</c> read out of the room's bindings.json — recording, for instance,
+    /// <c>adapter=agy, model=opus</c> against an execution that ran on agy.
+    /// </para>
+    /// <para>
+    /// The fallback's declared Model/Effort reach the rungs as the TIER values, not as requested ones:
+    /// they are hand-authored config that names what this role falls back to, not an axis some
+    /// dispatcher asked for on this run, so the stamp reads <see cref="BindingValueSource.ResolvedDefault"/>.
+    /// Same-vendor keeps the primary's stamps, which are then still true —
+    /// <c>WorkerBindingConfigParser</c> refuses a fallback naming the entry's own adapter, so on a
+    /// parsed config that arm is unreachable, but this method is also reached from hand-built configs.
+    /// The comparison is case-insensitive while the FIELD is left exactly as authored: normalizing it
+    /// here would make an unregistered spelling resolve where it refuses today.
+    /// </para>
+    /// </summary>
+    internal static WorkerBindingConfigEntry ToFallbackEntry(WorkerBindingConfigEntry entry, FallbackBinding fallback)
+    {
+        var fallbackEntry = entry with
+        {
+            Adapter = fallback.Adapter,
+            Model = fallback.Model,
+            Effort = fallback.Effort,
+            // The fallback's OWN dispatch never declares a further fallback -- #802 rules
+            // undeclared/chained failover out permanently (operator ruling, 2026-09-01); a single
+            // declared hop is the whole feature.
+            FallbackOnExhaustion = null,
+        };
+
+        if (string.Equals(fallback.Adapter.Trim(), entry.Adapter.Trim(), StringComparison.OrdinalIgnoreCase))
+        {
+            return fallbackEntry;
+        }
+
+        var (modelResolved, modelSource) = RoleDispatch.ResolveModelStamp(
+            fallbackEntry.Adapter, requestedModel: null, tierModel: fallbackEntry.Model);
+        var (effortResolved, effortSource) = RoleDispatch.ResolveEffortStamp(
+            fallbackEntry.Adapter, requestedEffort: null, tierEffort: fallbackEntry.Effort, modelResolved);
+
+        return fallbackEntry with
+        {
+            ModelResolved = modelResolved,
+            ModelSource = modelSource,
+            EffortResolved = effortResolved,
+            EffortSource = effortSource,
+        };
     }
 
     private static WorkerBinding ResolveEntry(
