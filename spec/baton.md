@@ -4102,6 +4102,37 @@ format that has one:** per-vendor subtotals, then the labelled all-vendor estima
 contributing rows under `--drill`. Determinism is `LedgerRollup`'s promise rather than each caller's —
 its own remarks state the three sort keys and why the third is not redundant.
 
+**Export — shipped (#1901 C3, operator ruling 2026-09-05).** `baton ledger export --to <dir>
+[--as-of <yyyy-MM-dd>] [--repo-identity <key>]` writes `<dir>/<yyyy-MM-dd>.csv` — the whole store,
+in the same bytes `--format csv` prints, through the same writer, so an export cannot disagree with
+the reading it claims to reproduce — and maintains `<dir>/README.md`'s table (file, schema version,
+row count, newest `endedAt`) as a marked region, so the hand-written prose around it survives every
+export and a re-export of a date already in the table updates that row in place rather than
+appending a second. **The date names the file; it does not window the rows** — an export is always
+the store as it stood at write time, and the table's newest-row column is what says how current a
+given file is. Read-only over the ledger: the verb is deliberately not a sibling of `backfill`, so a
+weekly publication cannot mutate the thing it publishes. **Nothing else under `~/.baton` — rooms,
+streams, transcripts, memory — is exported, read, or otherwise in scope**; the ledger alone is the
+product data ruled committable. The cadence is **weekly**, by hand or by the conductor, and the
+committed files live in `benchmarks/ledger/`, whose README states what a reader may and may not
+conclude from them; `benchmarks/ledger/derive.py` produces the per-model, per-vendor and per-arm
+medians the comparator (#1903) and the tier issue (#1863) read, from those committed CSVs only.
+
+**The CSV format is redacted and the other two are not**, because it is the one that leaves the
+machine into a *public* repository. `room` and `parentRoom` are reduced to their basename — lossless,
+since a room path is `{BatonPaths.Root}/rooms/<room>` and the discarded prefix is a home directory —
+and a cell that still looks like a filesystem path, or that carries the exporting machine's OS
+account name, **refuses the whole write** (`LedgerCsvRedactionException`) rather than being
+published. Refusing is the posture rather than best-effort scrubbing because `LedgerCsv` knows how to
+reduce a path *column* and knows nothing about what an operator typed into `resolutionReason` or what
+a session-log import will put in `raw`, and a guessed redaction silently corrupts the number an
+analysis reads. `repository` keeps its canonical `github.com/owner/repo` value: that is the ledger's
+key and a public handle, not a local account. The redaction is applied at the WRITE, after
+`LedgerRollup` has selected and sorted, so the sort keys this section's determinism promise names are
+computed from the rows as recorded. The schema version an export was written under is
+`LedgerCsv.SchemaVersion` — the column count and a truncated digest **of the column list itself**, the
+sole source of truth, so it moves when a field is added to the record and cannot sit stale.
+
 `--format json` is the machine contract Fleet Glass (#1746) and enforcement (#1848) read — one object
 `{query, vendors, total, rows?}`, `WhenWritingNull`, with the ledger record's own field names inside
 it (the row schema above, including #1901 C1's `issue`/`pr`, the diff shape, the verdict fields and
@@ -4129,7 +4160,8 @@ where `raw` gets a writer, since only a whole session log carries the vendor's f
 is compaction, at the 90-day window the native-retention survey on #1849 settles on — the backfill half
 of D shipped early as #1901 C2 (`baton ledger backfill`, above), because rooms are perishable and the
 look-back that motivated it could not wait. Nothing in B–D requires a schema migration: the source-kind
-label and the repository key exist from day one.
+label and the repository key exist from day one. #1901 C3's export sits beside the phase plan rather
+than inside it: it publishes what B already reads, and adds no schema.
 
 **The retention sweep is safe to run after a backfill** (#1901's own acceptance criterion): once
 `baton ledger backfill` has walked a room, everything an analysis reads about that room's spend is in

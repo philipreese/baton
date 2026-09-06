@@ -82,9 +82,9 @@ public sealed class LedgerCsvRedactionTests
     }
 
     /// <summary>
-    /// The channel a column allowlist cannot close: the ruling's own list named <c>workspace</c> and
-    /// <c>sourcePath</c>, neither of which is a column, while the schema carries six free-text reason
-    /// fields nobody validates. A path there refuses the export rather than being published.
+    /// The channel a column allowlist cannot close — <see cref="LedgerCsv"/>'s own note on why the
+    /// guard is a shape rather than a list. A path in a free-text reason field refuses the export
+    /// rather than being published.
     /// </summary>
     [Fact]
     public void A_path_left_in_a_free_text_column_refuses_the_whole_export()
@@ -101,8 +101,8 @@ public sealed class LedgerCsvRedactionTests
     }
 
     /// <summary>
-    /// <c>raw</c> is an unbounded verbatim vendor object whose writer arrives with spec/baton.md §7's
-    /// phase C. It is empty in every row written today, which is exactly why it is pinned now: the
+    /// The <c>raw</c> column — see <see cref="LedgerCsv"/>'s own note on why no column list can be the
+    /// guard here. It is empty in every row written today, which is exactly why it is pinned now: the
     /// leak it can carry would first appear in a phase nobody is thinking about redaction in.
     /// </summary>
     [Fact]

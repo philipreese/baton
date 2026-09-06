@@ -33,15 +33,12 @@ namespace Baton.Cli;
 /// see a zero the record never wrote.
 /// </para>
 /// <para>
-/// <b>This format is REDACTED and the other two are not</b> (#1901 C3, operator ruling 2026-09-05):
-/// a path column is reduced to its basename here, and a cell that still looks like a filesystem path
-/// or still carries the OS account name refuses the whole write. CSV is the format that leaves the
-/// machine — <c>benchmarks/ledger/</c> is committed to a PUBLIC repository — while <c>--format json</c>
-/// is the machine contract Fleet Glass (#1746) and enforcement (#1848) read locally and
-/// <c>--format text</c> is the operator's own screen, so neither of those is narrowed. The redaction
-/// lives at the WRITE, after <see cref="Baton.Accounting.LedgerRollup"/> has selected and sorted: a
-/// redaction applied on read would be editing the cells that projection's documented sort keys are
-/// computed from.
+/// <b>The narrowing #1901 C3 adds lives here</b> (operator ruling 2026-09-05) — spec/baton.md §7's
+/// export paragraph states the rule, which readings it applies to, and why it refuses rather than
+/// scrubs. What belongs here rather than there: the redaction runs at the WRITE, after
+/// <see cref="Baton.Accounting.LedgerRollup"/> has selected and sorted, because editing cells before
+/// that projection sorts would be editing the inputs to the sort keys its own determinism promise
+/// names.
 /// </para>
 /// </remarks>
 public static class LedgerCsv
@@ -81,12 +78,12 @@ public static class LedgerCsv
     public static IReadOnlyList<string> PathColumns { get; } = ["room", "parentRoom"];
 
     /// <summary>
-    /// A cell that still looks like a filesystem path after <see cref="PathColumns"/> has been reduced.
-    /// A drive-qualified path (<c>C:\</c>, <c>C:/</c>) or a <c>Users</c>/<c>home</c> segment: the two
-    /// shapes an account name actually arrives inside. Deliberately NOT an allowlist of columns — the
-    /// ruling's own list named <c>workspace</c> and <c>sourcePath</c>, neither of which is a column,
-    /// and the schema has six free-text reason fields plus <c>raw</c> (an unbounded verbatim vendor
-    /// object, whose writer arrives with §7 phase C) that no column list can anticipate.
+    /// The two shapes an account name actually arrives inside: a drive-qualified path (<c>C:\</c>,
+    /// <c>C:/</c>) or a <c>Users</c>/<c>home</c> segment. A SHAPE rather than a second list of
+    /// columns, because the columns that can carry one are not enumerable — the C3 ruling's own list
+    /// named two fields this schema does not have, and the fields it does have include six free-text
+    /// reasons and <c>raw</c>, whose contents are a vendor's verbatim session object
+    /// (spec/baton.md §7, phase C).
     /// </summary>
     private static readonly Regex PathShapedCell =
         new(@"[A-Za-z]:[\\/]|[\\/](?:Users|home)[\\/]", RegexOptions.Compiled | RegexOptions.CultureInvariant);

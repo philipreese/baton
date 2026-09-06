@@ -6,13 +6,10 @@ namespace Baton.Cli;
 /// ruling 2026-09-05: "the operator's username must not appear in any cell").
 /// </summary>
 /// <remarks>
-/// The CSV is what <c>baton ledger export</c> commits to a PUBLIC repository, and a leaked path or
-/// account name is not undone by a later commit — the pushed object survives the deletion. So this
-/// refuses the whole write rather than redacting a cell it does not understand: <see cref="LedgerCsv"/>
-/// knows how to reduce a path COLUMN to a basename, and knows nothing about what an operator typed
-/// into <c>resolutionReason</c> or what a vendor session log put in <c>raw</c>. Guessing at those would
-/// be a redaction that silently corrupts the number an analysis reads; refusing is a failure the
-/// operator can see and fix at the source row.
+/// Why refusing beats scrubbing is spec/baton.md §7's export paragraph. What that leaves for this
+/// type: a refusal has to be legible at the SOURCE ROW, since the operator's only fix is upstream of
+/// the export, so the message names the offending column and row position and points at the
+/// unredacted format for a local reading.
 /// </remarks>
 public sealed class LedgerCsvRedactionException : BatonFlowException
 {

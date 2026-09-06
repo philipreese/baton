@@ -111,7 +111,7 @@ public sealed class LedgerExportCommandTests : IDisposable
         Assert.Equal(1, CountRowsFor(readme, "2026-09-05.csv"));
         Assert.Equal(1, CountRowsFor(readme, "2026-09-12.csv"));
 
-        // Newest first: a reader who stops after the first data row has read the current export.
+        // Descending, for the reason UpdateReadme's sort states.
         Assert.True(
             readme.IndexOf("2026-09-12.csv", StringComparison.Ordinal)
                 < readme.IndexOf("2026-09-05.csv", StringComparison.Ordinal),
@@ -147,8 +147,8 @@ public sealed class LedgerExportCommandTests : IDisposable
     }
 
     /// <summary>
-    /// A README with no markers is refused rather than appended to: a second table quietly grown at the
-    /// end of the file is how a reader ends up reading the stale one.
+    /// A README with no markers is refused rather than appended to, for the reason
+    /// <see cref="LedgerExportCommand.TableBeginMarker"/> states.
     /// </summary>
     [Fact]
     public async Task A_readme_carrying_no_markers_is_refused_rather_than_appended_to()

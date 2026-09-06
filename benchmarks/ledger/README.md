@@ -10,30 +10,23 @@ is exported here on a **weekly** cadence, by hand or by the conductor.
 baton ledger export --to benchmarks/ledger [--as-of 2026-09-05]
 ```
 
-Each file is the whole store as it stood when the export ran, in the same bytes `baton ledger
---format csv` prints — the same writer, so the export cannot disagree with the reading. **The date
-names the file; it does not window the rows.** The `Newest row` column below is what tells you how
-current a given file actually is. Re-running for a date already in the table rewrites that day's
-file and updates its row in place. The verb is read-only over the ledger, and the ledger is the
-*only* thing under `~/.baton` any of this touches — spec/baton.md §7 states that scope rule and what
-it excludes.
+The verb's contract — what one file holds, what its name means, what the run is allowed to read —
+is spec/baton.md §7's export paragraph, and none of it is restated here. The one consequence worth
+having in front of you while reading the table: a file is a full snapshot taken when the export ran,
+so **its name is not a window**, and the `Newest row` column is what says how current it is.
 
-The row schema is spec/baton.md §7's table, not restated here. `Schema version` is
-`LedgerCsv.SchemaVersion`: the column count and a truncated digest **of the column list itself**, so
-it moves the moment a field is added to `CostLedgerEntry` and cannot sit stale. Two files with equal
-versions have byte-comparable headers.
+The row schema is spec/baton.md §7's table, not restated here, and `Schema version` is
+`LedgerCsv.SchemaVersion` — that section says what it is derived from. All you need to read the table
+below: equal versions mean two files' headers are byte-comparable, and a version that changes between
+two exports means a field was added or renamed in between.
 
 ## Redaction
 
-The repository is public, so `--format csv` is redacted and the other two formats are not — CSV is
-the one that leaves the machine. `room` and `parentRoom` are reduced to their basename, which is
-lossless (a room path is `~/.baton/rooms/<room>`, so the basename *is* the room's identity and the
-discarded prefix is a home directory). Any cell that still looks like a filesystem path, or that
-carries the exporting machine's OS account name, **refuses the whole export** rather than being
-published — `LedgerCsv` knows how to reduce a path column and knows nothing about what an operator
-typed into `resolutionReason` or what a vendor session log will one day put in `raw`, and a guessed
-redaction silently corrupts the number an analysis reads. `repository` keeps its canonical
-`github.com/owner/repo` value: that is the ledger's key and a public handle, not a local account.
+These files are published from a machine, into a public repository, so they go through the narrowing
+spec/baton.md §7 describes — including why it fails closed rather than scrubbing best-effort. As a
+reader of what landed here: room identities appear as bare names rather than paths, `repository` still
+carries the public `github.com/owner/repo` handle because that is the ledger's key, and an export that
+would have carried anything else does not exist — it failed instead of landing.
 
 ## Exports
 
@@ -55,17 +48,12 @@ next export is where the joins appear.
 [`derive.py`](derive.py) reads **the committed CSVs only** — never `~/.baton` — and writes
 `medians.md` and `medians.json` beside them.
 
-The unit of observation is a **merged PR**: rows are grouped by their `pr` column, each group's
-billed tokens, tool steps (`turns`) and wall clock are summed, and its fix rounds counted (the
-`implement`-role attempts after the first, so a one-shot PR is 0). The medians are then taken across
-PRs, cut three ways — per model, per vendor, and per arm (the dispatch `label` #1901 C1 stamps, which
-is what makes an A/B comparison a comparison). Medians rather than means because a single arrested or
-runaway lane moves a mean and says nothing about the typical PR.
-
-Beside them, the `identitySource` and `completeness` mix over every row, and the count of rows no PR
-could be attributed to. Those three are not decoration: they are how a reader sees **how much of the
-population is backfilled or partial** before believing a median drawn from it. A median over four PRs
-is a number; it is not evidence.
+Its docstring is the only place the metrics, the three cuts and the absence handling are defined; do
+not look for them twice. Two things that page cannot say for you. First: the cut worth caring about
+is the arm — the dispatch `label` #1901 C1 stamps — because without it there is no A/B, only a
+before-and-after. Second: medians, not means, since one arrested or runaway lane moves a mean and
+says nothing about the typical case. And read the population block before any number under it. A
+median over four PRs is a number; it is not evidence.
 
 `python benchmarks/ledger/derive.py --check` exits 1 when the committed outputs differ from a fresh
 derivation, and `--selftest` proves that check discriminates by sabotaging a scratch copy. Both run

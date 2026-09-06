@@ -37,6 +37,7 @@ benchmarks/deepswe/*/derived-scores.csv text eol=lf
 # byte-equal across machines) and `derive.py --check` compares its committed outputs byte-for-byte
 # against a fresh LF derivation.
 benchmarks/ledger/*.csv text eol=lf
+benchmarks/ledger/fixtures/*.csv text eol=lf
 benchmarks/ledger/medians.json text eol=lf
 benchmarks/ledger/medians.md text eol=lf
 

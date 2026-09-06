@@ -24,9 +24,10 @@ namespace Baton.Cli;
 /// weekly cadence spec/baton.md §7 states cannot accidentally mutate the thing it is publishing.
 /// </para>
 /// <para>
-/// <b>Only the ledger.</b> Nothing else under <c>~/.baton</c> — rooms, streams, transcripts, memory —
-/// is opened by this command. That is the C3 ruling's "not in scope" clause, made structural: the one
-/// path it reads is the ledger file <see cref="LedgerViewCommand.ResolveLedgerFilePathAsync"/> returns.
+/// <b>Only the ledger.</b> The C3 ruling's scope clause (spec/baton.md §7) is structural here rather
+/// than a promise: the single path this command opens for reading is whatever
+/// <see cref="LedgerViewCommand.ResolveLedgerFilePathAsync"/> returns, and there is no second reader
+/// to keep honest.
 /// </para>
 /// <para>
 /// Not a <see cref="CommandResult"/>/<see cref="FlowStateReporter"/> command, for the same reason the
