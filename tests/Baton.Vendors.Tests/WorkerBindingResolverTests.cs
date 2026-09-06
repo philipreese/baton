@@ -871,5 +871,48 @@ public class WorkerBindingResolverTests
         var ex = Assert.Throws<ProjectNotTrustedException>(() => WorkerBindingResolver.ResolveFallbacks(config, adapters));
         Assert.Equal(unseenProject, ex.ProjectPath);
     }
+
+    /// <summary>
+    /// #1927 re-review LOW: <see cref="WorkerBindingResolver.ToFallbackEntry"/> re-runs the same
+    /// bind-time resolution the redispatch paths do rather than copying the primary's display stamps
+    /// across the swap — that method's own doc has which paths those are and what the stale copy cost
+    /// on disk. Asserted on the entry rather than on the resolved
+    /// <see cref="WorkerBinding.Process"/>, which carries none of the four stamps — the reason the
+    /// stale copy was invisible until the on-disk readers (<c>RoomBindingStamps</c>,
+    /// <c>CostLedgerStore</c>) started reading them.
+    /// </summary>
+    [Fact]
+    public void A_fallbacks_vendor_swap_re_resolves_the_display_stamps_rather_than_copying_the_primarys()
+    {
+        var entry = new WorkerBindingConfigEntry(
+            "claude", ArchitectContract, "Draft a plan.", TimeSpan.FromMinutes(5), Model: "opus",
+            Effort: "careful",
+            FallbackOnExhaustion: new FallbackBinding("agy")) with
+        {
+            ModelResolved = "opus",
+            ModelSource = BindingValueSource.Requested,
+            EffortResolved = "careful",
+            EffortSource = BindingValueSource.Requested,
+        };
+
+        var swapped = WorkerBindingResolver.ToFallbackEntry(entry, entry.FallbackOnExhaustion!);
+
+        // The agy CLI default, and #1927's suffix rung read off it -- not the claude parent's opus.
+        Assert.Equal(AdapterDefaultModels.For("agy"), swapped.ModelResolved);
+        Assert.Equal(BindingValueSource.ResolvedDefault, swapped.ModelSource);
+        Assert.Equal("high", swapped.EffortResolved);
+        Assert.Equal(BindingValueSource.ResolvedDefault, swapped.EffortSource);
+
+        // The polarity control: a fallback naming the same vendor (which WorkerBindingConfigParser
+        // refuses, but a hand-built config reaches) keeps stamps that are still true.
+        var kept = WorkerBindingResolver.ToFallbackEntry(entry, new FallbackBinding("Claude"));
+        Assert.Equal("opus", kept.ModelResolved);
+        Assert.Equal(BindingValueSource.Requested, kept.ModelSource);
+        Assert.Equal("careful", kept.EffortResolved);
+        Assert.Equal(BindingValueSource.Requested, kept.EffortSource);
+        // And the adapter field itself is left exactly as authored, casing included: normalizing it
+        // here would make a spelling the registry does not carry resolve instead of refusing.
+        Assert.Equal("Claude", kept.Adapter);
+    }
 }
 

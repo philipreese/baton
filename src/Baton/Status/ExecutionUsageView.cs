@@ -804,14 +804,6 @@ public static class ExecutionUsageProjector
     }
 
     /// <summary>
-    /// #1706 review L3: the identity of the bytes this projector read — both stream files' length and
-    /// last-write time, plus BOTH resolved parsers. The terminal parser and the replay parser are
-    /// resolved independently and can differ (see the replay site), so keying on one of them would let
-    /// two calls passing different <c>adapters</c> registries for the same stream collide and serve
-    /// each other's reading. Null when either stat throws, which simply disables the memo for that
-    /// execution rather than guessing at an identity.
-    /// </summary>
-    /// <summary>
     /// #1927: the last line of one stream segment that names a model, scanned from the END so the last
     /// answer wins. Its two callers are the current file and the rolled segment, in that order.
     /// </summary>
@@ -828,6 +820,14 @@ public static class ExecutionUsageProjector
         return null;
     }
 
+    /// <summary>
+    /// #1706 review L3: the identity of the bytes this projector read — both stream files' length and
+    /// last-write time, plus BOTH resolved parsers. The terminal parser and the replay parser are
+    /// resolved independently and can differ (see the replay site), so keying on one of them would let
+    /// two calls passing different <c>adapters</c> registries for the same stream collide and serve
+    /// each other's reading. Null when either stat throws, which simply disables the memo for that
+    /// execution rather than guessing at an identity.
+    /// </summary>
     private static string? BuildReadingCacheKey(
         string stdoutPath,
         string rolloverPath,

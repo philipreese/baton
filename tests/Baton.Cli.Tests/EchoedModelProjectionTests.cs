@@ -135,7 +135,56 @@ public sealed class EchoedModelProjectionTests
         Assert.Contains("tokensIn", json, StringComparison.Ordinal);
     }
 
-    private static ExecutionUsageView ProjectSingle(string adapter, params string[] streamLines)
+    /// <summary>
+    /// #1927 re-review LOW: the scan spans BOTH stream segments, so a stream that rolled over before
+    /// its only model-naming line was written still answers. The current file here names no model at
+    /// all — its <c>result</c> event carries usage and nothing else — so a found id can only have come
+    /// from <c>.stdout.log.1</c>, which is what makes the arm discriminating. Red against the
+    /// current-file-only scan this fix replaced.
+    /// </summary>
+    [Fact]
+    public void A_model_named_only_in_the_rolled_segment_is_still_found()
+    {
+        var view = Project(
+            "claude",
+            rolledLines: ["""{"type":"assistant","message":{"model":"claude-opus-4-6-20260115","content":[]}}"""],
+            markerFileNames: [],
+            """{"type":"result","num_turns":4,"usage":{"input_tokens":7,"output_tokens":3}}""");
+
+        Assert.Equal("claude-opus-4-6-20260115", view.ModelEchoed);
+        // The control: the usage read off the current file still works, so the id above is the scan
+        // reaching the rolled segment rather than the projector reading that file INSTEAD of this one.
+        Assert.Equal(7, view.TokensIn);
+    }
+
+    /// <summary>
+    /// The ordering the same fix had to preserve while moving the scan above the early returns
+    /// (#1888's ruling, spec/baton.md §3): with BOTH markers on disk the write-failure reason still
+    /// outranks the rollover one, and the echoed model is reported anyway, for the reason the scan's
+    /// own comment in <c>ExecutionUsageView</c> states.
+    /// </summary>
+    [Fact]
+    public void Both_markers_present_keeps_the_write_failure_reason_first_and_still_reports_the_echo()
+    {
+        var view = Project(
+            "claude",
+            rolledLines: ["""{"type":"assistant","message":{"model":"claude-opus-4-6-20260115","content":[]}}"""],
+            markerFileNames:
+            [
+                ExecutionStreamLogger.StdoutTruncationMarkerFileName,
+                ExecutionStreamLogger.StdoutWriteFailureMarkerFileName,
+            ],
+            """{"type":"result","num_turns":4,"usage":{"input_tokens":7,"output_tokens":3}}""");
+
+        Assert.Equal(ExecutionUsageView.StreamTruncatedByWriteFailureReason, view.BilledReconciliationUnavailable);
+        Assert.Equal("claude-opus-4-6-20260115", view.ModelEchoed);
+    }
+
+    private static ExecutionUsageView ProjectSingle(string adapter, params string[] streamLines) =>
+        Project(adapter, rolledLines: null, markerFileNames: [], streamLines);
+
+    private static ExecutionUsageView Project(
+        string adapter, string[]? rolledLines, IReadOnlyList<string> markerFileNames, params string[] streamLines)
     {
         var testRoot = Path.Combine(Path.GetTempPath(), $"echoed-model-{Guid.NewGuid():N}");
         try
@@ -156,6 +205,19 @@ public sealed class EchoedModelProjectionTests
             File.WriteAllText(
                 Path.Combine(outputDir, ExecutionStreamLogger.StdoutLogFileName),
                 string.Join('\n', streamLines) + "\n");
+
+            if (rolledLines is not null)
+            {
+                File.WriteAllText(
+                    Path.Combine(outputDir, ExecutionStreamLogger.StdoutRolloverFileName),
+                    string.Join('\n', rolledLines) + "\n");
+            }
+
+            foreach (var markerFileName in markerFileNames)
+            {
+                // Both markers are empty by design -- their presence is the whole state change.
+                File.WriteAllText(Path.Combine(outputDir, markerFileName), string.Empty);
+            }
 
             var usage = ExecutionUsageProjector.BuildByExecutionId(
                 entries, testRoot, WorkerAdapterRegistry.Default, testRoot);

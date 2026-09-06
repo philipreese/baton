@@ -371,7 +371,8 @@ public static class RedispatchCommand
     /// the RESOLVED MODEL ID's suffix, so moving the model axis moves the correct effort answer too.
     /// A same-vendor <c>--model gemini-3.8-flash-low</c> over an agy parent stamped <c>high</c> kept
     /// that <c>high</c> while the CLI ran at <c>low</c> — an effort the room displays and the model id
-    /// contradicts, which is worse than the bare vendor #1927 set out to fix.
+    /// contradicts, which is the trade <c>Baton.Domain.AdapterDefaultModels</c>'s own remarks already
+    /// rule on.
     /// </para>
     /// <para>
     /// The trigger is <c>--model</c> given AND the parent recorded NO effort of its own, not "the model
