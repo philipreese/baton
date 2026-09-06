@@ -415,4 +415,234 @@ public class RoomRegistryStoreTests
             FileCleanup.Delete(path);
         }
     }
+
+    /// <summary>
+    /// #1942, the retry policy's own budget scaled down: many short attempts rather than three
+    /// twenty-second ones, so a test can drive the contended path without sleeping out the real budget.
+    /// Every arm using this releases the lock inside the first second, so what it costs is a second, not
+    /// its ceiling — sixty attempts plus their growing backoff is ≈ 42 s if a holder ever wedges, which
+    /// is a slow arm rather than a hung one. The <em>shape</em> is what these tests pin — attempt, back
+    /// off, attempt again — not the production numbers, which live on
+    /// <c>RoomRegistryStore.WaitPolicy</c> alone; that a retrying policy still gives up is pinned by
+    /// <c>MutexGuardedFileLockTests</c> on the primitive itself.
+    /// </summary>
+    private static readonly LockWaitPolicy FastRetryPolicy = new(
+        AttemptTimeout: TimeSpan.FromMilliseconds(100), MaxAttempts: 60, BackoffBase: TimeSpan.FromMilliseconds(20));
+
+    /// <summary>
+    /// The control arm's policy: exactly one attempt, which is what every registry access did before
+    /// #1942. Same held lock, same duration — the only variable is whether the caller retries.
+    /// </summary>
+    private static readonly LockWaitPolicy SingleAttemptPolicy =
+        LockWaitPolicy.Single(TimeSpan.FromMilliseconds(100));
+
+    /// <summary>How long <see cref="HeldRegistryLock"/> stays held before the arms that release it do.</summary>
+    private static readonly TimeSpan HoldDuration = TimeSpan.FromMilliseconds(500);
+
+    /// <summary>
+    /// #1942: a lane's teardown write while a sibling process holds the registry lock — the shape
+    /// <c>RoomRegistryStore.WaitPolicy</c>'s remarks record the measurement for. With the retry policy
+    /// the append waits the holder out and the registry line lands.
+    /// <see cref="Appending_under_a_lock_held_past_a_single_attempt_still_throws_without_the_retry"/>
+    /// is the control: identical fixture, one attempt, and it throws.
+    /// </summary>
+    [Fact]
+    public async Task Appending_under_a_held_lock_lands_once_the_holder_releases()
+    {
+        var path = TempRegistryPath();
+        var holder = new HeldRegistryLock(path);
+        try
+        {
+            var roomDir = Path.Combine(Path.GetTempPath(), $"room-{Guid.NewGuid():N}");
+
+            var append = RoomRegistryStore.AppendAsync(
+                roomDir, "C:/project", path, explicitRegister: true, FastRetryPolicy, TestContext.Current.CancellationToken);
+
+            // Outlasts several whole attempts, so the append is provably retrying rather than sitting in
+            // one long wait — then hand the lock over.
+            await Task.Delay(HoldDuration, TestContext.Current.CancellationToken);
+            Assert.False(append.IsCompleted, "The append cannot have finished while the lock was still held.");
+            holder.Release();
+
+            await append;
+
+            var entries = await RoomRegistryStore.ReadDistinctByRoomAsync(path, TestContext.Current.CancellationToken);
+            var entry = Assert.Single(entries);
+            Assert.Equal(BatonPaths.RecordKey(roomDir), entry.RoomPath);
+        }
+        finally
+        {
+            holder.Dispose();
+            FileCleanup.Delete(path);
+        }
+    }
+
+    /// <summary>
+    /// The control for <see cref="Appending_under_a_held_lock_lands_once_the_holder_releases"/>: the
+    /// pre-#1942 single-attempt wait, against the same held lock, throws — which is what made the
+    /// harness's result about the retry rather than about the fixture failing to contend at all.
+    /// </summary>
+    [Fact]
+    public async Task Appending_under_a_lock_held_past_a_single_attempt_still_throws_without_the_retry()
+    {
+        var path = TempRegistryPath();
+        var holder = new HeldRegistryLock(path);
+        try
+        {
+            var roomDir = Path.Combine(Path.GetTempPath(), $"room-{Guid.NewGuid():N}");
+
+            await Assert.ThrowsAsync<IOException>(() => RoomRegistryStore.AppendAsync(
+                roomDir, "C:/project", path, explicitRegister: true, SingleAttemptPolicy, TestContext.Current.CancellationToken));
+        }
+        finally
+        {
+            holder.Dispose();
+            FileCleanup.Delete(path);
+        }
+    }
+
+    /// <summary>
+    /// The uncontended arm: with nothing holding the lock, the retry policy changes nothing — the first
+    /// attempt takes it and the append lands, well inside a single attempt's slice.
+    /// </summary>
+    [Fact]
+    public async Task Appending_with_the_lock_free_takes_it_on_the_first_attempt()
+    {
+        var path = TempRegistryPath();
+        try
+        {
+            var roomDir = Path.Combine(Path.GetTempPath(), $"room-{Guid.NewGuid():N}");
+
+            await RoomRegistryStore.AppendAsync(
+                roomDir, "C:/project", path, explicitRegister: true, FastRetryPolicy, TestContext.Current.CancellationToken);
+
+            var entries = await RoomRegistryStore.ReadDistinctByRoomAsync(path, FastRetryPolicy, TestContext.Current.CancellationToken);
+            var entry = Assert.Single(entries);
+            Assert.Equal(BatonPaths.RecordKey(roomDir), entry.RoomPath);
+        }
+        finally
+        {
+            FileCleanup.Delete(path);
+        }
+    }
+
+    /// <summary>
+    /// #1942's third reported occurrence was a *read*, not a teardown write: <c>baton resolve --close</c>
+    /// with five live rooms reported the 30 s registry timeout, and the same command succeeded twenty
+    /// seconds later. A read fails open rather than throwing, so the damage is quieter and worse — the
+    /// registry silently resolves to no entries. The retry waits the holder out and returns the real
+    /// entry instead.
+    /// </summary>
+    [Fact]
+    public async Task Reading_under_a_held_lock_returns_the_entries_once_the_holder_releases()
+    {
+        var path = TempRegistryPath();
+        var roomDir = Path.Combine(Path.GetTempPath(), $"room-{Guid.NewGuid():N}");
+        await RoomRegistryStore.AppendAsync(
+            roomDir, "C:/project", path, explicitRegister: true, cancellationToken: TestContext.Current.CancellationToken);
+
+        var holder = new HeldRegistryLock(path);
+        try
+        {
+            var read = RoomRegistryStore.ReadDistinctByRoomAsync(path, FastRetryPolicy, TestContext.Current.CancellationToken);
+
+            await Task.Delay(HoldDuration, TestContext.Current.CancellationToken);
+            Assert.False(read.IsCompleted, "The read cannot have finished while the lock was still held.");
+            holder.Release();
+
+            var entry = Assert.Single(await read);
+            Assert.Equal(BatonPaths.RecordKey(roomDir), entry.RoomPath);
+        }
+        finally
+        {
+            holder.Dispose();
+            FileCleanup.Delete(path);
+        }
+    }
+
+    /// <summary>
+    /// The read control, and the polarity the arm above needs to mean anything: one attempt against the
+    /// same held lock resolves to *no entries* and one stderr line, which is exactly the silent coverage
+    /// loss #1942 reported.
+    /// </summary>
+    [Fact]
+    public async Task Reading_under_a_lock_held_past_a_single_attempt_still_degrades_to_empty_without_the_retry()
+    {
+        var path = TempRegistryPath();
+        var roomDir = Path.Combine(Path.GetTempPath(), $"room-{Guid.NewGuid():N}");
+        await RoomRegistryStore.AppendAsync(
+            roomDir, "C:/project", path, explicitRegister: true, cancellationToken: TestContext.Current.CancellationToken);
+
+        var holder = new HeldRegistryLock(path);
+        var originalError = Console.Error;
+        try
+        {
+            var stderr = new StringWriter();
+            Console.SetError(stderr);
+
+            var entries = await RoomRegistryStore.ReadDistinctByRoomAsync(
+                path, SingleAttemptPolicy, TestContext.Current.CancellationToken);
+
+            Assert.Empty(entries);
+            Assert.Contains("Could not read the room registry", stderr.ToString());
+        }
+        finally
+        {
+            Console.SetError(originalError);
+            holder.Dispose();
+            FileCleanup.Delete(path);
+        }
+    }
+
+    /// <summary>
+    /// Holds the real registry <see cref="Mutex"/> for <paramref name="registryFilePath"/> on a thread
+    /// of its own — mutex ownership is thread-affine, and the thread that waits must be the one that
+    /// releases, so this cannot be an <c>await</c>-based holder. The lock name is rebuilt from the same
+    /// prefix literal <c>MutexGuardedFileLockTests</c> pins, deliberately rather than reaching for
+    /// <c>RoomRegistryStore</c>'s private constant: a test that renamed itself alongside the production
+    /// literal would stop contending with the shipped store at all and pass on an uncontended lock.
+    /// </summary>
+    private sealed class HeldRegistryLock : IDisposable
+    {
+        private const string RegistryLockNamePrefix = "baton-room-registry";
+        private static readonly TimeSpan JoinTimeout = TimeSpan.FromSeconds(30);
+
+        private readonly Thread thread;
+        private readonly ManualResetEventSlim acquired = new(false);
+        private readonly ManualResetEventSlim releaseRequested = new(false);
+
+        internal HeldRegistryLock(string registryFilePath)
+        {
+            var mutexName = MutexGuardedFileLock.BuildMutexName(registryFilePath, RegistryLockNamePrefix);
+            thread = new Thread(() =>
+            {
+                using var mutex = new Mutex(initiallyOwned: false, name: mutexName);
+                mutex.WaitOne();
+                acquired.Set();
+                releaseRequested.Wait();
+                mutex.ReleaseMutex();
+            })
+            {
+                IsBackground = true,
+                Name = "held-registry-lock",
+            };
+            thread.Start();
+            Assert.True(acquired.Wait(JoinTimeout), "The holder thread never acquired the registry lock.");
+        }
+
+        /// <summary>Hands the lock back and waits for the holder thread to actually let go of it.</summary>
+        internal void Release()
+        {
+            releaseRequested.Set();
+            Assert.True(thread.Join(JoinTimeout), "The holder thread never released the registry lock.");
+        }
+
+        public void Dispose()
+        {
+            releaseRequested.Set();
+            thread.Join(JoinTimeout);
+            acquired.Dispose();
+            releaseRequested.Dispose();
+        }
+    }
 }

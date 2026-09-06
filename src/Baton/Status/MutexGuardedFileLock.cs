@@ -46,33 +46,55 @@ public static class MutexGuardedFileLock
     }
 
     /// <summary>
-    /// Runs <paramref name="action"/> holding a named <see cref="Mutex"/> keyed on
-    /// <paramref name="filePath"/> and <paramref name="lockNamePrefix"/>. Throws
-    /// <see cref="IOException"/> if <paramref name="lockTimeout"/> elapses before the lock is
-    /// acquired, and lets <see cref="WaitHandleCannotBeOpenedException"/> (a non-mutex kernel object
-    /// already holding the name) propagate — both are the caller's fail-open contract to honour, not
-    /// this primitive's to swallow.
+    /// Single-attempt overload: runs <paramref name="action"/> holding the lock, throwing
+    /// <see cref="IOException"/> if <paramref name="lockTimeout"/> elapses once. Equivalent to passing
+    /// <see cref="LockWaitPolicy.Single"/> to the policy-taking overload below, which carries the rest
+    /// of the contract.
     /// </summary>
-    public static T RunUnderLock<T>(string filePath, string lockNamePrefix, TimeSpan lockTimeout, Func<T> action)
+    public static T RunUnderLock<T>(string filePath, string lockNamePrefix, TimeSpan lockTimeout, Func<T> action) =>
+        RunUnderLock(filePath, lockNamePrefix, LockWaitPolicy.Single(lockTimeout), action);
+
+    /// <summary>
+    /// Runs <paramref name="action"/> holding a named <see cref="Mutex"/> keyed on
+    /// <paramref name="filePath"/> and <paramref name="lockNamePrefix"/>. Waits for the lock as
+    /// <paramref name="waitPolicy"/> describes — one kernel wait, or several separated by a jittered
+    /// backoff — and throws <see cref="IOException"/> only once the whole policy is exhausted.
+    /// <see cref="WaitHandleCannotBeOpenedException"/> (a non-mutex kernel object already holding the
+    /// name) propagates; both are the caller's fail-open contract to honour, not this primitive's to
+    /// swallow.
+    /// </summary>
+    public static T RunUnderLock<T>(string filePath, string lockNamePrefix, LockWaitPolicy waitPolicy, Func<T> action)
     {
+        ArgumentNullException.ThrowIfNull(waitPolicy);
+        ArgumentOutOfRangeException.ThrowIfLessThan(waitPolicy.MaxAttempts, 1);
+
         using var mutex = new Mutex(initiallyOwned: false, name: BuildMutexName(filePath, lockNamePrefix));
 
-        bool owned;
-        try
+        var owned = false;
+        for (var attempt = 1; attempt <= waitPolicy.MaxAttempts && !owned; attempt++)
         {
-            owned = mutex.WaitOne(lockTimeout);
-        }
-        catch (AbandonedMutexException)
-        {
-            // A prior holder crashed mid-access. Per Mutex's own contract, ownership still transfers
-            // to us when this is thrown -- whatever partial state it left behind is each caller's own
-            // tolerant, skip-malformed-lines read path to handle, not something to react to here.
-            owned = true;
+            try
+            {
+                owned = mutex.WaitOne(waitPolicy.AttemptTimeout);
+            }
+            catch (AbandonedMutexException)
+            {
+                // A prior holder crashed mid-access. Per Mutex's own contract, ownership still transfers
+                // to us when this is thrown -- whatever partial state it left behind is each caller's own
+                // tolerant, skip-malformed-lines read path to handle, not something to react to here.
+                owned = true;
+            }
+
+            if (!owned && attempt < waitPolicy.MaxAttempts)
+            {
+                Thread.Sleep(waitPolicy.BackoffAfterAttempt(attempt));
+            }
         }
 
         if (!owned)
         {
-            throw new IOException($"Timed out after {lockTimeout} waiting for the '{lockNamePrefix}' lock on '{filePath}'.");
+            throw new IOException(
+                $"Timed out after {waitPolicy.MaxTotalWait} waiting for the '{lockNamePrefix}' lock on '{filePath}'.");
         }
 
         try
@@ -85,11 +107,71 @@ public static class MutexGuardedFileLock
         }
     }
 
-    /// <summary>Action-returning overload of <see cref="RunUnderLock{T}"/>.</summary>
+    /// <summary>Action-returning overload of <see cref="RunUnderLock{T}(string,string,TimeSpan,Func{T})"/>.</summary>
     public static void RunUnderLock(string filePath, string lockNamePrefix, TimeSpan lockTimeout, Action action) =>
-        RunUnderLock<object?>(filePath, lockNamePrefix, lockTimeout, () =>
+        RunUnderLock(filePath, lockNamePrefix, LockWaitPolicy.Single(lockTimeout), action);
+
+    /// <summary>Action-returning overload of <see cref="RunUnderLock{T}(string,string,LockWaitPolicy,Func{T})"/>.</summary>
+    public static void RunUnderLock(string filePath, string lockNamePrefix, LockWaitPolicy waitPolicy, Action action) =>
+        RunUnderLock<object?>(filePath, lockNamePrefix, waitPolicy, () =>
         {
             action();
             return null;
         });
+}
+
+/// <summary>
+/// How <see cref="MutexGuardedFileLock"/> waits for a lock another process already holds (#1942): one
+/// kernel wait of <paramref name="AttemptTimeout"/>, and — if that elapses — up to
+/// <paramref name="MaxAttempts"/> of them in total, separated by a jittered backoff. A caller that
+/// wants the historical single-shot behaviour uses <see cref="Single"/>, which is exactly one attempt
+/// and therefore never sleeps.
+/// </summary>
+/// <remarks>
+/// <b>What retrying a timed-out wait buys, and what it does not.</b> It buys a bounded, varied re-entry:
+/// the budget is spent as several separately-timed bids with a gap no other waiter is sleeping for,
+/// each one reported and ended on a stated slice, rather than as one undifferentiated wait — and the
+/// ceiling stays stated in one place (<see cref="MaxTotalWait"/>). It does <em>not</em> break up a
+/// collision: <see cref="Mutex.WaitOne(TimeSpan)"/> parks in a kernel wait queue and the object is
+/// handed to one waiter at a time, so there is no re-collision on release for the jitter to
+/// desynchronize, and a waiter that times out rejoins that queue at the back. (That queueing behaviour
+/// is reasoned from the platform's contract, not measured here.) Which is why the per-attempt wait
+/// stays long relative to any critical section this guards: each timeout costs the caller its place in
+/// the queue, so short slices would trade one failure mode for a worse one.
+/// </remarks>
+/// <param name="AttemptTimeout">How long one <see cref="Mutex.WaitOne(TimeSpan)"/> waits.</param>
+/// <param name="MaxAttempts">How many such waits are made in total, including the first.</param>
+/// <param name="BackoffBase">
+/// The unit the gap between attempts is built from: attempt <c>n</c> sleeps <c>n</c> times this plus a
+/// random extra of up to one more, so two processes that timed out together do not retry together.
+/// </param>
+public sealed record LockWaitPolicy(TimeSpan AttemptTimeout, int MaxAttempts, TimeSpan BackoffBase)
+{
+    /// <summary>
+    /// One attempt, no retry and no backoff — byte-for-byte the behaviour every caller had before
+    /// #1942, and what the <c>TimeSpan</c>-taking <see cref="MutexGuardedFileLock.RunUnderLock{T}(string,string,TimeSpan,Func{T})"/>
+    /// overloads still resolve to.
+    /// </summary>
+    public static LockWaitPolicy Single(TimeSpan lockTimeout) =>
+        new(lockTimeout, MaxAttempts: 1, BackoffBase: TimeSpan.Zero);
+
+    /// <summary>
+    /// The worst-case wait before <see cref="MutexGuardedFileLock.RunUnderLock{T}(string,string,LockWaitPolicy,Func{T})"/>
+    /// gives up — the kernel waits only, excluding the backoff sleeps, since those are randomized. What
+    /// the timeout <see cref="IOException"/> reports, so an operator reading it is told the budget that
+    /// actually elapsed rather than a single attempt's slice.
+    /// </summary>
+    public TimeSpan MaxTotalWait => AttemptTimeout * MaxAttempts;
+
+    /// <summary>
+    /// The gap after a failed attempt <paramref name="attemptNumber"/> (1-based). Grows linearly and
+    /// carries up to one <see cref="BackoffBase"/> of jitter; zero for a policy with no backoff.
+    /// </summary>
+    internal TimeSpan BackoffAfterAttempt(int attemptNumber)
+    {
+        var baseMilliseconds = (int)BackoffBase.TotalMilliseconds;
+        return baseMilliseconds <= 0
+            ? TimeSpan.Zero
+            : TimeSpan.FromMilliseconds((baseMilliseconds * attemptNumber) + Random.Shared.Next(baseMilliseconds));
+    }
 }
