@@ -20,6 +20,23 @@ public static class WorkflowOutcome
     public const string Cancelled = "Cancelled";
 
     /// <summary>
+    /// #1945: every step succeeded, and at least one of them did so on the arm
+    /// <see cref="Baton.Outcomes.OutcomeClassifier"/> takes when the dispatch timeout killed a worker
+    /// whose workspace was already clean and already pushed. The work is complete and off the machine;
+    /// the kill landed in teardown, which for this repo means the pre-push hook's <c>gates-fast</c>.
+    /// <para>
+    /// <b>A SUCCEEDED-shaped word, not a failure one.</b> Every consumer that asks "did this room
+    /// finish?" must accept it exactly where it accepts <see cref="Succeeded"/> —
+    /// <c>RunExitCodeResolver</c> (exit 0), <c>QueueSchedulerService.ClassifyTerminal</c>
+    /// (<c>Done</c>), <c>RedispatchCommand</c>'s parent check, <c>RoomsPruneOptionsParser</c>'s
+    /// vocabulary. It is a separate word rather than a bare <see cref="Succeeded"/> so the room says
+    /// WHY a timeout kill still settled clean, which is the fact a conductor previously had to
+    /// reconstruct by hand from the worktree and the remote.
+    /// </para>
+    /// </summary>
+    public const string FinishedDuringTeardown = "FinishedDuringTeardown";
+
+    /// <summary>
     /// #1586 S1 (state-truth design, ratified 2026-09-01 amendment): journal facts alone cannot
     /// distinguish success from failure for this room — the two-predicate model (execution outcome vs
     /// contract completion) disagrees with itself, e.g. work-evidence contradicts contract-evidence
@@ -84,7 +101,11 @@ public static class WorkflowOutcome
 
         if (steps.All(step => step.Status == StepStatus.Succeeded))
         {
-            return Succeeded;
+            // #1945: ahead of the plain Succeeded return, or it could never fire. A FLAG, never a
+            // reason-string prefix the way IsTimeoutFailure below has to work: StateProjector nulls
+            // LatestFailureReason on the succeeded path by construction, so no sentence survives that
+            // hop.
+            return steps.Any(step => step.FinishedDuringTeardown) ? FinishedDuringTeardown : Succeeded;
         }
 
         // #1608 / #1623: checked ahead of the ordinary Failed/Rejected read below — an unresolved

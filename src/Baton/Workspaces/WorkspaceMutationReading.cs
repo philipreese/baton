@@ -34,18 +34,47 @@ namespace Baton.Workspaces;
 /// <param name="HasNewCommits">
 /// Whether the workspace carries commits the probe's ref does not, however that was established.
 /// </param>
+/// <param name="CommitsAheadOfRemote">
+/// #1945: how many commits <c>HEAD</c> carries that its tracking branch does not
+/// (<c>git rev-list --count @{upstream}..HEAD</c>), or null when git could not answer — no upstream
+/// configured, a detached HEAD, any git failure. Never fabricated as zero: zero is the reading
+/// <see cref="FinishedAndPushed"/> treats as "the push landed", so a blind probe must not be able to
+/// manufacture it.
+/// <para>
+/// <b>The tracking ref is not stale for this question</b>, which is the reader's likely prior. The
+/// only thing that moves it is a push from this same workspace — the very push the pre-push hook was
+/// gating — so no <c>git fetch</c> is needed and none is done: hook passed and the push completed
+/// leaves 0, a kill landing before or inside the hook leaves &gt; 0.
+/// </para>
+/// </param>
 public sealed record WorkspaceMutationReading(
     bool Measured,
     int ChangedPathCount,
     int? NewCommitCount,
-    bool HasNewCommits)
+    bool HasNewCommits,
+    int? CommitsAheadOfRemote = null)
 {
     /// <summary>The reading for a workspace git could not answer for at all.</summary>
     public static readonly WorkspaceMutationReading Unmeasurable = new(false, 0, null, false);
 
     /// <summary>An exact reading, both halves counted against a known start ref.</summary>
-    public static WorkspaceMutationReading FromCounts(int changedPathCount, int newCommitCount) =>
-        new(true, changedPathCount, newCommitCount, newCommitCount > 0);
+    public static WorkspaceMutationReading FromCounts(
+        int changedPathCount, int newCommitCount, int? commitsAheadOfRemote = null) =>
+        new(true, changedPathCount, newCommitCount, newCommitCount > 0, commitsAheadOfRemote);
+
+    /// <summary>
+    /// #1945: whether this workspace's work is already committed AND already on the remote — the
+    /// signature of a lane that finished inside its box and was killed while the pre-push hook's
+    /// <c>gates-fast</c> was still running. Read only from inside <see cref="Mutated"/>'s arm in
+    /// <see cref="Outcomes.OutcomeClassifier"/>, so "the worker did nothing at all" (clean, no
+    /// commits) can never reach it and be read as finished.
+    /// <para>
+    /// Fails closed exactly as <see cref="Mutated"/> does: an unmeasured workspace, or one whose
+    /// upstream count git could not produce, is false — a lane is only called finished on positive
+    /// evidence that its work left the machine.
+    /// </para>
+    /// </summary>
+    public bool FinishedAndPushed => Measured && ChangedPathCount == 0 && CommitsAheadOfRemote == 0;
 
     /// <summary>
     /// Whether this workspace holds work no blind retry may run over. True whenever the reading

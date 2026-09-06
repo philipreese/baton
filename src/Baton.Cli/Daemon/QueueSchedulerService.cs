@@ -390,9 +390,10 @@ public sealed class QueueSchedulerService : BackgroundService
     /// <b>The room's own outcome word decides, in the same vocabulary the projector emits</b> —
     /// <see cref="WorkflowOutcome"/>'s constants, which <c>WorkflowStatusProjector</c> and
     /// <see cref="TerminalSentinelWriter.WriteValidationRefusedAsync"/> are the only producers of.
-    /// Only <see cref="WorkflowOutcome.Succeeded"/> is <see cref="QueueItemState.Done"/>; every other
-    /// word is a failure carrying that word. spec/baton.md §13 has the ruling and what reading the
-    /// step list or <see cref="WorkflowStatusView.Error"/> instead cost.
+    /// Only the two SUCCEEDED-shaped words — <see cref="WorkflowOutcome.Succeeded"/> and (#1945)
+    /// <see cref="WorkflowOutcome.FinishedDuringTeardown"/> — are <see cref="QueueItemState.Done"/>;
+    /// every other word is a failure carrying that word. spec/baton.md §13 has the ruling and what
+    /// reading the step list or <see cref="WorkflowStatusView.Error"/> instead cost.
     /// </para>
     /// <para>
     /// <b>Fails closed on a word this assembly does not know</b>, including the null a hand-written
@@ -419,6 +420,10 @@ public sealed class QueueSchedulerService : BackgroundService
         return sentinel.State switch
         {
             WorkflowOutcome.Succeeded => (QueueItemState.Done, null),
+            // #1945: Done, beside Succeeded — the room finished inside its box and the timeout kill
+            // only caught the pre-push hook. Failing it here would leave the conductor doing exactly
+            // the manual worktree-and-remote inspection the new word exists to remove.
+            WorkflowOutcome.FinishedDuringTeardown => (QueueItemState.Done, null),
             WorkflowOutcome.Indeterminate => (QueueItemState.Failed,
                 $"room {roomDirectory} settled indeterminate{detail} — resolve it with 'baton resolve' and "
                 + "redispatch if you want it redone"),

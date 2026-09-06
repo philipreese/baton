@@ -75,6 +75,11 @@ public static class RunExitCodeResolver
         return outcome switch
         {
             WorkflowOutcome.Succeeded => RunExitCode.Succeeded,
+            // #1945: exit 0, beside Succeeded. The room finished and its work is on the remote; the
+            // dispatch timeout only caught the teardown. Anything else would move the bug rather than
+            // fix it — WorkflowOutcome.FinishedDuringTeardown's own remarks list every consumer that
+            // owes it this reading.
+            WorkflowOutcome.FinishedDuringTeardown => RunExitCode.Succeeded,
             WorkflowOutcome.Cancelled => RunExitCode.Cancelled,
             WorkflowOutcome.Failed => ResolveFailed(result.State.Steps),
             // #1608 / #1623: WorkflowOutcome.Describe returns this whenever a step reads
