@@ -334,6 +334,30 @@ public sealed record CostLedgerEntry(
     [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
     long? VerifyResultsBytes = null,
 
+    /// <summary>
+    /// #1910: what this attempt's own <c>git push</c>es spent in the pre-push gate, summed across every
+    /// push the execution made. <see cref="PrePushGateMs"/> is the hook's whole wall clock (the receipt
+    /// check, plus the fallback <c>gates --fast</c> run when the receipt did not cover the tree);
+    /// <see cref="PushWaitMs"/> is the part of it spent QUEUED on the shared build lock rather than
+    /// doing work — the figure ruling C exists to drive down, so the two are read together and never
+    /// summed with each other.
+    /// <para>
+    /// Read at settle from <c>push-timing.jsonl</c> in the execution's own artifact directory, which
+    /// <c>.githooks/pre-push</c> appends one line to per push. <b>Absent means "no push timing was
+    /// recorded for this execution"</b>, never "the push was instant" and never "no push happened": an
+    /// execution that never pushed, one whose hook ran outside a Baton-supplied
+    /// <c>BATON_OUTPUT_DIR</c>, and one whose artifact directory is gone by settle time all read the
+    /// same way. <c>0</c>, by contrast, is a measurement — a push that waited on nothing.
+    /// </para>
+    /// </summary>
+    [property: JsonPropertyName("pushWaitMs")]
+    [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    long? PushWaitMs = null,
+    /// <summary>The hook's whole wall clock across this execution's pushes — see <see cref="PushWaitMs"/>.</summary>
+    [property: JsonPropertyName("prePushGateMs")]
+    [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    long? PrePushGateMs = null,
+
     // The vendor-derived billed figures ExecutionUsageView already owns the definitions of -- carried
     // through under the same names rather than recomputed, so #1706's reconciliation triple means one
     // thing in both files.
