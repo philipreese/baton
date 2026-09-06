@@ -891,10 +891,10 @@ public sealed class MemoryImportTests : IDisposable
 
         // Control: the well-formed spellings parse, so the arms above are keyed on what they claim.
         var ok = MemoryImportOptionsParser.Parse(
-            ["--dry-run", "--root", "r", "--assert", @"C:\a=b/c", "--asserted-by", "me"]);
+            ["--dry-run", "--root", "r", "--assert", @"C:\a=github.com/b/c", "--asserted-by", "me"]);
         Assert.True(ok.DryRun);
         Assert.Equal(["r"], ok.Roots);
-        Assert.Equal(new MemoryImportAssertion(@"C:\a", "b/c"), Assert.Single(ok.Assertions));
+        Assert.Equal(new MemoryImportAssertion(@"C:\a", "github.com/b/c"), Assert.Single(ok.Assertions));
         Assert.Equal("me", ok.AssertedBy);
 
         Assert.Throws<CliArgumentException>(() => MemoryImportOptionsParser.Parse(["--frobnicate"]));
