@@ -214,6 +214,45 @@ public sealed class VendorUsageHarvesterTests : IDisposable
     }
 
     /// <summary>
+    /// The boundary trigger's WIRING, which the scheduler's own suite cannot reach: it is handed
+    /// boundaries, while this asserts that the harvester reads them off the vendor's persisted snapshot
+    /// and hands them over before harvesting. A <see cref="ReadWindowBoundaries"/> that returned nothing
+    /// would leave every scheduler arm green and silently disable the trigger in production. Both
+    /// polarities on the one thing that decides it — a reset already past fires, one still ahead does
+    /// not — driven under a scheduler that is never due on its own, so a harvest here can only be the
+    /// boundary's doing.
+    /// </summary>
+    [Theory]
+    [InlineData(-1, 1)]
+    [InlineData(1, 0)]
+    public async Task TickOnce_ReadsTheResetInstantsOffThePersistedSnapshot(int resetHoursFromNow, int expectedReads)
+    {
+        var now = DateTimeOffset.UtcNow;
+        VendorUsageHarvester.Persist(
+            "claude",
+            new VendorUsageSnapshot(
+                "claude",
+                now - TimeSpan.FromHours(3),
+                Caveat: null,
+                [
+                    new VendorUsageWindow("session", 8, now + TimeSpan.FromHours(resetHoursFromNow), "Current session: 8% used"),
+                    // A window whose reset did not parse contributes no boundary rather than a guessed
+                    // one -- it must not fire a harvest of its own on the arm that expects none.
+                    new VendorUsageWindow("week (all models)", 40, null, "Current week (all models): 40% used"),
+                ]));
+
+        var source = new FakeSource("claude", FreshSnapshot());
+        var harvester = new VendorUsageHarvester(
+            [source],
+            NeverDueScheduler(),
+            countLiveLanes: _ => Task.FromResult(new Dictionary<string, int>(StringComparer.Ordinal)));
+
+        await harvester.TickOnceAsync(now, TestContext.Current.CancellationToken);
+
+        Assert.Equal(expectedReads, source.Reads);
+    }
+
+    /// <summary>
     /// The cost side of harvesting every vendor rather than the live ones: two vendor CLIs must never be
     /// running at once on the operator's machine. Asserted on observed overlap, not on the shape of the
     /// loop — a <c>Task.WhenAll</c> refactor is the edit this exists to catch, and it would leave every
