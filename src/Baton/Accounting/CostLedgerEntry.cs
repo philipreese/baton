@@ -329,6 +329,57 @@ public sealed record CostLedgerEntry(
     long? WallClockMs = null,
 
     /// <summary>
+    /// #1921: how many real tool calls this attempt made — <c>ExecutionUsageView.ToolSteps</c>, in the
+    /// unit <c>MaxToolSteps</c> caps and <c>ArrestReason.ToolStepCap</c> arrests on (spec/baton.md §3
+    /// states that unit once). Not a token figure, not a dimension of spend, and it enters neither
+    /// estimate: what it makes queryable is how a lane's step BUDGET was spent, which is the axis a
+    /// row's token totals cannot show.
+    /// <para>
+    /// <b>Present exactly when <see cref="RefusedToolSteps"/> and <see cref="RepeatedToolSteps"/> are</b>
+    /// — <c>ToolStepTally.Snapshot</c> is the single decision point and its doc states the three states.
+    /// <b>Absent means the stream carried no readable tool activity</b> (or was never captured, or was
+    /// not whole), never "this attempt ran no tools": an envelope no parser here understands reads the
+    /// same way, and a 0 would be a claim about the worker that only the stream's silence supports.
+    /// </para>
+    /// </summary>
+    [property: JsonPropertyName("toolSteps")]
+    [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    int? ToolSteps = null,
+
+    /// <summary>
+    /// #1921's field: how many of <see cref="ToolSteps"/> came back refused by this Baton's permission
+    /// grant — a step that was billed and bought the location of the boundary instead of information.
+    /// "How much of a lane's step budget went to discovering the boundary" is a filter over rows rather
+    /// than a log read, which is what #1920's measured case (10 of a review lane's first 16 steps) cost
+    /// to find by hand.
+    /// <para>
+    /// Counted by matching <c>Domain.GrantRefusal.Marker</c> in the tool RESULT — one marker stamped at
+    /// each producing site, so a new refusal phrasing cannot escape the count. <b>A 0 on a room captured
+    /// before that marker landed is a false zero</b>, and <c>Status.ToolStepTally</c>'s remarks state
+    /// why that cost was accepted and why it drains.
+    /// </para>
+    /// </summary>
+    [property: JsonPropertyName("refusedToolSteps")]
+    [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    int? RefusedToolSteps = null,
+
+    /// <summary>
+    /// #1921: how many of <see cref="ToolSteps"/> re-issued a tool+arguments pair this same execution
+    /// had already issued — the other information-free step shape, and the one no grant refused.
+    /// Occurrences beyond the first, summed over distinct pairs; <c>Status.ToolStepCounts.Repeated</c>
+    /// states that arithmetic once and why the other reading was rejected.
+    /// <para>
+    /// <b>A 0 has two meanings and they are not distinguishable on the row</b>: every call was distinct,
+    /// or the vendor's stream carried no arguments to key on
+    /// (<c>Status.IWorkerUsageParser.ToolInvocationKeys</c> names which vendor and when). <c>baton audit
+    /// lanes</c>, which reports per vendor, is where that ambiguity resolves.
+    /// </para>
+    /// </summary>
+    [property: JsonPropertyName("repeatedToolSteps")]
+    [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    int? RepeatedToolSteps = null,
+
+    /// <summary>
     /// #1882's two non-token dimensions, carried through from <c>ExecutionUsageView</c> under the same
     /// names: the wall clock of the room's zero-token pre-turn verify step, and the size of the
     /// <c>verify-results.md</c> the reviewer then reads. Neither is a token figure and neither enters

@@ -254,6 +254,13 @@ public static partial class CostLedgerStore
                 ThinkingTokens: usage.ThinkingTokens,
                 Turns: usage.Turns,
                 WallClockMs: usage.WallClockMs,
+                // #1921: carried through as the stream reader counted them -- all three together or all
+                // three absent, which is ToolStepTally.Snapshot's decision, not one taken again here.
+                // The fourth count that reader produces (emptyToolResults) deliberately stays off the
+                // row; spec/baton.md §7's table says why.
+                ToolSteps: usage.ToolSteps,
+                RefusedToolSteps: usage.RefusedToolSteps,
+                RepeatedToolSteps: usage.RepeatedToolSteps,
                 // #1882: carried through as the projector attributed them -- one execution's row gets
                 // both, every other row gets neither. No arithmetic here on purpose.
                 VerifyStepMs: usage.VerifyStepMs,
