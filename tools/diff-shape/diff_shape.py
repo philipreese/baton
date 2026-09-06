@@ -39,6 +39,7 @@ PROTECTED_TOOLING_PATHS: tuple[tuple[str, str, str], ...] = (
     ("file", "tests/Launcher.Tests.ps1", "launcher-selftest's body -- exercises baton.cmd/baton.ps1 against a mock exe fixture (gates.py OVERLAP)"),
     ("dir", "tools/Baton.VendorProbe/", "vendor-check's actual body, the loud half of the drift grace window (gates.py AFTER_BUILD_FAST); a directory because it is a compiled project"),
     ("file", "benchmarks/deepswe/derive_scores.py", "the checker and selftest bodies for both deepswe-derived gate members (gates.py OVERLAP)"),
+    ("file", "benchmarks/ledger/derive.py", "the checker and selftest bodies for both ledger-derived gate members (gates.py OVERLAP)"),
 )
 
 # pixi.toml is protected at LINE level, not whole-file (#1744 narrowing of #1603's original

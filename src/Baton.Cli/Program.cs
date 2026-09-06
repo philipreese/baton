@@ -130,8 +130,9 @@ if (args.Length == 0 || !knownSubcommands.Contains(args[0]))
     Console.Error.WriteLine($"       {LedgerCommand.Usage[7..]}");
     Console.Error.WriteLine($"       {LedgerViewOptionsParser.Usage[7..]}");
     Console.Error.WriteLine($"       {LedgerBackfillOptionsParser.Usage[7..]}");
+    Console.Error.WriteLine($"       {LedgerExportOptionsParser.Usage[7..]}");
     Console.Error.WriteLine(
-        "              ('ledger --rebuild' is a different FILE from the other two -- 'baton ledger --help' says which)");
+        "              ('ledger --rebuild' is a different FILE from the other three -- 'baton ledger --help' says which)");
     Console.Error.WriteLine($"       {MemoryAuditOptionsParser.Usage[7..]}");
     Console.Error.WriteLine(
         "       baton mcp [--capture-file <path>] [--memory-proposal-tool] [--fleet-status-tool] [--room-detail-tool]");
@@ -252,11 +253,19 @@ try
     // joins room/rooms above rather than the CommandResult/FlowStateReporter switch below.
     if (args[0] == "ledger")
     {
-        // Three commands under one verb, against two different files: `--rebuild` re-walks live rooms
+        // Four commands under one verb, against two different files: `--rebuild` re-walks live rooms
         // into the per-execution BURN ledger (#1570, quota-ledger.jsonl), `backfill` recovers rows into
-        // the repository-keyed COST ledger (#1901 C2), and everything else READS that same cost ledger
+        // the repository-keyed COST ledger (#1901 C2), `export` publishes that same cost ledger to a
+        // repository directory (#1901 C3, read-only over the store), and everything else READS it
         // (#1849 phase B, ledger/<repo>.jsonl). `--rebuild` touches neither of the others' file --
         // LedgerViewOptionsParser.HelpLines says so where an operator will see it.
+        if (args.Length >= 2 && args[1] == "export")
+        {
+            var exportOptions = LedgerExportOptionsParser.Parse(args[2..]);
+            return await LedgerExportCommand
+                .ExecuteAsync(exportOptions, Console.Out, cancellationToken: hostStopSource.Token).ConfigureAwait(false);
+        }
+
         if (args.Length >= 2 && args[1] == "backfill")
         {
             var backfillOptions = LedgerBackfillOptionsParser.Parse(args[2..]);

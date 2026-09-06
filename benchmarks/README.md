@@ -2,12 +2,15 @@
 
 Dated, immutable snapshots that inform routing decisions. Each lives in its own `YYYY-MM-DD`
 directory with a README stating source, harness, and scope; a new capture gets a new directory,
-never an edit to an old one.
+never an edit to an old one. `ledger/` is the one suite whose unit is a dated FILE rather than a
+dated directory — every export is a full snapshot written by a command rather than a hand-curated
+capture, so a directory each would be a directory per week holding one file.
 
 | Snapshot | What it holds | Feeds |
 |---|---|---|
 | [`deepswe/2026-09-04`](deepswe/2026-09-04/README.md) | 36 vendor/model/effort configurations from the DeepSWE v1.1 selector: pass@1, API-cost proxy, output tokens, agent steps. | Tier pins (#1861, #1863) |
 | [`subscription-usage/2026-09-04`](subscription-usage/2026-09-04/README.md) | Baton-launched versus native Claude Code sessions, 2026-08-31 to 09-04: responses, output, cache-read, implement-room outcomes. | #1848, #1849, #1391 |
+| [`ledger`](ledger/README.md) | Weekly `baton ledger export` snapshots of the cost ledger (`spec/baton.md` §7), one dated CSV per export, plus the per-model / per-vendor / per-arm medians `derive.py` computes from them. | #1901, #1903, #1863 |
 
 ## Derived scores
 

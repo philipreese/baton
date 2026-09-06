@@ -101,6 +101,12 @@ OVERLAP = [
     # member go RED, not skip -- deliberately, since the alternative is a copy of a memory store back
     # under ~/. The scratch directory itself persists between runs; only its per-run children go.
     "vendor-verify-selftest",
+    # #1901 C3: identical overlap-safety shape to the two above -- the checker reads the committed
+    # cost-ledger exports and its own committed outputs, and the selftest runs that same production
+    # check against a temporary copy with one derived cell edited. Neither reads ~/.baton, so a gate
+    # run on a machine that has never run Baton behaves the same as one on the operator's.
+    "ledger-derived-check",
+    "ledger-derived-check-selftest",
 ]
 
 # The MSBuild owners, strictly sequential: one MSBuild at a time.

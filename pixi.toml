@@ -302,6 +302,12 @@ diff-shape-selftest = { cmd = "python -u tools/diff-shape/diff_shape.py --selfte
 deepswe-derived-check = { cmd = "python -u benchmarks/deepswe/derive_scores.py --check-all" }
 deepswe-derived-check-selftest = { cmd = "python -u benchmarks/deepswe/derive_scores.py --selftest" }
 
+# #1901 C3, the same pair one benchmark over: the committed cost-ledger medians must be a fresh
+# derivation of the committed exports, and the selftest is what proves that check discriminates
+# rather than merely runs. Both read committed files only -- never ~/.baton.
+ledger-derived-check = { cmd = "python -u benchmarks/ledger/derive.py --check" }
+ledger-derived-check-selftest = { cmd = "python -u benchmarks/ledger/derive.py --selftest" }
+
 # Every local gate, one exit code. Report THIS command's exit status, never a per-gate line scraped
 # out of the combined output -- see tools/gates/gates.py for the two occasions that went wrong.
 gates = { cmd = "python -u tools/gates/gates.py" }

@@ -1,0 +1,18 @@
+{
+  "source": "2026-09-05.csv",
+  "population": {
+    "rows": 89,
+    "mergedPrs": 0,
+    "rowsWithNoPr": 89,
+    "identitySource": {
+      "(absent)": 89
+    },
+    "completeness": {
+      "complete": 75,
+      "partial": 14
+    }
+  },
+  "byModel": {},
+  "byVendor": {},
+  "byArm": {}
+}
