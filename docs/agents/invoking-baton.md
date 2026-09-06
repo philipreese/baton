@@ -389,8 +389,8 @@ the marker on its first line and reports it as `projection-skipped` rather than 
 behind each of those, and what a repository with nowhere to project into gets instead, are in
 `spec/baton.md` §12.
 
-**How much of a lane's step budget bought nothing (`baton audit lanes`).** The drill-down behind the
-cost ledger's `refusedToolSteps`/`repeatedToolSteps`, over the same room streams:
+**How much of a lane's step budget bought nothing (`baton audit lanes`).** The per-room read behind
+the cost-ledger fields `spec/baton.md` §7 defines, over the same captured room streams:
 
 ```
 baton audit lanes [--since <duration>] [--vendor <name>] [--rooms-root <dir>] [--format text|json] [--help]
@@ -398,16 +398,16 @@ baton audit lanes [--since <duration>] [--vendor <name>] [--rooms-root <dir>] [-
 
 Per room and per vendor: tool calls, calls Baton's own permission grant **refused**, calls that
 **repeated** a tool+arguments pair the same execution had already issued, and calls that returned an
-**empty** payload. Read-only — it opens flow logs and captured streams and writes nothing, which is
-why it has **no `--dry-run`**. `--since` is a *duration* (`90m`, `36h`, `7d`), not `baton ledger
---since`'s instant, and it filters on a room's flow-log last-write time.
+**empty** payload. It never writes, which is why it has **no `--dry-run`**. `--since` is a *duration*
+(`90m`, `36h`, `7d`), not `baton ledger --since`'s instant, and it selects on a room's flow-log
+last-write time.
 
-Three negatives a reader's prior will otherwise fill in wrongly. A room that reports **no counts at
-all** is one whose stream carried no tool activity this reader could parse — never a claim that the
-lane ran no tools. A **`refused 0` on a room captured before this shipped** is a false zero: refusals
-are counted by one marker Baton stamps where the refusal is produced, and older streams carry the old
-unmarked phrasings. A **`repeated 0`** can mean every call was distinct *or* that the vendor's stream
-carried no arguments to key on, which is why the per-vendor breakdown exists. See `spec/baton.md` §7.
+Three readings the output does **not** support, each of which a reader's prior will otherwise supply.
+A room reporting **no counts at all** did not necessarily run zero tools — its stream may simply carry
+no tool activity this reader can parse. A **`refused 0`** is not evidence of a well-behaved lane on a
+room captured before this shipped: `spec/baton.md` §7 states which zero is false and why. And a
+**`repeated 0`** does not always mean distinct calls — on a vendor whose stream omits arguments there
+was nothing to compare, which is what the per-vendor breakdown exists to show.
 
 ---
 

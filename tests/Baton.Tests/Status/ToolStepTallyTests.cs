@@ -64,8 +64,8 @@ public sealed class ToolStepTallyTests
     public void Claude_clean_stream_reports_zero_refusals_rather_than_absent()
     {
         // The polarity arm for Snapshot's second and third states: this stream HAS tool activity, so the
-        // zero is a measurement and must be written. Absent here would make "no refusals" and "nothing
-        // was read" the same reading, which is the defect the tri-state exists to prevent.
+        // zero is a measurement and must be written. Absent here would collapse the two states that
+        // method's doc keeps apart.
         var counts = Tally(
             new ClaudeUsageParser(),
             ClaudeToolUse("Read", """{"file_path":"a.cs"}"""),
@@ -123,8 +123,8 @@ public sealed class ToolStepTallyTests
     [Fact]
     public void An_unparseable_envelope_is_absent_rather_than_zero()
     {
-        // A vendor envelope no parser here understands reads exactly like a worker that ran no tools.
-        // Absent is the only honest answer; a 0 would be a claim about the worker.
+        // The second half of the same polarity: an envelope no parser understands must read as absent
+        // rather than as a measured zero.
         Assert.Null(Tally(new ClaudeUsageParser(), "not json at all", "{\"unrelated\":true}"));
     }
 
@@ -177,9 +177,8 @@ public sealed class ToolStepTallyTests
     [Fact]
     public void Codex_reports_no_repeats_when_the_stream_carries_no_argument_digest()
     {
-        // The documented gap, asserted in the direction that matters: a pre-#1921 codex stream names the
-        // tool and never its arguments, and this reader must report 0 repeats rather than counting two
-        // different reads of two different files as one file read twice.
+        // CodexUsageParser.ToolInvocationKeys' documented gap, asserted in the direction that matters:
+        // a stream with no digest must report 0 repeats rather than a fabricated one.
         var counts = Tally(
             new CodexUsageParser(),
             """{"type":"item.started","item":{"type":"mcp_tool_call","tool":"baton_read_text"}}""",

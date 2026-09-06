@@ -10,11 +10,10 @@ namespace Baton.Cli.Tests;
 /// </summary>
 /// <remarks>
 /// <para>
-/// <b>Every refusal SHAPE each gate produces is exercised, not one of them.</b> The count downstream is
-/// a substring match, so nothing fails when a new refusal path ships unmarked — these tests are what
-/// makes that impossible to do quietly. Each gate routes every refusal through one funnel
-/// (<c>HookCheckCommand.Refuse</c>, <c>AgyHookCheckCommand.DenyJson</c>); a path added around the funnel
-/// is what these turn red.
+/// <b>Every refusal SHAPE each gate produces is exercised, not one of them</b> — for the reason
+/// <c>Baton.Vendors.Tests.GrantRefusalMarkerTests</c> states once. Each gate routes every refusal
+/// through one funnel (<c>HookCheckCommand.Refuse</c>, <c>AgyHookCheckCommand.DenyJson</c>); a path
+/// added around the funnel is what these turn red.
 /// </para>
 /// <para>
 /// <b>Both directions.</b> An allowed call must carry no marker, on the same payload shape and the same

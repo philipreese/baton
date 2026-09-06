@@ -372,8 +372,8 @@ public static class HookCheckCommand
     /// <b>The single writer of every refusal this gate emits</b> (#1921), and the reason it exists as a
     /// method at all: this file refuses on eight distinct paths, and a ninth added without the marker
     /// would go uncounted with nothing failing. Claude Code copies this hook's stderr into the blocked
-    /// call's <c>tool_result</c> text — measured on <c>dispatch-implement-00c359a5</c>'s captured stream
-    /// — which is how the marker reaches <c>ClaudeUsageParser.CountRefusedToolSteps</c> at settle.
+    /// call's <c>tool_result</c> text; <c>Status.ClaudeUsageParser.CountRefusedToolSteps</c> is the
+    /// reader on the other end of that path and cites the room it was measured on.
     /// <para>
     /// The exit code is returned rather than written by the caller, so "wrote a refusal" and "denied"
     /// cannot come apart. The one refusal NOT routed through here is the internal-failure catch, which

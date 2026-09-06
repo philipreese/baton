@@ -55,9 +55,9 @@ public sealed record AuditLanesReport(
     [property: JsonPropertyName("byVendor")] IReadOnlyList<AuditLanesVendorTotal> ByVendor);
 
 /// <summary>
-/// <c>baton audit lanes</c> (#1921, operator scope addition 2026-09-05): the drill-down behind the cost
-/// ledger's <c>refusedToolSteps</c>/<c>repeatedToolSteps</c>. Per room and per vendor — tool calls,
-/// refused, identical repeats, empty results.
+/// <c>baton audit lanes</c> (#1921, operator scope addition 2026-09-05): per room and per vendor — tool
+/// calls, refused, identical repeats, empty results. The room-level read of the same figures
+/// <c>Accounting.CostLedgerEntry.ToolSteps</c> carries per execution.
 /// </summary>
 /// <remarks>
 /// <para>

@@ -328,9 +328,9 @@ try
             $"{MemoryImportOptionsParser.Usage} {MemorySyncOptionsParser.Usage}");
     }
 
-    // #1921: a noun-first verb group like `room`/`rooms`/`memory` above, and read-only in full -- it
-    // opens flow logs and captured streams and writes nothing anywhere. `lanes` is its only sub-verb;
-    // the group shape is what leaves room for a second without moving the first.
+    // #1921: a noun-first verb group like `room`/`rooms`/`memory` above, read-only for the reason
+    // AuditLanesOptions states. `lanes` is its only sub-verb; the group shape is what leaves room for a
+    // second without moving the first.
     if (args[0] == "audit")
     {
         if (args.Length >= 2 && args[1] == "lanes")

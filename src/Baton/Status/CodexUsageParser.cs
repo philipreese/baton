@@ -112,8 +112,8 @@ public sealed class CodexUsageParser : IWorkerUsageParser
     /// Codex's native <c>command_execution</c>/<c>file_change</c> items are not keyed for that reason —
     /// Baton grants codex no native shell or file tool at all (<c>CodexDynamicToolPolicy</c>), so such an
     /// item cannot occur in a Baton-driven stream, and inventing a key for one would be a shape nothing
-    /// here has measured. Contributing nothing is the documented alternative to keying on the tool name
-    /// alone, which would report two reads of two different files as one file read twice.
+    /// here has measured. Contributing nothing rather than keying on the tool name alone is
+    /// <see cref="IWorkerUsageParser.ToolInvocationKeys"/>'s general rule, applied here.
     /// </para>
     /// </summary>
     public IReadOnlyList<string> ToolInvocationKeys(string rawLine)

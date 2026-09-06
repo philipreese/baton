@@ -13,9 +13,9 @@ public enum AuditLanesOutputFormat
 /// </summary>
 /// <remarks>
 /// <b>Read-only by construction</b>, like <c>baton memory audit</c>: it opens each room's flow log and
-/// captured stdout and writes nothing anywhere, so there is no <c>--dry-run</c> and the parser rejects
-/// one by name rather than as a generic unknown option — a dry-run flag would imply a wet run that does
-/// not exist.
+/// captured stdout, and writes, moves and deletes nothing anywhere. There is therefore no
+/// <c>--dry-run</c>; <see cref="AuditLanesOptionsParser"/>'s own arm for that flag states how it is
+/// refused and why.
 /// </remarks>
 /// <param name="Since">
 /// Only rooms whose flow log was last written within this much of now. Absent = every room under the

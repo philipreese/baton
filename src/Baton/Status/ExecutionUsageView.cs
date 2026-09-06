@@ -149,7 +149,7 @@ public sealed record ExecutionUsageView(
     /// <summary>
     /// #1921: <see cref="ToolStepCounts.Refused"/> — steps whose result carried
     /// <see cref="Domain.GrantRefusal.Marker"/>. <see cref="ToolStepTally"/>'s remarks state the one
-    /// thing a reader must not conclude from a 0 on a room captured before that marker landed.
+    /// conclusion this figure does not support on an older room.
     /// </summary>
     [property: JsonPropertyName("refusedToolSteps")]
     [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]

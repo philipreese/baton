@@ -599,12 +599,11 @@ public static class AgyHookCheckCommand
     /// <remarks>
     /// #1921: the reason carries <see cref="GrantRefusal.Marker"/>, stamped here because this is the
     /// single funnel for every one of this gate's fourteen refusal paths — a fifteenth cannot be added
-    /// without it. agy delivers the reason back inside the denied step's
-    /// <c>step_update.tool_info.error.message</c>, wrapped in its own <c>tool call denied by pre-tool
-    /// hook:</c> prose (measured on <c>dispatch-implement-05550343</c>'s captured stream), which is how
-    /// the marker reaches <c>AgyUsageParser.CountRefusedToolSteps</c> at settle.
-    /// <see cref="GrantRefusal.Stamp"/> is idempotent, so a composed reason already carrying
-    /// <c>ShellCommandPatternMatcher</c>'s marker is left alone.
+    /// without it. agy delivers this reason back inside the denied step's own tool payload;
+    /// <c>Status.AgyUsageParser.CountRefusedToolSteps</c> is the reader on the other end of that path and
+    /// states the exact shape and the room it was measured on. <see cref="GrantRefusal.Stamp"/> is
+    /// idempotent, so a composed reason already carrying <c>ShellCommandPatternMatcher</c>'s marker is
+    /// left alone.
     /// </remarks>
     private static string DenyJson(string reason) =>
         JsonSerializer.Serialize(new { decision = "deny", reason = GrantRefusal.Stamp(reason) });

@@ -179,8 +179,7 @@ public sealed class AuditLanesCommandTests : IDisposable
     [Fact]
     public async Task An_absent_rooms_root_reports_nothing_and_exits_zero()
     {
-        // A machine that has never run a lane is not a malformed invocation, and this verb must never be
-        // the reason a script stops.
+        // The fail-open posture AuditLanesCommand's remarks state, asserted rather than asserted about.
         using var output = new StringWriter();
         var exitCode = await AuditLanesCommand.ExecuteAsync(
             new AuditLanesOptions(RoomsRoot: Path.Combine(_sandbox, "nothing-here")), output,
