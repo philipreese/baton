@@ -14,8 +14,9 @@ public sealed class MemoryAuditReportTests
     private const string Baton = "github.com/philipreese/baton";
     private const string Basis = "github.com/philipreese/basis";
 
-    private static MemoryFile File(string relativePath, string digest, long size = 10) =>
-        new(Path.Combine(@"C:\root", relativePath), relativePath, size, Sep5, digest);
+    private static MemoryFile File(
+        string relativePath, string digest, long size = 10, bool isProjection = false) =>
+        new(Path.Combine(@"C:\root", relativePath), relativePath, size, Sep5, digest, isProjection);
 
     private static MemoryRootResolution Live(
         string directoryName,
@@ -173,6 +174,56 @@ public sealed class MemoryAuditReportTests
         var report = Build(Live("C--x", Basis, File("project_batontown_notes.md", "aaaa")));
 
         Assert.Empty(report.Findings);
+    }
+
+    /// <summary>
+    /// A cache <c>baton memory sync</c> wrote into another repository's root is not a subject claim —
+    /// and the SAME file, same name, with the projection flag off still is. The pair is what makes the
+    /// skip key on the flag (which <c>MemoryRootInventory</c> sets from the file's first line) rather
+    /// than on the name <c>baton-projection.md</c>, which both arms share.
+    /// </summary>
+    [Fact]
+    public void A_projection_is_not_a_subject_claim_and_the_same_name_without_the_flag_is()
+    {
+        var projected = Build(Live(
+            "C--Users-pbree-source-repos-consumer",
+            Basis,
+            File("MEMORY.md", "aaaa"),
+            File(ClaudeProjectionTarget.ProjectionFileName, "bbbb", isProjection: true)));
+
+        Assert.Empty(projected.Findings);
+
+        var notProjected = Build(Live(
+            "C--Users-pbree-source-repos-consumer",
+            Basis,
+            File("MEMORY.md", "aaaa"),
+            File(ClaudeProjectionTarget.ProjectionFileName, "bbbb")));
+
+        var finding = Assert.Single(notProjected.Findings);
+        Assert.Equal(MemoryFindingKind.Ambiguous, finding.Kind);
+        Assert.Equal([Basis, Baton], finding.Candidates);
+    }
+
+    /// <summary>
+    /// Two live roots of one repository — two worktrees of one checkout, this project's normal shape —
+    /// receive BYTE-IDENTICAL projections by construction (the projector excludes the target path from
+    /// its inputs), so a duplicate row over them is true and is noise Baton minted itself. The control
+    /// is the same digest in the same two roots with the flag off, which still reports.
+    /// </summary>
+    [Fact]
+    public void Two_roots_holding_the_same_projection_are_not_a_duplicate_and_the_same_bytes_unflagged_are()
+    {
+        var projected = Build(
+            Live("C--a", Baton, File(ClaudeProjectionTarget.ProjectionFileName, "aaaa", isProjection: true)),
+            Live("C--b", Baton, File(ClaudeProjectionTarget.ProjectionFileName, "aaaa", isProjection: true)));
+
+        Assert.DoesNotContain(projected.Findings, f => f.Kind == MemoryFindingKind.Duplicate);
+
+        var unflagged = Build(
+            Live("C--a", Baton, File(ClaudeProjectionTarget.ProjectionFileName, "aaaa")),
+            Live("C--b", Baton, File(ClaudeProjectionTarget.ProjectionFileName, "aaaa")));
+
+        Assert.Single(unflagged.Findings, f => f.Kind == MemoryFindingKind.Duplicate);
     }
 
     [Fact]

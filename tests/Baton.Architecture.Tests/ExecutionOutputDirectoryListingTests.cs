@@ -102,6 +102,18 @@ public class ExecutionOutputDirectoryListingTests
         // point (#1941 review LOW).
         ["Baton.Vendors/SkillPackageLint.cs"] =
             "GetFiles enumerates one resolved skill package's own assets, not an execution output directory",
+        // #1852 C: lists the directory `--repository-facts` names, for the checked-in repository facts
+        // the projection reads. That flag is operator-set and unconstrained, so — unlike the two entries
+        // above — this makes no claim that a room's artifacts root is out of reach: an operator can point
+        // it at one. What puts the stream logs out of reach is the enumeration itself: it is `*.md`,
+        // TopDirectoryOnly, and no file name ExecutionStreamLogger.IsStreamLogFileName recognises has a
+        // .md extension, so none is matchable by this glob wherever the flag points — the
+        // LedgerBackfillCommand shape above, by glob rather than by exact name. (`*.md` is an exact
+        // match: .NET's short-name leak, where `*.doc` also matches .docx, is three-character extension
+        // patterns only.) The files are also read as repository facts and never presented as outputs,
+        // and the verb writes nothing into the directory it was handed.
+        ["Baton.Cli/MemorySyncCommand.cs"] =
+            "EnumerateFiles lists an operator-named directory for *.md repository facts, a glob no stream log file name can match",
         // #496: lists artifacts/.versions/ (a named artifact's own version-history sidecar, one
         // index.jsonl per name), never an execution's own output directory.
         ["Baton/Artifacts/RoomArtifacts.cs"] =

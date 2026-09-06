@@ -394,6 +394,7 @@ through `RoleDispatch.Materialize` against the real role catalog.
 | `unkeep` | `baton unkeep <room-dir>` | `UnkeepOptionsParser.cs` |
 | `memory` | `baton memory audit [--format text\|json] [--help]` | `MemoryAuditOptionsParser.cs` |
 | `memory` | `baton memory import [--dry-run] [--root <dir>]... [--assert <path>=<repository>]... [--asserted-by <who>] \| --undo <manifest> [--help]` | `MemoryImportOptionsParser.cs` |
+| `memory` | `baton memory sync [--repository <id>] [--apply] [--format text\|json] [--repository-facts <dir>] [--help]` | `MemorySyncOptionsParser.cs` |
 
 `templates` narrows to the built-in catalog only (`Baton.Vendors`'s `BuiltInWorkflowTemplates`) —
 there is no authoring UI to browse a saved-template library visually against (Appendix, R7 in the
@@ -5471,6 +5472,87 @@ a row's `repository` stays readable as a measurement. #1852's live subject-ambig
 phase A reports and refuses to resolve, is therefore imported under the **derived** identity. Q1's per-entry adjudication is not built here and is not reachable by
 assertion either; `MemoryAliasStore`'s remarks state what it would require and why this store is not
 it.
+
+**`baton memory sync` — phase C, shipped. The projections are caches, and they say so.** Every
+projected file opens with a header naming itself a cache, naming the canonical `entries.jsonl` it came
+from, and stating that an edit made in it is lost on the next sync and never read back; every section
+back-points to the canonical entry id it was projected from. **There is no timestamp in the output, and
+that is the mechanism rather than a stylistic choice** — a generated-at stamp is exactly what makes
+"re-running sync without source changes produces no diff" impossible, so the header carries a **content
+hash** of the body in its place. `MemoryProjection` is a pure function of `(repository,
+canonicalStorePath, entries, budget)` — the store path is an input because the header names it, so two
+runs differing only in it produce different bytes — and its remarks carry the other three properties
+that hold the byte-identity up (a total `(repository, kind, id)` order, pinned `\n`/UTF-8/no-BOM,
+invariant-culture numbers) and why the hash covers the body and not the header. **Byte-identity is
+therefore a per-machine claim**: absolute source paths and the store path are rendered into the output,
+so the same store on two machines projects two different files, and "an unchanged store produces no
+diff" is a statement about one machine over time. **`--apply` is the only thing that puts a byte on
+disk**, and short of it the verb has no filesystem effect whatever — `MemorySyncCommand`'s remarks
+carry why that has to be said as a negative rather than left as "it only reports".
+
+**The two verbs are not a loop: `import` recognises a projection and refuses to file it.** `sync`
+writes into a vendor root, and that root is `import`'s own population — so without a test the pair
+would re-ingest each cycle's cache as a fresh memory, growing the store by one entry and roughly
+doubling its bytes per cycle until the projection budget began evicting real memories. The test is the
+format marker on the projected file's first line, one constant shared by the writer and the reader
+(`MemoryProjection.IsProjectedFile`), checked **before** the subject is resolved so such a file is
+reported as `projection-skipped` and never as `unfiled` — the two mean different things, and only
+`unfiled` is a state an operator fixes with `--assert`. The marker is a test on content and not a
+guarantee about a partial file: the staging write is not atomic, so a `.tmp` truncated before its first
+line completed carries no marker and imports as an ordinary memory.
+
+**`audit` skips a projection too, on the same predicate — out of its FINDINGS only.** A cache Baton
+wrote is not evidence about whose memory a root holds, so it is excluded from the subject and duplicate
+rules and kept everywhere else: it is still walked, digested, listed in the root's row and added into
+the counts. `MemoryAuditReport`'s remarks carry the derivation — which two findings it would otherwise
+mint about the tool's own write, and why the exclusion stops at the findings — and
+`MemoryFile.IsBatonProjection` is where the inventory records the same content test rather than a
+second one.
+
+**An archived-origin entry (`historical-note`) is projected and labelled, never dropped** — the
+projector's remarks carry the derivation; the register's part is that labelling rather than hiding is
+the ruling, on the same reasoning every other omission on this surface is named rather than counted.
+
+**A superseded entry is omitted from the projection and named in the report** — the projector's own
+remarks carry the derivation; the register's part is that omitting is the ruling, since a cache is the
+*current* reading and the store still holds every row. The same posture covers the other two ways an
+entry can be absent: **budget truncation stops at the first entry that does not fit and drops the rest
+of the order** (a prefix kept, its suffix dropped — `ProjectionBudget` states why that beats
+skip-and-continue, which is equally deterministic and not predictable), and every dropped or overridden
+entry is **named with its canonical id**, never counted.
+
+**Conflicts are decided by precedence and never merged.** A checked-in repository fact outranks a
+vendor-memory fact — the authority model ratified on #1852 (operator, 2026-09-04) — and they collide on
+the same key phase B's supersession already uses: same subject, same source **filename**. Repository
+truth is projected; the vendor entry is reported as overridden, with its id, and is left untouched in
+the canonical store. Nothing compares the two beyond their digests, because comparing what they *say*
+is the inference Architecture Rule 1 and this section both forbid. **The population is whatever
+`--repository-facts <dir>` names, and Baton mints no convention for where repository facts live in a
+checkout**: phase B's scope keeps the store under `~/.baton` and never in a checkout, so this verb
+reads a directory the operator points it at and creates nothing. With the flag absent the rule has an
+empty population, which the report states in those words rather than printing a zero that reads as
+"no conflicts found".
+
+**Targets are markdown, and they are discovered rather than constructed.** Q4 (operator, 2026-09-05)
+confined this phase to markdown, so the targets are the Claude roots that resolve to the repository
+being synced and the Codex **markdown** roots an operator has asserted a repository for; the
+`memories_*.sqlite` stores and every Antigravity store are inventoried by A2 and never written —
+byte-identical idempotence over sqlite+WAL is a different problem with a different instrument. There is
+deliberately **no forward encoding** from a repository identity to a Claude project-directory name:
+`MemoryRootPath` shows the encoding is lossy, so `sync` runs the same `MemoryRootInventory` discovery
+`audit` and `import` run and writes into the roots that came back. **A repository with no discovered
+root gets no target and is reported as having none, because a projection written into a directory the
+vendor has never heard of is a file nothing ever reads, reported as a success.** **An archived Claude
+root is refused by construction, and an operator assertion does not lift the refusal** — an archive is
+a record of what was, a projection is the current reading, and `MemorySyncCommand`'s discovery remarks
+carry why the check has to run ahead of resolution. Every discovered root that is not a target is
+listed in the report with its reason, so "discovered and never written" is printed rather than only
+claimed. Each target root
+receives exactly one Baton-owned file and no other file in it is touched — not `MEMORY.md`, not the
+vendor's own memories. The honest consequence, stated because a reader's prior fills the gap the other
+way: a vendor that surfaces only the memories it has indexed may not read the projection until
+something points at it, and editing an index the operator owns is the destructive move #1852 declines
+everywhere else.
 
 **`baton memory audit [--format text|json]` — phase A, shipped.** Read-only, and read-only *by
 construction* rather than by flag: nothing on the path opens a file for writing, so there is

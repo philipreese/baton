@@ -369,6 +369,26 @@ an `ambiguous` root prints both candidates and picks neither, because deciding w
 needs the entries' text. `--format json` is the machine contract: one object
 `{claudeHome, roots, findings, counts}`. See `spec/baton.md` §12.
 
+**Pushing the canonical store back out as a cache (`baton memory sync`).** Projects Baton's canonical
+memory into the markdown vendor memory roots that already exist:
+
+```
+baton memory sync [--repository <id>] [--apply] [--format text|json] [--repository-facts <dir>] [--help]
+```
+
+Without `--apply` it writes **nothing** — no file, and no directory either — and reports what would
+change. One generated file per root and nothing else in it: the vendor's own memories and its
+`MEMORY.md` index are left alone. **The output carries no timestamp on purpose**, so a diff means the
+store changed and not that time passed. Targets are **discovered, never constructed**, and they are
+markdown only — Codex's `memories_*.sqlite`, every Antigravity store and every archived Claude root
+(`~/.claude/memory-archive/<label>/`) are inventoried and never written, each listed in the report with
+the reason. A superseded entry, one the projection budget could not fit, and a vendor fact a checked-in
+repository fact outranks are each **named with their canonical id** in the report, never counted.
+**Running `sync` and `import` in a loop does not grow the store**: `import` recognises a projection by
+the marker on its first line and reports it as `projection-skipped` rather than filing it. The rulings
+behind each of those, and what a repository with nowhere to project into gets instead, are in
+`spec/baton.md` §12.
+
 ---
 
 ## 4. Adapter notes

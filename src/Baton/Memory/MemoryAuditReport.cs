@@ -174,6 +174,18 @@ public sealed record MemorySubjectVocabulary(IReadOnlyDictionary<string, string>
 /// supersedes is phase B's import, which has the entries' text; a name-collision heuristic here would
 /// fire on the <c>MEMORY.md</c> every root carries and report noise as a finding.
 /// </para>
+/// <para>
+/// <b>Baton's own projections are excluded from every finding, and from findings only.</b>
+/// <c>baton memory sync --apply</c> writes a cache into a live root (<see cref="MemoryFile.IsBatonProjection"/>,
+/// decided by the content test <c>import</c> uses rather than by a filename), and that file is evidence
+/// about nobody's memory. Left in, it produces two findings Baton manufactured out of its own write:
+/// the projected file is named after Baton by construction, so a root belonging to any other repository
+/// reports a subject <see cref="MemoryFindingKind.Ambiguous"/> — the shape the vocabulary exists to
+/// surface, now minted by the tool that reports it — and two live roots of one repository receive
+/// byte-identical projections by design, so they pair as a <see cref="MemoryFindingKind.Duplicate"/>
+/// that is true and is noise. They stay in the rows and the counts, which measure what was walked: an
+/// operator who cannot see the file has no way to judge the skip. spec/baton.md §12 carries the ruling.
+/// </para>
 /// </remarks>
 public sealed record MemoryAuditReport(
     IReadOnlyList<MemoryRootRow> Roots,
@@ -294,7 +306,10 @@ public sealed record MemoryAuditReport(
             return null;
         }
 
-        foreach (var file in resolution.Root.Files)
+        // Projections skipped for the reason this type's remarks give: the file Baton writes is named
+        // after Baton, so reading it as a subject claim reports the tool's own cache as evidence about
+        // whose memory the root holds.
+        foreach (var file in resolution.Root.Files.Where(f => !f.IsBatonProjection))
         {
             foreach (var token in SubjectTokens(file.RelativePath))
             {
@@ -367,7 +382,10 @@ public sealed record MemoryAuditReport(
 
         foreach (var resolution in resolutions)
         {
-            foreach (var file in resolution.Root.Files)
+            // Projections skipped for the reason this type's remarks give: two live roots of one
+            // repository get byte-identical projections by design, so pairing them would report
+            // Baton's own write back to the operator as a cross-root duplicate.
+            foreach (var file in resolution.Root.Files.Where(f => !f.IsBatonProjection))
             {
                 if (!byDigest.TryGetValue(file.Sha256, out var list))
                 {

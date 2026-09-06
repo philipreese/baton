@@ -174,6 +174,47 @@ public static class MemoryStore
     }
 
     /// <summary>
+    /// Runs <paramref name="work"/> holding this store's lock on <paramref name="entriesFilePath"/> —
+    /// the entry point for a caller that must not observe a half-written store, and the only way to
+    /// take that lock from outside this assembly.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// <b>Why a projection writer needs it</b> (#1852 phase C). <c>baton memory sync</c> reads a
+    /// repository's entries and links and then writes derived files into a vendor root; without this,
+    /// a concurrent <c>baton memory import</c> could append between the two reads, and the projection
+    /// would be a cache of a store state that never existed. Holding the entries lock across the whole
+    /// read-project-write is what makes the projection a function of one observed store.
+    /// </para>
+    /// <para>
+    /// <b>The links file's lock is deliberately not taken here.</b> <see cref="ReadResolvedAsync"/>'s
+    /// remarks state the rule this preserves: the two are acquired one at a time and never nested, so
+    /// two callers cannot take them in opposite orders. A projection reading links under the entries
+    /// lock sees a links file that may have grown; the cost is one link discovered on the next run
+    /// rather than this one, which is the direction that fails closed.
+    /// </para>
+    /// </remarks>
+    /// <param name="entriesFilePath">The store file to lock and read.</param>
+    /// <param name="work">
+    /// Runs holding the lock, handed the entries as they sit on disk — <b>synchronous on purpose</b>.
+    /// An async body here would mean awaiting inside a held <see cref="MutexGuardedFileLock"/>, and the
+    /// only way to keep the lock across that await is to block on it, which is a deadlock waiting for a
+    /// caller with a synchronization context. Everything a projection does under this lock (project,
+    /// write bytes) is synchronous already.
+    /// </param>
+    public static Task<TResult> RunUnderEntriesLockAsync<TResult>(
+        string entriesFilePath,
+        Func<IReadOnlyList<MemoryEntry>, TResult> work,
+        CancellationToken cancellationToken = default)
+    {
+        ArgumentException.ThrowIfNullOrEmpty(entriesFilePath);
+        ArgumentNullException.ThrowIfNull(work);
+
+        return Ledger.RunUnderLockAsync(
+            entriesFilePath, () => work(Ledger.ReadAllUnlocked(entriesFilePath)), cancellationToken);
+    }
+
+    /// <summary>
     /// Removes exactly the rows in <paramref name="entryIds"/> from <paramref name="entriesFilePath"/>
     /// and returns how many were removed — <b>the undo half of a reversible import</b>, and the only
     /// operation in this namespace that unwrites anything.
