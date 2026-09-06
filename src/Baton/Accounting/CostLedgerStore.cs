@@ -153,7 +153,16 @@ public static partial class CostLedgerStore
                 // The same closed outcome token set QuotaLedgerEntry.Outcome documents -- one
                 // vocabulary across both ledgers, so a filter written against one works on the other.
                 case FlowEvent.ExecutionSucceeded succeeded:
-                    outcomeByExecutionId[succeeded.ExecutionId.Value] = "Succeeded";
+                    // #1945: the flagged execution names its own word here rather than flattening to
+                    // "Succeeded". This row is where a conductor reconciles a lane's spend against its
+                    // outcome, and it is the row carrying prePushGateMs (spec/baton.md §7) — so a lane
+                    // killed after its push saying "Succeeded" while its terminal.json says
+                    // FinishedDuringTeardown would put the divergence in exactly the two fields anyone
+                    // reading this question reads together. The vocabulary is WorkflowOutcome's; see
+                    // WorkflowOutcome.FinishedDuringTeardown for what the word means.
+                    outcomeByExecutionId[succeeded.ExecutionId.Value] = succeeded.FinishedDuringTeardown
+                        ? Status.WorkflowOutcome.FinishedDuringTeardown
+                        : "Succeeded";
                     break;
 
                 case FlowEvent.ExecutionFailed failed:

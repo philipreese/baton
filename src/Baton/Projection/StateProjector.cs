@@ -146,6 +146,10 @@ public static class StateProjector
                     // #1702: a fresh dispatch's own verify step (if any) speaks for this attempt, not
                     // whatever the PRIOR attempt's pre-flight check found.
                     state.VerifyNotRunReasonByStepId.Remove(acceptedStepId);
+
+                    // #1945: same clear, same reason -- a prior attempt having finished during its own
+                    // teardown says nothing about this one.
+                    state.FinishedDuringTeardownStepIds.Remove(acceptedStepId);
                 }
                 else
                 {
@@ -172,6 +176,18 @@ public static class StateProjector
                     state.WorkspaceChangedByStepId[succeededStepId] = succeeded.WorkspaceChanged;
                     state.HollowByStepId[succeededStepId] = succeeded.Hollow;
                     state.HollowReasonByStepId[succeededStepId] = succeeded.HollowReason;
+
+                    // #1945: set-or-clear, never set-only. A retry that succeeds normally after an
+                    // attempt that finished during teardown must not leave the room reading the old
+                    // word -- the same "the latest execution speaks" rule the four clears above follow.
+                    if (succeeded.FinishedDuringTeardown)
+                    {
+                        state.FinishedDuringTeardownStepIds.Add(succeededStepId);
+                    }
+                    else
+                    {
+                        state.FinishedDuringTeardownStepIds.Remove(succeededStepId);
+                    }
                 }
 
                 break;
@@ -767,7 +783,8 @@ public static class StateProjector
                 state.HollowByStepId.GetValueOrDefault(stepDefinition.StepId),
                 state.HollowReasonByStepId.GetValueOrDefault(stepDefinition.StepId),
                 state.VerifyNotRunReasonByStepId.GetValueOrDefault(stepDefinition.StepId),
-                state.ConductorRejectedStepIds.Contains(stepDefinition.StepId)));
+                state.ConductorRejectedStepIds.Contains(stepDefinition.StepId),
+                state.FinishedDuringTeardownStepIds.Contains(stepDefinition.StepId)));
         }
 
         var workflowStatus = DeriveWorkflowStatus(steps, snapshot);

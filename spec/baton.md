@@ -782,7 +782,8 @@ per `MaxParkWaitChunk` re-arm); `liveness`'s engine-identity read (`WorkflowStat
 
 ### The terminal vocabulary, and the two-predicate model (#1586 S1)
 
-`WorkflowOutcome` (`src/Baton/Status/WorkflowOutcome.cs`) has **six** members today:
+`WorkflowOutcome` (`src/Baton/Status/WorkflowOutcome.cs`) has these members today — deliberately no
+count in this sentence, since #1945 left the last one stale the moment it added a row:
 
 | Value | Meaning |
 |---|---|
@@ -792,6 +793,7 @@ per `MaxParkWaitChunk` re-arm); `liveness`'s engine-identity read (`WorkflowStat
 | `Failed` | At least one step failed or was rejected, and the room did not settle any other terminal way |
 | `Cancelled` | At least one step was cancelled and nothing failed |
 | `Indeterminate` | Journal facts alone could not decide success vs failure — see below |
+| `FinishedDuringTeardown` | #1945. Every step succeeded, and at least one did so on the arm below: Flow's own dispatch timeout killed the execution **after its push had landed, with nothing left to push** — the workspace was clean, `HEAD` carried nothing its tracking branch did not, and every declared output was already on disk (the contract check, #1945 review). The lane finished inside its box and the kill caught only what came after the transfer. That includes, but is not limited to, the tail of this repo's pre-push hook: a kill landing *inside* `gates-fast` is a kill *before* the transfer, leaves `HEAD` ≥ 1 ahead of `@{upstream}`, and settles `Indeterminate` as it always did. **A SUCCEEDED-shaped word**: every consumer that asks "did this room finish?" accepts it exactly where it accepts `Succeeded` (exit 0, queue `Done`, no redispatch warning). It is a separate word rather than a bare `Succeeded` so the room states why a timeout kill still settled clean — the fact a conductor previously reconstructed by hand. The predicate, why it is nested inside the #1373 mutated arm, and why no `git fetch` is needed are on `Workspaces.WorkspaceMutationReading` |
 
 **The two-predicate model.** A room's completion has always actually been two separate questions:
 *execution outcome* (did the worker's process finish, crash, or get cancelled — `OutcomeVerdict` /
@@ -830,7 +832,7 @@ not `ContractFailure`'s. What writes it now:
 | `OutcomeClassifier.Classify`'s #1593 uncaptured contract-failure arm — declared outputs simply absent or failed validation, or a dead worker (stream-json ending without a `result` record) on a mutated workspace, with no response to capture; also #1680's first-verdict canary (a natural, contract-satisfied exit whose caller reports ≥1 tool call and zero agy `PreToolUse` hook verdicts — the hook may never have run, and this vendor reads that silence as an ALLOW rather than an error) | `FlowEvent.ExecutionIndeterminate` (null `CapturedResponseFile`) | `ContractFailure` | #1593, #1680 |
 | The role's engine-run verify command exited non-zero after a clean, contract-satisfied worker exit | `FlowEvent.VerifyFailed` | `VerifyFailed` | #1623 |
 | A live execution crossed its role's token budget and was arrested | `FlowEvent.ExecutionArrested` | `Arrested` | #1623 |
-| `OutcomeClassifier.Classify`'s #1373 timeout arm — Flow's own dispatch timeout killed the execution and the workspace it was killed in carries work (see the paragraph below) | `FlowEvent.ExecutionIndeterminate` (null `CapturedResponseFile`) | `ContractFailure` | #1373 |
+| `OutcomeClassifier.Classify`'s #1373 timeout arm — Flow's own dispatch timeout killed the execution and the workspace it was killed in carries work (see the paragraph below, including #1945's one carve-out) | `FlowEvent.ExecutionIndeterminate` (null `CapturedResponseFile`) | `ContractFailure` | #1373 |
 | Verify actually started, but its only failing member(s) were blocked on `tools/buildlock.py`'s build lock, not genuinely broken — contention, never a gate defect | `FlowEvent.VerifyNotRun` (`BuildLockBusy: true`) | `BuildLockBusy` | #1796 |
 
 Every other Failed/Cancelled/Succeeded path is unchanged. All six raise the **one** flag
@@ -924,6 +926,14 @@ finishing looks like). The reason text opens with `OutcomeClassifier.TimeoutSent
 `Status.WorkflowOutcome.IsTimeoutFailure` still reads a mutated timeout as a timeout. **Consequence
 for a surface:** such a room now describes `Indeterminate`, so `baton run` no longer exits
 `RunExitCode.Timeout` for it — that exit code stays for a timeout with nothing to salvage.
+
+**Narrowed once, by #1945.** Not every mutated workspace is one a conductor has to look at. A
+workspace that is *also* clean and level with its tracking branch, on an execution whose declared
+outputs are all present, settles the succeeded-shaped `FinishedDuringTeardown` instead — the kill
+landed after the push, so there is nothing left to resolve and nothing a redispatch would finish.
+That is the only carve-out; everything else in this ruling, including the fail-closed reading and the
+retry it forecloses, is unchanged. The word, its predicate and the consumers that owe it a
+succeeded reading are §3's `FinishedDuringTeardown` row above.
 
 **The per-attempt start sha is journaled, not only held in memory (#1373 follow-up).** The commit half
 of the reading above is a delta against the sha read immediately before Core is asked to run — durable
@@ -2081,7 +2091,8 @@ stays display-only, never itself a gate. `StateProjector.DescribeArrest` is the 
 
 <!-- record-once-ok: #1378 src/Baton.Cli/RunExitCodeResolver.cs -->
 **Exit code 1 is not "terminal, a step failed."** `RunExitCodeResolver.Resolve` falls through to
-`Failed` for **`Running` and `Paused` too** — any outcome that is not `Succeeded`, `Cancelled`, or the
+`Failed` for **`Running` and `Paused` too** — any outcome that is not `Succeeded`,
+`FinishedDuringTeardown` (#1945: the second word that exits 0, §3's row), `Cancelled`, or the
 resolved `Failed`/`Timeout` split (`RunExitCodeResolver.cs`, comment verbatim: *"Running or
 Paused: the pump returned short of Terminal (no `--wait`, or `--wait`'s poll loop was cancelled --
 e.g. Ctrl-C -- before the room settled; a `--wait-timeout` expiry is handled ahead of this and never
@@ -5881,8 +5892,9 @@ sentinel-first path) and no cost-ledger row, which is indistinguishable from a l
 
 An item is **done** when its room reaches a terminal state, read from the room itself — no `.done`
 sentinel files, so a restarted daemon resolves an item it never launched. **The fate comes from the
-room's own outcome word**, the one `WorkflowOutcome` writes into the sentinel (§3): only `Succeeded`
-is done, and Cancelled / Failed / Indeterminate — and any word this reader does not know, including a
+room's own outcome word**, the one `WorkflowOutcome` writes into the sentinel (§3): the two
+succeeded-shaped words are done — `Succeeded`, and `FinishedDuringTeardown` (#1945, §3's row) — and
+Cancelled / Failed / Indeterminate — and any word this reader does not know, including a
 sentinel carrying none — are **failed, with the room id and that word**. Not from the sentinel's
 step list or its error field: a cancelled lane has no failed step and a rejected one carries no
 failure reason, so both read as a clean completion under either. Resolving and redispatching stay

@@ -2408,7 +2408,7 @@ public static class MutationInterface
         {
             OutcomeVerdict.Succeeded => new FlowEvent.ExecutionSucceeded(
                 executionId, classification.WorkspaceChanged, classification.Hollow, classification.HollowReason,
-                peakBilledInWindow),
+                peakBilledInWindow, classification.FinishedDuringTeardown),
             OutcomeVerdict.Failed => new FlowEvent.ExecutionFailed(
                 executionId, classification.FailureClassification, classification.Reason, classification.RetryNotBefore,
                 classification.CapturedResponseFile, classification.UnsatisfiedOutputNames, peakBilledInWindow),

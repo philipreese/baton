@@ -87,7 +87,12 @@ public sealed record OutcomeClassification(
     // account of these three fields -- gating, meaning, null-vs-false, all stated there once.
     bool? WorkspaceChanged = null,
     bool? Hollow = null,
-    string? HollowReason = null);
+    string? HollowReason = null,
+    // #1945: true only on the one arm that sets it -- see OutcomeClassifier.Classify's TimedOut
+    // branch. A FLAG, not a Reason prefix: the succeeded path nulls LatestFailureReason by
+    // construction (StateProjector), so a sentence could not survive the hop, and
+    // WorkflowOutcome.IsTimeoutFailure's own remarks are already an apology for having to sniff one.
+    bool FinishedDuringTeardown = false);
 
 /// <summary>
 /// Maps a <see cref="CoreDispatchResult"/> plus a step's <see cref="WorkerContract"/> into one of
@@ -152,7 +157,9 @@ public static class OutcomeClassifier
     /// <c>NaturalExit + code 0 + all ProducedOutputs satisfied + no ToolDenied/ExhaustedUntil signal in the stream</c> → Succeeded;
     /// <c>NaturalExit + code 0 + all ProducedOutputs satisfied + a ToolDenied/ExhaustedUntil signal in the stream</c> → Failed (#914/#1622);
     /// <c>NaturalExit + code 0 + an unsatisfied ProducedOutput</c> → Indeterminate (#1593/#1594/#1608, unless a dead worker without result on an untouched workspace);
-    /// <c>TimedOut + a mutated workspace</c> → Indeterminate (#1373);
+    /// <c>TimedOut + a mutated workspace that is clean and already pushed</c> → Succeeded, flagged
+    /// <see cref="OutcomeClassification.FinishedDuringTeardown"/> (#1945);
+    /// <c>TimedOut + any other mutated workspace</c> → Indeterminate (#1373);
     /// <c>NaturalExit</c> otherwise, or <c>TimedOut</c> → Failed;
     /// <c>CancelRequested</c> → Cancelled.
     /// </summary>
@@ -258,6 +265,40 @@ public static class OutcomeClassifier
                     ?? ((path, since) => Workspaces.WorktreeProvisioner.ReadWorkspaceMutation(
                         path, since, result.EnginePlacedFiles));
                 var reading = probe(mutationProbePath, workspaceHeadShaAtStart ?? worktreeBaseRef);
+
+                // #1945: the lane that committed and PUSHED inside its box, then was killed after
+                // that push landed with nothing left to push -- teardown, of which the pre-push
+                // hook's own tail is one instance and not the only one. Its workspace is clean and
+                // its HEAD is already on the remote, so there is nothing for a conductor to resolve
+                // and nothing a redispatch would finish -- reporting it as a timeout cost two rooms
+                // a manual inspection each on 2026-09-06.
+                //
+                // Nested INSIDE the Mutated arm on purpose: a lane that did nothing at all is also
+                // clean with HEAD == remote, and reads Mutated: false, so it never reaches here and
+                // keeps today's plain-timeout Failed below. The evidence is workspace STATE at kill
+                // time, never elapsed time -- how long the hook itself ran cannot change this
+                // classification, and the hook's own wall clock is already measured once, as the cost
+                // ledger's prePushGateMs (spec/baton.md §7). No second timing is minted here.
+                //
+                // The contract check is the second half of the discriminator, exactly as the #1089
+                // arm above pairs its terminal-success marker with one (#1945 review HIGH 1): declared
+                // outputs are written to the execution's ARTIFACTS directory, not into the worktree
+                // this probe reads, so "clean tree, already pushed" is silent about whether the
+                // deliverable was ever written. Without it a lane killed while still writing
+                // report.md settled Succeeded and exited 0 with its declared output missing. Absent
+                // the outputs this falls through to the Indeterminate arm below -- a conductor looks,
+                // which is what that shape has always meant. TerminalSuccessObserved is deliberately
+                // NOT also required: this population was killed mid-teardown, so no worker ever
+                // printed a terminal marker, and requiring one would make this arm dead code.
+                if (reading is { Mutated: true, FinishedAndPushed: true }
+                    && ContractValidator.IsSatisfied(contract, outputDirectory))
+                {
+                    return BuildSucceededClassification(
+                        contract, changesTreeWorkingDirectory, worktreeBaseRef, changesTree, result.EnginePlacedFiles)
+                        with
+                    { FinishedDuringTeardown = true };
+                }
+
                 if (reading is { Mutated: true })
                 {
                     return new OutcomeClassification(

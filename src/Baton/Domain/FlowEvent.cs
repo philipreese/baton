@@ -83,12 +83,21 @@ public abstract record FlowEvent
     /// recorded exit, or a spawn refusal before dispatch), and on any ledger line written before this
     /// field existed.
     /// </param>
+    /// <param name="FinishedDuringTeardown">
+    /// #1945: this execution was killed by the dispatch timeout, but its workspace was clean with
+    /// HEAD already on the remote — it finished inside its box and the kill landed in teardown (the
+    /// repo's pre-push hook). Carried so <see cref="Status.WorkflowOutcome"/> can say
+    /// <see cref="Status.WorkflowOutcome.FinishedDuringTeardown"/> at the room level rather than a
+    /// bare "Succeeded" that loses why. False on every other succeeded execution, and on any journal
+    /// line written before this field existed.
+    /// </param>
     public sealed record ExecutionSucceeded(
         ExecutionId ExecutionId,
         bool? WorkspaceChanged = null,
         bool? Hollow = null,
         string? HollowReason = null,
-        long? PeakBilledInWindow = null) : FlowEvent;
+        long? PeakBilledInWindow = null,
+        bool FinishedDuringTeardown = false) : FlowEvent;
 
     /// <summary>Flow has classified a completed execution as failed.</summary>
     /// <param name="Reason">
