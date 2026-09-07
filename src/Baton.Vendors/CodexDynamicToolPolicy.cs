@@ -208,12 +208,21 @@ public sealed class CodexDynamicToolPolicy
     /// <para>
     /// <b>Truncated at <see cref="MaxIdentityCharacters"/></b> with a trailing <c>…</c>, because a
     /// command line has no bound of its own and this field must not become the thing the digest exists
-    /// to avoid. A truncated identity is still the right unit for the dominant-shape reading it feeds
-    /// (<c>Status.CommandShape.Normalize</c> keys on the head of a command line), and equality
-    /// comparisons use the digest, not this. Null — the field is then simply absent — for a tool with
-    /// no identifying key, for an argument object that carries none, and for an
-    /// <see cref="ApplyPatchTool"/> envelope this parser cannot read: an absent field is honest, an
-    /// invented one is not.
+    /// to avoid. That cap costs the dominant-shape reading it feeds nothing:
+    /// <c>Status.CommandShape.Normalize</c> reads the whole string but caps its own output at
+    /// <c>CommandShape.MaxShapeLength</c> (80), so anything this truncates was already past that
+    /// consumer's own cut. Equality comparisons use the digest, never this. Null — the field is then
+    /// simply absent — for a tool with no identifying key, for an argument object that carries none,
+    /// and for an <see cref="ApplyPatchTool"/> envelope this parser cannot read: an absent field is
+    /// honest, an invented one is not.
+    /// </para>
+    /// <para>
+    /// <b>The <c>_ =&gt; null</c> arm is reachable and is the deliberate limit of the claim.</b> A tool
+    /// name Baton implements nowhere — the hallucinated or stale name <see cref="DescribeUnknownTool"/>
+    /// answers, five of which #1920 measured on one arm — is announced as an <c>mcp_tool_call</c> pair
+    /// before <see cref="ExecuteAsync"/> ever rejects it, and those two items carry a digest and no
+    /// identity. Scraping one out of raw arguments for a name with no known schema would reintroduce
+    /// exactly the whole-file-into-the-stream bound this method exists to hold.
     /// </para>
     /// </summary>
     internal static string? InputIdentity(string toolName, JsonElement arguments)

@@ -157,6 +157,12 @@ public sealed class CodexAppServerBrokerTests
     /// <c>Describe</c> that stamped the tool name into both fields would satisfy "present" and answer
     /// nothing.
     /// </para>
+    /// <para>
+    /// <b>The claim is over items naming a tool Baton implements</b>, which is the whole population a
+    /// room's grant can produce on purpose. The one exception —
+    /// <see cref="An_unimplemented_tool_name_is_still_digested_and_honestly_carries_no_identity"/> — is
+    /// its own test rather than a caveat in this one, so the universal here stays universal.
+    /// </para>
     /// </summary>
     [Fact]
     public async Task Every_tool_item_in_the_room_carries_the_arguments_digest_and_the_input_identity()
@@ -239,6 +245,69 @@ public sealed class CodexAppServerBrokerTests
             // reaches the stream through the new field.
             Assert.DoesNotContain(new string('x', 64), stream, StringComparison.Ordinal);
             Assert.DoesNotContain("*** Begin Patch", stream, StringComparison.Ordinal);
+        }
+        finally
+        {
+            DirectoryCleanup.DeleteRecursively(root);
+        }
+    }
+
+    /// <summary>
+    /// #2008, the polarity partner and the measured edge of the claim above: codex reaching for a tool
+    /// Baton implements nowhere (#1920 recorded five such calls on one arm). The item pair is announced
+    /// before <c>ExecuteAsync</c> rejects the name, so it is real traffic in a real room — and it
+    /// carries the digest, which still tells two such calls apart, with the identity ABSENT rather than
+    /// scraped out of arguments whose schema Baton does not know.
+    /// <para>
+    /// Absent, specifically, not blank — <c>ContainsKey</c> is the assertion. Why the two differ is
+    /// stated once beside the emitter, in <c>CodexAppServerBroker.Describe</c>.
+    /// </para>
+    /// </summary>
+    [Fact]
+    public async Task An_unimplemented_tool_name_is_still_digested_and_honestly_carries_no_identity()
+    {
+        var root = Path.Combine(Path.GetTempPath(), $"baton-codex-unknown-{Guid.NewGuid():N}");
+        var output = Path.Combine(root, "output");
+        Directory.CreateDirectory(output);
+        try
+        {
+            var grant = new PermissionGrant(ReadFiles: true);
+            var configuration = new CodexBrokerConfiguration(
+                root, "gpt-5.6-luna", "low", null, false, grant, ["report.md"], false);
+            var policy = new CodexDynamicToolPolicy(grant, root, output, [], ["report.md"]);
+            var transcript = string.Join('\n',
+            [
+                "{\"id\":1,\"result\":{\"userAgent\":\"fixture\"}}",
+                "{\"id\":2,\"result\":{\"thread\":{\"id\":\"thread-1\"}}}",
+                "{\"id\":3,\"result\":{\"turn\":{\"id\":\"turn-1\",\"status\":\"inProgress\",\"items\":[]}}}",
+                ToolCall(21, "str_replace_editor", new JsonObject { ["file"] = "controls.py" }),
+                "{\"method\":\"turn/completed\",\"params\":{\"threadId\":\"thread-1\",\"turn\":{\"id\":\"turn-1\",\"status\":\"completed\",\"items\":[]}}}",
+            ]) + "\n";
+            using var serverOutput = new StringReader(transcript);
+            using var serverInput = new StringWriter();
+            using var batonOutput = new StringWriter();
+            using var error = new StringWriter();
+
+            await CodexAppServerBroker.RunProtocolAsync(
+                configuration, "Edit it.", policy, serverInput, serverOutput,
+                batonOutput, error, TestContext.Current.CancellationToken);
+
+            var toolItems = Lines(batonOutput).Select(line => JsonNode.Parse(line)!)
+                .Where(node => node["item"]?["type"]?.GetValue<string>() == "mcp_tool_call")
+                .Select(node => node["item"]!.AsObject())
+                .ToArray();
+
+            Assert.Equal(2, toolItems.Length);
+            foreach (var item in toolItems)
+            {
+                Assert.Equal("str_replace_editor", item["tool"]!.GetValue<string>());
+                Assert.Matches(
+                    "^[0-9a-f]{16}$",
+                    item[Baton.Status.CodexUsageParser.ArgumentsDigestField]!.GetValue<string>());
+                Assert.False(item.ContainsKey(Baton.Status.CodexUsageParser.ArgumentsIdentityField));
+            }
+
+            Assert.Equal("failed", toolItems[1]["status"]!.GetValue<string>());
         }
         finally
         {
