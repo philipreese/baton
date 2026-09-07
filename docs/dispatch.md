@@ -87,10 +87,13 @@ unrelated command a scoped shell doesn't actually cover.
 committed `.baton/verify` outranks it, #1958 — spec/baton.md §3) — the ENGINE runs it once,
 never itself holding a lock across the run (`spec/baton.md` §3 states the actual locking mechanism),
 after the worker's own process exits 0 with its output contract satisfied; the worker itself is never
-asked to run gates or tests and never sees the command. `review`/`advise` and
-every other role declare none — and since #2029 a workspace's own `.baton/verify` does not reach them
-either, because each role's catalog entry now states whether the workspace's gates grade it at all
-(`verifies_workspace`; spec/baton.md §3 has the two sets and why, and why `--verify` is exempt).
+asked to run gates or tests and never sees the command. Every other role declares no command of its
+own — which is not the same as ungraded. Since #2029, whether a workspace's own committed
+`.baton/verify` reaches a role is that role's `verifies_workspace` key (`WorkerRoles.json`, one per
+role; spec/baton.md §3 has the two sets and why). Where it is true, that declaration is the *only* arm
+grading the lane — `janitor`'s shape, and since Baton's own repo commits one (#1958) a janitor lane
+dispatched here does run through it. Where it is false, neither that arm nor a role default resolves,
+and an operator's own `--verify` is the one arm that still does (§3, again, for why it is exempt).
 A verify failure is never a blind retry: it settles the step
 `Indeterminate`, with the failing gate members and a bounded output tail recorded as room facts
 (`verifyStarted`/`verifyPassed`/`verifyFailed` in `flow.jsonl`) — a conductor resolves it, the same way

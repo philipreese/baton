@@ -59,8 +59,12 @@ public sealed class VerifyCommandResolverTests
     [Fact]
     public void Resolve_repo_declaration_still_applies_when_the_role_declares_no_default()
     {
-        // Pins the rule spec/baton.md §3 states: a review/advise-shaped role (no VerifyPixiTask)
-        // dispatched against a workspace that declares .baton/verify still gets a verify step.
+        // Pins the arm-2 rule spec/baton.md §3 states as rewritten by #2029: a role that declares no
+        // VerifyPixiTask of its own -- janitor's shape -- dispatched against a workspace that declares
+        // .baton/verify still gets a verify step. Which roles reach this arm at all is
+        // WorkerRole.VerifiesWorkspace's to say and is gated at MutationInterface's call site, not here:
+        // Resolve stays role-independent, which is why the read-shaped roles are not this test's subject
+        // any more.
         var resolved = VerifyCommandResolver.Resolve(
             "python -c \"import sys; sys.exit(0)\"", overrideCommand: null, roleVerifyPixiTask: null);
 

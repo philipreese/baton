@@ -276,9 +276,19 @@ stdout; follow that rather than the general rule (spec/baton.md §3).
 outputs written, the engine runs that workspace's own verify command — but when the workspace does not
 define one (a role's baked-in `pixi` task absent from a foreign workspace), the step still settles
 `Succeeded`, and the room still exits 0, with the gate never having fired. `steps[].verify` is where
-that is said: it reads `"not-run"` exactly in that case and is **absent otherwise**, with
-`steps[].verifyReason` naming what was missing. So exit 0 plus `verify: "not-run"` means "the worker's
-own work looks clean and nothing checked it" — read the field before reporting a run as gated.
+that is said: it reads `"not-run"` exactly in that case, with `steps[].verifyReason` naming what was
+missing. So exit 0 plus `verify: "not-run"` means "the worker's own work looks clean and nothing checked
+it" — read the field before reporting a run as gated.
+
+**Since #2029 the field's *absence* no longer means the gate ran, either.** A role whose catalog entry
+sets `verifies_workspace: false` is not graded by the workspace's declaration or by a role default at
+all — `spec/baton.md` §3 is the register for which roles those are. Only an operator's own
+`--verify <cmd>` still resolves for such a role, and that one does run. Otherwise nothing is
+resolved at all, so no not-run fact is recorded and
+`steps[].verify` is simply absent — byte-identical to a run whose gate fired and passed. There is **no
+distinct reason string** for this case: the only discriminator is what you dispatched. So an ungated
+`Succeeded` has two shapes now — the loud one (`verify: "not-run"`), and the silent one (no `verify`
+field, a `verifies_workspace: false` role, no `--verify` passed).
 `spec/baton.md` §3 is the register for the resolution order, for how to declare a verify command for
 your own workspace (`.baton/verify`, which must be **committed** to take effect), and for the
 `--verify <cmd>` override.
