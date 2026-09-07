@@ -957,16 +957,11 @@ public class AgyHookCheckCommandTests
     }
 
     /// <summary>
-    /// The middle arm's other half on agy, matching the claude suite's: with the previous output in the
-    /// room's ledger, the second ask is denied WITH that output, because a deny reason is the only
-    /// channel this hook has. Recorded through the ledger file rather than through a hook call —
-    /// nothing on a <c>PreToolUse</c> path records an output, which is the scope
-    /// <c>RepeatedToolCallLedger.HookCommandDenial</c> states.
-    /// <para>
-    /// Both directions: this arm asserts the transcript sentence is ABSENT, and
-    /// <see cref="Three_identical_run_commands_are_one_allow_and_two_denials_and_a_changed_file_rereads"/>
-    /// — same shape, no recorded output — asserts it is present. The third ask stays plain.
-    /// </para>
+    /// agy's copy of <c>HookCheckCommandTests.A_repeat_whose_output_the_ledger_holds_is_denied_with_that_output</c>
+    /// — see there for the rationale and for the polarity partner's role; the reason it is duplicated
+    /// per vendor is that the two hooks are separate commands with separate wiring, which is the whole
+    /// reason #2002's review found the rung on one of them and not the other. Its own polarity partner
+    /// is <see cref="Three_identical_run_commands_are_one_allow_and_two_denials_and_a_changed_file_rereads"/>.
     /// </summary>
     [Fact]
     public void A_repeat_whose_output_the_ledger_holds_is_denied_with_that_output()

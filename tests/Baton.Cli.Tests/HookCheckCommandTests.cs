@@ -506,15 +506,15 @@ public class HookCheckCommandTests
 
     /// <summary>
     /// The middle arm's other half: when the room's ledger DOES hold the previous output, the second
-    /// ask is denied with that output in the reason rather than with a pointer at the transcript. A
-    /// deny reason is the only channel a <c>PreToolUse</c> hook has, so this is what replay looks like
-    /// here.
+    /// ask is denied with that output in the reason rather than with a pointer at the transcript.
+    /// <c>RepeatedToolCallLedger.HookCommandDenial</c> states why a denial is where that output goes,
+    /// and which of the two branches is reachable on which vendor.
     /// <para>
     /// Discriminating in both directions, because "the reason mentions the output" would also pass on a
     /// denial that pasted it unconditionally: this arm asserts the transcript sentence is ABSENT, and
-    /// <see cref="Three_identical_bash_commands_are_one_allow_and_two_denials"/> — same command, no
-    /// recorded output — asserts it is present. The third ask is plain in both, and must not carry the
-    /// output either: two replays of one answer is the waste this rung exists to remove.
+    /// <see cref="Three_identical_bash_commands_are_one_allow_and_two_denials"/> — the same command
+    /// with nothing recorded — asserts it is present. The third ask is plain in both and must not carry
+    /// the output either: two replays of one answer is the waste this rung exists to remove.
     /// </para>
     /// </summary>
     [Fact]
