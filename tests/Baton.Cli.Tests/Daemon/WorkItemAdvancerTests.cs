@@ -284,6 +284,49 @@ public sealed class WorkItemAdvancerTests
     }
 
     [Fact]
+    public async Task An_item_the_queue_cannot_derive_fails_with_the_reason_on_it_and_is_never_re_read()
+    {
+        var home = CreateTempHome();
+        using var scope = BatonEnvironmentSnapshot.BeginScope(BatonEnvironmentSnapshot.Blank with { HomeOverride = home });
+        try
+        {
+            // A hand-edited item: staged, settled succeeded, and with no branch to look for a PR on. The
+            // fake gh is willing (it would answer with PR #77), so this arm measures the missing branch
+            // and not an unavailable gh — ReadPullRequestAsync short-circuits before it spawns anything.
+            var room = await WriteSettledRoomAsync(home, WorkflowOutcome.Succeeded, verdictJson: null);
+            var seeded = await SeedAsync(home, WorkStage.Implement, room);
+            await QueueStore.MutateAsync(
+                BatonPaths.QueueFile, s => s with { Items = [seeded with { Branch = null }] }, Ct);
+
+            var advancer = new WorkItemAdvancer(
+                new FakeGh(PrJson(77, PushedSha)), (_, _) => Task.FromResult<string?>(PushedSha));
+
+            var fact = Assert.Single(await advancer.AdvanceAsync(Now, Ct));
+            Assert.Equal(QueueDecisionEntry.Failed, fact.Decision);
+
+            var item = await ReadBackAsync();
+            Assert.Equal(QueueItemState.Failed, item.State);
+            Assert.True(item.Halted);
+            Assert.Equal(WorkStage.Implement, item.Stage);
+            Assert.Contains("no pull request is open", item.Error!, StringComparison.Ordinal);
+            // The recovery the message names has to be one the code actually allows: an item still at
+            // implement IS replaceable by a re-add (QueueCommand.RefuseIfNotReplaceable).
+            Assert.Contains("baton queue add", item.Error!, StringComparison.Ordinal);
+            // The room survives the failure, which is what the operator has to read (spec/baton.md §13).
+            Assert.Equal(room, item.RoomDirectory);
+
+            // The half that costs money: before `halted`, this same item matched the candidate filter on
+            // every tick forever — a gh spawn, a git spawn and a queue.json rewrite apiece.
+            Assert.Empty(await advancer.AdvanceAsync(Now.AddMinutes(1), Ct));
+            Assert.Equal(item.Error, (await ReadBackAsync()).Error);
+        }
+        finally
+        {
+            DirectoryCleanup.DeleteRecursively(home);
+        }
+    }
+
+    [Fact]
     public async Task A_stage_less_dispatch_request_is_left_exactly_as_it_was()
     {
         var home = CreateTempHome();

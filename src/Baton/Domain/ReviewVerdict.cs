@@ -9,7 +9,10 @@ namespace Baton.Domain;
 /// <see cref="Outcomes.OutcomeVerdict"/>, which is Flow's own classification of how an execution
 /// ended; a <see cref="ReviewVerdict"/> is content a worker wrote, and per decision 0043 the engine
 /// only ever checks that it <i>parses</i> — severity and status are evidence surfaced to a person,
-/// never inputs to routing (Architecture Rule 1, decision 0038).
+/// never inputs to routing (Architecture Rule 1, decision 0038) — a rule about Flow's routing, which
+/// spec/baton.md §13 carves the conductor queue out of: <c>WorkItemLifecycle</c> may derive APPROVE and
+/// BLOCK from these two enumerated fields. That carve-out, and what it does not license, is stated
+/// there.
 /// </summary>
 /// <param name="ReviewedRef">
 /// What was reviewed — a branch, commit, or PR reference. Required: an unanchored verdict cannot

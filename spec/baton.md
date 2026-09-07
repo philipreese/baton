@@ -5878,15 +5878,31 @@ written:
 
 | At stage | The lane settled | Then | Because |
 |---|---|---|---|
-| implement / fix / continue | `Succeeded`, PR open | **review** | there is something to review |
-| implement / fix / continue | `Succeeded`, no PR | **operator** | the queue never opens a PR |
-| review / re-review | `Succeeded`, verdict approves | **ready** | the conductor merges; the queue never does |
-| review / re-review | `Succeeded`, verdict blocks | **fix**, round + 1 | the brief is the findings |
-| review / re-review | `Succeeded`, no readable verdict | **operator** | silence is not an approval |
+| implement / fix / continue | succeeded-shaped, PR open | **review** | there is something to review |
+| implement / fix / continue | succeeded-shaped, no PR | **operator** | the queue never opens a PR |
+| review / re-review | succeeded-shaped, verdict approves | **ready** | the conductor merges; the queue never does |
+| review / re-review | succeeded-shaped, verdict blocks | **fix** | the brief is the findings |
+| review / re-review | succeeded-shaped, no readable verdict | **operator** | silence is not an approval |
 | implement / fix / continue | anything else, work pushed | **re-review** | the PR head is the workspace head |
 | implement / fix / continue | anything else, work unpushed | **continue** | finish and push it |
 | review / re-review | anything else | **re-review** | a reviewer has nothing to push |
+| any stage, round at the ceiling | anything | **operator** | two of those arms are cycles with no natural end |
 | ready | anything | nothing | it stops here |
+
+**"Succeeded-shaped" is the set, never the one word.** Both terminal words §3's table calls
+succeeded-shaped — `Succeeded` and `FinishedDuringTeardown` — take every row above identically, through
+`WorkflowOutcome.IsSucceededShaped`, which is where that membership is spelled. This lifecycle is one of
+the consumers §3 obliges, and an ordinal `== "Succeeded"` here discarded a readable `verdict.json` and
+re-dispatched a full review lane against the same head.
+
+**Every dispatch is counted, and the count is bounded** (`WorkStages.MaxRounds`, 4). `round` is one per
+dispatch the lifecycle issues — review, fix, re-review, continue alike — not one per BLOCK, because the
+two arms that can repeat forever are `re-review → re-review` (a review lane that keeps hitting its wall
+clock) and `continue → continue` (a lane whose work never reaches the PR), and neither passes through a
+verdict. The default permits the conductor's own practice — round 1 the first review, then
+fix → re-review → fix — and stops at the dispatch after that, naming the count and the stage in the
+reason. Unattended overnight running is the whole point of the daemon, so an unbounded cycle is a
+frontier lane per tick with nothing putting it in front of a person.
 
 **APPROVE and BLOCK are derived from two enumerated fields and nothing else.** A finding that is both
 `severity: high` and `status: confirmed` blocks; every other combination — and an empty findings array
@@ -5911,10 +5927,20 @@ and it belongs in the operator's live list until then. What keeps it from launch
 a braces that silently takes over. An arm the queue cannot derive fails the item with the reason on
 it, where `baton queue list` shows it; it never guesses.
 
+**A failed work item is out of the advance for good** (`halted` on the item). It keeps its room and its
+stage — a failure with nowhere to look is not investigable — but the candidate filter skips it, because
+the same item otherwise matched on every tick forever: `gh` spawned, `git` spawned, `queue.json`
+rewritten, and the repeated fact hidden by the ledger's own `decision|reason|tag` collapse. What that
+costs is said out loud rather than worked around: an implement lane failed by a transient `gh` outage
+is no longer rescued by the next tick's re-read, and it needs the operator like any other halted item.
+**The reason names the recovery the product actually has** — a re-add for an item still at `implement`,
+and past that, the operator's own hand, since `baton queue` has no verb that reopens a failed item and
+a re-add is refused for any item past `implement`.
+
 ### The brief templates (operator ruling, 2026-09-06)
 
 "Every brief the conductor writes by hand is friction to remove, so the templates are the product, not
-a convenience." Three, at **`~/.baton/queue/templates/{implement,fix,re-review}.md`**, shipped
+a convenience." Four, at **`~/.baton/queue/templates/{implement,review,fix,re-review}.md`**, shipped
 compiled-in and **materialized only when the file is absent** — an operator's edit survives every
 later `add`. `{{TOKEN}}` placeholders are substituted; an unknown one is left alone rather than
 blanked, since a hole a reader cannot see is worse than a token they can.
@@ -5929,8 +5955,17 @@ The implement template carries the standing lane rules **once** — buildlock, n
 sub-agents, no live vendor CLI, no issue filing, never `--no-verify`, checkpoint commits, the
 test-hygiene tripwires, record-once, the ship block, and `Closes #N` alone on the last line with no AI
 attribution. `continue` renders from that same template with one generated paragraph naming what the
-previous lane left behind: a continuation *is* the implement brief plus that sentence, and a fourth
-file would be the same text with one paragraph different, drifting the first time the rules changed.
+previous lane left behind: a continuation *is* the implement brief plus that sentence, and a file of
+its own would be the same text with one paragraph different, drifting the first time the rules changed.
+
+**The first review and a re-review do not share one, and the split is on the prior verdict rather than
+the stage.** A re-review brief asserts a round that happened — its header, its "what the previous round
+found" section, its instruction to say whether the new head closes each finding — so rendering it for
+the first review told the reviewer about findings that did not exist: every sentence true of the
+template, the reader's conclusion false. What decides is whether there is a verdict to carry
+(`lastVerdict`, or findings rendered for this brief), not the round number and not the stage, so a
+re-review of a review lane that stalled without writing one renders the first-review brief, which is
+the correct brief for it.
 
 ### The recorded fact (Q4)
 

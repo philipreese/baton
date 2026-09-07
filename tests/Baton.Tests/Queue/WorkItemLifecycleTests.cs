@@ -132,6 +132,120 @@ public sealed class WorkItemLifecycleTests
     }
 
     [Fact]
+    public void A_review_lane_that_finished_during_teardown_routes_on_its_verdict_exactly_as_a_succeeded_one()
+    {
+        // #1945's word is SUCCEEDED-shaped (spec/baton.md §3): the lane satisfied its contract and the
+        // timeout kill landed during teardown, so its verdict.json is on disk and readable. Asserted as
+        // an equality against the Succeeded transition rather than a re-statement of the fix arm — that
+        // is the claim ("routes exactly as Succeeded does"), and it cannot pass by accident.
+        var verdict = Verdict(Finding(ReviewFindingSeverity.High, ReviewFindingStatus.Confirmed));
+
+        var teardown = WorkItemLifecycle.Decide(At(
+            WorkStage.Review, outcome: WorkflowOutcome.FinishedDuringTeardown, verdict: verdict, round: 1));
+
+        Assert.Equal(
+            WorkItemLifecycle.Decide(At(
+                WorkStage.Review, outcome: WorkflowOutcome.Succeeded, verdict: verdict, round: 1)),
+            teardown);
+        Assert.Equal(WorkStage.Fix, teardown.NextStage);
+
+        // The control that makes this arm about the WORD and not about the verdict: a word that is not
+        // succeeded-shaped discards the same verdict and re-dispatches a review of the same head.
+        var failed = WorkItemLifecycle.Decide(At(
+            WorkStage.Review, outcome: WorkflowOutcome.Failed, verdict: verdict, round: 1));
+
+        Assert.Equal(WorkStage.ReReview, failed.NextStage);
+    }
+
+    [Fact]
+    public void An_implement_lane_that_finished_during_teardown_goes_to_review_exactly_as_a_succeeded_one()
+    {
+        var teardown = WorkItemLifecycle.Decide(At(
+            WorkStage.Implement, outcome: WorkflowOutcome.FinishedDuringTeardown));
+
+        Assert.Equal(
+            WorkItemLifecycle.Decide(At(WorkStage.Implement, outcome: WorkflowOutcome.Succeeded)),
+            teardown);
+        Assert.Equal(WorkStage.Review, teardown.NextStage);
+    }
+
+    [Fact]
+    public void A_re_review_cycle_reaches_the_operator_at_the_ceiling_rather_than_running_forever()
+    {
+        // One below the ceiling is the control: the same stalled review lane still dispatches, so the
+        // arm below measures the ROUND and not the stall.
+        var below = WorkItemLifecycle.Decide(At(
+            WorkStage.ReReview, outcome: WorkflowOutcome.Failed, round: WorkStages.MaxRounds - 1));
+
+        Assert.Equal(WorkItemTransitionKind.Dispatch, below.Kind);
+        Assert.Equal(WorkStages.MaxRounds, below.Round);
+
+        var atCeiling = WorkItemLifecycle.Decide(At(
+            WorkStage.ReReview, outcome: WorkflowOutcome.Failed, round: WorkStages.MaxRounds));
+
+        Assert.Equal(WorkItemTransitionKind.NeedsOperator, atCeiling.Kind);
+        Assert.Contains("re-review", atCeiling.Reason, StringComparison.Ordinal);
+        Assert.Contains(
+            WorkStages.MaxRounds.ToString(System.Globalization.CultureInfo.InvariantCulture),
+            atCeiling.Reason, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void A_continue_cycle_reaches_the_operator_at_the_ceiling_too()
+    {
+        // The other endless arm: a lane whose work never reaches the PR is continued, and a continuation
+        // that keeps failing the same way would continue forever.
+        var below = WorkItemLifecycle.Decide(At(
+            WorkStage.Continue, outcome: WorkflowOutcome.Failed, workspaceHead: "0000111122223333",
+            round: WorkStages.MaxRounds - 1));
+
+        Assert.Equal(WorkStage.Continue, below.NextStage);
+
+        var atCeiling = WorkItemLifecycle.Decide(At(
+            WorkStage.Continue, outcome: WorkflowOutcome.Failed, workspaceHead: "0000111122223333",
+            round: WorkStages.MaxRounds));
+
+        Assert.Equal(WorkItemTransitionKind.NeedsOperator, atCeiling.Kind);
+        Assert.Contains("continue", atCeiling.Reason, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void The_ordinary_path_to_ready_never_reaches_the_ceiling()
+    {
+        // implement → review → fix → review → ready, threading each transition's own round into the next
+        // observation the way the advancer writes it back onto the item. Every step must be a dispatch:
+        // a ceiling that trips on the path the queue exists to run is a ceiling set wrong.
+        var review = WorkItemLifecycle.Decide(At(WorkStage.Implement, round: 0));
+        Assert.Equal(WorkItemTransitionKind.Dispatch, review.Kind);
+        Assert.Equal(1, review.Round);
+
+        var fix = WorkItemLifecycle.Decide(At(
+            WorkStage.Review, verdict: Verdict(Finding(ReviewFindingSeverity.High, ReviewFindingStatus.Confirmed)),
+            round: review.Round));
+        Assert.Equal(WorkStage.Fix, fix.NextStage);
+
+        var reReview = WorkItemLifecycle.Decide(At(WorkStage.Fix, round: fix.Round));
+        Assert.Equal(WorkItemTransitionKind.Dispatch, reReview.Kind);
+        Assert.True(reReview.Round <= WorkStages.MaxRounds);
+
+        var ready = WorkItemLifecycle.Decide(At(WorkStage.Review, verdict: Verdict(), round: reReview.Round));
+        Assert.Equal(WorkItemTransitionKind.Stop, ready.Kind);
+        Assert.Equal(WorkStage.Ready, ready.NextStage);
+    }
+
+    [Fact]
+    public void A_stalled_review_lane_with_no_open_pr_has_nothing_left_to_review()
+    {
+        // The polarity partner of A_stalled_review_lane_is_re_reviewed_rather_than_continued: the ONE
+        // input that differs is the PR, and without one there is no head to review at.
+        var transition = WorkItemLifecycle.Decide(At(
+            WorkStage.Review, outcome: WorkflowOutcome.Cancelled, pr: null, prHead: null));
+
+        Assert.Equal(WorkItemTransitionKind.NeedsOperator, transition.Kind);
+        Assert.Contains("nothing left to review", transition.Reason, StringComparison.Ordinal);
+    }
+
+    [Fact]
     public void An_unsettled_room_produces_nothing()
     {
         var transition = WorkItemLifecycle.Decide(At(WorkStage.Implement, outcome: null));

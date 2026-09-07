@@ -60,13 +60,16 @@ public sealed class WorkItemAdvancer
     {
         var snapshot = await QueueStore.LoadAsync(BatonPaths.QueueFile, cancellationToken).ConfigureAwait(false);
 
-        // Settled, staged, and not already ready. State rather than the sentinel: QueueSchedulerService's
-        // own done detection has already read the room this tick and is the one thing that moves an item
-        // out of `launched`, so re-deriving settledness here would be a second reader of the same file
-        // that can disagree with the first.
+        // Settled, staged, not already ready, and not one this advance has already given up on. State
+        // rather than the sentinel: QueueSchedulerService's own done detection has already read the room
+        // this tick and is the one thing that moves an item out of `launched`, so re-deriving settledness
+        // here would be a second reader of the same file that can disagree with the first. The
+        // `Halted` half is what stops a NeedsOperator item being re-observed on every tick forever —
+        // see QueueItem.Halted for what that cost.
         var candidates = snapshot.Items
             .Where(i => i.Stage is { } stage && !WorkStages.IsTerminal(stage)
                 && i.State is QueueItemState.Done or QueueItemState.Failed
+                && !i.Halted
                 && i.RoomDirectory is { Length: > 0 })
             .ToList();
         if (candidates.Count == 0)
@@ -205,12 +208,16 @@ public sealed class WorkItemAdvancer
     {
         // Failed, not silently left: every arm that reaches here is one where the queue would have to
         // guess, and a guess dispatches a lane against evidence nobody checked. The reason is on the
-        // item, so `baton queue list` is where the operator finds it.
+        // item, so `baton queue list` is where the operator finds it — and `Halted` is what makes this
+        // the LAST tick that reads this item, rather than the first of an unbounded run of identical
+        // ones (QueueItem.Halted's own remarks). The room and the stage are left on the item, for the
+        // reason spec/baton.md §13 gives.
         await MarkAsync(item.Tag, existing => existing with
         {
             Stage = from,
             State = QueueItemState.Failed,
             Error = transition.Reason,
+            Halted = true,
         }).ConfigureAwait(false);
 
         return new QueueDecisionEntry(
@@ -242,11 +249,17 @@ public sealed class WorkItemAdvancer
             CancellationToken.None);
 
     /// <summary>
-    /// <c>gh pr view &lt;branch&gt; --json number,headRefOid,mergeStateStatus</c>, run in the item's own
-    /// worktree. Every failure — no <c>gh</c>, not authenticated, no PR on the branch — is
-    /// <c>(null, null)</c>, which the lifecycle reads as "no PR": that routes a stalled lane to
-    /// <see cref="WorkStage.Continue"/> rather than to a review of a PR that may not exist.
+    /// <c>gh pr view &lt;branch&gt; --json number,headRefOid</c>, run in the item's own worktree. Every
+    /// failure — no <c>gh</c>, not authenticated, no PR on the branch — is <c>(null, null)</c>, which the
+    /// lifecycle reads as "no PR": that routes a stalled lane to <see cref="WorkStage.Continue"/> rather
+    /// than to a review of a PR that may not exist.
     /// </summary>
+    /// <remarks>
+    /// <b>Exactly the two fields something reads.</b> <c>mergeStateStatus</c> was requested and never
+    /// parsed (#2004 review); the queue never merges (spec/baton.md §13), so nothing here has a question
+    /// mergeability answers, and a requested-but-unread field reads to the next person as one that is
+    /// load-bearing somewhere.
+    /// </remarks>
     private async Task<(int? Number, string? HeadSha)> ReadPullRequestAsync(
         QueueItem item, CancellationToken cancellationToken)
     {
@@ -256,7 +269,7 @@ public sealed class WorkItemAdvancer
         }
 
         var result = await _gh.RunAsync(
-            item.Workspace, ["pr", "view", branch, "--json", "number,headRefOid,mergeStateStatus"], cancellationToken)
+            item.Workspace, ["pr", "view", branch, "--json", "number,headRefOid"], cancellationToken)
             .ConfigureAwait(false);
         if (!result.Started || result.ExitCode != 0)
         {

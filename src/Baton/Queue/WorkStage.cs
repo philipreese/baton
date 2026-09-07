@@ -52,6 +52,28 @@ public static class WorkStages
     /// <summary>The mutating role every non-review stage dispatches.</summary>
     public const string ImplementRole = "implement";
 
+    /// <summary>
+    /// <b>The ceiling on automatic rounds for one work item</b> — <c>WorkItemLifecycle</c> counts every
+    /// dispatch it issues, and the one that would exceed this is
+    /// <see cref="WorkItemTransitionKind.NeedsOperator"/> instead.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// The arithmetic, so a later reader changes it against visible reasoning rather than re-deriving
+    /// it: round 1 is the first review, and the conductor's practice is two fix rounds before a person
+    /// looks — rounds 2, 3 and 4 are <c>fix → re-review → fix</c>, and the dispatch after that (the
+    /// second re-review) is where the queue stops and asks. Four, not "as many as it takes": a
+    /// <c>re-review → re-review</c> or <c>continue → continue</c> cycle has no arm that ends it, and
+    /// each iteration is a full frontier lane on a daemon whose purpose is running unattended (#2004
+    /// review).
+    /// </para>
+    /// <para>
+    /// One home, deliberately: a second copy on <c>QueueItem</c> or in the scheduler would be the number
+    /// that disagrees the first time either is edited.
+    /// </para>
+    /// </remarks>
+    public const int MaxRounds = 4;
+
     /// <summary>Lower-case token for a ledger row and the listing. Never <c>ToString()</c> at a call
     /// site: the ledger is grep'd across machines and a casing change would split its history.</summary>
     public static string Token(WorkStage stage) => stage switch

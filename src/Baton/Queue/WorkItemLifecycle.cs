@@ -27,8 +27,14 @@ namespace Baton.Queue;
 /// <para>
 /// <b>Pushed-ness, not the timeout word, is what discriminates re-review from continue</b> —
 /// spec/baton.md §13 has the argument. What it means for the code below: nothing reads
-/// <c>WorkflowOutcome</c> beyond "is it <c>Succeeded</c>", and <see cref="IsPushed"/> is the whole
-/// discriminator for everything else.
+/// <c>WorkflowOutcome</c> beyond <see cref="Status.WorkflowOutcome.IsSucceededShaped"/> — the membership
+/// test that owns both succeeded-shaped words — and <see cref="IsPushed"/> is the whole discriminator
+/// for everything else.
+/// </para>
+/// <para>
+/// <b>Every dispatch is counted and bounded</b> (<see cref="WorkStages.MaxRounds"/>). Two of the arms
+/// below can repeat with nothing to end them — spec/baton.md §13 names which and why the ceiling is
+/// where a person gets asked.
 /// </para>
 /// </remarks>
 public static class WorkItemLifecycle
@@ -54,10 +60,10 @@ public static class WorkItemLifecycle
             return WorkItemTransition.None("the room has not settled yet");
         }
 
-        var succeeded = string.Equals(
-            observation.TerminalOutcome, Status.WorkflowOutcome.Succeeded, StringComparison.Ordinal);
-
-        if (!succeeded)
+        // The SUCCEEDED-shaped SET, never one word: #1945's FinishedDuringTeardown is a room that
+        // finished and pushed, and reading it as a failure here re-reviewed a PR whose verdict was
+        // already on disk. WorkflowOutcome owns the membership test (spec/baton.md §3).
+        if (!Status.WorkflowOutcome.IsSucceededShaped(observation.TerminalOutcome))
         {
             return DecideAfterIncompleteLane(observation);
         }
@@ -79,11 +85,11 @@ public static class WorkItemLifecycle
         {
             return WorkItemTransition.NeedsOperator(
                 $"the {WorkStages.Token(observation.Stage)} lane settled succeeded but no pull request is open on "
-                + $"'{observation.Branch}' — open one (or close the item) and re-add it; the queue will not open a PR");
+                + $"'{observation.Branch}' — the queue will not open a PR; {Recovery(observation.Stage)}");
         }
 
-        return WorkItemTransition.Dispatch(
-            WorkStage.Review, observation.Round,
+        return Dispatch(
+            observation, WorkStage.Review,
             $"the {WorkStages.Token(observation.Stage)} lane succeeded and PR #{pr} is open at "
             + $"{Short(observation.PullRequestHeadSha)}");
     }
@@ -100,7 +106,7 @@ public static class WorkItemLifecycle
             // and reading silence as APPROVE would merge on the strength of a missing file.
             return WorkItemTransition.NeedsOperator(
                 $"the {WorkStages.Token(observation.Stage)} lane settled succeeded but wrote no readable "
-                + "verdict.json — read the room's report.md and decide the round by hand");
+                + $"verdict.json — read the room's report.md and decide the round by hand; {Recovery(observation.Stage)}");
         }
 
         if (!IsBlocking(verdict))
@@ -110,8 +116,8 @@ public static class WorkItemLifecycle
                 $"the review approved: no confirmed high-severity finding in {verdict.Findings.Count} finding(s)");
         }
 
-        return WorkItemTransition.Dispatch(
-            WorkStage.Fix, observation.Round + 1,
+        return Dispatch(
+            observation, WorkStage.Fix,
             $"the review blocked: {CountBlocking(verdict)} confirmed high-severity finding(s)");
     }
 
@@ -128,29 +134,75 @@ public static class WorkItemLifecycle
         if (observation.Stage is WorkStage.Review or WorkStage.ReReview)
         {
             return observation.PullRequest is { } reviewPr
-                ? WorkItemTransition.Dispatch(
-                    WorkStage.ReReview, observation.Round,
+                ? Dispatch(
+                    observation, WorkStage.ReReview,
                     $"the review lane settled {observation.TerminalOutcome} without a verdict; PR #{reviewPr} is "
                     + $"still open at {Short(observation.PullRequestHeadSha)}")
                 : WorkItemTransition.NeedsOperator(
                     $"the review lane settled {observation.TerminalOutcome} and no pull request is open on "
-                    + $"'{observation.Branch}' — there is nothing left to review");
+                    + $"'{observation.Branch}' — there is nothing left to review; {Recovery(observation.Stage)}");
         }
 
         if (IsPushed(observation))
         {
-            return WorkItemTransition.Dispatch(
-                WorkStage.ReReview, observation.Round,
+            return Dispatch(
+                observation, WorkStage.ReReview,
                 $"the {WorkStages.Token(observation.Stage)} lane settled {observation.TerminalOutcome} with its work "
                 + $"pushed — PR #{observation.PullRequest} head {Short(observation.PullRequestHeadSha)} is the "
                 + "workspace head, so the round is re-review rather than fix");
         }
 
-        return WorkItemTransition.Dispatch(
-            WorkStage.Continue, observation.Round,
+        return Dispatch(
+            observation, WorkStage.Continue,
             $"the {WorkStages.Token(observation.Stage)} lane settled {observation.TerminalOutcome} with work that "
             + $"never reached the PR ({DescribeUnpushed(observation)}) — finish and push it");
     }
+
+    /// <summary>
+    /// <b>Every dispatch this type issues goes through here</b> — the round is incremented in one place
+    /// and <see cref="WorkStages.MaxRounds"/> is checked in one place. Five call sites each writing
+    /// <c>observation.Round + 1</c> is five places to forget one, which is how the cycle this bound
+    /// exists to stop was reachable at all: only the BLOCK arm counted, so re-review → re-review and
+    /// continue → continue ran forever at a full frontier lane apiece (#2004 review).
+    /// </summary>
+    /// <remarks>
+    /// Over the bound it is <see cref="WorkItemTransitionKind.NeedsOperator"/> rather than a longer
+    /// wait: the reason names the count and the stage pair it stopped at, and lands on the item where
+    /// <c>baton queue list</c> shows it.
+    /// </remarks>
+    private static WorkItemTransition Dispatch(WorkItemObservation observation, WorkStage next, string reason)
+    {
+        var round = observation.Round + 1;
+        if (round > WorkStages.MaxRounds)
+        {
+            return WorkItemTransition.NeedsOperator(
+                $"the queue has already dispatched {observation.Round} automatic round(s) for this item — its "
+                + $"ceiling is {WorkStages.MaxRounds} — and the {WorkStages.Token(observation.Stage)} lane wants a "
+                + $"{WorkStages.Token(next)} round again ({reason}); {Recovery(observation.Stage)}");
+        }
+
+        return WorkItemTransition.Dispatch(next, round, reason);
+    }
+
+    /// <summary>
+    /// What actually un-sticks a work item the queue has failed, said once because every
+    /// <see cref="WorkItemTransitionKind.NeedsOperator"/> reason ends with it.
+    /// </summary>
+    /// <remarks>
+    /// <b>Written against what the code does, not what would be convenient.</b> A failed item is out of
+    /// the advance candidate set for good (<c>WorkItemAdvancer.AdvanceAsync</c>): opening the missing PR
+    /// by hand no longer makes the next tick pick it up, which is what the pre-#2004 wording promised.
+    /// <c>baton queue</c> has <c>add</c>, <c>list</c>, <c>hold</c>, <c>resume</c> and <c>import</c> and
+    /// no verb that clears a failure, and <c>QueueCommand.RefuseIfNotReplaceable</c> refuses a re-add for
+    /// any item past <see cref="WorkStage.Implement"/> — so past implement the only recovery in the
+    /// product is the operator's own hand on <c>queue.json</c>.
+    /// </remarks>
+    private static string Recovery(WorkStage stage) =>
+        stage == WorkStage.Implement
+            ? "the item is still at implement, so 'baton queue add' with the same tag replaces it once you "
+                + "have fixed what it needs"
+            : $"no 'baton queue' verb reopens a failed item past implement — carry the round by hand, or edit "
+                + $"this item's stage/state/round in {Status.BatonPaths.QueueFileName} yourself";
 
     /// <summary>
     /// <b>The one predicate that turns a verdict into a round</b>: a finding that is both
@@ -208,7 +260,10 @@ public static class WorkItemLifecycle
 /// defaulted argument.
 /// </summary>
 /// <param name="Stage">The stage the item is at now.</param>
-/// <param name="Round">The fix round it is in — 0 until the first BLOCK.</param>
+/// <param name="Round">
+/// How many rounds the queue has already dispatched for it — 0 before the first, and one per dispatch
+/// of any stage after that. <see cref="WorkStages.MaxRounds"/> is the ceiling.
+/// </param>
 /// <param name="Branch">The lane's branch, for the reasons this produces. Never used to decide.</param>
 /// <param name="TerminalOutcome">
 /// The settled room's own outcome word (<c>WorkflowOutcome</c>'s vocabulary), or null when the room

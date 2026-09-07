@@ -86,8 +86,12 @@ public sealed record QueueItem
     /// </summary>
     public string? LastVerdict { get; init; }
 
-    /// <summary>The fix round: 0 until the first BLOCK, then one per fix. Names nothing on disk; it is
-    /// what a brief's header and the transition fact count.</summary>
+    /// <summary>
+    /// How many rounds the queue has run for this item: 0 at add time, and <c>WorkItemLifecycle</c>
+    /// raises it whenever it queues another, whatever the stage (spec/baton.md §13 has the counting rule
+    /// and why it is not per-fix). Names nothing on disk; it is what a brief's header and the transition
+    /// fact print, and what <see cref="WorkStages.MaxRounds"/> bounds.
+    /// </summary>
     public int Round { get; init; }
 
     /// <summary>
@@ -123,6 +127,23 @@ public sealed record QueueItem
 
     /// <summary>Why this item is <see cref="QueueItemState.Failed"/>; null otherwise.</summary>
     public string? Error { get; init; }
+
+    /// <summary>
+    /// True once the lifecycle has failed this work item with a reason a person has to act on —
+    /// <c>WorkItemLifecycle</c>'s <c>NeedsOperator</c> arms, including the
+    /// <see cref="WorkStages.MaxRounds"/> ceiling. <b>The flag the advance's candidate filter reads.</b>
+    /// </summary>
+    /// <remarks>
+    /// Distinct from <see cref="QueueItemState.Failed"/> deliberately: a room that settled badly leaves
+    /// the item failed too, and THAT item is exactly the one the advance still has to read (it is how a
+    /// timed-out lane reaches its continue round). Without a flag telling the two apart, an item the
+    /// queue had already given up on matched the candidate filter on every tick forever — same stage,
+    /// same failed state, same recorded room — re-spawning <c>gh</c> and <c>git</c> and rewriting
+    /// <c>queue.json</c> each time, and invisibly, for the reason spec/baton.md §13 gives (#2004
+    /// review). Nothing in the product clears it: see <c>WorkItemLifecycle</c>'s recovery
+    /// sentence, which says so to the operator rather than promising a verb that does not exist.
+    /// </remarks>
+    public bool Halted { get; init; }
 
     /// <summary>
     /// True for an item the operator ran outside baton and recorded here only so its weight counts.

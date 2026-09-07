@@ -5,8 +5,9 @@ using Baton.Tests.Shared;
 namespace Baton.Tests.Queue;
 
 /// <summary>
-/// The three shipped brief templates (#1934 slice 2): that a rendered brief carries the findings, that
-/// it carries no room path, and that an operator's edit survives.
+/// The four shipped brief templates (#1934 slice 2): that a rendered brief carries the findings, that
+/// it carries no room path, that a first review is not told about a round that never happened, and that
+/// an operator's edit survives.
 /// </summary>
 public sealed class QueueBriefTemplatesTests
 {
@@ -85,6 +86,46 @@ public sealed class QueueBriefTemplatesTests
 
         Assert.Contains("Re-review PR #1941 at deadbeef", brief, StringComparison.Ordinal);
         Assert.Contains("verdict.json", brief, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void A_first_review_brief_is_not_told_about_a_round_that_never_happened()
+    {
+        using var templates = new TempDirectory("baton_templates_");
+
+        // What the advancer passes for the first review: no findings for this render, and no verdict on
+        // the item yet. Round is 1 rather than 0 because rounds now count every dispatch — which is
+        // exactly why the split cannot key on the round number (QueueBriefTemplates' remarks).
+        var brief = QueueBriefTemplates.Compose(
+            WorkStage.Review, Item() with { Stage = WorkStage.Review, LastVerdict = null },
+            new QueueBriefTemplates.BriefContext(PullRequest: 1941, HeadSha: "deadbeef", Round: 1),
+            templates.Path);
+
+        Assert.Contains("Review PR #1941 at deadbeef", brief, StringComparison.Ordinal);
+        Assert.Contains("FIRST review", brief, StringComparison.Ordinal);
+        Assert.Contains("verdict.json", brief, StringComparison.Ordinal);
+
+        // The defect this arm exists for: the re-review brief's assertions about a previous round.
+        Assert.DoesNotContain("Re-review", brief, StringComparison.Ordinal);
+        Assert.DoesNotContain("previous round", brief, StringComparison.Ordinal);
+        Assert.DoesNotContain("no findings were recorded", brief, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void The_same_stage_renders_the_re_review_brief_once_a_verdict_exists_to_carry()
+    {
+        using var templates = new TempDirectory("baton_templates_");
+
+        // The polarity partner of the arm above: the ONE input that differs is the verdict already on
+        // the item, which is what makes the previous-round sections true.
+        var brief = QueueBriefTemplates.Compose(
+            WorkStage.Review,
+            Item() with { Stage = WorkStage.Review, LastVerdict = @"C:\baton\rooms\queue-1934-abcd\verdict.json" },
+            new QueueBriefTemplates.BriefContext(PullRequest: 1941, HeadSha: "deadbeef", Round: 3),
+            templates.Path);
+
+        Assert.Contains("Re-review PR #1941 at deadbeef", brief, StringComparison.Ordinal);
+        Assert.Contains("What the previous round found", brief, StringComparison.Ordinal);
     }
 
     [Fact]

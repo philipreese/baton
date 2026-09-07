@@ -5,7 +5,7 @@ using Baton.Status;
 namespace Baton.Queue;
 
 /// <summary>
-/// The three brief templates a work item's spec is rendered from (#1934 slice 2). The operator ruling
+/// The four brief templates a work item's spec is rendered from (#1934 slice 2). The operator ruling
 /// that makes these the product rather than a convenience is spec/baton.md §13's, with the specimen it
 /// was made against.
 /// </summary>
@@ -24,11 +24,22 @@ namespace Baton.Queue;
 /// trace with nothing rendering it.
 /// </para>
 /// <para>
-/// <b>Three templates, five stages.</b> <see cref="WorkStage.Continue"/> renders from
-/// <see cref="Implement"/> with one generated continuation paragraph prepended: a continuation IS the
-/// implement brief — same issue, same standing rules — plus the sentence saying what the previous lane
-/// left behind. A fourth file would be that same text with one paragraph different, and the two would
-/// drift the first time the standing rules changed.
+/// <b>Four templates, five stages, and the two sharings are not the same kind.</b>
+/// <see cref="WorkStage.Continue"/> renders from <see cref="Implement"/> with one generated
+/// continuation paragraph prepended: a continuation IS the implement brief — same issue, same standing
+/// rules — plus the sentence saying what the previous lane left behind. A file of its own would be that
+/// same text with one paragraph different, and the two would drift the first time the standing rules
+/// changed.
+/// </para>
+/// <para>
+/// <b><see cref="WorkStage.Review"/> and <see cref="WorkStage.ReReview"/> do NOT share one</b>, which
+/// they did until #2004's review. The re-review brief asserts things about a round that has happened —
+/// "Re-review PR #N", "What the previous round found", "say whether the new head actually closes it" —
+/// so rendering it for the first review handed the reviewer a brief about findings nobody had written
+/// (spec/baton.md §13 has what that cost). What separates them is not the
+/// stage but whether there IS a prior verdict to carry: <see cref="Compose"/> asks that — the item's
+/// <c>lastVerdict</c>, or findings passed for this render — and spec/baton.md §13 has the rule with the
+/// case it settles.
 /// </para>
 /// </remarks>
 public static class QueueBriefTemplates
@@ -37,6 +48,9 @@ public static class QueueBriefTemplates
     /// <see cref="WorkStage.Continue"/>.</summary>
     public const string Implement = "implement";
 
+    /// <summary>The first review of a PR: no prior round, so no findings section.</summary>
+    public const string Review = "review";
+
     /// <summary>The fix round: the conductor's "Fix round for PR #N" header plus the findings.</summary>
     public const string Fix = "fix";
 
@@ -44,14 +58,19 @@ public static class QueueBriefTemplates
     public const string ReReview = "re-review";
 
     /// <summary>Every shipped template name, in the order <c>baton queue</c> materializes them.</summary>
-    public static readonly IReadOnlyList<string> Names = [Implement, Fix, ReReview];
+    public static readonly IReadOnlyList<string> Names = [Implement, Review, Fix, ReReview];
 
-    /// <summary>The template each stage renders from — see the type remarks for why Continue shares one.</summary>
-    public static string NameFor(WorkStage stage) => stage switch
+    /// <summary>
+    /// The template a stage renders from. <paramref name="hasPriorRound"/> is the review split — see the
+    /// type remarks for why it is a prior <em>verdict</em> rather than the stage or the round number
+    /// (with rounds now counted per dispatch, the first review arrives at round 1, so a round test would
+    /// answer "re-review" for it).
+    /// </summary>
+    public static string NameFor(WorkStage stage, bool hasPriorRound) => stage switch
     {
         WorkStage.Implement or WorkStage.Continue => Implement,
         WorkStage.Fix => Fix,
-        WorkStage.Review or WorkStage.ReReview => ReReview,
+        WorkStage.Review or WorkStage.ReReview => hasPriorRound ? ReReview : Review,
         _ => throw new ArgumentOutOfRangeException(nameof(stage), stage, "A 'ready' item renders no brief."),
     };
 
@@ -173,7 +192,13 @@ public static class QueueBriefTemplates
         ArgumentNullException.ThrowIfNull(context);
 
         EnsureMaterialized(templatesDirectory);
-        var body = Render(Load(NameFor(stage), templatesDirectory), new Dictionary<string, string>(StringComparer.Ordinal)
+
+        // "Has a previous round left findings to carry", asked of the two things that can carry them:
+        // the findings rendered for THIS brief, and the verdict path already on the item from an
+        // earlier review. Neither is set for a first review, which is the whole split.
+        var hasPriorRound = context.Findings is { Length: > 0 } || item.LastVerdict is { Length: > 0 };
+
+        var body = Render(Load(NameFor(stage, hasPriorRound), templatesDirectory), new Dictionary<string, string>(StringComparer.Ordinal)
         {
             ["TITLE"] = context.Title,
             ["DO"] = context.Do,
@@ -230,6 +255,7 @@ public static class QueueBriefTemplates
     public static string ShippedDefault(string name) => (name switch
     {
         Implement => ImplementDefault,
+        Review => ReviewDefault,
         Fix => FixDefault,
         ReReview => ReReviewDefault,
         _ => throw new ArgumentOutOfRangeException(nameof(name), name, "No shipped template by that name."),
@@ -295,6 +321,23 @@ public static class QueueBriefTemplates
         evidence, not silently skipped — and if it is right about a defect the fix does not cover, say so.
 
         <<STANDING-RULES>>
+        """;
+
+    private const string ReviewDefault = """
+        # Review PR #{{PR}} at {{SHA}}
+
+        Issue #{{ISSUE}}, round {{ROUND}}. This is the FIRST review of this PR — there is no previous
+        round, and no findings to carry.
+
+        ## Do
+
+        Review PR #{{PR}} at `{{SHA}}` independently against issue #{{ISSUE}}: does the change do what
+        the issue asked, and does it do it correctly? Read the diff, not the commit messages' account of
+        it.
+
+        Write your findings as a ReviewVerdict to `$BATON_OUTPUT_DIR/verdict.json` — severity
+        high/medium/low, status confirmed/refuted/unverified. A confirmed high-severity finding is what
+        blocks the PR, so a claim you have not verified is `unverified` rather than `confirmed`.
         """;
 
     private const string ReReviewDefault = """
