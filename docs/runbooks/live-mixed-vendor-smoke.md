@@ -41,7 +41,10 @@ for exactly which calls), reading its fixture pair from `tests/Baton.Cli.SmokeTe
   `draft`'s output and declaring a `PausePoint` with no supersede targets.
 - `draft-review-paused-bindings.json` — `draft` bound to the `claude` adapter
   (`claude-haiku-4-5-20251001`), `review` bound to the `gemini` adapter (`gemini-3.6-flash-low`) — edit
-  either `Model` to point at a different model without touching any code.
+  either `Model` to point at a different model without touching any code. Both names are transcribed
+  from the fixture as it stands and are **historical**: `gemini-3.6-flash-low` is a retired name that no
+  shipped tier pins any more (`src/Baton.Vendors/WorkerTiers.json` is the pin register), so read this
+  line as what the fixture contains rather than as a current model choice.
 
 <!-- record-once-ok: #443 docs/runbooks/live-claude-smoke.md -->
 Each run uses a fresh temporary room directory, so repeated runs never resume a prior one.

@@ -367,8 +367,7 @@ at API list price, so it carries the per-token price gap between models but not 
 own weighting, which no vendor publishes.
 
 - **`frontier` — claude opus, high.** Unmoved, and the one pin both reads agreed on: the
-  `claude-opus-5`/`high` row, plus the repository's own record of Opus catching architectural tripwires
-  that the codex and agy arms missed. Engine work does not move.
+  `claude-opus-5`/`high` row. Engine work does not move.
 - **`standard` — codex `gpt-6-astra`, medium.** The `gpt-6-astra`/`medium` row matches
   `claude-opus-5`/`high` on quality at a fraction of its agent steps, and the ruling scopes this tier to
   the tooling-shaped implement work. It also spends a separate subscription pool:
