@@ -19,6 +19,11 @@ public class OwnPullRequestOnlyRuleTests
     [InlineData("gh pr create --fill", null)]
     [InlineData("git status && gh issue view 1994", 2005)]
     [InlineData("git branch -a", null)]
+    // The expansion arm is narrowed to lines that already drive `gh pr`, so ordinary build commands
+    // carrying a `$` or a `%` are untouched. Without these rows that arm could refuse everything.
+    [InlineData("pixi run test > $TMP/out.txt", 2005)]
+    [InlineData("dotnet build -p:Version=$(cat version.txt)", 2005)]
+    [InlineData("gh issue view $ISSUE", 2005)]
     public void Reads_this_rule_does_not_govern_are_allowed(string commandLine, int? ownPullRequest)
     {
         Assert.Null(OwnPullRequestOnlyRule.RefusalFor(commandLine, ownPullRequest));
@@ -47,6 +52,18 @@ public class OwnPullRequestOnlyRuleTests
     // A non-numeric argument cannot be shown to be this room's PR, so it fails closed.
     [InlineData("gh pr view 1943-a-claude", 2005)]
     [InlineData("gh pr diff --repo aer-works/baton", 2005)]
+    // A shell expansion is refused by its OWN arm, not by the non-numeric one above -- the shell
+    // resolves it after this rule has read the line, so what it will say is not in the string. These
+    // rows are what stops a later relaxation of the non-numeric branch from reopening substitution.
+    [InlineData("gh pr view $(gh pr list --json number -q '.[0].number')", 2005)]
+    [InlineData("gh pr view `cat n`", 2005)]
+    [InlineData("P=view; gh pr $P 1994", 2005)]
+    [InlineData("gh pr view %PRNUM%", 2005)]
+    [InlineData("for /f %i in ('git branch -a') do gh pr view %i", 2005)]
+    [InlineData("gh pr view ${OTHER}", 2005)]
+    // ...including when the expansion would resolve to this room's own number: an expansion is
+    // refused for being unreadable, never for what it happens to contain.
+    [InlineData("gh pr view $MY_PR", 2005)]
     public void Reading_a_pull_request_this_room_does_not_own_is_refused(string commandLine, int? ownPullRequest)
     {
         var refusal = OwnPullRequestOnlyRule.RefusalFor(commandLine, ownPullRequest);

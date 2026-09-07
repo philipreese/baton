@@ -80,6 +80,13 @@ public sealed class OwnPullRequestOnlyRule
     /// Records the room's own PR number from a <c>gh pr create</c> that succeeded. Call this only
     /// with the output of a command that exited zero: <c>gh</c> prints the new PR's URL on stdout,
     /// and that URL is the only thing here that can open the rule's gate.
+    /// <para>
+    /// Known and accepted: a <c>gh pr create</c> that fails with "a pull request for branch X already
+    /// exists" names the room's real PR and exits NON-zero, so the room never learns its number and
+    /// stays locked out of reading its own PR for the rest of the run. The failure direction is
+    /// refusal, which is the safe one. Widening the caller to parse a failed command's output is how
+    /// a sibling's URL quoted in an error message would become this room's "own" PR.
+    /// </para>
     /// </summary>
     public void ObserveCommandOutput(string? commandLine, string? output)
     {
@@ -112,6 +119,20 @@ public sealed class OwnPullRequestOnlyRule
     /// <param name="ownPullRequest">The room's own PR number, or null before it has opened one.</param>
     public static string? RefusalFor(string? commandLine, int? ownPullRequest)
     {
+        // FIRST, and independent of everything below: this rule reads a command line, and the shell
+        // that runs it expands `$(...)`, a backtick, `$VAR` and cmd's `%i` AFTERWARDS. Any of those
+        // can supply the sub-command or the number that the scan below would have judged, so a line
+        // carrying one is refused outright rather than judged on what it says now. Same fail-closed
+        // posture ShellCommandPatternMatcher.EvaluateChainedCommand takes on a scoped grant, and
+        // narrowed to lines that already say `gh pr` so ordinary `$`-carrying build commands are
+        // untouched. Deliberately NOT resting on "a non-numeric argument is refused": that branch is
+        // the one a later reader is most likely to relax.
+        if (MentionsGhPr(commandLine) && ContainsShellExpansion(commandLine!))
+        {
+            return Refusal("this `gh pr` command line contains a shell expansion Baton cannot judge "
+                + "before the shell resolves it", ownPullRequest);
+        }
+
         foreach (var (subCommand, argument) in GovernedInvocations(commandLine))
         {
             if (subCommand == "list")
@@ -190,20 +211,40 @@ public sealed class OwnPullRequestOnlyRule
         }
     }
 
-    private static bool MentionsGhPr(string? commandLine, string subCommand)
+    /// <summary>
+    /// Whether <c>gh</c> <c>pr</c> appears adjacent anywhere in the line, optionally followed by
+    /// <paramref name="subCommand"/>. Null asks the wider question — <em>this line drives
+    /// <c>gh pr</c> at all</em> — which is what the expansion guard needs, since an expansion can
+    /// supply the sub-command itself.
+    /// </summary>
+    private static bool MentionsGhPr(string? commandLine, string? subCommand = null)
     {
         var tokens = Tokenize(commandLine);
-        for (var i = 0; i + 2 < tokens.Count; i++)
+        for (var i = 0; i + 1 < tokens.Count; i++)
         {
-            if (IsGh(tokens[i])
-                && tokens[i + 1].Equals("pr", StringComparison.OrdinalIgnoreCase)
-                && tokens[i + 2].Equals(subCommand, StringComparison.OrdinalIgnoreCase))
+            if (!IsGh(tokens[i]) || !tokens[i + 1].Equals("pr", StringComparison.OrdinalIgnoreCase))
+            {
+                continue;
+            }
+            if (subCommand is null)
+            {
+                return true;
+            }
+            if (i + 2 < tokens.Count && tokens[i + 2].Equals(subCommand, StringComparison.OrdinalIgnoreCase))
             {
                 return true;
             }
         }
         return false;
     }
+
+    // `$(`/`${`/a bare `$` (sh), a backtick (both), and `%` (cmd's %VAR% and a `for /f` loop
+    // variable). Over-broad on purpose: every one of them is a character whose VALUE at run time is
+    // not in the string being judged.
+    private static bool ContainsShellExpansion(string commandLine) =>
+        commandLine.Contains('`', StringComparison.Ordinal)
+        || commandLine.Contains('$', StringComparison.Ordinal)
+        || commandLine.Contains('%', StringComparison.Ordinal);
 
     // `gh`, `gh.exe`, and a path to either -- the head token is not trusted to be bare.
     private static bool IsGh(string token)
