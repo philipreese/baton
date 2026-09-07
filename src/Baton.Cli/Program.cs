@@ -150,6 +150,18 @@ if (args.Length == 0 || !knownSubcommands.Contains(args[0]))
     return 64;
 }
 
+// #2030: a lane runs as `pwsh -Command "baton dispatch ... *> lane.log"`, and that wrapper only
+// proceeds once the redirected stream reaches EOF. Every child .NET spawns inherits a duplicate of
+// this process's stdout/stderr whether or not its own streams are redirected, so one straggler
+// outliving the lane held the wrapper open for an hour. Cleared here, before the first spawn, for
+// the verbs that run a lane; `watch` is excluded on purpose -- WatchNotifier's operator command
+// redirects only stdin and reads its stdout by inheritance. Why redirects alone cannot fix this is
+// StandardHandleInheritance's own remarks.
+if (args[0] is "run" or "dispatch" or "redispatch" or "resume")
+{
+    Baton.Core.Internal.StandardHandleInheritance.Disable();
+}
+
 using var hostStopSource = new CancellationTokenSource();
 
 // The host-initiated stop (M10 Phase 2), finally wired to something: Ctrl+C no longer kills the
