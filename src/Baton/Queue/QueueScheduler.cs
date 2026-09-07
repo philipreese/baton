@@ -59,11 +59,7 @@ public static class QueueScheduler
             return QueueDecision.Wait(QueueWaitReason.Hold, null, liveWeight, freeGb, floorGb);
         }
 
-        // The `ready` exclusion is HERE rather than left to the advancer that sets the stage (#1934
-        // slice 2). This is the only function that picks a candidate, so a guard anywhere else would
-        // be a second reader of the same rule with the launch still coming through this one.
-        var candidate = items.FirstOrDefault(i =>
-            i.State == QueueItemState.Queued && !i.External && !IsReady(i));
+        var candidate = Candidate(items);
         if (candidate is null)
         {
             return QueueDecision.Wait(QueueWaitReason.NoItems, null, liveWeight, freeGb, floorGb);
@@ -94,11 +90,40 @@ public static class QueueScheduler
     }
 
     /// <summary>
+    /// The item the queue would launch next, or null when nothing is eligible: the first queued,
+    /// non-external, non-<c>ready</c> item in operator order.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// The `ready` exclusion is HERE rather than left to the advancer that sets the stage (#1934 slice
+    /// 2). <b>This is the only function that picks a candidate</b>, so a guard anywhere else would be a
+    /// second reader of the same rule with the launch still coming through this one.
+    /// </para>
+    /// <para>
+    /// It is <c>internal</c> rather than folded into <see cref="Decide"/> for exactly that reason
+    /// (#1912 fix round): <c>QueueBoard.Project</c> has to mark the row a person will see launch next,
+    /// and re-spelling the predicate there made the invariant above false — the board went on marking
+    /// <c>isNext</c> from its own copy, which would drift silently the first time a term was added
+    /// here. Calling this is what keeps the two answers one answer. Nothing but the pick lives here:
+    /// the gap, memory, slot and hold gates stay inside <see cref="Decide"/>, which is still the only
+    /// thing that authorizes a launch.
+    /// </para>
+    /// </remarks>
+    internal static QueueItem? Candidate(IReadOnlyList<QueueItem> items) =>
+        items.FirstOrDefault(i =>
+            i.State == QueueItemState.Queued && !i.External && !IsReady(i));
+
+    /// <summary>
     /// A work item the reviewer approved. <b>Never launched</b>: spec/baton.md §13's "the queue records
     /// ready and does nothing until the conductor merges or resolves it". A stage-less dispatch request
     /// can never be one, which is why this is a stage read and not a state read.
+    /// <para>
+    /// <c>internal</c> for the same #1912 reason <see cref="Candidate"/> is: <c>QueueBoard</c> keeps a
+    /// <c>ready</c> item out of the pending table and off the candidate row, and both of those are this
+    /// rule rather than a second one that resembles it.
+    /// </para>
     /// </summary>
-    private static bool IsReady(QueueItem item) =>
+    internal static bool IsReady(QueueItem item) =>
         item.Stage is { } stage && WorkStages.IsTerminal(stage);
 }
 

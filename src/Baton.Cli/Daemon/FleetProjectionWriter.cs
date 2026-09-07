@@ -6,12 +6,15 @@ using System.Text.Json.Nodes;
 using System.Text.RegularExpressions;
 using Baton.Artifacts;
 using Baton.Cli.Mcp;
+using Baton.Core.Internal;
 using Baton.Dispatch;
 using Baton.Domain;
 using Baton.Mutation;
 using Baton.Outcomes;
+using Baton.Queue;
 using Baton.Status;
 using Baton.Store;
+using Baton.Vendors;
 using Microsoft.Extensions.Hosting;
 
 namespace Baton.Cli.Daemon;
@@ -41,10 +44,49 @@ namespace Baton.Cli.Daemon;
 /// <c>file</c> source was missing relative to <c>derive</c> — <see cref="ResolveTimelineAsync"/> and
 /// <see cref="ProjectTimeline"/> carry the policy and the content projection.
 /// </para>
+/// <para>
+/// <b>#1912 slice 1</b> added the top-level <c>queue</c> section — the conductor's own rows
+/// (<see cref="QueueBoard"/> is the projection and the register of what each field means).
+/// <b>This plane only:</b> <c>pusher.py</c> composes the mailbox payload key by key, so <c>queue</c>
+/// does not travel to it, and <c>glass.html</c> renders the section absent-safe for exactly that
+/// reason. That is the split C-11 rules, not an omission.
+/// </para>
 /// </remarks>
 public sealed class FleetProjectionWriter : BackgroundService
 {
+    private readonly Func<double?> _freeGb;
+
+    public FleetProjectionWriter()
+        : this(null)
+    {
+    }
+
+    /// <summary>
+    /// Test seam (Baton.Cli.Tests, via <c>InternalsVisibleTo</c>), the same shape
+    /// <see cref="QueueSchedulerService"/> uses: the free-memory reading is the one input to the
+    /// <c>queue</c> section that no fixture on disk can fix, so a test drives it as a delegate rather
+    /// than asserting around whatever this machine happens to have free.
+    /// </summary>
+    internal FleetProjectionWriter(Func<double?>? freeGb) =>
+        _freeGb = freeGb ?? FreePhysicalMemory.TryReadGiB;
+
     public const string IntervalSecondsEnvironmentVariable = "BATON_FLEET_PROJECTION_INTERVAL_SECONDS";
+
+    /// <summary>
+    /// The top-level key that carries why there is no <c>queue</c> section this tick — a SIBLING of
+    /// <c>queue</c> and present only when <c>queue</c> is absent.
+    /// <see cref="BuildQueueSectionAsync"/>'s remarks are the register for the three states it splits;
+    /// <c>glass.html</c>'s <c>queueBoardHtml</c> is the one reader.
+    /// </summary>
+    public const string QueueUnavailableReasonKey = "queueUnavailableReason";
+
+    /// <summary>
+    /// The one non-message value <see cref="QueueUnavailableReasonKey"/> takes: this machine has no
+    /// queue file, so it has never run <c>baton queue add</c>. A fixed token rather than a sentence
+    /// because the page keys on it to render nothing at all — an exception message is rendered, this
+    /// is not.
+    /// </summary>
+    public const string QueueUnavailableNoQueueFile = "no-queue-file";
 
     public static readonly TimeSpan DefaultInterval = TimeSpan.FromSeconds(30);
 
@@ -87,6 +129,8 @@ public sealed class FleetProjectionWriter : BackgroundService
     // tick would throw (ComputePrunedInfo's DeepClone is the other way out of the same trap).
     private readonly Dictionary<string, TerminalTimelineCacheEntry> _terminalTimelineCache =
         new(StringComparer.Ordinal);
+
+    private NewestDecisionCacheEntry? _newestDecision;
 
     private bool _loggedMissingSecretPatterns;
 
@@ -186,6 +230,7 @@ public sealed class FleetProjectionWriter : BackgroundService
         var timelines = new JsonObject();
         var liveKeysThisTick = new HashSet<string>(StringComparer.Ordinal);
         var liveLanesByVendor = new Dictionary<string, int>(StringComparer.Ordinal);
+        var liveLanes = new List<QueueLiveLane>();
 
         // pusher.py's main() loop reloads its secret-gate denylist every cycle (not once at startup),
         // so an operator's edit to the patterns file takes effect on the NEXT tick rather than needing
@@ -245,6 +290,18 @@ public sealed class FleetProjectionWriter : BackgroundService
                 liveLanesByVendor[adapter] = liveLanesByVendor.GetValueOrDefault(adapter) + 1;
             }
 
+            // #1912: the weighted tally, on the SAME Running gate and deliberately OUTSIDE the
+            // adapter-is-not-null pattern above. QueueWeights.For weighs a null role or adapter as a
+            // full implement lane on purpose ("an unidentified live lane counts against the cap rather
+            // than being free"), so nesting this inside that check would make the panel's total
+            // disagree with the scheduler's on exactly the room where the disagreement matters. The
+            // weight is asked of that one function, never spelled here.
+            if (view.State == "Running")
+            {
+                liveLanes.Add(new QueueLiveLane(
+                    view.Path, view.Label, view.Role, view.Adapter, QueueWeights.For(view.Role, view.Adapter)));
+            }
+
             var timelineEntries = await ResolveTimelineAsync(view.Path, diagnostics, cancellationToken)
                 .ConfigureAwait(false);
             if (timelineEntries.Count > 0)
@@ -279,7 +336,169 @@ public sealed class FleetProjectionWriter : BackgroundService
             root["vendors"] = JsonSerializer.SerializeToNode(vendors, FleetStatusTool.SerializerOptions);
         }
 
+        // #1912: the conductor's own rows, from the SAME walk above -- `liveLanes` is what that loop
+        // already collected, so the weighted total beside the cap costs no second room scan.
+        var queue = await BuildQueueSectionAsync(liveLanes, diagnostics, cancellationToken).ConfigureAwait(false);
+        if (queue.Board is { } board)
+        {
+            root["queue"] = JsonSerializer.SerializeToNode(board, FleetStatusTool.SerializerOptions);
+        }
+        else
+        {
+            // Sibling key, never a field inside a half-built `queue` object -- the same shape
+            // WorkflowStatusView.ArrestLedgerUnavailableReason takes beside `arrests`, and for the same
+            // reason: a partial section would render as a board reporting "slots unknown / nothing
+            // queued", which is a worse answer than no board.
+            root[QueueUnavailableReasonKey] = queue.UnavailableReason;
+        }
+
         return root.ToJsonString(FleetStatusTool.SerializerOptions);
+    }
+
+    /// <summary>
+    /// #1912 slice 1 — the <c>queue</c> section: the I/O around <see cref="QueueBoard.Project"/>, which
+    /// is where all the policy is. Reads the queue file, the settings block, free memory and the
+    /// decision ledger's newest row; decides nothing itself.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// <b>No board is THREE different facts, and each gets its own word</b> (#1912 fix round). A
+    /// projection with no <c>queue</c> key used to mean any of them, so all three rendered as the same
+    /// blank space with the only evidence in the daemon log:
+    /// </para>
+    /// <list type="bullet">
+    /// <item><b>This machine has never used the queue</b> — no queue file, the state of every machine
+    /// that has never run <c>baton queue add</c>. <see cref="QueueUnavailableNoQueueFile"/>, and the
+    /// panel deliberately renders NOTHING for it: an empty board would tell such an operator their
+    /// queue is empty when the truth is that they have none, and a note about a feature they do not
+    /// use is noise on every tick forever.</item>
+    /// <item><b>The section threw</b> — the exception's own message, which the panel renders as a
+    /// visible line. This is the state that was previously indistinguishable from the one above, and
+    /// it is the one an operator has to act on.</item>
+    /// <item><b>Neither key is present at all</b> — nothing the daemon wrote, because this delivery did
+    /// not come from the daemon. <c>pusher.py</c> composes the mailbox payload key by key
+    /// (<c>wrapped_snapshot</c>) and copies no unknown top-level key, so the tailnet plane carries
+    /// neither of the two above. <c>glass.html</c> says so rather than rendering blank.</item>
+    /// </list>
+    /// <para>
+    /// <b>A failure here costs the section, never the tick.</b> The whole projection is what the glass
+    /// runs on; losing every room because one queue file was mid-write would be a strictly worse trade
+    /// than losing this panel for 30 seconds, which the next tick restores. What the split above adds
+    /// is that the loss is now legible on the page instead of only in <c>~/.baton/daemon.log</c>.
+    /// </para>
+    /// <para>
+    /// An <em>empty</em> queue is none of these: it returns a real board. "No queue file" and "an empty
+    /// queue" are different facts too, and the page's own control arm asserts the second still renders.
+    /// </para>
+    /// </remarks>
+    private async Task<QueueSectionResult> BuildQueueSectionAsync(
+        IReadOnlyList<QueueLiveLane> liveLanes, TextWriter diagnostics, CancellationToken cancellationToken)
+    {
+        try
+        {
+            if (!File.Exists(BatonPaths.QueueFile))
+            {
+                return QueueSectionResult.Unavailable(QueueUnavailableNoQueueFile);
+            }
+
+            var snapshot = await QueueStore.LoadAsync(BatonPaths.QueueFile, cancellationToken).ConfigureAwait(false);
+            var settings = (await DaemonSettingsStore.LoadAsync(BatonPaths.SettingsFile, cancellationToken)
+                .ConfigureAwait(false)).Queue;
+            var lastDecision = await ReadNewestDecisionAsync(cancellationToken).ConfigureAwait(false);
+
+            return QueueSectionResult.From(QueueBoard.Project(
+                snapshot.Items,
+                snapshot.Held,
+                settings,
+                liveLanes,
+                _freeGb(),
+
+                // Local, exactly as QueueScheduler.Decide reads it -- the floor's hour band is a wall
+                // clock question and QueueSettings.FloorGbAt's own parameter doc has why UTC would give
+                // the wrong band for most of the world.
+                DateTime.Now,
+                lastDecision,
+                item => item.SpecFile is { Length: > 0 } spec && File.Exists(spec),
+                ReadVerdictDecision));
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException)
+        {
+            diagnostics.WriteLine($"FleetProjectionWriter: queue section skipped this tick: {ex.Message}");
+
+            // The message, not a token: the log line above already carries it and the page reader is
+            // the one person who cannot see that log. Mirrors StatusCommand's own
+            // `arrestLedgerUnavailableReason = ex.Message`.
+            return QueueSectionResult.Unavailable(ex.Message);
+        }
+    }
+
+    /// <summary>
+    /// The <c>queue</c> section, or the word for why there is none — never both, and never neither.
+    /// See <see cref="BuildQueueSectionAsync"/>'s remarks for the three states this discriminates.
+    /// </summary>
+    private readonly record struct QueueSectionResult(QueueBoardView? Board, string? UnavailableReason)
+    {
+        internal static QueueSectionResult From(QueueBoardView board) => new(board, null);
+
+        internal static QueueSectionResult Unavailable(string reason) => new(null, reason);
+    }
+
+    /// <summary>
+    /// The decision ledger's newest row, cached on the file's own (mtime, length) — the same
+    /// stat-before-read idiom <see cref="ComputePrunedInfo"/> and <see cref="ResolveTimelineAsync"/>
+    /// already use in this file, and it matters more here: the ledger is append-only, so an unguarded
+    /// <c>ReadAllAsync</c> would re-parse every decision the machine has ever made, every 30 seconds,
+    /// forever.
+    /// </summary>
+    private async Task<QueueDecisionEntry?> ReadNewestDecisionAsync(CancellationToken cancellationToken)
+    {
+        var file = new FileInfo(BatonPaths.QueueDecisionLedgerFile);
+        if (!file.Exists)
+        {
+            _newestDecision = null;
+            return null;
+        }
+
+        if (_newestDecision is { } cached
+            && cached.WrittenAtUtc == file.LastWriteTimeUtc && cached.Length == file.Length)
+        {
+            return cached.Entry;
+        }
+
+        var entries = await QueueDecisionLedgerStore
+            .ReadAllAsync(BatonPaths.QueueDecisionLedgerFile, cancellationToken).ConfigureAwait(false);
+
+        // Write order, not `At` order: the ledger is what the scheduler appended, and re-sorting it
+        // would let a row written under a clock adjustment displace the verdict actually in force.
+        var newest = entries.Count == 0 ? null : entries[^1];
+        _newestDecision = new NewestDecisionCacheEntry(file.LastWriteTimeUtc, file.Length, newest);
+        return newest;
+    }
+
+    /// <summary>
+    /// The <c>decision</c> word of an item's last recorded verdict, through
+    /// <see cref="ReviewVerdictSchema.TryParse"/> and no second reader — the same single definition
+    /// <see cref="WorkItemAdvancer"/> reads it with. Null for an item that has had no review, one whose
+    /// verdict file the operator moved, and one that no longer parses: three states the board renders
+    /// identically because none of them is a decision.
+    /// </summary>
+    private static string? ReadVerdictDecision(QueueItem item)
+    {
+        if (item.LastVerdict is not { Length: > 0 } path || !File.Exists(path))
+        {
+            return null;
+        }
+
+        try
+        {
+            return ReviewVerdictSchema.TryParse(File.ReadAllBytes(path), out var verdict, out _)
+                ? verdict?.Decision?.ToString().ToLowerInvariant()
+                : null;
+        }
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
+        {
+            return null;
+        }
     }
 
     /// <summary>
@@ -979,6 +1198,10 @@ public sealed class FleetProjectionWriter : BackgroundService
     }
 
     private sealed record PrunedCacheEntry(DateTime DirMtimeUtc, int ChildCount, JsonObject? Result);
+
+    /// <summary>The decision ledger's newest row and the identity of the file it was read from —
+    /// <see cref="ReadNewestDecisionAsync"/>'s own remarks carry why the key exists.</summary>
+    private sealed record NewestDecisionCacheEntry(DateTime WrittenAtUtc, long Length, QueueDecisionEntry? Entry);
 
     /// <summary>One timeline entry, already reduced to the four fields the projection publishes.</summary>
     internal sealed record ProjectedTimelineEntry(string Type, string? Timestamp, string? StepId, int? ExitCode);
