@@ -33,9 +33,14 @@ Replay:           OPT-IN, and the opt-in is the whole safety argument (#2010, 20
                   in the branch-excursion case. What the receipt holds and what a reader sees:
                   docs/dispatch.md (#2010).
                   BOUNDARY, stated rather than guarded: the same argv run WITHOUT the flag leaves an
-                  existing receipt alone, so a pass could in principle outlive a later unflagged
-                  failure of the same command. Unreachable as wired -- the flag is part of the pixi
-                  task line, which is fixed, and no other caller passes it.
+                  existing receipt alone, so a pass can outlive a later unflagged failure of the same
+                  command. The pixi lines are fixed and each is flagged or not, so they cannot reach
+                  it. The path that IS open, named rather than closed: a `--verify-cmd` (its row in
+                  docs/dispatch.md) whose allowlisted `dotnet test …` reproduces an opted-in task's
+                  argv verbatim, in the same worktree -- the engine wraps it unflagged, so its
+                  failure would leave the earlier pass standing for the flagged caller to replay.
+                  Closing it needs an unflagged run to compute the key, which is the tree walk the
+                  opt-in exists to avoid paying for.
 Priority classes: TWO, and the whole difference is whether the command can start an MSBuild (#1910).
                   `build` (the default, and what every pixi task that runs `dotnet` uses) queues for
                   the exclusive lock exactly as described above. `readonly` declares that the command

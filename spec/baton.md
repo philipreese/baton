@@ -5375,6 +5375,18 @@ nothing, however close it looks: `dotnet build -warnaserror` is not `lint`, whos
 ruling's own words — a lane's component runs standing as the receipt — are unchanged: the front door
 is how a lane makes such a run count.
 
+**What that attestation became once a member's task line could replay (#2010, 2026-09-07 review).**
+`fmt-check` is the only such member today. Its gate command still exits 0 for the tree being
+receipted — both layers key on the same tree identity, so the sentence above stays true — but the
+verdict behind it may have been earned earlier and printed from `tools/buildlock.py`'s own receipt,
+and the two six-hour bounds then COMPOSE for that member: a buildlock receipt replayed at 5h59m mints
+a per-member receipt good for six hours more. Accepted, with the exposure named rather than left to
+be discovered: a change *outside* buildlock's fingerprint on a byte-identical tree — an SDK upgrade, a
+re-restored package — can go unnoticed on that member for up to twelve hours instead of six. It is
+bounded to members whose line carries `--replay` (no build line does, and `gates-check-receipt` is
+refused it outright, both stated in `pixi.toml`), and CI is untouched: a fresh checkout has no receipt
+to replay.
+
 **The engine verify stops being the third full run (#1958).** Measured 2026-09-06 from the cost
 ledger's own `prePushGateMs`/`pushWaitMs` (§7), 23 pushes in one day: median 369.2s in the pre-push
 gate, median 160.2s of that queued on the build lock, and only 2 of the 23 skipped on a receipt. The
