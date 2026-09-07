@@ -468,8 +468,10 @@ public abstract record FlowEvent
     /// commands (<c>Mutation.TokenBudgetMonitor.SnapshotDominantCommandShape</c>), or null when no
     /// shape did, when none was announced, or on a ledger line written before this field existed. Read
     /// only by a <see cref="ArrestReason.ToolStepCap"/> arrest's text: "arrested at 272 steps" and
-    /// "arrested at 272 steps, 54 % of them `Get-Process -Id &lt;n&gt;`" are the same fact and a
-    /// different decision for whoever resolves the room.
+    /// "arrested at 272 steps, 54 % of its shell commands were `Get-Process -Id &lt;n&gt;`" are the
+    /// same fact and a different decision for whoever resolves the room. <b>Shell commands, not
+    /// steps</b> — the denominator is the share's, and the two differ by 11 points on the room this
+    /// was measured against.
     /// </param>
     /// <param name="DominantCommandSharePercent">
     /// #2002: <paramref name="DominantCommandShape"/>'s share of the shell commands, as a whole

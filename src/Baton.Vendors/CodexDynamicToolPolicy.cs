@@ -363,6 +363,7 @@ public sealed class CodexDynamicToolPolicy
         var path = ResolveWithinRoot(_outputRoot, normalized);
         WriteFile(path, content);
         _repeats.ForgetRead(path);
+        _repeats.ForgetAllCommands();
         return CodexDynamicToolResult.Allowed($"Wrote declared output '{normalized}'.");
     }
 
@@ -381,6 +382,12 @@ public sealed class CodexDynamicToolPolicy
         // is invisible to that check, and this is the one path where a stale answer could otherwise be
         // served as if it were the file.
         _repeats.ForgetRead(path);
+
+        // #2002 review HIGH: and it invalidates every remembered COMMAND output too. A build that
+        // failed before this write is not the answer after it; replaying that failure and then
+        // refusing with "the previous run is still the answer" was a plausible wrong answer, which is
+        // the worst shape a defect can take. See ForgetAllCommands for the rule and its one exception.
+        _repeats.ForgetAllCommands();
         return CodexDynamicToolResult.Allowed($"Wrote '{path}'.");
     }
 
@@ -430,7 +437,11 @@ public sealed class CodexDynamicToolPolicy
         // backgrounding attempt starts no process at all. The ceiling clause is composed here because
         // this is the path that enforces one: the figure is read off the delegate that kills the tree,
         // never transcribed (the timeout arm below reports the same value).
-        if (BackgroundingShapeDetector.Detect(commandLine) is { } backgroundingShape)
+        // NativeShell, because the branch below spawns COMSPEC on Windows and /bin/sh elsewhere —
+        // the same condition, read from the one place that states what each family does with a bare
+        // `&` (#2002 review LOW).
+        if (BackgroundingShapeDetector.Detect(commandLine, BackgroundingShapeDetector.NativeShell)
+            is { } backgroundingShape)
         {
             return CodexDynamicToolResult.Refused(BackgroundingShapeDetector.Refusal(
                 backgroundingShape,
@@ -509,13 +520,22 @@ public sealed class CodexDynamicToolPolicy
             combined = combined[^MaxCommandOutputCharacters..] +
                 $"\n[leading output truncated by Baton at {MaxCommandOutputCharacters} characters]";
         }
+        // #2002: a command is the broker's other write path, and the loud one -- see ForgetAllReads
+        // and ForgetAllCommands. Unless the ledger can prove it read-only, this command may have
+        // rewritten the tree every OTHER remembered output was observed against, so those go; this
+        // command's own entry is kept, because it observed the tree AFTER its own change and an
+        // immediate re-ask of it is the population rule 2 exists for. Eviction runs BEFORE the record
+        // below for exactly that reason -- reversing the two would drop the entry just recorded.
+        if (!RepeatedToolCallLedger.IsVolatile(commandLine))
+        {
+            _repeats.ForgetAllCommands(exceptCommandLine: commandLine);
+            _repeats.ForgetAllReads();
+        }
+
         // #2002: recorded whatever the exit code was, because a re-ask of a command that just failed
         // is the same wasted step as a re-ask of one that succeeded — the #1951 lane re-issued the
         // same failing `dotnet test` four times.
         _repeats.RecordCommandOutput(commandLine, combined);
-
-        // #2002: a command is the broker's other write path, and the loud one -- see ForgetAllReads.
-        _repeats.ForgetAllReads();
 
         // A non-zero exit is the command's own answer, carried back whole — `pixi run test` with three
         // failing tests is the case that matters, and its output IS the information the step bought.

@@ -67,6 +67,14 @@ public sealed class ExecutionStreamLogger
     /// </summary>
     private const string AgyHookVerdictLedgerFileName = ".agy-hook-verdicts.ndjson";
 
+    /// <summary>
+    /// The literal value of <c>Baton.Vendors.RepeatedToolCallLedger.FileName</c> (#2002), duplicated
+    /// for exactly the reason the constant above is: this layer may not reference
+    /// <c>Baton.Vendors</c>. Same shape of artifact too — a mechanism file the hooks write into the
+    /// execution's output directory, which no artifact listing should present as a deliverable.
+    /// </summary>
+    private const string RepeatedToolCallLedgerFileName = ".baton-repeat-ledger.json";
+
     /// <summary>The truncation marker that belongs beside <paramref name="logFileName"/>.</summary>
     private static string TruncationMarkerFileNameFor(string logFileName) =>
         string.Equals(logFileName, StdoutLogFileName, StringComparison.Ordinal)
@@ -123,6 +131,7 @@ public sealed class ExecutionStreamLogger
         || string.Equals(fileName, StderrLogFileName, StringComparison.Ordinal)
         || string.Equals(fileName, StderrRolloverFileName, StringComparison.Ordinal)
         || string.Equals(fileName, AgyHookVerdictLedgerFileName, StringComparison.Ordinal)
+        || string.Equals(fileName, RepeatedToolCallLedgerFileName, StringComparison.Ordinal)
         || string.Equals(fileName, StdoutTruncationMarkerFileName, StringComparison.Ordinal)
         || string.Equals(fileName, StderrTruncationMarkerFileName, StringComparison.Ordinal)
         || string.Equals(fileName, StdoutWriteFailureMarkerFileName, StringComparison.Ordinal)

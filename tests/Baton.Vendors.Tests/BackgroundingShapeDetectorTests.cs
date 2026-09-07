@@ -21,8 +21,52 @@ public sealed class BackgroundingShapeDetectorTests
     [InlineData("setsid dotnet test", "setsid")]
     [InlineData("dotnet test &", "a trailing &")]
     [InlineData("dotnet test > out.log 2>&1 &", "a trailing &")]
+    // #2002 review LOW: the alias and cmd-builtin spellings. saps/sajb are plain words; `start` is
+    // segment-anchored (see the negative arms below for what that buys).
+    [InlineData("saps dotnet -ArgumentList 'build'", "Start-Process")]
+    [InlineData("sajb { dotnet test }", "Start-Job")]
+    [InlineData("start notepad.exe", "start")]
+    [InlineData("git status; start dotnet.exe", "start")]
+    [InlineData("cmd /c start dotnet build", "cmd /c start")]
+    [InlineData("cmd /k start dotnet build", "cmd /c start")]
     public void Every_backgrounding_shape_is_named(string commandLine, string expectedShape) =>
-        Assert.Equal(expectedShape, BackgroundingShapeDetector.Detect(commandLine));
+        Assert.Equal(
+            expectedShape,
+            BackgroundingShapeDetector.Detect(commandLine, BackgroundingShapeDetector.ShellFamily.Windows));
+
+    /// <summary>
+    /// #2002 review LOW: the false positives the `start` spelling would cause if it were matched as a
+    /// bare word anywhere on the line. The review brief pre-declares these HIGH severity, and they are
+    /// the reason the match is anchored to a segment's first token rather than added to the word table.
+    /// This arm is the control for the four positive `start` arms above: delete the anchoring and the
+    /// positives still pass while these fail.
+    /// </summary>
+    [Theory]
+    [InlineData("npm start")]
+    [InlineData("pixi run start")]
+    [InlineData("dotnet run -- start")]
+    [InlineData("git commit -m \"start the daemon\"")]
+    public void The_start_spelling_does_not_refuse_a_subcommand_named_start(string commandLine) =>
+        Assert.Null(BackgroundingShapeDetector.Detect(
+            commandLine, BackgroundingShapeDetector.ShellFamily.Windows));
+
+    /// <summary>
+    /// #2002 review LOW: the bare `&` is the one rule that differs by shell, so it is asserted in both
+    /// directions on both families. A mid-line `&` backgrounds under a POSIX shell and separates under
+    /// cmd.exe; a redirection's `&` is neither, on either.
+    /// </summary>
+    [Theory]
+    [InlineData("dotnet build & sleep 1", BackgroundingShapeDetector.ShellFamily.Posix, "a background &")]
+    [InlineData("dotnet build & sleep 1", BackgroundingShapeDetector.ShellFamily.Windows, null)]
+    [InlineData("dotnet test &", BackgroundingShapeDetector.ShellFamily.Posix, "a background &")]
+    [InlineData("dotnet test &", BackgroundingShapeDetector.ShellFamily.Windows, "a trailing &")]
+    [InlineData("dotnet build && dotnet test", BackgroundingShapeDetector.ShellFamily.Posix, null)]
+    [InlineData("dotnet test > out.log 2>&1", BackgroundingShapeDetector.ShellFamily.Posix, null)]
+    [InlineData("dotnet test &> out.log", BackgroundingShapeDetector.ShellFamily.Posix, null)]
+    [InlineData("echo \"a & b\"", BackgroundingShapeDetector.ShellFamily.Posix, null)]
+    public void The_bare_ampersand_rule_is_shell_aware(
+        string commandLine, BackgroundingShapeDetector.ShellFamily shell, string? expected) =>
+        Assert.Equal(expected, BackgroundingShapeDetector.Detect(commandLine, shell));
 
     [Theory]
     // The ordinary traffic this rule must leave alone -- the two the issue names explicitly, plus the
@@ -47,7 +91,8 @@ public sealed class BackgroundingShapeDetectorTests
     // A `#` mid-token is an issue reference, not a comment marker; nothing here backgrounds either way.
     [InlineData("git log --grep=#2002 --oneline")]
     public void Ordinary_foreground_traffic_is_not_refused(string commandLine) =>
-        Assert.Null(BackgroundingShapeDetector.Detect(commandLine));
+        Assert.Null(BackgroundingShapeDetector.Detect(
+            commandLine, BackgroundingShapeDetector.ShellFamily.Windows));
 
     /// <summary>
     /// The one case the masking could get backwards: a comment marker INSIDE a quoted string does not
@@ -55,14 +100,16 @@ public sealed class BackgroundingShapeDetectorTests
     /// </summary>
     [Fact]
     public void A_hash_inside_quotes_does_not_hide_the_rest_of_the_line() =>
-        Assert.Equal("nohup", BackgroundingShapeDetector.Detect("echo \"issue #2002\" && nohup dotnet test"));
+        Assert.Equal("nohup", BackgroundingShapeDetector.Detect(
+            "echo \"issue #2002\" && nohup dotnet test", BackgroundingShapeDetector.ShellFamily.Windows));
 
     [Theory]
     [InlineData(null)]
     [InlineData("")]
     [InlineData("   ")]
     public void Nothing_to_read_is_not_a_refusal(string? commandLine) =>
-        Assert.Null(BackgroundingShapeDetector.Detect(commandLine));
+        Assert.Null(BackgroundingShapeDetector.Detect(
+            commandLine, BackgroundingShapeDetector.ShellFamily.Windows));
 
     /// <summary>
     /// The ceiling clause is the caller's, and its absence is a sentence rather than a gap — the two

@@ -871,7 +871,8 @@ public class AgyHookCheckCommandTests
     [Fact]
     public void The_polling_line_itself_is_not_what_rule_one_refuses() =>
         Assert.Null(Baton.Vendors.BackgroundingShapeDetector.Detect(
-            "Get-Process -Id 59340 -ErrorAction SilentlyContinue"));
+            "Get-Process -Id 59340 -ErrorAction SilentlyContinue",
+            Baton.Vendors.BackgroundingShapeDetector.NativeShell));
 
     private sealed class ThrowingReader : TextReader
     {

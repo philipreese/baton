@@ -1899,7 +1899,10 @@ public class StateProjectorTests
     /// #2002 rule 3, over a fixture ledger. Both arms in one test because the clause is only worth
     /// anything if it is CONDITIONAL: a build that appended it unconditionally would pass an assertion
     /// that a dominant shape is named, and would then be naming a shape on every long-but-honest lane.
-    /// The measured room this is drawn from read 54 % on `Get-Process -Id &lt;n&gt;`.
+    /// The measured room this is drawn from read 54 % on `Get-Process -Id &lt;n&gt;` — <b>of its shell
+    /// commands</b>, which is what the pinned string has to say. #2002's review found it saying "of
+    /// steps", a larger denominator that read 43 % on the same room; this text is the assertion that
+    /// keeps the sentence and the share's denominator the same quantity.
     /// </summary>
     [Fact]
     public void ExecutionArrested_DescribeArrest_names_the_dominant_command_shape_only_when_one_dominates()
@@ -1926,7 +1929,7 @@ public class StateProjectorTests
 
         Assert.Equal(
             "Execution arrested: tool-step cap exceeded (272 tool steps measured) — awaiting conductor "
-            + "resolution. 54 % of steps were `Get-Process -Id <n> -ErrorAction SilentlyContinue`.",
+            + "resolution. 54 % of its shell commands were `Get-Process -Id <n> -ErrorAction SilentlyContinue`.",
             StepFor(state, Architect).IndeterminateReason);
         Assert.Equal(
             "Execution arrested: tool-step cap exceeded (272 tool steps measured) — awaiting conductor resolution.",
