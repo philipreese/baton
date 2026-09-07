@@ -266,9 +266,8 @@ public sealed class CodexDynamicToolPolicy
             text = text[..MaxReadCharacters] + $"\n[truncated by Baton at {MaxReadCharacters} characters]";
         }
 
-        // A replayed read is re-read from disk rather than served from a remembered copy: the stat
-        // pair already proved it unchanged, and holding the bytes would have added the one way this
-        // rule could serve stale content as if it were the file.
+        // The replay preamble rides bytes this call has just taken off disk; RepeatedToolCallLedger's
+        // remarks say why a read entry deliberately holds no copy of them.
         return CodexDynamicToolResult.Allowed(
             repeat.Verdict == RepeatVerdict.Replay ? $"[{repeat.Preamble}]\n{text}" : text);
     }

@@ -505,9 +505,9 @@ public class HookCheckCommandTests
     }
 
     /// <summary>
-    /// #2002 review HIGH on the hook path: the same eviction the broker performs, at the only point a
-    /// PreToolUse hook learns a write is coming. Both directions — the write arm executes, the no-write
-    /// arm still denies — because an eviction on every tool call passes the first and fails the second.
+    /// #2002 review HIGH on the hook path: the same eviction the broker performs, arriving here at the
+    /// write-family allow. Both directions — the write arm executes, the no-write arm still denies —
+    /// because an eviction on every tool call passes the first and fails the second.
     /// </summary>
     [Fact]
     public void A_write_makes_the_next_identical_command_allowed_again()
