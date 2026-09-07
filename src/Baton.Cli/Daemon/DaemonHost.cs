@@ -59,11 +59,41 @@ public static class DaemonHost
         // driving this method must not leave the whole test host's console wrapped behind it.
         var originalOut = Console.Out;
         var originalError = Console.Error;
-        Console.SetOut(new TimestampedLineWriter(originalOut));
-        Console.SetError(new TimestampedLineWriter(originalError));
+        var timestampedOut = new TimestampedLineWriter(originalOut);
+        var timestampedError = new TimestampedLineWriter(originalError);
+        Console.SetOut(timestampedOut);
+        Console.SetError(timestampedError);
+
+        // #2036: the last-breath handlers. Installed here, around the same streams and inside the
+        // same try/finally, because their whole job is to write to `daemon.log` on the way out --
+        // DaemonLastBreath's own doc comment carries what each ending leaves behind and why the line
+        // goes to the writer UNDERNEATH the wrapper. Disposed in the finally with the streams: in
+        // production the process is gone either way, but a test driving this method must not leave a
+        // process-global handler pointing at a writer that test has finished with.
+        // BOTH wrappers, not just stderr: the host's console logger writes to stdout, which is where
+        // a partial line is most likely to be sitting when the process dies.
+        using var lastBreath = DaemonLastBreath.Install(originalError, timestampedOut, timestampedError);
         try
         {
             await RunHostAsync(args, onHostBuilt, mutex).ConfigureAwait(false);
+
+            // The graceful ending's own line, written HERE because the ProcessExit handler never
+            // sees this ending -- DaemonLastBreath.ProcessExitLine's doc owns which route reaches
+            // which ending, and why the `using` above is what rules this one out. Ctrl-C is the
+            // ordinary way the daemon stops, so without this the most common orderly ending was the
+            // one leaving no line. Idempotent with the handler by construction (Emit writes at most
+            // once), and on the success path only: an exception out of the host goes to the catch
+            // below, whose diagnosis line must not be pre-empted by a bare "exiting".
+            lastBreath.OnProcessExit(Environment.ExitCode);
+        }
+        catch (Exception ex)
+        {
+            // Logged and rethrown, never swallowed: an exception that escapes the host IS the
+            // diagnosis. This is the ONLY route to a line on this path -- `using` unregisters the
+            // AppDomain handler during the unwind, before the runtime ever sees the exception -- so
+            // without this catch an exception out of the host would still die quietly.
+            lastBreath.OnUnhandledException(ex, isTerminating: true);
+            throw;
         }
         finally
         {

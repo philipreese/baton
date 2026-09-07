@@ -102,6 +102,42 @@ internal sealed class TimestampedLineWriter : TextWriter
         }
     }
 
+    /// <summary>The lock every write takes, exposed for the same reason the seams in
+    /// <see cref="DaemonLastBreath"/> are: a test needs to hold it from another thread to drive the
+    /// wedged-writer polarity <see cref="TryFlushPendingLine"/> exists for. Nothing in production
+    /// reads it.</summary>
+    internal object LockForTest => _gate;
+
+    /// <summary>
+    /// #2036 — emits a trailing partial line and flushes, giving up if the lock is not free within
+    /// <paramref name="timeout"/>. Returns whether it got the lock.
+    /// <para>
+    /// <b>Bounded rather than blocking, because of who calls it:</b> <see cref="DaemonLastBreath"/>,
+    /// from a <c>ProcessExit</c>/unhandled-exception handler on a process that is already dying. A
+    /// thread wedged mid-<see cref="Write(char)"/> holds <see cref="_gate"/> forever, and .NET's
+    /// <c>ProcessExit</c> handlers have no timeout of their own — an unbounded wait here would hang
+    /// the very exit that recovers the daemon, which is a strictly worse trade than losing the tail
+    /// of one line. Same ordering finding as <see cref="DaemonWatchdog.CheckOnce"/>'s.
+    /// </para>
+    /// </summary>
+    internal bool TryFlushPendingLine(TimeSpan timeout)
+    {
+        if (!Monitor.TryEnter(_gate, timeout))
+        {
+            return false;
+        }
+
+        try
+        {
+            EmitPendingAndFlush();
+            return true;
+        }
+        finally
+        {
+            Monitor.Exit(_gate);
+        }
+    }
+
     /// <summary>A trailing partial line (a process exiting mid-write) is emitted rather than dropped:
     /// on 2026-09-06 the last thing the daemon did was exactly the kind of fact a dropped tail
     /// would have taken with it.</summary>
@@ -111,17 +147,23 @@ internal sealed class TimestampedLineWriter : TextWriter
         {
             lock (_gate)
             {
-                if (_pending.Length > 0)
-                {
-                    _inner.WriteLine($"[{_lineStartedAt:yyyy-MM-ddTHH:mm:ss.fffZ}] {_pending}");
-                    _pending.Clear();
-                    _lineOpen = false;
-                }
-
-                _inner.Flush();
+                EmitPendingAndFlush();
             }
         }
 
         base.Dispose(disposing);
+    }
+
+    /// <summary>Caller must hold <see cref="_gate"/>.</summary>
+    private void EmitPendingAndFlush()
+    {
+        if (_pending.Length > 0)
+        {
+            _inner.WriteLine($"[{_lineStartedAt:yyyy-MM-ddTHH:mm:ss.fffZ}] {_pending}");
+            _pending.Clear();
+            _lineOpen = false;
+        }
+
+        _inner.Flush();
     }
 }

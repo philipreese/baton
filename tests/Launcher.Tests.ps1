@@ -267,6 +267,108 @@ try {
         }
     }
 
+    # 8. #2036: the `baton-daemon` action's wrapper records the exit before returning it. Runs the
+    # EXACT `-Argument` string register-daemon-task.ps1 registers -- lifted out of that script's AST
+    # rather than restated here, so a wrapper that stops logging its exit fails this test instead of
+    # passing a copy of itself -- through the real `baton.ps1` launcher on PATH down to a mock
+    # `baton.exe`, in a throwaway working directory, and reads back `daemon.log`. SCOPED: this
+    # measures the wrapper's capture-log-exit
+    # shape (the half of #2036's gap 1 that lives outside the daemon process). It does NOT measure
+    # what Task Scheduler does with the code it returns; that needs the live measurement #2036 asks
+    # for and this test cannot stand in for it.
+    Write-Host "Test 8: the registered baton-daemon action records its exit code in daemon.log..."
+    $daemonTaskScript = [System.IO.Path]::Combine($repoRoot, "tools", "tool-refresh", "register-daemon-task.ps1")
+    $daemonAst = [System.Management.Automation.Language.Parser]::ParseFile($daemonTaskScript, [ref]$null, [ref]$null)
+    $actionCall = $daemonAst.FindAll({
+        param($node)
+        $node -is [System.Management.Automation.Language.CommandAst] -and
+        $node.GetCommandName() -eq "New-ScheduledTaskAction"
+    }, $true) | Select-Object -First 1
+    if (-not $actionCall) {
+        throw "Assertion failed: no New-ScheduledTaskAction call found in $daemonTaskScript"
+    }
+    $actionArgument = $null
+    for ($i = 0; $i -lt $actionCall.CommandElements.Count - 1; $i++) {
+        $element = $actionCall.CommandElements[$i]
+        if ($element -is [System.Management.Automation.Language.CommandParameterAst] -and
+            $element.ParameterName -eq "Argument") {
+            $actionArgument = $actionCall.CommandElements[$i + 1].Value
+        }
+    }
+    if (-not $actionArgument) {
+        throw "Assertion failed: could not read the -Argument string of New-ScheduledTaskAction in $daemonTaskScript"
+    }
+
+    # The operational-log enable (#2036 gap 2) cannot be measured here -- `wevtutil sl` needs
+    # elevation and this suite runs unelevated. What CAN be checked is the property that makes it
+    # safe to ship unrun: it is attempted, and it is inside a try, so under this script's
+    # `$ErrorActionPreference = "Stop"` a refused enable cannot fail the daemon's registration.
+    $daemonScriptText = Get-Content -LiteralPath $daemonTaskScript -Raw
+    Assert-Contains $daemonScriptText "Microsoft-Windows-TaskScheduler/Operational" `
+        "register-daemon-task.ps1 enables the Task Scheduler operational log"
+    $wevtutilCalls = $daemonAst.FindAll({
+        param($node)
+        $node -is [System.Management.Automation.Language.CommandAst] -and
+        $node.Extent.Text -like "*wevtutil*"
+    }, $true)
+    if ($wevtutilCalls.Count -eq 0) {
+        throw "Assertion failed: no wevtutil call found in $daemonTaskScript"
+    }
+    foreach ($wevtutilCall in $wevtutilCalls) {
+        $ancestor = $wevtutilCall.Parent
+        while ($ancestor -and -not ($ancestor -is [System.Management.Automation.Language.TryStatementAst])) {
+            $ancestor = $ancestor.Parent
+        }
+        if (-not $ancestor) {
+            throw "Assertion failed: the wevtutil call in $daemonTaskScript is not inside a try -- an unelevated run would fail the registration"
+        }
+    }
+
+    # Through the REAL launcher, against a stub that WRITES TO STDERR -- both halves matter, and an
+    # earlier draft of this arm had neither (2026-09-07 review). The action's `*>> 'daemon.log'`
+    # redirects the child's native stderr, and under PowerShell 5.1 a redirected native stderr line
+    # becomes a terminating NativeCommandError wherever $ErrorActionPreference is "Stop" -- which
+    # would abort the -Command script before its trailing Out-File/`exit $c` ever run. That is #1899,
+    # and its fix is the one line `$ErrorActionPreference = "Continue"` inside baton.ps1. A mock
+    # `baton.exe` dropped straight on PATH resolves `baton` to the exe and never traverses the
+    # launcher at all, so it cannot notice if that line is deleted; only `baton.ps1` goes on PATH
+    # here (no `baton.cmd`), so `baton` resolves to the launcher, which then resolves
+    # $BATON_HOME/tools/current to the stub. A stub emitting no stderr would likewise pass whether or
+    # not the fix is present.
+    $wrapperBinDir = Join-Path $tempDir "daemon-wrapper-bin"
+    [System.IO.Directory]::CreateDirectory($wrapperBinDir) | Out-Null
+    Copy-Item -LiteralPath $ps1Launcher -Destination (Join-Path $wrapperBinDir "baton.ps1") -Force
+    $wrapperSha = "daemon_wrapper_sha_2036"
+    $wrapperShaDir = Join-Path $toolsDir $wrapperSha
+    [System.IO.Directory]::CreateDirectory($wrapperShaDir) | Out-Null
+    Set-Content -LiteralPath $currentFile -Value "$wrapperSha`r`n"
+    $wrapperStderrLine = "MOCK-DAEMON-STDERR"
+    New-MockBatonExe $wrapperShaDir "MOCK-DAEMON" 70 $wrapperStderrLine | Out-Null
+    $wrapperRunDir = Join-Path $tempDir "daemon-wrapper-run"
+    [System.IO.Directory]::CreateDirectory($wrapperRunDir) | Out-Null
+    $pathBeforeWrapper = $env:PATH
+    try {
+        $env:PATH = "$wrapperBinDir;$pathBeforeWrapper"
+        # No -NoNewWindow, deliberately: the action carries `-WindowStyle Hidden`, and a child
+        # sharing this console would hide the console the test itself is printing to.
+        $proc = Start-Process -FilePath "powershell.exe" -ArgumentList $actionArgument `
+            -WorkingDirectory $wrapperRunDir -Wait -PassThru
+    } finally {
+        $env:PATH = $pathBeforeWrapper
+    }
+    Assert-Equal 70 $proc.ExitCode "the action returns the daemon's own exit code to Task Scheduler"
+    $wrapperLog = Join-Path $wrapperRunDir "daemon.log"
+    if (-not (Test-Path -LiteralPath $wrapperLog)) {
+        throw "Assertion failed: the action left no daemon.log in $wrapperRunDir"
+    }
+    # -Raw with no -Encoding: Get-Content follows the BOM `*>>` wrote, so an appended line in the
+    # wrong encoding shows up here as mojibake and fails the Assert-Contains below rather than
+    # passing quietly.
+    $wrapperLogText = Get-Content -LiteralPath $wrapperLog -Raw
+    Assert-Contains $wrapperLogText "MOCK-DAEMON daemon" "the action still captures the daemon's own output"
+    Assert-Contains $wrapperLogText $wrapperStderrLine "the action captures the daemon's stderr through the launcher"
+    Assert-Contains $wrapperLogText "baton daemon exited 70" "the action records the exit code in daemon.log"
+
     Write-Host "All launcher tests PASSED!"
 } finally {
     Remove-Item -LiteralPath $tempDir -Recurse -Force -ErrorAction SilentlyContinue
