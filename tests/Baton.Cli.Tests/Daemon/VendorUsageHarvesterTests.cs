@@ -216,7 +216,8 @@ public sealed class VendorUsageHarvesterTests : IDisposable
     /// <summary>
     /// The boundary trigger's WIRING, which the scheduler's own suite cannot reach: it is handed
     /// boundaries, while this asserts that the harvester reads them off the vendor's persisted snapshot
-    /// and hands them over before harvesting. A <see cref="ReadWindowBoundaries"/> that returned nothing
+    /// and hands them over before harvesting — through the production read, since #1966's review deleted
+    /// the constructor seam that would have let this bypass it. A <c>ReadLastSnapshot</c> that returned nothing
     /// would leave every scheduler arm green and silently disable the trigger in production. Both
     /// polarities on the one thing that decides it — a reset already past fires, one still ahead does
     /// not — driven under a scheduler that is never due on its own, so a harvest here can only be the

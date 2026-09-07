@@ -27,9 +27,10 @@ namespace Baton.Cli.Daemon;
 /// </para>
 /// <para>
 /// <b>The boundary trigger fires once per boundary regardless of outcome.</b> Dueness is decided
-/// against <see cref="VendorState.LastHarvestedAt"/>, which this type stamps when it RETURNS true — it
-/// never learns whether the harvest that followed succeeded. So a boundary whose harvest failed is not
-/// retried at that boundary; the periodic interval is what covers it. The alternative, retrying until a
+/// against the most recent read of that vendor's counters (<see cref="IsBoundaryDue"/> enumerates the
+/// three), of which <see cref="VendorState.LastHarvestedAt"/> — stamped when this type RETURNS true — is
+/// one; it never learns whether the harvest that followed succeeded. So a boundary whose harvest failed
+/// is not retried at that boundary; the periodic interval is what covers it. The alternative, retrying until a
 /// snapshot lands, turns a permanently broken vendor CLI into a spawn every tick.
 /// </para>
 /// <para>
@@ -86,11 +87,21 @@ public sealed class VendorUsageHarvestScheduler
     /// the periodic cadence alone drives it. Each boundary buys at most one harvest — see this type's own
     /// remarks for why a failed one is not retried at that boundary.
     /// </param>
+    /// <param name="snapshotHarvestedAt">
+    /// #1966 review: when the snapshot those boundaries came from was taken — the other half of the same
+    /// read (<see cref="VendorUsageHarvester.TickOnceAsync"/>). A harvest that happened before this
+    /// process started still read the counters, so a boundary behind it is already covered; without this
+    /// the first tick after a daemon restart spends a <c>/usage</c> call per vendor whose snapshot names
+    /// a reset instant behind its own <c>HarvestedAt</c>, which claude's parser accepts up to three days
+    /// back. Read ONLY by <see cref="IsBoundaryDue"/> — never by the coalesce window, which is about this
+    /// scheduler's own last spawn and would otherwise let a foreign harvest suppress a due periodic one.
+    /// </param>
     public bool OnTick(
         string vendor,
         DateTimeOffset now,
         bool anyLiveLaneNow,
-        IReadOnlyList<DateTimeOffset>? windowBoundaries = null)
+        IReadOnlyList<DateTimeOffset>? windowBoundaries = null,
+        DateTimeOffset? snapshotHarvestedAt = null)
     {
         var state = _states.TryGetValue(vendor, out var existing) ? existing : _states[vendor] = new VendorState();
 
@@ -117,7 +128,7 @@ public sealed class VendorUsageHarvestScheduler
 
         var periodicDue = state.NextPeriodicDueAt is { } periodicAt && now >= periodicAt;
         var postExitDue = state.PendingPostExitDueAt is { } postExitAt && now >= postExitAt;
-        var boundaryDue = IsBoundaryDue(state, now, windowBoundaries);
+        var boundaryDue = IsBoundaryDue(state, now, windowBoundaries, snapshotHarvestedAt);
 
         if (!periodicDue && !postExitDue && !boundaryDue)
         {
@@ -139,9 +150,19 @@ public sealed class VendorUsageHarvestScheduler
         // Coalesce: a trigger due within the coalesce window of the last ACTUAL harvest is satisfied
         // by that recent harvest rather than firing a second one on top of it. The due flags above are
         // still cleared/rescheduled either way -- a coalesced trigger is consumed, not deferred to the
-        // next tick, since the recent harvest already produced a fresh-enough reading.
+        // next tick, since the recent harvest already produced a fresh-enough reading. The boundary
+        // trigger has no due flag to clear, so consuming it is this stamp: without it, a boundary
+        // coalesced away at 03:00:00 is still due at 03:00:30 and fires there -- a second spawn 89s
+        // after the first, which is exactly what the window exists to prevent (#1966 review).
+        // Deliberately its own field: LastHarvestedAt is the last spawn THIS scheduler decided on, and
+        // the window above must keep reading only that.
         if (state.LastHarvestedAt is { } last && now - last < _coalesceWindow)
         {
+            if (boundaryDue)
+            {
+                state.BoundariesCoveredThrough = now;
+            }
+
             return false;
         }
 
@@ -150,26 +171,37 @@ public sealed class VendorUsageHarvestScheduler
     }
 
     /// <summary>
-    /// Whether a window boundary has passed that no harvest of this vendor has followed yet (#1966).
-    /// Deliberately keyed on <see cref="VendorState.LastHarvestedAt"/> rather than on a remembered
-    /// boundary: what makes a reset instant interesting is that the counters behind it have not been
-    /// re-read since, and any harvest after it re-reads them, whichever trigger fired it. A boundary
-    /// still in the future is not due, and one already followed by a harvest never becomes due again.
-    /// <b>On the first tick after a daemon start</b> there is no prior harvest, so a boundary already in
-    /// the past IS due — which is the intended reading: nothing this process knows of has read the
-    /// counters since the window turned over.
+    /// Whether a window boundary has passed that nothing has read the counters after yet (#1966).
+    /// Deliberately keyed on the most recent READ rather than on a remembered boundary: what makes a
+    /// reset instant interesting is that the counters behind it have not been re-read since, and any
+    /// harvest after it re-reads them, whichever trigger fired it. A boundary still in the future is not
+    /// due, and one already followed by a read never becomes due again.
+    /// <para>
+    /// The most recent read is the latest of three (#1966 review): this scheduler's own
+    /// <see cref="VendorState.LastHarvestedAt"/>; <see cref="VendorState.BoundariesCoveredThrough"/>, the
+    /// tick that consumed a boundary into a coalesced harvest; and <paramref name="snapshotHarvestedAt"/>,
+    /// the persisted snapshot's own stamp, which survives a process restart and also covers a harvest
+    /// some other caller made (<c>OnDemandRunwayHarvest</c>). Without the third, the first tick after a
+    /// daemon start re-fires every boundary the last snapshot already names behind its own
+    /// <c>HarvestedAt</c> — a spawn per vendor per restart, buying no new counters.
+    /// </para>
     /// </summary>
     private static bool IsBoundaryDue(
-        VendorState state, DateTimeOffset now, IReadOnlyList<DateTimeOffset>? windowBoundaries)
+        VendorState state,
+        DateTimeOffset now,
+        IReadOnlyList<DateTimeOffset>? windowBoundaries,
+        DateTimeOffset? snapshotHarvestedAt)
     {
         if (windowBoundaries is null)
         {
             return false;
         }
 
+        var lastRead = Latest(Latest(state.LastHarvestedAt, state.BoundariesCoveredThrough), snapshotHarvestedAt);
+
         foreach (var boundary in windowBoundaries)
         {
-            if (boundary <= now && (state.LastHarvestedAt is not { } last || last < boundary))
+            if (boundary <= now && (lastRead is not { } last || last < boundary))
             {
                 return true;
             }
@@ -177,6 +209,9 @@ public sealed class VendorUsageHarvestScheduler
 
         return false;
     }
+
+    private static DateTimeOffset? Latest(DateTimeOffset? a, DateTimeOffset? b) =>
+        a is null ? b : b is null ? a : a > b ? a : b;
 
     private TimeSpan JitterFor(TimeSpan baseline)
     {
@@ -193,6 +228,13 @@ public sealed class VendorUsageHarvestScheduler
         /// live under an idle schedule is rescheduled once rather than on every subsequent tick.</summary>
         public bool ScheduledWhileLive;
         public DateTimeOffset? PendingPostExitDueAt;
+
+        /// <summary>The last harvest this scheduler decided on — the coalesce window's ONLY input, so a
+        /// harvest made elsewhere can never suppress a due periodic one.</summary>
         public DateTimeOffset? LastHarvestedAt;
+
+        /// <summary>The tick that consumed a boundary trigger into a coalesced harvest rather than
+        /// firing one, so the boundary does not come due again once the window has passed.</summary>
+        public DateTimeOffset? BoundariesCoveredThrough;
     }
 }

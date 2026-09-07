@@ -46,7 +46,6 @@ public sealed class VendorUsageHarvester : BackgroundService
     private readonly IReadOnlyList<IVendorUsageSource> _sources;
     private readonly VendorUsageHarvestScheduler _scheduler;
     private readonly Func<CancellationToken, Task<Dictionary<string, int>>> _countLiveLanes;
-    private readonly Func<string, IReadOnlyList<DateTimeOffset>> _readWindowBoundaries;
 
     public VendorUsageHarvester()
         : this(VendorUsageSources.Default)
@@ -59,21 +58,21 @@ public sealed class VendorUsageHarvester : BackgroundService
     /// no, source returns null, source returns a snapshot — can be driven without fabricating a
     /// Running room per arm. The null-returns-nothing arm is #1869's red arm for
     /// "an errored harvest must not blank the last good snapshot".
-    /// <paramref name="readWindowBoundaries"/> substitutes for the on-disk snapshot read so #1966's
-    /// boundary trigger can be driven without persisting a fixture whose resets are relative to the
-    /// suite's own clock.
+    /// There is deliberately NO seam for the window-boundary read: #1966's trigger is driven through the
+    /// production <see cref="ReadLastSnapshot"/> over a persisted fixture
+    /// (<c>VendorUsageHarvesterTests.TickOnce_ReadsTheResetInstantsOffThePersistedSnapshot</c>), which is
+    /// the only way the wiring itself is covered — a seam here would let that test bypass the one
+    /// function deciding whether the trigger fires in production.
     /// </summary>
     internal VendorUsageHarvester(
         IReadOnlyList<IVendorUsageSource> sources,
         VendorUsageHarvestScheduler? scheduler = null,
-        Func<CancellationToken, Task<Dictionary<string, int>>>? countLiveLanes = null,
-        Func<string, IReadOnlyList<DateTimeOffset>>? readWindowBoundaries = null)
+        Func<CancellationToken, Task<Dictionary<string, int>>>? countLiveLanes = null)
     {
         _sources = sources;
         _scheduler = scheduler
             ?? new VendorUsageHarvestScheduler(PeriodicInterval, Jitter, PostExitDelay, CoalesceWindow, IdleInterval);
         _countLiveLanes = countLiveLanes ?? CountLiveLanesByVendorAsync;
-        _readWindowBoundaries = readWindowBoundaries ?? ReadWindowBoundaries;
     }
 
     protected override async Task ExecuteAsync(CancellationToken stoppingToken)
@@ -122,8 +121,8 @@ public sealed class VendorUsageHarvester : BackgroundService
 
             // Read BEFORE the harvest: after it, the boundaries would be the ones the snapshot this tick
             // just wrote names, which are in the future, so the trigger could never fire.
-            var boundaries = _readWindowBoundaries(source.Vendor);
-            if (!_scheduler.OnTick(source.Vendor, now, anyLive, boundaries))
+            var (boundaries, harvestedAt) = ReadLastSnapshot(source.Vendor);
+            if (!_scheduler.OnTick(source.Vendor, now, anyLive, boundaries, harvestedAt))
             {
                 continue;
             }
@@ -153,16 +152,21 @@ public sealed class VendorUsageHarvester : BackgroundService
     }
 
     /// <summary>
-    /// The reset instants this vendor's last persisted snapshot names (#1966), read through the same
-    /// <see cref="RunwaySnapshotReader"/> the runway hold reads — one on-disk snapshot format, one
-    /// reader, so the cadence and the gate can never disagree about what was last harvested. A window
-    /// whose <see cref="VendorUsageWindow.ResetsAt"/> did not parse contributes nothing rather than a
-    /// guessed instant, which is #1391's "unparsed → unknown, never a number" applied here.
+    /// The reset instants this vendor's last persisted snapshot names, and when that snapshot was taken
+    /// (#1966), read through the same <see cref="RunwaySnapshotReader"/> the runway hold reads — one
+    /// on-disk snapshot format, one reader, so the cadence and the gate can never disagree about what was
+    /// last harvested. A window whose <see cref="VendorUsageWindow.ResetsAt"/> did not parse contributes
+    /// nothing rather than a guessed instant, which is #1391's "unparsed → unknown, never a number"
+    /// applied here. Both halves come off ONE read: the boundaries decide whether a window has turned
+    /// over, and <c>HarvestedAt</c> is what already read the counters behind it — see
+    /// <see cref="VendorUsageHarvestScheduler.OnTick"/>'s <c>snapshotHarvestedAt</c>.
     /// </summary>
-    private static IReadOnlyList<DateTimeOffset> ReadWindowBoundaries(string vendor) =>
+    private static (IReadOnlyList<DateTimeOffset> Boundaries, DateTimeOffset? HarvestedAt) ReadLastSnapshot(
+        string vendor) =>
         RunwaySnapshotReader.Read(vendor) is { } snapshot
-            ? [.. snapshot.Windows.Where(w => w.ResetsAt is not null).Select(w => w.ResetsAt!.Value)]
-            : [];
+            ? ([.. snapshot.Windows.Where(w => w.ResetsAt is not null).Select(w => w.ResetsAt!.Value)],
+                snapshot.HarvestedAt)
+            : ([], null);
 
     private static async Task<Dictionary<string, int>> CountLiveLanesByVendorAsync(CancellationToken cancellationToken)
     {

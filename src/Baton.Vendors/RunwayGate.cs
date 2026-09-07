@@ -316,9 +316,10 @@ public static class RunwayGate
     /// takes the same inline-harvest path an absent one has taken since #1923, so the refusal owes the
     /// operator the same distinction: an old number nobody has tried to refresh is a daemon that is not
     /// running, an old number a harvest just failed to refresh is a vendor or CLI fault to look at.
-    /// Empty when no harvest was attempted (a caller that does not harvest) or when one succeeded — a
-    /// successful harvest that leaves the snapshot still stale is its own sentence rather than a silent
-    /// omission, since it means the vendor's report itself is dated.
+    /// Empty ONLY when no harvest was attempted (a caller that does not harvest). A harvest that reported
+    /// success and still left the snapshot stale gets its own sentence rather than a silent omission,
+    /// since it means the vendor's report itself is dated — an outcome an operator has to be told about,
+    /// not one to hide behind the bare staleness line.
     /// </summary>
     private static string DescribeFailedHarvest(RunwayHarvestAttempt? harvest) => harvest switch
     {

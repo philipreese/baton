@@ -786,7 +786,9 @@ public static class DispatchCommand
     /// <c>Func&lt;string, RunwayDecision&gt;</c> that roughly thirty test call sites already bind method
     /// groups to; widening it to a task-returning delegate would churn all of them to buy nothing here.
     /// The wait cannot exceed <see cref="OnDemandRunwayHarvest.Bound"/> (10 s) per gated vendor with no
-    /// snapshot, happens at most once per vendor per dispatch, and runs in a console process and on a
+    /// USABLE snapshot — absent, or, since #1966, stale, which is not a one-time bootstrap: on a machine
+    /// with no daemon it recurs every <c>maxSnapshotAgeHours</c> — happens at most once per vendor per
+    /// dispatch, and runs in a console process and on a
     /// thread-pool thread — no synchronization context either way, so there is no deadlock to have.
     /// It does not observe the dispatch's cancellation token for the same reason: the token is not in
     /// scope of a sync delegate, and the time bound is what makes that safe rather than unbounded.

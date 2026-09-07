@@ -3761,13 +3761,22 @@ walks `VendorUsageSources.Default` on each 30 s tick and harvests a vendor when 
 is due: every 15 min while one of its lanes is live, every 30 min while none is
 (`VendorUsageHarvester.IdleInterval` — well inside the 6 h staleness limit, which is the point), and
 once after each window-reset instant the vendor's own last snapshot named. Jitter and the 60 s coalesce
-window are #1391's and unchanged; each boundary buys one harvest whether or not it succeeded, so a
-broken vendor CLI cannot turn the trigger into a spawn every tick. The vendors are harvested **strictly
-in series** — two vendor CLIs never run at once. What this replaced was the idle backoff (#1391: no
-harvesting at all without a live lane), which is what made the on-demand path above the only thing that
+window are #1391's and unchanged, and every trigger obeys the window the same way — a boundary that
+falls inside it is *consumed* by the harvest that opened it, never deferred to a later tick; each
+boundary buys one harvest whether or not it succeeded, so a broken vendor CLI cannot turn the trigger
+into a spawn every tick. The vendors are harvested **strictly in series within a tick** — the tick
+awaits each vendor's source before starting the next, so the harvester never has two vendor CLIs
+running at once. That is the whole of the guarantee: the on-demand inline harvest above is not
+coordinated with the tick, and both live in the daemon process, so a hold evaluated while a tick is
+harvesting can spawn a second vendor CLI beside it. The bound is **one CLI from the tick plus one per
+concurrent gated dispatch evaluation** in that process, each bounded by its own timeout (10 s inline,
+45 s for a tick's source). What this replaced was the idle backoff (#1391: no harvesting at all without
+a live lane), which is what made the on-demand path above the only thing that
 ever refreshed an idle vendor: measured 2026-09-06 07:22 ET, an agy analysis lane held on a 12.2 h-old
 snapshot after no agy lane had run overnight, and the conductor had to override. What it costs is the
-extra `/usage` calls: at most one per vendor per 30 min while the fleet is idle.
+extra `/usage` calls: at most one per vendor per 30 min while the fleet is idle, **plus one per window
+boundary** that vendor's last snapshot named — claude's session window resets every five hours, so the
+boundary trigger is the smaller half of the bill, not a rounding error inside the 30 min one.
 
 **Hold new admissions; never arrest for fleet reasons** (operator ruling, 2026-09-04). A dispatch that
 would start new vendor spend is refused before the room is provisioned; work already running always

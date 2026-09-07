@@ -98,6 +98,101 @@ public sealed class VendorUsageHarvestSchedulerTests
         Assert.True(scheduler.OnTick("claude", next, anyLiveLaneNow: false, [boundary, next]));
     }
 
+    /// <summary>
+    /// #1966 review: TWO boundaries already past on the same tick buy ONE harvest, not one each. Current
+    /// behaviour, so this is coverage rather than a fix — the edit it exists to catch is turning
+    /// <c>IsBoundaryDue</c> into a remembered-boundary set that pops one boundary per fire, which every
+    /// other arm in this file stays green under because none supplies two past boundaries at once.
+    /// </summary>
+    [Fact]
+    public void TwoBoundariesAlreadyPastOnTheSameTick_BuyOneHarvestBetweenThem()
+    {
+        var scheduler = NoJitterScheduler();
+        var first = Start + TimeSpan.FromMinutes(5);
+        var second = Start + TimeSpan.FromMinutes(6);
+
+        // Control: both still ahead, so the harvest below is the boundaries' doing and not the tick's.
+        Assert.False(scheduler.OnTick("claude", Start, anyLiveLaneNow: false, [first, second]));
+
+        Assert.True(scheduler.OnTick("claude", second, anyLiveLaneNow: false, [first, second]));
+
+        // The discriminator, placed PAST the coalesce window (a tick inside it would be refused by the
+        // coalesce rule and prove nothing about the second boundary) and well inside the idle interval
+        // (a tick past that would harvest for the periodic reason instead).
+        var after = second + Coalesce + TimeSpan.FromSeconds(1);
+        Assert.True(after < Start + Idle, "the follow-up tick must land before the idle schedule comes due");
+        Assert.False(scheduler.OnTick("claude", after, anyLiveLaneNow: false, [first, second]));
+    }
+
+    /// <summary>
+    /// #1966 review: a boundary that falls inside the coalesce window is CONSUMED by the harvest that
+    /// opened the window, not deferred to a later tick. Before the fix the boundary stayed due and fired
+    /// on the first tick past the window — a second spawn 90 s after the first, which is exactly what the
+    /// coalesce window exists to prevent (spec/baton.md §7 states the consume rule).
+    /// </summary>
+    [Fact]
+    public void ABoundaryInsideTheCoalesceWindow_IsConsumedByThatHarvestRatherThanDeferred()
+    {
+        var scheduler = NoJitterScheduler();
+        var first = Start + TimeSpan.FromMinutes(5);
+        Assert.True(scheduler.OnTick("claude", first, anyLiveLaneNow: false, [first]));
+
+        // A second window turns over 30s later -- inside the 60s window, so it coalesces into the harvest
+        // just taken.
+        var inside = first + TimeSpan.FromSeconds(30);
+        Assert.True(inside - first < Coalesce, "fixture must place the second boundary INSIDE the window");
+        Assert.False(scheduler.OnTick("claude", inside, anyLiveLaneNow: false, [first, inside]));
+
+        // The assertion the fix bought: past the coalesce window, the consumed boundary does not come
+        // back. Deferred rather than consumed, this tick harvests.
+        Assert.False(scheduler.OnTick(
+            "claude", first + TimeSpan.FromSeconds(120), anyLiveLaneNow: false, [first, inside]));
+    }
+
+    /// <summary>
+    /// The polarity of the arm above: the same second boundary one step the other side of the coalesce
+    /// window fires its own harvest. Without this, a scheduler that consumed every boundary at the first
+    /// one would satisfy the arm above.
+    /// </summary>
+    [Fact]
+    public void ABoundaryOutsideTheCoalesceWindow_FiresItsOwnHarvest()
+    {
+        var scheduler = NoJitterScheduler();
+        var first = Start + TimeSpan.FromMinutes(5);
+        Assert.True(scheduler.OnTick("claude", first, anyLiveLaneNow: false, [first]));
+
+        var outside = first + Coalesce + TimeSpan.FromSeconds(30);
+        Assert.True(scheduler.OnTick("claude", outside, anyLiveLaneNow: false, [first, outside]));
+    }
+
+    /// <summary>
+    /// #1966 review: the first tick after a daemon restart must not re-fire a boundary the persisted
+    /// snapshot already read past. claude's reset parser accepts an instant up to three days behind the
+    /// snapshot's own <c>HarvestedAt</c>, so a snapshot taken minutes ago can name yesterday's reset —
+    /// and <c>pixi run tool-refresh</c> restarts the daemon routinely, so the cost was a full
+    /// <c>/usage</c> spawn per such vendor per restart for no new counters. Both polarities, since the
+    /// only thing that may decide it is which side of the boundary the snapshot was taken on.
+    /// </summary>
+    [Theory]
+    [InlineData(-30, false)] // snapshot taken AFTER the boundary: those counters are already read
+    [InlineData(-120, true)] // snapshot taken BEFORE it: the window turned over unread, so it is due
+    public void ABoundaryTheLastSnapshotAlreadyReadPast_IsNotDueOnTheFirstTickAfterARestart(
+        int snapshotMinutesFromStart, bool expected)
+    {
+        // A fresh scheduler IS the restart: no in-memory LastHarvestedAt, only what is on disk.
+        var scheduler = NoJitterScheduler();
+        var boundary = Start - TimeSpan.FromHours(1);
+
+        Assert.Equal(
+            expected,
+            scheduler.OnTick(
+                "claude",
+                Start,
+                anyLiveLaneNow: false,
+                [boundary],
+                snapshotHarvestedAt: Start + TimeSpan.FromMinutes(snapshotMinutesFromStart)));
+    }
+
     [Fact]
     public void OneLiveLane_HarvestsOncePerPeriodicInterval()
     {
