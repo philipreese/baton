@@ -343,15 +343,21 @@ public static class HookCheckCommand
                     // granted read path is named here, from this session's own withheld-tool list —
                     // the measured claude review lane spent 46 refusals rediscovering Read/Grep.
                     //
-                    // Scoped grants only, which is the population #1920 measured. On an UNSCOPED
-                    // grant this rung fires for a standing deny instead (implement's and janitor's
-                    // are `gh label*`, `gh pr merge*`, `gh api*`; `git push*`/`git commit*`/
-                    // `git rebase*` are the SCOPED review role's — WorkerRoles.json is the register
-                    // for both), and answering a write-shaped attempt with two read tools is the same
-                    // non-responsive guidance this issue exists to remove.
-                    var alternative = shellPatternList.Patterns.Count > 0
-                        ? Baton.Vendors.GrantedReadToolHint.ForClaude(denied.Contains)
-                        : null;
+                    // #1972 corrected the population this is gated on. It used to be "scoped grants
+                    // only", on the reasoning that only an UNSCOPED grant reaches this rung for a
+                    // standing deny — which is false: a scoped grant carries a deny list too, and the
+                    // review role's is mostly write-shaped (`git commit*`, `git push*`, `gh pr
+                    // comment*` …, WorkerRoles.json is the register). The real distinction is the
+                    // RUNG, not the scope: a standing deny is permanently closed, so it is answered
+                    // with no alternative at all, and the read clause stays on the rungs where
+                    // rephrasing is what the worker needs (an allow-list miss, an unparseable line).
+                    // Nothing is named in its place — the declared-output write this role does have is
+                    // `Write` into BATON_OUTPUT_DIR on claude, and volunteering it on every standing
+                    // deny (`gh api*` and `git config*` are denied here too) would be the mirror image
+                    // of the non-responsive guidance being removed.
+                    var alternative = result.MatchedStandingDeny
+                        ? null
+                        : Baton.Vendors.GrantedReadToolHint.ForClaude(denied.Contains);
                     // #1921: result.Reason already carries the marker (ScopedShellResult stamps every
                     // refusal it produces), so Refuse's own Stamp is a no-op here by design.
                     return Refuse(stderr, $"AER: the 'Bash' command is denied under this session's shell " +

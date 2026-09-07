@@ -226,6 +226,70 @@ public class HookCheckCommandTests
         Assert.DoesNotContain("Grep", stderr.ToString(), StringComparison.Ordinal);
     }
 
+    // #1972: the population the condition above was wrong about. One row per pattern the SHIPPED review
+    // role stands a deny on -- a scoped grant, reads granted -- read from the catalog rather than
+    // transcribed, so a pattern added to the role arrives here with it. Every row asserts the refusal
+    // happened (a row whose command no longer matches its own pattern would otherwise pass on an empty
+    // message) and that no read tool is named in it.
+    public static TheoryData<string, string> EveryReviewRoleStandingDeny()
+    {
+        var data = new TheoryData<string, string>();
+        foreach (var pattern in Baton.Vendors.WorkerRoleCatalog.For("review").Grant.DeniedShellCommandPatterns!)
+        {
+            // `git commit*` -> `git commit x`: the shortest line that still matches the glob, and a
+            // trailing argument so the trailing-* patterns match on a word boundary (#1679).
+            data.Add(pattern, pattern.TrimEnd('*').TrimEnd() + " x");
+        }
+
+        return data;
+    }
+
+    [Theory]
+    [MemberData(nameof(EveryReviewRoleStandingDeny))]
+    public void A_standing_deny_under_the_scoped_review_grant_names_no_read_tool(
+        string pattern, string command)
+    {
+        using var stderr = new StringWriter();
+
+        var exitCode = RunBashUnderTheReviewGrant(command, stderr);
+
+        Assert.Equal(HookCheckCommand.DeniedExitCode, exitCode);
+        Assert.Contains("standing deny list", stderr.ToString(), StringComparison.Ordinal);
+        Assert.DoesNotContain("Grep", stderr.ToString(), StringComparison.Ordinal);
+        Assert.DoesNotContain("read files with", stderr.ToString(), StringComparison.Ordinal);
+        Assert.NotEmpty(pattern);
+    }
+
+    // The arm that discriminates: the SAME scoped grant, the same granted Read, refused on the
+    // allow-list rung instead of the standing-deny one -- which is the rung #1920 measured and the one
+    // the clause still belongs on. Without it, deleting the clause outright passes every row above.
+    [Fact]
+    public void A_command_the_review_grant_merely_fails_to_allow_still_names_the_read_tools()
+    {
+        using var stderr = new StringWriter();
+
+        var exitCode = RunBashUnderTheReviewGrant("cat report.md", stderr);
+
+        Assert.Equal(HookCheckCommand.DeniedExitCode, exitCode);
+        Assert.Contains("read files with Read and search them with Grep",
+            stderr.ToString(), StringComparison.Ordinal);
+    }
+
+    private static int RunBashUnderTheReviewGrant(string command, TextWriter stderr)
+    {
+        var review = Baton.Vendors.WorkerRoleCatalog.For("review");
+        var payload = """{"tool_name": "Bash", "tool_input": {"command": COMMAND_JSON}}"""
+            .Replace("COMMAND_JSON", System.Text.Json.JsonSerializer.Serialize(command));
+        using var stdin = new StringReader(payload);
+
+        // "claude:Edit,Write" -- reads are granted, which is the condition that would let the read
+        // clause appear if the rung gate regressed.
+        return HookCheckCommand.Execute(
+            stdin, stderr, "claude:Edit,Write",
+            shellPatternsRaw: "claude:" + string.Join(",", review.Grant.ShellCommandPatterns!),
+            deniedShellPatternsRaw: "claude:" + string.Join(",", review.Grant.DeniedShellCommandPatterns!));
+    }
+
     private static int RunBashWithDeniedTools(
         string command, string deniedToolsRaw, TextWriter stderr,
         string? shellPatternsRaw = "claude:git diff*", string? deniedShellPatternsRaw = null)

@@ -15,6 +15,7 @@ public class ClaudeCliVocabularyTests
     {
         [nameof(ClaudeCliVocabulary.BashToolName)] = "Bash",
         [nameof(ClaudeCliVocabulary.ReadToolName)] = "Read",
+        [nameof(ClaudeCliVocabulary.GrepToolName)] = "Grep",
         [nameof(ClaudeCliVocabulary.EditToolName)] = "Edit",
         [nameof(ClaudeCliVocabulary.WriteToolName)] = "Write",
         [nameof(ClaudeCliVocabulary.NotebookEditToolName)] = "NotebookEdit",

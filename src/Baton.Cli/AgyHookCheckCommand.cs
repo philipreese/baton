@@ -428,11 +428,14 @@ public static class AgyHookCheckCommand
                 {
                     // #1920: same append as the claude hook's Bash rung — the matcher states the rule,
                     // this site knows the vendor and names agy's own read/search tools, suppressed
-                    // when this session withheld them, and (see there) only on a scoped grant, since
-                    // an unscoped one reaches this rung for a write-shaped standing deny.
-                    var alternative = shellPatternList.Patterns.Count > 0
-                        ? Baton.Vendors.GrantedReadToolHint.ForAgy(tool => IsWithheld(denied, tool))
-                        : null;
+                    // when this session withheld them. #1972 corrected the condition on both hooks
+                    // together: the scoped/unscoped test it used to carry was wrong about which
+                    // refusals are standing denies (a scoped grant carries a deny list too), so the
+                    // gate is now the rung the matcher reports. See HookCheckCommand's copy for the
+                    // measurement and for why nothing is named in the clause's place.
+                    var alternative = result.MatchedStandingDeny
+                        ? null
+                        : Baton.Vendors.GrantedReadToolHint.ForAgy(tool => IsWithheld(denied, tool));
                     return DenyJson(
                         $"AER: the command line '{commandLine}' is denied under this session's shell " +
                         $"grant — {result.Reason}." +

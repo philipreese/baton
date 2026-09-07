@@ -1207,6 +1207,15 @@ public sealed partial class ClaudeWorkerAdapter : IWorkerAdapter, IPermissionGra
         if (!grant.ReadFiles)
         {
             denied.Add(ClaudeCliVocabulary.ReadToolName);
+
+            // #1972: Grep goes with Read, on AgyWorkerAdapter.ReadTools' own reasoning — a search
+            // tool that returns matching LINES returns file content, so withholding the read tool
+            // alone leaves the withheld category reachable by a different name. No shipped role sets
+            // read_files false (WorkerRoles.json), so this is fail-closed parity with the agy mapping
+            // rather than a behaviour change against today's catalog. Deliberately not extended to
+            // Glob: it discloses paths, not contents, and widening this set past the leak that was
+            // measured is scope the anchor does not carry.
+            denied.Add(ClaudeCliVocabulary.GrepToolName);
         }
 
         if (!grant.WriteFiles && includeWriteTools)

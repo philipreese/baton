@@ -428,7 +428,17 @@ public static class ShellCommandPatternMatcher
     /// trusts, and an <see cref="ScopedShellVerdict.Allowed"/> command has nothing to name.
     /// </param>
     /// <param name="Reason">A denial reason a person can act on; <see langword="null"/> when allowed.</param>
-    public readonly record struct ScopedShellResult(ScopedShellVerdict Verdict, string? Segment, string? Reason)
+    /// <param name="MatchedStandingDeny">
+    /// #1972: <see langword="true"/> only when the refusal came from the STANDING DENY rung — a segment
+    /// matching <c>deniedPatterns</c> — rather than from an allow-list miss or an unparseable line. The
+    /// two rungs read the same to every caller otherwise, and they are not interchangeable: a standing
+    /// deny is permanently closed for the role, so guidance about a granted READ path answers a question
+    /// the worker did not ask (the measured case is a <c>gh pr comment</c> refusal under the review
+    /// role). The producing sites append their vendor's read clause on the other rungs only, and this
+    /// flag is what lets them tell the two apart without parsing <see cref="Reason"/>.
+    /// </param>
+    public readonly record struct ScopedShellResult(
+        ScopedShellVerdict Verdict, string? Segment, string? Reason, bool MatchedStandingDeny = false)
     {
         /// <summary>
         /// A denial reason a person can act on, carrying <see cref="GrantRefusal.Marker"/> — this
@@ -535,14 +545,22 @@ public static class ShellCommandPatternMatcher
 
                 if (segmentDenied)
                 {
-                    // #1920: a deny is standing, so the useful thing to say is that retrying a
-                    // variant of the same family cannot work — the measured lane spent a step on
-                    // `git remote -v` and had nothing to go on afterwards.
+                    // #1920: a deny is standing, so the useful thing to say is that retrying will not
+                    // help — the measured lane spent a step on `git remote -v` and had nothing to go
+                    // on afterwards. #1972 narrowed the claim to what a match here actually decides:
+                    // the deny is per PATTERN, not per command family, so a sentence about "the same
+                    // command" contradicted the allow list printed beside it (`git -c core.pager=cat
+                    // diff` is denied by `git -c *` while `git diff` is granted). Which pattern
+                    // matched is deliberately not named: both deny predicates return a bool, and
+                    // returning the match is a matcher API change rather than the message-only one
+                    // this is.
                     return new ScopedShellResult(
                         ScopedShellVerdict.DeniedSegment, segment,
                         $"segment '{segment}' matches this session's standing deny list, which is "
-                        + "permanently closed for this role — a variant of the same command will be "
-                        + $"denied too{RenderGrantedPatternSuffix(allowedPatterns)}");
+                        + "permanently closed for this role — the match is against a deny pattern "
+                        + "rather than the command as a whole, so respelling this segment is refused "
+                        + $"too wherever that pattern still matches{RenderGrantedPatternSuffix(allowedPatterns)}",
+                        MatchedStandingDeny: true);
                 }
             }
 

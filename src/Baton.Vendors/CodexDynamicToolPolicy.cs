@@ -275,7 +275,9 @@ public sealed class CodexDynamicToolPolicy
 
     // Deliberately short of "update"/"insert": codex's own `update_plan` is not a file write, and
     // answering it about the write path would be the same non-responsive guidance in the other
-    // direction.
+    // direction. Pinned since #1972 by
+    // CodexDynamicToolPolicyTests.Only_a_write_shaped_unknown_tool_name_is_answered_about_the_write_path,
+    // so re-adding either fragment fails a test rather than only contradicting this line.
     private static readonly string[] WriteAttemptFragments = ["patch", "write", "edit", "apply"];
 
     private static string? DescribeReadPath(IReadOnlyCollection<string> declared) =>
@@ -597,17 +599,17 @@ public sealed class CodexDynamicToolPolicy
         if (!decision.IsAllowed)
         {
             // #1920: the matcher's reason states the rule; this site knows the vendor, so it is where
-            // the granted alternative gets named (see GrantedReadToolHint). Covers every shell refusal
-            // shape the matcher produces — unparseable, standing-deny and not-in-grant alike.
-            // Scoped grants only, matching both hooks: on an unscoped grant this refusal is a
-            // standing deny (a write-shaped command), and read tools are no answer to one.
+            // the granted alternative gets named (see GrantedReadToolHint). #1972 replaced the
+            // scoped/unscoped gate with the rung flag on all three producing sites at once.
+            // HookCheckCommand's copy of this condition is where that ruling is recorded; codex is not
+            // a bystander to it, since this vendor runs the same WorkerRoles.json review role.
             var reason = decision.Reason ?? "Baton denied the command line.";
             var declared = DeclaredToolNames();
-            var alternative = _grant.ShellCommandPatterns is { Count: > 0 }
-                ? GrantedReadToolHint.Clause(
+            var alternative = decision.MatchedStandingDeny
+                ? null
+                : GrantedReadToolHint.Clause(
                     declared.Contains(ReadTextTool) ? ReadTextTool : null,
-                    declared.Contains(SearchTextTool) ? SearchTextTool : null)
-                : null;
+                    declared.Contains(SearchTextTool) ? SearchTextTool : null);
             return CodexDynamicToolResult.Refused(
                 alternative is null ? reason : $"{reason}. {char.ToUpperInvariant(alternative[0])}{alternative[1..]}.");
         }
