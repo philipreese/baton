@@ -155,6 +155,14 @@ public static class MemorySyncOptionsParser
     /// <c>GitHub.com/Owner/Repo</c> would slug to a store file that does not exist and the verb would
     /// report the repository as having no memories at all.
     /// </summary>
+    /// <remarks>
+    /// <b>Only that half is shared.</b> <c>--assert</c> carries a SECOND refusal — a value that
+    /// canonicalizes fine but whose first segment reads as no host (<c>owner/repo</c>) — which is not
+    /// applied here and deliberately so: that one guards the WRITE path from inventing a store, and its
+    /// rule and reasoning live in one place, <c>MemoryImportOptionsParser.RequireAHostThatAProbeCouldAnswer</c>.
+    /// On this read path <c>--repository owner/repo</c> is accepted and reports no memories, which is the
+    /// honest answer for a store that does not exist.
+    /// </remarks>
     private static string ParseRepository(string value) =>
         RepositoryIdentity.TryCanonicalize(value) is { Length: > 0 } canonical
             ? canonical
