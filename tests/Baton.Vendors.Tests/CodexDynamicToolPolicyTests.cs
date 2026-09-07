@@ -180,6 +180,76 @@ public sealed class CodexDynamicToolPolicyTests
     }
 
     /// <summary>
+    /// #1996 re-review HIGH: the locator names an INDENTED line — every line inside a class or a
+    /// function, and the shape the stacked-locator refusal tells the model to keep. The anchor is
+    /// trimmed when it is parsed, so an exact comparison against the file's own line matched nothing
+    /// here and the hunk was refused as locator-not-found: the remedy the ambiguity refusal above
+    /// advertises was inoperative for exactly the files it is needed on. Both spellings, because the
+    /// model can reproduce the indentation or drop it and neither used to work.
+    /// </summary>
+    [Theory]
+    [InlineData("@@     def handle_retry(self):")]
+    [InlineData("@@ def handle_retry(self):")]
+    public async Task A_locator_naming_an_indented_line_anchors_on_its_text_not_its_column(string locator)
+    {
+        using var fixture = new PolicyFixture(WriteShapedGrant, ["changes.md"]);
+        var target = Path.Combine(fixture.Workspace, "handlers.py");
+        const string original =
+            "class Handlers:\n    def handle_open(self):\n        log.debug(msg)\n"
+            + "        return None\n\n    def handle_retry(self):\n        log.debug(msg)\n"
+            + "        return None\n";
+        File.WriteAllText(target, original);
+
+        var result = await fixture.ApplyPatchAsync(
+            $"*** Begin Patch\n*** Update File: handlers.py\n{locator}\n"
+            + "         log.debug(msg)\n-        return None\n+        return Retry()\n*** End Patch");
+
+        Assert.True(result.Success, result.Text);
+        // The SECOND method, which is the assertion that discriminates: without the locator this same
+        // hunk matches both methods and is refused as ambiguous, and an anchor that matched the first
+        // method's line would refuse identically.
+        Assert.Equal(
+            "class Handlers:\n    def handle_open(self):\n        log.debug(msg)\n"
+            + "        return None\n\n    def handle_retry(self):\n        log.debug(msg)\n"
+            + "        return Retry()\n",
+            File.ReadAllText(target));
+    }
+
+    /// <summary>
+    /// #1996 re-review LOW: two headers spelling ONE file are refused even when only a resolver can
+    /// tell they are one — the parser compares path text, so './edit.txt' and (on Windows) 'EDIT.txt'
+    /// get past it. Planned from disk and written in order, the second header's write silently
+    /// discards the first's hunks and the result still reports success, which is HIGH 1's failure
+    /// reached through an alias. The assertion is on the file's bytes: a check that ran inside the
+    /// write loop instead would refuse with the first write already on disk.
+    /// </summary>
+    [Theory]
+    [InlineData("./edit.txt", false)]
+    [InlineData("EDIT.txt", true)]
+    public async Task Two_headers_resolving_to_one_file_are_refused_before_anything_is_written(
+        string alias, bool windowsOnly)
+    {
+        if (windowsOnly && !OperatingSystem.IsWindows())
+        {
+            Assert.Skip("path case is only an alias where the platform comparer is case-insensitive");
+            return;
+        }
+        using var fixture = new PolicyFixture(WriteShapedGrant, ["changes.md"]);
+        var target = Path.Combine(fixture.Workspace, "edit.txt");
+        File.WriteAllText(target, "one\ntwo\n");
+
+        var result = await fixture.ApplyPatchAsync(
+            $"*** Begin Patch\n*** Update File: edit.txt\n one\n-two\n+TWO\n"
+            + $"*** Update File: {alias}\n-one\n+ONE\n two\n*** End Patch");
+
+        Assert.False(result.Success);
+        // Not a grant decision — the same polarity the parser's own duplicate-path rows are pinned to.
+        Assert.DoesNotContain(GrantRefusal.Marker, result.Text);
+        Assert.Contains("same file", result.Text, StringComparison.Ordinal);
+        Assert.Equal("one\ntwo\n", File.ReadAllText(target));
+    }
+
+    /// <summary>
     /// #1996 re-review HIGH: a path with two headers is refused whole and neither header's hunks are
     /// applied. Cross-kind on purpose — a duplicate check keyed on (kind, path) passes an Update+Update
     /// row while still letting a Delete and an Update on one path run in sequence, which deletes the

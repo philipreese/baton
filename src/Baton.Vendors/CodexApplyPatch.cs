@@ -168,6 +168,17 @@ internal static class CodexApplyPatch
     /// locator line if it names one further down. Searching for the locator from <paramref name="cursor"/>
     /// rather than from the top is what keeps the floor monotonic — a floor behind the cursor would
     /// re-emit lines already written.
+    /// <para>
+    /// #1996 re-review LOW: forward-only is <b>Baton's</b> choice, not a measured copy of codex's own
+    /// applier. Whether that applier searches backwards, tolerates whitespace, or retries fuzzily is
+    /// unmeasured here — <c>docs/vendor-codex-probe-2026-09-04.md</c>'s "Known unknowns" records a
+    /// live workspace-write role as never exercised on that host, and no live CLI was run for this
+    /// change. Baton picks forward-only because it makes the ambiguity refusal deterministic: the
+    /// floor only ever moves forward, so a hunk's match count depends on the patch alone rather than
+    /// on where an earlier chunk happened to land, and the same envelope against the same file always
+    /// gets the same answer. Any divergence from the vendor costs a refusal the model recovers from,
+    /// never a misplaced write.
+    /// </para>
     /// </summary>
     private static int FloorFor(
         IReadOnlyList<string> lines, CodexPatchChunk chunk, CodexPatchOperation operation, int cursor)
@@ -176,13 +187,13 @@ internal static class CodexApplyPatch
         {
             return cursor;
         }
-        var at = IndexOfLine(lines, anchor, cursor);
+        var at = IndexOfAnchor(lines, anchor, cursor);
         if (at < 0)
         {
             throw new ArgumentException(
                 $"Patch locator not found in '{operation.Path}': no line after the previous hunk "
-                + $"matches '{anchor}'. A '{SectionMarker}' line must reproduce a line of the file "
-                + "exactly, including its indentation.");
+                + $"matches '{anchor}'. A '{SectionMarker}' line must reproduce the text of a line of "
+                + "the file; its indentation is ignored, but nothing else is.");
         }
         return at;
     }
@@ -249,10 +260,11 @@ internal static class CodexApplyPatch
     /// -success failure this parser exists to refuse, reached without a single ambiguous hunk.
     /// <para>
     /// Keyed on the path text with separators unified, because codex's measured habit is a Windows
-    /// backslash (#1920). Nothing here resolves a path, so <c>./a.txt</c> against <c>a.txt</c> is
-    /// two keys and passes; that aliasing is not what a model writing two <c>*** Update File:</c>
-    /// blocks produces, and closing it would need the policy's resolver, which lives on the other side
-    /// of this class's boundary.
+    /// backslash (#1920). Nothing here resolves a path, so every alias that only a resolver can see
+    /// gets past this check and is refused one layer out instead — <c>CodexDynamicToolPolicy.ApplyPatch</c>'s
+    /// plan loop, which keys the resolved path before any byte is written and states which aliases
+    /// those are (#1996 re-review LOW). Two checks rather than one because this one names both header
+    /// LINES, which the parser knows and the policy does not.
     /// </para>
     /// </summary>
     private static void EnsureOnePathOneHeader(List<CodexPatchOperation> operations)
@@ -397,6 +409,27 @@ internal static class CodexApplyPatch
         return matches;
     }
 
+    /// <summary>
+    /// Where a <c>@@</c> locator's line is, compared trimmed on BOTH sides — the anchor is trimmed
+    /// when it is parsed (<see cref="AppendUpdateLine"/>) while the file's line keeps its indentation,
+    /// so an Ordinal comparison made a locator naming any line inside a class or a function match
+    /// nothing at all, whatever spelling the model used (#1996 re-review HIGH). Context matching stays
+    /// exact: widening only the anchor cannot misplace a hunk, because the anchor moves a search FLOOR
+    /// and <see cref="MatchPositions"/>'s one-place rule still decides where the hunk lands. A looser
+    /// anchor therefore changes which refusal is raised, never which offset is written.
+    /// </summary>
+    private static int IndexOfAnchor(IReadOnlyList<string> lines, string anchor, int from)
+    {
+        for (var index = from; index < lines.Count; index++)
+        {
+            if (string.Equals(lines[index].Trim(), anchor, StringComparison.Ordinal))
+            {
+                return index;
+            }
+        }
+        return -1;
+    }
+
     private static int IndexOfLine(IReadOnlyList<string> lines, string line, int from)
     {
         for (var index = from; index < lines.Count; index++)
@@ -467,6 +500,9 @@ internal sealed class CodexPatchChunk
     /// The text after this hunk's <c>@@</c> marker, or null for a bare <c>@@</c> or no marker at all.
     /// A line of the file at or above the hunk: the context search starts AT that line rather than at
     /// the previous hunk's end, so a hunk whose own context begins with that line still places there.
+    /// Stored trimmed and matched trimmed against the file's line, so a locator naming an indented
+    /// line anchors on its text rather than on its column — see <c>CodexApplyPatch.IndexOfAnchor</c>
+    /// for why widening the anchor alone cannot misplace a hunk.
     /// </summary>
     public string? Anchor { get; init; }
 

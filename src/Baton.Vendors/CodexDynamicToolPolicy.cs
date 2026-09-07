@@ -109,8 +109,9 @@ public sealed class CodexDynamicToolPolicy
         + "' ' context, '-' removed and '+' added lines. Context must match the file exactly — there "
         + "is no fuzzy matching — and must match in exactly ONE place: a hunk whose context fits twice "
         + "is refused rather than placed at the first fit. Narrow it with more context lines, or with "
-        + "a '@@ <line>' locator above the hunk that reproduces exactly one earlier line of the file — "
-        + "the search then starts there. One '@@' line per hunk, every hunk needs at least one context "
+        + "a '@@ <line>' locator above the hunk that reproduces one earlier line of the file, whose "
+        + "indentation is ignored — the search then starts there. One '@@' line per hunk, every hunk "
+        + "needs at least one context "
         + "or removed line, one header per path (merge a file's hunks into a single block), and "
         + "'*** Move to:' is not supported. Baton checks every path and places every hunk before it "
         + "writes anything, so a refused path or an unplaceable hunk changes no file. To replace a "
@@ -439,11 +440,26 @@ public sealed class CodexDynamicToolPolicy
 
         var operations = CodexApplyPatch.Parse(input);
         List<(CodexPatchOperationKind Kind, string Path, string Content)> planned = [];
+        // #1996 re-review LOW: the parser's one-path-one-header check sees path TEXT, so the aliases
+        // only a resolver can see get past it — './a.txt' against 'a.txt', and on Windows 'A.txt'
+        // against 'a.txt'. Each operation is planned from what is on DISK, so two headers reaching one
+        // file write it twice and the last one silently discards the first's hunks while the result
+        // still says Allowed. Keyed on the resolved path with the same platform-aware comparer the
+        // rest of this class uses, and here in the plan loop rather than the write loop, so it refuses
+        // before any byte is written.
+        Dictionary<string, string> resolved = new(PathComparer);
         foreach (var operation in operations)
         {
             // ResolveWithinWorkspace, not a resolver of this method's own: the refusal a path outside
             // the workspace gets here is character-for-character the one baton_write_text gives.
             var path = ResolveWithinWorkspace(operation.Path);
+            if (resolved.TryGetValue(path, out var first))
+            {
+                return CodexDynamicToolResult.Failed(
+                    $"'{operation.Path}' and '{first}' are the same file, so this patch has two "
+                    + "headers for one path; merge the hunks into one Update File block.");
+            }
+            resolved.Add(path, operation.Path);
             switch (operation.Kind)
             {
                 case CodexPatchOperationKind.Add:
