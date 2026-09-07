@@ -1,6 +1,7 @@
 using System.Linq;
 using Baton.Vendors;
 using Baton.Domain;
+using Baton.Status;
 
 namespace Baton.Vendors.Tests;
 
@@ -548,17 +549,64 @@ public class RoleDispatchTests
 
     /// <summary>
     /// #1927: every rung silent yields no stamp at all — see <c>AdapterDefaultModels</c> for why claude
-    /// carries no entry. <c>orchestrate</c> is the shipped role whose tier names no model, so this
-    /// exercises the case through the real catalog rather than a fabricated role.
+    /// carries no entry. This used to run against the shipped <c>orchestrate</c> role, whose tier named
+    /// no model; #1863's ruling (2026-09-06) pinned <c>orchestrator</c> to claude opus/high explicitly,
+    /// so no shipped tier is silent any more and the case needs a fabricated one. The behaviour under
+    /// test is unchanged — an operator's own <c>worker-tiers.json</c> may still omit the model, which is
+    /// exactly what the override below stands in for.
     /// </summary>
     [Fact]
     public void An_unmeasured_adapter_default_leaves_the_resolved_model_absent()
     {
+        var dir = Path.Combine(Path.GetTempPath(), $"rdt-{Guid.NewGuid():N}");
+        Directory.CreateDirectory(dir);
+        try
+        {
+            var tiers = Path.Combine(dir, "tiers.json");
+            var roles = Path.Combine(dir, "roles.json");
+            // adapter claude, model null: AdapterDefaultModels carries no claude entry, so every rung
+            // is silent and nothing may be stamped.
+            File.WriteAllText(tiers, """{"silent":{"adapter":"claude","model":null,"effort":null}}""");
+            File.WriteAllText(
+                roles,
+                """
+                [{"id":"silent-role","tier":"silent","read_files":true,"write_files":false,
+                  "run_shell_commands":false,"network_access":false,"timeout_minutes":10,
+                  "verdict_schema":false,"purpose":"p",
+                  "outputs":[{"name":"out.md","schema":"none","instruction":"Write to out.md."}]}]
+                """);
+
+            using var env = BatonEnvironmentSnapshot.BeginScope(BatonEnvironmentSnapshot.Blank with
+            {
+                WorkerTiersPathOverride = tiers,
+                WorkerRolesPathOverride = roles,
+            });
+
+            var binding = RoleDispatch.ToBinding(WorkerRoleCatalog.For("silent-role"), "spec");
+
+            Assert.Equal("claude", binding.Adapter);
+            Assert.Null(binding.ModelResolved);
+            Assert.Null(binding.ModelSource);
+        }
+        finally
+        {
+            DirectoryCleanup.DeleteRecursively(dir);
+        }
+    }
+
+    /// <summary>
+    /// The polarity arm for the test above, and the regression pin for #1863's own change: the shipped
+    /// <c>orchestrate</c> role now resolves a model, so "no stamp" can no longer be produced by a tier
+    /// that simply forgot to pin one.
+    /// </summary>
+    [Fact]
+    public void The_shipped_orchestrate_role_resolves_the_explicitly_pinned_orchestrator_model()
+    {
         var binding = RoleDispatch.ToBinding(WorkerRoleCatalog.For("orchestrate"), "spec");
 
         Assert.Equal("claude", binding.Adapter);
-        Assert.Null(binding.ModelResolved);
-        Assert.Null(binding.ModelSource);
+        Assert.Equal("opus", binding.ModelResolved);
+        Assert.Equal("high", binding.EffortResolved);
     }
 }
 
