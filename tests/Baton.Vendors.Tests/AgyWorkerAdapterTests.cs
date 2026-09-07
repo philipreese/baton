@@ -2418,4 +2418,118 @@ public class AgyWorkerAdapterTests
         Assert.Equal("architect", ex.WorkerName);
         Assert.Contains("plan.md", ex.UnwritableOutputs);
     }
+
+    // ---- #1987: the dispatched workspace is readable on every role ----
+
+    /// <summary>
+    /// The measured failure (#1987): an agy <c>advise</c> lane dispatched with
+    /// <c>--workspace &lt;repo&gt;</c> runs in an isolated worktree under the room, so the operator's
+    /// repository reaches the invocation as <see cref="WorkerInvocation.WorktreeSourceRepository"/>
+    /// and nothing added it to the argv — every <c>view_file</c> on an absolute path under it was
+    /// auto-denied and the lane exited 0 with no output.
+    /// </summary>
+    [Fact]
+    public void An_advise_shaped_worktree_dispatch_binds_the_dispatched_workspace_as_a_readable_dir()
+    {
+        var sourceRepo = Path.Combine(Path.GetTempPath(), $"baton-1987-advise-src-{Guid.NewGuid():N}");
+        var worktreePath = Path.Combine(Path.GetTempPath(), $"baton-1987-advise-tree-{Guid.NewGuid():N}");
+        // The ceiling is keyed on the source repository for a worktree dispatch (ProjectCeilingGate),
+        // so trusting the worktree path instead would refuse before the argv is ever built.
+        ProjectCeilingStore.Set(sourceRepo, ProjectCeiling.Unrestricted, ProjectCeilingStore.DefaultPath);
+
+        // advise's catalog grant with RoleDispatch's agy write-widening already applied -- the exact
+        // shape the failing lane ran under (read, write inside the worktree, no shell, no network).
+        var adviseGrant = new PermissionGrant(
+            ReadFiles: true, WriteFiles: true, RunShellCommands: false, NetworkAccess: false);
+
+        var target = new AgyWorkerAdapter().Resolve(
+            new WorkerInvocation(
+                "Analyse the repository.", PermissionGrant: adviseGrant,
+                WorkingDirectory: worktreePath, WorktreeSourceRepository: sourceRepo),
+            ArchitectContract);
+
+        Assert.Equal("accept-edits", ArgValue(target, "--mode"));
+        Assert.Contains(sourceRepo, AddDirValues(target));
+
+        // Still bound to its own worktree -- the dispatched workspace is added alongside it, not
+        // instead of it.
+        Assert.Contains(worktreePath, AddDirValues(target));
+    }
+
+    /// <summary>
+    /// The same claim on <c>review</c>, whose grant resolves to <c>--dangerously-skip-permissions</c>
+    /// rather than <c>--mode accept-edits</c> — a different branch of <see cref="AgyWorkerAdapter.Resolve"/>,
+    /// so asserting it on <c>advise</c> alone would leave the role the issue's population names second
+    /// unmeasured (gate <c>claim-scope</c>).
+    /// </summary>
+    [Fact]
+    public void A_review_shaped_worktree_dispatch_binds_the_dispatched_workspace_as_a_readable_dir()
+    {
+        var sourceRepo = Path.Combine(Path.GetTempPath(), $"baton-1987-review-src-{Guid.NewGuid():N}");
+        var worktreePath = Path.Combine(Path.GetTempPath(), $"baton-1987-review-tree-{Guid.NewGuid():N}");
+        ProjectCeilingStore.Set(sourceRepo, ProjectCeiling.Unrestricted, ProjectCeilingStore.DefaultPath);
+
+        var reviewGrant = new PermissionGrant(
+            ReadFiles: true, WriteFiles: true, RunShellCommands: true,
+            ShellCommandPatterns: ["git diff"], NetworkAccess: false);
+
+        var adapter = new AgyWorkerAdapter(new FakeHookLivenessProbe(new AgyHookLivenessResult(true, "deny")));
+        var target = adapter.Resolve(
+            new WorkerInvocation(
+                "Review the diff.", PermissionGrant: reviewGrant, StreamJson: true,
+                WorkingDirectory: worktreePath, WorktreeSourceRepository: sourceRepo),
+            ArchitectContract);
+
+        Assert.Contains("--dangerously-skip-permissions", target.Args);
+        Assert.Contains(sourceRepo, AddDirValues(target));
+        Assert.Contains(worktreePath, AddDirValues(target));
+    }
+
+    /// <summary>
+    /// The control arm, and it discriminates: an <c>implement</c>-shaped dispatch runs in the operator's
+    /// repository directly (no worktree, so <see cref="WorkerInvocation.WorktreeSourceRepository"/> is
+    /// null) and its <c>--add-dir</c> set must be exactly the three it already carried — a change that
+    /// added the workspace a second time, or added one for a dispatch that declared none, fails here.
+    /// </summary>
+    [Fact]
+    public void An_implement_shaped_dispatch_without_a_worktree_keeps_its_existing_add_dir_set()
+    {
+        var project = Path.Combine(Path.GetTempPath(), $"baton-1987-implement-{Guid.NewGuid():N}");
+        ProjectCeilingStore.Set(project, ProjectCeiling.Unrestricted, ProjectCeilingStore.DefaultPath);
+
+        var implementGrant = new PermissionGrant(
+            ReadFiles: true, WriteFiles: true, RunShellCommands: true, NetworkAccess: true);
+
+        var target = new AgyWorkerAdapter().Resolve(
+            new WorkerInvocation(
+                "Implement the change.", PermissionGrant: implementGrant, WorkingDirectory: project),
+            ArchitectContract);
+
+        var addDirValues = AddDirValues(target);
+        Assert.Equal(3, addDirValues.Count);
+        Assert.Equal("%BATON_ARTIFACTS_ROOT%", addDirValues[0]);
+        Assert.EndsWith(AgyWorkerAdapter.AgyWorkspaceDirectoryName, addDirValues[1], StringComparison.Ordinal);
+        Assert.Equal(project, addDirValues[2]);
+    }
+
+    /// <summary>
+    /// The disclosure half of #1987: <c>DispatchCommand</c>'s pre-run workspace line asks the bound
+    /// adapter whether the dispatched workspace is readable rather than naming vendors, so this
+    /// vendor's answer has to match the argv the three facts above pin. The polarity partner is
+    /// <see cref="ClaudeWorkerAdapter"/>, which binds no such directory and must answer false —
+    /// without it a member hardcoded to <see langword="true"/> on the interface would pass.
+    /// </summary>
+    [Fact]
+    public void Agy_answers_that_it_binds_the_dispatched_workspace_readable_and_claude_does_not()
+    {
+        Assert.True(((IWorkerAdapter)new AgyWorkerAdapter()).BindsDispatchedWorkspaceReadable);
+        Assert.False(((IWorkerAdapter)new ClaudeWorkerAdapter()).BindsDispatchedWorkspaceReadable);
+    }
+
+    /// <summary>The values of every <c>--add-dir</c> pair in the resolved argv, in argv order.</summary>
+    private static List<string> AddDirValues(CoreDispatchTarget target) => target.Args
+        .Select((arg, i) => (arg, i))
+        .Where(pair => pair.arg == "--add-dir")
+        .Select(pair => target.Args[pair.i + 1])
+        .ToList();
 }

@@ -20,12 +20,23 @@ namespace Baton.Cli.Tests.TestSupport;
 /// conforming document, not <c>x</c>; the test pre-writes that document with a real file API and this
 /// copies it — no JSON is assembled through a shell echo. Outputs not in the map still get <c>x</c>.
 /// </param>
+/// <param name="bindsDispatchedWorkspaceReadable">
+/// #1987: what this fake answers for <see cref="IWorkerAdapter.BindsDispatchedWorkspaceReadable"/> —
+/// the question <c>DispatchCommand</c>'s pre-run workspace disclosure asks the bound adapter. Both
+/// answers are dispatchable here (the worktree itself is still granted by the real registry's agy
+/// entry), which is what makes the disclosure's two arms testable at all: <c>agy</c> is the only
+/// vendor adapter ever handed an auto-provisioned worktree, so the false arm has no vendor tag of
+/// its own to be dispatched under.
+/// </param>
 internal sealed class ContractOutputWorkerAdapter(
     bool satisfyOutputs,
     IReadOnlyDictionary<string, string>? outputFixtures = null,
     IReadOnlyList<WorkerCapabilityItem>? capabilities = null,
-    int failureExitCode = 0) : IWorkerAdapter
+    int failureExitCode = 0,
+    bool bindsDispatchedWorkspaceReadable = false) : IWorkerAdapter
 {
+    public bool BindsDispatchedWorkspaceReadable => bindsDispatchedWorkspaceReadable;
+
     /// <summary>The directory <see cref="DiscoverCapabilitiesAsync"/> was last called with — lets a test pin which directory <c>DispatchCommand</c> actually scanned (#1512 H1).</summary>
     public string? LastDiscoverCapabilitiesWorkingDirectory { get; private set; }
 

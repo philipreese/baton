@@ -40,7 +40,8 @@ see it is alive; drop it and you see nothing until the run settles.
 
 `baton dispatch` is the intended front door and needs no JSON from you. Read §6 before choosing it —
 an audited role/adapter pair now auto-provisions its own worktree rather than refusing, which is a
-real consequence (uncommitted changes become invisible to the worker), not a formality. `baton run`
+real consequence for what the worker runs against, not a formality (§6 has the per-vendor detail and
+the line dispatch prints). `baton run`
 remains the path that works uniformly, including for a composed template's audited phase, which §6
 still refuses at bind time.
 
@@ -629,7 +630,7 @@ suppress it. Today that is exactly the write-withholding roles on `agy`:
 
 | Role | Writes | `--adapter claude` | `--adapter agy` |
 |---|---|---|---|
-| `advise` | `advice.md` | works | works |
+| `advise` | `advice.md` | works | works — auto-provisioned worktree |
 | `implement` | `changes.md` | works | works |
 | `janitor` | `janitor.md`, `branch.diff` | works | works |
 | `review` | `report.md`, `verdict.json` | works | works — auto-provisioned worktree |
@@ -645,26 +646,30 @@ conductor queue: a `--lifecycle` item whose verdict names no decision stops for 
 of taking a round. `spec/baton.md` §13 is the ruling; the role's own prompt names the field and gives
 it in its example.
 
-**`advise`'s "works" on `agy` is not the same shape as `review`'s.** Unlike the other read-shaped
-roles, `advise` keeps an explicit `write_files: true` grant (pinned reason in `WorkerRoles.json`'s
-`advise` entry), so it never enters the `AuditedNotEnforced`/auto-provisioned-worktree path this
-table otherwise describes: on `agy` its write stays `Enforced` against your live `--workspace`
-directory, not a disposable worktree. See `docs/dispatch.md`'s printed-grant-line section for what a
-dispatch actually discloses before it runs.
+**`advise` is read-shaped like `review` — what differs is the column you land in by default.**
+`advise` declares `write_files: false` (`WorkerRoles.json`'s `advise` entry, whose purpose text
+carries the history), so `--adapter agy` puts it on exactly the
+`AuditedNotEnforced`/auto-provisioned-worktree path this table describes, same as `review`. What is
+different is the tier: `advise`'s tier no longer resolves to `agy` (#1861), so an unmodified `baton
+dispatch advise` — no `--adapter` — runs on a vendor whose withheld writes reach the outbox, which
+keeps the grant `Enforced` against your live `--workspace` directory with no worktree at all. See
+`docs/dispatch.md`'s printed-grant-line section for what a dispatch actually discloses before it runs.
 
 **"Auto-provisioned worktree" is a real consequence, not a formality.** The worker is handed a fresh
 worktree of `--workspace` (or the cwd) at `HEAD` — never the caller's own directory, whether or not
 that directory already happens to be a worktree itself, because the post-run audit's whole premise is
-that the tree started clean *because this run made it*. Concretely: **uncommitted and staged changes
-in the workspace are invisible to the worker.** Dispatch discloses this before the run starts —
+that the tree started clean *because this run made it*. Concretely: the tree your worker actually runs
+in holds `HEAD` and nothing else, so **whatever you have edited but not committed is not in it.**
 
-```
-Workspace: worktree of <repo> at HEAD (<short-sha>) — uncommitted changes are not visible to the worker
-```
-
-— and the tree's eventual teardown follows the same kept-vs-removed rule as any other provisioned
-worktree. See `docs/dispatch.md`'s `--workspace` row and its "auto-provisioned worktree" section for
-what that rule is and where the disclosure comes from.
+Whether the worker can nonetheless *read* your edits is a separate question with a per-vendor answer,
+and dispatch prints that answer as a trailing clause on its opening `Workspace:` line. On `--adapter
+agy` the clause names your `--workspace` directory as bound too — #1987 puts it in the argv — so a
+brief naming an absolute path under it resolves against your live checkout, dirty files and all. Every
+other adapter gets the opposite clause. Take it from the line the run printed rather than from either
+assumption: it is generated from the bound adapter's own answer, never a vendor list in the message.
+`docs/dispatch.md`'s "auto-provisioned worktree" section prints both clauses verbatim, and its
+`--workspace` row plus that same section carry the tree's kept-vs-removed teardown rule, which is the
+one every provisioned worktree follows.
 
 This still only reaches the composed **role** dispatch above — a template phase's audited grant (`baton
 dispatch <template>`) is unchanged and refuses at bind time exactly as it always has;

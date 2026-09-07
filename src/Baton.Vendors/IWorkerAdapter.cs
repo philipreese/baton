@@ -144,6 +144,31 @@ public interface IWorkerAdapter : Baton.Outcomes.IFailureClassifier, Baton.Statu
     bool WithheldWritesReachTheOutbox => false;
 
     /// <summary>
+    /// True when this adapter binds the workspace a lane was <em>dispatched against</em>
+    /// (<see cref="WorkerInvocation.WorktreeSourceRepository"/>) readable to the worker, so a
+    /// worktree-provisioned lane can still read that directory by absolute path (#1987) — its
+    /// uncommitted and staged content included, since the lane's own worktree is only that
+    /// repository at <c>HEAD</c>.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// Asked once, by <c>DispatchCommand</c>'s pre-run workspace disclosure, so the sentence an
+    /// operator reads before the run is true per adapter rather than per hardcoded vendor list —
+    /// the disclosure is the only consumer, and each adapter answers in its own vendor's terms
+    /// (Adapter Isolation). Each answering adapter carries its own mechanism and the ruling behind
+    /// it; see <c>AgyWorkerAdapter</c>'s override for the one that answers
+    /// <see langword="true"/> today.
+    /// </para>
+    /// <para>
+    /// <b>Defaults to false.</b> An adapter that binds nothing but the directory the worker runs in
+    /// is the ordinary shape, and the fail-direction is deliberate: a wrong "no" only under-promises
+    /// what a lane can see, while a wrong "yes" would tell an operator their uncommitted work was in
+    /// scope for a worker that cannot in fact read it.
+    /// </para>
+    /// </remarks>
+    bool BindsDispatchedWorkspaceReadable => false;
+
+    /// <summary>
     /// True when a path component of <paramref name="roomDirectoryPath"/> is one this adapter's own
     /// vendor CLI treats as sensitive and refuses to write under, regardless of the grant AER hands
     /// it — in which case <paramref name="offendingComponent"/> names the literal matching component.

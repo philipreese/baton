@@ -150,14 +150,29 @@ public static class DispatchCommand
         }
 
         // R1 (#1354/#1380): disclose the consequence up front, before the run starts, whenever
-        // RoleDispatch.ToBinding declared a fresh worktree for an audited role — the worker then never
-        // sees uncommitted or staged changes in `workspace`, only what HEAD already had (finding 5).
+        // RoleDispatch.ToBinding declared a fresh worktree for an audited role — the worker runs in
+        // that tree, so it sees `workspace` at HEAD, not the uncommitted or staged changes in it
+        // (finding 5).
+        //
+        // #1987: except on an adapter that ALSO binds the dispatched workspace itself readable, which
+        // makes the second half of that sentence false for the exact population this line prints for.
+        // Asked of the adapter this dispatch will actually run (IWorkerAdapter.
+        // BindsDispatchedWorkspaceReadable, answered once per adapter) rather than restated as a
+        // vendor list here, so the sentence cannot drift from the argv that produces it. `Any` over
+        // the worktree-declaring bindings is enough: a role dispatch is single-binding, and a composed
+        // template never auto-provisions (WorkflowTemplateComposer's autoProvisionWorktree: false).
         string? workspaceFact = null;
-        if (bindings.Values.Any(b => b.Worktree is not null))
+        var worktreeBindings = bindings.Values.Where(b => b.Worktree is not null).ToList();
+        if (worktreeBindings.Count > 0)
         {
             var headSha = await WorkspaceHead.CaptureAsync(workspace, cancellationToken).ConfigureAwait(false);
             var shortSha = headSha.Length > 8 ? headSha[..8] : headSha;
-            workspaceFact = $"Workspace: worktree of {workspace} at HEAD ({shortSha}) — uncommitted changes are not visible to the worker";
+            var dispatchedWorkspaceReadable = worktreeBindings.Any(
+                b => adapters.TryGetValue(b.Adapter, out var boundAdapter) && boundAdapter.BindsDispatchedWorkspaceReadable);
+            var visibility = dispatchedWorkspaceReadable
+                ? $"{workspace} is bound readable too, so its uncommitted changes are readable by absolute path"
+                : "uncommitted changes are not visible to the worker";
+            workspaceFact = $"Workspace: worktree of {workspace} at HEAD ({shortSha}) — {visibility}";
         }
 
         // #1442: warn-don't-refuse above the caution threshold — rationale in spec/baton.md §2.
