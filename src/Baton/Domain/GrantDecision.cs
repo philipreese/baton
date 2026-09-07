@@ -17,12 +17,12 @@ namespace Baton.Domain;
 /// <see cref="EventType"/> rather than an inference from prose.
 /// </para>
 /// <para>
-/// <b>Where the line lands is per enforcement point, and there are three</b> (spec/baton.md §9, "Where
-/// a tool rule is enforced"): the codex broker writes it into the room's captured stream beside its own
-/// <c>item.completed</c>, because it IS that stream's writer; the two <c>PreToolUse</c> hooks are
-/// subprocesses of the vendor CLI that never touch that file, so they append the same line to
-/// <see cref="Baton.Dispatch.GrantDecisionLog"/>'s per-execution file. One schema — this record's
-/// <see cref="ToJsonNode"/> — and two sinks, never two schemas.
+/// <b>Where the line lands follows the enforcement point that took the decision</b>, of which
+/// spec/baton.md §9 names three. A broker decision goes into the room's captured stream beside the
+/// <c>item.completed</c> for the same call, since the broker is that stream's own writer; a
+/// <c>PreToolUse</c> hook is a subprocess of the vendor CLI that never touches that file, so it
+/// appends to <see cref="Baton.Dispatch.GrantDecisionLog"/>'s per-execution file instead. One
+/// schema — this record's <see cref="ToJsonNode"/> — and two sinks, never two schemas.
 /// </para>
 /// </summary>
 /// <param name="Vendor">

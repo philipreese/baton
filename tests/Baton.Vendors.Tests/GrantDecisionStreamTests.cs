@@ -5,14 +5,15 @@ using Baton.Tests.Shared;
 namespace Baton.Vendors.Tests;
 
 /// <summary>
-/// #2009, the codex enforcement point (spec/baton.md §9's first of three): a grant decision the broker
+/// #2009, the codex enforcement point (first of the three spec/baton.md §9 names): a grant decision the broker
 /// takes is one structured line in the room's captured stream, not a sentence a later reader has to
 /// find inside tool output.
 /// <para>
 /// Driven from the app-server transcript rather than from <see cref="CodexDynamicToolPolicy"/> alone,
 /// which is the instrument the claim needs: the policy returning a refusal proves nothing about what
 /// the room's <c>.stdout.log</c> ends up holding, and "the rule shipped in a class no caller reaches"
-/// is exactly the half-shipped shape §9 records against <c>BackgroundingShapeDetector</c>.
+/// is exactly the half-shipped shape spec/baton.md §9 records against
+/// <c>BackgroundingShapeDetector</c>.
 /// </para>
 /// </summary>
 public sealed class GrantDecisionStreamTests
