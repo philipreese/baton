@@ -1,4 +1,5 @@
 using System.Text.Json;
+using Baton.Dispatch;
 using Baton.Domain;
 
 namespace Baton.Cli;
@@ -132,7 +133,17 @@ public static class AgyHookCheckCommand
     /// to avoid. <c>AgyHookCheckCommandTests</c> asserts the two agree, so the restatement cannot drift.
     /// </remarks>
     private const string FallbackDenyJson =
-        """{"decision":"deny","reason":"[baton:grant-refused] AER: the permission gate failed internally and denied this call rather than allowing it unchecked."}""";
+        "{\"decision\":\"deny\",\"reason\":\"" + FallbackDenyReason + "\"}";
+
+    /// <summary>
+    /// The sentence inside <see cref="FallbackDenyJson"/>, named separately (#2009) so the grant line
+    /// this path records carries the same reason as the verdict agy reads. Still costs the handler
+    /// nothing: both are <see langword="const"/>, so the JSON above is concatenated by the compiler and
+    /// the fallback path allocates and formats exactly as little as it did before. Carries no character
+    /// JSON would have to escape, which is what makes that concatenation safe to write by hand.
+    /// </summary>
+    private const string FallbackDenyReason =
+        "[baton:grant-refused] AER: the permission gate failed internally and denied this call rather than allowing it unchecked.";
 
     /// <summary>
     /// Runs the check, writing exactly one JSON object to <paramref name="stdout"/>. Takes its
@@ -148,10 +159,14 @@ public static class AgyHookCheckCommand
         ArgumentNullException.ThrowIfNull(stdin);
         ArgumentNullException.ThrowIfNull(stdout);
 
+        // #2009: this invocation's grant line, into the room's grant log. Built here, outside the try,
+        // so the catch-all denial below is recorded like every rung's — see the claude sibling.
+        var scribe = new GrantDecisionScribe(VendorTag, outboxDirectory);
+
         try
         {
             stdout.Write(Decide(
-                stdin, deniedToolsRaw, shellPatternsRaw, outboxDirectory, workspaceDirectory,
+                scribe, stdin, deniedToolsRaw, shellPatternsRaw, outboxDirectory, workspaceDirectory,
                 deniedShellPatternsRaw, deniedShellOptionTokensRaw));
         }
         catch
@@ -169,6 +184,12 @@ public static class AgyHookCheckCommand
             // the thing most likely to rethrow and leave stdout empty -- the failure this handler
             // exists to prevent.
             stdout.Write(FallbackDenyJson);
+
+            // #2009: after the stdout write, never before it — the verdict agy reads is what this
+            // handler exists to guarantee, and GrantDecisionLog.Append swallows its own failures for
+            // exactly that reason. The reason text is the constant above rather than a fresh string,
+            // so this path still allocates nothing it did not already.
+            scribe.Deny(GrantRules.GateInternalFailure, FallbackDenyReason);
         }
         finally
         {
@@ -213,7 +234,7 @@ public static class AgyHookCheckCommand
     }
 
     private static string Decide(
-        TextReader stdin, string? deniedToolsRaw, string? shellPatternsRaw,
+        GrantDecisionScribe scribe, TextReader stdin, string? deniedToolsRaw, string? shellPatternsRaw,
         string? outboxDirectory, string? workspaceDirectory, string? deniedShellPatternsRaw,
         string? deniedShellOptionTokensRaw)
     {
@@ -229,8 +250,9 @@ public static class AgyHookCheckCommand
         {
             // Could not read the payload, so the tool name is unknowable and this cannot be judged.
             // The claude sibling allows here; this must not.
-            return DenyJson("AER: the permission gate could not read the hook payload and denied " +
-                            "this call rather than allowing it unchecked.");
+            return DenyJson(scribe, GrantRules.UnjudgeableCall,
+                "AER: the permission gate could not read the hook payload and denied " +
+                "this call rather than allowing it unchecked.");
         }
 
         var deniedList = DeniedToolList.Parse(deniedToolsRaw, VendorTag);
@@ -241,7 +263,7 @@ public static class AgyHookCheckCommand
             // exactly like one that was — the failure `agy.hook-env-inherited` is a sentinel for. On
             // this vendor there is no backstop under --dangerously-skip-permissions, so the safe
             // direction is the only defensible one.
-            return DenyJson(
+            return DenyJson(scribe, GrantRules.UnjudgeableCall,
                 deniedList.Status == DeniedToolListStatus.Absent
                     ? "AER: the permission gate did not receive its denied-tool list and denied this " +
                       "call rather than allowing it unchecked."
@@ -265,8 +287,9 @@ public static class AgyHookCheckCommand
 
         if (string.IsNullOrWhiteSpace(input))
         {
-            return DenyJson("AER: the permission gate received an empty hook payload and denied " +
-                            "this call rather than allowing it unchecked.");
+            return DenyJson(scribe, GrantRules.UnjudgeableCall,
+                "AER: the permission gate received an empty hook payload and denied " +
+                "this call rather than allowing it unchecked.");
         }
 
         string? toolName;
@@ -286,8 +309,9 @@ public static class AgyHookCheckCommand
                 !toolCall.TryGetProperty("name", out var nameProp) ||
                 nameProp.ValueKind != JsonValueKind.String)
             {
-                return DenyJson("AER: the permission gate could not find toolCall.name in the hook " +
-                                "payload and denied this call rather than allowing it unchecked.");
+                return DenyJson(scribe, GrantRules.UnjudgeableCall,
+                    "AER: the permission gate could not find toolCall.name in the hook " +
+                    "payload and denied this call rather than allowing it unchecked.");
             }
 
             toolName = nameProp.GetString();
@@ -314,19 +338,27 @@ public static class AgyHookCheckCommand
         }
         catch (JsonException)
         {
-            return DenyJson("AER: the permission gate could not parse the hook payload and denied " +
-                            "this call rather than allowing it unchecked.");
+            return DenyJson(scribe, GrantRules.UnjudgeableCall,
+                "AER: the permission gate could not parse the hook payload and denied " +
+                "this call rather than allowing it unchecked.");
         }
 
         if (string.IsNullOrEmpty(toolName))
         {
-            return DenyJson("AER: the permission gate read an empty tool name from the hook payload " +
-                            "and denied this call rather than allowing it unchecked.");
+            return DenyJson(scribe, GrantRules.UnjudgeableCall,
+                "AER: the permission gate read an empty tool name from the hook payload " +
+                "and denied this call rather than allowing it unchecked.");
         }
+
+        // #2009: what this call was, for the grant line — the same three-argument identity the claude
+        // sibling records, in agy's own spellings.
+        scribe.Tool = toolName;
+        scribe.Input = commandLine ?? writeTarget ?? readTarget;
 
         if (IsWithheld(denied, toolName))
         {
-            return DenyJson($"AER: the '{toolName}' tool is withheld by this session's permission grant.");
+            return DenyJson(scribe, GrantRules.WithheldTool,
+                $"AER: the '{toolName}' tool is withheld by this session's permission grant.");
         }
 
         if (toolName == "run_command")
@@ -343,7 +375,8 @@ public static class AgyHookCheckCommand
                     commandLine, Baton.Vendors.BackgroundingShapeDetector.NativeShell)
                 is { } backgrounding)
             {
-                return DenyJson(Baton.Vendors.BackgroundingShapeDetector.Refusal(backgrounding, null));
+                return DenyJson(scribe, GrantRules.Backgrounding,
+                    Baton.Vendors.BackgroundingShapeDetector.Refusal(backgrounding, null));
             }
 
             // #2002 review MEDIUM: the half of rule 1 a command STRING cannot show. agy backgrounds
@@ -354,7 +387,7 @@ public static class AgyHookCheckCommand
             // backgrounding switch nobody has seen yet, and it costs today's traffic nothing.
             if (extraRunCommandArgs.Count > 0)
             {
-                return DenyJson(
+                return DenyJson(scribe, GrantRules.UnjudgeableCall,
                     $"AER: the 'run_command' tool carried {FormatArgNames(extraRunCommandArgs)}. Baton's " +
                     "gate cannot tell whether an argument it has never measured makes this command run " +
                     "in the background instead of to completion, so it refuses rather than allowing it " +
@@ -369,7 +402,7 @@ public static class AgyHookCheckCommand
             // another vendor's patterns this gate cannot read. Either way, deny run_command.
             if (shellPatternList.Status != ShellPatternListStatus.Present)
             {
-                return DenyJson(
+                return DenyJson(scribe, GrantRules.UnjudgeableCall,
                     shellPatternList.Status == ShellPatternListStatus.Absent
                         ? "AER: the permission gate did not receive its shell pattern list and denied this " +
                           "run_command call rather than allowing it unchecked."
@@ -383,7 +416,7 @@ public static class AgyHookCheckCommand
             // standing "never" we cannot read.
             if (deniedShellPatternList.Status != ShellPatternListStatus.Present)
             {
-                return DenyJson(
+                return DenyJson(scribe, GrantRules.UnjudgeableCall,
                     deniedShellPatternList.Status == ShellPatternListStatus.Absent
                         ? "AER: the permission gate did not receive its denied shell pattern list and denied " +
                           "this run_command call rather than allowing it unchecked."
@@ -415,7 +448,7 @@ public static class AgyHookCheckCommand
             {
                 if (commandLine is null)
                 {
-                    return DenyJson(
+                    return DenyJson(scribe, GrantRules.UnjudgeableCall,
                         "AER: the 'run_command' tool is gated by this session's shell command patterns " +
                         "(allowed, denied, or both), but this gate could not read toolCall.args.CommandLine " +
                         "in the hook payload and denied this call rather than allowing it unchecked.");
@@ -433,7 +466,7 @@ public static class AgyHookCheckCommand
                     var alternative = shellPatternList.Patterns.Count > 0
                         ? Baton.Vendors.GrantedReadToolHint.ForAgy(tool => IsWithheld(denied, tool))
                         : null;
-                    return DenyJson(
+                    return DenyJson(scribe, GrantRules.ShellPattern,
                         $"AER: the command line '{commandLine}' is denied under this session's shell " +
                         $"grant — {result.Reason}." +
                         (alternative is null ? string.Empty : $" To proceed, {alternative}."));
@@ -449,7 +482,7 @@ public static class AgyHookCheckCommand
             var deniedOptionTokenList = ShellPatternList.Parse(deniedShellOptionTokensRaw, VendorTag);
             if (deniedOptionTokenList.Status != ShellPatternListStatus.Present)
             {
-                return DenyJson(
+                return DenyJson(scribe, GrantRules.UnjudgeableCall,
                     deniedOptionTokenList.Status == ShellPatternListStatus.Absent
                         ? "AER: the permission gate did not receive its denied option token list and denied " +
                           "this run_command call rather than allowing it unchecked."
@@ -462,7 +495,7 @@ public static class AgyHookCheckCommand
             {
                 if (commandLine is null)
                 {
-                    return DenyJson(
+                    return DenyJson(scribe, GrantRules.UnjudgeableCall,
                         "AER: the 'run_command' tool has standing denied option tokens, but this gate could " +
                         "not read toolCall.args.CommandLine in the hook payload and denied this call rather " +
                         "than allowing it unchecked.");
@@ -471,7 +504,7 @@ public static class AgyHookCheckCommand
                 if (Baton.Vendors.ShellCommandPatternMatcher.IsDeniedByOptionToken(
                         commandLine, deniedOptionTokenList.Patterns))
                 {
-                    return DenyJson(
+                    return DenyJson(scribe, GrantRules.DeniedOptionToken,
                         $"AER: the command line '{commandLine}' carries an option this session's grant " +
                         "denies outright (a standing option-token 'never', matched anywhere on the line " +
                         "rather than at its start) and was refused.");
@@ -485,7 +518,7 @@ public static class AgyHookCheckCommand
             {
                 if (commandLine is null)
                 {
-                    return DenyJson(
+                    return DenyJson(scribe, GrantRules.UnjudgeableCall,
                         "AER: the permission gate could not read toolCall.args.CommandLine in the hook " +
                         "payload and denied this call rather than allowing it unchecked.");
                 }
@@ -493,7 +526,8 @@ public static class AgyHookCheckCommand
                 if (Baton.Vendors.OwnPullRequestOnlyRule.RefusalForOwnBranchOnly(commandLine)
                     is { } siblingPullRequestRefusal)
                 {
-                    return DenyJson($"AER: {siblingPullRequestRefusal}");
+                    return DenyJson(scribe, GrantRules.OwnPullRequestOnly,
+                        $"AER: {siblingPullRequestRefusal}");
                 }
             }
 
@@ -501,7 +535,7 @@ public static class AgyHookCheckCommand
             if (Baton.Vendors.RepeatedToolCallHook.JudgeCommand(outboxDirectory, commandLine)
                 is { } repeatedCommand)
             {
-                return DenyJson(repeatedCommand);
+                return DenyJson(scribe, GrantRules.Repeat, repeatedCommand);
             }
         }
 
@@ -511,7 +545,7 @@ public static class AgyHookCheckCommand
         if (toolName == ReadToolName &&
             Baton.Vendors.RepeatedToolCallHook.JudgeRead(outboxDirectory, readTarget) is { } repeatedRead)
         {
-            return DenyJson(repeatedRead);
+            return DenyJson(scribe, GrantRules.Repeat, repeatedRead);
         }
 
         // #679, as on claude -- see HookCheckCommand's equivalent. It matters more here: nothing agy
@@ -524,7 +558,7 @@ public static class AgyHookCheckCommand
                 // #2002 review HIGH, hook half — see the claude sibling and
                 // RepeatedToolCallHook.NoteWrite for the rule.
                 Baton.Vendors.RepeatedToolCallHook.NoteWrite(outboxDirectory, writeTarget);
-                return AllowJson;
+                return Allow(scribe);
             }
 
             // Two DIFFERENT failures, and reporting them as one is why #708 needed a dedicated
@@ -539,20 +573,20 @@ public static class AgyHookCheckCommand
             // instead of presenting as a mysterious always-denied capability.
             if (writeTarget is null)
             {
-                return DenyJson(
+                return DenyJson(scribe, GrantRules.WriteOutsideBounds,
                     $"AER: the '{toolName}' tool is granted, but this gate could not read the path it " +
                     "writes to, so it cannot confirm the write lands in this worker's workspace or " +
                     $"outbox. Tried {FormatFields(toolName)}; the call carried {argKeys}. " +
                     "If one of those names the target, add it to AgyHookCheckCommand.WriteTargetFields.");
             }
 
-            return DenyJson(
+            return DenyJson(scribe, GrantRules.WriteOutsideBounds,
                 $"AER: the '{toolName}' tool is granted, but its target ({writeTarget}) resolves " +
                 "outside both this worker's workspace and its outbox. A grant decides whether a " +
                 "worker may write, not where.");
         }
 
-        return AllowJson;
+        return Allow(scribe);
     }
 
     /// <summary>
@@ -763,8 +797,28 @@ public static class AgyHookCheckCommand
     /// idempotent, so a composed reason already carrying <c>ShellCommandPatternMatcher</c>'s marker is
     /// left alone.
     /// </remarks>
-    private static string DenyJson(string reason) =>
-        JsonSerializer.Serialize(new { decision = "deny", reason = GrantRefusal.Stamp(reason) });
+    /// <param name="rule">
+    /// #2009: which <see cref="GrantRules"/> member decided, for this room's grant line. Required at
+    /// every site rather than derived here, for the reason the claude sibling's
+    /// <c>HookCheckCommand.Refuse</c> states: a funnel cannot know which rung called it, and a guessed
+    /// id is a count of nothing.
+    /// </param>
+    private static string DenyJson(GrantDecisionScribe scribe, string rule, string reason)
+    {
+        var stamped = GrantRefusal.Stamp(reason);
+        scribe.Deny(rule, stamped);
+        return JsonSerializer.Serialize(new { decision = "deny", reason = stamped });
+    }
+
+    /// <summary>
+    /// The single allow exit (#2009). agy's hook allows on two paths; both come through here so the
+    /// room's allow count is the room's allow count.
+    /// </summary>
+    private static string Allow(GrantDecisionScribe scribe)
+    {
+        scribe.Allow();
+        return AllowJson;
+    }
 
     /// <summary>Mirrors <c>AgyWorkerAdapter.DeniedToolsVendorTag</c>; see it for why (#600).</summary>
     private const string VendorTag = "agy";

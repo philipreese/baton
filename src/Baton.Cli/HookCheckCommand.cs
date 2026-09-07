@@ -1,4 +1,5 @@
 using System.Text.Json;
+using Baton.Dispatch;
 using Baton.Domain;
 
 namespace Baton.Cli;
@@ -108,11 +109,17 @@ public static class HookCheckCommand
         ArgumentNullException.ThrowIfNull(stdin);
         ArgumentNullException.ThrowIfNull(stderr);
 
+        // #2009: one structured line per decision, into this room's grant log. Constructed here rather
+        // than inside Decide so the catch below — a denial that never reaches any rung — is recorded
+        // too. Reaching the room at all needs an absolute BATON_OUTPUT_DIR, exactly as the repeat
+        // ledger does; without one the log is off and the decision is still taken.
+        var scribe = new GrantDecisionScribe(VendorTag, outboxDirectory);
+
         try
         {
             return Decide(
-                stdin, stderr, deniedToolsRaw, outboxDirectory, workspaceDirectory, shellPatternsRaw,
-                deniedShellPatternsRaw, deniedShellOptionTokensRaw);
+                scribe, stdin, stderr, deniedToolsRaw, outboxDirectory, workspaceDirectory,
+                shellPatternsRaw, deniedShellPatternsRaw, deniedShellOptionTokensRaw);
         }
         catch (Exception ex)
         {
@@ -128,9 +135,14 @@ public static class HookCheckCommand
             // claude reads as an allow.
             try
             {
-                stderr.WriteLine(GrantRefusal.Stamp(
+                var reason = GrantRefusal.Stamp(
                     $"AER: the permission gate failed internally ({ex.GetType().Name}) and denied this " +
-                    "call rather than allowing it unchecked."));
+                    "call rather than allowing it unchecked.");
+                stderr.WriteLine(reason);
+                // #2009: recorded inside the same guard as the write above, and after it, for the same
+                // reason that write is guarded — nothing here may prevent the return below being
+                // reached, and a denial the gate forced on itself is still a decision this room took.
+                scribe.Deny(GrantRules.GateInternalFailure, reason);
             }
             catch
             {
@@ -143,9 +155,9 @@ public static class HookCheckCommand
     }
 
     private static int Decide(
-        TextReader stdin, TextWriter stderr, string? deniedToolsRaw, string? outboxDirectory,
-        string? workspaceDirectory, string? shellPatternsRaw, string? deniedShellPatternsRaw,
-        string? deniedShellOptionTokensRaw)
+        GrantDecisionScribe scribe, TextReader stdin, TextWriter stderr, string? deniedToolsRaw,
+        string? outboxDirectory, string? workspaceDirectory, string? shellPatternsRaw,
+        string? deniedShellPatternsRaw, string? deniedShellOptionTokensRaw)
     {
         // Always drain stdin before deciding anything, even when there is nothing to check
         // against below: Claude Code is the writer on the other end of this pipe, and exiting
@@ -158,7 +170,7 @@ public static class HookCheckCommand
         }
         catch (IOException)
         {
-            return Deny(stderr, "could not read the hook payload");
+            return Deny(scribe, stderr, "could not read the hook payload", GrantRules.UnjudgeableCall);
         }
 
         var deniedList = DeniedToolList.Parse(deniedToolsRaw, VendorTag);
@@ -168,8 +180,10 @@ public static class HookCheckCommand
             // withheld, and the old behaviour — allow — made a broken channel look like a working one.
             // #1921: it now says so. This was the one refusal path that denied in silence, which cost
             // the model any explanation and cost the count a refusal it could not see.
-            return Refuse(stderr, "AER: the permission gate received no list of withheld tools for this " +
-                                  "vendor and denied this call rather than allowing it unchecked.");
+            return Refuse(scribe, stderr,
+                "AER: the permission gate received no list of withheld tools for this " +
+                "vendor and denied this call rather than allowing it unchecked.",
+                GrantRules.UnjudgeableCall);
         }
 
         // #679 removed the early allow that used to sit here for an empty list. It read the empty
@@ -187,7 +201,7 @@ public static class HookCheckCommand
 
         if (string.IsNullOrWhiteSpace(input))
         {
-            return Deny(stderr, "received an empty hook payload");
+            return Deny(scribe, stderr, "received an empty hook payload", GrantRules.UnjudgeableCall);
         }
 
         string? toolName;
@@ -200,7 +214,8 @@ public static class HookCheckCommand
             if (doc.RootElement.ValueKind != JsonValueKind.Object ||
                 !doc.RootElement.TryGetProperty("tool_name", out var toolNameProp))
             {
-                return Deny(stderr, "could not find tool_name in the hook payload");
+                return Deny(scribe, stderr, "could not find tool_name in the hook payload",
+                    GrantRules.UnjudgeableCall);
             }
 
             toolName = toolNameProp.GetString();
@@ -210,13 +225,21 @@ public static class HookCheckCommand
         }
         catch (JsonException)
         {
-            return Deny(stderr, "could not parse the hook payload");
+            return Deny(scribe, stderr, "could not parse the hook payload", GrantRules.UnjudgeableCall);
         }
 
         if (string.IsNullOrEmpty(toolName))
         {
-            return Deny(stderr, "read an empty tool name from the hook payload");
+            return Deny(scribe, stderr, "read an empty tool name from the hook payload",
+                GrantRules.UnjudgeableCall);
         }
+
+        // #2009: what the grant line says this call WAS, now that the payload has been read. The input
+        // identity is whichever argument this gate judges the call on — the command line, the write
+        // target, the read path — digested by GrantDecisionScribe, so "the worker retried the refused
+        // call" is an equality over two lines rather than a search through prose.
+        scribe.Tool = toolName;
+        scribe.Input = shellCommandLine ?? writeTarget ?? readTarget?.Path;
 
         // #649: a write-family tool landing in the outbox is the worker's declared output, and it is
         // allowed before the denied-tools branch below can reclassify it -- a withheld write is not a
@@ -227,7 +250,7 @@ public static class HookCheckCommand
         if (WriteFamilyTools.Contains(toolName) && OutboxPath.IsInside(writeTarget, outboxDirectory))
         {
             Baton.Vendors.RepeatedToolCallHook.NoteWrite(outboxDirectory, writeTarget);
-            return AllowedExitCode;
+            return Allow(scribe);
         }
 
         if (denied.Contains(toolName))
@@ -240,7 +263,7 @@ public static class HookCheckCommand
             if (OutboxPath.IsInside(writeTarget, outboxDirectory))
             {
                 Baton.Vendors.RepeatedToolCallHook.NoteWrite(outboxDirectory, writeTarget);
-                return AllowedExitCode;
+                return Allow(scribe);
             }
 
             // Name the cause when the exemption was unusable rather than the target being outside it.
@@ -251,14 +274,16 @@ public static class HookCheckCommand
             // cause -- AER emitting a relative path at all.
             if (outboxDirectory is not null && !Path.IsPathRooted(outboxDirectory))
             {
-                return Refuse(stderr,
+                return Refuse(scribe, stderr,
                     $"AER: the '{toolName}' tool is withheld, and its outbox exemption is unavailable " +
                     $"because BATON_OUTPUT_DIR ('{outboxDirectory}') is not an absolute path — this gate " +
-                    "cannot tell where the outbox is. Re-run with an absolute --room-dir (#668).");
+                    "cannot tell where the outbox is. Re-run with an absolute --room-dir (#668).",
+                    GrantRules.UnjudgeableCall);
             }
 
-            return Refuse(stderr,
-                $"AER: the '{toolName}' tool is withheld by this session's permission grant.");
+            return Refuse(scribe, stderr,
+                $"AER: the '{toolName}' tool is withheld by this session's permission grant.",
+                GrantRules.WithheldTool);
         }
 
         // #679: the tool is granted, which decides WHETHER it may write, never WHERE. Until this
@@ -273,17 +298,18 @@ public static class HookCheckCommand
                 // command output is the answer any more. RepeatedToolCallHook.NoteWrite states the
                 // rule; this is the only point a PreToolUse hook learns a write is coming.
                 Baton.Vendors.RepeatedToolCallHook.NoteWrite(outboxDirectory, writeTarget);
-                return AllowedExitCode;
+                return Allow(scribe);
             }
 
             // Reached with a null writeTarget too, and that is the intended reading: a write-family
             // tool whose target this gate could not find is a write it cannot bound. Denying is what
             // keeps a future payload change loud instead of silently unbounded.
-            return Refuse(stderr,
+            return Refuse(scribe, stderr,
                 $"AER: the '{toolName}' tool is granted, but its target " +
                 $"({writeTarget ?? "unreadable from the payload"}) resolves outside both this " +
                 "worker's workspace and its outbox. A grant decides whether a worker may write, not " +
-                "where.");
+                "where.",
+                GrantRules.WriteOutsideBounds);
         }
 
         // #1459: the second enforcement layer for a scoped shell grant. Bash's own presence/absence
@@ -305,7 +331,9 @@ public static class HookCheckCommand
                     shellCommandLine, Baton.Vendors.BackgroundingShapeDetector.ShellFamily.Posix)
                 is { } backgrounding)
             {
-                return Refuse(stderr, Baton.Vendors.BackgroundingShapeDetector.Refusal(backgrounding, null));
+                return Refuse(scribe, stderr,
+                    Baton.Vendors.BackgroundingShapeDetector.Refusal(backgrounding, null),
+                    GrantRules.Backgrounding);
             }
 
             var shellPatternList = ShellPatternList.Parse(shellPatternsRaw, VendorTag);
@@ -354,9 +382,11 @@ public static class HookCheckCommand
                         : null;
                     // #1921: result.Reason already carries the marker (ScopedShellResult stamps every
                     // refusal it produces), so Refuse's own Stamp is a no-op here by design.
-                    return Refuse(stderr, $"AER: the 'Bash' command is denied under this session's shell " +
-                                          $"grant — {result.Reason}." +
-                                          (alternative is null ? string.Empty : $" To proceed, {alternative}."));
+                    return Refuse(scribe, stderr,
+                        $"AER: the 'Bash' command is denied under this session's shell " +
+                        $"grant — {result.Reason}." +
+                        (alternative is null ? string.Empty : $" To proceed, {alternative}."),
+                        GrantRules.ShellPattern);
                 }
             }
 
@@ -375,10 +405,11 @@ public static class HookCheckCommand
                 Baton.Vendors.ShellCommandPatternMatcher.IsDeniedByOptionToken(
                     shellCommandLine, deniedOptionTokenList.Patterns))
             {
-                return Refuse(stderr,
+                return Refuse(scribe, stderr,
                     "AER: the 'Bash' command carries an option this session's grant denies outright " +
                     "(a standing option-token 'never', matched anywhere on the line rather than at " +
-                    "its start) and was refused.");
+                    "its start) and was refused.",
+                    GrantRules.DeniedOptionToken);
             }
 
             // #2001: the sibling-pull-request rule, on the path that judges claude. Last of the
@@ -403,15 +434,17 @@ public static class HookCheckCommand
                     // Bash payload with no readable `command` is already denied above. A future
                     // governed role with neither list would reach here, and a command line this gate
                     // cannot read is one it cannot judge.
-                    return Refuse(stderr,
+                    return Refuse(scribe, stderr,
                         "AER: the permission gate could not read the 'Bash' command line from the hook " +
-                        "payload and denied this call rather than allowing it unchecked.");
+                        "payload and denied this call rather than allowing it unchecked.",
+                        GrantRules.UnjudgeableCall);
                 }
 
                 if (Baton.Vendors.OwnPullRequestOnlyRule.RefusalForOwnBranchOnly(shellCommandLine)
                     is { } siblingPullRequestRefusal)
                 {
-                    return Refuse(stderr, $"AER: {siblingPullRequestRefusal}");
+                    return Refuse(scribe, stderr, $"AER: {siblingPullRequestRefusal}",
+                        GrantRules.OwnPullRequestOnly);
                 }
             }
 
@@ -422,7 +455,7 @@ public static class HookCheckCommand
             if (Baton.Vendors.RepeatedToolCallHook.JudgeCommand(outboxDirectory, shellCommandLine)
                 is { } repeatedCommand)
             {
-                return Refuse(stderr, repeatedCommand);
+                return Refuse(scribe, stderr, repeatedCommand, GrantRules.Repeat);
             }
         }
 
@@ -433,9 +466,20 @@ public static class HookCheckCommand
             Baton.Vendors.RepeatedToolCallHook.JudgeRead(outboxDirectory, read.Path, read.Request)
                 is { } repeatedRead)
         {
-            return Refuse(stderr, repeatedRead);
+            return Refuse(scribe, stderr, repeatedRead, GrantRules.Repeat);
         }
 
+        return Allow(scribe);
+    }
+
+    /// <summary>
+    /// The single allow exit (#2009), for the same reason <see cref="Refuse"/> is the single refusal
+    /// one: this gate allows on four separate paths, and a fifth added without a line would make the
+    /// room's refusal SHARE quietly wrong while its refusal count stayed right.
+    /// </summary>
+    private static int Allow(GrantDecisionScribe scribe)
+    {
+        scribe.Allow();
         return AllowedExitCode;
     }
 
@@ -444,9 +488,9 @@ public static class HookCheckCommand
     /// the argument that <c>--disallowedTools</c> independently covered the same tool names — which
     /// #649 made false for writes by moving them off that flag onto this hook alone.
     /// </summary>
-    private static int Deny(TextWriter stderr, string what) =>
-        Refuse(stderr, $"AER: the permission gate {what} and denied this call rather than " +
-                       "allowing it unchecked.");
+    private static int Deny(GrantDecisionScribe scribe, TextWriter stderr, string what, string rule) =>
+        Refuse(scribe, stderr, $"AER: the permission gate {what} and denied this call rather than " +
+                               "allowing it unchecked.", rule);
 
     /// <summary>
     /// <b>The single writer of every refusal this gate emits</b> (#1921), and the reason it exists as a
@@ -461,9 +505,17 @@ public static class HookCheckCommand
     /// the marker inline for the same reason and its own comment says why the write is guarded.
     /// </para>
     /// </summary>
-    private static int Refuse(TextWriter stderr, string reason)
+    /// <param name="rule">
+    /// #2009: which <see cref="GrantRules"/> member decided, recorded on the room's grant line beside
+    /// the reason. Required rather than defaulted, and taken here rather than derived at the funnel,
+    /// for the reason this method exists at all: a rung added without naming its rule would otherwise
+    /// be counted under whichever id the funnel happened to guess.
+    /// </param>
+    private static int Refuse(GrantDecisionScribe scribe, TextWriter stderr, string reason, string rule)
     {
-        stderr.WriteLine(GrantRefusal.Stamp(reason));
+        var stamped = GrantRefusal.Stamp(reason);
+        stderr.WriteLine(stamped);
+        scribe.Deny(rule, stamped);
         return DeniedExitCode;
     }
 
