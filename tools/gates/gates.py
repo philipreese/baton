@@ -60,8 +60,12 @@ OVERLAP = [
     "audit-clitripwire",
     "audit-clitripwire-selftest",
     "flake-watch-selftest",
-    # #1402: pure python against an isolated temp lock file -- starts no MSBuild and never touches
-    # the real build lock, so it cannot interfere with the build phase it overlaps.
+    # #1402: real subprocesses against an isolated temp lock file -- starts no MSBuild and never
+    # touches the real build lock, so it cannot interfere with the build phase it overlaps. #2010
+    # added arms that need a git worktree: each runs against a throwaway repository this member
+    # creates under a temp dir, and the arms that use the REAL repository as cwd carry no `--replay`,
+    # so (replay being opt-in) they compute no fingerprint and write no receipt into its Git
+    # directory. Nothing this member does reaches outside its own temp dirs and that lock file.
     "buildlock-selftest",
     # #1645: pure python against injected fakes and temp dirs -- never spawns a real dotnet/baton/
     # pixi process and never touches this machine's real ~/.baton or NuGet cache, so it is exactly as

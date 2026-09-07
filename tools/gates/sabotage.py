@@ -423,7 +423,7 @@ ALLOWLIST: dict[str, str] = {
     "audit-commentspecrefs-selftest": "pure synthetic selftest exercising comment reference resolution polarity",
     "audit-clitripwire-selftest": "pure synthetic selftest exercising 7 CLI parser and doc drift arms",
     "flake-watch-selftest": "pure synthetic selftest exercising 5 flake disagreement discrimination arms",
-    "buildlock-selftest": "pure synthetic selftest exercising subprocess serialization, crash safety, and timeouts",
+    "buildlock-selftest": "pure synthetic selftest exercising subprocess serialization, crash safety, timeouts, priority-class discrimination, and (#2010) the replay opt-in, invalidation, expiry and prune arms against a throwaway git repository under a temp dir",
     "tool-refresh-selftest": "pure synthetic selftest exercising drain-predicate classification, version-compare, fail-loud-on-failure, and --dry-run discrimination arms, each against injected fakes",
     "gates-selftest": "pure synthetic selftest exercising aggregation polarity plus the #1636 gate-receipt and pre-push-hook discrimination arms",
     "fmt-check": "MSBuild-driven code format verification where sabotage requires compiling the .NET solution",
