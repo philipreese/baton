@@ -684,7 +684,11 @@ public static class StateProjector
             ? $" ({measured} tool steps measured)"
             : string.Empty;
         var shape = arrested is { DominantCommandShape: { Length: > 0 } dominant, DominantCommandSharePercent: { } percent }
-            ? $" {percent} % of steps were `{dominant}`."
+            // "of its shell commands", never "of steps" (#2002 review MEDIUM). The share
+            // SnapshotDominantCommandShape computes has _shellCommandCount as its denominator, and
+            // this clause sits one word after the tool-step count, which is a different and larger
+            // number: on the measured room the two readings are 54 % and 43 %.
+            ? $" {percent} % of its shell commands were `{dominant}`."
             : string.Empty;
 
         return $"Execution arrested: tool-step cap exceeded{steps} — awaiting conductor resolution.{shape}";

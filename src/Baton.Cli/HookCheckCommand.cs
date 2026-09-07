@@ -193,6 +193,7 @@ public static class HookCheckCommand
         string? toolName;
         string? writeTarget = null;
         string? shellCommandLine = null;
+        string? readTarget = null;
         try
         {
             using var doc = JsonDocument.Parse(input);
@@ -205,6 +206,7 @@ public static class HookCheckCommand
             toolName = toolNameProp.GetString();
             writeTarget = ReadWriteTarget(doc.RootElement, toolName);
             shellCommandLine = ReadShellCommandLine(doc.RootElement, toolName);
+            readTarget = ReadReadTarget(doc.RootElement, toolName);
         }
         catch (JsonException)
         {
@@ -224,6 +226,7 @@ public static class HookCheckCommand
         // belt-and-braces defence in depth.
         if (WriteFamilyTools.Contains(toolName) && OutboxPath.IsInside(writeTarget, outboxDirectory))
         {
+            Baton.Vendors.RepeatedToolCallHook.NoteWrite(outboxDirectory, writeTarget);
             return AllowedExitCode;
         }
 
@@ -236,6 +239,7 @@ public static class HookCheckCommand
             // traversal nor a link can walk back into the repo.
             if (OutboxPath.IsInside(writeTarget, outboxDirectory))
             {
+                Baton.Vendors.RepeatedToolCallHook.NoteWrite(outboxDirectory, writeTarget);
                 return AllowedExitCode;
             }
 
@@ -265,6 +269,10 @@ public static class HookCheckCommand
             if (OutboxPath.IsInside(writeTarget, workspaceDirectory) ||
                 OutboxPath.IsInside(writeTarget, outboxDirectory))
             {
+                // #2002 review HIGH, hook half: the room is about to change the tree, so no remembered
+                // command output is the answer any more. RepeatedToolCallHook.NoteWrite states the
+                // rule; this is the only point a PreToolUse hook learns a write is coming.
+                Baton.Vendors.RepeatedToolCallHook.NoteWrite(outboxDirectory, writeTarget);
                 return AllowedExitCode;
             }
 
@@ -290,7 +298,12 @@ public static class HookCheckCommand
             // which is precisely the population that backgrounds a build and then polls it. No ceiling
             // clause: this path enforces none, and naming the broker's would be a false claim about
             // what applies here.
-            if (Baton.Vendors.BackgroundingShapeDetector.Detect(shellCommandLine) is { } backgrounding)
+            // ShellFamily.Posix, named outright rather than read off this OS: claude's Bash tool is a
+            // POSIX shell on every platform it runs on, so a mid-line `&` really does background here
+            // (#2002 review LOW).
+            if (Baton.Vendors.BackgroundingShapeDetector.Detect(
+                    shellCommandLine, Baton.Vendors.BackgroundingShapeDetector.ShellFamily.Posix)
+                is { } backgrounding)
             {
                 return Refuse(stderr, Baton.Vendors.BackgroundingShapeDetector.Refusal(backgrounding, null));
             }
@@ -365,6 +378,24 @@ public static class HookCheckCommand
                     "(a standing option-token 'never', matched anywhere on the line rather than at " +
                     "its start) and was refused.");
             }
+
+            // #2002 rule 2, hook half — LAST in this branch, so a command the grant would refuse
+            // anyway is answered with the grant's reason and never enters the ledger as a command
+            // that ran. See RepeatedToolCallHook for why every failure of this rung is an allow, and
+            // spec/baton.md §9 for what shape this vendor's denial takes and why it cannot replay.
+            if (Baton.Vendors.RepeatedToolCallHook.JudgeCommand(outboxDirectory, shellCommandLine)
+                is { } repeatedCommand)
+            {
+                return Refuse(stderr, repeatedCommand);
+            }
+        }
+
+        // #2002 rule 2b, hook half. After the withheld-tool branch above, so a withheld read is
+        // answered with the grant's reason rather than this one.
+        if (toolName == ReadToolName &&
+            Baton.Vendors.RepeatedToolCallHook.JudgeRead(outboxDirectory, readTarget) is { } repeatedRead)
+        {
+            return Refuse(stderr, repeatedRead);
         }
 
         return AllowedExitCode;
@@ -443,6 +474,33 @@ public static class HookCheckCommand
     }
 
     private static readonly string[] WriteTargetProperties = ["file_path", "notebook_path"];
+
+    /// <summary>
+    /// claude's file-read tool. Named as a constant because #2002 rule 2b keys on it and nothing else
+    /// in this file did — <c>Grep</c> and <c>Glob</c> are searches whose answer legitimately moves,
+    /// and neither is in scope for the unchanged-file rule.
+    /// </summary>
+    private const string ReadToolName = "Read";
+
+    /// <summary>
+    /// The path a <c>Read</c> call targets, or <see langword="null"/> for any other tool. Same
+    /// <c>file_path</c> key the write family uses (claude Code names it that on both), read under its
+    /// own gate for the reason <see cref="ReadWriteTarget"/>'s remarks give for keying off the tool
+    /// name rather than the field.
+    /// </summary>
+    private static string? ReadReadTarget(JsonElement root, string? toolName)
+    {
+        if (toolName != ReadToolName ||
+            !root.TryGetProperty("tool_input", out var toolInput) ||
+            toolInput.ValueKind != JsonValueKind.Object ||
+            !toolInput.TryGetProperty("file_path", out var value) ||
+            value.ValueKind != JsonValueKind.String)
+        {
+            return null;
+        }
+
+        return value.GetString();
+    }
 
     /// <summary>
     /// The raw shell command line a <c>Bash</c> call carries, or <see langword="null"/> for any other
