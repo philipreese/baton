@@ -4319,7 +4319,7 @@ streams, transcripts, memory — is exported, read, or otherwise in scope**; the
 product data ruled committable. The cadence is **weekly**, by hand or by the conductor, and the
 committed files live in `benchmarks/ledger/`, whose README states what a reader may and may not
 conclude from them; `benchmarks/ledger/derive.py` produces the per-model, per-vendor and per-arm
-medians the comparator (#1903) and the tier issue (#1863) read, from those committed CSVs only.
+medians the [`comparator`](../benchmarks/comparator.md) (#1903) and the tier issue (#1863) read, from those committed CSVs only.
 
 **The CSV format is redacted and the other two are not**, because it is the one that leaves the
 machine into a *public* repository. `room` and `parentRoom` are reduced to their basename — lossless,
