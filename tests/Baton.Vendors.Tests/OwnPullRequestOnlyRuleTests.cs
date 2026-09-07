@@ -27,7 +27,7 @@ public class OwnPullRequestOnlyRuleTests
     [InlineData("gh issue view $ISSUE", 2005)]
     // THE DELIVERY LINE, in the spelling WorkerRoles.json's output instruction teaches
     // (`$BATON_OUTPUT_DIR/...`) and in cmd's spelling of the same variable. `create` is ungoverned by
-    // design -- opening its own PR is the lane's job -- and a variable in a `--body-file` path is not
+    // design (GovernedVerbs' remark says why) -- and a variable in a `--body-file` path is not
     // a pull-request selector, so the expansion arm has no business with either. A round-2 whole-line
     // scan refused all four of these, which refused the lane its own delivery.
     [InlineData("gh pr create --title x --body-file $BATON_OUTPUT_DIR/pr.md", null)]
