@@ -828,13 +828,19 @@ public sealed class CodexDynamicToolPolicyTests
     }
 
     /// <summary>
-    /// The rung ORDER on the broker path: the sibling-PR rung sits ahead of #2002's repeat ledger, so
-    /// a refused read never enters that ledger and the third identical ask still says why it was
-    /// refused. Reversing the two makes this line's third answer the repeat refusal instead, which is
-    /// a different sentence naming a different rule — that is what discriminates here.
+    /// A refused sibling read answers the same way however often it is asked: it is never replayed
+    /// and never becomes #2002's repeat refusal, so the lane keeps being told which rule refused it
+    /// rather than being told it already asked. That holds because the ledger only ever replays an
+    /// entry whose OUTPUT it recorded, and a refused command produced none — see
+    /// <c>RepeatedToolCallLedger.ClassifyCommand</c>, which states that case directly.
+    /// <para>
+    /// Deliberately NOT claiming to pin the rung order. The sibling rung does sit ahead of
+    /// <c>_repeats.ClassifyCommand</c> on this path, but reversing the two would not change any
+    /// answer here for exactly the reason above, so no test can show it and this one does not.
+    /// </para>
     /// </summary>
     [Fact]
-    public async Task A_refused_sibling_read_never_reaches_the_repeat_ledger()
+    public async Task A_refused_sibling_read_is_never_replayed_or_answered_by_the_repeat_rule()
     {
         using var fixture = new PolicyFixture(WorkerRoleCatalog.For("implement").Grant, ["changes.md"]);
 
@@ -845,6 +851,12 @@ public sealed class CodexDynamicToolPolicyTests
 
             Assert.False(refused.Success);
             Assert.Contains(OwnPullRequestOnlyRule.Rule, refused.Text, StringComparison.Ordinal);
+            // The two answers the ledger would give instead, named rather than merely implied by the
+            // sentence above: a replay is a SUCCESS carrying a preamble, and the repeat refusal is a
+            // different sentence about a different rule.
+            Assert.DoesNotContain("replayed:", refused.Text, StringComparison.Ordinal);
+            Assert.DoesNotContain(
+                RepeatedToolCallLedger.CommandRepeatRefusal, refused.Text, StringComparison.Ordinal);
         }
     }
 
