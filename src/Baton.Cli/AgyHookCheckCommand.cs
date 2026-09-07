@@ -603,29 +603,24 @@ public static class AgyHookCheckCommand
     /// </summary>
     /// <remarks>
     /// <para>
-    /// <b><c>WaitMsBeforeAsync</c> is the backgrounding parameter, and it is on every call.</b>
-    /// <c>docs/vendor-capabilities.md</c> records agy's <c>run_command</c> backgrounding a long
-    /// command while the model then polls, and says a blocking/wait parameter is "unmeasured, not
-    /// ruled out" — that sentence is about the STREAM, where every <c>tool_info</c> carries
-    /// <c>CommandLine</c> alone (414 of 414 in <c>dispatch-implement-12f930d9</c>). The HOOK payload
-    /// is a different surface and shows all three of these, at <c>WaitMsBeforeAsync: 5000</c>: see
-    /// <c>AgyHookCheckCommandTests.Payload</c>, taken from <c>agy.hook-env-inherited</c>'s live
-    /// capture. That check reports the payload's shape rather than asserting it, so this is a
-    /// second-hand reading of a real capture rather than a gated measurement.
+    /// <b><c>WaitMsBeforeAsync</c> is agy's backgrounding parameter, and it rides every call.</b>
+    /// <c>docs/vendor-capabilities.md</c> owns that finding, its value and its provenance (corrected
+    /// there 2026-09-06); do not restate them here.
     /// </para>
     /// <para>
-    /// So the parameter cannot be refused: it is agy's own default on every call, and denying it
-    /// would deny every command this vendor runs. That is the whole reason rule 1 is scoped rather
-    /// than claimed complete on agy. What this list DOES close is the next parameter — an
-    /// <c>Async</c>, a <c>Background</c>, a <c>Detach</c> — arriving unread.
+    /// The consequence for this gate: the parameter cannot be refused, because refusing agy's own
+    /// default would deny every command this vendor runs. That is why rule 1 is scoped rather than
+    /// claimed complete on agy (<c>spec/baton.md</c> §9). What this list DOES close is the next
+    /// parameter — an <c>Async</c>, a <c>Background</c>, a <c>Detach</c> — arriving unread.
     /// </para>
     /// </remarks>
     private static readonly IReadOnlySet<string> MeasuredRunCommandArgs =
         new HashSet<string>(StringComparer.Ordinal) { "CommandLine", "Cwd", "WaitMsBeforeAsync" };
 
     /// <summary>
-    /// agy's file-read tool (#2002 rule 2b). <c>grep_search</c> and <c>find_by_name</c> are searches
-    /// whose answer legitimately moves, so neither is in scope for the unchanged-file rule.
+    /// agy's file-read tool (#2002 rule 2b), the counterpart of the tool name
+    /// <see cref="HookCheckCommand"/> keys its own read rung on; see there for which tools this rule
+    /// deliberately leaves out.
     /// </summary>
     private const string ReadToolName = "view_file";
 

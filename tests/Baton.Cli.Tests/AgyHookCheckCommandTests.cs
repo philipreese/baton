@@ -983,8 +983,8 @@ public class AgyHookCheckCommandTests
     }
 
     /// <summary>
-    /// Built by concatenation rather than a raw interpolated literal: an agy payload ends in three
-    /// closing braces of its own, which no `$$"""…"""` can carry beside an interpolation hole.
+    /// Concatenated, for the same reason the claude suite's payload helper is: this JSON closes with
+    /// more braces than a `$$"""…"""` will carry alongside an interpolation hole.
     /// </summary>
     private static string ToolPayload(string toolName, string argsJson) =>
         "{\"toolCall\":{\"args\":" + argsJson + ",\"name\":" +
