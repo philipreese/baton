@@ -3714,9 +3714,9 @@ trigger is not registrable by a standard user and is not used (#1770).
   No pusher.py change rides with PR-A — both paths run side by side until a later PR retires the pusher's
   own derivation. A reader of this file opens it with `FileShare.ReadWrite | FileShare.Delete` in C#,
   or copies then parses in Python (#1782 — `open()` cannot express `FILE_SHARE_DELETE`), so an
-  in-flight atomic rewrite never surfaces a torn read to it. An OPEN that loses the race for the
-  handle can still fail, and that failure is a transient retry carrying no information about
-  content — the reader contract is stated once, on `FleetProjectionWriter.WriteAtomic` (#2012).
+  in-flight atomic rewrite never surfaces a torn read to it. The open itself is not promised —
+  contention on the handle is an ordinary retry, and what a reader may conclude from it is stated
+  once, on `FleetProjectionWriter.WriteAtomic` (#2012).
 - **The tailnet glass listener (#1946 slice 1)** — `GlassHttpService` (`src/Baton.Cli/Daemon/`, a
   hosted service registered after `FleetProjectionWriter`): three GET routes serving `glass.html`,
   the projection file above, and an SSE stream of its changes. The decision, the two planes, the
