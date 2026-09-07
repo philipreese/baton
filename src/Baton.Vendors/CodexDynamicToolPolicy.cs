@@ -33,9 +33,9 @@ public sealed class CodexDynamicToolPolicy
     internal const string ApplyPatchTool = "apply_patch";
 
     /// <summary>
-    /// The one sentence every withheld-workspace-write refusal opens with, stated once because two of
-    /// them raise it (<see cref="WriteText"/> and <see cref="ApplyPatch"/>) and a review lane's stream
-    /// is read for the exact string.
+    /// The one sentence every withheld-workspace-write refusal opens with, stated once because two
+    /// tools raise it (<see cref="WriteText"/> and <see cref="ApplyPatch"/>) and a third would
+    /// otherwise re-type it.
     /// </summary>
     private const string WithheldWorkspaceWrite = "This Baton role does not grant workspace writes.";
 
@@ -94,8 +94,9 @@ public sealed class CodexDynamicToolPolicy
         + "'+', '*** Delete File: <path>', and '*** Update File: <path>' with '@@' section markers and "
         + "' ' context, '-' removed and '+' added lines. Context must match the file exactly — there "
         + "is no fuzzy matching — every hunk needs at least one context or removed line, and "
-        + "'*** Move to:' is not supported. The whole envelope applies or none of it does. To replace "
-        + "a file's entire contents instead, use " + WriteTextTool + ".";
+        + "'*** Move to:' is not supported. Baton checks every path and places every hunk before it "
+        + "writes anything, so a refused path or an unplaceable hunk changes no file. To replace a "
+        + "file's entire contents instead, use " + WriteTextTool + ".";
 
     private const string ApplyPatchInputDescription =
         "The complete patch envelope, from '*** Begin Patch' to '*** End Patch'.";
@@ -400,7 +401,9 @@ public sealed class CodexDynamicToolPolicy
     /// #1996. Every path in the envelope is resolved and grant-checked, and every new content computed,
     /// BEFORE the first byte is written: a two-file patch whose second path is outside the workspace
     /// leaves the first file untouched. A patch is one edit, and half of one applied is a workspace no
-    /// reader — model or human — can reason about.
+    /// reader — model or human — can reason about. It is not a transaction, and the tool description
+    /// does not offer one: an I/O error partway through the write loop below (a locked file) can still
+    /// leave an earlier file written, which is the same exposure <see cref="WriteText"/> has.
     /// </summary>
     private CodexDynamicToolResult ApplyPatch(string input)
     {
