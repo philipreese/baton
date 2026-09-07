@@ -603,15 +603,24 @@ public static class AgyHookCheckCommand
     /// </summary>
     /// <remarks>
     /// <para>
-    /// <b><c>WaitMsBeforeAsync</c> is agy's backgrounding parameter, and it rides every call.</b>
-    /// <c>docs/vendor-capabilities.md</c> owns that finding, its value and its provenance (corrected
-    /// there 2026-09-06); do not restate them here.
+    /// <b>Scope: ONE captured <c>run_command</c> hook payload.</b> That payload carries these three,
+    /// including <c>WaitMsBeforeAsync</c> at 5000 — a name and a value that were observed;
+    /// <em>that it is the backgrounding mechanism</em> is inference from the name, which is how
+    /// <c>docs/vendor-capabilities.md</c> frames it too. That register owns the finding and its
+    /// provenance (corrected there 2026-09-06); do not restate them here.
     /// </para>
     /// <para>
-    /// The consequence for this gate: the parameter cannot be refused, because refusing agy's own
-    /// default would deny every command this vendor runs. That is why rule 1 is scoped rather than
+    /// The consequence for this gate: a parameter agy puts on its own calls cannot be refused, because
+    /// refusing it would deny every command this vendor runs. That is why rule 1 is scoped rather than
     /// claimed complete on agy (<c>spec/baton.md</c> §9). What this list DOES close is the next
     /// parameter — an <c>Async</c>, a <c>Background</c>, a <c>Detach</c> — arriving unread.
+    /// </para>
+    /// <para>
+    /// <b>Its failure mode is a refused legitimate command, and n=1 is the exposure.</b> If agy sends
+    /// a fourth argument on some prompt shape nobody has captured, this rung denies a <c>run_command</c>
+    /// that should have run. Stated rather than hidden: it is the fail-closed direction and the only
+    /// one available against an unread backgrounding switch, but a second captured payload carrying a
+    /// name not on this list is a reason to widen the list, not evidence that the rung worked.
     /// </para>
     /// </remarks>
     private static readonly IReadOnlySet<string> MeasuredRunCommandArgs =

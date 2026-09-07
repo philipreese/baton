@@ -114,11 +114,33 @@ public static class RepeatedToolCallHook
             ledger.Save(path);
             return verdict;
         }
+        catch (System.Text.Json.JsonException)
+        {
+            // Allow, and then throw the unreadable file away. Without the delete, a file that once
+            // failed to parse fails on every later call too — Load throws before anything can
+            // overwrite it — so the rung would switch itself off for the rest of the room, silently.
+            // Discarding it costs the memory of what came before and restores the rung on the next
+            // call, which is the recoverable direction.
+            Discard(path);
+            return null;
+        }
         catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or ArgumentException
-                                       or NotSupportedException or System.Text.Json.JsonException)
+                                       or NotSupportedException)
         {
             // Allow. See this type's remarks: a broken ledger must not become a permission denial.
             return null;
+        }
+    }
+
+    private static void Discard(string path)
+    {
+        try
+        {
+            File.Delete(path);
+        }
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
+        {
+            // Best effort, and its failure is the state we were already in.
         }
     }
 }

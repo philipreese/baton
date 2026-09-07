@@ -5042,22 +5042,29 @@ overreached (#2002 review).** Rule 1 closes **model-authored** backgrounding sha
 vendors. It does not close agy's **vendor-side** backgrounding: `docs/vendor-capabilities.md` records
 a `run_command` that backgrounds a long command with the model then polling `manage_task`, and that
 path carries no `Start-Process`, no `&` and no `nohup` for a detector reading a command string to
-see. It carries a **parameter** instead: agy's `PreToolUse` payload for `run_command` sends
-`WaitMsBeforeAsync: 5000` on every call (`docs/vendor-capabilities.md`, corrected 2026-09-06 — that
-register owns the finding and its provenance). **A gate cannot refuse the vendor's own default on
-every command**, so this is scoped rather than closed: `AgyHookCheckCommand.MeasuredRunCommandArgs`
-refuses only a `run_command` argument beyond the three measured ones, which closes the *next*
-backgrounding switch and not this one. Rule 1 is therefore **prospective on agy, not a fix for the
+see. It carries a **parameter** instead: the one captured agy `PreToolUse` payload for `run_command`
+carries `WaitMsBeforeAsync: 5000`, supplied by agy rather than chosen by the model
+(`docs/vendor-capabilities.md`, corrected 2026-09-06 — that register owns the finding, its n = 1
+scope, and what about it stays unmeasured). **A gate cannot refuse a parameter the vendor supplies
+itself**, so this is scoped rather than closed: `AgyHookCheckCommand.MeasuredRunCommandArgs` refuses
+only a `run_command` argument beyond those three, which closes the *next* backgrounding switch and
+not this one — and would refuse a legitimate command if agy's real argument set is wider than that
+single capture. Rule 1 is therefore **prospective on agy, not a fix for the
 measured lane**. Nor was it one for the measured
 room: `dispatch-implement-12f930d9` contains no backgrounding shape at all (see
 `BackgroundingShapeDetector`'s own remark, which quotes the room), and its `Get-Process -Id <pid>`
 polls were of *other worktrees'* builds, discovered from `buildlock.py`'s lock-holder line. Rule 2 is
 what would have bitten there. Rule 2 itself reaches **all three vendors**, but in two shapes, because
-a `PreToolUse` hook can only allow or deny: the codex broker **replays** the previous output and then
-refuses, while the claude and agy hooks **deny** the second byte-identical ask outright with a reason
-naming how long ago it ran. Neither vendor has a `PostToolUse` hook wired in this repository, so no
-cached output exists on the hook path to carry into that reason; the shipped hook wording points the
-model at its own transcript instead, on **both** vendors. The hooks share the broker's
+a `PreToolUse` hook can only allow or deny: the codex broker **replays** the previous output as the
+tool's result and then refuses, while on claude and agy the second byte-identical ask is **denied**
+and the deny reason is where the previous answer goes — it carries the cached output when the room's
+ledger holds one, and names how long ago the command ran and points at the model's own transcript
+when it does not. The third ask is denied plainly on every vendor. Which of those two hook wordings
+a reader will actually see today is the transcript one: **neither vendor has a `PostToolUse` hook
+wired in this repository**, so nothing on a hook-only room ever records an output, and the
+output-carrying branch is reachable only from a ledger some other writer filled (the file is per
+ROOM, not per vendor). That is a statement of scope, not a claim that the rung replays on those
+vendors. The hooks share the broker's
 `RepeatedToolCallLedger` through a file under the execution's output directory
 (`RepeatedToolCallHook`), and every failure of that file — missing, unparseable, unwritable — is an
 **allow**, because this rung removes waste and must never become a permission denial. Rule 3 holds on

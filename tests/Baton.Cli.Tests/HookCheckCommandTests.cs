@@ -505,6 +505,39 @@ public class HookCheckCommandTests
     }
 
     /// <summary>
+    /// The middle arm's other half: when the room's ledger DOES hold the previous output, the second
+    /// ask is denied with that output in the reason rather than with a pointer at the transcript. A
+    /// deny reason is the only channel a <c>PreToolUse</c> hook has, so this is what replay looks like
+    /// here.
+    /// <para>
+    /// Discriminating in both directions, because "the reason mentions the output" would also pass on a
+    /// denial that pasted it unconditionally: this arm asserts the transcript sentence is ABSENT, and
+    /// <see cref="Three_identical_bash_commands_are_one_allow_and_two_denials"/> — same command, no
+    /// recorded output — asserts it is present. The third ask is plain in both, and must not carry the
+    /// output either: two replays of one answer is the waste this rung exists to remove.
+    /// </para>
+    /// </summary>
+    [Fact]
+    public void A_repeat_whose_output_the_ledger_holds_is_denied_with_that_output()
+    {
+        using var room = new RepeatLedgerRoom();
+        room.RunBash("dotnet build -warnaserror", out _);
+        room.RecordOutput("dotnet build -warnaserror", "Build succeeded. 0 Warning(s), 0 Error(s)");
+
+        var second = room.RunBash("dotnet build -warnaserror", out var secondText);
+        var third = room.RunBash("dotnet build -warnaserror", out var thirdText);
+
+        Assert.Equal(HookCheckCommand.DeniedExitCode, second);
+        Assert.Contains("Build succeeded. 0 Warning(s), 0 Error(s)", secondText, StringComparison.Ordinal);
+        Assert.DoesNotContain("above in your transcript", secondText, StringComparison.Ordinal);
+
+        Assert.Equal(HookCheckCommand.DeniedExitCode, third);
+        Assert.Contains(
+            Baton.Vendors.RepeatedToolCallLedger.CommandRepeatRefusal, thirdText, StringComparison.Ordinal);
+        Assert.DoesNotContain("Build succeeded", thirdText, StringComparison.Ordinal);
+    }
+
+    /// <summary>
     /// #2002 review HIGH on the hook path: the same eviction the broker performs, arriving here at the
     /// write-family allow. Both directions — the write arm executes, the no-write arm still denies —
     /// because an eviction on every tool call passes the first and fails the second.
@@ -558,19 +591,54 @@ public class HookCheckCommandTests
     /// The fail-open arm, and the one that matters most: this rung removes waste, and both hooks wrap
     /// their decision in a catch that DENIES, so a garbage ledger file must never reach that catch. A
     /// half-written or hand-corrupted file allows.
+    /// <para>
+    /// Three calls, not one, because "allows" was not the whole requirement. <c>Load</c> throws before
+    /// anything can overwrite the bad file, so without the discard the rung switches itself off for
+    /// the rest of the room and every later call allows for the wrong reason. The third call denying
+    /// is what says the rung came back.
+    /// </para>
     /// </summary>
     [Fact]
-    public void A_corrupt_ledger_file_allows_rather_than_denying()
+    public void A_corrupt_ledger_file_allows_and_then_recovers()
     {
         using var room = new RepeatLedgerRoom();
         room.RunBash("dotnet build", out _);
         File.WriteAllText(
             Path.Combine(room.Outbox, Baton.Vendors.RepeatedToolCallLedger.FileName), "{\"Entries\": [ttt");
 
-        var exitCode = room.RunBash("dotnet build", out var text);
+        var overTheCorruption = room.RunBash("dotnet build", out var text);
+        var recorded = room.RunBash("pixi run gates-fast", out _);
+        var repeated = room.RunBash("pixi run gates-fast", out _);
 
-        Assert.Equal(HookCheckCommand.AllowedExitCode, exitCode);
+        Assert.Equal(HookCheckCommand.AllowedExitCode, overTheCorruption);
         Assert.Equal(string.Empty, text);
+        Assert.Equal(HookCheckCommand.AllowedExitCode, recorded);
+        Assert.Equal(HookCheckCommand.DeniedExitCode, repeated);
+    }
+
+    /// <summary>
+    /// The read half of the eviction, which the command half does not cover: a command that ran may
+    /// have rewritten a file this room already read, at the same byte count inside one filesystem
+    /// tick, where the stat predicate cannot see it. Both directions — with a command in between the
+    /// re-read is allowed, without one it is denied — because evicting reads on every tool call passes
+    /// the first arm and fails the second.
+    /// </summary>
+    [Fact]
+    public void A_command_that_ran_makes_the_next_identical_read_allowed_again()
+    {
+        using var room = new RepeatLedgerRoom();
+        var path = Path.Combine(room.Root, "Foo.cs");
+        File.WriteAllText(path, "aaa");
+
+        room.Read(path, out _);
+        room.RunBash("dotnet format", out _);
+        var afterCommand = room.Read(path, out _);
+
+        // Polarity partner: no command in between, and the file is untouched, so this is a repeat.
+        var withoutCommand = room.Read(path, out _);
+
+        Assert.Equal(HookCheckCommand.AllowedExitCode, afterCommand);
+        Assert.Equal(HookCheckCommand.DeniedExitCode, withoutCommand);
     }
 
     /// <summary>
@@ -598,6 +666,21 @@ public class HookCheckCommandTests
             Run(Payload("Read", "file_path", path), out stderrText);
 
         public int Write(string path) => Run(Payload("Write", "file_path", path), out _);
+
+        /// <summary>
+        /// Puts a previous run's output into this room's ledger file — the one thing no
+        /// <c>PreToolUse</c> hook can do for itself, since recording an output needs a <c>PostToolUse</c>
+        /// hook neither vendor has wired here. Reaching the ledger directly rather than faking the deny
+        /// text is what keeps this a test of the shipped read path: the file is per ROOM, so any writer
+        /// filling it is the case being exercised.
+        /// </summary>
+        public void RecordOutput(string command, string output)
+        {
+            var path = Path.Combine(Outbox, Baton.Vendors.RepeatedToolCallLedger.FileName);
+            var ledger = Baton.Vendors.RepeatedToolCallLedger.Load(path);
+            ledger.RecordCommandOutput(command, output);
+            ledger.Save(path);
+        }
 
         public void Dispose() => Baton.Tests.Shared.DirectoryCleanup.DeleteRecursively(Root);
 

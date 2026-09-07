@@ -53,9 +53,11 @@ public sealed record RepeatDecision(
 /// states what it does when the file cannot be read or written.
 /// </para>
 /// <para>
-/// <b>What the hooks cannot do is replay</b> — <c>spec/baton.md</c> §9 states why, and which shape
-/// shipped per vendor. The consequence here is <see cref="HookCommandDenial"/>: a denial that points
-/// at the transcript rather than carrying bytes this path does not hold.
+/// <b>A hook denies where the broker replays.</b> A <c>PreToolUse</c> hook can only allow or deny, so
+/// there is no substitute tool result to hand back. What it CAN do is put the previous answer inside
+/// the deny reason, and <see cref="HookCommandDenial"/> does exactly that whenever the ledger holds
+/// one; holding none, it points at the transcript instead. <c>spec/baton.md</c> §9 states which of the
+/// two each vendor gets today, and why.
 /// </para>
 /// <para>
 /// <b>Memory bound:</b> <see cref="Capacity"/> keys, each holding at most one command output, which
@@ -178,15 +180,21 @@ public sealed class RepeatedToolCallLedger
     /// or <see langword="null"/> to allow. The occurrence is recorded either way.
     /// <para>
     /// Two differences from <see cref="ClassifyCommand"/>, both forced by what a <c>PreToolUse</c> hook
-    /// is. It holds no recorded output — nothing on this path can produce one without a
-    /// <c>PostToolUse</c> hook, and neither vendor has one wired here — so the entry's mere existence
-    /// is the predicate rather than the bytes it holds. And the second ask is DENIED rather than
-    /// replayed, pointing at the transcript the model already has.
+    /// is. The entry's mere EXISTENCE is the predicate, rather than the bytes it holds: nothing on this
+    /// path records an output without a <c>PostToolUse</c> hook, and neither vendor has one wired here,
+    /// so keying on the bytes would switch the rung off entirely. And the second ask is DENIED rather
+    /// than replayed — the deny reason carries the previous output when the ledger happens to hold one
+    /// and points at the transcript when it does not (<see cref="HookCommandDenial"/> states which case
+    /// is reachable where).
     /// </para>
     /// <para>
-    /// An allowed command is about to change the tree, so it evicts the other command entries here,
-    /// where the broker does it after the process exits (<see cref="ForgetAllCommands"/>). The hook
-    /// fires before the tool runs and never learns what it did, so before is the only point available.
+    /// An allowed command is about to change the tree, so it evicts the other command entries AND
+    /// every read here, where the broker does both after the process exits
+    /// (<see cref="ForgetAllCommands"/>, <see cref="ForgetAllReads"/>). The hook fires before the tool
+    /// runs and never learns what it did, so before is the only point available. Dropping the read
+    /// half would give this path the very defect the command half was added to fix: read a file, run
+    /// <c>dotnet format</c>, re-read it — same byte count inside one filesystem tick — and be told it
+    /// has not changed.
     /// </para>
     /// </summary>
     public string? ClassifyHookCommand(string commandLine)
@@ -204,12 +212,13 @@ public sealed class RepeatedToolCallLedger
         {
             Put(key, new Entry { ExecutedAt = now });
             ForgetAllCommands(commandLine);
+            ForgetAllReads();
             return null;
         }
 
         entry.Served++;
         var ago = (int)Math.Round((now - entry.ExecutedAt).TotalSeconds);
-        return entry.Served == 1 ? HookCommandDenial(ago) : CommandRepeatRefusal;
+        return entry.Served == 1 ? HookCommandDenial(ago, entry.Output) : CommandRepeatRefusal;
     }
 
     /// <summary>
@@ -347,14 +356,31 @@ public sealed class RepeatedToolCallLedger
         "the previous read is still the answer; this file has not changed since";
 
     /// <summary>
-    /// The second-ask denial a hook emits for a repeated command. It points at the transcript rather
-    /// than carrying the previous output because nothing on the hook path holds that output — see this
-    /// type's remarks, and <c>spec/baton.md</c> §9 for which shape shipped per vendor.
+    /// The second-ask denial a hook emits for a repeated command. <paramref name="cachedOutput"/> is
+    /// the previous run's output when the ledger holds it, and the denial then CARRIES that output —
+    /// a deny reason is the only channel a <c>PreToolUse</c> hook has, so this is what replay looks
+    /// like on that path (see this type's remarks).
+    /// <para>
+    /// <b>Null is the ordinary case on claude and agy today, and that is a scope statement, not a
+    /// default.</b> An output only reaches the ledger through
+    /// <see cref="RecordCommandOutput"/>, which the broker calls after the process it ran exits;
+    /// neither hook vendor has a <c>PostToolUse</c> hook wired here, so on a room with no broker in it
+    /// nothing ever records one and every denial takes the transcript-pointer form. Both branches are
+    /// shipped rather than only the reachable one because the ledger file is per ROOM, not per vendor:
+    /// whatever writes an output into it, the hook that reads it next is the thing holding an answer
+    /// the model asked for, and dropping it on the floor would be the one avoidable waste this rung
+    /// exists to remove.
+    /// </para>
     /// </summary>
-    public static string HookCommandDenial(int agoSeconds) =>
-        $"AER: this is byte-identical to the command {agoSeconds} s ago (its output is above in your " +
-        "transcript). Baton refused the re-run rather than spending a tool step and a model turn on an " +
-        "answer you already hold. Change the command if you need a genuinely new observation.";
+    public static string HookCommandDenial(int agoSeconds, string? cachedOutput = null) =>
+        string.IsNullOrEmpty(cachedOutput)
+            ? $"AER: this is byte-identical to the command {agoSeconds} s ago (its output is above in " +
+              "your transcript). Baton refused the re-run rather than spending a tool step and a model " +
+              "turn on an answer you already hold. Change the command if you need a genuinely new " +
+              "observation."
+            : $"AER: this is byte-identical to the command {agoSeconds} s ago, so Baton did not re-run " +
+              "it. Its output, unchanged, is below — treat it as this call's result, and change the " +
+              "command if you need a genuinely new observation.\n\n" + cachedOutput;
 
     /// <summary>The second-ask denial a hook emits for a repeated read; same shape as its command sibling.</summary>
     public const string HookReadDenial =
@@ -412,9 +438,23 @@ public sealed class RepeatedToolCallLedger
                     _entries[key].Served, _entries[key].Output))
                 .ToArray());
 
+        // Beside the target, because an atomic replace needs the same volume. Deleted in `finally`
+        // whatever happens: a Move that fails because a concurrent hook holds the destination would
+        // otherwise leave `<name>.<pid>.tmp` in the output directory, and only the exact ledger name
+        // is filtered out of artifact listings — a leftover would surface as a worker deliverable.
         var temporary = path + "." + Environment.ProcessId + ".tmp";
-        File.WriteAllText(temporary, JsonSerializer.Serialize(state, SerializerOptions));
-        File.Move(temporary, path, overwrite: true);
+        try
+        {
+            File.WriteAllText(temporary, JsonSerializer.Serialize(state, SerializerOptions));
+            File.Move(temporary, path, overwrite: true);
+        }
+        finally
+        {
+            if (File.Exists(temporary))
+            {
+                File.Delete(temporary);
+            }
+        }
     }
 
     private static readonly JsonSerializerOptions SerializerOptions =

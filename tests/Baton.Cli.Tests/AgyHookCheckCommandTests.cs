@@ -957,6 +957,48 @@ public class AgyHookCheckCommandTests
     }
 
     /// <summary>
+    /// The middle arm's other half on agy, matching the claude suite's: with the previous output in the
+    /// room's ledger, the second ask is denied WITH that output, because a deny reason is the only
+    /// channel this hook has. Recorded through the ledger file rather than through a hook call —
+    /// nothing on a <c>PreToolUse</c> path records an output, which is the scope
+    /// <c>RepeatedToolCallLedger.HookCommandDenial</c> states.
+    /// <para>
+    /// Both directions: this arm asserts the transcript sentence is ABSENT, and
+    /// <see cref="Three_identical_run_commands_are_one_allow_and_two_denials_and_a_changed_file_rereads"/>
+    /// — same shape, no recorded output — asserts it is present. The third ask stays plain.
+    /// </para>
+    /// </summary>
+    [Fact]
+    public void A_repeat_whose_output_the_ledger_holds_is_denied_with_that_output()
+    {
+        var root = Path.Combine(Path.GetTempPath(), $"baton-agy-repeat-{Guid.NewGuid():N}");
+        var outbox = Path.Combine(root, "outbox");
+        Directory.CreateDirectory(outbox);
+        try
+        {
+            RepeatDecide(outbox, RunPayload("pixi run gates-fast"));
+            RecordOutput(outbox, "pixi run gates-fast", "GATES: PASS 34 of 34");
+
+            var second = RepeatDecide(outbox, RunPayload("pixi run gates-fast"));
+            var third = RepeatDecide(outbox, RunPayload("pixi run gates-fast"));
+
+            Assert.Equal("deny", Decision(second));
+            Assert.Contains("GATES: PASS 34 of 34", Reason(second), StringComparison.Ordinal);
+            Assert.DoesNotContain("above in your transcript", Reason(second), StringComparison.Ordinal);
+
+            Assert.Equal("deny", Decision(third));
+            Assert.Contains(
+                Baton.Vendors.RepeatedToolCallLedger.CommandRepeatRefusal, Reason(third),
+                StringComparison.Ordinal);
+            Assert.DoesNotContain("GATES: PASS", Reason(third), StringComparison.Ordinal);
+        }
+        finally
+        {
+            Baton.Tests.Shared.DirectoryCleanup.DeleteRecursively(root);
+        }
+    }
+
+    /// <summary>
     /// #2002 review HIGH on agy's hook path: a write evicts the remembered command, so the identical
     /// re-ask is allowed again. Polarity partner in the same test — no write, still denied.
     /// </summary>
@@ -1001,6 +1043,19 @@ public class AgyHookCheckCommandTests
 
     private static string WriteToolPayload(string path) =>
         ToolPayload("write_to_file", "{\"TargetFile\":" + JsonSerializer.Serialize(path) + "}");
+
+    /// <summary>
+    /// The claude suite's <c>RepeatLedgerRoom.RecordOutput</c>, in this suite's shape: writes a previous
+    /// run's output into the room's ledger file, which is the only way one gets there on a hook-only
+    /// room.
+    /// </summary>
+    private static void RecordOutput(string outbox, string command, string output)
+    {
+        var path = Path.Combine(outbox, Baton.Vendors.RepeatedToolCallLedger.FileName);
+        var ledger = Baton.Vendors.RepeatedToolCallLedger.Load(path);
+        ledger.RecordCommandOutput(command, output);
+        ledger.Save(path);
+    }
 
     private static string RepeatDecide(string outbox, string payload, string? workspace = null)
     {

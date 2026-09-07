@@ -1123,19 +1123,29 @@ gates-quiet` calls, measured at 260.9s and 460.7s respectively — multi-minute,
 minutes each" figure. Every `run_command` call actually observed in that lane
 passed only a `CommandLine` parameter — no other field was ever used.
 
-**Corrected 2026-09-06 (#2002): the wait parameter is not unmeasured — the STREAM is the wrong
+**Corrected 2026-09-06 (#2002): a parameter by that name has been seen — the STREAM is the wrong
 surface to look for it on.** The paragraph below still describes what the stream can and cannot
 answer, and that part stands: a `step_update`'s `tool_info.parameters` carries `CommandLine` alone
 (414 of 414 `run_command` calls in `dispatch-implement-12f930d9`, re-counted 2026-09-06). The
-**`PreToolUse` hook payload** is a different surface and carries three arguments —
-`CommandLine`, `Cwd`, and **`WaitMsBeforeAsync`, at 5000** — which is a wait-then-background switch
-on every call, sent by agy rather than chosen by the model. Provenance, stated so it is not
-overread: the fixture in `AgyHookCheckCommandTests.Payload` records it as "the real payload agy
-sends, from the live capture in `agy.hook-env-inherited`'s log"; that check *reports* payload shape
-rather than asserting it, so this is a second-hand reading of a real capture and not a gated
-measurement. The consequence for #2002 is in `spec/baton.md` §9: a gate cannot refuse a parameter
-agy puts on every call, so rule 1 is scoped on this vendor rather than claimed complete, and
-`AgyHookCheckCommand.MeasuredRunCommandArgs` refuses only an argument beyond these three.
+**`PreToolUse` hook payload** is a different surface, and **one captured payload** carries three
+arguments — `CommandLine`, `Cwd`, and **`WaitMsBeforeAsync`, at 5000**, a value agy supplies rather
+than the model choosing it.
+
+Scope and provenance, stated so none of this is overread: **n = 1.** The fixture in
+`AgyHookCheckCommandTests.Payload` records it as "the real payload agy sends, from the live capture
+in `agy.hook-env-inherited`'s log"; that check *reports* payload shape rather than asserting it, so
+this is a second-hand reading of one real capture, not a gated measurement. Two things remain
+**unmeasured**: whether agy sends these same three on every `run_command`, and whether
+`WaitMsBeforeAsync` is in fact the wait-then-background switch its name suggests — the name and the
+value are what was observed, the mechanism is inference. What this does settle is the earlier
+sentence's premise: a blocking/wait-shaped field is not absent from the tool, it is absent from the
+stream.
+
+The consequence for #2002 is in `spec/baton.md` §9: a gate cannot refuse a parameter agy supplies
+itself, so rule 1 is scoped on this vendor rather than claimed complete, and
+`AgyHookCheckCommand.MeasuredRunCommandArgs` refuses only an argument beyond these three — a rung
+whose own failure mode, against an argument set wider than this single capture, is refusing a
+legitimate command.
 
 The rest of this paragraph, unchanged: the `stream-json` `init` event's `tools` array lists tool
 *names* only —
