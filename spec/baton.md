@@ -5021,6 +5021,25 @@ honest cost of not declining both vendors to keep their capability artificially 
 what closed that gap on the agy side, so the two vendors converge on the same grant shape rather than
 staying deliberately unequal.
 
+**Polling is not progress: three rules on the run-command grant (#2002).** Measured 2026-09-06 across
+121 rooms modified that day: one agy arm-A lane spent 53.6 % of its 207 `run_command` steps on
+`Get-Process -Id <n>` liveness polls of builds it had backgrounded itself, and byte-identical repeated
+commands or reads ran at a median 17 % of tool calls on claude, 34 % on agy and 9 % on codex — #2002
+carries the histograms and the per-room figures, not restated here. So: (1) a command line carrying a
+backgrounding shape is **refused before anything is spawned**, on every vendor —
+`BackgroundingShapeDetector` owns the shapes and the sentence, and the claude hook, the agy hook and
+the codex broker each call it, because claude and agy run their own shells and a broker-only rule would
+never have reached the vendor this was measured on. (2) A byte-identical repeat is **replayed once and
+then refused**, judged on a 60-second clock for commands and on the file's own mtime-and-length for
+reads, with a named exemption list for commands whose output is expected to move
+(`RepeatedToolCallLedger.VolatileCommandPrefixes` states which and why). (3) A tool-step-cap arrest
+**names the dominant shape** when one normalised command line held more than half the shell commands,
+so a conductor reads what the steps were spent on rather than only how many there were. Rule 2 is the
+**broker's alone, deliberately**: a PreToolUse hook can only allow or deny — it cannot return a
+substitute tool result — so replay-then-refuse has no mechanism on claude or agy, and claiming
+otherwise would be a rule with no enforcement behind it. Rules 1 and 3 hold on all three. What none of
+this changes is the budget itself; #1749's arrest-rule question stays separate.
+
 Until #1759 retired it, `tools/baton-agy-loop/dispatch.py` mirrored this same coherence rule in its
 own `grant_refusal()`/`build_bindings()` rather than calling the engine's. #1759 ported the one
 assertion that mirror still carried — that every catalog role actually dispatches, on every real

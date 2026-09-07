@@ -820,6 +820,59 @@ public class AgyHookCheckCommandTests
         Assert.Equal("BATON_HOOK_VERDICT_LEDGER", AgyHookCheckCommand.VerdictLedgerEnvironmentVariable);
     }
 
+    /// <summary>
+    /// #2002 rule 1 on agy's half — the vendor the polling was measured on, and the one whose native
+    /// <c>run_command</c> never touches the codex broker, so this hook is the only place the rule can
+    /// reach it. Driven on an UNSCOPED grant (Present, empty pattern list — `implement`'s real shape),
+    /// where every other rung in this branch passes the line through, so a deny here can only be the
+    /// backgrounding detector's.
+    /// </summary>
+    [Theory]
+    [InlineData("Start-Process dotnet -ArgumentList 'build' -NoNewWindow -PassThru", "deny")]
+    [InlineData("dotnet test &", "deny")]
+    [InlineData("nohup pixi run gates-fast", "deny")]
+    [InlineData("dotnet test", "allow")]
+    [InlineData("Get-Process -Id 59340 -ErrorAction SilentlyContinue", "allow")]
+    public void A_backgrounded_run_command_is_denied_on_an_unscoped_grant(string command, string expected)
+    {
+        var payload = $$"""
+            {"artifactDirectoryPath":"C:/x/brain/abc","conversationId":"abc",
+             "modelName":"gemini-3.6-flash-medium","stepIdx":3,
+             "toolCall":{"args":{"CommandLine":{{JsonSerializer.Serialize(command)}}, "Cwd":"C:\\x","WaitMsBeforeAsync":5000},
+                         "name":"run_command"},
+             "transcriptPath":"C:/x/transcript_full.jsonl","workspacePaths":["C:/x"]}
+            """;
+        using var stdin = new StringReader(payload);
+        using var stdout = new StringWriter();
+
+        var exitCode = AgyHookCheckCommand.Execute(
+            stdin, stdout, "agy:write_to_file", shellPatternsRaw: "agy:",
+            deniedShellPatternsRaw: "agy:", deniedShellOptionTokensRaw: "agy:");
+
+        Assert.Equal(AgyHookCheckCommand.ExitCode, exitCode);
+        using var doc = JsonDocument.Parse(stdout.ToString());
+        Assert.Equal(expected, doc.RootElement.GetProperty("decision").GetString());
+        if (expected == "deny")
+        {
+            var reason = doc.RootElement.GetProperty("reason").GetString();
+            Assert.Contains("backgrounds the work", reason!, StringComparison.Ordinal);
+            Assert.Contains("costs no tool step", reason!, StringComparison.Ordinal);
+            Assert.Contains(Baton.Domain.GrantRefusal.Marker, reason!);
+        }
+    }
+
+    /// <summary>
+    /// The control that keeps the rule about BACKGROUNDING rather than about `run_command`: the
+    /// measured room's own polling line is allowed through by rule 1 (it is the symptom, not the
+    /// shape), which is why the poll itself is answered by rule 2 in the broker and by rule 3 in the
+    /// arrest text instead. Stated as an arm above (`Get-Process …` → allow) so a detector that grew
+    /// to refuse polls directly would turn this red rather than quietly changing what agy may run.
+    /// </summary>
+    [Fact]
+    public void The_polling_line_itself_is_not_what_rule_one_refuses() =>
+        Assert.Null(Baton.Vendors.BackgroundingShapeDetector.Detect(
+            "Get-Process -Id 59340 -ErrorAction SilentlyContinue"));
+
     private sealed class ThrowingReader : TextReader
     {
         public override string ReadToEnd() => throw new IOException("simulated pipe failure");
