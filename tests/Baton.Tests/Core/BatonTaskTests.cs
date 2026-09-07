@@ -19,6 +19,22 @@ public class BatonTaskTests
 
     private static (string Program, string[] Args) LongRunning() => ("ping", ["-n", "61", "127.0.0.1"]);
 
+    /// <summary>
+    /// ~3s of child: long enough to outlive a 1s timeout, short enough that the #2019 budget arms
+    /// below cost seconds rather than a minute.
+    /// </summary>
+    private static (string Program, string[] Args) ShortRunning() => ("ping", ["-n", "4", "127.0.0.1"]);
+
+    /// <summary>
+    /// ~25s of child: long enough to still be alive at the monitor's first 15s re-poll, which is the
+    /// only moment a retracted credit can be observed at all — see
+    /// <see cref="Run_TimeoutBudgetStopsReportingCredit_KeepsWhatWasAlreadyGranted"/>. The 10s either
+    /// side of that poll is margin, in absolute seconds, for the same reason the timing Theory's was
+    /// widened once already on this branch: a `Task.Delay` that wakes late must not turn correct code
+    /// red.
+    /// </summary>
+    private static (string Program, string[] Args) OutlivesOnePoll() => ("ping", ["-n", "26", "127.0.0.1"]);
+
     private static (string Program, string[] Args) EchoEnvVar(string var) => ("cmd", ["/c", $"echo %{var}%"]);
 
     private static (string Program, string[] Args) PrintCwd() => ("cmd", ["/c", "cd"]);
@@ -144,6 +160,120 @@ public class BatonTaskTests
     {
         (string prog, string[] args) = LongRunning();
         using BatonTask task = new BatonTask(prog, args).WithTimeout(TimeSpan.FromMilliseconds(300));
+
+        BatonTimeoutException ex = Assert.Throws<BatonTimeoutException>(task.Run);
+        Assert.Equal(BatonErrorCode.TimedOut, ex.ErrorCode);
+    }
+
+    /// <summary>
+    /// #2019, and the arm the whole credit mechanism rests on: an extension arriving after the monitor
+    /// has already started — which is what crediting a wait measured mid-lane looks like — moves the
+    /// kill rather than arriving too late to matter. The probe deliberately
+    /// returns the configured timeout on its FIRST call and the wider budget only afterwards — a
+    /// monitor that reads the budget once, however it reads it, kills this child at 1s.
+    /// </summary>
+    [Fact]
+    public void Run_TimeoutBudgetGrowsAfterTheFirstRead_MovesTheKill()
+    {
+        (string prog, string[] args) = ShortRunning();
+        int probes = 0;
+        using BatonTask task = new BatonTask(prog, args)
+            .WithTimeout(TimeSpan.FromSeconds(1))
+            .WithTimeoutBudget(() => Interlocked.Increment(ref probes) == 1
+                ? TimeSpan.FromSeconds(1)
+                : TimeSpan.FromSeconds(30));
+
+        task.Run();
+
+        Assert.True(probes > 1, $"the monitor must re-read the budget; it read it {probes} time(s)");
+    }
+
+    /// <summary>
+    /// The polarity the arm above cannot show: with no credit to report, the probe leaves the
+    /// configured timeout exactly where it was. A budget mechanism that merely disabled the kill would
+    /// pass the arm above and fail this one.
+    /// </summary>
+    [Fact]
+    public void Run_TimeoutBudgetReportsNoCredit_StillTimesOut()
+    {
+        (string prog, string[] args) = ShortRunning();
+        using BatonTask task = new BatonTask(prog, args)
+            .WithTimeout(TimeSpan.FromSeconds(1))
+            .WithTimeoutBudget(() => TimeSpan.FromSeconds(1));
+
+        BatonTimeoutException ex = Assert.Throws<BatonTimeoutException>(task.Run);
+        Assert.Equal(BatonErrorCode.TimedOut, ex.ErrorCode);
+    }
+
+    /// <summary>A budget shorter than the configured timeout can never cut a run short.</summary>
+    [Fact]
+    public void Run_TimeoutBudgetShorterThanTheTimeout_IsIgnored()
+    {
+        (string prog, string[] args) = ShortRunning();
+        using BatonTask task = new BatonTask(prog, args)
+            .WithTimeout(TimeSpan.FromSeconds(30))
+            .WithTimeoutBudget(() => TimeSpan.FromMilliseconds(1));
+
+        task.Run();
+    }
+
+    /// <summary>
+    /// #2058 review (HIGH): a credit, once granted, is never retracted. The arm above proves an
+    /// extension MOVES the kill; this one proves a later poll cannot move it back. What that costs a
+    /// lane when it is missing is stated once, on the high-water mark hoisted above the monitor's loop
+    /// in <c>BatonProcessRunner</c>. Both ways a poll can stop reporting an extension get an arm,
+    /// because the monitor reaches the same collapse down either: the probe throws, and the probe
+    /// reports no credit at all — which is what
+    /// <see cref="Baton.Dispatch.BuildLockWaitCredit"/>'s reader returns for a log it cannot open, the
+    /// realistic path on a Windows machine under the very build IO that earns the credit (#295). That
+    /// second arm stands in for the real file at the <see cref="BatonTask.WithTimeoutBudget"/> seam
+    /// rather than driving a locked one, because the composition behind it is pinned at the reader
+    /// already (<c>BuildLockWaitCreditTests</c>): a log that cannot be read reads as zero, and zero
+    /// leaves the box where it was, so the box is precisely what arrives here.
+    /// </summary>
+    /// <remarks>
+    /// The clocks are what make this discriminate, and they are why it costs ~25s: the monitor
+    /// re-polls at <c>min(remaining, BudgetPollInterval)</c>, so a poll lands STRICTLY BEFORE the
+    /// granted deadline only when that deadline is more than one poll interval out. A 1s box credited
+    /// to 40s is therefore re-polled at t≈15s with the child still alive: a monitor that re-derives
+    /// its budget from the box kills there, and one that keeps a high-water mark lets the child exit
+    /// naturally at ~25s. The probe count is asserted too — a monitor that simply stopped re-reading
+    /// would also let the child live, and that is a different (and worse) mechanism.
+    /// </remarks>
+    [Theory]
+    [InlineData(true)]
+    [InlineData(false)]
+    public void Run_TimeoutBudgetStopsReportingCredit_KeepsWhatWasAlreadyGranted(bool probeThrows)
+    {
+        TimeSpan box = TimeSpan.FromSeconds(1);
+        (string prog, string[] args) = OutlivesOnePoll();
+        int probes = 0;
+        using BatonTask task = new BatonTask(prog, args)
+            .WithTimeout(box)
+            .WithTimeoutBudget(() => Interlocked.Increment(ref probes) == 1
+                ? TimeSpan.FromSeconds(40)
+                : probeThrows
+                    ? throw new IOException("the wait log is unreadable")
+                    : box);
+
+        task.Run();
+
+        Assert.True(probes > 1, $"the monitor must re-read the budget; it read it {probes} time(s)");
+    }
+
+    /// <summary>
+    /// Fails closed: a probe that throws credits nothing and leaves the configured timeout in force —
+    /// it neither leaks the exception out of the monitor thread nor leaves the tree with no deadline.
+    /// Broken from the FIRST call, so nothing was ever granted; the theory above is the one that pins
+    /// what happens to a probe that breaks after a credit already landed.
+    /// </summary>
+    [Fact]
+    public void Run_TimeoutBudgetThrows_FallsBackToTheConfiguredTimeout()
+    {
+        (string prog, string[] args) = LongRunning();
+        using BatonTask task = new BatonTask(prog, args)
+            .WithTimeout(TimeSpan.FromMilliseconds(300))
+            .WithTimeoutBudget(() => throw new InvalidOperationException("the wait log is unreadable"));
 
         BatonTimeoutException ex = Assert.Throws<BatonTimeoutException>(task.Run);
         Assert.Equal(BatonErrorCode.TimedOut, ex.ErrorCode);

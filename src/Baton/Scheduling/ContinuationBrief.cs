@@ -36,7 +36,13 @@ public static class ContinuationBrief
     /// <param name="timeout">
     /// <c>WorkerBinding.Process.Timeout</c>. A killed attempt ran essentially its whole budget by
     /// definition, so the configured value IS the predecessor's duration — no per-execution timing
-    /// needs recording to say it.
+    /// needs recording to say it. Since #2019 that is a FLOOR rather than an equality: a predecessor
+    /// whose build-lock queueing was credited back ran up to
+    /// <see cref="Dispatch.BuildLockWaitCredit.MaxBudgetMultiplier"/>× this. The brief quotes the
+    /// configured value and says so in the text (#2058 review — a reader of the brief was being told
+    /// an equality that the credit can make false); it stays exactly right for the sentence that
+    /// matters to the next attempt — its own budget is this, and the credit it may earn is not a plan
+    /// it can spend.
     /// </param>
     public static string? ForRetryAfterTimeout(StepState stepState, int maxAttempts, TimeSpan timeout)
     {
@@ -62,7 +68,7 @@ public static class ContinuationBrief
         return $"""
             [baton] CONTINUATION BRIEF -- read this before the brief below.
 
-            {attemptClause} Attempt {attempt - 1} ran its full {DescribeDuration(timeout)} timeout budget and was killed by baton. It did not crash, it was not refused, and it did not decide to stop -- it ran out of clock, mid-work.
+            {attemptClause} Attempt {attempt - 1} ran for at least its full {DescribeDuration(timeout)} timeout budget (the configured box, before any build-lock wait credit) and was killed by baton. It did not crash, it was not refused, and it did not decide to stop -- it ran out of clock, mid-work.
 
             You are in the SAME workspace it left behind. Its work is still on disk. Before you write anything, read what is already there -- `git status`, `git log`, and the files themselves -- and then FINISH what attempt {attempt - 1} started. Do not restart it from the beginning, and do not undo it. Your budget is the same {DescribeDuration(timeout)}, so spend it on what is left rather than on what is done.
 

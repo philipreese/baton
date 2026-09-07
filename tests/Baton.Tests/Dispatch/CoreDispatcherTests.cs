@@ -651,6 +651,64 @@ public class CoreDispatcherTests
         }
     }
 
+    /// <summary>
+    /// #2019, both polarities on one ~7s child: the dispatcher reads the room's own
+    /// <c>lock-wait.jsonl</c> and the recorded build-lock queueing moves the kill out past the
+    /// configured box. The negative arm is the same dispatch with nothing recorded — without it, a
+    /// dispatcher that had simply stopped enforcing the timeout would pass. The recorded wait is far
+    /// wider than the box on purpose, so what the credited arm survives on is the
+    /// <see cref="BuildLockWaitCredit.MaxBudgetMultiplier"/> cap (10s here), not the raw 30s.
+    /// </summary>
+    /// <remarks>
+    /// The margins are absolute seconds, not ratios, because this test runs inside `gates --fast` on a
+    /// machine the issue itself measured at three vendor CLIs and under a gigabyte free: the credited
+    /// arm has ~3s of slack (7s child against a 10s kill) and the negative arm's slack only grows under
+    /// load (a 5s kill against a child that cannot finish before 7s).
+    /// </remarks>
+    [Theory]
+    [InlineData(true, CoreExitReason.Natural)]
+    [InlineData(false, CoreExitReason.TimedOut)]
+    public async Task DispatchAsync_credits_a_recorded_build_lock_wait_back_to_the_box(
+        bool recordAWait, CoreExitReason expected)
+    {
+        var artifactsRoot = Path.Combine(Path.GetTempPath(), $"artifacts-{Guid.NewGuid():N}");
+        var logPath = Path.Combine(Path.GetTempPath(), $"flow-{Guid.NewGuid():N}.jsonl");
+        try
+        {
+            var outputDirectory = ArtifactManager.AllocateOutputDirectory(artifactsRoot, ExecutionId);
+            if (recordAWait)
+            {
+                // Written by tools/buildlock.py in a real lane, one line per contended acquire.
+                await File.WriteAllTextAsync(
+                    Path.Combine(outputDirectory, BuildLockWaitCredit.LogFileName),
+                    """{"waitMs": 30000}""" + Environment.NewLine,
+                    TestContext.Current.CancellationToken);
+            }
+
+            var request = MakeRequest(
+                ArtifactManager.BuildEnvironment([], outputDirectory, artifactsRoot),
+                TimeSpan.FromSeconds(5));
+
+            await using var writer = new FlowEventLogWriter(logPath);
+            var result = await new CoreDispatcher(writer, writer).DispatchAsync(
+                request, SleepsSevenSeconds(), TestContext.Current.CancellationToken);
+
+            Assert.Equal(expected, result.Reason);
+        }
+        finally
+        {
+            DirectoryCleanup.DeleteRecursively(artifactsRoot);
+            FileCleanup.Delete(logPath);
+        }
+    }
+
+    private static CoreDispatchTarget SleepsSevenSeconds() =>
+        new("cmd", ["/c", "ping -n 8 127.0.0.1 > nul"]);
+
+    private static ExecutionRequest MakeRequest(
+        IReadOnlyList<EnvironmentVariable> environment, TimeSpan timeout) =>
+        MakeRequest(environment) with { Timeout = timeout };
+
     private static ExecutionRequest MakeRequest(IReadOnlyList<EnvironmentVariable> environment) => new(
         ExecutionId,
         new WorkflowId("wf-1"),

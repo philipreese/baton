@@ -17,10 +17,18 @@ internal static class BatonProcessRunner
 {
     private const int DrainBufferSize = 8192;
 
+    /// <summary>
+    /// How often the timeout monitor re-reads an extensible budget (<see cref="BatonTask.WithTimeoutBudget"/>).
+    /// Only reached when a probe was supplied; with none, the monitor waits the configured timeout out
+    /// in one delay exactly as it did before #2019.
+    /// </summary>
+    private static readonly TimeSpan BudgetPollInterval = TimeSpan.FromSeconds(15);
+
     public static void Run(
         string program,
         string[] args,
         TimeSpan? timeout,
+        Func<TimeSpan>? timeoutBudget,
         bool captureOutput,
         IReadOnlyList<(string Key, string Value)> envVars,
         bool clearEnv,
@@ -130,16 +138,75 @@ internal static class BatonProcessRunner
                 registration = cancellationToken.Register(() => KillIfAlive(job, cancelKillFired));
             }
 
-            if (timeout is { } deadline)
+            if (timeout is { } configuredTimeout)
             {
                 timeoutMonitorCts = new CancellationTokenSource();
                 CancellationToken monitorToken = timeoutMonitorCts.Token;
                 timeoutMonitorTask = Task.Run(async () =>
                 {
+                    // Re-read, not delay-once (#2019): a budget the probe grows at minute 39 of a
+                    // 40-minute box has to move the kill, or crediting the wait would change nothing
+                    // for the lane it exists for. With no probe the loop is the single delay it
+                    // replaced -- one full-length wait, then the kill.
+                    Stopwatch elapsed = Stopwatch.StartNew();
+
+                    // High-water mark, hoisted above the loop on purpose (#2058 review): a credit,
+                    // once granted, is never retracted. Re-deriving the budget per poll instead
+                    // would open a window that only exists once `elapsed` passes the configured box
+                    // -- exactly while a lane is living on credit -- where one poll that fails to
+                    // re-earn the extension makes `remaining` negative and kills the tree on the
+                    // spot, mid-credited-tail. That is #2019's own harm, reproduced by the fix for
+                    // it, and it presents as "the box is still too small" rather than as a failed
+                    // measurement.
+                    TimeSpan granted = configuredTimeout;
+                    bool probeFailureWarned = false;
                     try
                     {
-                        await Task.Delay(deadline, monitorToken).ConfigureAwait(false);
-                        KillIfAlive(job, timedOutKillFired);
+                        while (true)
+                        {
+                            if (timeoutBudget is not null)
+                            {
+                                try
+                                {
+                                    TimeSpan probed = timeoutBudget();
+                                    if (probed > granted)
+                                    {
+                                        granted = probed;
+                                    }
+                                }
+                                catch (Exception ex)
+                                {
+                                    // Fails closed, and here that means KEEPING WHAT WAS ALREADY
+                                    // GRANTED -- the same thing as falling back to the configured
+                                    // box until the first credit lands, and the opposite of it
+                                    // afterwards. The probe is a MEASUREMENT, so one that cannot be
+                                    // taken grants nothing NEW; it cannot take back an extension the
+                                    // lane is already running on. Swallowed rather than rethrown
+                                    // because throwing here would leave the tree with no deadline at
+                                    // all -- the opposite of what a broken probe should cost. Warned
+                                    // once rather than per poll: the cause repeats every
+                                    // BudgetPollInterval, so the first write is the findable one and
+                                    // the rest are noise.
+                                    if (!probeFailureWarned)
+                                    {
+                                        probeFailureWarned = true;
+                                        Debug.WriteLine($"BatonTask timeout budget probe failed; keeping the budget already granted: {ex}");
+                                    }
+                                }
+                            }
+
+                            TimeSpan remaining = granted - elapsed.Elapsed;
+                            if (remaining <= TimeSpan.Zero)
+                            {
+                                KillIfAlive(job, timedOutKillFired);
+                                return;
+                            }
+
+                            TimeSpan wait = timeoutBudget is not null && remaining > BudgetPollInterval
+                                ? BudgetPollInterval
+                                : remaining;
+                            await Task.Delay(wait, monitorToken).ConfigureAwait(false);
+                        }
                     }
                     catch (OperationCanceledException)
                     {

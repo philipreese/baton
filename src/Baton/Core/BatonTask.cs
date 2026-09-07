@@ -29,6 +29,7 @@ public sealed class BatonTask : IDisposable
     private readonly string[] args;
     private readonly List<(string Key, string Value)> envVars = [];
     private TimeSpan? timeout;
+    private Func<TimeSpan>? timeoutBudget;
     private bool captureOutput;
     private bool clearEnv;
     private string? cwd;
@@ -69,6 +70,31 @@ public sealed class BatonTask : IDisposable
     {
         ThrowIfDisposed();
         this.timeout = timeout;
+        return this;
+    }
+
+    /// <summary>
+    /// Makes the timeout re-readable while the run is in flight: <paramref name="budget"/> is polled
+    /// periodically and its return value is the run's total wall-clock budget, measured from the same
+    /// start as <see cref="WithTimeout"/>'s. A budget shorter than the configured timeout is ignored —
+    /// this can only ever extend a run, never cut one short. Nor can a LATER poll undo an earlier
+    /// one: the monitor keeps the longest budget it has been given, so a probe that throws, or that
+    /// stops reporting the extension it reported a moment ago, grants nothing NEW rather than
+    /// retracting what a run is already living on.
+    /// Must be called before the task is run, and only alongside <see cref="WithTimeout"/>: with no
+    /// timeout configured there is no deadline to extend and this is inert.
+    /// </summary>
+    /// <remarks>
+    /// Exists for <see cref="Dispatch.BuildLockWaitCredit"/> (#2019): a lane's box has to be able to
+    /// grow while the lane runs, because the queueing it is being credited for is measured as it
+    /// happens. Without a probe the monitor is the single-shot delay it has always been.
+    /// </remarks>
+    /// <returns>This instance, for chaining.</returns>
+    public BatonTask WithTimeoutBudget(Func<TimeSpan> budget)
+    {
+        ThrowIfDisposed();
+        ArgumentNullException.ThrowIfNull(budget);
+        timeoutBudget = budget;
         return this;
     }
 
@@ -187,7 +213,7 @@ public sealed class BatonTask : IDisposable
             throw new InvalidOperationException("BatonTask.Run/RunAsync may only be called once per instance.");
         }
 
-        BatonProcessRunner.Run(program, args, timeout, captureOutput, envVars, clearEnv, cwd, RaiseEvent, cancellationToken);
+        BatonProcessRunner.Run(program, args, timeout, timeoutBudget, captureOutput, envVars, clearEnv, cwd, RaiseEvent, cancellationToken);
     }
 
     private void RaiseEvent(BatonEventArgs args) => EventRaised?.Invoke(this, args);

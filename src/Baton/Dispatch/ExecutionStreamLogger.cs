@@ -139,6 +139,9 @@ public sealed class ExecutionStreamLogger
         // Referenced, not duplicated, for the same reason as the line above it — its name is declared
         // where it is written (Mutation.VerifyRunner.RawOutputFileName).
         || string.Equals(fileName, Mutation.VerifyRunner.RawOutputFileName, StringComparison.Ordinal)
+        // #2019: the build-lock wait log tools/buildlock.py appends to for this execution. Referenced
+        // from where its name is declared (BuildLockWaitCredit.LogFileName), like the two above.
+        || string.Equals(fileName, BuildLockWaitCredit.LogFileName, StringComparison.Ordinal)
         || string.Equals(fileName, StdoutTruncationMarkerFileName, StringComparison.Ordinal)
         || string.Equals(fileName, StderrTruncationMarkerFileName, StringComparison.Ordinal)
         || string.Equals(fileName, StdoutWriteFailureMarkerFileName, StringComparison.Ordinal)

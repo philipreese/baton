@@ -162,7 +162,8 @@ public static class ArtifactManager
     /// Builds the AER-computed environment variables a worker is invoked with:
     /// <c>BATON_INPUT_0</c>.. for each resolved input path, in order, <c>BATON_OUTPUT_DIR</c> for
     /// the pre-allocated output directory, <c>BATON_ARTIFACTS_ROOT</c> for <paramref name="artifactsRootPath"/>
-    /// itself, and — only when this dispatch is a <see cref="Domain.DecisionType.RetryWithRevision"/>
+    /// itself, <see cref="Dispatch.BuildLockWaitCredit.LogEnvironmentVariable"/> for this execution's
+    /// build-lock wait log, and — only when this dispatch is a <see cref="Domain.DecisionType.RetryWithRevision"/>
     /// or <see cref="Domain.DecisionType.Supersede"/> consequence carrying a supplement
     /// — <c>BATON_SUPPLEMENTARY_INPUT</c> for <paramref name="supplementaryInputPath"/>. A dedicated
     /// variable, not a declared input name, so it can never collide with a step's own declared
@@ -207,7 +208,7 @@ public static class ArtifactManager
             RefuseRelative(supplementaryInputPath, nameof(supplementaryInputPath));
         }
 
-        var variables = new List<EnvironmentVariable.BatonComputed>(inputPaths.Count + 3);
+        var variables = new List<EnvironmentVariable.BatonComputed>(inputPaths.Count + 4);
         for (var i = 0; i < inputPaths.Count; i++)
         {
             variables.Add(new EnvironmentVariable.BatonComputed($"BATON_INPUT_{i}", inputPaths[i]));
@@ -215,6 +216,15 @@ public static class ArtifactManager
 
         variables.Add(new EnvironmentVariable.BatonComputed("BATON_OUTPUT_DIR", outputDirectory));
         variables.Add(new EnvironmentVariable.BatonComputed("BATON_ARTIFACTS_ROOT", artifactsRootPath));
+
+        // #2019: where every build-lock wait this execution's commands pay for is recorded, so the box
+        // can be credited for queueing it did not cause. Emitted unconditionally and derived from the
+        // output directory rather than declared anywhere, exactly like the two above — the writer is
+        // tools/buildlock.py, reading this variable out of the worker's inherited environment, and the
+        // reader is Dispatch.BuildLockWaitCredit, which owns what the file means.
+        variables.Add(new EnvironmentVariable.BatonComputed(
+            Dispatch.BuildLockWaitCredit.LogEnvironmentVariable,
+            Path.Combine(outputDirectory, Dispatch.BuildLockWaitCredit.LogFileName)));
 
         if (supplementaryInputPath is not null)
         {

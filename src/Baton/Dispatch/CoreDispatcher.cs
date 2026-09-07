@@ -886,6 +886,18 @@ public sealed class CoreDispatcher(ICoreEventLogWriter coreEventLogWriter, IStre
         // dispatcher for a NonProcess execution) — Timeout is therefore always set.
         using var task = new BatonTask(target.Program, [.. expandedArgs]).WithTimeout(request.Timeout!.Value);
 
+        // #2019: the lane's own recorded build-lock queueing, credited back to its box.
+        // BuildLockWaitCredit is the register for what that means and what it is capped at; the one
+        // thing decided HERE is the path, read out of pathVariables rather than re-derived, so the
+        // file the engine reads is by construction the file the worker's children were told to write
+        // (ArtifactManager.BuildEnvironment).
+        if (pathVariables.TryGetValue(BuildLockWaitCredit.LogEnvironmentVariable, out var lockWaitLogPath))
+        {
+            var box = request.Timeout!.Value;
+            task.WithTimeoutBudget(() => BuildLockWaitCredit.EffectiveTimeout(
+                box, BuildLockWaitCredit.RecordedWait(lockWaitLogPath)));
+        }
+
         if (target.WorkingDirectory is { } workingDirectory)
         {
             task.WithCwd(workingDirectory);

@@ -246,7 +246,19 @@ A harness invokes work two ways, both in `src/Baton.Cli/Program.cs`:
   say — so such a lane does not die mid-flight. Role dispatch only, rejected for a template: a
   template's phases each carry their own role's timeout, so there is no single one to override. Values
   are whole minutes, rejected outright above a 24h ceiling (no interactive confirmation exists for a
-  non-interactive CLI) and merely flagged on stderr above 2h. `--label` (#1499) is display text only —
+  non-interactive CLI) and merely flagged on stderr above 2h. **The box measures the worker, not the
+  machine (#2019).** Every `dotnet build`/`test` a lane runs queues on the user-global build lock
+  (`tools/buildlock.py`, #1402), and under several live lanes that queue ate the box: four rooms
+  measured 2026-09-06/07 were killed mid-round having spent ≈5–6 minutes each purely waiting, with
+  finished work uncommitted. So `tools/buildlock.py` appends every wait it measures to
+  `lock-wait.jsonl` in the execution's own artifact directory (`BATON_LOCK_WAIT_LOG`, set by the
+  engine into the worker's environment), and the dispatch timeout is re-read while the run is in
+  flight: the deadline moves out by the recorded wait, capped at
+  `Baton.Dispatch.BuildLockWaitCredit.MaxBudgetMultiplier`× the configured box. That type is the
+  register for what the file means, what a line it will not credit is worth (nothing), and the one
+  thing the credit cannot see — a wait is recorded when the lock is finally obtained, so queueing
+  still IN FLIGHT is not yet credited. A separate sink from the pre-push hook's own
+  `BATON_BUILDLOCK_WAIT_LOG`, which alone feeds §7's `pushWaitMs`; neither reads the other's file. `--label` (#1499) is display text only —
   a short human-readable name (e.g. "the #1496 env-snapshot lane") so Fleet Glass (§6) can show
   something legible instead of a bare `dispatch-<role>-<hex8>` directory name; it is never part of the
   room directory's own name, which stays the generated hex identity above. Sanitized at parse time
@@ -2829,7 +2841,11 @@ call. `timeoutMs` is deliberately the raw configured timeout, not a countdown �
 would already be stale by the time a caller reads it. A renderer wanting remaining time pairs it
 with the same Running step's own `steps[].timestamp` above, which this shape already emits;
 `timeoutMs` is not duplicated there (the terminal path has no live "remaining" concept to pair it
-with at all).
+with at all). Since #2019 it is also a **floor, not the deadline**: a lane's build-lock queueing is
+credited back to its box (`Baton.Dispatch.BuildLockWaitCredit`, and the `--timeout` paragraph above
+for the rule), so a Running row whose elapsed time has passed `timeoutMs` — up to that class's
+`MaxBudgetMultiplier`× it — is not by itself evidence of a wedged lane and is not grounds to cancel.
+No field carries the applied credit yet; that, and the ledger dimension for it, are open.
 
 **`label` (#1499) is read from the same `bindings.json`, but deliberately NOT gated the way the
 quartet above is.** A room's `--label` is a room-level fact stamped onto every entry at dispatch time
