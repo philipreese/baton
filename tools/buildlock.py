@@ -23,7 +23,17 @@ Replay:           OPT-IN, and the opt-in is the whole safety argument (#2010, 20
                   sites may carry the flag lives HERE, and pixi.toml cites it rather than restating
                   it: a command whose whole output is a VERDICT over worktree content may opt in; a
                   command that PRODUCES an artifact another command then reads, or whose verdict is a
-                  function of state this file cannot fingerprint, may NOT. The fingerprint is HEAD
+                  function of state this file cannot fingerprint, may NOT -- UNLESS that state is
+                  itself rebuilt from fingerprinted source by a leg that always executes immediately
+                  before it, in the same fixed task line. That exception is not a softening, and it
+                  is what makes the two `--no-build` test legs legal rather than something at their
+                  call site: `dotnet test --no-build` grades `bin/`, which is outside the
+                  fingerprint, so it qualifies ONLY because `test`'s own unflagged
+                  `dotnet build --no-incremental` leg (pixi.toml:84) and, for `test-no-build`,
+                  `lint` inside `gates` force that `bin/` from source on every run. A command that
+                  reads out-of-fingerprint state with no such leg in front of it -- `dotnet run
+                  --project …`, i.e. `vendor-check` -- may NOT opt in, and reading the clause as
+                  soft is exactly how that mistake gets made. The fingerprint is HEAD
                   plus the porcelain status plus every dirty path's content -- `bin/`, `obj/`, the
                   environment and the wall clock are all outside it. So every `dotnet build` line is
                   excluded, `lint`'s and `test`'s especially: their `--no-incremental` is the #687 /
@@ -32,6 +42,14 @@ Replay:           OPT-IN, and the opt-in is the whole safety argument (#2010, 20
                   protection on the exact commands those two issues named, unconditionally, not just
                   in the branch-excursion case. What the receipt holds and what a reader sees:
                   docs/dispatch.md (#2010).
+                  THE ALLOWLIST, and it is pinned rather than merely written: exactly three call
+                  sites carry `--replay` -- `test`'s TEST leg, `test-no-build`, and `fmt-check`.
+                  `REPLAY_ALLOWLIST` below holds their verbatim segments and a selftest arm reads
+                  pixi.toml and asserts the set of `--replay`-carrying segments equals it, so a
+                  fourth line, or the flag moved one leg left onto `test`'s `dotnet build`, fails
+                  `pixi run buildlock-selftest` naming the offender. Prose alone could not: `test`
+                  and `build` are outside diff-shape's PIXI_PROTECTED_TASK_RULE, so that move needs
+                  no operator merge.
                   BOUNDARY, stated rather than guarded: the same argv run WITHOUT the flag leaves an
                   existing receipt alone, so a pass can outlive a later unflagged failure of the same
                   command. The pixi lines are fixed and each is flagged or not, so they cannot reach
@@ -98,6 +116,7 @@ import hashlib
 import json
 import os
 from pathlib import Path
+import re
 import subprocess
 import sys
 import tempfile
@@ -121,6 +140,49 @@ REPLAY_TAIL_BYTES = 64 * 1024
 # nothing asks for again) and, since the 2026-09-07 review, also inside the BODY -- which is what
 # lets prune_receipts recognise an orphan rather than leave it on disk forever.
 REPLAY_VERSION = 1
+
+# The `--replay` allowlist, mechanically pinned (#2010, 2026-09-07 re-review). The docstring's
+# "Replay" section is the RULE; this is the SET the rule currently admits, as (pixi task, verbatim
+# command segment) pairs. `_selftest_replay_allowlist` below asserts pixi.toml's flagged segments
+# equal it exactly, which is what stops the two failures prose cannot: a fourth line opting in, and
+# the flag moving from `test`'s test leg onto its `dotnet build --no-incremental` leg -- neither
+# task name is under diff-shape's PIXI_PROTECTED_TASK_RULE, so neither move needs an operator merge.
+REPLAY_ALLOWLIST = {
+    ("test",
+     "python tools/buildlock.py --replay dotnet test --no-build --minimum-expected-tests 1"),
+    ("test-no-build",
+     "python tools/buildlock.py --replay dotnet test --no-build "
+     "--max-parallel-test-modules 1 --minimum-expected-tests 1"),
+    ("fmt-check",
+     "python tools/buildlock.py --replay dotnet format --verify-no-changes"),
+}
+
+
+def replay_call_sites(pixi_toml: str) -> set[tuple[str, str]]:
+    """Every `--replay`-carrying command segment in a pixi.toml, as (task name, segment).
+
+    Pure over text so the selftest can feed it a fixture and prove the arm discriminates; a
+    checker that only ever sees the real file cannot tell "the set matches" from "I found
+    nothing". Comment lines are skipped -- pixi.toml discusses the flag more often than it
+    carries it -- and a chained `cmd` is split on `&&` so a per-LEG answer is possible at all.
+    """
+    sites: set[tuple[str, str]] = set()
+    current_table = ""
+    for raw in pixi_toml.splitlines():
+        line = raw.strip()
+        table = re.match(r"^\[tasks\.([A-Za-z0-9_-]+)\]", line)
+        if table:
+            current_table = table.group(1)
+            continue
+        if line.startswith("#") or "--replay" not in line:
+            continue
+        key = re.match(r"^([A-Za-z0-9_-]+)\s*=", line)
+        name = current_table if (not key or key.group(1) == "cmd") else key.group(1)
+        body = re.search(r'cmd\s*=\s*"([^"]*)"', line)
+        for segment in (body.group(1) if body else line).split("&&"):
+            if "--replay" in segment:
+                sites.add((name, " ".join(segment.split())))
+    return sites
 
 
 def replay_inputs(command: list[str], priority_class: str) -> tuple[Path, str] | None:
@@ -662,6 +724,22 @@ def _selftest_replay() -> bool:
         if still_valid.returncode != 0 or count() != before or "replaying" not in still_valid.stdout:
             print("  control FAILED: an unflagged run consumed the receipt")
             return False
+        # ... and WROTE none either -- the third verb, and the one the two arms above cannot reach.
+        # The key is (cwd, class, argv), identical for the flagged and unflagged forms, so a receipt
+        # written by an unflagged run would land on the same path with the same fingerprint and every
+        # later arm would read identically. Emptying the store first is what makes the write visible.
+        # Load-bearing beyond the docstring: gates.py's OVERLAP justification for running this
+        # selftest beside lint's build rests on unflagged runs never touching the real
+        # `.git/buildlock`, and arms 2-7 use the REAL repository as cwd.
+        store = Path(repo, ".git", "buildlock")
+        for existing in store.glob("*.json"):
+            existing.unlink()
+        before = count()
+        wrote_nothing = run_unflagged()
+        left_behind = sorted(p.name for p in store.glob("*.json"))
+        if wrote_nothing.returncode != 0 or count() != before + 1 or left_behind:
+            print(f"  control FAILED: an unflagged run wrote a receipt -- {left_behind}")
+            return False
         with open(failure, "w", encoding="utf-8") as f:
             f.write("fail")
         with open(tracked, "w", encoding="utf-8") as f:
@@ -726,8 +804,58 @@ def _selftest_replay() -> bool:
     return True
 
 
+def _selftest_replay_allowlist() -> bool:
+    """pixi.toml's `--replay` set is exactly REPLAY_ALLOWLIST -- membership, not just the default.
+
+    The rest of this file's replay arms pin what the flag DOES. This one pins WHO CARRIES IT, which
+    was prose plus a partial line-level protection: `test` and `build` are outside diff-shape's
+    PIXI_PROTECTED_TASK_RULE, so moving the flag from `test`'s `--no-build` leg onto its
+    `dotnet build --no-incremental` leg trips no gate and silently deletes #687/#688's protection.
+    Exact-segment equality catches that move (the segment text changes) as well as a fourth opt-in.
+    """
+    pixi = Path(__file__).resolve().parent.parent / "pixi.toml"
+    try:
+        text = pixi.read_text(encoding="utf-8")
+    except OSError as exc:
+        print(f"  control FAILED: could not read {pixi} -- {exc}")
+        return False
+    found = replay_call_sites(text)
+    if found != REPLAY_ALLOWLIST:
+        for extra in sorted(found - REPLAY_ALLOWLIST):
+            print(f"  control FAILED: unallowlisted --replay call site {extra[0]}: {extra[1]!r}")
+        for missing in sorted(REPLAY_ALLOWLIST - found):
+            print(f"  control FAILED: allowlisted --replay call site gone {missing[0]}: "
+                  f"{missing[1]!r}")
+        print("  (the allowlist and the rule behind it: REPLAY_ALLOWLIST and this module's "
+              "docstring, 'Replay')")
+        return False
+    # The discriminating control: on a fixture carrying a fourth opt-in and the flag moved onto a
+    # build leg, the same reader must report both. Without it, a parser that silently matched
+    # nothing would pass the equality above only by accident of an empty allowlist -- and would
+    # keep passing after someone did opt a build line in.
+    fixture = (
+        '[tasks]\n'
+        '# discussion of --replay in a comment must not count\n'
+        'lint = { cmd = "python tools/buildlock.py --replay dotnet build -warnaserror" }\n'
+        'test = { cmd = "python tools/buildlock.py dotnet build --no-incremental && '
+        'python tools/buildlock.py --replay dotnet test --no-build --minimum-expected-tests 1" }\n'
+    )
+    intruders = replay_call_sites(fixture)
+    expected_intruders = {
+        ("lint", "python tools/buildlock.py --replay dotnet build -warnaserror"),
+        ("test",
+         "python tools/buildlock.py --replay dotnet test --no-build --minimum-expected-tests 1"),
+    }
+    if intruders != expected_intruders:
+        print(f"  control FAILED: the allowlist reader missed a planted opt-in -- {intruders}")
+        return False
+    print("  replay allowlist: pass")
+    return True
+
+
 def selftest() -> int:
     ok = _selftest_replay()
+    ok = _selftest_replay_allowlist() and ok
     with tempfile.TemporaryDirectory() as td:
         lock_file = os.path.join(td, "selftest.lock")
         stamps = os.path.join(td, "stamps.txt")

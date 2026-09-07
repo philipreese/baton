@@ -44,7 +44,10 @@ UseSharedCompilation = "false"
 # #2010: replay is OPT-IN -- a wrapped line executes unless it carries `--replay`. The rule for
 # which lines may carry it is stated once, in tools/buildlock.py's docstring ("Replay"), and cited
 # here rather than restated: a VERDICT over worktree content may opt in, a producer of artifacts
-# another command reads may not. No `dotnet build` line below opts in, for the reason that docstring
+# another command reads may not. The SET admitted under that rule is pinned mechanically, not by
+# this comment: `REPLAY_ALLOWLIST` in that same file, asserted against these lines by
+# `pixi run buildlock-selftest`, so a fourth opt-in -- or the flag moved onto `test`'s build leg --
+# fails a gate naming it. No `dotnet build` line below opts in, for the reason that docstring
 # gives; the saving those lines would have bought already exists, and against an authenticated
 # per-member store rather than as a second path to the same skip -- C-12 ruling C's
 # `gates-fast-cover`.
