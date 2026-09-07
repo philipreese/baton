@@ -15,8 +15,27 @@ file in the machine's temp directory. The kernel releases it the instant the hol
 dies, however it dies -- so there is no stale-lock file to detect, no PID-liveness check, and no
 steal logic. A crashed holder frees the lock by crashing.
 
-Usage:            python tools/buildlock.py [--no-replay] [--class build|readonly] <command> [args...]
-Replay:           see docs/dispatch.md (#2010) for receipt scope and forced execution.
+Usage:            python tools/buildlock.py [--replay] [--class build|readonly] <command> [args...]
+Replay:           OPT-IN, and the opt-in is the whole safety argument (#2010, 2026-09-07 review). A
+                  wrapped command EXECUTES unless its invocation carries `--replay`; only a flagged
+                  invocation reads, writes or voids a receipt, so an unflagged one behaves exactly as
+                  this wrapper did before #2010 (inherited stdout included). The rule for which call
+                  sites may carry the flag lives HERE, and pixi.toml cites it rather than restating
+                  it: a command whose whole output is a VERDICT over worktree content may opt in; a
+                  command that PRODUCES an artifact another command then reads, or whose verdict is a
+                  function of state this file cannot fingerprint, may NOT. The fingerprint is HEAD
+                  plus the porcelain status plus every dirty path's content -- `bin/`, `obj/`, the
+                  environment and the wall clock are all outside it. So every `dotnet build` line is
+                  excluded, `lint`'s and `test`'s especially: their `--no-incremental` is the #687 /
+                  #688 protection against MSBuild skipping a project whose source predates its
+                  assembly, and a replayed build performs no rebuild at all -- it would delete that
+                  protection on the exact commands those two issues named, unconditionally, not just
+                  in the branch-excursion case. What the receipt holds and what a reader sees:
+                  docs/dispatch.md (#2010).
+                  BOUNDARY, stated rather than guarded: the same argv run WITHOUT the flag leaves an
+                  existing receipt alone, so a pass could in principle outlive a later unflagged
+                  failure of the same command. Unreachable as wired -- the flag is part of the pixi
+                  task line, which is fixed, and no other caller passes it.
 Priority classes: TWO, and the whole difference is whether the command can start an MSBuild (#1910).
                   `build` (the default, and what every pixi task that runs `dotnet` uses) queues for
                   the exclusive lock exactly as described above. `readonly` declares that the command
@@ -93,6 +112,10 @@ CLASSES = (CLASS_BUILD, CLASS_READONLY)
 WAIT_LOG_VAR = "BATON_BUILDLOCK_WAIT_LOG"
 REPLAY_MAX_AGE_S = 6 * 60 * 60
 REPLAY_TAIL_BYTES = 64 * 1024
+# Receipt format version. It is inside the KEY (so a bump orphans every existing file under a key
+# nothing asks for again) and, since the 2026-09-07 review, also inside the BODY -- which is what
+# lets prune_receipts recognise an orphan rather than leave it on disk forever.
+REPLAY_VERSION = 1
 
 
 def replay_inputs(command: list[str], priority_class: str) -> tuple[Path, str] | None:
@@ -106,7 +129,7 @@ def replay_inputs(command: list[str], priority_class: str) -> tuple[Path, str] |
             "rev-parse", "--show-toplevel", "--absolute-git-dir", "HEAD").splitlines()
         root = Path(os.fsdecode(root_raw))
         git_dir = Path(os.fsdecode(git_dir_raw))
-        identity = json.dumps([1, os.getcwd(), priority_class, command]).encode()
+        identity = json.dumps([REPLAY_VERSION, os.getcwd(), priority_class, command]).encode()
         key = hashlib.sha256(identity).hexdigest()
         status = git("-C", str(root), "status", "--porcelain=v1", "-z",
                      "--untracked-files=all", "--ignore-submodules=none")
@@ -141,7 +164,8 @@ def replay_pass(inputs: tuple[Path, str] | None, command: list[str]) -> bool:
     path, fingerprint = inputs
     try:
         receipt = json.loads(path.read_text(encoding="utf-8"))
-        if (receipt["fingerprint"] != fingerprint or receipt["exit_code"] != 0
+        if (receipt.get("version") != REPLAY_VERSION
+                or receipt["fingerprint"] != fingerprint or receipt["exit_code"] != 0
                 or not 0 <= time.time() - receipt["passed_at"] <= REPLAY_MAX_AGE_S):
             return False
         tail = base64.b64decode(receipt["stdout_tail"], validate=True)
@@ -165,14 +189,55 @@ def invalidate_pass(inputs: tuple[Path, str] | None) -> bool:
         return False
 
 
+def prune_receipts(directory: Path, keep: Path) -> None:
+    """Drop this directory's expired and version-orphaned receipts. Bounded, best-effort.
+
+    Runs only on a WRITE, and only over the receipt directory being written to -- one worktree's
+    own, holding one file per distinct (cwd, class, argv) that has opted in, at up to
+    REPLAY_TAIL_BYTES plus change each. Nothing else ever deletes one: `invalidate_pass` removes
+    only the exact key being re-run, and a format bump (REPLAY_VERSION) orphans every existing file
+    under a key that is never read again, so without this the main checkout's `.git/buildlock` grows
+    for the life of the clone. Never a reason to fail the command that just passed.
+    """
+    for sibling in directory.glob("*.json"):
+        if sibling == keep:
+            continue
+        try:
+            receipt = json.loads(sibling.read_text(encoding="utf-8"))
+            live = (receipt.get("version") == REPLAY_VERSION
+                    and 0 <= time.time() - receipt["passed_at"] <= REPLAY_MAX_AGE_S)
+        except (OSError, ValueError, KeyError, TypeError):
+            live = False  # unreadable is unusable: replay_pass would refuse it too
+        if not live:
+            try:
+                sibling.unlink()
+            except OSError:
+                pass
+
+
 def run_recorded(command: list[str], env: dict[str, str], priority_class: str,
                  inputs: tuple[Path, str] | None) -> int:
     """Stream stdout unchanged, retaining a bounded byte tail; stderr stays inherited."""
-    before = replay_inputs(command, priority_class) if inputs is not None else None
+    if inputs is None:
+        # Not replay-eligible (no `--replay`, or unreadable inputs): nothing to record, so stdout
+        # stays the INHERITED handle it was before #2010 rather than a pipe this process pumps.
+        # That is most of the pipe's blast radius removed -- see the remark on the read loop below
+        # for the part that necessarily remains.
+        return subprocess.run(command, env=env).returncode
+    before = replay_inputs(command, priority_class)
     # A previous holder may have published while this process queued.
     if not invalidate_pass(inputs):
         before = None
     tail = bytearray()
+    # UNVERIFIED RESIDUAL, and it is on the MSBuild-owning commands specifically (2026-09-07 review):
+    # a pipe ends at EOF, which arrives only when every process holding the write handle has closed
+    # it, so a grandchild that outlives the wrapped command would stall this loop after the build
+    # finished -- in the file whose Timeout section exists to stop exactly that hang class, and this
+    # loop has no bound of its own. MSBuild's handle-inheritance behaviour was not measured. The
+    # opted-in set is what bounds the exposure: it is `dotnet format --verify-no-changes` and the
+    # `--no-build` test legs, which do own MSBuild, so this is narrowed rather than gone.
+    # `pixi.toml`'s activation env (MSBUILDDISABLENODEREUSE, UseSharedCompilation=false) is what
+    # stops node reuse leaving such a process behind, and it does not apply outside a pixi shell.
     with subprocess.Popen(command, env=env, stdout=subprocess.PIPE) as child:
         assert child.stdout is not None
         while chunk := child.stdout.read1(8192):
@@ -190,10 +255,11 @@ def run_recorded(command: list[str], env: dict[str, str], priority_class: str,
             with tempfile.NamedTemporaryFile(mode="w", encoding="utf-8", dir=path.parent,
                                              delete=False) as f:
                 temporary = f.name
-                json.dump({"fingerprint": fingerprint, "exit_code": 0,
+                json.dump({"version": REPLAY_VERSION, "fingerprint": fingerprint, "exit_code": 0,
                            "passed_at": time.time(),
                            "stdout_tail": base64.b64encode(tail).decode("ascii")}, f)
             os.replace(temporary, path)
+            prune_receipts(path.parent, path)
         except OSError:
             pass  # Losing an optimization must not turn a passing command into a failure.
         finally:
@@ -360,19 +426,23 @@ def split_class(argv: list[str]) -> tuple[str, list[str]]:
 
 def main() -> int:
     argv = sys.argv[1:]
-    no_replay = bool(argv and argv[0] == "--no-replay")
-    if no_replay:
+    # OPT-IN (see the docstring's Replay section for the rule this flag encodes). There is
+    # deliberately no negative twin: the default IS forced execution, so `--no-replay` would be a
+    # second flag on one axis whose only use -- defeating a task line's baked-in `--replay` -- is
+    # unreachable, since `pixi run <task>` cannot insert a flag ahead of the command.
+    replay = bool(argv and argv[0] == "--replay")
+    if replay:
         argv = argv[1:]
     priority_class, command = split_class(argv)
-    if command and command[0] == "--no-replay":
-        no_replay = True
+    if command and command[0] == "--replay":
+        replay = True
         command = command[1:]
     if priority_class not in CLASSES:
         print(f"buildlock: unknown priority class {priority_class!r} -- one of {', '.join(CLASSES)}")
         return 2
     if not command:
         print("buildlock: no command given -- usage: python tools/buildlock.py "
-              "[--no-replay] [--class build|readonly] <command> [args...]")
+              "[--replay] [--class build|readonly] <command> [args...]")
         return 2
 
     if priority_class == CLASS_READONLY:
@@ -385,8 +455,10 @@ def main() -> int:
                   f"MSBuild ({' '.join(command)}) -- run it in the default {CLASS_BUILD} class")
             return 2
 
-    inputs = replay_inputs(command, priority_class)
-    if not no_replay and replay_pass(inputs, command):
+    # Unflagged: no key computed, no tree walked, no receipt read, written or voided -- which is
+    # also what keeps this file's own selftest out of the real repository's receipt store.
+    inputs = replay_inputs(command, priority_class) if replay else None
+    if replay_pass(inputs, command):
         return 0
     # Delete BEFORE waiting/spawning: a failed or interrupted attempt voids the previous pass.
     if not invalidate_pass(inputs):
@@ -425,7 +497,7 @@ def main() -> int:
 
 _CHILD_HOLD_AND_STAMP = """
 import os, sys, time
-sys.argv = [sys.argv[0], "--no-replay", sys.executable, "-c",
+sys.argv = [sys.argv[0], sys.executable, "-c",
     "import time,sys; open(sys.argv[1],'a').write(f'{time.monotonic()} start\\\\n'); "
     "time.sleep(0.6); open(sys.argv[1],'a').write(f'{time.monotonic()} end\\\\n')",
     sys.argv[1]]
@@ -536,7 +608,14 @@ def _selftest_replay() -> bool:
                    counter, failure]
 
         def run(*flags: str) -> subprocess.CompletedProcess:
-            return subprocess.run([sys.executable, os.path.abspath(__file__), *flags, *command],
+            """An OPTED-IN invocation -- what a pixi task line that carries `--replay` looks like."""
+            return subprocess.run(
+                [sys.executable, os.path.abspath(__file__), "--replay", *flags, *command],
+                cwd=repo, env=env, capture_output=True, text=True, check=False, timeout=180)
+
+        def run_unflagged() -> subprocess.CompletedProcess:
+            """The DEFAULT invocation: no `--replay`, so no receipt is read, written or voided."""
+            return subprocess.run([sys.executable, os.path.abspath(__file__), *command],
                                   cwd=repo, env=env, capture_output=True, text=True,
                                   check=False, timeout=180)
 
@@ -558,14 +637,31 @@ def _selftest_replay() -> bool:
             if result.returncode != 0 or count() != before + 1:
                 print("  control FAILED: tracked content edit replayed")
                 return False
+        # THE OPT-IN (2026-09-07 review). A live receipt is sitting next to an unchanged tree right
+        # now -- the arm above just proved a flagged run replays in exactly this state -- and an
+        # UNFLAGGED command must still execute, twice running. Both halves discriminate: "executes
+        # once" would also pass under an inversion that merely stopped WRITING receipts, and the
+        # absence of the replay line is what separates executing from replaying silently.
         before = count()
-        forced = run("--no-replay")
-        if forced.returncode != 0 or count() != before + 1:
-            print("  control FAILED: --no-replay did not execute")
+        unflagged_first, unflagged_second = run_unflagged(), run_unflagged()
+        if (unflagged_first.returncode != 0 or unflagged_second.returncode != 0
+                or count() != before + 2
+                or "replaying" in unflagged_first.stdout + unflagged_second.stdout):
+            print(f"  control FAILED: an unflagged command did not execute twice -- "
+                  f"{count() - before} run(s), {unflagged_second.stdout!r}")
+            return False
+        # ... and left that receipt untouched: the docstring's stated BOUNDARY, pinned so a future
+        # change that starts voiding receipts from unflagged runs updates the claim with the code.
+        before = count()
+        still_valid = run()
+        if still_valid.returncode != 0 or count() != before or "replaying" not in still_valid.stdout:
+            print("  control FAILED: an unflagged run consumed the receipt")
             return False
         with open(failure, "w", encoding="utf-8") as f:
             f.write("fail")
-        failed = run("--no-replay")
+        with open(tracked, "w", encoding="utf-8") as f:
+            f.write("edited before the failure")  # moves off the receipted fingerprint
+        failed = run()
         before = count()
         failed_again = run()
         if failed.returncode != 3 or failed_again.returncode != 3 or count() != before + 1:
@@ -598,6 +694,28 @@ def _selftest_replay() -> bool:
         receipt_path.write_text("broken json", encoding="utf-8")
         if run().returncode != 0 or count() != before + 2:
             print("  control FAILED: corrupt receipt did not execute")
+            return False
+        # Pruning on write, both polarities: an EXPIRED sibling and a VERSION-ORPHANED one go, the
+        # live receipt this write just produced stays. Without the negative half a prune that
+        # emptied the directory would look identical from here.
+        store = receipt_path.parent
+        stale = {
+            store / "expired.json": {"version": REPLAY_VERSION, "fingerprint": "x", "exit_code": 0,
+                                     "passed_at": time.time() - REPLAY_MAX_AGE_S - 1,
+                                     "stdout_tail": ""},
+            store / "orphan.json": {"version": REPLAY_VERSION + 1, "fingerprint": "x",
+                                    "exit_code": 0, "passed_at": time.time(), "stdout_tail": ""},
+        }
+        for planted, body in stale.items():
+            planted.write_text(json.dumps(body), encoding="utf-8")
+        with open(tracked, "w", encoding="utf-8") as f:
+            f.write("edited for the prune arm")
+        if run().returncode != 0:
+            print("  control FAILED: the prune arm's own run did not pass")
+            return False
+        survivors = sorted(p.name for p in store.glob("*.json"))
+        if survivors != [receipt_path.name]:
+            print(f"  control FAILED: prune left {survivors}, want just the live receipt")
             return False
     print("  replay controls: pass")
     return True
@@ -647,7 +765,7 @@ def selftest() -> int:
         crasher.communicate(timeout=30)
         env = _selftest_env(BATON_BUILDLOCK_FILE=lock_file, BATON_BUILDLOCK_TIMEOUT_S="3")
         after = subprocess.run(
-            [sys.executable, os.path.abspath(__file__), "--no-replay", sys.executable, "-c", "pass"],
+            [sys.executable, os.path.abspath(__file__), sys.executable, "-c", "pass"],
             env=env, capture_output=True, text=True, check=False, timeout=30,
         )
         if after.returncode != 0:
@@ -678,7 +796,7 @@ def selftest() -> int:
         else:
             env["BATON_BUILDLOCK_TIMEOUT_S"] = "1"
             waiter = subprocess.run(
-                [sys.executable, os.path.abspath(__file__), "--no-replay", sys.executable, "-c", "pass"],
+                [sys.executable, os.path.abspath(__file__), sys.executable, "-c", "pass"],
                 env=env, capture_output=True, text=True, check=False, timeout=30,
             )
             holder.terminate()
@@ -700,7 +818,7 @@ def selftest() -> int:
         env[HELD_MARKER] = "999999"  # nobody's pid; simulates a marker that outlived its setter
         env["BATON_BUILDLOCK_TIMEOUT_S"] = "5"
         stale = subprocess.run(
-            [sys.executable, os.path.abspath(__file__), "--no-replay", sys.executable, "-c", "pass"],
+            [sys.executable, os.path.abspath(__file__), sys.executable, "-c", "pass"],
             env=env, capture_output=True, text=True, check=False, timeout=30,
         )
         if stale.returncode != 0 or not os.path.exists(lock_file + ".info"):
@@ -739,7 +857,7 @@ def selftest() -> int:
 
             env["BATON_BUILDLOCK_TIMEOUT_S"] = "1"
             queued = subprocess.run(
-                [sys.executable, os.path.abspath(__file__), "--no-replay", sys.executable, "-c", "pass"],
+                [sys.executable, os.path.abspath(__file__), sys.executable, "-c", "pass"],
                 env=env, capture_output=True, text=True, check=False, timeout=30,
             )
             holder.terminate()
@@ -845,7 +963,7 @@ def selftest() -> int:
         env["BATON_BUILDLOCK_TIMEOUT_S"] = "20"
         env.pop(HELD_MARKER, None)
         uncontended = subprocess.run(
-            [sys.executable, os.path.abspath(__file__), "--no-replay", sys.executable, "-c", "pass"],
+            [sys.executable, os.path.abspath(__file__), sys.executable, "-c", "pass"],
             env=env, capture_output=True, text=True, check=False, timeout=30,
         )
         if uncontended.returncode != 0 or os.path.exists(wait_log):
@@ -869,7 +987,7 @@ def selftest() -> int:
         else:
             env["BATON_BUILDLOCK_TIMEOUT_S"] = "60"
             contended = subprocess.run(
-                [sys.executable, os.path.abspath(__file__), "--no-replay", sys.executable, "-c", "pass"],
+                [sys.executable, os.path.abspath(__file__), sys.executable, "-c", "pass"],
                 env=env, capture_output=True, text=True, check=False, timeout=90,
             )
             holder.communicate(timeout=30)
