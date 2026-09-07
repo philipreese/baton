@@ -795,7 +795,7 @@ public static class DispatchCommand
         return identity is null
             ? []
             : await CostLedgerStore
-                .ReadAllAsync(BatonPaths.CostLedgerFile(identity.FileSlug), cancellationToken).ConfigureAwait(false);
+                .ReadAllAsync(CostLedgerLocation.Resolve(identity.FileSlug), cancellationToken).ConfigureAwait(false);
     }
 
     /// <summary>

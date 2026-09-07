@@ -258,8 +258,9 @@ public static class MemorySyncCommand
     /// The enumeration is over <c>{BATON_HOME}/&lt;slug&gt;/memory/entries.jsonl</c> rather than over a
     /// registry, because there is no registry: Q3's layout makes the repository directory the unit, so
     /// the directories on disk ARE the list. A directory with no store file is not a repository this
-    /// verb knows about — <c>rooms/</c>, <c>ledger/</c> and the rest of <c>{BATON_HOME}</c> sit beside
-    /// them and are skipped by exactly that test.
+    /// verb knows about — <c>rooms/</c>, <c>queue/</c> and the rest of <c>{BATON_HOME}</c> sit beside
+    /// them and are skipped by exactly that test, as is a repository directory holding only the cost
+    /// ledger #2041 moved in beside the store.
     /// </remarks>
     private static IEnumerable<string> StoredRepositorySlugs(string? repository)
     {

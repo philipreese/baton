@@ -182,7 +182,7 @@ public static class LedgerExportCommand
         "# Cost-ledger exports\n"
         + "\n"
         + "Written by `baton ledger export --to <dir>`: each file is the whole repository-keyed cost\n"
-        + "ledger (`~/.baton/ledger/<repository>.jsonl`) as it stood on that date, in the same bytes\n"
+        + "ledger (`~/.baton/<repository>/cost-ledger.jsonl`) as it stood on that date, in the same bytes\n"
         + "`baton ledger --format csv` prints. The date names the file; it does not window the rows.\n"
         + "\n"
         + "The `Schema version` column is `LedgerCsv.SchemaVersion` — the column count and a truncated\n"

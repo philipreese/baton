@@ -4115,12 +4115,28 @@ second one.
 The burn ledger above stays exactly what it is: the per-execution source, keyed by machine, pruned by
 nothing. The **cost ledger** consumes it and adds three things it does not have — a *repository* key,
 *versioned price provenance*, and durability past the vendors' own history windows. Append-only JSONL
-at `BatonPaths.CostLedgerFile(slug)` (`{BatonPaths.Root}/ledger/<repository-slug>.jsonl`), one file per
+at `BatonPaths.CostLedgerFile(slug)` (`{BatonPaths.Root}/<repository-slug>/cost-ledger.jsonl`), one
+file per
 canonical repository identity, written through the same `JsonLinesLedger<T>` the burn ledger above
 wraps (and so the same `MutexGuardedFileLock`) under its own lock name. Written at the same settle site as `quota-ledger.jsonl` (`Program.cs`'s terminal-sentinel write),
 from the same `terminalEntries` already in hand, in its own `try`/`catch` so neither ledger's failure
 loses the other's. Fails open identically: logged on stderr, never a reason a settled run reports as
 failed.
+
+**Inside the repository directory since #2041, and relocated rather than read from both places.** The
+file was `{Root}/ledger/<repository-slug>.jsonl` until #2041 moved it under §12's Q3 layout, beside
+that repository's memory store, so one repository's state stops living in two roots.
+`CostLedgerLocation.Resolve` is the **one** resolver every production reader and writer goes through,
+and its own remarks carry the mechanism; what the register owns is the choice and its cost. A reader
+that fell back to the old path while the writer appended to the new one would split a repository's
+ledger across two files the instant anything settled — so the legacy file is **moved** onto the
+canonical path on first sight, byte-for-byte (`CostLedgerEntry` declares no catch-all for fields an
+older build may have written, and the JSONL reader skips malformed lines, so re-serializing history
+would silently lose some of it while the row count still matched), with one line appended to
+`{Root}/ledger-migrations.jsonl` recording where it went. **The accepted loss:** if a legacy file
+exists *while* a canonical one already does — reachable only from a pre-#2041 build writing after the
+move, or from a restored backup — the old file is left in place, unread and unmerged, and named on
+stderr. Merging it would mean the re-serialization the move exists to avoid.
 
 **One row per settled execution attempt.** `CostLedgerStore.BuildEntries` reuses
 `ExecutionUsageProjector.BuildByExecutionId` and `ExecutionBindingResolver.Resolve` — the same two
@@ -5848,10 +5864,10 @@ directories with the memory store **inside** each — `~/.baton/<repo-slug>/memo
 work in. `BatonPaths.MemoryEntriesFile` is the one spelling of it (`<repo-slug>/memory/entries.jsonl`),
 `BatonPaths.MemoryLinksFile` of the `links.jsonl` beside it, and `MemoryStore` is what writes both:
 append-only JSONL through the same `JsonLinesLedger` + `MutexGuardedFileLock` the two ledgers use, each
-file under its own lock, rather than a third concurrency mechanism. **Phase A wrote no canonical store at all**, and still writes none. The same ruling carries a
-follow-up for the cost ledger's own path (§7) — moving under the same per-repo root, with a reader that
-accepts both during the transition — which is a later phase's work, not a correction to what §7 states
-now.
+file under its own lock, rather than a third concurrency mechanism. **Phase A wrote no canonical store at all**, and still writes none. The same ruling's follow-up for the
+cost ledger's own path landed in #2041: it now sits at `<repo-slug>/cost-ledger.jsonl` beside the
+memory store, relocated on first sight rather than read from both places — §7's cost-ledger section is
+the register for that, including the one state it accepts leaving behind.
 
 **An entry's subject and its provenance are two fields, not one** (Q1, operator 2026-09-05).
 `MemoryEntry.Repository` is whose memory it is; `sourcePath`/`sourceVendor`/`sourceScope`/

@@ -21,7 +21,7 @@ namespace Baton.Accounting;
 /// <para>
 /// <b><see cref="Value"/> is not a filename.</b> A normalized origin identity carries <c>/</c>
 /// separators and a common-dir fallback carries a drive letter and a colon, either of which would
-/// break or silently nest <c>{BatonPaths.Root}/ledger/&lt;identity&gt;.jsonl</c>. <see cref="FileSlug"/>
+/// break or silently nest <c>{BatonPaths.Root}/&lt;identity&gt;/cost-ledger.jsonl</c>. <see cref="FileSlug"/>
 /// is the on-disk spelling, and it ends in a digest of <see cref="Value"/> precisely so two distinct
 /// identities that sanitize to the same readable prefix still get two files rather than silently
 /// sharing one ledger.

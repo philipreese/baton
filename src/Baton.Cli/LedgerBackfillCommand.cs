@@ -97,7 +97,7 @@ public static class LedgerBackfillCommand
 
     /// <param name="ghRunner">Defaults to the real <see cref="GhCliRunner"/> — the one seam #734 already owns.</param>
     /// <param name="ledgerDirectoryOverride">
-    /// Test seam — production always writes under <c>BatonPaths.CostLedgerFile</c>. A test must never be
+    /// Test seam — production always writes under <c>CostLedgerLocation.Resolve</c>. A test must never be
     /// one mis-resolved identity away from appending to the operator's real ledger.
     /// </param>
     /// <param name="repositoryProbe">Test seam — see <see cref="RepositoryProbe"/>.</param>
@@ -678,10 +678,13 @@ public static class LedgerBackfillCommand
         }
     }
 
+    // The override branch deliberately does NOT go through CostLedgerLocation: a test seam pointed at
+    // a scratch directory has no legacy location to relocate from, and routing it through the resolver
+    // would make a fixture's flat <slug>.jsonl silently unreadable.
     private static string LedgerFilePathFor(RepositoryIdentity repository, string? ledgerDirectoryOverride) =>
         ledgerDirectoryOverride is { Length: > 0 } directory
             ? Path.Combine(directory, $"{repository.FileSlug}.jsonl")
-            : BatonPaths.CostLedgerFile(repository.FileSlug);
+            : CostLedgerLocation.Resolve(repository.FileSlug);
 
     private static void Accumulate(
         Dictionary<string, List<CostLedgerEntry>> pending, string ledgerFilePath, IReadOnlyList<CostLedgerEntry> rows)

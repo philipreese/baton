@@ -1,6 +1,6 @@
 # Cost-ledger exports
 
-The cost ledger (spec/baton.md §7) lives at `~/.baton/ledger/<repository>.jsonl` and only on the
+The cost ledger (spec/baton.md §7) lives at `~/.baton/<repository>/cost-ledger.jsonl` and only on the
 operator's machine. The question #1901 exists to answer — *is work through Baton more or less
 efficient than a direct session* — has to be answerable from this repository, the way
 [`../deepswe`](../deepswe) is, including in the case where the answer is unflattering. So the ledger

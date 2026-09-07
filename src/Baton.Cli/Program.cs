@@ -277,7 +277,7 @@ try
         // into the per-execution BURN ledger (#1570, quota-ledger.jsonl), `backfill` recovers rows into
         // the repository-keyed COST ledger (#1901 C2), `export` publishes that same cost ledger to a
         // repository directory (#1901 C3, read-only over the store), and everything else READS it
-        // (#1849 phase B, ledger/<repo>.jsonl). `--rebuild` touches neither of the others' file --
+        // (#1849 phase B, <repo>/cost-ledger.jsonl). `--rebuild` touches neither of the others' file --
         // LedgerViewOptionsParser.HelpLines says so where an operator will see it.
         if (args.Length >= 2 && args[1] == "export")
         {
@@ -525,7 +525,7 @@ try
                 .TryResolveForRoomAsync(resolvedRoomDirectoryPath, CancellationToken.None).ConfigureAwait(false);
             if (repository is not null)
             {
-                var costLedgerPath = BatonPaths.CostLedgerFile(repository.FileSlug);
+                var costLedgerPath = CostLedgerLocation.Resolve(repository.FileSlug);
                 var existingRows = await CostLedgerStore.ReadAllAsync(costLedgerPath, CancellationToken.None).ConfigureAwait(false);
                 var resolutionRow = CostLedgerStore.BuildResolutionRow(
                     existingRows,

@@ -28,7 +28,7 @@ public static class LedgerViewOptionsParser
     public static IReadOnlyList<string> HelpLines { get; } =
     [
         "",
-        "Reads the repository-keyed COST ledger (~/.baton/ledger/<repository>.jsonl): one row per settled",
+        "Reads the repository-keyed COST ledger (~/.baton/<repository>/cost-ledger.jsonl): one row per settled",
         "execution attempt, with token dimensions and two labelled estimates. Both estimates are",
         "API-equivalent/plan-meter ESTIMATES -- never an invoice, never subscription spend, never a quota",
         "reading. 'baton ledger --rebuild' is a different command against a DIFFERENT file (the",

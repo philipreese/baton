@@ -89,7 +89,7 @@ public static class TerminalSettleRecorder
                 .TryResolveForRoomAsync(terminalRoomDirectoryPath, CancellationToken.None).ConfigureAwait(false);
             if (repository is not null)
             {
-                var costLedgerPath = BatonPaths.CostLedgerFile(repository.FileSlug);
+                var costLedgerPath = CostLedgerLocation.Resolve(repository.FileSlug);
 
                 // #1848's audited runway override and #1499's dispatch --label, both read back off this
                 // room's own bindings.json in ONE parse (RoomBindingStamps' own remarks say why one
