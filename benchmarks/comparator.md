@@ -31,9 +31,9 @@ grant whose shell patterns do not allowlist a `gh pr` read — implement's unsco
 review's, whose job is reading someone else's PR — `gh pr view`, `gh pr diff`, `gh pr checkout` and
 `gh pr list` are refused unless the argument is the PR this room itself opened, which the room learns
 from its own `gh pr create`. `gh issue view` is untouched. The rule, its exact conditions and its
-limits are stated on `src/Baton.Vendors/OwnPullRequestOnlyRule.cs`; the one limit a protocol reader
-needs is that it is enforced today only on the codex broker's run-command path, because claude's and
-agy's `PreToolUse` hooks decide before a command runs and so never see `gh pr create`'s output.
+limits are stated on `src/Baton.Vendors/OwnPullRequestOnlyRule.cs`, which also says why the codex
+broker's run-command path is the only place enforcing it so far. **An arm on any other vendor is
+covered by 1 and 3 alone**, which is what a protocol reader needs from that limit.
 
 **3. Per-arm contamination check — the row's own precondition.** Before an arm is scored, its room's
 captured stream is scanned for any sibling arm's branch name or PR number. **A hit voids the arm**:

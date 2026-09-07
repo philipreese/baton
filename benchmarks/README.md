@@ -14,8 +14,7 @@ capture, so a directory each would be a directory per week holding one file.
 | [`ledger`](ledger/README.md) | Weekly `baton ledger export` snapshots of the cost ledger (`spec/baton.md` §7), one dated CSV per export, plus the per-model / per-vendor / per-arm medians `derive.py` computes from them. | #1901, #1903, #1863 |
 
 [`comparator.md`](comparator.md) is the one file here that is not a snapshot: the #1903 A/B
-protocol's isolation rules — what has to be true of an arm for its row to be evidence at all — and
-the per-arm contamination check that voids one.
+protocol's isolation rules and the per-arm contamination check that voids an arm.
 
 ## Derived scores
 
