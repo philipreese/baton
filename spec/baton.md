@@ -4579,13 +4579,51 @@ dispatch-time probe that a *fresh environment's* hook actually loads is
 installation, and a harness author dispatching into an unfamiliar environment should treat it as
 such.
 
-**The `PreToolUse`/`agy-hook-check` hook stays the enforcement mechanism** — the only enforcement
-point over the toolset a worker actually has, since `--allowedTools` pre-approves rather than
+**The `PreToolUse`/`agy-hook-check` hook stays the enforcement mechanism on claude and agy** — the
+only enforcement point over the toolset a worker actually has *on those two vendors*, since
+`--allowedTools` pre-approves rather than
 restricting (measured directly: `PermissionGrant.cs`, citing the
 `gate.allowedtools-is-preapproval-not-ceiling` sentinel check in `tools/vendor-verify/verify.py`).
 Baton ships one on every
-spawned worker, on both vendors, via `hook-check`/`agy-hook-check`
+spawned worker, on both of them, via `hook-check`/`agy-hook-check`
 (`Program.cs`, `src/Baton.Cli/HookCheckCommand.cs`, `src/Baton.Cli/AgyHookCheckCommand.cs`).
+codex is enforced somewhere else entirely — see the next paragraph, which is canonical for how many
+enforcement points there are and what each can do.
+
+**Where a tool rule is enforced — three call sites, and there is no shared path underneath them.** A
+rule about what a worker's tool call may do reaches a vendor through exactly one of three places,
+named here as the code names them: **`CodexDynamicToolPolicy.ExecuteAsync`**
+(`src/Baton.Vendors/CodexDynamicToolPolicy.cs`), the app-server broker's dynamic tools — the one
+vendor whose tools Baton itself executes, so it can **execute** the call, **substitute a result** for
+it (`CodexDynamicToolResult.Allowed`/`Refused`/`Failed`), and **observe the output** it produced;
+**`HookCheckCommand.Decide`** (`src/Baton.Cli/HookCheckCommand.cs`), claude's `PreToolUse`
+subprocess, which allows by exiting `AllowedExitCode` (0) and denies by exiting `DeniedExitCode` (2)
+with stderr carrying the reason (`HookCheckCommand.Deny`/`Refuse`); and
+**`AgyHookCheckCommand.Decide`** (`src/Baton.Cli/AgyHookCheckCommand.cs`), agy's, which writes
+`{"decision":"allow"}` or `{"decision":"deny","reason":…}` to stdout
+(`AgyHookCheckCommand.DenyJson`). Both hooks
+allow or deny and nothing else — Baton's own choice, not the vendors' (agy documents `ask`,
+`force_ask`, `deny_unless_prior_grant`, and an `overwrite` that rewrites a call's *arguments* before
+it runs: `docs/vendor-doc-audit.md`), per the binary paragraph above (#1417) — and each deny reason is
+**free text this repository writes**, so a hook's entire leverage over a call it refuses is the
+sentence it hands back. **Neither hook sees the tool's output.** Both vendors do offer a post-tool
+hook, and neither is wired here: claude's `PostToolUse` is documented and measured firing under `-p`,
+carrying an `updatedToolOutput` that rewrites a result before the model sees it, while agy's is
+documented and expects `{}` back — so it could observe, not substitute (both
+`docs/vendor-doc-audit.md`). Neither adapter installs one: `ClaudeWorkerAdapter`'s `--settings` writer
+and `AgyWorkerAdapter.BuildHooksJson` each emit a `PreToolUse` handler and nothing else. **The rule: a
+vendor-neutral tool rule is one class with three callers and a test per caller; a PR that ships it in
+one caller is incomplete.** Twice on 2026-09-06 a brief said vendor-neutral and the lane shipped
+broker-only, caught both times only at review (#2015, #2016) — the measured offender was an agy lane
+each time, whose commands never reach the broker at all. The landed shape to copy is
+`RepeatedToolCallLedger`/`RepeatedToolCallHook`: three callers, and a test per caller
+(`tests/Baton.Vendors.Tests/RepeatedToolCallTests.cs`,
+`tests/Baton.Cli.Tests/HookCheckCommandTests.cs`, `tests/Baton.Cli.Tests/AgyHookCheckCommandTests.cs`).
+`BackgroundingShapeDetector` has the same three callers but not the third test: the claude and agy
+callers each have a deny arm (`HookCheckCommandTests.A_backgrounded_command_is_denied_on_an_unscoped_grant`,
+`AgyHookCheckCommandTests.A_backgrounded_run_command_is_denied_on_an_unscoped_grant`) while its codex
+caller (`CodexDynamicToolPolicy.RunCommandAsync`) is covered only by the detector's own unit tests —
+which is the half-shipped shape this rule names, recorded here rather than fixed by this docs change.
 
 **The hook is binary: allow / deny, nothing else.** The ask band that once made it ternary
 (`BATON_HOOK_ASK_TOOLS`, the `permissionDecision: "ask"` STDOUT envelope) was part of the mid-lane
@@ -5076,8 +5114,9 @@ pointer**, because the ledger stores a read's stat pair and never its bytes, so 
 nothing to carry by construction rather than by today's wiring — and pasting a re-read file back into
 a deny reason would spend precisely the tokens this rung exists to save. The third ask is denied
 plainly on every vendor. Which of those two hook wordings
-a reader will actually see today is the transcript one: **neither vendor has a `PostToolUse` hook
-wired in this repository**, so nothing on a hook-only room ever records an output, and the
+a reader will actually see today is the transcript one: no post-tool hook is wired on either hook
+vendor (*Where a tool rule is enforced* above is canonical for that, per vendor), so nothing on a
+hook-only room ever records an output, and the
 output-carrying branch is reachable only from a ledger some other writer filled (the file is per
 ROOM, not per vendor). That is a statement of scope, not a claim that the rung replays on those
 vendors. The hooks share the broker's
