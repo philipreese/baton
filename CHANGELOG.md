@@ -9,6 +9,28 @@ that carried them: `git show v0.35.0:src/Baton.Cli/CHANGELOG.md` (likewise `src/
 `release-please-config.json`. Everything below this line predates the split: the repo's single
 shared version through `0.14.0`.
 
+## [0.38.0](https://github.com/philipreese/baton/compare/v0.37.0...v0.38.0) (2026-09-07)
+
+
+### Features
+
+* **accounting:** Record a dispatch's workspace branch so runner lanes' PRs join to their rooms ([#2047](https://github.com/philipreese/baton/issues/2047)) ([9e70116](https://github.com/philipreese/baton/commit/9e701160791fb6b2c1036464cb5134a96f320287))
+* **broker:** Record every allow/deny decision as one structured room line ([#2037](https://github.com/philipreese/baton/issues/2037)) ([bfbd890](https://github.com/philipreese/baton/commit/bfbd890534655b695a0be760305e9719fbb518a4))
+* **dispatch:** Inline a codex binding's declared skills through one shared helper ([#2055](https://github.com/philipreese/baton/issues/2055)) ([e1b4bf1](https://github.com/philipreese/baton/commit/e1b4bf172e1faf298564f9022af0da912ca1638f))
+* **glass:** Show the conductor's slots, queue, PR stages and twin arms on the daemon page ([#2039](https://github.com/philipreese/baton/issues/2039)) ([98a90fb](https://github.com/philipreese/baton/commit/98a90fb0f22ce42c285dad3cd81574e2ae81bd1e))
+
+
+### Bug Fixes
+
+* **benchmarks:** Let the DeepSWE collector accept a uniform per-model price adjustment ([#2049](https://github.com/philipreese/baton/issues/2049)) ([f6e2487](https://github.com/philipreese/baton/commit/f6e2487d17999e6aae0088e6c3755f2e1f67ef47))
+* **grants:** Keep read-tool guidance off write-shaped standing denies ([#2048](https://github.com/philipreese/baton/issues/2048)) ([879d654](https://github.com/philipreese/baton/commit/879d6548d28079f974cb52a07ad5069a449ec30d))
+* **memory:** Account for a source dropped between the inventory walk and the read ([#2052](https://github.com/philipreese/baton/issues/2052)) ([952e14d](https://github.com/philipreese/baton/commit/952e14d995dc02b6d28a2aec447784d0b6a07476))
+* **rooms:** Measure a timed-out room's unpushed work against its remote branch, not main ([#2051](https://github.com/philipreese/baton/issues/2051)) ([855cee1](https://github.com/philipreese/baton/commit/855cee17ba29e9027434dd0bb4de580288a7977f))
+* **rooms:** Show the failing verify command's own lines in verifyTail and the real execution ids in a resolve refusal ([#2050](https://github.com/philipreese/baton/issues/2050)) ([6e978b1](https://github.com/philipreese/baton/commit/6e978b189e9b09e34cae8efd548e1e230bfdfad5))
+* **ui:** Match a real meta element when injecting the glass source marker ([#2056](https://github.com/philipreese/baton/issues/2056)) ([0db45d7](https://github.com/philipreese/baton/commit/0db45d71d167a4af93dbdc20b848ceb9df9fdccc))
+* **vendors:** Grant an agy lane read access to the workspace it was dispatched against ([#2054](https://github.com/philipreese/baton/issues/2054)) ([cbf585b](https://github.com/philipreese/baton/commit/cbf585b8bcf5491fbc6e77bd4ceab3eb4a844c57))
+* **vendors:** Stamp the arguments digest and input identity on every codex tool item ([#2038](https://github.com/philipreese/baton/issues/2038)) ([14b51c2](https://github.com/philipreese/baton/commit/14b51c29758d238a4e308bff1abe268421a3e2e9))
+
 ## [0.37.0](https://github.com/philipreese/baton/compare/v0.36.0...v0.37.0) (2026-09-07)
 
 
