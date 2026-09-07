@@ -150,6 +150,19 @@ if (args.Length == 0 || !knownSubcommands.Contains(args[0]))
     return 64;
 }
 
+// #2030: a lane runs as `pwsh -Command "baton dispatch ... *> lane.log"`, and that wrapper only
+// proceeds once the redirected stream reaches EOF. Every child .NET spawns inherits a duplicate of
+// this process's stdout/stderr whether or not its own streams are redirected, so one straggler
+// outliving the lane held the wrapper open for an hour. Cleared here, before the first spawn, for
+// the verbs that run a lane; `watch` is excluded on purpose -- WatchNotifier's operator command
+// redirects only stdin and reads its stdout by inheritance. Why redirects alone cannot fix this is
+// StandardHandleInheritance's own remarks; which verbs run a lane is IsLaneVerb at the foot of this
+// file, the same symbol the exit-code table below reads.
+if (IsLaneVerb(args[0]))
+{
+    Baton.Core.Internal.StandardHandleInheritance.Disable();
+}
+
 using var hostStopSource = new CancellationTokenSource();
 
 // The host-initiated stop (M10 Phase 2), finally wired to something: Ctrl+C no longer kills the
@@ -546,7 +559,7 @@ try
     // ruling names the completion contract explicitly, unlike cancel/decide/supply below, which
     // #1356 never asked to widen. #1441: baton redispatch drives the identical RunCommand pump a fresh
     // dispatch does, so it gets the same table for the same reason.
-    if (args[0] is "run" or "dispatch" or "redispatch" or "resume")
+    if (IsLaneVerb(args[0]))
     {
         return (int)RunExitCodeResolver.Resolve(result);
     }
@@ -566,7 +579,7 @@ catch (BatonFlowException ex) when (ex is Baton.Concurrency.WorkflowLockedExcept
     // contradict 'baton status --json' reading the very same room's ledger as Running at the same
     // moment. The room is left exactly as it was; the exit code alone says "retry later".
     WriteErrorWithTry(ex);
-    return args[0] is "run" or "dispatch" or "redispatch" or "resume" ? (int)RunExitCode.RoomHeld : 1;
+    return IsLaneVerb(args[0]) ? (int)RunExitCode.RoomHeld : 1;
 }
 catch (Baton.Status.StaleSentinelDeletionException ex)
 {
@@ -577,7 +590,7 @@ catch (Baton.Status.StaleSentinelDeletionException ex)
     // back into the raw IOException this arm exists to remove -- the same "leave the room exactly as
     // it was" carve-out shape #1374 F1 uses above.
     WriteErrorWithTry(ex);
-    return args[0] is "run" or "dispatch" or "redispatch" or "resume" ? (int)RunExitCode.ValidationRefused : 1;
+    return IsLaneVerb(args[0]) ? (int)RunExitCode.ValidationRefused : 1;
 }
 catch (BatonFlowException ex)
 {
@@ -598,6 +611,12 @@ catch (BatonFlowException ex)
     // it with a fabricated Failed/no-outputs sentinel (see invoking-baton.md's exit-code section for
     // the scenario this guards). The exit code still reports the refusal; only the sentinel write is
     // conditional.
+    //
+    // #2030 review: this is deliberately NOT IsLaneVerb -- it is that set minus `resume`, and the
+    // omission is the point, not drift. A resume always targets an already-dispatched room, so it has
+    // no pre-ledger state to leave a sentinel for; the `resume` arm below returns the same refusal
+    // code without the sentinel write. Widening this to IsLaneVerb would make that arm unreachable
+    // and fabricate a terminal sentinel for a room #1359 says cannot exist.
     if (args[0] is "run" or "dispatch" or "redispatch" && roomDirectoryPathForFailureSentinel is not null)
     {
         if (!RoomLedgerProbe.HasLedger(roomDirectoryPathForFailureSentinel))
@@ -620,6 +639,15 @@ catch (BatonFlowException ex)
 
     return 1;
 }
+
+// #2030 review (record-once): the sole definition of "a verb that runs a lane" in this file. It had
+// been written out as a literal tuple in four places -- the #2030 handle-inheritance clear and the
+// three arms of the run/dispatch/redispatch/resume exit-code table -- which is a set that can drift
+// in four directions at once. Adding a fifth lane verb is one edit here, and the #2030 wiring test
+// reads THIS line rather than a call site, so a new verb cannot silently miss the handle clear.
+// The one predicate that is not this set (the pre-ledger sentinel write in the BatonFlowException
+// catch above) says at its own site why it is narrower.
+static bool IsLaneVerb(string verb) => verb is "run" or "dispatch" or "redispatch" or "resume";
 
 // #1382 F8: the one place either BatonFlowException catch above prints an error, so a Try line set on
 // a future WorkflowLockedException/FlowJournalHeldException is never silently dropped again.

@@ -8,7 +8,7 @@ namespace Baton.Core.Internal;
 /// spawned process's entire descendant tree (the "no orphans" guarantee aer-core's M3 milestone
 /// established) — this is Win32 surface, not the aer-core Rust FFI that CLAUDE.md's Architecture
 /// Rule 3 (P/Invoke Layer) scopes to the deleted ABI; CreateJobObject/AssignProcessToJobObject/
-/// TerminateJobObject calling Windows directly is the allowed exception it names.
+/// TerminateJobObject calling Windows directly is one of the exceptions it enumerates.
 /// </summary>
 /// <remarks>
 /// A <see cref="SafeHandle"/>, not a raw <c>nint</c>, for the same reason the deleted FFI binding used

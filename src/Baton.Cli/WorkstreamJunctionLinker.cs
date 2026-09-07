@@ -15,8 +15,8 @@ namespace Baton.Cli;
 /// <remarks>
 /// Junctions (<c>mklink /J</c>), not symlinks: junction creation needs no elevation or Developer Mode
 /// on Windows — the only supported platform (`ci.yml`, #1405) — while a directory symlink does. There
-/// is no managed junction API in .NET, and adding a raw reparse-point P/Invoke would be a new Win32
-/// surface Architecture Rule 3 reserves for the Job Object containment it already owns — so this
+/// is no managed junction API in .NET, and adding a raw reparse-point P/Invoke would widen the Win32
+/// surface beyond the short list Architecture Rule 3 enumerates — so this
 /// shells out to <c>cmd.exe /c mklink /J</c>, the same pattern <c>WorktreeProvisioner</c> already uses
 /// for git.
 /// </remarks>
