@@ -927,6 +927,33 @@ finishing looks like). The reason text opens with `OutcomeClassifier.TimeoutSent
 for a surface:** such a room now describes `Indeterminate`, so `baton run` no longer exits
 `RunExitCode.Timeout` for it — that exit code stays for a timeout with nothing to salvage.
 
+**What the reason SAYS is measured against the remote, not the base ref (#1978).** The delta above
+decides the retry and is unchanged. What the summary *reports* is `@{upstream}..HEAD` whenever a
+tracking branch answers — commits that have not left the machine — and only when that reading is
+absent does it fall back to that delta, saying `(not measured against a remote)` so the two readings
+are never mistaken for one. That phrase names no cause on purpose: no upstream configured, a detached
+HEAD and a git that failed are one indistinguishable null at this reading, so naming any one of them
+would assert a repository state nothing measured.
+They are not the same number: a lane that committed once and pushed carries 0 against its upstream and
+1 against `main`. Read as the first, the second says a delivered lane is stranded, and on 2026-09-06 a
+conductor acted on it — amending and hand-pushing a branch that was already on origin behind an open
+PR, then resetting the divergent head that produced. Where the head *is* on the remote and
+`Mutation.DeliveryVerifier.ReadOpenPullRequestAsync` (the one PR-detection path, asked by
+`MutationInterface` on the live timeout path for a `DeliversBranch` role, bounded by its own spawn
+timeout) names an open PR, the summary names it too and offers **no redispatch instruction**: nothing
+on that branch is left for anyone to push. Whether anything is *owed* is a second question, and the
+changed/untracked count is what answers it — "nothing is stranded, no follow-on brief" is said only
+over a tree that is also clean, and a workspace still holding uncommitted or untracked paths is told
+the branch is delivered and that those paths are not. Only the second shape is actually reachable
+today: a pushed head over a clean tree whose declared outputs are present settles
+`FinishedDuringTeardown` one branch earlier, so the clean wording is the gate's fail-safe rather than a
+live path. Calling that work *delivered* takes
+the contract check as well — the pushed-but-output-missing shape #1945's review already added a control
+for names the PR and says what is missing instead. The verdict is untouched throughout: the step still
+settles `Indeterminate` and still resolves through `--reject --reason`. A lookup that does not answer —
+no `gh`, unauthenticated, no network, abandoned at its bound — costs the PR reference and nothing else,
+and the summary reads exactly as it did before.
+
 **Narrowed once, by #1945.** Not every mutated workspace is one a conductor has to look at. A
 workspace that is *also* clean and level with its tracking branch, on an execution whose declared
 outputs are all present, settles the succeeded-shaped `FinishedDuringTeardown` instead — the kill

@@ -43,6 +43,27 @@ public sealed record DeliveryCheckOutcome(
 }
 
 /// <summary>
+/// #1978: what <c>gh pr list --head &lt;branch&gt; --json number</c> answered, as three states rather
+/// than a bool — <see cref="AnyOpen"/> <see langword="null"/> means the question was NOT answered
+/// (<c>gh</c> missing, unauthenticated, network down, a detached HEAD, output that did not parse), and
+/// <see cref="NotRunReason"/> says which. Only <see langword="false"/> is positive evidence that no PR
+/// is open; only a non-null <see cref="Number"/> may be printed to an operator as a PR reference.
+/// </summary>
+/// <param name="Number">
+/// The first open PR's number when one could be read. <see langword="null"/> both when nothing is open
+/// and when the answer was unmeasurable — never a fabricated number, so a consumer must read
+/// <see cref="AnyOpen"/> to tell those apart.
+/// </param>
+public sealed record OpenPullRequestReading(bool? AnyOpen, int? Number = null, string? NotRunReason = null)
+{
+    /// <summary>The question was answered and no PR is open for the branch.</summary>
+    public static readonly OpenPullRequestReading NoneOpen = new(AnyOpen: false);
+
+    /// <summary>The question was not answered at all — <paramref name="reason"/> says why.</summary>
+    public static OpenPullRequestReading NotRun(string reason) => new(AnyOpen: null, NotRunReason: reason);
+}
+
+/// <summary>
 /// #1788 (contract: <c>spec/baton.md</c> §3, "Post-exit delivery check"): resolves whether a workspace
 /// has actually delivered what a <c>DeliversBranch</c> role's brief promises — pushed and, when expected,
 /// PR'd. Full rationale (why <c>NotRun</c> vs <c>Failed</c> is drawn where it is, the <c>--heads</c>/
@@ -180,29 +201,16 @@ public static class DeliveryVerifier
 
         if (expectPr)
         {
-            var prResult = await RunAsync(ghProgram, ["pr", "list", "--head", branch, "--json", "number"], workingDirectory, cancellationToken)
-                .ConfigureAwait(false);
-            if (!prResult.Spawned)
+            var pr = await ReadOpenPullRequestAsync(workingDirectory, branch, ghProgram, cancellationToken).ConfigureAwait(false);
+            if (pr.AnyOpen is null)
             {
-                notRunReasons.Add($"could not spawn '{ghProgram}'");
+                // Neither fabricated pass nor fabricated failure -- see OpenPullRequestReading's own doc.
+                notRunReasons.Add(pr.NotRunReason!);
             }
-            else if (prResult.ExitCode != 0)
+            else if (pr.AnyOpen is false)
             {
-                notRunReasons.Add("'gh pr list' did not succeed (gh/network unavailable)");
-            }
-            else
-            {
-                var isEmpty = TryIsEmptyJsonArray(prResult.Output);
-                if (isEmpty is true)
-                {
-                    failingMembers.Add("pr-not-open");
-                    tailLines.Add($"pr-not-open: no open PR found for branch '{branch}' — open one before this lane can settle Succeeded.");
-                }
-                else if (isEmpty is null)
-                {
-                    // Neither fabricated pass nor fabricated failure -- see TryIsEmptyJsonArray's own doc.
-                    notRunReasons.Add("'gh pr list' succeeded but its output did not parse as the expected JSON array");
-                }
+                failingMembers.Add("pr-not-open");
+                tailLines.Add($"pr-not-open: no open PR found for branch '{branch}' — open one before this lane can settle Succeeded.");
             }
         }
 
@@ -270,23 +278,112 @@ public static class DeliveryVerifier
     }
 
     /// <summary>
-    /// <see langword="true"/>/<see langword="false"/> for a positively-parsed JSON array (empty or not);
-    /// <see langword="null"/> when <paramref name="output"/> does not parse as one at all -- a
-    /// third, "unmeasurable" outcome distinct from either boolean, so a caller never has to fabricate a
-    /// pass or a failure from output that plainly did not answer the question.
+    /// #1978: <c>gh pr list --head &lt;branch&gt; --json number</c>, resolving the branch from
+    /// <paramref name="workingDirectory"/> itself. Extracted from this class's own <c>expectPr</c> block
+    /// so the timeout summary (<c>Outcomes.OutcomeClassifier</c>'s #1373 mutated-workspace arm, wired at
+    /// <c>MutationInterface</c>) names a PR through the SAME question and the same spelling this check
+    /// already asks — one PR-detection path, not two. <c>Cli.WorkspaceDeliveryProbe</c> asks the same
+    /// question a third time on purpose and says so in its own doc: it lives in another assembly behind
+    /// its own bounded spawner.
+    /// <para>
+    /// <b>Unbounded in time, like every other spawn in this class.</b> A caller that is not already
+    /// inside a bounded step must pass a token it has bounded itself — <c>MutationInterface</c>'s
+    /// <c>OpenPullRequestLookupTimeout</c> is that bound and states why one is needed at all.
+    /// </para>
     /// </summary>
-    private static bool? TryIsEmptyJsonArray(string output)
+    public static async Task<OpenPullRequestReading> ReadOpenPullRequestAsync(
+        string? workingDirectory,
+        CancellationToken cancellationToken,
+        string gitProgram = "git",
+        string ghProgram = "gh")
     {
+        if (string.IsNullOrWhiteSpace(workingDirectory))
+        {
+            return OpenPullRequestReading.NotRun("no working directory for this execution");
+        }
+
+        var branchResult = await RunAsync(gitProgram, ["rev-parse", "--abbrev-ref", "HEAD"], workingDirectory, cancellationToken)
+            .ConfigureAwait(false);
+        if (!branchResult.Spawned || branchResult.ExitCode != 0)
+        {
+            return OpenPullRequestReading.NotRun("could not determine the current branch (not a git repository?)");
+        }
+
+        var branch = branchResult.Output.Trim();
+        if (branch.Length == 0 || string.Equals(branch, "HEAD", StringComparison.Ordinal))
+        {
+            // A detached HEAD names no branch to ask `gh` about. Unmeasurable, never "no PR is open":
+            // this reading is only ever used to ADD a fact, so a fabricated absence would be silent.
+            return OpenPullRequestReading.NotRun("the workspace has no checked-out branch (detached HEAD)");
+        }
+
+        return await ReadOpenPullRequestAsync(workingDirectory, branch, ghProgram, cancellationToken).ConfigureAwait(false);
+    }
+
+    /// <inheritdoc cref="ReadOpenPullRequestAsync(string?, CancellationToken, string, string)"/>
+    /// <remarks>The overload for a caller that has already resolved the branch — <see cref="CheckCoreAsync"/>.</remarks>
+    private static async Task<OpenPullRequestReading> ReadOpenPullRequestAsync(
+        string workingDirectory, string branch, string ghProgram, CancellationToken cancellationToken)
+    {
+        var prResult = await RunAsync(ghProgram, ["pr", "list", "--head", branch, "--json", "number"], workingDirectory, cancellationToken)
+            .ConfigureAwait(false);
+        if (!prResult.Spawned)
+        {
+            return OpenPullRequestReading.NotRun($"could not spawn '{ghProgram}'");
+        }
+
+        if (prResult.ExitCode != 0)
+        {
+            return OpenPullRequestReading.NotRun("'gh pr list' did not succeed (gh/network unavailable)");
+        }
+
+        return ParseOpenPullRequests(prResult.Output);
+    }
+
+    /// <summary>
+    /// The three readings <c>gh pr list --json number</c>'s stdout admits, kept as three rather than
+    /// collapsed: a positively-parsed empty array (no PR), a non-empty one (at least one PR, named when
+    /// its <c>number</c> is readable), and output that does not parse as an array at all.
+    /// </summary>
+    private static OpenPullRequestReading ParseOpenPullRequests(string output)
+    {
+        const string unparsedReason = "'gh pr list' succeeded but its output did not parse as the expected JSON array";
+
         try
         {
             using var document = JsonDocument.Parse(output);
-            return document.RootElement.ValueKind == JsonValueKind.Array
-                ? document.RootElement.GetArrayLength() == 0
-                : null;
+            if (document.RootElement.ValueKind != JsonValueKind.Array)
+            {
+                return OpenPullRequestReading.NotRun(unparsedReason);
+            }
+
+            if (document.RootElement.GetArrayLength() == 0)
+            {
+                return OpenPullRequestReading.NoneOpen;
+            }
+
+            foreach (var element in document.RootElement.EnumerateArray())
+            {
+                if (element.ValueKind == JsonValueKind.Object
+                    && element.TryGetProperty("number", out var number)
+                    && number.ValueKind == JsonValueKind.Number
+                    && number.TryGetInt32(out var value))
+                {
+                    // The first of several open PRs for one branch, which `gh` orders newest-first --
+                    // the same choice Cli.WorkspaceDeliveryProbe makes for the same output.
+                    return new OpenPullRequestReading(AnyOpen: true, Number: value);
+                }
+            }
+
+            // A non-empty array whose entries carry no readable `number`. `--json number` cannot produce
+            // it, so this stays "a PR is open, unnameable" rather than fabricating either polarity: the
+            // delivery check passes on it exactly as it did before #1978, and the timeout summary names
+            // nothing.
+            return new OpenPullRequestReading(AnyOpen: true, Number: null);
         }
         catch (JsonException)
         {
-            return null;
+            return OpenPullRequestReading.NotRun(unparsedReason);
         }
     }
 

@@ -2185,10 +2185,29 @@ public static class MutationInterface
                 hookVerdictCount = countHookVerdicts(prepared.OutputDirectory);
             }
 
+            // #1978: the one population whose timeout summary can name a PR -- a branch-delivering role
+            // that was killed at its box. Resolved HERE rather than inside Classify because Classify is
+            // synchronous and this is a network-touching `gh` spawn (and because Classify also runs on
+            // the crash-recovery path above, which must make no subprocess at all -- the same reason the
+            // #1623 verify step sits outside it). Cheap and narrow: at most one `gh pr list` per
+            // timed-out delivering execution, never on a natural exit, and null for every other shape,
+            // which keeps today's text.
+            int? openPullRequest = null;
+            if (dispatchResult.Reason == CoreExitReason.TimedOut && binding.DeliversBranch)
+            {
+                openPullRequest = await ReadOpenPullRequestForTimeoutAsync(
+                        mutationProbePath,
+                        // "gh" unless a test scope says otherwise -- BeginOpenPullRequestGhProgramScope
+                        // states why the seam exists and why it is an AsyncLocal.
+                        OpenPullRequestGhProgramOverride.Value ?? "gh",
+                        dispatchCancellationToken)
+                    .ConfigureAwait(false);
+            }
+
             var classification = OutcomeClassifier.Classify(
                 dispatchResult, binding.Contract, prepared.OutputDirectory, binding.FailureClassifier, timeProvider,
                 grantAuditMode, worktreePath, binding.ResponseParser, usageParser, binding.WorktreeBaseSha, binding.ChangesTree,
-                changesTreeWorkingDirectory, toolCallCount, hookVerdictCount, workspaceHeadShaAtStart);
+                changesTreeWorkingDirectory, toolCallCount, hookVerdictCount, workspaceHeadShaAtStart, openPullRequest: openPullRequest);
 
             // #1623 (contract: spec/baton.md §3): the engine's own verify
             // step, spawned here -- between Classify returning Succeeded and the outcome event append
@@ -2823,6 +2842,108 @@ public static class MutationInterface
             RequiredInputs: [],
             ProducedOutputs: [.. request.Outputs.Select(o => new ProducedOutput(o))],
             OptionalMetadata: []);
+    }
+
+    /// <summary>
+    /// #1978: how long the timeout summary's PR lookup may take before it is abandoned.
+    /// <para>
+    /// <b>The bound is here because nothing else bounds it</b> — the same reason
+    /// <c>Cli.WorkspaceDeliveryProbe.SpawnTimeout</c> gives for the identical shape.
+    /// <see cref="VerifyRunner.CaptureAsync"/> sets no process-level timeout (its own F3 remark), and on
+    /// a TIMEOUT the dispatch token is not cancelled — the box closing is what produced this outcome, not
+    /// an operator's Ctrl-C — so a <c>gh</c> or <c>git</c> wedged on a credential prompt would otherwise
+    /// stall the outcome append of a run that is already over, indefinitely. Twenty seconds is far past
+    /// any healthy answer to two local reads and one API call.
+    /// </para>
+    /// </summary>
+    private static readonly TimeSpan OpenPullRequestLookupTimeout = TimeSpan.FromSeconds(20);
+
+    private static readonly AsyncLocal<string?> OpenPullRequestGhProgramOverride = new();
+
+    /// <summary>
+    /// #1978 fix round: test-only seam (Baton.Tests, via <c>InternalsVisibleTo</c>) — the program the
+    /// PR lookup below spawns instead of <c>gh</c>, for the calling async flow only, until the returned
+    /// scope is disposed. Production reads the default and no call site takes a parameter.
+    /// <para>
+    /// <b>Why a seam exists at all.</b> The classifier arms inject <c>openPullRequest</c> straight into
+    /// <see cref="OutcomeClassifier.Classify"/>, so dropping this file's argument at that call site left
+    /// every one of them green while silently restoring the bug #1978 is about. The one fixture that
+    /// fails when it is dropped is <c>TimeoutOnMutatedWorkspaceEndToEndTests</c>'s pushed-behind-a-PR
+    /// arm, whose own doc states what it builds; the single thing it cannot build for itself is an
+    /// answering <c>gh</c>.
+    /// </para>
+    /// <para>
+    /// <see cref="AsyncLocal{T}"/> rather than a mutable static or a <c>PATH</c> edit, for the reason
+    /// <c>Status.BatonEnvironmentSnapshot.BeginScope</c> states at length for the same shape: it is
+    /// scoped to one async flow, so it needs no serialized-collection enrollment and runs parallel-safe
+    /// with every other test. Threaded as an argument from the one call site rather than read inside the
+    /// lookup, so the value a spawn uses is visible where the spawn is decided.
+    /// </para>
+    /// </summary>
+    internal static IDisposable BeginOpenPullRequestGhProgramScope(string ghProgram)
+    {
+        ArgumentException.ThrowIfNullOrWhiteSpace(ghProgram);
+        return new OpenPullRequestGhProgramScope(ghProgram);
+    }
+
+    private sealed class OpenPullRequestGhProgramScope : IDisposable
+    {
+        private readonly string? _prior;
+        private bool _disposed;
+
+        public OpenPullRequestGhProgramScope(string ghProgram)
+        {
+            _prior = OpenPullRequestGhProgramOverride.Value;
+            OpenPullRequestGhProgramOverride.Value = ghProgram;
+        }
+
+        public void Dispose()
+        {
+            if (_disposed)
+            {
+                return;
+            }
+
+            _disposed = true;
+            OpenPullRequestGhProgramOverride.Value = _prior;
+        }
+    }
+
+    /// <summary>
+    /// #1978: the open PR for a timed-out delivering role's workspace branch, or null. Fails open at
+    /// every step, exactly as the summary it feeds does — a missing <c>gh</c>, an unauthenticated one, a
+    /// dead network, a cancel, or a lookup that ran past
+    /// <see cref="OpenPullRequestLookupTimeout"/> each cost the PR reference and nothing else, and the
+    /// reason text then reads as it did before #1978 (resolve, then redispatch), which is the safe
+    /// direction: a conductor is sent to look rather than told the work is done.
+    /// </summary>
+    /// <param name="ghProgram">
+    /// <c>gh</c> in every production call — <see cref="BeginOpenPullRequestGhProgramScope"/> is the only
+    /// thing that makes it anything else, and says why.
+    /// </param>
+    private static async Task<int?> ReadOpenPullRequestForTimeoutAsync(
+        string? workspacePath, string ghProgram, CancellationToken cancellationToken)
+    {
+        using var bound = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
+        bound.CancelAfter(OpenPullRequestLookupTimeout);
+
+        try
+        {
+            var reading = await DeliveryVerifier
+                .ReadOpenPullRequestAsync(workspacePath, bound.Token, ghProgram: ghProgram)
+                .ConfigureAwait(false);
+            return reading.Number;
+        }
+        catch (OperationCanceledException)
+        {
+            // Said out loud, per the no-silent-swallow rule: an abandoned lookup and a branch with no PR
+            // produce the same summary, and only this line tells them apart afterwards.
+            Console.Error.WriteLine(
+                $"Could not resolve an open PR for '{workspacePath}' within "
+                + $"{OpenPullRequestLookupTimeout.TotalSeconds:0.##}s (or the run was cancelled), so this "
+                + "execution's timeout summary names none.");
+            return null;
+        }
     }
 
     /// <summary>
