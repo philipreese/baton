@@ -407,7 +407,7 @@ public sealed class CodexDynamicToolPolicy
         // while it runs — a `git push` here spends most of its wall clock inside the repository's own
         // pre-push gate — so the flat ceiling killed finished work rather than runaway work. The classes,
         // the table that sorts a line into one, and every ceiling are in the engine; nothing about them
-        // is restated on this path (spec/baton.md §5).
+        // is restated on this path (spec/baton.md §9).
         var commandClass = ShellCommandClassifier.Classify(commandLine);
         var ceiling = _commandCeiling(commandClass);
 

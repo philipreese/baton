@@ -28,9 +28,8 @@ public sealed class ShippingCeilingSettleReasonTests
             Directory.CreateDirectory(stream);
             WriteStream(
                 stream,
-                RunCommandCompleted("Build succeeded."),
-                RunCommandCompleted(
-                    ShellCommandCeilings.DescribeTimeout(ShellCommandClass.Shipping, ShellCommandCeilings.Shipping)));
+                RunCommandSucceeded("Build succeeded."),
+                RunCommandTimedOut());
 
             Assert.True(ShippingCeilingStreamReader.FinalRunCommandHitShippingCeiling(new CodexUsageParser(), stream));
 
@@ -38,10 +37,7 @@ public sealed class ShippingCeilingSettleReasonTests
 
             Assert.Equal(DeliveryCheckStatus.Failed, outcome.Status);
             Assert.Equal(["branch-not-pushed"], outcome.FailingMembers);
-            Assert.Contains(
-                $"the push exceeded the shipping ceiling ({ShellCommandCeilings.Shipping.TotalSeconds:0.##} s) during the pre-push gate",
-                outcome.Tail,
-                StringComparison.Ordinal);
+            Assert.Contains(ShellCommandCeilings.ShippingBreachReason(), outcome.Tail, StringComparison.Ordinal);
         }
         finally
         {
@@ -67,9 +63,8 @@ public sealed class ShippingCeilingSettleReasonTests
             Directory.CreateDirectory(stream);
             WriteStream(
                 stream,
-                RunCommandCompleted(
-                    ShellCommandCeilings.DescribeTimeout(ShellCommandClass.Shipping, ShellCommandCeilings.Shipping)),
-                RunCommandCompleted("On branch 1998-lane"));
+                RunCommandTimedOut(),
+                RunCommandSucceeded("On branch 1998-lane"));
 
             var reader = new CodexUsageParser();
             Assert.False(ShippingCeilingStreamReader.FinalRunCommandHitShippingCeiling(reader, stream));
@@ -89,9 +84,10 @@ public sealed class ShippingCeilingSettleReasonTests
     }
 
     /// <summary>
-    /// The control for the anchoring rule
-    /// <see cref="IWorkerUsageParser.ReportsShippingCeilingTimeout"/> states — the false positive that
-    /// rule exists to stop, driven rather than described.
+    /// The TOOL half of the anchoring rule
+    /// <see cref="IWorkerUsageParser.ReportsShippingCeilingTimeout"/> states: a result carrying the
+    /// marker under a tool that cannot run a command at all. It passes on the tool-name mismatch and
+    /// says nothing about content — which is what the two arms below are for.
     /// </summary>
     [Fact]
     public void A_read_whose_content_merely_contains_the_marker_is_not_a_timed_out_push()
@@ -102,8 +98,62 @@ public sealed class ShippingCeilingSettleReasonTests
             Directory.CreateDirectory(stream);
             WriteStream(
                 stream,
-                RunCommandCompleted("Everything up-to-date"),
+                RunCommandSucceeded("Everything up-to-date"),
                 ReadTextCompleted($"public const string ShippingCeilingMarker = \"{ShellCommandCeilings.ShippingCeilingMarker}\";"));
+
+            Assert.False(ShippingCeilingStreamReader.FinalRunCommandHitShippingCeiling(new CodexUsageParser(), stream));
+        }
+        finally
+        {
+            DirectoryCleanup.DeleteRecursively(stream);
+        }
+    }
+
+    /// <summary>
+    /// The STATUS control, and the case the tool anchor alone admits: a run-command that SUCCEEDED and
+    /// printed the timeout text — what any lane in THIS repository produces by diffing or printing the
+    /// file that defines the marker, here in its worst shape, with the marker at position 0 so the
+    /// leading test cannot be what rejects it. Drop the status read in <c>CodexUsageParser</c> and this
+    /// arm goes red; nothing else in this class does.
+    /// </summary>
+    [Fact]
+    public void A_successful_run_command_that_prints_the_timeout_text_is_not_a_timed_out_push()
+    {
+        var stream = TempPath("stream");
+        try
+        {
+            Directory.CreateDirectory(stream);
+            WriteStream(
+                stream,
+                RunCommandSucceeded(
+                    ShellCommandCeilings.DescribeTimeout(ShellCommandClass.Shipping, ShellCommandCeilings.Shipping)));
+
+            Assert.False(ShippingCeilingStreamReader.FinalRunCommandHitShippingCeiling(new CodexUsageParser(), stream));
+        }
+        finally
+        {
+            DirectoryCleanup.DeleteRecursively(stream);
+        }
+    }
+
+    /// <summary>
+    /// The LEADING-MARKER control, which the status read does not cover: a run-command that FAILED for
+    /// its own reason — a non-zero exit, whose output the broker prefixes with its exit line — while its
+    /// output quotes the marker further down. Drop
+    /// <see cref="ShellCommandCeilings.IsShippingCeilingTimeout"/>'s leading test and this arm goes red.
+    /// </summary>
+    [Fact]
+    public void A_failed_run_command_that_merely_quotes_the_marker_is_not_a_timed_out_push()
+    {
+        var stream = TempPath("stream");
+        try
+        {
+            Directory.CreateDirectory(stream);
+            WriteStream(
+                stream,
+                RunCommandFailed(
+                    "Command exited 1.\n+    public const string ShippingCeilingMarker = "
+                    + $"\"{ShellCommandCeilings.ShippingCeilingMarker}\";"));
 
             Assert.False(ShippingCeilingStreamReader.FinalRunCommandHitShippingCeiling(new CodexUsageParser(), stream));
         }
@@ -149,19 +199,30 @@ public sealed class ShippingCeilingSettleReasonTests
     /// <summary>
     /// The captured-stream shape <c>Baton.Vendors.CodexAppServerBroker</c> writes for one dynamic-tool
     /// result: an <c>item.completed</c> <c>mcp_tool_call</c> whose <c>aggregated_output</c> is
-    /// <c>CodexDynamicToolResult.Text</c> verbatim.
+    /// <c>CodexDynamicToolResult.Text</c> verbatim, under the <c>status</c> that broker stamps —
+    /// <c>completed</c> for <c>CodexDynamicToolResult.Allowed</c>, <c>failed</c> for
+    /// <c>Failed</c>/<c>Refused</c>. The distinction is load-bearing here, so each fixture spells its
+    /// own rather than every result sharing one.
     /// </summary>
     /// <remarks>
     /// The command line itself is deliberately absent: the broker emits an arguments DIGEST and never
     /// the line, so a fixture carrying one would not be the stream a room actually holds. Which command
     /// produced the result is legible from the result text at each call site.
     /// </remarks>
-    private static string RunCommandCompleted(string output) =>
-        CompletedItem(CodexUsageParser.RunCommandToolName, output);
+    private static string RunCommandSucceeded(string output) =>
+        CompletedItem(CodexUsageParser.RunCommandToolName, output, "completed");
 
-    private static string ReadTextCompleted(string output) => CompletedItem("baton_read_text", output);
+    private static string RunCommandFailed(string output) =>
+        CompletedItem(CodexUsageParser.RunCommandToolName, output, "failed");
 
-    private static string CompletedItem(string tool, string output)
+    /// <summary>What the broker writes for the kill this whole class is about, produced by the one method that produces it.</summary>
+    private static string RunCommandTimedOut() =>
+        RunCommandFailed(
+            ShellCommandCeilings.DescribeTimeout(ShellCommandClass.Shipping, ShellCommandCeilings.Shipping));
+
+    private static string ReadTextCompleted(string output) => CompletedItem("baton_read_text", output, "failed");
+
+    private static string CompletedItem(string tool, string output, string status)
     {
         var item = new System.Text.Json.Nodes.JsonObject
         {
@@ -170,7 +231,7 @@ public sealed class ShippingCeilingSettleReasonTests
             {
                 ["type"] = "mcp_tool_call",
                 ["tool"] = tool,
-                ["status"] = "failed",
+                ["status"] = status,
                 ["aggregated_output"] = output,
             },
         };

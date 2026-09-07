@@ -23,6 +23,13 @@ public sealed class ShellCommandClassifierTests
     [InlineData("python tools\\buildlock.py dotnet test")]
     [InlineData("pixi run audit-recordonce")]
     [InlineData("pixi run audit-completeness")]
+    [InlineData("pixi run test")]
+    [InlineData("pixi run test-no-build")]
+    [InlineData("pixi run lint")]
+    [InlineData("pixi run build")]
+    [InlineData("pixi run gates-fast")]
+    [InlineData("pixi run gates-fast-cover")]
+    [InlineData("pixi run gates")]
     [InlineData("dotnet test")]
     [InlineData("dotnet build -warnaserror")]
     public void Gate_shapes_classify_as_gate(string commandLine) =>
@@ -30,7 +37,9 @@ public sealed class ShellCommandClassifierTests
 
     /// <summary>
     /// The discriminating negatives. A substring search would call the first one shipping — which is why
-    /// the table matches LEADING TOKENS — and the second shares only <c>git</c> with the two-token key.
+    /// the table matches LEADING TOKENS — and <c>git status</c> shares only <c>git</c> with the two-token
+    /// key. <c>pixi run fmt-check</c> is the boundary the table's own remark states: a pixi task that is
+    /// not named is <see cref="ShellCommandClass.Other"/>, not a gate by family resemblance.
     /// </summary>
     [Theory]
     [InlineData("echo \"git push\"")]
@@ -38,7 +47,7 @@ public sealed class ShellCommandClassifierTests
     [InlineData("git commit -m \"ready to git push\"")]
     [InlineData("git status")]
     [InlineData("git pushx")]
-    [InlineData("pixi run test")]
+    [InlineData("pixi run fmt-check")]
     [InlineData("dotnet format --verify-no-changes")]
     [InlineData("")]
     public void Everything_else_classifies_as_other(string commandLine) =>
@@ -73,7 +82,7 @@ public sealed class ShellCommandClassifierTests
     public void The_ceilings_are_ordered_and_derived_the_way_the_ruling_states()
     {
         Assert.Equal(ShellCommandCeilings.Other, ShellCommandCeilings.For(ShellCommandClass.Other));
-        Assert.Equal(ShellCommandCeilings.MeasuredGatesFastWallClock * 1.5, ShellCommandCeilings.For(ShellCommandClass.Gate));
+        Assert.Equal(ShellCommandCeilings.MedianPrePushGateWallClock * 1.5, ShellCommandCeilings.For(ShellCommandClass.Gate));
         Assert.Equal(
             ShellCommandCeilings.For(ShellCommandClass.Gate) + ShellCommandCeilings.PushTransferAllowance,
             ShellCommandCeilings.For(ShellCommandClass.Shipping));
@@ -100,5 +109,9 @@ public sealed class ShellCommandClassifierTests
         Assert.False(ShellCommandCeilings.IsShippingCeilingTimeout(other));
         Assert.Contains("default command ceiling (1 s)", other, StringComparison.Ordinal);
         Assert.False(ShellCommandCeilings.IsShippingCeilingTimeout(null));
+
+        // The marker LEADS or it is not this build's timeout: a command that merely printed it —
+        // the shape any lane diffing this repository produces — carries it somewhere else.
+        Assert.False(ShellCommandCeilings.IsShippingCeilingTimeout($"Command exited 1.\ndiff: {shipping}"));
     }
 }

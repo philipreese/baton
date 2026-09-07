@@ -272,8 +272,18 @@ public sealed class CodexDynamicToolPolicyTests
     /// under the user profile, and an ancestor that happens to be a repository would give a bare
     /// <c>git push</c> a real upstream. What makes this inert is the command itself:
     /// <c>--dry-run</c> against a remote name that exists nowhere. Its leading tokens are unchanged, so
-    /// it classifies exactly as a real push does; the <c>&amp;</c> makes the shell run the hanging
-    /// segment regardless, which is what carries the line to the ceiling.
+    /// it classifies exactly as a real push does; the push therefore fails on every host, and
+    /// <c>||</c> is what runs the hanging segment and carries the line to the ceiling.
+    /// </para>
+    /// <para>
+    /// <b>Seam for #2002, named rather than assumed away.</b> That issue's arm 1 refuses backgrounding
+    /// shapes "including a trailing <c>&amp;</c>"; this arm reached the ceiling through a mid-line
+    /// <c>&amp;</c> until now, so a refusal pattern matching one would have taken the only end-to-end
+    /// proof of the shipping ceiling with it. <c>||</c> is not a backgrounding shape on either shell, so
+    /// nothing in this PR now depends on that decision. Arm 2 is the one still open: if a byte-identical
+    /// repeat replays the previous output, a replayed timeout re-emits the marker in a fresh
+    /// run-command result, and <c>ShippingCeilingStreamReader</c> reads the FINAL such result — so #2002
+    /// has to decide whether a replay is a fresh answer, and its note must not lead with the marker.
     /// </para>
     /// </summary>
     [Fact]
@@ -291,7 +301,7 @@ public sealed class CodexDynamicToolPolicyTests
 
         var result = await fixture.ExecuteAsync(
             CodexDynamicToolPolicy.RunCommandTool,
-            new { command = $"git push --dry-run nonexistent-remote-xyzzy & {hang}" });
+            new { command = $"git push --dry-run nonexistent-remote-xyzzy || {hang}" });
 
         Assert.False(result.Success);
         Assert.Contains("shipping command ceiling (0.15 s)", result.Text, StringComparison.Ordinal);

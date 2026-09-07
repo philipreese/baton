@@ -60,8 +60,22 @@ public static class ShellCommandClassifier
     /// wrong and then need exclusions.
     /// </para>
     /// <para>
+    /// <b>The <c>pixi run</c> spellings are the ones a lane here is REQUIRED to use</b> (CLAUDE.md,
+    /// "Running tasks": always <c>pixi run &lt;task&gt;</c>, never <c>dotnet</c> directly), so they are
+    /// the first thing the table has to name — without them the forbidden spelling got the gate ceiling
+    /// and the mandated one did not. The keys are read off <c>pixi.toml</c> rather than guessed at:
+    /// <c>test*</c> is <c>test</c>/<c>test-flow</c>/<c>test-other</c>/<c>test-no-build</c>,
+    /// <c>gates*</c> is every <c>gates…</c> runner including <c>gates-fast</c> and
+    /// <c>gates-fast-cover</c>, and <c>lint</c>/<c>build</c>/<c>audit-*</c> are the tasks of those
+    /// names. Each is a <c>python tools/buildlock.py</c> line, which the entry above already recognises
+    /// when a lane spells it that way. The bare <c>dotnet test</c>/<c>dotnet build</c> entries stay for
+    /// the same reason: a lane that ran one directly ran the same work.
+    /// </para>
+    /// <para>
     /// This is where a newly-added gate task goes. It is not widened by guesswork: a command class is a
-    /// claim that the command is progressing while it runs, and only a named, measured task supports it.
+    /// claim that the command is progressing while it runs, and only a named task supports it — a pixi
+    /// task not listed here (<c>fmt-check</c>, say) takes <see cref="ShellCommandClass.Other"/> until
+    /// someone names it.
     /// </para>
     /// </summary>
     private static readonly (string[] Tokens, ShellCommandClass Class)[] Table =
@@ -70,6 +84,10 @@ public static class ShellCommandClassifier
         (["gh", "pr", "create"], ShellCommandClass.Shipping),
         (["python", "tools/buildlock.py"], ShellCommandClass.Gate),
         (["pixi", "run", "audit-*"], ShellCommandClass.Gate),
+        (["pixi", "run", "gates*"], ShellCommandClass.Gate),
+        (["pixi", "run", "test*"], ShellCommandClass.Gate),
+        (["pixi", "run", "lint"], ShellCommandClass.Gate),
+        (["pixi", "run", "build"], ShellCommandClass.Gate),
         (["dotnet", "test"], ShellCommandClass.Gate),
         (["dotnet", "build"], ShellCommandClass.Gate),
     ];

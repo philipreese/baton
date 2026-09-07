@@ -126,9 +126,14 @@ public interface IWorkerUsageParser
     /// </para>
     /// <para>
     /// Anchored inside the vendor's tool-result node, never a search of the raw line — the rule
-    /// <see cref="Baton.Domain.GrantRefusal.Marker"/> states once, and it matters more here: a lane
-    /// working in Baton's OWN repository reads the marker's defining file, and an unanchored test would
-    /// call that a timed-out push.
+    /// <see cref="Baton.Domain.GrantRefusal.Marker"/> states once. <b>The anchor is not enough on its
+    /// own</b>, and the difference is why this is not the same reading as that one: a lane working in
+    /// Baton's OWN repository runs a run-command that PRINTS the marker's defining file, which the tool
+    /// anchor admits. So the item's own outcome is read as well — only a result the vendor reports as
+    /// failed, whose text LEADS with the marker
+    /// (<see cref="Baton.Domain.ShellCommandCeilings.IsShippingCeilingTimeout"/>), is a timed-out push;
+    /// a successful command quoting it, or a failed one whose own exit line comes first, is
+    /// <see langword="false"/>.
     /// </para>
     /// Default null: a vendor Baton enforces no command ceiling on (claude and agy both run their shell
     /// inside the vendor CLI) reports nothing rather than a fabricated false.

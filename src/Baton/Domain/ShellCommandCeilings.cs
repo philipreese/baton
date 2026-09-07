@@ -10,14 +10,21 @@ namespace Baton.Domain;
 /// <c>spec/baton.md</c> §9's per-command-class paragraph. Not restated here.
 /// </para>
 /// <para>
-/// <b>Provenance of the gate figure, stated because it is not what #1998's body assumed.</b> That body
-/// says <c>tools/gates/</c> publishes the <c>gates-fast</c> wall clock; checked on 2026-09-06, it does
-/// not — <c>gates.py</c> records a receipt (tree hash, dirty hash, mode, timestamp) and no duration, so
-/// there is nothing to read. <see cref="MeasuredGatesFastWallClock"/> is therefore a named constant
-/// here, carrying the figure the dispatch brief and #1998 both state (<c>gates-fast</c> takes about
-/// five minutes on this machine) and its date. It is a measurement of one machine on one day, not a
-/// bound: a contended build lock makes a real run arbitrarily longer, and no ceiling here claims to
-/// cover that.
+/// <b>Provenance of the gate figure.</b> It is not read from <c>tools/gates/</c> — <c>gates.py</c>
+/// records a receipt (tree hash, dirty hash, mode, timestamp) and no duration. It is the measurement
+/// the register already holds, <c>spec/baton.md</c> C-12's #1958 paragraph, taken from the cost
+/// ledger's own <c>prePushGateMs</c> over 23 pushes. C-12 is that figure's one home;
+/// <see cref="MedianPrePushGateWallClock"/> is the single place this code spells it, and every ceiling
+/// below is an expression over it rather than a second number.
+/// </para>
+/// <para>
+/// <b>What that figure is not.</b> The register records a MEDIAN, not a percentile, so the ruling's
+/// own ×1.5 margin is applied to a median and <see cref="Gate"/> is not a tail bound. C-12's other
+/// median says why it cannot be one: 160.2 s of the 369.2 s was spent queued on the shared build
+/// lock, whose own wait budget (<c>tools/buildlock.py</c>) is 1800 s by default, so a contended run is
+/// unbounded in exactly the direction a ceiling would have to cover. What these ceilings buy is that a
+/// command known to be progressing is not killed at a quick command's figure; a fleet-contended one
+/// can still exceed them.
 /// </para>
 /// </summary>
 public static class ShellCommandCeilings
@@ -29,14 +36,16 @@ public static class ShellCommandCeilings
     public static readonly TimeSpan Other = TimeSpan.FromMinutes(5);
 
     /// <summary>
-    /// <c>pixi run gates-fast</c>'s wall clock: the figure #1998 and the dispatch brief both state
-    /// (2026-09-06), <b>cited rather than re-measured here</b>. See this class's own remark for why it
-    /// is a constant rather than a value read from <c>tools/gates/</c>, and for what it does not claim.
+    /// The median wall clock of one pre-push gate run, <b>cited from <c>spec/baton.md</c> C-12 rather
+    /// than re-measured here</b>. What that hook runs is <c>gates-fast</c>, which is why the gate class
+    /// is sized from it; the register's figure measures the whole hook, so this is the gate task plus
+    /// the hook around it rather than a claim about <c>gates-fast</c> alone. See this class's own remark
+    /// for what it does not bound.
     /// </summary>
-    public static readonly TimeSpan MeasuredGatesFastWallClock = TimeSpan.FromMinutes(5);
+    public static readonly TimeSpan MedianPrePushGateWallClock = TimeSpan.FromSeconds(369.2);
 
-    /// <summary>The gate class: <see cref="MeasuredGatesFastWallClock"/> plus 50 % margin (the ruling's own sizing).</summary>
-    public static readonly TimeSpan Gate = MeasuredGatesFastWallClock * 1.5;
+    /// <summary>The gate class: <see cref="MedianPrePushGateWallClock"/> plus 50 % margin (the ruling's own sizing).</summary>
+    public static readonly TimeSpan Gate = MedianPrePushGateWallClock * 1.5;
 
     /// <summary>
     /// What a shipping command is allowed on top of the gate its hook runs: the transfer itself plus
@@ -92,9 +101,18 @@ public static class ShellCommandCeilings
     public static string ShippingBreachReason() =>
         $"the push exceeded the shipping ceiling ({Seconds(Shipping)} s) during the pre-push gate";
 
-    /// <summary>Whether <paramref name="text"/> is a shipping-class ceiling timeout this build produced.</summary>
+    /// <summary>
+    /// Whether <paramref name="text"/> is a shipping-class ceiling timeout this build produced —
+    /// <b>the marker FIRST, never anywhere in the text</b>. <see cref="DescribeTimeout"/> puts it at
+    /// position 0 and <c>Baton.Vendors.CodexDynamicToolResult.Failed</c> carries that text verbatim, so
+    /// a leading test costs nothing and discriminates the case a containment test cannot: a command
+    /// whose own OUTPUT quotes the marker, which in THIS repository is any lane that diffs or prints
+    /// this file. It is one of two conditions — the caller also reads the item's status
+    /// (<c>Status.IWorkerUsageParser.ReportsShippingCeilingTimeout</c>), because a non-zero exit prefixes
+    /// its own line ahead of the command's output.
+    /// </summary>
     public static bool IsShippingCeilingTimeout(string? text) =>
-        text is not null && text.Contains(ShippingCeilingMarker, StringComparison.Ordinal);
+        text is not null && text.StartsWith(ShippingCeilingMarker, StringComparison.Ordinal);
 
     private static string Name(ShellCommandClass commandClass) => commandClass switch
     {

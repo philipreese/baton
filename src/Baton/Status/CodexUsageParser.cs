@@ -94,11 +94,20 @@ public sealed class CodexUsageParser : IWorkerUsageParser
     /// <see langword="false"/> rather than being left out of the ordering the reader depends on. The
     /// payload is <c>aggregated_output</c> — <c>CodexDynamicToolResult.Text</c> verbatim — so the marker
     /// arrives unwrapped here exactly as the refusal marker does.
+    /// <para>
+    /// <b>The STATUS is read too, and it is what the tool anchor alone does not buy.</b> A timeout is a
+    /// <c>Failed</c> result, which the broker stamps <c>"failed"</c>; a command that SUCCEEDED and merely
+    /// printed the marker — this repository's own source, a diff of it — is <c>"completed"</c> and is
+    /// <see langword="false"/> here. That is the same acceptance <c>GrantRefusal</c> tolerates for a
+    /// COUNT, refused here because this answer is a binary causal claim decided by one final item rather
+    /// than one over-count on a tally.
+    /// </para>
     /// </summary>
     public bool? ReportsShippingCeilingTimeout(string rawLine) =>
         TryReadCompletedToolItem(rawLine, out var item)
             && ReadString(item, "tool") == RunCommandToolName
-                ? ShellCommandCeilings.IsShippingCeilingTimeout(ReadString(item, "aggregated_output"))
+                ? ReadString(item, "status") == "failed"
+                    && ShellCommandCeilings.IsShippingCeilingTimeout(ReadString(item, "aggregated_output"))
                 : null;
 
     /// <summary>

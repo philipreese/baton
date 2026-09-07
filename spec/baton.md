@@ -5005,15 +5005,18 @@ exactly one implementation of this rule rather than two kept in step by hand.
 **The run-command ceiling is per command CLASS, not flat (#1998, operator ruling 2026-09-06).** A
 granted shell command Baton itself runs — the codex broker's `baton_run_command`, the only path where
 Baton holds the stopwatch, since claude and agy run their shell inside the vendor CLI — is bounded by
-one of three classes. `shipping` is `git push` and `gh pr create`; `gate` is the named gate tasks
-(`python tools/buildlock.py …`, `pixi run audit-*`, `dotnet test`, `dotnet build`); `other` is
-everything else and keeps the ceiling every command had before. The two named classes are commands
+one of three classes. `shipping` is the commands that transfer finished work out of the workspace;
+`gate` is the named gate tasks, in the `pixi run` spellings "Running tasks" mandates and in the
+wrapped spellings those tasks run as; `other` is everything else and keeps the ceiling every command
+had before. The two named classes are commands
 *known to be progressing while they run*, so a ceiling sized to a quick command kills finished work
 rather than runaway work: measured twice on 2026-09-06, a lane with all five commits on its branch
 lost the whole run because its verified `git push` was killed while this repository's own pre-push
 hook was still running `gates-fast`, and the room settled `Verify failed (branch-not-pushed,
-pr-not-open)` for work that was complete. So `gate` is the measured `gates-fast` wall clock plus 50 %
-and `shipping` is that plus the push itself. **Every value, and the table that sorts a command line
+pr-not-open)` for work that was complete. So `gate` is the measured pre-push gate wall clock plus
+50 % and `shipping` is that plus the push itself. That measurement is the one C-12's #1958 paragraph
+already records from the cost ledger's own `prePushGateMs`, not a second one — and it is a MEDIAN, so
+the margin is not a tail bound: C-12's median build-lock queue is most of what a contended run adds. **Every value, and the table that sorts a command line
 into a class, lives in `Baton.Domain.ShellCommandCeilings` / `ShellCommandClassifier`** — the timeout
 text and the delivery check's `branch-not-pushed` tail both read them rather than restating one, and
 that tail is where a push killed at the shipping ceiling is reported as the cause instead of leaving
