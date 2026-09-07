@@ -298,15 +298,16 @@ public sealed class CodexUsageParser : IWorkerUsageParser
     }
 
     /// <summary>
-    /// The <c>item.started</c> field <c>Baton.Vendors.CodexAppServerBroker</c> writes and
-    /// <see cref="ToolInvocationKeys"/> reads — named once here because those two are in different
+    /// The <c>mcp_tool_call</c> item field <c>Baton.Vendors.CodexAppServerBroker</c> writes (on both
+    /// <c>item.started</c> and <c>item.completed</c> since #2008) and <see cref="ToolInvocationKeys"/> reads — named once here because those two are in different
     /// projects (<c>Baton.Vendors</c> → <c>Baton</c>, never the reverse), so this is the only symbol
     /// both can see. A rename that reached one and not the other would silently stop the repeat count.
     /// </summary>
     public const string ArgumentsDigestField = "argumentsDigest";
 
     /// <summary>
-    /// #2008: the sibling field carrying the call's NORMALISED INPUT IDENTITY — the command line of a
+    /// #2008: the sibling field carrying the call's INPUT IDENTITY, as the worker wrote it (selected
+    /// and length-capped, not normalised: whitespace and path spelling are the worker's own) — the command line of a
     /// <see cref="RunCommandToolName"/> call, the path of a read/list/search/write, the declared output
     /// name of a write-output, the patched paths of an <c>apply_patch</c>.
     /// <c>Baton.Vendors.CodexDynamicToolPolicy.InputIdentity</c> is the one place that mapping lives and

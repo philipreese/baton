@@ -435,9 +435,9 @@ public static class CodexAppServerBroker
     /// <para>
     /// <b>Stamping the completed item counts nothing twice.</b> The two readers that tally are anchored
     /// on one lifecycle line each and stay there:
-    /// <c>Status.CodexUsageParser.ToolInvocationKeys</c> and <c>ShellCommandLines</c> read
-    /// <c>item.started</c> only, <c>CountToolSteps</c>/<c>CountRefusedToolSteps</c>/
-    /// <c>CountEmptyToolResults</c> read <c>item.completed</c> only. A reader that stopped gating on the
+    /// <c>Status.CodexUsageParser.ToolInvocationKeys</c>, <c>ShellCommandLines</c> and
+    /// <c>CountToolSteps</c> (via <c>TryParseToolName</c>) read <c>item.started</c> only;
+    /// <c>CountRefusedToolSteps</c>/<c>CountEmptyToolResults</c> read <c>item.completed</c> only. A reader that stopped gating on the
     /// envelope's <c>type</c> would double every codex figure at once, which is what those methods'
     /// tests pin.
     /// </para>
