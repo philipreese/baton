@@ -4,17 +4,18 @@ using Baton.Domain;
 namespace Baton.Status;
 
 /// <summary>
-/// Parses the per-turn usage on Codex CLI JSONL <c>turn.completed</c> events (#1853). Codex reports
+/// Parses the usage on Codex CLI JSONL events — one <c>turn.usage</c> per model round-trip (#2020)
+/// and the terminal <c>turn.completed</c> (#1853). Codex reports
 /// <c>input_tokens</c> inclusive of <c>cached_input_tokens</c>; Baton's additive shape keeps those
-/// dimensions disjoint, so <see cref="WorkerUsage.TokensIn"/> is the non-cached remainder.
+/// dimensions disjoint (as agy's input already is), so <see cref="WorkerUsage.TokensIn"/> is the non-cached remainder.
 /// <para>
 /// <b>No <see cref="IWorkerUsageParser.TryParseEchoedModel"/> override, because codex has no reachable
 /// source for one</b> (#1927 review HIGH). The absence is a DIFFERENT kind from agy's beside it: agy's
 /// vendor stream was measured to carry no <c>model</c> key, whereas codex never reaches Baton as a
 /// vendor stream at all. Both lifecycle events on this vendor's stdout are synthesized by
 /// <c>Baton.Vendors.CodexAppServerBroker</c> — <c>thread.started</c> carries a thread id and nothing
-/// else, <c>turn.completed</c> a usage object and nothing else — so a parser reading either would be
-/// reading Baton's own two keys back. The emitter is in-tree, which makes this deterministic rather
+/// else, <c>turn.usage</c> and <c>turn.completed</c> a usage object and nothing else — so a parser
+/// reading any of them would be reading Baton's own keys back. The emitter is in-tree, which makes this deterministic rather
 /// than a sample; the captured stream agrees (<c>tests/Baton.Cli.Tests/Fixtures/codex-live-stream.jsonl</c>,
 /// 261 lines, no <c>model</c> key on any of them), and neither does the recorded app-server event
 /// grammar name one — the probe document is the one <c>WorkerBindingConfigEntry.EffortResolved</c>
@@ -28,11 +29,132 @@ namespace Baton.Status;
 /// </summary>
 public sealed class CodexUsageParser : IWorkerUsageParser
 {
-    public bool TryParseFinalUsage(string rawLine, out WorkerUsage? usage) =>
-        TryParse(rawLine, out usage);
+    /// <summary>
+    /// #2020: the per-model-round-trip usage line <c>Baton.Vendors.CodexAppServerBroker</c> writes on
+    /// every <c>thread/tokenUsage/updated</c> notification. Named here rather than in the broker
+    /// because this class is the only reader of it and the broker its only writer — the two would
+    /// otherwise hold two copies of one string.
+    /// </summary>
+    public const string TurnUsageEventType = "turn.usage";
 
+    /// <summary>
+    /// #2020: the 1-based model round-trip a usage object reports, written by the same broker inside
+    /// the <c>usage</c> object on both line types. Absent on every stream captured before that
+    /// emitter, which is exactly how a reader tells the two eras apart without a version stamp.
+    /// <para>
+    /// <b>Why an index that restarts at 1 is safe to dedupe on, and the one shape where it is not</b>
+    /// (#2020 review LOW). It is safe because a capture file normally holds ONE broker invocation, so
+    /// one monotone sequence rather than two concatenated ones. Not for the reason it is tempting to
+    /// give: <c>Dispatch.ExecutionStreamLogger</c> does not truncate — both creates are guarded by
+    /// <c>File.Exists</c> and every later write is <c>FileMode.Append</c>, and its own <c>#1724</c>
+    /// remark treats a second logger over one directory as a contemplated shape. What holds instead is
+    /// the directory: an ordinary dispatch, a retry and a resume each mint a fresh
+    /// <see cref="Domain.ExecutionId"/> (<c>new ExecutionId(Guid.NewGuid()…)</c>) and pass it to
+    /// <see cref="Artifacts.ArtifactManager.AllocateOutputDirectory"/>, which addresses
+    /// <c>execution_{id}</c> by that id — so each gets its own capture file.
+    /// </para>
+    /// <para>
+    /// The exception, stated because it is invisible otherwise: <c>Mutation.MutationInterface</c>'s
+    /// M10 Phase 3 crash-recovery RESUBMIT re-dispatches an already-accepted request under its
+    /// EXISTING id ("the same attempt, not a retry", at that loop's own comment), so a resubmitted
+    /// execution's second broker appends into the first's <c>.stdout.log</c> and the index restarts at
+    /// 1 inside one file. Consequences, none of them new damage but none of them free: the fold above
+    /// is unaffected (it sums every <c>turn.usage</c> line and both attempts really were billed);
+    /// <c>Mutation.TokenBudgetMonitor</c>'s replay over such a concatenated file drops the resubmitted
+    /// round-trips whose index collides with the crashed attempt's, so its live figure reads LOW rather
+    /// than high — the fail-safe direction for an arrest, and the same direction the pre-#2020 code
+    /// erred in; and <c>Vendors.CodexWorkerAdapter.IsPostResponseTerminalLine</c>'s backward scan can
+    /// only reach the crashed attempt's final response if the resubmit produced no agent message of its
+    /// own, which is a captured answer where there would otherwise have been none. Closing the
+    /// collision needs an attempt discriminator the resubmit path does not currently write; nothing
+    /// here depends on it being closed.
+    /// </para>
+    /// </summary>
+    public const string RoundTripField = "round_trip";
+
+    private const string TerminalEventType = "turn.completed";
+
+    /// <summary>
+    /// Sums one execution's usage over its complete captured stream (#2020), current and rolled
+    /// segments together. State belongs to this read, never the shared parser instance; absent
+    /// dimensions stay absent.
+    /// <para>
+    /// The <see cref="TurnUsageEventType"/> lines are the population, one per model round-trip. A
+    /// stream captured BEFORE that emitter landed carries none of them and its whole usage report is
+    /// the terminal <c>turn.completed</c>, so it falls back to folding those — which recovers exactly
+    /// what such a stream ever knew (the final round-trip) rather than regressing it to absent. The
+    /// two populations are never mixed: a current stream's terminal line restates a round-trip the
+    /// <c>turn.usage</c> lines already carry, and folding both would double-count it.
+    /// </para>
+    /// <para>
+    /// <b>Keyed on line TYPE, where <see cref="TryParseIncrementalUsage"/>'s reader keys on
+    /// <see cref="RoundTripField"/>.</b> Two mechanisms for one no-double-count claim, deliberately:
+    /// this fold sees the whole stream at once and can partition it, while the live monitor sees one
+    /// line at a time and can only remember what it has already counted. They agree on every stream
+    /// either can meet — <c>Baton.Vendors.Tests.CodexBrokerRoomUsageTests</c> asserts the agreement
+    /// directly, as <c>BilledTokens == LiveBilledTokens</c> over the broker's own emitted bytes.
+    /// </para></summary>
+    public WorkerUsage? ParseExecutionUsage(IEnumerable<string> lines)
+    {
+        WorkerUsage? perRoundTrip = null;
+        WorkerUsage? terminal = null;
+        foreach (var line in lines)
+        {
+            if (TryParse(line, TurnUsageEventType, out var roundTrip) && roundTrip is not null)
+            {
+                perRoundTrip = Combine(perRoundTrip, roundTrip);
+            }
+            else if (TryParse(line, TerminalEventType, out var completed) && completed is not null)
+            {
+                terminal = Combine(terminal, completed);
+            }
+        }
+
+        // #2020: the round-trip index is dropped on the way out. Combine carries `left`'s fields, so a
+        // three-round-trip fold would otherwise claim round-trip 1's identity for a total that is not
+        // any one round-trip. Nothing reads WorkerUsage.MessageId off an execution total today; this
+        // keeps it that way rather than leaving a wrong value there for something to start reading.
+        return (perRoundTrip ?? terminal) is { } folded ? folded with { MessageId = null } : null;
+    }
+
+    /// <summary>
+    /// #2020 review LOW: one fold step, built with <c>with</c> so a dimension added to
+    /// <see cref="WorkerUsage"/> is carried rather than silently dropped. The positional constructor
+    /// this replaced named six of thirteen fields, so a two-or-more-turn read dropped the other seven
+    /// while a one-turn read (which returns its single reading untouched) preserved them — a
+    /// difference no caller could see coming. Only the summable dimensions are folded; every other
+    /// field keeps <paramref name="left"/>'s value, which is the first reading's.
+    /// </summary>
+    internal static WorkerUsage Combine(WorkerUsage? left, WorkerUsage right) =>
+        left is null ? right : left with
+        {
+            TokensIn = Sum(left.TokensIn, right.TokensIn),
+            TokensOut = Sum(left.TokensOut, right.TokensOut),
+            Turns = left.Turns + right.Turns,
+            CacheReadTokens = Sum(left.CacheReadTokens, right.CacheReadTokens),
+            CacheCreationTokens = Sum(left.CacheCreationTokens, right.CacheCreationTokens),
+            ThinkingTokens = Sum(left.ThinkingTokens, right.ThinkingTokens),
+        };
+
+    private static long? Sum(long? left, long? right) =>
+        left is null && right is null ? null : (left ?? 0) + (right ?? 0);
+
+    public bool TryParseFinalUsage(string rawLine, out WorkerUsage? usage) =>
+        TryParse(rawLine, TerminalEventType, out usage);
+
+    /// <summary>
+    /// #2020: BOTH line types, deduplicated by <see cref="RoundTripField"/> rather than by type. The
+    /// live monitor sums the output side across matching lines, and on a current stream the terminal
+    /// <c>turn.completed</c> restates a round-trip its own <c>turn.usage</c> line already reported —
+    /// so the restatement carries the same index and <c>Mutation.TokenBudgetMonitor</c>'s existing
+    /// repeated-<see cref="WorkerUsage.MessageId"/> rule drops it. Rejecting <c>turn.completed</c>
+    /// outright would be the simpler guard and is wrong: a stream captured before that emitter has
+    /// the terminal line as its ONLY usage line, and a running codex room reading it is what
+    /// <c>rooms[].live</c> is built from (#1886).
+    /// </summary>
     public bool TryParseIncrementalUsage(string rawLine, out WorkerUsage? usage) =>
-        TryParse(rawLine, out usage);
+        TryParse(rawLine, TurnUsageEventType, out usage)
+        || TryParse(rawLine, TerminalEventType, out usage);
 
     public string? TryParseToolName(string rawLine)
     {
@@ -217,7 +339,7 @@ public sealed class CodexUsageParser : IWorkerUsageParser
         }
     }
 
-    private static bool TryParse(string rawLine, out WorkerUsage? usage)
+    private static bool TryParse(string rawLine, string expectedType, out WorkerUsage? usage)
     {
         usage = null;
         if (string.IsNullOrWhiteSpace(rawLine))
@@ -231,7 +353,7 @@ public sealed class CodexUsageParser : IWorkerUsageParser
             var root = document.RootElement;
             if (root.ValueKind != JsonValueKind.Object
                 || !root.TryGetProperty("type", out var type)
-                || type.GetString() != "turn.completed"
+                || type.GetString() != expectedType
                 || !root.TryGetProperty("usage", out var reported)
                 || reported.ValueKind != JsonValueKind.Object)
             {
@@ -262,7 +384,14 @@ public sealed class CodexUsageParser : IWorkerUsageParser
                 Turns: 1,
                 CacheReadTokens: cachedInput,
                 CacheCreationTokens: cacheWrite,
-                ThinkingTokens: reasoning);
+                ThinkingTokens: reasoning,
+                // #2020: the dedup key TryParseIncrementalUsage's remark explains, carried on the
+                // field TokenBudgetMonitor already keys its repeated-reading rule on. Null when the
+                // stream predates RoundTripField, which is what makes such a stream's single terminal
+                // line accumulate as it always did.
+                MessageId: ReadLong(reported, RoundTripField) is { } index
+                    ? $"round-trip-{index}"
+                    : null);
             return true;
         }
         catch (JsonException)

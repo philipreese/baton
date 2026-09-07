@@ -738,17 +738,40 @@ public static class ExecutionUsageProjector
             return null;
         }
 
+        // #2020: codex's execution total is a fold over the WHOLE captured stream
+        // (CodexUsageParser.ParseExecutionUsage, applied at the replay site below), so this vendor's
+        // last line reports ONE model round-trip and never a total. A guard rather than a term in the
+        // loop condition (#2020 review LOW): the condition is constant across every iteration, and
+        // keying the loop on `replayParser` while its body parses through `adapter` put two
+        // independently resolved objects (see the resolution above) one line apart with nothing
+        // saying how they relate. They relate like this — StandardWorkerUsageParsers.Default maps
+        // "codex" to a CodexUsageParser, so on this vendor `replayParser` is one whatever registry a
+        // caller passed, which is exactly why the CHECK belongs on it and the parse on `adapter`.
+        //
+        // Skipping the scan is what withholds the figure on the three incomplete-capture returns
+        // below (the two truncation markers and the unreadable rollover), which report `terminal` as
+        // it stands here: a single round-trip presented as an execution total is the misreading #2020
+        // measured, and absent is the honest answer instead.
+        //
+        // STATED BECAUSE IT CHANGES PROVENANCE, not only presence (#2020 review LOW): an
+        // ARRESTED codex execution now reaches the #1876 in-memory journal fallback above, where it
+        // previously used this last stream line. The journalled figure is the live monitor's running Σ
+        // over the same stream, so it is the better of the two — the point is that the same reported
+        // field now comes from a different source on that path.
         WorkerUsage? terminal = null;
-        for (var i = lines.Length - 1; i >= 0; i--)
+        if (replayParser is not CodexUsageParser)
         {
-            var line = lines[i];
-            if (string.IsNullOrWhiteSpace(line))
+            for (var i = lines.Length - 1; i >= 0; i--)
             {
-                continue;
-            }
+                var line = lines[i];
+                if (string.IsNullOrWhiteSpace(line))
+                {
+                    continue;
+                }
 
-            terminal = adapter.TryParseFinalUsage(line, out var usage) ? usage : null;
-            break;
+                terminal = adapter.TryParseFinalUsage(line, out var usage) ? usage : null;
+                break;
+            }
         }
 
         // The rollover segment, read HERE rather than at its point of use below purely so the echoed-
@@ -850,6 +873,11 @@ public static class ExecutionUsageProjector
         // the resolved adapter is still tried rather than skipping the replay outright.
         // #1691 merge: billedRateLimit is null here for the same reason budget/maxToolSteps are -- a
         // replay must not be able to arrest anything; it only reads.
+        if (replayParser is CodexUsageParser codexParser)
+        {
+            terminal = codexParser.ParseExecutionUsage(rolledLines.Concat(lines));
+        }
+
         var replayMonitor = new TokenBudgetMonitor(budget: null, maxToolSteps: null, billedRateLimit: null, replayParser);
         // #1921: fed from the same loops, off the same parser, so the step count and the billed Σ are
         // always over identical bytes. A separate object rather than another counter on the monitor

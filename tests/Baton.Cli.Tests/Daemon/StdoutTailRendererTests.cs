@@ -96,6 +96,33 @@ public sealed class StdoutTailRendererTests : IDisposable
     }
 
     /// <summary>
+    /// #2020 review LOW, and a deliberate DIVERGENCE from pusher.py rather than a port of it (the class
+    /// remark names why the C# renderer is now the shipped reader): the broker writes one
+    /// <c>turn.usage</c> line per model round-trip, which is accounting, not anything an operator
+    /// watching the glass can act on. It is dropped the way every other recognized-but-silent shape is
+    /// — <see cref="StdoutTailRenderer"/>'s Noise arm — so a long codex lane does not spend its 40-line
+    /// window on raw usage JSON. The codex agent message beside it must still render, which is what
+    /// stops the arm from being a blanket codex filter.
+    /// </summary>
+    [Fact]
+    public void ComputeTail_DropsCodexTurnUsageLines_AndKeepsTheRestOfTheStream()
+    {
+        var path = WriteLog("codex.stdout.log", [
+            """{"type":"thread.started","thread_id":"thread-1"}""",
+            """{"type":"turn.usage","usage":{"input_tokens":40000,"cached_input_tokens":38000,"output_tokens":300,"round_trip":1}}""",
+            """{"type":"item.completed","item":{"id":"item-1","type":"agent_message","text":"done"}}""",
+            """{"type":"turn.usage","usage":{"input_tokens":90000,"cached_input_tokens":88000,"output_tokens":450,"round_trip":2}}""",
+        ]);
+
+        var tail = StdoutTailRenderer.ComputeTail(path, patterns: []);
+
+        Assert.DoesNotContain("turn.usage", tail);
+        Assert.DoesNotContain("round_trip", tail);
+        Assert.Contains("thread.started", tail);
+        Assert.Contains("agent_message", tail);
+    }
+
+    /// <summary>
     /// One plain line carrying a credential-shaped token, one plain line carrying a 250-char
     /// whitespace-free blob, and one JSON tool_use line whose rendered summary embeds the same
     /// credential-shaped token — pins that the secret gate runs AFTER rendering (spec/baton.md §6) and

@@ -646,4 +646,49 @@ public sealed class TokenBudgetMonitorTests
         Assert.Equal(oneShot.SnapshotToolStepCount(), incremental.SnapshotToolStepCount());
         Assert.NotNull(oneShotUsage.BilledTokens);
     }
+
+    /// <summary>
+    /// #2020 review MEDIUM, and the behaviour half of that change rather than the reporting half: a
+    /// codex lane now arrests MID-turn, at the round-trip that crosses the budget, where before the
+    /// per-round-trip emitter its only reading was the terminal <c>turn.completed</c> and the arrest
+    /// could not fire until the turn was already over. Decided deliberately (see
+    /// <see cref="TokenBudgetMonitor"/>'s own remark and the PR body): claude and agy already arrest
+    /// mid-turn on this rung, and codex was the outlier by accident of emission.
+    /// <para>
+    /// Figures: codex's <c>TokensIn</c> is the non-cached remainder, so each round-trip bills
+    /// (1000 − 0) + 100 output + 0 cache-write = 1100. Σ crosses a 2000 budget at round-trip 2 of 3,
+    /// and both polarities are asserted — unarrested after 1, arrested after 2. Distinct
+    /// <c>round_trip</c> values matter: they land on <see cref="WorkerUsage.MessageId"/> and a repeat
+    /// is dropped by the dedup rule above.
+    /// </para>
+    /// </summary>
+    [Fact]
+    public void A_codex_stream_crossing_the_budget_at_round_trip_2_of_3_arrests_at_round_trip_2()
+    {
+        var monitor = new TokenBudgetMonitor(budget: 2000, maxToolSteps: null, billedRateLimit: null, new CodexUsageParser());
+
+        monitor.OnStdoutLine(UsageLine(roundTrip: 1));
+        Assert.False(monitor.Arrested);
+        Assert.False(monitor.ArrestRequested.IsCancellationRequested);
+
+        monitor.OnStdoutLine(UsageLine(roundTrip: 2));
+
+        Assert.True(monitor.Arrested);
+        Assert.True(monitor.ArrestRequested.IsCancellationRequested);
+        Assert.Equal(ArrestReason.TokenBudget, monitor.ArrestReasonValue);
+        Assert.Equal(2200, monitor.SnapshotUsage().BilledTokens);
+
+        // The third round-trip never happens on a real arrested lane; feeding it here pins that the
+        // arrest is latched at 2 rather than merely reported at whatever the last line was.
+        monitor.OnStdoutLine(UsageLine(roundTrip: 3));
+        Assert.Equal(ArrestReason.TokenBudget, monitor.ArrestReasonValue);
+
+        // Substituted from the constants rather than typed out, so a rename of either cannot leave this
+        // arm passing against a shape the broker no longer writes.
+        static string UsageLine(int roundTrip) =>
+            """{"type":"USAGE_TYPE","usage":{"input_tokens":1000,"cached_input_tokens":0,"cache_write_input_tokens":0,"output_tokens":100,"reasoning_output_tokens":0,"ROUND_TRIP_FIELD":RT}}"""
+                .Replace("USAGE_TYPE", CodexUsageParser.TurnUsageEventType, StringComparison.Ordinal)
+                .Replace("ROUND_TRIP_FIELD", CodexUsageParser.RoundTripField, StringComparison.Ordinal)
+                .Replace("RT", roundTrip.ToString(System.Globalization.CultureInfo.InvariantCulture), StringComparison.Ordinal);
+    }
 }

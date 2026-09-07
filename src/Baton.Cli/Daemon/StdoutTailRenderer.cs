@@ -13,6 +13,14 @@ namespace Baton.Cli.Daemon;
 /// (pusher.py:687-1085 at the plan's own reading). PR-B's byte-identical diff between this file's
 /// output and the pusher's depends on every rule here matching exactly — see each method's own remarks
 /// for where it does.
+/// <para>
+/// <b>One deliberate divergence since #2020</b>: <see cref="RenderStreamJsonProse"/> drops codex's
+/// <c>turn.usage</c> line, which pusher.py has no arm for. Parity was the constraint while pusher.py
+/// was the shipped reader; since #2028 serves the glass from the daemon, this file IS the shipped
+/// reader and pusher.py the legacy one — so the two now agree everywhere except that arm, which its
+/// own comment states. A future rule added here needs the same treatment or the parity claim above
+/// silently becomes false.
+/// </para>
 /// </summary>
 /// <remarks>
 /// Deliberately NOT built on <c>WorkerStreamRendering.cs</c>/<c>RunCommand.EchoStreamJsonLine</c>: those
@@ -620,6 +628,17 @@ internal static class StdoutTailRenderer
                 }
 
                 return ProseResult.Rendered("[result: success]");
+            }
+
+            // #2020 review LOW: codex's per-model-round-trip usage line is accounting an operator
+            // cannot act on, and one lands per round-trip -- left raw it crowds a 40-line window on a
+            // long lane. Dropped as Noise, the same arm every other recognized-but-silent shape takes.
+            // Deliberately NOT the whole vendor: codex's other lines still pass through raw, so an
+            // agent message stays visible. This is the file's one divergence from pusher.py (the class
+            // remark names it), which has no codex arm at all.
+            if (evtType == Baton.Status.CodexUsageParser.TurnUsageEventType)
+            {
+                return ProseResult.Noise;
             }
 
             if (evtType == "system")
