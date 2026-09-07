@@ -3160,7 +3160,13 @@ mailbox-payload `derived_at` above, which is the pusher's cycle time). Since #19
 top-level key, `timelines` (room path → the same projected entries, `{}` when no room has a readable
 one). It does **not** bump the four-field count: the count is of fields the mailbox payload lacks,
 and the payload has always carried `timelines` — what changed is that the FILE can now supply it,
-which is the PR-B2/PR-C thread below, not new payload surface. Per room, alongside `live`,
+which is the PR-B2/PR-C thread below, not new payload surface. Since #1912 there is a third top-level
+key, `queue` — the conductor's own rows, absent entirely on a machine with no queue file. **It is the
+one key that exists on the file and cannot reach the mailbox**, which is the opposite direction from
+everything else in this paragraph: `pusher.py` composes its payload key by key and does not forward
+it, so §13's board is a tailnet-plane row by construction (C-11, §11) rather than by a decision anyone
+has to keep re-making. Its fields are `Baton.Queue.QueueBoard`'s to define and are not restated here.
+Per room, alongside `live`,
 whenever that room's steps carry a Running execution (present even when #1513 has downgraded the
 room's own displayed `state` to `"Stalled"` — these three exist specifically to diagnose that case,
 so gating them on `state == "Running"` the way `live` itself is gated would hide them from exactly
@@ -6113,7 +6119,10 @@ departed from. Nothing in the queue substitutes a model.
 one spelling of that choice — no `--kind work` alias. It needs `--issue` (the issue is what its
 briefs are rendered from and what its PR is looked for on), refuses `--role` (the stage picks it), and
 defaults its tag to `<n>-lane`. The item carries `issue`, its worktree, `branch`, `stage`, `pr`,
-`lastVerdict` and `round` alongside every slice-1 field.
+`lastVerdict` and `round` alongside every slice-1 field, plus `checks`/`checksObservedAt` (#1912) —
+what the PR's checks were doing the last time the advance looked. **Those two are display surface, not
+policy**: nothing in the lifecycle reads them, they are stamped only when the advance actually got an
+answer from `gh`, and the pair travels together so a reader cannot show a word without its age.
 
 The lifecycle is the one the conductor ran by hand roughly forty times in the week before it was
 written:
@@ -6269,7 +6278,14 @@ order is load-bearing for the reason recorded: an operator who held the queue mu
 whichever other gate happens also to be shut. The ledger **fails open** like every other accounting
 write: a recording failure is never the reason a lane that launched is treated as not having launched.
 
-`fleet_status` and the projection carry nothing new for the queue in slice 1; #1912 is the reader.
+`fleet_status` carries nothing new for the queue. **The projection does, since #1912 slice 1** — its
+`queue` key (§6) is the conductor's board, and this ledger is one of the three things it reads: the
+newest row's `reason` is what a candidate row prints, so the queue's *recorded* verdict and the
+displayed one cannot be two answers. The row's `at` travels with it, because the collapse above means
+a standing verdict is legitimately hours old and a reason rendered without its age would read as this
+instant's. The counters beside it are deliberately **not** read — the board recomputes `liveWeight`,
+`freeGb` and `floorGb` on its own tick, and pairing a three-hour-old floor with a current free-memory
+reading would invent a comparison nothing made.
 
 ### Launching, done detection, and shutdown
 

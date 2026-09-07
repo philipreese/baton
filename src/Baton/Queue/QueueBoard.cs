@@ -45,8 +45,9 @@ public static class QueueBoard
     /// <param name="briefExists">Whether an item's <see cref="QueueItem.SpecFile"/> is readable. The
     /// caller stats the file; a queued item whose brief is gone can never dispatch, and that is
     /// invisible in the queue file itself.</param>
-    /// <param name="verdictDecision">The <c>decision</c> word of an item's last recorded verdict, or
-    /// null when there is none or it no longer parses.</param>
+    /// <param name="verdictDecision">Reads an item's last recorded verdict; null when there is none.
+    /// A delegate rather than a field on the item, because a verdict is a file on disk and this
+    /// function does no I/O.</param>
     public static QueueBoardView Project(
         IReadOnlyList<QueueItem> items,
         bool held,
@@ -361,14 +362,11 @@ public sealed record QueuePendingView(
     int? TwinIssue);
 
 /// <summary>One PR row: where the loop has got to on a work item that has a pull request open.</summary>
-/// <param name="Verdict">The <c>decision</c> word of the last verdict this item recorded; null when
-/// no review has produced one yet.</param>
-/// <param name="Checks">
-/// The PR's checks as the advancer last observed them (<c>PullRequestChecks</c>'s tokens). <b>Never
-/// this instant's</b>: the advancer only reads a work item whose lane has settled, so
-/// <paramref name="ChecksObservedAt"/> is what qualifies the word and the page renders its age beside
-/// it, the same way a vendor block's <c>harvestedAt</c> qualifies a percentage.
-/// </param>
+/// <param name="Verdict">Whatever the caller's <c>verdictDecision</c> delegate returned — its own
+/// implementation is where the reading rule lives (<c>FleetProjectionWriter.ReadVerdictDecision</c>).</param>
+/// <param name="Checks">Copied verbatim off <see cref="QueueItem.Checks"/>, whose remarks are the
+/// register for what it means and why it must never be rendered without
+/// <paramref name="ChecksObservedAt"/>.</param>
 public sealed record QueuePullRequestView(
     [property: JsonPropertyName("tag")] string Tag,
     [property: JsonPropertyName("pr")] int PullRequest,
