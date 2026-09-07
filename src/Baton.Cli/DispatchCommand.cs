@@ -206,6 +206,12 @@ public static class DispatchCommand
         // capture-step probe above, because that one runs only for a worktree-provisioned binding and
         // this must cover the plain --workspace case too. RoomDeliveryBranch decides what is worth
         // recording and fails open; nothing in this run reads it back.
+        //
+        // PROBED, not carried, even though QueueItem.Branch already holds what `queue add --issue`
+        // provisioned: what the workspace is on NOW is a fact, and an add-time value is a claim that a
+        // later `git checkout` in that worktree silently falsifies. Probing is also what makes ONE
+        // code path cover both dispatch shapes -- a queued lane and a hand-run `--workspace` -- rather
+        // than a carried field covering one and a probe covering the other.
         await RoomDeliveryBranch.RecordAsync(
             options.RoomDirectoryPath,
             await WorkspaceHead.TryReadBranchAsync(workspace, cancellationToken).ConfigureAwait(false),

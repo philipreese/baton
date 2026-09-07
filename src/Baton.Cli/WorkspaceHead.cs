@@ -32,9 +32,13 @@ internal static class WorkspaceHead
         var result = await RunRevParseAsync(workingDirectory, ["HEAD"], cancellationToken).ConfigureAwait(false);
         if (!result.Started)
         {
+            // The reason git did not start is carried through rather than assumed: not-on-PATH is the
+            // usual one, but a Process.Start that returns null or refuses for another reason reaches
+            // here too, and a refusal naming the wrong cause sends an operator to the wrong fix.
             throw new CliArgumentException(
-                $"git was not found on PATH, so the base ref for a capture step could not be captured in "
-                + $"'{workingDirectory}'. A workflow with a diff-of-work-so-far step needs a git workspace.");
+                $"git could not be started, so the base ref for a capture step could not be captured in "
+                + $"'{workingDirectory}'. A workflow with a diff-of-work-so-far step needs a git "
+                + $"workspace. {result.Stderr.Trim()}");
         }
 
         if (result.ExitCode != 0)
