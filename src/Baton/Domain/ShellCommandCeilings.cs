@@ -6,13 +6,8 @@ namespace Baton.Domain;
 /// room's delivery check reads <see cref="ShippingBreachReason"/> to say why a branch never reached
 /// origin.
 /// <para>
-/// <b>The failure these are sized against, measured 2026-09-06</b> (#1998): two lanes finished their
-/// work, committed it, and then lost the whole run at the push. A <c>git push</c> in this repository
-/// runs <c>.githooks/pre-push</c>, which runs <c>gates-fast</c>; under the flat five-minute ceiling the
-/// push was killed while that gate was still making progress, so the room settled
-/// <c>Verify failed (branch-not-pushed, pr-not-open)</c> and a conductor pushed by hand. A ceiling that
-/// fires on a command known to be progressing is not a bound on runaway work, it is a bound on finished
-/// work.
+/// The ruling that sizes them, and the two failures on 2026-09-06 it was paid for, are
+/// <c>spec/baton.md</c> §9's per-command-class paragraph. Not restated here.
 /// </para>
 /// <para>
 /// <b>Provenance of the gate figure, stated because it is not what #1998's body assumed.</b> That body

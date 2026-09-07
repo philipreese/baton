@@ -29,11 +29,10 @@ public enum ShellCommandClass
 /// Sorts one shell command line into a <see cref="ShellCommandClass"/> (#1998, operator ruling
 /// 2026-09-06: the ceiling is per-command-class).
 /// <para>
-/// <b>Vendor-neutral on purpose, and enforced on exactly one path today.</b> It lives in the engine
-/// so that any adapter that enforces a ceiling of its own reads the same table; the only path that
-/// enforces one now is the codex broker's <c>baton_run_command</c>
-/// (<c>Baton.Vendors.CodexDynamicToolPolicy</c>), because claude and agy run their shell inside the
-/// vendor CLI where Baton times nothing.
+/// <b>Vendor-neutral on purpose, and enforced on exactly one path today</b>
+/// (<c>Baton.Vendors.CodexDynamicToolPolicy</c>) — which path, and why only that one, is
+/// <c>spec/baton.md</c> §9's per-command-class paragraph. It lives in the engine so that the next
+/// adapter to enforce a ceiling reads this table rather than growing one.
 /// </para>
 /// <para>
 /// <b>Deliberately not shared with <c>Baton.Vendors.ShellCommandPatternMatcher</c></b>, which does its
