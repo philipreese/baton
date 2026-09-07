@@ -344,9 +344,11 @@ public static class HookCheckCommand
                     // the measured claude review lane spent 46 refusals rediscovering Read/Grep.
                     //
                     // Scoped grants only, which is the population #1920 measured. On an UNSCOPED
-                    // grant this rung fires for a standing deny (implement/janitor: git push*,
-                    // git commit*, git rebase*), and answering a write-shaped attempt with two read
-                    // tools is the same non-responsive guidance this issue exists to remove.
+                    // grant this rung fires for a standing deny instead (implement's and janitor's
+                    // are `gh label*`, `gh pr merge*`, `gh api*`; `git push*`/`git commit*`/
+                    // `git rebase*` are the SCOPED review role's — WorkerRoles.json is the register
+                    // for both), and answering a write-shaped attempt with two read tools is the same
+                    // non-responsive guidance this issue exists to remove.
                     var alternative = shellPatternList.Patterns.Count > 0
                         ? Baton.Vendors.GrantedReadToolHint.ForClaude(denied.Contains)
                         : null;
@@ -377,6 +379,40 @@ public static class HookCheckCommand
                     "AER: the 'Bash' command carries an option this session's grant denies outright " +
                     "(a standing option-token 'never', matched anywhere on the line rather than at " +
                     "its start) and was refused.");
+            }
+
+            // #2001: the sibling-pull-request rule, on the path that judges claude. Last of the
+            // grant rungs, because it is the narrowest; only the #2002 repeat rung below follows it,
+            // so a refused sibling read never enters the ledger. The broker's copy of this call passes the room's own PR number, which
+            // it learns from `gh pr create`'s stdout; a PreToolUse hook decides before the command
+            // runs and never sees that stdout, so it takes the entry point that needs no number —
+            // a governed `gh pr` verb is allowed only with no selector, which `gh` resolves from the
+            // branch this room is standing on. See OwnPullRequestOnlyRule for both entry points and
+            // for the routes neither of them covers.
+            //
+            // The allow-pattern list is the whole of what this rung needs to know about the grant:
+            // reaching here means Bash is granted, and a list that allowlists a `gh pr` read is the
+            // review role opting out. What an ABSENT or wrong-vendor channel means here, and why it
+            // reads opposite to the pattern rung above, is stated once on
+            // OwnPullRequestOnlyRule.AppliesToShellPatterns.
+            if (Baton.Vendors.OwnPullRequestOnlyRule.AppliesToShellPatterns(shellPatternList.Patterns))
+            {
+                if (shellCommandLine is null)
+                {
+                    // Belt-and-braces: both roles this rung governs today carry a deny list, so a
+                    // Bash payload with no readable `command` is already denied above. A future
+                    // governed role with neither list would reach here, and a command line this gate
+                    // cannot read is one it cannot judge.
+                    return Refuse(stderr,
+                        "AER: the permission gate could not read the 'Bash' command line from the hook " +
+                        "payload and denied this call rather than allowing it unchecked.");
+                }
+
+                if (Baton.Vendors.OwnPullRequestOnlyRule.RefusalForOwnBranchOnly(shellCommandLine)
+                    is { } siblingPullRequestRefusal)
+                {
+                    return Refuse(stderr, $"AER: {siblingPullRequestRefusal}");
+                }
             }
 
             // #2002 rule 2, hook half — LAST in this branch, so a command the grant would refuse

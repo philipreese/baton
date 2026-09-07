@@ -621,10 +621,11 @@ public class AgyHookCheckCommandTests
     // nested under a non-empty allow list here, so this rung engages the same way on an unscoped
     // grant as on review's scoped one.
     [InlineData("implement", "gh pr create --title x --body-file y", "allow")]
-    [InlineData("implement", "gh pr edit 1 --body-file y", "allow")]
+    // #2001: respelled selectorless for the reason HookCheckCommandTests' equivalent rows state.
+    [InlineData("implement", "gh pr edit --body-file y", "allow")]
     [InlineData("implement", "gh label create x", "deny")]
-    [InlineData("implement", "gh pr edit 1 --add-label x", "deny")]
-    [InlineData("implement", "gh pr edit 1 --remove-label x", "deny")]
+    [InlineData("implement", "gh pr edit --add-label x", "deny")]
+    [InlineData("implement", "gh pr edit --remove-label x", "deny")]
     // Found-while-fixing, same PR: `--label` at creation time attaches a label too, and was never
     // covered by the issue's own token list.
     [InlineData("implement", "gh pr create --title x --label operator-merge", "deny")]
@@ -639,10 +640,10 @@ public class AgyHookCheckCommandTests
     [InlineData("implement", "dotnet test > out.txt", "allow")]
     [InlineData("implement", "echo $PATH", "allow")]
     [InlineData("janitor", "gh pr create --title x --body-file y", "allow")]
-    [InlineData("janitor", "gh pr edit 1 --body-file y", "allow")]
+    [InlineData("janitor", "gh pr edit --body-file y", "allow")]
     [InlineData("janitor", "gh label create x", "deny")]
-    [InlineData("janitor", "gh pr edit 1 --add-label x", "deny")]
-    [InlineData("janitor", "gh pr edit 1 --remove-label x", "deny")]
+    [InlineData("janitor", "gh pr edit --add-label x", "deny")]
+    [InlineData("janitor", "gh pr edit --remove-label x", "deny")]
     [InlineData("janitor", "gh pr merge 1 --squash", "deny")]
     [InlineData("janitor", "gh api repos/a/b", "deny")]
     [InlineData("janitor", "true && gh label create x", "deny")]
@@ -679,6 +680,73 @@ public class AgyHookCheckCommandTests
         Assert.Equal(AgyHookCheckCommand.ExitCode, exitCode);
         using var doc = JsonDocument.Parse(stdout.ToString());
         Assert.Equal(expectedDecision, doc.RootElement.GetProperty("decision").GetString());
+    }
+
+    /// <summary>
+    /// #2001's HIGH finding, on the vendor it was MEASURED on — room dispatch-implement-c91d2ad7 was
+    /// an agy lane. <see cref="Baton.Vendors.OwnPullRequestOnlyRule"/> records what it ran and why a
+    /// hook needs no PR number to refuse it. Same rows as the claude sibling
+    /// (<c>HookCheckCommandTests</c>), deliberately: the two hooks agreeing on when a rung engages is
+    /// the point.
+    /// <para>
+    /// Discriminated the same way, by this class's own
+    /// <see cref="Review_role_command_allow_deny_polarities_from_catalog"/>; the claude sibling's
+    /// remarks say what that arm proves.
+    /// </para>
+    /// </summary>
+    [Theory]
+    [InlineData("implement", "gh pr view", "allow")]
+    [InlineData("implement", "gh pr view --json number", "allow")]
+    [InlineData("implement", "gh pr diff", "allow")]
+    [InlineData("implement", "gh pr checks", "allow")]
+    [InlineData("implement", "gh pr comment --body-file out.md", "allow")]
+    [InlineData("implement", "gh issue view 1943", "allow")]
+    [InlineData("implement", "gh pr view 1994", "deny")]
+    [InlineData("implement", "gh pr view --json title 1994", "deny")]
+    [InlineData("implement", "gh pr view 1943-a-agy", "deny")]
+    [InlineData("implement", "gh pr list", "deny")]
+    [InlineData("implement", "gh pr status", "deny")]
+    [InlineData("implement", "gh pr list | head -20", "deny")]
+    [InlineData("implement", "gh pr comment 1994 --body-file out.md", "deny")]
+    // The discriminating row for the without-saying-`gh pr` half, for the reason the claude sibling's
+    // equivalent row states. Its `gh api` twin is absent here too, and for the same reason.
+    [InlineData("implement", "gh search prs --state open", "deny")]
+    [InlineData("janitor", "gh pr view", "allow")]
+    [InlineData("janitor", "gh pr view 1994", "deny")]
+    [InlineData("janitor", "gh pr list", "deny")]
+    public void A_governed_lane_reads_only_the_pull_request_of_the_branch_it_is_on(
+        string roleId, string command, string expectedDecision)
+    {
+        var role = Baton.Vendors.WorkerRoleCatalog.For(roleId);
+        var deniedShellPatternsRaw = "agy:" + string.Join(",", role.Grant.DeniedShellCommandPatterns!);
+        var deniedShellOptionTokensRaw = "agy:" + string.Join(",", role.Grant.DeniedShellOptionTokens!);
+
+        var payload = $$"""
+            {"artifactDirectoryPath":"C:/x/brain/abc","conversationId":"abc",
+             "modelName":"gemini-3.6-flash-medium","stepIdx":3,
+             "toolCall":{"args":{"CommandLine":{{JsonSerializer.Serialize(command)}}, "Cwd":"C:\\x","WaitMsBeforeAsync":5000},
+                         "name":"run_command"},
+             "transcriptPath":"C:/x/transcript_full.jsonl","workspacePaths":["C:/x"]}
+            """;
+        using var stdin = new StringReader(payload);
+        using var stdout = new StringWriter();
+
+        var exitCode = AgyHookCheckCommand.Execute(
+            stdin, stdout, "agy:write_to_file,replace_file_content",
+            shellPatternsRaw: "agy:", // unscoped: Present, empty pattern list
+            deniedShellPatternsRaw: deniedShellPatternsRaw,
+            deniedShellOptionTokensRaw: deniedShellOptionTokensRaw);
+
+        Assert.Equal(AgyHookCheckCommand.ExitCode, exitCode);
+        using var doc = JsonDocument.Parse(stdout.ToString());
+        Assert.Equal(expectedDecision, doc.RootElement.GetProperty("decision").GetString());
+        if (expectedDecision == "deny")
+        {
+            Assert.Contains(
+                Baton.Vendors.OwnPullRequestOnlyRule.Rule,
+                doc.RootElement.GetProperty("reason").GetString()!,
+                StringComparison.Ordinal);
+        }
     }
 
     [Fact]

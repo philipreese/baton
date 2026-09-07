@@ -325,10 +325,14 @@ public class HookCheckCommandTests
     // #1731: the write roles may not create/apply labels, merge a PR, or call the API on their own --
     // spec/baton.md §9 records the shape of the grant these rows exercise through the real catalog.
     [InlineData("implement", "gh pr create --title x --body-file y", HookCheckCommand.AllowedExitCode)]
-    [InlineData("implement", "gh pr edit 1 --body-file y", HookCheckCommand.AllowedExitCode)]
+    // #2001: selectorless, because that is the only spelling of a PR write this rung now admits (the
+    // numbered one is its own polarity row below). Respelled here rather than left numbered so these
+    // rows keep isolating the channel they were written for -- a `gh pr edit 1 --add-label x` denies
+    // for two reasons now, and would pass this theory with the option-token channel switched off.
+    [InlineData("implement", "gh pr edit --body-file y", HookCheckCommand.AllowedExitCode)]
     [InlineData("implement", "gh label create x", HookCheckCommand.DeniedExitCode)]
-    [InlineData("implement", "gh pr edit 1 --add-label x", HookCheckCommand.DeniedExitCode)]
-    [InlineData("implement", "gh pr edit 1 --remove-label x", HookCheckCommand.DeniedExitCode)]
+    [InlineData("implement", "gh pr edit --add-label x", HookCheckCommand.DeniedExitCode)]
+    [InlineData("implement", "gh pr edit --remove-label x", HookCheckCommand.DeniedExitCode)]
     // Found-while-fixing, same PR (spec/baton.md §9 has the full "why"): `--label` at PR/issue
     // creation time attaches a label too, closed by adding it to the token list alongside
     // `--add-label`/`--remove-label`.
@@ -349,10 +353,10 @@ public class HookCheckCommandTests
     [InlineData("implement", "dotnet test > out.txt", HookCheckCommand.AllowedExitCode)]
     [InlineData("implement", "echo $PATH", HookCheckCommand.AllowedExitCode)]
     [InlineData("janitor", "gh pr create --title x --body-file y", HookCheckCommand.AllowedExitCode)]
-    [InlineData("janitor", "gh pr edit 1 --body-file y", HookCheckCommand.AllowedExitCode)]
+    [InlineData("janitor", "gh pr edit --body-file y", HookCheckCommand.AllowedExitCode)]
     [InlineData("janitor", "gh label create x", HookCheckCommand.DeniedExitCode)]
-    [InlineData("janitor", "gh pr edit 1 --add-label x", HookCheckCommand.DeniedExitCode)]
-    [InlineData("janitor", "gh pr edit 1 --remove-label x", HookCheckCommand.DeniedExitCode)]
+    [InlineData("janitor", "gh pr edit --add-label x", HookCheckCommand.DeniedExitCode)]
+    [InlineData("janitor", "gh pr edit --remove-label x", HookCheckCommand.DeniedExitCode)]
     [InlineData("janitor", "gh pr merge 1 --squash", HookCheckCommand.DeniedExitCode)]
     [InlineData("janitor", "gh api repos/a/b", HookCheckCommand.DeniedExitCode)]
     [InlineData("janitor", "true && gh label create x", HookCheckCommand.DeniedExitCode)]
@@ -382,6 +386,67 @@ public class HookCheckCommandTests
             deniedShellOptionTokensRaw: deniedShellOptionTokensRaw);
 
         Assert.Equal(expectedExitCode, exitCode);
+    }
+
+    /// <summary>
+    /// #2001's HIGH finding: the contamination <see cref="Baton.Vendors.OwnPullRequestOnlyRule"/>
+    /// records was measured on a hook path, not on the codex broker, and neither governed role's deny
+    /// patterns (<c>gh label*</c>, <c>gh pr merge*</c>, <c>gh api*</c>) names either command it ran —
+    /// so before this rung both succeeded on claude and agy. A hook cannot learn the room's PR number,
+    /// and does not need to: the selectorless form is the room's own PR by construction.
+    /// <para>
+    /// The exemption's control arm is <see cref="Review_role_command_allow_deny_polarities_from_catalog"/>'s
+    /// <c>gh pr view 1</c> row, which stays ALLOWED off the same real catalog — so these denials are
+    /// this rule's doing on the governed roles, not a blanket refusal of <c>gh pr</c>.
+    /// </para>
+    /// </summary>
+    [Theory]
+    [InlineData("implement", "gh pr view", HookCheckCommand.AllowedExitCode)]
+    [InlineData("implement", "gh pr view --json number", HookCheckCommand.AllowedExitCode)]
+    [InlineData("implement", "gh pr diff", HookCheckCommand.AllowedExitCode)]
+    [InlineData("implement", "gh pr checks", HookCheckCommand.AllowedExitCode)]
+    [InlineData("implement", "gh pr comment --body-file out.md", HookCheckCommand.AllowedExitCode)]
+    [InlineData("implement", "gh issue view 1943", HookCheckCommand.AllowedExitCode)]
+    [InlineData("implement", "gh pr view 1994", HookCheckCommand.DeniedExitCode)]
+    [InlineData("implement", "gh pr view --json title 1994", HookCheckCommand.DeniedExitCode)]
+    [InlineData("implement", "gh pr view 1943-a-agy", HookCheckCommand.DeniedExitCode)]
+    [InlineData("implement", "gh pr list", HookCheckCommand.DeniedExitCode)]
+    [InlineData("implement", "gh pr status", HookCheckCommand.DeniedExitCode)]
+    [InlineData("implement", "gh pr list | head -20", HookCheckCommand.DeniedExitCode)]
+    [InlineData("implement", "gh pr comment 1994 --body-file out.md", HookCheckCommand.DeniedExitCode)]
+    // `gh api …/pulls/…` is denied twice over on this path (the role's own `gh api*` pattern denies
+    // it first), so it does not discriminate here -- OwnPullRequestOnlyRuleTests holds that row
+    // against the detector directly. Only this rung refuses `gh search prs` (why: the remark on
+    // OwnPullRequestOnlyRule.ReadsPullRequestsWithoutSayingGhPr), which is what makes it the
+    // discriminating row for that half.
+    [InlineData("implement", "gh search prs --state open", HookCheckCommand.DeniedExitCode)]
+    [InlineData("janitor", "gh pr view", HookCheckCommand.AllowedExitCode)]
+    [InlineData("janitor", "gh pr view 1994", HookCheckCommand.DeniedExitCode)]
+    [InlineData("janitor", "gh pr list", HookCheckCommand.DeniedExitCode)]
+    public void A_governed_lane_reads_only_the_pull_request_of_the_branch_it_is_on(
+        string roleId, string command, int expectedExitCode)
+    {
+        var role = Baton.Vendors.WorkerRoleCatalog.For(roleId);
+        var deniedShellPatternsRaw = "claude:" + string.Join(",", role.Grant.DeniedShellCommandPatterns!);
+        var deniedShellOptionTokensRaw = "claude:" + string.Join(",", role.Grant.DeniedShellOptionTokens!);
+
+        var payload = """{"tool_name": "Bash", "tool_input": {"command": COMMAND_JSON}}"""
+            .Replace("COMMAND_JSON", System.Text.Json.JsonSerializer.Serialize(command));
+        using var stdin = new StringReader(payload);
+        using var stderr = new StringWriter();
+
+        var exitCode = HookCheckCommand.Execute(
+            stdin, stderr, "claude:Edit,Write",
+            shellPatternsRaw: "claude:", // unscoped: Present, empty pattern list
+            deniedShellPatternsRaw: deniedShellPatternsRaw,
+            deniedShellOptionTokensRaw: deniedShellOptionTokensRaw);
+
+        Assert.Equal(expectedExitCode, exitCode);
+        if (expectedExitCode == HookCheckCommand.DeniedExitCode)
+        {
+            Assert.Contains(
+                Baton.Vendors.OwnPullRequestOnlyRule.Rule, stderr.ToString(), StringComparison.Ordinal);
+        }
     }
 
     [Fact]

@@ -478,6 +478,25 @@ public static class AgyHookCheckCommand
                 }
             }
 
+            // #2001, and this is the vendor the contamination was measured on. The rung, its order
+            // and the reason it takes the number-free entry point are stated once, beside the claude
+            // hook's identical call (HookCheckCommand) and on OwnPullRequestOnlyRule itself.
+            if (Baton.Vendors.OwnPullRequestOnlyRule.AppliesToShellPatterns(shellPatternList.Patterns))
+            {
+                if (commandLine is null)
+                {
+                    return DenyJson(
+                        "AER: the permission gate could not read toolCall.args.CommandLine in the hook " +
+                        "payload and denied this call rather than allowing it unchecked.");
+                }
+
+                if (Baton.Vendors.OwnPullRequestOnlyRule.RefusalForOwnBranchOnly(commandLine)
+                    is { } siblingPullRequestRefusal)
+                {
+                    return DenyJson($"AER: {siblingPullRequestRefusal}");
+                }
+            }
+
             // #2002 rule 2. Placed where HookCheckCommand places its own, for the reason stated there.
             if (Baton.Vendors.RepeatedToolCallHook.JudgeCommand(outboxDirectory, commandLine)
                 is { } repeatedCommand)
