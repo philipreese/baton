@@ -2166,7 +2166,10 @@ sqlite and protobuf stores are inventoried and never written — which is what t
   every record does, or that the vendor guarantees it at all. Deliberately not pursued, and safe to leave
   so, because nothing depends on it: the reader scans for the field rather than assuming a position
   (`MaxSessionLinesScanned` lines per file), and a transcript carrying none contributes no ground truth
-  and degrades the root to the decoder's own ambiguity. Measuring it would mean reading the operator's
+  and degrades the root to the decoder's own ambiguity. **That degradation is pinned, not asserted**
+  (#2042): `MemoryRootPathTests.A_cwd_past_the_line_bound_is_not_read` puts a `cwd` past the bound and
+  gets nothing, with a control arm moving the same record one line inside it and getting the path — so
+  the unmeasured shape is safe by test rather than by this paragraph. Measuring it would mean reading the operator's
   real transcripts, which the #1852 lanes are barred from; a future probe on a synthetic Claude session
   is what would settle it.
 - **`defer`'s single-tool-call limit.** Three attempts failed to make the model batch tool calls

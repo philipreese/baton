@@ -130,22 +130,31 @@ internal static class RepositoryIdentityResolver
     /// thousands of ten-second-timeout git invocations behind one audited root.
     /// </para>
     /// <para>
-    /// <b>What it actually checks, stated narrowly</b> (#1908 re-review low 1, correcting a remark that
-    /// claimed more): the entry named <c>.git</c> is not validated at all — not opened, not parsed, not
-    /// followed. A <c>.git</c> file whose <c>gitdir:</c> pointer is broken and a stray non-repository
-    /// directory named <c>.git</c> both satisfy this predicate. <b>A bare repository does not</b>: it
-    /// has no <c>.git</c> entry, so it fails here rather than passing and being rejected later.
+    /// <b>What it actually checks</b> (#2042; #1908 re-review low 1 left the entry unvalidated and this
+    /// is the narrowing it asked for): the <c>.git</c> entry must carry the shape git gives it — a
+    /// <b>directory</b> holding a <c>HEAD</c> <i>file</i>, or a <b>file</b> whose first non-blank text is
+    /// <c>gitdir:</c>, the linked-worktree pointer <see cref="TryResolveAsync"/>'s
+    /// <c>--git-common-dir</c> comment turns on. A stray directory named <c>.git</c> that is no
+    /// repository, and a file of that name holding anything else, both used to satisfy this predicate and
+    /// no longer do. <b>A bare repository still does not</b>: it has no <c>.git</c> entry at all, so it
+    /// fails here rather than passing and being rejected later.
     /// </para>
     /// <para>
-    /// <b>What that costs, and why it is still the right predicate.</b> The value this buys is the
-    /// direction it was added for: a decoded reading that is merely a directory <i>inside</i> a checkout
-    /// no longer counts as having found that checkout (see
-    /// <see cref="Baton.Memory.MemoryRootPath.Resolve"/>'s tie-break comment). What it does not buy is a
-    /// guarantee about what happens to the two false positives above — <see cref="TryResolveAsync"/>
-    /// probes git at that path, and git discovers a repository by walking <b>up</b>, so a stray
-    /// <c>.git</c> directory planted inside a real checkout resolves to that checkout's identity rather
-    /// than to nothing. Nothing here has measured which of those it does in each case, so nothing here
-    /// claims it.
+    /// <b>Shape, not validity — the negative, because a reader's prior otherwise fills it in wrongly.</b>
+    /// Nothing here follows the pointer or opens the repository. A <c>gitdir:</c> naming a directory that
+    /// has since been deleted still passes, and so does a <c>.git</c> directory whose <c>HEAD</c> is
+    /// empty or garbage. This discriminates entries that were never a repository from ones that are
+    /// shaped like one; whether git can actually answer for the path stays
+    /// <see cref="TryResolveAsync"/>'s question.
+    /// </para>
+    /// <para>
+    /// <b>What it costs, and how it fails.</b> The directory arm is one extra <c>File.Exists</c>; the
+    /// file arm is a single read bounded at <see cref="GitDirPointerProbeChars"/> characters, so a
+    /// multi-gigabyte file named <c>.git</c> is not read whole — both far under the process spawn the
+    /// paragraph above rules out. An unreadable entry answers <see langword="false"/>, the same one-way
+    /// degradation <see cref="Baton.Memory.MemoryRootPath.MaxReadingsEnumerated"/>'s remark states for
+    /// the enumeration cap: a lost resolution costs an ambiguous row, an invented one files a root under
+    /// a repository it never belonged to.
     /// </para>
     /// </remarks>
     public static bool IsWorkTreeRoot(string path)
@@ -156,7 +165,37 @@ internal static class RepositoryIdentityResolver
         }
 
         var gitEntry = Path.Combine(path, ".git");
-        return Directory.Exists(gitEntry) || File.Exists(gitEntry);
+        return Directory.Exists(gitEntry)
+            ? File.Exists(Path.Combine(gitEntry, "HEAD"))
+            : File.Exists(gitEntry) && StartsWithGitDirPointer(gitEntry);
+    }
+
+    /// <summary>
+    /// How much of a <c>.git</c> file is read before deciding. The pointer git writes is one short line,
+    /// so this is slack, not a budget — its job is that an arbitrarily large file that merely shares the
+    /// name cannot be read whole by a predicate applied per decoded reading.
+    /// </summary>
+    private const int GitDirPointerProbeChars = 512;
+
+    /// <summary><see langword="true"/> when <paramref name="gitFilePath"/> opens with git's <c>gitdir:</c> pointer.</summary>
+    private static bool StartsWithGitDirPointer(string gitFilePath)
+    {
+        try
+        {
+            using var reader = new StreamReader(
+                new FileStream(gitFilePath, FileMode.Open, FileAccess.Read, FileShare.ReadWrite),
+                System.Text.Encoding.UTF8);
+
+            var buffer = new char[GitDirPointerProbeChars];
+            var read = reader.ReadBlock(buffer, 0, buffer.Length);
+            return new ReadOnlySpan<char>(buffer, 0, read).TrimStart().StartsWith("gitdir:", StringComparison.Ordinal);
+        }
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
+        {
+            // Unreadable reads as "not a work tree root": see the remarks above for why the degradation
+            // runs this way and not the other.
+            return false;
+        }
     }
 
     /// <summary>Stdout of a git invocation, trimmed — or null on any non-zero exit, missing git, or timeout.</summary>
