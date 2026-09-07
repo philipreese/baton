@@ -514,6 +514,9 @@ public sealed class CodexDynamicToolPolicy
         // same failing `dotnet test` four times.
         _repeats.RecordCommandOutput(commandLine, combined);
 
+        // #2002: a command is the broker's other write path, and the loud one -- see ForgetAllReads.
+        _repeats.ForgetAllReads();
+
         // A non-zero exit is the command's own answer, carried back whole — `pixi run test` with three
         // failing tests is the case that matters, and its output IS the information the step bought.
         // Failed rather than Refused: stamping the refusal marker here counted every failing allowed

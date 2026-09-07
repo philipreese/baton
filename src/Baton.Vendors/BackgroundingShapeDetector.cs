@@ -110,6 +110,12 @@ public static class BackgroundingShapeDetector
     /// characters that can hide a closing double quote — POSIX <c>\</c> and PowerShell <c>`</c>.
     /// An unterminated quote masks to end of line, which is the conservative direction: it can only
     /// cause this detector to MISS a shape on a line no shell would have run anyway.
+    /// <para>
+    /// <b>Invariant: <c>masked.Length == i</c> at the top of every iteration</b> — every branch appends
+    /// exactly one character per character consumed. The comment test depends on it: it asks
+    /// <c>masked.Length == 0</c> for "at the start of the line" while indexing <c>line</c> for the
+    /// preceding character, and those two only agree because the lengths stay in step.
+    /// </para>
     /// </summary>
     private static string MaskQuotedAndCommented(string line)
     {
