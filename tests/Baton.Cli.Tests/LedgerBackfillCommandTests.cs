@@ -245,6 +245,66 @@ public sealed class LedgerBackfillCommandTests : IDisposable
     }
 
     /// <summary>
+    /// #1944, the join this issue exists for: a room that DECLARED nothing but whose dispatch recorded
+    /// the workspace's branch at the room root still attributes its PR. The second room is the control
+    /// arm and it is the discriminating one — it is identical except for the recorded fact, so a read
+    /// that ignored the room-root file would fail the first arm while still passing the second.
+    /// </summary>
+    [Fact]
+    public async Task A_merged_pr_joins_to_a_room_whose_dispatch_recorded_the_branch_without_the_lane_declaring_it()
+    {
+        await WriteSettledRoomAsync("recorded", "exec-recorded");
+        await RoomDeliveryBranch.RecordAsync(
+            Path.Combine(RoomsRoot, "recorded"), "1944-lane", TestContext.Current.CancellationToken);
+
+        await WriteSettledRoomAsync("silent", "exec-silent");
+
+        var output = await RunAsync(gh: new StubGh("""
+            [
+              {"number":2040,"headRefName":"1944-lane","mergedAt":"2026-09-06T12:00:00Z"},
+              {"number":2041,"headRefName":"1863-lane","mergedAt":"2026-09-06T11:00:00Z"}
+            ]
+            """));
+
+        var rows = await ReadLedgerAsync();
+        var joined = Assert.Single(rows, r => r.PullRequest == "2040");
+        Assert.Equal(BatonPaths.RecordKey(Path.Combine(RoomsRoot, "recorded")), joined.Room);
+
+        var orphan = Assert.Single(rows, r => r.PullRequest == "2041");
+        Assert.Null(orphan.Room);
+        Assert.Contains("PRs not joined to a room: 1", output, StringComparison.Ordinal);
+    }
+
+    /// <summary>
+    /// #1944's precedence, both directions in one room: the lane's own declared output wins over what
+    /// dispatch observed, and the observation is what the previous test proves is read when there is no
+    /// declaration. Written this way because the two sources are a precedence rather than two
+    /// independent reads — asserting only the fallback would pass equally if the fallback had replaced
+    /// the declaration instead of standing behind it.
+    /// </summary>
+    [Fact]
+    public async Task A_lanes_declared_delivery_branch_wins_over_the_one_dispatch_recorded()
+    {
+        await WriteSettledRoomAsync("both", "exec-both");
+        WriteDeliveryBranch(Path.Combine(RoomsRoot, "both"), "exec-both", "declared-lane");
+        await RoomDeliveryBranch.RecordAsync(
+            Path.Combine(RoomsRoot, "both"), "observed-lane", TestContext.Current.CancellationToken);
+
+        await RunAsync(gh: new StubGh("""
+            [
+              {"number":2050,"headRefName":"declared-lane","mergedAt":"2026-09-06T12:00:00Z"},
+              {"number":2051,"headRefName":"observed-lane","mergedAt":"2026-09-06T11:00:00Z"}
+            ]
+            """));
+
+        var rows = await ReadLedgerAsync();
+        Assert.Equal(
+            BatonPaths.RecordKey(Path.Combine(RoomsRoot, "both")),
+            Assert.Single(rows, r => r.PullRequest == "2050").Room);
+        Assert.Null(Assert.Single(rows, r => r.PullRequest == "2051").Room);
+    }
+
+    /// <summary>
     /// One malformed entry costs its own row and nothing else — the fail-open-per-PR rule, with the
     /// well-formed sibling beside it as the control.
     /// </summary>
