@@ -184,6 +184,12 @@ def _dedupe(names):
             seen.append(name)
     return seen
 
+# main() prints this unconditionally once it has run the members, so its presence in a run's output
+# is "members were run" and its absence is "they were not" -- read in both directions by the #2031
+# selftest arm. A constant, not a repeated literal, because the arm's evidence is that main() and
+# the arm mean the same string (record-once): a reworded print with the arm left alone would leave
+# the arm green on a refusal that ran the whole suite.
+RAN_REPORT = "gates: ran "
 PASS_MARK = "GATES: PASS"
 FAIL_MARK = "GATES: FAIL"
 # #1796: a member's own tools/buildlock.py wrapper timed out waiting for the build lock --
@@ -1452,7 +1458,17 @@ def selftest():
 
     # Unrecognised-flag control (#1684): before this fix, an unknown flag fell through every
     # `"--x" in sys.argv` check and reached run_all() -- silently running the full suite instead of
-    # refusing. This must exit 2 fast, with no gate run and no receipt written/touched.
+    # refusing. This must exit 2 with no gate run and no receipt of either kind written/touched.
+    #
+    # #2031: the property, never the clock. This arm used to also assert the child returned in
+    # under a second, on the reasoning that anything slower must have run a member. What that
+    # actually measured was Python start-up on the box it happened to run on, and under the build
+    # lock with several lanes live it exceeded a second routinely -- reddening a pre-push gate for
+    # a reason the tree had nothing to do with, which is the flake class `audit-waitceiling` exists
+    # to keep out of tests. "Ran no member" is now read directly, twice over: the subprocess leaves
+    # no receipt of either kind, and the same refusal driven through main() with a recording runner
+    # in place of pixi records nothing. The second is what the red-proof needs -- a refusal that
+    # ran a member without receipting it moves no receipt, so the receipt arms alone cannot see it.
     with tempfile.TemporaryDirectory() as td:
         repo = os.path.join(td, "repo")
         os.makedirs(repo)
@@ -1461,22 +1477,103 @@ def selftest():
         rp = receipt_path(repo)
         before_mtime = os.path.getmtime(rp)
 
-        start = time.monotonic()
         bogus = subprocess.run([sys.executable, os.path.abspath(__file__), "--bogus"],
                                cwd=repo, capture_output=True, text=True, check=False)
-        elapsed = time.monotonic() - start
 
         if bogus.returncode != 2:
             print(f"  control FAILED: --bogus did not exit 2 -- got {bogus.returncode} "
                   f"(stdout={bogus.stdout!r} stderr={bogus.stderr!r})")
             ok = False
-        if elapsed >= 1.0:
-            print(f"  control FAILED: --bogus took {elapsed:.2f}s -- not under 1s, so it did not "
-                  f"refuse before running gate members")
+        # main() reports what it ran unconditionally, so that report reaching the child's output at
+        # all means the refusal did not happen first. The polarity arm below runs the same literal
+        # in the other direction, which is what keeps this from passing on a string main() stopped
+        # printing.
+        if RAN_REPORT in bogus.stdout + bogus.stderr:
+            print(f"  control FAILED: --bogus reached main()'s member-run report -- "
+                  f"stdout={bogus.stdout!r} stderr={bogus.stderr!r}")
             ok = False
-        after_mtime = os.path.getmtime(rp)
+        # `if exists`, not a bare getmtime: a fallthrough run that fails DELETES the receipt, and a
+        # control that raises FileNotFoundError there reports a crash where it should report the
+        # violation it just caught. Found running this arm's own red-proof.
+        after_mtime = os.path.getmtime(rp) if os.path.exists(rp) else None
         if before_mtime != after_mtime:
-            print("  control FAILED: --bogus modified the gate receipt")
+            print(f"  control FAILED: --bogus modified the gate receipt "
+                  f"({'deleted it' if after_mtime is None else 'rewrote it'})")
+            ok = False
+        left_behind = covered_members(cwd=repo)
+        if left_behind:
+            print(f"  control FAILED: --bogus left member receipt(s) behind -- "
+                  f"{', '.join(sorted(left_behind))}")
+            ok = False
+
+        # Same refusal, in-process, against a runner that records instead of spawning `pixi`.
+        # `bogus_ran == []` is the claim itself and depends on no printed format; main() resolves
+        # `pixi_runner` from module globals at call time, so a member run inserted anywhere ahead
+        # of the refusal lands in the list. argparse's usage error on stderr and the SystemExit(2)
+        # it raises are the refusal working, not a failure -- expect both in this gate's log.
+        bogus_ran = []
+
+        def _recording_runner(name):
+            bogus_ran.append(name)
+            return 0
+
+        def _recording_spawner(name):
+            bogus_ran.append(name)
+            return fake_spawner(0)
+
+        def _recording_run_gates_and_shutdown(after_build, runner, quiet, skip=frozenset()):
+            return run_all(after_build, spawner=_recording_spawner, runner=runner,
+                           quiet=quiet, skip=skip)
+
+        prior_cwd = os.getcwd()
+        prior_argv = list(sys.argv)
+        prior_globals = (pixi_runner, telemetry_snapshot, run_gates_and_shutdown)
+        try:
+            os.chdir(repo)
+            globals()["pixi_runner"] = _recording_runner
+            globals()["telemetry_snapshot"] = lambda: {}
+            globals()["run_gates_and_shutdown"] = _recording_run_gates_and_shutdown
+
+            # Polarity first: without it, "recorded nothing" is satisfiable by an injection that
+            # could never have recorded anything, and "the report never appeared" by a report
+            # main() no longer prints. A RECOGNISED flag over the same fixture and the same fakes
+            # has to do both. (How many members, and which, is the --skip-covered fixture's claim
+            # below, not restated here.) Its output is captured rather than printed: gates-selftest
+            # is re-printed verbatim into every `gates` run, and this arm is a whole fake fast run
+            # -- the token cost of inherited gate output is what this file's own docstring measures.
+            sys.argv = ["gates.py", "--fast"]
+            captured.seek(0); captured.truncate()
+            sys.stdout = _Buf()  # type: ignore[assignment]
+            try:
+                main()
+            finally:
+                sys.stdout = real_stdout
+            polarity_out = captured.getvalue()
+            polarity_ran, bogus_ran[:] = list(bogus_ran), []
+
+            sys.argv = ["gates.py", "--bogus"]
+            try:
+                inproc_rc = main()
+            except SystemExit as e:
+                inproc_rc = e.code
+        finally:
+            os.chdir(prior_cwd)
+            sys.argv = prior_argv
+            sys.stdout = real_stdout
+            (globals()["pixi_runner"], globals()["telemetry_snapshot"],
+             globals()["run_gates_and_shutdown"]) = prior_globals
+
+        if not polarity_ran:
+            print("  control FAILED: the recording runner recorded nothing on a RECOGNISED flag, "
+                  "so --bogus recording nothing proves nothing")
+            ok = False
+        if RAN_REPORT.encode() not in polarity_out:
+            print(f"  control FAILED: a RECOGNISED flag did not print {RAN_REPORT!r}, so --bogus "
+                  f"not printing it proves nothing")
+            ok = False
+        if inproc_rc != 2 or bogus_ran:
+            print(f"  control FAILED: --bogus through main() exited {inproc_rc} after running "
+                  f"{bogus_ran} -- an unknown flag must be refused before any member runs")
             ok = False
 
     # `--fast --skip-covered` (pixi's gates-fast-cover), which had no control arm at all (#1936
@@ -1748,7 +1845,7 @@ def main():
     write_telemetry(mode, start_snapshot, end_snapshot)
 
     print()
-    print(f"gates: ran {len(names)} member(s): {', '.join(names)}")
+    print(f"{RAN_REPORT}{len(names)} member(s): {', '.join(names)}")
 
     # #1676: the assertion that CI cannot silently drift from the tracked member list. Under --ci
     # this must equal every gates.py member (build order) minus CI_SKIP -- any other result means
