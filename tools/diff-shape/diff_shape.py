@@ -35,6 +35,11 @@ PROTECTED_TOOLING_PATHS: tuple[tuple[str, str, str], ...] = (
     # directories -- protecting the specific file, not the whole directory, so a genuinely unwired
     # sibling (tools/fleet-glass/pusher.py) stays unprotected.
     ("file", "tools/fleet-glass/worker.selftest.mjs", "the only thing standing between worker.js's paging/heartbeat-merge logic and a silent revert (gates.py OVERLAP)"),
+    # #1912 fix round: same shape and same reason one line up -- a wired member's own body. The
+    # sabotage fixture guards the EXTRACTION (a gutted panel, a renamed marker); dropping check(...)
+    # lines from the assertion list leaves the member green and quiet, which is the exposure this
+    # entry closes.
+    ("file", "tools/fleet-glass/glass.selftest.mjs", "the conductor panel's assertion set -- the only thing between glass.html's row kinds and a silent break (gates.py OVERLAP)"),
     ("file", "tools/tool-refresh/refresh.py", "tool-refresh-selftest's body (gates.py OVERLAP)"),
     ("file", "tests/Launcher.Tests.ps1", "launcher-selftest's body -- exercises baton.cmd/baton.ps1 against a mock exe fixture (gates.py OVERLAP)"),
     ("dir", "tools/Baton.VendorProbe/", "vendor-check's actual body, the loud half of the drift grace window (gates.py AFTER_BUILD_FAST); a directory because it is a compiled project"),

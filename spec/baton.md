@@ -3166,7 +3166,9 @@ one key that exists on the file and cannot reach the mailbox**, which is the opp
 everything else in this paragraph: `pusher.py` composes its payload key by key and does not forward
 it, so §13's board is a tailnet-plane row by construction (C-11, §11) rather than by a decision anyone
 has to keep re-making. Its fields are `Baton.Queue.QueueBoard`'s to define and are not restated here.
-Per room, alongside `live`,
+When `queue` is absent a sibling key, `queueUnavailableReason`, says **which** absence it is — the
+three states and which word each takes are `FleetProjectionWriter.BuildQueueSectionAsync`'s remarks to
+define, not this section's. Per room, alongside `live`,
 whenever that room's steps carry a Running execution (present even when #1513 has downgraded the
 room's own displayed `state` to `"Stalled"` — these three exist specifically to diagnose that case,
 so gating them on `state == "Running"` the way `live` itself is gated would hide them from exactly

@@ -72,6 +72,22 @@ public sealed class FleetProjectionWriter : BackgroundService
 
     public const string IntervalSecondsEnvironmentVariable = "BATON_FLEET_PROJECTION_INTERVAL_SECONDS";
 
+    /// <summary>
+    /// The top-level key that carries why there is no <c>queue</c> section this tick — a SIBLING of
+    /// <c>queue</c> and present only when <c>queue</c> is absent.
+    /// <see cref="BuildQueueSectionAsync"/>'s remarks are the register for the three states it splits;
+    /// <c>glass.html</c>'s <c>queueBoardHtml</c> is the one reader.
+    /// </summary>
+    public const string QueueUnavailableReasonKey = "queueUnavailableReason";
+
+    /// <summary>
+    /// The one non-message value <see cref="QueueUnavailableReasonKey"/> takes: this machine has no
+    /// queue file, so it has never run <c>baton queue add</c>. A fixed token rather than a sentence
+    /// because the page keys on it to render nothing at all — an exception message is rendered, this
+    /// is not.
+    /// </summary>
+    public const string QueueUnavailableNoQueueFile = "no-queue-file";
+
     public static readonly TimeSpan DefaultInterval = TimeSpan.FromSeconds(30);
 
     /// <summary>
@@ -323,9 +339,17 @@ public sealed class FleetProjectionWriter : BackgroundService
         // #1912: the conductor's own rows, from the SAME walk above -- `liveLanes` is what that loop
         // already collected, so the weighted total beside the cap costs no second room scan.
         var queue = await BuildQueueSectionAsync(liveLanes, diagnostics, cancellationToken).ConfigureAwait(false);
-        if (queue is not null)
+        if (queue.Board is { } board)
         {
-            root["queue"] = JsonSerializer.SerializeToNode(queue, FleetStatusTool.SerializerOptions);
+            root["queue"] = JsonSerializer.SerializeToNode(board, FleetStatusTool.SerializerOptions);
+        }
+        else
+        {
+            // Sibling key, never a field inside a half-built `queue` object -- the same shape
+            // WorkflowStatusView.ArrestLedgerUnavailableReason takes beside `arrests`, and for the same
+            // reason: a partial section would render as a board reporting "slots unknown / nothing
+            // queued", which is a worse answer than no board.
+            root[QueueUnavailableReasonKey] = queue.UnavailableReason;
         }
 
         return root.ToJsonString(FleetStatusTool.SerializerOptions);
@@ -338,25 +362,43 @@ public sealed class FleetProjectionWriter : BackgroundService
     /// </summary>
     /// <remarks>
     /// <para>
-    /// <b>Null — the key is omitted entirely — when there is no queue file at all</b>, which is the
-    /// state of every machine that has never run <c>baton queue add</c>. An empty board rendered as if
-    /// it were a real one would tell such an operator their queue is empty when the truth is that they
-    /// have none, and <c>glass.html</c>'s absent-safe render already says nothing for a missing key.
+    /// <b>No board is THREE different facts, and each gets its own word</b> (#1912 fix round). A
+    /// projection with no <c>queue</c> key used to mean any of them, so all three rendered as the same
+    /// blank space with the only evidence in the daemon log:
     /// </para>
+    /// <list type="bullet">
+    /// <item><b>This machine has never used the queue</b> — no queue file, the state of every machine
+    /// that has never run <c>baton queue add</c>. <see cref="QueueUnavailableNoQueueFile"/>, and the
+    /// panel deliberately renders NOTHING for it: an empty board would tell such an operator their
+    /// queue is empty when the truth is that they have none, and a note about a feature they do not
+    /// use is noise on every tick forever.</item>
+    /// <item><b>The section threw</b> — the exception's own message, which the panel renders as a
+    /// visible line. This is the state that was previously indistinguishable from the one above, and
+    /// it is the one an operator has to act on.</item>
+    /// <item><b>Neither key is present at all</b> — nothing the daemon wrote, because this delivery did
+    /// not come from the daemon. <c>pusher.py</c> composes the mailbox payload key by key
+    /// (<c>wrapped_snapshot</c>) and copies no unknown top-level key, so the tailnet plane carries
+    /// neither of the two above. <c>glass.html</c> says so rather than rendering blank.</item>
+    /// </list>
     /// <para>
     /// <b>A failure here costs the section, never the tick.</b> The whole projection is what the glass
     /// runs on; losing every room because one queue file was mid-write would be a strictly worse trade
-    /// than losing this panel for 30 seconds, which the next tick restores.
+    /// than losing this panel for 30 seconds, which the next tick restores. What the split above adds
+    /// is that the loss is now legible on the page instead of only in <c>~/.baton/daemon.log</c>.
+    /// </para>
+    /// <para>
+    /// An <em>empty</em> queue is none of these: it returns a real board. "No queue file" and "an empty
+    /// queue" are different facts too, and the page's own control arm asserts the second still renders.
     /// </para>
     /// </remarks>
-    private async Task<QueueBoardView?> BuildQueueSectionAsync(
+    private async Task<QueueSectionResult> BuildQueueSectionAsync(
         IReadOnlyList<QueueLiveLane> liveLanes, TextWriter diagnostics, CancellationToken cancellationToken)
     {
         try
         {
             if (!File.Exists(BatonPaths.QueueFile))
             {
-                return null;
+                return QueueSectionResult.Unavailable(QueueUnavailableNoQueueFile);
             }
 
             var snapshot = await QueueStore.LoadAsync(BatonPaths.QueueFile, cancellationToken).ConfigureAwait(false);
@@ -364,7 +406,7 @@ public sealed class FleetProjectionWriter : BackgroundService
                 .ConfigureAwait(false)).Queue;
             var lastDecision = await ReadNewestDecisionAsync(cancellationToken).ConfigureAwait(false);
 
-            return QueueBoard.Project(
+            return QueueSectionResult.From(QueueBoard.Project(
                 snapshot.Items,
                 snapshot.Held,
                 settings,
@@ -377,13 +419,28 @@ public sealed class FleetProjectionWriter : BackgroundService
                 DateTime.Now,
                 lastDecision,
                 item => item.SpecFile is { Length: > 0 } spec && File.Exists(spec),
-                ReadVerdictDecision);
+                ReadVerdictDecision));
         }
         catch (Exception ex) when (ex is not OperationCanceledException)
         {
             diagnostics.WriteLine($"FleetProjectionWriter: queue section skipped this tick: {ex.Message}");
-            return null;
+
+            // The message, not a token: the log line above already carries it and the page reader is
+            // the one person who cannot see that log. Mirrors StatusCommand's own
+            // `arrestLedgerUnavailableReason = ex.Message`.
+            return QueueSectionResult.Unavailable(ex.Message);
         }
+    }
+
+    /// <summary>
+    /// The <c>queue</c> section, or the word for why there is none — never both, and never neither.
+    /// See <see cref="BuildQueueSectionAsync"/>'s remarks for the three states this discriminates.
+    /// </summary>
+    private readonly record struct QueueSectionResult(QueueBoardView? Board, string? UnavailableReason)
+    {
+        internal static QueueSectionResult From(QueueBoardView board) => new(board, null);
+
+        internal static QueueSectionResult Unavailable(string reason) => new(null, reason);
     }
 
     /// <summary>

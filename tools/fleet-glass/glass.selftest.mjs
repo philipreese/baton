@@ -37,22 +37,35 @@ if (missing.length) {
   process.exit(1);
 }
 
-// The two page-level helpers the block calls, copied to behave as glass.html's own do. `age` returns
-// the WORD "just now" under a minute and null for an absent instant -- the panel's freshness clauses
-// are built around exactly those two, so a shim that returned "0m" would test a different function.
-const esc = (s) => String(s ?? "").replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
-let NOW = Date.parse("2026-09-07T12:00:00Z");
-function age(iso) {
-  if (!iso) return null;
-  const ms = NOW - Date.parse(iso);
-  if (!isFinite(ms) || ms < 0) return null;
-  const m = Math.floor(ms / 60000);
-  if (m < 1) return "just now";
-  if (m < 60) return m + "m";
-  const h = Math.floor(m / 60);
-  if (h < 48) return h + "h";
-  return Math.floor(h / 24) + "d";
+// The two page-level helpers the block calls, SLICED from glass.html for the same reason the panel
+// itself is (see the header): a hand copy is a second copy, and this one is load-bearing -- the
+// panel's freshness clauses are built on `age` returning the literal word "just now" and null, so a
+// re-typed shim would keep asserting against itself after the page reworded either.
+function sliceOne(pattern, what) {
+  const found = [...html.matchAll(pattern)];
+  if (found.length !== 1) {
+    console.error(`glass.selftest.mjs: FAIL -- expected exactly one ${what} in glass.html, found ${found.length}.`);
+    console.error("  These are sliced, never copied; if the page reshaped one, update the pattern here.");
+    process.exit(1);
+  }
+  return found[0][0];
 }
+
+const escSource = sliceOne(/^const esc = \(s\) => .*;$/gm, "definition of `esc`");
+
+// `age` is the one thing that cannot be taken verbatim: it reads the wall clock, and a test that
+// moved with it would assert nothing. Exactly ONE substitution, and the count is checked first -- a
+// page that grew a second Date.now() must not quietly leave one of them live.
+const ageSourceRaw = sliceOne(/^function age\(iso\)\{[\s\S]*?\n\}$/gm, "definition of `age`");
+const clockReads = (ageSourceRaw.match(/Date\.now\(\)/g) || []).length;
+if (clockReads !== 1) {
+  console.error(`glass.selftest.mjs: FAIL -- glass.html's age() reads Date.now() ${clockReads} time(s); this harness substitutes exactly one.`);
+  process.exit(1);
+}
+const NOW = Date.parse("2026-09-07T12:00:00Z");
+const ageSource = ageSourceRaw.replace("Date.now()", "NOW");
+
+const { esc, age } = new Function("NOW", `${escSource}\n${ageSource}\nreturn { esc, age };`)(NOW);
 
 const panel = new Function("esc", "age", `${source}\nreturn { ${REQUIRED.join(", ")} };`)(esc, age);
 const { queueSlotsLineHtml, queuePendingTableHtml, queuePrTableHtml, queueLanesTableHtml, queueBoardHtml } = panel;
@@ -62,11 +75,28 @@ function check(name, cond) {
   if (!cond) failures.push(name);
 }
 
-// -- absent-safe: the mailbox delivery never carries `queue` at all --
-check("an absent queue section renders NOTHING, not an empty board", queueBoardHtml(undefined) === "");
-check("a null queue section renders nothing", queueBoardHtml(null) === "");
+// -- no board is THREE facts, and each gets its own word (#1912 fix round) --
+// FleetProjectionWriter.BuildQueueSectionAsync's remarks are the register for which state produces
+// which reason; these assert the page tells them apart instead of rendering one blank space.
+check("a machine that has never used the queue renders NOTHING -- a note about a feature it does not use would be noise on every tick",
+      queueBoardHtml(undefined, "no-queue-file") === "");
+check("a section the daemon could not build this tick renders the daemon's OWN reason, not blank space",
+      queueBoardHtml(undefined, "The queue file is not readable as a queue.").includes("The queue file is not readable as a queue."));
+check("... labelled as this tick's failure rather than as an empty queue",
+      queueBoardHtml(undefined, "boom").includes("Conductor rows unavailable this tick"));
+check("the mailbox delivery -- neither key, because pusher.py composes key by key -- says the rows are daemon-page-only",
+      queueBoardHtml(undefined).includes("this delivery does not carry them"));
+check("a null queue section with no reason is the mailbox case too",
+      queueBoardHtml(null).includes("this delivery does not carry them"));
+check("(control) the three absences render three DIFFERENT things -- otherwise the split says nothing",
+      new Set([queueBoardHtml(undefined, "no-queue-file"),
+               queueBoardHtml(undefined, "boom"),
+               queueBoardHtml(undefined)]).size === 3);
+check("a daemon reason carrying markup is escaped -- an exception message is not trusted HTML",
+      !queueBoardHtml(undefined, "<img src=x onerror=1>").includes("<img")
+      && queueBoardHtml(undefined, "<img src=x onerror=1>").includes("&lt;img"));
 check("(control) a present-but-empty queue section DOES render a board -- 'no queue file' and 'an empty queue' are different facts",
-      queueBoardHtml({ slots: { cap: 4, live: 0, floorGb: 2, nightBand: false, lanes: [] }, pending: [], pullRequests: [] }).includes("queueboard"));
+      queueBoardHtml({ slots: { cap: 4, live: 0, floorGb: 2, nightBand: false, lanes: [] }, pending: [], pullRequests: [] }).includes("queueboard-head"));
 
 // -- weighted slots --
 {

@@ -1456,9 +1456,13 @@ function vendorUsageHtml(vendors){
 // #1912 slice 1 -- the conductor's own rows: weighted slots, the dispatch queue in order, PR stages,
 // and A/B twins rendered adjacent. Read-only display of `snap.queue`, absent-safe exactly like
 // `vendors`/`conductor` above, and for one more reason than they are: `pusher.py` composes the
-// mailbox payload key by key, so this section reaches the DAEMON-SERVED delivery only (#1946's
-// tailnet plane). On the mailbox delivery the key is simply not there and the panel renders nothing,
-// which is the same thing it does on a machine that has never used the queue at all.
+// mailbox payload key by key and copies no unknown top-level key, so this section reaches the
+// DAEMON-SERVED delivery only (#1946's tailnet plane).
+//
+// An absent section is THREE facts, not one -- the mailbox delivery, a machine that has never used
+// the queue, and a section the daemon could not build this tick. They used to render as the same
+// blank space with the only evidence in ~/.baton/daemon.log; `snap.queueUnavailableReason` is what
+// tells them apart and `queueBoardHtml` below is where each gets its word.
 //
 // Nothing here derives a scheduling verdict of its own. Every reason word arrives already decided
 // (QueueBoard.Project is the one projection, and it reads the scheduler's own recorded token off the
@@ -1538,8 +1542,23 @@ function queuePrTableHtml(q){
   return `<table><thead><tr><th>pr</th><th>item</th><th>stage</th><th>round</th><th>last verdict</th><th>checks</th></tr></thead>`
     + `<tbody>${rows}</tbody></table>`;
 }
-function queueBoardHtml(q){
-  if(!q || typeof q !== "object") return "";
+function queueBoardHtml(q, unavailableReason){
+  // Three ways there is no board, three different answers (#1912 fix round). FleetProjectionWriter's
+  // BuildQueueSectionAsync remarks are the register for which state produces which; here:
+  //   - "no-queue-file"  -> nothing at all. This machine has never run `baton queue add`, and a note
+  //                         about a feature it does not use would be noise on every tick forever.
+  //   - any other reason -> the daemon's own exception message. This is the state that used to be
+  //                         invisible, and the only one an operator has to act on.
+  //   - no reason at all -> nothing the daemon wrote, because this payload is not the daemon's:
+  //                         pusher.py composes the mailbox body key by key and copies no unknown
+  //                         top-level key, so neither `queue` nor its reason reaches the tailnet plane.
+  if(!q || typeof q !== "object"){
+    if(unavailableReason === "no-queue-file") return "";
+    const note = typeof unavailableReason === "string" && unavailableReason.length
+      ? `Conductor rows unavailable this tick: ${unavailableReason}`
+      : "Conductor rows are served by the daemon page only — this delivery does not carry them.";
+    return `<div class="queueboard"><div class="queueboard-note q-empty">${esc(note)}</div></div>`;
+  }
   // The ledger collapses a repeated verdict, so the newest row can be hours old and still be the
   // standing reason -- the same freshness qualifier a vendor block's `harvestedAt` carries.
   const decided = age(q.lastDecisionAt);
@@ -1555,7 +1574,7 @@ function queueBoardHtml(q){
     + `</div>`;
 }
 // <<< QUEUE-PANEL-END
-function renderQueueBoard(q){ $("queueboard").innerHTML = queueBoardHtml(q); }
+function renderQueueBoard(q, unavailableReason){ $("queueboard").innerHTML = queueBoardHtml(q, unavailableReason); }
 
 // #1656: on-demand paging over the terminal archive (see terminalArchiveExtra's own comment at its
 // declaration). One-shot fetch on click -- `refetchInterval: 0` means this watchTool call does not
@@ -2338,8 +2357,9 @@ function startDaemonFeed(applySnapshot){
         render(snap.rooms, snap.pushed_at, snap.underhood, snap.heartbeat_at, accumulatedTimelines, snap.stale_hidden_count, dismissedRooms, snap.conductor, snap.derived_at);
         // #1391: independent of the board render above -- vendors[] is fleet-wide, not per-room.
         vendorUsageHtml(snap.vendors);
-        // #1912: same footing -- fleet-wide, absent on the mailbox delivery by construction.
-        renderQueueBoard(snap.queue);
+        // #1912: same footing -- fleet-wide, absent on the mailbox delivery by construction. The second
+        // argument is what tells that absence apart from the daemon's own two (queueBoardHtml says how).
+        renderQueueBoard(snap.queue, snap.queueUnavailableReason);
       } else if(snap && snap.rooms === null){
         $("content").innerHTML = "";
         $("dismissnote").innerHTML = "";

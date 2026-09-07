@@ -265,10 +265,12 @@ public sealed class WorkItemAdvancer
             CancellationToken.None);
 
     /// <summary>
-    /// <c>gh pr view &lt;branch&gt; --json number,headRefOid</c>, run in the item's own worktree. Every
-    /// failure — no <c>gh</c>, not authenticated, no PR on the branch — is <c>(null, null)</c>, which the
-    /// lifecycle reads as "no PR": that routes a stalled lane to <see cref="WorkStage.Continue"/> rather
-    /// than to a review of a PR that may not exist.
+    /// <c>gh pr view &lt;branch&gt; --json number,headRefOid,statusCheckRollup</c>, run in the item's own
+    /// worktree. Every failure — no <c>gh</c>, not authenticated, no PR on the branch, output that does
+    /// not parse — is <c>(null, null, null)</c>, which the lifecycle reads as "no PR": that routes a
+    /// stalled lane to <see cref="WorkStage.Continue"/> rather than to a review of a PR that may not
+    /// exist. The third field goes the same way rather than to <see cref="PullRequestChecks.None"/> —
+    /// "the call failed" is not "no checks are configured".
     /// </summary>
     /// <remarks>
     /// <b>Exactly the three fields something reads.</b> <c>mergeStateStatus</c> was requested and never

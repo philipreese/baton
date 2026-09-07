@@ -73,13 +73,10 @@ public static class QueueBoard
             NightBand: settings.IsNightBand(localNow),
             Lanes: liveLanes);
 
-        // The candidate is picked the way QueueScheduler.Decide picks it and no other way -- same
-        // predicate, so the row the panel marks `next` is the row the scheduler would launch. The
-        // `ready` exclusion is part of that predicate, which is why a ready item is a PR row below and
-        // never a pending one.
-        var candidate = items.FirstOrDefault(i =>
-            i.State == QueueItemState.Queued && !i.External
-            && !(i.Stage is { } s && WorkStages.IsTerminal(s)));
+        // The scheduler's OWN pick, called rather than re-spelled -- QueueScheduler.Candidate's remarks
+        // are why it is exposed at all. The row the panel marks `next` is therefore the row the
+        // scheduler would launch by construction, not by two copies of a predicate agreeing today.
+        var candidate = QueueScheduler.Candidate(items);
 
         var pending = new List<QueuePendingView>();
         foreach (var item in OrderTwinsAdjacent(items))
@@ -88,11 +85,15 @@ public static class QueueBoard
             // `Halted` together with `QueueItemState.Failed` (WorkItemAdvancer's own fail arm), so a
             // filter on Queued alone would put every item the queue has given up on nowhere at all
             // unless it happened to have a PR open -- and an implement lane halted before it opened one
-            // is exactly the item a person has to act on. It is listed here rather than launched: the
-            // candidate predicate below is untouched, so nothing about this admits it to a dispatch.
+            // is exactly the item a person has to act on. It is listed here rather than launched: what
+            // admits an item to a dispatch is QueueScheduler.Candidate above, which this filter neither
+            // is nor widens.
+            //
+            // The `ready` exclusion is QueueScheduler.IsReady, called rather than re-spelled -- a ready
+            // item is a PR row below and never a pending one, and that is the SAME rule that keeps it
+            // off the candidate row, not a second rule resembling it.
             var stuck = item.Halted;
-            if ((item.State != QueueItemState.Queued && !stuck)
-                || (item.Stage is { } s && WorkStages.IsTerminal(s)))
+            if ((item.State != QueueItemState.Queued && !stuck) || QueueScheduler.IsReady(item))
             {
                 continue;
             }
@@ -113,10 +114,16 @@ public static class QueueBoard
                 TwinIssue: null));
         }
 
+        // Issue membership AND a stage, both -- the stage read is not redundant with TwinIssues. That
+        // set is computed over stage-bearing items only (its own summary says why), so a THIRD item on
+        // the same issue with no stage would otherwise pick up a pair highlight it is not half of:
+        // OrderTwinsAdjacent gates on a stage too and refuses to pull it alongside the arms, leaving a
+        // row marked as a pair sitting away from the pair. Same gate the PR table already applies by
+        // requiring a stage to build a row at all.
         var twinIssues = TwinIssues(items);
         for (var i = 0; i < pending.Count; i++)
         {
-            if (pending[i].Issue is { } issue && twinIssues.Contains(issue))
+            if (pending[i].Stage is not null && pending[i].Issue is { } issue && twinIssues.Contains(issue))
             {
                 pending[i] = pending[i] with { TwinIssue = issue };
             }

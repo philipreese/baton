@@ -243,6 +243,99 @@ public sealed class QueueBoardTests
         Assert.All(staged.Pending, p => Assert.Equal(1530, p.TwinIssue));
     }
 
+    /// <summary>
+    /// #1912 fix round: the mixed shape the all-stage-less case above does not reach. A one-shot
+    /// <c>baton dispatch --issue 1530</c> alongside a real A/B on 1530 is an ordinary thing to have, and
+    /// marking it as half of the pair would render a "twin" highlight on a row
+    /// <c>OrderTwinsAdjacent</c> refuses to pull next to the pair — a pairing claim about a lane that is
+    /// not part of the experiment, sitting away from it.
+    /// </summary>
+    [Fact]
+    public void A_stage_less_item_sharing_an_issue_with_a_real_pair_is_not_marked_as_one_of_them()
+    {
+        var board = Project(
+        [
+            Item("1530-opus", stage: WorkStage.Implement, issue: 1530),
+            Item("1530-sonnet", stage: WorkStage.Implement, issue: 1530),
+            Item("one-shot", issue: 1530),
+        ]);
+
+        var oneShot = board.Pending.Single(p => p.Tag == "one-shot");
+        Assert.Null(oneShot.TwinIssue);
+
+        // Control, opposite polarity on the same fixture: the two real arms ARE marked, so the null
+        // above is the stage gate and not twin detection failing outright on this shape.
+        Assert.Equal(1530, board.Pending.Single(p => p.Tag == "1530-opus").TwinIssue);
+        Assert.Equal(1530, board.Pending.Single(p => p.Tag == "1530-sonnet").TwinIssue);
+
+        // The mark and the ordering have to agree: an unmarked row must also be the one left where it
+        // was, since a marked-but-not-adjacent row is exactly the defect this covers.
+        Assert.Equal(["1530-opus", "1530-sonnet", "one-shot"], board.Pending.Select(p => p.Tag));
+    }
+
+    /// <summary>
+    /// #1912 fix round: <c>isNext</c> is <see cref="QueueScheduler"/>'s answer, not a second one that
+    /// resembles it. The board used to re-spell the candidate predicate, so this runs both over the same
+    /// fixtures and requires the same item — including the shapes that separate the predicate's terms
+    /// (a <c>ready</c> head, an external head, a non-queued head).
+    /// </summary>
+    [Theory]
+    [InlineData("plain")]
+    [InlineData("ready-head")]
+    [InlineData("external-head")]
+    [InlineData("failed-head")]
+    [InlineData("nothing-eligible")]
+    public void The_row_marked_next_is_the_item_the_scheduler_itself_would_pick(string shape)
+    {
+        QueueItem[] items = shape switch
+        {
+            "plain" =>
+            [
+                Item("a", stage: WorkStage.Implement, issue: 1),
+                Item("b", stage: WorkStage.Implement, issue: 2),
+            ],
+            "ready-head" =>
+            [
+                Item("ready", stage: WorkStage.Ready, issue: 1, pr: 2028),
+                Item("b", stage: WorkStage.Implement, issue: 2),
+            ],
+            "external-head" =>
+            [
+                Item("ext", stage: WorkStage.Implement, issue: 1, external: true),
+                Item("b", stage: WorkStage.Implement, issue: 2),
+            ],
+            "failed-head" =>
+            [
+                Item("halted", stage: WorkStage.Implement, issue: 1, state: QueueItemState.Failed, halted: true),
+                Item("b", stage: WorkStage.Implement, issue: 2),
+            ],
+            _ =>
+            [
+                Item("ready", stage: WorkStage.Ready, issue: 1, pr: 2028),
+                Item("ext", stage: WorkStage.Implement, issue: 2, external: true),
+            ],
+        };
+
+        var decision = QueueScheduler.Decide(
+            DateTimeOffset.UtcNow, items, liveWeight: 0, freeGb: 64, new QueueSettings(),
+            lastLaunchAt: null, held: false);
+
+        var marked = Project(items).Pending.SingleOrDefault(p => p.IsNext);
+
+        Assert.Equal(decision.Item?.Tag, marked?.Tag);
+
+        // Control: the fixture set actually exercises both outcomes, so the equality above is not
+        // trivially satisfied by every shape having (or lacking) a candidate.
+        if (shape == "nothing-eligible")
+        {
+            Assert.Null(decision.Item);
+        }
+        else
+        {
+            Assert.NotNull(decision.Item);
+        }
+    }
+
     [Fact]
     public void A_pr_row_exists_per_work_item_with_a_pull_request_and_carries_its_stage_verdict_and_checks()
     {
@@ -332,9 +425,8 @@ public sealed class QueueBoardTests
     [Fact]
     public void A_rerun_supersedes_the_earlier_run_of_the_SAME_check_rather_than_being_added_to_it()
     {
-        // Measured against this repository's PR #2035 on 2026-09-07: the rollup carried both a 10:17
-        // FAILURE and a 13:42 SUCCESS for `diff-shape`. Reducing over every element would report a
-        // green PR as failing forever.
+        // The fixture is the rollup PullRequestChecks' own remarks record measuring, transcribed to
+        // its two load-bearing elements; that type is where the measurement and what it costs live.
         const string json = """
         [
           {"name":"diff-shape","completedAt":"2026-09-07T10:17:29Z","conclusion":"FAILURE"},

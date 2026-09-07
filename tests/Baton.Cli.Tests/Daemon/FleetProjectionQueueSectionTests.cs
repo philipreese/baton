@@ -10,7 +10,7 @@ namespace Baton.Cli.Tests.Daemon;
 /// #1912 slice 1: <see cref="FleetProjectionWriter"/> carries the conductor's rows under the
 /// projection's <c>queue</c> key. What <see cref="Baton.Tests"/>' <c>QueueBoardTests</c> covers is the
 /// projection's own arms; this covers the I/O around it — that a fixture queue on disk reaches the
-/// file, and that a machine with no queue at all gets no key rather than an empty board.
+/// file, and that each way there is no board gets its own answer rather than one blank space.
 /// </summary>
 /// <remarks>
 /// Same per-test isolated <c>BATON_HOME</c> pattern as <c>FleetProjectionWriterTests</c>, which is what
@@ -113,17 +113,63 @@ public sealed class FleetProjectionQueueSectionTests : IDisposable
         Assert.True(slots.TryGetProperty("floorGb", out _));
     }
 
+    /// <summary>
+    /// #1912 fix round, state 1 of three: no queue file. The <c>queue</c> key stays absent for the
+    /// reason <c>FleetProjectionWriter.BuildQueueSectionAsync</c>'s remarks give; what is new is that
+    /// the reason key now says WHICH absence this is.
+    /// </summary>
     [Fact]
-    public async Task A_machine_that_has_never_used_the_queue_gets_no_queue_key_at_all()
+    public async Task A_machine_that_has_never_used_the_queue_gets_no_queue_key_and_says_so()
     {
         Assert.False(File.Exists(BatonPaths.QueueFile));
 
-        Assert.False((await BuildAsync()).TryGetProperty("queue", out _));
+        var root = await BuildAsync();
+        Assert.False(root.TryGetProperty("queue", out _));
+        Assert.Equal(
+            FleetProjectionWriter.QueueUnavailableNoQueueFile,
+            root.GetProperty(FleetProjectionWriter.QueueUnavailableReasonKey).GetString());
 
-        // Control, opposite polarity: once a queue file exists the key appears -- so the absence above
-        // is the missing-file arm and not the section never being written.
+        // Control, opposite polarity: once a queue file exists the key appears and the reason goes
+        // away -- so the absence above is the missing-file arm and not the section never being written.
         await WriteQueueAsync(Item("a", WorkStage.Implement, 1));
-        Assert.True((await BuildAsync()).TryGetProperty("queue", out _));
+        var withQueue = await BuildAsync();
+        Assert.True(withQueue.TryGetProperty("queue", out _));
+        Assert.False(withQueue.TryGetProperty(FleetProjectionWriter.QueueUnavailableReasonKey, out _));
+    }
+
+    /// <summary>
+    /// #1912 fix round, state 2 of three: the section threw. This is the arm that used to be
+    /// indistinguishable from state 1 above, and the one an operator has to act on — what that cost is
+    /// <c>FleetProjectionWriter.BuildQueueSectionAsync</c>'s remarks to say.
+    /// <para>
+    /// State 3 — the mailbox delivery, where <c>pusher.py</c> composes the payload key by key and
+    /// carries NEITHER key — is not reachable from this side and is covered on the page:
+    /// <c>tools/fleet-glass/glass.selftest.mjs</c>, "the mailbox delivery ... says the rows are
+    /// daemon-page-only".
+    /// </para>
+    /// </summary>
+    [Fact]
+    public async Task A_queue_section_that_throws_reports_the_reason_rather_than_looking_like_no_queue()
+    {
+        Directory.CreateDirectory(Path.GetDirectoryName(BatonPaths.QueueFile)!);
+        await File.WriteAllTextAsync(
+            BatonPaths.QueueFile, "{ this is not a queue", TestContext.Current.CancellationToken);
+
+        var diagnostics = new StringWriter();
+        var json = await new FleetProjectionWriter(() => 5.0)
+            .BuildProjectionJsonAsync(CancellationToken.None, diagnostics);
+        var root = JsonDocument.Parse(json).RootElement;
+
+        Assert.False(root.TryGetProperty("queue", out _));
+
+        var reason = root.GetProperty(FleetProjectionWriter.QueueUnavailableReasonKey).GetString();
+        Assert.NotNull(reason);
+        Assert.NotEqual(FleetProjectionWriter.QueueUnavailableNoQueueFile, reason);
+
+        // The tick survives the section, which is the whole point of the catch this splits -- the
+        // writer's remarks are where that trade is argued.
+        Assert.True(root.TryGetProperty("rooms", out _));
+        Assert.Contains("queue section skipped this tick", diagnostics.ToString());
     }
 
     [Fact]
