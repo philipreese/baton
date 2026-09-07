@@ -167,13 +167,13 @@ public sealed class QueueSchedulerService : BackgroundService
         }
 
         var item = decision.Item!;
-        var tier = QueueTierTable.Resolve(item, settings);
+        var tier = QueueTierTable.Resolve(item, settings, WorkerRoleCatalog.QueueTierFor);
 
         // Fail closed, per spec/baton.md §13's tier-resolution ruling. Reachable only through a
         // hand-edited queue file, since QueueOptionsParser already refuses the scope class -- which is
         // why the daemon checks anyway rather than trusting the verb that wrote the item.
         if (item.ScopeClass is { Length: > 0 } scopeClass && tier.TierKey is not null
-            && QueueTierTable.LookupTier(tier.TierKey, settings) is null)
+            && QueueTierTable.LookupTier(tier.TierKey, settings, WorkerRoleCatalog.QueueTierFor) is null)
         {
             await FailAsync(
                 item, $"no tier is configured for '{tier.TierKey}' (scope class '{scopeClass}', role '{item.Role}')",

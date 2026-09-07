@@ -354,7 +354,17 @@ def is_probe_input(line: str) -> bool:
 
 
 def step9_pinned_models_exist():
-    """Every `agy` model name pinned in the worker-role catalog or a tool is one `agy models` lists.
+    """Every pinned model name is one its OWN vendor's catalogue carries.
+
+    Two joins, one per vendor with a catalogue to join against:
+      * `agy` -- every pinned name is one `agy models` lists (the original arm; everything below
+        about population and scope describes it).
+      * `codex` -- every `WorkerTiers.json` tier on the codex adapter names a model AND an effort the
+        recorded `model/list` answer at `src/Baton.Vendors/codex-model-list-2026-09-04.jsonl` carries
+        (#1863, the codex arm below). Added when the first codex tier pin shipped: until then the
+        count of tier pins with no catalogue join was zero, and it went to one. `CodexWorkerAdapter`
+        already refuses an unrecorded model, but only at DISPATCH -- after the lane has been queued
+        and the operator is waiting -- so the pin's validity rested on a human read of the recording.
 
     Population, precisely: the shared tier pins in `src/Baton.Vendors/WorkerTiers.json` (#888, the
     canonical source the engine reads -- `tools/baton-agy-loop/dispatch.py` read the same file until
@@ -391,9 +401,13 @@ def step9_pinned_models_exist():
     tools/ approximately on every PR. Neither subsumes the other.
 
     SCOPE, stated because two limits are narrower than the title
-      * **agy only.** The `claude` pins (`opus`, `haiku`) are CLI aliases, and `claude` has no
-        catalogue subcommand at all -- `claude models` is taken as a PROMPT and answered, which
-        spends usage (preflight's header documents this). So nothing here validates them.
+      * **agy and codex only, and only codex's TIER pins.** The `claude` pins (`opus`, `haiku`) are
+        CLI aliases, and `claude` has no catalogue subcommand at all -- `claude models` is taken as a
+        PROMPT and answered, which spends usage (preflight's header documents this). So nothing here
+        validates them. The codex arm reads `WorkerTiers.json` only: the `tools/` textual walk below
+        is an agy-shaped join (`accepted` is `agy models`' answer), so a `gpt-` name found there is
+        checked against agy's list, which serves OpenAI models too -- widening the codex arm to that
+        walk would need a second pass and is not what shipped.
       * **The tools/ scan is TEXTUAL**, and declared as a limitation rather than presented as
         equivalent to reading the code. It finds names in a pin POSITION -- next to `--model`, or as
         a `"model":` value -- which is what keeps prose about model names out of the population. A
@@ -403,7 +417,8 @@ def step9_pinned_models_exist():
         import this step used to make, that direct read survived dispatch.py's retirement (#887's
         front door was always the intended replacement).
     """
-    rule("STEP 9 -- every pinned agy model name is one `agy models` lists")
+    rule("STEP 9 -- every pinned model name is one its own vendor's catalogue carries"
+         " (agy: `agy models`; codex tiers: the recorded model/list)")
     accepted, why = register_models()
     if accepted is None:
         print(f"    !! {why}")
@@ -502,7 +517,87 @@ def step9_pinned_models_exist():
         ok &= good
         print(f" {'OK' if good else '!!'} {where:<46} {model}"
               f"{'' if good else '  -- not listed by `agy models`'}")
-    return bool(ok)
+    return bool(ok) & _codex_tier_pins_are_recorded(tier_map)
+
+
+# The recorded `codex model/list` answer -- the same file `CodexWorkerAdapter.ValidateModel` refuses
+# against, so the audit and the adapter join a codex pin to ONE register rather than two readings of
+# it. `docs/vendor-codex-probe-2026-09-04.md` is the record of how it was captured, and says the list
+# should be re-probed rather than trusted forever; a codex release that retires a model makes this
+# file stale, and re-running that probe is what corrects it.
+CODEX_RECORDING = "src/Baton.Vendors/codex-model-list-2026-09-04.jsonl"
+
+
+def _codex_tier_pins_are_recorded(tier_map):
+    """#1863: every codex tier pin names a model AND an effort the recorded catalogue carries.
+
+    Joined the way the agy pins above are joined to `agy models`, with one addition the agy arm has
+    no equivalent for: codex's recording enumerates each model's `supportedReasoningEfforts`, so the
+    EFFORT is checkable too, and a tier pinning `xhigh` on a model that stops offering it is the same
+    class of stale pin as a retired model name.
+
+    Every failure here is a HARD failure, including "no codex tier pins at all". That mirrors the agy
+    arm's zero-population refusal for its reason: a population that silently shrinks is how a check
+    keeps printing OK about less and less. If a later ruling moves every tier off codex, deleting
+    this arm is a deliberate edit rather than a check that quietly stopped looking.
+    """
+    path = os.path.join(ROOT, *CODEX_RECORDING.split("/"))
+    if not os.path.exists(path):
+        print(f"    !! {CODEX_RECORDING} not found -- the codex tier pins cannot be checked, so this"
+              " step cannot make its claim")
+        return False
+
+    # JSONL: one JSON value per line, the `model/list` answer being the object carrying
+    # `result.data`. Located by SHAPE rather than by line number, so a re-probe that emits the
+    # session/status lines in a different order does not silently stop finding the catalogue.
+    catalogue = {}
+    with open(path, encoding="utf-8") as f:
+        for text in f:
+            text = text.strip()
+            if not text:
+                continue
+            try:
+                value = json.loads(text)
+            except json.JSONDecodeError:
+                continue
+            data = value.get("result", {}).get("data") if isinstance(value, dict) else None
+            if not isinstance(data, list):
+                continue
+            for entry in data:
+                if isinstance(entry, dict) and entry.get("id"):
+                    catalogue[entry["id"]] = {
+                        e.get("reasoningEffort")
+                        for e in entry.get("supportedReasoningEfforts") or []
+                        if isinstance(e, dict)
+                    }
+
+    if not catalogue:
+        print(f"    !! {CODEX_RECORDING} carries no `result.data` model list -- the recording has been"
+              " emptied or reshaped, so this arm is no longer checking anything")
+        return False
+    line("codex models enumerated by the recording", len(catalogue))
+
+    pins = [(name, tier.get("model"), tier.get("effort"))
+            for name, tier in tier_map.items()
+            if tier.get("adapter") == "codex" and tier.get("model")]
+    if not pins:
+        print("    !! WorkerTiers.json defines no codex tier with a model pin -- if that is deliberate,"
+              " remove this arm rather than letting it silently check nothing")
+        return False
+
+    ok = True
+    for name, model, effort in pins:
+        efforts = catalogue.get(model)
+        if efforts is None:
+            why = "  -- not in the recorded codex model/list"
+        elif effort and effort not in efforts:
+            why = f"  -- effort '{effort}' is not one {model} records ({', '.join(sorted(efforts))})"
+        else:
+            why = ""
+        ok &= not why
+        where = f"WorkerTiers.json[{name!r}]"
+        print(f" {'OK' if not why else '!!'} {where:<46} {model} / {effort or '(vendor default)'}{why}")
+    return ok
 
 
 # Multi-word phrases only, and matched with word boundaries -- a first version used bare "open" and
@@ -1058,11 +1153,13 @@ def main() -> int:
         "  check; this list previously mislabelled it as the build plan.)",
         "That the vendor-verify checks still pass -- run `pixi run vendor-verify` for that.",
         "Whether a source nobody thought of exists. Enumeration cannot find its own blind spot.",
-        "Step 9 checks the AGY pins only. `opus`/`haiku` are claude CLI aliases with no",
-        "  vendor catalogue to join against, so nothing HERE validates them --",
-        "  smoke-preflight does check claude alias/shape, but only for tests/.",
+        "Step 9 checks the AGY pins and codex's TIER pins. `opus`/`haiku` are claude CLI",
+        "  aliases with no vendor catalogue to join against, so nothing HERE validates them --",
+        "  smoke-preflight does check claude alias/shape, but only for tests/. The codex arm",
+        "  reads WorkerTiers.json only, not the tools/ walk, whose join is agy's list.",
         "Step 9 proves a name is one the CLI LISTS, never that the CLI still lists it --",
-        "  the register is a recording, and re-running `agy models` is what refreshes it.",
+        "  both registers are recordings, and re-running `agy models` or the codex probe",
+        "  (docs/vendor-codex-probe-2026-09-04.md) is what refreshes them.",
         "Step 4 only catches a citation near a staleness WORD -- a doc that calls a closed issue",
         "  \"resolved\" while still describing the old, wrong behaviour reads clean to this check.",
         "Step 11 checks the three version headers AGREE, never that any is the version",

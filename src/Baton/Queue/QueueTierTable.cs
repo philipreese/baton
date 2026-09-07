@@ -30,11 +30,24 @@ public static class QueueTierTable
     /// tier over two scopes; it is written out rather than fallen back to, so a later divergence is a
     /// one-line edit instead of a change to the resolution rule.
     /// </summary>
+    /// <remarks>
+    /// <b>Why the rows are two different shapes (#1863).</b> <c>tooling</c> names the
+    /// <c>WorkerTiers.json</c> tier <c>standard</c> rather than a vendor triple, because both describe
+    /// the same thing — the tooling-shaped implement work — and stating it twice is what let them
+    /// disagree: <c>standard</c> moved to codex/<c>gpt-6-astra</c>/medium on 2026-09-06 while this row
+    /// and spec/baton.md §13 still read claude/opus/medium, so an item with <c>--scope tooling</c>
+    /// launched on the pin the ruling had retired. Naming the tier makes the disagreement
+    /// unrepresentable rather than merely corrected.
+    /// <para>
+    /// The other five rows keep their triples, and NOT out of caution. spec/baton.md §13 states why,
+    /// per row; it is the register for that ruling and this comment does not restate it.
+    /// </para>
+    /// </remarks>
     public static readonly IReadOnlyDictionary<string, QueueTierSettings> ShippedDefaults =
         new Dictionary<string, QueueTierSettings>(StringComparer.OrdinalIgnoreCase)
         {
             ["engine"] = new() { Adapter = "claude", Model = "opus", Effort = "high" },
-            ["tooling"] = new() { Adapter = "claude", Model = "opus", Effort = "medium" },
+            ["tooling"] = new() { Tier = "standard" },
             ["docs"] = new() { Adapter = "claude", Model = "opus", Effort = "medium" },
             ["review-engine"] = new() { Adapter = "claude", Model = "opus", Effort = "high" },
             ["review-tooling"] = new() { Adapter = "codex", Model = "gpt-5.6-sol", Effort = "high" },
@@ -91,17 +104,29 @@ public static class QueueTierTable
     /// value, then the tier entry's, then — model only — the adapter default. A resolution of all
     /// nulls is a legitimate result, not a failure; spec/baton.md §13 says what a caller does with it.
     /// </remarks>
-    public static QueueTierResolution Resolve(QueueItem item, QueueSettings settings)
+    /// <param name="item">The queued item being resolved.</param>
+    /// <param name="settings">The queue settings whose table overlays <see cref="ShippedDefaults"/>.</param>
+    /// <param name="namedTiers">
+    /// Resolves a <c>WorkerTiers.json</c> tier name to its three axes, for a row that names a tier
+    /// instead of a triple. Required rather than defaulted: this project (<c>Baton</c>) does not
+    /// reference <c>Baton.Vendors</c>, where that register is read, so the catalog arrives as a
+    /// delegate — and a defaulted null is exactly how the two production call sites would drift into
+    /// resolving the same item differently. <c>Baton.Vendors.WorkerRoleCatalog.QueueTierFor</c> is the
+    /// one production implementation.
+    /// </param>
+    public static QueueTierResolution Resolve(
+        QueueItem item, QueueSettings settings, Func<string, QueueTierSettings?> namedTiers)
     {
         ArgumentNullException.ThrowIfNull(item);
         ArgumentNullException.ThrowIfNull(settings);
+        ArgumentNullException.ThrowIfNull(namedTiers);
 
         string? key = null;
         QueueTierSettings? tier = null;
         if (item.ScopeClass is { Length: > 0 } scopeClass)
         {
             key = KeyFor(item.Role, scopeClass);
-            tier = LookupTier(key, settings);
+            tier = LookupTier(key, settings, namedTiers);
         }
 
         var adapter = item.Adapter ?? tier?.Adapter;
@@ -129,13 +154,23 @@ public static class QueueTierTable
 
     /// <summary>
     /// The tier entry for <paramref name="key"/> after the operator's table is overlaid on
-    /// <see cref="ShippedDefaults"/>, or null when neither has it. Null is what makes an unknown scope
-    /// class fail closed at the caller rather than resolving to some other tier's model.
+    /// <see cref="ShippedDefaults"/> and any named tier is flattened into it, or null when neither
+    /// table has the key. Null is what makes an unknown scope class fail closed at the caller rather
+    /// than resolving to some other tier's model.
     /// </summary>
-    public static QueueTierSettings? LookupTier(string key, QueueSettings settings)
+    /// <remarks>
+    /// A row naming a tier <paramref name="namedTiers"/> cannot resolve also returns null, and for the
+    /// same reason: returning the unflattened row would report the key as "configured" to
+    /// <c>QueueSchedulerService</c>'s fail-closed check, which would then let the item through to
+    /// resolve to all nulls and launch on the ROLE's own tier — the silent-wrong-model failure this
+    /// table exists to prevent, recorded with <see cref="QueueTierResolution.IsOverride"/> false.
+    /// </remarks>
+    public static QueueTierSettings? LookupTier(
+        string key, QueueSettings settings, Func<string, QueueTierSettings?> namedTiers)
     {
         ArgumentException.ThrowIfNullOrEmpty(key);
         ArgumentNullException.ThrowIfNull(settings);
+        ArgumentNullException.ThrowIfNull(namedTiers);
 
         if (settings.Tiers is { } configured)
         {
@@ -145,12 +180,39 @@ public static class QueueTierTable
             {
                 if (string.Equals(configuredKey, key, StringComparison.OrdinalIgnoreCase))
                 {
-                    return value;
+                    return Flatten(value, namedTiers);
                 }
             }
         }
 
-        return ShippedDefaults.TryGetValue(key, out var shipped) ? shipped : null;
+        return ShippedDefaults.TryGetValue(key, out var shipped) ? Flatten(shipped, namedTiers) : null;
+    }
+
+    /// <summary>
+    /// <paramref name="entry"/> with its named tier's axes filled in, or null when it names a tier
+    /// <paramref name="namedTiers"/> does not carry. An axis the entry states itself wins over the
+    /// named tier's, so a row may follow a tier and still depart from it on one axis — the same
+    /// per-axis precedence <see cref="Resolve"/> applies between the item and its tier.
+    /// </summary>
+    private static QueueTierSettings? Flatten(
+        QueueTierSettings entry, Func<string, QueueTierSettings?> namedTiers)
+    {
+        if (entry.Tier is not { Length: > 0 } tierName)
+        {
+            return entry;
+        }
+
+        if (namedTiers(tierName) is not { } named)
+        {
+            return null;
+        }
+
+        return entry with
+        {
+            Adapter = entry.Adapter ?? named.Adapter,
+            Model = entry.Model ?? named.Model,
+            Effort = entry.Effort ?? named.Effort,
+        };
     }
 
     private static string? LookupAdapterDefaultModel(string adapter, QueueSettings settings)

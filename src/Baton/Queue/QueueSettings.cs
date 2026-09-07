@@ -138,6 +138,15 @@ public sealed record QueueSettings
 /// own tier effort in force.</summary>
 public sealed record QueueTierSettings
 {
+    /// <summary>
+    /// The <c>WorkerTiers.json</c> tier this entry FOLLOWS, instead of spelling a vendor triple of its
+    /// own — the shipped <c>tooling</c> row's shape (#1863). An entry that names one inherits that
+    /// tier's three axes for every axis it leaves null, so the tier register stays the single home for
+    /// "which vendor does this run on" and the two cannot drift apart. Null means this entry names its
+    /// own triple, which is every other shipped row.
+    /// </summary>
+    public string? Tier { get; init; }
+
     public string? Adapter { get; init; }
     public string? Model { get; init; }
     public string? Effort { get; init; }

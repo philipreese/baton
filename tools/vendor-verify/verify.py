@@ -87,7 +87,11 @@ CHECKS: dict[str, dict] = {}
 # agy encodes effort in the model name (`-low` suffix), so it takes no separate --effort.
 CHEAP = {
     "claude": ["--model", "haiku", "--effort", "low"],
-    "agy": ["--model", "gemini-3.6-flash-low"],
+    # #1863: the 3.6 Flash family left every pin position on 2026-09-06. This one tracks the
+    # CHEAPEST catalogued variant (`-low`), NOT `WorkerTiers.json`'s `cheap` tier
+    # (`gemini-3.8-flash-medium`, the lowest variant the deepswe snapshot actually measures) --
+    # the two answer different questions and are meant to differ.
+    "agy": ["--model", "gemini-3.8-flash-low"],
 }
 
 # Checks that must NOT be downgraded, because what they observe depends on the model making a real
