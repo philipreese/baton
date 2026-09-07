@@ -77,7 +77,10 @@ public sealed class BatonTask : IDisposable
     /// Makes the timeout re-readable while the run is in flight: <paramref name="budget"/> is polled
     /// periodically and its return value is the run's total wall-clock budget, measured from the same
     /// start as <see cref="WithTimeout"/>'s. A budget shorter than the configured timeout is ignored —
-    /// this can only ever extend a run, never cut one short — and a probe that throws credits nothing.
+    /// this can only ever extend a run, never cut one short. Nor can a LATER poll undo an earlier
+    /// one: the monitor keeps the longest budget it has been given, so a probe that throws, or that
+    /// stops reporting the extension it reported a moment ago, grants nothing NEW rather than
+    /// retracting what a run is already living on.
     /// Must be called before the task is run, and only alongside <see cref="WithTimeout"/>: with no
     /// timeout configured there is no deadline to extend and this is inert.
     /// </summary>
