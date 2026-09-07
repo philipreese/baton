@@ -129,14 +129,13 @@ public sealed class CodexUsageParserTests
     }
 
     /// <summary>
-    /// #2020: the two reads share per-turn semantics and are keyed on DIFFERENT lines — incremental on
-    /// the per-round-trip <c>turn.usage</c>, final on the terminal <c>turn.completed</c>. Both
-    /// polarities are asserted rather than only the accepted line, because what the rejected line
-    /// would cost is invisible from the accepted one:
-    /// <see cref="CodexUsageParser.TryParseIncrementalUsage"/> states it.
+    /// #2020: the two reads share per-turn semantics; incremental spans both line types while final
+    /// stays on the terminal one. Asserting that the per-round-trip line is NOT a final-usage line is
+    /// the half that discriminates — it is what stops a mid-turn line being read as an execution's
+    /// terminal report.
     /// </summary>
     [Fact]
-    public void Incremental_and_final_parsing_share_per_turn_semantics_on_their_own_line_types()
+    public void Incremental_spans_both_line_types_while_final_usage_stays_on_the_terminal_one()
     {
         var parser = new CodexUsageParser();
         const string usage = """
@@ -147,13 +146,40 @@ public sealed class CodexUsageParserTests
             """;
 
         Assert.True(parser.TryParseIncrementalUsage(usage, out var incremental));
+        Assert.True(parser.TryParseIncrementalUsage(completed, out var alsoIncremental));
         Assert.True(parser.TryParseFinalUsage(completed, out var final));
         Assert.Equal(final, incremental);
+        Assert.Equal(final, alsoIncremental);
 
-        Assert.False(parser.TryParseIncrementalUsage(completed, out var notIncremental));
-        Assert.Null(notIncremental);
         Assert.False(parser.TryParseFinalUsage(usage, out var notFinal));
         Assert.Null(notFinal);
+    }
+
+    /// <summary>
+    /// #2020: the terminal line restates the last round-trip, so a Σ over a CURRENT stream must count
+    /// it once. The mechanism is <see cref="CodexUsageParser.RoundTripField"/> feeding
+    /// <see cref="WorkerUsage.MessageId"/>, which
+    /// <see cref="Baton.Mutation.TokenBudgetMonitor"/> already deduplicates on. The last assertion is
+    /// the one that keeps the mechanism honest — why a pre-emitter capture must still yield an
+    /// untagged reading is on <see cref="CodexUsageParser.TryParseIncrementalUsage"/>, and what it
+    /// costs a real room if it does not is
+    /// <c>Baton.Vendors.Tests.CodexBrokerRoomUsageTests</c>'s own control arm.
+    /// </summary>
+    [Fact]
+    public void The_round_trip_index_is_carried_only_when_the_stream_reports_one()
+    {
+        var parser = new CodexUsageParser();
+
+        Assert.True(parser.TryParseIncrementalUsage(
+            """{"type":"turn.usage","usage":{"output_tokens":9,"round_trip":3}}""", out var tagged));
+        Assert.Equal("round-trip-3", tagged!.MessageId);
+        Assert.True(parser.TryParseIncrementalUsage(
+            """{"type":"turn.completed","usage":{"output_tokens":9,"round_trip":3}}""", out var restated));
+        Assert.Equal(tagged.MessageId, restated!.MessageId);
+
+        Assert.True(parser.TryParseIncrementalUsage(
+            """{"type":"turn.completed","usage":{"output_tokens":9}}""", out var legacy));
+        Assert.Null(legacy!.MessageId);
     }
 
     /// <summary>

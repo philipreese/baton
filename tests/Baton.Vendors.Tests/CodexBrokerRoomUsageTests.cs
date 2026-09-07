@@ -63,6 +63,13 @@ public sealed class CodexBrokerRoomUsageTests
             Assert.Equal(38_000 + 88_000 + 126_720, view.CacheReadTokens);
             Assert.Equal(500 + 700 + 900, view.CacheCreationTokens);
             Assert.Equal(64 + 128 + 256, view.ThinkingTokens);
+
+            // The no-double-count check, over the real TokenBudgetMonitor replayed on these same
+            // lines: the terminal turn.completed restates round-trip 3, and if its output were
+            // accumulated a second time the live Σ would exceed the terminal Σ by 689.
+            Assert.Equal(5_086 + 1_439 + 2_100, view.BilledTokens);
+            Assert.Equal(view.BilledTokens, view.LiveBilledTokens);
+            Assert.Equal(0, view.BilledUnderReadTokens);
         }
         finally
         {
@@ -76,6 +83,17 @@ public sealed class CodexBrokerRoomUsageTests
     /// and nothing else) still reports that line's figures rather than regressing to absent. Without
     /// it, a fold that simply ignored the terminal line would pass the test above unnoticed while
     /// blanking every historical codex room.
+    /// <para>
+    /// <b><see cref="ExecutionUsageView.LiveBilledTokens"/> is the assertion this arm turns on</b>, and
+    /// it is a different reader from the four settle-time figures beneath it: those come from
+    /// <see cref="CodexUsageParser.ParseExecutionUsage"/>, which already folded a legacy stream's
+    /// terminal line correctly, so they cannot tell a live-side regression from a healthy one. The live
+    /// figure is the REAL <c>Mutation.TokenBudgetMonitor</c> replayed over these same captured bytes
+    /// (<c>ExecutionUsageView</c>'s replay site), reading through
+    /// <see cref="CodexUsageParser.TryParseIncrementalUsage"/> — so a version of that method matching
+    /// <c>turn.usage</c> ALONE reports null here on every room captured before the emitter, which is
+    /// precisely the regression the round-trip index exists to avoid paying for.
+    /// </para>
     /// </summary>
     [Fact]
     public void A_stream_captured_before_the_per_round_trip_emitter_still_reports_its_terminal_line()
@@ -93,6 +111,9 @@ public sealed class CodexBrokerRoomUsageTests
             Assert.Equal(689, view.TokensOut);
             Assert.Equal(1, view.Turns);
             Assert.Equal(126_720, view.CacheReadTokens);
+
+            // The half the fold cannot answer -- see this method's own remark.
+            Assert.Equal(1_086 + 689 + 900, view.LiveBilledTokens);
         }
         finally
         {
@@ -101,19 +122,20 @@ public sealed class CodexBrokerRoomUsageTests
     }
 
     /// <summary>
-    /// The double-count arm. A CURRENT stream carries both the per-round-trip lines and a terminal
-    /// <c>turn.completed</c> restating the last of them — that terminal line is what
-    /// <c>Outcomes.OutcomeClassifier</c> reads for substantial-work evidence, so it stays — and folding
-    /// both populations would count the final round-trip twice.
+    /// The settle-time half of the no-double-count claim the live monitor's half is asserted on above.
+    /// <c>CodexAppServerBroker</c>'s class remark states what a current stream carries and why;
+    /// <see cref="CodexUsageParser.ParseExecutionUsage"/> states why the fold partitions by line type
+    /// where the monitor deduplicates by <see cref="CodexUsageParser.RoundTripField"/>. This is the arm
+    /// for the fold's side of that agreement.
     /// </summary>
     [Fact]
     public void The_terminal_line_is_not_folded_a_second_time_on_a_stream_that_carries_both()
     {
         var usage = new CodexUsageParser().ParseExecutionUsage(
         [
-            """{"type":"turn.usage","usage":{"input_tokens":100,"cached_input_tokens":60,"output_tokens":20}}""",
-            """{"type":"turn.usage","usage":{"input_tokens":300,"cached_input_tokens":260,"output_tokens":30}}""",
-            """{"type":"turn.completed","usage":{"input_tokens":300,"cached_input_tokens":260,"output_tokens":30}}""",
+            """{"type":"turn.usage","usage":{"input_tokens":100,"cached_input_tokens":60,"output_tokens":20,"round_trip":1}}""",
+            """{"type":"turn.usage","usage":{"input_tokens":300,"cached_input_tokens":260,"output_tokens":30,"round_trip":2}}""",
+            """{"type":"turn.completed","usage":{"input_tokens":300,"cached_input_tokens":260,"output_tokens":30,"round_trip":2}}""",
         ]);
 
         Assert.NotNull(usage);
@@ -121,6 +143,10 @@ public sealed class CodexBrokerRoomUsageTests
         Assert.Equal(50, usage.TokensOut);
         Assert.Equal(2, usage.Turns);
         Assert.Equal(320, usage.CacheReadTokens);
+
+        // A total is not any one round-trip, so it carries no round-trip identity -- ParseExecutionUsage
+        // states why that is dropped rather than inherited from the first reading folded.
+        Assert.Null(usage.MessageId);
     }
 
     private static async Task<string[]> RunBrokerAsync(string workspace, string brokerOutput)

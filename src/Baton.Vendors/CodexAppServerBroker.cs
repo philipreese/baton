@@ -30,10 +30,15 @@ namespace Baton.Vendors;
 /// payload first (spec/baton.md §7's ledger row is where such a measurement lands).
 /// </para>
 /// <para>
-/// The terminal <c>turn.completed</c> keeps carrying the final round-trip's usage unchanged: it is
-/// what <c>Outcomes.OutcomeClassifier</c>'s last-line substantial-work evidence reads, and giving it a
-/// second copy of a figure the <c>turn.usage</c> lines already carry would double-count it in any Σ
-/// over the stream.
+/// The terminal <c>turn.completed</c> keeps carrying the final round-trip's usage unchanged — it is
+/// what <c>Outcomes.OutcomeClassifier</c>'s last-line substantial-work evidence reads — so on a
+/// current stream that figure appears TWICE, once on its own <c>turn.usage</c> line and once on the
+/// terminal one. Both lines therefore carry
+/// <see cref="CodexUsageParser.RoundTripField"/>, a 1-based index of the round-trip they report, and
+/// the terminal line repeats the last one's. That index is what lets a Σ over the stream drop the
+/// restatement (<c>Mutation.TokenBudgetMonitor</c>'s existing repeated-id rule) without the reader
+/// needing to know which line types it has seen — and a stream captured before this emitter carries
+/// no index at all, so it keeps accumulating exactly as it did.
 /// </para>
 /// </summary>
 public static class CodexAppServerBroker
@@ -204,6 +209,7 @@ public static class CodexAppServerBroker
         await EmitAsync(batonOutput, new JsonObject { ["type"] = "turn.started" }).ConfigureAwait(false);
 
         JsonObject? lastUsage = null;
+        var roundTrip = 0;
         while (await serverOutput.ReadLineAsync(cancellationToken).ConfigureAwait(false) is { } line)
         {
             if (!TryParseObject(line, out var message))
@@ -228,10 +234,11 @@ public static class CodexAppServerBroker
                     // carries every round-trip it had already paid for. See the class remark.
                     if (lastUsage is not null)
                     {
+                        roundTrip++;
                         await EmitAsync(batonOutput, new JsonObject
                         {
                             ["type"] = CodexUsageParser.TurnUsageEventType,
-                            ["usage"] = ToBatonUsage(lastUsage),
+                            ["usage"] = ToBatonUsage(lastUsage, roundTrip),
                         }).ConfigureAwait(false);
                     }
                     break;
@@ -249,7 +256,7 @@ public static class CodexAppServerBroker
                     }
                     break;
                 case "turn/completed":
-                    return await EmitTerminalTurnAsync(message, lastUsage, batonOutput).ConfigureAwait(false);
+                    return await EmitTerminalTurnAsync(message, lastUsage, roundTrip, batonOutput).ConfigureAwait(false);
             }
         }
 
@@ -468,7 +475,7 @@ public static class CodexAppServerBroker
     }
 
     private static async Task<int> EmitTerminalTurnAsync(
-        JsonObject message, JsonObject? usage, TextWriter output)
+        JsonObject message, JsonObject? usage, int roundTrip, TextWriter output)
     {
         var turn = message["params"]?["turn"];
         var status = turn?["status"]?.GetValue<string>();
@@ -477,7 +484,7 @@ public static class CodexAppServerBroker
             var terminal = new JsonObject { ["type"] = "turn.completed" };
             if (usage is not null)
             {
-                terminal["usage"] = ToBatonUsage(usage);
+                terminal["usage"] = ToBatonUsage(usage, roundTrip);
             }
             await EmitAsync(output, terminal).ConfigureAwait(false);
             return 0;
@@ -496,17 +503,19 @@ public static class CodexAppServerBroker
 
     /// <summary>
     /// One app-server <c>tokenUsage</c> object in the snake_case shape
-    /// <see cref="CodexUsageParser"/> reads. Shared by the per-round-trip <c>turn.usage</c> line and
-    /// the terminal <c>turn.completed</c> so the two cannot drift into naming the same dimensions
-    /// differently.
+    /// <see cref="CodexUsageParser"/> reads, tagged with the 1-based round-trip it reports. Shared by
+    /// the per-round-trip <c>turn.usage</c> line and the terminal <c>turn.completed</c> so the two
+    /// cannot drift into naming the same dimensions differently — and so the terminal restatement
+    /// carries the SAME tag as the round-trip it restates, which is what makes it droppable from a Σ.
     /// </summary>
-    private static JsonObject ToBatonUsage(JsonObject usage) => new()
+    private static JsonObject ToBatonUsage(JsonObject usage, int roundTrip) => new()
     {
         ["input_tokens"] = usage["inputTokens"]?.DeepClone(),
         ["cached_input_tokens"] = usage["cachedInputTokens"]?.DeepClone(),
         ["cache_write_input_tokens"] = usage["cacheWriteInputTokens"]?.DeepClone(),
         ["output_tokens"] = usage["outputTokens"]?.DeepClone(),
         ["reasoning_output_tokens"] = usage["reasoningOutputTokens"]?.DeepClone(),
+        [CodexUsageParser.RoundTripField] = roundTrip,
     };
 
     private static async Task<JsonObject> ReadResponseAsync(

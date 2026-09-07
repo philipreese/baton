@@ -37,6 +37,13 @@ public sealed class CodexUsageParser : IWorkerUsageParser
     /// </summary>
     public const string TurnUsageEventType = "turn.usage";
 
+    /// <summary>
+    /// #2020: the 1-based model round-trip a usage object reports, written by the same broker inside
+    /// the <c>usage</c> object on both line types. Absent on every stream captured before that
+    /// emitter, which is exactly how a reader tells the two eras apart without a version stamp.
+    /// </summary>
+    public const string RoundTripField = "round_trip";
+
     private const string TerminalEventType = "turn.completed";
 
     /// <summary>
@@ -51,7 +58,14 @@ public sealed class CodexUsageParser : IWorkerUsageParser
     /// two populations are never mixed: a current stream's terminal line restates a round-trip the
     /// <c>turn.usage</c> lines already carry, and folding both would double-count it.
     /// </para>
-    /// </summary>
+    /// <para>
+    /// <b>Keyed on line TYPE, where <see cref="TryParseIncrementalUsage"/>'s reader keys on
+    /// <see cref="RoundTripField"/>.</b> Two mechanisms for one no-double-count claim, deliberately:
+    /// this fold sees the whole stream at once and can partition it, while the live monitor sees one
+    /// line at a time and can only remember what it has already counted. They agree on every stream
+    /// either can meet — <c>Baton.Vendors.Tests.CodexBrokerRoomUsageTests</c> asserts the agreement
+    /// directly, as <c>BilledTokens == LiveBilledTokens</c> over the broker's own emitted bytes.
+    /// </para></summary>
     public WorkerUsage? ParseExecutionUsage(IEnumerable<string> lines)
     {
         WorkerUsage? perRoundTrip = null;
@@ -68,7 +82,11 @@ public sealed class CodexUsageParser : IWorkerUsageParser
             }
         }
 
-        return perRoundTrip ?? terminal;
+        // #2020: the round-trip index is dropped on the way out. Combine carries `left`'s fields, so a
+        // three-round-trip fold would otherwise claim round-trip 1's identity for a total that is not
+        // any one round-trip. Nothing reads WorkerUsage.MessageId off an execution total today; this
+        // keeps it that way rather than leaving a wrong value there for something to start reading.
+        return (perRoundTrip ?? terminal) is { } folded ? folded with { MessageId = null } : null;
     }
 
     /// <summary>
@@ -97,16 +115,18 @@ public sealed class CodexUsageParser : IWorkerUsageParser
         TryParse(rawLine, TerminalEventType, out usage);
 
     /// <summary>
-    /// #2020: the per-round-trip line ONLY. The terminal <c>turn.completed</c> restates the final
-    /// round-trip, so admitting it here would count that round-trip's output twice in
-    /// <c>Mutation.TokenBudgetMonitor</c>'s running Σ — the monitor sums the output side across
-    /// matching lines. The cost is that a stream captured before the emitter landed reports no live
-    /// figure at all; that is deliberate, and the same withholding this parser applies to an
-    /// incomplete capture rather than a regression, because the figure such a stream could offer is
-    /// one round-trip of a lane presented as the whole of it.
+    /// #2020: BOTH line types, deduplicated by <see cref="RoundTripField"/> rather than by type. The
+    /// live monitor sums the output side across matching lines, and on a current stream the terminal
+    /// <c>turn.completed</c> restates a round-trip its own <c>turn.usage</c> line already reported —
+    /// so the restatement carries the same index and <c>Mutation.TokenBudgetMonitor</c>'s existing
+    /// repeated-<see cref="WorkerUsage.MessageId"/> rule drops it. Rejecting <c>turn.completed</c>
+    /// outright would be the simpler guard and is wrong: a stream captured before that emitter has
+    /// the terminal line as its ONLY usage line, and a running codex room reading it is what
+    /// <c>rooms[].live</c> is built from (#1886).
     /// </summary>
     public bool TryParseIncrementalUsage(string rawLine, out WorkerUsage? usage) =>
-        TryParse(rawLine, TurnUsageEventType, out usage);
+        TryParse(rawLine, TurnUsageEventType, out usage)
+        || TryParse(rawLine, TerminalEventType, out usage);
 
     public string? TryParseToolName(string rawLine)
     {
@@ -336,7 +356,14 @@ public sealed class CodexUsageParser : IWorkerUsageParser
                 Turns: 1,
                 CacheReadTokens: cachedInput,
                 CacheCreationTokens: cacheWrite,
-                ThinkingTokens: reasoning);
+                ThinkingTokens: reasoning,
+                // #2020: the dedup key TryParseIncrementalUsage's remark explains, carried on the
+                // field TokenBudgetMonitor already keys its repeated-reading rule on. Null when the
+                // stream predates RoundTripField, which is what makes such a stream's single terminal
+                // line accumulate as it always did.
+                MessageId: ReadLong(reported, RoundTripField) is { } index
+                    ? $"round-trip-{index}"
+                    : null);
             return true;
         }
         catch (JsonException)

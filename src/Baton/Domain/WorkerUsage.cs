@@ -50,9 +50,20 @@ namespace Baton.Domain;
 /// measured against real captures to repeat across several consecutive lines with the SAME
 /// <c>message.usage</c> object (a single API response split across content-block chunks), which would
 /// double-count <paramref name="BilledTokens"/> if summed per line rather than per message. Null on
-/// every reading agy produces (that vendor's shape has no analogous id) and on the terminal-line
-/// reading, which is never summed. <see cref="Mutation.TokenBudgetMonitor"/> is the sole consumer —
-/// it dedupes its own running Σ by this field rather than exposing it as a general-purpose identity.
+/// every reading agy produces (that vendor's shape has no analogous id).
+/// <see cref="Mutation.TokenBudgetMonitor"/> is the sole consumer — it dedupes its own running Σ by
+/// this field rather than exposing it as a general-purpose identity.
+/// <para>
+/// #2020: a SECOND vendor now populates it, on a different shape, and the claude sentence above no
+/// longer generalises. Codex's terminal <c>turn.completed</c> restates the last model round-trip that
+/// its own <c>turn.usage</c> line already reported, and <c>Status.CodexUsageParser</c> reads BOTH
+/// (the terminal line is a pre-emitter stream's only usage line, so refusing it would blank every
+/// historical codex room's live figure) — so on that vendor this field is
+/// <c>round-trip-{index}</c>, and the restatement carries the SAME one. Which means "null on the
+/// terminal-line reading, which is never summed" was true of claude only: codex's terminal line IS
+/// summed, and this field is what stops it being summed twice. A per-execution fold sets it back to
+/// null — <c>Status.CodexUsageParser.ParseExecutionUsage</c> is where that is stated.
+/// </para>
 /// </param>
 /// <param name="BilledIsFloor">
 /// #1706: <see langword="true"/> when the reading this belongs to is a LOWER BOUND on the execution's
