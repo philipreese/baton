@@ -31,14 +31,17 @@ public static class RoomDeliveryBranch
     /// Branch names a dispatch records nothing for. #1944's wanted behaviour is "a git worktree, or any
     /// checkout on a NON-DEFAULT branch", and this list is how the default half is decided.
     /// <para>
-    /// <b>Named rather than asked, and the cost of the list being wrong for a repository is nil.</b>
-    /// Git has no local, spawn-free answer for "what is this repository's default branch" —
-    /// <c>origin/HEAD</c> is unset in most clones and worktrees — so the alternative is a second spawn
-    /// that usually fails. What a wrong entry buys is a room recording a trunk name as its delivery
-    /// branch; the join it feeds is against merged pull requests' HEAD branches, and a PR is never
-    /// merged from the branch it merges into, so such a record matches no PR rather than matching a
-    /// wrong one. Excluding trunk keeps every room dispatched on it from crowding one join key with an
-    /// entry that is false about the room and useless to the reader.
+    /// <b>Named rather than asked, and a repository this list is wrong for is a disclosed limitation
+    /// rather than a harmless one.</b> Git has no local, spawn-free answer for "what is this
+    /// repository's default branch" — <c>origin/HEAD</c> is unset in most clones and worktrees — so the
+    /// alternative is a second spawn that usually fails. A repository whose trunk is named otherwise
+    /// records that trunk, and a trunk name CAN be a merged pull request's HEAD branch — a gitflow
+    /// <c>develop</c>-into-<c>main</c> release PR is one — so the bound on being wrong is: exactly one
+    /// arbitrary room holds that join key (the last the walk sees), and every such release PR in the
+    /// window is attributed to it, which <c>baton ledger backfill</c> then reports as joined rather
+    /// than counting unattributed. Excluding <c>main</c>/<c>master</c> keeps every room dispatched on
+    /// them from crowding one join key with an entry that is false about the room and useless to the
+    /// reader.
     /// </para>
     /// </summary>
     public static readonly IReadOnlyList<string> TrunkBranchNames = ["main", "master"];

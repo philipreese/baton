@@ -56,11 +56,19 @@ internal static class WorkspaceHead
     /// The branch name checked out at <paramref name="workingDirectory"/> — <c>git rev-parse
     /// --abbrev-ref HEAD</c> — or <see langword="null"/> when there is no named branch to report.
     /// <para>
-    /// <b>Fails open at every step</b>, which is what makes it safe to call on the ordinary dispatch
-    /// path: git not on PATH, a workspace that is not a git repository, a repository with no commits,
-    /// and a detached <c>HEAD</c> (which git answers with the literal string <c>HEAD</c>, never a
-    /// branch) all read the same way — absent. The one caller records an accounting join key, so the
-    /// cost of every one of those is that join and nothing else.
+    /// <b>Fails open on every git failure</b>, which is what makes it safe to call on the ordinary
+    /// dispatch path: git not on PATH, a workspace that is not a git repository, a repository with no
+    /// commits, and a detached <c>HEAD</c> (which git answers with the literal string <c>HEAD</c>,
+    /// never a branch) all read the same way — absent. The one caller records an accounting join key,
+    /// so the cost of every one of those is that join and nothing else.
+    /// </para>
+    /// <para>
+    /// <b>Cancellation is the one thing that does not fail open.</b> The <c>rev-parse</c> reads take
+    /// the caller's token and nothing here catches an <see cref="OperationCanceledException"/>, so a
+    /// cancellation landing during the spawn leaves this method by throwing rather than by answering
+    /// absent — the caller's own bound, not this one's.
+    /// <see cref="RoomDeliveryBranch.RecordAsync"/> catches it on the write half only, for the reason
+    /// its own doc states.
     /// </para>
     /// </summary>
     public static async Task<string?> TryReadBranchAsync(

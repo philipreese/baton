@@ -4202,11 +4202,15 @@ only ever ADD rows.
   `--dry-run` listed was unattributed — the observation half exists because asking lanes to declare had
   produced nothing in 691 rooms. It is recorded at dispatch and never rewritten, so a room whose
   workspace later moves to another branch keeps the branch it was launched on. **Many rooms may record
-  one branch** — an implement lane and its review lane share a worktree, and a redispatch adds another
-  — and the join is one room per branch: the last room the walk sees wins, which is the highest path in
-  `OrdinalIgnoreCase` order. Arbitrary, disclosed, and not repaired here: the PR joins to *a* room that
-  worked that branch rather than to all of them, and a reader wanting every room's spend for a branch
-  filters the ledger's own rows rather than reading this join.
+  one branch**, and the population is every room whose workspace sat on it at launch rather than only
+  the lanes that worked it — an implement lane and its review lane share a worktree, a redispatch adds
+  another, and a dispatch given neither `--workspace` nor a materialized worktree falls back to the
+  current directory, so an unrelated `advise` or `review` room launched from a shell sitting in that
+  checkout records it too. The join is one room per branch: the last room the walk sees wins, which is
+  the highest path in `OrdinalIgnoreCase` order. Arbitrary, disclosed, and not repaired here: the PR
+  joins to *a* room dispatched on that branch — not necessarily one that worked it — rather than to all
+  of them, and a reader wanting every room's spend for a branch filters the ledger's own rows rather
+  than reading this join.
 - **Idempotent, on the ledger's own dedupe.** A room row dedupes on its `ExecutionId`; a PR row on
   `github-pr-<n>`. Why a PR row needs an id at all rather than none is
   `CostLedgerStore.GithubBackfillExecutionId`'s own doc: it names the `JsonLinesLedger` rule and what a

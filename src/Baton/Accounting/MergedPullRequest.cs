@@ -21,9 +21,13 @@ namespace Baton.Accounting;
 /// </remarks>
 /// <param name="Room">
 /// The <c>BatonPaths.RecordKey</c> of the room whose work produced this PR, when one could be joined to
-/// it by branch name. <b>Absent means "no room on disk declares this branch"</b> — a room already swept
-/// by retention, a PR opened by hand, or a lane whose workflow declares no <c>delivery-branch.txt</c>.
-/// The row is written either way; the dry run reports how many landed unattributed and why.
+/// it by branch name. Two sources can supply a room's branch — a lane's own DECLARED
+/// <c>delivery-branch.txt</c> step output, and the one <c>baton dispatch</c> writes at the room root
+/// from the branch it OBSERVED in the workspace at launch (#1944). Their precedence is the spec's
+/// ruling to state rather than this doc's: see §7's backfill bullet. <b>Absent means no room on disk
+/// carries this branch by either source</b>: already swept by retention, opened by hand, or dispatched
+/// before #1944 started recording one. The row is written either way; the dry run reports how many landed
+/// unattributed and why.
 /// </param>
 public sealed record MergedPullRequest(
     int Number,

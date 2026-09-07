@@ -70,6 +70,37 @@ public sealed class DispatchDeliveryBranchTests : IDisposable
         Assert.Equal(recorded ? branch : null, RoomDeliveryBranch.TryRead(roomDirectory));
     }
 
+    /// <summary>
+    /// The detached-<c>HEAD</c> guard, which nothing else in the suite discriminates.
+    /// </summary>
+    /// <remarks>
+    /// <c>git rev-parse --abbrev-ref HEAD</c> answers the literal string <c>HEAD</c> for a detached
+    /// checkout, and <c>RoomDeliveryBranch.IsDeliveryBranch("HEAD")</c> is <see langword="true"/> —
+    /// <c>HEAD</c> is not a trunk name — so the single clause in
+    /// <c>WorkspaceHead.TryReadBranchAsync</c> is the only thing standing between a detached workspace
+    /// and a room recording <c>HEAD</c> as a join key no pull request's head ref can match. Delete that
+    /// clause and this is the only test that goes red. Detached checkouts are a shape this system
+    /// routinely provisions rather than a contrivance: <c>RoleDispatch.ToBinding</c> builds an audited
+    /// role's worktree as <c>new WorktreeWorkspace(workingDirectory, "HEAD")</c>.
+    /// </remarks>
+    [Fact]
+    public async Task A_dispatch_whose_workspace_is_on_a_detached_head_records_nothing()
+    {
+        var workspace = await InitRepositoryAsync("1944-detached");
+        await RunGitAsync(workspace, "checkout", "--detach");
+
+        var roomDirectory = Path.Combine(_sandbox, "room-detached");
+        var specPath = Path.Combine(_sandbox, "spec-detached.md");
+        await File.WriteAllTextAsync(specPath, "## Do\n\nWeigh the options for X.\n", TestContext.Current.CancellationToken);
+
+        var options = new DispatchOptions(
+            "advise", specPath, roomDirectory, Adapter: "fake", WorkspaceDirectory: workspace);
+        await DispatchCommand.ExecuteAsync(options, Adapters, TestContext.Current.CancellationToken);
+
+        Assert.False(File.Exists(Path.Combine(roomDirectory, DeliveryReferenceOutputNames.Branch)));
+        Assert.Null(RoomDeliveryBranch.TryRead(roomDirectory));
+    }
+
     /// <summary>A fresh repository on <paramref name="branch"/> with one commit, so <c>HEAD</c> resolves.</summary>
     private async Task<string> InitRepositoryAsync(string branch)
     {
