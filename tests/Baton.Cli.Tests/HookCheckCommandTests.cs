@@ -444,4 +444,34 @@ public class HookCheckCommandTests
             Baton.Vendors.ClaudeWorkerAdapter.DeniedShellOptionTokensVariable,
             HookCheckCommand.DeniedShellOptionTokensEnvironmentVariable);
     }
+
+    /// <summary>
+    /// #2002 rule 1 on claude's half. Both arms drive an UNSCOPED grant (no shell pattern list at
+    /// all), which is `implement`'s and `janitor`'s actual shape and the one this rung has to reach:
+    /// every other rung in this branch is skipped there, so a denial arriving under those conditions
+    /// can only have come from the backgrounding detector.
+    /// </summary>
+    [Theory]
+    [InlineData("Start-Process dotnet -ArgumentList 'build'", true)]
+    [InlineData("dotnet build &", true)]
+    [InlineData("dotnet build", false)]
+    [InlineData("git push -u origin 2002-lane", false)]
+    public void A_backgrounded_command_is_denied_on_an_unscoped_grant(string command, bool expectDenied)
+    {
+        using var stderr = new StringWriter();
+
+        var exitCode = RunBash(command, shellPatternsRaw: null, stderr: stderr);
+
+        Assert.Equal(
+            expectDenied ? HookCheckCommand.DeniedExitCode : HookCheckCommand.AllowedExitCode, exitCode);
+        if (expectDenied)
+        {
+            Assert.Contains("backgrounds the work", stderr.ToString(), StringComparison.Ordinal);
+            Assert.Contains("runs to completion synchronously", stderr.ToString(), StringComparison.Ordinal);
+            // This path enforces no Baton per-command ceiling, so naming the broker's five minutes here
+            // would be a claim about a mechanism that does not apply to a claude worker.
+            Assert.Contains("no Baton per-command ceiling", stderr.ToString(), StringComparison.Ordinal);
+            Assert.Contains(Baton.Domain.GrantRefusal.Marker, stderr.ToString());
+        }
+    }
 }
