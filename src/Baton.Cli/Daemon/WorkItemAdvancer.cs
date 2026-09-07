@@ -133,7 +133,7 @@ public sealed class WorkItemAdvancer
         QueueItem item,
         WorkStage from,
         WorkItemTransition transition,
-        (int? Number, string? HeadSha) pr,
+        (int? Number, string? HeadSha, string? Checks) pr,
         ReviewVerdict? verdict,
         string? verdictPath,
         DateTimeOffset now,
@@ -173,6 +173,13 @@ public sealed class WorkItemAdvancer
             Role = WorkStages.RoleFor(next),
             Round = transition.Round,
             PullRequest = pr.Number ?? existing.PullRequest,
+            // Coalesced, never assigned: a `gh` that did not run (missing, unauthenticated, no PR on
+            // the branch) reports null, and overwriting a real observation with that would turn "no
+            // answer this tick" into "no checks", which is a different claim. The stamp moves only when
+            // the word does, so QueueItem.Checks' own "never render one without the other" rule cannot
+            // be satisfied by an age that outlives its reading.
+            Checks = pr.Checks ?? existing.Checks,
+            ChecksObservedAt = pr.Checks is null ? existing.ChecksObservedAt : now,
             LastVerdict = verdictPath ?? existing.LastVerdict,
             State = QueueItemState.Queued,
             RoomDirectory = null,
@@ -187,7 +194,7 @@ public sealed class WorkItemAdvancer
         QueueItem item,
         WorkStage from,
         WorkItemTransition transition,
-        (int? Number, string? HeadSha) pr,
+        (int? Number, string? HeadSha, string? Checks) pr,
         string? verdictPath,
         DateTimeOffset now,
         string room)
@@ -196,6 +203,8 @@ public sealed class WorkItemAdvancer
         {
             Stage = WorkStage.Ready,
             PullRequest = pr.Number ?? existing.PullRequest,
+            Checks = pr.Checks ?? existing.Checks,
+            ChecksObservedAt = pr.Checks is null ? existing.ChecksObservedAt : now,
             LastVerdict = verdictPath ?? existing.LastVerdict,
             State = QueueItemState.Queued,
             RoomDirectory = null,
@@ -262,25 +271,29 @@ public sealed class WorkItemAdvancer
     /// than to a review of a PR that may not exist.
     /// </summary>
     /// <remarks>
-    /// <b>Exactly the two fields something reads.</b> <c>mergeStateStatus</c> was requested and never
+    /// <b>Exactly the three fields something reads.</b> <c>mergeStateStatus</c> was requested and never
     /// parsed (#2004 review); the queue never merges (spec/baton.md §13), so nothing here has a question
     /// mergeability answers, and a requested-but-unread field reads to the next person as one that is
-    /// load-bearing somewhere.
+    /// load-bearing somewhere. <c>statusCheckRollup</c> earned its place under that same rule in #1912:
+    /// the lifecycle still does not read it, but the conductor board's PR row does, and it is written
+    /// onto the item here (<see cref="QueueItem.Checks"/>) because this is the only place that already
+    /// spawns <c>gh</c> for this PR.
     /// </remarks>
-    private async Task<(int? Number, string? HeadSha)> ReadPullRequestAsync(
+    private async Task<(int? Number, string? HeadSha, string? Checks)> ReadPullRequestAsync(
         QueueItem item, CancellationToken cancellationToken)
     {
         if (item.Branch is not { Length: > 0 } branch || !Directory.Exists(item.Workspace))
         {
-            return (null, null);
+            return (null, null, null);
         }
 
         var result = await _gh.RunAsync(
-            item.Workspace, ["pr", "view", branch, "--json", "number,headRefOid"], cancellationToken)
-            .ConfigureAwait(false);
+            item.Workspace,
+            ["pr", "view", branch, "--json", "number,headRefOid,statusCheckRollup"],
+            cancellationToken).ConfigureAwait(false);
         if (!result.Started || result.ExitCode != 0)
         {
-            return (null, null);
+            return (null, null, null);
         }
 
         try
@@ -291,13 +304,15 @@ public sealed class WorkItemAdvancer
                 ? n.GetInt32()
                 : (int?)null;
             var headSha = root.TryGetProperty("headRefOid", out var h) ? h.GetString() : null;
-            return (number, headSha);
+            var checks = PullRequestChecks.Summarize(
+                root.TryGetProperty("statusCheckRollup", out var rollup) ? rollup : null);
+            return (number, headSha, checks);
         }
         catch (JsonException ex)
         {
             Console.Error.WriteLine(
                 $"WorkItemAdvancer: could not read 'gh pr view {branch}' output as JSON for '{item.Tag}': {ex.Message}");
-            return (null, null);
+            return (null, null, null);
         }
     }
 

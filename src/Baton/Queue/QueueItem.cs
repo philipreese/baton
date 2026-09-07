@@ -107,6 +107,23 @@ public sealed record QueueItem
     /// </remarks>
     public string? Instructions { get; init; }
 
+    /// <summary>
+    /// What the PR's checks were doing the last time the advancer looked (<see cref="PullRequestChecks"/>'s
+    /// tokens). Null until one has.
+    /// </summary>
+    /// <remarks>
+    /// <b>Recorded rather than read at display time</b>, and it is deliberately not current: the advance
+    /// only reads a work item whose lane has SETTLED, so a <see cref="WorkStage.Ready"/> item's word is
+    /// frozen at the moment it went ready. <see cref="ChecksObservedAt"/> is what makes that legible, and
+    /// no reader may render one without the other — a stale green with no age beside it is a mechanism
+    /// reading as a guarantee. Nothing gates on this field; it exists because #1912's board row asks
+    /// "what is this PR waiting on" and a checks word is half that answer.
+    /// </remarks>
+    public string? Checks { get; init; }
+
+    /// <summary>When <see cref="Checks"/> was read. Absent whenever that is.</summary>
+    public DateTimeOffset? ChecksObservedAt { get; init; }
+
     /// <summary>The directory the worker runs in. Always set by the time an item is queued — an
     /// <c>--issue</c> item gets it from the worktree provisioned at add time.</summary>
     public required string Workspace { get; init; }

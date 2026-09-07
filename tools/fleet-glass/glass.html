@@ -155,6 +155,20 @@ h2{font-family:'Sora',sans-serif; font-size:.85rem; margin:1.4rem 0 .5rem; color
 .vendorusage-head{font-weight:600; color:var(--ink); margin-bottom:.25rem;}
 .vendorusage-row{white-space:nowrap;}
 .vendorusage-caveat{margin-top:.3rem; font-size:.7rem; opacity:.75;}
+/* #1912: the conductor's own rows. Read-only like .vendorusage above and styled the same way on
+   purpose -- nothing here is a control, and a panel that looked like one would be the first thing on
+   this page to imply a verb it does not have. */
+.queueboard{border:1px solid var(--line); border-radius:8px; background:var(--card); padding:.5rem .7rem; margin:.6rem 0; font-size:.78rem; color:var(--ink-soft);}
+.queueboard-head{font-weight:600; color:var(--ink); margin-bottom:.35rem;}
+.queueboard-note{font-size:.7rem; opacity:.75; margin-top:.3rem;}
+.queueboard table{border-collapse:collapse; width:100%; margin-top:.3rem;}
+.queueboard th{text-align:left; font:600 .66rem 'Public Sans'; letter-spacing:.05em; text-transform:uppercase; color:var(--ink-soft); padding:.2rem .5rem .2rem 0; border-bottom:1px solid var(--line);}
+.queueboard td{padding:.22rem .5rem .22rem 0; vertical-align:top; white-space:nowrap;}
+.queueboard tr.twin td{background:var(--chip-idle);}
+.queueboard .q-next{color:var(--run); font-weight:600;}
+.queueboard .q-halt{color:var(--bad); font-weight:600;}
+.queueboard .q-tag{font-family:var(--mono);}
+.queueboard .q-empty{opacity:.75;}
 details{margin:.6rem 0;}
 summary{cursor:pointer; font:600 .8rem 'Public Sans'; color:var(--ink-soft);}
 .mono{font-family:var(--mono); font-size:.9em;}
@@ -279,6 +293,7 @@ footer{margin-top:2rem; font-size:.7rem; color:var(--ink-soft); border-top:1px s
   </div>
   <div id="banner"></div>
   <div id="vendorusage"></div>
+  <div id="queueboard"></div>
   <div class="tabpanel" id="tab-fleet">
     <div class="stalenote" id="stalenote"></div>
     <div class="dismissnote" id="dismissnote"></div>
@@ -1438,6 +1453,110 @@ function vendorUsageHtml(vendors){
   $("vendorusage").innerHTML = `<div class="vendorusage">${blocks}</div>`;
 }
 
+// #1912 slice 1 -- the conductor's own rows: weighted slots, the dispatch queue in order, PR stages,
+// and A/B twins rendered adjacent. Read-only display of `snap.queue`, absent-safe exactly like
+// `vendors`/`conductor` above, and for one more reason than they are: `pusher.py` composes the
+// mailbox payload key by key, so this section reaches the DAEMON-SERVED delivery only (#1946's
+// tailnet plane). On the mailbox delivery the key is simply not there and the panel renders nothing,
+// which is the same thing it does on a machine that has never used the queue at all.
+//
+// Nothing here derives a scheduling verdict of its own. Every reason word arrives already decided
+// (QueueBoard.Project is the one projection, and it reads the scheduler's own recorded token off the
+// decision ledger), so this file cannot drift into being a second opinion about why a lane is
+// waiting -- the same discipline `vendorUsageRowHtml` follows for burn and exhaustion.
+//
+// >>> QUEUE-PANEL-BEGIN (extracted verbatim by tools/fleet-glass/glass.selftest.mjs -- keep this
+// block free of DOM access so the harness needs no shim; the one $("queueboard") write lives after
+// the END marker.)
+function queueSlotsLineHtml(q){
+  const s = q.slots || {};
+  const cap = typeof s.cap === "number" ? s.cap : null;
+  const live = typeof s.live === "number" ? s.live : null;
+  const slots = cap === null || live === null ? "slots unknown" : `${live} / ${cap} weighted slots`;
+  const mem = typeof s.freeGb === "number"
+    ? `${s.freeGb} GiB free, floor ${typeof s.floorGb === "number" ? s.floorGb : "?"} GiB`
+    : `memory unmeasured, floor ${typeof s.floorGb === "number" ? s.floorGb : "?"} GiB`;
+  const band = s.nightBand ? "night band" : "day band";
+  // The cap is not a promise that nothing else can start: QueueWeights.BypassesCap admits a review
+  // lane at the cap, and a bare "4 / 4" would read as a guarantee the mechanism does not give.
+  const caveat = "review lanes weigh 0 and start even at the cap";
+  const held = q.held ? " · QUEUE HELD" : "";
+  return `<div class="queueboard-head">${esc(slots)} · ${esc(mem)} (${esc(band)})${esc(held)}</div>`
+    + `<div class="queueboard-note">${esc(caveat)}</div>`;
+}
+function queueLanesTableHtml(q){
+  const lanes = (q.slots && Array.isArray(q.slots.lanes)) ? q.slots.lanes : [];
+  if(!lanes.length) return `<div class="queueboard-note q-empty">No lane is running.</div>`;
+  const rows = lanes.map(l =>
+    `<tr><td class="q-tag">${esc(l.label || l.room || "?")}</td>`
+    + `<td>${esc(l.role || "role unknown")}</td>`
+    + `<td>${esc(l.adapter || "adapter unknown")}</td>`
+    + `<td>${esc(typeof l.weight === "number" ? l.weight : "?")}</td></tr>`).join("");
+  return `<table><thead><tr><th>live lane</th><th>role</th><th>adapter</th><th>weight</th></tr></thead>`
+    + `<tbody>${rows}</tbody></table>`;
+}
+function queuePendingTableHtml(q){
+  const pending = Array.isArray(q.pending) ? q.pending : [];
+  if(!pending.length) return `<div class="queueboard-note q-empty">Nothing queued.</div>`;
+  const rows = pending.map(p => {
+    // `isNext`, never the row's position: twins are pulled adjacent for display, so the top row is
+    // not necessarily the one that launches (QueueBoard.OrderTwinsAdjacent says so on its own side).
+    const cls = p.twinIssue ? ' class="twin"' : "";
+    const reason = p.halted ? `<span class="q-halt">${esc(p.reason)}</span>`
+      : p.isNext ? `<span class="q-next">${esc(p.reason)}</span>`
+      : esc(p.reason);
+    return `<tr${cls}><td class="q-tag">${esc(p.tag)}</td>`
+      + `<td>${esc(p.stage || p.role || "—")}</td>`
+      + `<td>${esc(p.round)}</td>`
+      + `<td>${p.issue ? esc("#" + p.issue) : "—"}</td>`
+      + `<td>${esc(p.arm || "—")}</td>`
+      + `<td>${reason}</td></tr>`;
+  }).join("");
+  return `<table><thead><tr><th>queued</th><th>stage</th><th>round</th><th>issue</th><th>arm</th><th>waiting on</th></tr></thead>`
+    + `<tbody>${rows}</tbody></table>`;
+}
+function queuePrTableHtml(q){
+  const prs = Array.isArray(q.pullRequests) ? q.pullRequests : [];
+  if(!prs.length) return `<div class="queueboard-note q-empty">No work item has a pull request open.</div>`;
+  const rows = prs.map(p => {
+    const cls = p.twinIssue ? ' class="twin"' : "";
+    // The age is part of the value, never an optional garnish: the advancer only looks at a settled
+    // lane, so a `ready` item's checks word is frozen at the moment it went ready and rendering it
+    // bare would read as this instant's (QueueItem.Checks carries that rule on the producing side).
+    const observed = age(p.checksObservedAt);
+    const checks = p.checks
+      ? `${p.checks} (${observed === null ? "age unknown" : observed === "just now" ? "just now" : observed + " ago"})`
+      : "not observed";
+    const stage = p.halted ? `<span class="q-halt">${esc(p.stage)} · halted</span>` : esc(p.stage);
+    return `<tr${cls}><td>${esc("#" + p.pr)}</td>`
+      + `<td class="q-tag">${esc(p.tag)}</td>`
+      + `<td>${stage}</td>`
+      + `<td>${esc(p.round)}</td>`
+      + `<td>${esc(p.verdict || "no verdict")}</td>`
+      + `<td>${esc(checks)}</td></tr>`;
+  }).join("");
+  return `<table><thead><tr><th>pr</th><th>item</th><th>stage</th><th>round</th><th>last verdict</th><th>checks</th></tr></thead>`
+    + `<tbody>${rows}</tbody></table>`;
+}
+function queueBoardHtml(q){
+  if(!q || typeof q !== "object") return "";
+  // The ledger collapses a repeated verdict, so the newest row can be hours old and still be the
+  // standing reason -- the same freshness qualifier a vendor block's `harvestedAt` carries.
+  const decided = age(q.lastDecisionAt);
+  const decidedNote = decided === null ? "no scheduling decision recorded yet"
+    : decided === "just now" ? "last scheduling decision just now"
+    : `last scheduling decision ${decided} ago`;
+  return `<div class="queueboard">`
+    + queueSlotsLineHtml(q)
+    + queueLanesTableHtml(q)
+    + queuePendingTableHtml(q)
+    + queuePrTableHtml(q)
+    + `<div class="queueboard-note">${esc(decidedNote)}</div>`
+    + `</div>`;
+}
+// <<< QUEUE-PANEL-END
+function renderQueueBoard(q){ $("queueboard").innerHTML = queueBoardHtml(q); }
+
 // #1656: on-demand paging over the terminal archive (see terminalArchiveExtra's own comment at its
 // declaration). One-shot fetch on click -- `refetchInterval: 0` means this watchTool call does not
 // join the periodic 30s poll the main fleet_status subscription already runs; it settles once and
@@ -2147,7 +2266,9 @@ function startDaemonFeed(applySnapshot){
         // 11 else                    Clear the banner.
         //
         // #1946 — WHICH ROWS EXIST ON THE TAILNET DELIVERY. `/projection.json` carries `rooms`,
-        // `timelines`, `vendors` and `derived_at` and nothing else, so rows 1, 2, 3, 5, 7, 8 and 10
+        // `timelines`, `vendors`, `derived_at` and (since #1912) `queue`, and nothing else. `queue`
+        // feeds no banner — it is the one key that exists on this delivery and NOT on the mailbox's,
+        // which is the opposite direction from every field below. So rows 1, 2, 3, 5, 7, 8 and 10
         // are unreachable there by absent field alone and are left ungated (a field that is never
         // sent cannot fire). Row 4 is the exception and IS gated: `hbMs == null` is TRUE on every
         // tailnet render, and its text would permanently tell an operator to redeploy a worker that
@@ -2217,6 +2338,8 @@ function startDaemonFeed(applySnapshot){
         render(snap.rooms, snap.pushed_at, snap.underhood, snap.heartbeat_at, accumulatedTimelines, snap.stale_hidden_count, dismissedRooms, snap.conductor, snap.derived_at);
         // #1391: independent of the board render above -- vendors[] is fleet-wide, not per-room.
         vendorUsageHtml(snap.vendors);
+        // #1912: same footing -- fleet-wide, absent on the mailbox delivery by construction.
+        renderQueueBoard(snap.queue);
       } else if(snap && snap.rooms === null){
         $("content").innerHTML = "";
         $("dismissnote").innerHTML = "";

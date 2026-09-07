@@ -6,10 +6,12 @@ using System.Text.Json.Nodes;
 using System.Text.RegularExpressions;
 using Baton.Artifacts;
 using Baton.Cli.Mcp;
+using Baton.Core.Internal;
 using Baton.Dispatch;
 using Baton.Domain;
 using Baton.Mutation;
 using Baton.Outcomes;
+using Baton.Queue;
 using Baton.Status;
 using Baton.Store;
 using Microsoft.Extensions.Hosting;
@@ -41,9 +43,32 @@ namespace Baton.Cli.Daemon;
 /// <c>file</c> source was missing relative to <c>derive</c> — <see cref="ResolveTimelineAsync"/> and
 /// <see cref="ProjectTimeline"/> carry the policy and the content projection.
 /// </para>
+/// <para>
+/// <b>#1912 slice 1</b> added the top-level <c>queue</c> section — the conductor's own rows
+/// (<see cref="QueueBoard"/> is the projection and the register of what each field means).
+/// <b>This plane only:</b> <c>pusher.py</c> composes the mailbox payload key by key, so <c>queue</c>
+/// does not travel to it, and <c>glass.html</c> renders the section absent-safe for exactly that
+/// reason. That is the split C-11 rules, not an omission.
+/// </para>
 /// </remarks>
 public sealed class FleetProjectionWriter : BackgroundService
 {
+    private readonly Func<double?> _freeGb;
+
+    public FleetProjectionWriter()
+        : this(null)
+    {
+    }
+
+    /// <summary>
+    /// Test seam (Baton.Cli.Tests, via <c>InternalsVisibleTo</c>), the same shape
+    /// <see cref="QueueSchedulerService"/> uses: the free-memory reading is the one input to the
+    /// <c>queue</c> section that no fixture on disk can fix, so a test drives it as a delegate rather
+    /// than asserting around whatever this machine happens to have free.
+    /// </summary>
+    internal FleetProjectionWriter(Func<double?>? freeGb) =>
+        _freeGb = freeGb ?? FreePhysicalMemory.TryReadGiB;
+
     public const string IntervalSecondsEnvironmentVariable = "BATON_FLEET_PROJECTION_INTERVAL_SECONDS";
 
     public static readonly TimeSpan DefaultInterval = TimeSpan.FromSeconds(30);
@@ -87,6 +112,8 @@ public sealed class FleetProjectionWriter : BackgroundService
     // tick would throw (ComputePrunedInfo's DeepClone is the other way out of the same trap).
     private readonly Dictionary<string, TerminalTimelineCacheEntry> _terminalTimelineCache =
         new(StringComparer.Ordinal);
+
+    private NewestDecisionCacheEntry? _newestDecision;
 
     private bool _loggedMissingSecretPatterns;
 
@@ -186,6 +213,7 @@ public sealed class FleetProjectionWriter : BackgroundService
         var timelines = new JsonObject();
         var liveKeysThisTick = new HashSet<string>(StringComparer.Ordinal);
         var liveLanesByVendor = new Dictionary<string, int>(StringComparer.Ordinal);
+        var liveLanes = new List<QueueLiveLane>();
 
         // pusher.py's main() loop reloads its secret-gate denylist every cycle (not once at startup),
         // so an operator's edit to the patterns file takes effect on the NEXT tick rather than needing
@@ -245,6 +273,18 @@ public sealed class FleetProjectionWriter : BackgroundService
                 liveLanesByVendor[adapter] = liveLanesByVendor.GetValueOrDefault(adapter) + 1;
             }
 
+            // #1912: the weighted tally, on the SAME Running gate and deliberately OUTSIDE the
+            // adapter-is-not-null pattern above. QueueWeights.For weighs a null role or adapter as a
+            // full implement lane on purpose ("an unidentified live lane counts against the cap rather
+            // than being free"), so nesting this inside that check would make the panel's total
+            // disagree with the scheduler's on exactly the room where the disagreement matters. The
+            // weight is asked of that one function, never spelled here.
+            if (view.State == "Running")
+            {
+                liveLanes.Add(new QueueLiveLane(
+                    view.Path, view.Label, view.Role, view.Adapter, QueueWeights.For(view.Role, view.Adapter)));
+            }
+
             var timelineEntries = await ResolveTimelineAsync(view.Path, diagnostics, cancellationToken)
                 .ConfigureAwait(false);
             if (timelineEntries.Count > 0)
@@ -279,7 +319,128 @@ public sealed class FleetProjectionWriter : BackgroundService
             root["vendors"] = JsonSerializer.SerializeToNode(vendors, FleetStatusTool.SerializerOptions);
         }
 
+        // #1912: the conductor's own rows, from the SAME walk above -- `liveLanes` is what that loop
+        // already collected, so the weighted total beside the cap costs no second room scan.
+        var queue = await BuildQueueSectionAsync(liveLanes, diagnostics, cancellationToken).ConfigureAwait(false);
+        if (queue is not null)
+        {
+            root["queue"] = JsonSerializer.SerializeToNode(queue, FleetStatusTool.SerializerOptions);
+        }
+
         return root.ToJsonString(FleetStatusTool.SerializerOptions);
+    }
+
+    /// <summary>
+    /// #1912 slice 1 — the <c>queue</c> section: the I/O around <see cref="QueueBoard.Project"/>, which
+    /// is where all the policy is. Reads the queue file, the settings block, free memory and the
+    /// decision ledger's newest row; decides nothing itself.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// <b>Null — the key is omitted entirely — when there is no queue file at all</b>, which is the
+    /// state of every machine that has never run <c>baton queue add</c>. An empty board rendered as if
+    /// it were a real one would tell such an operator their queue is empty when the truth is that they
+    /// have none, and <c>glass.html</c>'s absent-safe render already says nothing for a missing key.
+    /// </para>
+    /// <para>
+    /// <b>A failure here costs the section, never the tick.</b> The whole projection is what the glass
+    /// runs on; losing every room because one queue file was mid-write would be a strictly worse trade
+    /// than losing this panel for 30 seconds, which the next tick restores.
+    /// </para>
+    /// </remarks>
+    private async Task<QueueBoardView?> BuildQueueSectionAsync(
+        IReadOnlyList<QueueLiveLane> liveLanes, TextWriter diagnostics, CancellationToken cancellationToken)
+    {
+        try
+        {
+            if (!File.Exists(BatonPaths.QueueFile))
+            {
+                return null;
+            }
+
+            var snapshot = await QueueStore.LoadAsync(BatonPaths.QueueFile, cancellationToken).ConfigureAwait(false);
+            var settings = (await DaemonSettingsStore.LoadAsync(BatonPaths.SettingsFile, cancellationToken)
+                .ConfigureAwait(false)).Queue;
+            var lastDecision = await ReadNewestDecisionAsync(cancellationToken).ConfigureAwait(false);
+
+            return QueueBoard.Project(
+                snapshot.Items,
+                snapshot.Held,
+                settings,
+                liveLanes,
+                _freeGb(),
+
+                // Local, exactly as QueueScheduler.Decide reads it -- the floor's hour band is a wall
+                // clock question and QueueSettings.FloorGbAt's own parameter doc has why UTC would give
+                // the wrong band for most of the world.
+                DateTime.Now,
+                lastDecision,
+                item => item.SpecFile is { Length: > 0 } spec && File.Exists(spec),
+                ReadVerdictDecision);
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException)
+        {
+            diagnostics.WriteLine($"FleetProjectionWriter: queue section skipped this tick: {ex.Message}");
+            return null;
+        }
+    }
+
+    /// <summary>
+    /// The decision ledger's newest row, cached on the file's own (mtime, length) — the same
+    /// stat-before-read idiom <see cref="ComputePrunedInfo"/> and <see cref="ResolveTimelineAsync"/>
+    /// already use in this file, and it matters more here: the ledger is append-only, so an unguarded
+    /// <c>ReadAllAsync</c> would re-parse every decision the machine has ever made, every 30 seconds,
+    /// forever.
+    /// </summary>
+    private async Task<QueueDecisionEntry?> ReadNewestDecisionAsync(CancellationToken cancellationToken)
+    {
+        var file = new FileInfo(BatonPaths.QueueDecisionLedgerFile);
+        if (!file.Exists)
+        {
+            _newestDecision = null;
+            return null;
+        }
+
+        if (_newestDecision is { } cached
+            && cached.WrittenAtUtc == file.LastWriteTimeUtc && cached.Length == file.Length)
+        {
+            return cached.Entry;
+        }
+
+        var entries = await QueueDecisionLedgerStore
+            .ReadAllAsync(BatonPaths.QueueDecisionLedgerFile, cancellationToken).ConfigureAwait(false);
+
+        // Write order, not `At` order: the ledger is what the scheduler appended, and re-sorting it
+        // would let a row written under a clock adjustment displace the verdict actually in force.
+        var newest = entries.Count == 0 ? null : entries[^1];
+        _newestDecision = new NewestDecisionCacheEntry(file.LastWriteTimeUtc, file.Length, newest);
+        return newest;
+    }
+
+    /// <summary>
+    /// The <c>decision</c> word of an item's last recorded verdict, through
+    /// <see cref="ReviewVerdictSchema.TryParse"/> and no second reader — the same single definition
+    /// <see cref="WorkItemAdvancer"/> reads it with. Null for an item that has had no review, one whose
+    /// verdict file the operator moved, and one that no longer parses: three states the board renders
+    /// identically because none of them is a decision.
+    /// </summary>
+    private static string? ReadVerdictDecision(QueueItem item)
+    {
+        if (item.LastVerdict is not { Length: > 0 } path || !File.Exists(path))
+        {
+            return null;
+        }
+
+        try
+        {
+            return ReviewVerdictSchema.TryParse(File.ReadAllBytes(path), out var verdict, out _)
+                ? verdict.Decision?.ToString().ToLowerInvariant()
+                : null;
+        }
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
+        {
+            return null;
+        }
     }
 
     /// <summary>
@@ -959,6 +1120,10 @@ public sealed class FleetProjectionWriter : BackgroundService
     }
 
     private sealed record PrunedCacheEntry(DateTime DirMtimeUtc, int ChildCount, JsonObject? Result);
+
+    /// <summary>The decision ledger's newest row and the identity of the file it was read from —
+    /// <see cref="ReadNewestDecisionAsync"/>'s own remarks carry why the key exists.</summary>
+    private sealed record NewestDecisionCacheEntry(DateTime WrittenAtUtc, long Length, QueueDecisionEntry? Entry);
 
     /// <summary>One timeline entry, already reduced to the four fields the projection publishes.</summary>
     internal sealed record ProjectedTimelineEntry(string Type, string? Timestamp, string? StepId, int? ExitCode);
