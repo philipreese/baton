@@ -166,10 +166,9 @@ public sealed class RepeatedToolCallTests
     }
 
     /// <summary>
-    /// The room's own write invalidates its own read, through the ledger's eviction rather than through
-    /// the stat pair — see <c>CodexDynamicToolPolicy.WriteText</c> for why that pair cannot see this
-    /// case. The arm is written to land exactly there: same byte count, same tick, and it must still
-    /// re-read.
+    /// The eviction arm — see <c>CodexDynamicToolPolicy.WriteText</c> for what it is for and why the
+    /// stat pair cannot cover it. Written to land exactly on that case: same byte count, same tick,
+    /// and the next read must still execute.
     /// </summary>
     [Fact]
     public async Task The_rooms_own_write_makes_the_next_read_execute()
