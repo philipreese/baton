@@ -922,6 +922,10 @@ public sealed class FleetProjectionWriter : BackgroundService
             Directory.CreateDirectory(directory);
         }
 
+        // Same directory, therefore same volume: the atomicity promise above rests on the rename being
+        // a single MoveFileEx namespace operation, which holds only when source and target share a
+        // volume. Building the temp name from the target path is what guarantees that -- a temp
+        // directory elsewhere would turn the publish into copy+delete and void the promise (#2012).
         var tempPath = $"{path}.{Guid.NewGuid():N}.tmp";
         File.WriteAllText(tempPath, content);
 

@@ -257,10 +257,15 @@ public sealed class FleetProjectionWriterTests : IDisposable
         }
 
         Assert.NotNull(openFailure);
-        Assert.True(
-            IsTransientOpenFailure(openFailure),
-            $"a contended open raised {openFailure.GetType().Name} (HResult 0x{openFailure.HResult:X8}), " +
-            "which the reader would report as a torn file rather than retry");
+        // The HResults IsTransientOpenFailure recognises are Win32's (sharing violation, lock
+        // violation, delete-pending access denied); the classification is only meaningful there.
+        if (OperatingSystem.IsWindows())
+        {
+            Assert.True(
+                IsTransientOpenFailure(openFailure),
+                $"a contended open raised {openFailure.GetType().Name} (HResult 0x{openFailure.HResult:X8}), " +
+                "which the reader would report as a torn file rather than retry");
+        }
 
         // The body the contended open never got to see is whole -- an open failure carries no
         // information about content, which is the whole of #2012's fork.
