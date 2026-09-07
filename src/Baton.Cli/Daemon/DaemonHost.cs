@@ -76,6 +76,15 @@ public static class DaemonHost
         try
         {
             await RunHostAsync(args, onHostBuilt, mutex).ConfigureAwait(false);
+
+            // The graceful ending's own line, written HERE because the ProcessExit handler never
+            // sees this ending -- DaemonLastBreath.ProcessExitLine's doc owns which route reaches
+            // which ending, and why the `using` above is what rules this one out. Ctrl-C is the
+            // ordinary way the daemon stops, so without this the most common orderly ending was the
+            // one leaving no line. Idempotent with the handler by construction (Emit writes at most
+            // once), and on the success path only: an exception out of the host goes to the catch
+            // below, whose diagnosis line must not be pre-empted by a bare "exiting".
+            lastBreath.OnProcessExit(Environment.ExitCode);
         }
         catch (Exception ex)
         {

@@ -262,33 +262,42 @@ def read_projection_file(path: Path, now_ts: float, max_age_s: float = PROJECTIO
     case the caller falls back to `derive_snapshot_and_timelines` for this cycle (#1557 plan §5).
     `staleness` is `None` when `data` is fresh (nothing to report -- glass.html's chip stays absent,
     same optional-field convention as `pusher.writeBudgetExhaustedUntil`), else
-    `{daemon_derived_at, age_s, stale: True}` for the pushed body -- `daemon_derived_at`/`age_s` are
-    `None` when the file is absent/unreadable/malformed rather than merely old."""
+    `{daemon_derived_at, age_s, stale: True, fault}` for the pushed body -- `daemon_derived_at`/`age_s`
+    are `None` when the file is absent/unreadable/malformed rather than merely old.
+
+    `fault` (#2036 review) names WHICH of those this is, because "stale" is only one of them and the
+    verdict that pages an operator prints the word: `"absent"` (no readable file at all), `"malformed"`
+    (a file that is present and may be perfectly fresh, but whose shape this reader cannot use), or
+    `"stale"` (well-formed and simply older than `max_age_s`). Titling a fresh-but-malformed
+    projection "stale" put a word in the page title that the age in its own body contradicted."""
     try:
         raw = path.read_text(encoding="utf-8")
     except OSError:
-        return None, {"daemon_derived_at": None, "age_s": None, "stale": True}
+        return None, {"daemon_derived_at": None, "age_s": None, "stale": True, "fault": "absent"}
 
     try:
         parsed = json.loads(raw)
     except json.JSONDecodeError:
-        return None, {"daemon_derived_at": None, "age_s": None, "stale": True}
+        return None, {"daemon_derived_at": None, "age_s": None, "stale": True, "fault": "malformed"}
 
     daemon_derived_at = parsed.get("derived_at") if isinstance(parsed, dict) else None
     if not isinstance(daemon_derived_at, str):
-        return None, {"daemon_derived_at": None, "age_s": None, "stale": True}
+        return None, {"daemon_derived_at": None, "age_s": None, "stale": True, "fault": "malformed"}
 
     try:
         derived_dt = datetime.fromisoformat(daemon_derived_at.replace("Z", "+00:00"))
     except ValueError:
-        return None, {"daemon_derived_at": daemon_derived_at, "age_s": None, "stale": True}
+        return None, {"daemon_derived_at": daemon_derived_at, "age_s": None, "stale": True,
+                      "fault": "malformed"}
 
     age_s = max(0.0, now_ts - derived_dt.timestamp())
     if age_s > max_age_s:
-        return None, {"daemon_derived_at": daemon_derived_at, "age_s": round(age_s, 1), "stale": True}
+        return None, {"daemon_derived_at": daemon_derived_at, "age_s": round(age_s, 1), "stale": True,
+                      "fault": "stale"}
 
     if not isinstance(parsed.get("rooms"), list):
-        return None, {"daemon_derived_at": daemon_derived_at, "age_s": round(age_s, 1), "stale": True}
+        return None, {"daemon_derived_at": daemon_derived_at, "age_s": round(age_s, 1), "stale": True,
+                      "fault": "malformed"}
 
     return parsed, None
 
@@ -333,13 +342,34 @@ def daemon_liveness_verdict(staleness: dict | None, heartbeat_age_s: float | Non
 
     The heartbeat is read separately and only names WHICH fault this is; it never suppresses the
     alert. A live heartbeat beside a stale projection is still page-worthy (the glass is showing a
-    fleet nobody is updating), it just isn't "the daemon is gone"."""
+    fleet nobody is updating), it just isn't "the daemon is gone".
+
+    The TITLE takes its word from `read_projection_file`'s `fault` rather than saying "stale" for
+    everything that reader rejected: a present, fresh projection with a malformed `rooms` field is
+    not stale, and titling it so paged an operator with a word its own message body contradicted
+    ("fleet projection is stale" / "projection.json is 12s old"). Three words, one per fault:
+    missing, malformed, stale."""
     if staleness is None:
         return None
 
     age_s = staleness.get("age_s")
     derived_at = staleness.get("daemon_derived_at")
-    projection_age = f"{age_s:.0f}s" if isinstance(age_s, (int, float)) else "unknown (absent or unreadable)"
+    has_age = isinstance(age_s, (int, float))
+    # Callers predating the `fault` key (and hand-built dicts) still get an honest word rather than a
+    # wrong one: no age at all is the absent case, an age is the stale one -- the two this function
+    # could already tell apart. Only `malformed` needs the reader to say so.
+    fault = staleness.get("fault")
+    if fault not in ("absent", "malformed", "stale"):
+        fault = "stale" if has_age else "absent"
+
+    if fault == "absent":
+        projection = "projection.json is absent or unreadable"
+    elif fault == "malformed":
+        projection = (f"projection.json is malformed -- {age_s:.0f}s old but its shape is unusable"
+                      if has_age else "projection.json is present but unparseable")
+    else:
+        projection = f"projection.json is {age_s:.0f}s old" if has_age else "projection.json is stale"
+
     if heartbeat_age_s is None:
         heartbeat = "no readable heartbeat either -- `baton daemon` is probably not running"
     elif heartbeat_age_s > max_age_s:
@@ -349,9 +379,13 @@ def daemon_liveness_verdict(staleness: dict | None, heartbeat_age_s: float | Non
                      f"its projection tick is failing")
 
     return {
-        "magnitude": int((age_s if isinstance(age_s, (int, float)) else 0) // 3600),
-        "title": "Baton daemon: fleet projection is stale",
-        "message": (f"projection.json is {projection_age} old (derived_at={derived_at}); {heartbeat}. "
+        "magnitude": int((age_s if has_age else 0) // 3600),
+        "title": {
+            "absent": "Baton daemon: fleet projection is missing",
+            "malformed": "Baton daemon: fleet projection is malformed",
+            "stale": "Baton daemon: fleet projection is stale",
+        }[fault],
+        "message": (f"{projection} (derived_at={derived_at}); {heartbeat}. "
                     f"The glass is falling back to its own derivation.")[:200],
     }
 
@@ -6647,10 +6681,27 @@ def _selftest() -> int:
               staleness is not None and staleness["stale"] is True
               and staleness["daemon_derived_at"] == stale_derived_at)
 
+        check("read_projection_file: a merely-old file is faulted 'stale', not 'malformed'",
+              staleness is not None and staleness["fault"] == "stale")
+
         data, staleness = read_projection_file(proj_tmp / "does-not-exist.json", now)
         check("read_projection_file: an absent file falls back to derive with daemon_derived_at=None",
               data is None and staleness is not None and staleness["stale"] is True
               and staleness["daemon_derived_at"] is None)
+        check("read_projection_file: an absent file is faulted 'absent', not 'stale'",
+              staleness is not None and staleness["fault"] == "absent")
+
+        # #2036 review: the case the old single word got wrong -- present, FRESH, and unusable. Its
+        # age is seconds, so a title saying "stale" is contradicted by the age in its own body.
+        malformed_projection = proj_tmp / "malformed-projection.json"
+        malformed_projection.write_text(json.dumps({
+            "derived_at": datetime.fromtimestamp(now, tz=timezone.utc).isoformat(),
+            "rooms": {"not": "a list"},
+        }), encoding="utf-8")
+        data, staleness = read_projection_file(malformed_projection, now)
+        check("read_projection_file: a fresh file with an unusable `rooms` is faulted 'malformed'",
+              data is None and staleness is not None and staleness["fault"] == "malformed"
+              and staleness["age_s"] is not None and staleness["age_s"] < 5)
 
     # -- #1557 PR-B2 ACCEPTANCE: the pushed snapshot is identical across both projection sources
     # over one frozen fixture, or every difference is named. Runs the pusher's OWN derivation
@@ -7158,6 +7209,28 @@ def _selftest() -> int:
           live_hb_verdict is not None and "projection tick is failing" in live_hb_verdict["message"])
     check("daemon liveness: an absent/unreadable projection (age_s None) still pages",
           daemon_liveness_verdict({"daemon_derived_at": None, "age_s": None, "stale": True}, None) is not None)
+    # #2036 review: three faults, three words. Polarity in both directions -- the malformed arm must
+    # NOT say stale, and the stale arm must NOT say malformed, or one word covering all three passes.
+    check("daemon liveness: a merely-old projection is titled 'stale'",
+          stale_verdict["title"] == "Baton daemon: fleet projection is stale")
+    malformed_verdict = daemon_liveness_verdict(
+        {"daemon_derived_at": "2026-09-07T04:47:00Z", "age_s": 12.0, "stale": True,
+         "fault": "malformed"}, 3.0)
+    check("daemon liveness: a fresh-but-malformed projection is NOT titled stale",
+          malformed_verdict["title"] == "Baton daemon: fleet projection is malformed"
+          and "stale" not in malformed_verdict["title"])
+    check("daemon liveness: ... and its message says unusable rather than merely old",
+          "unusable" in malformed_verdict["message"])
+    absent_verdict = daemon_liveness_verdict(
+        {"daemon_derived_at": None, "age_s": None, "stale": True, "fault": "absent"}, None)
+    check("daemon liveness: an absent projection is titled missing, not stale",
+          absent_verdict["title"] == "Baton daemon: fleet projection is missing")
+    # A dict from before the `fault` key (or hand-built) still gets an honest word, never a wrong one.
+    check("daemon liveness: a staleness dict with no `fault` key falls back on the age it does have",
+          daemon_liveness_verdict({"daemon_derived_at": "x", "age_s": 4000.0, "stale": True}, None)["title"]
+          == "Baton daemon: fleet projection is stale"
+          and daemon_liveness_verdict({"daemon_derived_at": None, "age_s": None, "stale": True}, None)["title"]
+          == "Baton daemon: fleet projection is missing")
     check("tier table: daemon_down is urgent, so quiet hours cannot suppress it",
           ntfy_priority_for_event("daemon_down") == "urgent")
 

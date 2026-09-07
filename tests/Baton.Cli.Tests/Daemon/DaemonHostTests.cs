@@ -23,7 +23,13 @@ namespace Baton.Cli.Tests.Daemon;
 /// public <see cref="ConcurrencySlotGate.SetCaps"/> rather than that type's test-only internal reset,
 /// which this project has no IVT grant for; these tests never call <c>AcquireAsync</c>, so only the
 /// two cap values need resetting.
+/// <para>
+/// Enrolled in <see cref="ConsoleErrorCaptureCollection"/> (#1783, enforced by
+/// <c>Baton.Architecture.Tests.ConsoleSwapTests</c>): the two #2036 last-breath arms below swap
+/// <see cref="Console.Error"/>, which is a process-global every other class in this assembly shares.
+/// </para>
 /// </summary>
+[Collection(ConsoleErrorCaptureCollection.Name)]
 public class DaemonHostTests
 {
     public DaemonHostTests() => ConcurrencySlotGate.SetCaps(ConcurrencySlotGate.DefaultGlobalCap, ConcurrencySlotGate.DefaultPerVendorCap);
@@ -199,5 +205,91 @@ public class DaemonHostTests
                 Directory.Delete(tempHome, true);
             }
         }
+    }
+
+    /// <summary>
+    /// #2036 (review): the ORDINARY graceful ending leaves a line. It is the one ending the
+    /// <c>ProcessExit</c> handler never sees — <see cref="DaemonLastBreath"/>'s <c>using</c>
+    /// unregisters both handlers as this method returns, so the runtime raises <c>ProcessExit</c>
+    /// with nothing registered — and it is also the ending an operator's Ctrl-C produces, i.e. the
+    /// common one. Stopping through <see cref="IHostApplicationLifetime"/> is the same path
+    /// <c>ConsoleLifetime</c> drives a Ctrl-C down.
+    /// <para>
+    /// Reads <c>Console.Error</c> because that is the writer <c>RunDaemonAsync</c> hands
+    /// <c>DaemonLastBreath.Install</c> as the one UNDERNEATH the timestamping wrapper. Hence this
+    /// class's <see cref="ConsoleErrorCaptureCollection"/> enrollment (#1783).
+    /// </para>
+    /// </summary>
+    [Fact]
+    public async Task RunDaemonAsync_AGracefulStop_StillLeavesTheProcessExitLine()
+    {
+        var tempHome = CreateTempHome();
+        using var scope = BatonEnvironmentSnapshot.BeginScope(BatonEnvironmentSnapshot.Blank with { HomeOverride = tempHome });
+        var originalError = Console.Error;
+        var captured = new StringWriter();
+        try
+        {
+            Console.SetError(captured);
+
+            await DaemonHost.RunDaemonAsync(["--no-mutex"], StopAsSoonAsStarted)
+                .WaitAsync(TimeSpan.FromSeconds(60), TestContext.Current.CancellationToken);
+        }
+        finally
+        {
+            // RunDaemonAsync's own finally restores what it captured on the way in -- which is this
+            // test's StringWriter, not the real console -- so the real one is restored here.
+            Console.SetError(originalError);
+            if (Directory.Exists(tempHome))
+            {
+                Directory.Delete(tempHome, true);
+            }
+        }
+
+        Assert.Contains("baton daemon: process exiting", captured.ToString());
+    }
+
+    /// <summary>
+    /// #2036 (review): the catch around the host is the only route to a line when the host itself
+    /// throws (that catch's own comment in <see cref="DaemonHost"/> owns why), so it gets an arm
+    /// rather than a claim. Both polarities that matter:
+    /// the line is written, AND the exception still propagates (a catch that logged and
+    /// swallowed would turn a dead daemon into a silent success, which is the opposite of what this
+    /// change is for). <paramref name="onHostBuilt"/> is the seam: throwing there fails the run
+    /// after the host is built and before any hosted service starts.
+    /// </summary>
+    [Fact]
+    public async Task RunDaemonAsync_AnExceptionOutOfTheHost_LeavesALineAndStillPropagates()
+    {
+        var tempHome = CreateTempHome();
+        using var scope = BatonEnvironmentSnapshot.BeginScope(BatonEnvironmentSnapshot.Blank with { HomeOverride = tempHome });
+        var originalError = Console.Error;
+        var captured = new StringWriter();
+        try
+        {
+            Console.SetError(captured);
+
+            var thrown = await Assert.ThrowsAsync<InvalidOperationException>(() =>
+                DaemonHost.RunDaemonAsync(
+                    ["--no-mutex"],
+                    _ => throw new InvalidOperationException("the host could not be started"))
+                    .WaitAsync(TimeSpan.FromSeconds(60), TestContext.Current.CancellationToken));
+
+            Assert.Equal("the host could not be started", thrown.Message);
+        }
+        finally
+        {
+            Console.SetError(originalError);
+            if (Directory.Exists(tempHome))
+            {
+                Directory.Delete(tempHome, true);
+            }
+        }
+
+        var text = captured.ToString();
+        Assert.Contains("baton daemon: unhandled exception", text);
+        Assert.Contains("the host could not be started", text);
+        // The stack, not just the message: "it died here" is the whole reason the full ToString()
+        // goes into the line.
+        Assert.Contains("InvalidOperationException", text);
     }
 }

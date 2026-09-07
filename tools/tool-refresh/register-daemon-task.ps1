@@ -47,8 +47,15 @@ $batonHome = if ($env:BATON_HOME) { $env:BATON_HOME } else { Join-Path $HOME ".b
 # ZERO -- reporting success for a daemon that never ran, which is the one reading Task Scheduler
 # must never be handed. 1 rather than 70: 70 is the watchdog's own code (DaemonWatchdog.HungExitCode)
 # and must keep meaning only that.
+#
+# `[cultureinfo]::InvariantCulture` on the ToString below is load-bearing too: `:` in a custom format
+# string is the CULTURE's time separator, so on a host whose locale separates with '.' the appended
+# line would read `04.57.06` and stop matching the `[...Z]` shape every other line in `daemon.log`
+# uses -- breaking any reader that parses it, on the one line that exists to be read after an outage.
+# (The literal `Z` needs no escaping: it is not a recognised custom specifier, so it is emitted
+# verbatim, same as on the C# side.)
 $action = New-ScheduledTaskAction -Execute "powershell.exe" `
-    -Argument '-NoProfile -WindowStyle Hidden -Command "& { baton daemon *>> ''daemon.log'' }; $c = $LASTEXITCODE; if ($null -eq $c) { $c = 1 }; (''['' + [DateTime]::UtcNow.ToString(''yyyy-MM-ddTHH:mm:ss.fffZ'') + ''] baton daemon exited '' + $c) | Out-File -FilePath ''daemon.log'' -Append -Encoding unicode; exit $c"' `
+    -Argument '-NoProfile -WindowStyle Hidden -Command "& { baton daemon *>> ''daemon.log'' }; $c = $LASTEXITCODE; if ($null -eq $c) { $c = 1 }; (''['' + [DateTime]::UtcNow.ToString(''yyyy-MM-ddTHH:mm:ss.fffZ'', [cultureinfo]::InvariantCulture) + ''] baton daemon exited '' + $c) | Out-File -FilePath ''daemon.log'' -Append -Encoding unicode; exit $c"' `
     -WorkingDirectory $batonHome
 
 # This script registers unelevated, as the operator (#1770): a boot (`-AtStartup`) trigger runs

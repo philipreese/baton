@@ -102,6 +102,12 @@ internal sealed class TimestampedLineWriter : TextWriter
         }
     }
 
+    /// <summary>The lock every write takes, exposed for the same reason the seams in
+    /// <see cref="DaemonLastBreath"/> are: a test needs to hold it from another thread to drive the
+    /// wedged-writer polarity <see cref="TryFlushPendingLine"/> exists for. Nothing in production
+    /// reads it.</summary>
+    internal object LockForTest => _gate;
+
     /// <summary>
     /// #2036 — emits a trailing partial line and flushes, giving up if the lock is not free within
     /// <paramref name="timeout"/>. Returns whether it got the lock.
@@ -114,12 +120,6 @@ internal sealed class TimestampedLineWriter : TextWriter
     /// of one line. Same ordering finding as <see cref="DaemonWatchdog.CheckOnce"/>'s.
     /// </para>
     /// </summary>
-    /// <summary>The lock every write takes, exposed for the same reason the seams in
-    /// <see cref="DaemonLastBreath"/> are: a test needs to hold it from another thread to drive the
-    /// wedged-writer polarity <see cref="TryFlushPendingLine"/> exists for. Nothing in production
-    /// reads it.</summary>
-    internal object LockForTest => _gate;
-
     internal bool TryFlushPendingLine(TimeSpan timeout)
     {
         if (!Monitor.TryEnter(_gate, timeout))

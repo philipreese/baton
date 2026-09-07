@@ -1,3 +1,4 @@
+using System.Text;
 using Baton.Cli.Daemon;
 
 namespace Baton.Cli.Tests.Daemon;
@@ -125,5 +126,47 @@ public class DaemonLastBreathTests
             _ => throw new ObjectDisposedException("console"), () => { });
 
         breath.OnProcessExit(0);
+    }
+
+    /// <summary>The same invariant stated as the invariant actually is, rather than over the two
+    /// exception types the first draft happened to think of. The filter used to be
+    /// <c>IOException or ObjectDisposedException</c>, so every one of these escaped the handler —
+    /// an <see cref="EncoderFallbackException"/> is the realistic one, thrown when a stack trace
+    /// carries a character the console encoding cannot map, which is exactly the line this type
+    /// exists to write. A theory about which faults are possible is not what the caller needs; the
+    /// caller needs "never throws".</summary>
+    [Fact]
+    public void AWriteThatFailsInAnUnforeseenWay_StillDoesNotEscapeTheHandler()
+    {
+        List<Exception> failures =
+        [
+            new EncoderFallbackException("a character the console encoding cannot map"),
+            new NotSupportedException("the stream was detached"),
+            new InvalidOperationException("the writer is in a bad state"),
+        ];
+
+        foreach (var failure in failures)
+        {
+            // A fresh instance per case: Emit writes at most once, so one shared instance would
+            // short-circuit every case after the first and pass without running them.
+            var breath = DaemonLastBreath.ForTest(_ => throw failure, () => { });
+
+            breath.OnProcessExit(0);
+        }
+    }
+
+    /// <summary>The other half of the same try: the pending-tail flush reaches the real console
+    /// writer too, so a failure there must not escape either.</summary>
+    [Fact]
+    public void APendingFlushThatFails_DoesNotEscapeTheHandler()
+    {
+        var lines = new List<string>();
+        var breath = DaemonLastBreath.ForTest(
+            lines.Add, () => throw new InvalidOperationException("the wrapper is gone"));
+
+        breath.OnUnhandledException(new InvalidOperationException("the room walk threw"), isTerminating: true);
+
+        // The diagnosis still landed: it is written before the flush, which is the whole ordering.
+        Assert.Contains("the room walk threw", Assert.Single(lines));
     }
 }

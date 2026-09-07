@@ -94,11 +94,28 @@ internal sealed class DaemonLastBreath : IDisposable
                + $"(runtime says {terminating}): {detail}";
     }
 
-    /// <summary>What the process's ending leaves behind — reached by every orderly exit, including
-    /// <see cref="DaemonWatchdog"/>'s <c>Environment.Exit(70)</c> and an operator's Ctrl-C. The exit
-    /// code here is <see cref="Environment.ExitCode"/> as the runtime has it at handler time, which
-    /// is NOT guaranteed to be the code the OS finally reports; the wrapper's own
-    /// <c>baton daemon exited &lt;code&gt;</c> line is the authoritative reading of that.</summary>
+    /// <summary>
+    /// What the process's ending leaves behind. Two routes reach it, and they are not the same
+    /// route — do not read "the line" as "the handler":
+    /// <list type="bullet">
+    /// <item>the registered <c>ProcessExit</c> handler, for an ending that happens while
+    /// <see cref="DaemonHost.RunDaemonAsync(string[])"/> is still running — <see cref="DaemonWatchdog"/>'s
+    /// <c>Environment.Exit(70)</c> is the one that matters, since it fires from a supervision thread
+    /// while the host is still being awaited;</item>
+    /// <item>a direct <see cref="OnProcessExit"/> call at the shutdown site in
+    /// <c>DaemonHost.RunDaemonAsync</c>, for the ORDINARY graceful stop (an operator's Ctrl-C, or any
+    /// other signal <c>ConsoleLifetime</c> handles). That ending never reaches the handler: the host
+    /// returns, the <c>using</c> disposes this object and unregisters both handlers, and only then
+    /// does the runtime raise <c>ProcessExit</c> — with nothing left registered. The direct call is
+    /// what puts a line on the most common orderly ending, and <see cref="Emit"/>'s once-only rule is
+    /// what keeps it from doubling up with the handler.</item>
+    /// </list>
+    /// Neither route covers a kill or a launcher that never resolved; the wrapper in
+    /// <c>tools/tool-refresh/register-daemon-task.ps1</c> is the half that does. The exit code here is
+    /// <see cref="Environment.ExitCode"/> as the runtime has it at the time, which is NOT guaranteed to
+    /// be the code the OS finally reports; the wrapper's own <c>baton daemon exited &lt;code&gt;</c>
+    /// line is the authoritative reading of that.
+    /// </summary>
     internal static string ProcessExitLine(int exitCode) =>
         $"[{DateTimeOffset.UtcNow:yyyy-MM-ddTHH:mm:ss.fffZ}] baton daemon: process exiting, "
         + $"Environment.ExitCode={exitCode} (the wrapper's own line carries the code the OS reports).";
@@ -123,11 +140,25 @@ internal sealed class DaemonLastBreath : IDisposable
             _write(line);
             _flushPending();
         }
-        catch (Exception ex) when (ex is IOException or ObjectDisposedException)
+        catch (Exception)
         {
-            // Handled, not swallowed: this runs on a process that is already dying, there is nothing
-            // above it to rethrow to, and a console that can no longer be written to is exactly the
-            // condition under which nothing better can be recorded anywhere.
+            // One of the rare places a bare catch(Exception) is the correct posture, so the reason is
+            // written down rather than assumed. The invariant is about the CALLER, not about which
+            // faults are foreseeable: a ProcessExit handler that throws has nothing above it to
+            // rethrow to, and the escaping exception replaces the exit code the scheduled task reads
+            // -- on the exact path this type exists to make readable. Narrowing the filter to the
+            // faults we thought of (it was IOException/ObjectDisposedException) left the invariant
+            // resting on that list being complete, which it was not: an EncoderFallbackException (an
+            // ArgumentException) from a stack trace carrying a character the console encoding cannot
+            // map, a NotSupportedException from a detached stream, and an InvalidOperationException
+            // all escaped.
+            //
+            // Swallowed with no second write, deliberately: `_write` is already the RAW stderr handed
+            // to Install (DaemonHost passes `originalError`), so the sink that just failed IS stderr,
+            // and the only other writer in reach is Console.Error -- the TimestampedLineWriter whose
+            // shared lock this whole mechanism exists to avoid blocking on. There is nowhere better
+            // to report to, and re-entering the wrapper to try would risk the hang instead of the
+            // lost line.
         }
     }
 

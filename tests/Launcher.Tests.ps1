@@ -270,8 +270,9 @@ try {
     # 8. #2036: the `baton-daemon` action's wrapper records the exit before returning it. Runs the
     # EXACT `-Argument` string register-daemon-task.ps1 registers -- lifted out of that script's AST
     # rather than restated here, so a wrapper that stops logging its exit fails this test instead of
-    # passing a copy of itself -- against a mock `baton.exe` on PATH, in a throwaway working
-    # directory, and reads back `daemon.log`. SCOPED: this measures the wrapper's capture-log-exit
+    # passing a copy of itself -- through the real `baton.ps1` launcher on PATH down to a mock
+    # `baton.exe`, in a throwaway working directory, and reads back `daemon.log`. SCOPED: this
+    # measures the wrapper's capture-log-exit
     # shape (the half of #2036's gap 1 that lives outside the daemon process). It does NOT measure
     # what Task Scheduler does with the code it returns; that needs the live measurement #2036 asks
     # for and this test cannot stand in for it.
@@ -323,8 +324,26 @@ try {
         }
     }
 
+    # Through the REAL launcher, against a stub that WRITES TO STDERR -- both halves matter, and an
+    # earlier draft of this arm had neither (2026-09-07 review). The action's `*>> 'daemon.log'`
+    # redirects the child's native stderr, and under PowerShell 5.1 a redirected native stderr line
+    # becomes a terminating NativeCommandError wherever $ErrorActionPreference is "Stop" -- which
+    # would abort the -Command script before its trailing Out-File/`exit $c` ever run. That is #1899,
+    # and its fix is the one line `$ErrorActionPreference = "Continue"` inside baton.ps1. A mock
+    # `baton.exe` dropped straight on PATH resolves `baton` to the exe and never traverses the
+    # launcher at all, so it cannot notice if that line is deleted; only `baton.ps1` goes on PATH
+    # here (no `baton.cmd`), so `baton` resolves to the launcher, which then resolves
+    # $BATON_HOME/tools/current to the stub. A stub emitting no stderr would likewise pass whether or
+    # not the fix is present.
     $wrapperBinDir = Join-Path $tempDir "daemon-wrapper-bin"
-    New-MockBatonExe $wrapperBinDir "MOCK-DAEMON" 70 | Out-Null
+    [System.IO.Directory]::CreateDirectory($wrapperBinDir) | Out-Null
+    Copy-Item -LiteralPath $ps1Launcher -Destination (Join-Path $wrapperBinDir "baton.ps1") -Force
+    $wrapperSha = "daemon_wrapper_sha_2036"
+    $wrapperShaDir = Join-Path $toolsDir $wrapperSha
+    [System.IO.Directory]::CreateDirectory($wrapperShaDir) | Out-Null
+    Set-Content -LiteralPath $currentFile -Value "$wrapperSha`r`n"
+    $wrapperStderrLine = "MOCK-DAEMON-STDERR"
+    New-MockBatonExe $wrapperShaDir "MOCK-DAEMON" 70 $wrapperStderrLine | Out-Null
     $wrapperRunDir = Join-Path $tempDir "daemon-wrapper-run"
     [System.IO.Directory]::CreateDirectory($wrapperRunDir) | Out-Null
     $pathBeforeWrapper = $env:PATH
@@ -347,6 +366,7 @@ try {
     # passing quietly.
     $wrapperLogText = Get-Content -LiteralPath $wrapperLog -Raw
     Assert-Contains $wrapperLogText "MOCK-DAEMON daemon" "the action still captures the daemon's own output"
+    Assert-Contains $wrapperLogText $wrapperStderrLine "the action captures the daemon's stderr through the launcher"
     Assert-Contains $wrapperLogText "baton daemon exited 70" "the action records the exit code in daemon.log"
 
     Write-Host "All launcher tests PASSED!"
