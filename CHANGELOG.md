@@ -9,6 +9,59 @@ that carried them: `git show v0.35.0:src/Baton.Cli/CHANGELOG.md` (likewise `src/
 `release-please-config.json`. Everything below this line predates the split: the repo's single
 shared version through `0.14.0`.
 
+## [0.36.0](https://github.com/philipreese/baton/compare/v0.35.0...v0.36.0) (2026-09-07)
+
+
+### Features
+
+* **accounting:** Count grant-refused and repeated tool steps per execution, and add baton audit lanes ([#1963](https://github.com/philipreese/baton/issues/1963)) ([e2a75fb](https://github.com/philipreese/baton/commit/e2a75fb8038ea70e1796dd5e3c5ce7ec59edc3c4))
+* **daemon:** Write per-room timelines into the fleet projection file ([#1956](https://github.com/philipreese/baton/issues/1956)) ([2f3a816](https://github.com/philipreese/baton/commit/2f3a8162f9c7e0b292cd95eabdc04a28beab47c4))
+* **dispatch:** Record the model a worker actually ran, so a room never shows a bare vendor ([#1957](https://github.com/philipreese/baton/issues/1957)) ([27ca09d](https://github.com/philipreese/baton/commit/27ca09d5d5ca240e5e648c5983a958d2083daa70))
+* **memory:** Project the canonical memory store into vendor markdown roots as a deterministic, self-identifying cache ([#1964](https://github.com/philipreese/baton/issues/1964)) ([97b1ebf](https://github.com/philipreese/baton/commit/97b1ebf2da79b6b7f5571d4b0ef7a9660037d3f4))
+* **queue:** Drive an issue-anchored work item's lifecycle from its PR and verdict state ([#2004](https://github.com/philipreese/baton/issues/2004)) ([abd434d](https://github.com/philipreese/baton/commit/abd434dbdfaf139b16b30525ed3ee7bed07f4aa5))
+
+
+### Bug Fixes
+
+* **audit:** Fail audit-controls when a control's fault never applies ([#1994](https://github.com/philipreese/baton/issues/1994)) ([4ffd058](https://github.com/philipreese/baton/commit/4ffd058da1548cd8294972edcfe4d9af0dfcac8a))
+* **broker:** Declare codex's apply_patch as a granted Baton edit tool ([#2013](https://github.com/philipreese/baton/issues/2013)) ([9f5ff7b](https://github.com/philipreese/baton/commit/9f5ff7b2fb969722753f73af1678536a612d3d66))
+* **broker:** Give shipping and gate commands a ceiling sized to what they run ([#2014](https://github.com/philipreese/baton/issues/2014)) ([5e422c5](https://github.com/philipreese/baton/commit/5e422c516448e31174310b7746c123e51f2b776c))
+* **daemon:** Show a hung daemon on the glass, then die loudly instead of hanging quietly ([#1985](https://github.com/philipreese/baton/issues/1985)) ([e25bf74](https://github.com/philipreese/baton/commit/e25bf745f7de4c858b722facdbd2a02ed76d67be))
+* **dispatch:** Harvest a gated vendor's usage once inline when the runway hold finds no snapshot ([#1961](https://github.com/philipreese/baton/issues/1961)) ([de25e83](https://github.com/philipreese/baton/commit/de25e8360a5627d45c662ae4fdfd9cdef176d077))
+* **dispatch:** Harvest every configured vendor on a daemon tick, and send a stale snapshot down the inline-harvest path ([#2005](https://github.com/philipreese/baton/issues/2005)) ([23d9b5a](https://github.com/philipreese/baton/commit/23d9b5ad2ada6969a7c98868cdb08a2fccc6cfd9))
+* **dispatch:** Retry a contended room-registry lock with jittered backoff past 30 s ([#1983](https://github.com/philipreese/baton/issues/1983)) ([41cf2be](https://github.com/philipreese/baton/commit/41cf2bee471f150a8934b15a6e654a5b72ffc776))
+* **memory:** Refuse a bare owner/repo in --assert as the help text promises ([#2003](https://github.com/philipreese/baton/issues/2003)) ([7d4fb4e](https://github.com/philipreese/baton/commit/7d4fb4e64e11aecca770c7240c4b2b504033f917))
+* **memory:** Take the source mtime from the same read as the digest ([#1977](https://github.com/philipreese/baton/issues/1977)) ([c321a6c](https://github.com/philipreese/baton/commit/c321a6cdad5c9645966b6180a8b96d0905477ac3))
+* **queue:** Distinguish a held ledger from a corrupt one in the post-launch fault projection ([#1993](https://github.com/philipreese/baton/issues/1993)) ([ee72195](https://github.com/philipreese/baton/commit/ee72195494f6004136e566418f56505dc41ff91e))
+* **queue:** Report a lane killed after its push landed as FinishedDuringTeardown, not timed out ([#1984](https://github.com/philipreese/baton/issues/1984)) ([156682a](https://github.com/philipreese/baton/commit/156682aa2f55bb1586dd09e042069a840a7a08e1))
+* **review:** Name the granted alternative in refusal messages and review prompts ([#1962](https://github.com/philipreese/baton/issues/1962)) ([4d8766a](https://github.com/philipreese/baton/commit/4d8766a408865f87c3c504cd70629a095ddaf84b))
+* **review:** Stamp instruments on resume and supply verdicts and anchor the redispatch prompt strip to the engine's own clause ([#1960](https://github.com/philipreese/baton/issues/1960)) ([1efb246](https://github.com/philipreese/baton/commit/1efb2466eff3d15b82de077bada8067d65bb59c6))
+
+
+### Performance Improvements
+
+* **gates:** Declare the receipted fast subset as Baton's own engine verify ([#1982](https://github.com/philipreese/baton/issues/1982)) ([67972da](https://github.com/philipreese/baton/commit/67972da07ef6164244a9cfd8a14a9ad246dadb80))
+
+
+### Code Refactoring
+
+* **vendors:** Name the Claude adapter's tool names and permission flags as typed constants ([#1952](https://github.com/philipreese/baton/issues/1952)) ([f25aeb3](https://github.com/philipreese/baton/commit/f25aeb3134080a93872d26d6794ffd8de8790aad))
+
+
+### Documentation
+
+* **spec:** Qualify §3 liveness presence rule for sentinel-frozen steps ([#1974](https://github.com/philipreese/baton/issues/1974)) ([93c7ddc](https://github.com/philipreese/baton/commit/93c7ddc54a99faadbff660350e07321087588008))
+
+
+### Tests
+
+* **memory:** Cover the import undo's link-removal path ([#1969](https://github.com/philipreese/baton/issues/1969)) ([10fa9fd](https://github.com/philipreese/baton/commit/10fa9fd706c20ab0bb267ff344f1c5306c3f0cd7))
+
+
+### Miscellaneous
+
+* **repo:** Remove the dead Baton.Daemon folder and the stale per-project changelogs ([#1979](https://github.com/philipreese/baton/issues/1979)) ([1c94829](https://github.com/philipreese/baton/commit/1c948294fc8c6020e94a7375f6d9f7315e42f7f1))
+
 ## [0.35.0](https://github.com/philipreese/baton/compare/v0.34.0...v0.35.0) (2026-09-06)
 
 
