@@ -632,10 +632,15 @@ suppress it. Today that is exactly the write-withholding roles on `agy`:
 | `advise` | `advice.md` | works | works |
 | `implement` | `changes.md` | works | works |
 | `janitor` | `janitor.md`, `branch.diff` | works | works |
-| `review` | `report.md`, `verdict.json` | works | works — auto-provisioned worktree |
+| `review` | `report.md`, `verdict.json` (needs `decision`) | works | works — auto-provisioned worktree |
 | `patch` | `patch.diff` | works | works — auto-provisioned worktree |
 | `fact-check` | `findings.md` | works | works — auto-provisioned worktree |
 | `orchestrate` | `turn-actions.json` | works | works — auto-provisioned worktree |
+
+**`review`'s `verdict.json` must carry `"decision": "approve" | "block"`** — the reviewer's own call
+on the reviewed change, never derived from its findings — or the room does not satisfy its contract
+and does not settle succeeded-shaped, exactly as a missing `report.md` would not. `spec/baton.md` §13
+is the ruling; the role's own prompt names the field and gives it in its example.
 
 **`advise`'s "works" on `agy` is not the same shape as `review`'s.** Unlike the other read-shaped
 roles, `advise` keeps an explicit `write_files: true` grant (pinned reason in `WorkerRoles.json`'s

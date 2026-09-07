@@ -134,10 +134,11 @@ public static class QueueBriefTemplates
     /// <c>severity status file:line — claim</c> line per finding with its detail indented under it.
     /// </summary>
     /// <remarks>
-    /// <b>Every finding, not only the blocking ones.</b> <c>WorkItemLifecycle.IsBlocking</c> decides
-    /// whether there is a fix round; what the fixer then reads is the whole review, because a medium
-    /// finding beside the high one is context for the same change. Verbatim text, no summarizing — the
-    /// engine does not paraphrase what a worker wrote.
+    /// <b>Every finding, not only the ones the reviewer would call blocking.</b> The verdict's own
+    /// <c>decision</c> is what opens a fix round (<c>WorkItemLifecycle</c>); what the fixer then reads
+    /// is the whole review, because a medium finding beside the high one is context for the same
+    /// change — and nothing here can tell which findings the reviewer decided on anyway. Verbatim
+    /// text, no summarizing — the engine does not paraphrase what a worker wrote.
     /// </remarks>
     public static string RenderFindings(ReviewVerdict verdict)
     {
@@ -336,8 +337,14 @@ public static class QueueBriefTemplates
         it.
 
         Write your findings as a ReviewVerdict to `$BATON_OUTPUT_DIR/verdict.json` — severity
-        high/medium/low, status confirmed/refuted/unverified. A confirmed high-severity finding is what
-        blocks the PR, so a claim you have not verified is `unverified` rather than `confirmed`.
+        high/medium/low, status confirmed/refuted/unverified, and a claim you have not verified is
+        `unverified` rather than `confirmed`.
+
+        ## Verdict
+
+        Write `"decision": "approve"` or `"decision": "block"` in `verdict.json`: it is YOUR call on
+        whether this PR is ready, nothing derives it from the findings, and a verdict without it fails
+        this room's contract.
         """;
 
     private const string ReReviewDefault = """
@@ -357,7 +364,13 @@ public static class QueueBriefTemplates
         introduced.
 
         Write your findings as a ReviewVerdict to `$BATON_OUTPUT_DIR/verdict.json` — severity
-        high/medium/low, status confirmed/refuted/unverified. A confirmed high-severity finding is what
-        blocks the PR, so a claim you have not verified is `unverified` rather than `confirmed`.
+        high/medium/low, status confirmed/refuted/unverified, and a claim you have not verified is
+        `unverified` rather than `confirmed`.
+
+        ## Verdict
+
+        Write `"decision": "approve"` or `"decision": "block"` in `verdict.json`: it is YOUR call on
+        whether this PR is ready, nothing derives it from the findings, and a verdict without it fails
+        this room's contract.
         """;
 }

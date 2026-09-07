@@ -120,8 +120,13 @@ public static class ContractValidator
     {
         var error = schema switch
         {
+            // ...ForReviewContract, not the bare parse: ReviewVerdictSchema is where both halves of
+            // "valid verdict" are defined, and that method's own remarks say why the extra one sits a
+            // layer above the parse rather than inside it.
             OutputSchema.ReviewVerdict =>
-                ReviewVerdictSchema.TryParse(File.ReadAllBytes(path), out _, out var parseError) ? null : parseError,
+                ReviewVerdictSchema.TryParseForReviewContract(File.ReadAllBytes(path), out _, out var parseError)
+                    ? null
+                    : parseError,
             OutputSchema.Diff =>
                 UnifiedDiffSchema.TryParse(File.ReadAllBytes(path), out _, out var parseError) ? null : parseError,
             _ => throw new ArgumentOutOfRangeException(nameof(schema), schema, "Unknown OutputSchema case."),

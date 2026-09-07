@@ -33,15 +33,30 @@ public sealed class WorkItemAdvancerTests
     private static string PrJson(int number, string headSha) =>
         $$"""{"number":{{number}},"headRefOid":"{{headSha}}","mergeStateStatus":"CLEAN"}""";
 
+    /// <summary>
+    /// A blocking verdict whose blocking-ness is its <c>decision</c> and nothing else. The finding is
+    /// a MEDIUM one on purpose — the deleted predicate would have advanced this PR to <c>ready</c>
+    /// (spec/baton.md §13).
+    /// </summary>
     private const string BlockingVerdict = """
-        {"reviewedRef":"PR #77","summary":"one blocker","findings":[
-          {"claim":"the guard is never reached","severity":"high","status":"confirmed",
+        {"reviewedRef":"PR #77","decision":"block","summary":"one blocker","findings":[
+          {"claim":"the guard is never reached","severity":"medium","status":"confirmed",
            "anchor":{"file":"src/Baton/Queue/QueueScheduler.cs","line":62},"detail":"Decide returns first"}]}
         """;
 
+    /// <summary>The polarity partner, and crossed the other way: two CONFIRMED HIGHS the reviewer
+    /// nonetheless approved.</summary>
     private const string ApprovingVerdict = """
-        {"reviewedRef":"PR #77","summary":"nothing blocking","findings":[
-          {"claim":"a nit","severity":"low","status":"confirmed"}]}
+        {"reviewedRef":"PR #77","decision":"approve","summary":"nothing blocking","findings":[
+          {"claim":"a real one, already fixed on the branch","severity":"high","status":"confirmed"},
+          {"claim":"another","severity":"high","status":"confirmed"}]}
+        """;
+
+    /// <summary>A readable verdict the reviewer left no decision on — the arm that has to reach a
+    /// person rather than being guessed from the two confirmed highs in it.</summary>
+    private const string DecisionlessVerdict = """
+        {"reviewedRef":"PR #77","summary":"I could not decide","findings":[
+          {"claim":"maybe a problem","severity":"high","status":"confirmed"}]}
         """;
 
     /// <summary>Writes a settled room: the sentinel plus, when asked, the verdict the sentinel's own
@@ -194,6 +209,86 @@ public sealed class WorkItemAdvancerTests
             var again = await advancer.AdvanceAsync(Now.AddMinutes(1), Ct);
             Assert.Empty(again);
             Assert.Equal(WorkStage.Ready, (await ReadBackAsync()).Stage);
+        }
+        finally
+        {
+            DirectoryCleanup.DeleteRecursively(home);
+        }
+    }
+
+    [Fact]
+    public async Task A_readable_verdict_with_no_decision_reaches_the_operator_rather_than_a_guess()
+    {
+        var home = CreateTempHome();
+        using var scope = BatonEnvironmentSnapshot.BeginScope(BatonEnvironmentSnapshot.Blank with { HomeOverride = home });
+        try
+        {
+            // Same room shape as the blocking and approving arms above; the ONE thing that differs is
+            // the verdict's `decision`, so this measures that field and not a broken room.
+            var room = await WriteSettledRoomAsync(home, WorkflowOutcome.Succeeded, DecisionlessVerdict);
+            await SeedAsync(home, WorkStage.Review, room);
+
+            var fact = Assert.Single(await new WorkItemAdvancer(
+                new FakeGh(PrJson(77, PushedSha)), (_, _) => Task.FromResult<string?>(PushedSha)).AdvanceAsync(Now, Ct));
+
+            var item = await ReadBackAsync();
+            Assert.Equal(QueueDecisionEntry.Failed, fact.Decision);
+            Assert.Equal(QueueItemState.Failed, item.State);
+            Assert.True(item.Halted);
+            Assert.Equal(WorkStage.Review, item.Stage);
+            Assert.Contains("carries no decision", item.Error!, StringComparison.Ordinal);
+        }
+        finally
+        {
+            DirectoryCleanup.DeleteRecursively(home);
+        }
+    }
+
+    [Fact]
+    public async Task A_re_review_after_a_fix_lane_carries_the_last_reviews_findings_not_an_empty_section()
+    {
+        var home = CreateTempHome();
+        using var scope = BatonEnvironmentSnapshot.BeginScope(BatonEnvironmentSnapshot.Blank with { HomeOverride = home });
+        try
+        {
+            // The whole chain, because the defect only appears at the end of it (#2004 review round 1):
+            // implement → review(block) → fix → re-review. A FIX room writes no verdict, so a re-review
+            // rendered from the room that just settled says "(no findings were recorded)" and then asks
+            // the reviewer whether the new head closes findings it was never shown.
+            var reviewRoom = await WriteSettledRoomAsync(home, WorkflowOutcome.Succeeded, BlockingVerdict);
+            await SeedAsync(home, WorkStage.Review, reviewRoom, round: 1);
+
+            var advancer = new WorkItemAdvancer(
+                new FakeGh(PrJson(77, PushedSha)), (_, _) => Task.FromResult<string?>(PushedSha));
+            await advancer.AdvanceAsync(Now, Ct);
+
+            var afterBlock = await ReadBackAsync();
+            Assert.Equal(WorkStage.Fix, afterBlock.Stage);
+            Assert.Equal(Path.Combine(reviewRoom, "verdict.json"), afterBlock.LastVerdict);
+
+            // That fix lane settles cleanly with its work pushed, and produces no verdict of its own.
+            var fixRoom = await WriteSettledRoomAsync(home, WorkflowOutcome.Succeeded, verdictJson: null);
+            await QueueStore.MutateAsync(
+                BatonPaths.QueueFile,
+                s => s with { Items = [afterBlock with { State = QueueItemState.Done, RoomDirectory = fixRoom }] },
+                Ct);
+
+            await advancer.AdvanceAsync(Now.AddMinutes(5), Ct);
+
+            var item = await ReadBackAsync();
+            Assert.Equal(WorkStage.Review, item.Stage);
+
+            var brief = await File.ReadAllTextAsync(item.SpecFile, Ct);
+            Assert.Contains("Re-review PR #77", brief, StringComparison.Ordinal);
+            Assert.Contains("the guard is never reached", brief, StringComparison.Ordinal);
+            Assert.Contains("Decide returns first", brief, StringComparison.Ordinal);
+
+            // The defect's own signature, and the reason the assertions above are not enough on their
+            // own: the empty-findings text is what the brief carried before.
+            Assert.DoesNotContain("no findings were recorded", brief, StringComparison.Ordinal);
+
+            // Still text, never the path it was read back from (spec/baton.md §13).
+            Assert.DoesNotContain(reviewRoom, brief, StringComparison.OrdinalIgnoreCase);
         }
         finally
         {

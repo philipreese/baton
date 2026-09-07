@@ -21,8 +21,13 @@ public sealed class WorkItemLifecycleTests
         int round = 0) =>
         new(stage, round, "1934-lane", outcome, verdict, pr, prHead, workspaceHead);
 
-    private static ReviewVerdict Verdict(params ReviewFinding[] findings) =>
-        new("PR #42", findings, "the summary, which nothing routes on");
+    /// <summary>
+    /// A verdict whose DECISION and whose FINDINGS are set independently — which is the whole point of
+    /// the arms below: the two are crossed, so a lifecycle that had gone back to reading findings
+    /// cannot pass.
+    /// </summary>
+    private static ReviewVerdict Verdict(ReviewDecision? decision, params ReviewFinding[] findings) =>
+        new("PR #42", findings, "the summary, which nothing routes on", Decision: decision);
 
     private static ReviewFinding Finding(
         ReviewFindingSeverity severity, ReviewFindingStatus status, string claim = "the claim") =>
@@ -50,37 +55,64 @@ public sealed class WorkItemLifecycleTests
     }
 
     [Fact]
-    public void A_confirmed_high_finding_blocks_into_a_fix_round_and_bumps_the_round()
+    public void A_blocking_decision_opens_a_fix_round_and_bumps_the_round()
     {
         var transition = WorkItemLifecycle.Decide(At(
-            WorkStage.Review, verdict: Verdict(Finding(ReviewFindingSeverity.High, ReviewFindingStatus.Confirmed)),
-            round: 1));
+            WorkStage.Review, verdict: Verdict(ReviewDecision.Block), round: 1));
 
         Assert.Equal(WorkItemTransitionKind.Dispatch, transition.Kind);
         Assert.Equal(WorkStage.Fix, transition.NextStage);
         Assert.Equal(2, transition.Round);
     }
 
-    [Theory]
-    // Both fields must line up for a BLOCK, so each is falsified on its own: a high finding the
-    // reviewer refuted is not a block, and a confirmed medium one is not either.
-    [InlineData(ReviewFindingSeverity.High, ReviewFindingStatus.Refuted)]
-    [InlineData(ReviewFindingSeverity.High, ReviewFindingStatus.Unverified)]
-    [InlineData(ReviewFindingSeverity.Medium, ReviewFindingStatus.Confirmed)]
-    [InlineData(ReviewFindingSeverity.Low, ReviewFindingStatus.Confirmed)]
-    public void A_finding_that_is_not_both_high_and_confirmed_approves(
-        ReviewFindingSeverity severity, ReviewFindingStatus status)
+    [Fact]
+    public void The_decision_routes_and_the_findings_do_not_touch_it()
     {
-        var transition = WorkItemLifecycle.Decide(At(WorkStage.Review, verdict: Verdict(Finding(severity, status))));
+        // The crossed pair, and the reason this file's helper takes the two separately. Each arm is
+        // one the deleted `severity: high && status: confirmed` predicate would have got WRONG: two
+        // confirmed highs that the reviewer nonetheless approved, and a block over an empty findings
+        // array. A lifecycle still reading findings fails both, in opposite directions — which is
+        // what makes this a control rather than a restatement. spec/baton.md §13 has the ruling.
+        var approvedWithHighs = WorkItemLifecycle.Decide(At(
+            WorkStage.Review,
+            verdict: Verdict(
+                ReviewDecision.Approve,
+                Finding(ReviewFindingSeverity.High, ReviewFindingStatus.Confirmed, "one"),
+                Finding(ReviewFindingSeverity.High, ReviewFindingStatus.Confirmed, "two"))));
 
-        Assert.Equal(WorkItemTransitionKind.Stop, transition.Kind);
-        Assert.Equal(WorkStage.Ready, transition.NextStage);
+        Assert.Equal(WorkItemTransitionKind.Stop, approvedWithHighs.Kind);
+        Assert.Equal(WorkStage.Ready, approvedWithHighs.NextStage);
+
+        // The block a reviewer states without any finding an enumerated field could carry — the case
+        // the old heuristic sent to `ready`.
+        var blockedWithNothing = WorkItemLifecycle.Decide(At(
+            WorkStage.Review, verdict: Verdict(ReviewDecision.Block)));
+
+        Assert.Equal(WorkItemTransitionKind.Dispatch, blockedWithNothing.Kind);
+        Assert.Equal(WorkStage.Fix, blockedWithNothing.NextStage);
     }
 
     [Fact]
-    public void An_empty_verdict_approves_and_a_ready_item_is_then_never_dispatched_again()
+    public void A_verdict_with_no_decision_reaches_the_operator_rather_than_being_guessed_from_its_findings()
     {
-        var approved = WorkItemLifecycle.Decide(At(WorkStage.Review, verdict: Verdict()));
+        // Neither arm of the pair above: the reviewer wrote a readable verdict and no decision in it,
+        // which is a thing only a person can resolve. Asserted with findings PRESENT, so an
+        // implementation that fell back to counting them would approve or block here instead.
+        var transition = WorkItemLifecycle.Decide(At(
+            WorkStage.Review,
+            verdict: Verdict(null, Finding(ReviewFindingSeverity.High, ReviewFindingStatus.Confirmed))));
+
+        Assert.Equal(WorkItemTransitionKind.NeedsOperator, transition.Kind);
+        Assert.Contains("carries no decision", transition.Reason, StringComparison.Ordinal);
+
+        // Distinguishable from the no-verdict-at-all arm below, whose recovery is a different one.
+        Assert.DoesNotContain("no readable", transition.Reason, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void An_approving_verdict_stops_and_a_ready_item_is_then_never_dispatched_again()
+    {
+        var approved = WorkItemLifecycle.Decide(At(WorkStage.Review, verdict: Verdict(ReviewDecision.Approve)));
         Assert.Equal(WorkStage.Ready, approved.NextStage);
 
         // The item as the advancer leaves it: ready, and re-observed on the next tick.
@@ -138,7 +170,7 @@ public sealed class WorkItemLifecycleTests
         // timeout kill landed during teardown, so its verdict.json is on disk and readable. Asserted as
         // an equality against the Succeeded transition rather than a re-statement of the fix arm — that
         // is the claim ("routes exactly as Succeeded does"), and it cannot pass by accident.
-        var verdict = Verdict(Finding(ReviewFindingSeverity.High, ReviewFindingStatus.Confirmed));
+        var verdict = Verdict(ReviewDecision.Block, Finding(ReviewFindingSeverity.High, ReviewFindingStatus.Confirmed));
 
         var teardown = WorkItemLifecycle.Decide(At(
             WorkStage.Review, outcome: WorkflowOutcome.FinishedDuringTeardown, verdict: verdict, round: 1));
@@ -220,15 +252,15 @@ public sealed class WorkItemLifecycleTests
         Assert.Equal(1, review.Round);
 
         var fix = WorkItemLifecycle.Decide(At(
-            WorkStage.Review, verdict: Verdict(Finding(ReviewFindingSeverity.High, ReviewFindingStatus.Confirmed)),
-            round: review.Round));
+            WorkStage.Review, verdict: Verdict(ReviewDecision.Block), round: review.Round));
         Assert.Equal(WorkStage.Fix, fix.NextStage);
 
         var reReview = WorkItemLifecycle.Decide(At(WorkStage.Fix, round: fix.Round));
         Assert.Equal(WorkItemTransitionKind.Dispatch, reReview.Kind);
         Assert.True(reReview.Round <= WorkStages.MaxRounds);
 
-        var ready = WorkItemLifecycle.Decide(At(WorkStage.Review, verdict: Verdict(), round: reReview.Round));
+        var ready = WorkItemLifecycle.Decide(At(
+            WorkStage.Review, verdict: Verdict(ReviewDecision.Approve), round: reReview.Round));
         Assert.Equal(WorkItemTransitionKind.Stop, ready.Kind);
         Assert.Equal(WorkStage.Ready, ready.NextStage);
     }

@@ -19,10 +19,11 @@ namespace Baton.Queue;
 /// on what a worker wrote; <see cref="ReviewVerdict"/>'s own doc says severity and status are evidence
 /// for a person, never inputs to routing. This is not the Flow engine, and spec/baton.md §13 carries
 /// that distinction as an explicit ruling rather than leaving a reader to reconcile the two. What the
-/// ruling buys is paid for here in one way that matters:
-/// <see cref="IsBlocking"/> reads <b>structured, enumerated fields only</b>. Nothing here reads
-/// <see cref="ReviewVerdict.Summary"/> or a finding's <c>detail</c> — parsing model prose to pick a
-/// branch is the thing Rule 1 actually forbids, and it stays forbidden.
+/// ruling buys is paid for here in one way that matters: the branch is read off
+/// <see cref="ReviewVerdict.Decision"/>, <b>one enumerated field the reviewer wrote its decision
+/// into</b>, and nothing here reads <see cref="ReviewVerdict.Summary"/>, a finding's <c>detail</c>, or
+/// a severity — parsing model prose to pick a branch is the thing Rule 1 actually forbids, and it
+/// stays forbidden.
 /// </para>
 /// <para>
 /// <b>Pushed-ness, not the timeout word, is what discriminates re-review from continue</b> —
@@ -95,8 +96,8 @@ public static class WorkItemLifecycle
     }
 
     /// <summary>
-    /// A review lane that reached Terminal cleanly. <b>The verdict decides, and only its structured
-    /// fields do</b> — see the type's remarks.
+    /// A review lane that reached Terminal cleanly. <b>The reviewer's own decision decides</b> — see
+    /// the type's remarks, and <see cref="ReviewVerdict.Decision"/> for the field.
     /// </summary>
     private static WorkItemTransition DecideFromVerdict(WorkItemObservation observation)
     {
@@ -109,16 +110,28 @@ public static class WorkItemLifecycle
                 + $"verdict.json — read the room's report.md and decide the round by hand; {Recovery(observation.Stage)}");
         }
 
-        if (!IsBlocking(verdict))
+        // Never a guess from the findings. A decision-less verdict reaches a person with the findings
+        // intact and the round unmade — spec/baton.md §13 has the operator ruling this arm exists for,
+        // and the review role's contract is what normally stops one arriving here at all
+        // (ReviewVerdictSchema.TryParseForReviewContract).
+        if (verdict.Decision is not { } decision)
+        {
+            return WorkItemTransition.NeedsOperator(
+                $"the {WorkStages.Token(observation.Stage)} lane's verdict carries no decision — "
+                + $"read its {verdict.Findings.Count} finding(s) and the room's report.md, then carry the round by "
+                + $"hand; {Recovery(observation.Stage)}");
+        }
+
+        if (decision == ReviewDecision.Approve)
         {
             return WorkItemTransition.Stop(
                 WorkStage.Ready,
-                $"the review approved: no confirmed high-severity finding in {verdict.Findings.Count} finding(s)");
+                $"the review approved: decision 'approve' over {verdict.Findings.Count} finding(s)");
         }
 
         return Dispatch(
             observation, WorkStage.Fix,
-            $"the review blocked: {CountBlocking(verdict)} confirmed high-severity finding(s)");
+            $"the review blocked: decision 'block' over {verdict.Findings.Count} finding(s)");
     }
 
     /// <summary>
@@ -203,29 +216,6 @@ public static class WorkItemLifecycle
                 + "have fixed what it needs"
             : $"no 'baton queue' verb reopens a failed item past implement — carry the round by hand, or edit "
                 + $"this item's stage/state/round in {Status.BatonPaths.QueueFileName} yourself";
-
-    /// <summary>
-    /// <b>The one predicate that turns a verdict into a round</b>: a finding that is both
-    /// <see cref="ReviewFindingSeverity.High"/> and <see cref="ReviewFindingStatus.Confirmed"/> blocks;
-    /// anything else — medium, low, refuted, unverified, or no findings at all — approves.
-    /// </summary>
-    /// <remarks>
-    /// Two enumerated fields, deliberately. <c>status</c> alone would let an unverified suspicion open
-    /// a fix round, and <c>severity</c> alone would let a refuted high-severity claim — one the
-    /// reviewer investigated and found untrue, which the schema keeps precisely because a refutation is
-    /// evidence — do the same. Both fields are non-null on every verdict a reader ever sees:
-    /// <see cref="ReviewVerdictSchema.TryParse"/> refuses a document missing either, which is what
-    /// makes the null arms below unreachable rather than lenient.
-    /// </remarks>
-    public static bool IsBlocking(ReviewVerdict verdict)
-    {
-        ArgumentNullException.ThrowIfNull(verdict);
-        return CountBlocking(verdict) > 0;
-    }
-
-    private static int CountBlocking(ReviewVerdict verdict) =>
-        verdict.Findings?.Count(f =>
-            f is { Severity: ReviewFindingSeverity.High, Status: ReviewFindingStatus.Confirmed }) ?? 0;
 
     /// <summary>
     /// Whether the lane's work reached the PR. Both halves must be known: an unknown workspace head or

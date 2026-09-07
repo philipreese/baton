@@ -5880,8 +5880,9 @@ written:
 |---|---|---|---|
 | implement / fix / continue | succeeded-shaped, PR open | **review** | there is something to review |
 | implement / fix / continue | succeeded-shaped, no PR | **operator** | the queue never opens a PR |
-| review / re-review | succeeded-shaped, verdict approves | **ready** | the conductor merges; the queue never does |
-| review / re-review | succeeded-shaped, verdict blocks | **fix** | the brief is the findings |
+| review / re-review | succeeded-shaped, `decision: approve` | **ready** | the conductor merges; the queue never does |
+| review / re-review | succeeded-shaped, `decision: block` | **fix** | the brief is the findings |
+| review / re-review | succeeded-shaped, verdict with no decision | **operator** | never guessed from the findings |
 | review / re-review | succeeded-shaped, no readable verdict | **operator** | silence is not an approval |
 | implement / fix / continue | anything else, work pushed | **re-review** | the PR head is the workspace head |
 | implement / fix / continue | anything else, work unpushed | **continue** | finish and push it |
@@ -5904,15 +5905,34 @@ fix → re-review → fix — and stops at the dispatch after that, naming the c
 reason. Unattended overnight running is the whole point of the daemon, so an unbounded cycle is a
 frontier lane per tick with nothing putting it in front of a person.
 
-**APPROVE and BLOCK are derived from two enumerated fields and nothing else.** A finding that is both
-`severity: high` and `status: confirmed` blocks; every other combination — and an empty findings array
-— approves. Both fields are required by `ReviewVerdictSchema`, so neither can be absent. **Nothing
-reads the verdict's `summary` or a finding's `detail` to decide anything**, and that is the line this
-ruling draws: routing on a worker's prose is what Architecture Rule 1 forbids, and it stays forbidden.
-Routing on the verdict's *structured* fields is permitted **here and only here** — the conductor's
-queue is not the Flow engine, and it is the surface that was a PowerShell loop reading the same file
-with `jq` last week. `ReviewVerdict`'s "evidence for a person, never an input to routing" (decision
-0043) continues to hold where it was written: inside the engine's own routing.
+**APPROVE and BLOCK are READ from the verdict's `decision`, never derived** (operator ruling,
+2026-09-06 evening). `verdict.json` carries `"decision": "approve" | "block"` — the reviewer's own
+call — and the lifecycle routes on that field alone. A verdict that names no decision, or names a word
+this enum does not have, is **the operator's**, not a guess: the reason says "carries no decision" and
+the round is left unmade.
+
+**This replaced a heuristic — `severity: high && status: confirmed` — that was wrong in practice.**
+Today's reviewers block on mediums routinely, and on judgments no enumerated field carries at all, so
+the predicate advanced blocked PRs to `ready`: a wrong branch taken confidently, which is worse than
+one not taken. Severity and status now route **nothing**; they are evidence for a person and text for
+the fixer's brief, which is what `ReviewVerdict` always said they were.
+
+**`decision` is required for a review room to settle succeeded-shaped**, the same way `report.md` is —
+it is part of the review role's output contract, refused by
+`ReviewVerdictSchema.TryParseForReviewContract` and named in the role's own prompt
+(`WorkerRoles.json`) and in both queue review briefs. The bare `ReviewVerdictSchema.TryParse` stays
+tolerant of a missing or unrecognised one and yields `null`, deliberately: the cost ledger's finding
+counts and `baton watch`'s payload still read every verdict written before this field existed, and the
+queue can tell "the reviewer wrote no decision" apart from "there is no readable verdict at all",
+which are different messages with different recoveries.
+
+**Nothing reads the verdict's `summary` or a finding's `detail` to decide anything**, and that is the
+line this ruling draws: routing on a worker's prose is what Architecture Rule 1 forbids, and it stays
+forbidden. Routing on one *structured, enumerated* field the reviewer wrote its decision into is
+permitted **here and only here** — the conductor's queue is not the Flow engine, and it is the surface
+that was a PowerShell loop reading the same file with `jq` last week. `ReviewVerdict`'s "evidence for
+a person, never an input to routing" (decision 0043) continues to hold where it was written: inside
+the engine's own routing.
 
 **Pushed-ness, not a timeout word, discriminates re-review from continue.** A lane that runs out of
 wall clock settles `Failed` — `WorkflowOutcome` has no distinct word for it — so keying on one would
@@ -5966,6 +5986,17 @@ template, the reader's conclusion false. What decides is whether there is a verd
 (`lastVerdict`, or findings rendered for this brief), not the round number and not the stage, so a
 re-review of a review lane that stalled without writing one renders the first-review brief, which is
 the correct brief for it.
+
+**The findings a brief inlines come from the last REVIEW round, not from the room that just settled.**
+A fix lane writes no verdict, so the obvious reading — render what this room produced — handed a
+re-review "(no findings were recorded)" and then asked it whether the new head closed findings it was
+never shown. The advance falls back to `lastVerdict`, re-read through the same single verdict reader;
+the findings still travel as text and the path still does not.
+
+**Both review briefs carry the Verdict sentence** — the `decision` field, what the two words mean, and
+that a verdict without one fails the room's contract. Two files means two places for it, which is
+exactly why a test asserts it renders in both: the round it goes missing from is the round whose room
+then fails to settle.
 
 ### The recorded fact (Q4)
 

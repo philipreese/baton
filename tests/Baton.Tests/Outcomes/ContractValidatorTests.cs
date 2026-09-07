@@ -320,7 +320,7 @@ public class ContractValidatorTests
             File.WriteAllText(
                 Path.Combine(directory, "verdict.json"),
                 """
-                {"reviewedRef": "branch-x", "findings": [
+                {"reviewedRef": "branch-x", "decision": "block", "findings": [
                     {"severity": "high", "claim": "off-by-one in pager", "status": "confirmed",
                      "anchor": {"file": "src/P.cs", "line": 42}}
                 ]}
@@ -333,6 +333,56 @@ public class ContractValidatorTests
             var unsatisfied = Assert.Single(result.UnsatisfiedOutputs);
             Assert.Equal(UnsatisfiedOutputReason.SchemaViolation, unsatisfied.Reason);
             Assert.False(string.IsNullOrWhiteSpace(unsatisfied.Detail));
+        }
+        finally
+        {
+            DirectoryCleanup.DeleteRecursively(directory);
+        }
+    }
+
+    /// <summary>
+    /// The review role's own requirement beyond a readable document: <c>decision</c>. spec/baton.md
+    /// §13 is the ruling; what this pins is that the validator enforces it.
+    /// </summary>
+    /// <remarks>
+    /// The polarity partner is the arm above, whose identical fixture DOES carry a decision and IS
+    /// satisfied. Without that pairing this would pass against a validator that refused every verdict.
+    /// </remarks>
+    [Fact]
+    public void A_verdict_with_no_decision_does_not_satisfy_the_review_contract()
+    {
+        var directory = CreateTempDirectory();
+        try
+        {
+            var contract = new WorkerContract(
+                "reviewer",
+                [],
+                [new ProducedOutput("verdict.json", Schema: OutputSchema.ReviewVerdict)],
+                []);
+
+            File.WriteAllText(
+                Path.Combine(directory, "verdict.json"),
+                """
+                {"reviewedRef": "branch-x", "findings": [
+                    {"severity": "high", "claim": "off-by-one in pager", "status": "confirmed"}
+                ]}
+                """);
+
+            var result = ContractValidator.Validate(contract, directory);
+
+            var unsatisfied = Assert.Single(result.UnsatisfiedOutputs);
+            Assert.Equal(UnsatisfiedOutputReason.SchemaViolation, unsatisfied.Reason);
+            Assert.Contains("decision", unsatisfied.Detail!, StringComparison.Ordinal);
+
+            // A near-miss word lands identically: the converter reads it as absent rather than
+            // throwing, and this is where it is refused.
+            File.WriteAllText(
+                Path.Combine(directory, "verdict.json"),
+                """{"reviewedRef": "branch-x", "decision": "approved", "findings": []}""");
+
+            Assert.Equal(
+                UnsatisfiedOutputReason.SchemaViolation,
+                Assert.Single(ContractValidator.Validate(contract, directory).UnsatisfiedOutputs).Reason);
         }
         finally
         {
@@ -450,7 +500,7 @@ public class ContractValidatorTests
         {
             File.WriteAllText(
                 Path.Combine(directory, "verdict.json"),
-                """{"reviewedRef": "branch-x", "findings": [], "gate": "rejected"}""");
+                """{"reviewedRef": "branch-x", "decision": "approve", "findings": [], "gate": "rejected"}""");
             var contract = new WorkerContract(
                 "reviewer",
                 [],

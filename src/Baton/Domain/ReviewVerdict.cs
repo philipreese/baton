@@ -10,9 +10,10 @@ namespace Baton.Domain;
 /// ended; a <see cref="ReviewVerdict"/> is content a worker wrote, and per decision 0043 the engine
 /// only ever checks that it <i>parses</i> — severity and status are evidence surfaced to a person,
 /// never inputs to routing (Architecture Rule 1, decision 0038) — a rule about Flow's routing, which
-/// spec/baton.md §13 carves the conductor queue out of: <c>WorkItemLifecycle</c> may derive APPROVE and
-/// BLOCK from these two enumerated fields. That carve-out, and what it does not license, is stated
-/// there.
+/// spec/baton.md §13 carves the conductor queue out of: <c>WorkItemLifecycle</c> reads
+/// <see cref="Decision"/>, the field the reviewer wrote its own APPROVE/BLOCK into. That carve-out,
+/// and what it does not license, is stated there — severity and status remain evidence for a person
+/// and route nothing.
 /// </summary>
 /// <param name="ReviewedRef">
 /// What was reviewed — a branch, commit, or PR reference. Required: an unanchored verdict cannot
@@ -28,12 +29,85 @@ namespace Baton.Domain;
 /// engine overwrites whatever the model put here, which is what makes "a reviewer cannot claim an
 /// instrument it did not have" true rather than merely asked for.
 /// </param>
+/// <param name="Decision">
+/// <b>The reviewer's own APPROVE/BLOCK, and the only thing the conductor queue routes on</b>
+/// (operator ruling, spec/baton.md §13). Null when the document names no decision or names one this
+/// enum does not have — the parse survives that, so a decision-less verdict is still readable by the
+/// ledger and by a person, and <c>WorkItemLifecycle</c> can say "carries no decision" rather than
+/// being handed a guess. What refuses it instead is
+/// <see cref="ReviewVerdictSchema.TryParseForReviewContract"/>.
+/// </param>
 public sealed record ReviewVerdict(
     string ReviewedRef,
     IReadOnlyList<ReviewFinding> Findings,
     string? Summary = null,
     [property: JsonConverter(typeof(TolerantVerifyInstrumentListConverter))]
-    IReadOnlyList<VerifyInstrument>? Instruments = null);
+    IReadOnlyList<VerifyInstrument>? Instruments = null,
+    [property: JsonConverter(typeof(TolerantReviewDecisionConverter))]
+    ReviewDecision? Decision = null);
+
+/// <summary>
+/// What the reviewer decided the PR should do next. <b>Two values, and no third for "unsure"</b>: the
+/// absence of a decision is already expressible — the field is null — and a reviewer who cannot decide
+/// is exactly the case that has to reach a person rather than a routing arm.
+/// </summary>
+public enum ReviewDecision
+{
+    /// <summary>Nothing here blocks the PR; the conductor may merge it.</summary>
+    Approve,
+
+    /// <summary>The PR needs another round before it can merge.</summary>
+    Block,
+}
+
+/// <summary>
+/// Reads <c>decision</c> as <see langword="null"/> for anything that is not the string
+/// <c>approve</c> or <c>block</c> (case-insensitively) — a missing field, a null, a number, an object,
+/// or a word this enum does not have.
+/// </summary>
+/// <remarks>
+/// <b>Tolerant on purpose, and the tolerance is what makes the requirement enforceable.</b> The plain
+/// <see cref="JsonStringEnumConverter{T}"/> throws on an unknown value, which would make a reviewer's
+/// typo ("approved") indistinguishable from a file that is not JSON at all: both would fail
+/// <see cref="ReviewVerdictSchema.TryParse"/>, and every downstream reader — the cost ledger's finding
+/// counts, <c>baton watch</c>'s payload, the conductor's own operator message — would lose the whole
+/// document over one word. Null instead, refused one layer up by
+/// <see cref="ReviewVerdictSchema.TryParseForReviewContract"/>, so the document still reads and the
+/// refusal still happens.
+/// </remarks>
+internal sealed class TolerantReviewDecisionConverter : JsonConverter<ReviewDecision?>
+{
+    public override ReviewDecision? Read(
+        ref Utf8JsonReader reader, Type typeToConvert, JsonSerializerOptions options)
+    {
+        // Consumed whole, for the same reason the instrument converter does it: a partially-read token
+        // corrupts the parse of every sibling field.
+        var element = JsonElement.ParseValue(ref reader);
+        if (element.ValueKind != JsonValueKind.String)
+        {
+            return null;
+        }
+
+        return element.GetString() switch
+        {
+            { } value when value.Equals("approve", StringComparison.OrdinalIgnoreCase) => ReviewDecision.Approve,
+            { } value when value.Equals("block", StringComparison.OrdinalIgnoreCase) => ReviewDecision.Block,
+            _ => null,
+        };
+    }
+
+    /// <remarks>Lower-case, matching what the prompt asks a reviewer to write.</remarks>
+    public override void Write(Utf8JsonWriter writer, ReviewDecision? value, JsonSerializerOptions options)
+    {
+        if (value is null)
+        {
+            writer.WriteNullValue();
+            return;
+        }
+
+        writer.WriteStringValue(value.Value == ReviewDecision.Approve ? "approve" : "block");
+    }
+}
 
 /// <summary>
 /// Reads <c>instruments</c> as null rather than throwing whenever it is not a well-formed array of
@@ -291,6 +365,39 @@ public static class ReviewVerdictSchema
 
         verdict = parsed;
         error = null;
+        return true;
+    }
+
+    /// <summary>
+    /// <see cref="TryParse"/> plus the one thing the review ROLE requires beyond a readable document:
+    /// a <see cref="ReviewVerdict.Decision"/>. This is what <c>ContractValidator</c> evaluates for
+    /// <c>OutputSchema.ReviewVerdict</c>; spec/baton.md §13 is the ruling that makes the field
+    /// mandatory and says what it costs.
+    /// </summary>
+    /// <remarks>
+    /// <b>A second method rather than a check inside <see cref="TryParse"/>, and the split is the
+    /// point.</b> "Valid verdict" is still defined once, here, in this class — this method is that
+    /// definition plus a role requirement, not a second reader. What the extra layer buys the readers
+    /// downstream is spec/baton.md §13's paragraph, not restated here. What it buys the code is the
+    /// contrast with severity and status, which ARE refused inside <see cref="TryParse"/>: a null
+    /// there is silently WRONG rather than absent, since their enum defaults read as <c>high</c> and
+    /// <c>confirmed</c>. A null decision reads as exactly what it is.
+    /// </remarks>
+    public static bool TryParseForReviewContract(byte[] bytes, out ReviewVerdict? verdict, out string? error)
+    {
+        if (!TryParse(bytes, out verdict, out error))
+        {
+            return false;
+        }
+
+        if (verdict!.Decision is null)
+        {
+            verdict = null;
+            error = "'decision' must be \"approve\" or \"block\" — the review's own routing decision, "
+                + "which nothing derives from the findings.";
+            return false;
+        }
+
         return true;
     }
 }

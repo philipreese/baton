@@ -144,7 +144,14 @@ public sealed class WorkItemAdvancer
 
         // The findings travel as TEXT, never the verdict's path -- QueueBriefTemplates' own remarks
         // have the mechanism and spec/baton.md §13 the ruling.
-        var findings = verdict is null ? null : QueueBriefTemplates.RenderFindings(verdict);
+        //
+        // The LAST REVIEW's verdict, not the room that just settled: a fix lane produces none, so a
+        // re-review dispatched straight after one rendered "(no findings were recorded)" and asked the
+        // reviewer to say whether a new head closed findings it could not see (#2004 review round 1).
+        // `item.LastVerdict` is the path the previous review round already recorded here, read back
+        // through the same single reader below.
+        var findingsVerdict = verdict ?? ReadLastVerdict(item);
+        var findings = findingsVerdict is null ? null : QueueBriefTemplates.RenderFindings(findingsVerdict);
 
         // The issue's own instructions, which a continuation still needs — read off the ITEM, because
         // the brief file this would otherwise be parsed out of is rewritten every round
@@ -321,6 +328,14 @@ public sealed class WorkItemAdvancer
             return null;
         }
     }
+
+    /// <summary>
+    /// The verdict the item's last review round recorded, re-read off <see cref="QueueItem.LastVerdict"/>
+    /// — null when there has been no review yet, when the operator moved that room, or when the file no
+    /// longer parses. A brief renders without findings in that case rather than failing the round.
+    /// </summary>
+    private static ReviewVerdict? ReadLastVerdict(QueueItem item) =>
+        item.LastVerdict is { Length: > 0 } path && File.Exists(path) ? TryReadVerdict(path) : null;
 
     /// <summary>The workspace's own HEAD, or null when it cannot be read — a worktree the operator
     /// removed, or one with no commits. Null reads as "not pushed".</summary>

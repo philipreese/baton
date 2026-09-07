@@ -128,6 +128,28 @@ public sealed class QueueBriefTemplatesTests
         Assert.Contains("What the previous round found", brief, StringComparison.Ordinal);
     }
 
+    [Theory]
+    [InlineData(WorkStage.Review, null)]
+    [InlineData(WorkStage.ReReview, @"C:\baton\rooms\queue-1934-abcd\verdict.json")]
+    public void Both_review_briefs_tell_the_reviewer_to_write_the_decision(WorkStage stage, string? lastVerdict)
+    {
+        using var templates = new TempDirectory("baton_templates_");
+
+        // BOTH templates, because they are two separate files since #2004's first round: a sentence
+        // added to one of them is a reviewer told about `decision` in some rounds and not others, and
+        // the round it goes missing in is the one whose room then fails its contract.
+        var brief = QueueBriefTemplates.Compose(
+            stage, Item() with { Stage = stage, LastVerdict = lastVerdict },
+            new QueueBriefTemplates.BriefContext(
+                PullRequest: 1941, HeadSha: "deadbeef", Round: 2,
+                Findings: lastVerdict is null ? null : QueueBriefTemplates.RenderFindings(Verdict())),
+            templates.Path);
+
+        Assert.Contains(@"""decision"": ""approve""", brief, StringComparison.Ordinal);
+        Assert.Contains(@"""decision"": ""block""", brief, StringComparison.Ordinal);
+        Assert.Contains("this room's contract", brief, StringComparison.Ordinal);
+    }
+
     [Fact]
     public void An_implement_brief_carries_the_standing_rules_and_the_closes_line()
     {
