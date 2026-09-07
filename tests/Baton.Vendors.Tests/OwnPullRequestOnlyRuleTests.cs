@@ -104,9 +104,9 @@ public class OwnPullRequestOnlyRuleTests
     }
 
     /// <summary>
-    /// Which grants the rule governs, asserted against the real role catalog rather than a
-    /// hand-built grant: <c>implement</c>'s shell is unscoped, and <c>review</c>'s allowlists
-    /// <c>gh pr view*</c> because reading someone else's PR is the whole of that role's job.
+    /// The two ends of <see cref="OwnPullRequestOnlyRule.AppliesTo"/>, asserted against the REAL role
+    /// catalog rather than a hand-built grant, so a catalog edit that widened or narrowed either
+    /// role's shell patterns fails here. That method states why the two differ.
     /// </summary>
     [Fact]
     public void The_rule_governs_implement_and_exempts_review()
