@@ -538,6 +538,22 @@ public sealed class CodexDynamicToolPolicy
             }
         }
 
+        // #2002 re-review HIGH: the same eviction WriteText does, on the tool codex is told to edit
+        // WITH. Without it, a `dotnet build` that failed before the patch is replayed after it and
+        // then refused with "nothing this room did since could have changed it" — a plausible wrong
+        // answer, and this is the primary write path, not the secondary one.
+        //
+        // BEFORE the write loop, not after: this method's summary says an I/O error or the leaf
+        // re-check can throw partway through, leaving earlier files on disk, and eviction after the
+        // loop would then be skipped on exactly the tree that DID change. Evicting for a patch that
+        // then fails costs a re-run, which is the direction ForgetAllCommands' own doc takes.
+        // A Delete invalidates a cached read of that path as surely as a write does.
+        foreach (var (_, path, _) in planned)
+        {
+            _repeats.ForgetRead(path);
+        }
+        _repeats.ForgetAllCommands();
+
         foreach (var (kind, path, content) in planned)
         {
             if (kind == CodexPatchOperationKind.Delete)

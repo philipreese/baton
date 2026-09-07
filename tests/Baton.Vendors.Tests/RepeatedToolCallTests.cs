@@ -87,6 +87,77 @@ public sealed class RepeatedToolCallTests
     }
 
     /// <summary>
+    /// #2002 re-review HIGH: the arm above, driven through <c>apply_patch</c> — the tool codex is told
+    /// to edit WITH (#2013), which landed on main after this branch and carried none of the eviction.
+    /// <c>baton_write_text</c> is the secondary path, so the arm above was covering the wrong tool.
+    /// <para>
+    /// The polarity partner is the second half: same clock advance, same command, no patch in
+    /// between, still replayed. And the read arm is deliberately constructed so only the eviction can
+    /// pass it — the patch swaps <c>two</c> for <c>TWO</c>, the same byte count, and the file's mtime
+    /// is put back to what it was, so the ledger's stat pair is IDENTICAL across the patch. That is
+    /// the same-length-same-tick case <c>RepeatedToolCallLedger.ForgetRead</c> exists for, made
+    /// deterministic rather than hoped for.
+    /// </para>
+    /// </summary>
+    [Fact]
+    public async Task A_patch_makes_the_next_identical_command_execute_and_the_next_read_too()
+    {
+        using var fixture = new RepeatFixture(commandCeiling: null, StablePattern);
+        var path = fixture.WriteWorkspaceFile("edit.txt", "one\ntwo\nthree\n");
+        var stamp = File.GetLastWriteTimeUtc(path);
+        var length = new FileInfo(path).Length;
+
+        await fixture.RunAsync(StableCommand);
+        var beforePatch = await fixture.ReadAsync(path);
+        var patched = await fixture.ExecuteAsync(
+            CodexDynamicToolPolicy.ApplyPatchTool,
+            new
+            {
+                input = "*** Begin Patch\n*** Update File: edit.txt\n one\n-two\n+TWO\n three\n"
+                        + "*** End Patch",
+            });
+        // The stat pair the ledger judges on, restored: same length by construction, and now the same
+        // mtime too, so a build without the eviction MUST replay the pre-patch bytes here.
+        File.SetLastWriteTimeUtc(path, stamp);
+
+        fixture.Clock.Advance(TimeSpan.FromSeconds(2));
+        var afterPatch = await fixture.RunAsync(StableCommand);
+        var reRead = await fixture.ReadAsync(path);
+
+        // Polarity partner: same advance, same command, no patch in between.
+        fixture.Clock.Advance(TimeSpan.FromSeconds(2));
+        var withoutPatch = await fixture.RunAsync(StableCommand);
+
+        Assert.True(patched.Success, patched.Text);
+        Assert.Equal(length, new FileInfo(path).Length);
+        Assert.Equal("one\ntwo\nthree\n", beforePatch.Text);
+        Assert.DoesNotContain("replayed:", afterPatch.Text, StringComparison.Ordinal);
+        Assert.Equal("one\nTWO\nthree\n", reRead.Text);
+        Assert.Contains("[replayed: identical command 2 s ago]", withoutPatch.Text, StringComparison.Ordinal);
+    }
+
+    /// <summary>
+    /// The third write path, and the reason the population was enumerated from the tree rather than
+    /// from the two tools the <c>WriteFiles</c> grant check gates: <c>baton_write_output</c> writes a
+    /// declared output under the WORKER CONTRACT rather than under the grant, so a grep for the grant
+    /// check alone would have missed it. It evicts like the other two.
+    /// </summary>
+    [Fact]
+    public async Task A_declared_output_write_makes_the_next_identical_command_execute()
+    {
+        using var fixture = new RepeatFixture(commandCeiling: null, StablePattern);
+
+        await fixture.RunAsync(StableCommand);
+        var wrote = await fixture.ExecuteAsync(
+            CodexDynamicToolPolicy.WriteOutputTool, new { name = "report.md", content = "# findings" });
+        fixture.Clock.Advance(TimeSpan.FromSeconds(2));
+        var afterWrite = await fixture.RunAsync(StableCommand);
+
+        Assert.True(wrote.Success, wrote.Text);
+        Assert.DoesNotContain("replayed:", afterWrite.Text, StringComparison.Ordinal);
+    }
+
+    /// <summary>
     /// The same rule for the OTHER writer: a command the ledger cannot prove read-only may have
     /// rewritten the tree, so it evicts every other remembered command output — while keeping its own,
     /// which is what the arm above proves is still there to keep.
