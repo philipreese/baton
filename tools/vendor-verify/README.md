@@ -93,7 +93,7 @@ error: one verification session took the operator's plan from **33% used to 78%*
 ### The model tier, and why it is not a blanket downgrade
 
 Checks run on **the cheapest model each vendor offers, at the lowest effort** —
-`claude --model haiku --effort low`, `agy --model gemini-3.6-flash-low`. Most checks measure a
+`claude --model haiku --effort low`, `agy --model gemini-3.8-flash-low`. Most checks measure a
 **mechanism**: does a hook fire, is a flag honoured, is an elicitation routed. The model has no say
 in any of that, so paying for a frontier model buys nothing.
 
