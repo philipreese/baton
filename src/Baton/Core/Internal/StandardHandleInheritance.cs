@@ -5,10 +5,9 @@ namespace Baton.Core.Internal;
 
 /// <summary>
 /// Clears <c>HANDLE_FLAG_INHERIT</c> on this process's own stdout and stderr handles, so nothing
-/// Baton spawns can keep them open after Baton exits (#2030). Like <see cref="SafeJobObjectHandle"/>
-/// and <see cref="FreePhysicalMemory"/> beside it this is plain Win32 surface, not the deleted
-/// aer-core Rust FFI that CLAUDE.md's Architecture Rule 3 scopes; the rule names the exceptions it
-/// allows and this is the third.
+/// Baton spawns can keep them open after Baton exits (#2030). One of the narrow Win32 P/Invokes
+/// CLAUDE.md's Architecture Rule 3 enumerates, alongside <see cref="SafeJobObjectHandle"/> and
+/// <see cref="FreePhysicalMemory"/> beside it — read the rule there for what it still forbids.
 /// </summary>
 /// <remarks>
 /// <para>

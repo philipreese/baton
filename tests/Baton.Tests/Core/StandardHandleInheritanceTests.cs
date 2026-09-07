@@ -19,10 +19,23 @@ namespace Baton.Tests.Core;
 /// The invariant is a property of the handle, so proving it on an owned handle proves it.
 /// </para>
 /// <para>
-/// The control arm is read first and is what makes the green arm mean anything: it shows this
-/// harness CAN observe the blocked case, and — after killing the child — that it can observe EOF at
-/// all. A harness that never saw EOF would pass the control and fail the green arm; one that always
-/// saw EOF would pass the green arm while proving nothing.
+/// Three facts, read in order. The <b>harness</b> arm shows this reader can observe EOF at all (a
+/// harness that never could would pass the control and fail the green arm for the wrong reason); the
+/// <b>control</b> arm shows an inheritable write end is held open by a spawned child; the
+/// <b>green</b> arm shows clearing the flag ends that. Only the last differs from the control by the
+/// <c>DisableFor</c> call, which is what makes it red-before-green by construction rather than by a
+/// temporary edit.
+/// </para>
+/// <para>
+/// <b>Why the harness arm does not simply kill the control's child and watch EOF arrive.</b> xUnit
+/// runs classes in this assembly in parallel, and an inheritable handle is duplicated into
+/// <i>every</i> process any other test starts while it is open — the neighbouring process-tree tests
+/// spawn constantly. "Killing the only holder" is therefore not a fact this test can establish, and
+/// asserting it would surface cross-test interference as a bogus harness failure. Extra holders can
+/// only reinforce the control arm's "no EOF", so it is unaffected; the harness arm's pipe is
+/// non-inheritable so nothing else can take it. The green arm has one narrow exposure left, stated
+/// rather than hidden: a concurrent spawn landing between the pipe's construction and the
+/// <c>DisableFor</c> call two statements later would inherit it.
 /// </para>
 /// </remarks>
 public class StandardHandleInheritanceTests
@@ -37,6 +50,22 @@ public class StandardHandleInheritanceTests
 
     /// <summary>Ceiling on an EOF that should already have happened. Absorbs a contended runner.</summary>
     private static readonly TimeSpan EofBound = TimeSpan.FromSeconds(30);
+
+    /// <summary>The harness arm: a write end nothing can inherit, so EOF is the only possible
+    /// outcome once this test's own copy is closed. Read first — every other assertion here is about
+    /// the difference between EOF and no EOF, which means nothing if EOF is unobservable.</summary>
+    [Fact]
+    public async Task Harness_NothingHoldsTheWriteEnd_ReaderSeesEof()
+    {
+        using var pipe = new AnonymousPipeServerStream(PipeDirection.In, HandleInheritability.None);
+        pipe.DisposeLocalCopyOfClientHandle();
+
+        Task<int> read = Task.Run(pipe.ReadByte);
+
+        await Task.WhenAny(read, Task.Delay(EofBound, TestContext.Current.CancellationToken));
+        Assert.True(read.IsCompleted, "no EOF with no holder at all -- this reader cannot observe EOF");
+        Assert.Equal(-1, await read);
+    }
 
     [Fact]
     public async Task Control_InheritableHandle_ChildHoldsTheWriteEndOpenSoTheReaderNeverSeesEof()
@@ -55,15 +84,6 @@ public class StandardHandleInheritanceTests
                 "the reader saw EOF while the child was still alive -- this arm is supposed to reproduce the "
                 + "wedge (#2030), so either the child did not inherit the handle or it died early");
             Assert.False(child.HasExited, "the child exited early; this arm proves nothing about a live holder");
-
-            child.Kill(entireProcessTree: true);
-            await child.WaitForExitAsync(TestContext.Current.CancellationToken);
-
-            // The discriminating half: without this, "never completed" could just mean the harness
-            // cannot observe EOF at all, and the green arm below would be untrustworthy.
-            await Task.WhenAny(read, Task.Delay(EofBound, TestContext.Current.CancellationToken));
-            Assert.True(read.IsCompleted, "no EOF even after the only holder was killed -- the harness cannot see EOF");
-            Assert.Equal(-1, await read);
         }
         finally
         {
