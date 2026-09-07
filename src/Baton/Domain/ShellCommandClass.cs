@@ -30,9 +30,9 @@ public enum ShellCommandClass
 /// 2026-09-06: the ceiling is per-command-class).
 /// <para>
 /// <b>Vendor-neutral on purpose, and enforced on exactly one path today</b>
-/// (<c>Baton.Vendors.CodexDynamicToolPolicy</c>) — which path, and why only that one, is
-/// <c>spec/baton.md</c> §9's per-command-class paragraph. It lives in the engine so that the next
-/// adapter to enforce a ceiling reads this table rather than growing one.
+/// (<c>Baton.Vendors.CodexDynamicToolPolicy</c>). Which path that is and why only that one:
+/// <see cref="ShellCommandCeilings"/>'s own remark, and the register entry it cites. Living in the
+/// engine is what makes the next adapter to enforce a ceiling read this table rather than grow one.
 /// </para>
 /// <para>
 /// <b>Deliberately not shared with <c>Baton.Vendors.ShellCommandPatternMatcher</c></b>, which does its
