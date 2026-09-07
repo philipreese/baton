@@ -1210,15 +1210,6 @@ public sealed partial class AgyWorkerAdapter : IWorkerAdapter, IPermissionGrantT
         return invocation.PermissionScope ?? DefaultPermissionScope;
     }
 
-    /// <summary>
-    /// A byte count rendered for the dispatch roster — whole bytes below 1 KiB, one decimal above, so a
-    /// short skill does not read as <c>0.0 KB</c>.
-    /// </summary>
-    private static string DescribeSize(int byteCount) =>
-        byteCount < 1024
-            ? $"{byteCount} B"
-            : string.Create(System.Globalization.CultureInfo.InvariantCulture, $"{byteCount / 1024.0:0.0} KB");
-
     private static string BuildPrompt(
         string promptTemplate, WorkerContract contract, bool isWindows, string? workingDirectory,
         IReadOnlyList<SkillPackage>? declaredSkills = null)
@@ -1291,7 +1282,7 @@ public sealed partial class AgyWorkerAdapter : IWorkerAdapter, IPermissionGrantT
             var canonicalSkills = SkillPackageReader.DiscoverPackages(workingDirectory);
             foreach (var package in canonicalSkills)
             {
-                var size = DescribeSize(Encoding.UTF8.GetByteCount(SkillInlining.InlinedSkillBody(package)));
+                var size = SkillInlining.DescribeSize(Encoding.UTF8.GetByteCount(SkillInlining.InlinedSkillBody(package)));
                 items.Add(new WorkerCapabilityItem($"{package.Name} (inlined, {size})", "skill", package.Description));
             }
         }

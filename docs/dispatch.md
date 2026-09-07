@@ -218,15 +218,18 @@ can actually consume, and nothing else about #1151 ships yet:
 |---|---|---|
 | claude | the package's files are **projected** into `<workspace>/.claude/skills/<name>/`, where the CLI reads project skills — **inside the operator's own checkout**, see "Where the projection lands" below | `<name> (to be projected)` |
 | agy | the `SKILL.md` body is **inlined** into the dispatch prompt under a `# Skill: <name>` header AER emits, since #1572 measured that agy does not read `.agents/skills` on its own | `<name> (inlined, <size>)` |
-| codex | the `SKILL.md` body is **inlined** exactly as agy's is — same helper, same header, same order (#2044) — but for a **declared** set only (`--skill`, or a binding's `Skills`). codex runs no `<workspace>/skills/` scan, so a repository's own `skills/` reaches a codex worker only when the binding names it — `CodexWorkerAdapter.BuildPrompt`'s `declaredSkills` parameter is the register for why | `Skills (declared): <names>` — never `(inlined, <size>)`, which only the scanning path can measure |
+| codex | the `SKILL.md` body is **inlined** exactly as agy's is — same helper, same header, same order (#2044) — but for a **declared** set only (`--skill`, or a binding's `Skills`). codex runs no `<workspace>/skills/` scan, so a repository's own `skills/` reaches a codex worker only when the binding names it — `CodexWorkerAdapter.BuildPrompt`'s `declaredSkills` parameter is the register for why | `Skills (declared): <names>` — never `(inlined, <size>)`, which only the scanning path can measure, and the declared line is vendor-agnostic, so it does not say *inlined* for codex either. That is why a declared set is **refused** when its bodies together reach #748's oversize-prompt threshold, naming each package and its size: the bound stands in for the disclosure this line cannot give (`SkillInlining.InlineSkills`) |
 
-**Both realizations are predictions at roster time**, and only claude's is written in the future tense.
-Neither has happened when the line is printed: the projection is placed later, by the dispatcher, and
-the inlining happens later still, at prompt build. Claude's is tensed because it is the one whose
+**All three realizations are predictions at roster time**, and only claude's is written in the future
+tense. None has happened when the line is printed: the projection is placed later, by the dispatcher,
+and the inlining happens later still, at prompt build. Claude's is tensed because it is the one whose
 prediction can come out *false* — a destination holding different bytes is kept, so a declared file may
-not be placed (#1929 review). Inlining's cannot: the size it reports is measured on the same string the
-prompt gets (`SkillInlining.InlinedSkillBody`), so `(inlined, <size>)` is a prediction that a
-dispatch cannot contradict.
+not be placed (#1929 review). Agy's scanned line cannot: the size it reports is measured on the same
+string the prompt gets (`SkillInlining.InlinedSkillBody`), so `(inlined, <size>)` is a prediction that a
+dispatch cannot contradict. Codex's prediction is the vendor-agnostic `Skills (declared): <names>` line
+every declaring binding gets (`src/Baton.Cli/DispatchCommand.cs`'s skill-roster block), and it predicts
+*names* rather than a placement or a size — which is why the declared set is size-bounded instead of
+size-disclosed (`SkillInlining.InlineSkills`'s remark is the register for that bound).
 
 **When the projection happens, and what it will not do.** Nothing is written while a binding is merely
 resolved: `baton decide`, `run` and `resume` all resolve bindings that may never dispatch, and the

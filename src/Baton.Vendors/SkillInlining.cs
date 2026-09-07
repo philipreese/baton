@@ -1,4 +1,5 @@
 using System.Text;
+using Baton.Dispatch;
 
 namespace Baton.Vendors;
 
@@ -31,19 +32,26 @@ public static class SkillInlining
     /// (or discovery) order (#1151). Returns the prompt unchanged if no canonical skill packages exist.
     /// </summary>
     /// <remarks>
-    /// <b>Uncapped, and the roster is what discloses it.</b> Every package's body goes in whole, so the
-    /// worker's context budget is spent in proportion to what the repository carries, and one non-trivial
-    /// package pushes the dispatch onto #748's oversize-prompt path. There is no argv hazard there
-    /// (<c>OversizePromptWrapper</c> swaps the inline prompt for a <c>BATON_PROMPT_FILE</c> reference far
-    /// below the platform ceiling), so the cost is context rather than failure — which is why the agy
-    /// adapter discloses a per-package size in the dispatch roster instead of silently truncating. A cap
-    /// belongs with the manifest #1151's slice 1 still owes, not here.
+    /// <b>Every body goes in whole, and the two arms answer that cost differently (#2044 review
+    /// MEDIUM).</b> A <i>scanned</i> package is uncapped, and what covers it is disclosure: the roster
+    /// prints a per-package <c>(inlined, &lt;size&gt;)</c> measured on this same string
+    /// (<c>AgyWorkerAdapter.DiscoverCapabilitiesAsync</c> is where that is built; docs/dispatch.md's
+    /// realization table is the operator-facing register). A <i>declared</i> set gets no such line — the
+    /// roster prints declared skills by name alone — so it is <b>bounded</b> instead: reaching
+    /// <see cref="CoreDispatcher.OversizePromptThreshold"/> refuses with
+    /// <see cref="SkillInliningOversizeException"/>, naming each package and its size. Fail closed, and
+    /// deliberately that number rather than a second one: #748's threshold is this project's only
+    /// existing statement of how long a prompt stops being ordinary. Reaching it is not itself a failure
+    /// — <c>OversizePromptWrapper</c> swaps the inline prompt for a <c>BATON_PROMPT_FILE</c> reference far
+    /// below the platform ceiling, so neither arm has an argv hazard — it is the one ceiling on record,
+    /// borrowed here for a cost that is undisclosed rather than merely large. The predicate counts
+    /// characters, the unit the threshold is in; the message renders bytes, the unit the roster prints. A
+    /// per-package budget of its own belongs with the manifest #1151's slice 1 still owes, not here.
     /// </remarks>
     /// <param name="workingDirectory">
     /// The workspace scanned for <c>skills/&lt;name&gt;/</c> when no set is declared. A caller that
-    /// realizes <b>declared skills only</b> passes null — codex does, because its roster reports no
-    /// <c>skill</c> items, and inlining what a scan found while the roster says "none discovered" is the
-    /// silent context cost the per-package size line exists to prevent.
+    /// realizes <b>declared skills only</b> passes null — codex does, for the reason
+    /// <c>CodexWorkerAdapter.BuildPrompt</c>'s <c>declaredSkills</c> parameter states canonically.
     /// </param>
     /// <param name="declaredSkills">
     /// #1151: the binding's own declared skill set — <see cref="WorkerInvocation.Skills"/> is the
@@ -52,6 +60,9 @@ public static class SkillInlining
     /// set does not need: those packages may come from the account-wide library, and inlining writes
     /// nothing anywhere.
     /// </param>
+    /// <exception cref="SkillInliningOversizeException">
+    /// The declared set alone reaches the bound above. A scan cannot raise this: see the remark.
+    /// </exception>
     public static string InlineSkills(
         string prompt, string? workingDirectory, IReadOnlyList<SkillPackage>? declaredSkills = null)
     {
@@ -59,6 +70,7 @@ public static class SkillInlining
         if (declaredSkills is { Count: > 0 })
         {
             packages = declaredSkills;
+            RefuseOversizeDeclaredSet(packages);
         }
         else
         {
@@ -82,4 +94,34 @@ public static class SkillInlining
         }
         return sb.ToString();
     }
+
+    /// <summary>
+    /// The declared arm's bound, stated in the remark above and enforced here only.
+    /// </summary>
+    private static void RefuseOversizeDeclaredSet(IReadOnlyList<SkillPackage> declaredSkills)
+    {
+        var bodies = declaredSkills.Select(InlinedSkillBody).ToList();
+        var inlinedLength = bodies.Sum(body => body.Length);
+        if (inlinedLength < CoreDispatcher.OversizePromptThreshold)
+        {
+            return;
+        }
+
+        throw new SkillInliningOversizeException(
+            declaredSkills.Select(package => package.Name).ToList(),
+            declaredSkills
+                .Select((package, i) => $"'{package.Name}' ({DescribeSize(Encoding.UTF8.GetByteCount(bodies[i]))})")
+                .ToList(),
+            inlinedLength);
+    }
+
+    /// <summary>
+    /// A byte count rendered for an operator — whole bytes below 1 KiB, one decimal above, so a short
+    /// skill does not read as <c>0.0 KB</c>. One renderer, because the roster's <c>(inlined, &lt;size&gt;)</c>
+    /// suffix and the oversize refusal above state the same quantity to the same reader.
+    /// </summary>
+    internal static string DescribeSize(int byteCount) =>
+        byteCount < 1024
+            ? $"{byteCount} B"
+            : string.Create(System.Globalization.CultureInfo.InvariantCulture, $"{byteCount / 1024.0:0.0} KB");
 }

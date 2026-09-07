@@ -199,6 +199,44 @@ public sealed class SkillBindingRealizationTests : IDisposable
         Assert.DoesNotContain("---", prompt, StringComparison.Ordinal);
     }
 
+    /// <summary>
+    /// #2044 review MEDIUM: a declared set is inlined whole and the roster prints declared skills by
+    /// name with no size, so the set is bounded — at #748's oversize-prompt threshold, the one number
+    /// this project already states a prompt by. Both polarities, one condition apart: a package over the
+    /// bound refuses and names itself, the same package under it inlines.
+    /// </summary>
+    [Fact]
+    public void A_declared_skill_over_the_inlining_bound_refuses_and_names_itself()
+    {
+        var oversize = new string('x', Baton.Dispatch.CoreDispatcher.OversizePromptThreshold);
+        WriteAccountPackage("big-skill", $"# Big\n{oversize}");
+        WriteAccountPackage("small-skill", "# Small\nBe brief.");
+        using var scope = AccountLibraryScope();
+
+        var entry = new WorkerBindingConfigEntry(
+            Adapter: "codex", Contract: Contract, PromptTemplate: "Do the work.",
+            Timeout: TimeSpan.FromMinutes(5), WorkingDirectory: _workspace, Skills: ["big-skill"]);
+
+        var ex = Assert.Throws<SkillInliningOversizeException>(() => WorkerBindingResolver.Resolve(
+            new Dictionary<string, WorkerBindingConfigEntry> { ["worker"] = entry },
+            new Dictionary<string, IWorkerAdapter> { ["codex"] = new CodexWorkerAdapter() }));
+        Assert.Contains("big-skill", ex.Message, StringComparison.Ordinal);
+        Assert.Contains("KB", ex.Message, StringComparison.Ordinal);
+
+        // agy's declared arm is the same helper and the same bound -- no per-vendor branch to drift.
+        Assert.Throws<SkillInliningOversizeException>(() => WorkerBindingResolver.Resolve(
+            new Dictionary<string, WorkerBindingConfigEntry> { ["worker"] = entry with { Adapter = "agy" } },
+            new Dictionary<string, IWorkerAdapter> { ["agy"] = new AgyWorkerAdapter() }));
+
+        // The control: an ordinary package under the bound still reaches the prompt, so the refusal
+        // above is about size and not about declaring a skill at all.
+        var bindings = WorkerBindingResolver.Resolve(
+            new Dictionary<string, WorkerBindingConfigEntry> { ["worker"] = entry with { Skills = ["small-skill"] } },
+            new Dictionary<string, IWorkerAdapter> { ["codex"] = new CodexWorkerAdapter() });
+        var prompt = Assert.IsType<Baton.Mutation.WorkerBinding.Process>(bindings["worker"]).Target.PromptText!;
+        Assert.Contains("# Skill: small-skill", prompt, StringComparison.Ordinal);
+    }
+
     [Fact]
     public void An_unknown_skill_on_a_hand_authored_binding_refuses_at_resolve()
     {
