@@ -35,7 +35,7 @@ public sealed class RepeatedToolCallTests
     [Fact]
     public async Task Three_identical_commands_are_one_execution_one_replay_and_one_refusal()
     {
-        using var fixture = new RepeatFixture(StablePattern);
+        using var fixture = new RepeatFixture(commandTimeout: null, StablePattern);
 
         var first = await fixture.RunAsync(StableCommand);
         fixture.Clock.Advance(TimeSpan.FromSeconds(12));
@@ -65,7 +65,7 @@ public sealed class RepeatedToolCallTests
     [Fact]
     public async Task Three_identical_git_status_calls_are_three_executions()
     {
-        using var fixture = new RepeatFixture("git status*");
+        using var fixture = new RepeatFixture(commandTimeout: null, "git status*");
 
         var results = new List<CodexDynamicToolResult>();
         for (var i = 0; i < 3; i++)
@@ -87,7 +87,7 @@ public sealed class RepeatedToolCallTests
     [Fact]
     public async Task An_identical_command_past_the_window_executes_again()
     {
-        using var fixture = new RepeatFixture(StablePattern);
+        using var fixture = new RepeatFixture(commandTimeout: null, StablePattern);
 
         await fixture.RunAsync(StableCommand);
         fixture.Clock.Advance(RepeatedToolCallLedger.Window + TimeSpan.FromSeconds(1));
@@ -107,7 +107,7 @@ public sealed class RepeatedToolCallTests
     {
         var sleep = OperatingSystem.IsWindows() ? "ping -n 30 127.0.0.1" : "sleep 30";
         using var fixture = new RepeatFixture(
-            "ping*", "sleep*", commandTimeout: TimeSpan.FromMilliseconds(150));
+            TimeSpan.FromMilliseconds(150), "ping*", "sleep*");
 
         var result = await fixture.RunAsync(sleep + " &");
 
@@ -128,7 +128,7 @@ public sealed class RepeatedToolCallTests
     [Fact]
     public async Task An_unchanged_file_is_replayed_then_refused()
     {
-        using var fixture = new RepeatFixture(StablePattern);
+        using var fixture = new RepeatFixture(commandTimeout: null, StablePattern);
         var path = fixture.WriteWorkspaceFile("notes.md", "one");
 
         var first = await fixture.ReadAsync(path);
@@ -150,7 +150,7 @@ public sealed class RepeatedToolCallTests
     [Fact]
     public async Task A_file_rewritten_by_another_process_is_read_again()
     {
-        using var fixture = new RepeatFixture(StablePattern);
+        using var fixture = new RepeatFixture(commandTimeout: null, StablePattern);
         var path = fixture.WriteWorkspaceFile("build.log", "before");
 
         var first = await fixture.ReadAsync(path);
@@ -173,7 +173,7 @@ public sealed class RepeatedToolCallTests
     [Fact]
     public async Task The_rooms_own_write_makes_the_next_read_execute()
     {
-        using var fixture = new RepeatFixture(StablePattern);
+        using var fixture = new RepeatFixture(commandTimeout: null, StablePattern);
         var path = fixture.WriteWorkspaceFile("draft.md", "aaa");
 
         var first = await fixture.ReadAsync(path);
@@ -184,6 +184,36 @@ public sealed class RepeatedToolCallTests
         Assert.Equal("aaa", first.Text);
         Assert.Equal("bbb", second.Text);
         Assert.DoesNotContain("replayed:", second.Text, StringComparison.Ordinal);
+    }
+
+    /// <summary>
+    /// A command that RAN is the broker's other write path, and the loud one — see
+    /// <c>RepeatedToolCallLedger.ForgetAllReads</c>. Same construction as the write-tool arm above
+    /// (same byte count, same tick, so the stat pair cannot see it), except the writer is the shell.
+    /// The second arm is the polarity partner: a command that was REFUSED wrote nothing, so it must
+    /// not throw the read cache away.
+    /// </summary>
+    [Fact]
+    public async Task A_command_that_ran_makes_the_next_read_execute_and_a_refused_one_does_not()
+    {
+        using var fixture = new RepeatFixture(commandTimeout: null, StablePattern);
+        var path = fixture.WriteWorkspaceFile("built.txt", "aaa");
+
+        await fixture.ReadAsync(path);
+        await fixture.RunAsync(StableCommand);
+        File.WriteAllText(path, "bbb");
+        var afterCommand = await fixture.ReadAsync(path);
+
+        // Second arm: a refused command (backgrounded) never ran, so the read it follows is still a
+        // repeat. Without this, a build that cleared the cache on EVERY run-command call would pass.
+        var cached = fixture.WriteWorkspaceFile("cached.txt", "x");
+        await fixture.ReadAsync(cached);
+        await fixture.RunAsync(StableCommand + " &");
+        var afterRefusal = await fixture.ReadAsync(cached);
+
+        Assert.Equal("bbb", afterCommand.Text);
+        Assert.DoesNotContain("replayed:", afterCommand.Text, StringComparison.Ordinal);
+        Assert.Contains("replayed: identical read", afterRefusal.Text, StringComparison.Ordinal);
     }
 
     /// <summary>
@@ -201,17 +231,9 @@ public sealed class RepeatedToolCallTests
 
     private sealed class RepeatFixture : IDisposable
     {
-        public RepeatFixture(params string[] shellPatterns)
-            : this(shellPatterns, null)
-        {
-        }
-
-        public RepeatFixture(string shellPattern, string secondPattern, TimeSpan? commandTimeout)
-            : this([shellPattern, secondPattern], commandTimeout)
-        {
-        }
-
-        private RepeatFixture(string[] shellPatterns, TimeSpan? commandTimeout)
+        // One constructor, so a future arm wanting two patterns and no custom timeout cannot land on
+        // an overload that does not exist. The timeout leads because `params` has to trail.
+        public RepeatFixture(TimeSpan? commandTimeout, params string[] shellPatterns)
         {
             Root = Path.Combine(Path.GetTempPath(), $"baton-repeat-{Guid.NewGuid():N}");
             Workspace = Path.Combine(Root, "workspace");
