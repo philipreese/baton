@@ -413,6 +413,43 @@ def _sabotage_audit_controls() -> None:
         )
 
 
+@fixture("fleet-glass-selftest")
+def _sabotage_fleet_glass_selftest() -> None:
+    """#1912. A fixture rather than an allowlist entry, because this member has the one failure mode
+    an allowlist cannot speak to: it slices its subject out of `glass.html` by marker, so a rename or
+    a gutted block would leave it passing while testing nothing. Two arms, and the second is the one
+    that earns the fixture -- a broken PANEL must red it, AND a missing MARKER must red it too."""
+    glass_src = (ROOT / "tools" / "fleet-glass" / "glass.html").read_text(encoding="utf-8")
+    selftest_src = (ROOT / "tools" / "fleet-glass" / "glass.selftest.mjs").read_text(encoding="utf-8")
+
+    def run(glass_text: str, arm: str) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            dest = Path(td)
+            (dest / "glass.html").write_text(glass_text, encoding="utf-8")
+            (dest / "glass.selftest.mjs").write_text(selftest_src, encoding="utf-8")
+            proc = subprocess.run(
+                ["node", str(dest / "glass.selftest.mjs")],
+                cwd=dest,
+                capture_output=True,
+                text=True,
+                env=_clean_git_env(),
+            )
+            assert proc.returncode != 0, (
+                f"fleet-glass-selftest exited {proc.returncode} on {arm}; expected non-zero"
+            )
+
+    # Arm 1: the panel still renders, but stops marking which item launches next.
+    broken_panel = glass_src.replace('class="q-next"', 'class="q-plain"')
+    assert broken_panel != glass_src, "q-next mutation target not found in glass.html"
+    run(broken_panel, "a panel that no longer marks the next item")
+
+    # Arm 2: the extraction anchor is gone. Without this arm a marker rename would silently make the
+    # member vacuous, which is exactly the failure the member cannot detect about itself.
+    no_marker = glass_src.replace(">>> QUEUE-PANEL-BEGIN", ">>> QUEUE-PANEL-RENAMED")
+    assert no_marker != glass_src, "QUEUE-PANEL-BEGIN marker not found in glass.html"
+    run(no_marker, "a renamed extraction marker")
+
+
 # Allowlist for gate members where sabotage is not meaningful, each with a one-line justification.
 ALLOWLIST: dict[str, str] = {
     "audit-staleness-ext-selftest": "pure synthetic selftest already proving internal polarity without live GitHub dependencies",
