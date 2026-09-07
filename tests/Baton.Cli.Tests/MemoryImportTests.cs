@@ -1216,7 +1216,7 @@ public sealed class MemoryImportTests : IDisposable
             Sha256: Convert.ToHexString(SHA256.HashData(goneBytes)).ToLowerInvariant(),
             ModifiedUtc: File.GetLastWriteTimeUtc(gonePath),
             SizeBytes: goneBytes.Length);
-        File.Delete(gonePath);
+        FileCleanup.EnsureDeleted(gonePath);
 
         // The control: a file in the same source that is still there.
         var presentPath = Path.Combine(directory, "user_present.md");
