@@ -10,7 +10,9 @@ namespace Baton.Cli.Tests;
 /// against strings. This file covers the seam that decides WHICH strings — and it does so against real
 /// git, because the worktree-convergence claim rests entirely on this type probing
 /// <c>--git-common-dir</c> rather than <c>--git-dir</c>, and no string-level test can tell those apart.
-/// A real <c>git worktree add</c> is the only instrument that can.
+/// A real <c>git worktree add</c> is the only instrument that can. The exception is #2042's
+/// <c>IsWorkTreeRoot</c> negatives, which are synthesized because git cannot be asked to produce a
+/// malformed <c>.git</c>; each says so at its own site.
 /// </summary>
 public sealed class RepositoryIdentityResolverTests
 {
@@ -175,6 +177,82 @@ public sealed class RepositoryIdentityResolverTests
 
             Assert.True(File.Exists(Path.Combine(linked, ".git")));
             Assert.True(RepositoryIdentityResolver.IsWorkTreeRoot(linked));
+        }
+        finally
+        {
+            DirectoryCleanup.DeleteRecursively(root);
+        }
+    }
+
+    /// <summary>
+    /// #2042 (carried from #1908's review). The predicate used to accept ANY entry named <c>.git</c>, so
+    /// a file that is no pointer read as a work-tree root and a decoded reading landing on one would be
+    /// filed under a repository that was never there. <b>Synthesized rather than made with real git, of
+    /// necessity</b> — git cannot produce a malformed <c>.git</c>, so the negatives this needs have no
+    /// real-git instrument, and the real-git positives in this file are what keep the tightening from
+    /// being "reject everything".
+    /// </summary>
+    [Fact]
+    public void A_git_file_that_is_not_a_gitdir_pointer_is_not_a_work_tree_root()
+    {
+        var root = NewTempDirectory();
+        try
+        {
+            var decoy = Path.Combine(root, "decoy");
+            Directory.CreateDirectory(decoy);
+            File.WriteAllText(Path.Combine(decoy, ".git"), "notes about this directory\n");
+            Assert.False(RepositoryIdentityResolver.IsWorkTreeRoot(decoy));
+
+            // Its own arm: a zero-length file is what a truncated or interrupted write leaves behind,
+            // and reads differently from a file with the wrong content.
+            var empty = Path.Combine(root, "empty");
+            Directory.CreateDirectory(empty);
+            File.WriteAllText(Path.Combine(empty, ".git"), string.Empty);
+            Assert.False(RepositoryIdentityResolver.IsWorkTreeRoot(empty));
+
+            // Both polarities in one: the same file shape WITH the prefix is accepted -- so the arms
+            // above are the prefix check rather than the file arm having been dropped outright -- and
+            // the target it names does not exist, which pins the deliberate narrowness the predicate's
+            // remarks state. Shape, not validity: this must stay true.
+            var pointer = Path.Combine(root, "pointer");
+            Directory.CreateDirectory(pointer);
+            File.WriteAllText(
+                Path.Combine(pointer, ".git"),
+                $"gitdir: {Path.Combine(root, "gone", ".git", "worktrees", "x")}\n");
+            Assert.True(RepositoryIdentityResolver.IsWorkTreeRoot(pointer));
+        }
+        finally
+        {
+            DirectoryCleanup.DeleteRecursively(root);
+        }
+    }
+
+    /// <summary>
+    /// The directory half of the same tightening: a stray directory named <c>.git</c> is not a
+    /// repository, and <c>HEAD</c> is the entry git always writes into one. See
+    /// <see cref="A_git_file_that_is_not_a_gitdir_pointer_is_not_a_work_tree_root"/> for why these are
+    /// synthesized.
+    /// </summary>
+    [Fact]
+    public void A_directory_named_git_that_holds_no_head_is_not_a_work_tree_root()
+    {
+        var root = NewTempDirectory();
+        try
+        {
+            var stray = Path.Combine(root, "stray");
+            Directory.CreateDirectory(Path.Combine(stray, ".git"));
+            Assert.False(RepositoryIdentityResolver.IsWorkTreeRoot(stray));
+
+            // A DIRECTORY named HEAD is not the file git writes, and must not satisfy it either --
+            // Directory.Exists would have, which is the weaker check this is not.
+            var wrongKind = Path.Combine(root, "wrong-kind");
+            Directory.CreateDirectory(Path.Combine(wrongKind, ".git", "HEAD"));
+            Assert.False(RepositoryIdentityResolver.IsWorkTreeRoot(wrongKind));
+
+            // Polarity control: add the HEAD file and the same stray directory qualifies. Its content is
+            // never read, which is the "shape, not validity" negative the remarks state.
+            File.WriteAllText(Path.Combine(stray, ".git", "HEAD"), "ref: refs/heads/main\n");
+            Assert.True(RepositoryIdentityResolver.IsWorkTreeRoot(stray));
         }
         finally
         {
