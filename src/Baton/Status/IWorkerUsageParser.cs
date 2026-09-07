@@ -154,4 +154,25 @@ public interface IWorkerUsageParser
     /// Default empty.
     /// </summary>
     IReadOnlyList<string> ToolInvocationKeys(string rawLine) => [];
+
+    /// <summary>
+    /// #2002: the raw SHELL command lines <paramref name="rawLine"/> announces — the argument of
+    /// claude's <c>Bash</c> and of agy's <c>run_command</c>, and nothing else. Feeds
+    /// <c>Mutation.TokenBudgetMonitor</c>'s dominant-shape reading, so a tool-step-cap arrest can say
+    /// what the steps were spent on rather than only how many there were.
+    /// <para>
+    /// <b>Each parser names its own vendor's shell tool</b> (Adapter Isolation), rather than reading
+    /// <c>Baton.Vendors.ShellCommandPatternMatcher.ShellToolNames</c> — which this assembly cannot
+    /// reference anyway, the dependency running the other way. That constant is canonical for the
+    /// grant/display seam it documents; this is the usage-parsing seam, and the two answer different
+    /// questions about the same tool names.
+    /// </para>
+    /// <para>
+    /// Empty for codex, and that is the same real gap <see cref="ToolInvocationKeys"/> states: an
+    /// <c>mcp_tool_call</c> names the tool and never its arguments, so no command line is derivable.
+    /// A vendor that cannot answer contributes nothing rather than a fabricated shape.
+    /// </para>
+    /// Default empty.
+    /// </summary>
+    IReadOnlyList<string> ShellCommandLines(string rawLine) => [];
 }

@@ -97,6 +97,12 @@ public sealed class TokenBudgetMonitor
     // from "the monitor watched and genuinely measured a zero peak."
     private long? _peakBilledInWindow;
     private int _toolStepCount;
+    // #2002 rule 3: how many shell commands this stream announced, and how many of each SHAPE
+    // (Status.CommandShape). Bounded by the number of DISTINCT shapes rather than by the step count --
+    // the room this was measured on held 8 shapes across 207 run_command steps -- so the pathological
+    // stream this exists to describe is the cheap one to hold.
+    private readonly Dictionary<string, int> _commandShapeCounts = new(StringComparer.Ordinal);
+    private int _shellCommandCount;
     private bool _arrested;
     private ArrestReason? _arrestReason;
 
@@ -179,6 +185,9 @@ public sealed class TokenBudgetMonitor
         // usage lines, the same pattern the incremental usage parse cannot see at all.
         var toolStepDelta = _usageParser.CountToolSteps(line);
         var usageParsed = _usageParser.TryParseIncrementalUsage(line, out var usage) && usage is not null;
+        // #2002: read off every line for the same reason the tool-step count above is, and outside the
+        // lock because normalising is pure string work.
+        var shellCommands = _usageParser.ShellCommandLines(line);
 
         ArrestReason? newlyArmed = null;
         lock (_lock)
@@ -186,6 +195,13 @@ public sealed class TokenBudgetMonitor
             if (toolStepDelta > 0)
             {
                 _toolStepCount += toolStepDelta;
+            }
+
+            foreach (var commandLine in shellCommands)
+            {
+                _shellCommandCount++;
+                var shape = Status.CommandShape.Normalize(commandLine);
+                _commandShapeCounts[shape] = _commandShapeCounts.TryGetValue(shape, out var seen) ? seen + 1 : 1;
             }
 
             if (usageParsed)
@@ -371,5 +387,34 @@ public sealed class TokenBudgetMonitor
     public int SnapshotToolStepCount()
     {
         lock (_lock) { return _toolStepCount; }
+    }
+
+    /// <summary>
+    /// #2002 rule 3: the one normalised command shape holding MORE THAN HALF of this stream's shell
+    /// commands, with its share as a whole percent — or <see langword="null"/> when no shape does, when
+    /// the stream announced no shell command at all, or when this vendor's stream does not carry
+    /// command lines (codex; see <see cref="IWorkerUsageParser.ShellCommandLines"/>).
+    /// <para>
+    /// <b>Strictly more than half</b>, so the claim "the steps were spent on this" is true of a
+    /// majority rather than merely of a plurality. The share is over SHELL commands, not over all tool
+    /// steps: it answers "what were the commands", and mixing reads into the denominator would
+    /// understate a room that polled with every command it issued. The measured #2002 arm-A agy room
+    /// reads 53 % here.
+    /// </para>
+    /// </summary>
+    public (string Shape, int Percent)? SnapshotDominantCommandShape()
+    {
+        lock (_lock)
+        {
+            if (_shellCommandCount == 0)
+            {
+                return null;
+            }
+
+            var dominant = _commandShapeCounts.OrderByDescending(pair => pair.Value).First();
+            return dominant.Value * 2 > _shellCommandCount
+                ? (dominant.Key, (int)Math.Round(dominant.Value * 100.0 / _shellCommandCount))
+                : null;
+        }
     }
 }
