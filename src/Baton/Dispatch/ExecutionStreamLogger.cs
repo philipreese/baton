@@ -135,6 +135,10 @@ public sealed class ExecutionStreamLogger
         // #2009: the hooks' grant-decision log. Unlike the two constants above, its name is declared in
         // this layer (GrantDecisionLog.FileName), so it is referenced rather than duplicated.
         || string.Equals(fileName, GrantDecisionLog.FileName, StringComparison.Ordinal)
+        // #1971: the engine-run verify step's own capture of the verify command's combined stream.
+        // Referenced, not duplicated, for the same reason as the line above it — its name is declared
+        // where it is written (Mutation.VerifyRunner.RawOutputFileName).
+        || string.Equals(fileName, Mutation.VerifyRunner.RawOutputFileName, StringComparison.Ordinal)
         || string.Equals(fileName, StdoutTruncationMarkerFileName, StringComparison.Ordinal)
         || string.Equals(fileName, StderrTruncationMarkerFileName, StringComparison.Ordinal)
         || string.Equals(fileName, StdoutWriteFailureMarkerFileName, StringComparison.Ordinal)

@@ -311,4 +311,283 @@ public sealed class VerifyRunnerTests
             Baton.Tests.Shared.FileCleanup.Delete(markerPath);
         }
     }
+
+    /// <summary>
+    /// #1971, the measured failure: on <c>dispatch-implement-1b79802b</c> and <c>-311af7d4</c> the
+    /// <c>test-no-build</c> member's tail was <c>CAPTURED (#1594)</c> markers and stream-logger
+    /// access-denied warnings — noise Baton's OWN test fixtures print to stderr as they exercise those
+    /// paths — end to end, with the failing assertion nowhere in it. The fixture below reproduces that
+    /// exact shape: a real failure summary near the top of the member's block, then more than a full
+    /// tail's worth of fixture noise after it.
+    /// <para>
+    /// The discriminating assertion is <c>DoesNotContain</c> on the STREAM-LOGGER line, not on the
+    /// CAPTURED one: that warning literally reads "Warning: Failed to initialize execution stream
+    /// logger", so an implementation that promotes failure lines with a bare <c>Contains("Failed")</c>
+    /// re-surfaces the very line the filter just dropped, and a test that only excludes CAPTURED passes
+    /// against it.
+    /// </para>
+    /// </summary>
+    [Fact]
+    public async Task The_tail_drops_fixture_noise_carries_the_failure_summary_and_leaves_the_raw_stream_on_disk()
+    {
+        var fixtureDirectory = Path.Combine(Path.GetTempPath(), $"baton-1971-{Guid.NewGuid():N}");
+        var rawDirectory = Path.Combine(fixtureDirectory, "artifacts");
+        try
+        {
+            Directory.CreateDirectory(fixtureDirectory);
+            var noise = string.Join("\n", Enumerable.Range(0, 40).Select(index =>
+                $"CAPTURED (#1594): the worker's declared output(s) 'report-{index}.md' were never written by the worker "
+                + "itself. baton captured its terminal response to '.captured-response.md' -- the declared output(s) were "
+                + "NOT written, and this execution settles Indeterminate pending conductor resolution ('baton resolve').\n"
+                + $"Warning: Failed to initialize execution stream logger for 'C:\\rooms\\execution_{index}': Access to the "
+                + "path 'C:\\rooms\\stdout.log' is denied. Stream logging disabled for this execution."));
+
+            var stream = string.Join("\n",
+                "  pass  fmt-check  (exit 0)",
+                noise,
+                "  Failed Baton.Tests.Rooms.RoomStateTests.The_room_settles_Failed [24 ms]",
+                "  Error Message:",
+                "   Assert.Equal() Failure: Values differ",
+                noise,
+                "  FAIL  test-no-build  (exit 1)",
+                "GATES: FAIL 1 of 25 -- test-no-build",
+                string.Empty);
+            await File.WriteAllTextAsync(
+                Path.Combine(fixtureDirectory, "stream.txt"), stream, TestContext.Current.CancellationToken);
+
+            // Relative filename against an explicit working directory: no quoting inside the `cmd /c`
+            // argument, so the fixture path can never be mangled by the shell.
+            var outcome = await VerifyRunner.RunProcessAsync(
+                "cmd", ["/c", "type stream.txt & exit 1"], fixtureDirectory, TestContext.Current.CancellationToken,
+                rawOutputDirectory: rawDirectory);
+
+            Assert.False(outcome.Passed);
+            Assert.Equal(["test-no-build"], outcome.FailingMembers);
+            Assert.NotNull(outcome.Tail);
+            Assert.True(outcome.Tail!.Length <= 4000, $"tail was {outcome.Tail.Length} chars, want <= 4000");
+
+            Assert.Contains("Assert.Equal() Failure: Values differ", outcome.Tail, StringComparison.Ordinal);
+            Assert.Contains("Failed Baton.Tests.Rooms.RoomStateTests", outcome.Tail, StringComparison.Ordinal);
+            Assert.DoesNotContain("Failed to initialize execution stream logger", outcome.Tail, StringComparison.Ordinal);
+            Assert.DoesNotContain("CAPTURED (#1594)", outcome.Tail, StringComparison.Ordinal);
+
+            // Nothing is lost: the filter is a display rule, and the whole unfiltered stream sits one
+            // file open away, in the same directory as the execution's other artifacts.
+            var rawPath = Path.Combine(rawDirectory, VerifyRunner.RawOutputFileName);
+            Assert.True(File.Exists(rawPath), $"the raw verify output was not written to '{rawPath}'");
+            var raw = await File.ReadAllTextAsync(rawPath, TestContext.Current.CancellationToken);
+            Assert.Contains("Failed to initialize execution stream logger", raw, StringComparison.Ordinal);
+            Assert.Contains("CAPTURED (#1594)", raw, StringComparison.Ordinal);
+            Assert.Contains(VerifyRunner.RawOutputFileName, outcome.Tail, StringComparison.Ordinal);
+        }
+        finally
+        {
+            Baton.Tests.Shared.DirectoryCleanup.DeleteRecursively(fixtureDirectory);
+        }
+    }
+
+    /// <summary>
+    /// #1971, the half the noise filter alone does not buy: a failure summary can be pushed out of the
+    /// tail by ordinary, non-noise output too (a long build log after the failing test). The promoted
+    /// excerpt is what keeps it readable — nothing here matches <c>FixtureNoiseLine</c>, so a filter
+    /// with no promotion step fails this and passes the test above.
+    /// </summary>
+    [Fact]
+    public async Task A_failure_summary_above_a_full_tails_worth_of_ordinary_output_is_still_promoted_into_the_tail()
+    {
+        var fixtureDirectory = Path.Combine(Path.GetTempPath(), $"baton-1971-{Guid.NewGuid():N}");
+        try
+        {
+            Directory.CreateDirectory(fixtureDirectory);
+            var padding = string.Join("\n", Enumerable.Range(0, 60).Select(index => $"  ordinary build chatter line {index} {new string('y', 90)}"));
+            var stream = string.Join("\n",
+                "   Assert.True() Failure: the projection was not rebuilt",
+                padding,
+                "  FAIL  test-no-build  (exit 1)",
+                "GATES: FAIL 1 of 25 -- test-no-build",
+                string.Empty);
+            await File.WriteAllTextAsync(
+                Path.Combine(fixtureDirectory, "stream.txt"), stream, TestContext.Current.CancellationToken);
+
+            var outcome = await VerifyRunner.RunProcessAsync(
+                "cmd", ["/c", "type stream.txt & exit 1"], fixtureDirectory, TestContext.Current.CancellationToken);
+
+            Assert.False(outcome.Passed);
+            Assert.NotNull(outcome.Tail);
+            Assert.True(outcome.Tail!.Length <= 4000, $"tail was {outcome.Tail.Length} chars, want <= 4000");
+            Assert.Contains("Assert.True() Failure: the projection was not rebuilt", outcome.Tail, StringComparison.Ordinal);
+            // Polarity: the tail is still the command's own LAST lines, not only the promoted excerpt.
+            Assert.Contains("ordinary build chatter line 59", outcome.Tail, StringComparison.Ordinal);
+            // No directory was supplied, so no raw file is written and no pointer line is fabricated.
+            Assert.DoesNotContain(VerifyRunner.RawOutputFileName, outcome.Tail, StringComparison.Ordinal);
+        }
+        finally
+        {
+            Baton.Tests.Shared.DirectoryCleanup.DeleteRecursively(fixtureDirectory);
+        }
+    }
+
+    /// <summary>
+    /// #1971 review: the noise filter's MIS-CUT direction, which the two arms above do not pin — they
+    /// assert the noise goes and the failure stays, never that a genuine failure line QUOTING one of
+    /// the two noise messages survives. It has to: a failing test about the #1594 capture marker, or
+    /// about the stream logger's own warning, prints that text inside its assertion output, and a
+    /// filter that dropped it would hand the reader a tail with the failure's own lines removed while
+    /// looking, from the outside, exactly like a clean filter. Both anchors are exercised, and the
+    /// second is the one a substring filter fails: <c>Assert.Contains() Failure: 'Warning: Failed to
+    /// initialize...'</c> is a failure line whose text contains a whole noise message.
+    /// </summary>
+    [Fact]
+    public async Task A_failure_line_that_quotes_a_noise_message_is_kept_while_the_noise_itself_is_dropped()
+    {
+        var fixtureDirectory = Path.Combine(Path.GetTempPath(), $"baton-1971-{Guid.NewGuid():N}");
+        try
+        {
+            Directory.CreateDirectory(fixtureDirectory);
+            var stream = string.Join("\n",
+                "  pass  fmt-check  (exit 0)",
+                "  Failed Baton.Tests.Outcomes.CapturedResponseTests.The_marker_names_the_issue [7 ms]",
+                "   Assert.Equal() Failure: expected the marker line 'CAPTURED (#1594): report.md was never written'",
+                "   Assert.Contains() Failure: 'Warning: Failed to initialize execution stream logger for room X' not found",
+                "CAPTURED (#1594): the worker's declared output 'report.md' was never written by the worker itself.",
+                @"Warning: Failed to initialize execution stream logger for 'C:\rooms\x': Access to the path is denied.",
+                "  FAIL  test-no-build  (exit 1)",
+                "GATES: FAIL 1 of 25 -- test-no-build",
+                string.Empty);
+            await File.WriteAllTextAsync(
+                Path.Combine(fixtureDirectory, "stream.txt"), stream, TestContext.Current.CancellationToken);
+
+            var outcome = await VerifyRunner.RunProcessAsync(
+                "cmd", ["/c", "type stream.txt & exit 1"], fixtureDirectory, TestContext.Current.CancellationToken);
+
+            Assert.False(outcome.Passed);
+            Assert.NotNull(outcome.Tail);
+            // Kept: both quoting lines are the failure's own diagnostic text, not the noise.
+            Assert.Contains(
+                "expected the marker line 'CAPTURED (#1594): report.md was never written'",
+                outcome.Tail!, StringComparison.Ordinal);
+            Assert.Contains(
+                "'Warning: Failed to initialize execution stream logger for room X' not found",
+                outcome.Tail, StringComparison.Ordinal);
+            // Polarity, same fixture: the real noise lines, which differ only in where the message
+            // sits on the line, are still gone.
+            Assert.DoesNotContain("was never written by the worker itself", outcome.Tail, StringComparison.Ordinal);
+            Assert.DoesNotContain("Access to the path is denied", outcome.Tail, StringComparison.Ordinal);
+        }
+        finally
+        {
+            Baton.Tests.Shared.DirectoryCleanup.DeleteRecursively(fixtureDirectory);
+        }
+    }
+
+    /// <summary>
+    /// #1971 review: an over-long failure line must not suppress the shorter ones ABOVE it. Promotion
+    /// walks the missing failure lines from the end backwards, and a line that does not fit what is
+    /// left of the reserve is skipped rather than ending the walk — otherwise the 2000-character
+    /// <c>Assert.Equal()</c> string diff in the middle of this fixture would cost the reader the
+    /// short <c>Failed &lt;test&gt;</c> line above it, which is the one naming what broke.
+    /// </summary>
+    [Fact]
+    public async Task An_over_long_failure_line_does_not_suppress_the_shorter_ones_above_it()
+    {
+        var fixtureDirectory = Path.Combine(Path.GetTempPath(), $"baton-1971-{Guid.NewGuid():N}");
+        try
+        {
+            Directory.CreateDirectory(fixtureDirectory);
+            // Longer than the promotion reserve (1200 chars) on its own, so it can never be taken.
+            var overLong = "   Assert.Equal() Failure: " + new string('z', 2000);
+            // Wider than the whole tail budget, so all three failure lines above it fall outside both
+            // the conservative cut the excerpt is chosen against and the returned tail itself.
+            var padding = string.Join("\n", Enumerable.Range(0, 50).Select(i => $"  ordinary build chatter line {i} {new string('y', 90)}"));
+            var stream = string.Join("\n",
+                "  Failed Baton.Tests.Rooms.RoomStateTests.TestA [3 ms]",
+                overLong,
+                "Failed! - Failed: 3, Passed: 0, Skipped: 0, Total: 3",
+                padding,
+                "  FAIL  test-no-build  (exit 1)",
+                "GATES: FAIL 1 of 25 -- test-no-build",
+                string.Empty);
+            await File.WriteAllTextAsync(
+                Path.Combine(fixtureDirectory, "stream.txt"), stream, TestContext.Current.CancellationToken);
+
+            var outcome = await VerifyRunner.RunProcessAsync(
+                "cmd", ["/c", "type stream.txt & exit 1"], fixtureDirectory, TestContext.Current.CancellationToken);
+
+            Assert.False(outcome.Passed);
+            Assert.NotNull(outcome.Tail);
+            Assert.True(outcome.Tail!.Length <= 4000, $"tail was {outcome.Tail.Length} chars, want <= 4000");
+            // The summary fits and is taken first (walking backwards); the over-long line is then
+            // skipped, and this line -- above it -- is still promoted.
+            Assert.Contains("Failed! - Failed: 3, Passed: 0", outcome.Tail, StringComparison.Ordinal);
+            Assert.Contains("Failed Baton.Tests.Rooms.RoomStateTests.TestA", outcome.Tail, StringComparison.Ordinal);
+            // Polarity: skipping it is not the same as spending the reserve on it.
+            Assert.DoesNotContain(new string('z', 2000), outcome.Tail, StringComparison.Ordinal);
+        }
+        finally
+        {
+            Baton.Tests.Shared.DirectoryCleanup.DeleteRecursively(fixtureDirectory);
+        }
+    }
+
+    /// <summary>
+    /// #1971 review: <c>ExtractBuildLockReason</c> reads the raw stream (a display rule must not decide
+    /// a settlement), and <c>Regex.Match</c> over the whole stream returns the FIRST match in it — so
+    /// two blocked members with different holders journaled whichever holder printed earliest, not the
+    /// one that blocked the member gates.py actually named. The reason is now scoped to the named
+    /// members' own blocks first. The pre-existing arms above are the control: one blocked member,
+    /// line inside its own block, unchanged.
+    /// </summary>
+    [Fact]
+    public async Task The_reason_names_the_holder_from_the_named_member_s_own_block_not_the_earliest_in_the_stream()
+    {
+        var command = string.Join(" & ", new[]
+        {
+            "echo buildlock: BLOCKED after 60s waiting for the build lock held by PID 111 (dotnet format) since 2026-09-04 01:00:00 -- raise BATON_BUILDLOCK_TIMEOUT_S or find out why the holder is stuck",
+            "echo   BLOCKED  fmt-check  (exit 75)",
+            "echo buildlock: BLOCKED after 1800s waiting for the build lock held by PID 222 (dotnet build) since 2026-09-04 01:30:00 -- raise BATON_BUILDLOCK_TIMEOUT_S or find out why the holder is stuck",
+            "echo   BLOCKED  lint  (exit 75)",
+            "echo GATES: BLOCKED 1 of 25 -- lint",
+        }) + " & exit 3";
+
+        var outcome = await VerifyRunner.RunProcessAsync("cmd", ["/c", command], workingDirectory: null, CancellationToken.None);
+
+        Assert.Equal(Baton.Domain.VerifyFailedKind.BuildLockBusy, outcome.Kind);
+        Assert.Equal(
+            "build lock busy for 1800s (holder: PID 222 (dotnet build) since 2026-09-04 01:30:00)",
+            outcome.NotRunReason);
+    }
+
+    /// <summary>
+    /// #1971 review, the direction the scoping above must never move in: a buildlock line printed
+    /// OUTSIDE any member's block (here, after the last marker line — gates.py's own trailing summary
+    /// region) still yields a reason. <c>ExtractBuildLockReason</c>'s own remarks say why the fallback
+    /// is load-bearing rather than belt-and-braces; this arm is what holds it there.
+    /// </summary>
+    [Fact]
+    public async Task A_buildlock_line_outside_every_member_block_still_yields_the_reason()
+    {
+        var command = string.Join(" & ", new[]
+        {
+            "echo   BLOCKED  lint  (exit 75)",
+            "echo GATES: BLOCKED 1 of 25 -- lint",
+            "echo buildlock: BLOCKED after 900s waiting for the build lock held by PID 333 (dotnet build) since 2026-09-04 03:00:00 -- raise BATON_BUILDLOCK_TIMEOUT_S or find out why the holder is stuck",
+        }) + " & exit 3";
+
+        var outcome = await VerifyRunner.RunProcessAsync("cmd", ["/c", command], workingDirectory: null, CancellationToken.None);
+
+        Assert.Equal(Baton.Domain.VerifyFailedKind.BuildLockBusy, outcome.Kind);
+        Assert.Equal(
+            "build lock busy for 900s (holder: PID 333 (dotnet build) since 2026-09-04 03:00:00)",
+            outcome.NotRunReason);
+    }
+
+    /// <summary>
+    /// #1971 review: <c>.verify-output.log</c> lands in an execution's OUTPUT directory, so it is
+    /// registered beside the other engine-owned files there — the convention
+    /// <c>Dispatch.GrantDecisionLog</c> states and #2009 followed. Without it, the first filtered
+    /// listing surface to exist presents the engine's own capture as a worker deliverable (#1351).
+    /// </summary>
+    [Fact]
+    public void The_raw_verify_output_file_is_registered_as_an_engine_owned_name()
+        => Assert.True(Baton.Dispatch.ExecutionStreamLogger.IsStreamLogFileName(VerifyRunner.RawOutputFileName));
 }

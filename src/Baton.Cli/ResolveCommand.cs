@@ -144,6 +144,20 @@ public static class ResolveCommand
                 ThrowDiscriminatedRefusal(namedStep!.IndeterminateProducer, explicitExecutionId, roomDirectoryPath, accepted, close);
             }
 
+            // #1971: the id named no step at all. That is a different mistake from "this step is not
+            // resolvable", and the generic advice below cannot fix it -- the operator who hit this
+            // passed a plausible-looking `exec-1`, read the room state the refusal pointed at, found it
+            // Indeterminate exactly as promised, and had no way to learn the real id from the refusal.
+            // So this arm SHOWS the ids instead of describing where to look them up.
+            if (namedStep is null)
+            {
+                throw new CliArgumentException(
+                    $"Execution '{explicitExecutionId}' is not the latest execution of any step in room '{roomDirectoryPath}'. "
+                    + DescribeLatestExecutions(state)
+                    + " Name one of those ids with --execution (or omit --execution entirely when exactly one step "
+                    + "awaits resolution, and baton will pick it).");
+            }
+
             // #1608 review finding 7: a resolved-but-Failed step and an unresolved one both read
             // ordinary "Failed" per-step in status --json (WorkflowStatusStepView carries no
             // IndeterminateAwaitingResolution field) -- the room-level `state` reading Indeterminate
@@ -156,6 +170,38 @@ public static class ResolveCommand
         }
 
         return executionId;
+    }
+
+    /// <summary>
+    /// #1971: every step's latest execution id, with the step and the state that go with it — enough
+    /// for the caller to fix a wrong <c>--execution</c> from the refusal alone, without a second
+    /// <c>baton status --json</c> read.
+    /// </summary>
+    /// <remarks>
+    /// Worded for what <see cref="StateProjector"/> can actually prove here. A null
+    /// <c>namedStep</c> covers two cases — an id naming nothing at all, and a real but SUPERSEDED
+    /// execution of a step that has since been redispatched — and telling them apart would need an
+    /// event scan this refusal does not otherwise need. "not the latest execution of any step" is true
+    /// of both, and listing the latest ids fixes the caller's id either way.
+    /// <para>
+    /// <see cref="StepState.IndeterminateAwaitingResolution"/> is called out per step because
+    /// <c>StepStatus</c> alone does not distinguish a resolved step from one still awaiting a
+    /// conductor (finding 7 above), and that flag is precisely what decides which id this verb will
+    /// accept.
+    /// </para>
+    /// </remarks>
+    private static string DescribeLatestExecutions(FlowState state)
+    {
+        var known = state.Steps
+            .Where(step => step.LatestExecutionId is not null)
+            .Select(step => $"{step.StepId.Value} ({step.Status}"
+                + (step.IndeterminateAwaitingResolution ? ", awaiting conductor resolution" : string.Empty)
+                + $") -> {step.LatestExecutionId!.Value.Value}")
+            .ToList();
+
+        return known.Count == 0
+            ? "This room has no step with a recorded execution yet."
+            : "This room's steps and their latest executions: " + string.Join("; ", known) + ".";
     }
 
     /// <summary>

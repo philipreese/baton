@@ -459,6 +459,47 @@ public class ResolveCommandEndToEndTests
     }
 
     /// <summary>
+    /// #1971: the conductor's own measured mistake on <c>dispatch-implement-1b79802b</c> — a
+    /// plausible-looking <c>--execution exec-1</c> that named no execution at all. The old refusal sent
+    /// them to <c>baton status --json</c> to "confirm 'state' reads Indeterminate", which it did, so the
+    /// wrong ID survived the check it pointed at. The refusal now carries the room's real id(s) with the
+    /// step and state beside each, so the caller can fix the id from the refusal alone.
+    /// </summary>
+    [Fact]
+    public async Task An_execution_id_naming_no_step_is_refused_with_the_rooms_real_execution_ids_listed()
+    {
+        var testRoot = Path.Combine(Path.GetTempPath(), $"cli-resolve-{Guid.NewGuid():N}");
+        var roomDirectory = Path.Combine(testRoot, "task");
+        try
+        {
+            var executionId = await SeedVerifyFailedRoomAsync(testRoot, roomDirectory, "advice.md");
+
+            var ex = await Assert.ThrowsAsync<CliArgumentException>(() => ResolveCommand.ExecuteAsync(
+                ResolveOptionsParser.Parse([roomDirectory, "--execution", "exec-1", "--close", "--reason", "flake"]),
+                TestContext.Current.CancellationToken));
+
+            // The whole point: the real id is IN the refusal, not one status read away.
+            Assert.Contains(executionId.Value, ex.Message, StringComparison.Ordinal);
+            Assert.Contains("awaiting conductor resolution", ex.Message, StringComparison.Ordinal);
+            Assert.Contains(StepStatus.Failed.ToString(), ex.Message, StringComparison.Ordinal);
+            // Polarity: the generic refusal's advice ("confirm 'state' reads Indeterminate") is exactly
+            // the check this caller already passed, so this arm must NOT fall into it.
+            Assert.DoesNotContain("has no unresolved indeterminate capture", ex.Message, StringComparison.Ordinal);
+
+            // Control: the id the refusal named is genuinely the one that works.
+            var result = await ResolveCommand.ExecuteAsync(
+                ResolveOptionsParser.Parse(
+                    [roomDirectory, "--execution", executionId.Value, "--close", "--reason", "flake"]),
+                TestContext.Current.CancellationToken);
+            Assert.False(Assert.Single(result.State.Steps).IndeterminateAwaitingResolution);
+        }
+        finally
+        {
+            DirectoryCleanup.DeleteRecursively(testRoot);
+        }
+    }
+
+    /// <summary>
     /// #1622 (d)/#1700: end-to-end through the real CLI parser and command, the same round trip every
     /// other fixture in this file proves — `--close --reason <text>` on a VerifyFailed-producer room
     /// settles Failed, clears the "awaiting conductor resolution" text, and marks `rejected`/`resolvedBy`.

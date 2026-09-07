@@ -1286,7 +1286,31 @@ per-member `"  pass/FAIL  name  (exit code)"` summary lines — never a blind cu
 `gates-quiet` run (`Baton.Mutation.VerifyRunner`'s own remarks are the canonical account of why, and
 of its whole-stream fallback when a `gates.py` shape drift leaves no marker line to key off). This is
 also what `baton status --json` now surfaces per step as `verifyTail`, so a flake is diagnosable from
-the room without reconstructing it by hand. An operator cancel landing inside the verify window is the one exception: `VerifyFailedKind.Cancelled`
+the room without reconstructing it by hand.
+
+**What that block is cut down to, and the one rule (#1971).** A member's own block is not shown raw.
+In order: every line matching a known fixture-noise shape is dropped; what survives is kept tail-first
+inside the shared `MaxTailChars` budget; and any surviving test-runner failure line the cut dropped is
+promoted back as a short labelled excerpt above it. Which shapes those are is `Baton.Mutation.VerifyRunner`'s
+own account and is not restated here — the code is what runs, and a sixth shape added there must not
+leave a transcribed list in this register saying otherwise. What this register records is the
+measurement behind the rule: the noise is two unguarded `Console.Error.WriteLine`s in Baton's own
+`src/` that its own test fixtures trigger, so they land in the `test-no-build` member's captured
+stream and, measured on `dispatch-implement-1b79802b`/`-311af7d4`, filled the whole tail while the
+failing assertion sat outside it.
+**This is a display rule and only a display rule**: on any engine-run verify failure the unfiltered
+combined stream is written to `VerifyRunner.RawOutputFileName` (`.verify-output.log`), beside that
+execution's other artifacts, the tail names that file in its
+first line, and nothing that decides an outcome reads the filtered text —
+`VerifyFailedKind.BuildLockBusy`'s `NotRunReason` is parsed from the raw stream for exactly that
+reason. That file keeps every line as printed, up to a cap it shares with the execution's stream logs
+(`ExecutionStreamLogger.DefaultMaxSizeBytes`); a run that exceeds it keeps its head and tail with an
+explicit marker naming what was elided, so "nothing is lost" holds at a stated size rather than
+unconditionally. Only this producer writes one: a `VerifyFailedKind.DeliveryFailed` tail is assembled
+by `DeliveryVerifier` from its own per-check findings rather than cut out of one command's combined
+stream, so no `.verify-output.log` exists for it to point at and it carries no pointer line.
+
+An operator cancel landing inside the verify window is the one exception: `VerifyFailedKind.Cancelled`
 observed together with the caller's own cancellation token already firing means the journal *can*
 decide (it holds the cancel), so `MutationInterface` appends `FlowEvent.ExecutionCancelled` instead —
 room reads `Cancelled`, retry stays open, `VerifyStarted` survives as the diagnostic record that verify
@@ -2134,7 +2158,7 @@ code is the only signal a lane is even still going, and it is unreliable for tha
       "linkedFromUsage"?: ExecutionUsageView,
       "liveness"?: "alive" | "dead" | "unknown",  // #1375/#1513: present while this step reads "Running" (unless frozen by a room-level sentinel; §13), or "Failed" with a RetryNotBefore still pending
       "exhaustedUntil"?: string,  // #1551: the ExhaustedUntil park's reset instant (ISO-8601, UTC) -- gating rule at §6 schema below
-      "verifyTail"?: string,      // #1701: the failing gate member(s)' OWN captured output for a VerifyFailed Indeterminate -- see "Engine-run verify" below. Distinct from "verify"/"verifyReason": that pair says verify never ran, this says it ran and went red.
+      "verifyTail"?: string,      // #1701/#1971: the failing gate member(s)' OWN captured output for a VerifyFailed Indeterminate, noise-filtered -- see "Engine-run verify" below for the rule. Its first line names the unfiltered .verify-output.log ONLY for an engine-run verify failure; a DeliveryFailed tail has no such file and no pointer line. Distinct from "verify"/"verifyReason": that pair says verify never ran, this says it ran and went red.
       "resolvedByConductor"?: boolean,  // #1622 (c)/(d): true iff this step's terminal state was set by an explicit, non-accepting `baton resolve` ruling (--reject or --close); omitted when false
       "workspaceChanged"?: boolean,     // #1622 (b)/#1390: present ONLY for a tree-changing role's (implement/janitor) Succeeded settle -- see the paragraph below the table
       "hollow"?: boolean,               // #1622 (b)/#1390: present under the identical gate as workspaceChanged, true only when workspaceChanged is false AND the contract declares zero outputs
