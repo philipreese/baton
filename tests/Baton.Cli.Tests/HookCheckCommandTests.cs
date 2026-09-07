@@ -474,4 +474,162 @@ public class HookCheckCommandTests
             Assert.Contains(Baton.Domain.GrantRefusal.Marker, stderr.ToString());
         }
     }
+
+    /// <summary>
+    /// #2002 rule 2 on claude, which the first cut scoped out as impossible here. It is possible: the
+    /// ledger persists under this execution's output directory, so a fresh hook subprocess per tool
+    /// call still sees what the last one did. Three identical asks — allow, deny naming how long ago,
+    /// deny plainly — matching the broker's three arms except that the middle one denies rather than
+    /// replaying, because a PreToolUse hook cannot return a substitute result.
+    /// </summary>
+    [Fact]
+    public void Three_identical_bash_commands_are_one_allow_and_two_denials()
+    {
+        using var room = new RepeatLedgerRoom();
+
+        var first = room.RunBash("dotnet build -warnaserror", out var firstText);
+        var second = room.RunBash("dotnet build -warnaserror", out var secondText);
+        var third = room.RunBash("dotnet build -warnaserror", out var thirdText);
+
+        Assert.Equal(HookCheckCommand.AllowedExitCode, first);
+        Assert.Equal(string.Empty, firstText);
+
+        Assert.Equal(HookCheckCommand.DeniedExitCode, second);
+        Assert.Contains("byte-identical to the command", secondText, StringComparison.Ordinal);
+        Assert.Contains("above in your transcript", secondText, StringComparison.Ordinal);
+        Assert.Contains(Baton.Domain.GrantRefusal.Marker, secondText);
+
+        Assert.Equal(HookCheckCommand.DeniedExitCode, third);
+        Assert.Contains(
+            Baton.Vendors.RepeatedToolCallLedger.CommandRepeatRefusal, thirdText, StringComparison.Ordinal);
+    }
+
+    /// <summary>
+    /// #2002 review HIGH on the hook path: the same eviction the broker performs, at the only point a
+    /// PreToolUse hook learns a write is coming. Both directions — the write arm executes, the no-write
+    /// arm still denies — because an eviction on every tool call passes the first and fails the second.
+    /// </summary>
+    [Fact]
+    public void A_write_makes_the_next_identical_command_allowed_again()
+    {
+        using var room = new RepeatLedgerRoom();
+
+        room.RunBash("dotnet build", out _);
+        room.Write(Path.Combine(room.Outbox, "report.md"));
+        var afterWrite = room.RunBash("dotnet build", out var afterWriteText);
+
+        // Polarity partner: no write in between, so this one is still a repeat.
+        var withoutWrite = room.RunBash("dotnet build", out _);
+
+        Assert.Equal(HookCheckCommand.AllowedExitCode, afterWrite);
+        Assert.Equal(string.Empty, afterWriteText);
+        Assert.Equal(HookCheckCommand.DeniedExitCode, withoutWrite);
+    }
+
+    /// <summary>
+    /// #2002 rule 2b on claude: an unchanged file is denied on the re-read and then denied plainly, and
+    /// the control is the file that CHANGED between reads — without it, a gate that denied every second
+    /// Read would pass.
+    /// </summary>
+    [Fact]
+    public void An_unchanged_reread_is_denied_and_a_changed_one_is_not()
+    {
+        using var room = new RepeatLedgerRoom();
+        var path = Path.Combine(room.Root, "notes.md");
+        File.WriteAllText(path, "one");
+
+        var first = room.Read(path, out _);
+        var second = room.Read(path, out var secondText);
+        var third = room.Read(path, out var thirdText);
+
+        File.WriteAllText(path, "one, then rather more than one");
+        var afterChange = room.Read(path, out _);
+
+        Assert.Equal(HookCheckCommand.AllowedExitCode, first);
+        Assert.Equal(HookCheckCommand.DeniedExitCode, second);
+        Assert.Contains("has not changed since you last read it", secondText, StringComparison.Ordinal);
+        Assert.Equal(HookCheckCommand.DeniedExitCode, third);
+        Assert.Contains(
+            Baton.Vendors.RepeatedToolCallLedger.ReadRepeatRefusal, thirdText, StringComparison.Ordinal);
+        Assert.Equal(HookCheckCommand.AllowedExitCode, afterChange);
+    }
+
+    /// <summary>
+    /// The fail-open arm, and the one that matters most: this rung removes waste, and both hooks wrap
+    /// their decision in a catch that DENIES, so a garbage ledger file must never reach that catch. A
+    /// half-written or hand-corrupted file allows.
+    /// </summary>
+    [Fact]
+    public void A_corrupt_ledger_file_allows_rather_than_denying()
+    {
+        using var room = new RepeatLedgerRoom();
+        room.RunBash("dotnet build", out _);
+        File.WriteAllText(
+            Path.Combine(room.Outbox, Baton.Vendors.RepeatedToolCallLedger.FileName), "{\"Entries\": [ttt");
+
+        var exitCode = room.RunBash("dotnet build", out var text);
+
+        Assert.Equal(HookCheckCommand.AllowedExitCode, exitCode);
+        Assert.Equal(string.Empty, text);
+    }
+
+    /// <summary>
+    /// A room on disk: an outbox for the ledger to live in, and the three payload shapes the rungs
+    /// above need. Every call is a separate <see cref="HookCheckCommand.Execute"/>, which is what
+    /// makes it a stand-in for the fresh subprocess claude actually spawns per tool call.
+    /// </summary>
+    private sealed class RepeatLedgerRoom : IDisposable
+    {
+        public RepeatLedgerRoom()
+        {
+            Root = Path.Combine(Path.GetTempPath(), $"baton-hook-repeat-{Guid.NewGuid():N}");
+            Outbox = Path.Combine(Root, "outbox");
+            Directory.CreateDirectory(Outbox);
+        }
+
+        public string Root { get; }
+
+        public string Outbox { get; }
+
+        public int RunBash(string command, out string stderrText) =>
+            Run(Payload("Bash", "command", command), out stderrText);
+
+        public int Read(string path, out string stderrText) =>
+            Run(Payload("Read", "file_path", path), out stderrText);
+
+        public int Write(string path) => Run(Payload("Write", "file_path", path), out _);
+
+        public void Dispose()
+        {
+            try
+            {
+                Directory.Delete(Root, recursive: true);
+            }
+            catch (IOException)
+            {
+            }
+        }
+
+        private int Run(string payload, out string stderrText)
+        {
+            using var stdin = new StringReader(payload);
+            using var stderr = new StringWriter();
+            // "claude:" -- nothing withheld, which is `implement`'s shape and the population #2002
+            // measured. Bash and Read both reach their own rungs from here.
+            var exitCode = HookCheckCommand.Execute(
+                stdin, stderr, "claude:", outboxDirectory: Outbox, workspaceDirectory: Root);
+            stderrText = stderr.ToString();
+            return exitCode;
+        }
+
+        /// <summary>
+        /// Built by concatenation rather than a raw interpolated literal: the payload ends in two
+        /// closing braces of its own, which a `$$"""…"""` cannot carry beside an interpolation hole.
+        /// </summary>
+        private static string Payload(string toolName, string inputKey, string inputValue) =>
+            "{\"tool_name\": " + Json(toolName) + ", \"tool_input\": {" + Json(inputKey) + ": " +
+            Json(inputValue) + "}}";
+
+        private static string Json(string value) => System.Text.Json.JsonSerializer.Serialize(value);
+    }
 }

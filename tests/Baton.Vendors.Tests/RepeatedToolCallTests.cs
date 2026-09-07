@@ -50,12 +50,74 @@ public sealed class RepeatedToolCallTests
         Assert.EndsWith(first.Text, second.Text, StringComparison.Ordinal);
 
         Assert.False(third.Success);
-        Assert.Contains(
-            "the previous run is still the answer; nothing runs in the background here",
-            third.Text,
-            StringComparison.Ordinal);
+        Assert.Contains(RepeatedToolCallLedger.CommandRepeatRefusal, third.Text, StringComparison.Ordinal);
         Assert.Contains(GrantRefusal.Marker, third.Text);
     }
+
+    /// <summary>
+    /// #2002 review HIGH, and the arm that was missing: after the room's OWN write, a byte-identical
+    /// command executes rather than replaying the pre-write output. The failure it pins is a plausible
+    /// wrong answer — a build told its fix changed nothing, then refused with "the previous run is
+    /// still the answer", whose first clause was false the moment the room wrote.
+    /// <para>
+    /// <b>Both directions, because eviction is one line from deleting the feature.</b> The second arm
+    /// is the polarity partner: with no write in between, the identical re-ask still replays. A build
+    /// that evicted command entries unconditionally passes the first arm and fails this one.
+    /// </para>
+    /// </summary>
+    [Fact]
+    public async Task A_write_makes_the_next_identical_command_execute_and_no_write_still_replays()
+    {
+        using var fixture = new RepeatFixture(commandTimeout: null, StablePattern);
+
+        await fixture.RunAsync(StableCommand);
+        await fixture.ExecuteAsync(
+            CodexDynamicToolPolicy.WriteTextTool,
+            new { path = Path.Combine(fixture.Workspace, "edited.cs"), content = "// the fix" });
+        fixture.Clock.Advance(TimeSpan.FromSeconds(2));
+        var afterWrite = await fixture.RunAsync(StableCommand);
+
+        // Polarity partner: same clock advance, same command, no write in between.
+        fixture.Clock.Advance(TimeSpan.FromSeconds(2));
+        var withoutWrite = await fixture.RunAsync(StableCommand);
+
+        Assert.DoesNotContain("replayed:", afterWrite.Text, StringComparison.Ordinal);
+        Assert.DoesNotContain(GrantRefusal.Marker, afterWrite.Text);
+        Assert.Contains("[replayed: identical command 2 s ago]", withoutWrite.Text, StringComparison.Ordinal);
+    }
+
+    /// <summary>
+    /// The same rule for the OTHER writer: a command the ledger cannot prove read-only may have
+    /// rewritten the tree, so it evicts every other remembered command output — while keeping its own,
+    /// which is what the arm above proves is still there to keep.
+    /// </summary>
+    [Fact]
+    public async Task A_command_that_ran_evicts_the_other_commands_output()
+    {
+        using var fixture = new RepeatFixture(commandTimeout: null, StablePattern, "cd*");
+
+        await fixture.RunAsync(StableCommand);
+        await fixture.RunAsync("cd .");
+        fixture.Clock.Advance(TimeSpan.FromSeconds(3));
+        var reAsked = await fixture.RunAsync(StableCommand);
+
+        Assert.DoesNotContain("replayed:", reAsked.Text, StringComparison.Ordinal);
+        Assert.DoesNotContain(GrantRefusal.Marker, reAsked.Text);
+    }
+
+    /// <summary>
+    /// #2002 review LOW: a volatile prefix must not launder a chained non-exempt tail. Both directions,
+    /// because the defect was an ASYMMETRY — <c>git status &amp;&amp; X</c> escaped rule 2 while
+    /// <c>X &amp;&amp; git status</c> did not — and only asserting both says the two now agree. The
+    /// control is the third arm: a line that is volatile all the way through is still exempt.
+    /// </summary>
+    [Theory]
+    [InlineData("git status && ver", false)]
+    [InlineData("ver && git status", false)]
+    [InlineData("git status && git log -n 1", true)]
+    [InlineData("git status --short", true)]
+    public void A_volatile_prefix_does_not_exempt_a_chained_tail(string commandLine, bool expected) =>
+        Assert.Equal(expected, RepeatedToolCallLedger.IsVolatile(commandLine));
 
     /// <summary>
     /// The control, and the arm that makes the test above about repeats rather than about the second

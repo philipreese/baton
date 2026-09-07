@@ -71,8 +71,8 @@ public static class RepeatedToolCallHook
 
     /// <summary>
     /// Records that the room is about to write <paramref name="writeTarget"/>: the read entry for that
-    /// path is forgotten, and every remembered command output with it, because after the tree changes
-    /// no cached command output is the answer (<see cref="RepeatedToolCallLedger.ForgetAllCommands"/>).
+    /// path is forgotten, and every remembered command output with it — see
+    /// <see cref="RepeatedToolCallLedger.ForgetAllCommands"/> for the rule and its one exception.
     /// Called on the allow path of a write-family tool on both hooks, which is the only point either
     /// one learns that a write is coming.
     /// </summary>

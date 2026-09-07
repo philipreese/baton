@@ -5042,10 +5042,13 @@ overreached (#2002 review).** Rule 1 closes **model-authored** backgrounding sha
 vendors. It does not close agy's **vendor-side** backgrounding: `docs/vendor-capabilities.md` records
 a `run_command` that backgrounds a long command with the model then polling `manage_task`, and that
 path carries no `Start-Process`, no `&` and no `nohup` for a detector reading a command string to
-see. The agy hook therefore also refuses a `run_command` carrying any argument other than
-`CommandLine` — the fail-closed answer to that register's "an undocumented blocking/wait parameter is
-unmeasured, not ruled out" — but a vendor that backgrounds on its own needs no parameter either, so
-rule 1 is **prospective on agy, not a fix for the measured lane**. Nor was it one for the measured
+see. It carries a **parameter** instead: agy's `PreToolUse` payload for `run_command` sends
+`WaitMsBeforeAsync: 5000` on every call (`docs/vendor-capabilities.md`, corrected 2026-09-06 — that
+register owns the finding and its provenance). **A gate cannot refuse the vendor's own default on
+every command**, so this is scoped rather than closed: `AgyHookCheckCommand.MeasuredRunCommandArgs`
+refuses only a `run_command` argument beyond the three measured ones, which closes the *next*
+backgrounding switch and not this one. Rule 1 is therefore **prospective on agy, not a fix for the
+measured lane**. Nor was it one for the measured
 room: `dispatch-implement-12f930d9` contains no backgrounding shape at all (see
 `BackgroundingShapeDetector`'s own remark, which quotes the room), and its `Get-Process -Id <pid>`
 polls were of *other worktrees'* builds, discovered from `buildlock.py`'s lock-holder line. Rule 2 is

@@ -300,11 +300,11 @@ public static class AgyHookCheckCommand
                     commandLine = cmdProp.GetString();
                 }
 
-                // #2002 review MEDIUM. Every arg key this call carried, so the branch below can refuse
-                // a run_command that carries anything other than CommandLine — see there.
+                // #2002 review MEDIUM: every arg key this call carried that no measurement accounts
+                // for, so the branch below can refuse it — see there and MeasuredRunCommandArgs.
                 extraRunCommandArgs = args.EnumerateObject()
                     .Select(property => property.Name)
-                    .Where(name => !string.Equals(name, "CommandLine", StringComparison.Ordinal))
+                    .Where(name => !MeasuredRunCommandArgs.Contains(name))
                     .ToArray();
             }
 
@@ -346,25 +346,19 @@ public static class AgyHookCheckCommand
                 return DenyJson(Baton.Vendors.BackgroundingShapeDetector.Refusal(backgrounding, null));
             }
 
-            // #2002 review MEDIUM: the OTHER half of rule 1 on this vendor, and the half a command
-            // string cannot show. docs/vendor-capabilities.md records that agy's `run_command`
-            // backgrounds a long command while the model polls, and that whether the tool exposes an
-            // undocumented blocking/wait parameter (a `WaitMsBeforeAsync`-style field) is UNMEASURED,
-            // not ruled out. What IS measured, twice, is the argument shape: every one of the 414
-            // run_command calls in `dispatch-implement-12f930d9` and every call in the #1623 lane
-            // passed `CommandLine` and nothing else. So an unrecognised parameter is refused rather
-            // than passed through — the fail-closed direction, and the only direction available when
-            // the parameter that would matter has no measured name.
-            //
-            // This does NOT close agy's vendor-side backgrounding, which needs no parameter at all;
-            // spec/baton.md §9 scopes that explicitly rather than letting rule 1 read as complete.
+            // #2002 review MEDIUM: the half of rule 1 a command STRING cannot show. agy backgrounds
+            // through a tool parameter, not a shell shape — see MeasuredRunCommandArgs for what is
+            // actually measured about that parameter, and spec/baton.md §9 for why this rung does not
+            // make rule 1 complete on this vendor. An argument no measurement accounts for is refused
+            // rather than passed unread: it is the only fail-closed move available against a
+            // backgrounding switch nobody has seen yet, and it costs today's traffic nothing.
             if (extraRunCommandArgs.Count > 0)
             {
                 return DenyJson(
-                    $"AER: the 'run_command' tool carried {FormatArgNames(extraRunCommandArgs)}, which " +
-                    "this gate does not recognise — every measured call passes CommandLine alone, and a " +
-                    "parameter that could make the command run in the background rather than to " +
-                    "completion is refused rather than allowed unread. Re-issue with CommandLine only.");
+                    $"AER: the 'run_command' tool carried {FormatArgNames(extraRunCommandArgs)}. Baton's " +
+                    "gate cannot tell whether an argument it has never measured makes this command run " +
+                    "in the background instead of to completion, so it refuses rather than allowing it " +
+                    "unread. Re-issue with the arguments agy normally sends.");
             }
 
             // The shell channel gates this tool. A non-Present list means the gate cannot judge the
@@ -484,8 +478,7 @@ public static class AgyHookCheckCommand
                 }
             }
 
-            // #2002 rule 2, hook half — last in this branch for the same reason the claude hook puts
-            // it last (see there). Same class, same predicates, same file-backed ledger.
+            // #2002 rule 2. Placed where HookCheckCommand places its own, for the reason stated there.
             if (Baton.Vendors.RepeatedToolCallHook.JudgeCommand(outboxDirectory, commandLine)
                 is { } repeatedCommand)
             {
@@ -603,6 +596,32 @@ public static class AgyHookCheckCommand
 
         return null;
     }
+
+    /// <summary>
+    /// The <c>run_command</c> argument names a measurement accounts for. Anything else is refused
+    /// (#2002 review MEDIUM) — see the branch that reads this.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// <b><c>WaitMsBeforeAsync</c> is the backgrounding parameter, and it is on every call.</b>
+    /// <c>docs/vendor-capabilities.md</c> records agy's <c>run_command</c> backgrounding a long
+    /// command while the model then polls, and says a blocking/wait parameter is "unmeasured, not
+    /// ruled out" — that sentence is about the STREAM, where every <c>tool_info</c> carries
+    /// <c>CommandLine</c> alone (414 of 414 in <c>dispatch-implement-12f930d9</c>). The HOOK payload
+    /// is a different surface and shows all three of these, at <c>WaitMsBeforeAsync: 5000</c>: see
+    /// <c>AgyHookCheckCommandTests.Payload</c>, taken from <c>agy.hook-env-inherited</c>'s live
+    /// capture. That check reports the payload's shape rather than asserting it, so this is a
+    /// second-hand reading of a real capture rather than a gated measurement.
+    /// </para>
+    /// <para>
+    /// So the parameter cannot be refused: it is agy's own default on every call, and denying it
+    /// would deny every command this vendor runs. That is the whole reason rule 1 is scoped rather
+    /// than claimed complete on agy. What this list DOES close is the next parameter — an
+    /// <c>Async</c>, a <c>Background</c>, a <c>Detach</c> — arriving unread.
+    /// </para>
+    /// </remarks>
+    private static readonly IReadOnlySet<string> MeasuredRunCommandArgs =
+        new HashSet<string>(StringComparer.Ordinal) { "CommandLine", "Cwd", "WaitMsBeforeAsync" };
 
     /// <summary>
     /// agy's file-read tool (#2002 rule 2b). <c>grep_search</c> and <c>find_by_name</c> are searches

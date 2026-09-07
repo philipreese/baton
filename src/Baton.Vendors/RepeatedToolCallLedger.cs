@@ -53,11 +53,9 @@ public sealed record RepeatDecision(
 /// states what it does when the file cannot be read or written.
 /// </para>
 /// <para>
-/// <b>What the hooks cannot do is replay.</b> A <c>PreToolUse</c> hook allows or denies; it cannot
-/// return a substitute tool result. Neither vendor has a <c>PostToolUse</c> hook wired in this
-/// repository, so no cached output exists on that path either — the hook's second-ask denial points
-/// the model at its own transcript instead (<see cref="HookCommandDenial"/>). <c>spec/baton.md</c> §9
-/// states which of the two shapes shipped per vendor.
+/// <b>What the hooks cannot do is replay</b> — <c>spec/baton.md</c> §9 states why, and which shape
+/// shipped per vendor. The consequence here is <see cref="HookCommandDenial"/>: a denial that points
+/// at the transcript rather than carrying bytes this path does not hold.
 /// </para>
 /// <para>
 /// <b>Memory bound:</b> <see cref="Capacity"/> keys, each holding at most one command output, which

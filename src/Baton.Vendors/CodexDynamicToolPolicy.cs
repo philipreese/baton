@@ -377,10 +377,9 @@ public sealed class CodexDynamicToolPolicy
         var path = ResolveWithinWorkspace(requestedPath);
         WriteFile(path, content);
 
-        // #2002 rule 2b: the room's own write invalidates its own read. Not belt-and-braces on the
-        // stat check — a rewrite of the same byte count inside the filesystem's timestamp granularity
-        // is invisible to that check, and this is the one path where a stale answer could otherwise be
-        // served as if it were the file.
+        // #2002 rule 2b: the room's own write invalidates its own read, and not merely as
+        // belt-and-braces on the stat check — RepeatedToolCallLedger.ForgetRead states the case that
+        // check cannot see.
         _repeats.ForgetRead(path);
 
         // #2002 review HIGH: and it invalidates every remembered COMMAND output too. A build that
