@@ -29,7 +29,7 @@ Replay:           OPT-IN, and the opt-in is the whole safety argument (#2010, 20
                   is what makes the two `--no-build` test legs legal rather than something at their
                   call site: `dotnet test --no-build` grades `bin/`, which is outside the
                   fingerprint, so it qualifies ONLY because `test`'s own unflagged
-                  `dotnet build --no-incremental` leg (pixi.toml:84) and, for `test-no-build`,
+                  `dotnet build --no-incremental` leg and, for `test-no-build`,
                   `lint` inside `gates` force that `bin/` from source on every run. A command that
                   reads out-of-fingerprint state with no such leg in front of it -- `dotnet run
                   --project …`, i.e. `vendor-check` -- may NOT opt in, and reading the clause as
@@ -848,6 +848,13 @@ def _selftest_replay_allowlist() -> bool:
     }
     if intruders != expected_intruders:
         print(f"  control FAILED: the allowlist reader missed a planted opt-in -- {intruders}")
+        return False
+    # The docstring names the same three in prose, which is a second copy of the set and the one a
+    # reader meets first. Pinned too, cheaply: a legitimate future change to REPLAY_ALLOWLIST must
+    # update that sentence or fail here, rather than leaving it stale and green.
+    unnamed = sorted(task for task, _ in REPLAY_ALLOWLIST if f"`{task}`" not in (__doc__ or ""))
+    if unnamed:
+        print(f"  control FAILED: allowlisted task(s) unnamed in the module docstring -- {unnamed}")
         return False
     print("  replay allowlist: pass")
     return True
