@@ -330,6 +330,12 @@ public abstract record FlowEvent
     /// did — or, just as often, that a legitimate declaration was never committed and therefore never
     /// took effect.
     /// <para>
+    /// #2029: appended on drift whatever the role, including one whose committed declaration graded
+    /// nothing at all (<c>Baton.Vendors.WorkerRole.VerifiesWorkspace</c> false) — "did anything touch my
+    /// verify declaration?" is the same operator question either way, and the same reason #1708 L1
+    /// already appends it after a failed, arrested or cancelled run.
+    /// </para>
+    /// <para>
     /// <b>Diagnostic only, and deliberately terminal as a record.</b> Same shape as
     /// <see cref="VerifyStarted"/>/<see cref="VerifyPassed"/>: no <see cref="StepState"/> field, no
     /// <c>WorkflowStatusView</c> surface, no <c>fleet_status</c> plumbing, no

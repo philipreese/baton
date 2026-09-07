@@ -8,6 +8,7 @@
     "network_access": false,
     "timeout_minutes": 25,
     "verdict_schema": false,
+    "verifies_workspace": false,
     "token_budget": 150000,
     "billed_rate_limit": null,
     "allows_subagents": true,
@@ -31,6 +32,7 @@
     "denied_shell_option_tokens": ["--add-label", "--remove-label", "--label"],
     "timeout_minutes": 40,
     "verdict_schema": false,
+    "verifies_workspace": true,
     "verify_pixi_task": "gates-quiet",
     "token_budget": 1200000,
     "max_tool_steps": 610,
@@ -70,6 +72,7 @@
     "shell_commands_are_read_only": true,
     "timeout_minutes": 25,
     "verdict_schema": true,
+    "verifies_workspace": false,
     "token_budget": { "claude": 250000, "agy": 250000, "codex": 250000 },
     "max_tool_steps": 100,
     "billed_rate_limit": null,
@@ -96,6 +99,7 @@
     "network_access": false,
     "timeout_minutes": 25,
     "verdict_schema": false,
+    "verifies_workspace": false,
     "purpose": "Proposes code modifications as an applyable unified diff without mutating its workspace directly (withheld writes run enforced on claude, and audited-not-enforced on agy per #659).",
     "outputs": [
       {
@@ -114,6 +118,7 @@
     "network_access": false,
     "timeout_minutes": 15,
     "verdict_schema": false,
+    "verifies_workspace": false,
     "purpose": "'Confirm these specific facts against the repo.' Handed an exhaustive list, so the list determines the work and a cheap model runs it. NOT for anything where noticing something absent from the list is the point.",
     "outputs": [
       {
@@ -134,6 +139,7 @@
     "denied_shell_option_tokens": ["--add-label", "--remove-label", "--label"],
     "timeout_minutes": 15,
     "verdict_schema": false,
+    "verifies_workspace": true,
     "purpose": "After an implementer commits: run the named mechanical checkers and make them green without changing behavior (#729). Until #1759 retired it, the canonical brief was janitor-prompt.md next to tools/baton-agy-loop/dispatch.py, passed via --prompt-file; baton dispatch janitor has no equivalent standing brief file today -- the operator supplies the checkers to run via --spec/--spec-text each time. The checkers determine the work, so the cheap tier runs it; anything needing judgment comes back [NOT DONE], not guessed at. #1355 kept network_access true here for the same reason as implement -- see implement's purpose field for the full reasoning (it is not agy-specific), not restated here.",
     "outputs": [
       {
@@ -157,6 +163,7 @@
     "network_access": false,
     "timeout_minutes": 10,
     "verdict_schema": false,
+    "verifies_workspace": false,
     "purpose": "Resident room occupant turn that reads room state and emits turn actions.",
     "outputs": [
       {

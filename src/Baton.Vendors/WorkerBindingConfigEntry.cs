@@ -64,6 +64,12 @@ namespace Baton.Vendors;
 /// highest precedence in <c>Baton.Mutation.VerifyCommandResolver.Resolve</c>. Null defers to the
 /// workspace's own <c>.baton/verify</c> declaration, then <paramref name="VerifyPixiTask"/>.
 /// </param>
+/// <param name="VerifiesWorkspace">
+/// #2029: <see cref="WorkerRole.VerifiesWorkspace"/>, carried the same hop as
+/// <paramref name="VerifyPixiTask"/> — that field's own remarks are the record. False suppresses the
+/// <c>.baton/verify</c> and <paramref name="VerifyPixiTask"/> arms for this execution;
+/// <paramref name="VerifyCommandOverride"/> is unaffected.
+/// </param>
 /// <param name="TokenBudget">
 /// #1623: <see cref="WorkerRole.TokenBudget"/>, or the <c>--token-budget</c> override
 /// (<see cref="RoleDispatch.ToBinding"/>'s <c>tokenBudgetOverride</c>) when one was supplied.
@@ -257,7 +263,12 @@ public sealed record WorkerBindingConfigEntry(
     string? ModelResolved = null,
     string? ModelSource = null,
     string? EffortResolved = null,
-    string? EffortSource = null);
+    string? EffortSource = null,
+    // #2029, appended last for the same round-trip reason as Skills above. Default-OPEN, unlike every
+    // other flag on this record: a hand-authored bindings.json (baton run/resume/decide) that omits it
+    // keeps the pre-#2029 behaviour of being graded by the workspace's own declaration, rather than
+    // silently skipping a gate.
+    bool VerifiesWorkspace = true);
 
 /// <summary>
 /// #1927: the closed vocabulary <see cref="WorkerBindingConfigEntry.ModelSource"/> and

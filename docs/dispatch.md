@@ -88,7 +88,10 @@ committed `.baton/verify` outranks it, #1958 — spec/baton.md §3) — the ENGI
 never itself holding a lock across the run (`spec/baton.md` §3 states the actual locking mechanism),
 after the worker's own process exits 0 with its output contract satisfied; the worker itself is never
 asked to run gates or tests and never sees the command. `review`/`advise` and
-every other role declare none. A verify failure is never a blind retry: it settles the step
+every other role declare none — and since #2029 a workspace's own `.baton/verify` does not reach them
+either, because each role's catalog entry now states whether the workspace's gates grade it at all
+(`verifies_workspace`; spec/baton.md §3 has the two sets and why, and why `--verify` is exempt).
+A verify failure is never a blind retry: it settles the step
 `Indeterminate`, with the failing gate members and a bounded output tail recorded as room facts
 (`verifyStarted`/`verifyPassed`/`verifyFailed` in `flow.jsonl`) — a conductor resolves it, the same way
 an ambiguous captured-response outcome does (spec/baton.md §3).

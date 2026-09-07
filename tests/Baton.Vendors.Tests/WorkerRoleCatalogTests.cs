@@ -662,6 +662,82 @@ public class WorkerRoleCatalogTests
         Assert.True(WorkerRoleCatalog.For("r").AllowsSubagents);
     }
 
+    // #2029: verifies_workspace -- see WorkerRole.VerifiesWorkspace's own remarks for what it gates.
+
+    /// <summary>
+    /// The two sets, stated (spec/baton.md §3). Enumerated by NAME rather than derived from the grant,
+    /// because the derivation is the thing this pins: a catalog that silently flipped `review` back to
+    /// true would still satisfy any predicate written over `write_files`.
+    /// </summary>
+    [Fact]
+    public void The_shipped_tree_changing_roles_verify_the_workspace_and_the_read_shaped_ones_do_not()
+    {
+        using var env = ShippedDefault();
+
+        foreach (var id in new[] { "implement", "janitor" })
+        {
+            Assert.True(WorkerRoleCatalog.For(id).VerifiesWorkspace, $"role '{id}' must be graded by the workspace's own gates.");
+        }
+
+        foreach (var id in new[] { "review", "advise", "patch", "fact-check", "orchestrate" })
+        {
+            Assert.False(
+                WorkerRoleCatalog.For(id).VerifiesWorkspace,
+                $"role '{id}' writes nothing to the workspace, so the workspace's audits cannot be grading it (#2029).");
+        }
+    }
+
+    /// <summary>
+    /// The lockstep half, and the invariant that stops the NEXT role getting it wrong: a role graded by
+    /// the workspace's gate suite must be able to change that workspace in the first place — the same
+    /// write_files &amp;&amp; run_shell_commands predicate <c>WorkerBindingConfigEntry.ChangesTree</c>
+    /// is computed from, and #2029's own measurement is exactly a role failing it. One-directional for
+    /// the same reason <see cref="Every_role_that_delivers_a_branch_can_write_files"/> is: the reverse
+    /// ("every tree-changing role must be graded") is policy no ruling covers, and asserting it would
+    /// leave this catalog field carrying nothing the grant does not already say. The shipped values are
+    /// pinned by name above.
+    /// </summary>
+    [Fact]
+    public void Every_role_graded_by_the_workspace_can_change_the_workspace()
+    {
+        using var env = ShippedDefault();
+
+        foreach (var role in WorkerRoleCatalog.All.Where(r => r.VerifiesWorkspace))
+        {
+            Assert.True(
+                role.Grant.WriteFiles && role.Grant.RunShellCommands,
+                $"role '{role.Id}' is graded by the workspace's gates but cannot change that workspace.");
+        }
+    }
+
+    /// <summary>
+    /// The one optional catalog flag whose omission default is TRUE. A role that forgets the key is
+    /// graded loudly rather than silently settling unverified — the fail-closed direction.
+    /// </summary>
+    [Fact]
+    public void A_role_with_no_verifies_workspace_key_parses_as_true()
+    {
+        using var cat = new TempCatalog();
+        using var env = PointAt(
+            cat,
+            """{"t":{"adapter":"gemini","model":"m","effort":null}}""",
+            $"[{Role("r", "t")}]");
+
+        Assert.True(WorkerRoleCatalog.For("r").VerifiesWorkspace);
+    }
+
+    [Fact]
+    public void A_role_declaring_verifies_workspace_false_parses_as_false()
+    {
+        using var cat = new TempCatalog();
+        using var env = PointAt(
+            cat,
+            """{"t":{"adapter":"gemini","model":"m","effort":null}}""",
+            "[" + Role("r", "t")[..^1] + ", \"verifies_workspace\": false}]");
+
+        Assert.False(WorkerRoleCatalog.For("r").VerifiesWorkspace);
+    }
+
     /// <summary>#1745: spec/baton.md §3 has why `review` and why its two values are equal.</summary>
     [Fact]
     public void The_shipped_review_role_carries_a_per_adapter_map_whose_values_equal_the_prior_single_figure()

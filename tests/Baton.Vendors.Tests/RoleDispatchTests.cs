@@ -192,6 +192,19 @@ public class RoleDispatchTests
         Assert.Equal(250_000, RoleDispatch.ToBinding(Review, "spec", billedRateLimitOverride: 250_000).BilledRateLimit);
     }
 
+    /// <summary>
+    /// #2029: the catalog's <c>verifies_workspace</c> reaches the binding entry, on both arms. Nothing
+    /// else covers this hop — the catalog tests read the catalog and the engine tests construct a
+    /// binding directly — so without this the plumbing line could be deleted and stay green, and every
+    /// dispatched review lane would be back to running the reviewed branch's own audits.
+    /// </summary>
+    [Fact]
+    public void Whether_a_role_is_graded_by_the_workspace_reaches_the_binding()
+    {
+        Assert.False(RoleDispatch.ToBinding(Review, "spec").VerifiesWorkspace);
+        Assert.True(RoleDispatch.ToBinding(WorkerRoleCatalog.For("implement"), "spec").VerifiesWorkspace);
+    }
+
     [Fact]
     public void The_adapter_defaults_to_the_roles_tier_but_an_override_wins()
     {
