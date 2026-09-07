@@ -4629,6 +4629,20 @@ callers each have a deny arm (`HookCheckCommandTests.A_backgrounded_command_is_d
 caller (`CodexDynamicToolPolicy.RunCommandAsync`) is covered only by the detector's own unit tests —
 which is the half-shipped shape this rule names, recorded here rather than fixed by this docs change.
 
+**Every decision any of the three takes is a structured room fact (#2009).** `Baton.Domain
+.GrantDecision` is the one record and the one schema — vendor, tool, allow/deny, the rule id from
+`GrantRules`, the deny reason, a digest of the call's identifying argument, and the instant — and each
+enforcement point writes it where that point can reach: the broker emits it into the room's captured
+stream through its own emitter, and the two hooks append it to `Baton.Dispatch.GrantDecisionLog`'s
+per-execution `.baton-grants.ndjson`, since a hook subprocess cannot write `.stdout.log` without
+breaking that file's prefix invariant (§3) and the agy verdict ledger counts every line it holds as a
+#1680 canary verdict. What that buys is stated once in `docs/dispatch.md`, "Grant decisions": a
+refusal used to leave no trace but its own sentence inside the vendor's tool result, so the
+2026-09-06 audit's "refusals per room" measured rooms doing Baton work **on** the refusal system
+rather than rooms being refused. A rule id is deliberately coarser than a refusal sentence — several
+sites share one, and the reason text is what separates them — but naming one is mandatory at every
+refusal site, so a new rung cannot be counted under an id a funnel guessed.
+
 **The hook is binary: allow / deny, nothing else.** The ask band that once made it ternary
 (`BATON_HOOK_ASK_TOOLS`, the `permissionDecision: "ask"` STDOUT envelope) was part of the mid-lane
 ask machinery and is DELETED (#1417) — lanes are fully pre-cleared, so an ungranted capability

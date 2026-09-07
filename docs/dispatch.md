@@ -462,6 +462,22 @@ holding each step's declared outputs. The authoritative room layout is `spec/bat
 `baton status <dir>` — the room directory is positional there, not a flag — reads the ledger and
 reports where each step stands.
 
+### Grant decisions (#2009)
+
+Every allow/deny a Baton gate takes about a tool call is one JSON line carrying
+`"type":"baton.grant"`, with the vendor, the tool, `"decision":"allow"|"deny"`, the rule id that
+decided, a digest of the call's identifying argument, and — on a deny only — the refusal sentence the
+worker was given. So "how many calls did this room refuse", "under which rule", and "did it re-issue
+one it was refused" are filters over those lines rather than a text search for refusal wording, which
+is what they used to be. **Where the line lands follows the enforcement point** (`spec/baton.md` §9,
+*Where a tool rule is enforced*): the codex broker writes it into that execution's captured
+`.stdout.log`, beside the `item.completed` for the same call, because the broker is that stream's
+writer; the claude and agy `PreToolUse` hooks are subprocesses of the vendor CLI that cannot write
+that file, so they append the identical line to `.baton-grants.ndjson` in the same execution
+directory. One schema, two files, both under `artifacts/execution_*/` and both filtered out of any
+deliverable listing as engine mechanism. Reading a whole room means both — a hook-vendor room has no
+grant lines in its stream, and a codex room writes no `.baton-grants.ndjson` at all.
+
 ## The vendor premise
 
 AER spawns the vendor's **own** first-party CLI, which authenticates itself against a **subscription**
