@@ -15,6 +15,16 @@
   Claude Code mobile session; nothing here calls baton or the engine directly (spec/baton.md §10:
   origination and arrest both stay orchestrator-only from this page).
 
+  #1946 — ONE PAGE, TWO DELIVERIES (spec/baton.md §11 C-11). This same file is also served by
+  `baton daemon` over the operator's tailnet, which injects
+  `<meta name="baton-glass-source" content="daemon">` into the bytes it sends. That meta — absent
+  from every artifact — is the only thing that switches delivery: `DAEMON_SERVED` at the bottom of
+  this file takes a same-origin read of `/projection.json` plus an `/events` EventSource instead of
+  the connector, and `applySnapshot` renders the identical board either way. The tailnet delivery
+  carries the FLEET ROW ONLY, the same payload the mailbox carries; drill-down (stdout tail, room
+  artifacts, timeline beyond what the projection already holds) is C-11's slice 2 and belongs to
+  that plane alone -- it must never be added to the mailbox path this file also serves.
+
   role/adapter/model/effort/timeoutMs (engine PR #1504, epic #1502 item #5/#6/#7; #1613 item 3
   carries them through the terminal-sentinel fast path too, when bindings.json names exactly one
   role) are read ABSENT-SAFE throughout: every reference below is behind a truthiness/null check,
@@ -1965,15 +1975,52 @@ document.addEventListener("click", (ev) => {
 });
 window.addEventListener("hashchange", applyRoute);
 
+// #1946 (spec/baton.md §11 C-11): ONE page, TWO deliveries. The Claude.ai artifact reaches the
+// fleet through the `baton` MCP connector, exactly as it always has; the daemon-served copy on the
+// operator's tailnet reaches the SAME fleet row same-origin. The daemon injects the meta below into
+// the bytes it serves, so an artifact — which never carries it — takes the mailbox path unchanged,
+// and there is no probe that could mistake a mailbox delivery for a tailnet one. Read once, at
+// parse time, because the delivery cannot change under a loaded page.
+const DAEMON_SERVED = !!document.querySelector('meta[name="baton-glass-source"][content="daemon"]');
+
+// #1946: the daemon's own delivery of the same snapshot `applySnapshot` renders for the mailbox.
+// GET-only and same-origin by construction: `/projection.json` is the file the daemon's
+// FleetProjectionWriter already writes, served as-is, and `/events` is an EventSource (which cannot
+// be anything but a GET). Nothing here originates or arrests anything — C-11's read-only tripwire,
+// enforced structurally by FleetGlassReadOnlyTests.
+//
+// The SSE frame carries only a version number, deliberately: the page re-reads /projection.json on
+// each one, so the stream stays a change signal and the projection stays served from exactly one
+// place. EventSource reconnects on its own (with Last-Event-ID), which is why a phone that sleeps
+// constantly is the client this transport was chosen for.
+function startDaemonFeed(applySnapshot){
+  // 404 and 503 are DIFFERENT facts and must not paint the same banner: the daemon answers 404 only
+  // when the projection file has never been written, and 503 when it exists but could not be read
+  // this instant (a transient lock). Mapping both to null would tell an operator the daemon "has not
+  // written" a file that is sitting right there -- the plausible-and-wrong shape the banner
+  // precedence table below exists to keep out.
+  const load = () => fetch("/projection.json", { cache: "no-store" })
+    .then((r) => {
+      if(r.ok) return r.json();
+      if(r.status === 404) return null;
+      throw new Error(`HTTP ${r.status}`);
+    })
+    .then((snap) => {
+      if(snap && Array.isArray(snap.rooms)) applySnapshot(snap);
+      else banner("<b>No fleet projection yet.</b> The daemon is serving this page but has not written <span class='mono'>fleet/projection.json</span> — check that <span class='mono'>baton daemon</span>'s projection writer is running.");
+    })
+    .catch((e) => banner(`<b>Could not read the fleet projection.</b> ${esc(String(e && e.message || e))}`));
+  load();
+  const events = new EventSource("/events");
+  events.addEventListener("projection", load);
+  // The inbox tab is a MAILBOX-plane surface (deliverables_list/deliverable_read are MCP tools, and
+  // this delivery has no connector): say so rather than showing a permanently empty list. Every
+  // `window.mcpHandle` call site already early-returns when it is unset, so nothing throws here —
+  // this is about the operator knowing why, not about avoiding an error.
+  $("inboxbanner").innerHTML = `<div class="banner"><b>Deliverables live on the mailbox plane.</b> This page is being served by <span class="mono">baton daemon</span> over the tailnet, which carries the fleet row only — open the Claude.ai artifact for the inbox.</div>`;
+}
+
 (async () => {
-  const mcp = await claude.use("mcp");
-  if(!mcp){
-    banner("<b>No MCP in this view.</b> The fleet feed comes from the <span class='mono'>baton</span> connector; this surface cannot reach connectors.");
-    $("fresh").textContent = "static";
-    applyRoute();
-    return;
-  }
-  window.mcpHandle = mcp;
   // #1486: heartbeat_at (independent of the change-gated snapshot) is what tells a dead pusher
   // apart from a quiet fleet whose pushed_at is legitimately stale. Loud only past ~2 missed beats
   // + slop, so one delayed cycle doesn't cry wolf.
@@ -2002,10 +2049,11 @@ window.addEventListener("hashchange", applyRoute);
   // neutral banner below) mistook that construction for evidence; the real cap signal is
   // `pusher.kvWriteCapResetsAt`, sourced from the Worker's own 429. See spec/baton.md §6.
   const KV_CAP_SYNC_MS = 3 * 60 * 1000;
-  mcp.watchTool("baton", "fleet_status", {}, (ev) => {
-    if(ev.type === "data"){
-      let snap = ev.result.payload;
-      if(typeof snap === "string"){ try { snap = JSON.parse(snap); } catch { snap = null; } }
+  // #1946: the one place a fleet snapshot becomes the rendered board, called by BOTH deliveries —
+  // the mailbox's `fleet_status` subscription below and `startDaemonFeed`'s same-origin read above.
+  // Two copies of this banner chain across two deliveries is exactly the drift the precedence table
+  // inside it exists to prevent.
+  const applySnapshot = (snap) => {
       if(snap && Array.isArray(snap.rooms)){
         lastGood = snap;
         accumulatedTimelines = updateAccumulatedTimelines(accumulatedTimelines, snap.rooms, snap.timelines);
@@ -2097,7 +2145,16 @@ window.addEventListener("hashchange", applyRoute);
         //                            false-fires for the length of a hard-429 cap window
         //                            (worker.core.mjs, PROJECTION_UNREACHABLE_CADENCE_MULTIPLE).
         // 11 else                    Clear the banner.
-        if(kvWriteCapResetsAt){
+        //
+        // #1946 — WHICH ROWS EXIST ON THE TAILNET DELIVERY. `/projection.json` carries `rooms`,
+        // `timelines`, `vendors` and `derived_at` and nothing else, so rows 1, 2, 3, 5, 7, 8 and 10
+        // are unreachable there by absent field alone and are left ungated (a field that is never
+        // sent cannot fire). Row 4 is the exception and IS gated: `hbMs == null` is TRUE on every
+        // tailnet render, and its text would permanently tell an operator to redeploy a worker that
+        // is not in this delivery's path at all. Rows 6 and 9 stay reachable and stay meaningful —
+        // on this plane `derived_at` is the daemon's own write stamp — so they keep their place in
+        // the chain and say the right thing about whichever delivery is rendering them.
+        if(!DAEMON_SERVED && kvWriteCapResetsAt){
           banner(`<b>The worker is refusing writes</b> (Cloudflare's daily KV write cap, confirmed by a live 429; writes resume ${esc(kvWriteCapResetsAt)}). Data below is from the last push before the cap hit.`);
         } else if(budgetExhaustedUntil){
           banner(`<b>Write budget exhausted for today.</b> The pusher hit its daily KV write cap and stopped snapshot pushes until ${esc(budgetExhaustedUntil)} — deliverables may still be landing. Data below is from the last push before the stop.`);
@@ -2105,7 +2162,7 @@ window.addEventListener("hashchange", applyRoute);
           const daemonDerivedAt = typeof staleness.daemon_derived_at === "string" ? staleness.daemon_derived_at : null;
           const ageText = typeof staleness.age_s === "number" ? `${Math.round(staleness.age_s)}s old` : "absent";
           banner(`<b>Fleet projection file is stale.</b> The daemon's projection file (${daemonDerivedAt ? `last written ${esc(ageText)}` : "never written, or unreadable"}) fell back to the pusher's own derivation this cycle — data below is live, but check that \`baton daemon\` is running.`);
-        } else if(hbMs == null){
+        } else if(!DAEMON_SERVED && hbMs == null){
           banner("<b>No heartbeat recorded yet.</b> heartbeat_at is unset — redeploy worker.js and the pusher for #1486, or the mailbox hasn't received one yet.");
         } else if(!isFinite(hbMs) || hbMs > HEARTBEAT_DEAD_MS){
           banner(`<b>Pusher likely dead.</b> No heartbeat in ${esc(age(snap.heartbeat_at) || "over 2.5h")} — the fleet machine may be off or the pusher process may have stopped. Data below is from the last push.`);
@@ -2113,7 +2170,9 @@ window.addEventListener("hashchange", applyRoute);
           // Finding 6: mirrors the hbMs==null branch above -- a pusher not yet redeployed for
           // #1613 posts no derived_at at all, and that used to fall through to a silently clean
           // banner, disabling the "derivation may be stuck" check below with no indication why.
-          banner("<b>No derivation timestamp yet.</b> derived_at is unset — redeploy pusher.py for #1613, or the mailbox hasn't received one yet.");
+          banner(DAEMON_SERVED
+            ? "<b>No derivation timestamp yet.</b> derived_at is unset in the daemon's own projection file — check <span class='mono'>~/.baton/daemon.log</span>."
+            : "<b>No derivation timestamp yet.</b> derived_at is unset — redeploy pusher.py for #1613, or the mailbox hasn't received one yet.");
         } else if(pendingPushMs != null && isFinite(pendingPushMs) && pendingPushMs > PUSH_FAILING_MS){
           banner(`<b>Push failing.</b> The pusher has had a snapshot waiting to go out for ${esc(dur(pendingPushMs))} even though derivation is healthy (derived_at ${esc(age(snap.derived_at))} ago) — check pusher.log for POST errors (413 from the 1 MB cap, 5xx, network). Data below may be stale.`);
         } else if(isFinite(hbMs) && isFinite(derivedMs) && hbMs > RUNNING_SUSPICION_MS && derivedMs > RUNNING_SUSPICION_MS
@@ -2129,7 +2188,12 @@ window.addEventListener("hashchange", applyRoute);
           // The parenthetical is #1981's: this branch cannot tell FLEET_GLASS_PROJECTION_SOURCE
           // apart, and in the default `file` mode derived_at is the DAEMON's write stamp, not the
           // pusher's derivation -- so it must not send an operator to pusher.log alone.
-          banner(`<b>Snapshot derivation may be stuck.</b> The pusher is alive (heartbeat ${esc(age(snap.heartbeat_at))} ago) but the last successful derivation was ${esc(age(snap.derived_at))} ago while rooms show Running — derive_snapshot_and_timelines may be failing every cycle (or, in the default FLEET_GLASS_PROJECTION_SOURCE=file mode, this stamp is the daemon's own: check <span class='mono'>baton daemon</span> too).`);
+          // #1946: on the tailnet delivery `derived_at` is unambiguously the daemon's own write
+          // stamp and there is no pusher in the path at all, so naming one would send an operator
+          // to a log that cannot explain what they are looking at.
+          banner(DAEMON_SERVED
+            ? `<b>The daemon's projection may be stuck.</b> The last write to <span class='mono'>fleet/projection.json</span> was ${esc(age(snap.derived_at))} ago while rooms show Running — check <span class='mono'>~/.baton/daemon.log</span> and the <span class='mono'>baton-daemon</span> scheduled task.`
+            : `<b>Snapshot derivation may be stuck.</b> The pusher is alive (heartbeat ${esc(age(snap.heartbeat_at))} ago) but the last successful derivation was ${esc(age(snap.derived_at))} ago while rooms show Running — derive_snapshot_and_timelines may be failing every cycle (or, in the default FLEET_GLASS_PROJECTION_SOURCE=file mode, this stamp is the daemon's own: check <span class='mono'>baton daemon</span> too).`);
         } else if(projection){
           // #1981: the daemon hung for 13 minutes on 2026-09-06 with its process alive, its
           // scheduled task reporting Running, and this page showing the frozen picture as if it
@@ -2159,6 +2223,30 @@ window.addEventListener("hashchange", applyRoute);
         banner("<b>No snapshot pushed yet.</b> The mailbox is live but the fleet machine hasn't pushed data.");
         $("fresh").textContent = "empty mailbox";
       }
+  };
+
+  // #1946: the tailnet delivery stops here — no connector is reached, and `window.mcpHandle` stays
+  // unset, which every mcpHandle call site already treats as "this affordance is unavailable".
+  if(DAEMON_SERVED){
+    startDaemonFeed(applySnapshot);
+    applyRoute();
+    return;
+  }
+
+  const mcp = await claude.use("mcp");
+  if(!mcp){
+    banner("<b>No MCP in this view.</b> The fleet feed comes from the <span class='mono'>baton</span> connector; this surface cannot reach connectors.");
+    $("fresh").textContent = "static";
+    applyRoute();
+    return;
+  }
+  window.mcpHandle = mcp;
+
+  mcp.watchTool("baton", "fleet_status", {}, (ev) => {
+    if(ev.type === "data"){
+      let snap = ev.result.payload;
+      if(typeof snap === "string"){ try { snap = JSON.parse(snap); } catch { snap = null; } }
+      applySnapshot(snap);
       return;
     }
     const e = ev.error || {};

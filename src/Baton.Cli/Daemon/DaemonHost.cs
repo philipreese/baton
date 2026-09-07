@@ -113,6 +113,11 @@ public static class DaemonHost
         // a policy change (a floor, the cap, the tier table) takes effect without a daemon restart.
         builder.Services.AddHostedService<QueueSchedulerService>();
 
+        // #1946: GlassHttpService's own doc comment carries what it serves and under which ruling.
+        // Registered AFTER FleetProjectionWriter above so the file it serves is being produced by
+        // the time the first request can arrive, and inert unless settings.json opts in.
+        builder.Services.AddHostedService<GlassHttpService>();
+
         // #1981: the self-watchdog, registered LAST so its supervision thread starts after every
         // service it watches has had its StartAsync run -- DaemonWatchdog's own doc comment carries
         // what it trips on, what it deliberately does not, and why it does not run on the thread pool.

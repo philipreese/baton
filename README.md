@@ -100,6 +100,51 @@ needs two harvests and disappears again when the vendor's window rolls over, and
 estimate exists without a positive rate. `spec/baton.md` §6's `windows[]` table states the absence
 rules in full.
 
+### Opening the glass over your tailnet (#1946)
+
+`baton daemon` can serve that same `glass.html` itself, so the page is a bookmark on your phone
+rather than an artifact you re-publish. Off unless you ask for it — add to `~/.baton/settings.json`
+(`$BATON_HOME/settings.json`) and restart the daemon:
+
+```json
+{ "Glass": { "Listen": true, "Port": 8420 } }
+```
+
+`Listen` and `Port` are documented on `GlassListenerSettings`
+(`src/Baton.Vendors/DaemonSettingsStore.cs`), which is also where the default port lives — this
+snippet is an example, not a second copy of the schema. The daemon logs the URLs it bound, once, at
+startup.
+
+**The bind rule is not configurable.** The listener binds loopback and, when the machine has one,
+its own Tailscale address. Two signals are required, not one — the range Tailscale assigns from is
+shared with carrier-grade NAT, so the owning adapter has to be Tailscale's as well. Never `0.0.0.0`,
+and there is no setting that widens it
+(`GlassBindPolicy` states the rule and the residual; the decision is `spec/baton.md` §11 C-11). On Windows, binding the tailnet
+address needs a one-time URL reservation from an **elevated** prompt; the daemon prints the exact
+command when the bind is refused, and the loopback listener comes up either way:
+
+```powershell
+netsh http add urlacl url=http://<your-tailscale-ip>:8420/ user=$env:USERDOMAIN\$env:USERNAME
+```
+
+One reservation per refused prefix, so a machine with an IPv6 tailnet address needs a second, with
+the address bracketed. Don't retype either from here — the daemon prints the exact command for the
+prefix it could not bind.
+
+For HTTPS (and a name instead of an IP), let Tailscale terminate TLS in front of it — two lines,
+run on the fleet machine, after which the page is at `https://<machine>.<tailnet>.ts.net/`.
+**Unlike the `netsh` line above, this recipe is Tailscale's documented usage and has not been run
+here**, so treat it as a starting point rather than a measurement:
+
+```powershell
+tailscale cert            # once, to issue the node's certificate
+tailscale serve --bg 8420
+```
+
+The routes are `/` (the page), `/projection.json` (the fleet projection, as-is) and `/events` (a
+Server-Sent Events stream of its changes). All GET, all read-only. **You get the fleet board and
+nothing beneath it** — stdout tails, room artifacts and timelines are C-11's next slice.
+
 ## Vendor authentication
 
 Baton does not authenticate to any model provider. It spawns the vendor's own first-party CLI

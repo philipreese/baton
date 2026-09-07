@@ -70,11 +70,29 @@ public sealed record DaemonSettings
         init => _queue = value ?? DefaultQueue;
     }
 
+    /// <summary>
+    /// #1946 — what <c>Baton.Cli.Daemon.GlassHttpService</c> reads. Never null, by the same
+    /// read-through nullable backing field <see cref="RunwayHold"/> uses; that property's remarks carry
+    /// the whole argument, record equality included. Off unless the operator opts in:
+    /// <code>
+    /// { "Glass": { "Listen": true, "Port": 8420 } }
+    /// </code>
+    /// </summary>
+    public GlassListenerSettings Glass
+    {
+        get => _glass ?? DefaultGlass;
+        init => _glass = value ?? DefaultGlass;
+    }
+
     private static readonly RunwayHoldSettings DefaultRunwayHold = new();
 
     private static readonly QueueSettings DefaultQueue = new();
 
+    private static readonly GlassListenerSettings DefaultGlass = new();
+
     private readonly QueueSettings? _queue = DefaultQueue;
+
+    private readonly GlassListenerSettings? _glass = DefaultGlass;
 
     private readonly RunwayHoldSettings? _runwayHold = DefaultRunwayHold;
 
@@ -172,6 +190,38 @@ public sealed record CodexPlanCeilingSettings
     /// <c>[JsonIgnore]</c> reason as above.</summary>
     [JsonIgnore]
     public long? EffectiveWeeklyTokens => WeeklyTokens is > 0 ? WeeklyTokens : null;
+}
+
+/// <summary>
+/// #1946 — the daemon-served glass listener's configuration, and the ONE home for its key names and
+/// its default port (README's daemon section cites this record rather than restating them).
+/// <para>
+/// <b><see cref="Listen"/> defaults to false, and that is the whole opt-in.</b> A machine that has
+/// never been configured runs no listener at all: the tailnet plane is a surface the operator asks
+/// for, not one that appears because the daemon was upgraded. The bind rule itself is not
+/// configurable — loopback plus the machine's own tailnet address, never <c>0.0.0.0</c>
+/// (spec/baton.md §11 C-11); <c>Baton.Cli.Daemon.GlassBindPolicy</c> is where that is decided and
+/// there is deliberately no setting that can widen it.
+/// </para>
+/// </summary>
+public sealed record GlassListenerSettings
+{
+    /// <summary>Whether <c>baton daemon</c> serves the glass at all. Off unless set.</summary>
+    public bool Listen { get; init; }
+
+    /// <summary>
+    /// TCP port for every bound prefix. A zero, negative, or out-of-range value is an operator typo
+    /// and reads as <see cref="DefaultPort"/> — the same posture <see cref="RunwayHoldSettings"/>
+    /// takes for an out-of-range percentage, and for the same reason: <c>0</c> is the plausible typo
+    /// and <see cref="System.Net.HttpListener"/> cannot bind an ephemeral port anyway.
+    /// </summary>
+    public int Port { get; init; } = DefaultPort;
+
+    /// <summary>The port in force, after the typo fallback above.</summary>
+    [JsonIgnore]
+    public int EffectivePort => Port is > 0 and <= 65535 ? Port : DefaultPort;
+
+    public const int DefaultPort = 8420;
 }
 
 /// <summary>One vendor's overrides of <see cref="RunwayHoldSettings"/>; every field is null-for-inherit.</summary>

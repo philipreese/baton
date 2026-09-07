@@ -14,6 +14,15 @@
     <PackageReference Include="Microsoft.Extensions.Hosting" Version="10.0.0" />
   </ItemGroup>
 
+  <ItemGroup>
+    <!-- #1946: the SAME glass.html the Claude.ai artifact is published from, embedded so
+         `baton daemon` can serve it from an installed tool directory with no path configuration and
+         no second copy of the page. One page, two deliveries (spec/baton.md §11 C-11) — a copy under
+         src/ would be the drift the record-once gate exists to stop, and the link name below is what
+         GlassPage.cs resolves. -->
+    <EmbeddedResource Include="..\..\tools\fleet-glass\glass.html" LogicalName="Baton.Cli.Daemon.glass.html" />
+  </ItemGroup>
+
   <PropertyGroup>
     <OutputType>Exe</OutputType>
     <TargetFramework>net10.0</TargetFramework>
