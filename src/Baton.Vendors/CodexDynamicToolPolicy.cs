@@ -33,6 +33,13 @@ public sealed class CodexDynamicToolPolicy
     private readonly HashSet<string> _declaredOutputs;
     private readonly TimeSpan _commandTimeout;
 
+    /// <summary>
+    /// #2001: null when this grant is not governed — <see cref="OwnPullRequestOnlyRule.AppliesTo"/>
+    /// states the condition. One instance per policy, because the rule carries the room's own PR
+    /// number and learns it from a command this policy ran.
+    /// </summary>
+    private readonly OwnPullRequestOnlyRule? _ownPullRequestOnly;
+
     /// <param name="commandTimeout">
     /// How long one <c>baton_run_command</c> may run before Baton kills its process tree; null is
     /// <see cref="DefaultCommandTimeout"/>. A parameter rather than a constant so the timeout arm is
@@ -60,6 +67,7 @@ public sealed class CodexDynamicToolPolicy
         _declaredOutputs = producedOutputNames.Where(name => !string.IsNullOrWhiteSpace(name))
             .Select(NormalizeRelativeOutput).ToHashSet(PathComparer);
         _commandTimeout = commandTimeout ?? DefaultCommandTimeout;
+        _ownPullRequestOnly = OwnPullRequestOnlyRule.AppliesTo(grant) ? new OwnPullRequestOnlyRule() : null;
     }
 
     /// <summary>The exact dynamic-tool declarations supplied on <c>thread/start</c>.</summary>
@@ -375,6 +383,13 @@ public sealed class CodexDynamicToolPolicy
         {
             return CodexDynamicToolResult.Refused("The command contains an option token denied by this Baton role.");
         }
+        // #2001: last of the three command checks, because it is the narrowest — a `gh pr` read of a
+        // pull request this room did not open. Refused rather than Failed so it lands in the same
+        // refusal count as every other grant decision on this path.
+        if (_ownPullRequestOnly?.Refuse(commandLine) is { } siblingPullRequestRefusal)
+        {
+            return CodexDynamicToolResult.Refused(siblingPullRequestRefusal);
+        }
 
         var startInfo = new ProcessStartInfo
         {
@@ -427,6 +442,13 @@ public sealed class CodexDynamicToolPolicy
         }
 
         var combined = (await stdout.ConfigureAwait(false)) + (await stderr.ConfigureAwait(false));
+        if (process.ExitCode == 0)
+        {
+            // #2001: the one place a room can learn its own PR number while it is still running —
+            // `gh pr create` prints the new PR's URL, and only a create that SUCCEEDED opened one.
+            // Read before the truncation below, which drops leading output.
+            _ownPullRequestOnly?.ObserveCommandOutput(commandLine, combined);
+        }
         if (combined.Length > MaxCommandOutputCharacters)
         {
             combined = combined[^MaxCommandOutputCharacters..] +
