@@ -662,14 +662,23 @@ public abstract record FlowEvent
     public sealed record CancellationDelivered(ExecutionId ExecutionId) : FlowEvent;
 
     /// <summary>
-    /// #1549: the pump-side <c>cancel.request</c> poller (<c>Baton.Cli.CancelRequestPoller</c>)
-    /// exhausted its bounded retry (5 ticks) against a target that still projects
-    /// <see cref="StepStatus.Running"/> but was never reachable through
-    /// <see cref="Mutation.InFlightExecutionRegistry"/> — the "likely non-process work" refusal
-    /// <c>CancelRequestFile.Reject</c> also records to the file channel. Recorded only when a
-    /// concrete <see cref="ExecutionId"/> was resolved; a malformed request or an ambiguous
-    /// <c>latest</c> (no execution ever named) has nothing to key an execution-scoped journal fact
-    /// on and stays a file-and-stderr-only rejection, same as before this event existed.
+    /// #1549: an arrest the engine refused, for a target it could not take. TWO producers, both of
+    /// which have re-derived from projected state that the target is no longer arrestable
+    /// (<c>Baton.Projection.ArrestableExecutions.Find</c> returns null for it):
+    /// <list type="bullet">
+    /// <item><c>Baton.Cli.CancelRequestPoller.TickAsync</c>'s "too late (it already settled)" path —
+    /// a resolved <see cref="ExecutionId"/> some <see cref="ExecutionRequestAccepted"/> did name, but
+    /// which had settled by the time the poller re-checked.</item>
+    /// <item><c>Mutation.MutationInterface.SettleArrestIntentsAsync</c>'s drop of a marked intent the
+    /// pump can no longer settle ("already settled" or "unknown execution id").</item>
+    /// </list>
+    /// #2045 removed a third: the poller's bounded 5-tick retry ceiling used to append this event for
+    /// a target <c>Find</c> STILL admits, contradicted moments later by the pump honouring the same
+    /// request's mark (#1825) — that ceiling now stops at the <c>.rejected</c> file and stderr, and
+    /// <c>CancelRequestPoller</c>'s own remarks at the site state why. Recorded only when a concrete
+    /// <see cref="ExecutionId"/> was resolved; a malformed request or an ambiguous <c>latest</c> (no
+    /// execution ever named) has nothing to key an execution-scoped journal fact on and stays a
+    /// file-and-stderr-only rejection, same as before this event existed.
     /// </summary>
     /// <param name="Reason">
     /// #1530: the same reason string <c>CancelRequestFile.Reject</c> writes into the <c>.rejected</c>

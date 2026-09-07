@@ -31,7 +31,9 @@ namespace Baton.Cli;
 /// fail-closed gate is <c>MutationInterface.SettleArrestIntentsAsync</c>'s alone, which is exactly
 /// why marking here is unconditional (whenever <see cref="ArrestableExecutions.Find"/> still admits
 /// the target) while the pump's own bounded 5-tick ceiling below stays the honest backstop for a
-/// still-Process target that never resolves.
+/// still-Process target that never resolves — a <em>file-channel</em> backstop only since #2045: it
+/// stops retrying and writes the <c>.rejected</c> body, and deliberately journals no
+/// <see cref="FlowEvent.CancellationRejected"/> for a target the mark above still owes a delivery to.
 /// </para>
 /// </summary>
 public static class CancelRequestPoller
@@ -112,7 +114,9 @@ public static class CancelRequestPoller
     /// a still-pending step-less execution, via <see cref="Projection.ArrestableExecutions.Find"/>) is
     /// marked on <paramref name="inFlightExecutions"/> (#1556 PR 2) and retried up to 5 ticks before
     /// being rejected with an outcome that says arrest was requested, not that the target was
-    /// unreachable — the parked shape alone retries unbounded, per its own remarks below; malformed
+    /// unreachable — that ceiling rejection is written to the <c>.rejected</c> file and stderr only
+    /// (#2045: a marked target never receives a durable <see cref="FlowEvent.CancellationRejected"/>
+    /// from it), and the parked shape alone retries unbounded, per its own remarks below; malformed
     /// content or an unresolvable <c>latest</c> is rejected immediately (fail closed, no guessing,
     /// reason in body) rather than retried forever or left to crash the pump.
     /// </summary>
@@ -323,13 +327,28 @@ public static class CancelRequestPoller
                     + "its own; if the target is a live process that never registers, use Ctrl+C on the pump or wait for it to settle";
             CancelRequestFile.Reject(requestPath, content.Target, reason);
 
-            // #1549/#1530: a concrete targetExecutionId is resolved on this branch (unlike the
-            // malformed-content or ambiguous-'latest' rejections above, which reject before any
-            // execution-scoped id exists to key a journal fact on) — so this is the one rejection
-            // shape that can also become a durable flow.jsonl fact carrying the SAME reason
-            // CancelRequestFile.Reject wrote to the ephemeral .rejected file, not just a
-            // file-and-stderr one.
-            await inFlightExecutions.RecordCancellationRejectedAsync(targetExecutionId, reason, cancellationToken).ConfigureAwait(false);
+            // #2045: the FILE channel gives up here; the arrest itself does not, so no durable
+            // FlowEvent.CancellationRejected is appended for it. Every target reaching this branch was
+            // marked above (this branch is only reachable while ArrestableExecutions.Find still admits
+            // it), and since #1825 a mark is a delivery guarantee the pump can honour moments later —
+            // SettleArrestIntentsAsync then appends CancellationRequested/ExecutionCancelled for the
+            // same id, and ArrestLedgerProjector folds the pair into ONE entry that reads Delivered
+            // while still carrying this rejection's reason, a shape ArrestLedgerEntry.Reason
+            // ("populated only for Rejected") says cannot exist. The two rejection shapes that DO
+            // still journal a CancellationRejected are the ones the registry could not take: the
+            // `!stillArrestable` "too late (it already settled)" path above, and
+            // MutationInterface.SettleArrestIntentsAsync's own drop of an intent Find no longer
+            // admits. stderr keeps the operator-facing signal this branch used to owe the journal.
+            try
+            {
+                Console.Error.WriteLine(
+                    $"cancel.request against '{roomDirectoryPath}' named execution '{targetExecutionId.Value}' — {reason}. "
+                    + "The arrest stays marked for delivery, so no rejection was recorded to the journal.");
+            }
+            catch
+            {
+                // F6: swallow broken stderr pipe
+            }
         }
     }
 

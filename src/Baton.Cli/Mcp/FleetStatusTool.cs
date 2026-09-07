@@ -410,13 +410,14 @@ public sealed class FleetStatusTool : IMcpTool
             // rejection shapes with no ExecutionId to key a flow.jsonl fact on, flow.jsonl (via
             // `entries`, already read above) for every shape that does.
             IReadOnlyList<ArrestLedgerEntry> arrestLedger;
+            string? arrestLedgerUnavailableReason = null;
             try
             {
                 var roomLogPath = Path.Combine(roomDir, BatonPaths.RoomLogFileName);
                 var roomEvents = await new RoomEventLogReader(roomLogPath).ReadAllRoomEventsAsync(cancellationToken).ConfigureAwait(false);
                 arrestLedger = ArrestLedgerProjector.Project(entries, roomEvents);
             }
-            catch (FlowEventLogReadException)
+            catch (FlowEventLogReadException ex)
             {
                 // #1916 fix round 2: a room.jsonl line this build's RoomEventLogReader cannot
                 // deserialize (an unknown $type from a version-skew write) used to escape uncaught
@@ -425,13 +426,22 @@ public sealed class FleetStatusTool : IMcpTool
                 // the ledger read failed. Degrade just the ledger instead, the same posture
                 // StatusCommand's own text/JSON paths take for this identical read.
                 arrestLedger = [];
+
+                // #2045: the degrade above leaves `arrests` absent -- indistinguishable, to the glass,
+                // from the room that simply never saw a cancel.request. What separates the two is the
+                // sibling key below (spec/baton.md §6's `arrestLedgerUnavailableReason` entry states
+                // the rule; WorkflowStatusView's own field is where `baton status --json` gets it).
+                // A sibling key, never a half-built `arrests` array -- the posture
+                // FleetProjectionWriter's `queue` section already takes for the same reason.
+                arrestLedgerUnavailableReason = ex.Message;
             }
 
             // Explicit for readability -- a null/omitted registry now falls back to this same
             // StandardWorkerUsageParsers.Default internally (#1590), so this argument is redundant
             // rather than load-bearing, but names the parser set the tool's usage figures depend on.
             var view = WorkflowStatusProjector.Project(
-                state, snapshot, roomDir, entries, StandardWorkerUsageParsers.Default, arrestLedger);
+                state, snapshot, roomDir, entries, StandardWorkerUsageParsers.Default, arrestLedger,
+                arrestLedgerUnavailableReason);
             var eventTimestamps = WorkflowStatusProjector.ExtractEventTimestamps(entries);
 
             var steps = new List<FleetStepStatusView>(view.Steps.Count);
@@ -509,6 +519,7 @@ public sealed class FleetStatusTool : IMcpTool
                 TerminalAt: view.TerminalAt,
                 Delivery: await TryResolveDeliveryAsync(roomDir, view.Outputs, cancellationToken).ConfigureAwait(false),
                 Arrests: view.Arrests,
+                ArrestLedgerUnavailableReason: view.ArrestLedgerUnavailableReason,
                 Runway: ExtractRoomRunway(bindings));
         }
         catch (Exception ex) when (ex is not OperationCanceledException)
@@ -826,6 +837,13 @@ public sealed record FleetRoomStatusView(
     [property: JsonPropertyName("arrests")]
     [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
     IReadOnlyList<ArrestLedgerEntryView>? Arrests = null,
+    // #2045: the room-level WorkflowStatusView.ArrestLedgerUnavailableReason, copied the same way
+    // Rejected/ResolvedBy/TerminalAt above are -- never re-derived here. That field's own doc, and
+    // spec/baton.md §6's schema entry, state when it is present and what `Arrests`' absence alone
+    // does not tell a reader.
+    [property: JsonPropertyName("arrestLedgerUnavailableReason")]
+    [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    string? ArrestLedgerUnavailableReason = null,
     // #1896's RunwayAdmission (its own remarks are the register), read off this room's bindings.json
     // exactly the way Label/Workstream above are -- so it costs no extra file read here, and is absent by
     // construction on a room dispatched before it shipped. One entry per vendor the dispatch gated

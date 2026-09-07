@@ -1,5 +1,6 @@
 using Baton.Domain;
 using Baton.Mutation;
+using Baton.Status;
 using Baton.Store;
 
 namespace Baton.Cli.Tests;
@@ -360,14 +361,88 @@ public class CancelRequestPollerTests
             Assert.Equal("exec-non-process", rejected.Target);
             Assert.Contains("arrest requested (#1556) but not yet confirmed settled after 5 polls", rejected.Reason);
 
-            // #1549/#1530: this rejection resolved a concrete ExecutionId, so it also becomes a
-            // durable journal fact alongside the file-and-stderr rejection above -- and (#1530)
-            // carries the SAME reason the .rejected file body does, rather than being content-free.
+            // #2045: the file channel gives up (above); the journal records NOTHING, because every
+            // target that reaches this ceiling was marked on the registry and the mark is a delivery
+            // guarantee (#1825) the pump can still honour. This assertion previously read
+            // Assert.Single(...CancellationRejected) with the same reason -- see
+            // A_marked_target_the_pump_settles_after_the_ceiling_leaves_no_rejection_in_the_ledger
+            // for the operator-visible defect that pairing produced, and
+            // A_request_naming_an_execution_not_currently_registered_and_not_running_is_consumed_as_a_too_late_no_op
+            // for the polarity control: a target ArrestableExecutions.Find no longer admits DOES
+            // still journal a CancellationRejected, and that test asserts exactly that.
             var reader = new FlowEventLogReader(logPath);
             var events = await reader.ReadAllAsync(TestContext.Current.CancellationToken);
-            var cancellationRejected = Assert.Single(events.OfType<FlowEvent.CancellationRejected>());
-            Assert.Equal(execId, cancellationRejected.ExecutionId);
-            Assert.Equal(rejected.Reason, cancellationRejected.Reason);
+            Assert.DoesNotContain(events, e => e is FlowEvent.CancellationRejected);
+        }
+        finally
+        {
+            DirectoryCleanup.DeleteRecursively(roomDirectory);
+        }
+    }
+
+    /// <summary>
+    /// #2045: the operator-visible half of the assertion above, read off the ledger an operator
+    /// actually sees (<c>baton status</c>'s <c>Arrests:</c> block / <c>--json arrests</c>) rather than
+    /// off the raw journal. The sequence is the one #1825 made reachable: the poller marks a target
+    /// <see cref="Baton.Projection.ArrestableExecutions.Find"/> still admits, the ceiling fires five
+    /// ticks later, and the pump then honours the SAME mark. Because a rejection reuses an already-open
+    /// builder rather than opening its own (<see cref="Baton.Status.ArrestLedgerProjector.Project"/>),
+    /// journalling one at the ceiling produced a single entry reading <c>Delivered</c> while still
+    /// carrying the ceiling's rejection <c>Reason</c> — a shape
+    /// <see cref="Baton.Status.ArrestLedgerEntry"/>'s own <c>Reason</c> doc ("populated only for
+    /// Rejected") says cannot exist, and one an operator reads as "the arrest was refused, and also
+    /// it happened".
+    /// </summary>
+    [Fact]
+    public async Task A_marked_target_the_pump_settles_after_the_ceiling_leaves_no_rejection_in_the_ledger()
+    {
+        var roomDirectory = Path.Combine(Path.GetTempPath(), $"cancel-request-poller-{Guid.NewGuid():N}");
+        Directory.CreateDirectory(roomDirectory);
+        try
+        {
+            var logPath = Path.Combine(roomDirectory, "flow.jsonl");
+            var execId = new ExecutionId("exec-marked-then-settled");
+
+            await using (var writer = new FlowEventLogWriter(logPath))
+            {
+                await writer.AppendAsync(
+                    new FlowEvent.ExecutionRequestAccepted(MakeRequest(execId, new StepId("a"))), TestContext.Current.CancellationToken);
+
+                await CancelRequestFile.WriteAsync(roomDirectory, execId.Value, TestContext.Current.CancellationToken);
+
+                // BOUND, unlike the parked-mark tests: an unbound registry no-ops
+                // RecordCancellationRejectedAsync outright, which would let this test pass against the
+                // pre-#2045 code for a reason that has nothing to do with the property under test.
+                var registry = new InFlightExecutionRegistry();
+                registry.Bind(writer);
+
+                for (var tick = 1; tick <= 5; tick++)
+                {
+                    await CancelRequestPoller.TickAsync(
+                        roomDirectory, logPath, Snapshot, registry, TestContext.Current.CancellationToken);
+                }
+
+                // The mark the whole property rests on: the ceiling fired against a target the
+                // registry took, so the pump still owes this request a delivery.
+                Assert.Contains(execId, registry.DrainArrestIntents().Select(intent => intent.ExecutionId));
+
+                // The pump wakes on that mark and settles it — SettleArrestIntentsAsync's own
+                // CancellationRequested append, then the round's derived obligation finalizing it.
+                // Written here directly rather than by driving MutationInterface: this test is about
+                // what the ledger renders for the pair, not about the settle path itself.
+                await writer.AppendAsync(
+                    new FlowEvent.CancellationRequested(execId, CancellationOrigin.Operator), TestContext.Current.CancellationToken);
+                await writer.AppendAsync(new FlowEvent.ExecutionCancelled(execId), TestContext.Current.CancellationToken);
+            }
+
+            var entries = await new FlowEventLogReader(logPath)
+                .ReadAllEntriesWithTimestampsAsync(TestContext.Current.CancellationToken);
+            var ledger = ArrestLedgerProjector.Project(entries, []);
+
+            var entry = Assert.Single(ledger);
+            Assert.Equal(execId, entry.ExecutionId);
+            Assert.Equal(ArrestOutcome.Delivered, entry.Outcome);
+            Assert.Null(entry.Reason);
         }
         finally
         {

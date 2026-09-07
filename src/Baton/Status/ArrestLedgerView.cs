@@ -117,11 +117,16 @@ public static class ArrestLedgerProjector
                     // all -- InFlightExecutionRegistry.RequestCancellationAsync returns false (and
                     // records nothing) for a target that never registered in-flight, so
                     // RecordCancellationRejectedAsync's CancellationRejected is the ONLY event this
-                    // lifecycle ever produces. Reusing an existing builder when one is already open
-                    // (the bounded-retry-exhausted shape, which DOES resolve through
-                    // MarkArrestIntent/SettleArrestIntentsAsync's own CancellationRequested append
-                    // first) still takes the `TryGetValue` branch; a rejection with nothing open
-                    // synthesizes its own single-entry lifecycle instead of being silently dropped.
+                    // lifecycle ever produces (the poller's "too late (it already settled)" path).
+                    // Reusing an existing builder when one is already open still takes the
+                    // `TryGetValue` branch -- SettleArrestIntentsAsync's dropped-intent rejection can
+                    // land against a lifecycle some earlier CancellationRequested already opened; a
+                    // rejection with nothing open synthesizes its own single-entry lifecycle instead
+                    // of being silently dropped. #2045 removed the third producer this comment used
+                    // to name (the poller's bounded-retry ceiling): a rejection for a target still
+                    // admitted by ArrestableExecutions.Find was the one shape that could reopen as a
+                    // Delivered entry still carrying a rejection Reason, which the entry's own
+                    // `Reason` doc forbids.
                     if (builders.TryGetValue(rejected.ExecutionId, out var pendingRejection))
                     {
                         builders[rejected.ExecutionId] = pendingRejection with

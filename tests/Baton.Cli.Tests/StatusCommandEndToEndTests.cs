@@ -1060,6 +1060,63 @@ public class StatusCommandEndToEndTests
         }
     }
 
+    /// <summary>
+    /// #2045: the text rendering above was the only pinned side of the #1916 degrade — nothing pinned
+    /// <c>--json</c>'s own <c>arrestLedgerUnavailableReason</c>, the field whose whole job is to
+    /// separate a failed read from an un-arrested room (see
+    /// <see cref="Baton.Status.WorkflowStatusView.ArrestLedgerUnavailableReason"/> for that
+    /// distinction — <c>arrests</c> is absent either way). Both arms in one test: the clean read is
+    /// the polarity control, since a field that were always present would satisfy the failure arm
+    /// while telling a reader nothing.
+    /// </summary>
+    [Fact]
+    public async Task StatusCommand_json_carries_the_unavailable_reason_only_when_the_ledger_read_failed()
+    {
+        var testRoot = Path.Combine(Path.GetTempPath(), $"cli-e2e-{Guid.NewGuid():N}");
+        var roomDirectory = Path.Combine(testRoot, "task");
+        try
+        {
+            await WriteFullArrestLedgerFixtureAsync(roomDirectory);
+
+            // Control arm: the same fixture, read cleanly -- arrests present, no reason field at all.
+            var cleanOutput = new StringWriter();
+            await StatusCommand.ExecuteAsync(
+                new StatusOptions(roomDirectory, Json: true), cleanOutput, TestContext.Current.CancellationToken);
+
+            using (var cleanDocument = JsonDocument.Parse(cleanOutput.ToString()))
+            {
+                Assert.True(cleanDocument.RootElement.TryGetProperty("arrests", out _));
+                Assert.False(cleanDocument.RootElement.TryGetProperty("arrestLedgerUnavailableReason", out _));
+            }
+
+            // Failure arm: the same version-skew corruption the text-mode test above uses.
+            var roomLogPath = Path.Combine(roomDirectory, "room.jsonl");
+            await File.WriteAllTextAsync(
+                roomLogPath, """{"$type":"noSuchDiscriminator","foo":"bar"}""" + "\n", TestContext.Current.CancellationToken);
+
+            // The --json path also writes a diagnostic line to stderr (this class does not capture it,
+            // exactly as the text-mode degrade test above does not -- stdout is the contract here).
+            var degradedOutput = new StringWriter();
+            await StatusCommand.ExecuteAsync(
+                new StatusOptions(roomDirectory, Json: true), degradedOutput, TestContext.Current.CancellationToken);
+
+            using var degradedDocument = JsonDocument.Parse(degradedOutput.ToString());
+            Assert.True(
+                degradedDocument.RootElement.TryGetProperty("arrestLedgerUnavailableReason", out var reason),
+                "expected --json to carry the reason the ledger read failed");
+            Assert.False(string.IsNullOrWhiteSpace(reason.GetString()));
+
+            // The degrade is scoped to the ledger: `arrests` goes absent (it is not emitted as an
+            // empty array), and the rest of the view still projects.
+            Assert.False(degradedDocument.RootElement.TryGetProperty("arrests", out _));
+            Assert.True(degradedDocument.RootElement.TryGetProperty("steps", out _));
+        }
+        finally
+        {
+            DirectoryCleanup.DeleteRecursively(testRoot);
+        }
+    }
+
     private static async Task<string> WriteThreeStepWorkflowAsync(string directory)
     {
         Directory.CreateDirectory(directory);

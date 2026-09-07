@@ -205,9 +205,22 @@ public abstract record RoomEvent
         string? AssignedBy = null) : RoomEvent;
 
     /// <summary>
-    /// #1530: a <c>cancel.request</c> the poller rejected before ever resolving a target
-    /// <see cref="ExecutionId"/> — malformed content, or an ambiguous/absent <c>latest</c> candidate
-    /// (<c>Baton.Cli.CancelRequestPoller.TickAsync</c>). Neither shape has an execution to key a
+    /// #1530: a <c>cancel.request</c> the poller rejected without ever reaching a
+    /// <see cref="ExecutionId"/> a <see cref="FlowEvent.CancellationRejected"/> could be keyed on.
+    /// THREE producers, all in <c>Baton.Cli.CancelRequestPoller.TickAsync</c> (#2045 — this doc said
+    /// "neither shape" while the third had already shipped in #1916's fix round):
+    /// <list type="bullet">
+    /// <item>malformed content — no <c>Target</c> survives the parse at all, so the event's own
+    /// <paramref name="Target"/> is the empty string;</item>
+    /// <item>an ambiguous or absent <c>latest</c> candidate — a <c>Target</c> the resolver refused to
+    /// turn into a single execution;</item>
+    /// <item>a literal target id no <see cref="FlowEvent.ExecutionRequestAccepted"/> ever named (a
+    /// typo'd or stale id). This one <em>does</em> resolve a syntactic
+    /// <see cref="Domain.ExecutionId"/>, but no execution behind it ever existed — see
+    /// <c>TickAsync</c>'s own <c>everAccepted</c> remarks for why "too late (it already settled)",
+    /// the <see cref="FlowEvent.CancellationRejected"/> shape, would be a false claim for it.</item>
+    /// </list>
+    /// None of the three has a real execution to key a
     /// <see cref="FlowEvent.CancellationRejected"/> on, so without this, the room's own
     /// <c>room.jsonl</c> — <c>BatonPaths.RoomLogFileName</c>'s own remarks: a log the poller can
     /// append to without ever touching <c>flow.lock</c>, which is its whole premise — was the only

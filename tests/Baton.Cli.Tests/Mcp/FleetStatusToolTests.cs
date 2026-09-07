@@ -2405,4 +2405,97 @@ public sealed class FleetStatusToolTests : IDisposable
         Assert.Contains($"{FleetProjectionWriter.StaleAfterTicks} of its tick intervals", description);
         Assert.DoesNotContain("three of its tick intervals", description);
     }
+
+    /// <summary>
+    /// #2045 (items 2 and 3): nothing pinned the #1916 ledger degrade on THIS reader — only
+    /// <c>baton status</c>'s text mode was covered — and the degrade itself was silent, rendering
+    /// <c>arrests</c> absent exactly as a room that was never arrested does. Both halves here: the row
+    /// survives (steps, state and the rest still project; it is not collapsed into
+    /// <c>{name, path, error}</c> by the broad per-room catch), and it now names why the ledger is
+    /// missing. The clean-room control below is what makes the second half discriminating.
+    /// </summary>
+    [Fact]
+    public async Task UnreadableRoomLog_DegradesOnlyTheLedger_AndNamesWhyOnTheRow()
+    {
+        var room = await WriteArrestedRoomAsync("arrest-degrade-room");
+
+        // A room.jsonl line this build's RoomEventLogReader cannot deserialize -- the version-skew
+        // write ProcessRoomAsync's own catch describes.
+        await File.WriteAllTextAsync(
+            Path.Combine(room, BatonPaths.RoomLogFileName),
+            """{"$type":"noSuchDiscriminator","foo":"bar"}""" + "\n",
+            TestContext.Current.CancellationToken);
+
+        var result = await new FleetStatusTool().CallAsync(Parse("{}"), TestContext.Current.CancellationToken);
+
+        Assert.False(result.IsError);
+        var degraded = Assert.Single(JsonSerializer.Deserialize<FleetStatusResponse>(result.Text)!.Rooms!);
+
+        Assert.NotNull(degraded.ArrestLedgerUnavailableReason);
+        Assert.False(string.IsNullOrWhiteSpace(degraded.ArrestLedgerUnavailableReason));
+
+        // Scoped to the ledger: the row is a real row, not the {name, path, error} collapse.
+        Assert.Null(degraded.Error);
+        Assert.NotNull(degraded.State);
+        Assert.Single(degraded.Steps!);
+        Assert.Null(degraded.Arrests);
+    }
+
+    /// <summary>
+    /// The polarity control for <see cref="UnreadableRoomLog_DegradesOnlyTheLedger_AndNamesWhyOnTheRow"/>:
+    /// the SAME room with a readable <c>room.jsonl</c> projects its arrest history and carries no
+    /// reason at all. Without this arm, a field emitted unconditionally would pass that test while
+    /// telling the glass nothing it could act on.
+    /// </summary>
+    [Fact]
+    public async Task ReadableRoomLog_ProjectsTheLedger_AndCarriesNoUnavailableReason()
+    {
+        await WriteArrestedRoomAsync("arrest-clean-room");
+
+        var result = await new FleetStatusTool().CallAsync(Parse("{}"), TestContext.Current.CancellationToken);
+
+        Assert.False(result.IsError);
+        var clean = Assert.Single(JsonSerializer.Deserialize<FleetStatusResponse>(result.Text)!.Rooms!);
+
+        Assert.Null(clean.ArrestLedgerUnavailableReason);
+        var arrest = Assert.Single(clean.Arrests!);
+        Assert.Equal("latest", arrest.Target);
+        Assert.DoesNotContain("\"arrestLedgerUnavailableReason\"", result.Text);
+    }
+
+    /// <summary>
+    /// One live (non-terminal, so the active-room projection path rather than the terminal sentinel)
+    /// room whose <c>room.jsonl</c> carries one arrest fact — the fixture both ledger tests above
+    /// drive, so the degraded and clean readings can never diverge over which room they describe.
+    /// </summary>
+    private async Task<string> WriteArrestedRoomAsync(string roomName)
+    {
+        var room = Path.Combine(_tempHome, BatonPaths.RoomsDirectoryName, roomName);
+        Directory.CreateDirectory(room);
+
+        var stepDef = new WorkflowStepDefinition(new StepId("step-arrested"), "agent-worker", [], ["plan.md"], [], new RetryPolicy(1));
+        var def = new WorkflowDefinition(new WorkflowTemplateId("arrest-wf"), 1, [stepDef]);
+        var snapshot = SnapshotBinder.Bind(def);
+        await SnapshotBinder.PersistAsync(snapshot, Path.Combine(room, "snapshot.json"), TestContext.Current.CancellationToken);
+
+        var execId = new ExecutionId("exec-arrest-1");
+        await using (var writer = new FlowEventLogWriter(Path.Combine(room, "flow.jsonl")))
+        {
+            await writer.AppendAsync(
+                new FlowEvent.ExecutionRequestAccepted(new ExecutionRequest(
+                    execId, new WorkflowId("arrest-wf"), stepDef.StepId, stepDef.Worker,
+                    [], [], TimeSpan.FromSeconds(30), [], new Dictionary<StepId, ExecutionId>())),
+                TestContext.Current.CancellationToken);
+        }
+
+        var requestedAt = new DateTimeOffset(2026, 9, 1, 10, 0, 0, TimeSpan.Zero);
+        await using (var roomWriter = new RoomEventLogWriter(Path.Combine(room, BatonPaths.RoomLogFileName)))
+        {
+            await roomWriter.AppendAsync(
+                new RoomEvent.ArrestRequestUnresolvable("latest", "ambiguous — 2 candidates", requestedAt, requestedAt.AddSeconds(2)),
+                TestContext.Current.CancellationToken);
+        }
+
+        return room;
+    }
 }
