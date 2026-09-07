@@ -90,9 +90,10 @@ after the worker's own process exits 0 with its output contract satisfied; the w
 asked to run gates or tests and never sees the command. Every other role declares no command of its
 own — which is not the same as ungraded. Since #2029, whether a workspace's own committed
 `.baton/verify` reaches a role is that role's `verifies_workspace` key (`WorkerRoles.json`, one per
-role; spec/baton.md §3 has the two sets and why). Where it is true, that declaration is the *only* arm
-grading the lane — `janitor`'s shape, and since Baton's own repo commits one (#1958) a janitor lane
-dispatched here does run through it. Where it is false, neither that arm nor a role default resolves,
+role; spec/baton.md §3 has the two sets and why). Where it is true, a role that declares no command of
+its own is graded by that declaration alone — `janitor`'s shape, and since Baton's own repo commits
+one (#1958) a janitor lane dispatched here does run through it. Where it is false, neither that arm
+nor a role default resolves,
 and an operator's own `--verify` is the one arm that still does (§3, again, for why it is exempt).
 A verify failure is never a blind retry: it settles the step
 `Indeterminate`, with the failing gate members and a bounded output tail recorded as room facts
