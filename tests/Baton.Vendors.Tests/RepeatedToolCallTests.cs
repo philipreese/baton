@@ -35,7 +35,7 @@ public sealed class RepeatedToolCallTests
     [Fact]
     public async Task Three_identical_commands_are_one_execution_one_replay_and_one_refusal()
     {
-        using var fixture = new RepeatFixture(commandTimeout: null, StablePattern);
+        using var fixture = new RepeatFixture(commandCeiling: null, StablePattern);
 
         var first = await fixture.RunAsync(StableCommand);
         fixture.Clock.Advance(TimeSpan.FromSeconds(12));
@@ -68,7 +68,7 @@ public sealed class RepeatedToolCallTests
     [Fact]
     public async Task A_write_makes_the_next_identical_command_execute_and_no_write_still_replays()
     {
-        using var fixture = new RepeatFixture(commandTimeout: null, StablePattern);
+        using var fixture = new RepeatFixture(commandCeiling: null, StablePattern);
 
         await fixture.RunAsync(StableCommand);
         await fixture.ExecuteAsync(
@@ -94,7 +94,7 @@ public sealed class RepeatedToolCallTests
     [Fact]
     public async Task A_command_that_ran_evicts_the_other_commands_output()
     {
-        using var fixture = new RepeatFixture(commandTimeout: null, StablePattern, "cd*");
+        using var fixture = new RepeatFixture(commandCeiling: null, StablePattern, "cd*");
 
         await fixture.RunAsync(StableCommand);
         await fixture.RunAsync("cd .");
@@ -127,7 +127,7 @@ public sealed class RepeatedToolCallTests
     [Fact]
     public async Task Three_identical_git_status_calls_are_three_executions()
     {
-        using var fixture = new RepeatFixture(commandTimeout: null, "git status*");
+        using var fixture = new RepeatFixture(commandCeiling: null, "git status*");
 
         var results = new List<CodexDynamicToolResult>();
         for (var i = 0; i < 3; i++)
@@ -149,7 +149,7 @@ public sealed class RepeatedToolCallTests
     [Fact]
     public async Task An_identical_command_past_the_window_executes_again()
     {
-        using var fixture = new RepeatFixture(commandTimeout: null, StablePattern);
+        using var fixture = new RepeatFixture(commandCeiling: null, StablePattern);
 
         await fixture.RunAsync(StableCommand);
         fixture.Clock.Advance(RepeatedToolCallLedger.Window + TimeSpan.FromSeconds(1));
@@ -168,8 +168,11 @@ public sealed class RepeatedToolCallTests
     public async Task A_backgrounded_command_is_refused_and_nothing_is_spawned()
     {
         var sleep = OperatingSystem.IsWindows() ? "ping -n 30 127.0.0.1" : "sleep 30";
+        // #1998 made the ceiling per command CLASS, so the falsifier has to hold for whichever class
+        // this line sorts into — a delegate ignoring its argument is that, and it keeps the arm about
+        // "nothing was spawned" rather than about which class `ping` lands in.
         using var fixture = new RepeatFixture(
-            TimeSpan.FromMilliseconds(150), "ping*", "sleep*");
+            commandCeiling: _ => TimeSpan.FromMilliseconds(150), "ping*", "sleep*");
 
         var result = await fixture.RunAsync(sleep + " &");
 
@@ -190,7 +193,7 @@ public sealed class RepeatedToolCallTests
     [Fact]
     public async Task An_unchanged_file_is_replayed_then_refused()
     {
-        using var fixture = new RepeatFixture(commandTimeout: null, StablePattern);
+        using var fixture = new RepeatFixture(commandCeiling: null, StablePattern);
         var path = fixture.WriteWorkspaceFile("notes.md", "one");
 
         var first = await fixture.ReadAsync(path);
@@ -212,7 +215,7 @@ public sealed class RepeatedToolCallTests
     [Fact]
     public async Task A_file_rewritten_by_another_process_is_read_again()
     {
-        using var fixture = new RepeatFixture(commandTimeout: null, StablePattern);
+        using var fixture = new RepeatFixture(commandCeiling: null, StablePattern);
         var path = fixture.WriteWorkspaceFile("build.log", "before");
 
         var first = await fixture.ReadAsync(path);
@@ -235,7 +238,7 @@ public sealed class RepeatedToolCallTests
     [Fact]
     public async Task The_rooms_own_write_makes_the_next_read_execute()
     {
-        using var fixture = new RepeatFixture(commandTimeout: null, StablePattern);
+        using var fixture = new RepeatFixture(commandCeiling: null, StablePattern);
         var path = fixture.WriteWorkspaceFile("draft.md", "aaa");
 
         var first = await fixture.ReadAsync(path);
@@ -258,7 +261,7 @@ public sealed class RepeatedToolCallTests
     [Fact]
     public async Task A_command_that_ran_makes_the_next_read_execute_and_a_refused_one_does_not()
     {
-        using var fixture = new RepeatFixture(commandTimeout: null, StablePattern);
+        using var fixture = new RepeatFixture(commandCeiling: null, StablePattern);
         var path = fixture.WriteWorkspaceFile("built.txt", "aaa");
 
         await fixture.ReadAsync(path);
@@ -293,9 +296,11 @@ public sealed class RepeatedToolCallTests
 
     private sealed class RepeatFixture : IDisposable
     {
-        // One constructor, so a future arm wanting two patterns and no custom timeout cannot land on
-        // an overload that does not exist. The timeout leads because `params` has to trail.
-        public RepeatFixture(TimeSpan? commandTimeout, params string[] shellPatterns)
+        // One constructor, so a future arm wanting two patterns and no custom ceiling cannot land on
+        // an overload that does not exist. The ceiling leads because `params` has to trail; it is the
+        // per-CLASS delegate #1998 made it, and every arm but the no-spawn one passes null for it.
+        public RepeatFixture(
+            Func<Baton.Domain.ShellCommandClass, TimeSpan>? commandCeiling, params string[] shellPatterns)
         {
             Root = Path.Combine(Path.GetTempPath(), $"baton-repeat-{Guid.NewGuid():N}");
             Workspace = Path.Combine(Root, "workspace");
@@ -314,7 +319,7 @@ public sealed class RepeatedToolCallTests
                 Output,
                 [],
                 ["report.md"],
-                commandTimeout,
+                commandCeiling,
                 Clock);
         }
 
