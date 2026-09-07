@@ -794,6 +794,125 @@ public sealed class CodexDynamicToolPolicyTests
             },
         }));
 
+    /// <summary>
+    /// #2016 re-review MEDIUM: the BROKER wiring of <see cref="OwnPullRequestOnlyRule"/> — the third
+    /// of its three enforcement points, and the only one whose end-to-end path had no test. What the
+    /// rule itself decides is specified once, in <c>OwnPullRequestOnlyRuleTests</c>; nothing here
+    /// re-tests that. What is only true on this path is asserted instead: that the rule is
+    /// CONSTRUCTED at all for a codex implement lane (the <c>AppliesTo</c> call in the constructor),
+    /// that <see cref="CodexDynamicToolPolicy.RunCommandTool"/> consults it, and that the answer
+    /// arrives as a Refused rather than a Failed, so it lands in the refusal count.
+    /// <para>
+    /// Off the REAL catalog grant, because the claim is about the shipped implement role: a role
+    /// whose shell patterns grew a <c>gh pr</c> allowance would silently stop being governed here.
+    /// No process is spawned — the refusal returns ahead of <c>Process.Start</c>, which is what makes
+    /// this testable without a vendor CLI on the machine.
+    /// </para>
+    /// </summary>
+    [Fact]
+    public async Task A_codex_implement_lane_is_refused_a_pull_request_it_did_not_open()
+    {
+        using var fixture = new PolicyFixture(WorkerRoleCatalog.For("implement").Grant, ["changes.md"]);
+
+        var refused = await fixture.ExecuteAsync(
+            CodexDynamicToolPolicy.RunCommandTool, new { command = "gh pr view 1994" });
+
+        Assert.False(refused.Success);
+        // The rule's own sentence, not merely "a refusal": the allow/deny and option-token rungs above
+        // it refuse too, and a loose assertion passes on a build where this rung was never wired.
+        Assert.Contains(OwnPullRequestOnlyRule.Rule, refused.Text, StringComparison.Ordinal);
+        Assert.Contains("has not opened a pull request yet", refused.Text, StringComparison.Ordinal);
+        // Refused rather than Failed, which is what RunCommandAsync's comment at this rung claims.
+        Assert.Contains(GrantRefusal.Marker, refused.Text);
+        Assert.Equal(1, RefusedStepsCountedFor(refused));
+    }
+
+    /// <summary>
+    /// The rung ORDER on the broker path: the sibling-PR rung sits ahead of #2002's repeat ledger, so
+    /// a refused read never enters that ledger and the third identical ask still says why it was
+    /// refused. Reversing the two makes this line's third answer the repeat refusal instead, which is
+    /// a different sentence naming a different rule — that is what discriminates here.
+    /// </summary>
+    [Fact]
+    public async Task A_refused_sibling_read_never_reaches_the_repeat_ledger()
+    {
+        using var fixture = new PolicyFixture(WorkerRoleCatalog.For("implement").Grant, ["changes.md"]);
+
+        for (var ask = 1; ask <= 3; ask++)
+        {
+            var refused = await fixture.ExecuteAsync(
+                CodexDynamicToolPolicy.RunCommandTool, new { command = "gh pr view 1994" });
+
+            Assert.False(refused.Success);
+            Assert.Contains(OwnPullRequestOnlyRule.Rule, refused.Text, StringComparison.Ordinal);
+        }
+    }
+
+    /// <summary>
+    /// The gate-OPENING half of the same wiring, which is the only half that needs a process: the
+    /// policy hands <c>gh pr create</c>'s combined output to
+    /// <see cref="OwnPullRequestOnlyRule.ObserveCommandOutput"/> when the command exited zero, and the
+    /// number it learns there admits exactly that pull request on the NEXT ask.
+    /// <para>
+    /// A shim <c>gh</c> in the workspace root — invoked as <c>.\gh</c> / <c>./gh</c>, never bare, so
+    /// a real <c>gh</c> on the machine's PATH can never be the thing that runs — prints the URL a
+    /// create prints. The control arm is read first and is what makes the pass attributable: the SAME
+    /// <c>gh pr view 2005</c> is refused before the create and allowed after it, so a build that
+    /// stopped calling <c>ObserveCommandOutput</c> fails the second arm while a build that admitted
+    /// every number fails the first.
+    /// </para>
+    /// </summary>
+    [Fact]
+    public async Task The_broker_learns_this_rooms_pull_request_from_its_own_gh_pr_create()
+    {
+        using var fixture = new PolicyFixture(WorkerRoleCatalog.For("implement").Grant, ["changes.md"]);
+        var gh = ShimGh(fixture.Workspace, "https://github.com/aer-works/baton/pull/2005");
+
+        var before = await fixture.ExecuteAsync(
+            CodexDynamicToolPolicy.RunCommandTool, new { command = $"{gh} pr view 2005" });
+        var create = await fixture.ExecuteAsync(
+            CodexDynamicToolPolicy.RunCommandTool, new { command = $"{gh} pr create --fill" });
+        var after = await fixture.ExecuteAsync(
+            CodexDynamicToolPolicy.RunCommandTool, new { command = $"{gh} pr view 2005" });
+
+        Assert.False(before.Success);
+        Assert.Contains("has not opened a pull request yet", before.Text, StringComparison.Ordinal);
+        Assert.True(create.Success, create.Text);
+        Assert.True(after.Success, after.Text);
+        Assert.DoesNotContain(OwnPullRequestOnlyRule.Rule, after.Text, StringComparison.Ordinal);
+        // And the sibling stays refused with the room's own number now named in the refusal, so the
+        // create opened the gate for ONE number rather than for every number.
+        var sibling = await fixture.ExecuteAsync(
+            CodexDynamicToolPolicy.RunCommandTool, new { command = $"{gh} pr view 1994" });
+        Assert.False(sibling.Success);
+        Assert.Contains("This room opened #2005", sibling.Text, StringComparison.Ordinal);
+    }
+
+    /// <summary>
+    /// Writes a fake <c>gh</c> into <paramref name="directory"/> that prints <paramref name="url"/>
+    /// and exits zero, and returns the RELATIVE spelling to invoke it by. Relative on purpose: a bare
+    /// <c>gh</c> would resolve to whatever real CLI is on this machine's PATH.
+    /// </summary>
+    private static string ShimGh(string directory, string url)
+    {
+        if (OperatingSystem.IsWindows())
+        {
+            // `.\gh` with no extension: cmd applies PATHEXT to a relative path, so this reaches gh.cmd
+            // and never a `gh.exe` elsewhere. The rule reads the file name off the path either way.
+            File.WriteAllText(Path.Combine(directory, "gh.cmd"), $"@echo off\r\n@echo {url}\r\n");
+            return ".\\gh";
+        }
+
+        var script = Path.Combine(directory, "gh");
+        File.WriteAllText(script, $"#!/bin/sh\necho {url}\n");
+        File.SetUnixFileMode(
+            script,
+            UnixFileMode.UserRead | UnixFileMode.UserWrite | UnixFileMode.UserExecute
+            | UnixFileMode.GroupRead | UnixFileMode.GroupExecute
+            | UnixFileMode.OtherRead | UnixFileMode.OtherExecute);
+        return "./gh";
+    }
+
     [Fact]
     public async Task Reparse_point_escape_is_denied_when_the_platform_can_create_one()
     {
