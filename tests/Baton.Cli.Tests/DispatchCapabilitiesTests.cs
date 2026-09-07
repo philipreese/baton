@@ -42,8 +42,8 @@ public class DispatchCapabilitiesTests
         }
 
         // agy models (illustrative only — agy has no alias catalog to source from)
-        // #1863: the 3.6 Flash family left every pin position on 2026-09-06, so the illustration
-        // names the family the tier now uses.
+        // #1863: retired names must not survive here as an illustration — docs/dispatch.md's tier
+        // paragraph is the record of which family is current and why.
         Assert.Contains("gemini-3.8-flash-high", text);
         Assert.DoesNotContain("gemini-3.6-flash", text);
         Assert.DoesNotContain("gemini-3.1-pro", text);
