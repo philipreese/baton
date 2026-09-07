@@ -1610,6 +1610,13 @@ public sealed partial class AgyWorkerAdapter : IWorkerAdapter, IPermissionGrantT
     /// states the rule and why this clock cannot simply read the credit instead.
     /// </para>
     /// <para>
+    /// What the 60 s actually has to cover at the ceiling: the engine's kill lands slightly LATE of it.
+    /// <c>BatonProcessRunner</c>'s monitor polls the budget every 15 s but shortens its final wait to
+    /// exactly the remaining budget, so the overshoot is one probe read plus the process-tree teardown,
+    /// not a whole poll interval — a few hundred milliseconds against a 60 s margin. The margin binds
+    /// on the ceiling, not on the poll cycle.
+    /// </para>
+    /// <para>
     /// Fixed rather than proportional. A proportional margin is dangerously tight at the short end —
     /// 25% of a 30-second timeout is under 8 seconds, well inside process-teardown jitter on a loaded
     /// machine — while at the long end the size of the backstop is irrelevant, because AER terminates

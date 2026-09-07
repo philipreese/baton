@@ -1183,7 +1183,10 @@ wall. That is the real argument for the margin direction below: it converts a *m
 a correct one (`"Execution timed out."`), which is stronger than "a better message".
 
 **Fixed in `#588`:** the adapter now emits `--print-timeout` derived from the worker binding's own
-`Timeout`, set deliberately *past* it so AER's enforcement is the binding constraint. That direction is
+`Timeout`, set deliberately *past* it so AER's enforcement is the binding constraint. Since #2019 it is
+past the furthest that binding's clock can be extended to rather than past the raw configured value —
+`AgyWorkerAdapter.PrintTimeoutMargin` and `Baton.Dispatch.BuildLockWaitCredit` are canonical for the
+arithmetic, so do not read a figure off this file. That direction is
 the point — whichever limit expires first decides the failure mode, and they are not equally good:
 AER's yields `CoreExitReason.TimedOut` and a real diagnostic, agy's yields a clean exit 0 with no
 output. agy's limit is left as a backstop that should never fire.
