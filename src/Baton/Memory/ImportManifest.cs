@@ -65,10 +65,14 @@ public sealed record ImportLinkRow(
 /// <param name="SourcePath">Absolute path of the file.</param>
 /// <param name="Sha256">Its digest — recorded even here, because provenance is the point of the row.</param>
 /// <param name="SourceMtimeUtc">
-/// Its last-write time. Which read the digest and this came from differs by population — a file this
-/// import opened carries that read's values (see <see cref="MemoryEntry.SourceMtimeUtc"/>), and one it
-/// never opened carries the inventory walk's — so the field on <see cref="ImportManifest"/> the row sits
-/// in is what says which, and it is stated there rather than enumerated here.
+/// Its last-write time, taken from the same read as <paramref name="Sha256"/> and
+/// <paramref name="SizeBytes"/>. <b>Which read that was is decided by one thing: whether the import
+/// opened the file.</b> It opens an <see cref="ImportManifest.Unfiled"/> or an
+/// <see cref="ImportManifest.ProjectionsSkipped"/> file like any other source and only then declines to
+/// file it, so all three values on those rows are this import's own (see
+/// <see cref="MemoryEntry.SourceMtimeUtc"/>). It never opens an <see cref="ImportManifest.Machinery"/>
+/// file and could not open a <see cref="ImportManifest.Dropped"/> one, so theirs are the inventory
+/// walk's — with the consequence peculiar to the second stated at <see cref="ImportManifest.Dropped"/>.
 /// </param>
 /// <param name="SizeBytes">Its length, from whichever read the digest came from.</param>
 /// <param name="Reason">Why it produced no entry, in one clause.</param>

@@ -1301,6 +1301,182 @@ public sealed class MemoryImportTests : IDisposable
     }
 
     /// <summary>
+    /// The reconcile identity the manifest's contract is: <c>inventoried = entries + unfiled +
+    /// machinery + projection-skipped + dropped</c>, over a population where all five are non-empty.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// <b>Why summing them is a different claim from checking them.</b> Each population already has an
+    /// arm proving its rows are shaped right; none of those can notice a file that reached NO
+    /// population, because a missing row is invisible to an assertion about the rows that are there.
+    /// That is precisely how #1976 shipped — the read's <c>catch</c> discarded the file, the count of
+    /// every population stayed self-consistent, and the whole suite stayed green.
+    /// </para>
+    /// <para>
+    /// <b>Two instruments, one claim, because neither reaches the whole population.</b> The first half
+    /// drives the verb, so what it grades is the manifest <c>MemoryImportCommand</c> itself assembled
+    /// — the only thing that can catch a population computed correctly and then left out of the
+    /// manifest, since <see cref="ImportManifest.Dropped"/> is an optional argument the compiler will
+    /// not miss. The second half drives the read seam, because no fixture can stage a vanishing file
+    /// through the verb: <see cref="A_source_gone_between_the_walk_and_the_read_is_recorded_as_dropped"/>
+    /// records why, and it is why the verb's own manifest is one population short of the identity.
+    /// </para>
+    /// <para>
+    /// <b>Source paths, not merely a total.</b> Equal totals also hold when one file lands in two
+    /// populations while a second lands in none — the exact shape a routing change produces — so the
+    /// union of the five populations' paths is compared against what the walk found, and the row count
+    /// against that union's size. Together those two are "exactly one population each".
+    /// </para>
+    /// </remarks>
+    [Fact]
+    public async Task Every_file_the_walk_found_lands_in_exactly_one_manifest_population()
+    {
+        var checkout = Checkout("accounted");
+        await InitGitRepoAsync(checkout, "https://github.com/philipreese/accounted.git");
+        WriteClaudeRoot(
+            "C--accounted", checkout,
+            ("user_who.md", "a memory a person wrote"),
+            (ClaudeProjectionTarget.ProjectionFileName, MemoryProjection.FormatMarker + "\n# a cache\n"));
+        WriteClaudeRoot("C--orphaned", Checkout("never-created"), ("user_orphan.md", "its checkout is gone"));
+        Directory.CreateDirectory(Path.Combine(UserHome, ".codex"));
+        File.WriteAllText(Path.Combine(UserHome, ".codex", "memories_1.sqlite"), "synthetic-not-a-database");
+
+        // The walk's own answer to "what did the import look at", taken from the inventory rather than
+        // from the tree and taken BEFORE the run: the files under _root include a session.jsonl per
+        // root, the git objects, and the store the run is about to write, none of which the import
+        // looked at. The vendor half is every family's rows, which in this fixture is the sqlite.
+        var walked = MemoryRootInventory
+            .Scan(ClaudeHome, TestContext.Current.CancellationToken)
+            .SelectMany(r => r.Files)
+            .Concat(MemoryRootInventory
+                .ScanVendorRoots(UserHome, BatonPaths.Root, limits: null, TestContext.Current.CancellationToken)
+                .SelectMany(r => r.Files))
+            .Select(f => f.Path)
+            .ToHashSet(StringComparer.OrdinalIgnoreCase);
+        Assert.Equal(4, walked.Count);
+
+        await RunAsync();
+
+        var manifest = ImportManifest.Read(Assert.Single(
+            Directory.GetFiles(Path.Combine(BatonPaths.Root, BatonPaths.MemoryImportsDirectoryName))));
+
+        // Four of the five populated, so dropping any one of those four from the sum fails here.
+        Assert.NotEmpty(manifest.Entries);
+        Assert.NotEmpty(manifest.Unfiled);
+        Assert.NotEmpty(manifest.Machinery);
+        Assert.NotEmpty(manifest.ProjectionsSkipped!);
+        Assert.Empty(manifest.Dropped!);
+        AssertEveryWalkedFileIsAccountedForExactlyOnce(manifest, walked);
+
+        // The fifth, at the seam. One source with a subject (a memory, a projection, and a file the
+        // read will not find) and one without (the unfiled row), plus a machinery row of the kind the
+        // walk hands the command untouched.
+        var directory = Path.Combine(_root, "reconcile");
+        var orphanDirectory = Path.Combine(_root, "reconcile-unfiled");
+        Directory.CreateDirectory(directory);
+        Directory.CreateDirectory(orphanDirectory);
+
+        var keptRow = WriteSeamFile(directory, "user_kept.md", "a memory the read will find");
+        var projectionRow = WriteSeamFile(
+            directory, "projected.md", MemoryProjection.FormatMarker + "\n# a cache\n");
+        var orphanRow = WriteSeamFile(orphanDirectory, "user_orphan.md", "no subject for this root");
+        var goneRow = WriteSeamFile(directory, "user_vanished.md", "the memory the read will miss");
+        FileCleanup.EnsureDeleted(goneRow.Path);
+
+        var machineryRow = new ImportSkippedRow(
+            Path.Combine(_root, "machinery", "memories_1.sqlite"),
+            "0f".PadRight(64, '0'),
+            new DateTime(2025, 6, 7, 8, 9, 10, DateTimeKind.Utc),
+            SizeBytes: 11,
+            "recorded by the walk and never opened.");
+
+        var seamSources = new[]
+        {
+            new MemoryImportSource(
+                directory, MemoryRootInventory.ClaudeVendor, VendorMemoryScope.Vendor, Archived: false,
+                "github.com/philipreese/accounted", UnfiledReason: null, [keptRow, projectionRow, goneRow]),
+            new MemoryImportSource(
+                orphanDirectory, MemoryRootInventory.ClaudeVendor, VendorMemoryScope.Vendor, Archived: false,
+                Repository: null, "the checkout this memory belongs to is gone", [orphanRow]),
+        };
+
+        var reads = seamSources.Select(s => (Source: s, Read: MemoryImportCommand.ReadSourceFiles(s))).ToList();
+        var seamPlan = MemoryImportPlan.Build(
+            [.. reads.Select(r => r.Source with { Files = r.Read.Files })],
+            DateTime.UtcNow,
+            [.. reads.SelectMany(r => r.Read.Dropped)]);
+
+        var seamManifestPath = Path.Combine(_root, "manifests", "import-reconcile.json");
+        new ImportManifest(
+            ImportManifest.CurrentVersion,
+            DateTime.UtcNow,
+            BatonPaths.Root,
+            [.. seamPlan.Entries.Select(e => new ImportManifestRow(
+                e.SourcePath, e.Sha256, e.SourceMtimeUtc, SizeBytes: 0, e.SourceVendor, e.SourceScope,
+                e.Id, e.Repository, EntriesFilePath: "entries.jsonl"))],
+            seamPlan.Unfiled,
+            [machineryRow],
+            [],
+            seamPlan.ProjectionsSkipped,
+            seamPlan.Dropped).Write(seamManifestPath);
+
+        var seamManifest = ImportManifest.Read(seamManifestPath);
+
+        // All five populated now, so the sum is short if ANY of them is dropped from it.
+        Assert.Single(seamManifest.Entries);
+        Assert.Single(seamManifest.Unfiled);
+        Assert.Single(seamManifest.Machinery);
+        Assert.Single(seamManifest.ProjectionsSkipped!);
+        Assert.Single(seamManifest.Dropped!);
+        AssertEveryWalkedFileIsAccountedForExactlyOnce(
+            seamManifest,
+            new[] { keptRow.Path, projectionRow.Path, orphanRow.Path, goneRow.Path, machineryRow.SourcePath }
+                .ToHashSet(StringComparer.OrdinalIgnoreCase));
+    }
+
+    /// <summary>
+    /// The identity itself, so both halves of the arm above measure one claim rather than two similar
+    /// ones. The count is asserted separately from the set because they fail on different defects: the
+    /// set on a file that reached no population, the count on one that reached two.
+    /// </summary>
+    private static void AssertEveryWalkedFileIsAccountedForExactlyOnce(
+        ImportManifest manifest, IReadOnlySet<string> walked)
+    {
+        var accounted = manifest.Entries.Select(e => e.SourcePath)
+            .Concat(manifest.Unfiled.Select(r => r.SourcePath))
+            .Concat(manifest.Machinery.Select(r => r.SourcePath))
+            .Concat((manifest.ProjectionsSkipped ?? []).Select(r => r.SourcePath))
+            .Concat((manifest.Dropped ?? []).Select(r => r.SourcePath))
+            .ToList();
+
+        Assert.Equal(walked.Count, accounted.Count);
+        Assert.Equal(
+            walked.OrderBy(p => p, StringComparer.OrdinalIgnoreCase),
+            accounted.OrderBy(p => p, StringComparer.OrdinalIgnoreCase),
+            StringComparer.OrdinalIgnoreCase);
+    }
+
+    /// <summary>
+    /// One file on disk plus the inventory row the walk would have produced for it — the seam takes
+    /// rows, and a row whose digest did not come from the bytes beside it would make the arm above
+    /// pass over values nothing ever computed.
+    /// </summary>
+    private static MemoryImportFile WriteSeamFile(string directory, string name, string content)
+    {
+        var path = Path.Combine(directory, name);
+        var bytes = System.Text.Encoding.UTF8.GetBytes(content);
+        File.WriteAllBytes(path, bytes);
+
+        return new MemoryImportFile(
+            path,
+            name,
+            Text: string.Empty,
+            Convert.ToHexString(SHA256.HashData(bytes)).ToLowerInvariant(),
+            File.GetLastWriteTimeUtc(path),
+            bytes.Length);
+    }
+
+    /// <summary>
     /// Two Claude roots resolving to one repository through a real worktree, plus a live entry the
     /// archive tests supersede. Three files, all under <c>github.com/philipreese/baton</c>.
     /// </summary>

@@ -5783,9 +5783,11 @@ Baton's own root: the per-repository store and one `ImportManifest`. What an ent
 **decode** of the source's bytes with the byte digest beside it, both taken from **one** read — the
 digest is the authority on what the file held, and taking it from the earlier inventory walk instead
 would let a file edited in between be stored under a digest describing a version nobody kept. The
-manifest accounts for **every file the import looked at** — imported, unfiled, or recorded as
-machinery — because a manifest listing only successes is what the undocumented
-`memory-archive/2026-09-03` migration already demonstrated the cost of. `--undo <manifest>` removes
+manifest accounts for **every file the import looked at** — imported, unfiled, recorded as machinery,
+refused as a projection, or **dropped**, which is a source the walk found and the copy step could not
+then open at all, having been deleted, locked or made unreadable in the window between the two (#1976)
+— because a manifest listing only successes is what the undocumented `memory-archive/2026-09-03`
+migration already demonstrated the cost of. `--undo <manifest>` removes
 exactly the entries and links that run appended and no others; rows an earlier import had already
 written are excluded, so an undo cannot reverse work its manifest did not do. **An undo that reversed
 less than its manifest claims exits non-zero and names the store files that came up short, and one
