@@ -4,7 +4,7 @@ using Baton.Dispatch;
 namespace Baton.Vendors;
 
 /// <summary>
-/// A binding's <b>declared</b> canonical skill packages would together inline more prompt than #748's
+/// A binding's <b>declared</b> canonical skill packages would together inline a prompt reaching #748's
 /// <see cref="CoreDispatcher.OversizePromptThreshold"/> (#2044 review MEDIUM). The bound, why it is that
 /// number, and why only the declared arm carries one are stated once on
 /// <see cref="SkillInlining.InlineSkills"/> — this type is the refusal, not a second copy of the rule.

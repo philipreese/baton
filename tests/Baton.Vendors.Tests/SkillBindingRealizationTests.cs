@@ -228,6 +228,16 @@ public sealed class SkillBindingRealizationTests : IDisposable
             new Dictionary<string, WorkerBindingConfigEntry> { ["worker"] = entry with { Adapter = "agy" } },
             new Dictionary<string, IWorkerAdapter> { ["agy"] = new AgyWorkerAdapter() }));
 
+        // And on codex's BROKERED path, which every grant-carrying dispatch takes: CodexWorkerAdapter
+        // .Resolve hands off to ResolveBroker as soon as a grant is present, so a grant-less arm alone
+        // would prove nothing about the dispatch shape lanes actually run (#2044's own first round).
+        Assert.Throws<SkillInliningOversizeException>(() => WorkerBindingResolver.Resolve(
+            new Dictionary<string, WorkerBindingConfigEntry>
+            {
+                ["worker"] = entry with { PermissionGrant = new PermissionGrant(ReadFiles: true) },
+            },
+            new Dictionary<string, IWorkerAdapter> { ["codex"] = new CodexWorkerAdapter() }));
+
         // The control: an ordinary package under the bound still reaches the prompt, so the refusal
         // above is about size and not about declaring a skill at all.
         var bindings = WorkerBindingResolver.Resolve(
