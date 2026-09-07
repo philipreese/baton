@@ -719,12 +719,14 @@ public static class OutcomeClassifier
     /// </remarks>
     /// <remarks>
     /// <para>
-    /// <b>#1978 — the delivered arm.</b> A head that is already on the remote with an open PR is not
-    /// stranded work, whatever else the workspace still carries, and a summary that tells a conductor to
-    /// finish it is how one came to hand-push an already-pushed branch and reset a divergent head on
-    /// 2026-09-06. That arm therefore names the PR and never uses the word "redispatch" at all — pinned
-    /// by an absence assertion in <c>OutcomeClassifierTests</c>, because the harm was the instruction,
-    /// not the count. What it leaves alone (the verdict, and the one resolve verb
+    /// <b>#1978 — the delivered arm.</b> A head that is already on the remote with an open PR is not a
+    /// branch anyone should push, and a summary that tells a conductor to finish it is how one came to
+    /// hand-push an already-pushed branch and reset a divergent head on 2026-09-06. That arm therefore
+    /// names the PR and never uses the word "redispatch" at all — pinned by an absence assertion in
+    /// <c>OutcomeClassifierTests</c>, because the harm was the instruction, not the count. <b>Delivered
+    /// is a claim about the BRANCH, never about the workspace</b>: the changed/untracked count is what
+    /// decides whether a follow-on is owed, and the two clauses are split on it below for the reason
+    /// stated there. What this arm leaves alone (the verdict, and the one resolve verb
     /// <c>ContractFailure</c> admits) is spec/baton.md §3's #1978 paragraph, not restated here.
     /// </para>
     /// <para>
@@ -743,15 +745,38 @@ public static class OutcomeClassifier
 
         if (reading.HeadIsPushed && openPullRequest is { } pullRequest)
         {
-            return contractSatisfied
-                ? $"{carries}; its head is on origin and PR #{pullRequest} is open, so this attempt's work is "
-                  + "already delivered — resolve it ('baton resolve --reject --reason <text>') and review "
-                  + $"PR #{pullRequest}. Nothing is stranded here: do not push the branch by hand, and no "
-                  + "follow-on brief is owed for this work — awaiting conductor resolution."
-                : $"{carries}; its head is on origin and PR #{pullRequest} is open, but this execution's "
-                  + "declared output(s) are missing — resolve it ('baton resolve --reject --reason "
-                  + $"<text>') and read PR #{pullRequest} for what did land. Do not push the branch by "
-                  + "hand: it is already on origin — awaiting conductor resolution.";
+            if (contractSatisfied)
+            {
+                // What is DELIVERED and what is OWED are two questions, and only the first is answered
+                // by the push. "Nothing is stranded" is therefore said over a clean tree only; with
+                // paths still in the workspace it would tell a conductor to ignore the very work the
+                // same sentence just counted. Never the word "redispatch" in either arm — the harm
+                // #1978 is about was the instruction to finish an already-delivered branch, and a
+                // residue clause naming what is left is not that instruction.
+                var deliveredBranch =
+                    $"{carries}; its head is on origin and PR #{pullRequest} is open, so this attempt's "
+                    + "committed work is already delivered — resolve it ('baton resolve --reject --reason "
+                    + $"<text>') and review PR #{pullRequest}. Do not push the branch by hand: it is "
+                    + "already on origin";
+
+                // Which of these two arms production actually reaches, and why, is spec/baton.md §3's
+                // #1978 paragraph -- #1945's branch above is what decides it, and it decides it before
+                // this builder is called at all. The unreached one is written out regardless, and
+                // OutcomeClassifierTests holds two arms that vary only the count, so a later change to
+                // that branch cannot silently resurrect a "nothing is owed" claim over a workspace that
+                // still holds work.
+                return reading.ChangedPathCount == 0
+                    ? $"{deliveredBranch}. Nothing is stranded here, and no follow-on brief is owed for "
+                      + "this work — awaiting conductor resolution."
+                    : $"{deliveredBranch}, and the {reading.ChangedPathCount} changed/untracked path(s) "
+                      + "in the workspace are not delivered: a follow-on brief owes that residue — "
+                      + "awaiting conductor resolution.";
+            }
+
+            return $"{carries}; its head is on origin and PR #{pullRequest} is open, but this execution's "
+                + "declared output(s) are missing — resolve it ('baton resolve --reject --reason "
+                + $"<text>') and read PR #{pullRequest} for what did land. Do not push the branch by "
+                + "hand: it is already on origin — awaiting conductor resolution.";
         }
 
         // "then redispatch", never "or redispatch": RedispatchCommand refuses an Indeterminate parent

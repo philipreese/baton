@@ -1,4 +1,5 @@
 using System.Diagnostics;
+using Baton.Artifacts;
 using Baton.Dispatch;
 using Baton.Domain;
 using Baton.Mutation;
@@ -54,10 +55,14 @@ public sealed class TimeoutOnMutatedWorkspaceEndToEndTests
             // thing (spec/baton.md §3's settle-shape table).
             Assert.Equal(IndeterminateProducer.ContractFailure, step.IndeterminateProducer);
             // #1978: real git, and this fixture's `git init` repo has no remote at all — so the commit
-            // half falls back to the delta against the attempt's start sha and SAYS it did. The one arm
-            // of #1978's split that a real tree can discriminate here; the pushed/ahead-of-upstream arms
-            // are pinned against the classifier in OutcomeClassifierTests, which needs no origin.
-            Assert.Contains("1 new commit(s) (no upstream)", step.LatestFailureReason!, StringComparison.Ordinal);
+            // half falls back to the delta against the attempt's start sha and SAYS it did, naming the
+            // missing measurement rather than guessing which of its three causes produced it. The
+            // pushed arm is A_timeout_on_a_pushed_workspace_behind_an_open_PR... below, against a real
+            // origin.
+            Assert.Contains(
+                "1 new commit(s) (not measured against a remote)",
+                step.LatestFailureReason!,
+                StringComparison.Ordinal);
 
             // A committed work product leaves a CLEAN tree. This is the arm a status-only probe would
             // have read as "nothing here" and retried straight over.
@@ -134,6 +139,63 @@ public sealed class TimeoutOnMutatedWorkspaceEndToEndTests
         }
     }
 
+    /// <summary>
+    /// #1978 fix round: the seam the PR body disclosed as unpinned. Every classifier arm injects
+    /// <c>openPullRequest</c> straight into <c>OutcomeClassifier.Classify</c>, so dropping
+    /// <c>MutationInterface</c>'s own argument at that call site left all of them green while restoring
+    /// the bug. This runs the real pump over a real pushed workspace with a real origin, a
+    /// <c>DeliversBranch</c> binding and a fake <c>gh</c>, and reads the settled reason — the one path
+    /// that fails if the argument is dropped.
+    /// <para>
+    /// It is also the dirty-delivered arm end to end: the branch is on origin behind PR #1974, and one
+    /// uncommitted path is still in the workspace, so the summary owes that residue and must not say
+    /// nothing is owed.
+    /// </para>
+    /// </summary>
+    [Fact]
+    public async Task A_timeout_on_a_pushed_workspace_behind_an_open_PR_names_the_PR_and_still_owes_the_residue()
+    {
+        var run = await RunTimedOutLaneAsync(
+            workspace => File.WriteAllText(Path.Combine(workspace, "left-behind.txt"), "written, never committed"),
+            pushToOrigin: true,
+            deliversBranch: true,
+            openPullRequestJson: """[{"number":1974}]""",
+            satisfyContract: true);
+
+        try
+        {
+            var step = run.FinalState.Steps.Single(s => s.StepId == Implement);
+            var reason = step.LatestFailureReason!;
+
+            // The verdict is untouched by #1978 — only the text moves.
+            Assert.Equal(WorkflowOutcome.Indeterminate, WorkflowOutcome.Describe(run.FinalState));
+            Assert.True(step.IndeterminateAwaitingResolution);
+
+            // Real git against a real origin: the commit half is the REMOTE reading, and this workspace
+            // pushed everything it committed. The fallback phrase must not appear at all here — that is
+            // the arm the no-remote fixture above pins.
+            Assert.Contains("0 unpushed commit(s) and 1 changed/untracked path(s)", reason, StringComparison.Ordinal);
+            Assert.DoesNotContain("not measured against a remote", reason, StringComparison.Ordinal);
+
+            // The seam itself: this fact can only have come from MutationInterface's own `gh` spawn
+            // being handed to Classify.
+            Assert.Contains("PR #1974 is open", reason, StringComparison.Ordinal);
+            Assert.Contains("already delivered", reason, StringComparison.Ordinal);
+            Assert.DoesNotContain("redispatch", reason, StringComparison.OrdinalIgnoreCase);
+
+            // And the residue is still owed: one path never left the workspace.
+            Assert.Contains(
+                "the 1 changed/untracked path(s) in the workspace are not delivered", reason, StringComparison.Ordinal);
+            Assert.DoesNotContain("no follow-on brief is owed", reason, StringComparison.Ordinal);
+
+            Assert.Empty(run.Events.OfType<FlowEvent.StepRetryScheduled>());
+        }
+        finally
+        {
+            run.Cleanup();
+        }
+    }
+
     private sealed record LaneRun(
         FlowState FinalState,
         IReadOnlyList<FlowEvent> Events,
@@ -145,7 +207,12 @@ public sealed class TimeoutOnMutatedWorkspaceEndToEndTests
     /// <paramref name="mutateWorkspace"/> against the lane's real git workspace — the fake dispatcher's
     /// stand-in for a worker that did some work and then ran out of clock.
     /// </summary>
-    private static async Task<LaneRun> RunTimedOutLaneAsync(Action<string>? mutateWorkspace)
+    private static async Task<LaneRun> RunTimedOutLaneAsync(
+        Action<string>? mutateWorkspace,
+        bool pushToOrigin = false,
+        bool deliversBranch = false,
+        string? openPullRequestJson = null,
+        bool satisfyContract = false)
     {
         var roomDirectory = Path.Combine(Path.GetTempPath(), $"task-{Guid.NewGuid():N}");
         var workspace = Path.Combine(roomDirectory, "lane");
@@ -159,6 +226,19 @@ public sealed class TimeoutOnMutatedWorkspaceEndToEndTests
         File.WriteAllText(Path.Combine(workspace, "seeded.txt"), "already here before the lane started");
         RunGit(workspace, "add", ".");
         RunGit(workspace, "commit", "-m", "lane base");
+
+        if (pushToOrigin)
+        {
+            // A real bare origin and a real `push -u`, because `@{upstream}..HEAD` is what is under
+            // test: a fabricated ref (TempGitRepository.SetReviewedBaselineAtHead's shortcut) sets no
+            // tracking branch, so the probe would read null and this arm would silently become the
+            // no-remote one.
+            var origin = Path.Combine(roomDirectory, "origin.git");
+            Directory.CreateDirectory(origin);
+            RunGit(origin, "init", "--bare");
+            RunGit(workspace, "remote", "add", "origin", origin);
+            RunGit(workspace, "push", "-u", "origin", "HEAD");
+        }
 
         var snapshot = new WorkflowDefinitionSnapshot(
             new WorkflowDefinitionSnapshotId("snapshot-1373"),
@@ -189,13 +269,25 @@ public sealed class TimeoutOnMutatedWorkspaceEndToEndTests
                 // A tree-changing role: write + shell, so no isolated worktree is provisioned and the
                 // lane's own directory is what carries the work — the shape every implement lane in the
                 // 2026-09-01 measurement had, and the one a worktree-only probe would never see.
-                ChangesTree: true),
+                ChangesTree: true,
+                // #1978 gates the PR lookup on this, exactly as WorkerRoles.json sets it for `implement`
+                // and nothing else.
+                DeliversBranch: deliversBranch),
         };
 
-        var dispatcher = new TimingOutCoreDispatcher(workspace, mutateWorkspace);
+        var dispatcher = new TimingOutCoreDispatcher(
+            workspace,
+            mutateWorkspace,
+            satisfyContract ? artifactsRoot : null);
 
         await using var writer = new FlowEventLogWriter(logPath);
         var reader = new FlowEventLogReader(logPath);
+
+        // The fake `gh` lives OUTSIDE the workspace: a .cmd dropped inside it would be one more
+        // untracked path and would move the count this test asserts on.
+        using var ghScope = openPullRequestJson is null
+            ? null
+            : MutationInterface.BeginOpenPullRequestGhProgramScope(WriteFakeGh(roomDirectory, openPullRequestJson));
 
         var finalState = await MutationInterface.StartWorkflowAsync(
             new WorkflowId("wf-1373"),
@@ -223,7 +315,16 @@ public sealed class TimeoutOnMutatedWorkspaceEndToEndTests
     /// produces. Records every target it was handed, which is the only place the argument a worker
     /// would have been spawned with can be read.
     /// </summary>
-    private sealed class TimingOutCoreDispatcher(string workspace, Action<string>? mutateOnFirstDispatch) : ICoreDispatcher
+    /// <param name="artifactsRootForDeclaredOutput">
+    /// Non-null for the one arm that needs a SATISFIED contract: the declared <c>pr.md</c> is written to
+    /// the execution's artifacts directory, which is where a worker writes it and deliberately not the
+    /// worktree this test's mutation probe reads — the two are separate evidence, which is the whole
+    /// reason the classifier's "delivered" wording is gated on the contract as well as the push.
+    /// </param>
+    private sealed class TimingOutCoreDispatcher(
+        string workspace,
+        Action<string>? mutateOnFirstDispatch,
+        string? artifactsRootForDeclaredOutput = null) : ICoreDispatcher
     {
         private readonly List<CoreDispatchTarget> _targets = [];
 
@@ -237,9 +338,28 @@ public sealed class TimeoutOnMutatedWorkspaceEndToEndTests
                 mutateOnFirstDispatch?.Invoke(workspace);
             }
 
+            if (artifactsRootForDeclaredOutput is { } artifactsRoot)
+            {
+                var outputDirectory = ArtifactManager.ResolveOutputDirectory(artifactsRoot, request.ExecutionId);
+                Directory.CreateDirectory(outputDirectory);
+                File.WriteAllText(Path.Combine(outputDirectory, "pr.md"), "the declared output, written");
+            }
+
             _targets.Add(target);
             return Task.FromResult(new CoreDispatchResult(0, CoreExitReason.TimedOut));
         }
+    }
+
+    /// <summary>
+    /// A <c>gh</c> that answers one fixed JSON body and exits 0 — the same shape
+    /// <c>DeliveryVerifierTests</c> uses, kept local because that one is private to its own class and
+    /// this fixture needs the file outside the workspace it writes into.
+    /// </summary>
+    private static string WriteFakeGh(string directory, string jsonOutput)
+    {
+        var path = Path.Combine(directory, $"fake-gh-{Guid.NewGuid():N}.cmd");
+        File.WriteAllText(path, $"@echo off\necho {jsonOutput}\nexit /b 0\n");
+        return path;
     }
 
     private static void RunGit(string workingDirectory, params string[] args)

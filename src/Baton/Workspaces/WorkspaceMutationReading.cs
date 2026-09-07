@@ -103,15 +103,10 @@ public sealed record WorkspaceMutationReading(
     /// two integers and fixed words, never a path list — so unlike
     /// <see cref="WorktreeProvisioner.DescribeWorkspaceEvidence"/> this needs no caller-side truncation.
     /// <para>
-    /// <b>The commit half names what is not on the REMOTE (#1978), not what is not on the base ref.</b>
-    /// <see cref="CommitsAheadOfRemote"/> when a tracking branch answered — the number a conductor
-    /// actually acts on, since that is what is still stranded on the machine — and only when there is
-    /// none does it fall back to <see cref="NewCommitCount"/>'s delta against the probe's start ref,
-    /// saying <c>(no upstream)</c> so the two are never read as the same measurement. They are not: a
-    /// lane that committed once and pushed reads 0 against its upstream and 1 against <c>main</c>. On
-    /// 2026-09-06 a conductor read the second number as the first, hand-pushed a branch that was
-    /// already on origin with an open PR, and had to reset the divergent head that produced. The
-    /// changed/untracked half is unchanged and is absolute either way.
+    /// <b>The commit half names what is not on the REMOTE (#1978), not what is not on the base ref</b> —
+    /// which ref is measured, which fallback phrase stands in when no remote reading exists, and the
+    /// 2026-09-06 hand-push that forced the split all live in spec/baton.md §3's #1978 paragraph, not
+    /// here. The changed/untracked half is unchanged and is absolute either way.
     /// </para>
     /// </summary>
     public string Describe()
@@ -123,15 +118,19 @@ public sealed record WorkspaceMutationReading(
 
         // The upstream count wins whenever it exists, INCLUDING over an uncounted reflog reading:
         // "how much is not on origin" is the actionable question, and it was answered exactly.
+        // The fallback phrase names the MISSING READING, never a cause: null here is "no upstream
+        // configured", "a detached HEAD" and "git failed" collapsed into one value
+        // (CommitsAheadOfRemote's own param doc lists them), so printing any one of the three would
+        // assert a repository state this probe never established.
         var commits = CommitsAheadOfRemote is { } ahead
             ? $"{ahead} unpushed commit(s)"
-            : $"{DescribeCommitsSinceStartRef()} (no upstream)";
+            : $"{DescribeCommitsSinceStartRef()} (not measured against a remote)";
 
         return $"{commits} and {ChangedPathCount} changed/untracked path(s)";
     }
 
     /// <summary>
-    /// The pre-#1978 commit phrase, now reached only when there is no upstream to measure against —
+    /// The pre-#1978 commit phrase, now reached only when no remote reading exists to report instead —
     /// including the reflog heuristic's uncounted shape, which stays uncounted rather than being
     /// fabricated as a number.
     /// </summary>
