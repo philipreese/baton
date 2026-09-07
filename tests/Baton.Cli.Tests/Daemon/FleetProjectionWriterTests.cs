@@ -36,6 +36,57 @@ public sealed class FleetProjectionWriterTests : IDisposable
         }
     }
 
+    /// <summary>ERROR_SHARING_VIOLATION / ERROR_LOCK_VIOLATION as .NET surfaces them on an
+    /// <see cref="IOException.HResult"/> — the only two IO codes
+    /// <see cref="IsTransientOpenFailure"/> forgives.</summary>
+    private const int HResultSharingViolation = unchecked((int)0x8007_0020);
+    private const int HResultLockViolation = unchecked((int)0x8007_0021);
+
+    /// <summary>
+    /// #2012 — an OPEN of the projection file that failed because something else momentarily held it.
+    /// <see cref="FleetProjectionWriter.WriteAtomic"/>'s own doc comment is the record for why this is
+    /// a RETRY rather than evidence of corruption, and names the three shipped readers that treat it
+    /// as one; this predicate is only the test-side spelling of it.
+    /// <para>
+    /// Deliberately narrow, because everything it forgives is a failure this test can no longer see:
+    /// <see cref="FileNotFoundException"/> and <see cref="DirectoryNotFoundException"/> are excluded
+    /// even though both derive from <see cref="IOException"/>, since the target name disappearing —
+    /// even for an instant — would mean the publish was NOT a single rename and is exactly the product
+    /// defect #2012 asked about. Only the two sharing codes, plus the
+    /// <see cref="UnauthorizedAccessException"/> Windows raises for a delete-pending name, pass.
+    /// </para>
+    /// </summary>
+    private static bool IsTransientOpenFailure(Exception ex) =>
+        ex is UnauthorizedAccessException
+        || (ex is IOException and not FileNotFoundException and not DirectoryNotFoundException
+            && ex.HResult is HResultSharingViolation or HResultLockViolation);
+
+    /// <summary>
+    /// #2012 — what one LANDED read of the projection file was: <c>null</c> when the body is one whole
+    /// write, else the defect in words. Factored out of the racing reader below so
+    /// <see cref="ReadClassifier_NamesATornBody_AndPassesAWholeOne"/> can drive it against a
+    /// deliberately torn body without racing anything — the race arm and the discriminating control
+    /// then cannot drift apart, which is the failure mode a second hand-rolled copy of these two
+    /// conditions would have.
+    /// </summary>
+    private static string? ClassifyRead(string text, int lengthA, int lengthB)
+    {
+        if (text.Length != lengthA && text.Length != lengthB)
+        {
+            return $"torn read of length {text.Length} (expected {lengthA} or {lengthB})";
+        }
+
+        return text.Length > 0 && text[0] != text[^1] ? "read mixed content from two writes" : null;
+    }
+
+    /// <summary>
+    /// #2012: the property <see cref="FleetProjectionWriter.WriteAtomic"/> actually promises — a read
+    /// that LANDS never sees a torn or mixed body — raced against a rewriter. A contended OPEN is not
+    /// part of that promise and is counted, not failed; <see cref="IsTransientOpenFailure"/> carries
+    /// why, and <see cref="ReadClassifier_NamesATornBody_AndPassesAWholeOne"/> plus
+    /// <see cref="AContendedOpen_FailsTransiently_LeavingTheBodyWhole"/> are the two arms that keep
+    /// that forgiveness from making this one pass vacuously.
+    /// </summary>
     [Fact]
     public void WriteAtomic_never_lets_a_concurrent_reader_see_a_torn_file()
     {
@@ -45,38 +96,58 @@ public sealed class FleetProjectionWriterTests : IDisposable
         FleetProjectionWriter.WriteAtomic(path, contentA);
 
         Exception? readerException = null;
+        string? tornRead = null;
+        var landedReads = 0;
+        var transientOpenFailures = 0;
         var stop = false;
 
         var reader = new Thread(() =>
         {
-            try
+            while (!Volatile.Read(ref stop))
             {
-                while (!Volatile.Read(ref stop))
+                FileStream stream;
+                try
                 {
                     // FileShare.Delete: a well-behaved poller of a file it knows gets rewritten out from
                     // under it -- File.ReadAllText's own default share (Read only) would make the
                     // writer's rename fail with a sharing violation on Windows whenever this loop happens
-                    // to hold the file open, which is a liveness question this single-writer, no-retry
-                    // design (the next ~30s tick self-heals) accepts. What this test asserts is narrower
-                    // and must hold regardless: a read that DOES land never observes torn or mixed content.
-                    using var stream = new FileStream(
+                    // to hold the file open, which is a liveness question this single-writer design
+                    // (the next ~30s tick self-heals) accepts.
+                    stream = new FileStream(
                         path, FileMode.Open, FileAccess.Read, FileShare.ReadWrite | FileShare.Delete);
-                    using var streamReader = new StreamReader(stream);
-                    var text = streamReader.ReadToEnd();
-                    if (text.Length != contentA.Length && text.Length != contentB.Length)
-                    {
-                        throw new InvalidOperationException($"torn read of length {text.Length}");
-                    }
+                }
+                catch (Exception ex) when (IsTransientOpenFailure(ex))
+                {
+                    transientOpenFailures++;
+                    continue;
+                }
+                catch (Exception ex)
+                {
+                    readerException = ex;
+                    return;
+                }
 
-                    if (text.Length > 0 && text[0] != text[^1])
+                try
+                {
+                    using (stream)
+                    using (var streamReader = new StreamReader(stream))
                     {
-                        throw new InvalidOperationException("read mixed content from two writes");
+                        var text = streamReader.ReadToEnd();
+                        landedReads++;
+                        tornRead = ClassifyRead(text, contentA.Length, contentB.Length);
+                        if (tornRead is not null)
+                        {
+                            return;
+                        }
                     }
                 }
-            }
-            catch (Exception ex)
-            {
-                readerException = ex;
+                catch (Exception ex)
+                {
+                    // Past the open, nothing is forgiven: the handle is bound to a file object the
+                    // rename cannot pull out from under it, so a failure here is not transient.
+                    readerException = ex;
+                    return;
+                }
             }
         });
         reader.Start();
@@ -93,7 +164,86 @@ public sealed class FleetProjectionWriterTests : IDisposable
         Volatile.Write(ref stop, true);
         reader.Join();
 
-        Assert.Null(readerException);
+        // #2012: the CI failure this replaces read only "Assert.Null() Failure: Value is not null",
+        // which is why deciding between a product defect and a test defect needed a local repro at all.
+        // Both counts and the captured value are named here so the next one is diagnosable from the
+        // job log alone.
+        Assert.True(
+            readerException is null && tornRead is null,
+            $"reader captured {readerException?.GetType().Name ?? "no exception"} " +
+            $"(HResult 0x{readerException?.HResult ?? 0:X8}): {readerException?.Message ?? tornRead ?? "-"} " +
+            $"-- landed reads: {landedReads}, transient open failures: {transientOpenFailures}");
+
+        // Discriminating control: forgiving contended opens means a run where NO read ever landed would
+        // otherwise sail past both content checks. Measured 213,219 landed reads over 3x200 writes on a
+        // Windows 11 dev box (#2012), so this floor is not close to the observed rate.
+        Assert.True(landedReads > 0, $"no read ever landed ({transientOpenFailures} transient open failures)");
+    }
+
+    /// <summary>
+    /// #2012 discriminating control for <see cref="ClassifyRead"/>, driven without a race: a body that
+    /// is genuinely a partial write must still be NAMED as torn. Without this arm the narrowing above
+    /// is unfalsifiable — a classifier that returned <c>null</c> for everything would pass the race arm
+    /// on every machine.
+    /// </summary>
+    [Fact]
+    public void ReadClassifier_NamesATornBody_AndPassesAWholeOne()
+    {
+        var contentA = new string('a', 50_000);
+        var contentB = new string('b', 80_000);
+
+        // A partial JSON body -- the prefix a non-atomic writer's truncate-then-write leaves visible.
+        var torn = ClassifyRead(new string('b', 31_000), contentA.Length, contentB.Length);
+        Assert.NotNull(torn);
+        Assert.Contains("31000", torn, StringComparison.Ordinal);
+
+        // The other torn shape, which the length check alone cannot see: a whole-looking length made of
+        // two different writes.
+        Assert.NotNull(ClassifyRead(new string('b', 49_999) + "a", contentA.Length, contentB.Length));
+
+        // Polarity: both whole bodies pass, so the arm above is not merely "everything is torn".
+        Assert.Null(ClassifyRead(contentA, contentA.Length, contentB.Length));
+        Assert.Null(ClassifyRead(contentB, contentA.Length, contentB.Length));
+    }
+
+    /// <summary>
+    /// #2012: the window the CI flake actually hit, constructed rather than waited for — a reader's
+    /// OPEN of the projection file losing a race for the handle. Locally the race arm above measured
+    /// zero such failures over 213,219 reads, so the shard's own contention (an antivirus scan of a
+    /// file rewritten 200 times, another poller) is not reproducible by loading the box; holding the
+    /// target with <see cref="FileShare.None"/> produces the same open failure deterministically.
+    /// <para>
+    /// Two things at once, and both are the point: the failure is one
+    /// <see cref="IsTransientOpenFailure"/> forgives, AND the file's body is untouched by it — which is
+    /// what makes forgiving it correct rather than a weakened assertion.
+    /// </para>
+    /// </summary>
+    [Fact]
+    public void AContendedOpen_FailsTransiently_LeavingTheBodyWhole()
+    {
+        var path = Path.Combine(_tempHome, "projection.json");
+        var contentB = new string('b', 80_000);
+        FleetProjectionWriter.WriteAtomic(path, contentB);
+
+        Exception openFailure;
+        using (new FileStream(path, FileMode.Open, FileAccess.Read, FileShare.None))
+        {
+            openFailure = Record.Exception(() =>
+            {
+                using var _ = new FileStream(
+                    path, FileMode.Open, FileAccess.Read, FileShare.ReadWrite | FileShare.Delete);
+            })!;
+        }
+
+        Assert.NotNull(openFailure);
+        Assert.True(
+            IsTransientOpenFailure(openFailure),
+            $"a contended open raised {openFailure.GetType().Name} (HResult 0x{openFailure.HResult:X8}), " +
+            "which the reader would report as a torn file rather than retry");
+
+        // The body the contended open never got to see is whole -- an open failure carries no
+        // information about content, which is the whole of #2012's fork.
+        Assert.Null(ClassifyRead(File.ReadAllText(path), 50_000, contentB.Length));
     }
 
     /// <summary>#1782: a reader that opens the file with <see cref="FileShare.Read"/> only (the

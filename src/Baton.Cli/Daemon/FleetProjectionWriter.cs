@@ -897,7 +897,23 @@ public sealed class FleetProjectionWriter : BackgroundService
     /// this PR's change.) So a reader's share mode narrows the window, and only the reader letting go
     /// closes it. This tick must never throw out of
     /// the hosted service for that -- the next ~30s tick already self-heals a skipped write, so a
-    /// reader that never lets go is logged and skipped rather than crashing the loop.</summary>
+    /// reader that never lets go is logged and skipped rather than crashing the loop.
+    /// <para>
+    /// <b>What this promises a READER, and the negative a reader's prior otherwise fills in (#2012).</b>
+    /// The guarantee is about the BODY: a read that lands sees one whole write, never a partial or a
+    /// mixed one, because publication is a single rename and an already-open handle stays bound to the
+    /// file object that rename displaced. It is NOT a promise that a reader's <i>open</i> succeeds --
+    /// this file is rewritten on a cadence, and an open that loses the race for the handle (a sharing
+    /// or lock violation, or the access-denied Windows raises for a delete-pending name) is an
+    /// ordinary transient RETRY that carries no information about content. Every shipped reader
+    /// already treats it as one, and this is the single place that rule is stated:
+    /// <c>tools/fleet-glass/pusher.py</c>'s <c>read_projection_file</c> (<c>except OSError</c> -> fall
+    /// back to derive this cycle, re-read next), <see cref="Mcp.FleetProjectionStaleness"/>'s
+    /// <c>Read</c> and <see cref="GlassHttpService"/>'s <c>WriteProjectionAsync</c> (both catch, report
+    /// unavailable, and re-read on the next call). A reader that reported a failed open as corruption
+    /// would be wrong about this contract -- which is what <c>FleetProjectionWriterTests</c>' own race
+    /// arm was doing when #2012 was filed.
+    /// </para></summary>
     internal static void WriteAtomic(string path, string content)
     {
         var directory = Path.GetDirectoryName(path);
