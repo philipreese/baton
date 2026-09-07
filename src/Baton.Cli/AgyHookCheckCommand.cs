@@ -640,6 +640,17 @@ public static class AgyHookCheckCommand
     /// and no other. A null here allows: an unreadable target is one this rung cannot judge, and this
     /// rung must never be the reason a granted read is denied.
     /// </summary>
+    /// <remarks>
+    /// <b>Any argument beyond <c>AbsolutePath</c> skips the rung (#2002 re-review HIGH),</b> for the
+    /// reason <c>HookCheckCommand.ReadReadTarget</c> states on claude's half and
+    /// <c>RepeatedToolCallLedger.ReadKey</c> states as the rule: an argument that narrows what comes
+    /// back makes a repeat denial's own sentence false, and what <c>view_file</c> accepts beyond a
+    /// path is unmeasured — the 104 calls say what that lane SENT, not what the tool takes. So no
+    /// range argument is invented for this vendor and none is keyed; the unaccounted payload allows.
+    /// A no-op on the measured population by construction, since those 104 carried nothing else.
+    /// Unlike <see cref="MeasuredRunCommandArgs"/>, which refuses an unmeasured argument, this one
+    /// allows: that rung guards a backgrounding switch, and this one only removes waste.
+    /// </remarks>
     private static string? ReadReadTarget(JsonElement toolCall, string? toolName)
     {
         if (toolName != ReadToolName ||
@@ -647,6 +658,14 @@ public static class AgyHookCheckCommand
             !args.TryGetProperty("AbsolutePath", out var target) || target.ValueKind != JsonValueKind.String)
         {
             return null;
+        }
+
+        foreach (var argument in args.EnumerateObject())
+        {
+            if (!string.Equals(argument.Name, "AbsolutePath", StringComparison.Ordinal))
+            {
+                return null;
+            }
         }
 
         return target.GetString();

@@ -276,10 +276,17 @@ public sealed class RepeatedToolCallLedger
     /// here exactly as it is for the broker, so this needs no clock and no recorded bytes — the one
     /// rung of #2002 that works identically on both paths.
     /// </summary>
-    public string? ClassifyHookRead(string path, DateTimeOffset lastWriteUtc, long length)
+    /// <param name="request">
+    /// The normalised spelling of the read's range arguments, or <see langword="null"/>/empty for a
+    /// whole-file read. <see cref="ReadKey"/> states why a read is keyed on this rather than on the
+    /// path alone; the broker's <see cref="ClassifyRead"/> takes no such parameter because
+    /// <c>baton_read_text</c> takes a path and no range at all.
+    /// </param>
+    public string? ClassifyHookRead(
+        string path, DateTimeOffset lastWriteUtc, long length, string? request = null)
     {
         ArgumentNullException.ThrowIfNull(path);
-        var key = ReadKey(path);
+        var key = ReadKey(path, request);
 
         if (!TryTouch(key, out var entry) || entry.LastWriteUtc != lastWriteUtc || entry.Length != length)
         {
@@ -298,10 +305,15 @@ public sealed class RepeatedToolCallLedger
     /// could be served as if it were the file. The room's own writes are the population the broker can
     /// see, and this closes it deterministically rather than hoping the clock ticks.
     /// </summary>
+    /// <remarks>
+    /// Every remembered window of that path goes, not only the whole-file one — see
+    /// <see cref="ReadKey"/> for why one path can hold several entries. A write changes the file, so
+    /// no window of the version before it is an answer to anything.
+    /// </remarks>
     public void ForgetRead(string path)
     {
         ArgumentNullException.ThrowIfNull(path);
-        Forget(ReadKey(path));
+        ForgetWherePrefix(ReadKey(path));
     }
 
     /// <summary>
@@ -468,10 +480,26 @@ public sealed class RepeatedToolCallLedger
 
     private static string CommandKey(string commandLine) => "cmd " + commandLine;
 
-    private static string ReadKey(string path)
+    /// <summary>
+    /// <b>A read is keyed on the whole request, not on the path alone (#2002 re-review HIGH).</b> A
+    /// read tool that takes a range returns a WINDOW, so a second call naming a different one is a new
+    /// question about the same unchanged file — and denying it with
+    /// <see cref="HookReadDenial"/> ("its content is above in your transcript") asserts something
+    /// false: the room holds the first window and asked for a second. <paramref name="request"/> is
+    /// the caller's normalised spelling of every argument beyond the path that narrows what comes
+    /// back, empty when there is none; a caller that cannot account for an argument passes no request
+    /// at all and skips this rung instead (see <see cref="RepeatedToolCallHook.JudgeRead"/>).
+    /// <para>
+    /// The separator is a NUL so <see cref="ForgetRead"/> can forget every window of one path with a
+    /// single prefix pass without <c>C:\foo</c> also matching <c>C:\foobar</c>. An absent request and
+    /// an empty one are one key, which is what keeps two ordinary whole-file reads a repeat.
+    /// </para>
+    /// </summary>
+    private static string ReadKey(string path, string? request = null)
     {
         var normalised = Path.TrimEndingDirectorySeparator(Path.GetFullPath(path));
-        return "read " + (OperatingSystem.IsWindows() ? normalised.ToUpperInvariant() : normalised);
+        return "read " + (OperatingSystem.IsWindows() ? normalised.ToUpperInvariant() : normalised)
+               + "\0" + request;
     }
 
     /// <summary>

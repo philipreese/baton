@@ -1020,6 +1020,47 @@ public class AgyHookCheckCommandTests
     }
 
     /// <summary>
+    /// #2002 re-review HIGH, agy's half: a <c>view_file</c> payload carrying an argument no
+    /// measurement accounts for skips rule 2b entirely, because an unaccounted argument may narrow
+    /// what comes back and the denial would then claim the room already holds bytes it never got.
+    /// See <c>AgyHookCheckCommand.ReadReadTarget</c> for why nothing here invents a range argument
+    /// for this vendor.
+    /// <para>
+    /// The polarity partner is in the same test and is what makes it about the unaccounted argument
+    /// rather than about reads in general: the identical payload with <c>AbsolutePath</c> alone is
+    /// still denied on the re-ask. A build that dropped the rung altogether passes the first two
+    /// asserts and fails the last.
+    /// </para>
+    /// </summary>
+    [Fact]
+    public void A_view_file_carrying_an_unaccounted_argument_is_never_a_repeat()
+    {
+        var root = Path.Combine(Path.GetTempPath(), $"baton-agy-repeat-{Guid.NewGuid():N}");
+        var outbox = Path.Combine(root, "outbox");
+        Directory.CreateDirectory(outbox);
+        try
+        {
+            var file = Path.Combine(root, "spec.md");
+            File.WriteAllText(file, "five thousand lines, in spirit");
+
+            var firstWindow = RepeatDecide(outbox, ViewPayload(file, "\"StartLine\":200"));
+            var sameWindowAgain = RepeatDecide(outbox, ViewPayload(file, "\"StartLine\":200"));
+
+            var plain = RepeatDecide(outbox, ViewPayload(file));
+            var plainAgain = RepeatDecide(outbox, ViewPayload(file));
+
+            Assert.Equal("allow", Decision(firstWindow));
+            Assert.Equal("allow", Decision(sameWindowAgain));
+            Assert.Equal("allow", Decision(plain));
+            Assert.Equal("deny", Decision(plainAgain));
+        }
+        finally
+        {
+            Baton.Tests.Shared.DirectoryCleanup.DeleteRecursively(root);
+        }
+    }
+
+    /// <summary>
     /// Concatenated, for the same reason the claude suite's payload helper is: this JSON closes with
     /// more braces than a `$$"""…"""` will carry alongside an interpolation hole.
     /// </summary>
@@ -1033,8 +1074,11 @@ public class AgyHookCheckCommandTests
             "{\"CommandLine\":" + JsonSerializer.Serialize(command) +
             ",\"Cwd\":\"C:\\\\x\",\"WaitMsBeforeAsync\":5000}");
 
-    private static string ViewPayload(string path) =>
-        ToolPayload("view_file", "{\"AbsolutePath\":" + JsonSerializer.Serialize(path) + "}");
+    private static string ViewPayload(string path, string? extraArgs = null) =>
+        ToolPayload(
+            "view_file",
+            "{\"AbsolutePath\":" + JsonSerializer.Serialize(path) +
+            (extraArgs is null ? string.Empty : "," + extraArgs) + "}");
 
     private static string WriteToolPayload(string path) =>
         ToolPayload("write_to_file", "{\"TargetFile\":" + JsonSerializer.Serialize(path) + "}");

@@ -38,11 +38,20 @@ public static class RepeatedToolCallHook
 
     /// <summary>
     /// The deny sentence for a re-read of <paramref name="path"/> whose mtime and length are unchanged
-    /// since this room last read it, or <see langword="null"/> to allow. A path that cannot be stat'd
-    /// — it does not exist yet, or this process cannot see it — allows: the read is about to fail or
-    /// to produce something new, and either way there is no previous answer standing in for it.
+    /// since this room last read it <em>under the same <paramref name="request"/></em>, or
+    /// <see langword="null"/> to allow. A path that cannot be stat'd — it does not exist yet, or this
+    /// process cannot see it — allows: the read is about to fail or to produce something new, and
+    /// either way there is no previous answer standing in for it.
     /// </summary>
-    public static string? JudgeRead(string? outputDirectory, string? path)
+    /// <param name="request">
+    /// The caller's normalised spelling of the read's range arguments, empty or
+    /// <see langword="null"/> for a whole-file read. <c>RepeatedToolCallLedger.ReadKey</c>
+    /// states the rule this parameter exists for; the CALLER's duty is that it accounts for every
+    /// argument the vendor's read tool can narrow with, and passes <paramref name="path"/> as
+    /// <see langword="null"/> — skipping the rung — for a payload it cannot account for. This rung
+    /// removes waste, so an unrecognised argument allows.
+    /// </param>
+    public static string? JudgeRead(string? outputDirectory, string? path, string? request = null)
     {
         if (string.IsNullOrWhiteSpace(path))
         {
@@ -66,7 +75,8 @@ public static class RepeatedToolCallHook
 
         return WithLedger(
             outputDirectory,
-            ledger => ledger.ClassifyHookRead(info.FullName, info.LastWriteTimeUtc, info.Length));
+            ledger => ledger.ClassifyHookRead(
+                info.FullName, info.LastWriteTimeUtc, info.Length, request));
     }
 
     /// <summary>

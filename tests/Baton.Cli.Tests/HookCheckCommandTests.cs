@@ -588,6 +588,92 @@ public class HookCheckCommandTests
     }
 
     /// <summary>
+    /// #2002 re-review HIGH: a NARROWED re-request is a new question, not a repeat. A read tool that
+    /// takes a range answers with a window, so the second call naming a different one asks for bytes
+    /// the room does not hold — and <c>HookReadDenial</c> ("its content is above in your transcript")
+    /// would be affirmatively false about both clauses. The file never changes in this test, so the
+    /// stat predicate cannot be what allows anything here; only the key can.
+    /// <para>
+    /// Four arms, both directions. The identical tuple denied — twice over, once with no range and
+    /// once with the same range — is the polarity partner: a build that simply stopped keying reads,
+    /// or one that keyed on the raw payload text, passes the narrowed arms and fails these.
+    /// </para>
+    /// </summary>
+    [Fact]
+    public void A_narrowed_reread_is_allowed_and_an_identical_tuple_is_not()
+    {
+        using var room = new RepeatLedgerRoom();
+        var path = Path.Combine(room.Root, "spec.md");
+        File.WriteAllText(path, "five thousand lines, in spirit");
+
+        var whole = room.Read(path, out _);
+        var wholeAgain = room.Read(path, out var wholeAgainText);
+        var narrowed = room.Read(path, out _, "\"offset\": 2000");
+        var narrowedAgain = room.Read(path, out var narrowedAgainText, "\"offset\": 2000");
+        var narrowedFurther = room.Read(path, out _, "\"offset\": 4000");
+
+        Assert.Equal(HookCheckCommand.AllowedExitCode, whole);
+        Assert.Equal(HookCheckCommand.DeniedExitCode, wholeAgain);
+        Assert.Contains("above in your transcript", wholeAgainText, StringComparison.Ordinal);
+
+        Assert.Equal(HookCheckCommand.AllowedExitCode, narrowed);
+        Assert.Equal(HookCheckCommand.DeniedExitCode, narrowedAgain);
+        Assert.Contains("above in your transcript", narrowedAgainText, StringComparison.Ordinal);
+        Assert.Equal(HookCheckCommand.AllowedExitCode, narrowedFurther);
+    }
+
+    /// <summary>
+    /// The other half of the same fix: an argument this gate does not account for disables the rung
+    /// for that call rather than being dropped from the key — see
+    /// <c>HookCheckCommand.ReadReadTarget</c> for why the denial's own sentence is what forbids
+    /// keying past an unread argument. The last two arms are the polarity partner in the same room:
+    /// with nothing unaccounted in the payload, the re-read is still denied.
+    /// </summary>
+    [Fact]
+    public void A_read_carrying_an_unaccounted_argument_is_never_a_repeat()
+    {
+        using var room = new RepeatLedgerRoom();
+        var path = Path.Combine(room.Root, "notes.md");
+        File.WriteAllText(path, "one");
+
+        var first = room.Read(path, out _, "\"someFutureNarrowing\": \"x\"");
+        var second = room.Read(path, out _, "\"someFutureNarrowing\": \"x\"");
+        var plain = room.Read(path, out _);
+        var plainAgain = room.Read(path, out _);
+
+        Assert.Equal(HookCheckCommand.AllowedExitCode, first);
+        Assert.Equal(HookCheckCommand.AllowedExitCode, second);
+        Assert.Equal(HookCheckCommand.AllowedExitCode, plain);
+        Assert.Equal(HookCheckCommand.DeniedExitCode, plainAgain);
+    }
+
+    /// <summary>
+    /// A write forgets every remembered WINDOW of the path it wrote, not only the whole-file entry —
+    /// <c>RepeatedToolCallLedger.ForgetRead</c>'s remark states the rule, and this is the arm that
+    /// pins it. The polarity partner is the second half: a window of a DIFFERENT file, untouched by
+    /// that write, is still a repeat.
+    /// </summary>
+    [Fact]
+    public void A_write_forgets_every_window_of_the_path_it_wrote()
+    {
+        using var room = new RepeatLedgerRoom();
+        var written = Path.Combine(room.Root, "edited.cs");
+        var other = Path.Combine(room.Root, "untouched.cs");
+        File.WriteAllText(written, "aaa");
+        File.WriteAllText(other, "bbb");
+
+        room.Read(written, out _, "\"offset\": 100");
+        room.Read(other, out _, "\"offset\": 100");
+        room.Write(written);
+
+        var afterWrite = room.Read(written, out _, "\"offset\": 100");
+        var untouched = room.Read(other, out _, "\"offset\": 100");
+
+        Assert.Equal(HookCheckCommand.AllowedExitCode, afterWrite);
+        Assert.Equal(HookCheckCommand.DeniedExitCode, untouched);
+    }
+
+    /// <summary>
     /// The fail-open arm, and the one that matters most: this rung removes waste, and both hooks wrap
     /// their decision in a catch that DENIES, so a garbage ledger file must never reach that catch. A
     /// half-written or hand-corrupted file allows.
@@ -662,8 +748,8 @@ public class HookCheckCommandTests
         public int RunBash(string command, out string stderrText) =>
             Run(Payload("Bash", "command", command), out stderrText);
 
-        public int Read(string path, out string stderrText) =>
-            Run(Payload("Read", "file_path", path), out stderrText);
+        public int Read(string path, out string stderrText, string? extraArgs = null) =>
+            Run(Payload("Read", "file_path", path, extraArgs), out stderrText);
 
         public int Write(string path) => Run(Payload("Write", "file_path", path), out _);
 
@@ -700,9 +786,10 @@ public class HookCheckCommandTests
         /// Built by concatenation rather than a raw interpolated literal: the payload ends in two
         /// closing braces of its own, which a `$$"""…"""` cannot carry beside an interpolation hole.
         /// </summary>
-        private static string Payload(string toolName, string inputKey, string inputValue) =>
+        private static string Payload(
+            string toolName, string inputKey, string inputValue, string? extraArgs = null) =>
             "{\"tool_name\": " + Json(toolName) + ", \"tool_input\": {" + Json(inputKey) + ": " +
-            Json(inputValue) + "}}";
+            Json(inputValue) + (extraArgs is null ? string.Empty : ", " + extraArgs) + "}}";
 
         private static string Json(string value) => System.Text.Json.JsonSerializer.Serialize(value);
     }

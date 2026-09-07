@@ -193,7 +193,7 @@ public static class HookCheckCommand
         string? toolName;
         string? writeTarget = null;
         string? shellCommandLine = null;
-        string? readTarget = null;
+        (string Path, string Request)? readTarget = null;
         try
         {
             using var doc = JsonDocument.Parse(input);
@@ -391,9 +391,11 @@ public static class HookCheckCommand
         }
 
         // #2002 rule 2b, hook half. After the withheld-tool branch above, so a withheld read is
-        // answered with the grant's reason rather than this one.
-        if (toolName == ReadToolName &&
-            Baton.Vendors.RepeatedToolCallHook.JudgeRead(outboxDirectory, readTarget) is { } repeatedRead)
+        // answered with the grant's reason rather than this one. The request, not the path alone —
+        // see ReadReadTarget for the narrowed re-request this keys apart from a repeat.
+        if (toolName == ReadToolName && readTarget is { } read &&
+            Baton.Vendors.RepeatedToolCallHook.JudgeRead(outboxDirectory, read.Path, read.Request)
+                is { } repeatedRead)
         {
             return Refuse(stderr, repeatedRead);
         }
@@ -483,24 +485,69 @@ public static class HookCheckCommand
     private const string ReadToolName = "Read";
 
     /// <summary>
-    /// The path a <c>Read</c> call targets, or <see langword="null"/> for any other tool. Same
-    /// <c>file_path</c> key the write family uses (claude Code names it that on both), read under its
-    /// own gate for the reason <see cref="ReadWriteTarget"/>'s remarks give for keying off the tool
-    /// name rather than the field.
+    /// The <c>Read</c> call rule 2b judges — its path and the normalised spelling of the arguments
+    /// that narrow what comes back — or <see langword="null"/> for any other tool, an unreadable
+    /// payload, <b>or a payload carrying an argument this gate does not account for</b>. The path key
+    /// is the same <c>file_path</c> the write family uses (claude Code names it that on both), read
+    /// under its own gate for the reason <see cref="ReadWriteTarget"/>'s remarks give for keying off
+    /// the tool name rather than the field.
     /// </summary>
-    private static string? ReadReadTarget(JsonElement root, string? toolName)
+    /// <remarks>
+    /// <b>What this gate accounts for is <see cref="ReadArgumentNames"/> and nothing else, and the
+    /// third exit above is the whole point (#2002 re-review HIGH).</b> The denial this rung emits —
+    /// <c>RepeatedToolCallLedger.HookReadDenial</c>, "its content is above in your transcript" — is a
+    /// claim that the previous call answered this one. An argument that narrows the result makes that
+    /// claim false, so a payload naming one this gate cannot normalise disables the rung for that
+    /// call rather than denying on a key that ignored it. This states nothing about what claude's
+    /// <c>Read</c> payload does or does not carry: it is the fail-open construction that makes the
+    /// question not need answering, the same direction every other failure of this rung takes.
+    /// <para>
+    /// A property present but <c>null</c> is treated as absent, so an explicit
+    /// <c>"offset": null</c> keys the same as a whole-file read. Two spellings of one window
+    /// (<c>offset: 0</c> against no offset) key differently and therefore both execute, which costs a
+    /// read and never a false denial.
+    /// </para>
+    /// </remarks>
+    private static (string Path, string Request)? ReadReadTarget(JsonElement root, string? toolName)
     {
         if (toolName != ReadToolName ||
             !root.TryGetProperty("tool_input", out var toolInput) ||
             toolInput.ValueKind != JsonValueKind.Object ||
             !toolInput.TryGetProperty("file_path", out var value) ||
-            value.ValueKind != JsonValueKind.String)
+            value.ValueKind != JsonValueKind.String ||
+            value.GetString() is not { } path)
         {
             return null;
         }
 
-        return value.GetString();
+        foreach (var property in toolInput.EnumerateObject())
+        {
+            if (!ReadArgumentNames.Contains(property.Name))
+            {
+                return null;
+            }
+        }
+
+        // Fixed order, and raw JSON text so 10 and 1e1 are not silently one window — the ledger keys
+        // on this string, and two spellings keying apart only ever costs a read.
+        var request = string.Join(
+            ";",
+            ReadRangeArgumentNames
+                .Where(name => toolInput.TryGetProperty(name, out var argument) &&
+                               argument.ValueKind != JsonValueKind.Null)
+                .Select(name => $"{name}={toolInput.GetProperty(name).GetRawText()}"));
+        return (path, request);
     }
+
+    /// <summary>
+    /// The <c>Read</c> arguments beyond <c>file_path</c> that go into the read key, in the order they
+    /// are spelled into it. <see cref="ReadReadTarget"/>'s remarks state what this list is for and what
+    /// happens to a payload carrying anything outside it.
+    /// </summary>
+    private static readonly string[] ReadRangeArgumentNames = ["offset", "limit"];
+
+    private static readonly IReadOnlySet<string> ReadArgumentNames =
+        new HashSet<string>(["file_path", .. ReadRangeArgumentNames], StringComparer.Ordinal);
 
     /// <summary>
     /// The raw shell command line a <c>Bash</c> call carries, or <see langword="null"/> for any other
