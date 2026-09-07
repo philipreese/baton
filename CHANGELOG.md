@@ -9,6 +9,39 @@ that carried them: `git show v0.35.0:src/Baton.Cli/CHANGELOG.md` (likewise `src/
 `release-please-config.json`. Everything below this line predates the split: the repo's single
 shared version through `0.14.0`.
 
+## [0.37.0](https://github.com/philipreese/baton/compare/v0.36.0...v0.37.0) (2026-09-07)
+
+
+### Features
+
+* **glass:** Serve the fleet glass from the daemon over the tailnet ([#2028](https://github.com/philipreese/baton/issues/2028)) ([f76de40](https://github.com/philipreese/baton/commit/f76de409805c6dbc20a6fec2fedbc3d01fcb9689))
+* **tools:** Replay unchanged successful buildlock commands ([#2024](https://github.com/philipreese/baton/issues/2024)) ([dc5662d](https://github.com/philipreese/baton/commit/dc5662d8471ac432f256c2c2ec3afc6083057f62))
+
+
+### Bug Fixes
+
+* **audit:** Declare every attribute a control fault reads lazily ([#2035](https://github.com/philipreese/baton/issues/2035)) ([b75eba1](https://github.com/philipreese/baton/commit/b75eba1b7c2faf85b1c6b50bf26e096dd40221cc))
+* **broker:** Emit codex usage per model round-trip so a lane's room figures cover the whole turn ([#2022](https://github.com/philipreese/baton/issues/2022)) ([7245812](https://github.com/philipreese/baton/commit/72458123066e6f3c8090a08f74647a1ad93044b1))
+* **broker:** Refuse an implement lane a PR it did not open ([#2016](https://github.com/philipreese/baton/issues/2016)) ([ba4184e](https://github.com/philipreese/baton/commit/ba4184e2d1f272db807199bcd723ae7917ce6943))
+* **broker:** Refuse backgrounding, replay identical repeats, and name the dominant shape on arrest ([#2015](https://github.com/philipreese/baton/issues/2015)) ([c59e7fb](https://github.com/philipreese/baton/commit/c59e7fb4e442951fd3de63454ce1cbd94c3c622b))
+* **vendors:** Spawn child processes without windows ([#2027](https://github.com/philipreese/baton/issues/2027)) ([09eaf32](https://github.com/philipreese/baton/commit/09eaf324b59ae19f677488e336318c2912994e46))
+
+
+### Documentation
+
+* **benchmarks:** Record comparator results ([#2025](https://github.com/philipreese/baton/issues/2025)) ([cc334a6](https://github.com/philipreese/baton/commit/cc334a6f2c1cde90379732a40ce963bb6b8fcf4f))
+* **spec:** Name the three enforcement points a vendor-neutral tool rule must reach ([#2032](https://github.com/philipreese/baton/issues/2032)) ([3706f15](https://github.com/philipreese/baton/commit/3706f15893d854ceef7d98c67e9a5fea649b7753))
+
+
+### Tests
+
+* **daemon:** Classify a contended projection open as a retry, not a torn read ([#2033](https://github.com/philipreese/baton/issues/2033)) ([9285767](https://github.com/philipreese/baton/commit/92857677e4b3f9ee5a2fed74ff2b678e1309fa45))
+
+
+### Miscellaneous
+
+* **vendors:** Reshuffle the worker tier pins onto the 2026-09-06 ruling ([#2017](https://github.com/philipreese/baton/issues/2017)) ([a2a699f](https://github.com/philipreese/baton/commit/a2a699f83173d7338fbfc108d4bc6913b8652311))
+
 ## [0.36.0](https://github.com/philipreese/baton/compare/v0.35.0...v0.36.0) (2026-09-07)
 
 
