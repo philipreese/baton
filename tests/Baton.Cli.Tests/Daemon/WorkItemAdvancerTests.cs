@@ -447,4 +447,69 @@ public sealed class WorkItemAdvancerTests
             DirectoryCleanup.DeleteRecursively(home);
         }
     }
+
+    /// <summary>
+    /// #1912: the advance is the one place already spawning <c>gh</c> for this PR, so it is where the
+    /// board's checks word is read — and it must be stamped with WHEN, since the advance only ever
+    /// looks at a settled lane (<see cref="QueueItem.Checks"/> carries that rule).
+    /// </summary>
+    [Fact]
+    public async Task The_advance_records_the_prs_checks_and_when_it_observed_them()
+    {
+        var home = CreateTempHome();
+        using var scope = BatonEnvironmentSnapshot.BeginScope(BatonEnvironmentSnapshot.Blank with { HomeOverride = home });
+        try
+        {
+            var room = await WriteSettledRoomAsync(home, WorkflowOutcome.Succeeded, verdictJson: null);
+            await SeedAsync(home, WorkStage.Implement, room);
+
+            const string prWithChecks = $$"""
+                {"number":77,"headRefOid":"{{PushedSha}}",
+                 "statusCheckRollup":[{"name":"gates","conclusion":"FAILURE"}]}
+                """;
+            await new WorkItemAdvancer(new FakeGh(prWithChecks), (_, _) => Task.FromResult<string?>(PushedSha))
+                .AdvanceAsync(Now, Ct);
+
+            var item = await ReadBackAsync();
+            Assert.Equal(PullRequestChecks.Failing, item.Checks);
+            Assert.Equal(Now, item.ChecksObservedAt);
+        }
+        finally
+        {
+            DirectoryCleanup.DeleteRecursively(home);
+        }
+    }
+
+    /// <summary>
+    /// The other half, and the one that makes the field trustworthy: a <c>gh</c> that answered nothing
+    /// must not overwrite a real observation with "no checks" — see the coalescing comment in
+    /// <c>WorkItemAdvancer</c>'s own next-round write.
+    /// </summary>
+    [Fact]
+    public async Task A_gh_that_could_not_answer_leaves_the_last_observation_and_its_stamp_alone()
+    {
+        var home = CreateTempHome();
+        using var scope = BatonEnvironmentSnapshot.BeginScope(BatonEnvironmentSnapshot.Blank with { HomeOverride = home });
+        try
+        {
+            var room = await WriteSettledRoomAsync(home, WorkflowOutcome.Succeeded, verdictJson: null);
+            var seeded = await SeedAsync(home, WorkStage.Implement, room);
+            var observedAt = Now.AddHours(-2);
+            await QueueStore.MutateAsync(
+                BatonPaths.QueueFile,
+                s => s with { Items = [seeded with { Checks = PullRequestChecks.Passing, ChecksObservedAt = observedAt }] },
+                Ct);
+
+            await new WorkItemAdvancer(new FakeGh(string.Empty, exitCode: 1), (_, _) => Task.FromResult<string?>(PushedSha))
+                .AdvanceAsync(Now, Ct);
+
+            var item = await ReadBackAsync();
+            Assert.Equal(PullRequestChecks.Passing, item.Checks);
+            Assert.Equal(observedAt, item.ChecksObservedAt);
+        }
+        finally
+        {
+            DirectoryCleanup.DeleteRecursively(home);
+        }
+    }
 }

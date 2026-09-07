@@ -14,6 +14,7 @@ using Baton.Outcomes;
 using Baton.Queue;
 using Baton.Status;
 using Baton.Store;
+using Baton.Vendors;
 using Microsoft.Extensions.Hosting;
 
 namespace Baton.Cli.Daemon;
@@ -434,7 +435,7 @@ public sealed class FleetProjectionWriter : BackgroundService
         try
         {
             return ReviewVerdictSchema.TryParse(File.ReadAllBytes(path), out var verdict, out _)
-                ? verdict.Decision?.ToString().ToLowerInvariant()
+                ? verdict?.Decision?.ToString().ToLowerInvariant()
                 : null;
         }
         catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
