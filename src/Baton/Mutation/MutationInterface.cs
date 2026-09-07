@@ -2138,6 +2138,10 @@ public static class MutationInterface
                 // asked). No OutcomeClassifier.Classify call at all: classifying a cancelled-out-from-
                 // under-it process would only produce a Cancelled/Failed verdict that this replaces
                 // wholesale, never Succeeded.
+                //
+                // #2002: read once and destructured, never twice inline -- the two halves of this
+                // reading must describe the same snapshot.
+                var dominantCommand = budgetMonitor.SnapshotDominantCommandShape();
                 await eventLogWriter.AppendAsync(
                     new FlowEvent.ExecutionArrested(
                         prepared.Request.ExecutionId,
@@ -2153,7 +2157,11 @@ public static class MutationInterface
                         // adapter this execution actually ran on, not binding.Adapter (the CATALOG's
                         // pre-crash-recovery value), so a rebound execution's arrest text names the
                         // vendor whose figure actually fired.
-                        prepared.Request.Adapter),
+                        prepared.Request.Adapter,
+                        // #2002: recorded on every arrest, like PeakBilledInWindow above, so the fact
+                        // is durable even though only the tool-step-cap text reads it today.
+                        dominantCommand?.Shape,
+                        dominantCommand?.Percent),
                     CancellationToken.None).ConfigureAwait(false);
                 return;
             }
