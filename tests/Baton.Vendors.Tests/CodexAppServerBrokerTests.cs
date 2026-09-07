@@ -207,7 +207,13 @@ public sealed class CodexAppServerBrokerTests
             Assert.Equal(8, toolItems.Length);
             foreach (var node in toolItems)
             {
-                var item = node["item"]!;
+                // Read through ContainsKey rather than dereferencing, so a missing field fails as the
+                // claim it is ("this item carries no digest") instead of a NullReferenceException from
+                // the assertion's own indexer.
+                var item = node["item"]!.AsObject();
+                var where = $"{node["type"]} {item["tool"]}";
+                Assert.True(item.ContainsKey(Baton.Status.CodexUsageParser.ArgumentsDigestField), where);
+                Assert.True(item.ContainsKey(Baton.Status.CodexUsageParser.ArgumentsIdentityField), where);
                 Assert.Matches(
                     "^[0-9a-f]{16}$",
                     item[Baton.Status.CodexUsageParser.ArgumentsDigestField]!.GetValue<string>());

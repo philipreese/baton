@@ -260,9 +260,10 @@ public sealed class CodexUsageParserTests
     /// <c>dispatch-implement-26c16874</c>, whose every <c>item.started</c> carries the digest — with the
     /// input identity #2008 adds, and the two cross-vendor readings taken over it.
     /// <para>
-    /// The counting arms are the discrimination, not the presence: the identity is now stamped on BOTH
-    /// lifecycle items of a call, so a reader that stopped gating on <c>item.started</c> would report
-    /// each of these two commands twice. Two commands over four tool items is what pins that.
+    /// The counting arms are the discrimination, not the presence: both of a call's items now carry the
+    /// field (<c>Baton.Vendors.CodexAppServerBroker.Describe</c> states why that counts nothing twice),
+    /// so a reader that stopped gating on <c>item.started</c> would report each of these two commands
+    /// twice. Two commands over four run-command items is what pins that.
     /// </para>
     /// </summary>
     [Fact]

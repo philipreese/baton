@@ -201,10 +201,9 @@ public sealed class CodexDynamicToolPolicy
     /// output name for <see cref="WriteOutputTool"/>, and the patched paths for
     /// <see cref="ApplyPatchTool"/> (whose sole argument is the whole envelope, so the paths are read
     /// out of it with the same parser that applies it). <c>content</c> and the patch body are NEVER
-    /// emitted, which is the point: a <see cref="WriteTextTool"/> call's arguments carry a whole file,
-    /// and every byte of the stream is a byte the projector re-reads at settle and the rollover
-    /// threshold counts. That is the same constraint that made the sibling field a DIGEST rather than
-    /// the arguments — see <c>CodexAppServerBroker.HandleDynamicToolCallAsync</c>.
+    /// emitted: the stream-size constraint that made the sibling field a DIGEST rather than the
+    /// arguments applies unchanged here, and it is stated once beside that field in
+    /// <c>CodexAppServerBroker.Describe</c>.
     /// </para>
     /// <para>
     /// <b>Truncated at <see cref="MaxIdentityCharacters"/></b> with a trailing <c>…</c>, because a
