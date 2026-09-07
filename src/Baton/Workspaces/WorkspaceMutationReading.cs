@@ -77,7 +77,20 @@ public sealed record WorkspaceMutationReading(
     /// evidence that its work left the machine.
     /// </para>
     /// </summary>
-    public bool FinishedAndPushed => Measured && ChangedPathCount == 0 && CommitsAheadOfRemote == 0;
+    public bool FinishedAndPushed => HeadIsPushed && ChangedPathCount == 0;
+
+    /// <summary>
+    /// #1978: whether <c>HEAD</c> is positively known to be on the remote already — the tracking branch
+    /// answered, and it answered zero. The commit half of <see cref="FinishedAndPushed"/>, split out
+    /// because the timeout summary needs it on its own: a workspace that pushed its head and is still
+    /// dirty (or whose declared output never got written) is not finished, but its commits are already
+    /// delivered and a conductor must not push them again.
+    /// <para>
+    /// Fails closed exactly as <see cref="FinishedAndPushed"/> does: unmeasured, or an upstream count git
+    /// could not produce, is false.
+    /// </para>
+    /// </summary>
+    public bool HeadIsPushed => Measured && CommitsAheadOfRemote == 0;
 
     /// <summary>
     /// Whether this workspace holds work no blind retry may run over. True whenever the reading
@@ -89,6 +102,17 @@ public sealed record WorkspaceMutationReading(
     /// The bounded phrase the Indeterminate reason names the stakes with. Bounded by construction —
     /// two integers and fixed words, never a path list — so unlike
     /// <see cref="WorktreeProvisioner.DescribeWorkspaceEvidence"/> this needs no caller-side truncation.
+    /// <para>
+    /// <b>The commit half names what is not on the REMOTE (#1978), not what is not on the base ref.</b>
+    /// <see cref="CommitsAheadOfRemote"/> when a tracking branch answered — the number a conductor
+    /// actually acts on, since that is what is still stranded on the machine — and only when there is
+    /// none does it fall back to <see cref="NewCommitCount"/>'s delta against the probe's start ref,
+    /// saying <c>(no upstream)</c> so the two are never read as the same measurement. They are not: a
+    /// lane that committed once and pushed reads 0 against its upstream and 1 against <c>main</c>. On
+    /// 2026-09-06 a conductor read the second number as the first, hand-pushed a branch that was
+    /// already on origin with an open PR, and had to reset the divergent head that produced. The
+    /// changed/untracked half is unchanged and is absolute either way.
+    /// </para>
     /// </summary>
     public string Describe()
     {
@@ -97,10 +121,21 @@ public sealed record WorkspaceMutationReading(
             return "workspace state could not be read, so surviving work cannot be ruled out";
         }
 
-        var commits = NewCommitCount is { } count
-            ? $"{count} new commit(s)"
-            : HasNewCommits ? "new commit(s) (uncounted)" : "0 new commit(s)";
+        // The upstream count wins whenever it exists, INCLUDING over an uncounted reflog reading:
+        // "how much is not on origin" is the actionable question, and it was answered exactly.
+        var commits = CommitsAheadOfRemote is { } ahead
+            ? $"{ahead} unpushed commit(s)"
+            : $"{DescribeCommitsSinceStartRef()} (no upstream)";
 
         return $"{commits} and {ChangedPathCount} changed/untracked path(s)";
     }
+
+    /// <summary>
+    /// The pre-#1978 commit phrase, now reached only when there is no upstream to measure against —
+    /// including the reflog heuristic's uncounted shape, which stays uncounted rather than being
+    /// fabricated as a number.
+    /// </summary>
+    private string DescribeCommitsSinceStartRef() => NewCommitCount is { } count
+        ? $"{count} new commit(s)"
+        : HasNewCommits ? "new commit(s) (uncounted)" : "0 new commit(s)";
 }

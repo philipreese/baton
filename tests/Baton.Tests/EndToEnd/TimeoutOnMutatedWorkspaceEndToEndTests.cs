@@ -53,7 +53,11 @@ public sealed class TimeoutOnMutatedWorkspaceEndToEndTests
             // to accept, and a conductor's judgement after inspecting the workspace IS a rejectable
             // thing (spec/baton.md §3's settle-shape table).
             Assert.Equal(IndeterminateProducer.ContractFailure, step.IndeterminateProducer);
-            Assert.Contains("1 new commit(s)", step.LatestFailureReason!, StringComparison.Ordinal);
+            // #1978: real git, and this fixture's `git init` repo has no remote at all — so the commit
+            // half falls back to the delta against the attempt's start sha and SAYS it did. The one arm
+            // of #1978's split that a real tree can discriminate here; the pushed/ahead-of-upstream arms
+            // are pinned against the classifier in OutcomeClassifierTests, which needs no origin.
+            Assert.Contains("1 new commit(s) (no upstream)", step.LatestFailureReason!, StringComparison.Ordinal);
 
             // A committed work product leaves a CLEAN tree. This is the arm a status-only probe would
             // have read as "nothing here" and retried straight over.

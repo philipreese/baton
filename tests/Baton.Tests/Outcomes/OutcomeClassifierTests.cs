@@ -2262,7 +2262,9 @@ public class OutcomeClassifierTests
             Assert.Null(classification.CapturedResponseFile);
 
             var reason = classification.Reason!;
-            Assert.Contains("2 new commit(s) and 14 changed/untracked path(s)", reason, StringComparison.Ordinal);
+            // #1978: no upstream (commitsAheadOfRemote null), so the commit half keeps its delta against
+            // the probe's start ref and names that reading rather than passing it off as a remote one.
+            Assert.Contains("2 new commit(s) (no upstream) and 14 changed/untracked path(s)", reason, StringComparison.Ordinal);
             Assert.Contains("baton resolve --reject", reason, StringComparison.Ordinal);
             // Both markers are load-bearing, not phrasing: WorkflowOutcome.IsTimeoutFailure reads the
             // prefix, and StateProjector.BuildConductorResolvedReason strips the trailing clause. The
@@ -2422,6 +2424,156 @@ public class OutcomeClassifierTests
             // Fails closed: unmeasured is not "pushed".
             Assert.Equal(OutcomeVerdict.Indeterminate, classification.Verdict);
             Assert.False(classification.FinishedDuringTeardown);
+        }
+        finally
+        {
+            DirectoryCleanup.DeleteRecursively(directory);
+        }
+    }
+
+    // #1978: the four arms below are read together and are one input apart each. The bug they exist for
+    // is a SENTENCE, not a verdict — every one of them still settles Indeterminate — so what they pin is
+    // which number the summary reports and whether it tells a conductor to finish work that is already
+    // on origin behind an open PR. On 2026-09-06 it did, and the conductor hand-pushed a pushed branch.
+
+    [Fact]
+    public void Classify_names_the_open_PR_and_offers_no_redispatch_when_the_head_is_pushed()
+    {
+        var directory = CreateTempDirectory();
+        try
+        {
+            // Delivered: head level with origin, declared output written, PR open. The tree is still
+            // dirty, which is why this reaches the Indeterminate arm at all rather than #1945's
+            // FinishedDuringTeardown — a conductor has something to look at, and none of it is a push.
+            File.WriteAllText(Path.Combine(directory, "report.md"), "content");
+            var contract = new WorkerContract("worker", [], [new ProducedOutput("report.md")], []);
+
+            var classification = OutcomeClassifier.Classify(
+                new CoreDispatchResult(0, CoreExitReason.TimedOut),
+                contract,
+                directory,
+                worktreePath: "C:/rooms/room/workspaces/implement",
+                workspaceMutationProbe: ProbeReturning(WorkspaceMutationReading.FromCounts(
+                    changedPathCount: 2, newCommitCount: 1, commitsAheadOfRemote: 0)),
+                openPullRequest: 1974);
+
+            // The verdict is deliberately unchanged: only the text and the recommended action move.
+            Assert.Equal(OutcomeVerdict.Indeterminate, classification.Verdict);
+
+            var reason = classification.Reason!;
+            Assert.StartsWith("Execution timed out.", reason, StringComparison.Ordinal);
+            Assert.Contains("0 unpushed commit(s) and 2 changed/untracked path(s)", reason, StringComparison.Ordinal);
+            Assert.Contains("PR #1974 is open", reason, StringComparison.Ordinal);
+            Assert.Contains("already delivered", reason, StringComparison.Ordinal);
+            // The harm was the instruction, so its ABSENCE is the assertion — not a rephrasing of it.
+            Assert.DoesNotContain("redispatch", reason, StringComparison.OrdinalIgnoreCase);
+            // Still resolvable, and still through the one verb ContractFailure admits.
+            Assert.Contains("baton resolve --reject --reason <text>", reason, StringComparison.Ordinal);
+            Assert.Contains("awaiting conductor resolution.", reason, StringComparison.Ordinal);
+        }
+        finally
+        {
+            DirectoryCleanup.DeleteRecursively(directory);
+        }
+    }
+
+    [Fact]
+    public void Classify_never_calls_a_pushed_timeout_delivered_when_a_declared_output_is_missing()
+    {
+        var directory = CreateTempDirectory();
+        try
+        {
+            // The discriminating control for the arm above, and the population #1945 review HIGH 1 added
+            // its own control for: identical inputs but for report.md never being written. Naming the PR
+            // is still right (the branch is on origin either way, and hand-pushing it is the bug #1978
+            // is about); the word "delivered" is not — BuildTimeoutOnMutatedWorkspaceReason says why.
+            var contract = new WorkerContract("worker", [], [new ProducedOutput("report.md")], []);
+
+            var classification = OutcomeClassifier.Classify(
+                new CoreDispatchResult(0, CoreExitReason.TimedOut),
+                contract,
+                directory,
+                worktreePath: "C:/rooms/room/workspaces/implement",
+                workspaceMutationProbe: ProbeReturning(WorkspaceMutationReading.FromCounts(
+                    changedPathCount: 2, newCommitCount: 1, commitsAheadOfRemote: 0)),
+                openPullRequest: 1974);
+
+            Assert.Equal(OutcomeVerdict.Indeterminate, classification.Verdict);
+
+            var reason = classification.Reason!;
+            Assert.Contains("PR #1974 is open", reason, StringComparison.Ordinal);
+            Assert.DoesNotContain("delivered", reason, StringComparison.OrdinalIgnoreCase);
+            Assert.Contains("declared output(s) are missing", reason, StringComparison.Ordinal);
+            Assert.DoesNotContain("redispatch", reason, StringComparison.OrdinalIgnoreCase);
+        }
+        finally
+        {
+            DirectoryCleanup.DeleteRecursively(directory);
+        }
+    }
+
+    [Fact]
+    public void Classify_keeps_the_redispatch_text_when_the_workspace_is_ahead_of_its_upstream()
+    {
+        var directory = CreateTempDirectory();
+        try
+        {
+            var contract = new WorkerContract("worker", [], [], []);
+
+            // The polarity control for both arms above: an open PR exists, but one commit has NOT left
+            // the machine. newCommitCount deliberately differs from commitsAheadOfRemote so the reported
+            // number can only come from the remote measurement -- against main this lane carries 3.
+            var classification = OutcomeClassifier.Classify(
+                new CoreDispatchResult(0, CoreExitReason.TimedOut),
+                contract,
+                directory,
+                worktreePath: "C:/rooms/room/workspaces/implement",
+                workspaceMutationProbe: ProbeReturning(WorkspaceMutationReading.FromCounts(
+                    changedPathCount: 0, newCommitCount: 3, commitsAheadOfRemote: 1)),
+                openPullRequest: 1974);
+
+            Assert.Equal(OutcomeVerdict.Indeterminate, classification.Verdict);
+
+            var reason = classification.Reason!;
+            Assert.Contains("1 unpushed commit(s) and 0 changed/untracked path(s)", reason, StringComparison.Ordinal);
+            Assert.DoesNotContain("3 new commit(s)", reason, StringComparison.Ordinal);
+            Assert.DoesNotContain("PR #1974", reason, StringComparison.Ordinal);
+            Assert.Contains(
+                "then redispatch a brief telling the next worker to finish what this attempt started.",
+                reason,
+                StringComparison.Ordinal);
+        }
+        finally
+        {
+            DirectoryCleanup.DeleteRecursively(directory);
+        }
+    }
+
+    [Fact]
+    public void Classify_keeps_the_redispatch_text_when_the_head_is_pushed_but_no_PR_was_found()
+    {
+        var directory = CreateTempDirectory();
+        try
+        {
+            var contract = new WorkerContract("worker", [], [], []);
+
+            // The other polarity control: identical to the delivered arm's reading, with the PR lookup
+            // having answered nothing -- no PR open, `gh` missing, unauthenticated, or abandoned at its
+            // bound. Fails closed to today's text rather than inventing a delivery.
+            var classification = OutcomeClassifier.Classify(
+                new CoreDispatchResult(0, CoreExitReason.TimedOut),
+                contract,
+                directory,
+                worktreePath: "C:/rooms/room/workspaces/implement",
+                workspaceMutationProbe: ProbeReturning(WorkspaceMutationReading.FromCounts(
+                    changedPathCount: 2, newCommitCount: 1, commitsAheadOfRemote: 0)),
+                openPullRequest: null);
+
+            Assert.Equal(OutcomeVerdict.Indeterminate, classification.Verdict);
+            Assert.Contains(
+                "then redispatch a brief telling the next worker to finish what this attempt started.",
+                classification.Reason!,
+                StringComparison.Ordinal);
         }
         finally
         {

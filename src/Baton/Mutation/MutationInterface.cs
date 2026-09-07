@@ -2185,10 +2185,24 @@ public static class MutationInterface
                 hookVerdictCount = countHookVerdicts(prepared.OutputDirectory);
             }
 
+            // #1978: the one population whose timeout summary can name a PR -- a branch-delivering role
+            // that was killed at its box. Resolved HERE rather than inside Classify because Classify is
+            // synchronous and this is a network-touching `gh` spawn (and because Classify also runs on
+            // the crash-recovery path above, which must make no subprocess at all -- the same reason the
+            // #1623 verify step sits outside it). Cheap and narrow: at most one `gh pr list` per
+            // timed-out delivering execution, never on a natural exit, and null for every other shape,
+            // which keeps today's text.
+            int? openPullRequest = null;
+            if (dispatchResult.Reason == CoreExitReason.TimedOut && binding.DeliversBranch)
+            {
+                openPullRequest = await ReadOpenPullRequestForTimeoutAsync(mutationProbePath, dispatchCancellationToken)
+                    .ConfigureAwait(false);
+            }
+
             var classification = OutcomeClassifier.Classify(
                 dispatchResult, binding.Contract, prepared.OutputDirectory, binding.FailureClassifier, timeProvider,
                 grantAuditMode, worktreePath, binding.ResponseParser, usageParser, binding.WorktreeBaseSha, binding.ChangesTree,
-                changesTreeWorkingDirectory, toolCallCount, hookVerdictCount, workspaceHeadShaAtStart);
+                changesTreeWorkingDirectory, toolCallCount, hookVerdictCount, workspaceHeadShaAtStart, openPullRequest: openPullRequest);
 
             // #1623 (contract: spec/baton.md §3): the engine's own verify
             // step, spawned here -- between Classify returning Succeeded and the outcome event append
@@ -2818,6 +2832,51 @@ public static class MutationInterface
             RequiredInputs: [],
             ProducedOutputs: [.. request.Outputs.Select(o => new ProducedOutput(o))],
             OptionalMetadata: []);
+    }
+
+    /// <summary>
+    /// #1978: how long the timeout summary's PR lookup may take before it is abandoned.
+    /// <para>
+    /// <b>The bound is here because nothing else bounds it</b> — the same reason
+    /// <c>Cli.WorkspaceDeliveryProbe.SpawnTimeout</c> gives for the identical shape.
+    /// <see cref="VerifyRunner.CaptureAsync"/> sets no process-level timeout (its own F3 remark), and on
+    /// a TIMEOUT the dispatch token is not cancelled — the box closing is what produced this outcome, not
+    /// an operator's Ctrl-C — so a <c>gh</c> or <c>git</c> wedged on a credential prompt would otherwise
+    /// stall the outcome append of a run that is already over, indefinitely. Twenty seconds is far past
+    /// any healthy answer to two local reads and one API call.
+    /// </para>
+    /// </summary>
+    private static readonly TimeSpan OpenPullRequestLookupTimeout = TimeSpan.FromSeconds(20);
+
+    /// <summary>
+    /// #1978: the open PR for a timed-out delivering role's workspace branch, or null. Fails open at
+    /// every step, exactly as the summary it feeds does — a missing <c>gh</c>, an unauthenticated one, a
+    /// dead network, a cancel, or a lookup that ran past
+    /// <see cref="OpenPullRequestLookupTimeout"/> each cost the PR reference and nothing else, and the
+    /// reason text then reads as it did before #1978 (resolve, then redispatch), which is the safe
+    /// direction: a conductor is sent to look rather than told the work is done.
+    /// </summary>
+    private static async Task<int?> ReadOpenPullRequestForTimeoutAsync(
+        string? workspacePath, CancellationToken cancellationToken)
+    {
+        using var bound = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
+        bound.CancelAfter(OpenPullRequestLookupTimeout);
+
+        try
+        {
+            var reading = await DeliveryVerifier.ReadOpenPullRequestAsync(workspacePath, bound.Token).ConfigureAwait(false);
+            return reading.Number;
+        }
+        catch (OperationCanceledException)
+        {
+            // Said out loud, per the no-silent-swallow rule: an abandoned lookup and a branch with no PR
+            // produce the same summary, and only this line tells them apart afterwards.
+            Console.Error.WriteLine(
+                $"Could not resolve an open PR for '{workspacePath}' within "
+                + $"{OpenPullRequestLookupTimeout.TotalSeconds:0.##}s (or the run was cancelled), so this "
+                + "execution's timeout summary names none.");
+            return null;
+        }
     }
 
     /// <summary>

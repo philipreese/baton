@@ -326,6 +326,77 @@ public sealed class DeliveryVerifierTests
         DirectoryCleanup.DeleteRecursively(origin);
     }
 
+    // #1978: the same `gh pr list --head <branch> --json number` question, now also asked on its own so
+    // the timeout summary can NAME the PR rather than only learn that one exists. Real git for the
+    // branch resolution, the same fake `gh` the arms above use for the answer.
+
+    [Fact]
+    public async Task ReadOpenPullRequestAsync_names_the_open_PR_for_the_workspace_branch()
+    {
+        var (workspace, origin) = CreatePushedWorkspace("feature-pr-named");
+        try
+        {
+            var gh = WriteFakeGh(workspace, """[{"number":1974}]""");
+
+            var reading = await DeliveryVerifier.ReadOpenPullRequestAsync(
+                workspace, TestContext.Current.CancellationToken, ghProgram: gh);
+
+            Assert.True(reading.AnyOpen);
+            Assert.Equal(1974, reading.Number);
+            Assert.Null(reading.NotRunReason);
+        }
+        finally
+        {
+            Cleanup(workspace, origin);
+        }
+    }
+
+    [Fact]
+    public async Task ReadOpenPullRequestAsync_reports_no_open_PR_without_fabricating_a_number()
+    {
+        // The discriminating control for the arm above: same workspace, same spawn, an empty array. The
+        // consumer must be able to tell "none is open" from "the question went unanswered" -- which is
+        // the arm below -- because only the first is evidence.
+        var (workspace, origin) = CreatePushedWorkspace("feature-pr-none");
+        try
+        {
+            var gh = WriteFakeGh(workspace, "[]");
+
+            var reading = await DeliveryVerifier.ReadOpenPullRequestAsync(
+                workspace, TestContext.Current.CancellationToken, ghProgram: gh);
+
+            Assert.False(reading.AnyOpen);
+            Assert.Null(reading.Number);
+            Assert.Null(reading.NotRunReason);
+        }
+        finally
+        {
+            Cleanup(workspace, origin);
+        }
+    }
+
+    [Fact]
+    public async Task ReadOpenPullRequestAsync_reports_NotRun_when_gh_is_not_available()
+    {
+        var (workspace, origin) = CreatePushedWorkspace("feature-pr-nogh");
+        try
+        {
+            var reading = await DeliveryVerifier.ReadOpenPullRequestAsync(
+                workspace, TestContext.Current.CancellationToken,
+                ghProgram: "this-is-not-a-real-gh-binary-12345");
+
+            // Never `false`: an unanswered question read as "no PR is open" is exactly the fabricated
+            // absence the tri-state exists to prevent.
+            Assert.Null(reading.AnyOpen);
+            Assert.Null(reading.Number);
+            Assert.NotNull(reading.NotRunReason);
+        }
+        finally
+        {
+            Cleanup(workspace, origin);
+        }
+    }
+
     private static string WriteFakeGh(string directory, string jsonOutput)
     {
         var path = Path.Combine(directory, $"fake-gh-{Guid.NewGuid():N}.cmd");

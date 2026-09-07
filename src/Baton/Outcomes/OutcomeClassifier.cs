@@ -195,6 +195,17 @@ public static class OutcomeClassifier
     /// that reason; what a double CAN discriminate is the branch this class takes given a reading,
     /// which is all it is used for.
     /// </param>
+    /// <param name="openPullRequest">
+    /// #1978: the number of an open PR for the probed workspace's branch, or null when none was found or
+    /// the question was not asked. Resolved by the CALLER, ahead of this call — <c>gh pr list</c> is a
+    /// network-touching spawn and this method is synchronous; <c>MutationInterface</c> asks
+    /// <see cref="Mutation.DeliveryVerifier.ReadOpenPullRequestAsync"/> (the one PR-detection path) on
+    /// the live-dispatch timeout path for a branch-delivering role, and nowhere else. It changes no
+    /// verdict — only the reason text of the #1373 mutated-workspace arm below, and only once that arm's
+    /// own workspace probe says the head is already on the remote. Null everywhere else, including on
+    /// the crash-recovery path, which therefore keeps today's text: an unnamed PR fails closed to a
+    /// summary that still sends a conductor to look.
+    /// </param>
     public static OutcomeClassification Classify(
         CoreDispatchResult result,
         WorkerContract contract,
@@ -211,7 +222,8 @@ public static class OutcomeClassifier
         int? toolCallCount = null,
         int? hookVerdictCount = null,
         string? workspaceHeadShaAtStart = null,
-        Func<string?, string?, Workspaces.WorkspaceMutationReading?>? workspaceMutationProbe = null)
+        Func<string?, string?, Workspaces.WorkspaceMutationReading?>? workspaceMutationProbe = null,
+        int? openPullRequest = null)
     {
         ArgumentNullException.ThrowIfNull(result);
         ArgumentNullException.ThrowIfNull(contract);
@@ -248,11 +260,15 @@ public static class OutcomeClassifier
             // changesTreeWorkingDirectory does NOT, and reading it here is a deliberate RELAXATION of
             // F4, not a case that satisfies it: that parameter was introduced for #1622/#1390's
             // work-product evidence, which decides nothing, and this makes it decide something. The
-            // ChangedPathCount half is also ABSOLUTE where the commit half is a delta against
-            // workspaceHeadShaAtStart -- it counts what git status reports, with no baseline taken at
-            // spawn. spec/baton.md §3's #1373 paragraph states which population that covers, what it
-            // costs, and why the ruling accepts it. A null path means this execution had nowhere to
-            // leave work, and keeps the retry.
+            // ChangedPathCount half is also ABSOLUTE where the commit half that decides RETRY is a delta
+            // against workspaceHeadShaAtStart -- it counts what git status reports, with no baseline
+            // taken at spawn. spec/baton.md §3's #1373 paragraph states which population that covers,
+            // what it costs, and why the ruling accepts it. A null path means this execution had nowhere
+            // to leave work, and keeps the retry.
+            //
+            // #1978: that delta still decides the retry, and no longer decides what the reason SAYS.
+            // The number a conductor reads is CommitsAheadOfRemote whenever a tracking branch answered
+            // -- WorkspaceMutationReading.Describe owns that split and the failure that forced it.
             var mutationProbePath = worktreePath ?? changesTreeWorkingDirectory;
             if (mutationProbePath is not null)
             {
@@ -290,8 +306,13 @@ public static class OutcomeClassifier
                 // which is what that shape has always meant. TerminalSuccessObserved is deliberately
                 // NOT also required: this population was killed mid-teardown, so no worker ever
                 // printed a terminal marker, and requiring one would make this arm dead code.
-                if (reading is { Mutated: true, FinishedAndPushed: true }
-                    && ContractValidator.IsSatisfied(contract, outputDirectory))
+                // #1978: hoisted out of the condition below because the reason builder needs the same
+                // answer. The two arms are one predicate apart on purpose -- see
+                // BuildTimeoutOnMutatedWorkspaceReason for why an unsatisfied contract must never reach
+                // the word "delivered", which is exactly the case the #1945 review HIGH 1 control pins.
+                var contractSatisfied = ContractValidator.IsSatisfied(contract, outputDirectory);
+
+                if (reading is { Mutated: true, FinishedAndPushed: true } && contractSatisfied)
                 {
                     return BuildSucceededClassification(
                         contract, changesTreeWorkingDirectory, worktreeBaseRef, changesTree, result.EnginePlacedFiles)
@@ -304,7 +325,9 @@ public static class OutcomeClassifier
                     return new OutcomeClassification(
                         OutcomeVerdict.Indeterminate,
                         FailureClassification: null, // Indeterminate carries no FailureClassification — see OutcomeVerdict.Indeterminate's own remarks.
-                        WithStderr(BuildTimeoutOnMutatedWorkspaceReason(reading), result.StderrTail),
+                        WithStderr(
+                            BuildTimeoutOnMutatedWorkspaceReason(reading, openPullRequest, contractSatisfied),
+                            result.StderrTail),
                         // Null, so StateProjector records IndeterminateProducer.ContractFailure: this
                         // shape has no captured body to accept and IS something a conductor can reject
                         // after inspecting the workspace, which is precisely that producer's grammar
@@ -694,14 +717,51 @@ public static class OutcomeClassifier
     /// actionable half must not be what gets dropped.
     /// </para>
     /// </remarks>
-    private static string BuildTimeoutOnMutatedWorkspaceReason(Workspaces.WorkspaceMutationReading reading) =>
+    /// <remarks>
+    /// <para>
+    /// <b>#1978 — the delivered arm.</b> A head that is already on the remote with an open PR is not
+    /// stranded work, whatever else the workspace still carries, and a summary that tells a conductor to
+    /// finish it is how one came to hand-push an already-pushed branch and reset a divergent head on
+    /// 2026-09-06. That arm therefore names the PR and never uses the word "redispatch" at all — pinned
+    /// by an absence assertion in <c>OutcomeClassifierTests</c>, because the harm was the instruction,
+    /// not the count. What it leaves alone (the verdict, and the one resolve verb
+    /// <c>ContractFailure</c> admits) is spec/baton.md §3's #1978 paragraph, not restated here.
+    /// </para>
+    /// <para>
+    /// <b>"Delivered" is gated on the contract, not on the push alone</b>, and that is the whole reason
+    /// <paramref name="contractSatisfied"/> is threaded in. This arm's population includes exactly the
+    /// case #1945 review HIGH 1 added a control for: a lane killed while still writing its declared
+    /// output, whose tree is clean and whose head is pushed. Calling that one delivered would announce a
+    /// deliverable nobody wrote. It still names the PR — the do-not-hand-push half is what #1978 is
+    /// about, and it is true either way — and says what is missing instead.
+    /// </para>
+    /// </remarks>
+    private static string BuildTimeoutOnMutatedWorkspaceReason(
+        Workspaces.WorkspaceMutationReading reading, int? openPullRequest, bool contractSatisfied)
+    {
+        var carries = $"{TimeoutSentence} Workspace carries {reading.Describe()}";
+
+        if (reading.HeadIsPushed && openPullRequest is { } pullRequest)
+        {
+            return contractSatisfied
+                ? $"{carries}; its head is on origin and PR #{pullRequest} is open, so this attempt's work is "
+                  + "already delivered — resolve it ('baton resolve --reject --reason <text>') and review "
+                  + $"PR #{pullRequest}. Nothing is stranded here: do not push the branch by hand, and no "
+                  + "follow-on brief is owed for this work — awaiting conductor resolution."
+                : $"{carries}; its head is on origin and PR #{pullRequest} is open, but this execution's "
+                  + "declared output(s) are missing — resolve it ('baton resolve --reject --reason "
+                  + $"<text>') and read PR #{pullRequest} for what did land. Do not push the branch by "
+                  + "hand: it is already on origin — awaiting conductor resolution.";
+        }
+
         // "then redispatch", never "or redispatch": RedispatchCommand refuses an Indeterminate parent
         // unconditionally and says so, with no --force, so offering the two as alternatives would send
         // a conductor straight into a refusal.
-        $"{TimeoutSentence} Workspace carries {reading.Describe()} — resolve it ('baton resolve --reject " +
-        "--reason <text>'), then redispatch a brief telling the next worker to finish what this attempt " +
-        "started. Not retried: a from-scratch attempt would restart on top of that work — awaiting " +
-        "conductor resolution.";
+        return $"{carries} — resolve it ('baton resolve --reject " +
+            "--reason <text>'), then redispatch a brief telling the next worker to finish what this attempt " +
+            "started. Not retried: a from-scratch attempt would restart on top of that work — awaiting " +
+            "conductor resolution.";
+    }
 
     /// <summary>
     /// Assembles the diagnostic for a natural, exit-0 completion whose contract still isn't
