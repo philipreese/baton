@@ -9,9 +9,9 @@
 # One-time prerequisite: `npx wrangler login` (opens a browser) so wrangler holds its own OAuth
 # session -- this script never handles a Cloudflare credential itself.
 #
-# #1946: this whole script -- and the Claude.ai artifact paste that follows it -- is now OPTIONAL.
-# `baton daemon` serves the same glass.html over the tailnet, and that URL is the primary way to
-# open the glass -- tools/fleet-glass/README.md says where that is set up. Everything below is
+# #1946: this whole script -- and the Claude.ai artifact paste that follows it -- is now OPTIONAL,
+# and no longer how an operator normally reaches the board; tools/fleet-glass/README.md states what
+# replaced it and where that is set up. Everything below is
 # the MAILBOX plane, whose remaining reach this directory's README states.
 # No step here changed: step 3 pushes the Worker's secrets, which
 # the Worker still needs for as long as the mailbox plane exists (the brief for #1946 described step
