@@ -12,10 +12,12 @@ embedded in `Baton.Cli` from this directory, so a change here reaches both deliv
 copy to keep in step. The config keys, the bind rule and the `tailscale serve` recipe are in the
 repo README's "Opening the glass over your tailnet"; it was ratified in `spec/baton.md` §11 C-11.
 
-**Publishing the Claude.ai artifact is now optional**, and the tailnet URL is the primary way to open
-the glass. The artifact and the mailbox behind it still work unchanged, and are still the only glass
-reachable from inside a Claude conversation; retiring them is its own issue, after the tailnet page
-has been proven on a phone.
+**Publishing the Claude.ai artifact is now optional**, and the tailnet URL is intended to become the
+primary way to open the glass — intended, not yet true: as of #1946 slice 1 the tailnet bind has
+never been executed and the page has never been rendered in a browser on this plane. The artifact and
+the mailbox behind it still work unchanged, and are still the only glass reachable from inside a
+Claude conversation; retiring them is its own issue, after the tailnet page has been proven on a
+phone.
 
 ## Where the fleet snapshot comes from (#1557)
 

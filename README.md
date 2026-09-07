@@ -116,8 +116,10 @@ snippet is an example, not a second copy of the schema. The daemon logs the URLs
 startup.
 
 **The bind rule is not configurable.** The listener binds loopback and, when the machine has one,
-its own Tailscale address (`100.64.0.0/10`) — never `0.0.0.0`, and there is no setting that widens
-it (`GlassBindPolicy`; the decision is `spec/baton.md` §11 C-11). On Windows, binding the tailnet
+its own Tailscale address. Two signals are required, not one — the range Tailscale assigns from is
+shared with carrier-grade NAT, so the owning adapter has to be Tailscale's as well. Never `0.0.0.0`,
+and there is no setting that widens it
+(`GlassBindPolicy` states the rule and the residual; the decision is `spec/baton.md` §11 C-11). On Windows, binding the tailnet
 address needs a one-time URL reservation from an **elevated** prompt; the daemon prints the exact
 command when the bind is refused, and the loopback listener comes up either way:
 
@@ -126,7 +128,9 @@ netsh http add urlacl url=http://<your-tailscale-ip>:8420/ user=$env:USERDOMAIN\
 ```
 
 For HTTPS (and a name instead of an IP), let Tailscale terminate TLS in front of it — two lines,
-run on the fleet machine, after which the page is at `https://<machine>.<tailnet>.ts.net/`:
+run on the fleet machine, after which the page is at `https://<machine>.<tailnet>.ts.net/`.
+**Unlike the `netsh` line above, this recipe is Tailscale's documented usage and has not been run
+here**, so treat it as a starting point rather than a measurement:
 
 ```powershell
 tailscale cert            # once, to issue the node's certificate
