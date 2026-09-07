@@ -233,14 +233,27 @@ PROJECTION_SOURCE_DEFAULT = "file"
 PROJECTION_STALE_AFTER_S = 900
 
 
-def resolve_projection_file_path() -> Path:
-    """Mirrors `BatonPaths.FleetProjectionFile` (src/Baton/Status/BatonPaths.cs) -- BATON_HOME when
-    set to a non-blank value, else `~/.baton`, then `fleet/projection.json`. This is the ONE place
-    that rule is duplicated in Python (#1557 PR-B1); every other reference goes through this
-    function rather than re-deriving the path."""
+def resolve_fleet_dir() -> Path:
+    """Mirrors `BatonPaths.Root` + `BatonPaths.FleetDirectoryName` (src/Baton/Status/BatonPaths.cs) --
+    BATON_HOME when set to a non-blank value, else `~/.baton`, then `fleet/`. This is the ONE place
+    that rule is duplicated in Python (#1557 PR-B1); every other reference goes through this function
+    or one of the two path helpers below rather than re-deriving the root."""
     home_override = os.environ.get("BATON_HOME", "")
     root = Path(home_override) if home_override.strip() else Path.home() / ".baton"
-    return root / "fleet" / "projection.json"
+    return root / "fleet"
+
+
+def resolve_projection_file_path() -> Path:
+    """`BatonPaths.FleetProjectionFile` -- what the fleet is doing."""
+    return resolve_fleet_dir() / "projection.json"
+
+
+def resolve_heartbeat_file_path() -> Path:
+    """`BatonPaths.FleetHeartbeatFile` -- whether the process that writes the projection is still
+    running its loops. That doc comment owns why the two are separate files; #2036 is why this
+    reader exists, and reading it is what tells a stale projection (daemon down) apart from a stale
+    projection beside a live heartbeat (daemon up, its projection tick failing)."""
+    return resolve_fleet_dir() / "heartbeat.json"
 
 
 def read_projection_file(path: Path, now_ts: float, max_age_s: float = PROJECTION_STALE_AFTER_S):
@@ -278,6 +291,69 @@ def read_projection_file(path: Path, now_ts: float, max_age_s: float = PROJECTIO
         return None, {"daemon_derived_at": daemon_derived_at, "age_s": round(age_s, 1), "stale": True}
 
     return parsed, None
+
+
+def read_daemon_heartbeat_age_s(path: Path, now_ts: float) -> float | None:
+    """Age in seconds of `tickCompletedAt` in the daemon's heartbeat file, or `None` when that file
+    is absent, unreadable, malformed, or carries no parseable stamp -- `Baton.Cli.Daemon.
+    DaemonTickLedger.RenderHeartbeatJson` owns the body's shape. `None` deliberately does NOT mean
+    "fine": `daemon_liveness_verdict` reads it as "no independent liveness evidence", which is what
+    an absent heartbeat beside a stale projection actually is."""
+    try:
+        parsed = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return None
+
+    stamp = parsed.get("tickCompletedAt") if isinstance(parsed, dict) else None
+    if not isinstance(stamp, str):
+        return None
+
+    try:
+        stamp_dt = datetime.fromisoformat(stamp.replace("Z", "+00:00"))
+    except ValueError:
+        return None
+
+    return max(0.0, now_ts - stamp_dt.timestamp())
+
+
+def daemon_liveness_verdict(staleness: dict | None, heartbeat_age_s: float | None,
+                            max_age_s: float = PROJECTION_STALE_AFTER_S) -> dict | None:
+    """#2036 -- `None` while the projection file is fresh, else the page-worthy verdict
+    `{magnitude, title, message}` for `push_ntfy_daemon_down`.
+
+    The trigger is exactly `read_projection_file`'s own staleness decision (its `staleness` return,
+    passed straight in) rather than a second threshold of this function's own: on 2026-09-07 the
+    daemon died at 00:57 and the pusher detected it every cycle for 8.7 hours while only writing a
+    line to `pusher.log` that nobody was reading. What this adds is the escalation, not the
+    detection.
+
+    `magnitude` is whole hours of staleness, so `ntfy_dedup_decision` re-alerts once an hour that
+    the outage continues and folds the ~140 cycles in between -- a first push the moment the
+    threshold trips, then an hourly reminder, and nothing else.
+
+    The heartbeat is read separately and only names WHICH fault this is; it never suppresses the
+    alert. A live heartbeat beside a stale projection is still page-worthy (the glass is showing a
+    fleet nobody is updating), it just isn't "the daemon is gone"."""
+    if staleness is None:
+        return None
+
+    age_s = staleness.get("age_s")
+    derived_at = staleness.get("daemon_derived_at")
+    projection_age = f"{age_s:.0f}s" if isinstance(age_s, (int, float)) else "unknown (absent or unreadable)"
+    if heartbeat_age_s is None:
+        heartbeat = "no readable heartbeat either -- `baton daemon` is probably not running"
+    elif heartbeat_age_s > max_age_s:
+        heartbeat = f"heartbeat is {heartbeat_age_s:.0f}s old too -- `baton daemon` is probably not running"
+    else:
+        heartbeat = (f"but the heartbeat is only {heartbeat_age_s:.0f}s old -- the daemon is alive and "
+                     f"its projection tick is failing")
+
+    return {
+        "magnitude": int((age_s if isinstance(age_s, (int, float)) else 0) // 3600),
+        "title": "Baton daemon: fleet projection is stale",
+        "message": (f"projection.json is {projection_age} old (derived_at={derived_at}); {heartbeat}. "
+                    f"The glass is falling back to its own derivation.")[:200],
+    }
 
 
 def log(msg: str) -> None:
@@ -3094,6 +3170,13 @@ NTFY_EVENT_TIERS: dict[str, str] = {
     "lane_succeeded_with_warnings": "default",
     "zombie_detected": "high",
     "pusher_anomaly": "high",
+    # #2036: urgent, and specifically not `high`, for the reason the outage that paid for it has:
+    # the daemon died at 00:57 ET, inside any quiet-hours window an operator would plausibly set,
+    # and `maybe_push_ntfy_event` suppresses every non-urgent tier during those hours. A tier that
+    # sleeps through the night could not have shortened an 8.7-hour outage that began at night.
+    # Nothing else in the fleet is silently down-for-hours in the same way -- every room-level
+    # condition below is still observable in a glass the daemon is keeping current.
+    "daemon_down": "urgent",
 }
 
 
@@ -3375,6 +3458,34 @@ def push_ntfy_pusher_anomaly(cfg: dict, secrets: dict, ntfy_state_path: Path, bl
             log(f"ntfy: pusher_anomaly ({block_name})")
     except Exception as ntfy_ex:  # noqa: BLE001 — the ntfy path itself must never break the loop
         log(f"ERROR (ntfy pusher anomaly) {type(ntfy_ex).__name__}: {ntfy_ex}")
+
+
+#: `daemon_down`'s single dedup key. Fixed rather than per-room -- there is one daemon -- so, like
+#: `pusher_anomaly:*`, it is already bounded and `prune_ntfy_dedup_state` leaves it alone.
+NTFY_DAEMON_DOWN_KEY = "daemon_down:projection"
+
+
+def push_ntfy_daemon_down(cfg: dict, secrets: dict, ntfy_state_path: Path, verdict: dict | None,
+                          now: datetime, sender=None) -> None:
+    """#2036 -- pushes `daemon_liveness_verdict`'s verdict, and CLEARS the dedup entry when the
+    verdict is `None`, so a daemon that comes back and dies again pages fresh instead of folding
+    forever against the first outage (the same recover-then-clear rule `push_ntfy_room_events`
+    applies per room). Owns its own load/save round-trip against `ntfy_state_path` for the same
+    reason `push_ntfy_pusher_anomaly` above does. Never raises."""
+    try:
+        state = load_push_state(ntfy_state_path)
+        if verdict is None:
+            ntfy_clear_dedup(state, NTFY_DAEMON_DOWN_KEY)
+            save_push_state(ntfy_state_path, state)
+            return
+        outcome = maybe_push_ntfy_event(
+            cfg, secrets, state, "daemon_down", NTFY_DAEMON_DOWN_KEY, verdict["magnitude"],
+            verdict["title"], verdict["message"], now, sender=sender)
+        save_push_state(ntfy_state_path, state)
+        if outcome == "sent":
+            log(f"ntfy: daemon_down -- {verdict['message']}")
+    except Exception as ntfy_ex:  # noqa: BLE001 — the ntfy path itself must never break the loop
+        log(f"ERROR (ntfy daemon down) {type(ntfy_ex).__name__}: {ntfy_ex}")
 
 
 # ---------------------------------------------------------------------------------------------
@@ -3867,6 +3978,10 @@ def main() -> None:
             # something to iterate even on a cycle whose snapshot try/except raised before assigning
             # this -- an empty list means "detect nothing this cycle", never a crash.
             room_list: list = []
+            # #2036: same defaulting rule as `room_list` above, for the daemon-liveness block at the
+            # bottom of the cycle -- a snapshot block that raised before assigning this must not let
+            # the PREVIOUS cycle's staleness page (or un-page) on stale evidence.
+            staleness = None
             try:
                 # #1557 PR-B1: `file` mode reads the daemon's own projection file instead of
                 # spawning `dotnet mcp` -- `used_file_this_cycle` is False whenever the file was
@@ -4241,6 +4356,18 @@ def main() -> None:
                     save_push_state(ntfy_state_path, ntfy_state)
                 except Exception as ex:  # noqa: BLE001 — loop must survive anything
                     log(f"ERROR (ntfy room events) {type(ex).__name__}: {ex}")
+
+                # #2036: the daemon-liveness page. `staleness` is whatever the snapshot block above
+                # already decided (None on a fresh file, and None throughout in `derive` mode, where
+                # an operator has deliberately taken the file out of the loop) -- this block adds no
+                # second threshold, only the escalation from a `pusher.log` line to a push. The
+                # heartbeat is read here rather than in the snapshot block because it plays no part
+                # in which projection source a cycle uses: it is read only to say which fault this is.
+                push_ntfy_daemon_down(
+                    cfg, ntfy_secrets, ntfy_state_path,
+                    daemon_liveness_verdict(
+                        staleness, read_daemon_heartbeat_age_s(resolve_heartbeat_file_path(), time.time())),
+                    datetime.now(timezone.utc))
 
             if once:
                 break
@@ -7009,6 +7136,76 @@ def _selftest() -> int:
                                   RuntimeError("boom again, different text"), outside, sender=fake_sender)
         check("push_ntfy_pusher_anomaly: a repeat in the SAME block folds regardless of exception text",
               not sent_calls)
+
+    # -- #2036: the daemon-liveness page. Both polarities of the verdict, then the tier property the
+    # whole fix rests on (the outage began at 00:57 ET, inside quiet hours), then the fold/re-alert/
+    # clear cycle. `_et` above builds the ET instants. --
+    check("daemon liveness: a fresh projection is no verdict at all",
+          daemon_liveness_verdict(None, 3.0) is None)
+    stale_verdict = daemon_liveness_verdict(
+        {"daemon_derived_at": "2026-09-07T04:47:00Z", "age_s": 31332.0, "stale": True}, None)
+    check("daemon liveness: a stale projection with no heartbeat is a verdict",
+          stale_verdict is not None)
+    check("daemon liveness: no readable heartbeat names the daemon, not the tick",
+          "not running" in stale_verdict["message"])
+    check("daemon liveness: 8.7h of staleness is magnitude 8 (hourly re-alert, not per-cycle)",
+          stale_verdict["magnitude"] == 8)
+    live_hb_verdict = daemon_liveness_verdict(
+        {"daemon_derived_at": "2026-09-07T04:47:00Z", "age_s": 1000.0, "stale": True}, 12.0)
+    check("daemon liveness: a live heartbeat beside a stale projection STILL pages",
+          live_hb_verdict is not None)
+    check("daemon liveness: ... but names the projection tick rather than a dead daemon",
+          live_hb_verdict is not None and "projection tick is failing" in live_hb_verdict["message"])
+    check("daemon liveness: an absent/unreadable projection (age_s None) still pages",
+          daemon_liveness_verdict({"daemon_derived_at": None, "age_s": None, "stale": True}, None) is not None)
+    check("tier table: daemon_down is urgent, so quiet hours cannot suppress it",
+          ntfy_priority_for_event("daemon_down") == "urgent")
+
+    with tempfile.TemporaryDirectory() as hb_tmp:
+        hb_dir = Path(hb_tmp)
+        check("read_daemon_heartbeat_age_s: an absent file reads as no evidence, not as fresh",
+              read_daemon_heartbeat_age_s(hb_dir / "missing.json", 1000.0) is None)
+        (hb_dir / "garbage.json").write_text("{not json", encoding="utf-8")
+        check("read_daemon_heartbeat_age_s: a malformed file reads as no evidence",
+              read_daemon_heartbeat_age_s(hb_dir / "garbage.json", 1000.0) is None)
+        # The exact body DaemonTickLedger.RenderHeartbeatJson writes, including its "O"-format stamp.
+        (hb_dir / "heartbeat.json").write_text(json.dumps({
+            "tickCompletedAt": "2026-09-07T04:57:06.1234567+00:00",
+            "startedAt": "2026-09-07T00:25:23.0000000+00:00",
+            "services": {"FleetProjectionWriter": {"lastTickMs": 12.0, "completedAt":
+                                                   "2026-09-07T04:57:06.1234567+00:00", "intervalMs": 30000.0}},
+        }), encoding="utf-8")
+        hb_age = read_daemon_heartbeat_age_s(
+            hb_dir / "heartbeat.json",
+            datetime(2026, 9, 7, 5, 57, 6, tzinfo=timezone.utc).timestamp())
+        check("read_daemon_heartbeat_age_s: parses the C# 'O' stamp the daemon actually writes",
+              hb_age is not None and 3599 <= hb_age <= 3601)
+
+    with tempfile.TemporaryDirectory() as daemon_tmp:
+        daemon_state_path = Path(daemon_tmp) / "ntfy-state.json"
+        daemon_cfg = dict(wrapping_cfg, ntfy_topic="my-topic")
+        outage_start = _et(1, 5, 0, 57)  # 00:57 ET -- the incident's own hour, inside quiet hours
+        first = daemon_liveness_verdict({"daemon_derived_at": "x", "age_s": 1000.0, "stale": True}, None)
+        sent_calls.clear()
+        push_ntfy_daemon_down(daemon_cfg, {}, daemon_state_path, first, outage_start, sender=fake_sender)
+        check("push_ntfy_daemon_down: the first cycle past the threshold pages DURING quiet hours",
+              len(sent_calls) == 1)
+        sent_calls.clear()
+        push_ntfy_daemon_down(daemon_cfg, {}, daemon_state_path, first, outage_start, sender=fake_sender)
+        check("push_ntfy_daemon_down: the next cycle of the same outage folds",
+              not sent_calls)
+        an_hour_in = daemon_liveness_verdict({"daemon_derived_at": "x", "age_s": 4000.0, "stale": True}, None)
+        push_ntfy_daemon_down(daemon_cfg, {}, daemon_state_path, an_hour_in, outage_start, sender=fake_sender)
+        check("push_ntfy_daemon_down: another hour of the same outage re-alerts",
+              len(sent_calls) == 1)
+        sent_calls.clear()
+        push_ntfy_daemon_down(daemon_cfg, {}, daemon_state_path, None, outage_start, sender=fake_sender)
+        check("push_ntfy_daemon_down: recovery sends nothing", not sent_calls)
+        check("push_ntfy_daemon_down: recovery CLEARS the dedup entry",
+              NTFY_DAEMON_DOWN_KEY not in load_push_state(daemon_state_path))
+        push_ntfy_daemon_down(daemon_cfg, {}, daemon_state_path, first, outage_start, sender=fake_sender)
+        check("push_ntfy_daemon_down: a SECOND outage after a recovery pages fresh, not folded",
+              len(sent_calls) == 1)
 
     if failures:
         print(f"pusher.py selftest: FAIL -- {len(failures)} check(s):", file=sys.stderr)
