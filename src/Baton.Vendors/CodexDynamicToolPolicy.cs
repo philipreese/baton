@@ -250,9 +250,9 @@ public sealed class CodexDynamicToolPolicy
 
         EnsureNoReparsePoint(path);
 
-        // #2002 rule 2b. Stat BEFORE serving, and stat rather than clock: the measured agy rooms
-        // re-opened their own `task-N.log` 22-25 times, while a file a build rewrote must be re-read
-        // truthfully however fast the re-ask came.
+        // #2002 rule 2b. Stat BEFORE serving, which is the whole predicate — see
+        // RepeatedToolCallLedger for why a read is judged on the stat pair and a command on a clock.
+        // The population: the measured agy rooms re-opened their own `task-N.log` 22-25 times.
         var info = new FileInfo(path);
         var repeat = _repeats.ClassifyRead(path, info.LastWriteTimeUtc, info.Length);
         if (repeat.Verdict == RepeatVerdict.Refuse)
