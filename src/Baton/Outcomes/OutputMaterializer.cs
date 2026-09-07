@@ -77,6 +77,21 @@ public static class OutputMaterializer
     private static readonly HashSet<string> ProseSafeExtensions =
         new(StringComparer.OrdinalIgnoreCase) { ".md", ".txt" };
 
+    /// <summary>
+    /// Whether a declared <see cref="OutputSchema"/> is a shape free text can honestly BE. The test
+    /// this half of the predicate is really asking (see the call site) is "could a captured response
+    /// ever satisfy this output", and until #2043 the code asked "does it declare a schema at all",
+    /// which was the same question while every schema was structured.
+    /// <see cref="OutputSchema.NonEmptyText"/> broke that equivalence: it asserts nothing about shape
+    /// beyond "the worker said something", and a capture only ever fires on a non-whitespace response
+    /// (<see cref="TryCaptureFinalResponse"/>'s own guard), so a captured response satisfies it by
+    /// construction.
+    /// Reading it as structured would refuse a capture for exactly the read-shaped, prose-only roles
+    /// the capture exists for.
+    /// </summary>
+    private static bool IsProseSatisfiable(OutputSchema schema) =>
+        schema is OutputSchema.None or OutputSchema.NonEmptyText;
+
     private static bool IsProseSafeName(string outputName)
     {
         var extension = Path.GetExtension(outputName);
@@ -160,7 +175,7 @@ public static class OutputMaterializer
         if (validation.UnsatisfiedOutputs.Any(u =>
                 !IsProseSafeName(u.Name)
                 || (outputByName.TryGetValue(u.Name, out var declared)
-                    && (declared.Schema != OutputSchema.None || declared.Condition is not null))))
+                    && (!IsProseSatisfiable(declared.Schema) || declared.Condition is not null))))
         {
             return null;
         }

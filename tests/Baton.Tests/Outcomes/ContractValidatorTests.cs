@@ -574,5 +574,69 @@ public class ContractValidatorTests
             DirectoryCleanup.DeleteRecursively(directory);
         }
     }
+
+    /// <summary>
+    /// #2043: a declared <see cref="OutputSchema.NonEmptyText"/> output is satisfied by prose and
+    /// unsatisfied by an empty or whitespace-only file, with
+    /// <see cref="UnsatisfiedOutputReason.SchemaViolation"/> — the "present and non-empty" verify the
+    /// issue asked for, which existence alone does not give. <b>Both polarities, and a control</b>:
+    /// the same two empty files under <see cref="OutputSchema.None"/> pass, which is what makes the
+    /// failures above about the schema rather than about the fixture.
+    /// </summary>
+    [Fact]
+    public void A_non_empty_text_output_is_unsatisfied_by_an_empty_or_whitespace_only_file_with_control()
+    {
+        var directory = CreateTempDirectory();
+        try
+        {
+            var textContract = new WorkerContract(
+                "consolidator", [], [new ProducedOutput("consolidation.md", Schema: OutputSchema.NonEmptyText)], []);
+            var noneContract = new WorkerContract(
+                "consolidator", [], [new ProducedOutput("consolidation.md", Schema: OutputSchema.None)], []);
+            var path = Path.Combine(directory, "consolidation.md");
+
+            File.WriteAllText(path, "## Shipped, verified in code\n- something\n");
+            Assert.True(ContractValidator.IsSatisfied(textContract, directory));
+
+            foreach (var nothing in new[] { string.Empty, "  \r\n\t \n" })
+            {
+                File.WriteAllText(path, nothing);
+                var result = ContractValidator.Validate(textContract, directory);
+                var unsatisfied = Assert.Single(result.UnsatisfiedOutputs);
+                Assert.Equal(UnsatisfiedOutputReason.SchemaViolation, unsatisfied.Reason);
+                Assert.Contains("non-whitespace", unsatisfied.Detail);
+
+                // Control: existence alone is all OutputSchema.None ever asked for, then and now.
+                Assert.True(ContractValidator.IsSatisfied(noneContract, directory));
+            }
+        }
+        finally
+        {
+            DirectoryCleanup.DeleteRecursively(directory);
+        }
+    }
+
+    /// <summary>
+    /// #2043: a file whose only content is a byte-order mark has said nothing. Pinned because the
+    /// obvious byte-wise implementation passes it — the three BOM bytes are not whitespace — and the
+    /// failure would be silent: a lane settling <c>Succeeded</c> on an empty consolidation.
+    /// </summary>
+    [Fact]
+    public void A_non_empty_text_output_holding_only_a_byte_order_mark_is_unsatisfied()
+    {
+        var directory = CreateTempDirectory();
+        try
+        {
+            var contract = new WorkerContract(
+                "consolidator", [], [new ProducedOutput("consolidation.md", Schema: OutputSchema.NonEmptyText)], []);
+            File.WriteAllBytes(Path.Combine(directory, "consolidation.md"), [0xEF, 0xBB, 0xBF]);
+
+            Assert.False(ContractValidator.IsSatisfied(contract, directory));
+        }
+        finally
+        {
+            DirectoryCleanup.DeleteRecursively(directory);
+        }
+    }
 }
 

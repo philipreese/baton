@@ -102,6 +102,7 @@ public static class BuiltInWorkflowTemplates
                     {
                         OutputSchema.ReviewVerdict => "review_verdict",
                         OutputSchema.Diff => "diff",
+                        OutputSchema.NonEmptyText => "non_empty_text",
                         _ => "none",
                     },
                     Instruction: o.Instruction)).ToList(),

@@ -1446,7 +1446,7 @@ place that reads it (withholding arms 2 and 3, never arm 1):
 - **true — `implement`, `janitor`.** The roles that write and commit. The workspace's own gate suite is
   grading the lane's own work, which is what a verify verdict is for. A red run here settles
   `Indeterminate` exactly like any other running-and-red verify.
-- **false — `review`, `advise`, `patch`, `fact-check`, `orchestrate`.** A read-shaped role writes
+- **false — `review`, `advise`, `patch`, `fact-check`, `orchestrate`, `consolidate`.** A read-shaped role writes
   nothing to the workspace, so the audits would be grading the tree it was pointed at rather than
   anything it did. Measured 2026-09-07 (room `dispatch-review-2aa39890`, reviewing PR #2023): the
   review wrote its `report.md` and a `BLOCK` `verdict.json` — one of whose findings *was* the branch's
@@ -1857,7 +1857,7 @@ to dispatch.
 
 **The tool-step cap (#1682, second producer, independent of usage parsing) — unit fixed and
 false-positive floor measured (#1686 review F1/F2).** `WorkerRole` carries `MaxToolSteps`
-(`implement` 610, `review` 100, `advise` unset; every other role none) — a second, independent arrest
+(`implement` 610, `review` 100, `consolidate` 150, `advise` unset; every other role none) — a second, independent arrest
 trigger on the running COUNT of tool-step lines, entirely apart from whether usage ever parses on the
 stream at all (a stream with malformed or absent usage lines still gets the tool-step protection;
 `TokenBudgetMonitorTests.The_tool_step_cap_fires_at_cap_plus_one_with_zero_usage_lines` proves this).
@@ -2306,7 +2306,8 @@ grant is both `write_files` and `run_shell_commands` — `implement`/`janitor` i
 `WorkerRoles.json` today (`RoleDispatch.ToBinding` derives the bit once, from the role's own grant,
 never re-derived downstream — see `Baton.Vendors.WorkerBindingConfigEntry.ChangesTree`'s own remarks for
 why a downstream re-derivation from a resolved binding's possibly-widened grant would misclassify a
-read-only role). Absent for every other role (`review`, `patch`, `fact-check`, `advise`, `orchestrate`)
+read-only role). Absent for every other role (`review`, `patch`, `fact-check`, `advise`, `orchestrate`,
+`consolidate`)
 and for every non-`Succeeded` step — the field's mere absence is the signal, not a fabricated `false`.
 `true`: the worktree carries commits over base or uncommitted changes; `false`: it measurably carries
 neither; **absent when the probe could not measure** (F2, #1720 review) — a working directory that is
@@ -4854,6 +4855,42 @@ view`/`diff`/`checks`, `gh issue view`. `denied_shell_command_patterns` closes t
 families (`commit`, `push`, `merge `, `checkout`, `switch`, `reset`, `clean`, `gh pr
 comment`/`edit`/`merge`, `gh issue comment`/`edit`, `gh label`, `gh extension`) as a standing, subtractive "never"
 (0022's DenyAlways) on top of the allowlist. Trailing-`*` shell patterns are matched on word boundaries. **The full accepting set is two branches on whether `P` itself ends in whitespace, five conditions total, not one** (#1683 F1 second round — the prior "three cases" wording silently assumed `P` never ends in whitespace, so it mis-described the branch that `git merge *` and `git -c *` actually take, the same class of defect F4 raised, restated in the correction). `ShellCommandPatternMatcher`'s own class comment is canonical for this rule, states the two branches and five conditions in full, and is what a change to it edits first — not restated here. So `git diff*` matches `git diff --stat` and `git diff`, never `git difftool` or `git diff-index`; `git merge *` matches bare `git merge` and `git merge origin/main` but never `git merge-base`; `git merge*` (no space), unlike `git merge *`, never matches `git merge origin/main` either; and `git log*` does **not** match `git log=x`, the ungated `=` widening #1683 F6 closed.
+
+**`consolidate` is that ceiling narrowed, never a second one (#2043).** A conductor-side read lane —
+one issue's thread and merged PRs, checked against the code, written up as the current-state block a
+person rewrites the body from — was dispatched through the conductor's own host sub-agent tool instead
+of a baton lane on 2026-09-07, and the two costs it named were the grant (every refused `cd`/`cat`/
+pipe/`git grep` habit spent a step) and the output shape (a text block for the operator, never a PR).
+The role answers both by declaring them once. Its `shell_command_patterns` are a **strict subset** of
+`review`'s above (`git diff`/`log`/`show`/`blame`/`ls-files`, `gh issue view`, `gh pr view`/`diff`) and
+its deny list and `--output` option deny are `review`'s verbatim, so it inherits that measurement
+rather than asserting a ceiling of its own; `WorkerRoleCatalogTests` pins the subset and superset
+relations in both directions, which is what makes a later widening a failing test instead of an
+invisible edit. It writes nothing and pushes nothing (`delivers_branch` and `verifies_workspace` both
+false), and a stage-less `baton queue add --role consolidate` item is never advanced by
+`WorkItemLifecycle` (§13's table is stage-keyed), so nothing on the settle path ever asks the lane for
+a PR. **What is NOT built here**: burst dispatch. Two independent gates hold it, and zeroing
+`GapSeconds` fleet-wide clears only one — `QueueWeights.For` tests the role name against `review`
+alone, so a `consolidate` lane weighs a full mutating lane (1.0) against `MaxLiveWeight` and
+`BypassesCap` is false for it. Want (2) therefore needs a gap bypass **and** a weight/bypass entry,
+and `BypassesCap` cannot be that entry as written since #2043 requires the memory floor to keep
+applying. Also not built: a `report-only`
+terminal display word distinct from the lifecycle's own "no pull request is open" (which a
+`consolidate` lane never reaches, so the confusion does not reproduce — a distinct word remains
+unbuilt).
+
+**`non_empty_text`: the fourth `OutputSchema` (#2043).** `none` is existence-only, so a zero-byte or
+whitespace-only file satisfies it and a role whose whole deliverable is prose settles `Succeeded`
+having said nothing. `non_empty_text` adds one assertion and no more — the file carries at least one
+non-whitespace character, read as decoded text so a lone byte-order mark does not count as content —
+which keeps `ContractValidator` parse-only in the sense Architecture Rule 1 requires: "is there any
+content" is not a reading of what the content says. One consequence is ruled here rather than left to
+a reader: the capture path's schema test (`OutputMaterializer`) asks whether a captured response could
+ever satisfy the output, which was the same question as "declares a schema" only while every schema
+was structured. It is not now — a capture never fires on a whitespace-only response, so it satisfies
+`non_empty_text` by construction — and reading this schema as structured would take the capture away
+from exactly the prose-only read roles it exists for. `consolidate`'s `consolidation.md` is the only
+shipped output declaring it.
 
 **That ceiling is why a review's runtime claims arrive as prose — and #1882's answer is a zero-token
 verify step, not a wider grant (operator ruling, 2026-09-04; trigger ruling, 2026-09-05).** The

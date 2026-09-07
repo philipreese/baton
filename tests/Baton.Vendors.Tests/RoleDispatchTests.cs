@@ -396,6 +396,9 @@ public class RoleDispatchTests
             ["fact-check"] = false,
             ["janitor"] = true,
             ["orchestrate"] = false,
+            // #2043: read-shaped despite holding a shell grant -- the derivation is write AND shell,
+            // and `consolidate`'s shell is scoped read-only with write_files false.
+            ["consolidate"] = false,
         };
 
         var actualRoleIds = WorkerRoleCatalog.All.Select(role => role.Id).OrderBy(id => id, StringComparer.Ordinal).ToList();

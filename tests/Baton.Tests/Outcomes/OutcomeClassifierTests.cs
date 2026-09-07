@@ -260,6 +260,33 @@ public class OutcomeClassifierTests
     }
 
     [Fact]
+    public void Classify_still_captures_a_missing_non_empty_text_output_even_though_it_declares_a_schema()
+    {
+        // #2043: OutputMaterializer.IsProseSatisfiable is the predicate under test, and spec/baton.md
+        // §9's `non_empty_text` paragraph is the ruling behind it -- not restated. What this arm pins
+        // is the direction: a declared schema no longer implies "prose cannot satisfy this". Polarity's
+        // other arm is the ReviewVerdict test above, which must keep refusing.
+        var directory = CreateTempDirectory();
+        try
+        {
+            WriteStdoutLog(directory, """{"event":"result","result":{"status":"SUCCESS","response":"## Shipped, verified in code"}}""");
+            var contract = new WorkerContract(
+                "worker", [], [new ProducedOutput("consolidation.md", Schema: OutputSchema.NonEmptyText)], []);
+
+            var classification = OutcomeClassifier.Classify(
+                new CoreDispatchResult(0, CoreExitReason.Natural), contract, directory,
+                responseParser: new FakeResponseParser("## Shipped, verified in code"));
+
+            Assert.Equal(OutputMaterializer.CapturedResponseFileName, classification.CapturedResponseFile);
+            Assert.True(File.Exists(Path.Combine(directory, OutputMaterializer.CapturedResponseFileName)));
+        }
+        finally
+        {
+            DirectoryCleanup.DeleteRecursively(directory);
+        }
+    }
+
+    [Fact]
     public void Classify_never_captures_a_missing_json_output_with_no_declared_schema()
     {
         // Second-reader finding (#1594): OutputSchema/OutputCondition is not the only signal that an

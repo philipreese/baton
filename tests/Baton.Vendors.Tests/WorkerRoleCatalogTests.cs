@@ -679,7 +679,7 @@ public class WorkerRoleCatalogTests
             Assert.True(WorkerRoleCatalog.For(id).VerifiesWorkspace, $"role '{id}' must be graded by the workspace's own gates.");
         }
 
-        foreach (var id in new[] { "review", "advise", "patch", "fact-check", "orchestrate" })
+        foreach (var id in new[] { "review", "advise", "patch", "fact-check", "orchestrate", "consolidate" })
         {
             Assert.False(
                 WorkerRoleCatalog.For(id).VerifiesWorkspace,
@@ -758,5 +758,100 @@ public class WorkerRoleCatalogTests
 
         Assert.Equal(1_200_000L, ((TokenBudgetSpec.Fixed)WorkerRoleCatalog.For("implement").TokenBudget!).Value);
         Assert.Equal(150_000L, ((TokenBudgetSpec.Fixed)WorkerRoleCatalog.For("advise").TokenBudget!).Value);
+    }
+
+    // #2043: the `consolidate` role. spec/baton.md §9 says what the role is for and what it deliberately
+    // does not build; what is pinned below is only the two things the issue measured as clumsy -- the
+    // grant and the output contract.
+
+    /// <summary>
+    /// The shape the issue asked for: read-only over `gh` and the tree, writes nothing to the
+    /// workspace, pushes nothing, and is not graded by someone else's gate suite (#2029's defect).
+    /// </summary>
+    [Fact]
+    public void The_shipped_consolidate_role_reads_gh_and_the_tree_and_writes_nothing()
+    {
+        using var env = ShippedDefault();
+
+        var consolidate = WorkerRoleCatalog.For("consolidate");
+        Assert.False(consolidate.Grant.WriteFiles);
+        Assert.True(consolidate.Grant.ReadFiles);
+        Assert.True(consolidate.Grant.RunShellCommands);
+        Assert.True(consolidate.Grant.ShellCommandsAreReadOnly);
+        // Same coexistence `review` relies on: gh's own reach to github.com is not the categorical
+        // WebFetch/WebSearch grant, and the read-only assertion is what lets scoped shell sit beside
+        // NetworkAccess false without PermissionGrant refusing the pair.
+        Assert.False(consolidate.Grant.NetworkAccess);
+        Assert.False(consolidate.DeliversBranch);
+        Assert.False(consolidate.VerifiesWorkspace);
+        Assert.False(consolidate.AllowsSubagents);
+        Assert.Null(consolidate.VerifyPixiTask);
+        // Both arrest triggers set, not null: a frontier role reading a long thread unwatched is the
+        // operator's money, and "no shipped default" is a decision this catalog should not make by
+        // omission. The role's own purpose field has the two figures' reasoning.
+        Assert.Equal(250_000L, ((TokenBudgetSpec.Fixed)consolidate.TokenBudget!).Value);
+        Assert.Equal(150, consolidate.MaxToolSteps);
+    }
+
+    /// <summary>
+    /// The relation, not the contents. Two hand-maintained allowlists drift silently and the ceiling
+    /// still looks enforced (the `record-once` failure), so what is pinned is that `consolidate`
+    /// NARROWS `review`'s measured ceiling in both directions — every command it allows, review
+    /// allows; every command review denies, it denies — rather than re-asserting a ceiling of its
+    /// own. Widening it past review's is then a failing test, not an invisible edit.
+    /// </summary>
+    [Fact]
+    public void The_consolidate_grant_is_a_narrowing_of_the_review_grant_in_both_directions()
+    {
+        using var env = ShippedDefault();
+
+        var consolidate = WorkerRoleCatalog.For("consolidate").Grant;
+        var review = WorkerRoleCatalog.For("review").Grant;
+
+        Assert.NotEmpty(consolidate.ShellCommandPatterns!);
+        Assert.Empty(consolidate.ShellCommandPatterns!.Except(review.ShellCommandPatterns!, StringComparer.Ordinal));
+        Assert.Empty(review.DeniedShellCommandPatterns!.Except(consolidate.DeniedShellCommandPatterns!, StringComparer.Ordinal));
+        Assert.Empty(review.DeniedShellOptionTokens!.Except(consolidate.DeniedShellOptionTokens!, StringComparer.Ordinal));
+        // A strict subset, not an alias for review: a `consolidate` that allowed everything review does
+        // would pass the first assertion above and buy nothing.
+        Assert.NotEmpty(review.ShellCommandPatterns!.Except(consolidate.ShellCommandPatterns!, StringComparer.Ordinal));
+    }
+
+    /// <summary>
+    /// The prompt template IS the deliverable of #2043's first want — a JSON string with no test is
+    /// prose that drops silently on the next edit. The four sections are named because the conductor's
+    /// hand-run version of this job produced exactly them.
+    /// </summary>
+    [Fact]
+    public void The_consolidate_instruction_names_the_four_sections_and_is_checked_for_emptiness()
+    {
+        using var env = ShippedDefault();
+
+        var output = Assert.Single(WorkerRoleCatalog.For("consolidate").Outputs);
+        Assert.Equal("consolidation.md", output.Name);
+        Assert.Equal(OutputSchema.NonEmptyText, output.Schema);
+        foreach (var section in new[] { "Shipped, verified in code", "Remains", "Stale", "Next slice" })
+        {
+            Assert.Contains(section, output.Instruction, StringComparison.Ordinal);
+        }
+
+        // The recipe half: the refused shell habits the issue measured are named so the worker does
+        // not spend a step discovering each one.
+        Assert.Contains("gh issue view", output.Instruction, StringComparison.Ordinal);
+        Assert.Contains("gh pr diff", output.Instruction, StringComparison.Ordinal);
+        Assert.Contains("git grep", output.Instruction, StringComparison.Ordinal);
+    }
+
+    /// <summary>#2043: the new wire word for <see cref="OutputSchema.NonEmptyText"/> resolves.</summary>
+    [Fact]
+    public void An_output_declaring_non_empty_text_parses_as_that_schema()
+    {
+        using var cat = new TempCatalog();
+        using var env = PointAt(
+            cat,
+            """{"t":{"adapter":"gemini","model":"m","effort":null}}""",
+            $"[{Role("r", "t", outputs: """[{"name":"r.md","schema":"non_empty_text","instruction":"i"}]""")}]");
+
+        Assert.Equal(OutputSchema.NonEmptyText, WorkerRoleCatalog.For("r").Outputs[0].Schema);
     }
 }
