@@ -375,9 +375,12 @@ own weighting, which no vendor publishes.
   [`benchmarks/subscription-usage/2026-09-04`](../benchmarks/subscription-usage/2026-09-04/README.md)
   attributes an early weekly Claude exhaustion to fleet volume with cache re-reads as the amplifier, so
   moving bounded implement work off claude is the point of the change as much as the score is. `advise`
-  rides this tier too; its shape does not change, because `CodexWorkerAdapter.WithheldWritesReachTheOutbox`
-  is `true` exactly as claude's is, so a withheld write still runs enforced against the caller's own
-  directory rather than audited in a provisioned worktree (§4 of `docs/agents/invoking-baton.md`).
+  rides this tier too, so it moves vendor with it. One consequence is settled and worth stating, because
+  #1861's move in the other direction changed it: `advise` still runs **enforced against the caller's own
+  directory** rather than audited in a provisioned worktree, because `RoleDispatch`'s audited-worktree
+  branch fires only for an adapter whose `WithheldWritesReachTheOutbox` is false, and codex's is `true`
+  exactly as claude's is. That is the only shape difference this paragraph claims to have checked —
+  §4 of `docs/agents/invoking-baton.md` is the register for the rest of the lane's shape.
 - **`cheap` — agy `gemini-3.8-flash-medium`.** The lowest *measured* 3.8 Flash variant, not the lowest
   catalogued one: `agy models` lists `gemini-3.8-flash-low`, but the 2026-09-05 snapshot has
   `gemini-3.8-flash` rows at `high` and `medium` only, so pinning `-low` would be pinning a number

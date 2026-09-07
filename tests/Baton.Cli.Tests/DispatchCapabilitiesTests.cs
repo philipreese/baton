@@ -42,9 +42,12 @@ public class DispatchCapabilitiesTests
         }
 
         // agy models (illustrative only — agy has no alias catalog to source from)
-        // #1863: retired names must not survive here as an illustration — docs/dispatch.md's tier
-        // paragraph is the record of which family is current and why.
+        // #1863: docs/dispatch.md's tier paragraph records which family is current and why.
         Assert.Contains("gemini-3.8-flash-high", text);
+        // Deliberately over the WHOLE printed block, not just the line above: the Role Timebox
+        // Defaults section below prints each role's resolved tier model too, so these two arms pin
+        // both halves at once -- no retired name may reach an operator's screen as an illustration
+        // OR as a live tier pin.
         Assert.DoesNotContain("gemini-3.6-flash", text);
         Assert.DoesNotContain("gemini-3.1-pro", text);
 
