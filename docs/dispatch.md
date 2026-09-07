@@ -117,10 +117,10 @@ Workspace: worktree of <repo> at HEAD (<short-sha>) — <repo> is bound readable
 
 Which one is the bound adapter's own answer (`IWorkerAdapter.BindsDispatchedWorkspaceReadable`), not a
 vendor list in the message: an adapter that binds the dispatched workspace as well as the worktree —
-`agy` does, via the `--add-dir` #1987 added, and no other shipped adapter is ever handed an
-auto-provisioned worktree in the first place — leaves the live tree readable by absolute path even
-though the worker is running somewhere else. `spec/baton.md` §9's #1987 paragraph is canonical for
-what that widens and what it does not.
+`agy` does, via the `--add-dir` #1987 added, and it is the only vendor that answers yes today —
+leaves the live tree readable by absolute path even though the worker is running somewhere else.
+Every other adapter answers no and gets the first shape. The ruling behind that binding, and the
+read-only bound that survives it, is #1987's paragraph in `spec/baton.md` §9.
 
 The provisioned tree is torn down once the room reaches Terminal — **except** when it carries
 uncommitted changes (a worker's own output written but not committed) or a removal is blocked (a

@@ -24,8 +24,9 @@ namespace Baton.Cli.Tests.TestSupport;
 /// #1987: what this fake answers for <see cref="IWorkerAdapter.BindsDispatchedWorkspaceReadable"/> —
 /// the question <c>DispatchCommand</c>'s pre-run workspace disclosure asks the bound adapter. Both
 /// answers are dispatchable here (the worktree itself is still granted by the real registry's agy
-/// entry), which is what makes the disclosure's two arms testable at all: no shipped adapter other
-/// than <c>agy</c> is ever handed an auto-provisioned worktree.
+/// entry), which is what makes the disclosure's two arms testable at all: <c>agy</c> is the only
+/// vendor adapter ever handed an auto-provisioned worktree, so the false arm has no vendor tag of
+/// its own to be dispatched under.
 /// </param>
 internal sealed class ContractOutputWorkerAdapter(
     bool satisfyOutputs,
