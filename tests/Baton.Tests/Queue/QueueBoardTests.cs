@@ -425,8 +425,8 @@ public sealed class QueueBoardTests
     [Fact]
     public void A_rerun_supersedes_the_earlier_run_of_the_SAME_check_rather_than_being_added_to_it()
     {
-        // The fixture is the rollup PullRequestChecks' own remarks record measuring, transcribed to
-        // its two load-bearing elements; that type is where the measurement and what it costs live.
+        // Two elements cut from the rollup PullRequestChecks' own remarks record measuring. That type
+        // is where the measurement lives, and where what it would cost to reduce naively is argued.
         const string json = """
         [
           {"name":"diff-shape","completedAt":"2026-09-07T10:17:29Z","conclusion":"FAILURE"},
