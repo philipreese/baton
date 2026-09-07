@@ -29,6 +29,20 @@ public sealed class CodexDynamicToolPolicy
     /// The grant applies here exactly as it does to <see cref="WriteTextTool"/>: same workspace root,
     /// same resolver, same refusal text. No new permission concept, and no separate write path — the
     /// envelope is parsed by <see cref="CodexApplyPatch"/> and written by <see cref="WriteFile"/>.
+    /// <para>
+    /// <b>Not <c>baton_apply_patch</c>, and the evidence for that is scoped.</b> The probe of
+    /// 2026-09-04 (CLI 0.153.x, one host — <c>docs/vendor-codex-probe-2026-09-04.md</c>, "Baton role
+    /// mediation through app-server") recorded that with this broker's disabled-feature list applied
+    /// and Code Mode enabled, the nested tool inventory the model saw held ONLY Baton's
+    /// grant-generated dynamic tools: no native verb shared that namespace for this name to collide
+    /// with, and codex's own apply_patch rides on the execution surfaces
+    /// (<c>shell_tool</c>, <c>unified_exec</c>) that <c>CodexAppServerBroker.DisabledFeatures</c>
+    /// turns off. What that observation does NOT cover is the write-granted inventory, which the same
+    /// document lists as unmeasured. So the native name is kept — it is the one a codex model reaches
+    /// for, which is the whole of #1996 — and the first live write-granted lane's declared inventory
+    /// is what would falsify it. A collision would show up as this tool never reaching
+    /// <see cref="ExecuteAsync"/>.
+    /// </para>
     /// </summary>
     internal const string ApplyPatchTool = "apply_patch";
 
@@ -93,7 +107,11 @@ public sealed class CodexDynamicToolPolicy
         + "'*** Begin Patch' / '*** End Patch': '*** Add File: <path>' with every body line prefixed "
         + "'+', '*** Delete File: <path>', and '*** Update File: <path>' with '@@' section markers and "
         + "' ' context, '-' removed and '+' added lines. Context must match the file exactly — there "
-        + "is no fuzzy matching — every hunk needs at least one context or removed line, and "
+        + "is no fuzzy matching — and must match in exactly ONE place: a hunk whose context fits twice "
+        + "is refused rather than placed at the first fit. Narrow it with more context lines, or with "
+        + "a '@@ <line>' locator above the hunk that reproduces exactly one earlier line of the file — "
+        + "the search then starts there. One '@@' line per hunk, every hunk needs at least one context "
+        + "or removed line, one header per path (merge a file's hunks into a single block), and "
         + "'*** Move to:' is not supported. Baton checks every path and places every hunk before it "
         + "writes anything, so a refused path or an unplaceable hunk changes no file. To replace a "
         + "file's entire contents instead, use " + WriteTextTool + ".";
@@ -398,12 +416,16 @@ public sealed class CodexDynamicToolPolicy
     }
 
     /// <summary>
-    /// #1996. Every path in the envelope is resolved and grant-checked, and every new content computed,
-    /// BEFORE the first byte is written: a two-file patch whose second path is outside the workspace
-    /// leaves the first file untouched. A patch is one edit, and half of one applied is a workspace no
-    /// reader — model or human — can reason about. It is not a transaction, and the tool description
-    /// does not offer one: an I/O error partway through the write loop below (a locked file) can still
-    /// leave an earlier file written, which is the same exposure <see cref="WriteText"/> has.
+    /// #1996. Every path in the envelope is resolved and grant-checked — outside the workspace root,
+    /// and crossing a reparse point, on all three kinds — and every new content computed, BEFORE the
+    /// first byte is written: a two-file patch whose second path is outside the workspace leaves the
+    /// first file untouched. A patch is one edit, and half of one applied is a workspace no reader —
+    /// model or human — can reason about. It is not a transaction, and the tool description does not
+    /// offer one: partway through the write loop below, an I/O error (a locked file) can still leave an
+    /// earlier file written, and so can <see cref="WriteFile"/>'s own re-check of the leaf, which is
+    /// there to catch a path that BECAME a link between this planning pass and the write. Both are the
+    /// same exposure <see cref="WriteText"/> has; neither is a grant decision taken on a path this
+    /// method could have checked first.
     /// </summary>
     private CodexDynamicToolResult ApplyPatch(string input)
     {
@@ -425,6 +447,11 @@ public sealed class CodexDynamicToolPolicy
             switch (operation.Kind)
             {
                 case CodexPatchOperationKind.Add:
+                    // includeLeaf: false because the leaf is what this operation creates — the parents
+                    // are what can already be a junction. Planned here rather than left to WriteFile
+                    // (#1996 re-review HIGH): the sibling arms check at plan time, and a check that
+                    // first runs inside the write loop refuses AFTER an earlier file is on disk.
+                    EnsureNoReparsePoint(path, includeLeaf: false);
                     if (File.Exists(path))
                     {
                         return CodexDynamicToolResult.Failed(

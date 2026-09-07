@@ -7,11 +7,13 @@ namespace Baton.Vendors;
 /// nothing here resolves a path, opens a file, or knows what a workspace root is.
 /// <para>
 /// <b>Deliberately narrow.</b> Context matches are exact — no fuzzy match, no whitespace-tolerant
-/// fallback, no positional guessing from a <c>@@</c> marker. A patch this parser cannot place is a
-/// <see cref="ArgumentException"/> naming the line it could not find, which is a step the model
+/// fallback — and it must match in exactly one place: a hunk whose context fits twice is refused
+/// rather than placed at the first fit, and a <c>@@</c> locator moves where the search starts rather
+/// than being guessed at or discarded. A patch this parser cannot place unambiguously is an
+/// <see cref="ArgumentException"/> naming what it could not resolve, which is a step the model
 /// recovers from; a hunk applied at the wrong offset is a corrupted file that reports success. The
-/// accepted subset is restated once for the model in <c>CodexDynamicToolPolicy</c>'s tool description,
-/// which is its only spec for the format.
+/// accepted subset and the placement rules are stated once for the model in
+/// <c>CodexDynamicToolPolicy</c>'s tool description, which is its only spec for the format.
 /// </para>
 /// </summary>
 internal static class CodexApplyPatch
@@ -34,6 +36,11 @@ internal static class CodexApplyPatch
     {
         ArgumentNullException.ThrowIfNull(input);
         var lines = SplitLines(input, out _, out _);
+        // #1996 re-review LOW: a file this patch CREATES has no line ending of its own to preserve, so
+        // it takes the envelope's rather than the worker machine's — LF unless the patch itself came
+        // through carrying CRLF. The platform default put CRLF into an all-LF repo, which surfaces as
+        // a formatting failure on a later step rather than here.
+        var carriageReturns = input.Contains("\r\n", StringComparison.Ordinal);
         var start = 0;
         while (start < lines.Count && lines[start].Length == 0)
         {
@@ -64,17 +71,17 @@ internal static class CodexApplyPatch
             }
             if (line.StartsWith(AddPrefix, StringComparison.Ordinal))
             {
-                current = New(CodexPatchOperationKind.Add, line[AddPrefix.Length..], operations);
+                current = New(CodexPatchOperationKind.Add, line[AddPrefix.Length..], operations, index, carriageReturns);
                 continue;
             }
             if (line.StartsWith(DeletePrefix, StringComparison.Ordinal))
             {
-                current = New(CodexPatchOperationKind.Delete, line[DeletePrefix.Length..], operations);
+                current = New(CodexPatchOperationKind.Delete, line[DeletePrefix.Length..], operations, index, carriageReturns);
                 continue;
             }
             if (line.StartsWith(UpdatePrefix, StringComparison.Ordinal))
             {
-                current = New(CodexPatchOperationKind.Update, line[UpdatePrefix.Length..], operations);
+                current = New(CodexPatchOperationKind.Update, line[UpdatePrefix.Length..], operations, index, carriageReturns);
                 continue;
             }
             if (line.StartsWith("*** ", StringComparison.Ordinal))
@@ -104,6 +111,7 @@ internal static class CodexApplyPatch
         {
             throw new ArgumentException("The patch declares no file operations.");
         }
+        EnsureOnePathOneHeader(operations);
         foreach (var operation in operations)
         {
             Validate(operation);
@@ -112,9 +120,11 @@ internal static class CodexApplyPatch
     }
 
     /// <summary>
-    /// <paramref name="original"/> with every chunk applied in order, each placed at the first exact
-    /// occurrence of its context at or after the previous chunk's end. The file's own line ending and
-    /// its trailing-newline state are preserved, so a CRLF file stays CRLF.
+    /// <paramref name="original"/> with every chunk applied in order, each placed at the ONE exact
+    /// occurrence of its context at or after its search floor — the previous chunk's end, moved
+    /// forward to the chunk's <c>@@</c> locator when it carries one. A context that fits in more than
+    /// one place from that floor throws rather than taking the first fit. The file's own line ending
+    /// and its trailing-newline state are preserved, so a CRLF file stays CRLF.
     /// </summary>
     public static string ApplyUpdate(string original, CodexPatchOperation operation)
     {
@@ -126,15 +136,25 @@ internal static class CodexApplyPatch
         var cursor = 0;
         foreach (var chunk in operation.Chunks)
         {
-            var at = IndexOfContext(lines, chunk.Before, cursor);
-            if (at < 0)
+            var floor = FloorFor(lines, chunk, operation, cursor);
+            var matches = MatchPositions(lines, chunk.Before, floor);
+            if (matches.Count == 0)
             {
-                throw new ArgumentException(
-                    $"Patch context not found in '{operation.Path}': no line matches "
-                    + $"'{chunk.Before[0]}' where the patch expects it. Context must match the file "
-                    + "exactly; re-read the file and patch again, or replace it whole with "
-                    + $"{CodexDynamicToolPolicy.WriteTextTool}.");
+                throw new ArgumentException(DescribeUnplaceable(lines, chunk, operation, floor));
             }
+            if (matches.Count > 1)
+            {
+                // Never the first match: the model gave one description of a place and the file holds
+                // several, so which one it meant is unknown. Saying so costs it one step; guessing
+                // costs it a wrongly edited file reported as a success.
+                throw new ArgumentException(
+                    $"Patch context is ambiguous in '{operation.Path}': the hunk beginning "
+                    + $"'{chunk.Before[0]}' matches at {matches.Count} places, first at lines "
+                    + $"{matches[0] + 1} and {matches[1] + 1}. Add more context lines, or put a "
+                    + $"'{SectionMarker} <line>' locator above the hunk reproducing exactly a line "
+                    + "that precedes the one place you mean.");
+            }
+            var at = matches[0];
             result.AddRange(lines.Skip(cursor).Take(at - cursor));
             result.AddRange(chunk.After);
             cursor = at + chunk.Before.Count;
@@ -143,26 +163,113 @@ internal static class CodexApplyPatch
         return string.Join(newline, result) + (endsWithNewline ? newline : string.Empty);
     }
 
-    /// <summary>The exact content an <c>*** Add File:</c> operation creates.</summary>
+    /// <summary>
+    /// Where this chunk's context search starts: the previous chunk's end, or the chunk's <c>@@</c>
+    /// locator line if it names one further down. Searching for the locator from <paramref name="cursor"/>
+    /// rather than from the top is what keeps the floor monotonic — a floor behind the cursor would
+    /// re-emit lines already written.
+    /// </summary>
+    private static int FloorFor(
+        IReadOnlyList<string> lines, CodexPatchChunk chunk, CodexPatchOperation operation, int cursor)
+    {
+        if (chunk.Anchor is not { } anchor)
+        {
+            return cursor;
+        }
+        var at = IndexOfLine(lines, anchor, cursor);
+        if (at < 0)
+        {
+            throw new ArgumentException(
+                $"Patch locator not found in '{operation.Path}': no line after the previous hunk "
+                + $"matches '{anchor}'. A '{SectionMarker}' line must reproduce a line of the file "
+                + "exactly, including its indentation.");
+        }
+        return at;
+    }
+
+    /// <summary>
+    /// #1996 re-review LOW: names the first context line that is nowhere to be found, not simply the
+    /// block's first line — which on a multi-line hunk is usually a line the model can see is present,
+    /// so the message sent it looking for the wrong thing. When every line does exist separately, the
+    /// defect is the order or the run, and it says that instead.
+    /// </summary>
+    private static string DescribeUnplaceable(
+        IReadOnlyList<string> lines, CodexPatchChunk chunk, CodexPatchOperation operation, int floor)
+    {
+        var missing = chunk.Before.FirstOrDefault(line => IndexOfLine(lines, line, floor) < 0);
+        var detail = missing is not null
+            ? $"no line matches '{missing}' where the patch expects it"
+            : $"the lines of the hunk beginning '{chunk.Before[0]}' all appear, but not consecutively "
+                + "and in that order where the patch expects them";
+        return $"Patch context not found in '{operation.Path}': {detail}. Context must match the file "
+            + "exactly; re-read the file and patch again, or replace it whole with "
+            + $"{CodexDynamicToolPolicy.WriteTextTool}.";
+    }
+
+    /// <summary>
+    /// The exact content an <c>*** Add File:</c> operation creates. A file that did not exist has no
+    /// line ending of its own to preserve, so it takes LF unless the patch envelope itself arrived
+    /// with CRLF (#1996 re-review LOW): the platform default it used to take wrote CRLF into an all-LF
+    /// repository, where it fails a formatting gate one step later rather than here, and there is
+    /// nothing on this side of the parser boundary that knows the repository's convention.
+    /// </summary>
     public static string AddedContent(CodexPatchOperation operation)
     {
         ArgumentNullException.ThrowIfNull(operation);
-        // A file that did not exist has no line ending to preserve, so it takes the platform's — the
-        // same one every other tool on the worker's machine writes.
-        return string.Join(Environment.NewLine, operation.AddedLines) + Environment.NewLine;
+        var newline = operation.UsesCarriageReturns ? "\r\n" : "\n";
+        return string.Join(newline, operation.AddedLines) + newline;
     }
 
     private static CodexPatchOperation New(
-        CodexPatchOperationKind kind, string path, List<CodexPatchOperation> operations)
+        CodexPatchOperationKind kind,
+        string path,
+        List<CodexPatchOperation> operations,
+        int lineIndex,
+        bool carriageReturns)
     {
         var trimmed = path.Trim();
         if (trimmed.Length == 0)
         {
             throw new ArgumentException($"A '{kind}' patch header names no file.");
         }
-        var operation = new CodexPatchOperation(kind, trimmed);
+        var operation = new CodexPatchOperation(kind, trimmed)
+        {
+            HeaderLine = lineIndex + 1,
+            UsesCarriageReturns = carriageReturns,
+        };
         operations.Add(operation);
         return operation;
+    }
+
+    /// <summary>
+    /// #1996 re-review HIGH: two headers naming one path is refused whole, never applied in header
+    /// order. Each operation is planned and written independently from what is on DISK, so a second
+    /// header for the same path silently discards the first one's hunks (or, across kinds, re-creates
+    /// the file the same patch just deleted) and still reports success — the corrupted-file-that-reports
+    /// -success failure this parser exists to refuse, reached without a single ambiguous hunk.
+    /// <para>
+    /// Keyed on the path text with separators unified, because codex's measured habit is a Windows
+    /// backslash (#1920). Nothing here resolves a path, so <c>./a.txt</c> against <c>a.txt</c> is
+    /// two keys and passes; that aliasing is not what a model writing two <c>*** Update File:</c>
+    /// blocks produces, and closing it would need the policy's resolver, which lives on the other side
+    /// of this class's boundary.
+    /// </para>
+    /// </summary>
+    private static void EnsureOnePathOneHeader(List<CodexPatchOperation> operations)
+    {
+        Dictionary<string, CodexPatchOperation> seen = [];
+        foreach (var operation in operations)
+        {
+            var key = operation.Path.Replace('\\', '/');
+            if (seen.TryGetValue(key, out var first))
+            {
+                throw new ArgumentException(
+                    $"'{operation.Path}' has two patch headers, at line {first.HeaderLine} "
+                    + $"({first.Kind}) and line {operation.HeaderLine} ({operation.Kind}): a path "
+                    + "appears twice; merge the hunks into one Update File block.");
+            }
+            seen.Add(key, operation);
+        }
     }
 
     private static void AppendBodyLine(CodexPatchOperation operation, string line)
@@ -194,9 +301,20 @@ internal static class CodexApplyPatch
     {
         if (line.StartsWith(SectionMarker, StringComparison.Ordinal))
         {
-            // A navigation hint for a human reader. Baton places every chunk by exact context, so the
-            // marker starts a new chunk and contributes nothing to the match.
-            operation.Chunks.Add(new CodexPatchChunk());
+            // #1996 re-review HIGH: the marker starts a new chunk AND, when it carries text, anchors
+            // where that chunk's context search begins — the disambiguating half of codex's own
+            // dialect, which this parser used to discard while its description advertised support.
+            var anchor = line[SectionMarker.Length..].Trim();
+            if (operation.Chunks.Count > 0 && operation.Chunks[^1] is { Before.Count: 0, After.Count: 0 })
+            {
+                // Stacked locators (codex's nested-scope form) would silently lose the outer one to
+                // Validate's empty-chunk sweep, which is a locator the model believes it supplied.
+                throw new ArgumentException(
+                    $"A hunk of '{operation.Path}' stacks two '{SectionMarker}' locator lines. Baton "
+                    + "takes one locator per hunk: keep the innermost line and add context lines if "
+                    + "it is still ambiguous.");
+            }
+            operation.Chunks.Add(new CodexPatchChunk { Anchor = anchor.Length == 0 ? null : anchor });
             return;
         }
         if (operation.Chunks.Count == 0)
@@ -238,8 +356,9 @@ internal static class CodexApplyPatch
                 var contextless = operation.Chunks.FindIndex(chunk => chunk.Before.Count == 0);
                 if (contextless >= 0)
                 {
-                    // A pure-addition chunk names no place in the file, and this parser will not guess
-                    // one from the @@ marker: the wrong offset is a silent corruption.
+                    // A pure-addition chunk names no place in the file. Its @@ locator, if it has one,
+                    // moves where a search STARTS; it does not name the line to insert at, so there is
+                    // still nothing to place the hunk against, and a wrong offset is a silent corruption.
                     throw new ArgumentException(
                         $"A hunk of '{operation.Path}' has no context or removed lines, so Baton "
                         + "cannot tell where it goes. Include at least one unchanged context line.");
@@ -250,8 +369,15 @@ internal static class CodexApplyPatch
         }
     }
 
-    private static int IndexOfContext(IReadOnlyList<string> lines, IReadOnlyList<string> before, int from)
+    /// <summary>
+    /// Every position at or after <paramref name="from"/> where <paramref name="before"/> occurs — all
+    /// of them, not the first, because the count is the decision: one places the hunk, more than one
+    /// refuses it. Overlapping occurrences count separately; each is a place the hunk would fit.
+    /// </summary>
+    private static List<int> MatchPositions(
+        IReadOnlyList<string> lines, IReadOnlyList<string> before, int from)
     {
+        List<int> matches = [];
         for (var start = from; start + before.Count <= lines.Count; start++)
         {
             var matched = true;
@@ -265,7 +391,19 @@ internal static class CodexApplyPatch
             }
             if (matched)
             {
-                return start;
+                matches.Add(start);
+            }
+        }
+        return matches;
+    }
+
+    private static int IndexOfLine(IReadOnlyList<string> lines, string line, int from)
+    {
+        for (var index = from; index < lines.Count; index++)
+        {
+            if (string.Equals(lines[index], line, StringComparison.Ordinal))
+            {
+                return index;
             }
         }
         return -1;
@@ -306,6 +444,14 @@ internal sealed class CodexPatchOperation(CodexPatchOperationKind kind, string p
     /// <summary>The path exactly as the patch wrote it — resolved and grant-checked by the policy.</summary>
     public string Path { get; } = path;
 
+    /// <summary>1-based line of this operation's header inside the envelope, so a duplicate path can
+    /// name both places rather than only the offending one.</summary>
+    public int HeaderLine { get; init; }
+
+    /// <summary>Whether the envelope this operation came from used CRLF; see
+    /// <see cref="CodexApplyPatch.AddedContent"/>, its only reader.</summary>
+    public bool UsesCarriageReturns { get; init; }
+
     public List<string> AddedLines { get; } = [];
 
     public List<CodexPatchChunk> Chunks { get; } = [];
@@ -317,6 +463,13 @@ internal sealed class CodexPatchOperation(CodexPatchOperationKind kind, string p
 /// </summary>
 internal sealed class CodexPatchChunk
 {
+    /// <summary>
+    /// The text after this hunk's <c>@@</c> marker, or null for a bare <c>@@</c> or no marker at all.
+    /// A line of the file at or above the hunk: the context search starts AT that line rather than at
+    /// the previous hunk's end, so a hunk whose own context begins with that line still places there.
+    /// </summary>
+    public string? Anchor { get; init; }
+
     public List<string> Before { get; } = [];
 
     public List<string> After { get; } = [];

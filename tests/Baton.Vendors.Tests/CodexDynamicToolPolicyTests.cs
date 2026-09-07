@@ -50,7 +50,10 @@ public sealed class CodexDynamicToolPolicyTests
         File.WriteAllText(Path.Combine(fixture.Workspace, "edit.txt"), "one\ntwo\nthree\n");
         File.WriteAllText(Path.Combine(fixture.Workspace, "gone.txt"), "obsolete\n");
 
-        var result = await fixture.ApplyPatchAsync(
+        // Lf, and an exact "\n" expectation, because this source file is CRLF on disk and a raw string
+        // literal keeps the endings it was written with: asserting Environment.NewLine here passed on
+        // Windows whatever the added file's endings were, which is the bug the arm below measures.
+        var result = await fixture.ApplyPatchAsync(Lf(
             """
             *** Begin Patch
             *** Add File: src/new.txt
@@ -63,10 +66,10 @@ public sealed class CodexDynamicToolPolicyTests
              three
             *** Delete File: gone.txt
             *** End Patch
-            """);
+            """));
 
         Assert.True(result.Success, result.Text);
-        Assert.Equal("created" + Environment.NewLine,
+        Assert.Equal("created\n",
             File.ReadAllText(Path.Combine(fixture.Workspace, "src", "new.txt")));
         Assert.Equal("one\nTWO\nthree\n", File.ReadAllText(Path.Combine(fixture.Workspace, "edit.txt")));
         Assert.False(File.Exists(Path.Combine(fixture.Workspace, "gone.txt")));
@@ -98,6 +101,158 @@ public sealed class CodexDynamicToolPolicyTests
 
         Assert.True(result.Success, result.Text);
         Assert.Equal("alpha\r\nBETA\r\ngamma\r\n", File.ReadAllText(target));
+    }
+
+    /// <summary>
+    /// #1996 re-review LOW: an added file takes LF, not the worker machine's ending — a codex lane on
+    /// Windows added CRLF files to an all-LF repository, which fails a formatting gate a step later
+    /// rather than here. Both arms in one test because the rule is a pair: LF by default, and the
+    /// envelope's own CRLF when the patch arrived carrying it.
+    /// </summary>
+    [Fact]
+    public async Task An_added_file_takes_lf_unless_the_patch_envelope_itself_carries_crlf()
+    {
+        using var fixture = new PolicyFixture(WriteShapedGrant, ["changes.md"]);
+        const string patch = "*** Begin Patch\n*** Add File: added.txt\n+first\n+second\n*** End Patch";
+
+        var lf = await fixture.ApplyPatchAsync(patch);
+        var crlf = await fixture.ApplyPatchAsync(
+            patch.Replace("added.txt", "added-crlf.txt", StringComparison.Ordinal)
+                .ReplaceLineEndings("\r\n"));
+
+        Assert.True(lf.Success, lf.Text);
+        Assert.True(crlf.Success, crlf.Text);
+        Assert.Equal("first\nsecond\n", File.ReadAllText(Path.Combine(fixture.Workspace, "added.txt")));
+        Assert.Equal("first\r\nsecond\r\n",
+            File.ReadAllText(Path.Combine(fixture.Workspace, "added-crlf.txt")));
+    }
+
+    /// <summary>
+    /// #1996 re-review HIGH: a context block that fits in two places is refused, never placed at the
+    /// first fit — the corrupted-file-that-reports-success case, so the assertion is on the file's
+    /// bytes as much as on the result. The two functions differ only where the patch does not look.
+    /// </summary>
+    [Fact]
+    public async Task Apply_patch_with_context_matching_twice_is_refused_and_changes_nothing()
+    {
+        using var fixture = new PolicyFixture(WriteShapedGrant, ["changes.md"]);
+        var target = Path.Combine(fixture.Workspace, "handlers.py");
+        const string original =
+            "def handle_open():\n    log.debug(msg)\n    return None\n\n"
+            + "def handle_retry():\n    log.debug(msg)\n    return None\n";
+        File.WriteAllText(target, original);
+
+        var result = await fixture.ApplyPatchAsync(
+            "*** Begin Patch\n*** Update File: handlers.py\n"
+            + "     log.debug(msg)\n-    return None\n+    return Retry()\n*** End Patch");
+
+        Assert.False(result.Success);
+        Assert.DoesNotContain(GrantRefusal.Marker, result.Text);
+        Assert.Contains("ambiguous", result.Text, StringComparison.Ordinal);
+        Assert.Contains("matches at 2 places, first at lines 2 and 6", result.Text, StringComparison.Ordinal);
+        Assert.Equal(original, File.ReadAllText(target));
+    }
+
+    /// <summary>
+    /// The other polarity of the same rule, and the half that makes the refusal recoverable: the '@@'
+    /// locator codex's dialect defines moves the search past the first fit, so the identical hunk that
+    /// was refused above now names one place and applies — to the SECOND function, which is the
+    /// assertion that fails if the locator is read as a bare chunk boundary again.
+    /// </summary>
+    [Fact]
+    public async Task A_section_locator_narrows_two_matches_to_one_and_the_hunk_applies_there()
+    {
+        using var fixture = new PolicyFixture(WriteShapedGrant, ["changes.md"]);
+        var target = Path.Combine(fixture.Workspace, "handlers.py");
+        File.WriteAllText(target,
+            "def handle_open():\n    log.debug(msg)\n    return None\n\n"
+            + "def handle_retry():\n    log.debug(msg)\n    return None\n");
+
+        var result = await fixture.ApplyPatchAsync(
+            "*** Begin Patch\n*** Update File: handlers.py\n@@ def handle_retry():\n"
+            + "     log.debug(msg)\n-    return None\n+    return Retry()\n*** End Patch");
+
+        Assert.True(result.Success, result.Text);
+        Assert.Equal(
+            "def handle_open():\n    log.debug(msg)\n    return None\n\n"
+            + "def handle_retry():\n    log.debug(msg)\n    return Retry()\n",
+            File.ReadAllText(target));
+    }
+
+    /// <summary>
+    /// #1996 re-review HIGH: a path with two headers is refused whole and neither header's hunks are
+    /// applied. Cross-kind on purpose — a duplicate check keyed on (kind, path) passes an Update+Update
+    /// row while still letting a Delete and an Update on one path run in sequence, which deletes the
+    /// file and then re-creates it from disk content that no longer exists.
+    /// </summary>
+    [Theory]
+    [InlineData("*** Delete File: edit.txt\n*** Update File: edit.txt\n one\n-two\n+TWO")]
+    [InlineData("*** Update File: edit.txt\n one\n-two\n+TWO\n*** Update File: edit.txt\n-one\n+ONE")]
+    // The separator the check unifies, because a Windows backslash path is codex's measured habit
+    // (#1920): 'dir/edit.txt' and 'dir\edit.txt' are one file with two headers.
+    [InlineData("*** Update File: dir/edit.txt\n one\n-two\n+TWO\n*** Update File: dir\\edit.txt\n-one\n+ONE")]
+    public async Task A_path_with_two_patch_headers_is_refused_whole_and_neither_is_applied(string body)
+    {
+        using var fixture = new PolicyFixture(WriteShapedGrant, ["changes.md"]);
+        var target = Path.Combine(fixture.Workspace, "edit.txt");
+        File.WriteAllText(target, "one\ntwo\n");
+
+        var result = await fixture.ApplyPatchAsync($"*** Begin Patch\n{body}\n*** End Patch");
+
+        Assert.False(result.Success);
+        Assert.DoesNotContain(GrantRefusal.Marker, result.Text);
+        Assert.Contains("a path appears twice", result.Text, StringComparison.Ordinal);
+        Assert.Contains("edit.txt", result.Text, StringComparison.Ordinal);
+        Assert.Equal("one\ntwo\n", File.ReadAllText(target));
+        Assert.True(File.Exists(target));
+    }
+
+    /// <summary>
+    /// #1996 re-review HIGH: every path in the envelope crosses the reparse-point check while the patch
+    /// is being PLANNED. The added path is second on purpose — checked first inside the write loop
+    /// instead, this refusal arrives with the earlier file already rewritten, which is the guarantee
+    /// the tool description states.
+    /// </summary>
+    [Fact]
+    public async Task A_patch_adding_a_file_under_a_junction_is_refused_before_its_earlier_file_is_written()
+    {
+        using var fixture = new PolicyFixture(WriteShapedGrant, ["changes.md"]);
+        var readme = Path.Combine(fixture.Workspace, "README.md");
+        File.WriteAllText(readme, "before\n");
+        var target = Path.Combine(fixture.Workspace, "real");
+        Directory.CreateDirectory(target);
+        // A junction rather than a symbolic link: `mklink /J` needs no Developer Mode or elevation.
+        // Same shape as VendorMemoryRootTests' reparse-point arm, including its host skip.
+        var junction = Path.Combine(fixture.Workspace, "vendor");
+        var mklink = System.Diagnostics.Process.Start(new System.Diagnostics.ProcessStartInfo(
+            "cmd.exe", $"/c mklink /J \"{junction}\" \"{target}\"")
+        {
+            RedirectStandardOutput = true,
+            RedirectStandardError = true,
+        });
+
+        if (mklink is null)
+        {
+            Assert.Skip("this host could not start cmd.exe, so no reparse point can be planted here");
+            return;
+        }
+
+        await mklink.WaitForExitAsync(TestContext.Current.CancellationToken);
+        if (mklink.ExitCode != 0 || !Directory.Exists(junction))
+        {
+            Assert.Skip("this host refused `mklink /J`, so no reparse point can be planted here");
+            return;
+        }
+
+        var result = await fixture.ApplyPatchAsync(
+            "*** Begin Patch\n*** Update File: README.md\n-before\n+after\n"
+            + "*** Add File: vendor/new.txt\n+planted\n*** End Patch");
+
+        Assert.False(result.Success);
+        Assert.Contains(GrantRefusal.Marker, result.Text);
+        Assert.Contains("reparse point", result.Text, StringComparison.Ordinal);
+        Assert.Equal("before\n", File.ReadAllText(readme));
+        Assert.False(File.Exists(Path.Combine(target, "new.txt")));
     }
 
     /// <summary>
@@ -174,6 +329,12 @@ public sealed class CodexDynamicToolPolicyTests
     [InlineData("*** Begin Patch\n*** Update File: edit.txt\n+added\n*** End Patch", "no context")]
     [InlineData("*** Begin Patch\n*** Add File: edit.txt\n+clobber\n*** End Patch", "already exists")]
     [InlineData("*** Begin Patch\n*** Update File: absent.txt\n one\n-x\n*** End Patch", "does not exist")]
+    // The two '@@' corners (#1996 re-review HIGH): a locator naming no line of the file is not
+    // silently ignored, and two stacked locators are not silently collapsed into one.
+    [InlineData("*** Begin Patch\n*** Update File: edit.txt\n@@ def absent():\n one\n-two\n+TWO\n*** End Patch",
+        "Patch locator not found")]
+    [InlineData("*** Begin Patch\n*** Update File: edit.txt\n@@ class A:\n@@ def b():\n one\n-two\n+TWO\n*** End Patch",
+        "one locator per hunk")]
     public async Task An_unsupported_or_malformed_patch_fails_with_its_own_reason(
         string patch, string expectedReason)
     {
@@ -209,6 +370,12 @@ public sealed class CodexDynamicToolPolicyTests
         Assert.Contains(CodexDynamicToolPolicy.WriteOutputTool, result.Text, StringComparison.Ordinal);
         Assert.True(File.Exists(Path.Combine(fixture.Workspace, "workspace.txt")));
     }
+
+    /// <summary>
+    /// A raw string literal keeps the line endings of THIS source file, which git checks out CRLF. A
+    /// patch that must be LF to mean what the test says says so here rather than depending on that.
+    /// </summary>
+    private static string Lf(string patch) => patch.ReplaceLineEndings("\n");
 
     /// <summary>The shipped implement role's shape: reads, workspace writes, an unscoped shell.</summary>
     private static PermissionGrant WriteShapedGrant =>

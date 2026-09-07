@@ -140,6 +140,42 @@ public sealed class CodexAppServerBrokerTests
         }
     }
 
+    /// <summary>
+    /// #1996 re-review MEDIUM, and the checker that drift had none of: the instruction constraining
+    /// which tools the model may use must not exclude a tool the same payload declares. What it used
+    /// to exclude, and why that mattered, is stated once beside the instruction itself in
+    /// <see cref="CodexAppServerBroker.BuildThreadParams"/>. The loop is the general form — any
+    /// declared name outside the <c>baton_</c> prefix has to be named in the sentence or this fails.
+    /// </summary>
+    [Theory]
+    [InlineData(true)]
+    [InlineData(false)]
+    public void Developer_instructions_exclude_no_tool_the_same_payload_declares(bool writeGranted)
+    {
+        var grant = new PermissionGrant(ReadFiles: true, WriteFiles: writeGranted);
+        var configuration = new CodexBrokerConfiguration(
+            "C:/workspace", "gpt-5.6-luna", "low", null, false, grant, ["report.md"], false);
+        var policy = new CodexDynamicToolPolicy(grant, Path.GetTempPath(), Path.GetTempPath(), [], ["report.md"]);
+
+        var parameters = CodexAppServerBroker.BuildThreadParams(configuration, policy);
+
+        var instructions = parameters["developerInstructions"]!.GetValue<string>();
+        var declared = parameters["dynamicTools"]!.AsArray()
+            .Select(tool => tool!["name"]!.GetValue<string>()).ToArray();
+        Assert.DoesNotContain("baton_*", instructions, StringComparison.Ordinal);
+        Assert.Equal(writeGranted, declared.Contains(CodexDynamicToolPolicy.ApplyPatchTool));
+        foreach (var name in declared.Where(name => !name.StartsWith("baton_", StringComparison.Ordinal)))
+        {
+            Assert.Contains(name, instructions, StringComparison.Ordinal);
+        }
+        if (!writeGranted)
+        {
+            // The polarity partner: a read-only thread is not told about an edit tool it will not be
+            // offered, so the sentence tracks the manifest in both directions.
+            Assert.DoesNotContain(CodexDynamicToolPolicy.ApplyPatchTool, instructions, StringComparison.Ordinal);
+        }
+    }
+
     [Fact]
     public void Resume_request_reuses_the_persisted_thread_without_redeclaring_tools()
     {
