@@ -89,6 +89,27 @@ public sealed class CodexUsageParser : IWorkerUsageParser
                 : 0;
 
     /// <summary>
+    /// #1998. The same <c>item.completed</c> anchor, narrowed to the one tool that can carry a command
+    /// ceiling at all (<see cref="RunCommandToolName"/>), so an unrelated failed read or write is
+    /// <see langword="false"/> rather than being left out of the ordering the reader depends on. The
+    /// payload is <c>aggregated_output</c> — <c>CodexDynamicToolResult.Text</c> verbatim — so the marker
+    /// arrives unwrapped here exactly as the refusal marker does.
+    /// </summary>
+    public bool? ReportsShippingCeilingTimeout(string rawLine) =>
+        TryReadCompletedToolItem(rawLine, out var item)
+            && ReadString(item, "tool") == RunCommandToolName
+                ? ShellCommandCeilings.IsShippingCeilingTimeout(ReadString(item, "aggregated_output"))
+                : null;
+
+    /// <summary>
+    /// The dynamic tool whose result <see cref="ReportsShippingCeilingTimeout"/> anchors on. Named here
+    /// for the same reason <see cref="ArgumentsDigestField"/> is: <c>Baton.Vendors</c> declares the tool
+    /// and this project reads its results back, the dependency runs one way only, and this is the one
+    /// symbol both can see. <c>Baton.Vendors.CodexDynamicToolPolicy.RunCommandTool</c> is this constant.
+    /// </summary>
+    public const string RunCommandToolName = "baton_run_command";
+
+    /// <summary>
     /// #1921. The same completed item with an <c>aggregated_output</c> that is present and blank. A
     /// <c>"status":"failed"</c> item is not an empty result — its payload is its reason — and a refusal
     /// is a failed item by construction, so neither is counted here.

@@ -3,6 +3,7 @@ using System.Text;
 using System.Text.Json;
 using System.Text.Json.Nodes;
 using Baton.Domain;
+using Baton.Status;
 
 namespace Baton.Vendors;
 
@@ -18,26 +19,28 @@ public sealed class CodexDynamicToolPolicy
     internal const string SearchTextTool = "baton_search_text";
     internal const string WriteOutputTool = "baton_write_output";
     internal const string WriteTextTool = "baton_write_text";
-    internal const string RunCommandTool = "baton_run_command";
+    /// <summary>Named once in the engine (<see cref="CodexUsageParser.RunCommandToolName"/>) — see there for why.</summary>
+    internal const string RunCommandTool = CodexUsageParser.RunCommandToolName;
 
     private const int MaxReadCharacters = 200_000;
     private const int MaxListedFiles = 1_000;
     private const int MaxSearchMatches = 500;
     private const int MaxCommandOutputCharacters = 200_000;
-    private static readonly TimeSpan DefaultCommandTimeout = TimeSpan.FromMinutes(5);
 
     private readonly PermissionGrant _grant;
     private readonly string? _workspaceRoot;
     private readonly string _outputRoot;
     private readonly IReadOnlyList<string> _inputRoots;
     private readonly HashSet<string> _declaredOutputs;
-    private readonly TimeSpan _commandTimeout;
+    private readonly Func<ShellCommandClass, TimeSpan> _commandCeiling;
 
-    /// <param name="commandTimeout">
-    /// How long one <c>baton_run_command</c> may run before Baton kills its process tree; null is
-    /// <see cref="DefaultCommandTimeout"/>. A parameter rather than a constant so the timeout arm is
-    /// exercisable in a second instead of five minutes — a test that cannot reach it is how the timeout
-    /// came to be reported as a grant refusal (#1921 review HIGH).
+    /// <param name="commandCeiling">
+    /// How long one <c>baton_run_command</c> of a given class may run before Baton kills its process
+    /// tree; null is <see cref="ShellCommandCeilings.For"/>, the production table. A delegate rather
+    /// than constants so the timeout arm is exercisable in a second instead of minutes — a test that
+    /// cannot reach it is how the timeout came to be reported as a grant refusal (#1921 review HIGH) —
+    /// and per-CLASS since #1998, so a test can also show the classes actually differ rather than only
+    /// that one of them fires.
     /// </param>
     public CodexDynamicToolPolicy(
         PermissionGrant grant,
@@ -45,7 +48,7 @@ public sealed class CodexDynamicToolPolicy
         string outputDirectory,
         IEnumerable<string> inputPaths,
         IEnumerable<string> producedOutputNames,
-        TimeSpan? commandTimeout = null)
+        Func<ShellCommandClass, TimeSpan>? commandCeiling = null)
     {
         ArgumentNullException.ThrowIfNull(grant);
         ArgumentException.ThrowIfNullOrWhiteSpace(outputDirectory);
@@ -59,7 +62,7 @@ public sealed class CodexDynamicToolPolicy
             .Select(Path.GetFullPath).Distinct(PathComparer).ToArray();
         _declaredOutputs = producedOutputNames.Where(name => !string.IsNullOrWhiteSpace(name))
             .Select(NormalizeRelativeOutput).ToHashSet(PathComparer);
-        _commandTimeout = commandTimeout ?? DefaultCommandTimeout;
+        _commandCeiling = commandCeiling ?? ShellCommandCeilings.For;
     }
 
     /// <summary>The exact dynamic-tool declarations supplied on <c>thread/start</c>.</summary>
@@ -400,10 +403,18 @@ public sealed class CodexDynamicToolPolicy
             startInfo.ArgumentList.Add(commandLine);
         }
 
+        // #1998: the ceiling is per command CLASS. A shipping or gate command is known to be progressing
+        // while it runs — a `git push` here spends most of its wall clock inside the repository's own
+        // pre-push gate — so the flat ceiling killed finished work rather than runaway work. The classes,
+        // the table that sorts a line into one, and every ceiling are in the engine; nothing about them
+        // is restated on this path (spec/baton.md §5).
+        var commandClass = ShellCommandClassifier.Classify(commandLine);
+        var ceiling = _commandCeiling(commandClass);
+
         using var process = Process.Start(startInfo)
             ?? throw new IOException("Baton could not start the granted command.");
         using var timeout = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
-        timeout.CancelAfter(_commandTimeout);
+        timeout.CancelAfter(ceiling);
         var stdout = process.StandardOutput.ReadToEndAsync(timeout.Token);
         var stderr = process.StandardError.ReadToEndAsync(timeout.Token);
         try
@@ -416,8 +427,7 @@ public sealed class CodexDynamicToolPolicy
             await DrainAfterKillAsync(stdout, stderr).ConfigureAwait(false);
             // A timeout is a failure of a command the grant ALLOWED and Baton RAN. It costs the step
             // and reports no output, but nothing here declined it, so it carries no refusal marker.
-            return CodexDynamicToolResult.Failed(
-                $"Command exceeded Baton's {_commandTimeout.TotalMinutes:0.##}-minute tool limit.");
+            return CodexDynamicToolResult.Failed(ShellCommandCeilings.DescribeTimeout(commandClass, ceiling));
         }
         catch (OperationCanceledException)
         {
