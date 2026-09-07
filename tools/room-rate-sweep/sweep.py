@@ -459,6 +459,11 @@ def room_arrests(room_dir):
     Read off the EVENT's own `Adapter` and `Reason` fields rather than off the room -- a mixed-vendor
     room holds steps on more than one adapter, so crediting every arrest in it to every adapter the
     room mentions is wrong in exactly the direction that invents arrests for the vendor under study.
+
+    Adapter is as fine as this gets: `executionArrested` carries no step id, so an arrest cannot be
+    attributed to a ROLE from the event alone. The join exists -- `captureResolved` carries both
+    `StepId` and `ExecutionId` -- and is deliberately not walked here (#2034); a caller wanting
+    per-role arrest counts has to add it rather than read this function's per-adapter counts as one.
     """
     path = os.path.join(room_dir, "flow.jsonl")
     if not os.path.exists(path):
@@ -481,7 +486,11 @@ def settled_steps(rooms_dir, since=None):
     """One row per settled step in the corpus: its adapter, role, state and recorded usage.
 
     `since` filters on the room's own `terminalAt`, which is what makes "the rooms settled after a
-    fix landed" a one-flag question. Rows whose usage is absent entirely are still returned, with
+    fix landed" a one-flag question. Note the granularity, because it is invisible otherwise: the
+    filter is per ROOM, not per step -- a room that settled after the cutoff contributes every step
+    it holds, including one that ran hours before it, and a room still running (no `terminal.json`)
+    is excluded whenever its steps ran. Ask "has anything run since X" of the corpus's modification
+    times as well before reading an empty table as an answer. Rows whose usage is absent entirely are still returned, with
     None figures -- never a fabricated zero, following WorkerUsage's own convention -- so a caller
     can tell "no lane ran" from "lanes ran and measured nothing".
     """
