@@ -6119,10 +6119,10 @@ departed from. Nothing in the queue substitutes a model.
 one spelling of that choice — no `--kind work` alias. It needs `--issue` (the issue is what its
 briefs are rendered from and what its PR is looked for on), refuses `--role` (the stage picks it), and
 defaults its tag to `<n>-lane`. The item carries `issue`, its worktree, `branch`, `stage`, `pr`,
-`lastVerdict` and `round` alongside every slice-1 field, plus `checks`/`checksObservedAt` (#1912) —
-what the PR's checks were doing the last time the advance looked. **Those two are display surface, not
-policy**: nothing in the lifecycle reads them, they are stamped only when the advance actually got an
-answer from `gh`, and the pair travels together so a reader cannot show a word without its age.
+`lastVerdict` and `round` alongside every slice-1 field, plus the `checks`/`checksObservedAt` pair
+(#1912; `Baton.Queue.QueueItem.Checks` is the register for both). **What is ruled here rather than
+there: those two are display surface, not policy** — no arm of the table below reads either, so a
+change to how they are derived can never move an item to a different stage.
 
 The lifecycle is the one the conductor ran by hand roughly forty times in the week before it was
 written:
