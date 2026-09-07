@@ -69,6 +69,8 @@ public sealed class GlassHttpServiceTests : IDisposable
         // flake and a fast one does not wait.
         for (var attempt = 0; attempt < 200 && service.BoundPrefixes.Count == 0 && listen; attempt++)
         {
+            // A poll interval, not a ceiling: the 200 attempts around it are the ceiling.
+            // wait-ok: the ceiling is the attempt count above, plus the caller's CancellationToken.
             await Task.Delay(25, cancellationToken);
         }
 
@@ -247,6 +249,8 @@ public sealed class GlassHttpServiceTests : IDisposable
             // window dozens of poll intervals wide. Without it, the assertion below would pass just as
             // happily against a stream that emits continuously, which is the failure that would make
             // this whole test meaningless.
+            // The arm asserts nothing arrives across dozens of 25ms poll intervals, so it must elapse.
+            // wait-ok: this delay IS the measurement, not a ceiling on one.
             await Task.Delay(TimeSpan.FromSeconds(1), cts.Token);
             Assert.DoesNotContain(lines, line => line.StartsWith("event:", StringComparison.Ordinal));
 
@@ -278,6 +282,7 @@ public sealed class GlassHttpServiceTests : IDisposable
                 return;
             }
 
+            // wait-ok: a poll interval; `budget` is the ceiling and every caller passes seconds of it.
             await Task.Delay(25);
         }
 
