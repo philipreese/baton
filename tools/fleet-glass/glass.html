@@ -1994,8 +1994,17 @@ const DAEMON_SERVED = !!document.querySelector('meta[name="baton-glass-source"][
 // place. EventSource reconnects on its own (with Last-Event-ID), which is why a phone that sleeps
 // constantly is the client this transport was chosen for.
 function startDaemonFeed(applySnapshot){
+  // 404 and 503 are DIFFERENT facts and must not paint the same banner: the daemon answers 404 only
+  // when the projection file has never been written, and 503 when it exists but could not be read
+  // this instant (a transient lock). Mapping both to null would tell an operator the daemon "has not
+  // written" a file that is sitting right there -- the plausible-and-wrong shape the banner
+  // precedence table below exists to keep out.
   const load = () => fetch("/projection.json", { cache: "no-store" })
-    .then((r) => r.ok ? r.json() : null)
+    .then((r) => {
+      if(r.ok) return r.json();
+      if(r.status === 404) return null;
+      throw new Error(`HTTP ${r.status}`);
+    })
     .then((snap) => {
       if(snap && Array.isArray(snap.rooms)) applySnapshot(snap);
       else banner("<b>No fleet projection yet.</b> The daemon is serving this page but has not written <span class='mono'>fleet/projection.json</span> — check that <span class='mono'>baton daemon</span>'s projection writer is running.");
