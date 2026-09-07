@@ -2288,8 +2288,14 @@ public static class MutationInterface
             // return.
             if (classification.Verdict == OutcomeVerdict.Succeeded && binding.DeliversBranch)
             {
+                // #1998: read before the check, not after — a shipping command killed at its ceiling is
+                // exactly what produces the branch-not-pushed the check is about to find, and the tail
+                // it writes is the only place that cause survives.
+                var shippingCeilingExceeded = ShippingCeilingStreamReader.FinalRunCommandHitShippingCeiling(
+                    usageParser, prepared.OutputDirectory);
                 var deliveryOutcome = await DeliveryVerifier.CheckAsync(
-                    binding.Target.WorkingDirectory, binding.ExpectPr, dispatchCancellationToken).ConfigureAwait(false);
+                    binding.Target.WorkingDirectory, binding.ExpectPr, dispatchCancellationToken,
+                    shippingCeilingExceeded: shippingCeilingExceeded).ConfigureAwait(false);
                 switch (deliveryOutcome.Status)
                 {
                     // #1788 review: the operator's own cancel landing inside this check's own window --

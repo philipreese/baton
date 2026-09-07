@@ -235,8 +235,12 @@ public sealed class CodexDynamicToolPolicyTests
 
     /// <summary>
     /// The third outcome the funnel used to mark: a command the grant ALLOWED that Baton then killed for
-    /// exceeding its tool limit. Run against a 150ms limit rather than the shipped five minutes — the
-    /// timeout is a constructor parameter for exactly this reason.
+    /// exceeding its ceiling. Run against a 150ms ceiling rather than the shipped minutes — the ceiling
+    /// is a constructor parameter for exactly this reason.
+    /// <para>
+    /// #1998: an ordinary command is on the DEFAULT class, and the text says so — the polarity partner of
+    /// <see cref="A_shipping_command_is_killed_at_the_shipping_ceiling_and_says_so"/> below.
+    /// </para>
     /// </summary>
     [Fact]
     public async Task A_command_killed_at_the_tool_limit_is_a_failure_and_carries_no_refusal_marker()
@@ -245,15 +249,64 @@ public sealed class CodexDynamicToolPolicyTests
         var grant = new PermissionGrant(
             RunShellCommands: true, ShellCommandPatterns: ["ping*", "sleep*"], ShellCommandsAreReadOnly: true);
         using var fixture = new PolicyFixture(
-            grant, ["report.md"], commandTimeout: TimeSpan.FromMilliseconds(150));
+            grant, ["report.md"], commandCeiling: _ => TimeSpan.FromMilliseconds(150));
 
         var result = await fixture.ExecuteAsync(
             CodexDynamicToolPolicy.RunCommandTool, new { command = sleep });
 
         Assert.False(result.Success);
-        Assert.Contains("tool limit", result.Text, StringComparison.Ordinal);
+        Assert.Contains("default command ceiling", result.Text, StringComparison.Ordinal);
         Assert.DoesNotContain(GrantRefusal.Marker, result.Text);
+        Assert.False(ShellCommandCeilings.IsShippingCeilingTimeout(result.Text));
         Assert.Equal(0, RefusedStepsCountedFor(result));
+    }
+
+    /// <summary>
+    /// #1998: the broker bounds a command by its CLASS, and a shipping command is killed at the shipping
+    /// ceiling rather than the default one. The two injected ceilings differ, so a policy that classified
+    /// this line as <see cref="ShellCommandClass.Other"/> would print the other figure and fail here —
+    /// which is what makes the arm discriminate rather than merely reach the timeout.
+    /// <para>
+    /// <b>No push can occur, and the fixture's own directory is not what guarantees that.</b> It is a
+    /// fresh temp directory with no repository, but <c>git</c> walks UP — on Windows the temp root sits
+    /// under the user profile, and an ancestor that happens to be a repository would give a bare
+    /// <c>git push</c> a real upstream. What makes this inert is the command itself:
+    /// <c>--dry-run</c> against a remote name that exists nowhere. Its leading tokens are unchanged, so
+    /// it classifies exactly as a real push does; the push therefore fails on every host, and
+    /// <c>||</c> is what runs the hanging segment and carries the line to the ceiling.
+    /// </para>
+    /// <para>
+    /// <b>Seam for #2002, named rather than assumed away.</b> That issue's arm 1 refuses backgrounding
+    /// shapes "including a trailing <c>&amp;</c>"; this arm reached the ceiling through a mid-line
+    /// <c>&amp;</c> until now, so a refusal pattern matching one would have taken the only end-to-end
+    /// proof of the shipping ceiling with it. <c>||</c> is not a backgrounding shape on either shell, so
+    /// nothing in this PR now depends on that decision. Arm 2 is the one still open: if a byte-identical
+    /// repeat replays the previous output, a replayed timeout re-emits the marker in a fresh
+    /// run-command result, and <c>ShippingCeilingStreamReader</c> reads the FINAL such result — so #2002
+    /// has to decide whether a replay is a fresh answer, and its note must not lead with the marker.
+    /// </para>
+    /// </summary>
+    [Fact]
+    public async Task A_shipping_command_is_killed_at_the_shipping_ceiling_and_says_so()
+    {
+        var hang = OperatingSystem.IsWindows() ? "ping -n 30 127.0.0.1" : "sleep 30";
+        var grant = new PermissionGrant(
+            RunShellCommands: true, ShellCommandPatterns: ["git push*", "ping*", "sleep*"]);
+        using var fixture = new PolicyFixture(
+            grant,
+            ["report.md"],
+            commandCeiling: commandClass => commandClass == ShellCommandClass.Shipping
+                ? TimeSpan.FromMilliseconds(150)
+                : TimeSpan.FromMilliseconds(100));
+
+        var result = await fixture.ExecuteAsync(
+            CodexDynamicToolPolicy.RunCommandTool,
+            new { command = $"git push --dry-run nonexistent-remote-xyzzy || {hang}" });
+
+        Assert.False(result.Success);
+        Assert.Contains("shipping command ceiling (0.15 s)", result.Text, StringComparison.Ordinal);
+        Assert.True(ShellCommandCeilings.IsShippingCeilingTimeout(result.Text));
+        Assert.DoesNotContain(GrantRefusal.Marker, result.Text);
     }
 
     /// <summary>
@@ -395,7 +448,7 @@ public sealed class CodexDynamicToolPolicyTests
             PermissionGrant grant,
             IReadOnlyList<string> outputs,
             bool createInput = false,
-            TimeSpan? commandTimeout = null)
+            Func<ShellCommandClass, TimeSpan>? commandCeiling = null)
         {
             Root = Path.Combine(Path.GetTempPath(), $"baton-codex-policy-{Guid.NewGuid():N}");
             Workspace = Path.Combine(Root, "workspace");
@@ -409,7 +462,7 @@ public sealed class CodexDynamicToolPolicyTests
                 File.WriteAllText(Input, "input");
             }
             Policy = new CodexDynamicToolPolicy(
-                grant, Workspace, Output, createInput ? [Input] : [], outputs, commandTimeout);
+                grant, Workspace, Output, createInput ? [Input] : [], outputs, commandCeiling);
         }
 
         public string Root { get; }
