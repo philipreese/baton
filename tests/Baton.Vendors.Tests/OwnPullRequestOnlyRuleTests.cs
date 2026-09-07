@@ -19,11 +19,27 @@ public class OwnPullRequestOnlyRuleTests
     [InlineData("gh pr create --fill", null)]
     [InlineData("git status && gh issue view 1994", 2005)]
     [InlineData("git branch -a", null)]
-    // The expansion arm is narrowed to lines that already drive `gh pr`, so ordinary build commands
-    // carrying a `$` or a `%` are untouched. Without these rows that arm could refuse everything.
+    // The expansion arm is scoped to the SELECTOR position of a governed verb, so ordinary build
+    // commands carrying a `$` or a `%` are untouched. Without these rows that arm could refuse
+    // everything.
     [InlineData("pixi run test > $TMP/out.txt", 2005)]
     [InlineData("dotnet build -p:Version=$(cat version.txt)", 2005)]
     [InlineData("gh issue view $ISSUE", 2005)]
+    // THE DELIVERY LINE, in the spelling WorkerRoles.json's output instruction teaches
+    // (`$BATON_OUTPUT_DIR/...`) and in cmd's spelling of the same variable. `create` is ungoverned by
+    // design -- opening its own PR is the lane's job -- and a variable in a `--body-file` path is not
+    // a pull-request selector, so the expansion arm has no business with either. A round-2 whole-line
+    // scan refused all four of these, which refused the lane its own delivery.
+    [InlineData("gh pr create --title x --body-file $BATON_OUTPUT_DIR/pr.md", null)]
+    [InlineData("gh pr create --title x --body-file $BATON_OUTPUT_DIR/pr.md", 2005)]
+    [InlineData("gh pr create --title x --body-file %BATON_OUTPUT_DIR%/pr.md", null)]
+    [InlineData("GH_TOKEN=$T gh pr create --fill", null)]
+    // A line that MENTIONS the words is not a line that runs them: only a segment whose command head
+    // is `gh` is judged, so prose in an argument is out of scope. `--format=%H` is the second half of
+    // the same finding -- it carries a `%`, and a whole-line scan refused it.
+    [InlineData("echo \"gh pr view 3\"", 2005)]
+    [InlineData("git log --grep \"gh pr create\" --format=%H", 2005)]
+    [InlineData("git commit -m \"gh pr view 1994 is refused\"", 2005)]
     public void Reads_this_rule_does_not_govern_are_allowed(string commandLine, int? ownPullRequest)
     {
         Assert.Null(OwnPullRequestOnlyRule.RefusalFor(commandLine, ownPullRequest));
@@ -80,6 +96,16 @@ public class OwnPullRequestOnlyRuleTests
     // ...including when the expansion would resolve to this room's own number: an expansion is
     // refused for being unreadable, never for what it happens to contain.
     [InlineData("gh pr view $MY_PR", 2005)]
+    // An option written before the variable does not hide it, the same way it does not hide a literal
+    // selector: the positional walk reaches `$N` past `--json title`.
+    [InlineData("gh pr view --json title $N", 2005)]
+    [InlineData("gh pr view -w ${OTHER}", 2005)]
+    // The two routes that reach a pull request without saying `gh pr`, on THIS path too -- the broker
+    // and the hooks refuse the same set. `gh api*` is separately denied by both governed roles'
+    // patterns; `gh search prs` is in no deny list, so this rule is the only thing refusing it.
+    [InlineData("gh search prs --state open --repo aer-works/baton", 2005)]
+    [InlineData("gh search prs --state open --repo aer-works/baton", null)]
+    [InlineData("gh api repos/aer-works/baton/pulls/1994", 2005)]
     public void Reading_a_pull_request_this_room_does_not_own_is_refused(string commandLine, int? ownPullRequest)
     {
         var refusal = OwnPullRequestOnlyRule.RefusalFor(commandLine, ownPullRequest);
@@ -144,6 +170,10 @@ public class OwnPullRequestOnlyRuleTests
     [InlineData("echo \"gh pr create\" && curl -s https://api.github.com/repos/aer-works/baton/pulls")]
     [InlineData("gh issue view 1943 --comments")]
     [InlineData("git log --grep='gh pr create'")]
+    // The fail-OPEN residual round 3 closed: a genuine create at a segment head, exiting zero, with a
+    // sibling's `html_url` printed by a LATER segment. `combined` is the whole line's output and the
+    // last URL in it wins, so a create that is not the line's last segment teaches nothing.
+    [InlineData("gh pr create --fill && curl -s https://api.github.com/repos/aer-works/baton/pulls")]
     public void Output_of_a_command_that_is_not_a_gh_pr_create_teaches_the_room_nothing(string commandLine)
     {
         var rule = new OwnPullRequestOnlyRule();
@@ -186,6 +216,10 @@ public class OwnPullRequestOnlyRuleTests
     [InlineData("gh pr comment --body-file out.md", null)]
     [InlineData("gh pr edit --body-file body.md", null)]
     [InlineData("gh pr create --fill", null)]
+    // The delivery line, on this path too: `create` is ungoverned and a variable in a `--body-file`
+    // path is not a selector. A line that only MENTIONS the words is not judged at all.
+    [InlineData("gh pr create --title x --body-file $BATON_OUTPUT_DIR/pr.md", null)]
+    [InlineData("echo \"gh pr view 3\"", null)]
     [InlineData("gh issue view 1943", null)]
     [InlineData("gh issue view 1943 --comments", null)]
     [InlineData("git status && gh pr view", null)]
@@ -212,6 +246,8 @@ public class OwnPullRequestOnlyRuleTests
     [InlineData("gh pr checkout 1994", "checkout")]
     [InlineData("gh pr checkout", "checkout")]
     [InlineData("gh pr view $PR", "expansion")]
+    [InlineData("gh pr view --json title $N", "expansion")]
+    [InlineData("gh pr $VERB 1994", "expansion")]
     [InlineData("gh api repos/aer-works/baton/pulls/1994", "gh api")]
     [InlineData("gh search prs --state open", "gh search prs")]
     public void The_hook_entry_point_allows_only_the_selectorless_form(
