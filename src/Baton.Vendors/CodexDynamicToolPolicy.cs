@@ -22,6 +22,23 @@ public sealed class CodexDynamicToolPolicy
     /// <summary>Named once in the engine (<see cref="CodexUsageParser.RunCommandToolName"/>) — see there for why.</summary>
     internal const string RunCommandTool = CodexUsageParser.RunCommandToolName;
 
+    /// <summary>
+    /// Codex's own edit verb, declared under its native name (#1996). A write-granted codex worker had
+    /// a write tool — <see cref="WriteTextTool"/> — and still concluded its workspace was read-only,
+    /// because what it reached for was <c>apply_patch</c> and app-server offered nothing by that name.
+    /// The grant applies here exactly as it does to <see cref="WriteTextTool"/>: same workspace root,
+    /// same resolver, same refusal text. No new permission concept, and no separate write path — the
+    /// envelope is parsed by <see cref="CodexApplyPatch"/> and written by <see cref="WriteFile"/>.
+    /// </summary>
+    internal const string ApplyPatchTool = "apply_patch";
+
+    /// <summary>
+    /// The one sentence every withheld-workspace-write refusal opens with, stated once because two of
+    /// them raise it (<see cref="WriteText"/> and <see cref="ApplyPatch"/>) and a review lane's stream
+    /// is read for the exact string.
+    /// </summary>
+    private const string WithheldWorkspaceWrite = "This Baton role does not grant workspace writes.";
+
     private const int MaxReadCharacters = 200_000;
     private const int MaxListedFiles = 1_000;
     private const int MaxSearchMatches = 500;
@@ -65,6 +82,24 @@ public sealed class CodexDynamicToolPolicy
         _commandCeiling = commandCeiling ?? ShellCommandCeilings.For;
     }
 
+    /// <summary>
+    /// The model's only specification of the format, so it states the subset and the exclusions rather
+    /// than the verb alone — an <c>apply_patch</c> that silently accepted less than codex's own dialect
+    /// would read as a guarantee it does not provide.
+    /// </summary>
+    private const string ApplyPatchDescription =
+        "Edit files under Baton's granted workspace root with a codex patch envelope. This is the "
+        + "edit tool: the workspace is not writable through the shell. Supported inside "
+        + "'*** Begin Patch' / '*** End Patch': '*** Add File: <path>' with every body line prefixed "
+        + "'+', '*** Delete File: <path>', and '*** Update File: <path>' with '@@' section markers and "
+        + "' ' context, '-' removed and '+' added lines. Context must match the file exactly — there "
+        + "is no fuzzy matching — every hunk needs at least one context or removed line, and "
+        + "'*** Move to:' is not supported. The whole envelope applies or none of it does. To replace "
+        + "a file's entire contents instead, use " + WriteTextTool + ".";
+
+    private const string ApplyPatchInputDescription =
+        "The complete patch envelope, from '*** Begin Patch' to '*** End Patch'.";
+
     /// <summary>The exact dynamic-tool declarations supplied on <c>thread/start</c>.</summary>
     public JsonArray BuildToolDefinitions()
     {
@@ -94,6 +129,9 @@ public sealed class CodexDynamicToolPolicy
 
         if (_grant.WriteFiles)
         {
+            // Declared FIRST of the two writes, and named as the edit tool, because it is the verb a
+            // codex model reaches for; baton_write_text stays for whole-file replacement.
+            tools.Add(Function(ApplyPatchTool, ApplyPatchDescription, StringSchema("input", ApplyPatchInputDescription)));
             tools.Add(Function(WriteTextTool, "Write complete UTF-8 text under Baton's granted workspace root.",
                 TwoStringSchema("path", "Absolute or workspace-relative destination.", "content", "Complete UTF-8 file content.")));
         }
@@ -122,9 +160,10 @@ public sealed class CodexDynamicToolPolicy
                     RequiredString(arguments, "name"), RequiredString(arguments, "content")),
                 WriteTextTool => WriteText(
                     RequiredString(arguments, "path"), RequiredString(arguments, "content")),
+                ApplyPatchTool => ApplyPatch(RequiredString(arguments, "input")),
                 RunCommandTool => await RunCommandAsync(
                     RequiredString(arguments, "command"), cancellationToken).ConfigureAwait(false),
-                // Not a refusal (#1921 re-review): each of the six implemented names has its own case
+                // Not a refusal (#1921 re-review): each of the seven implemented names has its own case
                 // above and does its own grant check there, so a tool a grant WITHHELD never reaches
                 // here. What reaches here is a name Baton implements nowhere — a hallucinated or stale
                 // one — which is a malformed call, the same population as an empty search query. No
@@ -149,12 +188,15 @@ public sealed class CodexDynamicToolPolicy
     }
 
     /// <summary>
-    /// #1920 ask 2: what an unrecognised tool name is told. The measured dominant case on this arm is
+    /// #1920 ask 2: what an unrecognised tool name is told. The measured dominant case on this arm was
     /// codex reaching for its native <c>apply_patch</c> five times, so a write-shaped attempt is
-    /// answered about the WRITE path rather than handed two read tools — the extra step this issue
-    /// exists to remove. Every clause is derived from <see cref="DeclaredToolNames"/> rather than
-    /// re-deriving the grant conditions in <see cref="BuildToolDefinitions"/>, so a role that declares
-    /// no search tool is never told to search.
+    /// answered about the WRITE path rather than handed two read tools — the extra step that issue
+    /// existed to remove. #1996 then implemented <see cref="ApplyPatchTool"/> itself, so that exact
+    /// name no longer arrives here at all: what does is the rest of the write-shaped population (an
+    /// editor tool from another vendor's namespace, a hallucinated name), on any grant. Every clause is
+    /// derived from <see cref="DeclaredToolNames"/> rather than re-deriving the grant conditions in
+    /// <see cref="BuildToolDefinitions"/>, so a role that declares no search tool is never told to
+    /// search.
     /// </summary>
     private string DescribeUnknownTool(string toolName)
     {
@@ -182,15 +224,16 @@ public sealed class CodexDynamicToolPolicy
             .ToArray();
 
     /// <summary>
-    /// A name a model reaches for when it means to change a file — <c>apply_patch</c> is the measured
-    /// one (#1920). Deliberately a name test only: nothing here inspects arguments.
+    /// A name a model reaches for when it means to change a file — <c>apply_patch</c> was the measured
+    /// one (#1920), and is a declared tool since #1996, so what these fragments still catch is every
+    /// other write-shaped name. Deliberately a name test only: nothing here inspects arguments.
     /// </summary>
     private static bool LooksLikeWriteAttempt(string toolName) =>
         WriteAttemptFragments.Any(fragment => toolName.Contains(fragment, StringComparison.OrdinalIgnoreCase));
 
     // Deliberately short of "update"/"insert": codex's own `update_plan` is not a file write, and
     // answering it about the write path would be the same non-responsive guidance in the other
-    // direction. These four cover the measured `apply_patch`.
+    // direction.
     private static readonly string[] WriteAttemptFragments = ["patch", "write", "edit", "apply"];
 
     private static string? DescribeReadPath(IReadOnlyCollection<string> declared) =>
@@ -204,6 +247,12 @@ public sealed class CodexDynamicToolPolicy
 
     private string DescribeWritePath(IReadOnlyCollection<string> declared)
     {
+        if (declared.Contains(ApplyPatchTool))
+        {
+            return $"Edit with {ApplyPatchTool}, which takes a '*** Begin Patch' envelope, or replace a "
+                + $"file whole with {WriteTextTool}.";
+        }
+
         if (declared.Contains(WriteTextTool))
         {
             return $"Write with {WriteTextTool}, which takes a path and the file's complete new content.";
@@ -339,13 +388,89 @@ public sealed class CodexDynamicToolPolicy
     {
         if (!_grant.WriteFiles)
         {
-            return CodexDynamicToolResult.Refused("This Baton role does not grant workspace writes.");
+            return RefuseWorkspaceWrite();
         }
 
         var path = ResolveWithinWorkspace(requestedPath);
         WriteFile(path, content);
         return CodexDynamicToolResult.Allowed($"Wrote '{path}'.");
     }
+
+    /// <summary>
+    /// #1996. Every path in the envelope is resolved and grant-checked, and every new content computed,
+    /// BEFORE the first byte is written: a two-file patch whose second path is outside the workspace
+    /// leaves the first file untouched. A patch is one edit, and half of one applied is a workspace no
+    /// reader — model or human — can reason about.
+    /// </summary>
+    private CodexDynamicToolResult ApplyPatch(string input)
+    {
+        if (!_grant.WriteFiles)
+        {
+            // Reached, rather than the unknown-tool fallthrough it used to hit, now that this name is
+            // implemented. That makes it a real grant refusal — marked and counted like every other —
+            // so it carries the #1920 guidance the fallthrough used to add, from the same single site.
+            return RefuseWorkspaceWrite();
+        }
+
+        var operations = CodexApplyPatch.Parse(input);
+        List<(CodexPatchOperationKind Kind, string Path, string Content)> planned = [];
+        foreach (var operation in operations)
+        {
+            // ResolveWithinWorkspace, not a resolver of this method's own: the refusal a path outside
+            // the workspace gets here is character-for-character the one baton_write_text gives.
+            var path = ResolveWithinWorkspace(operation.Path);
+            switch (operation.Kind)
+            {
+                case CodexPatchOperationKind.Add:
+                    if (File.Exists(path))
+                    {
+                        return CodexDynamicToolResult.Failed(
+                            $"'{operation.Path}' already exists; use '*** Update File:' to change it.");
+                    }
+                    planned.Add((operation.Kind, path, CodexApplyPatch.AddedContent(operation)));
+                    break;
+                case CodexPatchOperationKind.Delete:
+                    if (!File.Exists(path))
+                    {
+                        return CodexDynamicToolResult.Failed($"'{operation.Path}' does not exist.");
+                    }
+                    EnsureNoReparsePoint(path);
+                    planned.Add((operation.Kind, path, string.Empty));
+                    break;
+                default:
+                    if (!File.Exists(path))
+                    {
+                        return CodexDynamicToolResult.Failed(
+                            $"'{operation.Path}' does not exist; use '*** Add File:' to create it.");
+                    }
+                    EnsureNoReparsePoint(path);
+                    planned.Add((operation.Kind, path,
+                        CodexApplyPatch.ApplyUpdate(File.ReadAllText(path, Encoding.UTF8), operation)));
+                    break;
+            }
+        }
+
+        foreach (var (kind, path, content) in planned)
+        {
+            if (kind == CodexPatchOperationKind.Delete)
+            {
+                File.Delete(path);
+                continue;
+            }
+            WriteFile(path, content);
+        }
+        return CodexDynamicToolResult.Allowed(
+            "Applied the patch: " + string.Join(", ", planned.Select(p => $"{p.Kind} '{p.Path}'")) + ".");
+    }
+
+    /// <summary>
+    /// The single site both workspace-write tools refuse from. It names the write path the role does
+    /// have, because a role reaching for an edit tool it was not granted is exactly the case #1920's
+    /// unknown-tool guidance was written for — and adding <see cref="ApplyPatchTool"/> to the switch is
+    /// what moved this population out of that fallthrough.
+    /// </summary>
+    private CodexDynamicToolResult RefuseWorkspaceWrite() =>
+        CodexDynamicToolResult.Refused($"{WithheldWorkspaceWrite} {DescribeWritePath(DeclaredToolNames())}");
 
     private async Task<CodexDynamicToolResult> RunCommandAsync(
         string commandLine, CancellationToken cancellationToken)
