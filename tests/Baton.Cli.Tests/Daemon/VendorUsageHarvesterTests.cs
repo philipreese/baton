@@ -222,18 +222,27 @@ public sealed class VendorUsageHarvesterTests : IDisposable
     /// polarities on the one thing that decides it — a reset already past fires, one still ahead does
     /// not — driven under a scheduler that is never due on its own, so a harvest here can only be the
     /// boundary's doing.
+    /// <para>
+    /// The third arm is the OTHER half of the same read (#1966 review): the snapshot's own
+    /// <c>HarvestedAt</c> is handed over beside the boundaries, so a reset the snapshot was already taken
+    /// after buys no harvest. Only a production-level arm can see it — the scheduler's own suite is handed
+    /// that instant directly, so a tick that passed <c>null</c> for it would leave every scheduler arm
+    /// green while a daemon restart spent a <c>/usage</c> call per vendor for nothing.
+    /// </para>
     /// </summary>
     [Theory]
-    [InlineData(-1, 1)]
-    [InlineData(1, 0)]
-    public async Task TickOnce_ReadsTheResetInstantsOffThePersistedSnapshot(int resetHoursFromNow, int expectedReads)
+    [InlineData(-1, -3, 1)] // reset an hour ago, snapshot three hours ago: the window turned over unread
+    [InlineData(1, -3, 0)]  // reset an hour out: nothing has turned over yet
+    [InlineData(-2, -1, 0)] // reset two hours ago but the snapshot was taken an hour ago: already read
+    public async Task TickOnce_ReadsTheResetInstantsOffThePersistedSnapshot(
+        int resetHoursFromNow, int harvestedHoursFromNow, int expectedReads)
     {
         var now = DateTimeOffset.UtcNow;
         VendorUsageHarvester.Persist(
             "claude",
             new VendorUsageSnapshot(
                 "claude",
-                now - TimeSpan.FromHours(3),
+                now + TimeSpan.FromHours(harvestedHoursFromNow),
                 Caveat: null,
                 [
                     new VendorUsageWindow("session", 8, now + TimeSpan.FromHours(resetHoursFromNow), "Current session: 8% used"),
