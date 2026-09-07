@@ -210,6 +210,7 @@ def _pr_body_takes_a_path_again():
         print("OK" if not faults else "!!")
         return 1 if faults else 0
 
+    requires(selfcheck.completeness, "negated_close_faults")
     with swap(selfcheck.completeness, "pr_body_mode", reads_stdin_whatever_the_argv):
         yield
 
@@ -315,11 +316,18 @@ def replacing(mod, name, value):
     The type is what lets `run_arms` tell those apart whether the un-applied sabotage surfaces from
     `__enter__` or from inside `check()`.
 
-    What that does NOT cover: a replacement closure that reads some OTHER attribute of `mod` lazily,
-    at call time -- `buggy_main` in `_recordonce_ignores_exclusion_reason` reads four. A rename there
-    still surfaces as a bare `AttributeError` from inside the check, which `run_arms` reads as the
-    check noticing the fault. Use `original` for anything read BEFORE `replacing`; the lazy reads are
-    known residue, not covered here.
+    The other shape -- a replacement closure that reads some OTHER attribute of `mod` lazily, at call
+    time, as `buggy_main` in `_recordonce_ignores_exclusion_reason` does for four of them -- was
+    uncovered residue until #2011 and is covered now, by `requires`: every such attribute is declared
+    before the fault is applied, so a rename raises `ControlSetupError` there instead of an
+    `AttributeError` from inside `check()`. The three helpers split by WHEN the attribute is touched:
+    `original` for what a fault reads while building its replacement, `requires` for what the
+    replacement will read when the check runs it, `replacing` for what it overwrites. The selftest's
+    'a fault whose replacement reads a renamed sibling' arm is what holds that -- that `requires`
+    classifies a rename, NOT that every fault calls it. Nothing enforces the declaration on a fault
+    added later: one written with an undeclared lazy read reproduces #2011 exactly, with every gate
+    green. The five faults that read lazily today are enumerated in #2011's PR, and an AST checker
+    for the rest is deliberately not built -- aliasing and closures make it mostly false positives.
     """
     if not hasattr(mod, name):
         raise ControlSetupError(
@@ -344,6 +352,30 @@ def original(mod, name):
     return getattr(mod, name)
 
 
+def requires(mod, *names):
+    """Declare, before the fault is applied, every attribute its replacement will read LAZILY.
+
+    `original` covers what a fault reads while BUILDING its replacement. This covers the other half:
+    a replacement closure that reads `mod.something` at call time, when the check runs it. A rename
+    there raises `AttributeError` from inside `check()`, where `run_arms` reads any
+    non-`ControlSetupError` raise as the check noticing the sabotage -- `OK red under` over an arm
+    that compared nothing.
+
+    Presence, not binding, and deliberately so: the replacement still reads the attribute at call
+    time, which some faults need. `_recordonce_ignores_exclusion_reason`'s `buggy_main` is the case
+    -- the check installs its own stubs over `added_lines_by_file` and `file_at` AFTER the fault is
+    applied, so a fault that bound them here would run against the real ones and model a different
+    defect. What this closes is the rename, which is what the harness could not see.
+    """
+    absent = [n for n in names if not hasattr(mod, n)]
+    if absent:
+        raise ControlSetupError(
+            "control depends on "
+            + ", ".join(f"{mod.__name__}.{n}" for n in absent)
+            + ", which does not exist -- renamed? "
+            "A fault whose replacement cannot read what it needs applied no fault.")
+
+
 RECORDONCE = "the record-once checker fires on restated prose, not on text the register prescribes"
 RECORDONCE_PIN = "the record-once checker still finds the passages it found in a real merge"
 RECORDONCE_APPLIES = "the record-once checker applies every exclusion reason to its changed-file population"
@@ -365,6 +397,7 @@ def _recordonce_reads_code():
     # thing produces. Injecting both faults at once would let a contiguity regression masquerade as
     # this one, and this arm is named for exactly one of them.
     def read_everything(mod):
+        requires(mod, "normalise")
         replacing(mod, "prose_runs",
                   lambda path, hunks: [[w for line in hunk for w in mod.normalise(line)]
                                        for hunk in hunks])
@@ -395,6 +428,7 @@ def _recordonce_marker_mutes_file():
     # that file from being compared, and nothing said so.
     def file_granular(mod):
         real = original(mod, "exemptions")
+        requires(mod, "prose_runs", "SHINGLE")
 
         def whole_file(path, at):
             shingles, notes, bad = real(path, at)
@@ -507,6 +541,11 @@ def _recordonce_pin_is_vacuous():
 def _recordonce_ignores_exclusion_reason():
     # Simulate #1465: a reason exists in excluded_from_comparison, but main() skips deleting it.
     def omit_del_block(mod):
+        # The four `mod.` reads below all happen when the check calls `buggy_main`, and two of them
+        # (`added_lines_by_file`, `file_at`) are stubs the check installs after this fault is
+        # applied -- so they are declared here rather than bound. See `requires`.
+        requires(mod, "added_lines_by_file", "excluded_from_comparison", "violations", "file_at")
+
         def buggy_main(argv):
             base = argv[1] if len(argv) > 1 else "origin/main"
             try:
@@ -538,7 +577,7 @@ AGY_TOOLS_CLASSIFIED = "the agy.tools-classified sentinel check discriminates on
 
 @control(AGY_TOOLS_CLASSIFIED, "the check stops rejecting unknown tool names, passing an unclassified tool")
 def _agy_tools_unknown_tool_passes():
-    orig_classify = selfcheck.verify._classify_agy_tools
+    orig_classify = original(selfcheck.verify, "_classify_agy_tools")
 
     def broken_classify(tools, tool_lists):
         _, mult = orig_classify(tools, tool_lists)
@@ -550,7 +589,7 @@ def _agy_tools_unknown_tool_passes():
 
 @control(AGY_TOOLS_CLASSIFIED, "the check stops rejecting multiply-classified tool names")
 def _agy_tools_multiply_classified_passes():
-    orig_classify = selfcheck.verify._classify_agy_tools
+    orig_classify = original(selfcheck.verify, "_classify_agy_tools")
 
     def broken_classify(tools, tool_lists):
         unclass, _ = orig_classify(tools, tool_lists)
@@ -562,7 +601,8 @@ def _agy_tools_multiply_classified_passes():
 
 @control(AGY_TOOLS_CLASSIFIED, "the failure message omits the unclassified tool name")
 def _agy_tools_message_omits_name():
-    orig_classified = selfcheck.verify._agy_tools_classified
+    orig_classified = original(selfcheck.verify, "_agy_tools_classified")
+    requires(selfcheck.verify, "FAIL")  # read lazily, inside the replacement below
 
     def broken_classified(catalogue=None, tool_lists=None):
         st, msg = orig_classified(catalogue=catalogue, tool_lists=tool_lists)
@@ -733,6 +773,21 @@ def _selftest() -> int:
             yield
 
     @contextlib.contextmanager
+    def replacement_reads_a_renamed_sibling():
+        # #2011's shape, and the one `requires` exists for: the fault applies cleanly, and what it
+        # installed reads a SIBLING attribute LAZILY, when the check calls it. Declared through
+        # `requires`, a rename raises `ControlSetupError` where the harness can classify it; read
+        # bare, it raises `AttributeError` from inside `check()` and prints `OK red under` over an
+        # arm that compared nothing. Sabotages the fixture too, so an arm reporting this as red is
+        # indistinguishable from the working arm above -- which is why the bare shape was invisible.
+        def deferred():
+            requires(_Fixture, "renamed_sibling")
+            return _Fixture.renamed_sibling
+
+        with swap(_Fixture, "hook", deferred), swap(_Fixture, "sabotaged", True):
+            yield
+
+    @contextlib.contextmanager
     def teardown_raises():
         # Applies its fault, so the arm itself is a genuine red: the teardown failure has to be
         # reported ALONGSIDE that red rather than instead of it, and must not cancel the arms after.
@@ -750,6 +805,7 @@ def _selftest() -> int:
         ("a setup that raises on its second step", setup_raises_after_a_mutation),
         ("a setup that reads a renamed attribute", setup_reads_a_renamed_attribute),
         ("a setup that raises inside the check", setup_raises_inside_the_check),
+        ("a fault whose replacement reads a renamed sibling", replacement_reads_a_renamed_sibling),
         ("a teardown that raises", teardown_raises),
         ("an arm after a failed teardown", applies_the_fault),
     ]
@@ -789,6 +845,7 @@ def _selftest() -> int:
          "ValueError: fixture setup failed on its second step"),
         ("a setup that reads a renamed attribute", "SETUP", "ControlSetupError: "),
         ("a setup that raises inside the check", "SETUP", "ControlSetupError: "),
+        ("a fault whose replacement reads a renamed sibling", "SETUP", "ControlSetupError: "),
         ("a teardown that raises", "TEARDOWN", "RuntimeError: fixture teardown could not restore"),
     ):
         # Anchored on the text `_setup_failed`/`_teardown` write around the arm name, for the same
@@ -817,10 +874,13 @@ def _selftest() -> int:
         problems.append("a fault was left applied after its arm finished")
     if getattr(_Fixture, "half_applied", False):
         problems.append("a fault that raised on its second step left the first one applied")
-    # Two arms above rely on `renamed_away` being ABSENT. If either ever creates it, the other stops
-    # discriminating in silence, which is the shape this whole file exists to catch.
+    # Three arms above rely on a name being ABSENT -- two on `renamed_away`, one on
+    # `renamed_sibling`. If any of them ever creates one, the arms resting on it stop discriminating
+    # in silence, which is the shape this whole file exists to catch.
     if hasattr(_Fixture, "renamed_away"):
         problems.append("a fixture arm left `renamed_away` defined, so both rename arms are inert")
+    if hasattr(_Fixture, "renamed_sibling"):
+        problems.append("a fixture arm left `renamed_sibling` defined, so the lazy-read arm is inert")
 
     if problems:
         print(" !! controls selftest FAILED:")
