@@ -66,17 +66,30 @@ public sealed class FleetProjectionWriterTests : IDisposable
     /// write, else the defect in words. Factored out of the racing reader below so
     /// <see cref="ReadClassifier_NamesATornBody_AndPassesAWholeOne"/> can drive it against a
     /// deliberately torn body without racing anything — the race arm and the discriminating control
-    /// then cannot drift apart, which is the failure mode a second hand-rolled copy of these two
+    /// then cannot drift apart, which is the failure mode a second hand-rolled copy of these
     /// conditions would have.
+    /// <para>
+    /// Each whole write is a single repeated fill character, so a body's LENGTH says which write it
+    /// ought to be and that write's fill character is then the oracle for the whole body. Binding the
+    /// two together is what catches the partial shape a first-versus-last-character check cannot see:
+    /// a truncated prefix of the LONGER write whose length happens to equal the shorter write's, which
+    /// is uniform, whole-looking, and still a partial body.
+    /// </para>
     /// </summary>
-    private static string? ClassifyRead(string text, int lengthA, int lengthB)
+    private static string? ClassifyRead(string text, string wholeA, string wholeB)
     {
-        if (text.Length != lengthA && text.Length != lengthB)
+        var expected = text.Length == wholeA.Length ? wholeA[0]
+            : text.Length == wholeB.Length ? wholeB[0]
+            : (char?)null;
+
+        if (expected is null)
         {
-            return $"torn read of length {text.Length} (expected {lengthA} or {lengthB})";
+            return $"torn read of length {text.Length} (expected {wholeA.Length} or {wholeB.Length})";
         }
 
-        return text.Length > 0 && text[0] != text[^1] ? "read mixed content from two writes" : null;
+        return text[0] != expected || text[^1] != expected
+            ? $"read of length {text.Length} runs '{text[0]}'..'{text[^1]}', not the whole '{expected}' write"
+            : null;
     }
 
     /// <summary>
@@ -134,7 +147,7 @@ public sealed class FleetProjectionWriterTests : IDisposable
                     {
                         var text = streamReader.ReadToEnd();
                         landedReads++;
-                        tornRead = ClassifyRead(text, contentA.Length, contentB.Length);
+                        tornRead = ClassifyRead(text, contentA, contentB);
                         if (tornRead is not null)
                         {
                             return;
@@ -193,17 +206,24 @@ public sealed class FleetProjectionWriterTests : IDisposable
         var contentB = new string('b', 80_000);
 
         // A partial JSON body -- the prefix a non-atomic writer's truncate-then-write leaves visible.
-        var torn = ClassifyRead(new string('b', 31_000), contentA.Length, contentB.Length);
+        var torn = ClassifyRead(new string('b', 31_000), contentA, contentB);
         Assert.NotNull(torn);
         Assert.Contains("31000", torn, StringComparison.Ordinal);
 
-        // The other torn shape, which the length check alone cannot see: a whole-looking length made of
-        // two different writes.
-        Assert.NotNull(ClassifyRead(new string('b', 49_999) + "a", contentA.Length, contentB.Length));
+        // The shape a length check alone cannot see: a whole-looking length made of two writes.
+        Assert.NotNull(ClassifyRead(new string('b', 49_999) + "a", contentA, contentB));
 
-        // Polarity: both whole bodies pass, so the arm above is not merely "everything is torn".
-        Assert.Null(ClassifyRead(contentA, contentA.Length, contentB.Length));
-        Assert.Null(ClassifyRead(contentB, contentA.Length, contentB.Length));
+        // The shape a first-versus-last-character check alone cannot see, and the one #2012's own
+        // "must still fail on a genuinely torn read (a partial JSON body)" names: a truncated prefix
+        // of the LONGER write, uniform throughout, whose length collides with the shorter write's.
+        var collidingPrefix = ClassifyRead(new string('b', 50_000), contentA, contentB);
+        Assert.NotNull(collidingPrefix);
+        Assert.Contains("'b'", collidingPrefix, StringComparison.Ordinal);
+        Assert.Contains("'a'", collidingPrefix, StringComparison.Ordinal);
+
+        // Polarity: both whole bodies pass, so the arms above are not merely "everything is torn".
+        Assert.Null(ClassifyRead(contentA, contentA, contentB));
+        Assert.Null(ClassifyRead(contentB, contentA, contentB));
     }
 
     /// <summary>
@@ -222,6 +242,7 @@ public sealed class FleetProjectionWriterTests : IDisposable
     public void AContendedOpen_FailsTransiently_LeavingTheBodyWhole()
     {
         var path = Path.Combine(_tempHome, "projection.json");
+        var contentA = new string('a', 50_000);
         var contentB = new string('b', 80_000);
         FleetProjectionWriter.WriteAtomic(path, contentB);
 
@@ -243,7 +264,7 @@ public sealed class FleetProjectionWriterTests : IDisposable
 
         // The body the contended open never got to see is whole -- an open failure carries no
         // information about content, which is the whole of #2012's fork.
-        Assert.Null(ClassifyRead(File.ReadAllText(path), 50_000, contentB.Length));
+        Assert.Null(ClassifyRead(File.ReadAllText(path), contentA, contentB));
     }
 
     /// <summary>#1782: a reader that opens the file with <see cref="FileShare.Read"/> only (the
