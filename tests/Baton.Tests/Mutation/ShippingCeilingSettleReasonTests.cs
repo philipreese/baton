@@ -89,10 +89,9 @@ public sealed class ShippingCeilingSettleReasonTests
     }
 
     /// <summary>
-    /// The anchoring control (<see cref="GrantRefusal.Marker"/>'s rule, applied to this marker). A lane
-    /// working in Baton's OWN repository reads the file that defines the marker and gets it back inside
-    /// a tool result — a whole-stream substring search would call that a timed-out push. Anchored to a
-    /// completed run-command RESULT, a read of that file is not one.
+    /// The control for the anchoring rule
+    /// <see cref="IWorkerUsageParser.ReportsShippingCeilingTimeout"/> states — the false positive that
+    /// rule exists to stop, driven rather than described.
     /// </summary>
     [Fact]
     public void A_read_whose_content_merely_contains_the_marker_is_not_a_timed_out_push()

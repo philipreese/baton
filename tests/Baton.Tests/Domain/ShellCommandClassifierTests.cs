@@ -53,6 +53,7 @@ public sealed class ShellCommandClassifierTests
     [InlineData("git add -A && git push")]
     [InlineData("git push && gh pr create --fill")]
     [InlineData("git push | tee push.log")]
+    [InlineData("git push & ping -n 30 127.0.0.1")]
     [InlineData("dotnet build && git push")]
     public void A_chained_line_takes_its_highest_segment(string commandLine) =>
         Assert.Equal(ShellCommandClass.Shipping, ShellCommandClassifier.Classify(commandLine));
