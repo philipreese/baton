@@ -187,6 +187,100 @@ public sealed class CodexDynamicToolPolicy
         return tools;
     }
 
+    /// <summary>
+    /// #2008: the one IDENTIFYING argument of a dynamic-tool call, as a short string —
+    /// <see cref="CodexAppServerBroker"/> stamps it on the room's <c>mcp_tool_call</c> items under
+    /// <see cref="CodexUsageParser.ArgumentsIdentityField"/>, and
+    /// <see cref="CodexUsageParser.ShellCommandLines"/> reads it back. It lives HERE rather than in the
+    /// broker because this class declares the argument schema in
+    /// <see cref="BuildToolDefinitions"/> and consumes it in <see cref="ExecuteAsync"/>; a third copy
+    /// of "which key names the target" in the broker is exactly the drift <c>record-once</c> forbids.
+    /// <para>
+    /// <b>Which key, per tool, and nothing else</b>: the command line for
+    /// <see cref="RunCommandTool"/>, the path for the read/list/search/write-text tools, the declared
+    /// output name for <see cref="WriteOutputTool"/>, and the patched paths for
+    /// <see cref="ApplyPatchTool"/> (whose sole argument is the whole envelope, so the paths are read
+    /// out of it with the same parser that applies it). <c>content</c> and the patch body are NEVER
+    /// emitted: the stream-size constraint that made the sibling field a DIGEST rather than the
+    /// arguments applies unchanged here, and it is stated once beside that field in
+    /// <c>CodexAppServerBroker.Describe</c>.
+    /// </para>
+    /// <para>
+    /// <b>Truncated at <see cref="MaxIdentityCharacters"/></b> with a trailing <c>…</c>, because a
+    /// command line has no bound of its own and this field must not become the thing the digest exists
+    /// to avoid. That cap costs the dominant-shape reading it feeds nothing:
+    /// <c>Status.CommandShape.Normalize</c> reads the whole string but caps its own output at
+    /// <c>CommandShape.MaxShapeLength</c> (80), so anything this truncates was already past that
+    /// consumer's own cut. Equality comparisons use the digest, never this. Null — the field is then
+    /// simply absent — for a tool with no identifying key, for an argument object that carries none,
+    /// and for an <see cref="ApplyPatchTool"/> envelope this parser cannot read: an absent field is
+    /// honest, an invented one is not.
+    /// </para>
+    /// <para>
+    /// <b>The <c>_ =&gt; null</c> arm is reachable and is the deliberate limit of the claim.</b> A tool
+    /// name Baton implements nowhere — the hallucinated or stale name <see cref="DescribeUnknownTool"/>
+    /// answers, five of which #1920 measured on one arm — is announced as an <c>mcp_tool_call</c> pair
+    /// before <see cref="ExecuteAsync"/> ever rejects it, and those two items carry a digest and no
+    /// identity. Scraping one out of raw arguments for a name with no known schema would reintroduce
+    /// exactly the whole-file-into-the-stream bound this method exists to hold.
+    /// </para>
+    /// </summary>
+    internal static string? InputIdentity(string toolName, JsonElement arguments)
+    {
+        if (arguments.ValueKind != JsonValueKind.Object)
+        {
+            return null;
+        }
+
+        var identity = toolName switch
+        {
+            RunCommandTool => OptionalString(arguments, "command"),
+            ReadTextTool or ListFilesTool or SearchTextTool or WriteTextTool =>
+                OptionalString(arguments, "path"),
+            WriteOutputTool => OptionalString(arguments, "name"),
+            ApplyPatchTool => PatchedPaths(OptionalString(arguments, "input")),
+            _ => null,
+        };
+
+        return identity is not { Length: > 0 }
+            ? null
+            : identity.Length <= MaxIdentityCharacters
+                ? identity
+                : identity[..MaxIdentityCharacters] + "…";
+    }
+
+    /// <summary>
+    /// The paths an <c>apply_patch</c> envelope touches, in envelope order, space-separated. Parsed
+    /// with <see cref="CodexApplyPatch.Parse"/> — the same reader <see cref="ApplyPatch"/> applies the
+    /// envelope with, so the recorded identity cannot name a path the write did not touch. That parser
+    /// throws <see cref="ArgumentException"/> on a malformed envelope, which here is not an error: the
+    /// call will fail on its own in <see cref="ExecuteAsync"/>, and the item simply carries no identity
+    /// rather than a guess scraped out of unparseable text.
+    /// </summary>
+    private static string? PatchedPaths(string? input)
+    {
+        if (input is not { Length: > 0 })
+        {
+            return null;
+        }
+
+        try
+        {
+            return string.Join(' ', CodexApplyPatch.Parse(input).Select(operation => operation.Path));
+        }
+        catch (ArgumentException)
+        {
+            return null;
+        }
+    }
+
+    private static string? OptionalString(JsonElement arguments, string name) =>
+        arguments.TryGetProperty(name, out var value) && value.ValueKind == JsonValueKind.String
+            ? value.GetString()
+            : null;
+
+    private const int MaxIdentityCharacters = 512;
+
     public async Task<CodexDynamicToolResult> ExecuteAsync(
         string toolName, JsonElement arguments, CancellationToken cancellationToken = default)
     {

@@ -392,25 +392,15 @@ public static class CodexAppServerBroker
         var tool = message["params"]?["tool"]?.GetValue<string>() ?? "unknown";
         var arguments = message["params"]?["arguments"];
         using var argumentsDocument = JsonDocument.Parse(arguments?.ToJsonString() ?? "{}");
+        // #2008: computed ONCE and stamped on both of this call's items. Two computations of the same
+        // two fields is how the started and the completed item would come to disagree about a call
+        // they both name.
+        var digest = ArgumentsDigest(argumentsDocument.RootElement);
+        var identity = CodexDynamicToolPolicy.InputIdentity(tool, argumentsDocument.RootElement);
         await EmitAsync(batonOutput, new JsonObject
         {
             ["type"] = "item.started",
-            ["item"] = new JsonObject
-            {
-                ["type"] = "mcp_tool_call",
-                ["tool"] = tool,
-                // #1921: what makes "this lane re-issued a call it had already made" countable on codex.
-                // Codex's own item.started names the tool and never its arguments, so without this the
-                // repeat count has nothing to key on and CodexUsageParser.ToolInvocationKeys reports
-                // none -- which is what it still does for a stream captured before this landed.
-                //
-                // A DIGEST rather than the arguments: a write_text call's arguments carry a whole file,
-                // and a repeat count only ever asks two keys whether they are equal. Emitting the
-                // arguments themselves would put a file's contents into the captured stream a second
-                // time to answer a question 16 hex characters answer, and every byte of .stdout.log is
-                // a byte the projector re-reads at settle and the rollover threshold counts.
-                [CodexUsageParser.ArgumentsDigestField] = ArgumentsDigest(argumentsDocument.RootElement),
-            },
+            ["item"] = Describe(tool, digest, identity),
         }).ConfigureAwait(false);
         var result = await policy.ExecuteAsync(tool, argumentsDocument.RootElement, cancellationToken)
             .ConfigureAwait(false);
@@ -427,17 +417,58 @@ public static class CodexAppServerBroker
                 }),
             },
         }, cancellationToken).ConfigureAwait(false);
+        var completed = Describe(tool, digest, identity);
+        completed["status"] = result.Success ? "completed" : "failed";
+        completed["aggregated_output"] = result.Text;
         await EmitAsync(batonOutput, new JsonObject
         {
             ["type"] = "item.completed",
-            ["item"] = new JsonObject
-            {
-                ["type"] = "mcp_tool_call",
-                ["tool"] = tool,
-                ["status"] = result.Success ? "completed" : "failed",
-                ["aggregated_output"] = result.Text,
-            },
+            ["item"] = completed,
         }).ConfigureAwait(false);
+    }
+
+    /// <summary>
+    /// #2008: one <c>mcp_tool_call</c> item's identifying fields, stamped on BOTH lifecycle items of a
+    /// call so every such item in a room answers the same two questions. Before this, the digest sat on
+    /// <c>item.started</c> alone — half of every codex room's <c>mcp_tool_call</c> lines — so an audit
+    /// reading the completed items (the ones that carry the outcome) could not tell two of them apart.
+    /// <para>
+    /// <b>Stamping the completed item counts nothing twice.</b> The two readers that tally are anchored
+    /// on one lifecycle line each and stay there:
+    /// <c>Status.CodexUsageParser.ToolInvocationKeys</c>, <c>ShellCommandLines</c> and
+    /// <c>CountToolSteps</c> (via <c>TryParseToolName</c>) read <c>item.started</c> only;
+    /// <c>CountRefusedToolSteps</c>/<c>CountEmptyToolResults</c> read <c>item.completed</c> only. A reader that stopped gating on the
+    /// envelope's <c>type</c> would double every codex figure at once, which is what those methods'
+    /// tests pin.
+    /// </para>
+    /// </summary>
+    private static JsonObject Describe(string tool, string digest, string? identity)
+    {
+        var item = new JsonObject
+        {
+            ["type"] = "mcp_tool_call",
+            ["tool"] = tool,
+            // #1921: what makes "this lane re-issued a call it had already made" countable on codex.
+            // Codex's own item.started names the tool and never its arguments, so without this the
+            // repeat count has nothing to key on and CodexUsageParser.ToolInvocationKeys reports
+            // none -- which is what it still does for a stream captured before this landed.
+            //
+            // A DIGEST rather than the arguments: a write_text call's arguments carry a whole file,
+            // and a repeat count only ever asks two keys whether they are equal. Emitting the
+            // arguments themselves would put a file's contents into the captured stream a second
+            // time to answer a question 16 hex characters answer, and every byte of .stdout.log is
+            // a byte the projector re-reads at settle and the rollover threshold counts.
+            [CodexUsageParser.ArgumentsDigestField] = digest,
+        };
+        // #2008: absent rather than null when the tool has no identifying argument -- a null would read
+        // as "this call had no target", which is a different claim from "this shape names none".
+        // CodexDynamicToolPolicy.InputIdentity states which key each tool's is and what it excludes.
+        if (identity is { Length: > 0 })
+        {
+            item[CodexUsageParser.ArgumentsIdentityField] = identity;
+        }
+
+        return item;
     }
 
     /// <summary>
