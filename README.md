@@ -127,6 +127,10 @@ command when the bind is refused, and the loopback listener comes up either way:
 netsh http add urlacl url=http://<your-tailscale-ip>:8420/ user=$env:USERDOMAIN\$env:USERNAME
 ```
 
+One reservation per refused prefix, so a machine with an IPv6 tailnet address needs a second, with
+the address bracketed. Don't retype either from here — the daemon prints the exact command for the
+prefix it could not bind.
+
 For HTTPS (and a name instead of an IP), let Tailscale terminate TLS in front of it — two lines,
 run on the fleet machine, after which the page is at `https://<machine>.<tailnet>.ts.net/`.
 **Unlike the `netsh` line above, this recipe is Tailscale's documented usage and has not been run

@@ -97,14 +97,19 @@ internal sealed class GlassHttpService : BackgroundService
         {
             var prefix = GlassBindPolicy.PrefixFor(address, port);
             var listener = new HttpListener();
-            listener.Prefixes.Add(prefix);
             try
             {
+                // Prefixes.Add is inside the try because it can reject a prefix outright
+                // (ArgumentException), and this loop now builds a shape no run has exercised: the
+                // bracketed IPv6 prefix an interface-gated ULA produces. A prefix costing its own
+                // reachability is this class's stated contract; a prefix taking the whole daemon down
+                // with it would not be.
+                listener.Prefixes.Add(prefix);
                 listener.Start();
                 listeners.Add(listener);
                 bound.Add(prefix);
             }
-            catch (HttpListenerException ex)
+            catch (Exception ex) when (ex is HttpListenerException or ArgumentException)
             {
                 listener.Close();
                 // Loud, once, with the exact remediation -- an operator who sees only "access is

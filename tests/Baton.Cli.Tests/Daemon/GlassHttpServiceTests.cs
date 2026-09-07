@@ -169,8 +169,9 @@ public sealed class GlassHttpServiceTests : IDisposable
             Assert.Equal(content, await response.Content.ReadAsStringAsync(cts.Token));
 
             // The route releases its handle before responding, so this only proves the write is not
-            // blocked afterwards. What the share mode itself buys is the next test, which holds a
-            // handle across the write.
+            // blocked afterwards. What the share mode itself buys is
+            // The_projection_route_opens_the_file_so_a_rename_over_it_can_still_succeed, which holds a
+            // handle across the replace.
             FleetProjectionWriter.WriteAtomic(harness.ProjectionPath, """{"rooms":[]}""");
             Assert.Equal("""{"rooms":[]}""", await File.ReadAllTextAsync(harness.ProjectionPath, cts.Token));
         }
