@@ -768,9 +768,10 @@ public static class DispatchCommand
     /// <summary>
     /// The production evaluator, over the settings the caller already loaded once for this dispatch,
     /// reading each vendor's latest PERSISTED snapshot (<see cref="RunwaySnapshotReader"/>) — and,
-    /// since #1923, harvesting once inline when a gated vendor has no snapshot at all.
+    /// since #1923, harvesting once inline when a gated vendor's snapshot cannot decide the admission.
     /// <see cref="OnDemandRunwayHarvest"/> owns that bootstrap and its bound; this method only decides
-    /// WHEN it runs (snapshot absent) and hands the attempt to the gate so the refusal can name it.
+    /// WHEN it runs — snapshot absent, or, since #1966, stale — and hands the attempt to the gate so the
+    /// refusal can name it.
     /// </summary>
     /// <remarks>
     /// <para>
@@ -785,7 +786,9 @@ public static class DispatchCommand
     /// <c>Func&lt;string, RunwayDecision&gt;</c> that roughly thirty test call sites already bind method
     /// groups to; widening it to a task-returning delegate would churn all of them to buy nothing here.
     /// The wait cannot exceed <see cref="OnDemandRunwayHarvest.Bound"/> (10 s) per gated vendor with no
-    /// snapshot, happens at most once per vendor per dispatch, and runs in a console process and on a
+    /// USABLE snapshot — absent, or, since #1966, stale, which is not a one-time bootstrap: on a machine
+    /// with no daemon it recurs every <c>maxSnapshotAgeHours</c> — happens at most once per vendor per
+    /// dispatch, and runs in a console process and on a
     /// thread-pool thread — no synchronization context either way, so there is no deadlock to have.
     /// It does not observe the dispatch's cancellation token for the same reason: the token is not in
     /// scope of a sync delegate, and the time bound is what makes that safe rather than unbounded.
@@ -806,11 +809,18 @@ public static class DispatchCommand
         Func<string, bool, Task<RunwayHarvestAttempt?>>? harvest = null) =>
         vendor =>
         {
-            var harvestOnce = harvest ?? ((v, exists) => OnDemandRunwayHarvest
-                .TryHarvestAsync(v, exists, VendorUsageSources.Default, CancellationToken.None));
+            var harvestOnce = harvest ?? ((v, usable) => OnDemandRunwayHarvest
+                .TryHarvestAsync(v, usable, VendorUsageSources.Default, CancellationToken.None));
 
+            var thresholds = settings.RunwayHold.For(vendor);
+            var now = DateTimeOffset.UtcNow;
             var snapshot = RunwaySnapshotReader.Read(vendor);
-            var attempt = harvestOnce(vendor, snapshot is not null)
+
+            // #1966: STALE is handed to the harvest as "not usable", not as "exists". A snapshot past
+            // the staleness limit decides nothing (RunwayGate.IsUsable owns that comparison), so leaving
+            // it unharvested refused the vendor on a counter no later reader was going to replace --
+            // which is the measured incident the issue carries.
+            var attempt = harvestOnce(vendor, RunwayGate.IsUsable(snapshot, thresholds, now))
                 .GetAwaiter()
                 .GetResult();
 
@@ -818,12 +828,12 @@ public static class DispatchCommand
             {
                 // Re-read rather than using the in-memory snapshot: the gate must decide on what is
                 // actually persisted, so a write that silently failed holds instead of admitting on a
-                // value no later reader would see.
+                // value no later reader would see. It is also what makes a successful stale-path harvest
+                // decide on the FRESH counters -- drop this and the gate re-holds on the stale ones.
                 snapshot = RunwaySnapshotReader.Read(vendor);
             }
 
-            return RunwayGate.Evaluate(
-                vendor, snapshot, settings.RunwayHold.For(vendor), DateTimeOffset.UtcNow, attempt);
+            return RunwayGate.Evaluate(vendor, snapshot, thresholds, now, attempt);
         };
 
     /// <summary>

@@ -255,6 +255,34 @@ public class RunwayGateTests
     }
 
     /// <summary>
+    /// #1966 review: the stale Hold's third wording, which nothing asserted — the arm
+    /// <c>RunwayGate.DescribeFailedHarvest</c>'s own doc comment describes and this file had no
+    /// instrument for. The control is the second half: the identical stale snapshot with no attempt must
+    /// NOT carry the suffix, or a gate that appended it unconditionally would pass on the first half.
+    /// </summary>
+    [Fact]
+    public void A_stale_snapshot_whose_harvest_succeeded_and_is_still_stale_says_so()
+    {
+        var stale = ClaudeUsageSlashCommandSource.Parse(
+            "Current session: 0% used\nCurrent week (all models): 0% used\n", Now.AddHours(-7));
+        var attempt = new RunwayHarvestAttempt(
+            new DateTimeOffset(2026, 9, 5, 15, 58, 0, TimeSpan.Zero), FailureReason: null);
+
+        var decision = RunwayGate.Evaluate("claude", stale, new RunwayThresholds(), Now, attempt);
+
+        Assert.Equal(RunwayDisposition.Hold, decision.Disposition);
+        Assert.Contains("stale counter", decision.Reason!, StringComparison.Ordinal);
+        Assert.Contains(
+            "harvest attempted at 15:58 and the snapshot it wrote is older than the limit too",
+            decision.Reason!,
+            StringComparison.Ordinal);
+        Assert.DoesNotContain("and failed", decision.Reason!, StringComparison.Ordinal);
+
+        var withoutAttempt = RunwayGate.Evaluate("claude", stale, new RunwayThresholds(), Now);
+        Assert.DoesNotContain("older than the limit too", withoutAttempt.Reason!, StringComparison.Ordinal);
+    }
+
+    /// <summary>
     /// #1848 review: the tripwire under the staleness message's formatting — why it is not an integer
     /// cast is stated once, beside the format string in <see cref="RunwayGate.Evaluate"/>.
     /// </summary>

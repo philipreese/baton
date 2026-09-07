@@ -62,7 +62,7 @@ public sealed class OnDemandRunwayHarvestTests : IDisposable
         Assert.True(Decide("agy", attempt: null).IsHold);
 
         var attempt = await OnDemandRunwayHarvest.TryHarvestAsync(
-            "agy", snapshotExists: false, [source], TestContext.Current.CancellationToken);
+            "agy", snapshotUsable: false, [source], TestContext.Current.CancellationToken);
 
         Assert.NotNull(attempt);
         Assert.Null(attempt.FailureReason);
@@ -82,7 +82,7 @@ public sealed class OnDemandRunwayHarvestTests : IDisposable
         var source = new StubUsageSource("agy", () => throw new InvalidOperationException("agy exited 1"));
 
         var attempt = await OnDemandRunwayHarvest.TryHarvestAsync(
-            "agy", snapshotExists: false, [source], TestContext.Current.CancellationToken);
+            "agy", snapshotUsable: false, [source], TestContext.Current.CancellationToken);
 
         Assert.NotNull(attempt);
         Assert.Equal("agy exited 1", attempt.FailureReason);
@@ -109,7 +109,7 @@ public sealed class OnDemandRunwayHarvestTests : IDisposable
         var source = new StubUsageSource("agy", () => null);
 
         var attempt = await OnDemandRunwayHarvest.TryHarvestAsync(
-            "agy", snapshotExists: false, [source], TestContext.Current.CancellationToken);
+            "agy", snapshotUsable: false, [source], TestContext.Current.CancellationToken);
 
         Assert.NotNull(attempt);
         Assert.NotNull(attempt.FailureReason);
@@ -134,25 +134,48 @@ public sealed class OnDemandRunwayHarvestTests : IDisposable
         var source = new StubUsageSource(vendor, () => AgySnapshot(95, 90));
 
         var attempt = await OnDemandRunwayHarvest.TryHarvestAsync(
-            vendor, snapshotExists: false, [source], TestContext.Current.CancellationToken);
+            vendor, snapshotUsable: false, [source], TestContext.Current.CancellationToken);
 
         Assert.Null(attempt);
         Assert.Equal(0, source.Reads);
         Assert.Equal(RunwayGate.UnmeasuredReason, Decide(vendor, attempt).Reason);
     }
 
-    /// <summary>A vendor that already has a snapshot pays nothing — the harvest is the cold-start path,
-    /// not something on every dispatch.</summary>
+    /// <summary>A vendor that already has a USABLE snapshot pays nothing — the harvest is the path for
+    /// counters that cannot decide, not something on every dispatch.</summary>
     [Fact]
-    public async Task A_vendor_that_already_has_a_snapshot_is_not_harvested()
+    public async Task A_vendor_that_already_has_a_usable_snapshot_is_not_harvested()
     {
         var source = new StubUsageSource("agy", () => AgySnapshot(95, 90));
 
         var attempt = await OnDemandRunwayHarvest.TryHarvestAsync(
-            "agy", snapshotExists: true, [source], TestContext.Current.CancellationToken);
+            "agy", snapshotUsable: true, [source], TestContext.Current.CancellationToken);
 
         Assert.Null(attempt);
         Assert.Equal(0, source.Reads);
+    }
+
+    /// <summary>
+    /// #1966's polarity partner for the arm above, on the flag whose meaning changed: a snapshot that
+    /// EXISTS but is past the staleness limit is "not usable", and buys the same one harvest an absent
+    /// one does. Without this arm the rename from <c>snapshotExists</c> is a spelling change — the two
+    /// arms together are what pin that the flag means freshness and not presence.
+    /// </summary>
+    [Fact]
+    public async Task A_vendor_whose_snapshot_is_stale_is_harvested_like_one_with_none()
+    {
+        VendorUsageHarvester.Persist(
+            "agy", AgySnapshot(95, 90, Now - TimeSpan.FromHours(12.2)));
+        Assert.NotNull(RunwaySnapshotReader.Read("agy"));
+
+        var source = new StubUsageSource("agy", () => AgySnapshot(95, 90));
+
+        var attempt = await OnDemandRunwayHarvest.TryHarvestAsync(
+            "agy", snapshotUsable: false, [source], TestContext.Current.CancellationToken);
+
+        Assert.NotNull(attempt);
+        Assert.Null(attempt.FailureReason);
+        Assert.Equal(1, source.Reads);
     }
 
     /// <summary>
@@ -167,10 +190,10 @@ public sealed class OnDemandRunwayHarvestTests : IDisposable
     [Fact]
     public void The_production_evaluator_harvests_before_deciding_when_no_snapshot_exists()
     {
-        var calls = new List<(string Vendor, bool SnapshotExists)>();
-        Task<RunwayHarvestAttempt?> Harvest(string vendor, bool snapshotExists)
+        var calls = new List<(string Vendor, bool SnapshotUsable)>();
+        Task<RunwayHarvestAttempt?> Harvest(string vendor, bool snapshotUsable)
         {
-            calls.Add((vendor, snapshotExists));
+            calls.Add((vendor, snapshotUsable));
             VendorUsageHarvester.Persist(
                 vendor, AgySnapshot(weeklyRemaining: 95, fiveHourRemaining: 90, DateTimeOffset.UtcNow));
             return Task.FromResult<RunwayHarvestAttempt?>(
@@ -198,6 +221,70 @@ public sealed class OnDemandRunwayHarvestTests : IDisposable
     }
 
     /// <summary>
+    /// <b>#1966's measured incident, end to end</b> — the morning hold on a 12.2 h-old agy snapshot that
+    /// the conductor had to <c>--override-runway</c> past; spec/baton.md §7 carries the measurement, and
+    /// the age below is its. The stale snapshot's counters are DELIBERATELY under both thresholds and
+    /// identical to the fresh ones, so the only thing that can move this from Hold to Admit is deciding
+    /// on the re-read snapshot rather than the one in hand — an evaluator that harvests and then still
+    /// evaluates its stale copy stays red here, which a fixture with admissible-only-when-fresh counters
+    /// would not catch.
+    /// </summary>
+    [Fact]
+    public void A_stale_snapshot_and_a_working_source_is_decided_on_the_freshly_harvested_counters()
+    {
+        var stale = AgySnapshot(
+            weeklyRemaining: 95, fiveHourRemaining: 90, DateTimeOffset.UtcNow - TimeSpan.FromHours(12.2));
+        VendorUsageHarvester.Persist("agy", stale);
+
+        // The control: the same counters, at the same age, with a harvest that does nothing. Stale holds.
+        var held = DispatchCommand.CreateDiskRunwayEvaluator(
+            new DaemonSettings(), (_, _) => Task.FromResult<RunwayHarvestAttempt?>(null))("agy");
+        Assert.Equal(RunwayDisposition.Hold, held.Disposition);
+        Assert.Contains("stale counter", held.Reason!, StringComparison.Ordinal);
+
+        var calls = new List<(string Vendor, bool SnapshotUsable)>();
+        Task<RunwayHarvestAttempt?> Harvest(string vendor, bool snapshotUsable)
+        {
+            calls.Add((vendor, snapshotUsable));
+            VendorUsageHarvester.Persist(
+                vendor, AgySnapshot(weeklyRemaining: 95, fiveHourRemaining: 90, DateTimeOffset.UtcNow));
+            return Task.FromResult<RunwayHarvestAttempt?>(
+                new RunwayHarvestAttempt(DateTimeOffset.Now, FailureReason: null));
+        }
+
+        var decision = DispatchCommand.CreateDiskRunwayEvaluator(new DaemonSettings(), Harvest)("agy");
+
+        // The flag the evaluator computes says "not usable" for a snapshot that exists but is stale --
+        // this is what routes it down the harvest path at all.
+        Assert.Equal(("agy", false), Assert.Single(calls));
+        Assert.Equal(RunwayDisposition.Admit, decision.Disposition);
+        Assert.Null(decision.Reason);
+    }
+
+    /// <summary>
+    /// The fail-closed half of the arm above, and the one #1961 already shipped for an ABSENT snapshot:
+    /// a stale snapshot whose harvest fails still holds, and the refusal names the attempt beside the
+    /// staleness rather than reading as though nothing had been tried.
+    /// </summary>
+    [Fact]
+    public void A_stale_snapshot_whose_harvest_fails_still_holds_and_names_the_attempt()
+    {
+        VendorUsageHarvester.Persist(
+            "agy",
+            AgySnapshot(95, 90, DateTimeOffset.UtcNow - TimeSpan.FromHours(12.2)));
+
+        var decision = DispatchCommand.CreateDiskRunwayEvaluator(
+            new DaemonSettings(),
+            (_, _) => Task.FromResult<RunwayHarvestAttempt?>(
+                new RunwayHarvestAttempt(DateTimeOffset.Now, "agy exited 1")))("agy");
+
+        Assert.Equal(RunwayDisposition.Hold, decision.Disposition);
+        Assert.Contains("stale counter", decision.Reason!, StringComparison.Ordinal);
+        Assert.Contains("harvest attempted at", decision.Reason!, StringComparison.Ordinal);
+        Assert.Contains("agy exited 1", decision.Reason!, StringComparison.Ordinal);
+    }
+
+    /// <summary>
     /// The bound's own arm, on the path both gated vendors actually take: their sources kill the CLI and
     /// report the killed run as a null (<c>VendorUsageCommandRun</c> folds <c>BatonCancelException</c>
     /// into one), so "did not finish within Ns" has to be recognised there and not only in the
@@ -211,7 +298,7 @@ public sealed class OnDemandRunwayHarvestTests : IDisposable
 
         var attempt = await OnDemandRunwayHarvest.TryHarvestAsync(
             "agy",
-            snapshotExists: false,
+            snapshotUsable: false,
             [source],
             TimeSpan.FromMilliseconds(50),
             TestContext.Current.CancellationToken);

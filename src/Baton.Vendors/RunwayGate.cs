@@ -172,6 +172,20 @@ public static class RunwayGate
         !string.IsNullOrEmpty(vendor) && WindowNames.ContainsKey(vendor);
 
     /// <summary>
+    /// Whether <paramref name="snapshot"/> is evidence this gate can decide on at <paramref name="now"/>:
+    /// present, and no older than <see cref="RunwayThresholds.EffectiveMaxSnapshotAge"/>. <b>The one place
+    /// that comparison is written</b> — <see cref="Evaluate"/>'s staleness arm and #1966's caller
+    /// (<c>DispatchCommand.CreateDiskRunwayEvaluator</c>, deciding whether to harvest inline) both read it
+    /// here rather than each spelling out an age test that could drift apart into a hold the harvest never
+    /// tries to clear.
+    /// </summary>
+    public static bool IsUsable(VendorUsageSnapshot? snapshot, RunwayThresholds thresholds, DateTimeOffset now)
+    {
+        ArgumentNullException.ThrowIfNull(thresholds);
+        return snapshot is not null && now - snapshot.HarvestedAt <= thresholds.EffectiveMaxSnapshotAge;
+    }
+
+    /// <summary>
     /// Decides admission for one vendor. <paramref name="snapshot"/> is that vendor's latest
     /// PERSISTED snapshot (null when none exists or it could not be read) — this method itself never
     /// makes a live <c>/usage</c> call.
@@ -179,11 +193,11 @@ public static class RunwayGate
     /// <param name="vendor">The adapter tag being dispatched to, e.g. <c>"claude"</c>.</param>
     /// <param name="now">The clock, passed in so the staleness arm is testable without waiting.</param>
     /// <param name="harvest">
-    /// #1923: the on-demand harvest the caller already ran for this vendor because it had no persisted
-    /// snapshot, or null when none was run (no source for the vendor, or a caller that does not harvest
-    /// at all). It only ever changes the WORDING of the missing-snapshot Hold — never the disposition,
-    /// which stays a Hold in every arm, because a failed harvest is exactly as much evidence of headroom
-    /// as no harvest at all.
+    /// #1923: the on-demand harvest the caller already ran for this vendor because its persisted snapshot
+    /// was absent — or, since #1966, stale — or null when none was run (no source for the vendor, or a
+    /// caller that does not harvest at all). It only ever changes the WORDING of those two Holds — never
+    /// the disposition, which stays a Hold in every arm, because a failed harvest is exactly as much
+    /// evidence of headroom as no harvest at all.
     /// </param>
     public static RunwayDecision Evaluate(
         string vendor,
@@ -214,8 +228,7 @@ public static class RunwayGate
                 []);
         }
 
-        var age = now - snapshot.HarvestedAt;
-        if (age > thresholds.EffectiveMaxSnapshotAge)
+        if (!IsUsable(snapshot, thresholds, now))
         {
             return new RunwayDecision(
                 vendor,
@@ -223,8 +236,10 @@ public static class RunwayGate
                 // One decimal, invariant: an integer cast prints a 6h30m snapshot as "6h old (limit 6h)",
                 // which reads as a refusal for no reason. Invariant because the refusal text is asserted
                 // on, and a comma decimal separator is not what a message contract should turn on.
-                $"the usage snapshot is {Hours(age)}h old (limit {Hours(thresholds.EffectiveMaxSnapshotAge)}h) — "
-                + "a stale counter is a lower bound on today's usage, not evidence of headroom",
+                $"the usage snapshot is {Hours(now - snapshot.HarvestedAt)}h old "
+                + $"(limit {Hours(thresholds.EffectiveMaxSnapshotAge)}h) — "
+                + "a stale counter is a lower bound on today's usage, not evidence of headroom"
+                + DescribeFailedHarvest(harvest),
                 Counters(snapshot, names),
                 SnapshotHarvestedAt: snapshot.HarvestedAt);
         }
@@ -292,10 +307,31 @@ public static class RunwayGate
     private static string DescribeMissingSnapshot(RunwayHarvestAttempt? harvest) => harvest switch
     {
         null => "no readable usage snapshot has been harvested for this vendor",
-        { FailureReason: { } why } =>
-            $"harvest attempted at {At(harvest.At)} and failed: {why}",
-        _ => $"harvest attempted at {At(harvest.At)} and failed: it wrote no snapshot this gate could read",
+        { FailureReason: { } why } => Attempted(harvest.At, why),
+        _ => Attempted(harvest.At, "it wrote no snapshot this gate could read"),
     };
+
+    /// <summary>
+    /// The same "attempted and failed" clause, appended to the STALE Hold (#1966). A stale snapshot now
+    /// takes the same inline-harvest path an absent one has taken since #1923, so the refusal owes the
+    /// operator the same distinction: an old number nobody has tried to refresh is a daemon that is not
+    /// running, an old number a harvest just failed to refresh is a vendor or CLI fault to look at.
+    /// Empty ONLY when no harvest was attempted (a caller that does not harvest). A harvest that reported
+    /// success and still left the snapshot stale gets its own sentence rather than a silent omission,
+    /// since it means the vendor's report itself is dated — an outcome an operator has to be told about,
+    /// not one to hide behind the bare staleness line.
+    /// </summary>
+    private static string DescribeFailedHarvest(RunwayHarvestAttempt? harvest) => harvest switch
+    {
+        null => string.Empty,
+        { FailureReason: { } why } => $"; {Attempted(harvest.At, why)}",
+        _ => $"; harvest attempted at {At(harvest.At)} and the snapshot it wrote is older than the limit too",
+    };
+
+    /// <summary>The ONE "attempted and failed" wording, shared by every arm that reports one so the
+    /// absent and stale refusals cannot drift into two spellings of one outcome.</summary>
+    private static string Attempted(DateTimeOffset at, string why) =>
+        $"harvest attempted at {At(at)} and failed: {why}";
 
     private static string At(DateTimeOffset instant) =>
         instant.ToString("HH:mm", System.Globalization.CultureInfo.InvariantCulture);

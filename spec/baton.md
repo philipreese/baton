@@ -3794,19 +3794,42 @@ own `/usage` counters. It consumes the per-vendor projection #1391/#1869 already
 harvests, `baton dispatch` reads the persisted snapshot (`BatonPaths.VendorUsageSnapshotFile`). The
 harvester's own `/usage` call is exempt from everything below — it is how the counters are measured.
 
-**On demand, once, when there is nothing to read (#1923).** When a gated vendor has a usage source but
-no persisted snapshot at all, the hold runs that source once inline — bounded at 10 s, written through
-the harvester's own writer, no second snapshot format and no second source list
-(`VendorUsageSources.Default`) — and then decides. This is the one case in which a gate check spends
-subscription usage, and it is bounded to one `/usage` call per such vendor per dispatch: a vendor whose
-snapshot already exists, fresh or stale, is never harvested here, so the common path still spends
-nothing and the gate still cannot be what exhausts the runway it protects. It exists because the
-daemon's harvester only fires while a lane of that vendor is live (or 60 s after one exits), which made
-the first lane of a reset window unlaunchable — no lane, so no snapshot; no snapshot, so no lane.
-**A failed harvest still holds**, and says so: the refusal reads `harvest attempted at HH:MM and
-failed: <reason>` rather than `no readable usage snapshot`, because "never harvested" is a bootstrap
-state and "harvested and it failed" is a fault to look at. Harvesting a *stale* snapshot on demand is
-not this, and is not shipped — tracked, with the daemon-tick half of #1923, in #1966.
+**On demand, once, when what is there cannot decide (#1923, widened by #1966).** When a gated vendor
+has a usage source and no snapshot this gate can decide on, the hold runs that source once inline —
+bounded at 10 s, written through the harvester's own writer, no second snapshot format and no second
+source list (`VendorUsageSources.Default`) — and then decides on what was actually persisted. **Cannot
+decide** means the two cases this section already holds for: no snapshot at all (#1923), and, since
+#1966, one older than `maxSnapshotAgeHours` — `RunwayGate.IsUsable` is where that test is written, and
+a stale counter is not evidence of headroom, so leaving it unharvested refused a vendor on a number
+nothing was going to replace. A **fresh** snapshot is never harvested here, so the common path still
+spends nothing and the gate still cannot be what exhausts the runway it protects. This is the one case
+in which a gate check spends subscription usage, bounded to one `/usage` call per such vendor per
+dispatch. **A failed harvest still holds**, and says so, in both cases: the refusal reads `harvest
+attempted at HH:MM and failed: <reason>` — alone when there was no snapshot, appended to the staleness
+sentence when there was one — because "never harvested" is a bootstrap state and "harvested and it
+failed" is a fault to look at.
+
+**The daemon tick harvests every configured vendor, live lane or not (#1966).** `VendorUsageHarvester`
+walks `VendorUsageSources.Default` on each 30 s tick and harvests a vendor when any of three triggers
+is due: every 15 min while one of its lanes is live, every 30 min while none is
+(`VendorUsageHarvester.IdleInterval` — well inside the 6 h staleness limit, which is the point), and
+once after each window-reset instant the vendor's own last snapshot named. Jitter and the 60 s coalesce
+window are #1391's and unchanged, and every trigger obeys the window the same way — a boundary that
+falls inside it is *consumed* by the harvest that opened it, never deferred to a later tick; each
+boundary buys one harvest whether or not it succeeded, so a broken vendor CLI cannot turn the trigger
+into a spawn every tick. The vendors are harvested **strictly in series within a tick** — the tick
+awaits each vendor's source before starting the next, so the harvester never has two vendor CLIs
+running at once. That is the whole of the guarantee: the on-demand inline harvest above is not
+coordinated with the tick, and both live in the daemon process, so a hold evaluated while a tick is
+harvesting can spawn a second vendor CLI beside it. The bound is **one CLI from the tick plus one per
+concurrent gated dispatch evaluation** in that process, each bounded by its own timeout (10 s inline,
+45 s for a tick's source). What this replaced was the idle backoff (#1391: no harvesting at all without
+a live lane), which is what made the on-demand path above the only thing that
+ever refreshed an idle vendor: measured 2026-09-06 07:22 ET, an agy analysis lane held on a 12.2 h-old
+snapshot after no agy lane had run overnight, and the conductor had to override. What it costs is the
+extra `/usage` calls: at most one per vendor per 30 min while the fleet is idle, **plus one per window
+boundary** that vendor's last snapshot named — claude's session window resets every five hours, so the
+boundary trigger is the smaller half of the bill, not a rounding error inside the 30 min one.
 
 **Hold new admissions; never arrest for fleet reasons** (operator ruling, 2026-09-04). A dispatch that
 would start new vendor spend is refused before the room is provisioned; work already running always
@@ -3848,13 +3871,13 @@ table would route every ceiling-less codex dispatch down the "recognised window,
 arm — holding the newest vendor on the fleet for the same absence this paragraph chose to admit.
 Gating on the derived counters is a separate decision, not a consequence of the source existing.
 
-**The harvest is a prerequisite, and its absence is a Hold.** On a machine where the daemon has not
-harvested within `maxSnapshotAgeHours`, every `claude` and `agy` dispatch is refused until one harvests
-or the operator passes `--override-runway`. That is the ruling's own consequence, not an oversight:
-unreadable holds, and a stale snapshot is unreadable for this purpose. The narrower case of *no
-snapshot at all* is what #1923's on-demand harvest above resolves before deciding — and still a Hold
-when that harvest fails. A vendor with no usage source at all is unaffected — it is admitted as
-unmeasured.
+**The harvest is a prerequisite, and its absence is a Hold.** On a machine where nothing has harvested
+within `maxSnapshotAgeHours`, every `claude` and `agy` dispatch is refused until something does or the
+operator passes `--override-runway`. That is the ruling's own consequence, not an oversight: unreadable
+holds, and a stale snapshot is unreadable for this purpose. Both of the cases that reach it — no
+snapshot, and one past the limit — are what the on-demand harvest above tries to resolve before
+deciding, and both are still a Hold when that harvest fails. A vendor with no usage source at all is
+unaffected — it is admitted as unmeasured.
 
 **Thresholds are operator config**, in the settings file baton already has —
 `{BatonPaths.Root}/settings.json`, `DaemonSettings.RunwayHold` — fleet-wide with per-vendor overrides

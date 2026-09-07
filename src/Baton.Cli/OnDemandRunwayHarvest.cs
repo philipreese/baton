@@ -5,11 +5,14 @@ namespace Baton.Cli;
 
 /// <summary>
 /// #1923: the runway hold's own harvest, run once inline for a vendor whose counters decide its
-/// admission and whose snapshot file does not exist yet. <b>The bootstrap this closes:</b> the
-/// daemon's <see cref="VendorUsageHarvester"/> only harvests a vendor while one of its lanes is live
-/// (or just after one exits), so a vendor with no lane running never got a snapshot, and the hold read
-/// "no snapshot" as halted — the first agy lane of a window could not start because no agy lane was
-/// running. Measured 2026-09-05 and ruled in spec/baton.md §7, which is the register for the contract.
+/// admission and whose snapshot cannot decide it — absent, or (since #1966) stale. <b>The bootstrap
+/// this closes:</b> the daemon's <see cref="VendorUsageHarvester"/> used to harvest a vendor only while
+/// one of its lanes was live (or just after one exited), so a vendor with no lane running never got a
+/// snapshot, and the hold read "no snapshot" as halted — the first agy lane of a window could not start
+/// because no agy lane was running. Measured 2026-09-05 and ruled in spec/baton.md §7, which is the
+/// register for the contract. #1966 gave that harvester a live-lane-independent cadence
+/// (<see cref="VendorUsageHarvester.IdleInterval"/>), so this path is now the exception it was always
+/// meant to be rather than the only thing that harvests an idle vendor.
 /// </summary>
 /// <remarks>
 /// <para>
@@ -21,9 +24,14 @@ namespace Baton.Cli;
 /// </para>
 /// <para>
 /// <b>Spends at most one <c>/usage</c> call per gated vendor per dispatch</b>, and only when that
-/// vendor has no snapshot on disk. A vendor whose snapshot exists — fresh or stale — is not harvested
-/// here: stale is a state the daemon's cadence already refreshes, and re-harvesting it would put a
-/// vendor spawn on the common path rather than the cold-start one.
+/// vendor's snapshot cannot decide the admission — absent, or (since #1966) older than
+/// <see cref="RunwayThresholds.EffectiveMaxSnapshotAge"/> — spec/baton.md §7 states that bound and what
+/// the common path therefore costs. #1961 confined this to absent on the
+/// reasoning that the daemon's cadence already refreshed a stale one; #1966 measured that it did not —
+/// that cadence only fired while a lane of the same vendor was live, so an idle vendor's snapshot aged
+/// past the limit and every dispatch was refused on a counter no harvest was going to replace. The
+/// daemon tick now harvests regardless of live lanes (spec/baton.md §7), which is what keeps this arm
+/// the exception rather than the rule.
 /// </para>
 /// <para>
 /// <b>No new spawn site.</b> The vendor CLI is started by the <see cref="IVendorUsageSource"/>
@@ -58,19 +66,22 @@ public static class OnDemandRunwayHarvest
     /// <summary>
     /// Harvests <paramref name="vendor"/> once and persists what it read, or returns null when no
     /// harvest was attempted — the vendor is not gated (its decision cannot turn on counters), no
-    /// source ships for it, or a snapshot already exists. Null is the caller's signal to leave the
-    /// refusal's existing "never harvested" wording alone.
+    /// source ships for it, or a usable snapshot already exists. Null is the caller's signal to leave
+    /// the refusal's existing wording alone.
     /// </summary>
-    /// <param name="snapshotExists">
-    /// Whether the vendor already has a readable persisted snapshot. Passed in rather than re-read
-    /// here so the caller reads the file exactly once per decision.
+    /// <param name="snapshotUsable">
+    /// Whether the vendor already has a persisted snapshot this gate can decide on —
+    /// <see cref="RunwayGate.IsUsable"/>, which is present AND within the staleness limit. Passed in
+    /// rather than re-read here so the caller reads the file exactly once per decision, and expressed as
+    /// "usable" rather than "exists" since #1966: a stale snapshot is not evidence, so it buys the same
+    /// harvest an absent one does.
     /// </param>
     public static Task<RunwayHarvestAttempt?> TryHarvestAsync(
         string vendor,
-        bool snapshotExists,
+        bool snapshotUsable,
         IReadOnlyList<IVendorUsageSource> sources,
         CancellationToken cancellationToken) =>
-        TryHarvestAsync(vendor, snapshotExists, sources, Bound, cancellationToken);
+        TryHarvestAsync(vendor, snapshotUsable, sources, Bound, cancellationToken);
 
     /// <summary>
     /// Test-only seam (Baton.Cli.Tests, via <c>InternalsVisibleTo</c>): the same harvest over a
@@ -80,7 +91,7 @@ public static class OnDemandRunwayHarvest
     /// </summary>
     internal static async Task<RunwayHarvestAttempt?> TryHarvestAsync(
         string vendor,
-        bool snapshotExists,
+        bool snapshotUsable,
         IReadOnlyList<IVendorUsageSource> sources,
         TimeSpan bound,
         CancellationToken cancellationToken)
@@ -88,7 +99,7 @@ public static class OnDemandRunwayHarvest
         ArgumentException.ThrowIfNullOrEmpty(vendor);
         ArgumentNullException.ThrowIfNull(sources);
 
-        if (snapshotExists || !RunwayGate.IsGated(vendor))
+        if (snapshotUsable || !RunwayGate.IsGated(vendor))
         {
             return null;
         }
