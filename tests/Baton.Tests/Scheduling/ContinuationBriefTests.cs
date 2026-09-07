@@ -29,7 +29,16 @@ public sealed class ContinuationBriefTests
         Assert.NotNull(brief);
         Assert.StartsWith("[baton] CONTINUATION BRIEF", brief, StringComparison.Ordinal);
         Assert.Contains("This is attempt 2 of 3.", brief, StringComparison.Ordinal);
-        Assert.Contains("Attempt 1 ran its full 1h timeout budget and was killed by baton.", brief, StringComparison.Ordinal);
+        // #2058 review (MEDIUM): "at least", and the parenthesis naming what the figure is. #2019's
+        // credit can push a killed predecessor past its configured box, so the flat equality this
+        // sentence used to assert is a claim the brief cannot make -- and it is the one surface that
+        // states the number to the worker itself.
+        Assert.Contains(
+            "Attempt 1 ran for at least its full 1h timeout budget (the configured box, before any "
+            + "build-lock wait credit) and was killed by baton.",
+            brief,
+            StringComparison.Ordinal);
+        Assert.DoesNotContain("ran its full 1h timeout budget", brief, StringComparison.Ordinal);
         Assert.Contains("SAME workspace it left behind", brief, StringComparison.Ordinal);
         Assert.Contains("FINISH what attempt 1 started", brief, StringComparison.Ordinal);
         Assert.Contains("Do not restart it from the beginning", brief, StringComparison.Ordinal);
@@ -46,7 +55,7 @@ public sealed class ContinuationBriefTests
 
         Assert.NotNull(brief);
         Assert.Contains("This is attempt 3 of 4.", brief, StringComparison.Ordinal);
-        Assert.Contains("Attempt 2 ran its full 1h 30m timeout budget", brief, StringComparison.Ordinal);
+        Assert.Contains("Attempt 2 ran for at least its full 1h 30m timeout budget", brief, StringComparison.Ordinal);
     }
 
     [Fact]

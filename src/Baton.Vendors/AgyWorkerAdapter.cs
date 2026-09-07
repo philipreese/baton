@@ -1594,7 +1594,8 @@ public sealed partial class AgyWorkerAdapter : IWorkerAdapter, IPermissionGrantT
     }
 
     /// <summary>
-    /// How far past AER's own timeout <c>--print-timeout</c> is set (#588).
+    /// How far past the longest deadline AER's own clock can reach <c>--print-timeout</c> is set
+    /// (#588; the "longest it can reach" half is #2058's review).
     /// </summary>
     /// <remarks>
     /// The point of the flag is not to impose a limit — it is to stop <c>agy</c> imposing <i>its</i>
@@ -1603,6 +1604,11 @@ public sealed partial class AgyWorkerAdapter : IWorkerAdapter, IPermissionGrantT
     /// <c>"Execution timed out."</c>, whereas agy's print-mode wait expiring produces a clean exit 0
     /// with no output file — the silent failure #588 was filed for. So agy's limit is pushed strictly
     /// beyond AER's and left as a backstop that should never fire.
+    /// <para>
+    /// The margin is added to <see cref="BuildLockWaitCredit.MaxEffectiveTimeout"/> and not to the
+    /// configured box, because since #2019 the engine's deadline moves during the run — that class
+    /// states the rule and why this clock cannot simply read the credit instead.
+    /// </para>
     /// <para>
     /// Fixed rather than proportional. A proportional margin is dangerously tight at the short end —
     /// 25% of a 30-second timeout is under 8 seconds, well inside process-teardown jitter on a loaded
@@ -1630,14 +1636,17 @@ public sealed partial class AgyWorkerAdapter : IWorkerAdapter, IPermissionGrantT
     /// </remarks>
     private static string FormatPrintTimeout(TimeSpan timeout)
     {
+        // The ceiling the engine's own clock can reach, never the bare box — see PrintTimeoutMargin.
+        var ceiling = BuildLockWaitCredit.MaxEffectiveTimeout(timeout);
+
         // Saturate rather than add blindly: TimeSpan addition *throws* on overflow instead of
         // clamping, and a binding's Timeout is operator-authored — any parseable TimeSpan is accepted,
         // including ones within a minute of TimeSpan.MaxValue. That throw would escape binding
         // resolution, so one absurd value in a bindings file would take down every worker in it
-        // rather than only its own.
-        var withMargin = timeout > TimeSpan.MaxValue - PrintTimeoutMargin
+        // rather than only its own. (MaxEffectiveTimeout saturates for the same reason.)
+        var withMargin = ceiling > TimeSpan.MaxValue - PrintTimeoutMargin
             ? TimeSpan.MaxValue
-            : timeout + PrintTimeoutMargin;
+            : ceiling + PrintTimeoutMargin;
 
         var seconds = (long)Math.Ceiling(withMargin.TotalSeconds);
         return $"{Math.Max(seconds, 1)}s";

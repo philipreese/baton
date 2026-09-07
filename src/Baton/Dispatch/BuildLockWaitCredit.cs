@@ -49,6 +49,15 @@ public static class BuildLockWaitCredit
     /// total wall clock however much queueing it recorded. The cap is what keeps a corrupt log, or a
     /// genuinely pathological machine, from making a lane immortal — the box stays a bound.
     /// </summary>
+    /// <remarks>
+    /// <b>Any other clock keyed to a lane's box must clear <see cref="MaxEffectiveTimeout"/>, not the
+    /// configured box</b> (#2058 review). A second clock sized as "box + margin" was correct only while
+    /// the engine killed at the box; under credit it can expire first and decide the failure mode
+    /// instead. Its one live consumer outside this class is <c>Baton.Vendors.AgyWorkerAdapter</c>'s
+    /// <c>--print-timeout</c> backstop, which cannot read the running credit at all — the flag is
+    /// emitted at argument-resolution time, before the lane starts and so before a millisecond of
+    /// queueing has been recorded — so the ceiling, which is knowable then, is what it is derived from.
+    /// </remarks>
     public const int MaxBudgetMultiplier = 2;
 
     /// <summary>
@@ -115,15 +124,25 @@ public static class BuildLockWaitCredit
             return box;
         }
 
-        var ceiling = box.Ticks > TimeSpan.MaxValue.Ticks / MaxBudgetMultiplier
-            ? TimeSpan.MaxValue
-            : box * MaxBudgetMultiplier;
+        var ceiling = MaxEffectiveTimeout(box);
         var extended = credit.Ticks > TimeSpan.MaxValue.Ticks - box.Ticks
             ? TimeSpan.MaxValue
             : box + credit;
 
         return extended > ceiling ? ceiling : extended;
     }
+
+    /// <summary>
+    /// The longest wall clock <paramref name="box"/> can ever become under credit —
+    /// <see cref="MaxBudgetMultiplier"/>× the box, saturating rather than overflowing. This is the
+    /// figure any clock outside the engine has to clear; see <see cref="MaxBudgetMultiplier"/>.
+    /// </summary>
+    public static TimeSpan MaxEffectiveTimeout(TimeSpan box) =>
+        box <= TimeSpan.Zero
+            ? box
+            : box.Ticks > TimeSpan.MaxValue.Ticks / MaxBudgetMultiplier
+                ? TimeSpan.MaxValue
+                : box * MaxBudgetMultiplier;
 
     /// <summary>One line's <c>waitMs</c>, or null for anything this reader will not credit.</summary>
     private static long? TryReadWaitMs(string line)

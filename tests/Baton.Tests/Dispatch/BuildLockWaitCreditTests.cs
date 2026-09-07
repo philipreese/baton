@@ -16,14 +16,11 @@ public class BuildLockWaitCreditTests : IDisposable
     public void Dispose()
     {
         GC.SuppressFinalize(this);
-        try
-        {
-            Directory.Delete(directory, recursive: true);
-        }
-        catch (IOException)
-        {
-            // A leftover temp directory is not a test failure.
-        }
+
+        // #438: never a raw recursive delete in a test -- it flakes on Windows when Defender or the
+        // indexer holds a transient handle (#295). DirectoryCleanup retries and swallows on the final
+        // attempt, so a leftover temp directory is not a test failure here either.
+        Baton.Tests.Shared.DirectoryCleanup.DeleteRecursively(directory);
     }
 
     /// <summary>
@@ -104,6 +101,18 @@ public class BuildLockWaitCreditTests : IDisposable
 
         Assert.Equal(TimeSpan.FromMilliseconds(4000), BuildLockWaitCredit.RecordedWait(log));
     }
+
+    /// <summary>
+    /// #2058 review (LOW): <c>lock-wait.jsonl</c> is engine-written and lands in the execution's OUTPUT
+    /// directory, so it is registered beside the other engine-owned names there — the convention
+    /// <c>GrantDecisionLog</c> (#2009) and <c>VerifyRunner.RawOutputFileName</c> (#1971) each followed.
+    /// Without it the first filtered listing surface to enumerate that directory presents the engine's
+    /// own bookkeeping as a worker deliverable (#1351), and the filter is deliberately narrow enough
+    /// that a name without a dot prefix cannot be caught by shape.
+    /// </summary>
+    [Fact]
+    public void The_lock_wait_log_is_registered_as_an_engine_owned_name()
+        => Assert.True(ExecutionStreamLogger.IsStreamLogFileName(BuildLockWaitCredit.LogFileName));
 
     private string WriteLog(params string[] lines)
     {

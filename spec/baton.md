@@ -2839,7 +2839,11 @@ call. `timeoutMs` is deliberately the raw configured timeout, not a countdown �
 would already be stale by the time a caller reads it. A renderer wanting remaining time pairs it
 with the same Running step's own `steps[].timestamp` above, which this shape already emits;
 `timeoutMs` is not duplicated there (the terminal path has no live "remaining" concept to pair it
-with at all).
+with at all). Since #2019 it is also a **floor, not the deadline**: a lane's build-lock queueing is
+credited back to its box (`Baton.Dispatch.BuildLockWaitCredit`, and the `--timeout` paragraph above
+for the rule), so a Running row whose elapsed time has passed `timeoutMs` — up to that class's
+`MaxBudgetMultiplier`× it — is not by itself evidence of a wedged lane and is not grounds to cancel.
+No field carries the applied credit yet; that, and the ledger dimension for it, are open.
 
 **`label` (#1499) is read from the same `bindings.json`, but deliberately NOT gated the way the
 quartet above is.** A room's `--label` is a room-level fact stamped onto every entry at dispatch time

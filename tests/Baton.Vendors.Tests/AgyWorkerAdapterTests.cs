@@ -236,8 +236,11 @@ public class AgyWorkerAdapterTests
         var target = new AgyWorkerAdapter().Resolve(
             new WorkerInvocation("Draft a plan.", Timeout: TimeSpan.FromMinutes(20)), ArchitectContract);
 
-        // 20 minutes + the 60s margin, as whole seconds.
-        Assert.Equal("1260s", ArgValue(target, "--print-timeout"));
+        // 2 x 20 minutes -- the most the engine's clock can reach once #2019's build-lock credit is
+        // applied -- plus the 60s margin, as whole seconds. Deliberately a literal: computing it from
+        // BuildLockWaitCredit here would make this arm pass with a wrong multiplier, which is exactly
+        // what it exists to catch. The invariant arm below is the one keyed to the helper.
+        Assert.Equal("2460s", ArgValue(target, "--print-timeout"));
     }
 
     /// <summary>
@@ -259,6 +262,12 @@ public class AgyWorkerAdapterTests
     /// decides the failure mode, and they are not equally good: AER's yields
     /// <c>CoreExitReason.TimedOut</c> and a real diagnostic, agy's yields a clean exit 0 with no
     /// output — the silent failure this issue was filed for. Equality would make that a race.
+    /// <para>
+    /// Measured against <see cref="BuildLockWaitCredit.MaxEffectiveTimeout"/> rather than the
+    /// configured box (#2058 review) — that class states the rule and why. Against the box alone this
+    /// arm stayed green while the property was false at runtime for exactly the lanes #2019 targets:
+    /// they credited 300–360 s, five to six times the margin.
+    /// </para>
     /// </summary>
     [Theory]
     [InlineData(30)]
@@ -273,10 +282,12 @@ public class AgyWorkerAdapterTests
         var emitted = ArgValue(target, "--print-timeout");
         Assert.NotNull(emitted);
 
+        var latestEngineKill = BuildLockWaitCredit.MaxEffectiveTimeout(batonTimeout).TotalSeconds;
         var emittedSeconds = int.Parse(emitted.TrimEnd('s'), System.Globalization.CultureInfo.InvariantCulture);
         Assert.True(
-            emittedSeconds > batonTimeoutSeconds,
-            $"print-timeout {emittedSeconds}s must exceed AER's own {batonTimeoutSeconds}s, or agy can give up first");
+            emittedSeconds > latestEngineKill,
+            $"print-timeout {emittedSeconds}s must exceed the latest AER can kill ({latestEngineKill}s, "
+            + $"a {batonTimeoutSeconds}s box fully credited), or agy can give up first");
     }
 
     /// <summary>
@@ -306,9 +317,15 @@ public class AgyWorkerAdapterTests
     /// tighter than intended, which is the direction that reintroduces the race. Zero is floored to a
     /// value the flag will actually parse.
     /// </summary>
+    /// <remarks>
+    /// The expectations are 2× the box plus the margin since #2058's review — 90.4 s doubles to 180.8 s,
+    /// and the fraction that has to round UP survives the doubling, which is the property this arm is
+    /// for. A non-positive box is not doubled (there is no credit against it), so it still yields the
+    /// bare margin.
+    /// </remarks>
     [Theory]
     [InlineData(0.5, "61s")]
-    [InlineData(90.4, "151s")]
+    [InlineData(90.4, "241s")]
     [InlineData(0, "60s")]
     public void The_print_timeout_rounds_up_and_never_emits_a_non_positive_duration(
         double seconds, string expected)

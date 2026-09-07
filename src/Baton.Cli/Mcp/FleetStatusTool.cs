@@ -676,6 +676,9 @@ public sealed class FleetStatusTool : IMcpTool
                // precisely the dispatch that used to render a bare vendor here.
                recordedRequest?.Model ?? resolved.Entry.Model ?? resolved.Entry.ModelResolved,
                resolved.Entry.Effort ?? resolved.Entry.EffortResolved,
+               // The configured box, before #2019's build-lock wait credit — a floor on when a lane
+               // can be killed, not the deadline. spec/baton.md §6's `timeoutMs` remarks state what a
+               // row past it does and does not mean.
                (long?)resolved.Entry.Timeout.TotalMilliseconds,
                // The stamp travels verbatim, absent and all: a hand-authored bindings.json (baton
                // run/resume) carries no source, and a surface must render "no mark" for that rather
