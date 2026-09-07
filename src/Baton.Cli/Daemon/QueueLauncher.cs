@@ -209,8 +209,29 @@ public static class QueueLauncher
     /// here: the write below is unconditional, taken even when the projection comes back null — the
     /// register says why that room in particular cannot be skipped.
     /// </para>
+    /// <para>
+    /// <b>A HELD file is retried; a corrupt or missing one is not</b> (#1951) — spec/baton.md §13's
+    /// post-launch bullet has the argument, <see cref="HeldLedgerRetryDelay"/> the bound. Mechanically:
+    /// <see cref="TryProjectRoomAsync"/> reports WHY it could not project, and this loop re-reads only
+    /// while that answer is <see cref="RoomProjectionFailure.Held"/>.
+    /// </para>
     /// </remarks>
-    internal static async Task RecordPostLaunchFaultAsync(string tag, string roomDirectory, string reason)
+    /// <param name="tag">The queued item's tag.</param>
+    /// <param name="roomDirectory">The room the lane was dispatched into.</param>
+    /// <param name="reason">Why the pump did not complete.</param>
+    /// <param name="heldAttempts">
+    /// How many projection attempts a held ledger gets in total, including the first. A test seam in
+    /// the same sense as <see cref="SettleFinishedPumpAsync"/>: a holder released on a real machine's
+    /// timing cannot be steered from outside, so the two arms that measure this path set their own
+    /// bound rather than sleeping against the default.
+    /// </param>
+    /// <param name="heldRetryDelay">The pause between those attempts; defaults to <see cref="HeldLedgerRetryDelay"/>.</param>
+    internal static async Task RecordPostLaunchFaultAsync(
+        string tag,
+        string roomDirectory,
+        string reason,
+        int heldAttempts = HeldLedgerAttempts,
+        TimeSpan? heldRetryDelay = null)
     {
         try
         {
@@ -221,12 +242,39 @@ public static class QueueLauncher
                 return;
             }
 
-            var projected = await TryProjectRoomAsync(roomDirectory).ConfigureAwait(false);
+            var delay = heldRetryDelay ?? HeldLedgerRetryDelay;
+            var attempt = await TryProjectRoomAsync(roomDirectory).ConfigureAwait(false);
+            for (var remaining = heldAttempts - 1; attempt.Failure == RoomProjectionFailure.Held && remaining > 0; remaining--)
+            {
+                await Task.Delay(delay).ConfigureAwait(false);
 
+                // The backoff put seconds between the guard above and the write below, so a verdict
+                // landing mid-wait would be overwritten by a Failed one — spec/baton.md §13's
+                // never-replace rule at a window this retry opened. This read is the EARLY-OUT half of
+                // closing it: it abandons the remaining attempts as soon as the room settles. The half
+                // that closes it is the read immediately before the write, which covers the iteration
+                // that exits the loop as well.
+                if (await TerminalSentinelWriter.TryReadAsync(roomDirectory, CancellationToken.None)
+                        .ConfigureAwait(false) is not null)
+                {
+                    return;
+                }
+
+                attempt = await TryProjectRoomAsync(roomDirectory).ConfigureAwait(false);
+            }
+
+            var projected = attempt.View;
             var error = $"the queue-launched lane '{tag}' did not complete after launch: {reason}";
             if (projected?.Error is { Length: > 0 } recordedFailure)
             {
                 error += $" — the room's own last recorded failure: {recordedFailure}";
+            }
+            else if (projected is null && attempt.Reason is { Length: > 0 } degraded)
+            {
+                var stillHeld = attempt.Failure == RoomProjectionFailure.Held
+                    ? $" (still held after {heldAttempts} attempt(s))"
+                    : string.Empty;
+                error += $" — this record carries no steps or outputs because {degraded}{stillHeld}";
             }
 
             var view = (projected ?? new WorkflowStatusView(WorkflowOutcome.Failed, [], [], null)) with
@@ -234,6 +282,15 @@ public static class QueueLauncher
                 State = WorkflowOutcome.Failed,
                 Error = error,
             };
+
+            // The last read before the replace, because TerminalSentinelWriter.WriteAsync replaces
+            // unconditionally: without it the one iteration with no guard after it is the iteration in
+            // which the holder released — the very moment a settle is most likely to land.
+            if (await TerminalSentinelWriter.TryReadAsync(roomDirectory, CancellationToken.None)
+                    .ConfigureAwait(false) is not null)
+            {
+                return;
+            }
 
             await TerminalSentinelWriter.WriteAsync(roomDirectory, view, CancellationToken.None).ConfigureAwait(false);
         }
@@ -245,6 +302,59 @@ public static class QueueLauncher
     }
 
     /// <summary>
+    /// Why <see cref="TryProjectRoomAsync"/> came back without a view. Only
+    /// <see cref="Held"/> is worth waiting on — the other two are as true a second later as they are now.
+    /// </summary>
+    private enum RoomProjectionFailure
+    {
+        /// <summary>It projected.</summary>
+        None,
+
+        /// <summary>
+        /// A file this projection needs is not there — nothing to project, and nothing arriving. Which
+        /// one is missing is in the reason, never folded into a disjunction: a room with no ledger never
+        /// started, where a room with a ledger and no snapshot ran and lost its binding.
+        /// </summary>
+        Absent,
+
+        /// <summary>
+        /// Another process holds <c>flow.jsonl</c> or <c>snapshot.json</c> with a conflicting share; a
+        /// release makes this projectable.
+        /// </summary>
+        Held,
+
+        /// <summary>The ledger or the snapshot is there and could not be read or parsed.</summary>
+        Unreadable,
+    }
+
+    /// <summary>One projection attempt: the view, or why there is none in the words the sentinel carries.</summary>
+    private readonly record struct RoomProjection(WorkflowStatusView? View, RoomProjectionFailure Failure, string? Reason);
+
+    /// <summary>
+    /// Total projection attempts a held file gets, including the first. Sized with — and only with —
+    /// <see cref="HeldLedgerRetryDelay"/>, whose remark carries the whole derivation.
+    /// </summary>
+    private const int HeldLedgerAttempts = 5;
+
+    /// <summary>
+    /// The pause between those attempts; four of them bound the wait at ~1.2s. This is the one home for
+    /// that bound's derivation — spec/baton.md §13's post-launch bullet points here rather than
+    /// restating it.
+    /// <para>
+    /// <b>Sized against the population that can actually reach this arm</b>, which spec/baton.md §13
+    /// names and <see cref="FlowJournalHeldException"/>'s doc argues: not a sibling <c>baton</c> command
+    /// and not this room's own engine — both of those admit a reader — but a holder outside Baton that
+    /// shares nothing. Nothing here measures how long one of those keeps a file, and no bound would be
+    /// safe if it did, so this one is <b>defensive rather than fitted</b>: long enough to ride out a
+    /// hand-off that is already ending, short enough that a room nobody releases still resolves
+    /// promptly. Degrading is correct for the long holder — the sentinel names the hold and the item
+    /// resolves either way. Change this number if a real hold is ever measured; do not change it to
+    /// chase one that has not been.
+    /// </para>
+    /// </summary>
+    private static readonly TimeSpan HeldLedgerRetryDelay = TimeSpan.FromMilliseconds(300);
+
+    /// <summary>
     /// The room's <em>actual</em> state, projected the way <see cref="TerminalSettleRecorder"/> and
     /// <c>StatusCommand</c> already project one: bound snapshot + <c>flow.jsonl</c> +
     /// <c>ProjectionCheckpointStore</c>, through the same <c>StateProjector</c>/
@@ -253,11 +363,19 @@ public static class QueueLauncher
     /// than shared with <c>FleetStatusTool.ProcessRoomAsync</c>'s identical block, which is a seam worth
     /// extracting on its own rather than inside this fix.
     /// <para>
-    /// Returns null — never throws — for a room this cannot project: no real ledger yet
+    /// Returns a null view — never throws — for a room this cannot project: no real ledger yet
     /// (<see cref="RoomLedgerProbe"/>, which is also why the ledger-less room in
     /// <c>QueueLauncherTests</c> still gets the bare view), no bound snapshot, or a read/parse failure.
     /// The caller writes the bare <c>Failed</c> sentinel in that case: a degraded record still resolves
     /// the item, where a throw out of the discarded continuation this runs in would resolve nothing.
+    /// </para>
+    /// <para>
+    /// <b>A sharing violation is <see cref="RoomProjectionFailure.Held"/>, not
+    /// <see cref="RoomProjectionFailure.Unreadable"/></b> (#1951), on <em>either</em> file this reads.
+    /// <see cref="FlowJournalHeldException"/> derives from <see cref="BatonFlowException"/>, so the
+    /// single catch below used to fold a held file into the same answer as a truncated one — and the
+    /// caller, seeing one answer, could neither wait out the first nor say which had happened. The
+    /// narrow arms come first for that reason; the ORDER is the fix.
     /// </para>
     /// <para>
     /// <b><see cref="WorkflowStatusStepView.Liveness"/> is dropped from every step</b>, while each
@@ -265,12 +383,25 @@ public static class QueueLauncher
     /// spec/baton.md §13's post-launch bullet has why the two are treated differently.
     /// </para>
     /// </summary>
-    private static async Task<WorkflowStatusView?> TryProjectRoomAsync(string roomDirectory)
+    private static async Task<RoomProjection> TryProjectRoomAsync(string roomDirectory)
     {
         var snapshotPath = Path.Combine(roomDirectory, BatonPaths.SnapshotFileName);
-        if (!RoomLedgerProbe.HasLedger(roomDirectory) || !File.Exists(snapshotPath))
+        // Two ifs rather than one disjunction: both facts are known here, and an operator reading the
+        // degraded sentinel cannot otherwise tell a room that never started from one whose binding went
+        // missing. A zero-length flow.jsonl is the first of the two, not a third state — see
+        // RoomLedgerProbe for why the writer leaves one behind on a refusal.
+        if (!RoomLedgerProbe.HasLedger(roomDirectory))
         {
-            return null;
+            return new RoomProjection(
+                null, RoomProjectionFailure.Absent, "the room carries no ledger of its own");
+        }
+
+        if (!File.Exists(snapshotPath))
+        {
+            return new RoomProjection(
+                null,
+                RoomProjectionFailure.Absent,
+                "the room has a ledger but no bound snapshot to project it against");
         }
 
         try
@@ -292,7 +423,42 @@ public static class QueueLauncher
             var view = WorkflowStatusProjector.Project(
                 state, snapshot, roomDirectory, entries, WorkerAdapterRegistry.Default);
 
-            return view with { Steps = [.. view.Steps.Select(step => step with { Liveness = null })] };
+            return new RoomProjection(
+                view with { Steps = [.. view.Steps.Select(step => step with { Liveness = null })] },
+                RoomProjectionFailure.None,
+                null);
+        }
+        catch (FlowJournalHeldException ex)
+        {
+            // Must precede the BatonFlowException arm below, which it would otherwise be swallowed by
+            // — see this method's own remarks for why the two answers cannot share one.
+            Console.Error.WriteLine(
+                $"QueueLauncher: '{roomDirectory}' could not be projected for its post-launch fault "
+                + $"record because its ledger is held: {ex.Message}");
+            return new RoomProjection(
+                null, RoomProjectionFailure.Held, $"the room's ledger is held open by another process: {ex.Message}");
+        }
+        catch (IOException ex) when (FileHolderProbe.IsSharingViolation(ex))
+        {
+            // The same condition on the OTHER file this reads: SnapshotBinder translates only a missing
+            // file, so a sharing violation on snapshot.json arrives raw and would otherwise be reported
+            // as unreadable and degraded on sight. One holder class, one answer, one remedy.
+            Console.Error.WriteLine(
+                $"QueueLauncher: '{roomDirectory}' could not be projected for its post-launch fault "
+                + $"record because a file it reads is held: {ex.Message}");
+            return new RoomProjection(
+                null,
+                RoomProjectionFailure.Held,
+                $"the room's snapshot is held open by another process: {ex.Message}");
+        }
+        catch (Exception ex) when (ex is FileNotFoundException or DirectoryNotFoundException)
+        {
+            // A ledger that vanishes between the HasLedger probe above and FlowEventLogReader's own
+            // File.Exists — or between that check and its open. Missing is not corrupt, and saying
+            // "could not be read" of a file that is simply gone sends an operator looking for damage.
+            // A race with no test: the window is microseconds wide and not steerable from outside.
+            return new RoomProjection(
+                null, RoomProjectionFailure.Absent, $"the room's ledger is no longer there: {ex.Message}");
         }
         catch (Exception ex) when (ex is BatonFlowException or IOException or UnauthorizedAccessException)
         {
@@ -302,7 +468,10 @@ public static class QueueLauncher
             Console.Error.WriteLine(
                 $"QueueLauncher: could not project '{roomDirectory}' for its post-launch fault record, "
                 + $"so its sentinel carries no steps or outputs: {ex.Message}");
-            return null;
+            return new RoomProjection(
+                null,
+                RoomProjectionFailure.Unreadable,
+                $"the room's ledger or snapshot could not be read: {ex.Message}");
         }
     }
 

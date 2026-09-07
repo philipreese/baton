@@ -25,8 +25,14 @@ namespace Baton.Store;
 /// return, no holder found because the handle already released — returns a descriptive marker rather than
 /// throwing, so a diagnostic can never turn a flake into a hard error or mask the original exception.
 /// </para>
+/// <para>
+/// <b>Public rather than internal since #1951</b>, only so <see cref="IsSharingViolation"/> stays one
+/// home: <c>QueueLauncher</c> (Baton.Cli) has to tell a held <c>snapshot.json</c> from a corrupt one,
+/// and the alternative was a second copy of <see cref="ErrorSharingViolationHResult"/> in another
+/// assembly. Nothing else here is meant for callers outside Baton.
+/// </para>
 /// </remarks>
-internal static class FileHolderProbe
+public static class FileHolderProbe
 {
     /// <summary>
     /// The Win32 HRESULT for ERROR_SHARING_VIOLATION. .NET assigns this same HRESULT to the

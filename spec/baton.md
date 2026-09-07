@@ -6004,6 +6004,27 @@ and each is closed where the fact exists:
   unconditional, because an unprojectable room is exactly the one that would otherwise wedge its item
   in `launched` forever.
 
+  **A file that is HELD is not one that is corrupt (#1951).** The two arrive at this path as the
+  same failed read and have opposite remedies: a sharing violation means somebody else has the file
+  open *right now* and the room becomes projectable the moment they let go, while a truncated ledger
+  or a malformed snapshot reads the same a minute later as it does now. Both files this projection
+  reads — `flow.jsonl` and `snapshot.json` — are opened for reading in a way that admits other
+  readers, so the holder is never a sibling `baton` command mid-append and never the room's own live
+  engine: `FlowJournalHeldException`'s own doc is the record of why a read open can only lose to a
+  handle that shares nothing at all. The reachable holder is therefore an exclusive opener from
+  outside Baton — an editor, an antivirus or backup scan, a copy or indexing tool — or a killed
+  process's handle the OS has not finished tearing down. So the held case is re-read on a **short
+  bounded backoff** before it degrades, and the corrupt or absent case degrades on sight; either way
+  the bare sentinel's `error` names **which of the two** produced it, and an absent one says which
+  file is missing, because "no steps or outputs" with no reason beside it is the one record an
+  operator cannot act on. This is a re-read inside one fault record, bounded in seconds and taken
+  once — not the item-level retry this section rules out above, which stays an operator verb. The
+  bound itself is deliberately short and **defensive rather than fitted**: no hold of that population
+  has been measured here, and an exclusive holder can outlast any bound, so degrading is the answer
+  for the long one. `QueueLauncher.HeldLedgerRetryDelay`'s remark is the one home for that
+  derivation and the place to change it. Resolving the item is what matters, and it resolves either
+  way.
+
   Keeping a mid-lane `Running` step is safe at both readers that key on one, and each for its own
   reason. The live-weight tally behind `MaxLiveWeight` skips any room carrying a sentinel at all
   (`includeTerminal: false`), so a settled lane cannot hold the queue's own cap open. The fleet
