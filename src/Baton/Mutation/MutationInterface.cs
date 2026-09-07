@@ -2237,8 +2237,13 @@ public static class MutationInterface
                 {
                     await eventLogWriter.AppendAsync(new FlowEvent.VerifyStarted(prepared.Request.ExecutionId), CancellationToken.None)
                         .ConfigureAwait(false);
+                    // #1971: the execution's own artifacts directory is where the whole unfiltered
+                    // verify stream lands (VerifyRunner.RawOutputFileName), so the noise-filtered
+                    // verifyTail a conductor reads from `baton status --json` costs nothing -- what it
+                    // drops is one file open away, beside this execution's other artifacts.
                     var verifyOutcome = await VerifyRunner.RunProcessAsync(
-                        resolvedVerify.Program, resolvedVerify.Args, binding.Target.WorkingDirectory, dispatchCancellationToken)
+                        resolvedVerify.Program, resolvedVerify.Args, binding.Target.WorkingDirectory, dispatchCancellationToken,
+                        rawOutputDirectory: prepared.OutputDirectory)
                         .ConfigureAwait(false);
                     if (verifyOutcome.Passed)
                     {
