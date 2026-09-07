@@ -937,51 +937,94 @@ public sealed class CodexWorkerAdapterTests
     }
 
     /// <summary>
-    /// #1941 review LOW: codex has no skill realization, and until now a <c>--skill</c> on a codex
-    /// binding resolved, linted, requirement-checked, persisted — and reached the worker as nothing,
-    /// disclosed only in two registers the operator may never have opened. The notice is what
-    /// <c>Resolve</c> writes to stderr; the polarity arm is a binding that declared none, which must
-    /// stay silent rather than printing an empty roster line at every ordinary dispatch.
+    /// #2044: a declared skill reaches a codex worker as inlined instructions, on <b>both</b> of this
+    /// adapter's dispatch paths. The brokered arm is the load-bearing one — every grant-carrying
+    /// dispatch (which is every conductor lane) takes it, so wiring only the grant-less path would ship
+    /// the same silence #1941's stderr notice was a placeholder for. The control arm is a binding that
+    /// declares nothing, whose prompt must be untouched.
     /// </summary>
     [Fact]
-    public void A_declared_skill_on_a_codex_binding_is_announced_as_skipped_rather_than_ignored()
+    public void A_declared_skill_is_inlined_into_the_prompt_on_both_dispatch_paths()
     {
         var packageRoot = Path.Combine(Path.GetTempPath(), $"codex-skill-{Guid.NewGuid():N}", "house-style");
         Directory.CreateDirectory(packageRoot);
         try
         {
-            File.WriteAllText(Path.Combine(packageRoot, "SKILL.md"), "description: House style");
+            File.WriteAllText(
+                Path.Combine(packageRoot, "SKILL.md"),
+                "---\ndescription: House style\n---\nUse short sentences.");
             var package = SkillPackageReader.LoadPackage(packageRoot);
+            var adapter = new CodexWorkerAdapter();
 
-            var notice = CodexWorkerAdapter.SkillSkipNotice([package]);
+            var direct = adapter.Resolve(
+                new WorkerInvocation("Inspect.", Skills: [package]), NoOutputContract);
+            var brokered = adapter.Resolve(
+                new WorkerInvocation("Inspect.", PermissionGrant: new PermissionGrant(ReadFiles: true), Skills: [package]),
+                NoOutputContract);
 
-            Assert.NotNull(notice);
-            Assert.Contains("house-style", notice, StringComparison.Ordinal);
-            Assert.Contains("will NOT reach this worker", notice, StringComparison.Ordinal);
-
-            Assert.Null(CodexWorkerAdapter.SkillSkipNotice([]));
-            Assert.Null(CodexWorkerAdapter.SkillSkipNotice(null));
-
-            // And Resolve actually says it -- a notice nothing prints is the same silence, one
-            // indirection further away.
-            var originalError = Console.Error;
-            using var captured = new StringWriter();
-            try
+            Assert.Equal("codex-broker", brokered.Args[1]);
+            foreach (var prompt in new[] { direct.PromptText!, brokered.PromptText! })
             {
-                Console.SetError(captured);
-                new CodexWorkerAdapter().Resolve(
-                    new WorkerInvocation("Inspect.", Skills: [package]), NoOutputContract);
-            }
-            finally
-            {
-                Console.SetError(originalError);
+                Assert.Contains("Inspect.", prompt, StringComparison.Ordinal);
+                Assert.Contains("\n\n# Skill: house-style\n", prompt, StringComparison.Ordinal);
+                Assert.Contains("Use short sentences.", prompt, StringComparison.Ordinal);
+
+                // The operator's front matter is stripped rather than shipped as instructions.
+                Assert.DoesNotContain("description: House style", prompt, StringComparison.Ordinal);
+                Assert.DoesNotContain("---", prompt, StringComparison.Ordinal);
             }
 
-            Assert.Contains("house-style", captured.ToString(), StringComparison.Ordinal);
+            // Control: nothing declared, nothing appended -- on both paths.
+            Assert.Equal(
+                "Inspect.",
+                adapter.Resolve(new WorkerInvocation("Inspect."), NoOutputContract).PromptText);
+            Assert.Equal(
+                "Inspect.",
+                adapter.Resolve(
+                    new WorkerInvocation("Inspect.", PermissionGrant: new PermissionGrant(ReadFiles: true)),
+                    NoOutputContract).PromptText);
         }
         finally
         {
             DirectoryCleanup.DeleteRecursively(Path.GetDirectoryName(packageRoot)!);
+        }
+    }
+
+    /// <summary>
+    /// #2044: codex inlines the binding's <b>declared</b> set only, running no
+    /// <c>&lt;workspace&gt;/skills/</c> scan — <c>CodexWorkerAdapter.BuildPrompt</c>'s
+    /// <c>declaredSkills</c> parameter is the register for why. The control is the same package
+    /// declared on the binding, which codex does inline, so this discriminates the absent scan from an
+    /// unreadable package. agy's own scan of an identical workspace is asserted by
+    /// <c>SkillBindingRealizationTests</c>.
+    /// </summary>
+    [Fact]
+    public void A_workspace_skills_directory_is_not_scanned_the_way_agys_is()
+    {
+        var workspace = Path.Combine(Path.GetTempPath(), $"codex-scan-{Guid.NewGuid():N}");
+        var skillDir = Path.Combine(workspace, "skills", "repo-skill");
+        Directory.CreateDirectory(skillDir);
+        ProjectCeilingStore.Set(workspace, ProjectCeiling.Unrestricted, ProjectCeilingStore.DefaultPath);
+        try
+        {
+            File.WriteAllText(Path.Combine(skillDir, "SKILL.md"), "# From the repo");
+
+            var scanned = new CodexWorkerAdapter().Resolve(
+                new WorkerInvocation("Inspect.", WorkingDirectory: workspace), NoOutputContract);
+            Assert.DoesNotContain("# Skill: repo-skill", scanned.PromptText!, StringComparison.Ordinal);
+
+            // Control: the identical package is inlined when the binding declares it, so what the arm
+            // above measures is the absent scan and not an unreadable package.
+            var declared = new CodexWorkerAdapter().Resolve(
+                new WorkerInvocation(
+                    "Inspect.", WorkingDirectory: workspace,
+                    Skills: SkillPackageReader.DiscoverPackages(workspace)),
+                NoOutputContract);
+            Assert.Contains("# Skill: repo-skill", declared.PromptText!, StringComparison.Ordinal);
+        }
+        finally
+        {
+            DirectoryCleanup.DeleteRecursively(workspace);
         }
     }
 

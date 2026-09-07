@@ -1296,9 +1296,9 @@ public sealed partial class ClaudeWorkerAdapter : IWorkerAdapter, IPermissionGra
     /// name="workingDirectory"/> is missing or absent from disk, so the projection has no destination.
     /// The declared set is consulted BEFORE the working-directory precondition on purpose — the other
     /// order returns an empty plan, which <c>ToSeedCopies</c> turns into no seed copies and
-    /// <c>AnnounceSkillProjection</c> reports as nothing, i.e. a silent drop. <c>AgyWorkerAdapter</c>'s
-    /// <c>InlineSkills</c> already orders its branches this way, for the sibling reason that its
-    /// realization needs no directory at all.
+    /// <c>AnnounceSkillProjection</c> reports as nothing, i.e. a silent drop.
+    /// <see cref="SkillInlining.InlineSkills"/> — the inlining realization agy and codex share —
+    /// already orders its branches this way, for the sibling reason that it needs no directory at all.
     /// </exception>
     public static SkillProjectionPlan PlanSkillProjection(
         string? workingDirectory, IReadOnlyList<SkillPackage>? declaredSkills = null)

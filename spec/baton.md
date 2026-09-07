@@ -5367,8 +5367,12 @@ manifest and carried on the package; it behaves exactly as `floor` until #1151's
 (agy) land the native realizations, each gated on its own S2 measurement. `SkillRealization` is the
 one place that is stated. The floor itself is per-vendor and already shipped (#1929): claude gets the
 package's files projected into `<workspace>/.claude/skills/<name>/` at dispatch time, agy gets the
-instructions inlined into the prompt, codex gets nothing — and says so on stderr at dispatch rather
-than dropping a declared set in silence. `docs/dispatch.md` is where those three realizations and the
+instructions inlined into the prompt, and codex — since #2044, because it is the `standard` tier
+(#2017) and every implement/advise lane on it was otherwise losing the skills its role declared — gets
+them inlined by the **same** helper agy uses (`SkillInlining`, the one place the format is described).
+The two inlining vendors differ in one respect, and only one: agy also scans `<workspace>/skills/` when
+a binding declares nothing, while codex realizes a **declared** set alone — `CodexWorkerAdapter.BuildPrompt`
+is the register for why. `docs/dispatch.md` is where the three realizations, that asymmetry, and the
 projection's consequences are described for an operator.
 
 `${BATON_SKILL_DIR}` is the second recorded-but-inert thing here (#1941 review HIGH). The lint

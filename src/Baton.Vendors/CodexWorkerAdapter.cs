@@ -74,30 +74,10 @@ public sealed class CodexWorkerAdapter : IWorkerAdapter, IPermissionGrantTransla
         return true;
     }
 
-    /// <summary>
-    /// What a codex binding is told when it declares skills this adapter has no realization for, or
-    /// null when it declares none (#1941 review LOW). <b>A skip, not a refusal</b>: "codex gets nothing"
-    /// is the shipped floor spec/baton.md §9 records, so refusing here would break a binding that is
-    /// merely using a capability codex does not have yet — but a register the operator has not read is
-    /// not a diagnostic, and the skills resolved, linted and requirement-checked all the way to this
-    /// point without one word about being dropped.
-    /// </summary>
-    internal static string? SkillSkipNotice(IReadOnlyList<SkillPackage>? skills) =>
-        skills is { Count: > 0 }
-            ? $"Skills: {string.Join(", ", skills.Select(skill => skill.Name))} will NOT reach this worker — "
-              + "codex has no skill realization (#1151, spec/baton.md §9). Dispatch on the claude or agy "
-              + "adapter to use them, or drop them from the binding."
-            : null;
-
     public CoreDispatchTarget Resolve(WorkerInvocation invocation, WorkerContract contract)
     {
         ArgumentNullException.ThrowIfNull(invocation);
         ArgumentNullException.ThrowIfNull(contract);
-
-        if (SkillSkipNotice(invocation.Skills) is { } skillSkipNotice)
-        {
-            Console.Error.WriteLine(skillSkipNotice);
-        }
 
         invocation = ProjectCeilingGate.Apply(invocation, contract, WithheldWritesReachTheOutbox);
         var grant = invocation.PermissionGrant;
@@ -108,7 +88,7 @@ public sealed class CodexWorkerAdapter : IWorkerAdapter, IPermissionGrantTransla
 
         var permissionMode = ResolvePermissionMode(invocation);
         var isWindows = OperatingSystem.IsWindows();
-        var prompt = BuildPrompt(invocation.PromptTemplate, contract, isWindows);
+        var prompt = BuildPrompt(invocation.PromptTemplate, contract, isWindows, invocation.Skills);
         var outputDirectory = WorkerEnvironmentReference.For("BATON_OUTPUT_DIR", isWindows);
 
         List<string> args = ["exec"];
@@ -706,7 +686,7 @@ public sealed class CodexWorkerAdapter : IWorkerAdapter, IPermissionGrantTransla
         }
 
         var isWindows = OperatingSystem.IsWindows();
-        var prompt = BuildPrompt(invocation.PromptTemplate, contract, isWindows);
+        var prompt = BuildPrompt(invocation.PromptTemplate, contract, isWindows, invocation.Skills);
         var outputDirectory = WorkerEnvironmentReference.For("BATON_OUTPUT_DIR", isWindows);
         var configPath = outputDirectory + (isWindows ? "\\" : "/") + BrokerConfigFileName;
         var hostDllPath = Path.Combine(AppContext.BaseDirectory, "Baton.Cli.dll");
@@ -794,9 +774,26 @@ public sealed class CodexWorkerAdapter : IWorkerAdapter, IPermissionGrantTransla
         }
     }
 
-    private static string BuildPrompt(string promptTemplate, WorkerContract contract, bool isWindows)
+    /// <summary>
+    /// #2044: a declared skill set is realized by inlining it, through the one helper agy's realization
+    /// also calls (<see cref="SkillInlining.InlineSkills"/>, which describes the format). Both of this
+    /// adapter's dispatch paths go through here, so the brokered lane — which every grant-carrying
+    /// dispatch takes — realizes skills exactly as the grant-less one does.
+    /// </summary>
+    /// <param name="declaredSkills">
+    /// <b>The canonical statement of codex's one asymmetry with agy.</b> The binding's own set, and only
+    /// that: codex passes no working directory to the helper, so it runs no
+    /// <c>&lt;workspace&gt;/skills/</c> scan. Why — its capability discovery emits no <c>skill</c> items
+    /// (<see cref="TryParseModelListResponse"/> builds modes alone), so a scanned package would reach
+    /// the model under a dispatch roster line reading "none discovered", which is the silent context
+    /// cost agy's per-package size suffix exists to prevent (#1929 review LOW).
+    /// </param>
+    private static string BuildPrompt(
+        string promptTemplate, WorkerContract contract, bool isWindows,
+        IReadOnlyList<SkillPackage>? declaredSkills = null)
     {
-        var prompt = new StringBuilder(promptTemplate);
+        var prompt = new StringBuilder(
+            SkillInlining.InlineSkills(promptTemplate, workingDirectory: null, declaredSkills));
         if (contract.RequiredInputs.Count > 0)
         {
             prompt.Append("\n\nInputs, in the order listed, are available at these absolute paths:\n");
