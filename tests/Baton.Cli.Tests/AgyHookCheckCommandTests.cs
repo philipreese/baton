@@ -826,6 +826,14 @@ public class AgyHookCheckCommandTests
     /// reach it. Driven on an UNSCOPED grant (Present, empty pattern list — `implement`'s real shape),
     /// where every other rung in this branch passes the line through, so a deny here can only be the
     /// backgrounding detector's.
+    /// <para>
+    /// The last arm is the control that keeps the rule about BACKGROUNDING rather than about
+    /// `run_command`: the measured room's own polling line is allowed through by rule 1 (it is the
+    /// symptom, not the shape), which is why the poll itself is answered by rule 2 in the broker and
+    /// by rule 3 in the arrest text instead. Stated as an arm here (`Get-Process …` → allow) so a
+    /// detector that grew to refuse polls directly would turn this red rather than quietly changing
+    /// what agy may run.
+    /// </para>
     /// </summary>
     [Theory]
     [InlineData("Start-Process dotnet -ArgumentList 'build' -NoNewWindow -PassThru", "deny")]
@@ -862,19 +870,15 @@ public class AgyHookCheckCommandTests
     }
 
     /// <summary>
-    /// The control that keeps the rule about BACKGROUNDING rather than about `run_command`: the
-    /// measured room's own polling line is allowed through by rule 1 (it is the symptom, not the
-    /// shape), which is why the poll itself is answered by rule 2 in the broker and by rule 3 in the
-    /// arrest text instead. Stated as an arm above (`Get-Process …` → allow) so a detector that grew
-    /// to refuse polls directly would turn this red rather than quietly changing what agy may run.
-    /// </summary>
-    /// <summary>
     /// #2002 review MEDIUM, both directions. An argument no measurement accounts for is refused,
     /// because it could be the backgrounding switch this gate cannot read. The control is the first
-    /// arm, and it is the one that matters: <c>WaitMsBeforeAsync</c> IS a backgrounding parameter and
-    /// agy sends it on every single call, so a rule that refused "anything but CommandLine" would deny
-    /// every command this vendor runs. <c>AgyHookCheckCommand.MeasuredRunCommandArgs</c> carries that
-    /// finding and its provenance.
+    /// arm, and it is the one that matters: <c>CommandLine</c>, <c>Cwd</c> and
+    /// <c>WaitMsBeforeAsync</c> were observed once, on room <c>dispatch-implement-12f930d9</c>, so a
+    /// rule that refused "anything but CommandLine" would deny the shape that capture shows agy
+    /// sending. What that observation does and does not establish — including whether
+    /// <c>WaitMsBeforeAsync</c> is the backgrounding switch its name suggests — is scoped in
+    /// <c>docs/vendor-capabilities.md</c>; <c>AgyHookCheckCommand.MeasuredRunCommandArgs</c> points
+    /// at it.
     /// </summary>
     [Theory]
     [InlineData("""{"CommandLine":"dotnet build","Cwd":"C:\\x","WaitMsBeforeAsync":5000}""", "allow")]
