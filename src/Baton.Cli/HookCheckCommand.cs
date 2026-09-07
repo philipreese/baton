@@ -494,13 +494,24 @@ public static class HookCheckCommand
     /// </summary>
     /// <remarks>
     /// <b>What this gate accounts for is <see cref="ReadArgumentNames"/> and nothing else, and the
-    /// third exit above is the whole point (#2002 re-review HIGH).</b> The denial this rung emits —
-    /// <c>RepeatedToolCallLedger.HookReadDenial</c>, "its content is above in your transcript" — is a
-    /// claim that the previous call answered this one. An argument that narrows the result makes that
-    /// claim false, so a payload naming one this gate cannot normalise disables the rung for that
-    /// call rather than denying on a key that ignored it. This states nothing about what claude's
-    /// <c>Read</c> payload does or does not carry: it is the fail-open construction that makes the
-    /// question not need answering, the same direction every other failure of this rung takes.
+    /// third exit above is the whole point (#2002 re-review HIGH).</b>
+    /// <c>RepeatedToolCallLedger.ReadKey</c> owns the rule this implements — that keying past an
+    /// argument which narrows the result makes the denial's own sentence false — so a payload naming
+    /// an argument this gate cannot normalise disables the rung for that call rather than denying on
+    /// a key that ignored it.
+    /// <para>
+    /// <b>What claude's <c>Read</c> payload actually carries is unmeasured here, and both registers
+    /// were checked rather than assumed silent</b> (CLAUDE.md `common-sense`):
+    /// <c>tools/vendor-verify/verify.py --list</c> has no check on any claude <c>tool_input</c>
+    /// shape, and <c>docs/vendor-doc-audit.md</c> records one captured claude <c>PreToolUse</c>
+    /// payload — for <c>Write</c> — in which <c>tool_input</c> holds the tool's own arguments
+    /// (<c>file_path</c>, <c>content</c>) and nothing else, every session field sitting at the root
+    /// beside it. That bounds this construction's cost but does not measure <c>Read</c>: if that tool
+    /// sends an argument outside <see cref="ReadArgumentNames"/> on EVERY call, this rung is off for
+    /// claude reads entirely and no denial is ever emitted. That is the fail-open direction every
+    /// other failure of this rung takes, and it is the disclosed cost of not needing the
+    /// measurement.
+    /// </para>
     /// <para>
     /// A property present but <c>null</c> is treated as absent, so an explicit
     /// <c>"offset": null</c> keys the same as a whole-file read. Two spellings of one window
