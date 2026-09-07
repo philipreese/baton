@@ -13,6 +13,11 @@ namespace Baton.Cli;
 /// Whether to write. <see langword="false"/> — the default — writes nothing anywhere, creates no
 /// directory, and reports what would change.
 /// </param>
+/// <param name="Check">
+/// Whether this run is a gate rather than a report (#2040). It writes nothing and puts its verdict in
+/// the process exit code; <c>MemorySyncCommand.StaleTargetCount</c> is where the predicate and the set
+/// it ranges over are defined. Mutually exclusive with <see cref="Apply"/>, refused at the parser.
+/// </param>
 /// <param name="Format">Report format, <c>text</c> or <c>json</c>.</param>
 /// <param name="RepositoryFactsDirectory">
 /// A directory of checked-in repository facts to weigh against the vendor-sourced ones, or
@@ -23,6 +28,7 @@ namespace Baton.Cli;
 public sealed record MemorySyncOptions(
     string? Repository,
     bool Apply,
+    bool Check,
     MemoryAuditOutputFormat Format,
     string? RepositoryFactsDirectory,
     bool Help);

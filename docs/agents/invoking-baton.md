@@ -384,7 +384,7 @@ needs the entries' text. `--format json` is the machine contract: one object
 memory into the markdown vendor memory roots that already exist:
 
 ```
-baton memory sync [--repository <id>] [--apply] [--format text|json] [--repository-facts <dir>] [--help]
+baton memory sync [--repository <id>] [--apply | --check] [--format text|json] [--repository-facts <dir>] [--help]
 ```
 
 Without `--apply` it writes **nothing** — no file, and no directory either — and reports what would
@@ -396,7 +396,13 @@ markdown only — Codex's `memories_*.sqlite`, every Antigravity store and every
 the reason. A superseded entry, one the projection budget could not fit, and a vendor fact a checked-in
 repository fact outranks are each **named with their canonical id** in the report, never counted.
 **Running `sync` and `import` in a loop does not grow the store**: `import` recognises a projection by
-the marker on its first line and reports it as `projection-skipped` rather than filing it. The rulings
+the marker on its first line and reports it as `projection-skipped` rather than filing it.
+**`--check` is the CI form**: it writes nothing, and its **exit code is 1** if any target it found is
+not already the file this run would project — which is what a build step can gate on. Passing
+`--apply` with it is refused. **Only found targets are in scope**: where discovery turned up no root
+there is no file to compare, the report prints `NO TARGET`, and the exit code stays 0 — so read that
+as "nowhere to write" rather than "all current", and use `baton memory audit` to see which roots this
+machine has. The rulings
 behind each of those, and what a repository with nowhere to project into gets instead, are in
 `spec/baton.md` §12.
 

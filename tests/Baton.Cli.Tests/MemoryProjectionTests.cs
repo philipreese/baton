@@ -676,6 +676,96 @@ public sealed class MemoryProjectionTests : IDisposable
         Assert.Equal(first, File.ReadAllBytes(target));
     }
 
+    /// <summary>
+    /// #2040's acceptance line, as a polarity pair rather than two arms: after <c>--apply</c> the
+    /// projections match the store and <c>--check</c> exits 0; append ONE entry to the canonical store
+    /// and the same invocation exits 1. The exit-0 half alone passes vacuously if <c>--check</c> gates
+    /// on nothing at all, so the appended entry is the control that makes the 0 mean something.
+    /// </summary>
+    /// <remarks>
+    /// The failing arm also asserts that <c>--check</c> is a read: the target file it reports as stale
+    /// is still byte-for-byte what <c>--apply</c> left, so a gate cannot repair what it measures.
+    /// </remarks>
+    [Fact]
+    public async Task Check_exits_zero_when_the_projections_match_and_one_when_the_store_moves_ahead()
+    {
+        var root = await SeedStoreAndClaudeRootAsync();
+        var target = Path.Combine(root, ClaudeProjectionTarget.ProjectionFileName);
+
+        await RunAsync("--repository", Repository, "--apply");
+        var applied = File.ReadAllBytes(target);
+
+        var (clean, cleanOutput) = await RunForExitAsync("--repository", Repository, "--check");
+        Assert.Equal(0, clean);
+        Assert.Contains("CHECK PASSED (exit 0)", cleanOutput, StringComparison.Ordinal);
+        Assert.Contains("[unchanged]", cleanOutput, StringComparison.Ordinal);
+
+        // The control: one more entry in the canonical store, and the same command must now fail.
+        await MemoryStore.AppendAsync(
+            [Entry("user_new.md", "a new memory")],
+            BatonPaths.MemoryEntriesFile(Slug),
+            TestContext.Current.CancellationToken);
+
+        var (stale, staleOutput) = await RunForExitAsync("--repository", Repository, "--check");
+        Assert.Equal(1, stale);
+        Assert.Contains("CHECK FAILED (exit 1) -- 1 discovered target(s)", staleOutput, StringComparison.Ordinal);
+        Assert.Contains("would rewrite", staleOutput, StringComparison.Ordinal);
+        Assert.Equal(applied, File.ReadAllBytes(target));
+
+        // The same failing state under --format json, because the verdict prose is deliberately text-only:
+        // the JSON report has to stay ONE parseable document under --check (a verdict line appended after
+        // the serializer would have made it two), and the 'check' field has to say which run it was. Both
+        // are asserted here rather than argued for in a comment.
+        var (staleJsonExit, staleJson) = await RunForExitAsync(
+            "--repository", Repository, "--check", "--format", "json");
+        Assert.Equal(1, staleJsonExit);
+
+        using var document = JsonDocument.Parse(staleJson);
+        Assert.True(document.RootElement.GetProperty("check").GetBoolean());
+        Assert.False(document.RootElement.GetProperty("apply").GetBoolean());
+        Assert.Equal(
+            "would rewrite",
+            document.RootElement.GetProperty("repositories")[0].GetProperty("targets")[0]
+                .GetProperty("disposition").GetString());
+    }
+
+    /// <summary>
+    /// A repository whose store has memories but whose machine has no matching root does NOT fail the
+    /// check: there is no target that could be rewritten. Pinned rather than left to the help text,
+    /// because "check passed" and "there was nothing to check" are the pair a reader most easily
+    /// conflates — the report still prints NO TARGET on the passing exit code.
+    /// </summary>
+    [Fact]
+    public async Task Check_passes_for_a_repository_with_no_discovered_root()
+    {
+        await SeedStoreAsync();
+        Directory.CreateDirectory(Path.Combine(ClaudeHome, "projects"));
+
+        var (exitCode, output) = await RunForExitAsync("--repository", Repository, "--check");
+
+        Assert.Equal(0, exitCode);
+        Assert.Contains("NO TARGET", output, StringComparison.Ordinal);
+        Assert.Contains("CHECK PASSED (exit 0)", output, StringComparison.Ordinal);
+    }
+
+    /// <summary>
+    /// <c>--check --apply</c> is refused at the parser: a run that repaired the targets it was
+    /// measuring could never report anything but success.
+    /// </summary>
+    [Fact]
+    public void Check_together_with_apply_is_refused()
+    {
+        var exception = Assert.Throws<CliArgumentException>(
+            () => MemorySyncOptionsParser.Parse(["--check", "--apply"]));
+
+        Assert.Contains("mutually exclusive", exception.Message, StringComparison.Ordinal);
+
+        // Polarity: each flag on its own parses, so the refusal is about the PAIR and not about either
+        // spelling being unknown.
+        Assert.True(MemorySyncOptionsParser.Parse(["--check"]).Check);
+        Assert.True(MemorySyncOptionsParser.Parse(["--apply"]).Apply);
+    }
+
     /// <summary><c>--repository-facts</c> without <c>--repository</c> is refused, never defaulted.</summary>
     [Fact]
     public void Repository_facts_without_a_repository_is_refused()
@@ -690,6 +780,18 @@ public sealed class MemoryProjectionTests : IDisposable
 
     private async Task<string> RunAsync(params string[] args)
     {
+        var (exitCode, output) = await RunForExitAsync(args);
+
+        Assert.Equal(0, exitCode);
+        return output;
+    }
+
+    /// <summary>
+    /// The same run, with the exit code kept rather than asserted away — what the <c>--check</c> arms
+    /// need, since the exit code is the whole of what <c>--check</c> adds (#2040).
+    /// </summary>
+    private async Task<(int ExitCode, string Output)> RunForExitAsync(params string[] args)
+    {
         var writer = new StringWriter();
         var exitCode = await MemorySyncCommand.ExecuteAsync(
             MemorySyncOptionsParser.Parse(args),
@@ -698,8 +800,7 @@ public sealed class MemoryProjectionTests : IDisposable
             TestContext.Current.CancellationToken,
             UserHome);
 
-        Assert.Equal(0, exitCode);
-        return writer.ToString();
+        return (exitCode, writer.ToString());
     }
 
     /// <summary>

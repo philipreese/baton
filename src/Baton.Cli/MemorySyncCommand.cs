@@ -9,7 +9,7 @@ using Baton.Status;
 namespace Baton.Cli;
 
 /// <summary>
-/// <c>baton memory sync [--repository &lt;id&gt;] [--apply] [--format text|json] [--repository-facts &lt;dir&gt;]</c>
+/// <c>baton memory sync [--repository &lt;id&gt;] [--apply | --check] [--format text|json] [--repository-facts &lt;dir&gt;]</c>
 /// (#1852 phase C): project the canonical memory store into the vendor memory roots that already
 /// exist, as a self-identifying cache.
 /// </summary>
@@ -86,6 +86,7 @@ public static class MemorySyncCommand
 
         var syncReport = new SyncReport(
             options.Apply,
+            options.Check,
             options.RepositoryFactsDirectory,
             repositoryFacts.Count,
             reports.OrderBy(r => r.Repository, StringComparer.Ordinal).ToList(),
@@ -100,8 +101,31 @@ public static class MemorySyncCommand
             WriteText(output, syncReport);
         }
 
-        return 0;
+        return options.Check && StaleTargetCount(syncReport) > 0 ? 1 : 0;
     }
+
+    /// <summary>
+    /// How many discovered targets <c>--check</c> fails on: every one whose disposition is not
+    /// <see cref="UnchangedDisposition"/> (#2040).
+    /// </summary>
+    /// <remarks>
+    /// <b>The set is the discovered targets, and a repository contributing none is not counted.</b>
+    /// Where discovery returned no root there is no file to compare, so such a repository can never
+    /// fail the gate; <see cref="NoTargetGuidance"/> is what the report says about it instead, printed
+    /// on either exit code. Why that is the ruling, and the wrong conclusion it invites, are in
+    /// spec/baton.md §12.
+    /// </remarks>
+    private static int StaleTargetCount(SyncReport report) =>
+        report.Repositories
+            .SelectMany(r => r.Targets)
+            .Count(t => !string.Equals(t.Disposition, UnchangedDisposition, StringComparison.Ordinal));
+
+    /// <summary>
+    /// The one disposition that means the file on disk already IS this run's projection — written by
+    /// <see cref="WriteOrPreview"/>, read by <see cref="StaleTargetCount"/>, and named once so the
+    /// writer and the gate cannot drift apart.
+    /// </summary>
+    private const string UnchangedDisposition = "unchanged";
 
     /// <summary>
     /// One repository's projection, computed and — under <c>--apply</c> — written, with the store's
@@ -199,7 +223,9 @@ public static class MemorySyncCommand
     /// <remarks>
     /// <b>The comparison is over bytes, not over a timestamp or a length.</b> "Unchanged" here means
     /// the existing file is byte-for-byte what this run would write, which is the same claim
-    /// <c>MemoryProjectionTests</c> asserts and the same one the acceptance line makes. The target
+    /// <c>MemoryProjectionTests</c> asserts, the same one the acceptance line makes, and — since
+    /// #2040 — the one <c>--check</c>'s exit code gates on, so a looser comparison here would silently
+    /// weaken a gate as well as a report. The target
     /// directory is never created: every target is a root discovery already found, so the directory
     /// exists by construction, and a missing one is a root that vanished mid-run rather than a
     /// directory this verb should mint.
@@ -220,7 +246,7 @@ public static class MemorySyncCommand
             target.Vendor,
             target.RootDirectoryPath,
             target.FilePath,
-            unchanged ? "unchanged" : existing is null ? (apply ? "created" : "would create") : (apply ? "rewritten" : "would rewrite"),
+            unchanged ? UnchangedDisposition : existing is null ? (apply ? "created" : "would create") : (apply ? "rewritten" : "would rewrite"),
             bytes.Length,
             Convert.ToHexString(SHA256.HashData(bytes)).ToLowerInvariant());
     }
@@ -445,7 +471,10 @@ public static class MemorySyncCommand
         output.WriteLine(
             report.Apply
                 ? "baton memory sync --apply -- projections written. The canonical store was NOT changed."
-                : "baton memory sync -- NOTHING WAS WRITTEN. No file, and no directory either.");
+                : report.Check
+                    ? "baton memory sync --check -- NOTHING WAS WRITTEN. No file, and no directory either. " +
+                      "The exit code is the answer."
+                    : "baton memory sync -- NOTHING WAS WRITTEN. No file, and no directory either.");
         output.WriteLine();
         output.WriteLine(
             report.RepositoryFactsDirectory is { Length: > 0 } directory
@@ -459,6 +488,7 @@ public static class MemorySyncCommand
             output.WriteLine();
             output.WriteLine("No repository has a canonical memory store yet. Run 'baton memory import' first.");
             WriteNonTargets(output, report.NonTargetRoots);
+            WriteCheckVerdict(output, report);
             return;
         }
 
@@ -485,6 +515,34 @@ public static class MemorySyncCommand
         }
 
         WriteNonTargets(output, report.NonTargetRoots);
+        WriteCheckVerdict(output, report);
+    }
+
+    /// <summary>
+    /// What <c>--check</c> decided, in the operator's terms and with the remedy — the same posture
+    /// <see cref="NoTargetGuidance"/> takes, because a bare exit 1 in a CI log is a verdict with no
+    /// next move (#2040).
+    /// </summary>
+    /// <remarks>
+    /// Text only. The JSON report already carries every target's disposition, which is what the exit
+    /// code is computed from, so printing a second machine-readable verdict beside it would be the
+    /// same fact twice — <see cref="SyncReport.Check"/>'s own doc carries that split.
+    /// </remarks>
+    private static void WriteCheckVerdict(TextWriter output, SyncReport report)
+    {
+        if (!report.Check)
+        {
+            return;
+        }
+
+        var stale = StaleTargetCount(report);
+        output.WriteLine();
+        output.WriteLine(
+            stale == 0
+                ? "CHECK PASSED (exit 0) -- every discovered target is byte-identical to what this run " +
+                  "would project. Nothing about roots that were never discovered: see any NO TARGET line above."
+                : $"CHECK FAILED (exit 1) -- {stale} discovered target(s) differ from what this run would " +
+                  "project. Run 'baton memory sync --apply' to make them match; nothing was written by this run.");
     }
 
     /// <summary>
@@ -558,8 +616,15 @@ public static class MemorySyncCommand
         [property: JsonPropertyName("vendor")] string Vendor,
         [property: JsonPropertyName("reason")] string Reason);
 
+    /// <param name="Check">
+    /// Which run this was, mirroring <paramref name="Apply"/> — NOT the verdict. The verdict is the
+    /// process exit code, and each target's <c>disposition</c> below is what it was computed from; a
+    /// second JSON field restating it would be the same fact in two places (CLAUDE.md,
+    /// <c>record-once</c>).
+    /// </param>
     private sealed record SyncReport(
         [property: JsonPropertyName("apply")] bool Apply,
+        [property: JsonPropertyName("check")] bool Check,
         [property: JsonPropertyName("repositoryFactsDirectory")] string? RepositoryFactsDirectory,
         [property: JsonPropertyName("repositoryFactsConsidered")] int RepositoryFactsConsidered,
         [property: JsonPropertyName("repositories")] IReadOnlyList<SyncRepositoryReport> Repositories,
