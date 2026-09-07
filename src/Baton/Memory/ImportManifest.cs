@@ -58,18 +58,23 @@ public sealed record ImportLinkRow(
     [property: JsonPropertyName("alreadyPresent")] bool AlreadyPresent = false);
 
 /// <summary>
-/// A file the import saw and did not turn into an entry, and why. Two populations land here and they
-/// mean different things — see <see cref="ImportManifest.Unfiled"/> and
-/// <see cref="ImportManifest.Machinery"/>.
+/// A file the import saw and did not turn into an entry, and why. Several populations land here and
+/// they mean different things: each of <see cref="ImportManifest"/>'s own fields of this type says
+/// what its rows mean.
 /// </summary>
 /// <param name="SourcePath">Absolute path of the file.</param>
 /// <param name="Sha256">Its digest — recorded even here, because provenance is the point of the row.</param>
 /// <param name="SourceMtimeUtc">
-/// Its last-write time. Which read the digest and this came from differs by population: an unfiled file
-/// was opened like any other, so both are from that read (see <see cref="MemoryEntry.SourceMtimeUtc"/>);
-/// a machinery file is never opened at all, so both are the inventory walk's.
+/// Its last-write time, taken from the same read as <paramref name="Sha256"/> and
+/// <paramref name="SizeBytes"/>. <b>Which read that was is decided by one thing: whether the import
+/// opened the file.</b> It opens an <see cref="ImportManifest.Unfiled"/> or an
+/// <see cref="ImportManifest.ProjectionsSkipped"/> file like any other source and only then declines to
+/// file it, so all three values on those rows are this import's own (see
+/// <see cref="MemoryEntry.SourceMtimeUtc"/>). It never opens an <see cref="ImportManifest.Machinery"/>
+/// file and could not open a <see cref="ImportManifest.Dropped"/> one, so theirs are the inventory
+/// walk's — with the consequence peculiar to the second stated at <see cref="ImportManifest.Dropped"/>.
 /// </param>
-/// <param name="SizeBytes">Its length, from whichever of the two the digest came from.</param>
+/// <param name="SizeBytes">Its length, from whichever read the digest came from.</param>
 /// <param name="Reason">Why it produced no entry, in one clause.</param>
 public sealed record ImportSkippedRow(
     [property: JsonPropertyName("sourcePath")] string SourcePath,
@@ -130,6 +135,23 @@ public sealed record ImportSkippedRow(
 /// <see cref="MemoryProjection.IsProjectedFile"/>. Distinct from <paramref name="Unfiled"/>, which is
 /// what an operator can still place. Absent (null) on a manifest written before the field existed.
 /// </param>
+/// <param name="Dropped">
+/// Files the inventory walk found and the import could then <b>not open</b> — gone, locked, or no
+/// longer permitted between the walk and the read (#1976). The row names the failure's exception kind
+/// in its <see cref="ImportSkippedRow.Reason"/>.
+/// <para>
+/// <b>Its digest, size and mtime are the WALK's, and are not evidence about what the import read</b> —
+/// no read happened, which is the whole population. They describe the bytes the walk saw, which may no
+/// longer exist; they say what was there a moment ago, never what was carried.
+/// </para>
+/// <para>
+/// <b>An undo ignores this population entirely</b>: nothing was written for it, so there is nothing to
+/// reverse. It exists so that a file that was walked and then failed to open is distinguishable from
+/// one that was never seen — before it, such a file appeared in no population at all and this
+/// manifest's own "accounts for every file the import looked at" was false for it.
+/// </para>
+/// Absent (null) on a manifest written before the field existed.
+/// </param>
 public sealed record ImportManifest(
     [property: JsonPropertyName("version")] int Version,
     [property: JsonPropertyName("importedAtUtc")] DateTime ImportedAtUtc,
@@ -142,17 +164,21 @@ public sealed record ImportManifest(
     IReadOnlyList<ImportLinkRow>? Links = null,
     [property: JsonPropertyName("projectionsSkipped")]
     [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
-    IReadOnlyList<ImportSkippedRow>? ProjectionsSkipped = null)
+    IReadOnlyList<ImportSkippedRow>? ProjectionsSkipped = null,
+    [property: JsonPropertyName("dropped")]
+    [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    IReadOnlyList<ImportSkippedRow>? Dropped = null)
 {
     /// <summary>
     /// The only version this build writes, and the only one <see cref="Read"/> accepts.
     /// <para>
-    /// <b>Not bumped when <see cref="Links"/> was added</b> (#1940 review round) <b>nor when
-    /// <see cref="ProjectionsSkipped"/> was</b> (#1852 phase C, review round two): the verb has never
-    /// shipped, so no version-1 manifest written by any released build exists to be misread, and both
-    /// fields are optional in both directions — an older manifest reads back with neither and undoes its
-    /// entries exactly as before. The next change to this schema after the verb ships is a bump,
-    /// because from then on a reader could genuinely meet a manifest an older build wrote.
+    /// <b>Not bumped when <see cref="Links"/> was added</b> (#1940 review round), <b>nor when
+    /// <see cref="ProjectionsSkipped"/> was</b> (#1852 phase C, review round two), <b>nor when
+    /// <see cref="Dropped"/> was</b> (#1976): the verb has never shipped, so no version-1 manifest
+    /// written by any released build exists to be misread, and all three fields are optional in both
+    /// directions — an older manifest reads back with none of them and undoes its entries exactly as
+    /// before. The next change to this schema after the verb ships is a bump, because from then on a
+    /// reader could genuinely meet a manifest an older build wrote.
     /// </para>
     /// </summary>
     public const int CurrentVersion = 1;

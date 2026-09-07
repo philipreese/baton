@@ -1150,20 +1150,346 @@ public sealed class MemoryImportTests : IDisposable
         Assert.NotEqual(staleMtime, currentMtime);
         Assert.NotEqual(staleRow.SizeBytes, currentBytes.Length);
 
-        var read = Assert.Single(MemoryImportCommand.ReadSourceFiles(new MemoryImportSource(
+        var result = MemoryImportCommand.ReadSourceFiles(new MemoryImportSource(
             directory,
             MemoryRootInventory.ClaudeVendor,
             VendorMemoryScope.Vendor,
             Archived: false,
             "github.com/philipreese/baton",
             UnfiledReason: null,
-            [staleRow])));
+            [staleRow]));
 
+        var read = Assert.Single(result.Files);
+        Assert.Empty(result.Dropped);
         Assert.Equal("the memory that is actually on disk now", read.Text);
         Assert.Equal(Convert.ToHexString(SHA256.HashData(currentBytes)).ToLowerInvariant(), read.Sha256);
         Assert.Equal(currentBytes.Length, read.SizeBytes);
         Assert.Equal(currentMtime, read.ModifiedUtc);
         Assert.Equal(DateTimeKind.Utc, read.ModifiedUtc.Kind);
+    }
+
+    /// <summary>
+    /// #1976: a source that is gone between the inventory walk and the read lands in the manifest's
+    /// <see cref="ImportManifest.Dropped"/> population — path, exception kind, and the walk's own
+    /// size/mtime — and survives being written and read back.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// <b>What this replaces.</b> The read's <c>catch</c> used to <c>continue</c>, so the file was
+    /// absent from the source's files, was never iterated by <c>MemoryImportPlan.Build</c>, and appeared
+    /// in <b>no</b> manifest population at all — indistinguishable from a file the walk never saw, which
+    /// is exactly the gap <see cref="ImportManifest"/>'s "accounts for every file the import looked at"
+    /// says the manifest closes. Red-before-green is not literally available for a field that did not
+    /// exist; what discriminates instead is the assertion below that the SAME source's readable sibling
+    /// still imports, so a green here cannot come from a read that produced nothing.
+    /// </para>
+    /// <para>
+    /// <b>Why the seam and not the verb.</b> The walk and the read run back to back inside the command
+    /// with nothing between them to interpose on, and the read opens
+    /// <see cref="FileShare.ReadWrite"/> — so a test holding the file open would not make it fail
+    /// either. Handing in a row for a path that is not there is what puts the read in the state a
+    /// vanished file leaves it in.
+    /// </para>
+    /// <para>
+    /// <b>The file is deleted, not its directory</b>, so the failure is deterministically a
+    /// <c>FileNotFoundException</c> rather than a <c>DirectoryNotFoundException</c>; the assertion is on
+    /// the kind's name, never on the exception's message, which is OS-worded.
+    /// </para>
+    /// </remarks>
+    [Fact]
+    public void A_source_gone_between_the_walk_and_the_read_is_recorded_as_dropped()
+    {
+        var directory = Path.Combine(_root, "vanished");
+        Directory.CreateDirectory(directory);
+
+        // The row the walk produced for a file that has since been deleted. What the values on it mean
+        // once they reach a manifest row is ImportManifest.Dropped's to say; this arm only pins that
+        // they are carried across unchanged.
+        var goneBytes = System.Text.Encoding.UTF8.GetBytes("the memory the walk saw and the read missed");
+        var gonePath = Path.Combine(directory, "user_gone.md");
+        File.WriteAllBytes(gonePath, goneBytes);
+        File.SetLastWriteTimeUtc(gonePath, new DateTime(2025, 1, 2, 3, 4, 5, DateTimeKind.Utc));
+        var goneRow = new MemoryImportFile(
+            gonePath,
+            "user_gone.md",
+            Text: string.Empty,
+            Sha256: Convert.ToHexString(SHA256.HashData(goneBytes)).ToLowerInvariant(),
+            ModifiedUtc: File.GetLastWriteTimeUtc(gonePath),
+            SizeBytes: goneBytes.Length);
+        FileCleanup.EnsureDeleted(gonePath);
+
+        // The control: a file in the same source that is still there.
+        var presentPath = Path.Combine(directory, "user_present.md");
+        File.WriteAllText(presentPath, "the memory that is still on disk");
+        var presentRow = new MemoryImportFile(
+            presentPath, "user_present.md", Text: string.Empty, Sha256: string.Empty,
+            ModifiedUtc: DateTime.UnixEpoch, SizeBytes: 0);
+
+        var result = MemoryImportCommand.ReadSourceFiles(new MemoryImportSource(
+            directory,
+            MemoryRootInventory.ClaudeVendor,
+            VendorMemoryScope.Vendor,
+            Archived: false,
+            "github.com/philipreese/baton",
+            UnfiledReason: null,
+            [goneRow, presentRow]));
+
+        var droppedRow = Assert.Single(result.Dropped);
+        Assert.Equal(gonePath, droppedRow.SourcePath);
+        Assert.Contains(nameof(FileNotFoundException), droppedRow.Reason, StringComparison.Ordinal);
+        Assert.Equal(goneRow.Sha256, droppedRow.Sha256);
+        Assert.Equal(goneRow.SizeBytes, droppedRow.SizeBytes);
+        Assert.Equal(goneRow.ModifiedUtc, droppedRow.SourceMtimeUtc);
+
+        // The readable sibling still imported, and the vanished file produced no entry of its own.
+        Assert.Equal(presentPath, Assert.Single(result.Files).Path);
+
+        var plan = MemoryImportPlan.Build(
+            [new MemoryImportSource(
+                directory, MemoryRootInventory.ClaudeVendor, VendorMemoryScope.Vendor, Archived: false,
+                "github.com/philipreese/baton", UnfiledReason: null, result.Files)],
+            DateTime.UtcNow,
+            result.Dropped);
+
+        Assert.DoesNotContain(plan.Entries, e => e.SourcePath == gonePath);
+        Assert.Equal(presentPath, Assert.Single(plan.Entries).SourcePath);
+        Assert.Empty(plan.Unfiled);
+
+        // Through the manifest and back off disk: a population that only exists in a live object is one
+        // an operator reading the manifest can never see.
+        var manifestPath = Path.Combine(_root, "manifests", "import-dropped.json");
+        new ImportManifest(
+            ImportManifest.CurrentVersion,
+            DateTime.UtcNow,
+            BatonPaths.Root,
+            [],
+            plan.Unfiled,
+            [],
+            [],
+            plan.ProjectionsSkipped,
+            plan.Dropped).Write(manifestPath);
+
+        var roundTripped = Assert.Single(ImportManifest.Read(manifestPath).Dropped!);
+        Assert.Equal(gonePath, roundTripped.SourcePath);
+        Assert.Equal(goneRow.Sha256, roundTripped.Sha256);
+        Assert.Equal(goneRow.SizeBytes, roundTripped.SizeBytes);
+        Assert.Equal(goneRow.ModifiedUtc, roundTripped.SourceMtimeUtc);
+        Assert.Contains(nameof(FileNotFoundException), roundTripped.Reason, StringComparison.Ordinal);
+    }
+
+    /// <summary>
+    /// The ordinary path still reports the new population as empty, end to end through the verb: an
+    /// import that read every file it walked writes <c>dropped: 0</c> and a manifest whose
+    /// <see cref="ImportManifest.Dropped"/> is empty. Without this, "one row when a file vanishes" would
+    /// be consistent with a row appearing for every file.
+    /// </summary>
+    [Fact]
+    public async Task An_import_that_read_every_file_reports_no_dropped_sources()
+    {
+        await BuildStandardFixtureAsync();
+
+        var text = await RunAsync();
+
+        Assert.Contains("dropped: 0", text, StringComparison.Ordinal);
+        Assert.DoesNotContain("Dropped --", text, StringComparison.Ordinal);
+
+        var manifest = ImportManifest.Read(
+            Directory.GetFiles(Path.Combine(BatonPaths.Root, BatonPaths.MemoryImportsDirectoryName)).Single());
+
+        Assert.Empty(manifest.Dropped!);
+        Assert.NotEmpty(manifest.Entries);
+    }
+
+    /// <summary>
+    /// The reconcile identity the manifest's contract is: <c>inventoried = entries + unfiled +
+    /// machinery + projection-skipped + dropped</c>, over a population where all five are non-empty.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// <b>Why summing them is a different claim from checking them.</b> Each population already has an
+    /// arm proving its rows are shaped right; none of those can notice a file that reached NO
+    /// population, because a missing row is invisible to an assertion about the rows that are there.
+    /// That is precisely how #1976 shipped — the read's <c>catch</c> discarded the file, the count of
+    /// every population stayed self-consistent, and the whole suite stayed green.
+    /// </para>
+    /// <para>
+    /// <b>Two instruments, one claim, because neither reaches the whole population.</b> The first half
+    /// drives the verb, so what it grades is the manifest <c>MemoryImportCommand</c> itself assembled
+    /// — the only thing that can catch a population computed correctly and then left out of the
+    /// manifest, since <see cref="ImportManifest.Dropped"/> is an optional argument the compiler will
+    /// not miss. The second half drives the read seam, because no fixture can stage a vanishing file
+    /// through the verb: <see cref="A_source_gone_between_the_walk_and_the_read_is_recorded_as_dropped"/>
+    /// records why, and it is why the verb's own manifest is one population short of the identity.
+    /// </para>
+    /// <para>
+    /// <b>Source paths, not merely a total.</b> Equal totals also hold when one file lands in two
+    /// populations while a second lands in none — the exact shape a routing change produces — so the
+    /// union of the five populations' paths is compared against what the walk found, and the row count
+    /// against that union's size. Together those two are "exactly one population each".
+    /// </para>
+    /// </remarks>
+    [Fact]
+    public async Task Every_file_the_walk_found_lands_in_exactly_one_manifest_population()
+    {
+        var checkout = Checkout("accounted");
+        await InitGitRepoAsync(checkout, "https://github.com/philipreese/accounted.git");
+        WriteClaudeRoot(
+            "C--accounted", checkout,
+            ("user_who.md", "a memory a person wrote"),
+            (ClaudeProjectionTarget.ProjectionFileName, MemoryProjection.FormatMarker + "\n# a cache\n"));
+        WriteClaudeRoot("C--orphaned", Checkout("never-created"), ("user_orphan.md", "its checkout is gone"));
+        Directory.CreateDirectory(Path.Combine(UserHome, ".codex"));
+        File.WriteAllText(Path.Combine(UserHome, ".codex", "memories_1.sqlite"), "synthetic-not-a-database");
+
+        // The walk's own answer to "what did the import look at", taken from the inventory rather than
+        // from the tree and taken BEFORE the run: the files under _root include a session.jsonl per
+        // root, the git objects, and the store the run is about to write, none of which the import
+        // looked at. The vendor half is every family's rows, which in this fixture is the sqlite.
+        var walked = MemoryRootInventory
+            .Scan(ClaudeHome, TestContext.Current.CancellationToken)
+            .SelectMany(r => r.Files)
+            .Concat(MemoryRootInventory
+                .ScanVendorRoots(UserHome, BatonPaths.Root, limits: null, TestContext.Current.CancellationToken)
+                .SelectMany(r => r.Files))
+            .Select(f => f.Path)
+            .ToHashSet(StringComparer.OrdinalIgnoreCase);
+
+        // Pinned as a SET rather than a count of four, for the reason the identity below is: a walk
+        // that one day picks up a fifth file — a family added to VendorMemoryRootTable, something under
+        // the Baton root — names it here instead of reporting "expected 4, actual 5". Such a file would
+        // break the identity honestly if the import consumes neither as a source nor as machinery, and
+        // that failure must not read as a fixture miscount.
+        Assert.Equal(
+            new[]
+            {
+                Path.Combine(ClaudeHome, "projects", "C--accounted", "memory", "user_who.md"),
+                Path.Combine(
+                    ClaudeHome, "projects", "C--accounted", "memory", ClaudeProjectionTarget.ProjectionFileName),
+                Path.Combine(ClaudeHome, "projects", "C--orphaned", "memory", "user_orphan.md"),
+                Path.Combine(UserHome, ".codex", "memories_1.sqlite"),
+            }.OrderBy(p => p, StringComparer.OrdinalIgnoreCase),
+            walked.OrderBy(p => p, StringComparer.OrdinalIgnoreCase),
+            StringComparer.OrdinalIgnoreCase);
+
+        await RunAsync();
+
+        var manifest = ImportManifest.Read(Assert.Single(
+            Directory.GetFiles(Path.Combine(BatonPaths.Root, BatonPaths.MemoryImportsDirectoryName))));
+
+        // Four of the five populated, so dropping any one of those four from the sum fails here.
+        Assert.NotEmpty(manifest.Entries);
+        Assert.NotEmpty(manifest.Unfiled);
+        Assert.NotEmpty(manifest.Machinery);
+        Assert.NotEmpty(manifest.ProjectionsSkipped!);
+        Assert.Empty(manifest.Dropped!);
+        AssertEveryWalkedFileIsAccountedForExactlyOnce(manifest, walked);
+
+        // The fifth, at the seam. One source with a subject (a memory, a projection, and a file the
+        // read will not find) and one without (the unfiled row), plus a machinery row of the kind the
+        // walk hands the command untouched.
+        var directory = Path.Combine(_root, "reconcile");
+        var orphanDirectory = Path.Combine(_root, "reconcile-unfiled");
+        Directory.CreateDirectory(directory);
+        Directory.CreateDirectory(orphanDirectory);
+
+        var keptRow = WriteSeamFile(directory, "user_kept.md", "a memory the read will find");
+        var projectionRow = WriteSeamFile(
+            directory, "projected.md", MemoryProjection.FormatMarker + "\n# a cache\n");
+        var orphanRow = WriteSeamFile(orphanDirectory, "user_orphan.md", "no subject for this root");
+        var goneRow = WriteSeamFile(directory, "user_vanished.md", "the memory the read will miss");
+        FileCleanup.EnsureDeleted(goneRow.Path);
+
+        var machineryRow = new ImportSkippedRow(
+            Path.Combine(_root, "machinery", "memories_1.sqlite"),
+            "0f".PadRight(64, '0'),
+            new DateTime(2025, 6, 7, 8, 9, 10, DateTimeKind.Utc),
+            SizeBytes: 11,
+            "recorded by the walk and never opened.");
+
+        var seamSources = new[]
+        {
+            new MemoryImportSource(
+                directory, MemoryRootInventory.ClaudeVendor, VendorMemoryScope.Vendor, Archived: false,
+                "github.com/philipreese/accounted", UnfiledReason: null, [keptRow, projectionRow, goneRow]),
+            new MemoryImportSource(
+                orphanDirectory, MemoryRootInventory.ClaudeVendor, VendorMemoryScope.Vendor, Archived: false,
+                Repository: null, "the checkout this memory belongs to is gone", [orphanRow]),
+        };
+
+        var reads = seamSources.Select(s => (Source: s, Read: MemoryImportCommand.ReadSourceFiles(s))).ToList();
+        var seamPlan = MemoryImportPlan.Build(
+            [.. reads.Select(r => r.Source with { Files = r.Read.Files })],
+            DateTime.UtcNow,
+            [.. reads.SelectMany(r => r.Read.Dropped)]);
+
+        var seamManifestPath = Path.Combine(_root, "manifests", "import-reconcile.json");
+        new ImportManifest(
+            ImportManifest.CurrentVersion,
+            DateTime.UtcNow,
+            BatonPaths.Root,
+            [.. seamPlan.Entries.Select(e => new ImportManifestRow(
+                e.SourcePath, e.Sha256, e.SourceMtimeUtc, SizeBytes: 0, e.SourceVendor, e.SourceScope,
+                e.Id, e.Repository, EntriesFilePath: "entries.jsonl"))],
+            seamPlan.Unfiled,
+            [machineryRow],
+            [],
+            seamPlan.ProjectionsSkipped,
+            seamPlan.Dropped).Write(seamManifestPath);
+
+        var seamManifest = ImportManifest.Read(seamManifestPath);
+
+        // All five populated now, so the sum is short if ANY of them is dropped from it.
+        Assert.Single(seamManifest.Entries);
+        Assert.Single(seamManifest.Unfiled);
+        Assert.Single(seamManifest.Machinery);
+        Assert.Single(seamManifest.ProjectionsSkipped!);
+        Assert.Single(seamManifest.Dropped!);
+        AssertEveryWalkedFileIsAccountedForExactlyOnce(
+            seamManifest,
+            new[] { keptRow.Path, projectionRow.Path, orphanRow.Path, goneRow.Path, machineryRow.SourcePath }
+                .ToHashSet(StringComparer.OrdinalIgnoreCase));
+    }
+
+    /// <summary>
+    /// The identity itself, so both halves of the arm above measure one claim rather than two similar
+    /// ones. The count is asserted separately from the set because they fail on different defects: the
+    /// set on a file that reached no population, the count on one that reached two.
+    /// </summary>
+    private static void AssertEveryWalkedFileIsAccountedForExactlyOnce(
+        ImportManifest manifest, IReadOnlySet<string> walked)
+    {
+        var accounted = manifest.Entries.Select(e => e.SourcePath)
+            .Concat(manifest.Unfiled.Select(r => r.SourcePath))
+            .Concat(manifest.Machinery.Select(r => r.SourcePath))
+            .Concat((manifest.ProjectionsSkipped ?? []).Select(r => r.SourcePath))
+            .Concat((manifest.Dropped ?? []).Select(r => r.SourcePath))
+            .ToList();
+
+        Assert.Equal(walked.Count, accounted.Count);
+        Assert.Equal(
+            walked.OrderBy(p => p, StringComparer.OrdinalIgnoreCase),
+            accounted.OrderBy(p => p, StringComparer.OrdinalIgnoreCase),
+            StringComparer.OrdinalIgnoreCase);
+    }
+
+    /// <summary>
+    /// One file on disk plus the inventory row the walk would have produced for it — the seam takes
+    /// rows, and a row whose digest did not come from the bytes beside it would make the arm above
+    /// pass over values nothing ever computed.
+    /// </summary>
+    private static MemoryImportFile WriteSeamFile(string directory, string name, string content)
+    {
+        var path = Path.Combine(directory, name);
+        var bytes = System.Text.Encoding.UTF8.GetBytes(content);
+        File.WriteAllBytes(path, bytes);
+
+        return new MemoryImportFile(
+            path,
+            name,
+            Text: string.Empty,
+            Convert.ToHexString(SHA256.HashData(bytes)).ToLowerInvariant(),
+            File.GetLastWriteTimeUtc(path),
+            bytes.Length);
     }
 
     /// <summary>
