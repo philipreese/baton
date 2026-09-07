@@ -5006,8 +5006,8 @@ exactly one implementation of this rule rather than two kept in step by hand.
 granted shell command Baton itself runs — the codex broker's `baton_run_command`, the only path where
 Baton holds the stopwatch, since claude and agy run their shell inside the vendor CLI — is bounded by
 one of three classes. `shipping` is the commands that transfer finished work out of the workspace;
-`gate` is the named gate tasks, in the `pixi run` spellings "Running tasks" mandates and in the
-wrapped spellings those tasks run as; `other` is everything else and keeps the ceiling every command
+`gate` is the named gate tasks, in the `pixi run` spellings `CLAUDE.md` mandates and in the wrapped
+spellings those tasks run as; `other` is everything else and keeps the ceiling every command
 had before. The two named classes are commands
 *known to be progressing while they run*, so a ceiling sized to a quick command kills finished work
 rather than runaway work: measured twice on 2026-09-06, a lane with all five commits on its branch
