@@ -282,6 +282,63 @@ public sealed class QueueCommandTests
         }
     }
 
+    /// <summary>
+    /// A halted item is marked, and one that merely failed its lane is not — the distinction
+    /// <c>QueueCommand.ListAsync</c>'s comment states this token exists for.
+    /// </summary>
+    /// <remarks>
+    /// Both items are in ONE listing and both are <c>failed</c>, so the token cannot be tracking the
+    /// state word: a listing that printed <c>halted</c> for every failure would fail the second
+    /// assertion, and one that printed it for none would fail the first.
+    /// </remarks>
+    [Fact]
+    public async Task List_marks_the_item_the_queue_has_given_up_on()
+    {
+        var home = CreateTempHome();
+        using var scope = BatonEnvironmentSnapshot.BeginScope(BatonEnvironmentSnapshot.Blank with { HomeOverride = home });
+        try
+        {
+            Directory.CreateDirectory(BatonPaths.QueueSpecsDirectory);
+            await QueueStore.MutateAsync(
+                BatonPaths.QueueFile,
+                s => s with
+                {
+                    Items =
+                    [
+                        new QueueItem
+                        {
+                            Tag = "given-up",
+                            Role = "implement",
+                            Workspace = Path.Combine(home, "w1"),
+                            SpecFile = BatonPaths.QueueSpecFile("given-up"),
+                            State = QueueItemState.Failed,
+                            Halted = true,
+                        },
+                        new QueueItem
+                        {
+                            Tag = "retryable",
+                            Role = "implement",
+                            Workspace = Path.Combine(home, "w2"),
+                            SpecFile = BatonPaths.QueueSpecFile("retryable"),
+                            State = QueueItemState.Failed,
+                        },
+                    ],
+                },
+                Ct);
+
+            var output = new StringWriter();
+            await QueueCommand.ExecuteAsync(new QueueOptions(QueueVerb.List), output, Ct);
+
+            var lines = output.ToString().ReplaceLineEndings("\n").Split('\n');
+            Assert.Contains(lines, line => line.StartsWith("given-up  failed halted", StringComparison.Ordinal));
+            Assert.Contains(lines, line => line.StartsWith("retryable  failed  ", StringComparison.Ordinal));
+        }
+        finally
+        {
+            DirectoryCleanup.DeleteRecursively(home);
+        }
+    }
+
     [Fact]
     public async Task List_says_nothing_about_waiting_when_the_last_decision_was_a_launch()
     {
