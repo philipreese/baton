@@ -820,6 +820,263 @@ public class AgyHookCheckCommandTests
         Assert.Equal("BATON_HOOK_VERDICT_LEDGER", AgyHookCheckCommand.VerdictLedgerEnvironmentVariable);
     }
 
+    /// <summary>
+    /// #2002 rule 1 on agy's half — the vendor the polling was measured on, and the one whose native
+    /// <c>run_command</c> never touches the codex broker, so this hook is the only place the rule can
+    /// reach it. Driven on an UNSCOPED grant (Present, empty pattern list — `implement`'s real shape),
+    /// where every other rung in this branch passes the line through, so a deny here can only be the
+    /// backgrounding detector's.
+    /// </summary>
+    [Theory]
+    [InlineData("Start-Process dotnet -ArgumentList 'build' -NoNewWindow -PassThru", "deny")]
+    [InlineData("dotnet test &", "deny")]
+    [InlineData("nohup pixi run gates-fast", "deny")]
+    [InlineData("dotnet test", "allow")]
+    [InlineData("Get-Process -Id 59340 -ErrorAction SilentlyContinue", "allow")]
+    public void A_backgrounded_run_command_is_denied_on_an_unscoped_grant(string command, string expected)
+    {
+        var payload = $$"""
+            {"artifactDirectoryPath":"C:/x/brain/abc","conversationId":"abc",
+             "modelName":"gemini-3.6-flash-medium","stepIdx":3,
+             "toolCall":{"args":{"CommandLine":{{JsonSerializer.Serialize(command)}}, "Cwd":"C:\\x","WaitMsBeforeAsync":5000},
+                         "name":"run_command"},
+             "transcriptPath":"C:/x/transcript_full.jsonl","workspacePaths":["C:/x"]}
+            """;
+        using var stdin = new StringReader(payload);
+        using var stdout = new StringWriter();
+
+        var exitCode = AgyHookCheckCommand.Execute(
+            stdin, stdout, "agy:write_to_file", shellPatternsRaw: "agy:",
+            deniedShellPatternsRaw: "agy:", deniedShellOptionTokensRaw: "agy:");
+
+        Assert.Equal(AgyHookCheckCommand.ExitCode, exitCode);
+        using var doc = JsonDocument.Parse(stdout.ToString());
+        Assert.Equal(expected, doc.RootElement.GetProperty("decision").GetString());
+        if (expected == "deny")
+        {
+            var reason = doc.RootElement.GetProperty("reason").GetString();
+            Assert.Contains("backgrounds the work", reason!, StringComparison.Ordinal);
+            Assert.Contains("costs no tool step", reason!, StringComparison.Ordinal);
+            Assert.Contains(Baton.Domain.GrantRefusal.Marker, reason!);
+        }
+    }
+
+    /// <summary>
+    /// The control that keeps the rule about BACKGROUNDING rather than about `run_command`: the
+    /// measured room's own polling line is allowed through by rule 1 (it is the symptom, not the
+    /// shape), which is why the poll itself is answered by rule 2 in the broker and by rule 3 in the
+    /// arrest text instead. Stated as an arm above (`Get-Process …` → allow) so a detector that grew
+    /// to refuse polls directly would turn this red rather than quietly changing what agy may run.
+    /// </summary>
+    /// <summary>
+    /// #2002 review MEDIUM, both directions. An argument no measurement accounts for is refused,
+    /// because it could be the backgrounding switch this gate cannot read. The control is the first
+    /// arm, and it is the one that matters: <c>WaitMsBeforeAsync</c> IS a backgrounding parameter and
+    /// agy sends it on every single call, so a rule that refused "anything but CommandLine" would deny
+    /// every command this vendor runs. <c>AgyHookCheckCommand.MeasuredRunCommandArgs</c> carries that
+    /// finding and its provenance.
+    /// </summary>
+    [Theory]
+    [InlineData("""{"CommandLine":"dotnet build","Cwd":"C:\\x","WaitMsBeforeAsync":5000}""", "allow")]
+    [InlineData("""{"CommandLine":"dotnet build"}""", "allow")]
+    [InlineData("""{"CommandLine":"dotnet build","Async":true}""", "deny")]
+    [InlineData("""{"CommandLine":"dotnet build","Cwd":"C:\\x","Detach":true}""", "deny")]
+    public void An_unmeasured_run_command_argument_is_refused_and_the_measured_three_are_not(
+        string argsJson, string expected)
+    {
+        var payload = $$"""
+            {"artifactDirectoryPath":"C:/x/brain/abc","conversationId":"abc",
+             "modelName":"gemini-3.6-flash-medium","stepIdx":3,
+             "toolCall":{"args":{{argsJson}},"name":"run_command"},
+             "transcriptPath":"C:/x/transcript_full.jsonl","workspacePaths":["C:/x"]}
+            """;
+        using var stdin = new StringReader(payload);
+        using var stdout = new StringWriter();
+
+        AgyHookCheckCommand.Execute(
+            stdin, stdout, "agy:write_to_file", shellPatternsRaw: "agy:",
+            deniedShellPatternsRaw: "agy:", deniedShellOptionTokensRaw: "agy:");
+
+        using var doc = JsonDocument.Parse(stdout.ToString());
+        Assert.Equal(expected, doc.RootElement.GetProperty("decision").GetString());
+        if (expected == "deny")
+        {
+            Assert.Contains(
+                "in the background instead of to completion",
+                doc.RootElement.GetProperty("reason").GetString()!,
+                StringComparison.Ordinal);
+        }
+    }
+
+    /// <summary>
+    /// #2002 rule 2 on agy, the same three arms the claude hook and the broker carry, through a ledger
+    /// file this execution's output directory holds — each call is a separate
+    /// <see cref="AgyHookCheckCommand.Execute"/>, standing in for the fresh subprocess agy spawns per
+    /// tool call. The <c>view_file</c> arm is rule 2b: unchanged file denied, changed file allowed,
+    /// which is the control that keeps it about the file rather than about the second read of
+    /// anything.
+    /// </summary>
+    [Fact]
+    public void Three_identical_run_commands_are_one_allow_and_two_denials_and_a_changed_file_rereads()
+    {
+        var root = Path.Combine(Path.GetTempPath(), $"baton-agy-repeat-{Guid.NewGuid():N}");
+        var outbox = Path.Combine(root, "outbox");
+        Directory.CreateDirectory(outbox);
+        try
+        {
+            var file = Path.Combine(root, "notes.md");
+            File.WriteAllText(file, "one");
+
+            var first = RepeatDecide(outbox, RunPayload("pixi run gates-fast"));
+            var second = RepeatDecide(outbox, RunPayload("pixi run gates-fast"));
+            var third = RepeatDecide(outbox, RunPayload("pixi run gates-fast"));
+
+            var firstRead = RepeatDecide(outbox, ViewPayload(file));
+            var secondRead = RepeatDecide(outbox, ViewPayload(file));
+            File.WriteAllText(file, "one, and then rather more than one");
+            var afterChange = RepeatDecide(outbox, ViewPayload(file));
+
+            Assert.Equal("allow", Decision(first));
+            Assert.Equal("deny", Decision(second));
+            Assert.Contains("byte-identical to the command", Reason(second), StringComparison.Ordinal);
+            Assert.Contains("above in your transcript", Reason(second), StringComparison.Ordinal);
+            Assert.Contains(Baton.Domain.GrantRefusal.Marker, Reason(third));
+            Assert.Equal("deny", Decision(third));
+            Assert.Contains(
+                Baton.Vendors.RepeatedToolCallLedger.CommandRepeatRefusal, Reason(third),
+                StringComparison.Ordinal);
+
+            Assert.Equal("allow", Decision(firstRead));
+            Assert.Equal("deny", Decision(secondRead));
+            Assert.Equal("allow", Decision(afterChange));
+        }
+        finally
+        {
+            Baton.Tests.Shared.DirectoryCleanup.DeleteRecursively(root);
+        }
+    }
+
+    /// <summary>
+    /// agy's copy of <c>HookCheckCommandTests.A_repeat_whose_output_the_ledger_holds_is_denied_with_that_output</c>
+    /// — see there for the rationale and for the polarity partner's role; the reason it is duplicated
+    /// per vendor is that the two hooks are separate commands with separate wiring, which is the whole
+    /// reason #2002's review found the rung on one of them and not the other. Its own polarity partner
+    /// is <see cref="Three_identical_run_commands_are_one_allow_and_two_denials_and_a_changed_file_rereads"/>.
+    /// </summary>
+    [Fact]
+    public void A_repeat_whose_output_the_ledger_holds_is_denied_with_that_output()
+    {
+        var root = Path.Combine(Path.GetTempPath(), $"baton-agy-repeat-{Guid.NewGuid():N}");
+        var outbox = Path.Combine(root, "outbox");
+        Directory.CreateDirectory(outbox);
+        try
+        {
+            RepeatDecide(outbox, RunPayload("pixi run gates-fast"));
+            RecordOutput(outbox, "pixi run gates-fast", "GATES: PASS 34 of 34");
+
+            var second = RepeatDecide(outbox, RunPayload("pixi run gates-fast"));
+            var third = RepeatDecide(outbox, RunPayload("pixi run gates-fast"));
+
+            Assert.Equal("deny", Decision(second));
+            Assert.Contains("GATES: PASS 34 of 34", Reason(second), StringComparison.Ordinal);
+            Assert.DoesNotContain("above in your transcript", Reason(second), StringComparison.Ordinal);
+
+            Assert.Equal("deny", Decision(third));
+            Assert.Contains(
+                Baton.Vendors.RepeatedToolCallLedger.CommandRepeatRefusal, Reason(third),
+                StringComparison.Ordinal);
+            Assert.DoesNotContain("GATES: PASS", Reason(third), StringComparison.Ordinal);
+        }
+        finally
+        {
+            Baton.Tests.Shared.DirectoryCleanup.DeleteRecursively(root);
+        }
+    }
+
+    /// <summary>
+    /// #2002 review HIGH on agy's hook path: a write evicts the remembered command, so the identical
+    /// re-ask is allowed again. Polarity partner in the same test — no write, still denied.
+    /// </summary>
+    [Fact]
+    public void A_write_makes_the_next_identical_run_command_allowed_again()
+    {
+        var root = Path.Combine(Path.GetTempPath(), $"baton-agy-repeat-{Guid.NewGuid():N}");
+        var outbox = Path.Combine(root, "outbox");
+        Directory.CreateDirectory(outbox);
+        try
+        {
+            RepeatDecide(outbox, RunPayload("dotnet build"));
+            RepeatDecide(outbox, WriteToolPayload(Path.Combine(outbox, "report.md")), workspace: root);
+            var afterWrite = RepeatDecide(outbox, RunPayload("dotnet build"));
+            var withoutWrite = RepeatDecide(outbox, RunPayload("dotnet build"));
+
+            Assert.Equal("allow", Decision(afterWrite));
+            Assert.Equal("deny", Decision(withoutWrite));
+        }
+        finally
+        {
+            Baton.Tests.Shared.DirectoryCleanup.DeleteRecursively(root);
+        }
+    }
+
+    /// <summary>
+    /// Concatenated, for the same reason the claude suite's payload helper is: this JSON closes with
+    /// more braces than a `$$"""…"""` will carry alongside an interpolation hole.
+    /// </summary>
+    private static string ToolPayload(string toolName, string argsJson) =>
+        "{\"toolCall\":{\"args\":" + argsJson + ",\"name\":" +
+        JsonSerializer.Serialize(toolName) + "}}";
+
+    private static string RunPayload(string command) =>
+        ToolPayload(
+            "run_command",
+            "{\"CommandLine\":" + JsonSerializer.Serialize(command) +
+            ",\"Cwd\":\"C:\\\\x\",\"WaitMsBeforeAsync\":5000}");
+
+    private static string ViewPayload(string path) =>
+        ToolPayload("view_file", "{\"AbsolutePath\":" + JsonSerializer.Serialize(path) + "}");
+
+    private static string WriteToolPayload(string path) =>
+        ToolPayload("write_to_file", "{\"TargetFile\":" + JsonSerializer.Serialize(path) + "}");
+
+    /// <summary>
+    /// The claude suite's <c>RepeatLedgerRoom.RecordOutput</c>, in this suite's shape: writes a previous
+    /// run's output into the room's ledger file, which is the only way one gets there on a hook-only
+    /// room.
+    /// </summary>
+    private static void RecordOutput(string outbox, string command, string output)
+    {
+        var path = Path.Combine(outbox, Baton.Vendors.RepeatedToolCallLedger.FileName);
+        var ledger = Baton.Vendors.RepeatedToolCallLedger.Load(path);
+        ledger.RecordCommandOutput(command, output);
+        ledger.Save(path);
+    }
+
+    private static string RepeatDecide(string outbox, string payload, string? workspace = null)
+    {
+        using var stdin = new StringReader(payload);
+        using var stdout = new StringWriter();
+        AgyHookCheckCommand.Execute(
+            stdin, stdout, "agy:", shellPatternsRaw: "agy:", outboxDirectory: outbox,
+            workspaceDirectory: workspace, deniedShellPatternsRaw: "agy:",
+            deniedShellOptionTokensRaw: "agy:");
+        return stdout.ToString();
+    }
+
+    private static string Decision(string json) =>
+        JsonDocument.Parse(json).RootElement.GetProperty("decision").GetString()!;
+
+    private static string Reason(string json) =>
+        JsonDocument.Parse(json).RootElement.TryGetProperty("reason", out var reason)
+            ? reason.GetString()!
+            : string.Empty;
+
+    [Fact]
+    public void The_polling_line_itself_is_not_what_rule_one_refuses() =>
+        Assert.Null(Baton.Vendors.BackgroundingShapeDetector.Detect(
+            "Get-Process -Id 59340 -ErrorAction SilentlyContinue",
+            Baton.Vendors.BackgroundingShapeDetector.NativeShell));
+
     private sealed class ThrowingReader : TextReader
     {
         public override string ReadToEnd() => throw new IOException("simulated pipe failure");

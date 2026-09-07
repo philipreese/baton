@@ -5021,6 +5021,55 @@ honest cost of not declining both vendors to keep their capability artificially 
 what closed that gap on the agy side, so the two vendors converge on the same grant shape rather than
 staying deliberately unequal.
 
+**Polling is not progress: three rules on the run-command grant (#2002).** Measured 2026-09-06 across
+121 rooms modified that day: one agy arm-A lane spent 53.6 % of its 207 `run_command` steps on
+`Get-Process -Id <n>` liveness polls of builds it had backgrounded itself, and byte-identical repeated
+commands or reads ran at a median 17 % of tool calls on claude, 34 % on agy and 9 % on codex — #2002
+carries the histograms and the per-room figures, not restated here. So: (1) a command line carrying a
+backgrounding shape is **refused before anything is spawned**, on every vendor —
+`BackgroundingShapeDetector` owns the shapes and the sentence, and the claude hook, the agy hook and
+the codex broker each call it, because claude and agy run their own shells and a broker-only rule would
+never have reached the vendor this was measured on. (2) A byte-identical repeat is **replayed once and
+then refused**, judged on a 60-second clock for commands and on the file's own mtime-and-length for
+reads, with a named exemption list for commands whose output is expected to move
+(`RepeatedToolCallLedger.VolatileCommandPrefixes` states which and why). (3) A tool-step-cap arrest
+**names the dominant shape** when one normalised command line held more than half the shell commands,
+so a conductor reads what the steps were spent on rather than only how many there were. What none of
+this changes is the budget itself; #1749's arrest-rule question stays separate.
+
+**What each rule does and does not reach, stated because three earlier readings of this paragraph
+overreached (#2002 review).** Rule 1 closes **model-authored** backgrounding shapes on all three
+vendors. It does not close agy's **vendor-side** backgrounding: `docs/vendor-capabilities.md` records
+a `run_command` that backgrounds a long command with the model then polling `manage_task`, and that
+path carries no `Start-Process`, no `&` and no `nohup` for a detector reading a command string to
+see. It carries a **parameter** instead: the one captured agy `PreToolUse` payload for `run_command`
+carries `WaitMsBeforeAsync: 5000`, supplied by agy rather than chosen by the model
+(`docs/vendor-capabilities.md`, corrected 2026-09-06 — that register owns the finding, its n = 1
+scope, and what about it stays unmeasured). **A gate cannot refuse a parameter the vendor supplies
+itself**, so this is scoped rather than closed: `AgyHookCheckCommand.MeasuredRunCommandArgs` refuses
+only a `run_command` argument beyond those three, which closes the *next* backgrounding switch and
+not this one — and would refuse a legitimate command if agy's real argument set is wider than that
+single capture. Rule 1 is therefore **prospective on agy, not a fix for the
+measured lane**. Nor was it one for the measured
+room: `dispatch-implement-12f930d9` contains no backgrounding shape at all (see
+`BackgroundingShapeDetector`'s own remark, which quotes the room), and its `Get-Process -Id <pid>`
+polls were of *other worktrees'* builds, discovered from `buildlock.py`'s lock-holder line. Rule 2 is
+what would have bitten there. Rule 2 itself reaches **all three vendors**, but in two shapes, because
+a `PreToolUse` hook can only allow or deny: the codex broker **replays** the previous output as the
+tool's result and then refuses, while on claude and agy the second byte-identical ask is **denied**
+and the deny reason is where the previous answer goes — it carries the cached output when the room's
+ledger holds one, and names how long ago the command ran and points at the model's own transcript
+when it does not. The third ask is denied plainly on every vendor. Which of those two hook wordings
+a reader will actually see today is the transcript one: **neither vendor has a `PostToolUse` hook
+wired in this repository**, so nothing on a hook-only room ever records an output, and the
+output-carrying branch is reachable only from a ledger some other writer filled (the file is per
+ROOM, not per vendor). That is a statement of scope, not a claim that the rung replays on those
+vendors. The hooks share the broker's
+`RepeatedToolCallLedger` through a file under the execution's output directory
+(`RepeatedToolCallHook`), and every failure of that file — missing, unparseable, unwritable — is an
+**allow**, because this rung removes waste and must never become a permission denial. Rule 3 holds on
+every vendor whose stream carries command lines.
+
 Until #1759 retired it, `tools/baton-agy-loop/dispatch.py` mirrored this same coherence rule in its
 own `grant_refusal()`/`build_bindings()` rather than calling the engine's. #1759 ported the one
 assertion that mirror still carried — that every catalog role actually dispatches, on every real

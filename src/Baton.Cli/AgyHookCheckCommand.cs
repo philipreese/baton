@@ -272,6 +272,8 @@ public static class AgyHookCheckCommand
         string? toolName;
         string? commandLine = null;
         string? writeTarget = null;
+        string? readTarget = null;
+        IReadOnlyList<string> extraRunCommandArgs = Array.Empty<string>();
         // Captured here because the JsonDocument is disposed before the denial below is built, and
         // a denial that cannot name what the payload carried is the misdirection #708 was made of.
         var argKeys = "no args object at all";
@@ -290,13 +292,23 @@ public static class AgyHookCheckCommand
 
             toolName = nameProp.GetString();
             if (toolName == "run_command" && toolCall.TryGetProperty("args", out var args) &&
-                args.ValueKind == JsonValueKind.Object &&
-                args.TryGetProperty("CommandLine", out var cmdProp) &&
-                cmdProp.ValueKind == JsonValueKind.String)
+                args.ValueKind == JsonValueKind.Object)
             {
-                commandLine = cmdProp.GetString();
+                if (args.TryGetProperty("CommandLine", out var cmdProp) &&
+                    cmdProp.ValueKind == JsonValueKind.String)
+                {
+                    commandLine = cmdProp.GetString();
+                }
+
+                // #2002 review MEDIUM: every arg key this call carried that no measurement accounts
+                // for, so the branch below can refuse it — see there and MeasuredRunCommandArgs.
+                extraRunCommandArgs = args.EnumerateObject()
+                    .Select(property => property.Name)
+                    .Where(name => !MeasuredRunCommandArgs.Contains(name))
+                    .ToArray();
             }
 
+            readTarget = ReadReadTarget(toolCall, toolName);
             writeTarget = ReadWriteTarget(toolCall, toolName);
             argKeys = DescribeArgKeys(toolCall);
         }
@@ -319,6 +331,36 @@ public static class AgyHookCheckCommand
 
         if (toolName == "run_command")
         {
+            // #2002 rule 1, the same rung the claude hook carries at its own `Bash` branch, from the
+            // same vendor-neutral detector; spec/baton.md §9 states the rule and the measurement.
+            // Unconditional and ahead of the pattern rungs because `implement` is an unscoped grant,
+            // which those rungs barely narrow. No ceiling clause: no Baton per-command ceiling applies
+            // on this path.
+            // NativeShell: agy emits PowerShell on Windows and a POSIX shell elsewhere
+            // (docs/vendor-capabilities.md, "Sharp edges"), which is what decides whether a mid-line
+            // `&` backgrounds (#2002 review LOW).
+            if (Baton.Vendors.BackgroundingShapeDetector.Detect(
+                    commandLine, Baton.Vendors.BackgroundingShapeDetector.NativeShell)
+                is { } backgrounding)
+            {
+                return DenyJson(Baton.Vendors.BackgroundingShapeDetector.Refusal(backgrounding, null));
+            }
+
+            // #2002 review MEDIUM: the half of rule 1 a command STRING cannot show. agy backgrounds
+            // through a tool parameter, not a shell shape — see MeasuredRunCommandArgs for what is
+            // actually measured about that parameter, and spec/baton.md §9 for why this rung does not
+            // make rule 1 complete on this vendor. An argument no measurement accounts for is refused
+            // rather than passed unread: it is the only fail-closed move available against a
+            // backgrounding switch nobody has seen yet, and it costs today's traffic nothing.
+            if (extraRunCommandArgs.Count > 0)
+            {
+                return DenyJson(
+                    $"AER: the 'run_command' tool carried {FormatArgNames(extraRunCommandArgs)}. Baton's " +
+                    "gate cannot tell whether an argument it has never measured makes this command run " +
+                    "in the background instead of to completion, so it refuses rather than allowing it " +
+                    "unread. Re-issue with the arguments agy normally sends.");
+            }
+
             // The shell channel gates this tool. A non-Present list means the gate cannot judge the
             // command's scope, so it denies rather than let an unjudged shell through. Absent = the
             // channel broke: AgyWorkerAdapter always emits this variable alongside the denied-tool
@@ -435,6 +477,22 @@ public static class AgyHookCheckCommand
                         "rather than at its start) and was refused.");
                 }
             }
+
+            // #2002 rule 2. Placed where HookCheckCommand places its own, for the reason stated there.
+            if (Baton.Vendors.RepeatedToolCallHook.JudgeCommand(outboxDirectory, commandLine)
+                is { } repeatedCommand)
+            {
+                return DenyJson(repeatedCommand);
+            }
+        }
+
+        // #2002 rule 2b, hook half. agy's read tool is `view_file` and its path argument is
+        // `AbsolutePath` — measured off the `dispatch-implement-12f930d9` stream (104 of 104 calls),
+        // the same way `TargetFile` was measured for the write family rather than read off agy's docs.
+        if (toolName == ReadToolName &&
+            Baton.Vendors.RepeatedToolCallHook.JudgeRead(outboxDirectory, readTarget) is { } repeatedRead)
+        {
+            return DenyJson(repeatedRead);
         }
 
         // #679, as on claude -- see HookCheckCommand's equivalent. It matters more here: nothing agy
@@ -444,6 +502,9 @@ public static class AgyHookCheckCommand
             if (OutboxPath.IsInside(writeTarget, workspaceDirectory) ||
                 OutboxPath.IsInside(writeTarget, outboxDirectory))
             {
+                // #2002 review HIGH, hook half — see the claude sibling and
+                // RepeatedToolCallHook.NoteWrite for the rule.
+                Baton.Vendors.RepeatedToolCallHook.NoteWrite(outboxDirectory, writeTarget);
                 return AllowJson;
             }
 
@@ -535,6 +596,65 @@ public static class AgyHookCheckCommand
 
         return null;
     }
+
+    /// <summary>
+    /// The <c>run_command</c> argument names a measurement accounts for. Anything else is refused
+    /// (#2002 review MEDIUM) — see the branch that reads this.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// <b>Scope: ONE captured <c>run_command</c> hook payload.</b> That payload carries these three,
+    /// including <c>WaitMsBeforeAsync</c> at 5000 — a name and a value that were observed;
+    /// <em>that it is the backgrounding mechanism</em> is inference from the name, which is how
+    /// <c>docs/vendor-capabilities.md</c> frames it too. That register owns the finding and its
+    /// provenance (corrected there 2026-09-06); do not restate them here.
+    /// </para>
+    /// <para>
+    /// The consequence for this gate: a parameter agy puts on its own calls cannot be refused, because
+    /// refusing it would deny every command this vendor runs. That is why rule 1 is scoped rather than
+    /// claimed complete on agy (<c>spec/baton.md</c> §9). What this list DOES close is the next
+    /// parameter — an <c>Async</c>, a <c>Background</c>, a <c>Detach</c> — arriving unread.
+    /// </para>
+    /// <para>
+    /// <b>Its failure mode is a refused legitimate command, and n=1 is the exposure.</b> If agy sends
+    /// a fourth argument on some prompt shape nobody has captured, this rung denies a <c>run_command</c>
+    /// that should have run. Stated rather than hidden: it is the fail-closed direction and the only
+    /// one available against an unread backgrounding switch, but a second captured payload carrying a
+    /// name not on this list is a reason to widen the list, not evidence that the rung worked.
+    /// </para>
+    /// </remarks>
+    private static readonly IReadOnlySet<string> MeasuredRunCommandArgs =
+        new HashSet<string>(StringComparer.Ordinal) { "CommandLine", "Cwd", "WaitMsBeforeAsync" };
+
+    /// <summary>
+    /// agy's file-read tool (#2002 rule 2b), the counterpart of the tool name
+    /// <see cref="HookCheckCommand"/> keys its own read rung on; see there for which tools this rule
+    /// deliberately leaves out.
+    /// </summary>
+    private const string ReadToolName = "view_file";
+
+    /// <summary>
+    /// The path a <c>view_file</c> call targets, or <see langword="null"/> for any other tool. The key
+    /// is <c>AbsolutePath</c>, measured off a real captured lane the way <see cref="WriteTargetFields"/>
+    /// was — 104 of 104 <c>view_file</c> calls in <c>dispatch-implement-12f930d9</c> carried that key
+    /// and no other. A null here allows: an unreadable target is one this rung cannot judge, and this
+    /// rung must never be the reason a granted read is denied.
+    /// </summary>
+    private static string? ReadReadTarget(JsonElement toolCall, string? toolName)
+    {
+        if (toolName != ReadToolName ||
+            !toolCall.TryGetProperty("args", out var args) || args.ValueKind != JsonValueKind.Object ||
+            !args.TryGetProperty("AbsolutePath", out var target) || target.ValueKind != JsonValueKind.String)
+        {
+            return null;
+        }
+
+        return target.GetString();
+    }
+
+    /// <summary>The argument names a refusal quotes back, comma-joined. Names only, per <see cref="DescribeArgKeys"/>.</summary>
+    private static string FormatArgNames(IReadOnlyList<string> names) =>
+        names.Count == 1 ? $"an unrecognised argument '{names[0]}'" : $"unrecognised arguments {string.Join(", ", names)}";
 
     /// <summary>The argument names this gate tried for a tool, for a denial reason a person can act on.</summary>
     private static string FormatFields(string toolName) =>

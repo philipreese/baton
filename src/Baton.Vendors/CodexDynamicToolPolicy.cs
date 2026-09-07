@@ -34,6 +34,13 @@ public sealed class CodexDynamicToolPolicy
     private readonly HashSet<string> _declaredOutputs;
     private readonly Func<ShellCommandClass, TimeSpan> _commandCeiling;
 
+    /// <summary>
+    /// #2002 rules 2/2b. One ledger per policy object, i.e. per dispatch, which is what makes "per
+    /// room" true without any disk state. See <see cref="RepeatedToolCallLedger"/> for the two
+    /// predicates and for how the hooks' vendors reach the same rung over a persisted file.
+    /// </summary>
+    private readonly RepeatedToolCallLedger _repeats;
+
     /// <param name="commandCeiling">
     /// How long one <c>baton_run_command</c> of a given class may run before Baton kills its process
     /// tree; null is <see cref="ShellCommandCeilings.For"/>, the production table. A delegate rather
@@ -42,13 +49,19 @@ public sealed class CodexDynamicToolPolicy
     /// and per-CLASS since #1998, so a test can also show the classes actually differ rather than only
     /// that one of them fires.
     /// </param>
+    /// <param name="timeProvider">
+    /// #2002: the clock the repeat window is measured against. Same reason as
+    /// <paramref name="commandCeiling"/> — a 60-second window a test cannot advance is a rule no test
+    /// can falsify.
+    /// </param>
     public CodexDynamicToolPolicy(
         PermissionGrant grant,
         string? workingDirectory,
         string outputDirectory,
         IEnumerable<string> inputPaths,
         IEnumerable<string> producedOutputNames,
-        Func<ShellCommandClass, TimeSpan>? commandCeiling = null)
+        Func<ShellCommandClass, TimeSpan>? commandCeiling = null,
+        TimeProvider? timeProvider = null)
     {
         ArgumentNullException.ThrowIfNull(grant);
         ArgumentException.ThrowIfNullOrWhiteSpace(outputDirectory);
@@ -63,6 +76,7 @@ public sealed class CodexDynamicToolPolicy
         _declaredOutputs = producedOutputNames.Where(name => !string.IsNullOrWhiteSpace(name))
             .Select(NormalizeRelativeOutput).ToHashSet(PathComparer);
         _commandCeiling = commandCeiling ?? ShellCommandCeilings.For;
+        _repeats = new RepeatedToolCallLedger(timeProvider);
     }
 
     /// <summary>The exact dynamic-tool declarations supplied on <c>thread/start</c>.</summary>
@@ -235,12 +249,27 @@ public sealed class CodexDynamicToolPolicy
         }
 
         EnsureNoReparsePoint(path);
+
+        // #2002 rule 2b. Stat BEFORE serving, which is the whole predicate — see
+        // RepeatedToolCallLedger for why a read is judged on the stat pair and a command on a clock.
+        // The population: the measured agy rooms re-opened their own `task-N.log` 22-25 times.
+        var info = new FileInfo(path);
+        var repeat = _repeats.ClassifyRead(path, info.LastWriteTimeUtc, info.Length);
+        if (repeat.Verdict == RepeatVerdict.Refuse)
+        {
+            return CodexDynamicToolResult.Refused(repeat.Reason!);
+        }
+
         var text = File.ReadAllText(path, Encoding.UTF8);
         if (text.Length > MaxReadCharacters)
         {
             text = text[..MaxReadCharacters] + $"\n[truncated by Baton at {MaxReadCharacters} characters]";
         }
-        return CodexDynamicToolResult.Allowed(text);
+
+        // The replay preamble rides bytes this call has just taken off disk; RepeatedToolCallLedger's
+        // remarks say why a read entry deliberately holds no copy of them.
+        return CodexDynamicToolResult.Allowed(
+            repeat.Verdict == RepeatVerdict.Replay ? $"[{repeat.Preamble}]\n{text}" : text);
     }
 
     private CodexDynamicToolResult ListFiles(string requestedPath)
@@ -332,6 +361,8 @@ public sealed class CodexDynamicToolPolicy
 
         var path = ResolveWithinRoot(_outputRoot, normalized);
         WriteFile(path, content);
+        _repeats.ForgetRead(path);
+        _repeats.ForgetAllCommands();
         return CodexDynamicToolResult.Allowed($"Wrote declared output '{normalized}'.");
     }
 
@@ -344,6 +375,17 @@ public sealed class CodexDynamicToolPolicy
 
         var path = ResolveWithinWorkspace(requestedPath);
         WriteFile(path, content);
+
+        // #2002 rule 2b: the room's own write invalidates its own read, and not merely as
+        // belt-and-braces on the stat check — RepeatedToolCallLedger.ForgetRead states the case that
+        // check cannot see.
+        _repeats.ForgetRead(path);
+
+        // #2002 review HIGH: and it invalidates every remembered COMMAND output too. A build that
+        // failed before this write is not the answer after it; replaying that failure and then
+        // refusing with "the previous run is still the answer" was a plausible wrong answer, which is
+        // the worst shape a defect can take. See ForgetAllCommands for the rule and its one exception.
+        _repeats.ForgetAllCommands();
         return CodexDynamicToolResult.Allowed($"Wrote '{path}'.");
     }
 
@@ -379,6 +421,48 @@ public sealed class CodexDynamicToolPolicy
             return CodexDynamicToolResult.Refused("The command contains an option token denied by this Baton role.");
         }
 
+        // #1998: the ceiling is per command CLASS. A shipping or gate command is known to be progressing
+        // while it runs — a `git push` here spends most of its wall clock inside the repository's own
+        // pre-push gate — so the flat ceiling killed finished work rather than runaway work. The classes,
+        // the table that sorts a line into one, and every ceiling are in the engine; nothing about them
+        // is restated on this path (spec/baton.md §9). Computed before the rule-1 refusal below because
+        // that sentence quotes THIS command's ceiling, and quoting some other class's would be a figure
+        // the model cannot act on.
+        var commandClass = ShellCommandClassifier.Classify(commandLine);
+        var ceiling = _commandCeiling(commandClass);
+
+        // #2002 rule 1. After the grant decisions and before anything is spawned, so a refused
+        // backgrounding attempt starts no process at all. The ceiling clause is composed here because
+        // this is the path that enforces one: the figure is read off the delegate that kills the tree,
+        // never transcribed (the timeout arm below reports the same value).
+        // NativeShell, because the branch below spawns COMSPEC on Windows and /bin/sh elsewhere —
+        // the same condition, read from the one place that states what each family does with a bare
+        // `&` (#2002 review LOW).
+        if (BackgroundingShapeDetector.Detect(commandLine, BackgroundingShapeDetector.NativeShell)
+            is { } backgroundingShape)
+        {
+            return CodexDynamicToolResult.Refused(BackgroundingShapeDetector.Refusal(
+                backgroundingShape,
+                $"Baton kills this command's process tree only at its "
+                + $"{ceiling.TotalMinutes:0.##}-minute tool limit, so a long build or test run "
+                + "has room to finish in the foreground."));
+        }
+
+        // #2002 rule 2. Refused rather than Failed on the third ask: this step bought no information
+        // because Baton declined it, which is the population the refusal marker counts, and a lane
+        // that spends five of six steps re-asking is exactly what that count exists to make visible.
+        var repeat = _repeats.ClassifyCommand(commandLine);
+        switch (repeat.Verdict)
+        {
+            case RepeatVerdict.Replay:
+                return CodexDynamicToolResult.Allowed($"[{repeat.Preamble}]\n{repeat.ReplayedOutput}");
+            case RepeatVerdict.Refuse:
+                return CodexDynamicToolResult.Refused(repeat.Reason!);
+            case RepeatVerdict.Execute:
+            default:
+                break;
+        }
+
         var startInfo = new ProcessStartInfo
         {
             FileName = OperatingSystem.IsWindows() ? Environment.GetEnvironmentVariable("COMSPEC") ?? "cmd.exe" : "/bin/sh",
@@ -402,14 +486,6 @@ public sealed class CodexDynamicToolPolicy
             startInfo.ArgumentList.Add("-c");
             startInfo.ArgumentList.Add(commandLine);
         }
-
-        // #1998: the ceiling is per command CLASS. A shipping or gate command is known to be progressing
-        // while it runs — a `git push` here spends most of its wall clock inside the repository's own
-        // pre-push gate — so the flat ceiling killed finished work rather than runaway work. The classes,
-        // the table that sorts a line into one, and every ceiling are in the engine; nothing about them
-        // is restated on this path (spec/baton.md §9).
-        var commandClass = ShellCommandClassifier.Classify(commandLine);
-        var ceiling = _commandCeiling(commandClass);
 
         using var process = Process.Start(startInfo)
             ?? throw new IOException("Baton could not start the granted command.");
@@ -442,6 +518,23 @@ public sealed class CodexDynamicToolPolicy
             combined = combined[^MaxCommandOutputCharacters..] +
                 $"\n[leading output truncated by Baton at {MaxCommandOutputCharacters} characters]";
         }
+        // #2002: a command is the broker's other write path, and the loud one -- see ForgetAllReads
+        // and ForgetAllCommands. Unless the ledger can prove it read-only, this command may have
+        // rewritten the tree every OTHER remembered output was observed against, so those go; this
+        // command's own entry is kept, because it observed the tree AFTER its own change and an
+        // immediate re-ask of it is the population rule 2 exists for. Eviction runs BEFORE the record
+        // below for exactly that reason -- reversing the two would drop the entry just recorded.
+        if (!RepeatedToolCallLedger.IsVolatile(commandLine))
+        {
+            _repeats.ForgetAllCommands(exceptCommandLine: commandLine);
+            _repeats.ForgetAllReads();
+        }
+
+        // #2002: recorded whatever the exit code was, because a re-ask of a command that just failed
+        // is the same wasted step as a re-ask of one that succeeded — the #1951 lane re-issued the
+        // same failing `dotnet test` four times.
+        _repeats.RecordCommandOutput(commandLine, combined);
+
         // A non-zero exit is the command's own answer, carried back whole — `pixi run test` with three
         // failing tests is the case that matters, and its output IS the information the step bought.
         // Failed rather than Refused: stamping the refusal marker here counted every failing allowed

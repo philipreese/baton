@@ -662,13 +662,36 @@ public static class StateProjector
         // than the throwing default arm below in production.
         return arrested.Reason switch
         {
-            ArrestReason.ToolStepCap => arrested.ToolStepCount is { } steps and > 0
-                ? $"Execution arrested: tool-step cap exceeded ({steps} tool steps measured) — awaiting conductor resolution."
-                : "Execution arrested: tool-step cap exceeded — awaiting conductor resolution.",
+            ArrestReason.ToolStepCap => DescribeToolStepCapArrest(arrested),
             ArrestReason.BilledRate => DescribeBilledRateArrest(arrested),
             ArrestReason.TokenBudget or null => DescribeTokenBudgetArrest(arrested),
             _ => throw new ArgumentOutOfRangeException(nameof(arrested), arrested.Reason, "Unknown ArrestReason."),
         };
+    }
+
+    /// <summary>
+    /// #2002 rule 3 (spec/baton.md §9). "tool-step cap exceeded (272 tool steps measured)" says how
+    /// much was spent and nothing about what on, so a conductor reading it cannot tell a runaway poll
+    /// loop from a lane that legitimately needed 272 steps — the two want opposite resolutions. The
+    /// dominance condition is <c>Mutation.TokenBudgetMonitor.SnapshotDominantCommandShape</c>'s and is
+    /// not re-decided here: this appends the clause when that reading is present and omits it when it
+    /// is not. Absent on every arrest before #2002 and on every vendor whose stream carries no command
+    /// lines, and the sentence still reads correctly without it.
+    /// </summary>
+    private static string DescribeToolStepCapArrest(FlowEvent.ExecutionArrested arrested)
+    {
+        var steps = arrested.ToolStepCount is { } measured and > 0
+            ? $" ({measured} tool steps measured)"
+            : string.Empty;
+        var shape = arrested is { DominantCommandShape: { Length: > 0 } dominant, DominantCommandSharePercent: { } percent }
+            // "of its shell commands", never "of steps" (#2002 review MEDIUM). The share
+            // SnapshotDominantCommandShape computes has _shellCommandCount as its denominator, and
+            // this clause sits one word after the tool-step count, which is a different and larger
+            // number: on the measured room the two readings are 54 % and 43 %.
+            ? $" {percent} % of its shell commands were `{dominant}`."
+            : string.Empty;
+
+        return $"Execution arrested: tool-step cap exceeded{steps} — awaiting conductor resolution.{shape}";
     }
 
     private static string DescribeBilledRateArrest(FlowEvent.ExecutionArrested arrested)
