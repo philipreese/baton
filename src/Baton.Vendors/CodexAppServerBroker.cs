@@ -232,6 +232,10 @@ public static class CodexAppServerBroker
                     lastUsage = message["params"]?["tokenUsage"]?["last"]?.AsObject().DeepClone().AsObject();
                     // #2020: written as it arrives, so an execution the host arrests mid-turn still
                     // carries every round-trip it had already paid for. See the class remark.
+                    // It also makes a mid-turn arrest REACHABLE on codex rather than merely survivable:
+                    // Baton.Mutation.TokenBudgetMonitor now sees a reading per round-trip instead of one
+                    // at turn end, so its budget and billed-rate rungs can fire part-way through a turn
+                    // exactly as they do on claude and agy. That remark states the decision.
                     if (lastUsage is not null)
                     {
                         roundTrip++;

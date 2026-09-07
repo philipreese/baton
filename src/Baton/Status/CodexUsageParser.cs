@@ -41,6 +41,20 @@ public sealed class CodexUsageParser : IWorkerUsageParser
     /// #2020: the 1-based model round-trip a usage object reports, written by the same broker inside
     /// the <c>usage</c> object on both line types. Absent on every stream captured before that
     /// emitter, which is exactly how a reader tells the two eras apart without a version stamp.
+    /// <para>
+    /// <b>Why an index that restarts at 1 is safe to dedupe on</b> (#2020 review LOW): one captured
+    /// <c>.stdout.log</c> holds exactly one broker invocation, so it holds one monotone sequence rather
+    /// than two interleaved ones. Every dispatch site in <c>Mutation.MutationInterface</c> mints a
+    /// fresh <see cref="Domain.ExecutionId"/> (<c>new ExecutionId(Guid.NewGuid()…)</c>) and passes it to
+    /// <see cref="Artifacts.ArtifactManager.AllocateOutputDirectory"/>, which addresses the directory by
+    /// that id — a resume or a retry therefore gets its OWN <c>execution_{id}</c> directory and its own
+    /// capture file, never a second broker appending into an existing one. Not a property of
+    /// <c>Dispatch.ExecutionStreamLogger</c>'s file mode, which appends rather than truncates: a second
+    /// logger over one directory would in fact continue the same file (its own <c>#1724</c> remark
+    /// treats that as a contemplated shape), so the per-execution directory is what the claim rests on.
+    /// <c>Vendors.CodexWorkerAdapter.IsPostResponseTerminalLine</c>'s backward scan rests on the same
+    /// invariant and cites this passage rather than restating it.
+    /// </para>
     /// </summary>
     public const string RoundTripField = "round_trip";
 

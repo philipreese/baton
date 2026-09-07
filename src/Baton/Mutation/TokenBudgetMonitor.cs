@@ -244,6 +244,15 @@ public sealed class TokenBudgetMonitor
                 // drops. Unlike claude's, codex's terminal line IS read here (CodexUsageParser
                 // .TryParseIncrementalUsage states why); a stream captured before that emitter carries
                 // no index at all and so accumulates exactly as it did.
+                // #2020 review MEDIUM -- a BEHAVIOUR change on codex, decided deliberately rather than
+                // fallen into: because the readings now arrive per round-trip instead of once at turn
+                // end, the ArrestReason.TokenBudget and ArrestReason.BilledRate rungs below can fire
+                // MID-turn on that vendor, where before they could only be reached after the turn was
+                // already over. That is the intended behaviour of a budget monitor and is what claude
+                // and agy have always done here; codex was the outlier by accident of its emission, not
+                // by design, and no rung is vendor-conditional. Recorded because an operator whose
+                // codex lane now stops part-way will otherwise read a fixed under-report as a
+                // regression. TokenBudgetMonitorTests pins the crossing round-trip.
                 var alreadyCounted = usage.MessageId is { Length: > 0 } messageId && !_seenMessageIds.Add(messageId);
                 if (!alreadyCounted)
                 {

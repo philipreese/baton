@@ -1,6 +1,7 @@
 using Baton.Dispatch;
 using Baton.Domain;
 using Baton.Outcomes;
+using Baton.Status;
 using Baton.Tests.Shared;
 using System.Text.Json;
 
@@ -673,6 +674,18 @@ public sealed class CodexWorkerAdapterTests
         Assert.False(adapter.IsPostResponseTerminalLine(failed));
         Assert.False(adapter.IsPostResponseTerminalLine(error));
         Assert.False(adapter.IsPostResponseTerminalLine("stray trailing output"));
+
+        // #2020 review HIGH: the broker's per-round-trip usage line is a TRAILER, not a boundary —
+        // it may land after the final agent message and before turn.completed, and its ordering
+        // relative to the response is unmeasured. CodexOutputMaterializationEndToEndTests drives the
+        // consequence end to end through OutputMaterializer; this is the predicate itself. The two
+        // arms below stay false: a usage line is not a terminal RESULT, only a trailer.
+        var usageLine =
+            """{"type":"USAGE_TYPE","usage":{"input_tokens":100,"output_tokens":20,"round_trip":2}}"""
+                .Replace("USAGE_TYPE", CodexUsageParser.TurnUsageEventType, StringComparison.Ordinal);
+        Assert.True(adapter.IsPostResponseTerminalLine(usageLine));
+        Assert.False(target.DetectsTerminalSuccess!(usageLine));
+        Assert.False(target.DetectsTerminalResult!(usageLine));
     }
 
     [Fact]

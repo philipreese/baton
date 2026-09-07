@@ -281,8 +281,24 @@ public sealed class CodexWorkerAdapter : IWorkerAdapter, IPermissionGrantTransla
         }
     }
 
+    /// <summary>
+    /// The trailers <see cref="Outcomes.OutputMaterializer"/>'s #1594 capture may scan backward PAST on
+    /// its way to the final agent message; anything else is a hard boundary that refuses extraction
+    /// (<see cref="IWorkerResponseParser.IsPostResponseTerminalLine"/> states that rule).
+    /// <para>
+    /// #2020 review HIGH: <see cref="CodexUsageParser.TurnUsageEventType"/> is one, because the broker
+    /// writes a usage line per model round-trip and the app-server's ordering of
+    /// <c>thread/tokenUsage/updated</c> against the turn's final <c>item/completed</c> is UNMEASURED
+    /// in this tree — nothing here establishes that a usage notification cannot follow the final agent
+    /// message, and nothing establishes that it can. Treating it as a trailer is correct under either
+    /// ordering; treating it as a boundary is correct under one and silently returns no capture at all
+    /// under the other. What stops the widened scan from walking back into an EARLIER turn's agent
+    /// message is that one capture file holds exactly one broker invocation — the invariant recorded on
+    /// <see cref="CodexUsageParser.RoundTripField"/>.
+    /// </para>
+    /// </summary>
     public bool IsPostResponseTerminalLine(string rawLine) =>
-        IsEventType(rawLine, "turn.completed");
+        IsEventType(rawLine, "turn.completed", CodexUsageParser.TurnUsageEventType);
 
     public bool TryParseFinalUsage(string rawLine, out WorkerUsage? usage) =>
         UsageParser.TryParseFinalUsage(rawLine, out usage);
