@@ -187,8 +187,8 @@ public sealed class RepeatedToolCallTests
     }
 
     /// <summary>
-    /// A command that RAN is the broker's other write path, and the loud one — see
-    /// <c>RepeatedToolCallLedger.ForgetAllReads</c>. Same construction as the write-tool arm above
+    /// A command that RAN invalidates the read cache too — <c>RepeatedToolCallLedger.ForgetAllReads</c>
+    /// states why, and this is that. Same construction as the write-tool arm above
     /// (same byte count, same tick, so the stat pair cannot see it), except the writer is the shell.
     /// The second arm is the polarity partner: a command that was REFUSED wrote nothing, so it must
     /// not throw the read cache away.
