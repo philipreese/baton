@@ -599,16 +599,7 @@ public class HookCheckCommandTests
 
         public int Write(string path) => Run(Payload("Write", "file_path", path), out _);
 
-        public void Dispose()
-        {
-            try
-            {
-                Directory.Delete(Root, recursive: true);
-            }
-            catch (IOException)
-            {
-            }
-        }
+        public void Dispose() => Baton.Tests.Shared.DirectoryCleanup.DeleteRecursively(Root);
 
         private int Run(string payload, out string stderrText)
         {

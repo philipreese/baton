@@ -952,7 +952,7 @@ public class AgyHookCheckCommandTests
         }
         finally
         {
-            Directory.Delete(root, recursive: true);
+            Baton.Tests.Shared.DirectoryCleanup.DeleteRecursively(root);
         }
     }
 
@@ -978,7 +978,7 @@ public class AgyHookCheckCommandTests
         }
         finally
         {
-            Directory.Delete(root, recursive: true);
+            Baton.Tests.Shared.DirectoryCleanup.DeleteRecursively(root);
         }
     }
 
