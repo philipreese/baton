@@ -365,16 +365,14 @@ public static class WorkspaceDeliveryProbe
     private static async Task<Daemon.GhCliResult> SpawnAsync(
         string program, string workingDirectory, IReadOnlyList<string> args, CancellationToken cancellationToken)
     {
-        var startInfo = new ProcessStartInfo(program)
+        var startInfo = ChildProcessStartInfo.Create(program, startInfo =>
         {
-            WorkingDirectory = workingDirectory,
-            RedirectStandardOutput = true,
-            RedirectStandardError = true,
-            UseShellExecute = false,
-            CreateNoWindow = true,
-            StandardOutputEncoding = Encoding.UTF8,
-            StandardErrorEncoding = Encoding.UTF8,
-        };
+            startInfo.WorkingDirectory = workingDirectory;
+            startInfo.RedirectStandardOutput = true;
+            startInfo.RedirectStandardError = true;
+            startInfo.StandardOutputEncoding = Encoding.UTF8;
+            startInfo.StandardErrorEncoding = Encoding.UTF8;
+        });
 
         // Non-interactive hardening, the same pair Baton.Mutation.DeliveryVerifier applies to its own
         // network-touching git spawns: a host whose credential helper needs a refresh can block on a

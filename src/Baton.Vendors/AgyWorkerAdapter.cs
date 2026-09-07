@@ -1541,15 +1541,13 @@ public sealed partial class AgyWorkerAdapter : IWorkerAdapter, IPermissionGrantT
     {
         try
         {
-            var startInfo = new ProcessStartInfo("agy")
+            var startInfo = ChildProcessStartInfo.Create("agy", startInfo =>
             {
-                RedirectStandardOutput = true,
-                RedirectStandardError = true,
-                UseShellExecute = false,
-                CreateNoWindow = true,
-                StandardOutputEncoding = System.Text.Encoding.UTF8,
-                StandardErrorEncoding = System.Text.Encoding.UTF8,
-            };
+                startInfo.RedirectStandardOutput = true;
+                startInfo.RedirectStandardError = true;
+                startInfo.StandardOutputEncoding = System.Text.Encoding.UTF8;
+                startInfo.StandardErrorEncoding = System.Text.Encoding.UTF8;
+            });
             foreach (var arg in args)
             {
                 startInfo.ArgumentList.Add(arg);

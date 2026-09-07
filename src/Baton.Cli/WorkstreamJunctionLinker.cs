@@ -65,17 +65,15 @@ public static class WorkstreamJunctionLinker
                 return;
             }
 
-            var startInfo = new ProcessStartInfo("cmd.exe")
+            var startInfo = ChildProcessStartInfo.Create("cmd.exe", startInfo =>
             {
-                RedirectStandardOutput = true,
-                RedirectStandardError = true,
-                UseShellExecute = false,
-                CreateNoWindow = true,
+                startInfo.RedirectStandardOutput = true;
+                startInfo.RedirectStandardError = true;
                 // #466: the null-encoding default decodes the pipe with the console code page (OEM
                 // cp437 under a default console), mangling non-ASCII output -- pin UTF-8 explicitly.
-                StandardOutputEncoding = System.Text.Encoding.UTF8,
-                StandardErrorEncoding = System.Text.Encoding.UTF8,
-            };
+                startInfo.StandardOutputEncoding = System.Text.Encoding.UTF8;
+                startInfo.StandardErrorEncoding = System.Text.Encoding.UTF8;
+            });
             startInfo.ArgumentList.Add("/c");
             startInfo.ArgumentList.Add("mklink");
             startInfo.ArgumentList.Add("/J");

@@ -550,17 +550,16 @@ public sealed class CodexDynamicToolPolicy
             return CodexDynamicToolResult.Refused("The command contains an option token denied by this Baton role.");
         }
 
-        var startInfo = new ProcessStartInfo
+        var startInfo = ChildProcessStartInfo.Create(
+            OperatingSystem.IsWindows() ? Environment.GetEnvironmentVariable("COMSPEC") ?? "cmd.exe" : "/bin/sh",
+            startInfo =>
         {
-            FileName = OperatingSystem.IsWindows() ? Environment.GetEnvironmentVariable("COMSPEC") ?? "cmd.exe" : "/bin/sh",
-            WorkingDirectory = _workspaceRoot ?? _outputRoot,
-            RedirectStandardOutput = true,
-            RedirectStandardError = true,
-            UseShellExecute = false,
-            CreateNoWindow = true,
-            StandardOutputEncoding = Encoding.UTF8,
-            StandardErrorEncoding = Encoding.UTF8,
-        };
+            startInfo.WorkingDirectory = _workspaceRoot ?? _outputRoot;
+            startInfo.RedirectStandardOutput = true;
+            startInfo.RedirectStandardError = true;
+            startInfo.StandardOutputEncoding = Encoding.UTF8;
+            startInfo.StandardErrorEncoding = Encoding.UTF8;
+        });
         if (OperatingSystem.IsWindows())
         {
             startInfo.ArgumentList.Add("/d");

@@ -159,16 +159,14 @@ internal sealed class ProcessAgyHookLivenessProbe : IAgyHookLivenessProbe
         try
         {
             var isWindows = OperatingSystem.IsWindows();
-            var startInfo = new ProcessStartInfo(isWindows ? "cmd" : "sh")
+            var startInfo = ChildProcessStartInfo.Create(isWindows ? "cmd" : "sh", startInfo =>
             {
-                RedirectStandardInput = true,
-                RedirectStandardOutput = true,
-                RedirectStandardError = true,
-                UseShellExecute = false,
-                CreateNoWindow = true,
-                StandardOutputEncoding = System.Text.Encoding.UTF8,
-                StandardErrorEncoding = System.Text.Encoding.UTF8,
-            };
+                startInfo.RedirectStandardInput = true;
+                startInfo.RedirectStandardOutput = true;
+                startInfo.RedirectStandardError = true;
+                startInfo.StandardOutputEncoding = System.Text.Encoding.UTF8;
+                startInfo.StandardErrorEncoding = System.Text.Encoding.UTF8;
+            });
             startInfo.ArgumentList.Add(isWindows ? "/c" : "-c");
             startInfo.ArgumentList.Add(command);
             foreach (var name in EnvironmentVariablesToStrip)

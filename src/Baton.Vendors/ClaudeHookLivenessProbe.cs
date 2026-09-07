@@ -118,16 +118,14 @@ internal sealed class ProcessClaudeHookLivenessProbe : IClaudeHookLivenessProbe
 
         try
         {
-            var startInfo = new ProcessStartInfo("dotnet")
+            var startInfo = ChildProcessStartInfo.Create("dotnet", startInfo =>
             {
-                RedirectStandardInput = true,
-                RedirectStandardOutput = true,
-                RedirectStandardError = true,
-                UseShellExecute = false,
-                CreateNoWindow = true,
-                StandardOutputEncoding = System.Text.Encoding.UTF8,
-                StandardErrorEncoding = System.Text.Encoding.UTF8,
-            };
+                startInfo.RedirectStandardInput = true;
+                startInfo.RedirectStandardOutput = true;
+                startInfo.RedirectStandardError = true;
+                startInfo.StandardOutputEncoding = System.Text.Encoding.UTF8;
+                startInfo.StandardErrorEncoding = System.Text.Encoding.UTF8;
+            });
             startInfo.ArgumentList.Add(hookAssemblyPath);
             startInfo.ArgumentList.Add("hook-check");
             foreach (var name in EnvironmentVariablesToStrip)

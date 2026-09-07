@@ -40,6 +40,7 @@ public class VendorSpawnGateTests
     private static readonly Dictionary<string, string> ApprovedSpawnSites = new()
     {
         ["src/Baton/Dispatch/CoreDispatcher.cs"] = "The gated dispatch path. Adapters build the gate into the target.",
+        ["src/Baton/Core/ChildProcessStartInfo.cs"] = "The shared construction seam for every ProcessStartInfo Baton owns. It only constructs start information; every direct spawn remains separately enumerated here.",
         ["src/Baton/Core/Internal/BatonProcessRunner.cs"] = "The managed spawn primitive BatonTask.Run/RunAsync bottoms out into (#1474). Previously invisible to this scan -- the same spawn happened across the FFI boundary inside native/core's Rust Command::new -- now visible because the port is plain C#. Gating happens upstream: an adapter builds the PreToolUse gate into the CoreDispatchTarget before CoreDispatcher ever constructs a BatonTask, so this file spawns whatever CoreDispatcher hands it, already gated.",
         ["src/Baton.Vendors/AgyWorkerAdapter.cs"] = "Read-only agy registry queries (models/agent/plugin list) — no -p, no tool execution.",
         ["src/Baton.Vendors/CodexWorkerAdapter.cs"] = "Read-only Codex app-server model-list discovery — no exec turn, no model inference, no command/tool execution. Worker turns still flow through CoreDispatcher's gated dispatch path.",
@@ -61,7 +62,10 @@ public class VendorSpawnGateTests
         ["src/Baton.Cli/WorkspaceDeliveryProbe.cs"] = "#1901: spawns 'git rev-parse', 'git diff --numstat' and 'gh pr list --json number' against a room's workspace at settle, to stamp issue, PR and diff shape on the cost-ledger row — git and gh, not a vendor CLI, the same read-only forge/repo questions IGhCliRunner and DeliveryVerifier already ask; every spawn goes through one injected CommandRunner and fails open. Hang safety is the TIME BOUND, not the environment: each spawn is abandoned and the child killed after WorkspaceDeliveryProbe.SpawnTimeout (20s, three spawns per distinct workspace) or when the host's own cancellation fires, so a Ctrl-C reaches it and a wedged 'gh' costs that workspace's facts rather than the settle. GIT_TERMINAL_PROMPT=0 and GCM_INTERACTIVE=never only make a credential prompt less likely — DeliveryVerifier's own doc records that they do not stop an OS credential manager, which is why the bound is what this line rests on.",
     };
 
-    private static readonly string[] SpawnMarkers = ["new ProcessStartInfo", "Process.Start", "new BatonTask"];
+    private static readonly string[] SpawnMarkers =
+        ["new ProcessStartInfo", "ChildProcessStartInfo.Create", "Process.Start", "new BatonTask"];
+    private static readonly string[] DirectSpawnMarkers = ["Process.Start", ".Start()"];
+    private const string SharedStartInfoFactoryCall = "ChildProcessStartInfo.Create";
 
     [Fact]
     public void No_unreviewed_site_in_src_can_start_a_process()
@@ -89,6 +93,26 @@ public class VendorSpawnGateTests
         Assert.True(
             stale.Count == 0,
             "ApprovedSpawnSites names files that no longer start a process:\n  " + string.Join("\n  ", stale));
+    }
+
+    [Fact]
+    public void Every_direct_spawn_uses_the_shared_windowless_start_info_factory()
+    {
+        var root = RepoRoot();
+        var bypasses = ApprovedSpawnSites.Keys
+            .Where(path =>
+            {
+                var source = File.ReadAllText(Path.Combine(root, path));
+                return DirectSpawnMarkers.Any(marker => source.Contains(marker, StringComparison.Ordinal))
+                    && !source.Contains(SharedStartInfoFactoryCall, StringComparison.Ordinal);
+            })
+            .OrderBy(path => path, StringComparer.Ordinal)
+            .ToList();
+
+        Assert.True(
+            bypasses.Count == 0,
+            "A reviewed direct process spawn bypasses the shared start-info factory:\n  "
+            + string.Join("\n  ", bypasses));
     }
 
     private static string RepoRoot()
