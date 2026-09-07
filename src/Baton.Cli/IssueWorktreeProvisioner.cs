@@ -173,20 +173,17 @@ public static class IssueWorktreeProvisioner
     private static async Task<(int ExitCode, string Output)> RunAsync(
         string fileName, IReadOnlyList<string> arguments, string workingDirectory, CancellationToken cancellationToken)
     {
-        var startInfo = new ProcessStartInfo
+        var startInfo = ChildProcessStartInfo.Create(fileName, startInfo =>
         {
-            FileName = fileName,
-            WorkingDirectory = workingDirectory,
-            RedirectStandardOutput = true,
-            RedirectStandardError = true,
+            startInfo.WorkingDirectory = workingDirectory;
+            startInfo.RedirectStandardOutput = true;
+            startInfo.RedirectStandardError = true;
             // Pinned rather than inherited: the console code page decides otherwise, and a gh error
             // message carrying a non-ASCII issue title would come back mojibake in the refusal the
             // operator reads. RedirectedProcessEncodingTests is what makes this non-optional.
-            StandardOutputEncoding = System.Text.Encoding.UTF8,
-            StandardErrorEncoding = System.Text.Encoding.UTF8,
-            UseShellExecute = false,
-            CreateNoWindow = true,
-        };
+            startInfo.StandardOutputEncoding = System.Text.Encoding.UTF8;
+            startInfo.StandardErrorEncoding = System.Text.Encoding.UTF8;
+        });
         foreach (var argument in arguments)
         {
             startInfo.ArgumentList.Add(argument);

@@ -103,12 +103,10 @@ public sealed class WatchNotifier : IWatchNotifier
     private static async Task SpawnCommandAsync(
         string command, string json, TimeSpan commandTimeout, CancellationToken cancellationToken)
     {
-        var psi = new ProcessStartInfo
+        var psi = ChildProcessStartInfo.Create(string.Empty, psi =>
         {
-            RedirectStandardInput = true,
-            UseShellExecute = false,
-            CreateNoWindow = true,
-        };
+            psi.RedirectStandardInput = true;
+        });
 
         if (OperatingSystem.IsWindows())
         {

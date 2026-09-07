@@ -377,17 +377,15 @@ public sealed class CodexWorkerAdapter : IWorkerAdapter, IPermissionGrantTransla
         Task<string>? errorDrain = null;
         try
         {
-            var startInfo = new ProcessStartInfo(CodexExecutableResolver.Resolve())
+            var startInfo = ChildProcessStartInfo.Create(CodexExecutableResolver.Resolve(), startInfo =>
             {
-                RedirectStandardInput = true,
-                RedirectStandardOutput = true,
-                RedirectStandardError = true,
-                UseShellExecute = false,
-                CreateNoWindow = true,
-                StandardInputEncoding = Encoding.UTF8,
-                StandardOutputEncoding = Encoding.UTF8,
-                StandardErrorEncoding = Encoding.UTF8,
-            };
+                startInfo.RedirectStandardInput = true;
+                startInfo.RedirectStandardOutput = true;
+                startInfo.RedirectStandardError = true;
+                startInfo.StandardInputEncoding = Encoding.UTF8;
+                startInfo.StandardOutputEncoding = Encoding.UTF8;
+                startInfo.StandardErrorEncoding = Encoding.UTF8;
+            });
             startInfo.ArgumentList.Add("app-server");
             startInfo.ArgumentList.Add("--stdio");
             if (!string.IsNullOrWhiteSpace(workingDirectory) && Directory.Exists(workingDirectory))

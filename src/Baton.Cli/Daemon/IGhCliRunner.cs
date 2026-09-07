@@ -33,16 +33,14 @@ public sealed class GhCliRunner : IGhCliRunner
     public async Task<GhCliResult> RunAsync(
         string workingDirectory, IReadOnlyList<string> args, CancellationToken cancellationToken)
     {
-        var startInfo = new ProcessStartInfo("gh")
+        var startInfo = ChildProcessStartInfo.Create("gh", startInfo =>
         {
-            WorkingDirectory = workingDirectory,
-            RedirectStandardOutput = true,
-            RedirectStandardError = true,
-            UseShellExecute = false,
-            CreateNoWindow = true,
-            StandardOutputEncoding = Encoding.UTF8,
-            StandardErrorEncoding = Encoding.UTF8,
-        };
+            startInfo.WorkingDirectory = workingDirectory;
+            startInfo.RedirectStandardOutput = true;
+            startInfo.RedirectStandardError = true;
+            startInfo.StandardOutputEncoding = Encoding.UTF8;
+            startInfo.StandardErrorEncoding = Encoding.UTF8;
+        });
         foreach (var arg in args)
         {
             startInfo.ArgumentList.Add(arg);

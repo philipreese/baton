@@ -223,22 +223,20 @@ public static class CodexAppServerBroker
 
     private static Process? StartAppServer(CodexBrokerConfiguration configuration, string isolatedHome)
     {
-        var startInfo = new ProcessStartInfo(CodexExecutableResolver.Resolve())
+        var startInfo = ChildProcessStartInfo.Create(CodexExecutableResolver.Resolve(), startInfo =>
         {
-            RedirectStandardInput = true,
-            RedirectStandardOutput = true,
-            RedirectStandardError = true,
-            UseShellExecute = false,
-            CreateNoWindow = true,
+            startInfo.RedirectStandardInput = true;
+            startInfo.RedirectStandardOutput = true;
+            startInfo.RedirectStandardError = true;
             // app-server consumes one JSON-RPC object per line. Encoding.UTF8's preamble becomes
             // the first bytes on redirected stdin on Windows, and app-server rejects that BOM as
             // "expected value at line 1 column 1" before initialize. Pin every redirected stream
             // to BOM-less UTF-8; stdout/stderr use the same encoding for symmetry.
-            StandardInputEncoding = JsonLineEncoding,
-            StandardOutputEncoding = JsonLineEncoding,
-            StandardErrorEncoding = JsonLineEncoding,
-            WorkingDirectory = configuration.WorkingDirectory ?? Environment.CurrentDirectory,
-        };
+            startInfo.StandardInputEncoding = JsonLineEncoding;
+            startInfo.StandardOutputEncoding = JsonLineEncoding;
+            startInfo.StandardErrorEncoding = JsonLineEncoding;
+            startInfo.WorkingDirectory = configuration.WorkingDirectory ?? Environment.CurrentDirectory;
+        });
         startInfo.ArgumentList.Add("app-server");
         startInfo.ArgumentList.Add("--stdio");
         foreach (var feature in DisabledFeatures(configuration.AllowsSubagents))

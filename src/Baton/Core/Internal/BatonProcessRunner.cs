@@ -255,22 +255,21 @@ internal static class BatonProcessRunner
     private static ProcessStartInfo BuildStartInfo(
         string program, string[] args, IReadOnlyList<(string Key, string Value)> envVars, bool clearEnv, string? cwd)
     {
-        ProcessStartInfo startInfo = new(program)
+        ProcessStartInfo startInfo = ChildProcessStartInfo.Create(program, startInfo =>
         {
-            UseShellExecute = false,
-            RedirectStandardInput = true,
+            startInfo.RedirectStandardInput = true;
             // Pipes are required even when output is not surfaced to callers: without draining, a
             // child writing beyond the OS pipe buffer deadlocks WaitForExit(). Never inherit here.
-            RedirectStandardOutput = true,
-            RedirectStandardError = true,
+            startInfo.RedirectStandardOutput = true;
+            startInfo.RedirectStandardError = true;
             // Both drain threads below read raw bytes off BaseStream, never through the
             // StreamReader these encodings would configure -- but #466/#1016's source-scan gate
             // (RedirectedProcessEncodingTests) requires every redirected stream to pin one anyway,
             // so a future caller who does reach for .StandardOutput/.StandardError directly is not
             // silently handed the OEM code page.
-            StandardOutputEncoding = System.Text.Encoding.UTF8,
-            StandardErrorEncoding = System.Text.Encoding.UTF8,
-        };
+            startInfo.StandardOutputEncoding = System.Text.Encoding.UTF8;
+            startInfo.StandardErrorEncoding = System.Text.Encoding.UTF8;
+        });
 
         foreach (string arg in args)
         {

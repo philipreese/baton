@@ -19,15 +19,14 @@ internal static class WorkspaceHead
     /// </summary>
     public static async Task<string> CaptureAsync(string workingDirectory, CancellationToken cancellationToken = default)
     {
-        var startInfo = new ProcessStartInfo("git")
+        var startInfo = ChildProcessStartInfo.Create("git", startInfo =>
         {
-            WorkingDirectory = workingDirectory,
-            RedirectStandardOutput = true,
-            RedirectStandardError = true,
-            UseShellExecute = false,
-            StandardOutputEncoding = System.Text.Encoding.UTF8,
-            StandardErrorEncoding = System.Text.Encoding.UTF8,
-        };
+            startInfo.WorkingDirectory = workingDirectory;
+            startInfo.RedirectStandardOutput = true;
+            startInfo.RedirectStandardError = true;
+            startInfo.StandardOutputEncoding = System.Text.Encoding.UTF8;
+            startInfo.StandardErrorEncoding = System.Text.Encoding.UTF8;
+        });
         startInfo.ArgumentList.Add("rev-parse");
         startInfo.ArgumentList.Add("HEAD");
 
