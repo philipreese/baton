@@ -101,8 +101,8 @@ public class OwnPullRequestOnlyRuleTests
     [InlineData("gh pr view --json title $N", 2005)]
     [InlineData("gh pr view -w ${OTHER}", 2005)]
     // The two routes that reach a pull request without saying `gh pr`, on THIS path too -- the broker
-    // and the hooks refuse the same set. `gh api*` is separately denied by both governed roles'
-    // patterns; `gh search prs` is in no deny list, so this rule is the only thing refusing it.
+    // and the hooks refuse the same set. Which of the two a role's own deny pattern also closes, and
+    // which this rule alone closes, is stated on ReadsPullRequestsWithoutSayingGhPr.
     [InlineData("gh search prs --state open --repo aer-works/baton", 2005)]
     [InlineData("gh search prs --state open --repo aer-works/baton", null)]
     [InlineData("gh api repos/aer-works/baton/pulls/1994", 2005)]
@@ -170,9 +170,10 @@ public class OwnPullRequestOnlyRuleTests
     [InlineData("echo \"gh pr create\" && curl -s https://api.github.com/repos/aer-works/baton/pulls")]
     [InlineData("gh issue view 1943 --comments")]
     [InlineData("git log --grep='gh pr create'")]
-    // The fail-OPEN residual round 3 closed: a genuine create at a segment head, exiting zero, with a
-    // sibling's `html_url` printed by a LATER segment. `combined` is the whole line's output and the
-    // last URL in it wins, so a create that is not the line's last segment teaches nothing.
+    // The fail-OPEN residual round 3 closed: a real create that is not the line's LAST segment, with
+    // a sibling's `html_url` printed after it. ObserveCommandOutput's remark says why the whole
+    // line's output cannot be attributed per segment; what this row pins is the consequence — such
+    // a line teaches nothing.
     [InlineData("gh pr create --fill && curl -s https://api.github.com/repos/aer-works/baton/pulls")]
     public void Output_of_a_command_that_is_not_a_gh_pr_create_teaches_the_room_nothing(string commandLine)
     {

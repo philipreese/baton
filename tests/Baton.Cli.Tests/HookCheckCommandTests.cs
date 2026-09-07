@@ -416,8 +416,9 @@ public class HookCheckCommandTests
     [InlineData("implement", "gh pr comment 1994 --body-file out.md", HookCheckCommand.DeniedExitCode)]
     // `gh api …/pulls/…` is denied twice over on this path (the role's own `gh api*` pattern denies
     // it first), so it does not discriminate here -- OwnPullRequestOnlyRuleTests holds that row
-    // against the detector directly. `gh search prs` is in NO deny list, so this rung is the only
-    // thing refusing it, which is what makes it the discriminating row for that half.
+    // against the detector directly. Only this rung refuses `gh search prs` (why: the remark on
+    // OwnPullRequestOnlyRule.ReadsPullRequestsWithoutSayingGhPr), which is what makes it the
+    // discriminating row for that half.
     [InlineData("implement", "gh search prs --state open", HookCheckCommand.DeniedExitCode)]
     [InlineData("janitor", "gh pr view", HookCheckCommand.AllowedExitCode)]
     [InlineData("janitor", "gh pr view 1994", HookCheckCommand.DeniedExitCode)]
