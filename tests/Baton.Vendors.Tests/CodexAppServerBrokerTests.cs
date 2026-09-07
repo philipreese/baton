@@ -73,6 +73,73 @@ public sealed class CodexAppServerBrokerTests
         }
     }
 
+    /// <summary>
+    /// #1996, end to end over the seam the lane actually runs: a codex stream that calls
+    /// <c>apply_patch</c> the way app-server delivers a dynamic-tool call, and the file on disk after
+    /// it. The manifest assertion and the disk assertion are one test on purpose — a declared tool the
+    /// broker cannot execute is the same "I cannot edit" the issue measured, one step later.
+    /// </summary>
+    [Fact]
+    public async Task A_codex_stream_that_calls_apply_patch_edits_the_file_the_grant_allows()
+    {
+        var root = Path.Combine(Path.GetTempPath(), $"baton-codex-patch-{Guid.NewGuid():N}");
+        var workspace = Path.Combine(root, "workspace");
+        var output = Path.Combine(root, "output");
+        Directory.CreateDirectory(workspace);
+        Directory.CreateDirectory(output);
+        try
+        {
+            var target = Path.Combine(workspace, "controls.py");
+            File.WriteAllText(target, "def control():\n    return False\n");
+            var patch = "*** Begin Patch\n*** Update File: controls.py\n"
+                + " def control():\n-    return False\n+    return True\n*** End Patch";
+            var grant = new PermissionGrant(ReadFiles: true, WriteFiles: true);
+            var configuration = new CodexBrokerConfiguration(
+                workspace, "gpt-5.6-terra", "high", null, false, grant, ["changes.md"], false);
+            var policy = new CodexDynamicToolPolicy(grant, workspace, output, [], ["changes.md"]);
+            var call = new JsonObject
+            {
+                ["id"] = 99,
+                ["method"] = "item/tool/call",
+                ["params"] = new JsonObject
+                {
+                    ["tool"] = CodexDynamicToolPolicy.ApplyPatchTool,
+                    ["arguments"] = new JsonObject { ["input"] = patch },
+                    ["callId"] = "call-1",
+                    ["threadId"] = "thread-1",
+                    ["turnId"] = "turn-1",
+                },
+            };
+            var transcript = string.Join('\n',
+            [
+                "{\"id\":1,\"result\":{\"userAgent\":\"fixture\"}}",
+                "{\"id\":2,\"result\":{\"thread\":{\"id\":\"thread-1\"}}}",
+                "{\"id\":3,\"result\":{\"turn\":{\"id\":\"turn-1\",\"status\":\"inProgress\",\"items\":[]}}}",
+                call.ToJsonString(),
+                "{\"method\":\"turn/completed\",\"params\":{\"threadId\":\"thread-1\",\"turn\":{\"id\":\"turn-1\",\"status\":\"completed\",\"items\":[]}}}",
+            ]) + "\n";
+            using var serverOutput = new StringReader(transcript);
+            using var serverInput = new StringWriter();
+            using var batonOutput = new StringWriter();
+            using var error = new StringWriter();
+
+            var exitCode = await CodexAppServerBroker.RunProtocolAsync(
+                configuration, "Fix the control.", policy, serverInput, serverOutput,
+                batonOutput, error, TestContext.Current.CancellationToken);
+
+            Assert.Equal(0, exitCode);
+            Assert.Equal("def control():\n    return True\n", File.ReadAllText(target));
+            var requests = Lines(serverInput).Select(line => JsonNode.Parse(line)).ToArray();
+            Assert.Contains(requests[2]!["params"]!["dynamicTools"]!.AsArray(),
+                tool => tool!["name"]!.GetValue<string>() == CodexDynamicToolPolicy.ApplyPatchTool);
+            Assert.True(requests[4]!["result"]!["success"]!.GetValue<bool>());
+        }
+        finally
+        {
+            DirectoryCleanup.DeleteRecursively(root);
+        }
+    }
+
     [Fact]
     public void Resume_request_reuses_the_persisted_thread_without_redeclaring_tools()
     {

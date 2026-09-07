@@ -20,6 +20,9 @@ public sealed class CodexDynamicToolPolicyTests
         Assert.Contains(CodexDynamicToolPolicy.WriteOutputTool, names);
         Assert.DoesNotContain(CodexDynamicToolPolicy.WriteTextTool, names);
         Assert.DoesNotContain(CodexDynamicToolPolicy.RunCommandTool, names);
+        // #1996: the manifest half of the grant. A role without WriteFiles must not be shown the edit
+        // tool at all — the polarity partner of Implement_role_gets_workspace_write_and_command_tools.
+        Assert.DoesNotContain(CodexDynamicToolPolicy.ApplyPatchTool, names);
     }
 
     [Fact]
@@ -30,9 +33,186 @@ public sealed class CodexDynamicToolPolicyTests
 
         var names = ToolNames(fixture.Policy);
 
+        Assert.Contains(CodexDynamicToolPolicy.ApplyPatchTool, names);
         Assert.Contains(CodexDynamicToolPolicy.WriteTextTool, names);
         Assert.Contains(CodexDynamicToolPolicy.RunCommandTool, names);
     }
+
+    /// <summary>
+    /// #1996's first arm: the tool codex reaches for natively changes files on disk, and does it
+    /// through the same write path <c>baton_write_text</c> takes. All three operations in one envelope
+    /// because "the whole patch applies" is part of the claim.
+    /// </summary>
+    [Fact]
+    public async Task Apply_patch_adds_updates_and_deletes_files_on_disk()
+    {
+        using var fixture = new PolicyFixture(WriteShapedGrant, ["changes.md"]);
+        File.WriteAllText(Path.Combine(fixture.Workspace, "edit.txt"), "one\ntwo\nthree\n");
+        File.WriteAllText(Path.Combine(fixture.Workspace, "gone.txt"), "obsolete\n");
+
+        var result = await fixture.ApplyPatchAsync(
+            """
+            *** Begin Patch
+            *** Add File: src/new.txt
+            +created
+            *** Update File: edit.txt
+            @@
+             one
+            -two
+            +TWO
+             three
+            *** Delete File: gone.txt
+            *** End Patch
+            """);
+
+        Assert.True(result.Success, result.Text);
+        Assert.Equal("created" + Environment.NewLine,
+            File.ReadAllText(Path.Combine(fixture.Workspace, "src", "new.txt")));
+        Assert.Equal("one\nTWO\nthree\n", File.ReadAllText(Path.Combine(fixture.Workspace, "edit.txt")));
+        Assert.False(File.Exists(Path.Combine(fixture.Workspace, "gone.txt")));
+    }
+
+    /// <summary>
+    /// The line-ending arm, which no LF fixture can fail: nearly every file this engine's own workers
+    /// edit on Windows is CRLF, and a patch body's lines arrive from JSON carrying none. If the split
+    /// left the carriage return on the line, no context would ever match and every real edit would come
+    /// back as a context failure.
+    /// </summary>
+    [Fact]
+    public async Task Apply_patch_matches_context_in_a_crlf_file_and_keeps_its_line_endings()
+    {
+        using var fixture = new PolicyFixture(WriteShapedGrant, ["changes.md"]);
+        var target = Path.Combine(fixture.Workspace, "crlf.txt");
+        File.WriteAllText(target, "alpha\r\nbeta\r\ngamma\r\n");
+
+        var result = await fixture.ApplyPatchAsync(
+            """
+            *** Begin Patch
+            *** Update File: crlf.txt
+             alpha
+            -beta
+            +BETA
+             gamma
+            *** End Patch
+            """);
+
+        Assert.True(result.Success, result.Text);
+        Assert.Equal("alpha\r\nBETA\r\ngamma\r\n", File.ReadAllText(target));
+    }
+
+    /// <summary>
+    /// The grant arm, and the reason the applier resolves every path before it writes any byte: the
+    /// FIRST file of this patch is a legal workspace edit. A non-atomic implementation refuses the
+    /// second path exactly like this one does and still leaves the first file rewritten, so a
+    /// single-path test would pass on the build this test exists to fail.
+    /// </summary>
+    [Fact]
+    public async Task Apply_patch_outside_the_workspace_is_refused_and_no_file_in_the_patch_is_touched()
+    {
+        using var fixture = new PolicyFixture(WriteShapedGrant, ["changes.md"]);
+        var inside = Path.Combine(fixture.Workspace, "inside.txt");
+        var outside = Path.Combine(Path.GetDirectoryName(fixture.Workspace)!, "outside.txt");
+        File.WriteAllText(inside, "keep\n");
+        File.WriteAllText(outside, "original\n");
+
+        var result = await fixture.ApplyPatchAsync(
+            $"""
+            *** Begin Patch
+            *** Update File: inside.txt
+            -keep
+            +changed
+            *** Update File: {outside.Replace('\\', '/')}
+            -original
+            +escaped
+            *** End Patch
+            """);
+
+        Assert.False(result.Success);
+        Assert.Contains(GrantRefusal.Marker, result.Text);
+        Assert.Contains("outside this Baton's workspace root", result.Text, StringComparison.Ordinal);
+        Assert.Equal("keep\n", File.ReadAllText(inside));
+        Assert.Equal("original\n", File.ReadAllText(outside));
+    }
+
+    /// <summary>
+    /// A context line that is not in the file must FAIL — not be placed somewhere else that looks
+    /// close. The wrong offset is the one failure mode of this tool that reports success and corrupts
+    /// the file, so the assertion is on the file's content, not only on the result.
+    /// </summary>
+    [Fact]
+    public async Task Apply_patch_with_context_that_does_not_match_fails_and_changes_nothing()
+    {
+        using var fixture = new PolicyFixture(WriteShapedGrant, ["changes.md"]);
+        var target = Path.Combine(fixture.Workspace, "edit.txt");
+        File.WriteAllText(target, "one\ntwo\nthree\n");
+
+        var result = await fixture.ApplyPatchAsync(
+            """
+            *** Begin Patch
+            *** Update File: edit.txt
+             one
+            -TWO
+            +two
+            *** End Patch
+            """);
+
+        Assert.False(result.Success);
+        Assert.DoesNotContain(GrantRefusal.Marker, result.Text);
+        Assert.Contains("Patch context not found", result.Text, StringComparison.Ordinal);
+        Assert.Equal("one\ntwo\nthree\n", File.ReadAllText(target));
+    }
+
+    /// <summary>
+    /// The excluded corners of the subset, each answered by a failure that names itself rather than by
+    /// a guess. A malformed or unsupported envelope is not a grant decision, so none of these is marked
+    /// or counted as a refusal — the polarity partner is the outside-the-workspace test above.
+    /// </summary>
+    [Theory]
+    [InlineData("*** Update File: edit.txt\n-one\n+ONE", "*** End Patch")]
+    [InlineData("*** Begin Patch\n*** Update File: edit.txt\n*** Move to: moved.txt\n-one\n+ONE\n*** End Patch",
+        "Move to")]
+    [InlineData("*** Begin Patch\n*** Update File: edit.txt\n+added\n*** End Patch", "no context")]
+    [InlineData("*** Begin Patch\n*** Add File: edit.txt\n+clobber\n*** End Patch", "already exists")]
+    [InlineData("*** Begin Patch\n*** Update File: absent.txt\n one\n-x\n*** End Patch", "does not exist")]
+    public async Task An_unsupported_or_malformed_patch_fails_with_its_own_reason(
+        string patch, string expectedReason)
+    {
+        using var fixture = new PolicyFixture(WriteShapedGrant, ["changes.md"]);
+        var target = Path.Combine(fixture.Workspace, "edit.txt");
+        File.WriteAllText(target, "one\ntwo\n");
+
+        var result = await fixture.ApplyPatchAsync(patch);
+
+        Assert.False(result.Success);
+        Assert.DoesNotContain(GrantRefusal.Marker, result.Text);
+        Assert.Contains(expectedReason, result.Text, StringComparison.Ordinal);
+        Assert.Equal("one\ntwo\n", File.ReadAllText(target));
+    }
+
+    /// <summary>
+    /// #1996 moved this population: <c>apply_patch</c> on a role without WriteFiles used to reach the
+    /// unknown-tool fallthrough (unmarked, uncounted, and carrying #1920's write-path guidance) and is
+    /// now a real grant refusal. The guidance must survive that move, which is the half a rename of the
+    /// stand-in name would have silently dropped.
+    /// </summary>
+    [Fact]
+    public async Task Apply_patch_without_the_write_grant_is_a_refusal_that_still_names_the_role_write_path()
+    {
+        using var fixture = new PolicyFixture(ReviewShapedGrant, ["report.md"]);
+
+        var result = await fixture.ApplyPatchAsync("*** Begin Patch\n*** Delete File: workspace.txt\n*** End Patch");
+
+        Assert.False(result.Success);
+        Assert.Contains(GrantRefusal.Marker, result.Text);
+        Assert.Equal(1, RefusedStepsCountedFor(result));
+        Assert.Contains("cannot edit workspace files", result.Text, StringComparison.Ordinal);
+        Assert.Contains(CodexDynamicToolPolicy.WriteOutputTool, result.Text, StringComparison.Ordinal);
+        Assert.True(File.Exists(Path.Combine(fixture.Workspace, "workspace.txt")));
+    }
+
+    /// <summary>The shipped implement role's shape: reads, workspace writes, an unscoped shell.</summary>
+    private static PermissionGrant WriteShapedGrant =>
+        new(ReadFiles: true, WriteFiles: true, RunShellCommands: true);
 
     // #1920: one row per refusal shape in the issue's measured table — the four Baton-produced ones
     // (row 1 a path outside the readable roots, rows 2-3 a backslash path, row 9 the standing deny
@@ -129,8 +309,11 @@ public sealed class CodexDynamicToolPolicyTests
                 CodexDynamicToolPolicy.RunCommandTool, new { command = "git remote -v" }),
             "ungranted-pattern" => fixture.ExecuteAsync(
                 CodexDynamicToolPolicy.RunCommandTool, new { command = "rg needle" }),
+            // #1996 implemented apply_patch, so the write-shaped UNKNOWN population is now every other
+            // editor name a model might reach for. str_replace_editor is one that still trips
+            // LooksLikeWriteAttempt (on "edit"), which is what this row is testing.
             "write-shaped-unknown-tool" => fixture.ExecuteAsync(
-                "apply_patch", new { path = "src/file.cs", content = "patch" }),
+                "str_replace_editor", new { path = "src/file.cs", content = "patch" }),
             _ => throw new InvalidOperationException($"Unknown refusal fixture '{refusalShape}'."),
         };
 
@@ -344,7 +527,7 @@ public sealed class CodexDynamicToolPolicyTests
     {
         using var fixture = new PolicyFixture(new PermissionGrant(ReadFiles: true), ["report.md"]);
 
-        var unknown = await fixture.ExecuteAsync("apply_patch", new { path = "src/a.cs", content = "x" });
+        var unknown = await fixture.ExecuteAsync("str_replace_editor", new { path = "src/a.cs", content = "x" });
         var withheld = await fixture.ExecuteAsync(
             CodexDynamicToolPolicy.WriteTextTool, new { path = "src/a.cs", content = "x" });
 
@@ -470,6 +653,9 @@ public sealed class CodexDynamicToolPolicyTests
         public string Output { get; }
         public string Input { get; }
         public CodexDynamicToolPolicy Policy { get; }
+
+        public Task<CodexDynamicToolResult> ApplyPatchAsync(string patch) =>
+            ExecuteAsync(CodexDynamicToolPolicy.ApplyPatchTool, new { input = patch });
 
         public async Task<CodexDynamicToolResult> ExecuteAsync(string toolName, object arguments)
         {
