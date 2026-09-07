@@ -24,7 +24,7 @@ namespace Baton.Accounting;
 /// it by branch name. Two sources can supply a room's branch — a lane's own DECLARED
 /// <c>delivery-branch.txt</c> step output, and the one <c>baton dispatch</c> writes at the room root
 /// from the branch it OBSERVED in the workspace at launch (#1944). Their precedence is the spec's
-/// ruling to state rather than this doc's: see §7's backfill bullet. <b>Absent means no room on disk
+/// ruling to state rather than this doc's: see the backfill bullet in <c>spec/baton.md</c> §7. <b>Absent means no room on disk
 /// carries this branch by either source</b>: already swept by retention, opened by hand, or dispatched
 /// before #1944 started recording one. The row is written either way; the dry run reports how many landed
 /// unattributed and why.
