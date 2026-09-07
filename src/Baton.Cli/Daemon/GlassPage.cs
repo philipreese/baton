@@ -1,5 +1,6 @@
 using System.Reflection;
 using System.Text;
+using System.Text.RegularExpressions;
 
 namespace Baton.Cli.Daemon;
 
@@ -25,6 +26,13 @@ internal static class GlassPage
     internal const string SourceMetaTag =
         $"""<meta name="{SourceMetaName}" content="{DaemonSourceValue}">""";
 
+    private static readonly Regex HtmlComment =
+        new("<!--.*?-->", RegexOptions.Singleline | RegexOptions.CultureInvariant);
+
+    private static readonly Regex ExistingSourceMeta = new(
+        $@"<meta\s[^>]*name\s*=\s*""{SourceMetaName}""",
+        RegexOptions.IgnoreCase | RegexOptions.CultureInvariant);
+
     private static string? _cached;
 
     /// <summary>
@@ -34,11 +42,19 @@ internal static class GlassPage
     /// so the title is the stable anchor; a meta before it lands in the same implied head either way.
     /// Idempotent: a page that already carries the tag is returned unchanged, so this can never
     /// double-inject if the source file itself ever gains one.
+    /// <para>
+    /// #2053 — the idempotency guard matches a real <c>&lt;meta&gt;</c> ELEMENT outside HTML
+    /// comments, never the name or the tag as text, because the page documents its own marker: the
+    /// header comment quotes the literal tag and the script quotes the name in a
+    /// <c>querySelector</c>. A guard that searched the raw bytes for either string matched that
+    /// documentation, returned the page unmodified, and the daemon served an artifact-path page that
+    /// rendered blank over the tailnet.
+    /// </para>
     /// </summary>
     internal static string Inject(string html)
     {
         ArgumentNullException.ThrowIfNull(html);
-        if (html.Contains(SourceMetaName, StringComparison.Ordinal))
+        if (ExistingSourceMeta.IsMatch(HtmlComment.Replace(html, string.Empty)))
         {
             return html;
         }
