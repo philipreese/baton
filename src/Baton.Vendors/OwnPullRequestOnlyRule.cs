@@ -3,7 +3,7 @@ using System.Text.RegularExpressions;
 namespace Baton.Vendors;
 
 /// <summary>
-/// #2001 part 2. An implement lane may read the pull request <em>it</em> opened, and no other one.
+/// #2001 part 2. A lane may read the pull request <em>its own room</em> is working on, and no other one.
 /// <para>
 /// The measured failure: comparator arms for one issue shared a clone and a repository, so an arm-A
 /// lane ran <c>gh pr list</c> and then <c>gh pr view</c> on a sibling arm's open PR and committed a
@@ -13,12 +13,42 @@ namespace Baton.Vendors;
 /// that has to live in Baton.
 /// </para>
 /// <para>
-/// Vendor-neutral on purpose — nothing here knows about codex. Today its only caller is the codex
-/// broker's run-command path (<see cref="CodexDynamicToolPolicy"/>), which is the one enforcement
-/// point that can also <em>learn</em> the room's PR number, because it sees a command's output.
-/// Claude's and agy's <c>PreToolUse</c> hooks decide before a command runs and never see
-/// <c>gh pr create</c>'s stdout, so they cannot maintain <see cref="OwnPullRequest"/> on their own;
-/// wiring them needs a durable source for that number and is not done here.
+/// <b>Two entry points, one rule, because the two enforcement points know different things.</b>
+/// <see cref="RefusalFor"/> is the NUMBER-aware one, used by the codex broker's run-command path
+/// (<see cref="CodexDynamicToolPolicy"/>): that path sees a command's output, so it can learn the
+/// room's own PR number from the <c>gh pr create</c> it ran and then admit exactly that number.
+/// <see cref="RefusalForOwnBranchOnly"/> is the one a <c>PreToolUse</c> hook can use
+/// (<c>HookCheckCommand</c> for claude, <c>AgyHookCheckCommand</c> for agy). A hook decides BEFORE a
+/// command runs and never sees <c>gh pr create</c>'s stdout, so it can never learn the number — and
+/// does not need it: a governed <c>gh pr</c> verb with NO pull-request selector is resolved by
+/// <c>gh</c> from the branch the room is standing on, which is the room's own by construction. So the
+/// hook rule is "no selector", and EVERY selector is refused, including the room's own number, which
+/// the hook has no way to recognise. The measured offender — an agy lane running <c>gh pr list</c>
+/// and then <c>gh pr view 1994</c> — is refused on that path by both of those.
+/// </para>
+/// <para>
+/// <b>Routes this rule does not cover</b>, named so a later shell-bearing role does not inherit an
+/// unwritten hole. <c>gh api repos/…/pulls/…</c> and <c>gh search prs</c> reach a sibling PR without
+/// ever saying <c>gh pr</c>: the hook path refuses both by name (<c>gh api*</c> is separately denied
+/// by <c>implement</c>'s and <c>janitor</c>'s <c>denied_shell_command_patterns</c>, so it is closed
+/// twice there and once here; <c>gh search prs</c> is in no deny list and this is the only thing
+/// refusing it). <c>curl</c> to the REST/GraphQL API, any other HTTP client, and a human opening a
+/// browser are covered by NOTHING here — a granted shell with network access can fetch a PR body
+/// directly. Nothing in Baton closes that, and the honest backstop is the per-arm contamination check
+/// (<c>benchmarks/comparator.md</c> part 3), which reads the room's stream after the fact and voids
+/// the arm. <c>git fetch origin pull/&lt;n&gt;/head</c> is unreachable for a different reason: a
+/// per-arm single-branch clone has no such ref locally, and the fetch itself is a network call this
+/// rule does not judge.
+/// </para>
+/// <para>
+/// <b>Which grants.</b> <see cref="AppliesTo"/> keys on the grant's own shell allowlist, so today it
+/// governs <c>implement</c> AND <c>janitor</c> (both unscoped shells) and exempts <c>review</c>
+/// (whose job is reading someone else's PR). Janitor being governed is deliberate: it runs on the
+/// branch an implement lane left behind, so the selectorless spelling reaches the PR it is meant to
+/// touch, and it has no business reading a sibling arm's. The cost is on the broker path only —
+/// a janitor lane never runs <c>gh pr create</c>, so <see cref="OwnPullRequest"/> stays null for its
+/// whole run and every governed verb is refused there, including its own. The refusal names the rule,
+/// and janitor's outputs are files rather than PR comments.
 /// </para>
 /// </summary>
 public sealed class OwnPullRequestOnlyRule
@@ -27,16 +57,44 @@ public sealed class OwnPullRequestOnlyRule
     public const string Rule = "an implement lane reads its own PR only";
 
     /// <summary>
-    /// The <c>gh pr</c> sub-commands that read a pull request the room may not own. <c>create</c>,
-    /// <c>comment</c>, <c>edit</c> and the rest are absent deliberately: this rule is about READING a
-    /// sibling, and the write-shaped ones are already governed by each role's own deny list
-    /// (<c>WorkerRoles.json</c>). <c>gh issue view</c> is untouched — issues are the shared context a
-    /// lane is dispatched against, and the measured contamination came through PRs.
+    /// The <c>gh pr</c> sub-commands that ENUMERATE pull requests. There is no selector to judge —
+    /// the command is the sibling enumeration, whatever this room owns — so both entry points refuse
+    /// them outright. <c>list</c> is the call the contaminated lane made first; <c>status</c> is the
+    /// same enumeration under a different verb (every comparator arm authenticates as the same
+    /// GitHub account, so "your" PRs are all of them).
     /// </summary>
-    private static readonly string[] GovernedSubCommands = ["view", "diff", "checkout", "list"];
+    private static readonly string[] EnumeratingSubCommands = ["list", "status"];
 
-    // The two shapes a PR argument comes in, matching what Status.DeliveryReferenceResolver pins for
-    // `delivery-pr.txt` -- a bare number or a github.com pull URL. Anchored here, because an argument
+    /// <summary>
+    /// The <c>gh pr</c> sub-commands that name one pull request and carry no free text, so the whole
+    /// argument list can be walked for a selector (see <see cref="SelectorsIn"/>).
+    /// </summary>
+    private static readonly string[] SelectorSubCommands = ["view", "diff", "checks", "checkout"];
+
+    /// <summary>
+    /// The governed sub-commands whose options carry FREE TEXT (<c>--body</c>, <c>--title</c>). A
+    /// positional walk cannot discriminate there — every word of a body is a bare token — so only the
+    /// shape test applies to these, and a body whose text contains a bare <c>2016</c> or <c>#1994</c>
+    /// token is refused. Write <c>--body-file</c> instead, which is what these lanes already do.
+    /// <para>
+    /// They are governed at all because <c>gh pr comment 1994</c> WRITES on a sibling's pull request,
+    /// which is worse than reading one; their being write-shaped is why each role's deny list also
+    /// has an opinion, not a reason to leave them out here.
+    /// </para>
+    /// </summary>
+    private static readonly string[] FreeTextSubCommands = ["edit", "comment"];
+
+    /// <summary>
+    /// Every governed verb. <c>create</c> is deliberately absent — opening its own PR is the lane's
+    /// job, and on the broker path it is also the one command that TEACHES this rule the number.
+    /// <c>gh issue view</c> is untouched: issues are the shared context a lane is dispatched against,
+    /// and the measured contamination came through PRs.
+    /// </summary>
+    private static readonly string[] GovernedSubCommands =
+        [.. EnumeratingSubCommands, .. SelectorSubCommands, .. FreeTextSubCommands];
+
+    // The two shapes a PR selector comes in, matching what Status.DeliveryReferenceResolver pins for
+    // `delivery-pr.txt` -- a bare number or a github.com pull URL. Anchored here, because a selector
     // is a whole token; the scanning twin below is what reads `gh pr create`'s stdout.
     private static readonly Regex PullRequestArgument = new(
         @"^#?(?:https://github\.com/[\w.-]+/[\w.-]+/pull/)?(\d+)/?$", RegexOptions.Compiled);
@@ -64,14 +122,24 @@ public sealed class OwnPullRequestOnlyRule
     public static bool AppliesTo(PermissionGrant grant)
     {
         ArgumentNullException.ThrowIfNull(grant);
-        if (!grant.RunShellCommands)
-        {
-            return false;
-        }
-
-        return !(grant.ShellCommandPatterns ?? []).Any(
-            pattern => pattern.TrimStart().StartsWith("gh pr ", StringComparison.OrdinalIgnoreCase));
+        return grant.RunShellCommands && AppliesToShellPatterns(grant.ShellCommandPatterns);
     }
+
+    /// <summary>
+    /// The half of <see cref="AppliesTo"/> a hook can answer. A hook has no
+    /// <see cref="PermissionGrant"/> — it receives the allow patterns as an environment channel — but
+    /// it reaches this rung only on a shell tool call, which is the other half. Same predicate, one
+    /// home, so widening the exemption cannot drift between the broker and the two hooks.
+    /// <para>
+    /// An ABSENT or unreadable pattern channel arrives here as an empty list, which reads as
+    /// "unscoped shell" and is GOVERNED. That is the fail-closed direction for this rule and the
+    /// opposite of how the same channel's absence reads for the pattern rung above it, where absence
+    /// means "no scoped list was ever wired" and must not deny every unscoped role.
+    /// </para>
+    /// </summary>
+    public static bool AppliesToShellPatterns(IEnumerable<string>? shellCommandPatterns) =>
+        !(shellCommandPatterns ?? []).Any(
+            pattern => pattern.TrimStart().StartsWith("gh pr ", StringComparison.OrdinalIgnoreCase));
 
     /// <summary>Refusal text for <paramref name="commandLine"/>, or null when it is allowed.</summary>
     public string? Refuse(string? commandLine) => RefusalFor(commandLine, OwnPullRequest);
@@ -81,16 +149,25 @@ public sealed class OwnPullRequestOnlyRule
     /// with the output of a command that exited zero: <c>gh</c> prints the new PR's URL on stdout,
     /// and that URL is the only thing here that can open the rule's gate.
     /// <para>
-    /// Known and accepted: a <c>gh pr create</c> that fails with "a pull request for branch X already
-    /// exists" names the room's real PR and exits NON-zero, so the room never learns its number and
-    /// stays locked out of reading its own PR for the rest of the run. The failure direction is
-    /// refusal, which is the safe one. Widening the caller to parse a failed command's output is how
-    /// a sibling's URL quoted in an error message would become this room's "own" PR.
+    /// <b>This is the gate-OPENING side, so it does not reuse the deliberately over-broad any-offset
+    /// scan the refusal side uses.</b> A line only teaches the room a number when <c>gh pr create</c>
+    /// stands at the HEAD of one of its segments. Over-matching is fail-closed when it refuses and
+    /// fail-OPEN here: <c>echo "gh pr create" &amp;&amp; curl -s …/pulls</c> mentions the three words
+    /// and prints a sibling's <c>html_url</c>, and under an any-offset match that sibling became this
+    /// room's "own" PR — after which the rule that exists to refuse reading it allowed it.
+    /// </para>
+    /// <para>
+    /// Known and accepted, both in the refusing direction: a <c>gh pr create</c> that fails with "a
+    /// pull request for branch X already exists" names the room's real PR and exits NON-zero, so the
+    /// room never learns its number and stays locked out of reading its own PR for the rest of the
+    /// run; and a create that is not at a segment head (<c>GH_TOKEN=… gh pr create</c>) teaches
+    /// nothing either. Widening the caller to parse a failed command's output is how a sibling's URL
+    /// quoted in an error message would become this room's "own" PR.
     /// </para>
     /// </summary>
     public void ObserveCommandOutput(string? commandLine, string? output)
     {
-        if (output is null || !MentionsGhPr(commandLine, "create"))
+        if (output is null || !IsHeadedByGhPrCreate(commandLine))
         {
             return;
         }
@@ -105,15 +182,17 @@ public sealed class OwnPullRequestOnlyRule
     }
 
     /// <summary>
-    /// The detector. Pure, so the table-driven test is the whole specification of the rule.
+    /// The number-aware detector, for an enforcement point that knows the room's own PR. Pure, so the
+    /// table-driven test is the whole specification of the rule.
     /// <para>
-    /// Tokenizes the WHOLE command line on whitespace and looks for <c>gh</c> <c>pr</c>
-    /// <c>&lt;sub-command&gt;</c> at any offset, rather than only at the head of the line. That is
-    /// what makes <c>git status &amp;&amp; gh pr view 1994</c> and <c>gh pr list | head</c> reach the
-    /// rule — the measured lane chained exactly this way — and it needs no second command-line
-    /// splitter beside <c>ShellCommandPatternMatcher</c>'s. It over-matches a mention of the words
-    /// inside a quoted string (a commit message saying "gh pr view 1994" is refused); that is the
-    /// fail-closed direction, and the refusal names the rule so the worker can rephrase.
+    /// Tokenizes the command line into segments and looks for <c>gh</c> <c>pr</c>
+    /// <c>&lt;sub-command&gt;</c> at any offset within a segment, rather than only at the head of the
+    /// line. That is what makes <c>git status &amp;&amp; gh pr view 1994</c> and
+    /// <c>gh pr list | head</c> reach the rule — the measured lane chained exactly this way — and it
+    /// needs no second command-line splitter beside <c>ShellCommandPatternMatcher</c>'s. It
+    /// over-matches a mention of the words inside a quoted string (a commit message saying "gh pr view
+    /// 1994" is refused); that is the fail-closed direction, and the refusal names the rule so the
+    /// worker can rephrase.
     /// </para>
     /// </summary>
     /// <param name="ownPullRequest">The room's own PR number, or null before it has opened one.</param>
@@ -133,34 +212,80 @@ public sealed class OwnPullRequestOnlyRule
                 + "before the shell resolves it", ownPullRequest);
         }
 
-        foreach (var (subCommand, argument) in GovernedInvocations(commandLine))
+        foreach (var (subCommand, selectors) in GovernedInvocations(commandLine))
         {
-            if (subCommand == "list")
+            if (EnumeratingSubCommands.Contains(subCommand))
             {
-                // No number to compare: `gh pr list` IS the sibling enumeration, whatever this room
-                // owns. This is the call the contaminated lane made first.
-                return Refusal($"`gh pr list` enumerates pull requests this room does not own", ownPullRequest);
+                return Refusal(
+                    $"`gh pr {subCommand}` enumerates pull requests this room does not own", ownPullRequest);
             }
 
             if (ownPullRequest is null)
             {
-                return Refusal($"this room has not opened a pull request yet", null);
+                // Ahead of the selectorless `continue` below, deliberately: a room that has not opened
+                // a PR has nothing this verb could legitimately reach, and the bare form is refused
+                // with it. On this path the accepted cost of that is a janitor lane (see the class
+                // remarks); the hook path, which cannot know the number at all, decides differently.
+                return Refusal("this room has not opened a pull request yet", null);
             }
 
-            if (argument is null)
+            foreach (var selector in selectors)
             {
-                // The bare form reads the PR of the branch the room is standing on, which is its own.
-                continue;
-            }
+                var match = PullRequestArgument.Match(selector);
+                if (match.Success && int.TryParse(match.Groups[1].Value, out var requested)
+                    && requested == ownPullRequest)
+                {
+                    continue;
+                }
 
-            var match = PullRequestArgument.Match(argument);
-            if (match.Success && int.TryParse(match.Groups[1].Value, out var requested)
-                && requested == ownPullRequest)
+                return Refusal(
+                    $"`gh pr {subCommand} {selector}` is not this room's pull request", ownPullRequest);
+            }
+        }
+
+        return null;
+    }
+
+    /// <summary>
+    /// The detector for an enforcement point that CANNOT know the room's PR number — both vendors'
+    /// <c>PreToolUse</c> hooks. A governed verb is allowed only with no pull-request selector at all,
+    /// because that is the form <c>gh</c> resolves from the current branch, which is the room's own.
+    /// Every selector is refused, the room's own number included: this path has no number to compare
+    /// against, and inventing a durable one is what the number-aware entry point above is for.
+    /// </summary>
+    public static string? RefusalForOwnBranchOnly(string? commandLine)
+    {
+        if (MentionsGhPr(commandLine) && ContainsShellExpansion(commandLine!))
+        {
+            return BranchOnlyRefusal("this `gh pr` command line contains a shell expansion Baton "
+                + "cannot judge before the shell resolves it");
+        }
+
+        if (ReadsPullRequestsWithoutSayingGhPr(commandLine) is { } route)
+        {
+            return BranchOnlyRefusal(route);
+        }
+
+        foreach (var (subCommand, selectors) in GovernedInvocations(commandLine))
+        {
+            if (EnumeratingSubCommands.Contains(subCommand))
             {
-                continue;
+                return BranchOnlyRefusal($"`gh pr {subCommand}` enumerates pull requests this room does not own");
             }
 
-            return Refusal($"`gh pr {subCommand} {argument}` is not this room's pull request", ownPullRequest);
+            if (subCommand == "checkout")
+            {
+                // No selectorless form worth keeping: `gh pr checkout` exists to move the worktree
+                // onto a NAMED pull request's branch, and the room is already standing on its own.
+                return BranchOnlyRefusal("`gh pr checkout` moves this room onto another pull request's branch");
+            }
+
+            if (selectors.Count > 0)
+            {
+                return BranchOnlyRefusal(
+                    $"`gh pr {subCommand} {selectors[0]}` names a pull request explicitly, and this gate "
+                    + "runs before the command does, so it cannot tell this room's own number from a sibling's");
+            }
         }
 
         return null;
@@ -175,68 +300,146 @@ public sealed class OwnPullRequestOnlyRule
             + "`gh issue view` is unaffected.";
     }
 
+    private static string BranchOnlyRefusal(string what) =>
+        $"Baton refuses this command: {what} — {Rule}; run `gh pr view` with no selector and `gh` "
+        + "resolves the pull request of the branch this room is on, which is its own. "
+        + "`gh issue view` is unaffected.";
+
     /// <summary>
-    /// Every <c>gh pr &lt;governed&gt;</c> occurrence in <paramref name="commandLine"/>, paired with
-    /// its first non-flag argument (null when it has none). A flag's own value is skipped past rather
-    /// than read as the PR, so <c>gh pr view -w 2005</c> finds 2005.
+    /// The two ways to reach a pull request without the words <c>gh pr</c>, or null when the line
+    /// takes neither. Named rather than left implicit: the class remarks list what is NOT covered,
+    /// and these two are the ones that are.
     /// </summary>
-    private static IEnumerable<(string SubCommand, string? Argument)> GovernedInvocations(string? commandLine)
+    private static string? ReadsPullRequestsWithoutSayingGhPr(string? commandLine)
     {
-        var tokens = Tokenize(commandLine);
-        for (var i = 0; i + 2 < tokens.Count; i++)
+        foreach (var tokens in Segments(commandLine))
         {
-            if (!IsGh(tokens[i]) || !tokens[i + 1].Equals("pr", StringComparison.OrdinalIgnoreCase))
+            for (var i = 0; i + 1 < tokens.Count; i++)
             {
-                continue;
-            }
-
-            var subCommand = tokens[i + 2].ToLowerInvariant();
-            if (!GovernedSubCommands.Contains(subCommand))
-            {
-                continue;
-            }
-
-            string? argument = null;
-            for (var j = i + 3; j < tokens.Count; j++)
-            {
-                if (tokens[j].StartsWith('-'))
+                if (!IsGh(tokens[i]))
                 {
                     continue;
                 }
-                argument = tokens[j];
-                break;
-            }
 
-            yield return (subCommand, argument);
+                var verb = tokens[i + 1].ToLowerInvariant();
+                if (verb == "api" && tokens.Skip(i + 2).Any(
+                        token => token.Contains("pulls", StringComparison.OrdinalIgnoreCase)))
+                {
+                    return "`gh api` reaches a pull request through the REST/GraphQL API";
+                }
+
+                if (verb == "search" && i + 2 < tokens.Count
+                    && tokens[i + 2].Equals("prs", StringComparison.OrdinalIgnoreCase))
+                {
+                    return "`gh search prs` enumerates pull requests this room does not own";
+                }
+            }
+        }
+
+        return null;
+    }
+
+    /// <summary>
+    /// Every <c>gh pr &lt;governed&gt;</c> occurrence in <paramref name="commandLine"/>, paired with
+    /// the tokens that name a pull request (empty when it names none).
+    /// </summary>
+    private static IEnumerable<(string SubCommand, IReadOnlyList<string> Selectors)> GovernedInvocations(
+        string? commandLine)
+    {
+        foreach (var tokens in Segments(commandLine))
+        {
+            for (var i = 0; i + 2 < tokens.Count; i++)
+            {
+                if (!IsGh(tokens[i]) || !tokens[i + 1].Equals("pr", StringComparison.OrdinalIgnoreCase))
+                {
+                    continue;
+                }
+
+                var subCommand = tokens[i + 2].ToLowerInvariant();
+                if (!GovernedSubCommands.Contains(subCommand))
+                {
+                    continue;
+                }
+
+                yield return (subCommand, SelectorsIn(
+                    tokens, i + 3, positional: SelectorSubCommands.Contains(subCommand)));
+            }
         }
     }
 
     /// <summary>
-    /// Whether <c>gh</c> <c>pr</c> appears adjacent anywhere in the line, optionally followed by
-    /// <paramref name="subCommand"/>. Null asks the wider question — <em>this line drives
-    /// <c>gh pr</c> at all</em> — which is what the expansion guard needs, since an expansion can
-    /// supply the sub-command itself.
+    /// The tokens of one invocation that name a pull request. TWO tests, and neither alone is enough:
+    /// <list type="number">
+    /// <item>SHAPE — a bare number, <c>#n</c> or a pull URL is a selector wherever it sits, because
+    /// nothing else in a governed invocation looks like one. This is what catches a selector hiding
+    /// behind a valueless flag (<c>gh pr view -w 1994</c>).</item>
+    /// <item>POSITION — a bare token whose predecessor is not an option is a positional argument, so
+    /// it is a selector even when it is not number-shaped. This is what catches a BRANCH name
+    /// (<c>gh pr view 1943-a-agy</c>), which is a selector <c>gh</c> accepts and no shape test sees.
+    /// Skipped for the free-text verbs, where it would read a <c>--body</c>'s words as arguments.</item>
+    /// </list>
+    /// A token whose predecessor IS an option is passed over as that option's value, which is what
+    /// makes <c>gh pr view --json body</c>, <c>gh pr diff --color never</c> and
+    /// <c>gh pr view --repo owner/name</c> reads of the room's OWN pull request rather than refusals —
+    /// the defect this replaced took the first non-flag token as the selector, so an option written
+    /// before the argument made the room's own PR unreadable. It needs no table of which flags take a
+    /// value: an option's value that is PR-shaped is still caught by test 1, and a real selector after
+    /// an option's value is still caught by test 2.
     /// </summary>
-    private static bool MentionsGhPr(string? commandLine, string? subCommand = null)
+    private static IReadOnlyList<string> SelectorsIn(
+        IReadOnlyList<string> tokens, int start, bool positional)
     {
-        var tokens = Tokenize(commandLine);
-        for (var i = 0; i + 1 < tokens.Count; i++)
+        var selectors = new List<string>();
+        for (var j = start; j < tokens.Count; j++)
         {
-            if (!IsGh(tokens[i]) || !tokens[i + 1].Equals("pr", StringComparison.OrdinalIgnoreCase))
+            if (tokens[j].StartsWith('-'))
             {
                 continue;
             }
-            if (subCommand is null)
+
+            if (PullRequestArgument.IsMatch(tokens[j]))
             {
-                return true;
+                selectors.Add(tokens[j]);
+                continue;
             }
-            if (i + 2 < tokens.Count && tokens[i + 2].Equals(subCommand, StringComparison.OrdinalIgnoreCase))
+
+            if (positional && !tokens[j - 1].StartsWith('-'))
             {
-                return true;
+                selectors.Add(tokens[j]);
             }
         }
+
+        return selectors;
+    }
+
+    /// <summary>
+    /// Whether <c>gh</c> <c>pr</c> appears adjacent anywhere in the line — <em>this line drives
+    /// <c>gh pr</c> at all</em>, which is what the expansion guard needs, since an expansion can
+    /// supply the sub-command itself.
+    /// </summary>
+    private static bool MentionsGhPr(string? commandLine)
+    {
+        foreach (var tokens in Segments(commandLine))
+        {
+            for (var i = 0; i + 1 < tokens.Count; i++)
+            {
+                if (IsGh(tokens[i]) && tokens[i + 1].Equals("pr", StringComparison.OrdinalIgnoreCase))
+                {
+                    return true;
+                }
+            }
+        }
+
         return false;
     }
+
+    /// <summary>Whether any segment of the line STARTS with <c>gh pr create</c>; see
+    /// <see cref="ObserveCommandOutput"/> for why this side is anchored and the refusing side is not.</summary>
+    private static bool IsHeadedByGhPrCreate(string? commandLine) =>
+        Segments(commandLine).Any(
+            tokens => tokens.Count >= 3 && IsGh(tokens[0])
+                && tokens[1].Equals("pr", StringComparison.OrdinalIgnoreCase)
+                && tokens[2].Equals("create", StringComparison.OrdinalIgnoreCase));
 
     // `$(`/`${`/a bare `$` (sh), a backtick (both), and `%` (cmd's %VAR% and a `for /f` loop
     // variable). Over-broad on purpose: every one of them is a character whose VALUE at run time is
@@ -255,12 +458,27 @@ public sealed class OwnPullRequestOnlyRule
             || name.Equals("gh.exe", StringComparison.OrdinalIgnoreCase);
     }
 
-    private static IReadOnlyList<string> Tokenize(string? commandLine) =>
+    // A chain/pipe/redirection separator ends one command's arguments and starts the next word's
+    // context, so the selector walk must not cross one -- `gh pr view | tee out.txt` names no PR, and
+    // reading `tee` as its argument is the same class of defect as reading a flag's value as one. The
+    // segmentation is this rule's own and deliberately cruder than ShellCommandPatternMatcher's: it
+    // only has to bound an argument walk, and every line it would mis-split that carries an expansion
+    // is refused by the guard above before it gets here.
+    private static readonly char[] SegmentSeparators =
+        [';', '|', '&', '\n', '\r', '(', ')', '`', '<', '>'];
+
+    private static readonly char[] TokenSeparators = [' ', '\t'];
+
+    private static IReadOnlyList<IReadOnlyList<string>> Segments(string? commandLine) =>
         string.IsNullOrWhiteSpace(commandLine)
             ? []
             : commandLine
-                .Split([' ', '\t', '\n', '\r', ';', '|', '&', '(', ')', '`'], StringSplitOptions.RemoveEmptyEntries)
-                .Select(token => token.Trim('"', '\''))
-                .Where(token => token.Length > 0)
+                .Split(SegmentSeparators, StringSplitOptions.RemoveEmptyEntries)
+                .Select(segment => (IReadOnlyList<string>)segment
+                    .Split(TokenSeparators, StringSplitOptions.RemoveEmptyEntries)
+                    .Select(token => token.Trim('"', '\''))
+                    .Where(token => token.Length > 0)
+                    .ToArray())
+                .Where(tokens => tokens.Count > 0)
                 .ToArray();
 }

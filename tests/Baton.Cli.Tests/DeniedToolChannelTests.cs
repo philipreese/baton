@@ -10,8 +10,16 @@ namespace Baton.Cli.Tests;
 public class DeniedToolChannelTests
 {
     private const string AgyDeny = "\"decision\":\"deny\"";
-    private const string AgyPayload = """{"toolCall":{"name":"run_command","args":{}}}""";
-    private const string ClaudePayload = """{"tool_name":"Bash"}""";
+    // #2001: both payloads carry a READABLE command line, as a production one always does. The
+    // sibling-pull-request rung (OwnPullRequestOnlyRule, last check on both hooks' shell branches)
+    // governs an unscoped grant and denies a shell call whose command line it cannot read — so an
+    // args-less payload would now deny for that reason, on a file whose subject is the denied-TOOL
+    // channel. Same reasoning as the shell-channel note below: give the fixture the shape production
+    // has, so the channel under test is the one deciding.
+    private const string AgyPayload =
+        """{"toolCall":{"name":"run_command","args":{"CommandLine":"git status"}}}""";
+    private const string ClaudePayload =
+        """{"tool_name":"Bash","tool_input":{"command":"git status"}}""";
 
     // These exercise the denied-tool channel, not the shell channel, but the default payload is a
     // run_command — so BOTH shell channels must be Present-and-unscoped ("agy:"), the way production

@@ -42,16 +42,32 @@ public class OwnPullRequestOnlyRuleTests
     [InlineData("gh pr diff 1994", 2005)]
     [InlineData("gh pr checkout 1994", 2005)]
     [InlineData("gh pr view https://github.com/aer-works/baton/pull/1994", 2005)]
-    // ...and `gh pr list` never becomes allowed, for the reason GovernedSubCommands states.
+    // ...and `gh pr list` never becomes allowed, for the reason EnumeratingSubCommands states.
     [InlineData("gh pr list", 2005)]
     [InlineData("gh pr list --state open", 2005)]
+    // `gh pr status` is the same enumeration under another verb: every comparator arm authenticates
+    // as one GitHub account, so "your" pull requests are all of them (second-reader finding, :36).
+    [InlineData("gh pr status", null)]
+    [InlineData("gh pr status", 2005)]
+    // The write-shaped verbs are governed too -- commenting on a sibling's PR is worse than reading
+    // one -- and a free-text body that names a number is refused with them (see FreeTextSubCommands).
+    [InlineData("gh pr comment 1994 --body-file out.md", 2005)]
+    [InlineData("gh pr edit 1994 --title x", 2005)]
+    [InlineData("gh pr checks 1994", 2005)]
     // A chained or piped call reaches the rule the same way -- the measured lane chained exactly so.
     [InlineData("git status && gh pr view 1994", 2005)]
     [InlineData("gh pr list | head -20", 2005)]
     [InlineData("git branch -a | grep 1943 ; gh pr view 1994", 2005)]
-    // A non-numeric argument cannot be shown to be this room's PR, so it fails closed.
+    // A non-numeric POSITIONAL argument cannot be shown to be this room's PR, so it fails closed --
+    // and a sibling arm's branch name is exactly that shape, which is why the positional test exists
+    // beside the number-shape one (SelectorsIn states both).
     [InlineData("gh pr view 1943-a-claude", 2005)]
-    [InlineData("gh pr diff --repo aer-works/baton", 2005)]
+    [InlineData("gh pr view --repo aer-works/baton 1943-a-agy", 2005)]
+    // An option written BEFORE the argument does not hide the argument (second-reader finding, :180).
+    [InlineData("gh pr view --json title 1994", 2005)]
+    [InlineData("gh pr diff --color never 1994", 2005)]
+    // A valueless flag does not hide it either: the number shape is a selector wherever it sits.
+    [InlineData("gh pr view -w 1994", 2005)]
     // A shell expansion is refused by its OWN arm, not by the non-numeric one above -- the shell
     // resolves it after this rule has read the line, so what it will say is not in the string. These
     // rows are what stops a later relaxation of the non-numeric branch from reopening substitution.
@@ -80,6 +96,18 @@ public class OwnPullRequestOnlyRuleTests
     [InlineData("gh pr view https://github.com/aer-works/baton/pull/2005", 2005)]
     [InlineData("gh pr view", 2005)] // the bare form reads the PR of the branch the room is on
     [InlineData("git diff && gh pr view 2005", 2005)]
+    // The other polarity of the :180 finding: an OPTION'S VALUE is not read as the selector, so the
+    // flag-first spelling of a read of the room's own PR is allowed. Every one of these was refused
+    // before, which broke the lane's re-read-the-body-after-create habit.
+    [InlineData("gh pr view --json body", 2005)]
+    [InlineData("gh pr view --json title 2005", 2005)]
+    [InlineData("gh pr diff --color never", 2005)]
+    [InlineData("gh pr diff --repo aer-works/baton", 2005)]
+    [InlineData("gh pr view --repo aer-works/baton 2005", 2005)]
+    [InlineData("gh pr checks", 2005)]
+    [InlineData("gh pr comment --body-file out.md", 2005)]
+    // A separator ends the invocation's arguments: `tee` is not a pull request selector.
+    [InlineData("gh pr view | tee pr.md", 2005)]
     public void Reading_the_pull_request_this_room_opened_is_allowed(string commandLine, int ownPullRequest)
     {
         Assert.Null(OwnPullRequestOnlyRule.RefusalFor(commandLine, ownPullRequest));
@@ -106,17 +134,101 @@ public class OwnPullRequestOnlyRuleTests
         Assert.NotNull(rule.Refuse("gh pr view 1994"));
     }
 
-    [Fact]
-    public void Output_of_a_command_that_is_not_gh_pr_create_teaches_the_room_nothing()
+    [Theory]
+    // The polarity arm for the learning step: the same URL, arriving from a read rather than a
+    // create, must not open the gate -- otherwise one `gh pr view 1994` would authorize itself.
+    [InlineData("gh pr view 1994")]
+    // Second-reader finding (:91), the discriminating row for it: this line is allowed, mentions the
+    // three words at a non-head offset, and prints a pull URL. `ObserveCommandOutput`'s remarks state
+    // why the gate-opening side is anchored where the refusing side is not.
+    [InlineData("echo \"gh pr create\" && curl -s https://api.github.com/repos/aer-works/baton/pulls")]
+    [InlineData("gh issue view 1943 --comments")]
+    [InlineData("git log --grep='gh pr create'")]
+    public void Output_of_a_command_that_is_not_a_gh_pr_create_teaches_the_room_nothing(string commandLine)
     {
         var rule = new OwnPullRequestOnlyRule();
 
-        // The polarity arm for the learning step: the same URL, arriving from a read rather than a
-        // create, must not open the gate -- otherwise one `gh pr view 1994` would authorize itself.
-        rule.ObserveCommandOutput("gh pr view 1994", "https://github.com/aer-works/baton/pull/1994");
+        rule.ObserveCommandOutput(
+            commandLine,
+            "see https://github.com/aer-works/baton/pull/1994 for #1994\n");
 
         Assert.Null(rule.OwnPullRequest);
         Assert.NotNull(rule.Refuse("gh pr view 1994"));
+    }
+
+    [Fact]
+    public void A_gh_pr_create_at_the_head_of_a_later_segment_still_teaches_the_room()
+    {
+        // The discriminating control for the theory above: the same output, from a line whose SECOND
+        // segment is a real create, does open the gate. Without this row the anchoring could be
+        // "learns nothing, ever" and every refusal row would still pass.
+        var rule = new OwnPullRequestOnlyRule();
+
+        rule.ObserveCommandOutput(
+            "git push -u origin HEAD && gh pr create --fill",
+            "https://github.com/aer-works/baton/pull/2005\n");
+
+        Assert.Equal(2005, rule.OwnPullRequest);
+    }
+
+    /// <summary>
+    /// #2001's HIGH finding: the measured contamination was an agy lane, judged by a
+    /// <c>PreToolUse</c> hook that cannot know the room's PR number. This entry point is what the two
+    /// hooks call, and the rule it enforces is "no pull-request selector" rather than "this number".
+    /// </summary>
+    [Theory]
+    // Allowed: no selector, so `gh` resolves the branch this room is standing on -- its own PR.
+    [InlineData("gh pr view", null)]
+    [InlineData("gh pr diff", null)]
+    [InlineData("gh pr checks", null)]
+    [InlineData("gh pr view --json number", null)]
+    [InlineData("gh pr view --json title,body -q .body", null)]
+    [InlineData("gh pr comment --body-file out.md", null)]
+    [InlineData("gh pr edit --body-file body.md", null)]
+    [InlineData("gh pr create --fill", null)]
+    [InlineData("gh issue view 1943", null)]
+    [InlineData("gh issue view 1943 --comments", null)]
+    [InlineData("git status && gh pr view", null)]
+    [InlineData("gh pr view | tee pr.md", null)]
+    // Refused: every selector, including a number that MIGHT be this room's own -- this path has no
+    // number to compare against, which is the whole reason it exists.
+    [InlineData("gh pr view 1994", "1994")]
+    [InlineData("gh pr view 2016", "2016")]
+    [InlineData("gh pr view #1994", "#1994")]
+    [InlineData("gh pr view https://github.com/aer-works/baton/pull/1994", "pull/1994")]
+    [InlineData("gh pr view 1943-a-agy", "1943-a-agy")]
+    [InlineData("gh pr view --json title 2016", "2016")]
+    [InlineData("gh pr view -w 1994", "1994")]
+    [InlineData("gh pr diff 1994", "1994")]
+    [InlineData("gh pr checks 1994", "1994")]
+    [InlineData("gh pr comment 1994 --body-file out.md", "1994")]
+    [InlineData("gh pr edit 1994 --title x", "1994")]
+    [InlineData("git branch -a | grep 1943 ; gh pr view 1994", "1994")]
+    // Refused whatever the selector: enumeration, a worktree move, an expansion, and the two routes
+    // that reach a pull request without ever saying `gh pr`.
+    [InlineData("gh pr list", "enumerates")]
+    [InlineData("gh pr list --state open", "enumerates")]
+    [InlineData("gh pr status", "enumerates")]
+    [InlineData("gh pr checkout 1994", "checkout")]
+    [InlineData("gh pr checkout", "checkout")]
+    [InlineData("gh pr view $PR", "expansion")]
+    [InlineData("gh api repos/aer-works/baton/pulls/1994", "gh api")]
+    [InlineData("gh search prs --state open", "gh search prs")]
+    public void The_hook_entry_point_allows_only_the_selectorless_form(
+        string commandLine, string? expectedInRefusal)
+    {
+        var refusal = OwnPullRequestOnlyRule.RefusalForOwnBranchOnly(commandLine);
+
+        if (expectedInRefusal is null)
+        {
+            Assert.Null(refusal);
+            return;
+        }
+
+        Assert.NotNull(refusal);
+        Assert.Contains(OwnPullRequestOnlyRule.Rule, refusal, StringComparison.Ordinal);
+        Assert.Contains("with no selector", refusal, StringComparison.Ordinal);
+        Assert.Contains(expectedInRefusal, refusal, StringComparison.Ordinal);
     }
 
     /// <summary>
@@ -125,9 +237,13 @@ public class OwnPullRequestOnlyRuleTests
     /// role's shell patterns fails here. That method states why the two differ.
     /// </summary>
     [Fact]
-    public void The_rule_governs_implement_and_exempts_review()
+    public void The_rule_governs_implement_and_janitor_and_exempts_review()
     {
         Assert.True(OwnPullRequestOnlyRule.AppliesTo(WorkerRoleCatalog.For("implement").Grant));
+        // janitor is the third shell-bearing role, and it is governed DELIBERATELY -- second-reader
+        // finding (:27), which found it governed with every statement about the rule saying
+        // "implement". The class remarks state which way it is meant to go and what it costs.
+        Assert.True(OwnPullRequestOnlyRule.AppliesTo(WorkerRoleCatalog.For("janitor").Grant));
         Assert.False(OwnPullRequestOnlyRule.AppliesTo(WorkerRoleCatalog.For("review").Grant));
     }
 

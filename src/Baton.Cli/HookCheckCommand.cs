@@ -379,6 +379,40 @@ public static class HookCheckCommand
                     "its start) and was refused.");
             }
 
+            // #2001: the sibling-pull-request rule, on the path that judges claude. Last of the
+            // grant rungs, because it is the narrowest; only the #2002 repeat rung below follows it,
+            // so a refused sibling read never enters the ledger. The broker's copy of this call passes the room's own PR number, which
+            // it learns from `gh pr create`'s stdout; a PreToolUse hook decides before the command
+            // runs and never sees that stdout, so it takes the entry point that needs no number —
+            // a governed `gh pr` verb is allowed only with no selector, which `gh` resolves from the
+            // branch this room is standing on. See OwnPullRequestOnlyRule for both entry points and
+            // for the routes neither of them covers.
+            //
+            // The allow-pattern list is the whole of what this rung needs to know about the grant:
+            // reaching here means Bash is granted, and a list that allowlists a `gh pr` read is the
+            // review role opting out. An absent or wrong-vendor channel arrives as an empty list,
+            // which is governed — the fail-closed direction for THIS rung, and deliberately opposite
+            // to how the pattern rung above reads the same absence.
+            if (Baton.Vendors.OwnPullRequestOnlyRule.AppliesToShellPatterns(shellPatternList.Patterns))
+            {
+                if (shellCommandLine is null)
+                {
+                    // Belt-and-braces: both roles this rung governs today carry a deny list, so a
+                    // Bash payload with no readable `command` is already denied above. A future
+                    // governed role with neither list would reach here, and a command line this gate
+                    // cannot read is one it cannot judge.
+                    return Refuse(stderr,
+                        "AER: the permission gate could not read the 'Bash' command line from the hook " +
+                        "payload and denied this call rather than allowing it unchecked.");
+                }
+
+                if (Baton.Vendors.OwnPullRequestOnlyRule.RefusalForOwnBranchOnly(shellCommandLine)
+                    is { } siblingPullRequestRefusal)
+                {
+                    return Refuse(stderr, $"AER: {siblingPullRequestRefusal}");
+                }
+            }
+
             // #2002 rule 2, hook half — LAST in this branch, so a command the grant would refuse
             // anyway is answered with the grant's reason and never enters the ledger as a command
             // that ran. See RepeatedToolCallHook for why every failure of this rung is an allow, and
