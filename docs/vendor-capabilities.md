@@ -1121,9 +1121,24 @@ which is why the shipped instruction (below) names no specific command rather th
 tests". The other two poll clusters (152 and 83 polls) backgrounded two separate `pixi run
 gates-quiet` calls, measured at 260.9s and 460.7s respectively — multi-minute, but not a single "~8
 minutes each" figure. Every `run_command` call actually observed in that lane
-passed only a `CommandLine` parameter — no other field was ever used. Whether `run_command` exposes an
-undocumented blocking/wait parameter (a `WaitMsBeforeAsync`-style field) is **unmeasured, not ruled
-out**: the `stream-json` `init` event's `tools` array lists tool *names* only —
+passed only a `CommandLine` parameter — no other field was ever used.
+
+**Corrected 2026-09-06 (#2002): the wait parameter is not unmeasured — the STREAM is the wrong
+surface to look for it on.** The paragraph below still describes what the stream can and cannot
+answer, and that part stands: a `step_update`'s `tool_info.parameters` carries `CommandLine` alone
+(414 of 414 `run_command` calls in `dispatch-implement-12f930d9`, re-counted 2026-09-06). The
+**`PreToolUse` hook payload** is a different surface and carries three arguments —
+`CommandLine`, `Cwd`, and **`WaitMsBeforeAsync`, at 5000** — which is a wait-then-background switch
+on every call, sent by agy rather than chosen by the model. Provenance, stated so it is not
+overread: the fixture in `AgyHookCheckCommandTests.Payload` records it as "the real payload agy
+sends, from the live capture in `agy.hook-env-inherited`'s log"; that check *reports* payload shape
+rather than asserting it, so this is a second-hand reading of a real capture and not a gated
+measurement. The consequence for #2002 is in `spec/baton.md` §9: a gate cannot refuse a parameter
+agy puts on every call, so rule 1 is scoped on this vendor rather than claimed complete, and
+`AgyHookCheckCommand.MeasuredRunCommandArgs` refuses only an argument beyond these three.
+
+The rest of this paragraph, unchanged: the `stream-json` `init` event's `tools` array lists tool
+*names* only —
 `run_command`, `manage_task`, `command_status`, `wait`, `wait_5_seconds`, plus the rest of the
 roster — never parameter schemas, so a probe would need a live turn. Two were attempted 2026-09-01
 (`agy -p "print your run_command tool's parameter schema, verbatim" --model gemini-3.7-flash-high` and
