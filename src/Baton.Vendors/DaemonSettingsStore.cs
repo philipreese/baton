@@ -71,7 +71,7 @@ public sealed record DaemonSettings
     }
 
     /// <summary>
-    /// #1946 — the tailnet plane's listener (spec/baton.md §11 C-11). Never null, by the same
+    /// #1946 — what <c>Baton.Cli.Daemon.GlassHttpService</c> reads. Never null, by the same
     /// read-through nullable backing field <see cref="RunwayHold"/> uses; that property's remarks carry
     /// the whole argument, record equality included. Off unless the operator opts in:
     /// <code>

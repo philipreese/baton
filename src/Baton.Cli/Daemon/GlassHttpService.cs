@@ -8,9 +8,9 @@ using Microsoft.Extensions.Hosting;
 namespace Baton.Cli.Daemon;
 
 /// <summary>
-/// #1946 slice 1 — the tailnet plane's listener (spec/baton.md §11 C-11): the daemon serves the same
-/// <c>glass.html</c> the Claude.ai artifact is published from, plus the fleet projection it already
-/// writes, plus a change stream. Off unless <see cref="GlassListenerSettings.Listen"/> is set.
+/// #1946 slice 1 — the tailnet plane's listener (spec/baton.md §11 C-11): three GET routes serving
+/// <see cref="GlassPage"/>, the fleet projection the daemon already writes, and a stream of that
+/// file's changes. Off unless <see cref="GlassListenerSettings.Listen"/> is set.
 /// </summary>
 /// <remarks>
 /// <para>

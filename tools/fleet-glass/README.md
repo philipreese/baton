@@ -5,6 +5,18 @@ into the Cloudflare KV mailbox `worker.js` serves to `glass.html`. Everything th
 the write budget, the secret gate, and the page's own rendering rules are specified in
 `spec/baton.md` §6 — this file is a pointer, not a second copy.
 
+## Two deliveries of one page (#1946)
+
+`glass.html` is also served by `baton daemon` over the operator's tailnet, off the same file — it is
+embedded in `Baton.Cli` from this directory, so a change here reaches both deliveries with no second
+copy to keep in step. The config keys, the bind rule and the `tailscale serve` recipe are in the
+repo README's "Opening the glass over your tailnet"; the decision is `spec/baton.md` §11 C-11.
+
+**Publishing the Claude.ai artifact is now optional**, and the tailnet URL is the primary way to open
+the glass. The artifact and the mailbox behind it still work unchanged, and are still the only glass
+reachable from inside a Claude conversation; retiring them is its own issue, after the tailnet page
+has been proven on a phone.
+
 ## Where the fleet snapshot comes from (#1557)
 
 Two sources, selected by the `FLEET_GLASS_PROJECTION_SOURCE` environment variable. Order per cycle:

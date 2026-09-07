@@ -3703,12 +3703,22 @@ trigger is not registrable by a standard user and is not used (#1770).
   (`{Root}/fleet/projection.json`) atomically roughly every 30s (env-var-configurable, clamped, same
   pattern as `RoomRetentionSweep`'s own interval), calling `FleetStatusTool`'s room-processing logic
   in-process and adding the §6 `live`/`pruned` fields plus `processAlive`/`stdout_last_write_ago_sec`/
-  `elapsed` (§6 schema). A fourth kept responsibility under the same outbound-only ceiling the rest of
-  this section states: the daemon only ever writes this file, never serves it over a listener. No
-  pusher.py change rides with PR-A — both paths run side by side until a later PR retires the pusher's
+  `elapsed` (§6 schema). A fourth kept responsibility. **Amended by #1946:** this bullet used to end
+  "under the same outbound-only ceiling the rest of this section states: the daemon only ever writes
+  this file, never serves it over a listener" — the tailnet listener below now serves exactly this
+  file. The writing half is unchanged, and there is still exactly one derivation of the fleet row.
+  No pusher.py change rides with PR-A — both paths run side by side until a later PR retires the pusher's
   own derivation. A reader of this file opens it with `FileShare.ReadWrite | FileShare.Delete` in C#,
   or copies then parses in Python (#1782 — `open()` cannot express `FILE_SHARE_DELETE`), so an
   in-flight atomic rewrite never surfaces a sharing violation or a torn read to it.
+- **The tailnet glass listener (#1946 slice 1)** — `GlassHttpService` (`src/Baton.Cli/Daemon/`, a
+  hosted service registered after `FleetProjectionWriter`): three GET routes serving `glass.html`,
+  the projection file above, and an SSE stream of its changes. The decision, the two planes, the
+  bind rule and the origination/arrest line are §11 C-11's and are not restated here; the config
+  keys and the default port have their one home on `GlassListenerSettings`
+  (`src/Baton.Vendors/DaemonSettingsStore.cs`), and the allowed bind addresses have theirs on
+  `GlassBindPolicy`. Off unless `settings.json` opts in. Slice 1 serves the fleet row only — the
+  same payload the mailbox carries; drill-down is slice 2.
 - **`DeliveryPoller`** (`Baton.Cli.Daemon`, a hosted service, #734) — a fifth kept responsibility, the
   same outbound-only ceiling as the fleet projection file above: a slow-cadence (default 5 min,
   `BATON_DELIVERY_POLL_INTERVAL_SECONDS`-configurable through `BatonEnvironmentSnapshot`, matching the
@@ -5306,6 +5316,19 @@ chatty two-way traffic, and the steering model settled alongside this entry (arr
 corrections travel as briefs through `redispatch --spec`, #1495/#1381) guarantees there is none.
 Revisit only if a genuinely interactive surface is ever ruled in — which §10's mid-run-steering
 ruling currently forbids.
+
+**Slice 1 landed 2026-09-07 (#1946): the page, not yet the drill-down.** `GlassHttpService` (§7)
+serves `tools/fleet-glass/glass.html` — the same file the artifact is published from, embedded in
+`Baton.Cli` and marked with a `baton-glass-source` meta so the page reads same-origin — plus
+`{Root}/fleet/projection.json` as-is and an SSE stream of its changes. **What slice 1 deliberately
+does NOT carry is the whole reason this plane exists:** no stdout tail beyond what the projection
+file already holds, no room artifacts, no timeline endpoint. Those are slice 2, they may live on
+this plane ONLY, and adding any of them to the worker-served or artifact copies violates this entry
+rather than extending it. The read-only tripwire is enforced structurally: every route is a GET, a
+non-GET is refused before routing, and `FleetGlassReadOnlyTests` pins that the page itself performs
+no non-GET request and reads no origin but the one that served it. That test's network-sink scan was
+narrowed by #1946 from "no network requests at all" to "no *mutating* network requests", which is the
+predicate its own summary always stated; the read-only decision above is unchanged by it.
 
 ### C-12 — Gate receipts: one passing run per tree, CI is the independent one
 

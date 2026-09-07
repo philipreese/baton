@@ -8,6 +8,14 @@
 #
 # One-time prerequisite: `npx wrangler login` (opens a browser) so wrangler holds its own OAuth
 # session -- this script never handles a Cloudflare credential itself.
+#
+# #1946: this whole script -- and the Claude.ai artifact paste that follows it -- is now OPTIONAL.
+# `baton daemon` serves the same glass.html over the tailnet, and that URL is the primary way to
+# open the glass; see the repo README's "Opening the glass over your tailnet". Everything below is
+# the MAILBOX plane, which is still the only glass reachable from inside a Claude conversation or
+# while the fleet machine is asleep. No step here changed: step 3 pushes the Worker's secrets, which
+# the Worker still needs for as long as the mailbox plane exists (the brief for #1946 described step
+# 3 as an artifact publish; there has never been one in this script).
 $ErrorActionPreference = "Stop"
 Set-Location $PSScriptRoot
 

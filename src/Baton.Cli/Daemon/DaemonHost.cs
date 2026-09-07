@@ -113,9 +113,8 @@ public static class DaemonHost
         // a policy change (a floor, the cap, the tier table) takes effect without a daemon restart.
         builder.Services.AddHostedService<QueueSchedulerService>();
 
-        // #1946: the tailnet plane's listener (spec/baton.md §11 C-11) -- serves the same glass.html
-        // the artifact is published from, plus the projection file FleetProjectionWriter above
-        // already writes. Registered AFTER that writer so the file it serves is being produced by
+        // #1946: GlassHttpService's own doc comment carries what it serves and under which ruling.
+        // Registered AFTER FleetProjectionWriter above so the file it serves is being produced by
         // the time the first request can arrive, and inert unless settings.json opts in.
         builder.Services.AddHostedService<GlassHttpService>();
 

@@ -100,6 +100,44 @@ needs two harvests and disappears again when the vendor's window rolls over, and
 estimate exists without a positive rate. `spec/baton.md` §6's `windows[]` table states the absence
 rules in full.
 
+### Opening the glass over your tailnet (#1946)
+
+`baton daemon` can serve that same `glass.html` itself, so the page is a bookmark on your phone
+rather than an artifact you re-publish. Off unless you ask for it — add to `~/.baton/settings.json`
+(`$BATON_HOME/settings.json`) and restart the daemon:
+
+```json
+{ "Glass": { "Listen": true, "Port": 8420 } }
+```
+
+`Listen` and `Port` are documented on `GlassListenerSettings`
+(`src/Baton.Vendors/DaemonSettingsStore.cs`), which is also where the default port lives — this
+snippet is an example, not a second copy of the schema. The daemon logs the URLs it bound, once, at
+startup.
+
+**The bind rule is not configurable.** The listener binds loopback and, when the machine has one,
+its own Tailscale address (`100.64.0.0/10`) — never `0.0.0.0`, and there is no setting that widens
+it (`GlassBindPolicy`; the decision is `spec/baton.md` §11 C-11). On Windows, binding the tailnet
+address needs a one-time URL reservation from an **elevated** prompt; the daemon prints the exact
+command when the bind is refused, and the loopback listener comes up either way:
+
+```powershell
+netsh http add urlacl url=http://<your-tailscale-ip>:8420/ user=$env:USERDOMAIN\$env:USERNAME
+```
+
+For HTTPS (and a name instead of an IP), let Tailscale terminate TLS in front of it — two lines,
+run on the fleet machine, after which the page is at `https://<machine>.<tailnet>.ts.net/`:
+
+```powershell
+tailscale cert            # once, to issue the node's certificate
+tailscale serve --bg 8420
+```
+
+The routes are `/` (the page), `/projection.json` (the fleet projection, as-is) and `/events` (a
+Server-Sent Events stream of its changes). All GET, all read-only. **This slice serves the fleet
+row only** — the same payload the mailbox carries; drill-down (stdout tail, room artifacts,
+timeline) is C-11's slice 2.
+
 ## Vendor authentication
 
 Baton does not authenticate to any model provider. It spawns the vendor's own first-party CLI
