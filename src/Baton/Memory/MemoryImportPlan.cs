@@ -66,10 +66,16 @@ public sealed record MemoryImportSource(
 /// can place with <c>--assert</c>, while one of these is a file Baton wrote and must never read back,
 /// whatever its root resolves to.
 /// </param>
+/// <param name="Dropped">
+/// Files the caller walked and could not open, passed through so this plan accounts for them too — see
+/// <see cref="ImportManifest.Dropped"/> for what the population means and what its digest does not
+/// claim. Not computed here: the failure is the caller's read, and this type has no filesystem.
+/// </param>
 public sealed record MemoryImportPlan(
     IReadOnlyList<MemoryEntry> Entries,
     IReadOnlyList<ImportSkippedRow> Unfiled,
-    IReadOnlyList<ImportSkippedRow> ProjectionsSkipped)
+    IReadOnlyList<ImportSkippedRow> ProjectionsSkipped,
+    IReadOnlyList<ImportSkippedRow> Dropped)
 {
     /// <summary>
     /// Turns already-read roots into the entries they produce. <b>Pure</b>: no filesystem, no git, no
@@ -79,9 +85,18 @@ public sealed record MemoryImportPlan(
     /// </summary>
     /// <param name="sources">The roots, in the order the caller wants them accounted for.</param>
     /// <param name="importedAtUtc">Stamped on every entry. Deliberately not part of any entry's id.</param>
-    public static MemoryImportPlan Build(IReadOnlyList<MemoryImportSource> sources, DateTime importedAtUtc)
+    /// <param name="dropped">
+    /// The files the caller could not open, carried onto <see cref="Dropped"/> unchanged. A parameter
+    /// rather than something computed here so the purity above still holds, and required rather than
+    /// optional so a caller that has such files cannot leave them out of the accounting by silence.
+    /// </param>
+    public static MemoryImportPlan Build(
+        IReadOnlyList<MemoryImportSource> sources,
+        DateTime importedAtUtc,
+        IReadOnlyList<ImportSkippedRow> dropped)
     {
         ArgumentNullException.ThrowIfNull(sources);
+        ArgumentNullException.ThrowIfNull(dropped);
 
         var entries = new List<MemoryEntry>();
         var unfiled = new List<ImportSkippedRow>();
@@ -145,7 +160,8 @@ public sealed record MemoryImportPlan(
                 .ThenBy(e => e.SourcePath, StringComparer.OrdinalIgnoreCase)
                 .ToList(),
             unfiled,
-            projections);
+            projections,
+            [.. dropped.OrderBy(d => d.SourcePath, StringComparer.OrdinalIgnoreCase)]);
     }
 
     /// <summary>

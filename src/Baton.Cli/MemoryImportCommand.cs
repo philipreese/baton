@@ -129,12 +129,12 @@ public static class MemoryImportCommand
         // no others: `--root <one Claude root>` used to record every Codex sqlite file on the machine.
         var machinery = selection.MachineryRoots.SelectMany(m => m.Rows).ToList();
 
-        var withFiles = sources
-            .Select(source => source with { Files = ReadSourceFiles(source) })
-            .ToList();
+        var reads = sources.Select(source => (Source: source, Read: ReadSourceFiles(source))).ToList();
+        var withFiles = reads.Select(r => r.Source with { Files = r.Read.Files }).ToList();
+        var dropped = reads.SelectMany(r => r.Read.Dropped).ToList();
 
         var importedAtUtc = DateTime.UtcNow;
-        var plan = MemoryImportPlan.Build(withFiles, importedAtUtc);
+        var plan = MemoryImportPlan.Build(withFiles, importedAtUtc, dropped);
 
         var sizeByPath = withFiles
             .SelectMany(s => s.Files)
@@ -192,7 +192,8 @@ public static class MemoryImportCommand
             machinery,
             linkRows.OrderBy(l => l.LinksFilePath, StringComparer.OrdinalIgnoreCase)
                 .ThenBy(l => l.LinkId, StringComparer.Ordinal).ToList(),
-            plan.ProjectionsSkipped);
+            plan.ProjectionsSkipped,
+            plan.Dropped);
 
         string? manifestPath = null;
         if (!options.DryRun)
@@ -455,21 +456,25 @@ public static class MemoryImportCommand
     /// beside it is over the bytes and is the authority on what the file held.
     /// </para>
     /// <para>
-    /// A file that vanished or became unreadable between the inventory and this read is dropped rather
-    /// than throwing, matching the inventory's own posture: one lost row in a walk that otherwise
-    /// finished. It cannot silently become an empty entry — a dropped file contributes neither an
-    /// entry nor a manifest row, so the import's own accounting shows it was not carried.
+    /// A file that vanished or became unreadable between the inventory and this read is not thrown on,
+    /// matching the inventory's own posture: one lost row in a walk that otherwise finished. It cannot
+    /// silently become an empty entry, and it is <b>not</b> silently absent either — it comes back on
+    /// <see cref="SourceRead.Dropped"/> and lands in the manifest's own population, whose contract is
+    /// stated once at <see cref="ImportManifest.Dropped"/> (#1976; before that, such a file appeared in
+    /// no population and was indistinguishable from one that was never there).
     /// </para>
     /// <para>
     /// <c>internal</c> rather than <c>private</c> only as a test seam (Baton.Cli.Tests, via
     /// <c>InternalsVisibleTo</c>): the walk and this read happen back to back inside
-    /// <see cref="ImportAsync"/> with nothing between them to interpose on, so the arm that proves a
-    /// stale inventory row cannot survive the read has to hand one in directly.
+    /// <see cref="ImportAsync"/> with nothing between them to interpose on, so the arms that prove a
+    /// stale inventory row cannot survive the read — and that a file gone since the walk is accounted
+    /// for — have to hand one in directly.
     /// </para>
     /// </remarks>
-    internal static IReadOnlyList<MemoryImportFile> ReadSourceFiles(MemoryImportSource source)
+    internal static SourceRead ReadSourceFiles(MemoryImportSource source)
     {
         var files = new List<MemoryImportFile>(source.Files.Count);
+        var dropped = new List<ImportSkippedRow>();
         foreach (var file in source.Files)
         {
             try
@@ -497,12 +502,34 @@ public static class MemoryImportCommand
             }
             catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
             {
-                // Gone or locked since the inventory digested it. Nothing true to import.
+                // Gone or locked since the inventory digested it. Nothing true to import -- but the
+                // walk DID look at it, so it is recorded rather than dropped on the floor. The values
+                // carried onto the row are the walk's, for the reason ImportManifest.Dropped states.
+                dropped.Add(new ImportSkippedRow(
+                    file.Path,
+                    file.Sha256,
+                    file.ModifiedUtc,
+                    file.SizeBytes,
+                    $"unreadable between the inventory walk and the read ({ex.GetType().Name}): the walk " +
+                    "found and digested it, and opening it to copy its text failed. Nothing was imported " +
+                    "from it. The digest, size and mtime here are the WALK's -- no read of this file " +
+                    "succeeded, so they describe bytes that may no longer exist."));
             }
         }
 
-        return files;
+        return new SourceRead(files, dropped);
     }
+
+    /// <summary>
+    /// What one source's read produced: the files that opened, and the rows for the files that did not.
+    /// </summary>
+    /// <param name="Files">The rows with their text read in, re-digested, re-sized and re-stamped.</param>
+    /// <param name="Dropped">
+    /// One row per file the walk found and this read could not open — see
+    /// <see cref="ImportManifest.Dropped"/> for what the population means.
+    /// </param>
+    internal sealed record SourceRead(
+        IReadOnlyList<MemoryImportFile> Files, IReadOnlyList<ImportSkippedRow> Dropped);
 
     /// <summary>
     /// Replays <paramref name="manifestPath"/> backwards: removes exactly the entries that run
@@ -636,9 +663,10 @@ public static class MemoryImportCommand
             $"Entries: {manifest.Entries.Count}   {(options.DryRun ? "would append" : "appended")}: {appended}   " +
             $"already present: {manifest.Entries.Count - appended}");
         var projectionsSkipped = manifest.ProjectionsSkipped ?? [];
+        var dropped = manifest.Dropped ?? [];
         output.WriteLine(
             $"Unfiled: {manifest.Unfiled.Count}   machinery recorded: {manifest.Machinery.Count}   " +
-            $"projection-skipped: {projectionsSkipped.Count}");
+            $"projection-skipped: {projectionsSkipped.Count}   dropped: {dropped.Count}");
 
         var links = manifest.Links ?? [];
         var appendedLinks = manifest.AppendedLinks.Count();
@@ -677,6 +705,22 @@ public static class MemoryImportCommand
             foreach (var row in projectionsSkipped.OrderBy(r => r.SourcePath, StringComparer.OrdinalIgnoreCase))
             {
                 output.WriteLine($"  {row.SourcePath}");
+            }
+        }
+
+        if (dropped.Count > 0)
+        {
+            // Named with their reason, because this is the only population that reports a FAILURE
+            // rather than a decision: every other skip is something the import chose, and an operator
+            // reading a bare count could not tell a file that went away from one this verb refused.
+            output.WriteLine();
+            output.WriteLine(
+                "Dropped -- found by the walk and NOT readable when the import went to copy them. " +
+                "Nothing was imported from these, and nothing was written for them to undo:");
+            foreach (var row in dropped.OrderBy(r => r.SourcePath, StringComparer.OrdinalIgnoreCase))
+            {
+                output.WriteLine($"  {row.SourcePath}");
+                output.WriteLine($"    {row.Reason}");
             }
         }
 

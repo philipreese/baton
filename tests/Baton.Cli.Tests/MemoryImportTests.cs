@@ -1150,20 +1150,154 @@ public sealed class MemoryImportTests : IDisposable
         Assert.NotEqual(staleMtime, currentMtime);
         Assert.NotEqual(staleRow.SizeBytes, currentBytes.Length);
 
-        var read = Assert.Single(MemoryImportCommand.ReadSourceFiles(new MemoryImportSource(
+        var result = MemoryImportCommand.ReadSourceFiles(new MemoryImportSource(
             directory,
             MemoryRootInventory.ClaudeVendor,
             VendorMemoryScope.Vendor,
             Archived: false,
             "github.com/philipreese/baton",
             UnfiledReason: null,
-            [staleRow])));
+            [staleRow]));
 
+        var read = Assert.Single(result.Files);
+        Assert.Empty(result.Dropped);
         Assert.Equal("the memory that is actually on disk now", read.Text);
         Assert.Equal(Convert.ToHexString(SHA256.HashData(currentBytes)).ToLowerInvariant(), read.Sha256);
         Assert.Equal(currentBytes.Length, read.SizeBytes);
         Assert.Equal(currentMtime, read.ModifiedUtc);
         Assert.Equal(DateTimeKind.Utc, read.ModifiedUtc.Kind);
+    }
+
+    /// <summary>
+    /// #1976: a source that is gone between the inventory walk and the read lands in the manifest's
+    /// <see cref="ImportManifest.Dropped"/> population — path, exception kind, and the walk's own
+    /// size/mtime — and survives being written and read back.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// <b>What this replaces.</b> The read's <c>catch</c> used to <c>continue</c>, so the file was
+    /// absent from the source's files, was never iterated by <c>MemoryImportPlan.Build</c>, and appeared
+    /// in <b>no</b> manifest population at all — indistinguishable from a file the walk never saw, which
+    /// is exactly the gap <see cref="ImportManifest"/>'s "accounts for every file the import looked at"
+    /// says the manifest closes. Red-before-green is not literally available for a field that did not
+    /// exist; what discriminates instead is the assertion below that the SAME source's readable sibling
+    /// still imports, so a green here cannot come from a read that produced nothing.
+    /// </para>
+    /// <para>
+    /// <b>Why the seam and not the verb.</b> The walk and the read run back to back inside the command
+    /// with nothing between them to interpose on, and the read opens
+    /// <see cref="FileShare.ReadWrite"/> — so a test holding the file open would not make it fail
+    /// either. Handing in a row for a path that is not there is what puts the read in the state a
+    /// vanished file leaves it in.
+    /// </para>
+    /// <para>
+    /// <b>The file is deleted, not its directory</b>, so the failure is deterministically a
+    /// <c>FileNotFoundException</c> rather than a <c>DirectoryNotFoundException</c>; the assertion is on
+    /// the kind's name, never on the exception's message, which is OS-worded.
+    /// </para>
+    /// </remarks>
+    [Fact]
+    public void A_source_gone_between_the_walk_and_the_read_is_recorded_as_dropped()
+    {
+        var directory = Path.Combine(_root, "vanished");
+        Directory.CreateDirectory(directory);
+
+        // The row the walk produced for a file that has since been deleted. What the values on it mean
+        // once they reach a manifest row is ImportManifest.Dropped's to say; this arm only pins that
+        // they are carried across unchanged.
+        var goneBytes = System.Text.Encoding.UTF8.GetBytes("the memory the walk saw and the read missed");
+        var gonePath = Path.Combine(directory, "user_gone.md");
+        File.WriteAllBytes(gonePath, goneBytes);
+        File.SetLastWriteTimeUtc(gonePath, new DateTime(2025, 1, 2, 3, 4, 5, DateTimeKind.Utc));
+        var goneRow = new MemoryImportFile(
+            gonePath,
+            "user_gone.md",
+            Text: string.Empty,
+            Sha256: Convert.ToHexString(SHA256.HashData(goneBytes)).ToLowerInvariant(),
+            ModifiedUtc: File.GetLastWriteTimeUtc(gonePath),
+            SizeBytes: goneBytes.Length);
+        File.Delete(gonePath);
+
+        // The control: a file in the same source that is still there.
+        var presentPath = Path.Combine(directory, "user_present.md");
+        File.WriteAllText(presentPath, "the memory that is still on disk");
+        var presentRow = new MemoryImportFile(
+            presentPath, "user_present.md", Text: string.Empty, Sha256: string.Empty,
+            ModifiedUtc: DateTime.UnixEpoch, SizeBytes: 0);
+
+        var result = MemoryImportCommand.ReadSourceFiles(new MemoryImportSource(
+            directory,
+            MemoryRootInventory.ClaudeVendor,
+            VendorMemoryScope.Vendor,
+            Archived: false,
+            "github.com/philipreese/baton",
+            UnfiledReason: null,
+            [goneRow, presentRow]));
+
+        var droppedRow = Assert.Single(result.Dropped);
+        Assert.Equal(gonePath, droppedRow.SourcePath);
+        Assert.Contains(nameof(FileNotFoundException), droppedRow.Reason, StringComparison.Ordinal);
+        Assert.Equal(goneRow.Sha256, droppedRow.Sha256);
+        Assert.Equal(goneRow.SizeBytes, droppedRow.SizeBytes);
+        Assert.Equal(goneRow.ModifiedUtc, droppedRow.SourceMtimeUtc);
+
+        // The readable sibling still imported, and the vanished file produced no entry of its own.
+        Assert.Equal(presentPath, Assert.Single(result.Files).Path);
+
+        var plan = MemoryImportPlan.Build(
+            [new MemoryImportSource(
+                directory, MemoryRootInventory.ClaudeVendor, VendorMemoryScope.Vendor, Archived: false,
+                "github.com/philipreese/baton", UnfiledReason: null, result.Files)],
+            DateTime.UtcNow,
+            result.Dropped);
+
+        Assert.DoesNotContain(plan.Entries, e => e.SourcePath == gonePath);
+        Assert.Equal(presentPath, Assert.Single(plan.Entries).SourcePath);
+        Assert.Empty(plan.Unfiled);
+
+        // Through the manifest and back off disk: a population that only exists in a live object is one
+        // an operator reading the manifest can never see.
+        var manifestPath = Path.Combine(_root, "manifests", "import-dropped.json");
+        new ImportManifest(
+            ImportManifest.CurrentVersion,
+            DateTime.UtcNow,
+            BatonPaths.Root,
+            [],
+            plan.Unfiled,
+            [],
+            [],
+            plan.ProjectionsSkipped,
+            plan.Dropped).Write(manifestPath);
+
+        var roundTripped = Assert.Single(ImportManifest.Read(manifestPath).Dropped!);
+        Assert.Equal(gonePath, roundTripped.SourcePath);
+        Assert.Equal(goneRow.Sha256, roundTripped.Sha256);
+        Assert.Equal(goneRow.SizeBytes, roundTripped.SizeBytes);
+        Assert.Equal(goneRow.ModifiedUtc, roundTripped.SourceMtimeUtc);
+        Assert.Contains(nameof(FileNotFoundException), roundTripped.Reason, StringComparison.Ordinal);
+    }
+
+    /// <summary>
+    /// The ordinary path still reports the new population as empty, end to end through the verb: an
+    /// import that read every file it walked writes <c>dropped: 0</c> and a manifest whose
+    /// <see cref="ImportManifest.Dropped"/> is empty. Without this, "one row when a file vanishes" would
+    /// be consistent with a row appearing for every file.
+    /// </summary>
+    [Fact]
+    public async Task An_import_that_read_every_file_reports_no_dropped_sources()
+    {
+        await BuildStandardFixtureAsync();
+
+        var text = await RunAsync();
+
+        Assert.Contains("dropped: 0", text, StringComparison.Ordinal);
+        Assert.DoesNotContain("Dropped --", text, StringComparison.Ordinal);
+
+        var manifest = ImportManifest.Read(
+            Directory.GetFiles(Path.Combine(BatonPaths.Root, BatonPaths.MemoryImportsDirectoryName)).Single());
+
+        Assert.Empty(manifest.Dropped!);
+        Assert.NotEmpty(manifest.Entries);
     }
 
     /// <summary>
