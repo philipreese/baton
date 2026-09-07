@@ -356,27 +356,47 @@ declared name(s) — `baton resolve` is the one permitted writer here (spec/bato
 | `orchestrate` | orchestrator | `turn-actions.json` | A resident room turn that reads room state and emits turn actions. |
 
 Each tier pins one vendor, model and effort in
-[`src/Baton.Vendors/WorkerTiers.json`](../src/Baton.Vendors/WorkerTiers.json). As of #1861 (2026-09-04)
-`frontier` is claude opus at high effort and `standard` is claude opus at medium: in
-[`benchmarks/deepswe/2026-09-04`](../benchmarks/deepswe/2026-09-04/README.md) Opus medium scored 69%
-at 52 agent steps while Sonnet never exceeded 54% at any effort and took about twice the steps at
-matched effort (108 vs 52 at medium, 147 vs 73 at high, 268 vs 99 at max), and
-[`benchmarks/subscription-usage/2026-09-04`](../benchmarks/subscription-usage/2026-09-04/README.md)
-shows Baton sessions re-reading roughly 10M cached tokens each at median; that snapshot attributes the
-early weekly exhaustion to fleet volume with cache re-reads as the amplifier, and "steps rather than
-output drain the plan" is this paragraph's inference from it. High buys review four more points for
-about 40% more steps; xhigh holds that score for 22% more steps, and max adds one point for about
-twice the cost. Moving `standard` onto claude also changes `advise`'s default shape: on agy its
-withheld write ran audited in a fresh worktree, on claude it runs enforced against the caller's own
-directory (a genuine read-only lane, see §4 of `docs/agents/invoking-baton.md`), which is the
-better fit for a second opinion that must not touch the tree. One caveat the snapshot itself states: its dollar
-column is tokens at API list price, so it carries the per-token price gap between models but not the
-subscription meter's own weighting, which the vendor does not publish. Opus medium is better on
-quality and steps for certain; cheaper on the plan only if that weighting is roughly proportional to
-price, which the conductor's per-launch model/effort log is what will show. The `standard` pin is interim — `cheap` keeps agy's
-flash-low for when that quota is idle, and the codex adapter (#1853) is expected to add a compact
-route (Sol high: 69% at 37 steps in the same snapshot) worth comparing against Opus medium for
-`implement` once it exists.
+[`src/Baton.Vendors/WorkerTiers.json`](../src/Baton.Vendors/WorkerTiers.json). The shipped pins are the
+operator's ruling of 2026-09-06 (#1863), taken after two independent role-by-role reads posted on that
+issue the same evening — a codex `gpt-5.6-sol` high read at 16:47–16:56 ET and an agy
+`gemini-3.8-flash-high` read at 16:55–16:58 ET, neither reader having seen the other. Every quality and
+step figure cited below is a row of
+[`benchmarks/deepswe/2026-09-05`](../benchmarks/deepswe/2026-09-05/README.md) — read the row rather than
+trusting a number retyped here, and read that snapshot's own caveat with it: its dollar column is tokens
+at API list price, so it carries the per-token price gap between models but not the subscription meter's
+own weighting, which no vendor publishes.
+
+- **`frontier` — claude opus, high.** Unmoved, and the one pin both reads agreed on: the
+  `claude-opus-5`/`high` row, plus the repository's own record of Opus catching architectural tripwires
+  that the codex and agy arms missed. Engine work does not move.
+- **`standard` — codex `gpt-6-astra`, medium.** The `gpt-6-astra`/`medium` row matches
+  `claude-opus-5`/`high` on quality at a fraction of its agent steps, and the ruling scopes this tier to
+  the tooling-shaped implement work. It also spends a separate subscription pool:
+  [`benchmarks/subscription-usage/2026-09-04`](../benchmarks/subscription-usage/2026-09-04/README.md)
+  attributes an early weekly Claude exhaustion to fleet volume with cache re-reads as the amplifier, so
+  moving bounded implement work off claude is the point of the change as much as the score is. `advise`
+  rides this tier too, so it moves vendor with it. One consequence is settled and worth stating, because
+  #1861's move in the other direction changed it: `advise` still runs **enforced against the caller's own
+  directory** rather than audited in a provisioned worktree, because `RoleDispatch`'s audited-worktree
+  branch fires only for an adapter whose `WithheldWritesReachTheOutbox` is false, and codex's is `true`
+  exactly as claude's is. That is the only shape difference this paragraph claims to have checked —
+  §4 of `docs/agents/invoking-baton.md` is the register for the rest of the lane's shape.
+- **`cheap` — agy `gemini-3.8-flash-medium`.** The lowest *measured* 3.8 Flash variant, not the lowest
+  catalogued one: `agy models` lists `gemini-3.8-flash-low`, but the 2026-09-05 snapshot has
+  `gemini-3.8-flash` rows at `high` and `medium` only, so pinning `-low` would be pinning a number
+  nobody has. agy encodes effort in the model-name suffix, so the tier's `effort` stays null. **This pin
+  is provisional.** The agy lanes measured for the ruling spent most of their tool-step budget polling
+  processes they had themselves backgrounded (#2002), so their step and cache figures measure that
+  pathology rather than the model; revisit once #2002 lands and two clean agy lanes have run.
+- **`minimal` — claude haiku, low.** Unchanged by this ruling; no snapshot row covers it.
+- **`orchestrator` — claude opus, high.** Now pinned explicitly. It previously named a vendor and no
+  model, which meant a conductor turn ran on whatever the `claude` CLI happened to default to that day —
+  an unrecorded choice, not a cheap one.
+
+Docs-only implement dispatches are not a tier. The conductor overrides them per dispatch onto
+`--adapter codex --model gpt-5.6-sol --effort high` (visible in the launch log, the same way the
+per-PR-kind review split of 2026-09-05 is); the `gpt-5.6-sol`/`high` row is the compact point that
+buys.
 
 The prompt each worker receives is the spec followed by the role's own output instructions, so the
 worker is told to produce exactly what the contract asserts. A dispatched worker is also told its turn

@@ -47,7 +47,7 @@ public static class DispatchCapabilitiesPrinter
 
         // Agy
         sb.AppendLine("  agy:");
-        sb.AppendLine("    Models:     gemini-3.6-flash-high, gemini-3.6-flash-low, gemini-3.1-pro-high, etc.");
+        sb.AppendLine("    Models:     gemini-3.8-flash-high, gemini-3.8-flash-medium, gemini-3.8-flash-low, etc.");
         var agyCanonical = string.Join(
             ", ", EffortTierMapping.CanonicalWords.Select(w => $"{w} (-> {EffortTierMapping.AgyByCanonical[w]})"));
         sb.AppendLine($"    Canonical:  {agyCanonical}");

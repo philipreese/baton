@@ -1,7 +1,7 @@
 {
   "frontier": { "adapter": "claude", "model": "opus", "effort": "high" },
-  "standard": { "adapter": "claude", "model": "opus", "effort": "medium" },
-  "cheap":    { "adapter": "agy", "model": "gemini-3.6-flash-low", "effort": null },
+  "standard": { "adapter": "codex", "model": "gpt-6-astra", "effort": "medium" },
+  "cheap":    { "adapter": "agy", "model": "gemini-3.8-flash-medium", "effort": null },
   "minimal":  { "adapter": "claude", "model": "haiku", "effort": "low" },
-  "orchestrator": { "adapter": "claude", "model": null, "effort": null }
+  "orchestrator": { "adapter": "claude", "model": "opus", "effort": "high" }
 }
