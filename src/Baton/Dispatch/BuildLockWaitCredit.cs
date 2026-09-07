@@ -73,10 +73,13 @@ public static class BuildLockWaitCredit
     /// </summary>
     /// <remarks>
     /// Fails closed in every direction: a missing file (no command has queued yet), an unreadable one,
-    /// a line that is not an object carrying a non-negative <c>waitMs</c> number, and a torn final line
-    /// an appender is mid-write on all read as no credit rather than as an error. Nothing here may
-    /// throw into the timeout monitor that calls it — a measurement that cannot be taken must not
-    /// change when a lane is killed.
+    /// a line that is not an object carrying a positive <c>waitMs</c> number, and a torn final line an
+    /// appender is mid-write on all read as no credit rather than as an error. Nothing here may throw
+    /// into the timeout monitor that calls it — a measurement that cannot be taken must not change
+    /// when a lane is killed. Zero credit means "nothing NEW to grant", never "retract what was
+    /// granted": the monitor holds its own high-water mark of the deadline for that reason
+    /// (<c>BatonProcessRunner</c>'s timeout monitor, #2058 review), since an unreadable log is at its
+    /// most likely under exactly the heavy build IO that earns the credit.
     /// </remarks>
     public static TimeSpan RecordedWait(string? logPath)
     {

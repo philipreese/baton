@@ -149,34 +149,53 @@ internal static class BatonProcessRunner
                     // for the lane it exists for. With no probe the loop is the single delay it
                     // replaced -- one full-length wait, then the kill.
                     Stopwatch elapsed = Stopwatch.StartNew();
+
+                    // High-water mark, hoisted above the loop on purpose (#2058 review): a credit,
+                    // once granted, is never retracted. Re-deriving the budget per poll instead
+                    // would open a window that only exists once `elapsed` passes the configured box
+                    // -- exactly while a lane is living on credit -- where one poll that fails to
+                    // re-earn the extension makes `remaining` negative and kills the tree on the
+                    // spot, mid-credited-tail. That is #2019's own harm, reproduced by the fix for
+                    // it, and it presents as "the box is still too small" rather than as a failed
+                    // measurement.
+                    TimeSpan granted = configuredTimeout;
+                    bool probeFailureWarned = false;
                     try
                     {
                         while (true)
                         {
-                            TimeSpan budget = configuredTimeout;
                             if (timeoutBudget is not null)
                             {
                                 try
                                 {
                                     TimeSpan probed = timeoutBudget();
-                                    if (probed > budget)
+                                    if (probed > granted)
                                     {
-                                        budget = probed;
+                                        granted = probed;
                                     }
                                 }
                                 catch (Exception ex)
                                 {
-                                    // Fails closed, and loudly enough to be findable: the probe is a
-                                    // MEASUREMENT, so one that cannot be taken credits nothing and
-                                    // leaves the configured box in force. Swallowed rather than
-                                    // rethrown because throwing here would leave the tree with no
-                                    // deadline at all -- the opposite of what a broken probe should
-                                    // cost.
-                                    Debug.WriteLine($"BatonTask timeout budget probe failed; falling back to the configured timeout: {ex}");
+                                    // Fails closed, and here that means KEEPING WHAT WAS ALREADY
+                                    // GRANTED -- the same thing as falling back to the configured
+                                    // box until the first credit lands, and the opposite of it
+                                    // afterwards. The probe is a MEASUREMENT, so one that cannot be
+                                    // taken grants nothing NEW; it cannot take back an extension the
+                                    // lane is already running on. Swallowed rather than rethrown
+                                    // because throwing here would leave the tree with no deadline at
+                                    // all -- the opposite of what a broken probe should cost. Warned
+                                    // once rather than per poll: the cause repeats every
+                                    // BudgetPollInterval, so the first write is the findable one and
+                                    // the rest are noise.
+                                    if (!probeFailureWarned)
+                                    {
+                                        probeFailureWarned = true;
+                                        Debug.WriteLine($"BatonTask timeout budget probe failed; keeping the budget already granted: {ex}");
+                                    }
                                 }
                             }
 
-                            TimeSpan remaining = budget - elapsed.Elapsed;
+                            TimeSpan remaining = granted - elapsed.Elapsed;
                             if (remaining <= TimeSpan.Zero)
                             {
                                 KillIfAlive(job, timedOutKillFired);
