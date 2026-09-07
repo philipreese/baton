@@ -85,9 +85,13 @@ public sealed class GlassHttpServiceTests : IDisposable
         try
         {
             Assert.Contains(harness.Service.BoundPrefixes, p => p.StartsWith("http://127.0.0.1:", StringComparison.Ordinal));
+            // Uri.Host keeps the brackets on an IPv6 literal, which IPAddress.Parse rejects.
+            // IsPermittedAddress is the address half of the rule -- all a bound prefix can carry, the
+            // interface having already been consumed at selection time.
             Assert.All(
                 harness.Service.BoundPrefixes,
-                prefix => Assert.True(GlassBindPolicy.IsBindable(IPAddress.Parse(new Uri(prefix).Host))));
+                prefix => Assert.True(
+                    GlassBindPolicy.IsPermittedAddress(IPAddress.Parse(new Uri(prefix).Host.Trim('[', ']')))));
 
             var log = harness.Log.ToString();
             Assert.Contains("serving the fleet glass at", log, StringComparison.Ordinal);
@@ -164,8 +168,9 @@ public sealed class GlassHttpServiceTests : IDisposable
             Assert.Equal("application/json", response.Content.Headers.ContentType?.MediaType);
             Assert.Equal(content, await response.Content.ReadAsStringAsync(cts.Token));
 
-            // The route must not hold the file in a way that makes FleetProjectionWriter's own
-            // rename-over-the-target skip a write (that method's remarks name this reader).
+            // The route releases its handle before responding, so this only proves the write is not
+            // blocked afterwards. What the share mode itself buys is the next test, which holds a
+            // handle across the write.
             FleetProjectionWriter.WriteAtomic(harness.ProjectionPath, """{"rooms":[]}""");
             Assert.Equal("""{"rooms":[]}""", await File.ReadAllTextAsync(harness.ProjectionPath, cts.Token));
         }
@@ -173,6 +178,61 @@ public sealed class GlassHttpServiceTests : IDisposable
         {
             await harness.Service.StopAsync(CancellationToken.None);
         }
+    }
+
+    /// <summary>
+    /// #2028 review — the share mode the projection route opens with, pinned by the permission it
+    /// actually grants rather than by reading the flag back. The route releases its handle before
+    /// responding, so the difference is only observable by holding one ACROSS a replace; and
+    /// <see cref="FleetProjectionWriter.WriteAtomic"/> never throws (it logs and skips), so "does not
+    /// throw" would pass in either state and falsify nothing.
+    /// <para>
+    /// Measured while writing this test, and it is why the arms use <see cref="File.Replace(string, string, string)"/>
+    /// rather than <c>WriteAtomic</c>: on Windows <c>File.Move(overwrite: true)</c> refuses a target
+    /// with any open handle whatever its share mode, so a <c>WriteAtomic</c> arm would be red for BOTH
+    /// values of the flag and discriminate nothing. <c>ReplaceFile</c> is the rename-over that honours
+    /// delete-sharing, which is the permission <see cref="GlassHttpService.ProjectionShare"/> exists to
+    /// grant. Windows-only: POSIX renames ignore share modes entirely, and Windows is the platform CI
+    /// runs (#1405).
+    /// </para>
+    /// </summary>
+    [Fact]
+    public async Task The_projection_route_opens_the_file_so_a_rename_over_it_can_still_succeed()
+    {
+        if (!OperatingSystem.IsWindows())
+        {
+            return;
+        }
+
+        using var cts = new CancellationTokenSource(TimeSpan.FromMinutes(1));
+        var path = Path.Combine(_tempHome, "share-mode.json");
+        var replacement = Path.Combine(_tempHome, "share-mode.new");
+        const string before = """{"rooms":[{"path":"before"}]}""";
+        const string after = """{"rooms":[{"path":"after"}]}""";
+
+        // POSITIVE ARM: the production constant itself, so dropping FileShare.Delete from the route
+        // fails here rather than only in a re-typed copy of it.
+        await File.WriteAllTextAsync(path, before, cts.Token);
+        await File.WriteAllTextAsync(replacement, after, cts.Token);
+        using (new FileStream(path, FileMode.Open, FileAccess.Read, GlassHttpService.ProjectionShare))
+        {
+            File.Replace(replacement, path, destinationBackupFileName: null);
+        }
+
+        Assert.Equal(after, await File.ReadAllTextAsync(path, cts.Token));
+
+        // CONTROL ARM: the same reader one enum flag short. Without delete-sharing the rename-over is
+        // refused outright and the writer's new content is lost -- which is what the route would cost
+        // the writer if it opened FileShare.ReadWrite alone.
+        await File.WriteAllTextAsync(path, before, cts.Token);
+        await File.WriteAllTextAsync(replacement, after, cts.Token);
+        using (new FileStream(path, FileMode.Open, FileAccess.Read, FileShare.ReadWrite))
+        {
+            Assert.ThrowsAny<IOException>(
+                () => File.Replace(replacement, path, destinationBackupFileName: null));
+        }
+
+        Assert.Equal(before, await File.ReadAllTextAsync(path, cts.Token));
     }
 
     [Fact]

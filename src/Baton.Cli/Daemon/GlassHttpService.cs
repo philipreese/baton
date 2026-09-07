@@ -87,7 +87,13 @@ internal sealed class GlassHttpService : BackgroundService
         var listeners = new List<HttpListener>();
         var bound = new List<string>();
 
-        foreach (var address in GlassBindPolicy.SelectBindAddresses())
+        var selection = GlassBindPolicy.SelectBindAddresses();
+        foreach (var refusal in selection.Refusals)
+        {
+            _log.WriteLine(refusal);
+        }
+
+        foreach (var address in selection.Addresses)
         {
             var prefix = GlassBindPolicy.PrefixFor(address, port);
             var listener = new HttpListener();
@@ -217,15 +223,31 @@ internal sealed class GlassHttpService : BackgroundService
         }
     }
 
-    /// <summary>
-    /// <see cref="BatonPaths.FleetProjectionFile"/> served as-is — never reshaped, never re-derived.
+    /// <summary>The share mode <c>spec/baton.md</c> §7 states for every C# reader of this file, named
+    /// so a test pins the production value rather than a re-typed copy of it.
     /// <para>
-    /// Opened <see cref="FileShare.ReadWrite"/> and copied straight out:
-    /// <see cref="FleetProjectionWriter.WriteAtomic"/>'s own remarks record that a reader holding this
-    /// file with <see cref="FileShare.Read"/> makes its <c>File.Move(overwrite: true)</c> throw and
-    /// SKIP a write, and names "a future room-watcher" as the reader that would do it. This is that
-    /// reader.
+    /// <see cref="FileShare.Delete"/> is the flag that matters, and what it protects is the writer's
+    /// <i>rename-over</i> rather than the writer's write —
+    /// <see cref="FleetProjectionWriter.WriteAtomic"/> replaces this path rather than writing into it,
+    /// so delete-sharing, not write-sharing, is the permission that replace needs.
+    /// <see cref="FileShare.ReadWrite"/> alone grants the one it does not.
     /// </para>
+    /// <para>
+    /// <b>The residual, measured 2026-09-07 and recorded on
+    /// <see cref="FleetProjectionWriter.WriteAtomic"/>:</b> this share mode is necessary and not
+    /// sufficient — <c>File.Move(overwrite: true)</c> refuses a target that has <i>any</i> open handle,
+    /// delete-sharing granted or not. So what actually keeps a tick from being skipped is that this
+    /// route holds the handle only for an in-memory copy and releases it before responding, plus
+    /// <c>WriteAtomic</c>'s retries. The flag is what makes that hold survivable at all, and it is the
+    /// contract <c>spec/baton.md</c> §7 states.
+    /// </para>
+    /// </summary>
+    internal const FileShare ProjectionShare = FileShare.ReadWrite | FileShare.Delete;
+
+    /// <summary>
+    /// <see cref="BatonPaths.FleetProjectionFile"/> served as-is — never reshaped, never re-derived —
+    /// opened <see cref="ProjectionShare"/> and copied straight out, so an in-flight atomic rewrite is
+    /// never skipped on this reader's account.
     /// </summary>
     private async Task WriteProjectionAsync(HttpListenerContext context)
     {
@@ -233,7 +255,7 @@ internal sealed class GlassHttpService : BackgroundService
         try
         {
             await using var stream = new FileStream(
-                _projectionPath, FileMode.Open, FileAccess.Read, FileShare.ReadWrite);
+                _projectionPath, FileMode.Open, FileAccess.Read, ProjectionShare);
             using var buffer = new MemoryStream();
             await stream.CopyToAsync(buffer).ConfigureAwait(false);
             payload = buffer.ToArray();

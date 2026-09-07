@@ -885,10 +885,17 @@ public sealed class FleetProjectionWriter : BackgroundService
     /// <summary>Bounded attempt count, not AtomicLaunchConfigWriter's wall-clock budget: that type is
     /// internal to Baton.Vendors with no InternalsVisibleTo grant for Baton.Cli, so this is a local
     /// port of its retry shape (`src/Baton.Vendors/AtomicLaunchConfigWriter.cs`) rather than a call
-    /// into it. #1782: a concurrent reader (a fleet-glass poller, a future room-watcher) can hold the
-    /// target open with <see cref="FileShare.Read"/> only, which makes <see cref="File.Move(string, string, bool)"/>'s
-    /// overwrite throw a transient <see cref="UnauthorizedAccessException"/> or <see cref="IOException"/>
-    /// sharing violation on Windows while the reader's handle is open. This tick must never throw out of
+    /// into it. #1782: a concurrent reader (a fleet-glass poller, the glass listener's
+    /// <c>/projection.json</c> route) holding the target open makes
+    /// <see cref="File.Move(string, string, bool)"/>'s overwrite throw a transient
+    /// <see cref="UnauthorizedAccessException"/> or <see cref="IOException"/> sharing violation on
+    /// Windows while that handle is open. <b>Measured 2026-09-07 (#2028 review), correcting what this
+    /// remark used to say:</b> that is true of <i>any</i> open handle, not only one opened with
+    /// <see cref="FileShare.Read"/> — <c>MoveFileEx</c>'s replace refuses a target with open handles even
+    /// when they granted <see cref="FileShare.Delete"/>. (<see cref="File.Replace(string, string, string)"/>,
+    /// i.e. <c>ReplaceFile</c>, does honour delete-sharing and succeeds there; switching to it is not
+    /// this PR's change.) So a reader's share mode narrows the window, and only the reader letting go
+    /// closes it. This tick must never throw out of
     /// the hosted service for that -- the next ~30s tick already self-heals a skipped write, so a
     /// reader that never lets go is logged and skipped rather than crashing the loop.</summary>
     internal static void WriteAtomic(string path, string content)

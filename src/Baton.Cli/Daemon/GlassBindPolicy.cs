@@ -11,18 +11,30 @@ namespace Baton.Cli.Daemon;
 /// </summary>
 /// <remarks>
 /// <para>
-/// <b>Detected by address range, not by adapter name.</b> Tailscale's interface is
-/// <c>tailscale0</c> on Linux/macOS and "Tailscale" on Windows, and neither string is contractual;
-/// the CGNAT range it assigns from is (<c>100.64.0.0/10</c>, RFC 6598, which Tailscale documents as
-/// the pool every node address comes from). A name match would silently bind nothing on a machine
-/// whose adapter was renamed, and — worse — could match an adapter that is not the tailnet at all.
+/// <b>Two signals, and one of them alone is not enough.</b> A tailnet address is an address in
+/// Tailscale's range <i>that the Tailscale adapter owns</i>. The range half is
+/// <c>100.64.0.0/10</c> (RFC 6598) plus the <c>fd7a:115c:a1e0::/48</c> ULA Tailscale documents as
+/// the pools every node address comes from — but 100.64/10's actual purpose is carrier-grade NAT,
+/// so a cellular modem, a Starlink-style gateway, a hotel or a campus network can hand this machine
+/// an address out of it directly. Binding on the range alone would offer the glass — which has no
+/// authentication of its own — to every other client on that segment. The interface half
+/// (<see cref="NamesTheTailscaleInterface"/>) is equally insufficient on its own, for the mirror
+/// reason: adapter names are not contractual, so a name match could hit an adapter that is not the
+/// tailnet. Requiring both is what makes the invariant in <c>spec/baton.md</c> §11 C-11 — "the
+/// tailnet/loopback interface only" — true of the code rather than of the range's usual case.
 /// </para>
 /// <para>
-/// <b>IPv4 only, deliberately.</b> Tailscale also assigns a <c>fd7a:115c:a1e0::/48</c> ULA address
-/// per node, and binding it would be a second prefix per machine with its own URL-ACL requirement
-/// for no reachability this does not already have — every Tailscale node has the 100.64/10 address.
-/// An IPv6 tailnet address is therefore *refused* like any other non-loopback address rather than
-/// silently treated as bindable; ::1 is loopback and is allowed.
+/// <b>The residual, stated.</b> Both signals are heuristics over what the OS reports; neither is a
+/// cryptographic identity. An adapter deliberately named "Tailscale" and given a 100.64/10 address
+/// by something other than Tailscale would still pass. Closing that would mean cross-checking
+/// <c>tailscale status --json</c> at bind time, which buys little here: the residual requires
+/// local control of this machine's adapter configuration, which is strictly more access than
+/// reading the page.
+/// </para>
+/// <para>
+/// <b>Fail closed.</b> Anything that leaves the policy without an interface to attribute an address
+/// to — enumeration unavailable, an unnamed adapter, a platform that reports neither — yields
+/// loopback only, never a wider bind.
 /// </para>
 /// <para>
 /// <b>This is an allowlist, and there is no setting that widens it</b> (see
@@ -32,64 +44,123 @@ namespace Baton.Cli.Daemon;
 /// </remarks>
 internal static class GlassBindPolicy
 {
+    /// <summary>One address the machine carries, together with the interface that owns it. The pair
+    /// is the unit the policy decides on: an address on its own cannot be judged, which is the whole
+    /// correction #2028's review forced.</summary>
+    internal sealed record CandidateAddress(IPAddress Address, string? InterfaceName, string? InterfaceDescription);
+
+    /// <summary>What <see cref="SelectBindAddresses(IEnumerable{CandidateAddress})"/> decided: the
+    /// addresses to bind, plus one line per in-range address refused for the interface that owns it,
+    /// which the caller logs — a silent refusal here reads to an operator exactly like Tailscale
+    /// being down.</summary>
+    internal sealed record BindSelection(IReadOnlyList<IPAddress> Addresses, IReadOnlyList<string> Refusals);
+
     /// <summary>
-    /// The RFC 6598 shared-address (CGNAT) range Tailscale assigns node addresses from:
-    /// <c>100.64.0.0/10</c> — i.e. first octet 100, second octet 64–127.
+    /// Whether <paramref name="address"/> is in one of Tailscale's documented pools:
+    /// <c>100.64.0.0/10</c> (RFC 6598 shared space — first octet 100, second octet 64–127) or the
+    /// <c>fd7a:115c:a1e0::/48</c> ULA. <b>Necessary, never sufficient</b> — the range is shared with
+    /// carrier-grade NAT, so <see cref="IsBindable(CandidateAddress)"/> is what decides a bind.
     /// </summary>
-    internal static bool IsTailnetAddress(IPAddress address)
+    internal static bool IsTailnetRange(IPAddress address)
     {
         ArgumentNullException.ThrowIfNull(address);
-        if (address.AddressFamily != AddressFamily.InterNetwork)
-        {
-            return false;
-        }
-
         var octets = address.GetAddressBytes();
-        return octets[0] == 100 && octets[1] >= 64 && octets[1] <= 127;
+        return address.AddressFamily switch
+        {
+            AddressFamily.InterNetwork => octets[0] == 100 && octets[1] >= 64 && octets[1] <= 127,
+            AddressFamily.InterNetworkV6 => octets[0] == 0xFD && octets[1] == 0x7A && octets[2] == 0x11
+                                            && octets[3] == 0x5C && octets[4] == 0xA1 && octets[5] == 0xE0,
+            _ => false,
+        };
     }
 
+    /// <summary>Whether the owning interface is Tailscale's. <c>tailscale0</c> on Linux/macOS and
+    /// "Tailscale" in the Windows adapter description; matched case-insensitively on either field,
+    /// because which of the two carries the string differs by platform. A null or empty pair is a
+    /// refusal, not a pass.</summary>
+    internal static bool NamesTheTailscaleInterface(string? interfaceName, string? interfaceDescription) =>
+        (interfaceName?.Contains("tailscale", StringComparison.OrdinalIgnoreCase) ?? false)
+        || (interfaceDescription?.Contains("tailscale", StringComparison.OrdinalIgnoreCase) ?? false);
+
     /// <summary>
-    /// Whether <paramref name="address"/> may be bound at all. <see cref="IPAddress.Any"/> /
+    /// Whether this address, on this interface, may be bound. Loopback always; anything else only
+    /// when it is in range <i>and</i> the Tailscale adapter owns it. <see cref="IPAddress.Any"/> /
     /// <see cref="IPAddress.IPv6Any"/> fail this by construction — they are neither loopback nor in
-    /// 100.64/10 — which is the point: the wildcard is refused by the same predicate that refuses a
-    /// LAN address, not by a special case that could be edited away on its own.
+    /// either tailnet pool — which is the point: the wildcard is refused by the same predicate that
+    /// refuses a LAN address, not by a special case that could be edited away on its own.
     /// </summary>
-    internal static bool IsBindable(IPAddress address)
+    internal static bool IsBindable(CandidateAddress candidate)
+    {
+        ArgumentNullException.ThrowIfNull(candidate);
+        return IPAddress.IsLoopback(candidate.Address)
+               || (IsTailnetRange(candidate.Address)
+                   && NamesTheTailscaleInterface(candidate.InterfaceName, candidate.InterfaceDescription));
+    }
+
+    /// <summary>The address half of <see cref="IsBindable(CandidateAddress)"/>, for callers holding a
+    /// bound prefix rather than an interface — a post-hoc check that nothing outside loopback and the
+    /// tailnet pools was bound. <b>Necessary, never sufficient</b>: it cannot see the interface, so it
+    /// must not be used to decide a bind.</summary>
+    internal static bool IsPermittedAddress(IPAddress address)
     {
         ArgumentNullException.ThrowIfNull(address);
-        return IPAddress.IsLoopback(address) || IsTailnetAddress(address);
+        return IPAddress.IsLoopback(address) || IsTailnetRange(address);
     }
 
     /// <summary>
     /// The addresses to bind, given every address the machine's interfaces carry: loopback always
     /// (so the page is reachable on the fleet machine itself even with Tailscale down), plus each
-    /// distinct tailnet address found. Never empty, and never anything <see cref="IsBindable"/>
-    /// refuses.
+    /// distinct tailnet address found. Never empty, and never anything
+    /// <see cref="IsBindable(CandidateAddress)"/> refuses.
     /// </summary>
-    internal static IReadOnlyList<IPAddress> SelectBindAddresses(IEnumerable<IPAddress> machineAddresses)
+    internal static BindSelection SelectBindAddresses(IEnumerable<CandidateAddress> candidates)
     {
-        ArgumentNullException.ThrowIfNull(machineAddresses);
+        ArgumentNullException.ThrowIfNull(candidates);
 
         var selected = new List<IPAddress> { IPAddress.Loopback };
-        foreach (var address in machineAddresses)
+        var refusals = new List<string>();
+        foreach (var candidate in candidates)
         {
-            if (address is not null && IsTailnetAddress(address) && !selected.Contains(address))
+            if (candidate?.Address is null || IPAddress.IsLoopback(candidate.Address))
             {
-                selected.Add(address);
+                continue;
+            }
+
+            if (!IsTailnetRange(candidate.Address))
+            {
+                continue;
+            }
+
+            if (!NamesTheTailscaleInterface(candidate.InterfaceName, candidate.InterfaceDescription))
+            {
+                // Named, not swallowed: this is the CGNAT case, and an operator who sees only "no
+                // tailnet prefix" would reasonably conclude Tailscale was down.
+                refusals.Add(
+                    $"GlassHttpService: not binding {candidate.Address} — it is in Tailscale's range but is " +
+                    $"owned by interface '{candidate.InterfaceName ?? "(unnamed)"}' " +
+                    $"({candidate.InterfaceDescription ?? "no description"}), not a Tailscale adapter. " +
+                    "That range is also carrier-grade NAT space, so this is a cellular/hotel/campus " +
+                    "uplink rather than the tailnet.");
+                continue;
+            }
+
+            if (!selected.Contains(candidate.Address))
+            {
+                selected.Add(candidate.Address);
             }
         }
 
-        return selected;
+        return new BindSelection(selected, refusals);
     }
 
-    /// <summary>The machine's own unicast addresses, for the production call of
-    /// <see cref="SelectBindAddresses(IEnumerable{IPAddress})"/>. Split from the pure overload so the
-    /// policy above is tested against fixture addresses rather than against whatever the test
-    /// machine's adapters happen to be — a test that passed only on a host with Tailscale installed
-    /// would be measuring the host.</summary>
-    internal static IReadOnlyList<IPAddress> SelectBindAddresses()
+    /// <summary>The machine's own unicast addresses and the interfaces owning them, for the
+    /// production call of <see cref="SelectBindAddresses(IEnumerable{CandidateAddress})"/>. Split from
+    /// the pure overload so the policy above is tested against fixture candidates rather than against
+    /// whatever the test machine's adapters happen to be — a test that passed only on a host with
+    /// Tailscale installed would be measuring the host.</summary>
+    internal static BindSelection SelectBindAddresses()
     {
-        var addresses = new List<IPAddress>();
+        var candidates = new List<CandidateAddress>();
         try
         {
             foreach (var nic in NetworkInterface.GetAllNetworkInterfaces())
@@ -101,23 +172,28 @@ internal static class GlassBindPolicy
 
                 foreach (var unicast in nic.GetIPProperties().UnicastAddresses)
                 {
-                    addresses.Add(unicast.Address);
+                    candidates.Add(new CandidateAddress(unicast.Address, nic.Name, nic.Description));
                 }
             }
         }
-        catch (NetworkInformationException)
+        catch (Exception ex) when (ex is NetworkInformationException or PlatformNotSupportedException)
         {
-            // Enumeration failing must not stop the loopback listener from coming up; the operator
-            // then simply has no tailnet prefix, which the bound-URL log line makes visible.
+            // Fail closed, and keep the daemon up: with no interface to attribute an address to, no
+            // address can pass the second signal, so this yields loopback only.
+            candidates.Clear();
         }
 
-        return SelectBindAddresses(addresses);
+        return SelectBindAddresses(candidates);
     }
 
-    /// <summary>The <see cref="HttpListener"/> prefix for one bound address and port.</summary>
+    /// <summary>The <see cref="HttpListener"/> prefix for one bound address and port. An IPv6 literal
+    /// is bracketed — <c>http://fd7a:...:8420/</c> is not a prefix the listener will accept.</summary>
     internal static string PrefixFor(IPAddress address, int port)
     {
         ArgumentNullException.ThrowIfNull(address);
-        return $"http://{address}:{port}/";
+        var host = address.AddressFamily == AddressFamily.InterNetworkV6
+            ? $"[{address}]"
+            : address.ToString();
+        return $"http://{host}:{port}/";
     }
 }
