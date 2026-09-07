@@ -184,7 +184,8 @@ Skills: none discovered
 or, when skills exist in the worker's environment (e.g. `~/.claude/skills/` or `<workspace>/.claude/skills/`
 for Claude — also `<CLAUDE_CONFIG_DIR>/skills` when `BATON_CLAUDE_CONFIG_ROOT` is set, replacing the
 `~/.claude` arm rather than adding to it — or canonical skill packages `<workspace>/skills/<name>/SKILL.md`
-realized per vendor, #1151):
+realized per vendor, #1151 — but **codex scans none of these**, so this line is `none discovered` on a
+codex binding however many packages the repository carries; see the table below):
 
 ```
 Skills: artifact-design (to be projected), run-checks (to be projected, 1 file(s) to be kept)
