@@ -676,9 +676,14 @@ public abstract record FlowEvent
     /// a target <c>Find</c> STILL admits, contradicted moments later by the pump honouring the same
     /// request's mark (#1825) — that ceiling now stops at the <c>.rejected</c> file and stderr, and
     /// <c>CancelRequestPoller</c>'s own remarks at the site state why. Recorded only when a concrete
-    /// <see cref="ExecutionId"/> was resolved; a malformed request or an ambiguous <c>latest</c> (no
-    /// execution ever named) has nothing to key an execution-scoped journal fact on and stays a
-    /// file-and-stderr-only rejection, same as before this event existed.
+    /// <see cref="ExecutionId"/> was resolved: a malformed request or an ambiguous <c>latest</c> has
+    /// nothing to key an execution-scoped journal fact on, so it never appears in <c>flow.jsonl</c> at
+    /// all. That is no longer the same as invisible — since #1530 both shapes append
+    /// <see cref="RoomEvent.ArrestRequestUnresolvable"/> to <c>room.jsonl</c> instead (best-effort, and
+    /// only when a room log path is in scope — <c>CancelRequestPoller.TryRecordUnresolvableAsync</c>'s
+    /// own remarks are the register for both caveats), which
+    /// <c>Status.ArrestLedgerProjector</c> renders as a Rejected ledger entry with no
+    /// <see cref="ExecutionId"/>.
     /// </summary>
     /// <param name="Reason">
     /// #1530: the same reason string <c>CancelRequestFile.Reject</c> writes into the <c>.rejected</c>

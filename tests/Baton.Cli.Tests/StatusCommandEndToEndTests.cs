@@ -928,8 +928,15 @@ public class StatusCommandEndToEndTests
             await writer.AppendAsync(
                 new FlowEvent.CancellationRequested(rejectedExecutionId, CancellationOrigin.Operator),
                 TestContext.Current.CancellationToken);
+            // #2045: the reason a LIVE producer still writes for this paired shape —
+            // SettleArrestIntentsAsync's drop of a marked intent ArrestableExecutions.Find no longer
+            // admits, which can land against a lifecycle an earlier CancellationRequested already
+            // opened (ArrestLedgerProjector's own CancellationRejected remarks). The poller's
+            // bounded-retry ceiling used to write one here too; #2045 removed that producer, so its
+            // wording would have left this fixture reading as coverage for something unreachable.
             await writer.AppendAsync(
-                new FlowEvent.CancellationRejected(rejectedExecutionId, "arrest requested but not yet confirmed settled after 5 polls"),
+                new FlowEvent.CancellationRejected(
+                    rejectedExecutionId, "arrest intent dropped (already settled; marked because: no live process registered for this target)"),
                 TestContext.Current.CancellationToken);
 
             // The orphan shape ArrestLedgerProjector.Project's own remarks on its CancellationRejected
@@ -972,7 +979,8 @@ public class StatusCommandEndToEndTests
             Assert.Contains("exec-delivered requested by operator @ ", text);
             Assert.Contains("— delivered", text);
             Assert.Contains("exec-rejected-paired requested by operator @ ", text);
-            Assert.Contains("rejected (arrest requested but not yet confirmed settled after 5 polls)", text);
+            Assert.Contains(
+                "rejected (arrest intent dropped (already settled; marked because: no live process registered for this target))", text);
             // The orphan rejection (no preceding CancellationRequested) must still render, not be
             // silently dropped -- the exact HIGH finding this fixture exists to close.
             Assert.Contains("exec-rejected-orphan requested by operator @ ", text);
@@ -1013,7 +1021,9 @@ public class StatusCommandEndToEndTests
 
             Assert.Equal("delivered", Find("exec-delivered").Outcome);
             Assert.Equal("rejected", Find("exec-rejected-paired").Outcome);
-            Assert.Equal("arrest requested but not yet confirmed settled after 5 polls", Find("exec-rejected-paired").Reason);
+            Assert.Equal(
+                "arrest intent dropped (already settled; marked because: no live process registered for this target)",
+                Find("exec-rejected-paired").Reason);
             Assert.Equal("rejected", Find("exec-rejected-orphan").Outcome);
             Assert.Equal(
                 "not currently in flight when this cancel.request was checked — too late (it already settled)",

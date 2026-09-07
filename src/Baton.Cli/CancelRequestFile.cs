@@ -119,7 +119,12 @@ public static class CancelRequestFile
     /// cancel. Called once, at pump start, before this pump's own <see cref="CancelRequestPoller"/>
     /// begins — renames to <c>.swept</c> rather than deleting outright to keep the inspect-the-record
     /// discipline, and never touches an already-settled <c>.consumed</c>/<c>.rejected</c>/<c>.swept</c>
-    /// sibling, which is historical record, not a pending request.
+    /// sibling, which is historical record, not a pending request. The consequence worth stating
+    /// because a reader's prior fills it in the other way (#2045): this method is the ONLY producer of
+    /// <see cref="RoomEvent.ArrestRequestExpired"/> (via <see cref="TryRecordExpiredAsync"/>), and it
+    /// early-returns when no PENDING request exists — so a request some poller already settled never
+    /// gets an expiry record here, including the bounded-retry ceiling's <c>.rejected</c>
+    /// (<c>CancelRequestPoller.TickAsync</c>'s own remarks at that branch).
     /// </summary>
     /// <param name="invocationStartUtc">
     /// #1649: this pump's own start, captured BEFORE <c>WorktreeWorkspaces.Provision</c> runs — i.e.

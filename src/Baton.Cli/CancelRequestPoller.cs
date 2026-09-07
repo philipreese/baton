@@ -33,7 +33,9 @@ namespace Baton.Cli;
 /// the target) while the pump's own bounded 5-tick ceiling below stays the honest backstop for a
 /// still-Process target that never resolves — a <em>file-channel</em> backstop only since #2045: it
 /// stops retrying and writes the <c>.rejected</c> body, and deliberately journals no
-/// <see cref="FlowEvent.CancellationRejected"/> for a target the mark above still owes a delivery to.
+/// <see cref="FlowEvent.CancellationRejected"/> for a target the pump may still settle from that mark.
+/// A target that never registers is abandoned there rather than recorded anywhere; that branch's own
+/// remarks are the register for the trade.
 /// </para>
 /// </summary>
 public static class CancelRequestPoller
@@ -323,27 +325,45 @@ public static class CancelRequestPoller
         {
             RetryCounters.TryRemove(retryKey, out _);
             const string reason =
-                "arrest requested (#1556) but not yet confirmed settled after 5 polls — the pump may still deliver it on "
-                    + "its own; if the target is a live process that never registers, use Ctrl+C on the pump or wait for it to settle";
+                "arrest requested (#1556) but not yet confirmed settled after 5 polls — the pump may still deliver it "
+                    + "from the mark this poller left; a target that never registers is abandoned here, so re-issue with "
+                    + "`baton cancel` if it is still running";
             CancelRequestFile.Reject(requestPath, content.Target, reason);
 
-            // #2045: the FILE channel gives up here; the arrest itself does not, so no durable
+            // #2045: the FILE channel gives up here; the arrest itself may not, so no durable
             // FlowEvent.CancellationRejected is appended for it. Every target reaching this branch was
             // marked above (this branch is only reachable while ArrestableExecutions.Find still admits
-            // it), and since #1825 a mark is a delivery guarantee the pump can honour moments later —
-            // SettleArrestIntentsAsync then appends CancellationRequested/ExecutionCancelled for the
-            // same id, and ArrestLedgerProjector folds the pair into ONE entry that reads Delivered
-            // while still carrying this rejection's reason, a shape ArrestLedgerEntry.Reason
+            // it), and since #1825 a mark is a delivery guarantee for every shape
+            // SettleArrestIntentsAsync can settle — it appends CancellationRequested/ExecutionCancelled
+            // for the same id, and ArrestLedgerProjector folds the pair into ONE entry that reads
+            // Delivered while still carrying this rejection's reason, a shape ArrestLedgerEntry.Reason
             // ("populated only for Rejected") says cannot exist. The two rejection shapes that DO
             // still journal a CancellationRejected are the ones the registry could not take: the
             // `!stillArrestable` "too late (it already settled)" path above, and
             // MutationInterface.SettleArrestIntentsAsync's own drop of an intent Find no longer
-            // admits. stderr keeps the operator-facing signal this branch used to owe the journal.
+            // admits.
+            //
+            // The one shape that mark is NOT a guarantee for is the one this ceiling exists for — a
+            // live Process dispatch that never registers (see this branch's own preamble above).
+            // SettleArrestIntentsAsync fail-closed-continues for a step-tied Running target whose
+            // binding is Process or will not resolve, recording nothing, explicitly on the premise
+            // that "the poller re-marks on its next ~2s tick" — which the Reject above just made
+            // impossible by deleting the pending request file, so DrainArrestIntents clears the mark
+            // and the arrest is abandoned: no CancellationRejected, no room.jsonl fact, no ledger
+            // entry, and (CancelRequestFile.DeleteStalePendingRequestAsync's own remarks) no
+            // ArrestRequestExpired at the next pump start either, since the request is already
+            // settled as .rejected rather than left pending. Which durable record should own that
+            // case is #1530's open question; inventing one here would put a Rejected row beside the
+            // Delivered one the common case still produces. What this branch owes instead is a true
+            // stderr line and the test that pins it
+            // (CancelRequestPollerTests.A_marked_target_the_pump_never_settles_is_abandoned_with_no_ledger_entry).
             try
             {
                 Console.Error.WriteLine(
                     $"cancel.request against '{roomDirectoryPath}' named execution '{targetExecutionId.Value}' — {reason}. "
-                    + "The arrest stays marked for delivery, so no rejection was recorded to the journal.");
+                    + "No rejection was recorded to the journal: if the pump honours the mark this poller left, the "
+                    + "arrest renders Delivered; if it never does, the pump's next drain discards that mark and nothing "
+                    + "records this request at all.");
             }
             catch
             {
@@ -354,8 +374,12 @@ public static class CancelRequestPoller
 
     /// <summary>
     /// #1530: best-effort append of <see cref="RoomEvent.ArrestRequestUnresolvable"/> to
-    /// <c>room.jsonl</c> — the durable home for the two rejection shapes above that never resolve an
-    /// <see cref="ExecutionId"/> to key a <see cref="FlowEvent.CancellationRejected"/> on.
+    /// <c>room.jsonl</c> — the durable home for the rejection shapes above that never reach an
+    /// <see cref="ExecutionId"/> a <see cref="FlowEvent.CancellationRejected"/> could be keyed on.
+    /// There are three of them, not the two this doc named until #2045, and all three call this method
+    /// from <see cref="TickAsync"/> above; <see cref="RoomEvent.ArrestRequestUnresolvable"/>'s own
+    /// remarks enumerate them, including why the third (a literal id no accepted request ever named)
+    /// belongs here despite resolving a syntactic <see cref="ExecutionId"/>.
     /// <paramref name="roomLogPath"/> is <c>null</c> for every caller that predates this feature or a
     /// test exercising <see cref="TickAsync"/> directly; a construction or append fault (room.jsonl
     /// contended by a concurrent room-scoped writer, per <c>BatonPaths.RoomLogFileName</c>'s own

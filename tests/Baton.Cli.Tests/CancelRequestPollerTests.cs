@@ -450,6 +450,85 @@ public class CancelRequestPollerTests
         }
     }
 
+    /// <summary>
+    /// #2045 fix round: the polarity twin of
+    /// <see cref="A_marked_target_the_pump_settles_after_the_ceiling_leaves_no_rejection_in_the_ledger"/>
+    /// — that one is the arm where the pump DOES honour the mark; this is the arm where it never can,
+    /// the unregistered-target case <c>CancelRequestPoller.TickAsync</c>'s remarks at the ceiling name
+    /// and explain (the drain records nothing and clears the intent map; the settled request file is
+    /// gone, so the next tick cannot re-mark). What the operator is left with is what this test pins:
+    /// nothing in the ledger at all, from either log.
+    /// </summary>
+    [Fact]
+    public async Task A_marked_target_the_pump_never_settles_is_abandoned_with_no_ledger_entry()
+    {
+        var roomDirectory = Path.Combine(Path.GetTempPath(), $"cancel-request-poller-{Guid.NewGuid():N}");
+        Directory.CreateDirectory(roomDirectory);
+        var originalError = Console.Error;
+        try
+        {
+            var logPath = Path.Combine(roomDirectory, "flow.jsonl");
+            var roomLogPath = Path.Combine(roomDirectory, "room.jsonl");
+            var execId = new ExecutionId("exec-never-registers");
+            var requestPath = CancelRequestFile.GetPath(roomDirectory);
+            using var stderr = new StringWriter();
+            Console.SetError(stderr);
+
+            await using (var writer = new FlowEventLogWriter(logPath))
+            {
+                await writer.AppendAsync(
+                    new FlowEvent.ExecutionRequestAccepted(MakeRequest(execId, new StepId("a"))), TestContext.Current.CancellationToken);
+
+                await CancelRequestFile.WriteAsync(roomDirectory, execId.Value, TestContext.Current.CancellationToken);
+
+                // BOUND, for the same reason the twin above is: an unbound registry no-ops
+                // RecordCancellationRejectedAsync, so an "empty ledger" assertion would hold against a
+                // ceiling that still journalled, for a reason unrelated to the property under test.
+                // roomLogPath is passed for the mirror-image reason — a fix that recorded
+                // RoomEvent.ArrestRequestUnresolvable here instead would otherwise be invisible.
+                var registry = new InFlightExecutionRegistry();
+                registry.Bind(writer);
+
+                for (var tick = 1; tick <= 5; tick++)
+                {
+                    await CancelRequestPoller.TickAsync(
+                        roomDirectory, logPath, Snapshot, registry, TestContext.Current.CancellationToken, roomLogPath);
+                }
+
+                Assert.False(File.Exists(requestPath), "the ceiling must have settled the request as .rejected");
+                Assert.True(File.Exists($"{requestPath}.rejected"));
+
+                // The line itself, not just the behaviour behind it: what the review found was a
+                // stderr sentence promising a delivery this shape never gets. Both directions, since
+                // the old wording and the new one are one clause apart.
+                Assert.DoesNotContain("stays marked for delivery", stderr.ToString(), StringComparison.Ordinal);
+                Assert.Contains("nothing records this request", stderr.ToString(), StringComparison.Ordinal);
+
+                // The pump's own drain, standing in for SettleArrestIntentsAsync: it takes the mark and
+                // records NOTHING for this shape, and the map is cleared by the drain itself.
+                Assert.Contains(execId, registry.DrainArrestIntents().Select(intent => intent.ExecutionId));
+                Assert.False(registry.HasPendingArrestIntents());
+
+                // Tick 6: the poller cannot re-mark, because the pending file it would read is gone —
+                // which is what turns "the pump re-marks next tick" from a premise into a dead end.
+                await CancelRequestPoller.TickAsync(
+                    roomDirectory, logPath, Snapshot, registry, TestContext.Current.CancellationToken, roomLogPath);
+                Assert.False(registry.HasPendingArrestIntents(), "a settled request must not re-mark an arrest intent");
+            }
+
+            var entries = await new FlowEventLogReader(logPath)
+                .ReadAllEntriesWithTimestampsAsync(TestContext.Current.CancellationToken);
+            var roomEvents = await new RoomEventLogReader(roomLogPath).ReadAllRoomEventsAsync(TestContext.Current.CancellationToken);
+            Assert.Empty(roomEvents);
+            Assert.Empty(ArrestLedgerProjector.Project(entries, roomEvents));
+        }
+        finally
+        {
+            Console.SetError(originalError);
+            DirectoryCleanup.DeleteRecursively(roomDirectory);
+        }
+    }
+
     // #1563 (S0 of the quota design, #802): a step Failed with a scheduled RetryNotBefore — the
     // shape the idle-deferral park leaves behind once its worker process has already exited — is
     // neither "still running" (so the old bounded-retry-until-registered path never fires) nor
