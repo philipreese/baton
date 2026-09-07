@@ -397,6 +397,14 @@ public static class RoleDispatch
             promptBuilder.Append($"\n\n{reviewToolGuidance}");
         }
 
+        // #1996: keyed on the GRANT, not the role id — the same condition that decides whether the
+        // broker declares the edit tool at all, so implement and janitor both carry it and a
+        // withheld-write role never claims a tool it will not be offered.
+        if (role.Grant.WriteFiles && WriteToolGuidance(adapter) is { } writeToolGuidance)
+        {
+            promptBuilder.Append($"\n\n{writeToolGuidance}");
+        }
+
         if (attachments is { Count: > 0 } && !string.IsNullOrEmpty(attachmentsDirectory))
         {
             var fileNames = attachments.Select(Path.GetFileName);
@@ -440,6 +448,30 @@ public static class RoleDispatch
         "read with Read, search with Grep; the Bash grant is a read-only git/gh allowlist, so cd, cat, "
         + "head, echo and git grep are refused, and a chained command (&&, |) is refused whole unless "
         + "every segment is itself granted";
+
+    /// <summary>
+    /// #1996's one sentence, and its only home: a write-granted codex worker is told what edits files
+    /// before its first turn. The measured failure it answers is a worker that had
+    /// <see cref="CodexDynamicToolPolicy.WriteTextTool"/> the whole time, read app-server's read-only
+    /// sandbox banner — true, and deliberate: codex's native tools are disabled and Baton's dynamic
+    /// tools write outside that sandbox — and reported that it could not edit anything. Both tool names
+    /// come from the policy's own constants, so the sentence cannot name a tool the broker stopped
+    /// declaring.
+    /// </summary>
+    private static readonly string CodexWriteToolGuidance =
+        $"Edit files with {CodexDynamicToolPolicy.ApplyPatchTool} (a '*** Begin Patch' envelope) or "
+        + $"replace one whole with {CodexDynamicToolPolicy.WriteTextTool}; the shell is for building "
+        + "and testing, and its own sandbox is read-only, which is not a limit on those two tools.";
+
+    /// <summary>
+    /// #1996: null for every other adapter on purpose. claude and agy edit through their vendors' own
+    /// first-class Edit/Write tools, so there is no name to teach and nothing measured to teach it for.
+    /// </summary>
+    private static string? WriteToolGuidance(string adapter) => adapter switch
+    {
+        "codex" => CodexWriteToolGuidance,
+        _ => null,
+    };
 
     /// <summary>
     /// #1920: vendor-specific because the tool names are. An adapter with no measured line returns

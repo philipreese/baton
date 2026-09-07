@@ -280,6 +280,15 @@ public static class CodexAppServerBroker
     internal static JsonObject BuildThreadParams(
         CodexBrokerConfiguration configuration, CodexDynamicToolPolicy policy)
     {
+        var tools = policy.BuildToolDefinitions();
+        // #1996 re-review MEDIUM: the instruction used to say "only the provided baton_* dynamic
+        // tools", a glob that by its own wording excluded the edit tool sitting in the very manifest
+        // it constrains — the model obeying it lands back on "I cannot edit this workspace", which is
+        // what #1996 measured. It names the edit tool from the policy's own constant, and only when
+        // this thread actually declares it, so it stays a constraint on the list rather than a second
+        // copy of it.
+        var declaresEditTool = tools.Any(
+            tool => tool?["name"]?.GetValue<string>() == CodexDynamicToolPolicy.ApplyPatchTool);
         var result = new JsonObject
         {
             ["cwd"] = configuration.WorkingDirectory,
@@ -287,11 +296,15 @@ public static class CodexAppServerBroker
             ["sandbox"] = "read-only",
             ["ephemeral"] = false,
             ["model"] = configuration.Model,
-            ["dynamicTools"] = policy.BuildToolDefinitions(),
+            ["dynamicTools"] = tools,
             ["environments"] = new JsonArray(),
             ["developerInstructions"] =
-                "You are a Baton worker. Use only the provided baton_* dynamic tools. " +
-                "A denied tool result is a hard permission boundary; do not seek another route.",
+                "You are a Baton worker. Use only the dynamic tools declared on this thread, whatever "
+                + "their names."
+                + (declaresEditTool
+                    ? $" {CodexDynamicToolPolicy.ApplyPatchTool} is this thread's edit tool."
+                    : string.Empty)
+                + " A denied tool result is a hard permission boundary; do not seek another route.",
             ["config"] = new JsonObject
             {
                 ["mcp_servers"] = new JsonObject(),

@@ -86,6 +86,43 @@ public class RoleDispatchTests
     }
 
     /// <summary>
+    /// #1996: a write-granted codex prompt names the edit tool once, before the first turn. Both
+    /// write-granted roles, because the sentence is keyed on the grant rather than on "implement" —
+    /// janitor edits files too and reached the same dead end.
+    /// </summary>
+    [Theory]
+    [InlineData("implement")]
+    [InlineData("janitor")]
+    public void A_write_granted_codex_prompt_names_the_edit_tool_once(string roleId)
+    {
+        var prompt = RoleDispatch.ToBinding(
+            WorkerRoleCatalog.For(roleId), "Make the change.", adapterOverride: "codex").PromptTemplate;
+
+        Assert.Contains($"Edit files with {CodexDynamicToolPolicy.ApplyPatchTool}", prompt, StringComparison.Ordinal);
+        Assert.Contains(CodexDynamicToolPolicy.WriteTextTool, prompt, StringComparison.Ordinal);
+        Assert.Equal(1, prompt.Split("Edit files with", StringSplitOptions.None).Length - 1);
+    }
+
+    /// <summary>
+    /// The two false arms of that predicate: a codex role WITHOUT the write grant is never told about a
+    /// tool its manifest will not declare, and a vendor with its own first-class edit tool is told
+    /// nothing at all. Without these the sentence could reach every role and every adapter and the
+    /// theory above would still pass.
+    /// </summary>
+    [Fact]
+    public void No_write_tool_guidance_reaches_a_read_only_role_or_another_vendor()
+    {
+        var codexReviewPrompt = RoleDispatch.ToBinding(
+            Review, "Review the change.", adapterOverride: "codex").PromptTemplate;
+        var claudeImplementPrompt = RoleDispatch.ToBinding(
+            WorkerRoleCatalog.For("implement"), "Make the change.", adapterOverride: "claude").PromptTemplate;
+
+        Assert.False(Review.Grant.WriteFiles);
+        Assert.DoesNotContain(CodexDynamicToolPolicy.ApplyPatchTool, codexReviewPrompt, StringComparison.Ordinal);
+        Assert.DoesNotContain(CodexDynamicToolPolicy.ApplyPatchTool, claudeImplementPrompt, StringComparison.Ordinal);
+    }
+
+    /// <summary>
     /// #1095: the dispatch prompt carries the one-shot execution contract (its rationale lives on
     /// <see cref="RoleDispatch"/>'s <c>OneShotContract</c>) — a dispatched worker's turn is never
     /// resumed, unlike a chat turn.
