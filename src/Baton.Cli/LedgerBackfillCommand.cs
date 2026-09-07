@@ -333,14 +333,20 @@ public static class LedgerBackfillCommand
     }
 
     /// <summary>
-    /// The branch a room declared it delivered, from the <c>delivery-branch.txt</c> output #734's
-    /// poller already recognises (<see cref="DeliveryReferenceOutputNames.Branch"/>) — the one durable
-    /// key spec/baton.md §7's backfill section settles on — including how often it currently finds
-    /// anything, and why it stays this key rather than a host-specific substitute. <see langword="null"/>
-    /// when the room's workflow declares no such output, which is the ordinary case for a lane that is
-    /// not a delivery lane; those PRs simply land unattributed and are reported as such.
+    /// The branch this room delivered on — the one durable key spec/baton.md §7's backfill section
+    /// settles on, including how often it finds anything and why it stays this key rather than a
+    /// host-specific substitute. Two sources, and that section is also where their precedence is
+    /// recorded: a step's own <c>delivery-branch.txt</c> output (#734's poller recognises the same name,
+    /// <see cref="DeliveryReferenceOutputNames.Branch"/>) first, then the one
+    /// <see cref="RoomDeliveryBranch"/> recorded at dispatch (#1944). <see langword="null"/> when
+    /// neither is there — a room dispatched before #1944 whose lane declared nothing; those PRs land
+    /// unattributed and are reported as such.
     /// </summary>
-    private static string? TryReadDeliveryBranch(string roomDirectoryPath)
+    private static string? TryReadDeliveryBranch(string roomDirectoryPath) =>
+        TryReadDeclaredDeliveryBranch(roomDirectoryPath) ?? RoomDeliveryBranch.TryRead(roomDirectoryPath);
+
+    /// <summary>The declared half of <see cref="TryReadDeliveryBranch"/>: a step output under the room's artifacts tree.</summary>
+    private static string? TryReadDeclaredDeliveryBranch(string roomDirectoryPath)
     {
         var artifactsRoot = Path.Combine(roomDirectoryPath, ArtifactManager.ArtifactsDirectoryName);
         if (!Directory.Exists(artifactsRoot))
@@ -362,7 +368,8 @@ public static class LedgerBackfillCommand
         }
         catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
         {
-            // Fail open, per this type's contract: the room loses its join key and nothing else.
+            // Fail open, per this type's contract: the room loses this source and nothing else -- the
+            // caller still falls back to the dispatch-recorded one.
             return null;
         }
 
@@ -500,8 +507,8 @@ public static class LedgerBackfillCommand
                 report.UnattributedPullRequest(
                     pullRequest.Number,
                     pullRequest.HeadRefName,
-                    "no room on disk declares this branch as its delivery-branch.txt (already swept by "
-                        + "retention, opened by hand, or a lane that declares no delivery branch)");
+                    "no room on disk carries this branch as its delivery branch (already swept by "
+                        + "retention, opened by hand, or dispatched before #1944 started recording one)");
             }
 
             // WorkingDirectory, and it is a statement of fact rather than a fallback: the repository

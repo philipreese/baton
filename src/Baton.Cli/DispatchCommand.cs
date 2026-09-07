@@ -199,6 +199,24 @@ public static class DispatchCommand
                 cancellationToken: cancellationToken).ConfigureAwait(false);
         }
 
+        // #1944: the room's delivery branch, observed rather than declared -- the workspace's own
+        // checked-out branch, which for a `baton queue add --issue` lane is the <n>-lane worktree the
+        // add provisioned and for a plain --workspace dispatch is whatever that checkout is on. Read
+        // through WorkspaceHead (no new spawn site) and recorded HERE rather than beside the
+        // capture-step probe above, because that one runs only for a worktree-provisioned binding and
+        // this must cover the plain --workspace case too. RoomDeliveryBranch decides what is worth
+        // recording and fails open; nothing in this run reads it back.
+        //
+        // PROBED, not carried, even though QueueItem.Branch already holds what `queue add --issue`
+        // provisioned: what the workspace is on NOW is a fact, and an add-time value is a claim that a
+        // later `git checkout` in that worktree silently falsifies. Probing is also what makes ONE
+        // code path cover both dispatch shapes -- a queued lane and a hand-run `--workspace` -- rather
+        // than a carried field covering one and a probe covering the other.
+        await RoomDeliveryBranch.RecordAsync(
+            options.RoomDirectoryPath,
+            await WorkspaceHead.TryReadBranchAsync(workspace, cancellationToken).ConfigureAwait(false),
+            cancellationToken).ConfigureAwait(false);
+
         // #1619: the navigational half of the ruling -- a no-op when --workstream was never passed.
         WorkstreamJunctionLinker.CreateIfRequested(options.Workstream, options.RoomDirectoryPath);
 

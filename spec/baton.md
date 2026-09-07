@@ -4181,14 +4181,36 @@ only ever ADD rows.
   than a repeated one. Three independent stops (a short page, a page that added nothing new, a page
   whose PRs carry no `mergedAt`), because any one alone can loop forever.
   Each row carries `endedAt` = the merge instant, the diff shape GitHub reports, `commits`,
-  `reviewCount` and the issue it closed, and is **joined to a room by branch name** — the room's own
-  `delivery-branch.txt` output (§2's delivery-state convention), the one room-to-branch link that
-  survives a torn-down worktree. A PR no room's branch matches is still written, with `room` absent,
-  and reported. **Today that is every PR**: measured 2026-09-05 over the operator's own
-  `~/.baton/rooms`, 0 of 691 rooms carry a `delivery-branch.txt` at all. The key stays this one rather
-  than a host-specific substitute — a room's workspace directory happens to be named after its issue on
-  that machine, and joining on that would be a convention this repo has never declared — so what ships
-  is the key that exists plus a report that says how often it found nothing.
+  `reviewCount` and the issue it closed, and is **joined to a room by branch name** — the one
+  room-to-branch link that survives a torn-down worktree. A PR no room's branch matches is still
+  written, with `room` absent, and reported. The key stays this one rather than a host-specific
+  substitute — a room's workspace directory happens to be named after its issue on that machine, and
+  joining on that would be a convention this repo has never declared — so what ships is the key that
+  exists plus a report that says how often it found nothing.
+- **Where the delivery branch comes from, in precedence order (#1944).** First a step's own
+  `delivery-branch.txt` output under the room's artifacts tree (§2's delivery-state convention) — a
+  lane's explicit declaration, which continues to win. Then, when no step declared one, the branch
+  `baton dispatch`/`baton redispatch` **observed** in the workspace at launch (`git rev-parse
+  --abbrev-ref HEAD` through `WorkspaceHead`, the base-ref spawn site) and wrote to
+  `<room>/delivery-branch.txt` — the same file name at the room root, where no step output can land, so
+  the location is what tells a declaration from an observation. Trunk names and a detached `HEAD`
+  record nothing; `RoomDeliveryBranch.TrunkBranchNames` is where that list and the cost of it being
+  wrong for a repository are stated. This is what makes a queue-runner lane join without declaring
+  anything: `baton queue add --issue <n>` provisions the `<n>-lane` worktree, and the dispatch into it
+  observes that branch. **What forced it**: measured 2026-09-05 over the operator's own
+  `~/.baton/rooms`, 0 of 691 rooms carried a `delivery-branch.txt`, so every merged PR a
+  `--dry-run` listed was unattributed — the observation half exists because asking lanes to declare had
+  produced nothing in 691 rooms. It is recorded at dispatch and never rewritten, so a room whose
+  workspace later moves to another branch keeps the branch it was launched on. **Many rooms may record
+  one branch**, and the population is every room whose workspace sat on it at launch rather than only
+  the lanes that worked it — an implement lane and its review lane share a worktree, a redispatch adds
+  another, and a dispatch given neither `--workspace` nor a materialized worktree falls back to the
+  current directory, so an unrelated `advise` or `review` room launched from a shell sitting in that
+  checkout records it too. The join is one room per branch: the last room the walk sees wins, which is
+  the highest path in `OrdinalIgnoreCase` order. Arbitrary, disclosed, and not repaired here: the PR
+  joins to *a* room dispatched on that branch — not necessarily one that worked it — rather than to all
+  of them, and a reader wanting every room's spend for a branch filters the ledger's own rows rather
+  than reading this join.
 - **Idempotent, on the ledger's own dedupe.** A room row dedupes on its `ExecutionId`; a PR row on
   `github-pr-<n>`. Why a PR row needs an id at all rather than none is
   `CostLedgerStore.GithubBackfillExecutionId`'s own doc: it names the `JsonLinesLedger` rule and what a

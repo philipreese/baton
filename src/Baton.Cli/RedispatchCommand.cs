@@ -241,6 +241,17 @@ public static class RedispatchCommand
             .ConfigureAwait(false);
 
         var workspace = entry.WorkingDirectory ?? entry.Worktree?.Repository ?? Directory.GetCurrentDirectory();
+
+        // #1944: the same room fact `baton dispatch` records, for the same reason -- a redispatched lane
+        // opens its PR from the same branch its parent's workspace is on, so leaving it out would leave
+        // exactly the rooms a conductor produces unattributed. Probed from the workspace rather than
+        // copied off the parent room: the branch a workspace is on now is a fact, and the parent's
+        // recorded one would be a stale claim whenever --workspace moved the redispatch elsewhere.
+        await RoomDeliveryBranch.RecordAsync(
+            options.RoomDirectoryPath,
+            await WorkspaceHead.TryReadBranchAsync(workspace, cancellationToken).ConfigureAwait(false),
+            cancellationToken).ConfigureAwait(false);
+
         // Register: true -- same rationale as DispatchCommand's own RunOptions construction (spec/baton.md §8, #1657).
         var runOptions = new RunOptions(
             workflowFilePath, bindingsFilePath, options.RoomDirectoryPath, ProjectRootDirectory: workspace, Register: true);
