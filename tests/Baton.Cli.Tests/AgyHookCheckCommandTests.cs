@@ -1,4 +1,5 @@
 using System.Text.Json;
+using Baton.Domain;
 
 namespace Baton.Cli.Tests;
 
@@ -1211,5 +1212,79 @@ public class AgyHookCheckCommandTests
     private sealed class ThrowingReader : TextReader
     {
         public override string ReadToEnd() => throw new IOException("simulated pipe failure");
+    }
+
+    /// <summary>
+    /// #2009, the agy enforcement point (spec/baton.md §9's third of three). Same sink and same schema
+    /// as the claude hook's — <see cref="Baton.Dispatch.GrantDecisionLog"/> in the execution's output
+    /// directory — because a room's grant lines are one query whatever vendor produced them, and this
+    /// vendor is the one both of 2026-09-06's broker-only rules turned out to have missed.
+    /// </summary>
+    public sealed class GrantLines : IDisposable
+    {
+        private string Root { get; }
+        private string Outbox { get; }
+
+        public GrantLines()
+        {
+            Root = Path.Combine(Path.GetTempPath(), $"baton-agy-grant-{Guid.NewGuid():N}");
+            Outbox = Path.Combine(Root, "outbox");
+            Directory.CreateDirectory(Outbox);
+        }
+
+        public void Dispose() => Baton.Tests.Shared.DirectoryCleanup.DeleteRecursively(Root);
+
+        [Fact]
+        public void A_denied_run_command_writes_exactly_one_deny_line_naming_the_rule_that_decided()
+        {
+            Assert.Equal("deny", Run(shellPatterns: "agy:git *"));
+
+            var line = Assert.Single(Read());
+            Assert.Equal(GrantDecision.EventType, line["type"]!.GetValue<string>());
+            Assert.Equal("agy", line["vendor"]!.GetValue<string>());
+            Assert.Equal("run_command", line["tool"]!.GetValue<string>());
+            Assert.Equal("deny", line["decision"]!.GetValue<string>());
+            Assert.Equal(GrantRules.ShellPattern.Id, line["rule"]!.GetValue<string>());
+            Assert.Contains(GrantRefusal.Marker, line["reason"]!.GetValue<string>());
+            Assert.Equal(GrantDecision.Identify("node --version"), line["input"]!.GetValue<string>());
+        }
+
+        [Fact]
+        public void An_allowed_run_command_writes_exactly_one_allow_line_and_no_reason()
+        {
+            Assert.Equal("allow", Run(shellPatterns: "agy:node *"));
+
+            var line = Assert.Single(Read());
+            Assert.Equal("allow", line["decision"]!.GetValue<string>());
+            Assert.Equal(GrantRules.Allowed.Id, line["rule"]!.GetValue<string>());
+            Assert.Null(line["reason"]);
+            // The identity is the same digest the deny arm records for the same command line, which is
+            // what lets a reader pair "refused" with "re-issued and allowed" across two lines.
+            Assert.Equal(GrantDecision.Identify("node --version"), line["input"]!.GetValue<string>());
+        }
+
+        private string Run(string shellPatterns)
+        {
+            using var stdin = new StringReader(Payload("run_command"));
+            using var stdout = new StringWriter();
+
+            AgyHookCheckCommand.Execute(
+                stdin, stdout, "agy:", shellPatternsRaw: shellPatterns, outboxDirectory: Outbox,
+                workspaceDirectory: Root, deniedShellPatternsRaw: "agy:",
+                deniedShellOptionTokensRaw: "agy:");
+
+            using var doc = JsonDocument.Parse(stdout.ToString());
+            return doc.RootElement.GetProperty("decision").GetString()!;
+        }
+
+        private System.Text.Json.Nodes.JsonObject[] Read()
+        {
+            var path = Path.Combine(Outbox, Baton.Dispatch.GrantDecisionLog.FileName);
+            Assert.True(File.Exists(path), $"no grant log was written to {path}");
+            return File.ReadAllLines(path)
+                .Where(line => line.Trim().Length > 0)
+                .Select(line => System.Text.Json.Nodes.JsonNode.Parse(line)!.AsObject())
+                .ToArray();
+        }
     }
 }

@@ -408,8 +408,9 @@ public sealed class TokenBudgetMonitor
     /// <summary>
     /// #2002 rule 3: the one normalised command shape holding MORE THAN HALF of this stream's shell
     /// commands, with its share as a whole percent — or <see langword="null"/> when no shape does, when
-    /// the stream announced no shell command at all, or when this vendor's stream does not carry
-    /// command lines (codex; see <see cref="IWorkerUsageParser.ShellCommandLines"/>).
+    /// the stream announced no shell command at all, or when the stream does not carry command lines
+    /// (see <see cref="IWorkerUsageParser.ShellCommandLines"/>: since #2008 every vendor answers there,
+    /// codex included, but a codex stream captured before that landed still carries none).
     /// <para>
     /// <b>Strictly more than half</b>, so the claim "the steps were spent on this" is true of a
     /// majority rather than merely of a plurality. The share is over SHELL commands, not over all tool
