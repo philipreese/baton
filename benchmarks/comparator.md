@@ -11,11 +11,20 @@ timings, token counts, costs, and diff figures.
 
 ## Isolation
 
-The 2026-09-06 lesson in [#2001](https://github.com/philipreese/baton/issues/2001) is that every
-headless arm runs in its own single-branch clone. Sample 8's `agy` arm instead ran in the shared
-clone and inspected its sibling branch and PR before committing, so that arm is void. Every sample's
-room streams are scanned for sibling branch names and PR numbers; either one voids the arm. The
-corresponding broker-side isolation rule remains queued under #2001.
+The 2026-09-06 lesson in [#2001](https://github.com/philipreese/baton/issues/2001) came out of a
+**Baton lane**, not a headless one: sample 8's `agy` arm was arm A, dispatched through the queue
+runner on the shared clone (worktrees off one `.git`), and it read `git branch --contains` and
+`gh pr view 1994` before committing, so that arm is void. The single-branch per-arm clone is
+therefore the recipe for **both** the headless arms (B and C) and the Baton-lane arms (A) — #2001
+part 1 changed the headless recipe first, and sample 6's codex B/C arms are the first that ran under
+it. The broker-side rule that reaches an arm-A lane from inside Baton is
+[PR #2016](https://github.com/philipreese/baton/pull/2016) ("Refuse an implement lane a PR it did not
+open"), still open and unmerged.
+
+Stream scanning is not yet a standing pass over every sample: sample 6's seven streams were scanned
+for sibling branch names and PR numbers and were clean ([row][s6]), and sample 8's `agy` arm was read
+post hoc, which is how its contamination was found ([row][s8]). Where a scan runs, either a sibling
+branch name or a sibling PR number voids the arm.
 
 ## Decision rule
 
@@ -31,10 +40,12 @@ Standing principle, in the operator's words: “measure before deciding.” ([ru
 
 ## Ledger
 
-`sourceKind` says where this summary row came from. A not-run row is `hand-recorded`, because no
-execution stream exists. “See row” deliberately leaves the raw measurement in its linked comment.
+`Provenance` says where this summary row came from — this document's own vocabulary, **not** the cost
+ledger's `sourceKind` field (`spec/baton.md` §7), whose closed set contains none of these values. A
+not-run row is `hand-recorded`, because no execution stream exists. “See row” deliberately leaves the
+raw measurement in its linked comment.
 
-| Sample | Issue | Arm | Vendor | `sourceKind` | PR | Tokens | Review outcome | Merged | Raw row |
+| Sample | Issue | Arm | Vendor | Provenance | PR | Tokens | Review outcome | Merged | Raw row |
 |---:|---:|:---:|---|---|---:|---|---|:---:|---|
 | 1 | #1902 | A | `claude` | `baton-room` | #1956 | See row | BLOCK → bounded fix | yes | [row][s1] |
 | 1 | #1902 | A | `codex` | `hand-recorded` | — | — | not run; rerun-only lane pulled 2026-09-06 16:30 | no | [row][s1] |
@@ -48,21 +59,21 @@ execution stream exists. “See row” deliberately leaves the raw measurement i
 | 2 | #1911 | A | `claude` | `baton-room` | #1960 | See row | BLOCK → bounded fix | yes | [row][s2] |
 | 2 | #1911 | A | `codex` | `hand-recorded` | — | — | not run; arm A claude only | no | [row][s2] |
 | 2 | #1911 | A | `agy` | `hand-recorded` | — | — | not run; arm A claude only | no | [row][s2] |
-| 2 | #1911 | B | `claude` | `hand-recorded` | — | — | arm A only, B/C not run (rerun-only lanes pulled 2026-09-06 16:30) | no | [row][s2] |
-| 2 | #1911 | B | `codex` | `hand-recorded` | — | — | arm A only, B/C not run (rerun-only lanes pulled 2026-09-06 16:30) | no | [row][s2] |
-| 2 | #1911 | B | `agy` | `hand-recorded` | — | — | arm A only, B/C not run (rerun-only lanes pulled 2026-09-06 16:30) | no | [row][s2] |
-| 2 | #1911 | C | `claude` | `hand-recorded` | — | — | arm A only, B/C not run (rerun-only lanes pulled 2026-09-06 16:30) | no | [row][s2] |
-| 2 | #1911 | C | `codex` | `hand-recorded` | — | — | arm A only, B/C not run (rerun-only lanes pulled 2026-09-06 16:30) | no | [row][s2] |
-| 2 | #1911 | C | `agy` | `hand-recorded` | — | — | arm A only, B/C not run (rerun-only lanes pulled 2026-09-06 16:30) | no | [row][s2] |
+| 2 | #1911 | B | `claude` | `headless-stream` | — | See row | ran, then refused after 2 min — found the merge one commit ahead of its worktree; no edit, no PR. Not a sample | no | [row][armB] |
+| 2 | #1911 | B | `codex` | `hand-recorded` | — | — | not run | no | [row][s2] |
+| 2 | #1911 | B | `agy` | `hand-recorded` | — | — | not run | no | [row][s2] |
+| 2 | #1911 | C | `claude` | `hand-recorded` | — | — | not run | no | [row][s2] |
+| 2 | #1911 | C | `codex` | `hand-recorded` | — | — | not run | no | [row][s2] |
+| 2 | #1911 | C | `agy` | `hand-recorded` | — | — | not run | no | [row][s2] |
 | 3 | #1918 | A | `claude` | `baton-room` | #1952 | See row | APPROVE → bounded fix | yes | [row][s3] |
 | 3 | #1918 | A | `codex` | `hand-recorded` | — | — | not run; arm A claude only | no | [row][s3] |
 | 3 | #1918 | A | `agy` | `hand-recorded` | — | — | not run; arm A claude only | no | [row][s3] |
-| 3 | #1918 | B | `claude` | `hand-recorded` | — | — | arm A only, B/C not run (rerun-only lanes pulled 2026-09-06 16:30) | no | [row][s3] |
-| 3 | #1918 | B | `codex` | `hand-recorded` | — | — | arm A only, B/C not run (rerun-only lanes pulled 2026-09-06 16:30) | no | [row][s3] |
-| 3 | #1918 | B | `agy` | `hand-recorded` | — | — | arm A only, B/C not run (rerun-only lanes pulled 2026-09-06 16:30) | no | [row][s3] |
-| 3 | #1918 | C | `claude` | `hand-recorded` | — | — | arm A only, B/C not run (rerun-only lanes pulled 2026-09-06 16:30) | no | [row][s3] |
-| 3 | #1918 | C | `codex` | `hand-recorded` | — | — | arm A only, B/C not run (rerun-only lanes pulled 2026-09-06 16:30) | no | [row][s3] |
-| 3 | #1918 | C | `agy` | `hand-recorded` | — | — | arm A only, B/C not run (rerun-only lanes pulled 2026-09-06 16:30) | no | [row][s3] |
+| 3 | #1918 | B | `claude` | `headless-stream` | #1968 | See row | ran, PR #1968 (+177/−31), closed unmerged; excluded from scoring — post-merge worktree, issue read as closed. Review outcome not recorded | no | [row][armB] |
+| 3 | #1918 | B | `codex` | `hand-recorded` | — | — | not run | no | [row][s3] |
+| 3 | #1918 | B | `agy` | `hand-recorded` | — | — | not run | no | [row][s3] |
+| 3 | #1918 | C | `claude` | `hand-recorded` | — | — | not run | no | [row][s3] |
+| 3 | #1918 | C | `codex` | `hand-recorded` | — | — | not run | no | [row][s3] |
+| 3 | #1918 | C | `agy` | `hand-recorded` | — | — | not run | no | [row][s3] |
 | 4 | #1947 | A | `claude` | `hand-recorded` | — | — | not run | no | [row][s4] |
 | 4 | #1947 | A | `codex` | `hand-recorded` | — | — | not run | no | [row][s4] |
 | 4 | #1947 | A | `agy` | `baton-room` | #1973 | See row | APPROVE | no | [row][s4] |
@@ -73,7 +84,7 @@ execution stream exists. “See row” deliberately leaves the raw measurement i
 | 4 | #1947 | C | `codex` | `hand-recorded` | — | — | not run | no | [row][s4] |
 | 4 | #1947 | C | `agy` | `hand-recorded` | — | — | not run | no | [row][s4] |
 | 5 | #1948 | A | `claude` | `hand-recorded` | — | — | not run | no | [row][s5] |
-| 5 | #1948 | A | `codex` | `baton-room` | #1980 | per-last-event, unusable until #1927's follow-up | BLOCK | no | [row][s5] |
+| 5 | #1948 | A | `codex` | `baton-room` | #1980 | per-last-event, unusable ([#2020](https://github.com/philipreese/baton/issues/2020), open) | BLOCK | no | [row][s5] |
 | 5 | #1948 | A | `agy` | `hand-recorded` | — | — | not run | no | [row][s5] |
 | 5 | #1948 | B | `claude` | `headless-stream` | #1975 | See row | APPROVE | no | [row][s5] |
 | 5 | #1948 | B | `codex` | `hand-recorded` | — | — | not run | no | [row][s5] |
@@ -82,7 +93,7 @@ execution stream exists. “See row” deliberately leaves the raw measurement i
 | 5 | #1948 | C | `codex` | `hand-recorded` | — | — | not run | no | [row][s5] |
 | 5 | #1948 | C | `agy` | `hand-recorded` | — | — | not run | no | [row][s5] |
 | 6 | #1949 | A | `claude` | `baton-room` | #1990 | See row | BLOCK | no | [row][s6] |
-| 6 | #1949 | A | `codex` | `baton-room` | #1989 | per-last-event, unusable until #1927's follow-up | BLOCK | no | [row][s6] |
+| 6 | #1949 | A | `codex` | `baton-room` | #1989 | per-last-event, unusable ([#2020](https://github.com/philipreese/baton/issues/2020), open) | BLOCK | no | [row][s6] |
 | 6 | #1949 | A | `agy` | `baton-room` | #1991 | See row | arrested, then hand-pushed; BLOCK (#2002) | no | [row][s6] |
 | 6 | #1949 | B | `claude` | `headless-stream` | #2000 | See row | BLOCK | no | [row][s6] |
 | 6 | #1949 | B | `codex` | `headless-stream` | #2006 | See row | BLOCK | no | [row][s6] |
@@ -91,37 +102,42 @@ execution stream exists. “See row” deliberately leaves the raw measurement i
 | 6 | #1949 | C | `codex` | `headless-stream` | #2007 | See row | BLOCK; no native subagent used | no | [row][s6] |
 | 6 | #1949 | C | `agy` | `hand-recorded` | — | — | not run pending #2002 | no | [row][s6] |
 | 7 | #1951 | A | `claude` | `baton-room` | #1993 | See row | BLOCK → bounded fix | yes | [row][s7] |
-| 7 | #1951 | A | `codex` | `baton-room` | #1997 | per-last-event, unusable until #1927's follow-up | BLOCK; hand-pushed after #1998 | no | [row][s7] |
+| 7 | #1951 | A | `codex` | `baton-room` | #1997 | per-last-event, unusable ([#2020](https://github.com/philipreese/baton/issues/2020), open) | BLOCK, 4 medium / 5 low; hand-pushed after #1998 — scored a LOSS, not a voided run. A rerun ran after #2013 anyway and landed PR #2023: BLOCK, 3 medium, closed unmerged | no | [row][s7], [rerun][s7r] |
 | 7 | #1951 | A | `agy` | `baton-room` | — | See row | arrested with no commit or PR; rerun after #2002 | no | [row][s7] |
 | 7 | #1951 | B | `claude` | `hand-recorded` | — | — | not run | no | [row][s7] |
-| 7 | #1951 | B | `codex` | `hand-recorded` | — | — | not run; codex rerun owed | no | [row][s7] |
-| 7 | #1951 | B | `agy` | `hand-recorded` | — | — | not run pending #2002; agy rerun owed | no | [row][s7] |
+| 7 | #1951 | B | `codex` | `hand-recorded` | — | — | not run | no | [row][s7] |
+| 7 | #1951 | B | `agy` | `hand-recorded` | — | — | not run pending #2002 | no | [row][s7] |
 | 7 | #1951 | C | `claude` | `hand-recorded` | — | — | not run | no | [row][s7] |
-| 7 | #1951 | C | `codex` | `hand-recorded` | — | — | not run; codex rerun owed | no | [row][s7] |
-| 7 | #1951 | C | `agy` | `hand-recorded` | — | — | not run pending #2002; agy rerun owed | no | [row][s7] |
+| 7 | #1951 | C | `codex` | `hand-recorded` | — | — | not run | no | [row][s7] |
+| 7 | #1951 | C | `agy` | `hand-recorded` | — | — | not run pending #2002 | no | [row][s7] |
 | 8 | #1943 | A | `claude` | `baton-room` | #1994 | See row | APPROVE → bounded fix | yes | [row][s8] |
-| 8 | #1943 | A | `codex` | `baton-room` | — | per-last-event, unusable until #1927's follow-up | void: no edit under the grant (#1996); rerun owed | no | [row][s8] |
+| 8 | #1943 | A | `codex` | `baton-room` | #2021 | per-last-event, unusable ([#2020](https://github.com/philipreese/baton/issues/2020), open) | first run void: no edit under the grant (#1996). Rerun after #2013 landed PR #2021: BLOCK, 1 high / 2 medium, closed unmerged | no | [row][s8], [rerun][s8r] |
 | 8 | #1943 | A | `agy` | `baton-room` | #1999 | See row | void: sibling contamination (#2001), repeated steps (#2002); rerun owed | no | [row][s8] |
 | 8 | #1943 | B | `claude` | `hand-recorded` | — | — | not run | no | [row][s8] |
-| 8 | #1943 | B | `codex` | `hand-recorded` | — | — | not run; codex rerun owed | no | [row][s8] |
-| 8 | #1943 | B | `agy` | `hand-recorded` | — | — | not run pending #2002; agy rerun owed | no | [row][s8] |
+| 8 | #1943 | B | `codex` | `hand-recorded` | — | — | not run | no | [row][s8] |
+| 8 | #1943 | B | `agy` | `hand-recorded` | — | — | not run pending #2002 | no | [row][s8] |
 | 8 | #1943 | C | `claude` | `hand-recorded` | — | — | not run | no | [row][s8] |
-| 8 | #1943 | C | `codex` | `hand-recorded` | — | — | not run; codex rerun owed | no | [row][s8] |
-| 8 | #1943 | C | `agy` | `hand-recorded` | — | — | not run pending #2002; agy rerun owed | no | [row][s8] |
+| 8 | #1943 | C | `codex` | `hand-recorded` | — | — | not run | no | [row][s8] |
+| 8 | #1943 | C | `agy` | `hand-recorded` | — | — | not run pending #2002 | no | [row][s8] |
 
 ## Caveats
 
 - The box carried other load during every sample, so wall clocks include contention.
-- `codex` arm C did not use its multi-agent feature in three runs.
-- Across the three `claude` comparisons, arm C cost 2.2×, 2.2×, and 1.3× arm B; it won two of three.
+- `codex` arm C did not use its multi-agent feature in either of the two runs it made: #1988 (sample 1 — its only non-file, non-shell calls are three empty `wait` calls, [row][s1]) and #2007 (sample 6 — `0 collab_tool_call`, [row][s6]). Every other `codex` arm C cell is `not run`.
+- Across the three `claude` arm B/C comparisons (samples 4, 5, 6), arm C cost more than arm B every time and won two of the three merges; the ratios and the dollar figures they come from are in the sample-6 row ([row][s6]), not copied here.
 - The `agy` rows are not a model measurement until #2002 lands.
-- Samples 7 and 8 still owe `codex` and `agy` reruns.
+- What samples 7 and 8 still owe, arm by arm — `codex` owes no rerun anywhere:
+  - Sample 7 arm A `agy`: arrested with no commit or PR; rerun owed after #2002.
+  - Sample 8 arm A `agy`: void (#2001/#2002); rerun owed.
+  - Sample 7 arm A `codex`: settled as a LOSS on #1997's own findings, not a rerun; the post-#2013 rerun (#2023) landed anyway.
+  - Sample 8 arm A `codex`: the rerun landed as #2021 (BLOCK, closed unmerged), so that arm carries a verdict, not a debt.
+  - Samples 7 and 8, arms B and C: never run at all, so what they owe is a first run, not a rerun.
 
 ## How to add a sample
 
 1. Pin the frozen brief on the issue.
-2. Dispatch arm A × 3 through the queue runner.
-3. Run arms B and C headless, one at a time, using the per-arm single-branch clone recipe.
+2. Dispatch arm A × 3 through the queue runner, each lane in its own single-branch clone — the shared clone is what let sample 8's `agy` arm read its sibling's PR, and the broker-side guard is still open (PR #2016).
+3. Run arms B and C headless, one at a time, under the same per-arm single-branch clone recipe.
 4. Send every PR to the same independent review, with sibling PRs excluded.
 5. Post the raw row on #1903 and update this ledger with its pointer.
 
@@ -133,4 +149,7 @@ execution stream exists. “See row” deliberately leaves the raw measurement i
 [s6]: https://github.com/philipreese/baton/issues/1903#issuecomment-5563557923
 [s7]: https://github.com/philipreese/baton/issues/1903#issuecomment-5563664913
 [s8]: https://github.com/philipreese/baton/issues/1903#issuecomment-5563182256
+[armB]: https://github.com/philipreese/baton/issues/1903#issuecomment-5560240517
+[s7r]: https://github.com/philipreese/baton/issues/1903#issuecomment-5565829724
+[s8r]: https://github.com/philipreese/baton/issues/1903#issuecomment-5565755238
 [rule]: https://github.com/philipreese/baton/issues/1903#issuecomment-5563450634

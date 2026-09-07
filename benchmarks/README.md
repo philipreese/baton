@@ -13,6 +13,10 @@ capture, so a directory each would be a directory per week holding one file.
 | [`subscription-usage/2026-09-04`](subscription-usage/2026-09-04/README.md) | Baton-launched versus native Claude Code sessions, 2026-08-31 to 09-04: responses, output, cache-read, implement-room outcomes. | #1848, #1849, #1391 |
 | [`ledger`](ledger/README.md) | Weekly `baton ledger export` snapshots of the cost ledger (`spec/baton.md` §7), one dated CSV per export, plus the per-model / per-vendor / per-arm medians `derive.py` computes from them. | #1901, #1903, #1863 |
 
+[`comparator.md`](comparator.md) is in this directory but not in the table above: it is #1903's live
+arm-by-arm ledger of the vendor/arm comparison, updated as samples close, so it is neither dated nor
+immutable and it copies no raw measurement — every row points at the issue comment that holds one.
+
 ## Derived scores
 
 [`deepswe/derive_scores.py`](deepswe/derive_scores.py) writes `derived-scores.csv` beside a date
