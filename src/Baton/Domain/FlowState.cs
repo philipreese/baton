@@ -235,10 +235,11 @@ public enum StepStatus
 /// <param name="IndeterminateVerifyTail">
 /// #1701: <see cref="FlowEvent.VerifyFailed"/>'s own <c>Tail</c> — the failing member(s)' OWN
 /// captured output, not <paramref name="IndeterminateReason"/>'s one-line member-name summary. Since
-/// #1971 that output is noise-filtered and failure-line-promoted rather than verbatim, and names the
-/// file holding the unfiltered stream (<c>Mutation.VerifyRunner.RawOutputFileName</c>, in the
-/// execution's own artifacts directory) in its first line. <c>VerifyRunner.BuildTail</c> is where that
-/// happens and what it cites. Set
+/// #1971 an ENGINE-RUN verify's tail is noise-filtered and failure-line-promoted rather than verbatim,
+/// and names the file holding the unfiltered stream (<c>Mutation.VerifyRunner.RawOutputFileName</c>, in
+/// the execution's own artifacts directory) in its first line. <c>VerifyRunner.BuildTail</c> is where
+/// that happens and what it cites; a <see cref="VerifyFailedKind.DeliveryFailed"/> tail comes from
+/// <c>Mutation.DeliveryVerifier</c> instead and has neither the filter nor that pointer line. Set
 /// only by the <see cref="Domain.IndeterminateProducer.VerifyFailed"/> producer (an arrest's
 /// <paramref name="IndeterminateReason"/> is already the full diagnostic — nothing truncated to
 /// recover); cleared in the same breath as <paramref name="IndeterminateReason"/> on resolution or

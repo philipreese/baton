@@ -77,25 +77,49 @@ public static class VerifyRunner
     private const int MaxPromotedChars = 1200;
 
     /// <summary>
-    /// #1971: the file <see cref="RunProcessAsync"/> writes the verify command's WHOLE unfiltered
-    /// combined stream to, in the execution's own artifacts directory, whenever the command fails and a
+    /// #1971: the file <see cref="RunProcessAsync"/> writes the verify command's unfiltered combined
+    /// stream to, in the execution's own artifacts directory, whenever the command fails and a
     /// directory was supplied. Dot-prefixed and always this one name, for the same reason
     /// <c>OutputMaterializer.CapturedResponseFileName</c> is: engine-owned, never a worker's declared
-    /// output. This is what makes the filtering below safe to do at all — nothing the filter drops is
-    /// lost, it is one file open away.
+    /// output — and registered in <see cref="Baton.Dispatch.ExecutionStreamLogger.IsStreamLogFileName"/>
+    /// beside the other engine-owned files that land in that directory (#1971 review), so the first
+    /// filtered listing surface to exist does not present it as something the worker produced.
+    /// This is what makes the filtering below safe to do at all — nothing the filter drops is lost, it
+    /// is one file open away, up to this file's own <see cref="MaxRawOutputChars"/> cap.
     /// </summary>
     public const string RawOutputFileName = ".verify-output.log";
+
+    /// <summary>
+    /// #1971 review: the bound on what <see cref="RawOutputFileName"/> retains, so one runaway gate
+    /// member cannot persist a multi-hundred-megabyte log into every failed execution's artifacts (and
+    /// make the settle wait on writing it). Deliberately <see
+    /// cref="Baton.Dispatch.ExecutionStreamLogger.DefaultMaxSizeBytes"/> rather than a second constant
+    /// of its own: this file's siblings in the same directory roll over at exactly that size, and one
+    /// engine-written file in a directory being bounded differently from the rest is the drift worth
+    /// avoiding. Counted in CHARS against a byte-named constant, which is the honest description of
+    /// what the code enforces — a gate run's output is overwhelmingly ASCII, where the two coincide,
+    /// and this is a bound on what is retained rather than a byte-exact file-size guarantee.
+    /// Over-cap text keeps its head and its tail with an explicit elision marker between them, never a
+    /// silent truncation: <see cref="MaxRawOutputElisionReserve"/> is the room left for that marker.
+    /// </summary>
+    private const int MaxRawOutputChars = (int)Baton.Dispatch.ExecutionStreamLogger.DefaultMaxSizeBytes;
+
+    private const int MaxRawOutputElisionReserve = 200;
 
     /// <summary>
     /// #1971: lines a gate member's own output carries that say nothing about why it failed. Exactly
     /// two shapes, and both are <see cref="Console.Error"/> writes from this repo's own <c>src/</c> —
     /// <c>Outcomes.OutcomeClassifier</c>'s <c>CAPTURED (#1594)</c> marker and
-    /// <c>Dispatch.ExecutionStreamLogger</c>'s initialization warning. <c>spec/baton.md</c> §3's
-    /// engine-run verify section is the record of what that measured, and of the rule as a whole.
+    /// <c>Dispatch.ExecutionStreamLogger</c>'s initialization warning. This file is the canonical
+    /// account of the shapes themselves; <c>spec/baton.md</c> §3's engine-run verify section records
+    /// what was measured and the rule as a whole, and points here rather than transcribing them
+    /// (#1971 review — one home per fact, so adding a shape here cannot leave the register stale).
     /// <para>
     /// Anchored on each message's own opening, never on a substring that could appear in real
-    /// diagnostic text. Dropping a line is only ever a display choice: the unfiltered stream is written
-    /// verbatim to <see cref="RawOutputFileName"/>.
+    /// diagnostic text — a genuine failure line QUOTING one of these messages (an assertion whose
+    /// expected value is the <c>CAPTURED (#1594)</c> text) is kept, which is the mis-cut direction
+    /// <c>VerifyRunnerTests</c> pins. Dropping a line is only ever a display choice: the unfiltered
+    /// stream is written to <see cref="RawOutputFileName"/>.
     /// </para>
     /// </summary>
     private static readonly Regex FixtureNoiseLine = new(
@@ -167,7 +191,7 @@ public static class VerifyRunner
     /// budget-injecting internal overload exists for.
     /// </summary>
     /// <param name="rawOutputDirectory">
-    /// #1971: where the whole unfiltered combined stream is written as
+    /// #1971: where the unfiltered combined stream is written as
     /// <see cref="RawOutputFileName"/> when the command FAILS — the execution's own artifacts
     /// directory in production, a temp directory in a test. Null writes nothing, which is what every
     /// caller that has no artifacts directory (the resolver's probes, the older tests) passes.
@@ -238,7 +262,7 @@ public static class VerifyRunner
         // and clamped, so a buildlock line that survived the pre-#1971 verbatim tail could silently
         // fall out of it -- and a NotRunReason that degrades to null because a DISPLAY rule evicted its
         // source line is a settlement changed by a formatting change.
-        var notRunReason = kind == VerifyFailedKind.BuildLockBusy ? ExtractBuildLockReason(text) : null;
+        var notRunReason = kind == VerifyFailedKind.BuildLockBusy ? ExtractBuildLockReason(text, failingMembers) : null;
         return new VerifyOutcome(false, failingMembers, tail, Kind: kind, NotRunReason: notRunReason);
     }
 
@@ -350,7 +374,7 @@ public static class VerifyRunner
     /// The whole result — promoted excerpt, raw-output pointer line and per-member tails together —
     /// stays bounded by <see cref="MaxTailChars"/>, never one-member-worth-of-bound times N members.
     /// Nothing dropped here is lost: <paramref name="rawOutputFileName"/> names the file holding the
-    /// unfiltered stream verbatim.
+    /// unfiltered stream, itself bounded by <see cref="MaxRawOutputChars"/>.
     /// </summary>
     /// <param name="rawOutputFileName">
     /// <see cref="RawOutputFileName"/> when it was written, null when no directory was supplied or the
@@ -420,14 +444,18 @@ public static class VerifyRunner
 
     /// <summary>
     /// Step 3 above. The promoted excerpt is computed against a CONSERVATIVELY clamped tail (one that
-    /// already gave up <see cref="MaxPromotedChars"/>), so the tail actually returned is never smaller
-    /// than the one the excerpt was chosen against — which is what guarantees every surviving failure
-    /// line lands in exactly one of the two halves rather than falling between them.
+    /// already gave up <see cref="MaxPromotedChars"/> AND the newline that joins the two halves), so
+    /// the tail actually returned is never smaller than the one the excerpt was chosen against — which
+    /// is what guarantees every surviving failure line lands in exactly one of the two halves rather
+    /// than falling between them. The <c>- 1</c> is that guarantee and not a rounding fudge (#1971
+    /// review): the returned tail's own budget is <c>budget - promoted.Length - 1</c> and
+    /// <c>promoted.Length</c> can equal <c>reserve</c> exactly, so conceding only <c>reserve</c> here
+    /// would leave the returned tail one character narrower than the one measured against.
     /// </summary>
     private static string BuildFilteredBody(List<string> blocks, int budget)
     {
         var reserve = Math.Min(MaxPromotedChars, budget / 2);
-        var conservativeTail = ClampBlocks(blocks, Math.Max(1, budget - reserve));
+        var conservativeTail = ClampBlocks(blocks, Math.Max(1, budget - reserve - 1));
         var promoted = PromoteFailureLines(blocks, conservativeTail, reserve);
         return promoted is null
             ? ClampBlocks(blocks, budget)
@@ -486,14 +514,16 @@ public static class VerifyRunner
 
         // Kept from the END backwards: the runner's own failure summary is the last thing it prints,
         // and a truncated excerpt that keeps the first N of a hundred failing tests is the least
-        // useful cut available.
+        // useful cut available. A line too long for what is left is SKIPPED, not a stop (#1971
+        // review): one 2000-char `Assert.Equal()` string-diff message must not suppress the short
+        // `Failed <test>` line above it, which is the one a reader wants most.
         var taken = new List<string>();
         var spent = header.Length;
         for (var i = missing.Count - 1; i >= 0; i--)
         {
             if (spent + missing[i].Length + 1 > reserve)
             {
-                break;
+                continue;
             }
 
             spent += missing[i].Length + 1;
@@ -505,12 +535,19 @@ public static class VerifyRunner
     }
 
     /// <summary>
-    /// #1971: the verify command's WHOLE combined stream, verbatim, in the execution's own artifacts
+    /// #1971: the verify command's combined stream, unfiltered, in the execution's own artifacts
     /// directory — what makes <see cref="BuildTail"/>'s filtering a display choice rather than a loss.
+    /// Bounded by <see cref="MaxRawOutputChars"/>, which is what "unfiltered" means here: every line is
+    /// kept as it was printed, and only a run that exceeds that cap loses its middle, to a marker that
+    /// says exactly how much.
     /// Returns the filename written, or null when there was no directory to write to or the write
     /// failed; a failure is reported on stderr and never thrown, mirroring
     /// <c>OutputMaterializer.TryCaptureFinalResponse</c>'s own rule that a diagnostic write must never
-    /// take down the settle path it runs on.
+    /// take down the settle path it runs on — the same four exception types, and the same inner guard
+    /// around the warning itself (#1971 review). The caller has already appended
+    /// <c>FlowEvent.VerifyStarted</c> and its own <c>try</c> catches none of these, so an escape here
+    /// is a room stuck at <c>VerifyStarted</c> with no terminal event: a diagnostic file failing to
+    /// write must cost the file, never the settle.
     /// </summary>
     private static async Task<string?> TryWriteRawOutputAsync(string? outputDirectory, string text)
     {
@@ -522,16 +559,50 @@ public static class VerifyRunner
         try
         {
             Directory.CreateDirectory(outputDirectory);
-            await File.WriteAllTextAsync(Path.Combine(outputDirectory, RawOutputFileName), text).ConfigureAwait(false);
+            await File.WriteAllTextAsync(Path.Combine(outputDirectory, RawOutputFileName), CapRawOutput(text))
+                .ConfigureAwait(false);
             return RawOutputFileName;
         }
-        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException
+            or ArgumentException or NotSupportedException)
         {
-            Console.Error.WriteLine(
-                $"Warning: #1971 could not write the verify command's raw output to '{RawOutputFileName}' "
-                + $"in '{outputDirectory}': {ex.Message}. The filtered tail is still recorded.");
+            try
+            {
+                Console.Error.WriteLine(
+                    $"Warning: #1971 could not write the verify command's raw output to '{RawOutputFileName}' "
+                    + $"in '{outputDirectory}': {ex.Message}. The filtered tail is still recorded.");
+            }
+            catch (IOException)
+            {
+                // The engine's own stderr is unwritable (a closed or broken pipe) —
+                // OutputMaterializer.TryCaptureFinalResponse's review-F6 guard, for the same reason:
+                // the warning above is best-effort by construction, and the one thing this path must
+                // not do is throw. Nothing further to do here.
+            }
+
             return null;
         }
+    }
+
+    /// <summary>
+    /// <see cref="MaxRawOutputChars"/> applied head-and-tail: the start of the run (which member ran,
+    /// what it was doing) and its end (the failure summary) are the two halves worth keeping, and what
+    /// went between them is named rather than silently dropped. Under the cap this returns the text
+    /// unchanged, which is every ordinary run.
+    /// </summary>
+    private static string CapRawOutput(string text)
+    {
+        if (text.Length <= MaxRawOutputChars)
+        {
+            return text;
+        }
+
+        var keep = MaxRawOutputChars - MaxRawOutputElisionReserve;
+        var head = keep / 2;
+        var tail = keep - head;
+        var marker = $"\n\n[verify] {text.Length - keep} characters elided here: this command's output "
+            + $"exceeded the {MaxRawOutputChars}-character cap on '{RawOutputFileName}'.\n\n";
+        return text[..head] + marker + text[^tail..];
     }
 
     /// <summary>
@@ -589,17 +660,36 @@ public static class VerifyRunner
     /// <c>FlowEvent.VerifyNotRun.Reason</c> journals verbatim. Null on a shape miss — never a
     /// fabricated holder. Reads the RAW captured stream rather than <see cref="BuildTail"/>'s output
     /// (#1971): see the call site for why a settlement must not depend on a display rule.
+    /// <para>
+    /// #1971 review: the BLOCKED members' own blocks are searched FIRST, in order, so a run with two
+    /// blocked members naming different holders reports the holder that actually blocked a named
+    /// member rather than whichever line the whole stream happened to print earliest. The whole-stream
+    /// scan stays as the fallback, and that is not belt-and-braces: buildlock's line can be printed
+    /// outside any member's block (before the first marker, or by the harness rather than the wrapped
+    /// member), and scoping alone would turn a reason that resolves today into null — the one
+    /// direction this parse must never move in, since a settlement's journaled text is what a
+    /// conductor reads to decide whether to retry.
+    /// </para>
     /// </summary>
-    private static string? ExtractBuildLockReason(string? output)
+    private static string? ExtractBuildLockReason(string? output, IReadOnlyList<string>? blockedMembers)
     {
         if (output is null)
         {
             return null;
         }
 
+        foreach (var block in SelectMemberBlocks(output, blockedMembers) ?? [])
+        {
+            if (BuildLockBlockedLine.Match(block) is { Success: true } scoped)
+            {
+                return Format(scoped);
+            }
+        }
+
         var match = BuildLockBlockedLine.Match(output);
-        return match.Success
-            ? $"build lock busy for {match.Groups["secs"].Value}s (holder: {match.Groups["holder"].Value})"
-            : null;
+        return match.Success ? Format(match) : null;
+
+        static string Format(Match match) =>
+            $"build lock busy for {match.Groups["secs"].Value}s (holder: {match.Groups["holder"].Value})";
     }
 }
