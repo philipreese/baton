@@ -1104,7 +1104,10 @@ shell's cwd. Observed twice, including in **the case the adapter will actually h
 `…\antigravity-cli\scratch` and, unable to find a file sitting in the launch directory, began a
 recursive search of the entire home folder. Workspace trust does not change the behaviour.
 **Bind the room's directory explicitly with `--add-dir`** — never rely on cwd. Any adapter that
-assumes cwd is silently pointing the worker somewhere else.
+assumes cwd is silently pointing the worker somewhere else. That includes the workspace a lane was
+*dispatched against* when it differs from the directory it runs in, which is every isolated-worktree
+role — `spec/baton.md` §9's #1987 paragraph is the canonical statement of that rule and why the fix
+is an `--add-dir` rather than a `permissions.allow` rule.
 
 **`agy` emits PowerShell on Windows**, not POSIX shell — its `run_command` steps carry PowerShell
 command lines. Pre-authorisation rules must match what it actually emits.

@@ -539,6 +539,25 @@ public sealed partial class AgyWorkerAdapter : IWorkerAdapter, IPermissionGrantT
             args.Add(invocation.WorkingDirectory);
         }
 
+        // #1987: the workspace the lane was DISPATCHED against, which for an isolated-worktree role
+        // is NOT the directory the block above just added. That one is the room-local worktree; the
+        // operator's `--workspace` survives only as WorktreeSourceRepository (RoleDispatch.ToBinding
+        // swaps a worktree spec in for it on every role this vendor's write-widening reaches), and
+        // until this nothing put it in the argv at all. Why an --add-dir rather than a rule in the
+        // seed settings below, what the measured failure was, and what this does and does not widen:
+        // spec/baton.md §9's #1987 paragraph, which is canonical -- not restated here.
+        //
+        // Unconditional, like the block above. A reads-withheld grant is handled by the denied-tools
+        // list (BuildDeniedTools withholds every ReadTool), not by which directories are bound, and
+        // nothing here reaches writes: AgyHookCheckCommand admits a write-family call only under
+        // BATON_WORKSPACE_DIR or the outbox, whichever directories the argv binds.
+        if (!string.IsNullOrWhiteSpace(invocation.WorktreeSourceRepository)
+            && !string.Equals(invocation.WorktreeSourceRepository, invocation.WorkingDirectory, StringComparison.OrdinalIgnoreCase))
+        {
+            args.Add("--add-dir");
+            args.Add(invocation.WorktreeSourceRepository);
+        }
+
         // #801: agy has no per-invocation flag equivalent to claude's --mcp-config (decision 0035),
         // so a real workspace directory carrying .agents/mcp_config.json has to exist on disk for
         // --add-dir to point at. Opt-in only, so a dispatch that does not ask for it keeps today's

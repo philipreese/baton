@@ -5140,6 +5140,28 @@ honest cost of not declining both vendors to keep their capability artificially 
 what closed that gap on the agy side, so the two vendors converge on the same grant shape rather than
 staying deliberately unequal.
 
+**On `agy`, the workspace a lane was dispatched against is bound readable on every role (#1987).**
+`AgyWorkerAdapter.Resolve` emits an `--add-dir` for `WorkerInvocation.WorktreeSourceRepository`
+alongside the one it already emits for `WorkingDirectory`, unconditionally. Both are needed because
+for an isolated-worktree role (`advise`, `review`, and every other role `RoleDispatch.ToBinding`
+write-widens on this vendor) they are different directories: `WorkingDirectory` is the room-local
+worktree, while the operator's `--workspace` survives only as `WorktreeSourceRepository`. `agy`
+ignores the process cwd (measured, `docs/vendor-capabilities.md`), so `--add-dir` membership is the
+only thing that makes a path answerable to `view_file`/`grep_search` at all — without it an `advise`
+lane whose brief named an absolute path under the dispatched workspace had every read auto-denied and
+exited 0 with no output. It is not the seed-`settings.json` route `AgyWorkerAdapter`'s #1084 write fix
+takes: reads are gated by path membership rather than per call (which is why reads inside the worktree
+already worked under the same `--mode accept-edits` that needed an explicit rule for a write), and the
+one prefix `docs/vendor-capabilities.md`'s "agy permission grammar" measured (`command`) matched the
+whole value literally, so a directory-wide `read_file(<dir>)` rule has no measured basis. Read-only
+intent is unaffected by the wider binding: `AgyHookCheckCommand` bounds every write-family call to
+`BATON_WORKSPACE_DIR` (the worktree) or the outbox regardless of which directories are bound, and on a
+`review`-shaped grant — which resolves to `--dangerously-skip-permissions` — that hook bound is the
+*only* thing keeping a write out of the operator's real tree. What does change is what a lane can see:
+the dispatched workspace is the operator's live tree, while the lane's own worktree is that repository
+at `HEAD`, so a lane can now read uncommitted content that differs from what it was provisioned
+against.
+
 **Polling is not progress: three rules on the run-command grant (#2002).** Measured 2026-09-06 across
 121 rooms modified that day: one agy arm-A lane spent 53.6 % of its 207 `run_command` steps on
 `Get-Process -Id <n>` liveness polls of builds it had backgrounded itself, and byte-identical repeated
