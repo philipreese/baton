@@ -533,6 +533,52 @@ public sealed class ClaudeUsageParser : IWorkerUsageParser
     }
 
     /// <summary>
+    /// #2002: claude's shell tool is <c>Bash</c> and its command sits at <c>input.command</c> — the
+    /// same key <c>HookCheckCommand.ReadShellCommandLine</c> reads out of the hook payload, arrived at
+    /// through the stream envelope instead.
+    /// </summary>
+    public IReadOnlyList<string> ShellCommandLines(string rawLine)
+    {
+        if (string.IsNullOrWhiteSpace(rawLine))
+        {
+            return [];
+        }
+
+        try
+        {
+            using var doc = JsonDocument.Parse(rawLine);
+            var root = doc.RootElement;
+            if (root.ValueKind != JsonValueKind.Object
+                || !root.TryGetProperty("type", out var typeProp) || typeProp.GetString() != "assistant"
+                || !root.TryGetProperty("message", out var message) || message.ValueKind != JsonValueKind.Object
+                || !message.TryGetProperty("content", out var content) || content.ValueKind != JsonValueKind.Array)
+            {
+                return [];
+            }
+
+            List<string> lines = [];
+            foreach (var block in content.EnumerateArray())
+            {
+                if (block.ValueKind == JsonValueKind.Object
+                    && block.TryGetProperty("type", out var blockType) && blockType.GetString() == "tool_use"
+                    && block.TryGetProperty("name", out var nameProp) && nameProp.GetString() == "Bash"
+                    && block.TryGetProperty("input", out var input) && input.ValueKind == JsonValueKind.Object
+                    && input.TryGetProperty("command", out var command) && command.ValueKind == JsonValueKind.String
+                    && command.GetString() is { Length: > 0 } commandLine)
+                {
+                    lines.Add(commandLine);
+                }
+            }
+
+            return lines;
+        }
+        catch (JsonException)
+        {
+            return [];
+        }
+    }
+
+    /// <summary>
     /// The one reader of claude's tool-result envelope, so the refusal count and the empty-result count
     /// cannot come to disagree about which blocks are results. <paramref name="matches"/> is applied to
     /// each block's text.
@@ -883,6 +929,30 @@ public sealed class AgyUsageParser : IWorkerUsageParser
         }
 
         return [name + " " + parameters.GetRawText()];
+    }
+
+    /// <summary>
+    /// #2002: agy's shell tool is <c>run_command</c> and its command sits at
+    /// <c>tool_info.parameters.CommandLine</c> — capitalised, which is agy's own spelling and is what
+    /// the measured arm-A stream carries. Read off the same terminal-step anchor as every other member
+    /// here, so a shape is counted exactly once per completed step rather than once per stream line
+    /// (agy's stream announces each step twice).
+    /// </summary>
+    public IReadOnlyList<string> ShellCommandLines(string rawLine)
+    {
+        if (!TryReadTerminalToolInfo(rawLine, out var toolInfo)
+            || !toolInfo.TryGetProperty("name", out var nameProp)
+            || nameProp.GetString() != "run_command"
+            || !toolInfo.TryGetProperty("parameters", out var parameters)
+            || parameters.ValueKind != JsonValueKind.Object
+            || !parameters.TryGetProperty("CommandLine", out var command)
+            || command.ValueKind != JsonValueKind.String
+            || command.GetString() is not { Length: > 0 } commandLine)
+        {
+            return [];
+        }
+
+        return [commandLine];
     }
 
     /// <summary>

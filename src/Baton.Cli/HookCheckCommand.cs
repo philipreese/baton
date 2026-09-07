@@ -284,6 +284,18 @@ public static class HookCheckCommand
         // closes and the segmentation rule that closes it (spec/baton.md §9).
         if (toolName == "Bash")
         {
+            // #2002 rule 1, and the reason it is here rather than only in the codex broker: claude and
+            // agy run their own shells, so a broker-only rule would never have reached the vendor the
+            // polling was measured on. Ahead of the pattern rungs below because it is unconditional —
+            // it engages on an unscoped grant (`implement`, `janitor`), which is precisely the
+            // population that backgrounds a build and then polls it. No ceiling clause: this path
+            // enforces no Baton per-command ceiling, and naming the broker's would be a false claim
+            // about what applies here (spec/baton.md §9).
+            if (Baton.Vendors.BackgroundingShapeDetector.Detect(shellCommandLine) is { } backgrounding)
+            {
+                return Refuse(stderr, Baton.Vendors.BackgroundingShapeDetector.Refusal(backgrounding, null));
+            }
+
             var shellPatternList = ShellPatternList.Parse(shellPatternsRaw, VendorTag);
 
             // Absent or another vendor's list reads OPPOSITE to how the denied-tool channel above
