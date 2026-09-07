@@ -445,12 +445,21 @@ public static class VerifyRunner
     /// <summary>
     /// Step 3 above. The promoted excerpt is computed against a CONSERVATIVELY clamped tail (one that
     /// already gave up <see cref="MaxPromotedChars"/> AND the newline that joins the two halves), so
-    /// the tail actually returned is never smaller than the one the excerpt was chosen against — which
-    /// is what guarantees every surviving failure line lands in exactly one of the two halves rather
-    /// than falling between them. The <c>- 1</c> is that guarantee and not a rounding fudge (#1971
-    /// review): the returned tail's own budget is <c>budget - promoted.Length - 1</c> and
-    /// <c>promoted.Length</c> can equal <c>reserve</c> exactly, so conceding only <c>reserve</c> here
-    /// would leave the returned tail one character narrower than the one measured against.
+    /// the tail actually returned is never smaller than the one the excerpt was chosen against. The
+    /// <c>- 1</c> is what makes that exact rather than off by one (#1971 review): the returned tail's
+    /// own budget is <c>budget - promoted.Length - 1</c> and <c>promoted.Length</c> can equal
+    /// <c>reserve</c>, so conceding only <c>reserve</c> here would leave the returned tail one
+    /// character narrower than the one measured against.
+    /// <para>
+    /// What that buys, stated no wider than it is: no surviving failure line SHORT ENOUGH FOR THE
+    /// RESERVE falls between the two halves — judged missing against a cut narrower than the one it is
+    /// then measured against. It is not "exactly one half" in general, in either direction. A line too
+    /// long for the reserve appears in neither (it is skipped by the promotion walk and sits above the
+    /// tail — bounded by <see cref="RawOutputFileName"/>, which holds it either way), and a line inside
+    /// the band between the two clamps can appear in both, since the returned tail is wider than
+    /// <c>alreadyShown</c> by however much of the reserve the excerpt did not spend. A duplicate costs
+    /// a reader nothing; a line falling through the gap costs them the failure.
+    /// </para>
     /// </summary>
     private static string BuildFilteredBody(List<string> blocks, int budget)
     {
