@@ -167,9 +167,9 @@ public sealed class RepeatedToolCallTests
 
     /// <summary>
     /// The room's own write invalidates its own read, through the ledger's eviction rather than through
-    /// the stat pair — a rewrite of the same length inside the filesystem's timestamp granularity is
-    /// invisible to that pair, and this arm is written to land exactly there: same byte count, same
-    /// tick, and it must still re-read.
+    /// the stat pair — see <c>CodexDynamicToolPolicy.WriteText</c> for why that pair cannot see this
+    /// case. The arm is written to land exactly there: same byte count, same tick, and it must still
+    /// re-read.
     /// </summary>
     [Fact]
     public async Task The_rooms_own_write_makes_the_next_read_execute()

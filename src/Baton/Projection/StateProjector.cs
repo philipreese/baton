@@ -670,13 +670,13 @@ public static class StateProjector
     }
 
     /// <summary>
-    /// #2002 rule 3. "tool-step cap exceeded (272 tool steps measured)" says how much was spent and
-    /// nothing about what on, so a conductor reading it cannot tell a runaway poll loop from a lane
-    /// that legitimately needed 272 steps — the two want opposite resolutions. The shape clause is
-    /// appended only when one normalised command line held more than half the shell commands, which is
-    /// the condition <c>Mutation.TokenBudgetMonitor.SnapshotDominantCommandShape</c> owns and this does
-    /// not re-decide. Absent on every arrest before #2002 and on every vendor whose stream carries no
-    /// command lines, and the sentence still reads correctly without it.
+    /// #2002 rule 3 (spec/baton.md §9). "tool-step cap exceeded (272 tool steps measured)" says how
+    /// much was spent and nothing about what on, so a conductor reading it cannot tell a runaway poll
+    /// loop from a lane that legitimately needed 272 steps — the two want opposite resolutions. The
+    /// dominance condition is <c>Mutation.TokenBudgetMonitor.SnapshotDominantCommandShape</c>'s and is
+    /// not re-decided here: this appends the clause when that reading is present and omits it when it
+    /// is not. Absent on every arrest before #2002 and on every vendor whose stream carries no command
+    /// lines, and the sentence still reads correctly without it.
     /// </summary>
     private static string DescribeToolStepCapArrest(FlowEvent.ExecutionArrested arrested)
     {
