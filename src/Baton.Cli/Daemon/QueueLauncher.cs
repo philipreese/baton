@@ -210,13 +210,10 @@ public static class QueueLauncher
     /// register says why that room in particular cannot be skipped.
     /// </para>
     /// <para>
-    /// <b>A HELD ledger is retried; a corrupt or missing one is not</b> (#1951) — spec/baton.md §13's
-    /// post-launch bullet has the argument and the bound. Mechanically: <see cref="TryProjectRoomAsync"/>
-    /// reports WHY it could not project, this loop re-reads only while that answer is
-    /// <see cref="RoomProjectionFailure.Held"/>, and whichever answer it ends on is appended to the
-    /// sentinel's <c>error</c> — so a bare sentinel says which of the two produced it rather than
-    /// leaving a reader to guess. The retry is a re-READ inside one fault record, not the item-level
-    /// retry spec/baton.md §13 rules out.
+    /// <b>A HELD file is retried; a corrupt or missing one is not</b> (#1951) — spec/baton.md §13's
+    /// post-launch bullet has the argument, <see cref="HeldLedgerRetryDelay"/> the bound. Mechanically:
+    /// <see cref="TryProjectRoomAsync"/> reports WHY it could not project, and this loop re-reads only
+    /// while that answer is <see cref="RoomProjectionFailure.Held"/>.
     /// </para>
     /// </remarks>
     /// <param name="tag">The queued item's tag.</param>
@@ -251,12 +248,12 @@ public static class QueueLauncher
             {
                 await Task.Delay(delay).ConfigureAwait(false);
 
-                // The guard above is no longer adjacent to the write, and this loop waits on a holder
-                // that is USUALLY the room's own live engine (FlowJournalHeldException's message names
-                // it) — which records this room's settle and only then lets the ledger go. Re-reading
-                // per attempt is what keeps a verdict landing mid-backoff instead of overwriting it
-                // with a Failed one, spec/baton.md §13's never-replace rule at a window this retry
-                // opened.
+                // The backoff put seconds between the guard above and the write below, so a verdict
+                // landing mid-wait would be overwritten by a Failed one — spec/baton.md §13's
+                // never-replace rule at a window this retry opened. This read is the EARLY-OUT half of
+                // closing it: it abandons the remaining attempts as soon as the room settles. The half
+                // that closes it is the read immediately before the write, which covers the iteration
+                // that exits the loop as well.
                 if (await TerminalSentinelWriter.TryReadAsync(roomDirectory, CancellationToken.None)
                         .ConfigureAwait(false) is not null)
                 {
@@ -286,6 +283,15 @@ public static class QueueLauncher
                 Error = error,
             };
 
+            // The last read before the replace, because TerminalSentinelWriter.WriteAsync replaces
+            // unconditionally: without it the one iteration with no guard after it is the iteration in
+            // which the holder released — the very moment a settle is most likely to land.
+            if (await TerminalSentinelWriter.TryReadAsync(roomDirectory, CancellationToken.None)
+                    .ConfigureAwait(false) is not null)
+            {
+                return;
+            }
+
             await TerminalSentinelWriter.WriteAsync(roomDirectory, view, CancellationToken.None).ConfigureAwait(false);
         }
         catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
@@ -304,10 +310,17 @@ public static class QueueLauncher
         /// <summary>It projected.</summary>
         None,
 
-        /// <summary>No ledger yet, or no bound snapshot — nothing to project, and nothing arriving.</summary>
+        /// <summary>
+        /// A file this projection needs is not there — nothing to project, and nothing arriving. Which
+        /// one is missing is in the reason, never folded into a disjunction: a room with no ledger never
+        /// started, where a room with a ledger and no snapshot ran and lost its binding.
+        /// </summary>
         Absent,
 
-        /// <summary>Another process holds <c>flow.jsonl</c> with a conflicting share; a release makes this projectable.</summary>
+        /// <summary>
+        /// Another process holds <c>flow.jsonl</c> or <c>snapshot.json</c> with a conflicting share; a
+        /// release makes this projectable.
+        /// </summary>
         Held,
 
         /// <summary>The ledger or the snapshot is there and could not be read or parsed.</summary>
@@ -317,14 +330,27 @@ public static class QueueLauncher
     /// <summary>One projection attempt: the view, or why there is none in the words the sentinel carries.</summary>
     private readonly record struct RoomProjection(WorkflowStatusView? View, RoomProjectionFailure Failure, string? Reason);
 
-    /// <summary>Total projection attempts a held ledger gets, including the first.</summary>
+    /// <summary>
+    /// Total projection attempts a held file gets, including the first. Sized with — and only with —
+    /// <see cref="HeldLedgerRetryDelay"/>, whose remark carries the whole derivation.
+    /// </summary>
     private const int HeldLedgerAttempts = 5;
 
     /// <summary>
-    /// The pause between those attempts. Four of them bound the wait at ~1.2s, which is what a
-    /// transient append by a sibling command costs; a live <c>baton run</c> engine holding the ledger
-    /// for its whole run is not something any bound here can outwait, and degrading is the answer for
-    /// that one — the item resolving is what matters, and it resolves either way.
+    /// The pause between those attempts; four of them bound the wait at ~1.2s. This is the one home for
+    /// that bound's derivation — spec/baton.md §13's post-launch bullet points here rather than
+    /// restating it.
+    /// <para>
+    /// <b>Sized against the population that can actually reach this arm</b>, which spec/baton.md §13
+    /// names and <see cref="FlowJournalHeldException"/>'s doc argues: not a sibling <c>baton</c> command
+    /// and not this room's own engine — both of those admit a reader — but a holder outside Baton that
+    /// shares nothing. Nothing here measures how long one of those keeps a file, and no bound would be
+    /// safe if it did, so this one is <b>defensive rather than fitted</b>: long enough to ride out a
+    /// hand-off that is already ending, short enough that a room nobody releases still resolves
+    /// promptly. Degrading is correct for the long holder — the sentinel names the hold and the item
+    /// resolves either way. Change this number if a real hold is ever measured; do not change it to
+    /// chase one that has not been.
+    /// </para>
     /// </summary>
     private static readonly TimeSpan HeldLedgerRetryDelay = TimeSpan.FromMilliseconds(300);
 
@@ -345,11 +371,11 @@ public static class QueueLauncher
     /// </para>
     /// <para>
     /// <b>A sharing violation is <see cref="RoomProjectionFailure.Held"/>, not
-    /// <see cref="RoomProjectionFailure.Unreadable"/></b> (#1951). <see cref="FlowJournalHeldException"/>
-    /// derives from <see cref="BatonFlowException"/>, so the single catch below used to fold a ledger
-    /// somebody is mid-append on into the same answer as a truncated one — and the caller, seeing one
-    /// answer, could neither wait out the first nor say which had happened. The narrow arm comes first
-    /// for that reason; the ORDER is the fix.
+    /// <see cref="RoomProjectionFailure.Unreadable"/></b> (#1951), on <em>either</em> file this reads.
+    /// <see cref="FlowJournalHeldException"/> derives from <see cref="BatonFlowException"/>, so the
+    /// single catch below used to fold a held file into the same answer as a truncated one — and the
+    /// caller, seeing one answer, could neither wait out the first nor say which had happened. The
+    /// narrow arms come first for that reason; the ORDER is the fix.
     /// </para>
     /// <para>
     /// <b><see cref="WorkflowStatusStepView.Liveness"/> is dropped from every step</b>, while each
@@ -360,12 +386,22 @@ public static class QueueLauncher
     private static async Task<RoomProjection> TryProjectRoomAsync(string roomDirectory)
     {
         var snapshotPath = Path.Combine(roomDirectory, BatonPaths.SnapshotFileName);
-        if (!RoomLedgerProbe.HasLedger(roomDirectory) || !File.Exists(snapshotPath))
+        // Two ifs rather than one disjunction: both facts are known here, and an operator reading the
+        // degraded sentinel cannot otherwise tell a room that never started from one whose binding went
+        // missing. A zero-length flow.jsonl is the first of the two, not a third state — see
+        // RoomLedgerProbe for why the writer leaves one behind on a refusal.
+        if (!RoomLedgerProbe.HasLedger(roomDirectory))
+        {
+            return new RoomProjection(
+                null, RoomProjectionFailure.Absent, "the room carries no ledger of its own");
+        }
+
+        if (!File.Exists(snapshotPath))
         {
             return new RoomProjection(
                 null,
                 RoomProjectionFailure.Absent,
-                "the room carries no ledger of its own, or no bound snapshot to project it against");
+                "the room has a ledger but no bound snapshot to project it against");
         }
 
         try
@@ -401,6 +437,28 @@ public static class QueueLauncher
                 + $"record because its ledger is held: {ex.Message}");
             return new RoomProjection(
                 null, RoomProjectionFailure.Held, $"the room's ledger is held open by another process: {ex.Message}");
+        }
+        catch (IOException ex) when (FileHolderProbe.IsSharingViolation(ex))
+        {
+            // The same condition on the OTHER file this reads: SnapshotBinder translates only a missing
+            // file, so a sharing violation on snapshot.json arrives raw and would otherwise be reported
+            // as unreadable and degraded on sight. One holder class, one answer, one remedy.
+            Console.Error.WriteLine(
+                $"QueueLauncher: '{roomDirectory}' could not be projected for its post-launch fault "
+                + $"record because a file it reads is held: {ex.Message}");
+            return new RoomProjection(
+                null,
+                RoomProjectionFailure.Held,
+                $"the room's snapshot is held open by another process: {ex.Message}");
+        }
+        catch (Exception ex) when (ex is FileNotFoundException or DirectoryNotFoundException)
+        {
+            // A ledger that vanishes between the HasLedger probe above and FlowEventLogReader's own
+            // File.Exists — or between that check and its open. Missing is not corrupt, and saying
+            // "could not be read" of a file that is simply gone sends an operator looking for damage.
+            // A race with no test: the window is microseconds wide and not steerable from outside.
+            return new RoomProjection(
+                null, RoomProjectionFailure.Absent, $"the room's ledger is no longer there: {ex.Message}");
         }
         catch (Exception ex) when (ex is BatonFlowException or IOException or UnauthorizedAccessException)
         {
