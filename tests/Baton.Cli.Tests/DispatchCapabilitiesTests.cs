@@ -42,7 +42,11 @@ public class DispatchCapabilitiesTests
         }
 
         // agy models (illustrative only — agy has no alias catalog to source from)
-        Assert.Contains("gemini-3.6-flash-high", text);
+        // #1863: the 3.6 Flash family left every pin position on 2026-09-06, so the illustration
+        // names the family the tier now uses.
+        Assert.Contains("gemini-3.8-flash-high", text);
+        Assert.DoesNotContain("gemini-3.6-flash", text);
+        Assert.DoesNotContain("gemini-3.1-pro", text);
 
         // Role timebox defaults — the exact formatted line per role, so two roles sharing a timebox
         // (25m) can't let one role's missing/mismatched line hide behind another's.
