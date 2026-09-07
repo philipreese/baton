@@ -128,17 +128,77 @@ public sealed class CodexUsageParserTests
         Assert.Equal(1, usage.Turns);
     }
 
+    /// <summary>
+    /// #2020: the two reads share per-turn semantics and are keyed on DIFFERENT lines — incremental on
+    /// the per-round-trip <c>turn.usage</c>, final on the terminal <c>turn.completed</c>. Both
+    /// polarities are asserted rather than only the accepted line, because what the rejected line
+    /// would cost is invisible from the accepted one:
+    /// <see cref="CodexUsageParser.TryParseIncrementalUsage"/> states it.
+    /// </summary>
     [Fact]
-    public void Incremental_and_final_parsing_use_the_same_per_turn_semantics()
+    public void Incremental_and_final_parsing_share_per_turn_semantics_on_their_own_line_types()
     {
         var parser = new CodexUsageParser();
-        const string line = """
+        const string usage = """
+            {"type":"turn.usage","usage":{"input_tokens":19579,"cached_input_tokens":11008,"output_tokens":9,"reasoning_output_tokens":0}}
+            """;
+        const string completed = """
             {"type":"turn.completed","usage":{"input_tokens":19579,"cached_input_tokens":11008,"output_tokens":9,"reasoning_output_tokens":0}}
             """;
 
-        Assert.True(parser.TryParseFinalUsage(line, out var final));
-        Assert.True(parser.TryParseIncrementalUsage(line, out var incremental));
+        Assert.True(parser.TryParseIncrementalUsage(usage, out var incremental));
+        Assert.True(parser.TryParseFinalUsage(completed, out var final));
         Assert.Equal(final, incremental);
+
+        Assert.False(parser.TryParseIncrementalUsage(completed, out var notIncremental));
+        Assert.Null(notIncremental);
+        Assert.False(parser.TryParseFinalUsage(usage, out var notFinal));
+        Assert.Null(notFinal);
+    }
+
+    /// <summary>
+    /// #2020 review LOW: the fold carries every dimension it does not sum. <see cref="WorkerUsage"/>
+    /// has thirteen fields and codex's own line parse sets six, so a fold driven from a codex stream
+    /// cannot observe the other seven — which is exactly why the positional reconstruction this
+    /// replaced could drop them unnoticed. Driving <c>Combine</c> directly with a reading that carries
+    /// one of the seven is the arm that discriminates: red on the six-argument constructor, green on
+    /// <c>with</c>.
+    /// </summary>
+    [Fact]
+    public void Folding_two_turns_carries_the_dimensions_it_does_not_sum()
+    {
+        var first = new WorkerUsage(
+            TokensIn: 10, TokensOut: 2, Turns: 1, CacheReadTokens: 5, CacheCreationTokens: 1,
+            ThinkingTokens: 3)
+        {
+            MessageId = "msg-1",
+            ContextLevelTokens = 900,
+            CacheReadLevelTokens = 800,
+            BilledTokens = 12,
+            BilledIsFloor = true,
+            IsSubAgentTurn = true,
+            ModelsObserved = ["gpt-5.6-luna"],
+        };
+        var second = new WorkerUsage(
+            TokensIn: 20, TokensOut: 4, Turns: 1, CacheReadTokens: 6, CacheCreationTokens: 2,
+            ThinkingTokens: 7);
+
+        var folded = CodexUsageParser.Combine(first, second);
+
+        Assert.Equal(30, folded.TokensIn);
+        Assert.Equal(6, folded.TokensOut);
+        Assert.Equal(2, folded.Turns);
+        Assert.Equal(11, folded.CacheReadTokens);
+        Assert.Equal(3, folded.CacheCreationTokens);
+        Assert.Equal(10, folded.ThinkingTokens);
+
+        Assert.Equal("msg-1", folded.MessageId);
+        Assert.Equal(900, folded.ContextLevelTokens);
+        Assert.Equal(800, folded.CacheReadLevelTokens);
+        Assert.Equal(12, folded.BilledTokens);
+        Assert.True(folded.BilledIsFloor);
+        Assert.True(folded.IsSubAgentTurn);
+        Assert.Equal(["gpt-5.6-luna"], folded.ModelsObserved);
     }
 
     [Fact]

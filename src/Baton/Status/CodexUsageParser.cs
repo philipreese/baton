@@ -4,7 +4,8 @@ using Baton.Domain;
 namespace Baton.Status;
 
 /// <summary>
-/// Parses the per-turn usage on Codex CLI JSONL <c>turn.completed</c> events (#1853). Codex reports
+/// Parses the usage on Codex CLI JSONL events — one <c>turn.usage</c> per model round-trip (#2020)
+/// and the terminal <c>turn.completed</c> (#1853). Codex reports
 /// <c>input_tokens</c> inclusive of <c>cached_input_tokens</c>; Baton's additive shape keeps those
 /// dimensions disjoint (as agy's input already is), so <see cref="WorkerUsage.TokensIn"/> is the non-cached remainder.
 /// <para>
@@ -13,8 +14,8 @@ namespace Baton.Status;
 /// vendor stream was measured to carry no <c>model</c> key, whereas codex never reaches Baton as a
 /// vendor stream at all. Both lifecycle events on this vendor's stdout are synthesized by
 /// <c>Baton.Vendors.CodexAppServerBroker</c> — <c>thread.started</c> carries a thread id and nothing
-/// else, <c>turn.completed</c> a usage object and nothing else — so a parser reading either would be
-/// reading Baton's own two keys back. The emitter is in-tree, which makes this deterministic rather
+/// else, <c>turn.usage</c> and <c>turn.completed</c> a usage object and nothing else — so a parser
+/// reading any of them would be reading Baton's own keys back. The emitter is in-tree, which makes this deterministic rather
 /// than a sample; the captured stream agrees (<c>tests/Baton.Cli.Tests/Fixtures/codex-live-stream.jsonl</c>,
 /// 261 lines, no <c>model</c> key on any of them), and neither does the recorded app-server event
 /// grammar name one — the probe document is the one <c>WorkerBindingConfigEntry.EffortResolved</c>
@@ -29,39 +30,83 @@ namespace Baton.Status;
 public sealed class CodexUsageParser : IWorkerUsageParser
 {
     /// <summary>
-    /// Sums every completed turn in one execution's complete captured stream (#2020).
-    /// State belongs to this read, never the shared parser instance; absent dimensions stay absent.
+    /// #2020: the per-model-round-trip usage line <c>Baton.Vendors.CodexAppServerBroker</c> writes on
+    /// every <c>thread/tokenUsage/updated</c> notification. Named here rather than in the broker
+    /// because this class is the only reader of it and the broker its only writer — the two would
+    /// otherwise hold two copies of one string.
+    /// </summary>
+    public const string TurnUsageEventType = "turn.usage";
+
+    private const string TerminalEventType = "turn.completed";
+
+    /// <summary>
+    /// Sums one execution's usage over its complete captured stream (#2020), current and rolled
+    /// segments together. State belongs to this read, never the shared parser instance; absent
+    /// dimensions stay absent.
+    /// <para>
+    /// The <see cref="TurnUsageEventType"/> lines are the population, one per model round-trip. A
+    /// stream captured BEFORE that emitter landed carries none of them and its whole usage report is
+    /// the terminal <c>turn.completed</c>, so it falls back to folding those — which recovers exactly
+    /// what such a stream ever knew (the final round-trip) rather than regressing it to absent. The
+    /// two populations are never mixed: a current stream's terminal line restates a round-trip the
+    /// <c>turn.usage</c> lines already carry, and folding both would double-count it.
+    /// </para>
     /// </summary>
     public WorkerUsage? ParseExecutionUsage(IEnumerable<string> lines)
     {
-        WorkerUsage? total = null;
+        WorkerUsage? perRoundTrip = null;
+        WorkerUsage? terminal = null;
         foreach (var line in lines)
         {
-            if (!TryParse(line, out var turn) || turn is null)
+            if (TryParse(line, TurnUsageEventType, out var roundTrip) && roundTrip is not null)
             {
-                continue;
+                perRoundTrip = Combine(perRoundTrip, roundTrip);
             }
-
-            total = total is null ? turn : new WorkerUsage(
-                TokensIn: Sum(total.TokensIn, turn.TokensIn),
-                TokensOut: Sum(total.TokensOut, turn.TokensOut),
-                Turns: total.Turns + turn.Turns,
-                CacheReadTokens: Sum(total.CacheReadTokens, turn.CacheReadTokens),
-                CacheCreationTokens: Sum(total.CacheCreationTokens, turn.CacheCreationTokens),
-                ThinkingTokens: Sum(total.ThinkingTokens, turn.ThinkingTokens));
+            else if (TryParse(line, TerminalEventType, out var completed) && completed is not null)
+            {
+                terminal = Combine(terminal, completed);
+            }
         }
 
-        return total;
+        return perRoundTrip ?? terminal;
     }
+
+    /// <summary>
+    /// #2020 review LOW: one fold step, built with <c>with</c> so a dimension added to
+    /// <see cref="WorkerUsage"/> is carried rather than silently dropped. The positional constructor
+    /// this replaced named six of thirteen fields, so a two-or-more-turn read dropped the other seven
+    /// while a one-turn read (which returns its single reading untouched) preserved them — a
+    /// difference no caller could see coming. Only the summable dimensions are folded; every other
+    /// field keeps <paramref name="left"/>'s value, which is the first reading's.
+    /// </summary>
+    internal static WorkerUsage Combine(WorkerUsage? left, WorkerUsage right) =>
+        left is null ? right : left with
+        {
+            TokensIn = Sum(left.TokensIn, right.TokensIn),
+            TokensOut = Sum(left.TokensOut, right.TokensOut),
+            Turns = left.Turns + right.Turns,
+            CacheReadTokens = Sum(left.CacheReadTokens, right.CacheReadTokens),
+            CacheCreationTokens = Sum(left.CacheCreationTokens, right.CacheCreationTokens),
+            ThinkingTokens = Sum(left.ThinkingTokens, right.ThinkingTokens),
+        };
 
     private static long? Sum(long? left, long? right) =>
         left is null && right is null ? null : (left ?? 0) + (right ?? 0);
 
     public bool TryParseFinalUsage(string rawLine, out WorkerUsage? usage) =>
-        TryParse(rawLine, out usage);
+        TryParse(rawLine, TerminalEventType, out usage);
 
+    /// <summary>
+    /// #2020: the per-round-trip line ONLY. The terminal <c>turn.completed</c> restates the final
+    /// round-trip, so admitting it here would count that round-trip's output twice in
+    /// <c>Mutation.TokenBudgetMonitor</c>'s running Σ — the monitor sums the output side across
+    /// matching lines. The cost is that a stream captured before the emitter landed reports no live
+    /// figure at all; that is deliberate, and the same withholding this parser applies to an
+    /// incomplete capture rather than a regression, because the figure such a stream could offer is
+    /// one round-trip of a lane presented as the whole of it.
+    /// </summary>
     public bool TryParseIncrementalUsage(string rawLine, out WorkerUsage? usage) =>
-        TryParse(rawLine, out usage);
+        TryParse(rawLine, TurnUsageEventType, out usage);
 
     public string? TryParseToolName(string rawLine)
     {
@@ -246,7 +291,7 @@ public sealed class CodexUsageParser : IWorkerUsageParser
         }
     }
 
-    private static bool TryParse(string rawLine, out WorkerUsage? usage)
+    private static bool TryParse(string rawLine, string expectedType, out WorkerUsage? usage)
     {
         usage = null;
         if (string.IsNullOrWhiteSpace(rawLine))
@@ -260,7 +305,7 @@ public sealed class CodexUsageParser : IWorkerUsageParser
             var root = document.RootElement;
             if (root.ValueKind != JsonValueKind.Object
                 || !root.TryGetProperty("type", out var type)
-                || type.GetString() != "turn.completed"
+                || type.GetString() != expectedType
                 || !root.TryGetProperty("usage", out var reported)
                 || reported.ValueKind != JsonValueKind.Object)
             {

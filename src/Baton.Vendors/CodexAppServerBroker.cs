@@ -10,6 +10,31 @@ namespace Baton.Vendors;
 /// Bidirectional bridge between Baton's one-process JSONL dispatch seam and Codex app-server.
 /// App-server's native mutation/tool surfaces are disabled; server-initiated dynamic tool calls are
 /// answered only through <see cref="CodexDynamicToolPolicy"/>.
+/// <para>
+/// <b>Usage is emitted per model round-trip, not once per turn (#2020 review HIGH).</b> app-server
+/// sends <c>thread/tokenUsage/updated</c> after every round-trip, carrying <c>tokenUsage.last</c>
+/// (that round-trip) and <c>tokenUsage.total</c> (cumulative). This broker latched <c>last</c> into a
+/// local and emitted it once at turn end, so a 110-step lane's captured stream reported the FINAL
+/// round-trip's figures as the execution's usage and every earlier one was discarded before a byte
+/// was written — no fold downstream could recover them. It now writes one
+/// <c>{"type":"turn.usage"}</c> line per notification carrying <c>last</c>, and
+/// <see cref="CodexUsageParser.ParseExecutionUsage"/> sums them.
+/// </para>
+/// <para>
+/// <b>Why <c>last</c> summed rather than <c>total</c> read off the final notification</b>, which is the
+/// simpler shape: <c>total</c> is an unmeasured key here. In-tree it appears only in this class's own
+/// test transcript, where a single-update fixture makes it trivially equal to <c>last</c> — consistent
+/// with a cumulative reading, not evidence of one — and no recorded app-server event grammar states
+/// whether it restarts across a <c>thread/resume</c>. Summing <c>last</c> asserts no new vendor fact
+/// beyond the one this class already relies on. Reading <c>total</c> needs a probe that records the
+/// payload first (spec/baton.md §7's ledger row is where such a measurement lands).
+/// </para>
+/// <para>
+/// The terminal <c>turn.completed</c> keeps carrying the final round-trip's usage unchanged: it is
+/// what <c>Outcomes.OutcomeClassifier</c>'s last-line substantial-work evidence reads, and giving it a
+/// second copy of a figure the <c>turn.usage</c> lines already carry would double-count it in any Σ
+/// over the stream.
+/// </para>
 /// </summary>
 public static class CodexAppServerBroker
 {
@@ -199,6 +224,16 @@ public static class CodexAppServerBroker
             {
                 case "thread/tokenUsage/updated":
                     lastUsage = message["params"]?["tokenUsage"]?["last"]?.AsObject().DeepClone().AsObject();
+                    // #2020: written as it arrives, so an execution the host arrests mid-turn still
+                    // carries every round-trip it had already paid for. See the class remark.
+                    if (lastUsage is not null)
+                    {
+                        await EmitAsync(batonOutput, new JsonObject
+                        {
+                            ["type"] = CodexUsageParser.TurnUsageEventType,
+                            ["usage"] = ToBatonUsage(lastUsage),
+                        }).ConfigureAwait(false);
+                    }
                     break;
                 case "item/completed":
                     await EmitCompletedItemAsync(message, batonOutput).ConfigureAwait(false);
@@ -442,14 +477,7 @@ public static class CodexAppServerBroker
             var terminal = new JsonObject { ["type"] = "turn.completed" };
             if (usage is not null)
             {
-                terminal["usage"] = new JsonObject
-                {
-                    ["input_tokens"] = usage["inputTokens"]?.DeepClone(),
-                    ["cached_input_tokens"] = usage["cachedInputTokens"]?.DeepClone(),
-                    ["cache_write_input_tokens"] = usage["cacheWriteInputTokens"]?.DeepClone(),
-                    ["output_tokens"] = usage["outputTokens"]?.DeepClone(),
-                    ["reasoning_output_tokens"] = usage["reasoningOutputTokens"]?.DeepClone(),
-                };
+                terminal["usage"] = ToBatonUsage(usage);
             }
             await EmitAsync(output, terminal).ConfigureAwait(false);
             return 0;
@@ -465,6 +493,21 @@ public static class CodexAppServerBroker
         }).ConfigureAwait(false);
         return 1;
     }
+
+    /// <summary>
+    /// One app-server <c>tokenUsage</c> object in the snake_case shape
+    /// <see cref="CodexUsageParser"/> reads. Shared by the per-round-trip <c>turn.usage</c> line and
+    /// the terminal <c>turn.completed</c> so the two cannot drift into naming the same dimensions
+    /// differently.
+    /// </summary>
+    private static JsonObject ToBatonUsage(JsonObject usage) => new()
+    {
+        ["input_tokens"] = usage["inputTokens"]?.DeepClone(),
+        ["cached_input_tokens"] = usage["cachedInputTokens"]?.DeepClone(),
+        ["cache_write_input_tokens"] = usage["cacheWriteInputTokens"]?.DeepClone(),
+        ["output_tokens"] = usage["outputTokens"]?.DeepClone(),
+        ["reasoning_output_tokens"] = usage["reasoningOutputTokens"]?.DeepClone(),
+    };
 
     private static async Task<JsonObject> ReadResponseAsync(
         TextReader reader, int expectedId, TextWriter error, CancellationToken cancellationToken)
