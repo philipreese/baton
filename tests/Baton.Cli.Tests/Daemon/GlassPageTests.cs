@@ -34,15 +34,6 @@ public sealed class GlassPageTests
             GlassPage.Html().ReplaceLineEndings());
     }
 
-    /// <summary>
-    /// The page as a browser parses it: HTML comments removed, so the header comment's quoted copy
-    /// of the marker and the script's `querySelector` string stop counting as markup. #2053's whole
-    /// defect lived in that difference -- assertions over the raw bytes found the documentation and
-    /// certified an injection that had not happened.
-    /// </summary>
-    private static string WithoutComments(string html) =>
-        Regex.Replace(html, "<!--.*?-->", string.Empty, RegexOptions.Singleline);
-
     [Fact]
     public void The_served_page_carries_exactly_one_marker_element_before_title()
     {
@@ -50,8 +41,8 @@ public sealed class GlassPageTests
         // DAEMON_SERVED was false and the board never rendered. The subject here is therefore
         // GlassPage.Html() -- the actual embedded resource the `/` handler writes -- not a fixture,
         // and not the disk file, because a fixture lacking the page's own two mentions of the name
-        // cannot reproduce the failure at all.
-        var served = WithoutComments(GlassPage.Html());
+        // cannot reproduce the failure at all. Markup, not bytes: GlassMarkup owns why.
+        var served = GlassMarkup.Of(GlassPage.Html());
 
         Assert.Single(Regex.Matches(served, Regex.Escape(GlassPage.SourceMetaTag)));
         Assert.True(
@@ -64,7 +55,7 @@ public sealed class GlassPageTests
     public void Injection_puts_the_marker_in_the_head_and_never_twice()
     {
         var injected = GlassPage.Inject(RepoGlassHtml());
-        var markup = WithoutComments(injected);
+        var markup = GlassMarkup.Of(injected);
 
         Assert.Single(Regex.Matches(markup, Regex.Escape(GlassPage.SourceMetaTag)));
         Assert.True(

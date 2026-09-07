@@ -140,7 +140,13 @@ public sealed class GlassHttpServiceTests : IDisposable
             // not against a substring that a second, drifting copy under src/ would also satisfy.
             var repoPage = await File.ReadAllTextAsync(RepoGlassHtmlPath(), cts.Token);
             Assert.Equal(GlassPage.Inject(repoPage).ReplaceLineEndings(), body.ReplaceLineEndings());
-            Assert.Contains(GlassPage.SourceMetaTag, body, StringComparison.Ordinal);
+
+            // #2053 -- over the MARKUP, not the bytes: `Assert.Contains(SourceMetaTag, body)` passed
+            // on the shipped bug, because the header comment quotes the tag verbatim. This is the
+            // assertion closest to the issue's own `curl /` measurement, so it is the one that had to
+            // start discriminating; GlassMarkup owns the reason.
+            Assert.Single(
+                Regex.Matches(GlassMarkup.Of(body), Regex.Escape(GlassPage.SourceMetaTag)));
         }
         finally
         {

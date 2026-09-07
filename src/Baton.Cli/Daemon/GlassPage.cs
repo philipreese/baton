@@ -29,9 +29,14 @@ internal static class GlassPage
     private static readonly Regex HtmlComment =
         new("<!--.*?-->", RegexOptions.Singleline | RegexOptions.CultureInvariant);
 
+    // Case-SENSITIVE on purpose: the page's own `querySelector('meta[name="baton-glass-source"]...')`
+    // matches that attribute value case-sensitively, so a differently-cased meta would satisfy a
+    // case-insensitive guard here while the page ignored it -- suppressing the injection and leaving
+    // the board blank, which is #2053's failure again by another route. Erring the other way is
+    // harmless: a second meta the selector still matches.
     private static readonly Regex ExistingSourceMeta = new(
         $@"<meta\s[^>]*name\s*=\s*""{SourceMetaName}""",
-        RegexOptions.IgnoreCase | RegexOptions.CultureInvariant);
+        RegexOptions.CultureInvariant);
 
     private static string? _cached;
 
