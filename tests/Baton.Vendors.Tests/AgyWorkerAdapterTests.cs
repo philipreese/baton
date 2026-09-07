@@ -2512,6 +2512,20 @@ public class AgyWorkerAdapterTests
         Assert.Equal(project, addDirValues[2]);
     }
 
+    /// <summary>
+    /// The disclosure half of #1987: <c>DispatchCommand</c>'s pre-run workspace line asks the bound
+    /// adapter whether the dispatched workspace is readable rather than naming vendors, so this
+    /// vendor's answer has to match the argv the three facts above pin. The polarity partner is
+    /// <see cref="ClaudeWorkerAdapter"/>, which binds no such directory and must answer false —
+    /// without it a member hardcoded to <see langword="true"/> on the interface would pass.
+    /// </summary>
+    [Fact]
+    public void Agy_answers_that_it_binds_the_dispatched_workspace_readable_and_claude_does_not()
+    {
+        Assert.True(((IWorkerAdapter)new AgyWorkerAdapter()).BindsDispatchedWorkspaceReadable);
+        Assert.False(((IWorkerAdapter)new ClaudeWorkerAdapter()).BindsDispatchedWorkspaceReadable);
+    }
+
     /// <summary>The values of every <c>--add-dir</c> pair in the resolved argv, in argv order.</summary>
     private static List<string> AddDirValues(CoreDispatchTarget target) => target.Args
         .Select((arg, i) => (arg, i))

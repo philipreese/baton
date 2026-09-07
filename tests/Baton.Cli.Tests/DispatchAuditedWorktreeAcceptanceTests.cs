@@ -273,6 +273,86 @@ public sealed class DispatchAuditedWorktreeAcceptanceTests : IDisposable
         }
     }
 
+    /// <summary>
+    /// #1987 review (MEDIUM): the pre-run workspace line said "uncommitted changes are not visible to
+    /// the worker" for every worktree dispatch, which stopped being true on the one vendor that ever
+    /// gets an auto-provisioned worktree the moment that vendor started binding the dispatched
+    /// workspace with a second <c>--add-dir</c>. Nothing pinned the string, which is why the drift was
+    /// invisible. This is the true arm; the fact below it is the control, and the two differ only in
+    /// what the bound adapter answers — so a line that ignored the adapter and printed one sentence
+    /// unconditionally fails one of them whichever sentence it picked.
+    /// </summary>
+    [Fact]
+    public async Task Dispatching_to_an_adapter_that_binds_the_dispatched_workspace_discloses_that_its_uncommitted_changes_are_readable()
+    {
+        var (output, workspace) = await DispatchAndCaptureAsync(bindsDispatchedWorkspaceReadable: true);
+
+        Assert.Contains(
+            $"{workspace} is bound readable too, so its uncommitted changes are readable by absolute path",
+            output,
+            StringComparison.Ordinal);
+        Assert.DoesNotContain("uncommitted changes are not visible to the worker", output, StringComparison.Ordinal);
+    }
+
+    /// <summary>
+    /// The control arm: an adapter that binds only the worktree it runs in still gets the original
+    /// disclosure, because for it the sentence is still true.
+    /// </summary>
+    [Fact]
+    public async Task Dispatching_to_an_adapter_that_does_not_bind_the_dispatched_workspace_keeps_the_invisible_disclosure()
+    {
+        var (output, workspace) = await DispatchAndCaptureAsync(bindsDispatchedWorkspaceReadable: false);
+
+        Assert.Contains("uncommitted changes are not visible to the worker", output, StringComparison.Ordinal);
+        Assert.DoesNotContain($"{workspace} is bound readable too", output, StringComparison.Ordinal);
+    }
+
+    /// <summary>
+    /// Dispatches <c>fact-check</c> on the <c>agy</c> tag — so the real registry entry's
+    /// <c>WithheldWritesReachTheOutbox: false</c> still widens the grant and provisions the worktree
+    /// the disclosure describes — against a fake that answers
+    /// <paramref name="bindsDispatchedWorkspaceReadable"/>, and returns everything the dispatch printed
+    /// alongside the workspace path it was pointed at.
+    /// </summary>
+    private static async Task<(string Output, string Workspace)> DispatchAndCaptureAsync(bool bindsDispatchedWorkspaceReadable)
+    {
+        var testRoot = Path.Combine(Path.GetTempPath(), $"dispatch-agy-workspace-fact-{Guid.NewGuid():N}");
+        var originalOut = Console.Out;
+        try
+        {
+            var workspace = Path.Combine(testRoot, "workspace");
+            await InitGitRepoAsync(workspace);
+
+            var specPath = await WriteSpecAsync(testRoot, "Confirm the facts.");
+            var roomDirectory = Path.Combine(testRoot, "task");
+            var adapters = new Dictionary<string, IWorkerAdapter>
+            {
+                ["agy"] = new ContractOutputWorkerAdapter(
+                    satisfyOutputs: true, bindsDispatchedWorkspaceReadable: bindsDispatchedWorkspaceReadable),
+            };
+
+            var options = new DispatchOptions(
+                "fact-check", specPath, roomDirectory, Adapter: "agy", WorkspaceDirectory: workspace);
+
+            using var consoleOutput = new StringWriter();
+            Console.SetOut(consoleOutput);
+            await DispatchCommand.ExecuteAsync(options, adapters, TestContext.Current.CancellationToken, evaluateRunway: RunwayTestGate.Admit);
+            Console.SetOut(originalOut);
+
+            var output = consoleOutput.ToString();
+            // The disclosure only exists at all when a worktree was declared -- assert that before
+            // reading polarity off it, or a dispatch that quietly stopped provisioning would pass the
+            // control arm by printing nothing.
+            Assert.Contains($"Workspace: worktree of {workspace} at HEAD (", output, StringComparison.Ordinal);
+            return (output, workspace);
+        }
+        finally
+        {
+            Console.SetOut(originalOut);
+            DirectoryCleanup.DeleteRecursively(testRoot);
+        }
+    }
+
     /// <param name="translatesGrants">
     /// F2/F3: the printed-grant-line test needs the bound "agy" adapter to actually consume a grant
     /// (<see cref="IPermissionGrantTranslator"/>) or <see cref="DispatchCommand"/> now prints nothing

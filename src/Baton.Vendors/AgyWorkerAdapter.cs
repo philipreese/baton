@@ -450,6 +450,16 @@ public sealed partial class AgyWorkerAdapter : IWorkerAdapter, IPermissionGrantT
         return true;
     }
 
+    /// <summary>
+    /// True (#1987): <see cref="Resolve"/> below emits an <c>--add-dir</c> for
+    /// <c>WorktreeSourceRepository</c>, so what the operator dispatched against stays readable even
+    /// when the worker runs in a room-local worktree. Answered here so the pre-run disclosure names
+    /// this vendor's real behaviour without hardcoding a vendor list — see
+    /// <see cref="IWorkerAdapter.BindsDispatchedWorkspaceReadable"/> for the question, and the
+    /// <c>--add-dir</c> block in <see cref="Resolve"/> for the mechanism.
+    /// </summary>
+    public bool BindsDispatchedWorkspaceReadable => true;
+
     public CoreDispatchTarget Resolve(WorkerInvocation invocation, WorkerContract contract)
     {
         ArgumentNullException.ThrowIfNull(invocation);

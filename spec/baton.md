@@ -5150,8 +5150,13 @@ ignores the process cwd (measured, `docs/vendor-capabilities.md`), so `--add-dir
 only thing that makes a path answerable to `view_file`/`grep_search` at all — without it an `advise`
 lane whose brief named an absolute path under the dispatched workspace had every read auto-denied and
 exited 0 with no output. It is not the seed-`settings.json` route `AgyWorkerAdapter`'s #1084 write fix
-takes: reads are gated by path membership rather than per call (which is why reads inside the worktree
-already worked under the same `--mode accept-edits` that needed an explicit rule for a write), and the
+takes: reads are gated by path membership rather than per call — measured by the
+`prompt.agy-payload-file-execution` sentinel in `tools/vendor-verify/verify.py`, which runs `agy -p …
+--add-dir <dir> --mode accept-edits` and asserts agy read a file under that path, so a read needs no
+rule of its own under the very scope that needed an explicit one for a write. That check runs with the
+process cwd set to the same directory, so on its own it cannot tell "`--add-dir` made it readable"
+from "cwd did"; #472's cwd-is-ignored finding in `docs/vendor-capabilities.md` is what closes that
+half. And the
 one prefix `docs/vendor-capabilities.md`'s "agy permission grammar" measured (`command`) matched the
 whole value literally, so a directory-wide `read_file(<dir>)` rule has no measured basis. Read-only
 intent is unaffected by the wider binding: `AgyHookCheckCommand` bounds every write-family call to
@@ -5160,7 +5165,10 @@ intent is unaffected by the wider binding: `AgyHookCheckCommand` bounds every wr
 *only* thing keeping a write out of the operator's real tree. What does change is what a lane can see:
 the dispatched workspace is the operator's live tree, while the lane's own worktree is that repository
 at `HEAD`, so a lane can now read uncommitted content that differs from what it was provisioned
-against.
+against. That is disclosed before the run rather than left to be discovered: `DispatchCommand`'s
+workspace line asks the bound adapter (`IWorkerAdapter.BindsDispatchedWorkspaceReadable`) instead of
+carrying a vendor list of its own, so the sentence an operator reads names the arm they actually got
+and cannot drift from the argv that produces it.
 
 **Polling is not progress: three rules on the run-command grant (#2002).** Measured 2026-09-06 across
 121 rooms modified that day: one agy arm-A lane spent 53.6 % of its 207 `run_command` steps on

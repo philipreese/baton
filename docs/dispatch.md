@@ -28,7 +28,7 @@ baton dispatch --list-capabilities
 | `--adapter <vendor>` | Run the role on a specific vendor (`claude` / `agy` / `codex`) instead of its tier's default. The `--adapter` escape hatch; a role never names a vendor itself. |
 | `--model <m>` | The model axis, independent of the role ([0017]/[0023]). Omitted keeps the tier's model — except on a vendor swap, where the tier's vendor-specific model is dropped for the new vendor's default (#1082). |
 | `--effort <e>` | The effort axis, independent of the role. Omitted keeps the tier's effort; dropped on a vendor swap. |
-| `--workspace <dir>` | The repository the worker's read access is scoped to. Defaults to the current directory. For a role whose grant is enforced as declared, this is literally the directory the worker runs in. For a role whose write grant is audited rather than enforced (a withheld-write role on a vendor whose withheld writes do not reach the outbox — today, the write-withholding roles on `agy`), dispatch instead auto-provisions a **fresh git worktree of this directory at `HEAD`** and hands the worker that (#1354/#1380) — the worker never sees uncommitted or staged changes in that case, only what HEAD already had. Bound explicitly because `agy -p` ignores the process working directory (#491). Needs a `baton trust` ceiling recorded against this exact path first, in both cases — see `docs/agents/invoking-baton.md` §2/§6 (#1166). |
+| `--workspace <dir>` | The repository the worker's read access is scoped to. Defaults to the current directory. For a role whose grant is enforced as declared, this is literally the directory the worker runs in. For a role whose write grant is audited rather than enforced (a withheld-write role on a vendor whose withheld writes do not reach the outbox — today, the write-withholding roles on `agy`), dispatch instead auto-provisions a **fresh git worktree of this directory at `HEAD`** and hands the worker that (#1354/#1380) — the tree the worker runs in carries only what HEAD already had, never this directory's uncommitted or staged changes. Whether it can still *read* them from here is the vendor's answer, disclosed per run by the line under "the auto-provisioned worktree" below. Bound explicitly because `agy -p` ignores the process working directory (#491). Needs a `baton trust` ceiling recorded against this exact path first, in both cases — see `docs/agents/invoking-baton.md` §2/§6 (#1166). |
 | `--workflow-id <label>` | A label forwarded to the run; defaults to the materialised template id. |
 | `--output <path>` | Copy the role's primary declared output to `<path>` once the run reaches Terminal, in addition to leaving it under the room's own `artifacts/`. Role dispatch only — refused up front on a template dispatch, the same way `--spec` is. `<path>`'s filename is validated before anything is printed or written: it must name a file (not end in a separator), must not start with `.` (the engine's reserved namespace), must not collide with the engine's own `prompt.txt` capture, and must not collide with another output the same role already declares. Delivered whenever the worker actually wrote it, regardless of what the engine's own verify step (below) decides (#1702). |
 | `--verify <cmd>` | Override the engine's own verify command for this dispatch (#1702), ahead of the workspace's own `.baton/verify` declaration and the role's `verify_pixi_task` default — spec/baton.md §3 has the full resolution order and the not-run outcome. Role dispatch only — refused up front on a template dispatch, the same way `--timeout`/`--token-budget` are. |
@@ -108,11 +108,19 @@ budget was resolved for.
 
 ### The auto-provisioned worktree, and what it costs
 
-An audited role's dispatch prints the consequence before the run starts:
+An audited role's dispatch prints the consequence before the run starts, in one of two shapes:
 
 ```
 Workspace: worktree of <repo> at HEAD (<short-sha>) — uncommitted changes are not visible to the worker
+Workspace: worktree of <repo> at HEAD (<short-sha>) — <repo> is bound readable too, so its uncommitted changes are readable by absolute path
 ```
+
+Which one is the bound adapter's own answer (`IWorkerAdapter.BindsDispatchedWorkspaceReadable`), not a
+vendor list in the message: an adapter that binds the dispatched workspace as well as the worktree —
+`agy` does, via the `--add-dir` #1987 added, and no other shipped adapter is ever handed an
+auto-provisioned worktree in the first place — leaves the live tree readable by absolute path even
+though the worker is running somewhere else. `spec/baton.md` §9's #1987 paragraph is canonical for
+what that widens and what it does not.
 
 The provisioned tree is torn down once the room reaches Terminal — **except** when it carries
 uncommitted changes (a worker's own output written but not committed) or a removal is blocked (a
