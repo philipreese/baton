@@ -27,6 +27,7 @@ import urllib.request
 from contextlib import redirect_stderr
 from datetime import date
 from pathlib import Path
+from typing import NamedTuple
 
 import derive_scores
 
@@ -56,6 +57,14 @@ MODEL_VENDOR_PREFIXES = {
 # refusal in displayed_costs() are what address that. Past the bound the run fails closed with both
 # numbers named, and --allow-cost-drift records an inspected divergence.
 COST_DRIFT_FACTOR = 4.0
+# A whole-model price change moves every one of that model's configurations by the same factor,
+# whatever their token mix, because it is a change to the per-token price and nothing else. That is
+# what --accept-price-adjustment tests for, and it is a real check rather than a hatch: the spread
+# across a model's selected configurations has to close to within this fraction before the bound is
+# stood down. A bad scrape -- the failure the bound exists for -- hits one row, so it shows up as a
+# non-uniform ratio and still fails closed. Measured 2026-09-06 on gpt-5-6-luna: five configurations
+# spanning 150k..15.4M mean input tokens, ratio 0.20 on every one (#1955).
+PRICE_ADJUSTMENT_TOLERANCE = 0.02
 ALLOWLIST = Path("tools/audit-completeness/docs-allowlist.txt")
 
 
@@ -157,15 +166,115 @@ def vendor_for(row: dict, allow_missing_provider: bool = False) -> str:
     return inferred
 
 
-def reconcile_cost(
-    label: str, config: str, artifact_cost: float, displayed_cost: float, allow_cost_drift: bool
-) -> float:
-    """Verify a scraped displayed cost against the artifact's own cost; never substitute it blind."""
+def check_displayed_cost(label: str, config: str, displayed_cost: float) -> None:
     if not math.isfinite(displayed_cost) or displayed_cost <= 0:
         raise ValueError(
             f"{label}: displayed cost for {config!r} must be finite and greater than zero; "
             f"got {displayed_cost!r}"
         )
+
+
+class PriceAdjustment(NamedTuple):
+    """One configuration's accepted launch-price/current-price pair, for the README's provenance."""
+
+    model: str
+    effort: str
+    config: str
+    artifact_cost: float
+    displayed_cost: float
+    ratio: float
+
+
+def price_adjustments(
+    payload: dict,
+    patterns: list[str],
+    display_cost_by_config: dict[str, float] | None,
+    accepted_models: list[str] | None,
+) -> dict[str, PriceAdjustment]:
+    """Verify that each named model's page/artifact divergence is one uniform per-model factor.
+
+    For a model named under --accept-price-adjustment the reconciliation bound is not relaxed, it is
+    REPLACED: every selected configuration of that model must show the same displayed/artifact ratio
+    to within PRICE_ADJUSTMENT_TOLERANCE, which is the signature of a price change and not of a
+    misread row. Only then is the page's current price recorded for those configurations. Anything
+    else -- a non-uniform ratio, a model that matched nothing, a model with too few configurations
+    to measure uniformity from -- fails closed with both numbers named.
+
+    Fewer than two selected configurations is refused rather than passed vacuously: a single ratio
+    agrees with itself no matter how wrong it is, so accepting it would make this an unbounded
+    per-model cost override while the snapshot README claims a uniformity check was performed.
+    --allow-cost-drift is the honest option for that case.
+
+    Ratios are computed from the raw upstream floats, never from the snapshot's rounded cents: at
+    snapshot precision gpt-5-6-luna low is 0.01/0.07, a 0.14 ratio that no uniformity check would
+    accept alongside its own model's 0.20.
+    """
+    if not accepted_models:
+        return {}
+    if display_cost_by_config is None:
+        raise ValueError(
+            "--accept-price-adjustment compares the canonical page's displayed costs against the "
+            "artifact's, and this run captured no displayed costs; rerun without --source-file"
+        )
+    compiled = [re.compile(pattern) for pattern in patterns]
+    wanted = list(dict.fromkeys(accepted_models))
+    observed: dict[str, list[PriceAdjustment]] = {model: [] for model in wanted}
+    for row in payload.get("rows") or []:
+        model = str(row.get("model", ""))
+        if model not in observed or not any(pattern.fullmatch(model) for pattern in compiled):
+            continue
+        effort = str(row.get("reasoning_effort") or "")
+        label = f"{model} / {effort or 'default'}"
+        config = str(row.get("config", ""))
+        # Diagnose a malformed artifact row as one, before the page gets blamed for having no cost
+        # under the empty config id.
+        if not config:
+            raise ValueError(f"{label}: missing config identifier")
+        if config not in display_cost_by_config:
+            raise ValueError(f"{label}: canonical page has no displayed cost for {config!r}")
+        artifact_cost = metric(row, "mean_cost_usd", 0)
+        if artifact_cost == 0:
+            raise ValueError(f"{label}: mean_cost_usd must be greater than zero")
+        displayed_cost = display_cost_by_config[config]
+        check_displayed_cost(label, config, displayed_cost)
+        observed[model].append(
+            PriceAdjustment(
+                model, effort, config, artifact_cost, displayed_cost, displayed_cost / artifact_cost
+            )
+        )
+
+    accepted: dict[str, PriceAdjustment] = {}
+    for model, entries in observed.items():
+        if len(entries) < 2:
+            raise ValueError(
+                f"--accept-price-adjustment {model!r} matched {len(entries)} selected "
+                "configuration(s); uniformity cannot be measured from fewer than two, so accepting "
+                "it would be an unbounded per-model cost override rather than a check -- inspect "
+                "both sources and use --allow-cost-drift if the divergence is intentional"
+            )
+        ratios = [entry.ratio for entry in entries]
+        spread = max(ratios) / min(ratios) - 1
+        if spread > PRICE_ADJUSTMENT_TOLERANCE:
+            detail = "; ".join(
+                f"{entry.config}: artifact {entry.artifact_cost:g}, displayed "
+                f"{entry.displayed_cost:g}, {entry.ratio:.2f}x"
+                for entry in entries
+            )
+            raise ValueError(
+                f"--accept-price-adjustment {model!r}: displayed/artifact ratios are not uniform "
+                f"({spread:.1%} spread, past {PRICE_ADJUSTMENT_TOLERANCE:.0%}), so this is not one "
+                f"price change; inspect both sources -- {detail}"
+            )
+        for entry in entries:
+            accepted[entry.config] = entry
+    return accepted
+
+
+def reconcile_cost(
+    label: str, config: str, artifact_cost: float, displayed_cost: float, allow_cost_drift: bool
+) -> float:
+    """Verify a scraped displayed cost against the artifact's own cost; never substitute it blind."""
+    check_displayed_cost(label, config, displayed_cost)
     ratio = displayed_cost / artifact_cost
     if 1 / COST_DRIFT_FACTOR <= ratio <= COST_DRIFT_FACTOR:
         return displayed_cost
@@ -219,6 +328,7 @@ def select_rows(
     display_cost_by_config: dict[str, float] | None = None,
     allow_cost_drift: bool = False,
     missing_provider_reason: str | None = None,
+    price_adjustment_by_config: dict[str, PriceAdjustment] | None = None,
 ) -> list[dict[str, str]]:
     compiled = [re.compile(pattern) for pattern in patterns]
     source_rows = payload.get("rows")
@@ -254,13 +364,19 @@ def select_rows(
             raise ValueError(f"{model} / {effort}: mean_agent_steps must be greater than zero")
         cost = artifact_cost
         if display_cost_by_config is not None:
-            cost = reconcile_cost(
-                f"{model} / {effort or 'default'}",
-                config,
-                artifact_cost,
-                display_cost_by_config[config],
-                allow_cost_drift,
-            )
+            # A verified uniform per-model price adjustment stands in for the bound on that model's
+            # rows; every other row still has to reconcile.
+            adjustment = (price_adjustment_by_config or {}).get(config)
+            if adjustment is not None:
+                cost = adjustment.displayed_cost
+            else:
+                cost = reconcile_cost(
+                    f"{model} / {effort or 'default'}",
+                    config,
+                    artifact_cost,
+                    display_cost_by_config[config],
+                    allow_cost_drift,
+                )
         displayed_cost = f"{cost:.2f}"
         displayed_tokens = displayed_output_tokens(output_tokens)
         displayed_steps = rounded_int(steps)
@@ -334,11 +450,17 @@ def delta_text(
     return "; ".join(parts), added, removed, removed_configs
 
 
-def cost_provenance(display_url: str, used_displayed_costs: bool, allow_cost_drift: bool) -> str:
+def cost_provenance(
+    display_url: str,
+    used_displayed_costs: bool,
+    allow_cost_drift: bool,
+    price_adjustment_by_config: dict[str, PriceAdjustment] | None = None,
+) -> str:
     """State where the recorded costs actually came from.
 
     A value of the cost source, not a flag next to it: a snapshot built from artifact costs must not
-    be able to claim canonical-page provenance.
+    be able to claim canonical-page provenance -- and once some rows bypass the bound, the sentence
+    claiming every cost was held inside it stops being true, so it is rewritten rather than annotated.
     """
     if not used_displayed_costs:
         return (
@@ -346,14 +468,31 @@ def cost_provenance(display_url: str, used_displayed_costs: bool, allow_cost_dri
             "NOT consulted for this snapshot, so a cost the page has since adjusted is recorded here "
             "at its launch price."
         )
+    adjustments = price_adjustment_by_config or {}
+    scope = "each" if not adjustments else "every cost except the price adjustments listed below"
     line = (
-        f"- Cost source: displayed costs from [{display_url}]({display_url}), each reconciled "
+        f"- Cost source: displayed costs from [{display_url}]({display_url}), {scope} reconciled "
         f"against the artifact's own cost and required to stay within {COST_DRIFT_FACTOR:g}x of it "
         "(the artifact can retain launch-price costs after the canonical page applies announced "
         "price changes)."
     )
     if allow_cost_drift:
         line += " Divergences past that bound were accepted for this run via `--allow-cost-drift`."
+    if not adjustments:
+        return line
+    models = ", ".join(f"`{name}`" for name in dict.fromkeys(a.model for a in adjustments.values()))
+    line += (
+        f" For {models} the bound was replaced by `--accept-price-adjustment`: every selected "
+        "configuration of the model showed the same displayed/artifact ratio to within "
+        f"{PRICE_ADJUSTMENT_TOLERANCE:.0%}, which is a whole-model price change rather than a "
+        "misread row, so the page's CURRENT price is what is recorded here."
+    )
+    for adjustment in adjustments.values():
+        line += (
+            f"\n  - `{adjustment.model}` / {adjustment.effort or 'default'} "
+            f"(`{adjustment.config}`): launch price {adjustment.artifact_cost:g}, current price "
+            f"{adjustment.displayed_cost:g}, factor {adjustment.ratio:.2f}."
+        )
     return line
 
 
@@ -473,13 +612,18 @@ def create_snapshot(
     allowlist_path: Path | None = None,
     allow_cost_drift: bool = False,
     missing_provider_reason: str | None = None,
+    accept_price_adjustment: list[str] | None = None,
 ) -> int:
+    adjustments = price_adjustments(
+        payload, selection["model_patterns"], display_cost_by_config, accept_price_adjustment
+    )
     rows = select_rows(
         payload,
         selection["model_patterns"],
         display_cost_by_config,
         allow_cost_drift,
         missing_provider_reason,
+        adjustments,
     )
     raw = csv_text(rows)
     previous_path = latest_snapshot(root)
@@ -519,7 +663,10 @@ def create_snapshot(
                 snapshot_date,
                 selection["source_url"],
                 cost_provenance(
-                    selection["display_url"], display_cost_by_config is not None, allow_cost_drift
+                    selection["display_url"],
+                    display_cost_by_config is not None,
+                    allow_cost_drift,
+                    adjustments,
                 ),
                 provider_provenance(missing_provider_reason),
                 selection["benchmark_version"],
@@ -681,6 +828,114 @@ def selftest() -> int:
         assert "provider mismatch" in str(error)
     else:
         raise AssertionError("a mismatched provider was accepted")
+
+    # --accept-price-adjustment. Shaped on the measured gpt-5-6-luna divergence (#1955): the page
+    # serves a fifth of the artifact's cost on every configuration of the model. Displayed costs are
+    # exact products of the artifact costs, because the ratio the check reads is the raw one -- the
+    # issue's own 3-decimal table rounds to a 3% spread that this check would (correctly) refuse.
+    luna = {
+        "generated_at": "2026-09-06T00:00:00Z",
+        "rows": [
+            {
+                "model": "gpt-5-6-luna", "provider": "openai", "reasoning_effort": "max",
+                "config": "mini_swe_agent_gpt_5_6_luna_max", "pass_at_1": 0.67, "ci_half": 0.04,
+                "mean_cost_usd": 3.0281, "mean_output_tokens": 73400, "mean_agent_steps": 102,
+            },
+            {
+                "model": "gpt-5-6-luna", "provider": "openai", "reasoning_effort": "high",
+                "config": "mini_swe_agent_gpt_5_6_luna_high", "pass_at_1": 0.44, "ci_half": 0.03,
+                "mean_cost_usd": 0.778, "mean_output_tokens": 25800, "mean_agent_steps": 49,
+            },
+        ],
+    }
+    luna_costs = {row["config"]: row["mean_cost_usd"] * 0.2 for row in luna["rows"]}
+    # The control the acceptance is read against: a 5x divergence is past the bound, so without the
+    # option these same inputs fail closed. If this arm ever stops raising, the arm below proves
+    # nothing.
+    try:
+        select_rows(luna, selection["model_patterns"], luna_costs)
+    except ValueError as error:
+        assert "reconciliation bound" in str(error)
+    else:
+        raise AssertionError("a 5x price adjustment was accepted without --accept-price-adjustment")
+    adjustments = price_adjustments(
+        luna, selection["model_patterns"], luna_costs, ["gpt-5-6-luna"]
+    )
+    assert set(adjustments) == set(luna_costs)
+    adjusted = select_rows(
+        luna, selection["model_patterns"], luna_costs, price_adjustment_by_config=adjustments
+    )
+    # The page's current price is what lands, not the artifact's 3.03 launch price.
+    assert [row["avg_api_cost_usd"] for row in adjusted] == ["0.61", "0.16"]
+    note = cost_provenance("https://example.invalid/", True, False, adjustments)
+    assert "launch price 3.0281, current price 0.60562, factor 0.20" in note
+    assert "current price 0.1556, factor 0.20" in note
+    # The unadjusted sentence would still claim every cost was held inside the bound.
+    assert "every cost except the price adjustments listed below reconciled" in note
+    assert "`gpt-5-6-luna`" in note and "2%" in note
+    # A non-uniform ratio is the misread-row case the bound was built for: still closed.
+    skewed = {**luna_costs, "mini_swe_agent_gpt_5_6_luna_high": 0.778 * 0.22}
+    try:
+        price_adjustments(luna, selection["model_patterns"], skewed, ["gpt-5-6-luna"])
+    except ValueError as error:
+        message = str(error)
+        assert "not uniform" in message
+        assert "0.778" in message and "0.17116" in message
+        assert "0.20x" in message and "0.22x" in message
+    else:
+        raise AssertionError("a non-uniform per-configuration ratio was accepted as one price change")
+    # One configuration agrees with itself whatever its ratio, so it is refused rather than passed.
+    single = {**luna, "rows": luna["rows"][:1]}
+    try:
+        price_adjustments(single, selection["model_patterns"], luna_costs, ["gpt-5-6-luna"])
+    except ValueError as error:
+        assert "fewer than two" in str(error)
+    else:
+        raise AssertionError("uniformity was declared from a single configuration")
+    unidentified = {**luna, "rows": [{**luna["rows"][0], "config": ""}, luna["rows"][1]]}
+    try:
+        price_adjustments(unidentified, selection["model_patterns"], luna_costs, ["gpt-5-6-luna"])
+    except ValueError as error:
+        assert "missing config identifier" in str(error)
+    else:
+        raise AssertionError("an artifact row with no config identifier was matched to a page cost")
+    try:
+        price_adjustments(luna, selection["model_patterns"], luna_costs, ["gpt-5-6-sol"])
+    except ValueError as error:
+        assert "matched 0 selected" in str(error)
+    else:
+        raise AssertionError("a model that matched no selected configuration was accepted")
+    try:
+        price_adjustments(luna, selection["model_patterns"], None, ["gpt-5-6-luna"])
+    except ValueError as error:
+        assert "captured no displayed costs" in str(error)
+    else:
+        raise AssertionError("a price adjustment was accepted with no displayed costs to compare")
+    # Default path unchanged: no named model means no adjustment machinery runs at all.
+    assert price_adjustments(luna, selection["model_patterns"], luna_costs, None) == {}
+    assert price_adjustments(luna, selection["model_patterns"], None, []) == {}
+    with redirect_stderr(io.StringIO()) as combined_error:
+        try:
+            main(["--dry-run", "--allow-cost-drift", "--accept-price-adjustment", "gpt-5-6-luna"])
+        except SystemExit as error:
+            assert error.code == 2
+        else:
+            raise AssertionError("both cost hatches were accepted on one run")
+    assert "cannot be combined" in combined_error.getvalue()
+    with tempfile.TemporaryDirectory() as temp:
+        adjusted_root = Path(temp) / "adjusted"
+        adjusted_root.mkdir()
+        assert (
+            create_snapshot(
+                luna, selection, adjusted_root, "2026-09-06", False, None, luna_costs, False, None,
+                False, None, ["gpt-5-6-luna"],
+            )
+            == 0
+        )
+        adjusted_readme = (adjusted_root / "2026-09-06" / "README.md").read_text(encoding="utf-8")
+        assert "launch price 3.0281, current price 0.60562, factor 0.20" in adjusted_readme
+        assert "`--accept-price-adjustment`" in adjusted_readme
+        assert "0.61" in (adjusted_root / "2026-09-06" / RAW).read_text(encoding="utf-8")
     with tempfile.TemporaryDirectory() as temp:
         source_file = Path(temp) / "source.json"
         source_file.write_text(json.dumps(fixture), encoding="utf-8")
@@ -804,6 +1059,14 @@ def main(argv: list[str]) -> int:
         help=f"accept a displayed cost past the {COST_DRIFT_FACTOR:g}x artifact-reconciliation bound",
     )
     parser.add_argument(
+        "--accept-price-adjustment",
+        metavar="MODEL",
+        action="append",
+        help="record the canonical page's current price for MODEL (spelled as the artifact spells "
+        "it) when every selected configuration of it diverges from the artifact by the same factor "
+        f"to within {PRICE_ADJUSTMENT_TOLERANCE:.0%}; repeatable",
+    )
+    parser.add_argument(
         "--allow-missing-provider",
         metavar="REASON",
         help="record the snapshot without the upstream provider cross-check; the reason is written "
@@ -813,6 +1076,15 @@ def main(argv: list[str]) -> int:
     args = parser.parse_args(argv)
     if args.selftest:
         return selftest()
+    # --allow-cost-drift is a whole-run boolean, so "naming a model under both options" is any run
+    # carrying both: the drift hatch would accept the very ratio the uniformity check is there to
+    # test, and the snapshot README would then claim a check that never discriminated anything.
+    if args.allow_cost_drift and args.accept_price_adjustment:
+        parser.error(
+            "--allow-cost-drift and --accept-price-adjustment cannot be combined: the first accepts "
+            "an inspected divergence wholesale, the second replaces the bound with a uniformity "
+            "check, and together the check cannot fail"
+        )
     if not re.fullmatch(r"\d{4}-\d{2}-\d{2}", args.date):
         parser.error("--date must be YYYY-MM-DD")
     if args.source_file and not args.dry_run:
@@ -845,6 +1117,7 @@ def main(argv: list[str]) -> int:
         ROOT.parents[1] / ALLOWLIST,
         args.allow_cost_drift,
         args.allow_missing_provider,
+        args.accept_price_adjustment,
     )
 
 

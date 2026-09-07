@@ -55,6 +55,13 @@ displayed cost more than 4x from the artifact's own cost for the same configurat
 cross-checked against. Each escape hatch that is used is recorded in the snapshot's own README, and
 so is which source the recorded costs came from.
 
+`--accept-price-adjustment MODEL` is a fourth option and deliberately not a hatch: it REPLACES the
+cost bound for one model with a uniformity check — every selected configuration of that model must
+diverge from the artifact by the same factor, which is what a whole-model price change looks like
+and what a misread row does not — and a non-uniform ratio still fails closed. What that check is and
+what it refuses lives in `price_adjustments()` in the collector; the accepted launch price, current
+price and factor land in the snapshot's own README (#1955).
+
 The file is sorted with `on_vendor_frontier` rows first, then by utility, then by quality — so a row a
 same-vendor sibling dominates (Opus xhigh, 73 at 89 steps, behind Opus high's 73 at 73) sorts below
 every frontier row whatever its utility. At the default L of 0.10 (one quality point forfeited per ten

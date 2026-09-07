@@ -15,6 +15,11 @@ later refresh rather than editing this one.
   written without comparison. It has not been regenerated through the reconciling path: doing so
   needs a live fetch, which the session that added the reconciliation could not make. The next
   refresh reconciles from upstream and does not inherit these values.
+- Costs recorded here for `gpt-5.6-luna` are the vendor's CURRENT (adjusted) price; the leaderboard
+  artifact still carries that model's launch price, 5x higher, on every one of its five efforts. The
+  divergence was measured across the whole model and ruled a uniform price adjustment rather than a
+  bad row, so these values stand — see #1955 and `--accept-price-adjustment` in
+  [`../refresh_snapshot.py`](../refresh_snapshot.py).
 - Provider cross-check: recorded before a missing upstream `provider` failed the run closed, so a
   row upstream reported no provider for would have been accepted here on the model prefix alone.
 - Upstream generation time: `2026-09-03T22:24:37.984682+00:00`
