@@ -767,12 +767,64 @@ public static class DispatchCommand
 
     /// <summary>
     /// The production evaluator, over the settings the caller already loaded once for this dispatch,
-    /// closed over each vendor's latest PERSISTED snapshot. Never spawns a vendor CLI — the daemon
-    /// harvests, dispatch reads (<see cref="RunwaySnapshotReader"/>).
+    /// reading each vendor's latest PERSISTED snapshot (<see cref="RunwaySnapshotReader"/>) — and,
+    /// since #1923, harvesting once inline when a gated vendor has no snapshot at all.
+    /// <see cref="OnDemandRunwayHarvest"/> owns that bootstrap and its bound; this method only decides
+    /// WHEN it runs (snapshot absent) and hands the attempt to the gate so the refusal can name it.
     /// </summary>
-    private static Func<string, RunwayDecision> CreateDiskRunwayEvaluator(DaemonSettings settings) =>
-        vendor => RunwayGate.Evaluate(
-            vendor, RunwaySnapshotReader.Read(vendor), settings.RunwayHold.For(vendor), DateTimeOffset.UtcNow);
+    /// <remarks>
+    /// <para>
+    /// <b>Every production runway decision goes through here</b> — <c>baton dispatch</c> with a null
+    /// <c>evaluateRunway</c> seam, and the daemon queue's <see cref="Daemon.QueueLauncher"/>, which
+    /// wraps this same delegate rather than substituting one. That is why the harvest lives inside the
+    /// delegate instead of beside its one caller: put it in <c>ApplyRunwayGateAsync</c> and the queue —
+    /// the launch path #1923 was actually measured on — would keep refusing an unharvested vendor.
+    /// </para>
+    /// <para>
+    /// <b>The blocking wait is deliberate and bounded.</b> The seam is a synchronous
+    /// <c>Func&lt;string, RunwayDecision&gt;</c> that roughly thirty test call sites already bind method
+    /// groups to; widening it to a task-returning delegate would churn all of them to buy nothing here.
+    /// The wait cannot exceed <see cref="OnDemandRunwayHarvest.Bound"/> (10 s) per gated vendor with no
+    /// snapshot, happens at most once per vendor per dispatch, and runs in a console process and on a
+    /// thread-pool thread — no synchronization context either way, so there is no deadlock to have.
+    /// It does not observe the dispatch's cancellation token for the same reason: the token is not in
+    /// scope of a sync delegate, and the time bound is what makes that safe rather than unbounded.
+    /// </para>
+    /// </remarks>
+    /// <param name="harvest">
+    /// Bound only by <c>Baton.Cli.Tests</c>, in the shape of <see cref="ExecuteAsync"/>'s own
+    /// <c>evaluateRunway</c> parameter: null means the real
+    /// <see cref="OnDemandRunwayHarvest.TryHarvestAsync"/> over <see cref="VendorUsageSources.Default"/>,
+    /// which is what every production caller passes. It exists because that default spawns a vendor
+    /// CLI, so without it no test can drive this composition at all — and the composition, not
+    /// <see cref="OnDemandRunwayHarvest"/> in isolation, is what makes #1923's fix reach the queue.
+    /// It takes no cancellation token deliberately: the delegate below is synchronous and has none in
+    /// scope, and the time bound rather than a token is what keeps the wait finite (see the remarks).
+    /// </param>
+    internal static Func<string, RunwayDecision> CreateDiskRunwayEvaluator(
+        DaemonSettings settings,
+        Func<string, bool, Task<RunwayHarvestAttempt?>>? harvest = null) =>
+        vendor =>
+        {
+            var harvestOnce = harvest ?? ((v, exists) => OnDemandRunwayHarvest
+                .TryHarvestAsync(v, exists, VendorUsageSources.Default, CancellationToken.None));
+
+            var snapshot = RunwaySnapshotReader.Read(vendor);
+            var attempt = harvestOnce(vendor, snapshot is not null)
+                .GetAwaiter()
+                .GetResult();
+
+            if (attempt is { FailureReason: null })
+            {
+                // Re-read rather than using the in-memory snapshot: the gate must decide on what is
+                // actually persisted, so a write that silently failed holds instead of admitting on a
+                // value no later reader would see.
+                snapshot = RunwaySnapshotReader.Read(vendor);
+            }
+
+            return RunwayGate.Evaluate(
+                vendor, snapshot, settings.RunwayHold.For(vendor), DateTimeOffset.UtcNow, attempt);
+        };
 
     /// <summary>
     /// The same production evaluator as <see cref="CreateDiskRunwayEvaluator"/>, over settings this

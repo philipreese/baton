@@ -14,7 +14,11 @@ namespace Baton.Memory;
 /// <param name="FileName">Its name, which is what the kind-prefix table reads.</param>
 /// <param name="Text">Its text, verbatim.</param>
 /// <param name="Sha256">Lower-case hex SHA-256 of its bytes.</param>
-/// <param name="ModifiedUtc">Its last-write time.</param>
+/// <param name="ModifiedUtc">
+/// Its last-write time. On a row the importer has read, this and <paramref name="Sha256"/>/
+/// <paramref name="SizeBytes"/> all come from that one read — see
+/// <see cref="MemoryEntry.SourceMtimeUtc"/>.
+/// </param>
 /// <param name="SizeBytes">Its length.</param>
 public sealed record MemoryImportFile(
     string Path,
@@ -55,9 +59,17 @@ public sealed record MemoryImportSource(
 /// </summary>
 /// <param name="Entries">The entries to append, ordered by subject then source path.</param>
 /// <param name="Unfiled">Files in a root with no resolvable subject, each with the reason.</param>
+/// <param name="ProjectionsSkipped">
+/// Files recognised as Baton's own projected caches and imported nowhere — see
+/// <see cref="MemoryProjection.IsProjectedFile"/> for the loop this closes. A separate population from
+/// <paramref name="Unfiled"/> on purpose: an unfiled file is one Baton could not place and an operator
+/// can place with <c>--assert</c>, while one of these is a file Baton wrote and must never read back,
+/// whatever its root resolves to.
+/// </param>
 public sealed record MemoryImportPlan(
     IReadOnlyList<MemoryEntry> Entries,
-    IReadOnlyList<ImportSkippedRow> Unfiled)
+    IReadOnlyList<ImportSkippedRow> Unfiled,
+    IReadOnlyList<ImportSkippedRow> ProjectionsSkipped)
 {
     /// <summary>
     /// Turns already-read roots into the entries they produce. <b>Pure</b>: no filesystem, no git, no
@@ -73,11 +85,30 @@ public sealed record MemoryImportPlan(
 
         var entries = new List<MemoryEntry>();
         var unfiled = new List<ImportSkippedRow>();
+        var projections = new List<ImportSkippedRow>();
 
         foreach (var source in sources)
         {
             foreach (var file in source.Files.OrderBy(f => f.Path, StringComparer.OrdinalIgnoreCase))
             {
+                // BEFORE the repository test, not after: a projection sitting in a root with no
+                // resolvable subject would otherwise land in `unfiled`, which reads as "assert a
+                // repository and this imports" -- the opposite of the rule. A projection is never
+                // imported under any subject.
+                if (MemoryProjection.IsProjectedFile(file.Text))
+                {
+                    projections.Add(new ImportSkippedRow(
+                        file.Path,
+                        file.Sha256,
+                        file.ModifiedUtc,
+                        file.SizeBytes,
+                        "a Baton projection ('" + MemoryProjection.FormatMarker + "' on its first line): " +
+                        "a cache 'baton memory sync' wrote from the canonical store, not a memory. " +
+                        "Importing it would re-ingest the store's own contents as a new entry every " +
+                        "cycle. Recorded for provenance; nothing was filed."));
+                    continue;
+                }
+
                 if (source.Repository is not { Length: > 0 } repository)
                 {
                     unfiled.Add(new ImportSkippedRow(
@@ -113,7 +144,8 @@ public sealed record MemoryImportPlan(
                 .OrderBy(e => e.Repository, StringComparer.OrdinalIgnoreCase)
                 .ThenBy(e => e.SourcePath, StringComparer.OrdinalIgnoreCase)
                 .ToList(),
-            unfiled);
+            unfiled,
+            projections);
     }
 
     /// <summary>

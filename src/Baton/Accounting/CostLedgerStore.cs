@@ -91,6 +91,12 @@ public static partial class CostLedgerStore
     /// a guessed source would be indistinguishable from a measured one, and
     /// <see cref="CostLedgerEntry.IdentitySource"/>'s own doc states what an absent value means.
     /// </param>
+    /// <param name="modelResolvedByWorker">
+    /// #1927. Supplied by the settle site off the same <c>bindings.json</c> parse
+    /// <paramref name="labelByWorker"/> comes from; <c>Baton.Cli.RoomBindingStamps</c>'s own doc states
+    /// what it holds and when it is consulted. Null everywhere else, which leaves such a row's
+    /// <c>model</c> absent exactly as it was before.
+    /// </param>
     public static IReadOnlyList<CostLedgerEntry> BuildEntries(
         IReadOnlyList<LogEntry> entries,
         string roomDirectoryPath,
@@ -100,7 +106,8 @@ public static partial class CostLedgerStore
         IReadOnlyDictionary<string, string>? runwayOverrideReasonByWorker = null,
         IReadOnlyDictionary<string, WorkspaceDelivery>? deliveryByWorker = null,
         IReadOnlyDictionary<string, string>? labelByWorker = null,
-        RepositoryIdentitySource? identitySource = null)
+        RepositoryIdentitySource? identitySource = null,
+        IReadOnlyDictionary<string, string>? modelResolvedByWorker = null)
     {
         ArgumentNullException.ThrowIfNull(entries);
         ArgumentException.ThrowIfNullOrEmpty(roomDirectoryPath);
@@ -146,7 +153,16 @@ public static partial class CostLedgerStore
                 // The same closed outcome token set QuotaLedgerEntry.Outcome documents -- one
                 // vocabulary across both ledgers, so a filter written against one works on the other.
                 case FlowEvent.ExecutionSucceeded succeeded:
-                    outcomeByExecutionId[succeeded.ExecutionId.Value] = "Succeeded";
+                    // #1945: the flagged execution names its own word here rather than flattening to
+                    // "Succeeded". This row is where a conductor reconciles a lane's spend against its
+                    // outcome, and it is the row carrying prePushGateMs (spec/baton.md §7) — so a lane
+                    // killed after its push saying "Succeeded" while its terminal.json says
+                    // FinishedDuringTeardown would put the divergence in exactly the two fields anyone
+                    // reading this question reads together. The vocabulary is WorkflowOutcome's; see
+                    // WorkflowOutcome.FinishedDuringTeardown for what the word means.
+                    outcomeByExecutionId[succeeded.ExecutionId.Value] = succeeded.FinishedDuringTeardown
+                        ? Status.WorkflowOutcome.FinishedDuringTeardown
+                        : "Succeeded";
                     break;
 
                 case FlowEvent.ExecutionFailed failed:
@@ -189,8 +205,17 @@ public static partial class CostLedgerStore
                 CacheCreation: usage.CacheCreationTokens,
                 Thinking: usage.ThinkingTokens);
 
+            // #1927: the requested model, else this worker's stamp (RoomBindingStamps.ModelResolvedByWorker
+            // states the precedence and why intent always wins). Applied before pricing on purpose:
+            // withholding it from Estimate would keep refusing to price a room whose model is known.
+            var resolvedModel = binding.Model
+                ?? (request?.Worker is { } modelWorker && modelResolvedByWorker is not null
+                    && modelResolvedByWorker.TryGetValue(modelWorker, out var stampedModel)
+                        ? stampedModel
+                        : null);
+
             var (apiUsd, apiStatus, planUsd, planStatus, estimateReason) =
-                Estimate(catalog, planFactors, binding.Adapter, binding.Model, tokens, usage.ModelsObserved, pricedAt);
+                Estimate(catalog, planFactors, binding.Adapter, resolvedModel, tokens, usage.ModelsObserved, pricedAt);
 
             var unavailableReason = usage.BilledReconciliationUnavailable;
             var completeness = ResolveCompleteness(unavailableReason, usage.BilledTokens);
@@ -222,7 +247,9 @@ public static partial class CostLedgerStore
                 Execution: executionId,
                 Role: request?.Worker,
                 Adapter: binding.Adapter,
-                Model: binding.Model,
+                Model: resolvedModel,
+                // #1927: recorded beside Model rather than merged into it -- see CostLedgerEntry.ModelEchoed.
+                ModelEchoed: usage.ModelEchoed,
                 ModelsObserved: usage.ModelsObserved,
                 Outcome: outcome,
                 Issue: delivery?.Issue,
@@ -236,6 +263,13 @@ public static partial class CostLedgerStore
                 ThinkingTokens: usage.ThinkingTokens,
                 Turns: usage.Turns,
                 WallClockMs: usage.WallClockMs,
+                // #1921: carried through as the stream reader counted them -- all three together or all
+                // three absent, which is ToolStepTally.Snapshot's decision, not one taken again here.
+                // The fourth count that reader produces (emptyToolResults) deliberately stays off the
+                // row; spec/baton.md §7's table says why.
+                ToolSteps: usage.ToolSteps,
+                RefusedToolSteps: usage.RefusedToolSteps,
+                RepeatedToolSteps: usage.RepeatedToolSteps,
                 // #1882: carried through as the projector attributed them -- one execution's row gets
                 // both, every other row gets neither. No arithmetic here on purpose.
                 VerifyStepMs: usage.VerifyStepMs,

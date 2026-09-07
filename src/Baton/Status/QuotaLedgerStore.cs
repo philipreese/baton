@@ -131,7 +131,11 @@ public static class QuotaLedgerStore
             switch (flowEntry.Event)
             {
                 case FlowEvent.ExecutionSucceeded succeeded:
-                    outcomeByExecutionId[succeeded.ExecutionId.Value] = "Succeeded";
+                    // #1945: kept identical to CostLedgerStore's own arm, whose remark states why the
+                    // flag is read here at all.
+                    outcomeByExecutionId[succeeded.ExecutionId.Value] = succeeded.FinishedDuringTeardown
+                        ? WorkflowOutcome.FinishedDuringTeardown
+                        : "Succeeded";
                     break;
 
                 case FlowEvent.ExecutionFailed failed:

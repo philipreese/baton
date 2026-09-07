@@ -1673,9 +1673,10 @@ def derive_snapshot_and_timelines(dll: str, roots: list, terminal_timeline_cache
       1. one full release has run with `file` in effect and NO
          "projection file stale or absent ... falling back to derive" line in pusher.log, and
       2. the projection file carries per-room `timelines`.
-    (2) is not satisfiable today and is not a nicety: `timelines` for a non-terminal room needs a
-    `room_detail` call per cycle, which is this subprocess, so PR-C cannot delete this path while
-    the file omits them -- see the `timelines` gap issue named in PR-B2's body. (1) is measurable
+    (2) HOLDS as of #1902: `FleetProjectionWriter` writes the same per-room `timelines` map, under
+    the same content projection and cap `extract_timeline` applies. It was the blocking half -- a
+    non-terminal room's timeline needs a `room_detail` call per cycle, which is this subprocess, so
+    PR-C could not delete this path while the file omitted them. (1) is measurable
     now that the `baton-daemon` scheduled task runs on the operator's machine (#1905 made the file
     the default on that basis): the fallback below is the edge case, and the log line it emits on
     a stale cycle is the honest signal that the daemon is down or behind.
@@ -3429,9 +3430,9 @@ def _identity_normalize_room(room: dict) -> dict:
 def snapshot_identity_diffs(derive_wrapped: dict, file_wrapped: dict) -> list[str]:
     """Sorted top-level keys of the pushed snapshot that differ between the two projection sources,
     after `_SNAPSHOT_IDENTITY_EXCLUSIONS`. `[]` means the two sources produced the same pushed body.
-    `["derived_at", "timelines"]` names the intentional source-dependent differences: file mode
-    preserves the daemon timestamp, while derive mints a new one; the daemon also carries no
-    per-room timelines yet (see `derive_snapshot_and_timelines`'s removal condition)."""
+    `["derived_at"]` names the one intentional source-dependent difference: file mode preserves the
+    daemon timestamp, while derive mints a new one. `timelines` used to be the second (the daemon
+    wrote none) and is not any more -- #1902 made the projection file carry them."""
     def prepare(wrapped: dict) -> dict:
         prepared = dict(wrapped)
         for key in ("rooms", "terminal_archive"):
@@ -3655,7 +3656,8 @@ def compare_projection(dll: str, roots: list) -> int:
     the file side the later sample) -- so ordering is read from each side's own `derived_at`
     instead of assumed from either the claimed or the actual call order. `derive_parsed`
     (fleet_status's raw result) carries no top-level `derived_at` the way the projection FILE does
-    (`FleetProjectionWriter.cs:162`), so the derive side's timestamp is captured explicitly, right
+    (`FleetProjectionWriter.BuildProjectionJsonAsync`, cited by symbol rather than by line: the
+    line number in that file has already rotted twice), so the derive side's timestamp is captured explicitly, right
     after `attach_live_telemetry` has read each room's live counters straight off disk -- that is
     the actual moment those counters were observed."""
     text, _timelines = derive_snapshot_and_timelines(dll, roots)
@@ -4629,6 +4631,36 @@ def _selftest() -> int:
 
     check("extract_timeline degrades to [] for a room_detail response with no timeline at all",
           extract_timeline({"name": "room-y", "note": "no flow.jsonl yet"}) == [])
+
+    # -- #1902 LOCK-STEP: this content projection exists TWICE (here, and in C# as
+    # FleetProjectionWriter.ProjectTimeline, which the daemon uses to write the projection file's
+    # `timelines`). Nothing in the type vocabulary can drift -- both consume the same in-process
+    # RoomDetailTool.DescribeEntry output -- but the CONTENT projection and its cap are two
+    # independent implementations, and until this arm nothing failed if they diverged. Both sides
+    # assert the SAME checked-in fixture, the doingNow pattern (spec/baton.md §6): a moved cap, an
+    # added or dropped field, or a reordered key reds one of them. The fixture's own `_readme` says
+    # which of its properties are load-bearing.
+    # The existence check is deliberately its own `check`, not an `if ...exists()` skip: a path bug
+    # that silently skipped the whole arm is exactly the failure class this arm exists to close.
+    timeline_fixture_path = (Path(__file__).resolve().parent.parent.parent
+                             / "tests" / "fixtures" / "timeline-projection-sample.json")
+    check("#1902 lock-step: the shared C#/Python timeline-projection fixture is present",
+          timeline_fixture_path.is_file())
+    if timeline_fixture_path.is_file():
+        timeline_fixture = json.loads(timeline_fixture_path.read_text(encoding="utf-8"))
+        fixture_projected = extract_timeline(timeline_fixture["roomDetail"])
+        check("#1902 lock-step: extract_timeline projects the shared fixture to its `expected` "
+              "entries exactly -- the same assertion FleetProjectionWriterTests makes against "
+              "ProjectTimeline, which is what keeps the two implementations from drifting. "
+              f"Actual length {len(fixture_projected)} vs expected {len(timeline_fixture['expected'])}",
+              fixture_projected == timeline_fixture["expected"])
+        # (control) the fixture must actually exercise the cap in the direction claimed -- otherwise
+        # the arm above would pass on an implementation that kept the OLDEST tail instead.
+        check("(control) #1902 lock-step: the fixture carries more entries than TIMELINE_CAP, and "
+              "the entry the cap drops is the OLDEST one",
+              len(timeline_fixture["roomDetail"]["timeline"]["entries"]) > TIMELINE_CAP
+              and len(fixture_projected) == TIMELINE_CAP
+              and timeline_fixture["roomDetail"]["timeline"]["entries"][0] not in fixture_projected)
 
     # #1537: extract_timeline admits every event TYPE -- it has never filtered on `type`, only on
     # field shape (KEEP-ONLY type+timestamp, see the function's own docstring). This is the
@@ -6419,7 +6451,9 @@ def _selftest() -> int:
             ]
             ident_underhood = [{"k": "v"}]
             # What `derive_snapshot_and_timelines` would return from its per-room `room_detail`
-            # calls -- the file has no counterpart, which is the whole point of the exclusion below.
+            # calls. Since #1902 the file has a counterpart, so the same dict is written into the
+            # fixture projection file below -- which is why this arm can only show the field
+            # survives the trip, never that the two projections agree (see the check below).
             ident_timelines = {str(ident_run_room): [{"type": "executionStarted",
                                                        "timestamp": "2026-09-05T00:00:00Z"}]}
 
@@ -6452,6 +6486,11 @@ def _selftest() -> int:
             ident_projection.write_text(json.dumps({
                 "derived_at": file_derived_at,
                 "rooms": file_rooms,
+                # #1902: the daemon now writes per-room `timelines` too, so the file side carries the
+                # same entries the derive side builds from its per-room `room_detail` calls. Written
+                # as the SAME object the derive arm uses -- the arm below asserts the two sources'
+                # posted bodies now differ in nothing but `derived_at`.
+                "timelines": ident_timelines,
             }), encoding="utf-8")
             ident_data, ident_staleness = read_projection_file(ident_projection, time.time())
             check("#1557 PR-B2 identity arm: the fixture projection file reads fresh (no fallback)",
@@ -6464,26 +6503,47 @@ def _selftest() -> int:
             file_post_body = json.loads(snapshot_post_body(file_wrapped, ident_data["derived_at"]))
             identity_diffs = snapshot_identity_diffs(derive_post_body, file_post_body)
             check("#1557 PR-B2 acceptance: the full posted bodies differ only in source-dependent "
-                  "`derived_at` and missing file `timelines`. "
+                  "`derived_at` -- #1902 closed the `timelines` gap that was the other difference. "
                   f"Actual diff: {identity_diffs}",
-                  identity_diffs == ["derived_at", "timelines"])
+                  identity_diffs == ["derived_at"])
             check("#1557 PR-B2 acceptance: each posted body carries its source's derived_at",
                   derive_post_body["derived_at"] == derive_derived_at
                   and file_post_body["derived_at"] == file_derived_at)
-            check("#1557 PR-B2 acceptance: and the `timelines` difference is exactly 'derive has "
-                  "entries, file has none' -- not two different sets of entries",
-                  derive_wrapped["timelines"] == ident_timelines and file_wrapped["timelines"] == {})
+            # Scoped to what one hand-written dict fed to BOTH sides can actually prove: that the
+            # `timelines` the file supplies reaches the pushed body intact, instead of being dropped
+            # or replaced on the way through (the pre-#1902 shape was 'derive has entries, file has
+            # none'). It is NOT evidence that the two CONTENT projections agree -- that claim is
+            # about two implementations, and the arm that tests it is the shared-fixture lock-step
+            # check above (`extract_timeline` vs. C#'s ProjectTimeline).
+            check("#1902: the file source's own per-room timelines survive into the pushed body "
+                  "unchanged, exactly as the derive source's do",
+                  derive_wrapped["timelines"] == ident_timelines
+                  and file_wrapped["timelines"] == ident_timelines)
 
             # CONTROL, read before trusting the green above: the comparator must RED on a real
             # derivation difference. Without this the arm certifies the harness, not the change.
             control_rooms = json.loads(json.dumps(ident_data["rooms"]))
             control_rooms[0]["live"]["billedTokens"] = ident_gate_case["expectedBilledTokens"] + 1
-            control_wrapped, _, _, _, _, _ = assemble_wrapped(control_rooms, ident_underhood, {}, 0)
+            control_wrapped, _, _, _, _, _ = assemble_wrapped(
+                control_rooms, ident_underhood, ident_timelines, 0)
             control_post_body = json.loads(snapshot_post_body(control_wrapped, ident_data["derived_at"]))
             check("(control) #1557 PR-B2 acceptance: a one-token `live.billedTokens` difference on "
                   "the file side IS reported -- the identity arm above discriminates, it is not "
                   "green because everything volatile was excluded",
                   "rooms" in snapshot_identity_diffs(derive_post_body, control_post_body))
+
+            # CONTROL for the `timelines` half specifically (#1902): the empty diff above must be
+            # earned by the two sources agreeing on the entries, not by `timelines` having become a
+            # key the comparator no longer sees. A one-entry difference on the file side IS reported.
+            tl_control_timelines = {p: [*e, {"type": "flow.executionSucceeded"}]
+                                    for p, e in ident_timelines.items()}
+            tl_control_wrapped, _, _, _, _, _ = assemble_wrapped(
+                json.loads(json.dumps(ident_data["rooms"])), ident_underhood, tl_control_timelines, 0)
+            tl_control_post_body = json.loads(
+                snapshot_post_body(tl_control_wrapped, ident_data["derived_at"]))
+            check("(control) #1902: a one-entry `timelines` difference on the file side IS reported "
+                  "-- the empty diff above discriminates on this field, it is not excluded",
+                  "timelines" in snapshot_identity_diffs(derive_post_body, tl_control_post_body))
             # -- #1557 PR-B2 found-while-fixing: drop_stale_rooms runs on the room list BEFORE the
             # live/pruned attach, so in `derive` mode `newest_timestamp` never sees those blocks --
             # `attach_live_telemetry`'s own doc calls that deliberate. In `file` mode the daemon has

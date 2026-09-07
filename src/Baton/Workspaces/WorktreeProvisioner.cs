@@ -509,6 +509,15 @@ public static class WorktreeProvisioner
             var changedPathCount = ChangedPathsExcludingEnginePlaced(
                 SplitPorcelainLines(statusOut), workspacePath, enginePlacedFiles).Count;
 
+            // #1945: how far HEAD is ahead of its tracking branch. Deliberately NOT folded into the
+            // Unmeasurable arms below — no upstream (a plain checkout, a detached HEAD) is an ordinary
+            // shape here, not a broken reading, and it must leave the field null rather than fail a
+            // mutation read that the two counts above answered fine. Why no fetch is needed is stated
+            // once, on WorkspaceMutationReading.CommitsAheadOfRemote.
+            var (aheadCode, aheadOut, _) = RunGit(workspacePath, "rev-list", "--count", "@{upstream}..HEAD");
+            int? commitsAheadOfRemote =
+                aheadCode == 0 && int.TryParse(aheadOut.Trim(), out var ahead) ? ahead : null;
+
             if (!string.IsNullOrWhiteSpace(sinceRef))
             {
                 var (countCode, countOut, _) = RunGit(workspacePath, "rev-list", "--count", $"{sinceRef}..HEAD");
@@ -519,7 +528,7 @@ public static class WorktreeProvisioner
                     return WorkspaceMutationReading.Unmeasurable;
                 }
 
-                return WorkspaceMutationReading.FromCounts(changedPathCount, newCommitCount);
+                return WorkspaceMutationReading.FromCounts(changedPathCount, newCommitCount, commitsAheadOfRemote);
             }
 
             var (refCode, refOut, _) = RunGit(workspacePath, "log", "-g", "-n", "1", "--format=%gs");
@@ -530,7 +539,8 @@ public static class WorktreeProvisioner
 
             var committed = !string.IsNullOrWhiteSpace(refOut)
                 && refOut.Trim().StartsWith("commit", StringComparison.OrdinalIgnoreCase);
-            return new WorkspaceMutationReading(true, changedPathCount, NewCommitCount: null, HasNewCommits: committed);
+            return new WorkspaceMutationReading(
+                true, changedPathCount, NewCommitCount: null, HasNewCommits: committed, commitsAheadOfRemote);
         }
         catch (Exception ex) when (ex is WorktreeProvisioningException or IOException)
         {

@@ -255,7 +255,24 @@ A harness invokes work two ways, both in `src/Baton.Cli/Program.cs`:
   Persisted onto every entry of that
   room's own `bindings.json` (`WorkerBindingConfigEntry.Label`) rather than a new file, since bindings
   already exists for every room regardless of terminal state — see §6 schema for how `fleet_status`
-  reads it back. `--token-budget` (#1623) overrides the dispatched role's own default per-execution
+  reads it back.
+
+  **A dispatch that omits `--model` still records what it will run on (#1927).** `RoleDispatch.ToBinding`
+  stamps `ModelResolved`/`ModelSource` — and `EffortResolved`/`EffortSource` — onto every entry of the
+  room's `bindings.json`; `WorkerBindingConfigEntry`'s own doc carries the precedence, the two source
+  values, and why an unmeasured rung yields an absent stamp instead of a guess. (PascalCase on purpose:
+  this file's `bindings.json` keys are what `WorkerBindingConfigWriter` actually serializes, and it
+  applies no naming policy. §6's camelCase spellings are the `fleet_status` projection's, which does
+  carry `[JsonPropertyName]`.) `baton redispatch` re-resolves the same four **per axis** whenever that
+  axis moved — a vendor swap, or an explicit `--model`/`--effort` — and inherits the parent's otherwise;
+  they are adapter-derived like `streamJson`, so carrying them across a swap made the child room
+  display and ledger the previous vendor's model. **Ruled here, because it
+  is the constraint the design rests on: those four are DISPLAY fields and may never feed dispatch.** The
+  measured defect (#1927: a room rendering a bare `agy`) is a rendering one, and repairing it by writing a
+  default into the fields that become the vendor's argv would silence a class of vendor-chosen behaviour
+  the operator never asked to change. §6's schema states how the render surfaces read the pair back.
+
+  `--token-budget` (#1623) overrides the dispatched role's own default per-execution
   token ceiling — §3's "Engine-run verify and the token budget" subsection is the full contract; this
   entry only names the flag. `--workstream` (#1619, rung 1 of #1614's ruling) is a **grouping key, not a title** —
   a room keeps its generated hex identity on disk; the slug only makes several rooms (e.g. an
@@ -377,6 +394,8 @@ through `RoleDispatch.Materialize` against the real role catalog.
 | `unkeep` | `baton unkeep <room-dir>` | `UnkeepOptionsParser.cs` |
 | `memory` | `baton memory audit [--format text\|json] [--help]` | `MemoryAuditOptionsParser.cs` |
 | `memory` | `baton memory import [--dry-run] [--root <dir>]... [--assert <path>=<repository>]... [--asserted-by <who>] \| --undo <manifest> [--help]` | `MemoryImportOptionsParser.cs` |
+| `memory` | `baton memory sync [--repository <id>] [--apply] [--format text\|json] [--repository-facts <dir>] [--help]` | `MemorySyncOptionsParser.cs` |
+| `audit` | `baton audit lanes [--since <duration>] [--vendor <name>] [--rooms-root <dir>] [--format text\|json] [--help]` | `AuditLanesOptionsParser.cs` |
 
 `templates` narrows to the built-in catalog only (`Baton.Vendors`'s `BuiltInWorkflowTemplates`) —
 there is no authoring UI to browse a saved-template library visually against (Appendix, R7 in the
@@ -763,7 +782,8 @@ per `MaxParkWaitChunk` re-arm); `liveness`'s engine-identity read (`WorkflowStat
 
 ### The terminal vocabulary, and the two-predicate model (#1586 S1)
 
-`WorkflowOutcome` (`src/Baton/Status/WorkflowOutcome.cs`) has **six** members today:
+`WorkflowOutcome` (`src/Baton/Status/WorkflowOutcome.cs`) has these members today — deliberately no
+count in this sentence, since #1945 left the last one stale the moment it added a row:
 
 | Value | Meaning |
 |---|---|
@@ -773,6 +793,7 @@ per `MaxParkWaitChunk` re-arm); `liveness`'s engine-identity read (`WorkflowStat
 | `Failed` | At least one step failed or was rejected, and the room did not settle any other terminal way |
 | `Cancelled` | At least one step was cancelled and nothing failed |
 | `Indeterminate` | Journal facts alone could not decide success vs failure — see below |
+| `FinishedDuringTeardown` | #1945. Every step succeeded, and at least one did so on the arm below: Flow's own dispatch timeout killed the execution **after its push had landed, with nothing left to push** — the workspace was clean, `HEAD` carried nothing its tracking branch did not, and every declared output was already on disk (the contract check, #1945 review). The lane finished inside its box and the kill caught only what came after the transfer. That includes, but is not limited to, the tail of this repo's pre-push hook: a kill landing *inside* `gates-fast` is a kill *before* the transfer, leaves `HEAD` ≥ 1 ahead of `@{upstream}`, and settles `Indeterminate` as it always did. **A SUCCEEDED-shaped word**: every consumer that asks "did this room finish?" accepts it exactly where it accepts `Succeeded` (exit 0, queue `Done`, no redispatch warning). It is a separate word rather than a bare `Succeeded` so the room states why a timeout kill still settled clean — the fact a conductor previously reconstructed by hand. The predicate, why it is nested inside the #1373 mutated arm, and why no `git fetch` is needed are on `Workspaces.WorkspaceMutationReading` |
 
 **The two-predicate model.** A room's completion has always actually been two separate questions:
 *execution outcome* (did the worker's process finish, crash, or get cancelled — `OutcomeVerdict` /
@@ -811,7 +832,7 @@ not `ContractFailure`'s. What writes it now:
 | `OutcomeClassifier.Classify`'s #1593 uncaptured contract-failure arm — declared outputs simply absent or failed validation, or a dead worker (stream-json ending without a `result` record) on a mutated workspace, with no response to capture; also #1680's first-verdict canary (a natural, contract-satisfied exit whose caller reports ≥1 tool call and zero agy `PreToolUse` hook verdicts — the hook may never have run, and this vendor reads that silence as an ALLOW rather than an error) | `FlowEvent.ExecutionIndeterminate` (null `CapturedResponseFile`) | `ContractFailure` | #1593, #1680 |
 | The role's engine-run verify command exited non-zero after a clean, contract-satisfied worker exit | `FlowEvent.VerifyFailed` | `VerifyFailed` | #1623 |
 | A live execution crossed its role's token budget and was arrested | `FlowEvent.ExecutionArrested` | `Arrested` | #1623 |
-| `OutcomeClassifier.Classify`'s #1373 timeout arm — Flow's own dispatch timeout killed the execution and the workspace it was killed in carries work (see the paragraph below) | `FlowEvent.ExecutionIndeterminate` (null `CapturedResponseFile`) | `ContractFailure` | #1373 |
+| `OutcomeClassifier.Classify`'s #1373 timeout arm — Flow's own dispatch timeout killed the execution and the workspace it was killed in carries work (see the paragraph below, including #1945's one carve-out) | `FlowEvent.ExecutionIndeterminate` (null `CapturedResponseFile`) | `ContractFailure` | #1373 |
 | Verify actually started, but its only failing member(s) were blocked on `tools/buildlock.py`'s build lock, not genuinely broken — contention, never a gate defect | `FlowEvent.VerifyNotRun` (`BuildLockBusy: true`) | `BuildLockBusy` | #1796 |
 
 Every other Failed/Cancelled/Succeeded path is unchanged. All six raise the **one** flag
@@ -905,6 +926,14 @@ finishing looks like). The reason text opens with `OutcomeClassifier.TimeoutSent
 `Status.WorkflowOutcome.IsTimeoutFailure` still reads a mutated timeout as a timeout. **Consequence
 for a surface:** such a room now describes `Indeterminate`, so `baton run` no longer exits
 `RunExitCode.Timeout` for it — that exit code stays for a timeout with nothing to salvage.
+
+**Narrowed once, by #1945.** Not every mutated workspace is one a conductor has to look at. A
+workspace that is *also* clean and level with its tracking branch, on an execution whose declared
+outputs are all present, settles the succeeded-shaped `FinishedDuringTeardown` instead — the kill
+landed after the push, so there is nothing left to resolve and nothing a redispatch would finish.
+That is the only carve-out; everything else in this ruling, including the fail-closed reading and the
+retry it forecloses, is unchanged. The word, its predicate and the consumers that owe it a
+succeeded reading are §3's `FinishedDuringTeardown` row above.
 
 **The per-attempt start sha is journaled, not only held in memory (#1373 follow-up).** The commit half
 of the reading above is a delta against the sha read immediately before Core is asked to run — durable
@@ -1333,9 +1362,12 @@ and settled `Indeterminate` even though the worker's own exit and output contrac
    **stdout only**, so a warning git writes to stderr can never be taken for the declaration's own first
    non-comment line. `Baton.Mutation.VerifyCommandResolver`'s single hardened-spawn helper is where all
    of that is applied; there is no second, unhardened path to this value.
-3. `WorkerRole.VerifyPixiTask` (`implement` → `gates-quiet`; every other shipped role → none) — today's
-   only source, run as `pixi run <task>`, unchanged. Baton's own repo keeps working unchanged under
-   this arm: no `.baton/verify` file here and no `--verify` on baton's own dispatches.
+3. `WorkerRole.VerifyPixiTask` (`implement` → `gates-quiet`; every other shipped role → none) — run as
+   `pixi run <task>`, unchanged, and still the arm every workspace that declares nothing lands on.
+   **Baton's own repo no longer lands there (#1958):** it commits a `.baton/verify` declaring
+   `pixi run gates-fast-cover-quiet`, so arm 2 wins here. What that changes about a room's verdict —
+   including that the engine verify no longer runs the test suite — is C-12's `#1958` paragraph, not
+   restated here. No `--verify` on baton's own dispatches; arm 1 stays unused here.
 
 An override/repo-declared command line runs through the platform shell (`cmd.exe /d /c <line>`, this
 project ships Windows-only per #1405) rather than hand-tokenized; the role default stays a direct
@@ -2059,7 +2091,8 @@ stays display-only, never itself a gate. `StateProjector.DescribeArrest` is the 
 
 <!-- record-once-ok: #1378 src/Baton.Cli/RunExitCodeResolver.cs -->
 **Exit code 1 is not "terminal, a step failed."** `RunExitCodeResolver.Resolve` falls through to
-`Failed` for **`Running` and `Paused` too** — any outcome that is not `Succeeded`, `Cancelled`, or the
+`Failed` for **`Running` and `Paused` too** — any outcome that is not `Succeeded`,
+`FinishedDuringTeardown` (#1945: the second word that exits 0, §3's row), `Cancelled`, or the
 resolved `Failed`/`Timeout` split (`RunExitCodeResolver.cs`, comment verbatim: *"Running or
 Paused: the pump returned short of Terminal (no `--wait`, or `--wait`'s poll loop was cancelled --
 e.g. Ctrl-C -- before the room settled; a `--wait-timeout` expiry is handled ahead of this and never
@@ -2095,7 +2128,7 @@ code is the only signal a lane is even still going, and it is unreliable for tha
       "linkedFrom"?: string,           // set when this step's latest execution is an `baton resume`
       "usage"?: ExecutionUsageView,
       "linkedFromUsage"?: ExecutionUsageView,
-      "liveness"?: "alive" | "dead" | "unknown",  // #1375/#1513: present while this step reads "Running", or "Failed" with a RetryNotBefore still pending
+      "liveness"?: "alive" | "dead" | "unknown",  // #1375/#1513: present while this step reads "Running" (unless frozen by a room-level sentinel; §13), or "Failed" with a RetryNotBefore still pending
       "exhaustedUntil"?: string,  // #1551: the ExhaustedUntil park's reset instant (ISO-8601, UTC) -- gating rule at §6 schema below
       "verifyTail"?: string,      // #1701: the failing gate member(s)' OWN captured output for a VerifyFailed Indeterminate -- see "Engine-run verify" below. Distinct from "verify"/"verifyReason": that pair says verify never ran, this says it ran and went red.
       "resolvedByConductor"?: boolean,  // #1622 (c)/(d): true iff this step's terminal state was set by an explicit, non-accepting `baton resolve` ruling (--reject or --close); omitted when false
@@ -2227,10 +2260,15 @@ where `ExecutionUsageView` is
   "cacheReadTokens"?: number, "cacheCreationTokens"?: number, "thinkingTokens"?: number,
   "billedTokens"?: number, "liveBilledTokens"?: number, "billedUnderReadTokens"?: number,
   "billedReconciliationUnavailable"?: string, "peakBilledInWindow"?: number,
-  "modelsObserved"?: string[],
-  "verifyStepMs"?: number, "verifyResultsBytes"?: number }
+  "modelsObserved"?: string[], "modelEchoed"?: string,
+  "verifyStepMs"?: number, "verifyResultsBytes"?: number,
+  "toolSteps"?: number, "refusedToolSteps"?: number, "repeatedToolSteps"?: number,
+  "emptyToolResults"?: number }
 ```
-(`src/Baton/Status/ExecutionUsageView.cs` declares the C# record; `WorkflowStatusView.cs` projects it). `wallClockMs` is
+(`src/Baton/Status/ExecutionUsageView.cs` declares the C# record; `WorkflowStatusView.cs` projects it). The four
+#1921 added are the step-budget axis, present or absent as a set of four (`Status.ToolStepTally.Snapshot`
+decides once); §7's ledger table states what each counts and which zeros are not measurements, and names
+`emptyToolResults` as the one the cost-ledger row deliberately does not carry. `wallClockMs` is
 always present when the object is present at all — derived from recorded start/exit timestamps. The
 three added by #1569 follow one vendor's own field split, not a Baton-invented one: `cacheReadTokens` is a
 real field on both measured vendors' envelopes (claude: `cache_read_input_tokens`; agy:
@@ -2277,6 +2315,13 @@ models the whole-tree read summed over, rather than only the total. `WorkerUsage
 the field, including what its absence does and does not say; §7's cost ledger is the consumer whose
 behaviour turns on it. `peakBilledInWindow` (#1709) was already on the record and missing from the shape
 above; both are listed now.
+
+**`modelEchoed` (#1927) is a different fact from `modelsObserved` beside it**, and the two are not
+substitutes — `CostLedgerEntry.ModelEchoed`'s own doc draws the distinction. It is read at settle by the
+same reader that derives the token dimensions, over the same captured bytes, and is deliberately
+computed BEFORE the truncation guards — a stream whose reconciliation is unavailable is exactly the
+stream whose model is still worth naming. §7's ledger row states which event each vendor's answer comes
+from, which one may not be read, and what its absence means; that ruling is not restated here.
 
 **The two added by #1882 are not token figures at all, and are attributed to ONE execution.**
 `verifyStepMs` and `verifyResultsBytes` are the wall clock of the room's pre-turn verify step (the
@@ -2455,11 +2500,13 @@ values `status --json` would report for the same room (`FleetStatusTool.cs`; the
 path copies `sentinel.Liveness`/`sentinel.Rejected`/`sentinel.ResolvedBy` since the sentinel already **is** a
 `WorkflowStatusView`). A fleet_status caller can now tell a dead engine or a rejection apart from an
 ordinary `Failed`/`Running` room without a second `status --json` call per room.
-`liveness` is present on a step this same projection calls `"Running"`, and (#1513) a `"Failed"` step
-still carrying a `RetryNotBefore` — the identical gate `StatusCommand.FormatStepStatus` uses before
-probing (a `Paused` step's engine has legitimately exited; a step with no execution yet has nothing
-to probe; a `Failed` step with no pending retry has no future engine action to question) — so its
-mere presence in the JSON already answers "does liveness apply here" before a caller reads its value.
+`liveness` is present on a step this same projection calls `"Running"` (a step frozen by a
+room-level sentinel — #1934 slice 1 / §13 — is the one exception carrying none), and (#1513)
+a `"Failed"` step still carrying a `RetryNotBefore` — the identical gate
+`StatusCommand.FormatStepStatus` uses before probing (a `Paused` step's engine has legitimately
+exited; a step with no execution yet has nothing to probe; a `Failed` step with no pending retry
+has no future engine action to question) — so its mere presence in the JSON already answers
+"does liveness apply here" before a caller reads its value.
 `fleet_status` invents no `reason` field beside `rejected`, on either of the two branches §3's
 `rejected` entry enumerates; which step rejected, if that
 matters, is `steps[].state == "Rejected"` — already a token distinct from `"Failed"`.
@@ -2601,8 +2648,10 @@ anticipated this shape):
   "resolvedBy"?: string,  // F10 (#1720 review): the room-level WorkflowStatusView.ResolvedBy, copied like `rejected`. The glass's only signal for a conductor `baton resolve --close`, which sets this WITHOUT setting `rejected` (§3)
   "role"?: string,        // bindings.json's own key for the Running step's worker
   "adapter"?: string,     // that role's WorkerBindingConfigEntry.Adapter
-  "model"?: string,       // that role's WorkerBindingConfigEntry.Model
-  "effort"?: string,      // that role's WorkerBindingConfigEntry.Effort
+  "model"?: string,       // that role's WorkerBindingConfigEntry.Model, falling back (#1927) to its ModelResolved when the dispatcher named none -- so a room dispatched without --model shows a model rather than a bare vendor
+  "effort"?: string,      // that role's WorkerBindingConfigEntry.Effort, with the same #1927 fallback to EffortResolved
+  "modelSource"?: string, // #1927: which rung produced `model` -- WorkerBindingConfigEntry.ModelSource carried verbatim, including what its absence means. Fleet Glass marks a "resolved-default" value with a trailing "~"
+  "effortSource"?: string, // #1927: the same for `effort`, same two values and same absence rule
   "timeoutMs"?: number,   // that role's WorkerBindingConfigEntry.Timeout, in milliseconds
   "label"?: string,       // #1499: the room's --label, WorkerBindingConfigEntry.Label
   "workstream"?: string,  // #1619: the room's --workstream, WorkerBindingConfigEntry.Workstream
@@ -3103,7 +3152,11 @@ new surface, not a relocation of anything above.** `BatonPaths.FleetProjectionFi
 (`{Root}/fleet/projection.json`, §7) wraps the same per-room shape this section already describes —
 `fleet_status`'s own fields, plus `live`/`pruned` gated exactly as above — under one more top-level
 `derived_at` (the daemon's own wall-clock at successful write completion; unrelated to the
-mailbox-payload `derived_at` above, which is the pusher's cycle time). Per room, alongside `live`,
+mailbox-payload `derived_at` above, which is the pusher's cycle time). Since #1902 there is a second
+top-level key, `timelines` (room path → the same projected entries, `{}` when no room has a readable
+one). It does **not** bump the four-field count: the count is of fields the mailbox payload lacks,
+and the payload has always carried `timelines` — what changed is that the FILE can now supply it,
+which is the PR-B2/PR-C thread below, not new payload surface. Per room, alongside `live`,
 whenever that room's steps carry a Running execution (present even when #1513 has downgraded the
 room's own displayed `state` to `"Stalled"` — these three exist specifically to diagnose that case,
 so gating them on `state == "Running"` the way `live` itself is gated would hide them from exactly
@@ -3200,16 +3253,32 @@ this section states rather than leaves to be discovered:
 - **`rooms[].live`/`rooms[].pruned`/`vendors` come from the file verbatim in `file` mode** — never
   recomputed by `pusher.py`, which is the per-cycle duplicate work the switch exists to remove
   (#1886 is the standing reason a second arithmetic is not merely redundant but can be *wrong*).
-- **`timelines` is the one field the file cannot supply yet**, so `file` mode pushes `timelines: {}`
-  until `FleetProjectionWriter` writes per-room timeline entries (#1902). This is also what blocks
-  PR-C: a non-terminal room's timeline needs a `room_detail` call per cycle, i.e. the very `dotnet
-  mcp` spawn PR-C exists to delete. `glass.html` accumulates timelines in `localStorage` across
-  pushes, so entries already seen persist; a room first seen after the cutover shows none.
+- **`timelines` was the one field the file could not supply, and #1902 closed that gap** — the
+  projection file now carries the top-level `timelines` map (room path → entries) that the pushed
+  body consumes, so `file` mode no longer pushes `timelines: {}`. PR-C's removal condition and what
+  the closure unblocks stay canonical on `derive_snapshot_and_timelines`'s own docstring, and the
+  daemon-side policy (terminal-room caching, its eviction, and the content projection) on
+  `FleetProjectionWriter.ResolveTimelineAsync`/`ProjectTimeline`'s — neither is restated here.
+  `glass.html` accumulates timelines in `localStorage` across pushes, so entries already seen
+  persist; a room first seen after the cutover shows none.
+- **One deliberate divergence between the two implementations, and it is load-bearing for PR-C.** A
+  room whose `flow.jsonl` this tick could not read gets `RoomDetailTool.ReadTimelineAsync`'s
+  synthetic `unreadable` marker; `extract_timeline` KEEPS that marker as a type-only entry, while
+  `FleetProjectionWriter.ProjectTimeline` omits the room from `timelines` entirely — that method's
+  own remarks carry why, not restated here. So "both sources carry the same timelines" is
+  true for every readable room and **not universally true**: on a room mid-read, `derive` shows a
+  marker row and `file` shows nothing. PR-C deletes the side that still shows the marker, which
+  makes this a behaviour change PR-C has to state, not an invisible cleanup.
 `pusher.py --selftest` carries the acceptance instrument — `snapshot_identity_diffs` compares the
-finished pushed snapshot from both sources over one frozen fixture and asserts `timelines` is the
-only difference, with a planted-difference control on each side. It is a different instrument from
-`--compare-projection` above (frozen fixture vs. two live samples, whole snapshot vs. one room);
-that function's own comment says why both exist.
+finished pushed snapshot from both sources over one frozen fixture and asserts `derived_at` is the
+only difference (it was `timelines` too before #1902), with a planted-difference control on each
+side, including one for the `timelines` field specifically. Because both sides of that arm are fed
+one hand-written entry dict, it cannot prove the two CONTENT projections agree; that is a separate
+arm asserting the shared fixture `tests/fixtures/timeline-projection-sample.json`, which
+`extract_timeline` and (in `Baton.Cli.Tests`) `FleetProjectionWriter.ProjectTimeline` both project
+to byte-for-byte — the same shared-fixture-not-shared-implementation pattern `doingNow` uses above.
+It is a different instrument from `--compare-projection` above (frozen fixture vs. two live samples,
+whole snapshot vs. one room); that function's own comment says why both exist.
 
 **Board + detail-pane IA (#1678, operator ruling 2026-09-02, Combo C+E).** `glass.html`'s Fleet tab
 is a three-column state board — Needs You (the conductor pinned first, then Stalled + Indeterminate
@@ -3668,11 +3737,23 @@ code path. Both vendors participate in the ledger.
 ### Runway hold (#1848) — shipped
 
 The **enforcement** half of the runway work, and the only place in the tree that gates on a vendor's
-own `/usage` counters. It consumes the per-vendor projection #1391/#1869 already persists and adds no
-second harvest path: the daemon harvests, `baton dispatch` reads the persisted snapshot
-(`BatonPaths.VendorUsageSnapshotFile`). A gate check therefore spends no subscription usage and can
-never itself be what exhausts the runway it protects. The harvester's own `/usage` call is exempt from
-everything below — it is how the counters are measured.
+own `/usage` counters. It consumes the per-vendor projection #1391/#1869 already persists: the daemon
+harvests, `baton dispatch` reads the persisted snapshot (`BatonPaths.VendorUsageSnapshotFile`). The
+harvester's own `/usage` call is exempt from everything below — it is how the counters are measured.
+
+**On demand, once, when there is nothing to read (#1923).** When a gated vendor has a usage source but
+no persisted snapshot at all, the hold runs that source once inline — bounded at 10 s, written through
+the harvester's own writer, no second snapshot format and no second source list
+(`VendorUsageSources.Default`) — and then decides. This is the one case in which a gate check spends
+subscription usage, and it is bounded to one `/usage` call per such vendor per dispatch: a vendor whose
+snapshot already exists, fresh or stale, is never harvested here, so the common path still spends
+nothing and the gate still cannot be what exhausts the runway it protects. It exists because the
+daemon's harvester only fires while a lane of that vendor is live (or 60 s after one exits), which made
+the first lane of a reset window unlaunchable — no lane, so no snapshot; no snapshot, so no lane.
+**A failed harvest still holds**, and says so: the refusal reads `harvest attempted at HH:MM and
+failed: <reason>` rather than `no readable usage snapshot`, because "never harvested" is a bootstrap
+state and "harvested and it failed" is a fault to look at. Harvesting a *stale* snapshot on demand is
+not this, and is not shipped — tracked, with the daemon-tick half of #1923, in #1966.
 
 **Hold new admissions; never arrest for fleet reasons** (operator ruling, 2026-09-04). A dispatch that
 would start new vendor spend is refused before the room is provisioned; work already running always
@@ -3714,11 +3795,13 @@ table would route every ceiling-less codex dispatch down the "recognised window,
 arm — holding the newest vendor on the fleet for the same absence this paragraph chose to admit.
 Gating on the derived counters is a separate decision, not a consequence of the source existing.
 
-**The harvest is a prerequisite, and its absence is a Hold.** On a machine where the daemon has never
-run (or has not harvested within `maxSnapshotAgeHours`), every `claude` and `agy` dispatch is refused
-until one harvests or the operator passes `--override-runway`. That is the ruling's own consequence,
-not an oversight: unreadable holds, and "no snapshot yet" is the most common way counters are
-unreadable. A vendor with no usage source at all is unaffected — it is admitted as unmeasured.
+**The harvest is a prerequisite, and its absence is a Hold.** On a machine where the daemon has not
+harvested within `maxSnapshotAgeHours`, every `claude` and `agy` dispatch is refused until one harvests
+or the operator passes `--override-runway`. That is the ruling's own consequence, not an oversight:
+unreadable holds, and a stale snapshot is unreadable for this purpose. The narrower case of *no
+snapshot at all* is what #1923's on-demand harvest above resolves before deciding — and still a Hold
+when that harvest fails. A vendor with no usage source at all is unaffected — it is admitted as
+unmeasured.
 
 **Thresholds are operator config**, in the settings file baton already has —
 `{BatonPaths.Root}/settings.json`, `DaemonSettings.RunwayHold` — fleet-wide with per-vendor overrides
@@ -3891,10 +3974,11 @@ repeated-settle shapes, and what inflated totals that skip is buying, not restat
 | `sourceKind` | Closed set. **Two have writers**: `baton-execution` (a settle, and #1901 C2's backfill of a room still on disk — a recovered execution is the same KIND of fact as a settled one, so it keeps this label rather than earning a "recovered" one) and `github-backfill` (#1901 C2's merged-PR half, below). `claude-code-session`, `codex-session`, `antigravity-session` stay reserved for phase C. Makes "Baton-only rows" a filter, not an inference. |
 | `repository` | `RepositoryIdentity.Value` — see below. |
 | `room`, `workflow`, `step`, `execution`, `role` | Identity, off the accepted `ExecutionRequest`. `role` is Baton's worker name; Baton has no second role concept. |
-| `adapter`, `model`, `outcome`, `startedAt`, `endedAt` | Route and lifecycle. **`model` is the model the step was REQUESTED at** (`ExecutionBindingResolver`, i.e. the accepted request plus any `StepRebound`), never the model the CLI echoed back — a substitution or a quota-driven downgrade is invisible in it, so grouping rows by `model` groups by intent, not by what ran. |
+| `adapter`, `model`, `outcome`, `startedAt`, `endedAt` | Route and lifecycle. **`model` is the model the step was REQUESTED at** (`ExecutionBindingResolver`, i.e. the accepted request plus any `StepRebound`), falling back since #1927 to the binding's own `ModelResolved` when the dispatcher named none — so a room dispatched without `--model` no longer writes a blank here. Never the model the CLI echoed back: grouping rows by `model` groups by intent, not by what ran, and `modelEchoed` below is the other half. |
 | `modelsObserved` | The models this row's token dimensions were summed ACROSS, off the vendor's own per-model breakdown (§3). Absent = the vendor reported no breakdown, which is *unknown*, never *one model*. |
-| `modelEchoed` | **Reserved, no phase-A writer** — the model as the CLI itself echoed it, which is the one `model` is not. Named now so phase C fills it rather than inventing a competitor. |
+| `modelEchoed` | #1927. The model the vendor CLI itself reported having RUN, which is the one `model` is not — written at settle off the captured stream by the same reader that derives the token dimensions (`IWorkerUsageParser.TryParseEchoedModel`, last line naming one wins). **Which event, per vendor, is each parser's own statement; what is ruled here is which event may NOT be read**: claude's `system:init` echoes the requested `--model` string verbatim even for an id that then fails to run (`docs/vendor-doc-audit.md` §5), so reading it would make this field a second copy of `model` under a name promising the opposite. Only **claude** has a writer today, and only its `assistant`/`message.model` rung is measured — the `result` event's own top-level `model` is read first and is unmeasured, since the repository's only captured result lines are error results carrying none. **Absent means the vendor echoed nothing**, never "same as requested" — and the two vendors it is always absent for are absent for different reasons, which a reader must not collapse: agy's own stream was measured to carry no `model` key on any event, whereas **codex never reaches this reader as a vendor stream at all** — Baton's own `CodexAppServerBroker` synthesizes both `thread.started` and `turn.completed`, so there is nothing to echo and the fact is UNMEASURED rather than measured-negative (stamping Baton's own configured model onto them would echo intent, exactly what `system:init` is refused for). For both, the resolved-at-bind stamp (§2/§6) is what names a model instead. A row where `model` and `modelEchoed` differ is a substitution or a quota-driven downgrade; `baton ledger` shows the difference rather than either alone. |
 | `tokensIn`, `tokensOut`, `cacheRead`, `cacheCreation`, `thinking`, `turns`, `wallClockMs` | The dimensions `QuotaLedgerEntry` carries, same names and same nullability. Cache-read is first-class here, never folded into a billed figure. |
+| `toolSteps`, `refusedToolSteps`, `repeatedToolSteps` | #1921. The step-BUDGET axis, which no token figure on this row can show: how many real tool calls the attempt made, how many of those came back refused by this Baton's grant, and how many re-issued a tool+arguments pair the same execution had already issued. `toolSteps` is the unit §3 defines once (`IWorkerUsageParser.CountToolSteps` — the same one `MaxToolSteps` caps). None enters either estimate: a refusal costs a step and a turn, not a rate. **All three present or all three absent** — `Status.ToolStepTally.Snapshot` is the one decision point and states the three states it decides between; absence means the stream carried no readable tool activity, was never captured, or was not whole, and **never** "this attempt ran no tools". `0` is a measurement, and on `refusedToolSteps` it is the one #1920's acceptance reads. **A refusal is counted by matching one marker** (`Domain.GrantRefusal.Marker`), stamped at each producing site — `ShellCommandPatternMatcher.ScopedShellResult`, `CodexDynamicToolResult.Refused`, and the claude and agy hook gates' single deny funnels — rather than by matching a list of phrasings, which is what made the count uncheckable before: a sixth phrasing added anywhere went uncounted with nothing failing. **Only a decision the grant took is marked**: a tool call the grant allowed and that then failed — a non-zero exit, a timeout, a missing file — is unmarked and uncounted, because its output is the information the step bought (`CodexDynamicToolResult.Failed` is that split made structural on the one vendor whose tools Baton executes itself). The accepted cost, stated rather than hidden: **a room captured before that marker landed reads `refusedToolSteps: 0` while carrying real refusals**, a false zero bounded to rooms already on disk and drained by retention. `repeatedToolSteps`'s `0` is likewise two facts — every call distinct, or the vendor's stream carried no arguments to key on (`IWorkerUsageParser.ToolInvocationKeys` names which, when, and why a name-only key was rejected as fabricating repeats). The stream reader counts a FOURTH figure, empty tool results, which stays off this row: an empty result is often the honest answer to a well-formed question where a refusal never is, so mixing them would put a measurement of the workspace into a measurement of the grant. `baton audit lanes` (§2) is where all four are read together, per room and per vendor. |
 | `verifyStepMs`, `verifyResultsBytes` | #1882's two non-token dimensions, carried through from `ExecutionUsageView` under the same names and by the same attribution — §3 above states which execution gets them and why they are present together or not at all. Neither enters either estimate: a zero-token step changes no price. |
 | `pushWaitMs`, `prePushGateMs` | #1910. What this attempt's own `git push`es spent in the pre-push gate, summed across every push it made: `prePushGateMs` is the hook's whole wall clock (receipt check, plus the fallback `gates --fast` when the receipt did not cover the tree), `pushWaitMs` the part of it spent QUEUED on the shared build lock rather than doing work — the figure C-12's ruling C exists to drive down. **Whose queueing, per path, since only two are reachable and the comparison is between them (#1936 review):** on the SKIP path it is 0 by construction, the receipt check running in `tools/buildlock.py`'s read-only class and queueing on nothing; on the FALLBACK path it is what that `gates --fast` run's own lock-taking members waited for. Nothing else in the hook's process tree may contribute — a gate member's selftest fabricating contention against a temp lock file is not this push waiting, and `tools/buildlock.py`'s `_selftest_env` is what keeps it out. Read at settle from `push-timing.jsonl` in the execution's own artifact directory, which `.githooks/pre-push` appends one line to per push. Present together or absent together — one file produces both. **Absent means "no push timing was recorded"**, never "the push was instant" and never "no push happened": an execution that never pushed, a hook that ran with no Baton-supplied `BATON_OUTPUT_DIR`, and an artifact directory gone by settle time all read the same way. `0` is a measurement — a push that waited on nothing. Neither enters either estimate. |
 | `billedTokens`, `liveBilledTokens`, `billedUnderReadTokens`, `peakBilledInWindow` | #1706/#1709's vendor-derived figures, carried through under the names `ExecutionUsageView` already defines. |
@@ -3910,7 +3994,7 @@ repeated-settle shapes, and what inflated totals that skip is buying, not restat
 | `label` | #1901 C2. The operator's `baton dispatch --label` for this row's worker, read back off the room's `bindings.json` (`WorkerBindingConfigEntry.Label`, §2/§6) at settle and again by the backfill — the arm key #1903's comparator filters on, so an A/B of two dispatch shapes is a filter rather than a hand-kept list of room paths. Already sanitized when it was recorded; carried through verbatim. Copied onto a correcting row for the same reason `issue`/`pr`/`role` are: it identifies the work, not the spend, and an arm reading would otherwise miss that arm's interventions. **Absent means "no label was recorded for this worker"**, never "unlabelled work" — a `baton run` against a hand-authored `bindings.json`, a dispatch that passed no `--label`, and a room whose bindings file is gone all read the same way. A `github-backfill` row never carries one: a merged PR has no worker and so no binding to read it from. |
 | `commits`, `reviewCount` | #1901 C2, `github-backfill` rows only. How many commits the merged PR carried and how many **reviews** `gh` reports for it. **`reviewCount` is not a review-comment count**, which #1901's C2 text asks for: `gh pr list --json` exposes `reviews` (one entry per submitted review) and `comments` (the PR's issue comments), and neither is the per-thread review-comment count — so the row records the one that was actually measured, under a name that says which. `0` is a measurement; absence means `gh` reported no such array at all. Both are absent on every execution row: a settle has no PR-level count in hand, and the diff shape beside it is a workspace measurement rather than a GitHub one. |
 | `identitySource` | #1931 review HIGH (operator ruling 2026-09-05). Which lookup produced this row's `repository` — `recorded-root` (the room's own recorded project root answered) or `working-directory` (it did not, or there was none, and the identity came from wherever the run was invoked). Closed set. Written by **every writer of a new row**: the settle site (#1931 re-review MEDIUM — `RepositoryIdentityResolver.TryResolveForRoomAsync` returns which rung answered alongside the identity, because the settle site writes most of the file and a field only the backfill stamped would partition the ledger by writer rather than by provenance), `baton ledger backfill` for both its halves, and a correcting row copying it from the row it corrects (so `baton resolve` never states different provenance from the row underneath it). **Absence therefore means "this row was written before provenance was recorded", never `recorded-root`.** On an execution row, `working-directory` is well-formed and may still be keyed to the WRONG repository — the exposure the fallback below accepts — and this field is the only thing on the row that can say so afterwards. It cannot repair one: the ledger is append-only, and a corrective run from the right checkout writes a different repository's file whose dedupe never sees the bad row. **On a `github-backfill` row the same value is a statement of fact, not a fallback, and carries no such risk**: those PRs came from the repository `gh` was run in by construction. The two populations separate on `sourceKind`, which is what a reader triaging this field filters on; a third enum value was rejected because it would change the schema every existing row is read under to record something `sourceKind` already says. |
-| `attempt`, `effort`, `parentRoom`, `workstream`, `raw` | **Reserved, no writer** — none is derivable from the events a settle has in hand (`modelEchoed`, above, is reserved for the same reason). Named now so a later phase fills a reserved field rather than inventing a competing one. |
+| `attempt`, `effort`, `parentRoom`, `workstream`, `raw` | **Reserved, no writer** — none is derivable from the events a settle has in hand. Named now so a later phase fills a reserved field rather than inventing a competing one. (`modelEchoed` was on this list until #1927 gave it a writer; it left the list rather than keeping a stale entry beside a populated field.) |
 
 **A `baton resolve` appends a correcting row; it never rewrites the row it corrects.** This ledger is
 append-only and its rows are immutable, which is what #1849's reproducibility guarantee rests on — so
@@ -4269,6 +4353,31 @@ created-at.
   writers at the store's public API and asserts none are lost). "Last-writer-wins per room" is the
   *read-time* semantic on top of that — `RoomRegistryStore.ReadDistinctByRoomAsync` folds repeated
   lines for one room path down to the last one written.
+- **A contended access retries with jittered backoff before it fails open (#1942).** Every access here —
+  read and write alike — makes *several* waits for the lock, separated by a randomized gap, rather than
+  one flat wait, because under six or more live rooms the flat wait was reporting a transient queue as a
+  failure. `RoomRegistryStore`'s own `WaitPolicy` is where that measurement and the resulting budget are
+  recorded; neither is transcribed here. `LockWaitPolicy`
+  (`src/Baton/Status/MutexGuardedFileLock.cs`) carries what the gap between attempts buys and what it
+  does not. **Every access's own failure contract is unchanged**, only deferred: one that still cannot
+  be had after the whole budget fails exactly the way it failed after a single wait. Which failure that
+  is depends on the access, and the fail-open swallow does not cover all of them: `ReadDistinctByRoomAsync`
+  — the read behind `fleet_status`, the daemon's readers and `baton ledger` — resolves to no entries and
+  one stderr line, and an `AppendAsync` write is reported on stderr and swallowed by its caller (`baton
+  run`/`dispatch` registration, `baton deliver`). The registry-maintenance entry points are the
+  exception, stated once on `RoomRegistryStore` itself: `RemoveByRoomPathAsync` (`baton room delete`,
+  and each room `baton rooms prune --yes` deletes), `CompactAsync` (`baton rooms prune --yes`) and
+  `PreviewCompactionAsync` (`baton rooms prune`'s default dry-run listing) surface the timeout to their
+  verb, which fails with it. No path here can fail a dispatch. The cost, stated
+  rather than left emergent: an access contending with a wedged holder now blocks for the whole budget
+  before it degrades, instead of giving up after one wait — a `fleet_status` call before falling back
+  to its directory scan, a `baton run`/`dispatch` start before its registration falls back to stderr,
+  and the daemon's four registry readers (`FleetProjectionWriter`, `DeliveryPoller`,
+  `VendorUsageHarvester`, and `QueueSchedulerService`'s live-weight tally, which feeds its launch
+  decision) each on their own tick. A tick that waits is late by up to the budget, never skipped —
+  the services are independent and each recovers on its next interval — so the consequence is a stale
+  projection, a late delivery poll or usage sample, and, for the scheduler alone, a queued lane
+  launched that much later: this can *delay* a dispatch, never fail one.
 - **Reader.** `FleetStatusTool` unions the registry's entries with its existing `BatonPaths.Rooms` +
   caller `roots` scan. A registry entry whose room directory no longer exists is skipped (not pruned
   from the file yet — see below). Every room `fleet_status` returns, whether found by the scan or the
@@ -4547,10 +4656,25 @@ commands before the worker's first turn, sequentially, and the contract is:
   which is what the field's own doc, `docs/agents/invoking-baton.md` and this bullet all already say.
   Skipping the stamp when no step ran is what made the field a claim rather than a record on the
   majority of review lanes: nothing removed a model-written array, and `--notify` carries
-  `verdict.json` verbatim off disk. **`baton redispatch` stamps too (#1895)**, always on the removal
-  arm: no verify step can run on that path — `--verify-cmd` is a `DispatchOptions` field with no
+  `verdict.json` verbatim off disk. **`baton redispatch`, `baton resume` and `baton supply` stamp too
+  (#1895, #1911)** — so four verbs stamp, always on the removal
+  arm: no verify step can run on any of those paths — `--verify-cmd` is a `DispatchOptions` field with no
   binding to inherit, so a redispatched review has no instruments of its own and the key is removed
-  rather than left carrying whatever the model wrote. (Not `--verify`, the post-exit flag, which *is*
+  rather than left carrying whatever the model wrote. A resumed turn and a supplied file are the same
+  case, and the scope removal may cover — the executions the invocation itself produced, never one an
+  earlier verb already settled — is stated once, on `VerdictInstrumentStamp`'s own remarks.
+  **Four verbs, not every verb that can write a `verdict.json`: `baton run` and `baton decide` both
+  can and neither stamps, and that hole is open rather than closed here (#1911 review, medium 2).**
+  Both pump a bound workflow to a fixed point, so a review role writing a fabricated `instruments`
+  under either of them still rides into a `--notify` payload — `WatchFireService.BuildPayload` reads
+  whatever `verdict.json` the room's outputs name and does not ask which verb produced it. `baton
+  run` is a documented review-producing path (`docs/agents/invoking-baton.md`), which is what makes
+  this a real gap rather than a theoretical one; `ResumeCommandEndToEndTests`' discriminating control
+  is where the un-stamped `run` behaviour is pinned today. The two are one gap seen twice: scoping
+  supply's removal to its own execution (above) also stopped supply from incidentally cleaning up a
+  `run`-produced verdict it was never entitled to rewrite. Out of scope for a different reason:
+  `baton resolve` pumps nothing and writes no artifact, and `baton deliver` writes under
+  `artifacts/conductor`, outside the `execution_*` population this stamp walks. (Not `--verify`, the post-exit flag, which *is*
   inherited as `WorkerBindingConfigEntry.VerifyCommandOverride` — §3's "Verify command resolution";
   conflating the two is what the earlier wording of this sentence did.) The prompt half of the same
   door is closed with it: the bare (`--spec`-less) redispatch reuses the parent's already-built
@@ -4559,6 +4683,10 @@ commands before the worker's first turn, sequentially, and the contract is:
   overridable on redispatch. It is stripped from the inherited prompt
   (`RoleDispatch.WithoutVerifyResultsParagraph`, applied in `RedispatchCommand.InheritBinding`), which
   is the same rule as "the prompt says nothing at all when no step ran" rather than an exception to it.
+  **The strip is anchored to the engine's own block, not to its text (#1911):** the paragraph is
+  removed only where the builder writes it — immediately before the `Required outputs:` block — so an
+  operator's brief that quotes the clause survives redispatch byte for byte. Anchored by position
+  rather than by a written marker because rooms already on disk carry no marker to find.
 - **The role's shell grant is unchanged**, and `WorkerRoles.json` is untouched. `--verify-cmd` is
   accepted only for a verdict-producing role (today, `review` alone) and refused for a workflow
   template. It is **not** `--verify`, which overrides the *post-exit* verify command a mutating role
@@ -5143,6 +5271,27 @@ nothing, however close it looks: `dotnet build -warnaserror` is not `lint`, whos
 ruling's own words — a lane's component runs standing as the receipt — are unchanged: the front door
 is how a lane makes such a run count.
 
+**The engine verify stops being the third full run (#1958).** Measured 2026-09-06 from the cost
+ledger's own `prePushGateMs`/`pushWaitMs` (§7), 23 pushes in one day: median 369.2s in the pre-push
+gate, median 160.2s of that queued on the build lock, and only 2 of the 23 skipped on a receipt. The
+engine's post-exit verify then ran `pixi run gates-quiet` — the FULL set, the `implement` role's
+`verify_pixi_task` in `src/Baton.Vendors/WorkerRoles.json` — over the same tree a third time. Baton's own repo now
+commits a `.baton/verify` (§3's arm 2) declaring `pixi run gates-fast-cover-quiet`
+(`gates.py --fast --skip-covered --quiet`), so the engine verify runs only the fast members this exact
+tree holds no per-member receipt for; the covering rule and the "a partial run never mints a whole-run
+receipt" rule are gates.py's, unchanged and unwidened. The role default stays `gates-quiet` for every
+other workspace, which is the point of putting this in a repo-level declaration rather than in the
+role.
+
+**What that costs, stated rather than discovered later.** `--fast` is `AFTER_BUILD_FAST`, which
+excludes `test-no-build`: **the engine verify no longer runs the test suite**, so a lane that breaks
+tests can settle its room `Verified` and be caught only by CI. That is the trade this ruling's own
+first paragraph already takes — CI is the independent run, and it is never skipped by any receipt —
+but it changes what a `Verified` room asserts, and it is a deliberate narrowing rather than a
+side effect. A repo that wants the receipts' saving *without* dropping the test leg declares
+`gates.py --skip-covered` with no `--fast`; Baton's own repo does not, pending the operator ruling on
+the residual local set (#1958 step 3).
+
 **Measured 2026-09-02 (#1648):** git exports `GIT_DIR`/`GIT_INDEX_FILE`/etc. to every hook, and
 `gates.py`'s own selftest fixture spawned `git init` in a temp dir without scrubbing them, so a
 push under `.githooks/pre-push` re-initialized the pushing repo itself instead of the fixture's
@@ -5392,6 +5541,87 @@ a row's `repository` stays readable as a measurement. #1852's live subject-ambig
 phase A reports and refuses to resolve, is therefore imported under the **derived** identity. Q1's per-entry adjudication is not built here and is not reachable by
 assertion either; `MemoryAliasStore`'s remarks state what it would require and why this store is not
 it.
+
+**`baton memory sync` — phase C, shipped. The projections are caches, and they say so.** Every
+projected file opens with a header naming itself a cache, naming the canonical `entries.jsonl` it came
+from, and stating that an edit made in it is lost on the next sync and never read back; every section
+back-points to the canonical entry id it was projected from. **There is no timestamp in the output, and
+that is the mechanism rather than a stylistic choice** — a generated-at stamp is exactly what makes
+"re-running sync without source changes produces no diff" impossible, so the header carries a **content
+hash** of the body in its place. `MemoryProjection` is a pure function of `(repository,
+canonicalStorePath, entries, budget)` — the store path is an input because the header names it, so two
+runs differing only in it produce different bytes — and its remarks carry the other three properties
+that hold the byte-identity up (a total `(repository, kind, id)` order, pinned `\n`/UTF-8/no-BOM,
+invariant-culture numbers) and why the hash covers the body and not the header. **Byte-identity is
+therefore a per-machine claim**: absolute source paths and the store path are rendered into the output,
+so the same store on two machines projects two different files, and "an unchanged store produces no
+diff" is a statement about one machine over time. **`--apply` is the only thing that puts a byte on
+disk**, and short of it the verb has no filesystem effect whatever — `MemorySyncCommand`'s remarks
+carry why that has to be said as a negative rather than left as "it only reports".
+
+**The two verbs are not a loop: `import` recognises a projection and refuses to file it.** `sync`
+writes into a vendor root, and that root is `import`'s own population — so without a test the pair
+would re-ingest each cycle's cache as a fresh memory, growing the store by one entry and roughly
+doubling its bytes per cycle until the projection budget began evicting real memories. The test is the
+format marker on the projected file's first line, one constant shared by the writer and the reader
+(`MemoryProjection.IsProjectedFile`), checked **before** the subject is resolved so such a file is
+reported as `projection-skipped` and never as `unfiled` — the two mean different things, and only
+`unfiled` is a state an operator fixes with `--assert`. The marker is a test on content and not a
+guarantee about a partial file: the staging write is not atomic, so a `.tmp` truncated before its first
+line completed carries no marker and imports as an ordinary memory.
+
+**`audit` skips a projection too, on the same predicate — out of its FINDINGS only.** A cache Baton
+wrote is not evidence about whose memory a root holds, so it is excluded from the subject and duplicate
+rules and kept everywhere else: it is still walked, digested, listed in the root's row and added into
+the counts. `MemoryAuditReport`'s remarks carry the derivation — which two findings it would otherwise
+mint about the tool's own write, and why the exclusion stops at the findings — and
+`MemoryFile.IsBatonProjection` is where the inventory records the same content test rather than a
+second one.
+
+**An archived-origin entry (`historical-note`) is projected and labelled, never dropped** — the
+projector's remarks carry the derivation; the register's part is that labelling rather than hiding is
+the ruling, on the same reasoning every other omission on this surface is named rather than counted.
+
+**A superseded entry is omitted from the projection and named in the report** — the projector's own
+remarks carry the derivation; the register's part is that omitting is the ruling, since a cache is the
+*current* reading and the store still holds every row. The same posture covers the other two ways an
+entry can be absent: **budget truncation stops at the first entry that does not fit and drops the rest
+of the order** (a prefix kept, its suffix dropped — `ProjectionBudget` states why that beats
+skip-and-continue, which is equally deterministic and not predictable), and every dropped or overridden
+entry is **named with its canonical id**, never counted.
+
+**Conflicts are decided by precedence and never merged.** A checked-in repository fact outranks a
+vendor-memory fact — the authority model ratified on #1852 (operator, 2026-09-04) — and they collide on
+the same key phase B's supersession already uses: same subject, same source **filename**. Repository
+truth is projected; the vendor entry is reported as overridden, with its id, and is left untouched in
+the canonical store. Nothing compares the two beyond their digests, because comparing what they *say*
+is the inference Architecture Rule 1 and this section both forbid. **The population is whatever
+`--repository-facts <dir>` names, and Baton mints no convention for where repository facts live in a
+checkout**: phase B's scope keeps the store under `~/.baton` and never in a checkout, so this verb
+reads a directory the operator points it at and creates nothing. With the flag absent the rule has an
+empty population, which the report states in those words rather than printing a zero that reads as
+"no conflicts found".
+
+**Targets are markdown, and they are discovered rather than constructed.** Q4 (operator, 2026-09-05)
+confined this phase to markdown, so the targets are the Claude roots that resolve to the repository
+being synced and the Codex **markdown** roots an operator has asserted a repository for; the
+`memories_*.sqlite` stores and every Antigravity store are inventoried by A2 and never written —
+byte-identical idempotence over sqlite+WAL is a different problem with a different instrument. There is
+deliberately **no forward encoding** from a repository identity to a Claude project-directory name:
+`MemoryRootPath` shows the encoding is lossy, so `sync` runs the same `MemoryRootInventory` discovery
+`audit` and `import` run and writes into the roots that came back. **A repository with no discovered
+root gets no target and is reported as having none, because a projection written into a directory the
+vendor has never heard of is a file nothing ever reads, reported as a success.** **An archived Claude
+root is refused by construction, and an operator assertion does not lift the refusal** — an archive is
+a record of what was, a projection is the current reading, and `MemorySyncCommand`'s discovery remarks
+carry why the check has to run ahead of resolution. Every discovered root that is not a target is
+listed in the report with its reason, so "discovered and never written" is printed rather than only
+claimed. Each target root
+receives exactly one Baton-owned file and no other file in it is touched — not `MEMORY.md`, not the
+vendor's own memories. The honest consequence, stated because a reader's prior fills the gap the other
+way: a vendor that surfaces only the memories it has indexed may not read the projection until
+something points at it, and editing an index the operator owns is the destructive move #1852 declines
+everywhere else.
 
 **`baton memory audit [--format text|json]` — phase A, shipped.** Read-only, and read-only *by
 construction* rather than by flag: nothing on the path opens a file for writing, so there is
@@ -5740,8 +5970,9 @@ sentinel-first path) and no cost-ledger row, which is indistinguishable from a l
 
 An item is **done** when its room reaches a terminal state, read from the room itself — no `.done`
 sentinel files, so a restarted daemon resolves an item it never launched. **The fate comes from the
-room's own outcome word**, the one `WorkflowOutcome` writes into the sentinel (§3): only `Succeeded`
-is done, and Cancelled / Failed / Indeterminate — and any word this reader does not know, including a
+room's own outcome word**, the one `WorkflowOutcome` writes into the sentinel (§3): the two
+succeeded-shaped words are done — `Succeeded`, and `FinishedDuringTeardown` (#1945, §3's row) — and
+Cancelled / Failed / Indeterminate — and any word this reader does not know, including a
 sentinel carrying none — are **failed, with the room id and that word**. Not from the sentinel's
 step list or its error field: a cancelled lane has no failed step and a rejected one carries no
 failure reason, so both read as a clean completion under either. Resolving and redispatching stay
@@ -5768,8 +5999,9 @@ and each is closed where the fact exists:
   consequences, each deliberate: the outcome word is always `Failed` whatever the projection reads,
   because nothing will ever carry this room to a recorded settle and only that word resolves the item;
   the fault is the terminal `error`, with the room's own last recorded failure folded in beside it
-  rather than replacing it; and each step's live `liveness` probe is dropped, since a value read at
-  projection time would be frozen into a file read long after that engine exited. A room with no
+  rather than replacing it; and each step's live `liveness` probe is dropped (the one exception to
+  §3's step-presence rule), since a value read at projection time would be frozen into a file read
+  long after that engine exited. A room with no
   ledger, no bound snapshot, or an unreadable one still gets the bare sentinel — the write is
   unconditional, because an unprojectable room is exactly the one that would otherwise wedge its item
   in `launched` forever.

@@ -631,4 +631,244 @@ public sealed class FleetProjectionWriterTests : IDisposable
         var root = JsonNode.Parse(json)!.AsObject();
         Assert.False(root.ContainsKey("vendors"));
     }
+
+    /// <summary>
+    /// #1902: the `timelines` map the `file` projection source was missing relative to `derive`. Both
+    /// room kinds in one arm because the policy differs by kind (a non-terminal room is re-read every
+    /// tick, a terminal one is cached) while the CONTENT projection must be identical for both — and
+    /// because a map keyed by room path is only meaningfully asserted with more than one key in it.
+    /// The entries are pinned field by field: `type`, `timestamp` and `stepId` present, and no
+    /// `detail` — <c>RoomTimelineEntryView</c> carries one, and publishing it would put a raw exception
+    /// message into the pushed body that pusher.py's own `extract_timeline` is careful to drop.
+    /// </summary>
+    [Fact]
+    public async Task BuildProjectionJson_WritesTimelines_ForARunningAndATerminalRoom()
+    {
+        var liveIdentity = (Environment.ProcessId, new DateTimeOffset(System.Diagnostics.Process.GetCurrentProcess().StartTime).ToUniversalTime());
+        var (runningRoom, _) = await CreateRunningRoomAsync("timeline-running-room", liveIdentity);
+        var terminalRoom = await CreateTerminalRoomWithFlowLogAsync("timeline-terminal-room", stepCount: 2);
+
+        var writer = new FleetProjectionWriter();
+        var json = await writer.BuildProjectionJsonAsync(TestContext.Current.CancellationToken);
+
+        var timelines = JsonNode.Parse(json)!["timelines"]!.AsObject();
+        Assert.Equal(2, timelines.Count);
+
+        var runningEntry = Assert.Single(timelines[runningRoom]!.AsArray())!.AsObject();
+        Assert.Equal("flow.executionRequestAccepted", runningEntry["type"]!.GetValue<string>());
+        Assert.Equal("step-a", runningEntry["stepId"]!.GetValue<string>());
+        Assert.True(runningEntry.ContainsKey("timestamp"));
+        Assert.False(runningEntry.ContainsKey("detail"));
+
+        var terminalEntries = timelines[terminalRoom]!.AsArray();
+        Assert.Equal(2, terminalEntries.Count);
+        Assert.Equal(
+            ["step-00", "step-01"],
+            terminalEntries.Select(e => e!["stepId"]!.GetValue<string>()).ToArray());
+        Assert.All(terminalEntries, e => Assert.Equal("flow.executionRequestAccepted", e!["type"]!.GetValue<string>()));
+    }
+
+    /// <summary>#1902: capped at the newest <c>TimelineCap</c> (30) entries, the same tail pusher.py's
+    /// `TIMELINE_CAP` keeps — newest kept, oldest dropped, never the other way round.</summary>
+    [Fact]
+    public async Task BuildProjectionJson_CapsATimelineAtTheNewestThirtyEntries()
+    {
+        var room = await CreateTerminalRoomWithFlowLogAsync("timeline-cap-room", stepCount: 35);
+
+        var writer = new FleetProjectionWriter();
+        var json = await writer.BuildProjectionJsonAsync(TestContext.Current.CancellationToken);
+
+        var entries = JsonNode.Parse(json)!["timelines"]![room]!.AsArray();
+        Assert.Equal(30, entries.Count);
+        Assert.Equal("step-05", entries[0]!["stepId"]!.GetValue<string>());
+        Assert.Equal("step-34", entries[^1]!["stepId"]!.GetValue<string>());
+    }
+
+    /// <summary>
+    /// #1902: a room whose <c>flow.jsonl</c> cannot be read this tick (here: another handle holds it
+    /// with <see cref="FileShare.None"/>) gets NO `timelines` entry, and the tick still completes —
+    /// the room itself is still projected, so this is "the timeline is missing", not "the room fell out
+    /// of the fleet". Deliberately divergent from pusher.py's `extract_timeline`, which keeps
+    /// <c>RoomDetailTool</c>'s synthetic `unreadable` marker; <c>ResolveTimelineAsync</c>'s own remarks
+    /// carry why the daemon omits instead.
+    /// </summary>
+    [Fact]
+    public async Task BuildProjectionJson_UnreadableFlowLog_YieldsNoTimelineEntryAndDoesNotThrow()
+    {
+        var room = await CreateTerminalRoomWithFlowLogAsync("timeline-unreadable-room", stepCount: 2);
+
+        using (new FileStream(
+                   Path.Combine(room, BatonPaths.FlowLogFileName), FileMode.Open, FileAccess.Read, FileShare.None))
+        {
+            var writer = new FleetProjectionWriter();
+            var json = await writer.BuildProjectionJsonAsync(TestContext.Current.CancellationToken);
+
+            var root = JsonNode.Parse(json)!.AsObject();
+            Assert.Single(root["rooms"]!.AsArray());
+            Assert.False(root["timelines"]!.AsObject().ContainsKey(room));
+        }
+    }
+
+    /// <summary>
+    /// #1902: the terminal-room caching policy <c>FleetProjectionWriter.ResolveTimelineAsync</c>'s own
+    /// remarks state. The second tick is what this arm exists for: the cached entries must
+    /// still render identically (a cached <c>JsonNode</c> re-parented onto a second tick's root would
+    /// throw, which a single-tick test cannot see), and they must still be served once the underlying
+    /// ledger is gone — which is also what proves the cache was consulted rather than the file re-read.
+    /// </summary>
+    [Fact]
+    public async Task BuildProjectionJson_SecondTick_ServesATerminalRoomsTimelineFromCache()
+    {
+        var room = await CreateTerminalRoomWithFlowLogAsync("timeline-cached-room", stepCount: 3);
+
+        var writer = new FleetProjectionWriter();
+        var first = await writer.BuildProjectionJsonAsync(TestContext.Current.CancellationToken);
+        var firstEntries = JsonNode.Parse(first)!["timelines"]![room]!.ToJsonString();
+
+        // EnsureDeleted, not Delete: this delete IS the discriminator (the arm proves the cache was
+        // consulted only because the ledger is gone), so it is setup, and FileCleanup's own contract
+        // says setup rethrows. A swallowed failure here -- the #295 lingering-handle flake
+        // CleanupRetry exists for -- would leave flow.jsonl in place, let the second tick re-read it,
+        // and turn this arm green on a writer that caches nothing.
+        FileCleanup.EnsureDeleted(Path.Combine(room, BatonPaths.FlowLogFileName));
+
+        var second = await writer.BuildProjectionJsonAsync(TestContext.Current.CancellationToken);
+        var secondEntries = JsonNode.Parse(second)!["timelines"]![room]!.ToJsonString();
+
+        Assert.Equal(firstEntries, secondEntries);
+
+        // Control: a NON-terminal room is never cached, so the same deletion takes its timeline away.
+        // Without this the arm above would pass equally on a writer that cached every room forever.
+        var liveIdentity = (Environment.ProcessId, new DateTimeOffset(System.Diagnostics.Process.GetCurrentProcess().StartTime).ToUniversalTime());
+        var (runningRoom, _) = await CreateRunningRoomAsync("timeline-uncached-room", liveIdentity);
+        var uncachedWriter = new FleetProjectionWriter();
+        Assert.True(JsonNode.Parse(await uncachedWriter.BuildProjectionJsonAsync(TestContext.Current.CancellationToken))!
+            ["timelines"]!.AsObject().ContainsKey(runningRoom));
+        FileCleanup.Delete(Path.Combine(runningRoom, BatonPaths.FlowLogFileName));
+        Assert.False(JsonNode.Parse(await uncachedWriter.BuildProjectionJsonAsync(TestContext.Current.CancellationToken))!
+            ["timelines"]!.AsObject().ContainsKey(runningRoom));
+    }
+
+    /// <summary>
+    /// #1902 review finding 1: terminal is NOT a one-way door
+    /// (<see cref="TerminalSentinelWriter.DeleteStaleSentinel"/> exists so a re-run can reuse a
+    /// finished room's directory), so a re-run's second terminal state must serve the SECOND run's
+    /// timeline. Before the eviction this arm drives, the first run's entries were served for the
+    /// life of the daemon process — which is a long-lived scheduled task, and <c>glass.html</c>
+    /// accumulates what it is served in <c>localStorage</c>.
+    /// <para>
+    /// The middle tick (while the room reads non-terminal) is deliberate and is what this arm proves:
+    /// the sentinel-write-time key that also covers a re-run finishing entirely between two ticks
+    /// cannot be tested without injecting a clock, since two writes milliseconds apart can report the
+    /// same <c>LastWriteTimeUtc</c> — an arm resting on that would be a flake, not a check.
+    /// </para>
+    /// </summary>
+    [Fact]
+    public async Task BuildProjectionJson_ARoomRerunAfterGoingTerminal_ServesTheRerunsTimeline()
+    {
+        var room = await CreateTerminalRoomWithFlowLogAsync("timeline-rerun-room", stepCount: 2);
+        var writer = new FleetProjectionWriter();
+
+        var first = JsonNode.Parse(await writer.BuildProjectionJsonAsync(TestContext.Current.CancellationToken))!;
+        Assert.Equal(2, first["timelines"]![room]!.AsArray().Count);
+
+        // The re-run: RunCommand's own pre-pump DeleteStaleSentinel, then more ledger events.
+        TerminalSentinelWriter.DeleteStaleSentinel(room);
+        var logWriter = new FlowEventLogWriter(Path.Combine(room, BatonPaths.FlowLogFileName));
+        await logWriter.AppendAsync(
+            new FlowEvent.ExecutionRequestAccepted(
+                new ExecutionRequest(
+                    new ExecutionId("exec-rerun"), new WorkflowId("wf"), new StepId("step-rerun"), "architect",
+                    [], [], TimeSpan.FromMinutes(5), [], new Dictionary<StepId, ExecutionId>(), Adapter: "claude"),
+                EnginePid: null,
+                EngineStartTime: null),
+            TestContext.Current.CancellationToken);
+        await logWriter.DisposeAsync();
+
+        // A tick lands while the re-run is in flight -- the room reads non-terminal here.
+        var duringRerun = JsonNode.Parse(await writer.BuildProjectionJsonAsync(TestContext.Current.CancellationToken))!;
+        Assert.Equal(3, duringRerun["timelines"]![room]!.AsArray().Count);
+
+        await TerminalSentinelWriter.WriteAsync(
+            room, new WorkflowStatusView("Succeeded", [], [], null, null), TestContext.Current.CancellationToken);
+
+        var afterRerun = JsonNode.Parse(await writer.BuildProjectionJsonAsync(TestContext.Current.CancellationToken))!;
+        var entries = afterRerun["timelines"]![room]!.AsArray();
+        Assert.Equal(3, entries.Count);
+        Assert.Equal("step-rerun", entries[^1]!["stepId"]!.GetValue<string>());
+    }
+
+    /// <summary>
+    /// #1902 review finding 4: the content projection exists twice — here as
+    /// <see cref="FleetProjectionWriter.ProjectTimeline"/>, and in <c>pusher.py</c> as
+    /// <c>extract_timeline</c>. Both project the SAME checked-in fixture to its <c>expected</c>
+    /// entries; <see cref="FleetProjectionWriter.ProjectTimeline"/>'s own doc comment states what
+    /// that buys; read the fixture's own <c>_readme</c> before editing it.
+    /// <c>python tools/fleet-glass/pusher.py --selftest</c> is this arm's other half. Compared as
+    /// serialized TEXT rather than field by field, so an ordering or type change (<c>0</c> vs
+    /// <c>"0"</c>) is caught too.
+    /// </summary>
+    [Fact]
+    public void ProjectTimeline_ProjectsTheSharedFixture_IdenticallyToPusherPySelftest()
+    {
+        var fixturePath = Path.Combine(FindRepoRoot(), "tests", "fixtures", "timeline-projection-sample.json");
+        Assert.True(File.Exists(fixturePath), $"Fixture file must exist at {fixturePath}");
+        var fixture = JsonNode.Parse(File.ReadAllText(fixturePath))!.AsObject();
+
+        var timeline = JsonSerializer.Deserialize<RoomTimelineView>(
+            fixture["roomDetail"]!["timeline"]!.ToJsonString())!;
+        var rendered = FleetProjectionWriter.RenderTimeline(FleetProjectionWriter.ProjectTimeline(timeline));
+
+        Assert.Equal(fixture["expected"]!.ToJsonString(), rendered.ToJsonString());
+
+        // (control) the fixture has to overflow the cap, and the entry it loses must be the oldest --
+        // the assertion above passes equally on a head-keeping projection if it does not.
+        Assert.True(fixture["roomDetail"]!["timeline"]!["entries"]!.AsArray().Count > rendered.Count);
+        Assert.Equal(30, rendered.Count);
+        Assert.DoesNotContain(
+            rendered,
+            e => e!["stepId"]?.GetValue<string>() ==
+                 fixture["roomDetail"]!["timeline"]!["entries"]![0]!["stepId"]!.GetValue<string>());
+    }
+
+    private static string FindRepoRoot()
+    {
+        var dir = new DirectoryInfo(AppContext.BaseDirectory);
+        while (dir is not null)
+        {
+            if (File.Exists(Path.Combine(dir.FullName, "Baton.slnx")))
+            {
+                return dir.FullName;
+            }
+
+            dir = dir.Parent;
+        }
+
+        throw new InvalidOperationException("Could not locate repo root (Baton.slnx) from " + AppContext.BaseDirectory);
+    }
+
+    /// <summary>A settled room (<c>terminal.json</c>) whose <c>flow.jsonl</c> carries
+    /// <paramref name="stepCount"/> <c>ExecutionRequestAccepted</c> events, each naming a distinct step
+    /// id so a timeline's ORDER and TAIL are both assertable by name rather than by count alone.</summary>
+    private async Task<string> CreateTerminalRoomWithFlowLogAsync(string roomName, int stepCount)
+    {
+        var room = Path.Combine(_tempHome, BatonPaths.RoomsDirectoryName, roomName);
+        Directory.CreateDirectory(room);
+        await TerminalSentinelWriter.WriteAsync(
+            room, new WorkflowStatusView("Succeeded", [], [], null, null), TestContext.Current.CancellationToken);
+
+        var logWriter = new FlowEventLogWriter(Path.Combine(room, BatonPaths.FlowLogFileName));
+        for (var i = 0; i < stepCount; i++)
+        {
+            var request = new ExecutionRequest(
+                new ExecutionId($"exec-{i:D2}"), new WorkflowId("wf"), new StepId($"step-{i:D2}"), "architect",
+                [], [], TimeSpan.FromMinutes(5), [], new Dictionary<StepId, ExecutionId>(), Adapter: "claude");
+            await logWriter.AppendAsync(
+                new FlowEvent.ExecutionRequestAccepted(request, EnginePid: null, EngineStartTime: null),
+                TestContext.Current.CancellationToken);
+        }
+
+        await logWriter.DisposeAsync();
+        return room;
+    }
 }

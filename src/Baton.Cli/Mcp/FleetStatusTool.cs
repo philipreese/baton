@@ -26,7 +26,8 @@ public sealed class FleetStatusTool : IMcpTool
 {
     // #1513: NOT a WorkflowOutcome member -- deliberately a fleet_status-only display word, so it
     // can never be confused for a ledger outcome by a consumer that already switches on
-    // WorkflowOutcome's own members (six as of #1586 S1's Indeterminate; spec/baton.md §3). Distinct
+    // WorkflowOutcome's own members (enumerated in spec/baton.md §3; deliberately no count here --
+    // #1945 made the previous one stale the day it added a member). Distinct
     // from "Failed": a stalled room is not
     // permanently done -- a fresh `baton run` against the room can revive it (`baton resume` cannot;
     // #1582 review found it refuses every room this reaches -- spec/baton.md §3 has the full
@@ -34,9 +35,10 @@ public sealed class FleetStatusTool : IMcpTool
     private const string StalledDisplayState = "Stalled";
 
     // #1513: confirms EVERY step whose liveness this projection probes reads "dead" -- not merely
-    // "none alive". Liveness is only ever populated (WorkflowStatusProjector.Project) for the exact
-    // steps keeping the workflow un-terminal (a Running step, or a Failed step still carrying a
-    // RetryNotBefore at all, expired or not -- see spec/baton.md §3), so this is already scoped to
+    // "none alive". Liveness is only ever populated (WorkflowStatusProjector.Project) for steps
+    // keeping the workflow un-terminal (a Running step, or a Failed step still carrying a
+    // RetryNotBefore at all, expired or not -- see spec/baton.md §3; a sentinel-frozen Running step
+    // carries none, §13, and so cannot count as "dead" here), so this is already scoped to
     // the steps whose promise this room's Running reading rests on. Requiring "all dead" rather than
     // "none alive" matters for a multi-step DAG: a sibling step whose own liveness probe comes back
     // "unknown" (a pre-#1375 ledger with no recorded identity, or a Win32Exception probing a PID this
@@ -304,8 +306,7 @@ public sealed class FleetStatusTool : IMcpTool
             // already covered the label alone.
             var terminalBindings = await TryLoadBindingsAsync(roomDir, cancellationToken).ConfigureAwait(false);
             var terminalBinding = ConductorRoomDetector.TryResolveSoleBinding(terminalBindings);
-            var (terminalRole, terminalAdapter, terminalModel, terminalEffort, terminalTimeoutMs) =
-                ProjectBindingFields(terminalBinding);
+            var terminalFields = ProjectBindingFields(terminalBinding);
             var terminalLineage = await TryReadLineageAsync(roomDir, cancellationToken).ConfigureAwait(false);
 
             return new FleetRoomStatusView(
@@ -318,11 +319,13 @@ public sealed class FleetStatusTool : IMcpTool
                 Try: sentinel.Try,
                 Rejected: sentinel.Rejected,
                 ResolvedBy: sentinel.ResolvedBy,
-                Role: terminalRole,
-                Adapter: terminalAdapter,
-                Model: terminalModel,
-                Effort: terminalEffort,
-                TimeoutMs: terminalTimeoutMs,
+                Role: terminalFields.Role,
+                Adapter: terminalFields.Adapter,
+                Model: terminalFields.Model,
+                Effort: terminalFields.Effort,
+                TimeoutMs: terminalFields.TimeoutMs,
+                ModelSource: terminalFields.ModelSource,
+                EffortSource: terminalFields.EffortSource,
                 Label: ExtractRoomLabel(terminalBindings),
                 Workstream: ExtractRoomWorkstream(terminalBindings),
                 ParentRoomPath: terminalLineage.ParentRoomDirectoryPath,
@@ -339,7 +342,7 @@ public sealed class FleetStatusTool : IMcpTool
         {
             var bindings = await TryLoadBindingsAsync(roomDir, cancellationToken).ConfigureAwait(false);
             var soleBinding = ConductorRoomDetector.TryResolveSoleBinding(bindings);
-            var (role, adapter, model, effort, timeoutMs) = ProjectBindingFields(soleBinding);
+            var (role, adapter, model, effort, timeoutMs, modelSource, effortSource) = ProjectBindingFields(soleBinding);
             if (string.Equals(role, "conductor", StringComparison.OrdinalIgnoreCase) ||
                 string.Equals(roomName, "conductor", StringComparison.OrdinalIgnoreCase))
             {
@@ -351,6 +354,8 @@ public sealed class FleetStatusTool : IMcpTool
                     Model: model,
                     Effort: effort,
                     TimeoutMs: timeoutMs,
+                    ModelSource: modelSource,
+                    EffortSource: effortSource,
                     Label: ExtractRoomLabel(bindings),
                     Workstream: ExtractRoomWorkstream(bindings),
                     Runway: ExtractRoomRunway(bindings));
@@ -445,7 +450,7 @@ public sealed class FleetStatusTool : IMcpTool
 
             var bindings = await TryLoadBindingsAsync(roomDir, cancellationToken).ConfigureAwait(false);
             var binding = TryResolveRunningBinding(bindings, steps, events);
-            var (role, adapter, model, effort, timeoutMs) = ProjectBindingFields(binding);
+            var (role, adapter, model, effort, timeoutMs, modelSource, effortSource) = ProjectBindingFields(binding);
             var lineage = await TryReadLineageAsync(roomDir, cancellationToken).ConfigureAwait(false);
 
             // #1513: the ledger's own `Running` (WorkflowOutcome.Describe/DeriveWorkflowStatus) means
@@ -476,6 +481,8 @@ public sealed class FleetStatusTool : IMcpTool
                 Model: model,
                 Effort: effort,
                 TimeoutMs: timeoutMs,
+                ModelSource: modelSource,
+                EffortSource: effortSource,
                 Label: ExtractRoomLabel(bindings),
                 Workstream: ExtractRoomWorkstream(bindings),
                 ParentRoomPath: lineage.ParentRoomDirectoryPath,
@@ -643,22 +650,44 @@ public sealed class FleetStatusTool : IMcpTool
     /// request to prefer, so its Adapter/Model always come from the pair itself (spec/baton.md §6
     /// schema).
     /// </summary>
-    private static (string? Role, string? Adapter, string? Model, string? Effort, long? TimeoutMs) ProjectBindingFields(
+    private static BindingFields ProjectBindingFields(
         (string Role, WorkerBindingConfigEntry Entry)? binding,
         ExecutionRequest? recordedRequest = null) =>
         binding is { } resolved
-            ? (resolved.Role,
+            ? new BindingFields(
+               resolved.Role,
                recordedRequest?.Adapter ?? resolved.Entry.Adapter,
-               recordedRequest?.Model ?? resolved.Entry.Model,
-               resolved.Entry.Effort,
-               (long?)resolved.Entry.Timeout.TotalMilliseconds)
-            : (null, null, null, null, null);
+               // #1927: the requested model still wins -- what an operator asked for is what they
+               // should see. ModelResolved is the LAST rung, reached only when nobody asked, which is
+               // precisely the dispatch that used to render a bare vendor here.
+               recordedRequest?.Model ?? resolved.Entry.Model ?? resolved.Entry.ModelResolved,
+               resolved.Entry.Effort ?? resolved.Entry.EffortResolved,
+               (long?)resolved.Entry.Timeout.TotalMilliseconds,
+               // The stamp travels verbatim, absent and all: a hand-authored bindings.json (baton
+               // run/resume) carries no source, and a surface must render "no mark" for that rather
+               // than asserting the value was requested.
+               resolved.Entry.ModelSource,
+               resolved.Entry.EffortSource)
+            : new BindingFields(null, null, null, null, null, null, null);
 
-    private static (string? Role, string? Adapter, string? Model, string? Effort, long? TimeoutMs) ProjectBindingFields(
+    private static BindingFields ProjectBindingFields(
         (string Role, WorkerBindingConfigEntry Entry, ExecutionRequest Request)? binding) =>
         binding is { } resolved
             ? ProjectBindingFields((resolved.Role, resolved.Entry), resolved.Request)
-            : (null, null, null, null, null);
+            : new BindingFields(null, null, null, null, null, null, null);
+
+    /// <summary>
+    /// What <see cref="ProjectBindingFields"/> yields — a named record rather than a tuple since #1927
+    /// took it past five members, where positional destructuring stops being readable at the call site.
+    /// </summary>
+    private sealed record BindingFields(
+        string? Role,
+        string? Adapter,
+        string? Model,
+        string? Effort,
+        long? TimeoutMs,
+        string? ModelSource,
+        string? EffortSource);
 
     /// <summary>
     /// Extracts a room's <c>--label</c> (#1499) off its loaded <c>bindings.json</c> dictionary.
@@ -790,7 +819,15 @@ public sealed record FleetRoomStatusView(
     // projection (#1557) serializes through this same record, which is how the glass gets it.
     [property: JsonPropertyName("runway")]
     [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
-    IReadOnlyList<RunwayAdmissionView>? Runway = null);
+    IReadOnlyList<RunwayAdmissionView>? Runway = null,
+    // #1927: WorkerBindingConfigEntry.ModelSource/EffortSource, carried verbatim off the same
+    // bindings.json read -- that field's own doc states the vocabulary and what an absent value means.
+    [property: JsonPropertyName("modelSource")]
+    [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    string? ModelSource = null,
+    [property: JsonPropertyName("effortSource")]
+    [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    string? EffortSource = null);
 
 /// <summary>
 /// Status of a single workflow step within a fleet room status report.
@@ -815,8 +852,8 @@ public sealed record FleetStepStatusView(
     ExecutionUsageView? LinkedFromUsage = null,
     // spec/baton.md §3/§6: the same WorkflowStatusStepView.Liveness FleetStatusTool already reads
     // off the shared projection (sentinel step's Liveness / stepView.Liveness) -- copied, never a
-    // second EngineLivenessProbe call. Present exactly when WorkflowStatusProjector.Project itself
-    // populates it -- spec/baton.md §3 states which steps that is and why.
+    // second EngineLivenessProbe call. Present per WorkflowStatusProjector.Project, except for
+    // sentinel-frozen steps — see spec/baton.md §3 for the presence rule and its sentinel exception.
     [property: JsonPropertyName("liveness")]
     [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
     string? Liveness = null,

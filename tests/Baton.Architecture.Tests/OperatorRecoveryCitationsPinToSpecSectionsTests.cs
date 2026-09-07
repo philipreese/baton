@@ -102,6 +102,15 @@ public sealed class OperatorRecoveryCitationsPinToSpecSectionsTests
             "intervention — {RecoveryGuidance.RunRoomDirInstruction}, and leave it running until \" + $\"{localRetryTime} or nothing fires (see spec/baton.md §3)\";",
             Section: 3,
             RoomDirRecoveryProcedure),
+        // MemorySyncCommand.cs (#1852 phase C): a repository whose canonical store holds memories but
+        // whose machine holds no vendor root to project them into is pointed at section 12 -- for the
+        // ruling that no target is reported rather than one being created, and for the two verbs that
+        // give it one.
+        new(
+            "src/Baton.Cli/MemorySyncCommand.cs",
+            "then assert a per-machine Codex root's repository with 'baton memory import --assert \" + $\"<root>={repository}' (see spec/baton.md §12).",
+            Section: 12,
+            "A repository with no discovered root gets no target and is reported as having none"),
     ];
 
     [Theory]

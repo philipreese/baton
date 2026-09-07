@@ -96,7 +96,7 @@ if (args.Length >= 1 && args[0] == "daemon")
     return 0;
 }
 
-var knownSubcommands = new[] { "run", "dispatch", "redispatch", "cancel", "decide", "resolve", "supply", "resume", "status", "watch", "deliver", "templates", "keep", "unkeep", "trust", "room", "rooms", "ledger", "memory", "queue", "mcp", "daemon" };
+var knownSubcommands = new[] { "run", "dispatch", "redispatch", "cancel", "decide", "resolve", "supply", "resume", "status", "watch", "deliver", "templates", "keep", "unkeep", "trust", "room", "rooms", "ledger", "memory", "audit", "queue", "mcp", "daemon" };
 if (args.Length == 0 || !knownSubcommands.Contains(args[0]))
 {
     Console.Error.WriteLine(RunOptionsParser.Usage);
@@ -134,6 +134,7 @@ if (args.Length == 0 || !knownSubcommands.Contains(args[0]))
     Console.Error.WriteLine(
         "              ('ledger --rebuild' is a different FILE from the other three -- 'baton ledger --help' says which)");
     Console.Error.WriteLine($"       {MemoryAuditOptionsParser.Usage[7..]}");
+    Console.Error.WriteLine($"       {AuditLanesOptionsParser.Usage[7..]}");
     Console.Error.WriteLine($"       {QueueOptionsParser.Usage[7..]}");
     // #1934: the one thing the grammar does not say — the queue does not launch anything; the daemon
     // does, on its own schedule, and records why (spec/baton.md §13).
@@ -296,9 +297,9 @@ try
     }
 
     // #1852: a noun-first verb group like `room`/`rooms` above -- `audit` (phase A, read-only) and
-    // `import` (phase B, which writes only under BatonPaths.Root). `sync`, phase C's projection half,
-    // is the reason the shape leaves room for a third. Neither produces a CommandResult, so they join
-    // the groups here rather than the switch below.
+    // `import` (phase B, which writes only under BatonPaths.Root) and `sync` (phase C, the projection
+    // half, which writes only into vendor memory roots that already exist and only under `--apply`).
+    // None produces a CommandResult, so they join the groups here rather than the switch below.
     if (args[0] == "memory")
     {
         if (args.Length >= 2 && args[1] == "audit")
@@ -315,9 +316,32 @@ try
                 .ExecuteAsync(memoryImportOptions, Console.Out, cancellationToken: hostStopSource.Token).ConfigureAwait(false);
         }
 
+        if (args.Length >= 2 && args[1] == "sync")
+        {
+            var memorySyncOptions = MemorySyncOptionsParser.Parse(args[2..]);
+            return await MemorySyncCommand
+                .ExecuteAsync(memorySyncOptions, Console.Out, cancellationToken: hostStopSource.Token).ConfigureAwait(false);
+        }
+
         throw new CliArgumentException(
             $"Unknown 'baton memory' sub-verb. {MemoryAuditOptionsParser.Usage} " +
-            $"{MemoryImportOptionsParser.Usage}");
+            $"{MemoryImportOptionsParser.Usage} {MemorySyncOptionsParser.Usage}");
+    }
+
+    // #1921: a noun-first verb group like `room`/`rooms`/`memory` above, read-only for the reason
+    // AuditLanesOptions states. `lanes` is its only sub-verb; the group shape is what leaves room for a
+    // second without moving the first.
+    if (args[0] == "audit")
+    {
+        if (args.Length >= 2 && args[1] == "lanes")
+        {
+            var auditLanesOptions = AuditLanesOptionsParser.Parse(args[2..]);
+            return await AuditLanesCommand
+                .ExecuteAsync(auditLanesOptions, Console.Out, cancellationToken: hostStopSource.Token)
+                .ConfigureAwait(false);
+        }
+
+        throw new CliArgumentException($"Unknown 'baton audit' sub-verb. {AuditLanesOptionsParser.Usage}");
     }
 
     // #1934 slice 1: a noun-first verb group like `room`/`rooms`/`memory` above. Writes the queue file

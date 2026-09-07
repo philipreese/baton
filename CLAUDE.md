@@ -30,10 +30,6 @@ baton/
 │                                (serving fleet_status/the registry), the snapshot push loop, and
 │                                the quota-runway ledger (spec/baton.md §7) are unbuilt new work for
 │                                a later PR, not something #1420's narrowing preserved
-│   └── Baton.Daemon/            CHANGELOG.md only (#1458 3b) — release-please's "simple" type has no
-│                              live package left to version, so the historical file stays at its old
-│                              path rather than being renamed or merged into another CHANGELOG; the
-│                              dir survives solely to hold it
 ├── tests/                     Unit/integration tests; live-smoke test projects (Baton.Cli.SmokeTests)
 │                              live outside Baton.slnx (default CI skips them) — see docs/runbooks/
 ├── spec/
@@ -75,6 +71,24 @@ use it until that command has been run once per clone.
 | `gates-fast` | the same minus `test`. What the pre-push hook runs when no receipt covers the tree |
 | `gates-fast-cover` | the same, minus every member this tree already holds a per-member receipt for (#1910). To get those receipts, run the member itself through `python tools/gates/gates.py --record-member <member>` — pass the name only; it runs that member's own gate task for you and receipts what it watched, so a `dotnet build` you ran by hand is not a `lint` receipt. This pass then completes the fast set and the push skips. Never mints a whole-run receipt |
 | `setup-hooks` | one-time per clone: `git config core.hooksPath .githooks` |
+
+**Before you push, receipt what you already ran — the order is the whole trick (#1958).** A receipt is
+keyed to `HEAD^{tree}` plus a hash of what is uncommitted, so one recorded on a dirty tree is void the
+moment you commit. Run the members **after your final commit and before the push**:
+
+```
+python tools/gates/gates.py --record-member lint          # and fmt-check, audit-recordonce, ...
+pixi run gates-fast-cover                                 # completes the union; skips what you receipted
+git push                                                  # hook prints the skip line, spends ~0
+```
+
+Only a union covering the **whole** fast set makes the hook skip (`gates.py` states that rule; the
+table row above states what `--record-member` will and will not accept), so the `gates-fast-cover` pass
+is not optional — receipting three members and pushing just runs `gates-fast` anyway. Recording a test
+member earns nothing here: `--fast` excludes `test-no-build` by construction, so it is not in the set
+being covered. The same receipts are what a dispatched lane's **engine verify** reads afterwards —
+`.baton/verify` runs the same fast-cover pass — so this one habit removes two of the three local runs
+per lane rather than one. What that costs is spec/baton.md C-12's `#1958` paragraph.
 
 **.NET 10 SDK** is required and installed separately — pixi does not manage it:
 - Windows: `winget install Microsoft.DotNet.SDK.10`

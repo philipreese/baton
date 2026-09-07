@@ -1,4 +1,5 @@
 using System.Text.Json;
+using Baton.Domain;
 
 namespace Baton.Cli;
 
@@ -123,8 +124,15 @@ public static class AgyHookCheckCommand
     /// <b>allow</b> on this vendor (<c>agy.hook-malformed-stdout-fails-open</c>). Losing the
     /// exception type from the reason is worth that.
     /// </remarks>
+    /// <remarks>
+    /// #1921: the marker is spelled out INSIDE this literal rather than composed from
+    /// <see cref="GrantRefusal.Marker"/>, which is the one place in this change that restates it. The
+    /// remark above is why: this constant exists so the fail-closed path allocates nothing and calls
+    /// nothing, and a string concatenation here would reintroduce exactly the allocation it was written
+    /// to avoid. <c>AgyHookCheckCommandTests</c> asserts the two agree, so the restatement cannot drift.
+    /// </remarks>
     private const string FallbackDenyJson =
-        """{"decision":"deny","reason":"AER: the permission gate failed internally and denied this call rather than allowing it unchecked."}""";
+        """{"decision":"deny","reason":"[baton:grant-refused] AER: the permission gate failed internally and denied this call rather than allowing it unchecked."}""";
 
     /// <summary>
     /// Runs the check, writing exactly one JSON object to <paramref name="stdout"/>. Takes its
@@ -376,9 +384,17 @@ public static class AgyHookCheckCommand
 
                 if (!result.IsAllowed)
                 {
+                    // #1920: same append as the claude hook's Bash rung — the matcher states the rule,
+                    // this site knows the vendor and names agy's own read/search tools, suppressed
+                    // when this session withheld them, and (see there) only on a scoped grant, since
+                    // an unscoped one reaches this rung for a write-shaped standing deny.
+                    var alternative = shellPatternList.Patterns.Count > 0
+                        ? Baton.Vendors.GrantedReadToolHint.ForAgy(tool => IsWithheld(denied, tool))
+                        : null;
                     return DenyJson(
                         $"AER: the command line '{commandLine}' is denied under this session's shell " +
-                        $"grant — {result.Reason}.");
+                        $"grant — {result.Reason}." +
+                        (alternative is null ? string.Empty : $" To proceed, {alternative}."));
                 }
             }
 
@@ -580,8 +596,17 @@ public static class AgyHookCheckCommand
     /// interpolation, so no reason text can produce output agy cannot parse — which it would read as
     /// an allow.
     /// </summary>
+    /// <remarks>
+    /// #1921: the reason carries <see cref="GrantRefusal.Marker"/>, stamped here because this is the
+    /// single funnel for every one of this gate's fourteen refusal paths — a fifteenth cannot be added
+    /// without it. agy delivers this reason back inside the denied step's own tool payload, where
+    /// <c>Status.AgyUsageParser.CountRefusedToolSteps</c> reads it — that member names the exact shape
+    /// and the room it was measured on. <see cref="GrantRefusal.Stamp"/> is
+    /// idempotent, so a composed reason already carrying <c>ShellCommandPatternMatcher</c>'s marker is
+    /// left alone.
+    /// </remarks>
     private static string DenyJson(string reason) =>
-        JsonSerializer.Serialize(new { decision = "deny", reason });
+        JsonSerializer.Serialize(new { decision = "deny", reason = GrantRefusal.Stamp(reason) });
 
     /// <summary>Mirrors <c>AgyWorkerAdapter.DeniedToolsVendorTag</c>; see it for why (#600).</summary>
     private const string VendorTag = "agy";

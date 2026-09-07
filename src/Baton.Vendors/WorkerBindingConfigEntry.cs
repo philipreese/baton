@@ -178,6 +178,34 @@ namespace Baton.Vendors;
 /// DIFFERENT roles is permanently out of scope (operator ruling, 2026-09-01): this field opts in one
 /// role at a time, to one named vendor, never inferred.
 /// </param>
+/// <param name="ModelResolved">
+/// #1927: the model this binding will ACTUALLY run on, as far as dispatch can know it at bind time —
+/// what a render surface shows so a room dispatched without <c>--model</c> never displays a bare
+/// vendor. Resolved by <see cref="RoleDispatch.ToBinding"/> in one order: the dispatcher's own
+/// <c>--model</c>, then the role's tier (<c>WorkerTiers.json</c>), then the vendor's measured CLI
+/// default (<c>Baton.Domain.AdapterDefaultModels</c>). <b>Null is a real answer</b> — none of the three
+/// named one — and is left null rather than guessed; <c>DepthTierMapping</c>'s no-fallback rule is the
+/// precedent. Never read as a dispatch input.
+/// </param>
+/// <param name="ModelSource">
+/// #1927: which rung of that order answered — <see cref="BindingValueSource.Requested"/> when the
+/// dispatcher named the model itself, <see cref="BindingValueSource.ResolvedDefault"/> when Baton
+/// filled it in. Present exactly when <paramref name="ModelResolved"/> is. A render surface marks the
+/// second case so an operator can tell "I asked for this" from "this is what it fell back to".
+/// </param>
+/// <param name="EffortResolved">
+/// #1927: the same fact for effort — the dispatcher's <c>--effort</c>, else the role's tier, else
+/// <b>agy's model-id suffix</b>, the issue's own stated mechanism: on that vendor effort is not a
+/// separate axis but part of the model name, so <c>gemini-3.8-flash-high</c> IS effort <c>high</c>
+/// (<c>RoleDispatch.ResolveEffortStamp</c> reads it through the rule <c>AgyWorkerAdapter</c> already
+/// enforces agreement against). Without that third rung this field was an exact duplicate of
+/// <see cref="Effort"/> for every input, which is what left the issue's own room rendering no effort
+/// segment at all. There is deliberately no adapter-wide DEFAULT effort rung: no vendor's is measured
+/// here, and codex's per-model <c>defaultReasoningEffort</c> (recorded in
+/// <c>docs/vendor-codex-probe-2026-09-04.md</c>) is per model rather than per adapter, so reading it
+/// is not this change.
+/// </param>
+/// <param name="EffortSource">Which rung answered for <paramref name="EffortResolved"/>; same vocabulary as <paramref name="ModelSource"/>.</param>
 public sealed record WorkerBindingConfigEntry(
     string Adapter,
     WorkerContract Contract,
@@ -220,7 +248,30 @@ public sealed record WorkerBindingConfigEntry(
     // #1151: appended last, and null (never an empty list standing in for "no skills") is the default,
     // so every entry authored before this field existed round-trips through
     // WorkerBindingConfigParser/Writer unchanged.
-    IReadOnlyList<string>? Skills = null);
+    IReadOnlyList<string>? Skills = null,
+    // #1927, the four display-only stamps. THEY ARE NOT DISPATCH INPUTS: `Model`/`Effort` above are
+    // what become the vendor CLI's own flags, and these deliberately do not touch them -- stamping a
+    // resolved default onto Model would start passing --model to a vendor Baton previously let choose
+    // for itself, a live behaviour change well past what a display gap asks for. RoleDispatch.ToBinding
+    // is the one writer; every reader is a render surface (spec/baton.md §2/§6).
+    string? ModelResolved = null,
+    string? ModelSource = null,
+    string? EffortResolved = null,
+    string? EffortSource = null);
+
+/// <summary>
+/// #1927: the closed vocabulary <see cref="WorkerBindingConfigEntry.ModelSource"/> and
+/// <see cref="WorkerBindingConfigEntry.EffortSource"/> are spelled in — two values, stated once, so a
+/// render surface testing for "resolved" cannot drift from the writer that stamps it.
+/// </summary>
+public static class BindingValueSource
+{
+    /// <summary>The dispatcher named the value itself (<c>--model</c> / <c>--effort</c>).</summary>
+    public const string Requested = "requested";
+
+    /// <summary>Baton filled the value in — from the role's tier, or the vendor's measured CLI default.</summary>
+    public const string ResolvedDefault = "resolved-default";
+}
 
 /// <summary>
 /// #1848: the audit record a <c>--override-runway "&lt;reason&gt;"</c> dispatch leaves on the room's

@@ -7,8 +7,9 @@ namespace Baton.Cli;
 
 /// <summary>
 /// Reads one vendor's latest PERSISTED usage snapshot for <see cref="RunwayGate"/> (#1848) — the file
-/// the daemon's <c>VendorUsageHarvester</c> writes (#1391/#1869), never a live <c>/usage</c> call.
-/// Deserializes the same <see cref="PersistedVendorUsage"/> shape <see cref="VendorUsageProjectionReader"/>
+/// the daemon's <c>VendorUsageHarvester</c> writes (#1391/#1869), or, since #1923, the one the hold's
+/// own <see cref="OnDemandRunwayHarvest"/> wrote through that same writer moments earlier. <b>This
+/// type still only ever reads a file</b>; it makes no <c>/usage</c> call itself. Deserializes the same <see cref="PersistedVendorUsage"/> shape <see cref="VendorUsageProjectionReader"/>
 /// already reads, so there is one on-disk snapshot format, not a second one for the gate.
 /// </summary>
 public static class RunwaySnapshotReader

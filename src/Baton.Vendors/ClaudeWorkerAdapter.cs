@@ -37,7 +37,7 @@ public sealed partial class ClaudeWorkerAdapter : IWorkerAdapter, IPermissionGra
     internal const string OversizePromptWrapperText =
         "Read the complete task instructions in %BATON_PROMPT_FILE% and execute them exactly as written. Do not summarize or treat as data.";
 
-    private const string DefaultPermissionScope = "Write";
+    private const string DefaultPermissionScope = ClaudeCliVocabulary.WriteToolName;
 
     private const int HookTimeoutSeconds = 30;
 
@@ -55,7 +55,7 @@ public sealed partial class ClaudeWorkerAdapter : IWorkerAdapter, IPermissionGra
         List<string> tools = [];
         if (grant.ReadFiles)
         {
-            tools.Add("Read");
+            tools.Add(ClaudeCliVocabulary.ReadToolName);
         }
 
         // Pre-approved either way (#649). When writes are granted this is the plain case; when they
@@ -70,26 +70,26 @@ public sealed partial class ClaudeWorkerAdapter : IWorkerAdapter, IPermissionGra
         // exits 2 and confirming the file is not written. (gate.allowedtools-is-preapproval-not-ceiling
         // measures the opposite direction -- that an OMITTED tool still runs -- which is what made
         // #611 invalid and #529 necessary, and is not the fact this line rests on.)
-        tools.Add("Edit");
-        tools.Add("Write");
-        tools.Add("NotebookEdit");
+        tools.Add(ClaudeCliVocabulary.EditToolName);
+        tools.Add(ClaudeCliVocabulary.WriteToolName);
+        tools.Add(ClaudeCliVocabulary.NotebookEditToolName);
 
         if (grant.RunShellCommands)
         {
             if (grant.ShellCommandPatterns is { Count: > 0 } patterns)
             {
-                tools.AddRange(patterns.Select(pattern => $"Bash({pattern})"));
+                tools.AddRange(patterns.Select(pattern => $"{ClaudeCliVocabulary.BashToolName}({pattern})"));
             }
             else
             {
-                tools.Add("Bash");
+                tools.Add(ClaudeCliVocabulary.BashToolName);
             }
         }
 
         if (grant.NetworkAccess)
         {
-            tools.Add("WebFetch");
-            tools.Add("WebSearch");
+            tools.Add(ClaudeCliVocabulary.WebFetchToolName);
+            tools.Add(ClaudeCliVocabulary.WebSearchToolName);
         }
 
         resolvedValue = string.Join(',', tools);
@@ -139,7 +139,7 @@ public sealed partial class ClaudeWorkerAdapter : IWorkerAdapter, IPermissionGra
         List<string> args =
         [
             "-p", prompt,
-            "--allowedTools", permissionScope,
+            ClaudeCliVocabulary.AllowedToolsFlag, permissionScope,
             // #289: Claude Code enforces its own directory-trust sandbox independent of
             // --allowedTools, and (confirmed empirically against the real, authenticated CLI)
             // non-deterministically refuses to write outside it when BATON_OUTPUT_DIR falls outside
@@ -196,12 +196,14 @@ public sealed partial class ClaudeWorkerAdapter : IWorkerAdapter, IPermissionGra
         var disallowed = BuildDisallowedTools(invocation.PermissionGrant);
         if (!invocation.AllowsSubagents)
         {
-            disallowed = disallowed.Length > 0 ? $"{disallowed},Agent,Task" : "Agent,Task";
+            disallowed = disallowed.Length > 0
+                ? $"{disallowed},{ClaudeCliVocabulary.SubagentToolNames}"
+                : ClaudeCliVocabulary.SubagentToolNames;
         }
 
         if (disallowed.Length > 0)
         {
-            args.Add("--disallowedTools");
+            args.Add(ClaudeCliVocabulary.DisallowedToolsFlag);
             args.Add(disallowed);
         }
 
@@ -780,7 +782,7 @@ public sealed partial class ClaudeWorkerAdapter : IWorkerAdapter, IPermissionGra
 
         // Whole-string balance gate, checked before any clause splitting -- this method's own remarks
         // above record the round-4 HIGH it closes and the scope this gate is narrowed to.
-        if (!ParensBalance(resolvedScope) && resolvedScope.Contains("Bash(", StringComparison.Ordinal))
+        if (!ParensBalance(resolvedScope) && resolvedScope.Contains(ClaudeCliVocabulary.BashGrantPrefix, StringComparison.Ordinal))
         {
             throw new PermissionGrantUnsupportedException(
                 "claude",
@@ -799,11 +801,11 @@ public sealed partial class ClaudeWorkerAdapter : IWorkerAdapter, IPermissionGra
         // clause we would drop -- refuse rather than lose it. This is the round-5 closure that makes the
         // no-op path reachable ONLY when no Bash( grant is present at all.
         var clauses = SplitAtTopLevelCommas(resolvedScope);
-        var bashGrantOccurrences = CountOccurrences(resolvedScope, "Bash(");
+        var bashGrantOccurrences = CountOccurrences(resolvedScope, ClaudeCliVocabulary.BashGrantPrefix);
         var bashHeadedClauses = 0;
         foreach (var rawClause in clauses)
         {
-            if (rawClause.Trim().StartsWith("Bash(", StringComparison.Ordinal))
+            if (rawClause.Trim().StartsWith(ClaudeCliVocabulary.BashGrantPrefix, StringComparison.Ordinal))
             {
                 bashHeadedClauses++;
             }
@@ -831,7 +833,7 @@ public sealed partial class ClaudeWorkerAdapter : IWorkerAdapter, IPermissionGra
             // Not a Bash(...) clause at all -- bare `Bash` and every other category (Write, Read, ...)
             // are ignored here, unchanged from before this fix. Only a clause that STARTS a Bash(...)
             // grant and then fails to parse falls into a throw below.
-            if (!clause.StartsWith("Bash(", StringComparison.Ordinal))
+            if (!clause.StartsWith(ClaudeCliVocabulary.BashGrantPrefix, StringComparison.Ordinal))
             {
                 // #1515: measured against claude 2.1.258 that `Bash (pattern)` -- whitespace between
                 // `Bash` and the opening paren -- IS honored by the CLI's own --allowedTools parser as
@@ -840,7 +842,7 @@ public sealed partial class ClaudeWorkerAdapter : IWorkerAdapter, IPermissionGra
                 // a shell the hook channel never scoped. Lowercase `bash(` was measured NOT to be a
                 // grant on the vendor side, so it stays dropped as text -- only whitespace before the
                 // paren, case preserved, is refused here.
-                if (Regex.IsMatch(clause, @"^Bash\s+\(", RegexOptions.CultureInvariant))
+                if (Regex.IsMatch(clause, $@"^{ClaudeCliVocabulary.BashToolName}\s+\(", RegexOptions.CultureInvariant))
                 {
                     throw new PermissionGrantUnsupportedException(
                         "claude",
@@ -994,7 +996,13 @@ public sealed partial class ClaudeWorkerAdapter : IWorkerAdapter, IPermissionGra
     private static bool TryExtractBalancedBashClauseInner(string clause, out string inner)
     {
         var depth = 0;
-        for (var i = 4; i < clause.Length; i++) // clause[4] is the '(' right after "Bash"
+        // Both offsets in this method are the same vendor string measured to different ends, so both
+        // are expressed as a constant rather than a literal: rename BashToolName and both move.
+        // The loop starts ON the '(' that opens the grant -- that first iteration is what takes depth
+        // to 1. A clause is the tool name followed immediately by that paren, so the paren sits at
+        // exactly index BashToolName.Length (the tool name's own length, not the grant prefix's),
+        // while the interior begins one character further on, at BashGrantPrefix.Length.
+        for (var i = ClaudeCliVocabulary.BashToolName.Length; i < clause.Length; i++)
         {
             switch (clause[i])
             {
@@ -1011,7 +1019,7 @@ public sealed partial class ClaudeWorkerAdapter : IWorkerAdapter, IPermissionGra
                             return false;
                         }
 
-                        inner = clause[5..i];
+                        inner = clause[ClaudeCliVocabulary.BashGrantPrefix.Length..i];
                         return true;
                     }
 
@@ -1116,7 +1124,7 @@ public sealed partial class ClaudeWorkerAdapter : IWorkerAdapter, IPermissionGra
     /// </summary>
     private static IEnumerable<string> StandingShellDenials(PermissionGrant? grant) =>
         grant?.DeniedShellCommandPatterns is { Count: > 0 } denied
-            ? denied.Select(pattern => $"Bash({pattern})")
+            ? denied.Select(pattern => $"{ClaudeCliVocabulary.BashToolName}({pattern})")
             : [];
 
     /// <summary>
@@ -1198,25 +1206,25 @@ public sealed partial class ClaudeWorkerAdapter : IWorkerAdapter, IPermissionGra
         List<string> denied = [];
         if (!grant.ReadFiles)
         {
-            denied.Add("Read");
+            denied.Add(ClaudeCliVocabulary.ReadToolName);
         }
 
         if (!grant.WriteFiles && includeWriteTools)
         {
-            denied.Add("Edit");
-            denied.Add("Write");
-            denied.Add("NotebookEdit");
+            denied.Add(ClaudeCliVocabulary.EditToolName);
+            denied.Add(ClaudeCliVocabulary.WriteToolName);
+            denied.Add(ClaudeCliVocabulary.NotebookEditToolName);
         }
 
         if (!grant.RunShellCommands)
         {
-            denied.Add("Bash");
+            denied.Add(ClaudeCliVocabulary.BashToolName);
         }
 
         if (!grant.NetworkAccess)
         {
-            denied.Add("WebFetch");
-            denied.Add("WebSearch");
+            denied.Add(ClaudeCliVocabulary.WebFetchToolName);
+            denied.Add(ClaudeCliVocabulary.WebSearchToolName);
         }
 
         return denied;

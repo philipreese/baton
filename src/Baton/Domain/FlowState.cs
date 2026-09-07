@@ -281,7 +281,11 @@ public sealed record StepState(
     string? VerifyNotRunReason = null,
     // F11 (#1720 review, conductor ruling): the `--reject` subset of ResolvedByConductor above --
     // see spec/baton.md §3 for why the two are not one flag and where they are told apart.
-    bool ConductorRejected = false);
+    bool ConductorRejected = false,
+    // #1945: the latest succeeded execution for this step was killed by the dispatch timeout with a
+    // clean, already-pushed workspace -- see FlowEvent.ExecutionSucceeded.FinishedDuringTeardown.
+    // Read only by Status.WorkflowOutcome, to pick the room-level word.
+    bool FinishedDuringTeardown = false);
 
 /// <summary>
 /// A step-less supplementary execution still awaiting completion: minted outside the

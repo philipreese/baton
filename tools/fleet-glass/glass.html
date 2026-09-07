@@ -399,12 +399,19 @@ function lineageLineHtml(room, roomsByPath){
 // #1505 item 1: binding fields (role/adapter/model/effort, engine PR #1504) + client-derived
 // timebox remaining (timeoutMs - (now - the Running step's own timestamp), both absent-safe).
 // -----------------------------------------------------------------------------------------------
+// #1927: `model`/`effort` now carry a `modelSource`/`effortSource` beside them. A value Baton
+// resolved rather than the dispatcher requesting it gets a trailing "~" -- the room shows a model
+// either way (the reported symptom was a card reading just "agy"), and the mark is what keeps
+// "I asked for this" distinguishable from "this is the default it fell back to". Absent source =
+// no mark: a hand-authored binding records none, and inventing one here would assert a provenance
+// nothing measured.
+function resolvedMark(source){ return source === "resolved-default" ? "~" : ""; }
 function bindingLineHtml(room){
   const bits = [];
   if(room.role) bits.push(esc(room.role));
   if(room.adapter) bits.push(esc(room.adapter));
-  if(room.model) bits.push(esc(room.model));
-  if(room.effort) bits.push(esc(room.effort));
+  if(room.model) bits.push(esc(room.model) + resolvedMark(room.modelSource));
+  if(room.effort) bits.push(esc(room.effort) + resolvedMark(room.effortSource));
   return bits.length ? `<div class="ev mono">${bits.join(" · ")}</div>` : "";
 }
 function timeboxChip(room, running){
@@ -508,6 +515,10 @@ function primaryStateChip(room){
     // (spec/baton.md §6's room schema).
     : st === "Failed" && room.resolvedBy ? ["CLOSED","c-warn"]
     : st === "Succeeded" ? ["SUCCEEDED","c-ok"]
+    // #1945: a succeeded-shaped word -- the lane finished and pushed inside its box and the timeout
+    // kill landed after that push. Same "done, nobody needs to act" green as SUCCEEDED, never
+    // the generic fallback's idle grey; a distinct label so the room still says why.
+    : st === "FinishedDuringTeardown" ? ["FINISHED (TEARDOWN)","c-ok"]
     : st === "Failed" ? ["FAILED","c-bad"]
     // #1582: Stalled means a scheduled retry with no scheduler left to fire it -- nothing moves
     // it without a person, so it gets the "needs you" colour, never the idle grey the generic
@@ -844,8 +855,9 @@ function copyButtonHtml(verb, label){
 }
 // #1659: `baton room delete` copy button, terminal cards only -- a room still Running/Stalled may
 // have a live engine holding its files (RoomDeleteCommand's own refusal exists for exactly that), so
-// this is offered only where `terminal` is true (Failed/Succeeded/Indeterminate, the states a room's
-// terminal.json is actually written for). Dry-run-free (no --force) on purpose: a terminal card is
+// this is offered only where `terminal` is true (Failed/Succeeded/Cancelled/FinishedDuringTeardown,
+// what roomDetailHtml's own predicate reads -- that list is stated there, and this clause names it
+// rather than keeping a second copy that drifts). Dry-run-free (no --force) on purpose: a terminal card is
 // already known terminal from the same fleet_status read this page renders from, so the default
 // refusal `baton room delete` would hit on a non-terminal room never applies here.
 function copyButtonsHtml(room, running, terminal){
@@ -1135,7 +1147,10 @@ function roomDetailHtml(room, timelines, openTimelinePaths, derivedAt, roomsByPa
   const lastStep = (room.steps||[])[ (room.steps||[]).length - 1 ];
   const failedStep = (room.steps||[]).find(s => s.state === "Failed");
   const focusStep = running || failedStep || lastStep;
-  const terminal = room.state === "Failed" || room.state === "Succeeded" || room.state === "Cancelled";
+  const terminal = room.state === "Failed" || room.state === "Succeeded" || room.state === "Cancelled"
+    // #1945: a FinishedDuringTeardown room is as terminal as a Succeeded one -- its terminal.json is
+    // written the same way -- so the detail pane owes it the same `baton room delete` verb.
+    || room.state === "FinishedDuringTeardown";
   const title = room.label ? esc(room.label) : esc(room.name);
   const roomIdLine = room.label ? `<div class="roomid">${esc(room.name)}</div>` : "";
   const isTlOpen = !!(openTimelinePaths && room.path && openTimelinePaths.has(room.path));
@@ -1211,7 +1226,13 @@ function render(rooms, pushedAt, underhood, heartbeatAt, timelines, staleHiddenC
   // rendered, the same truthy-unrecognised-state hole Stalled and Indeterminate closed above.
   const isFailedLike = (r) => r.state === "Failed" || r.state === "Cancelled";
   const failed  = rooms.filter(isFailedLike);
-  const done    = rooms.filter(r => r.state === "Succeeded");
+  // #1945: FinishedDuringTeardown rides the Succeeded bucket -- a succeeded-shaped word (the lane
+  // finished and its work is on the remote), so it belongs in the same column and already paints
+  // the same c-ok chip in primaryStateChip. Same truthy-unrecognised-state hole Stalled (#1582),
+  // Indeterminate (#1586 S1) and Cancelled (#1698) each fell into before their own arm: without
+  // this it matches no bucket and is not `!r.state` either, so the room vanishes off the board.
+  const isDoneLike = (r) => r.state === "Succeeded" || r.state === "FinishedDuringTeardown";
+  const done    = rooms.filter(isDoneLike);
   const other   = rooms.filter(r => !r.state);
   // #1656: fold in whatever terminal-archive pages the operator has already loaded via "load
   // older" -- deduped against the hot set by path, since fleet_status's `page=0` deliberately
@@ -1222,7 +1243,7 @@ function render(rooms, pushedAt, underhood, heartbeatAt, timelines, staleHiddenC
     for(const r of terminalArchiveExtra){
       if(!r || !r.path || seenPaths.has(r.path)) continue;
       seenPaths.add(r.path);
-      (isFailedLike(r) ? failed : r.state === "Succeeded" ? done : other).push(r);
+      (isFailedLike(r) ? failed : isDoneLike(r) ? done : other).push(r);
     }
   }
   const byNewest = (a,b) => (newestStepTime(b)||"").localeCompare(newestStepTime(a)||"");
@@ -1890,10 +1911,18 @@ document.addEventListener("click", (ev) => {
   if(dismissAllBtn){
     const section = dismissAllBtn.dataset.section;
     if(lastGood && Array.isArray(lastGood.rooms)){
-      const targetState = section === "failed" ? "Failed" : section === "succeeded" ? "Succeeded" : section === "stalled" ? "Stalled" : null;
-      if(targetState){
+      // #1945: a matcher rather than one state string, because the succeeded section now paints two
+      // words and "dismiss all" that skipped one would leave a card the operator just dismissed the
+      // section of. `failed` deliberately stays exact-match on "Failed": glass's failed COLUMN also
+      // carries Cancelled (isFailedLike, #1698), so this map has always under-swept it -- widening
+      // that is pre-existing drift with its own population, not this change.
+      const matchesSection = section === "failed" ? (s) => s === "Failed"
+        : section === "succeeded" ? (s) => s === "Succeeded" || s === "FinishedDuringTeardown"
+        : section === "stalled" ? (s) => s === "Stalled"
+        : null;
+      if(matchesSection){
         for(const r of lastGood.rooms){
-          if(r && r.path && r.state === targetState){
+          if(r && r.path && matchesSection(r.state)){
             dismissedRooms.add(r.path);
           }
         }

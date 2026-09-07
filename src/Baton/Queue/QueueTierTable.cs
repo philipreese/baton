@@ -41,12 +41,28 @@ public static class QueueTierTable
             ["review-docs"] = new() { Adapter = "codex", Model = "gpt-5.6-sol", Effort = "high" },
         };
 
-    /// <summary>The shipped per-adapter fallback model — today just agy's, which has no model in any
-    /// tier above because no tier routes to it by default.</summary>
+    /// <summary>
+    /// The shipped per-adapter fallback model, for an item whose tier names none — a deliberate SUBSET
+    /// of <see cref="Domain.AdapterDefaultModels.Shipped"/>, whose values it reads rather than restates
+    /// (#1927).
+    /// </summary>
+    /// <remarks>
+    /// <b>Why a subset and not that table itself.</b> This value becomes the vendor CLI's own
+    /// <c>--model</c> (<c>Baton.Cli.Daemon.QueueLauncher</c>); that one is display-only. agy's entry
+    /// belongs in both: it is an operator PLACEMENT (#1925) made in order to be passed, and the
+    /// conductor's runner already passes it. codex's does not: it is a captured reading of what that
+    /// CLI picks for itself, and <c>docs/vendor-codex-probe-2026-09-04.md</c> says in terms that the
+    /// model list "should be discovered rather than frozen" and that defaults can change — so freezing
+    /// it into an argv would start naming a model on the queue's behalf that Baton had been content to
+    /// let codex choose. Stale display is visibly stale; a stale flag value is not.
+    /// <para>
+    /// Pinned by <c>QueueTierTableTests</c>, because a comment is not what keeps codex out of here.
+    /// </para>
+    /// </remarks>
     public static readonly IReadOnlyDictionary<string, string> ShippedAdapterDefaultModels =
         new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase)
         {
-            ["agy"] = "gemini-3.8-flash-high",
+            ["agy"] = Domain.AdapterDefaultModels.Shipped["agy"],
         };
 
     /// <summary>The review role, whose tier keys carry the <c>review-</c> prefix and whose live

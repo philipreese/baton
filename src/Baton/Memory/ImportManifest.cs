@@ -11,8 +11,11 @@ namespace Baton.Memory;
 /// </summary>
 /// <param name="SourcePath">Absolute path of the file that was read.</param>
 /// <param name="Sha256">Lower-case hex SHA-256 of its bytes at import time.</param>
-/// <param name="SourceMtimeUtc">Its last-write time at import time.</param>
-/// <param name="SizeBytes">Its length at import time.</param>
+/// <param name="SourceMtimeUtc">
+/// Its last-write time at import time — the entry's own, so see <see cref="MemoryEntry.SourceMtimeUtc"/>
+/// for which read it comes from.
+/// </param>
+/// <param name="SizeBytes">Its length at import time, from that same read.</param>
 /// <param name="SourceVendor">Which vendor's root it sat in.</param>
 /// <param name="SourceScope">That root's <see cref="VendorMemoryScope"/>.</param>
 /// <param name="EntryId">The <see cref="MemoryEntry.Id"/> it produced.</param>
@@ -61,8 +64,12 @@ public sealed record ImportLinkRow(
 /// </summary>
 /// <param name="SourcePath">Absolute path of the file.</param>
 /// <param name="Sha256">Its digest — recorded even here, because provenance is the point of the row.</param>
-/// <param name="SourceMtimeUtc">Its last-write time.</param>
-/// <param name="SizeBytes">Its length.</param>
+/// <param name="SourceMtimeUtc">
+/// Its last-write time. Which read the digest and this came from differs by population: an unfiled file
+/// was opened like any other, so both are from that read (see <see cref="MemoryEntry.SourceMtimeUtc"/>);
+/// a machinery file is never opened at all, so both are the inventory walk's.
+/// </param>
+/// <param name="SizeBytes">Its length, from whichever of the two the digest came from.</param>
 /// <param name="Reason">Why it produced no entry, in one clause.</param>
 public sealed record ImportSkippedRow(
     [property: JsonPropertyName("sourcePath")] string SourcePath,
@@ -117,6 +124,12 @@ public sealed record ImportSkippedRow(
 /// store is made of. Absent (null) on a manifest written before the field existed; see
 /// <see cref="CurrentVersion"/> for why that did not need a version bump.
 /// </param>
+/// <param name="ProjectionsSkipped">
+/// Files the import recognised as Baton's own projected caches and read no memory out of — the
+/// <c>baton memory sync</c> → <c>baton memory import</c> loop, closed at
+/// <see cref="MemoryProjection.IsProjectedFile"/>. Distinct from <paramref name="Unfiled"/>, which is
+/// what an operator can still place. Absent (null) on a manifest written before the field existed.
+/// </param>
 public sealed record ImportManifest(
     [property: JsonPropertyName("version")] int Version,
     [property: JsonPropertyName("importedAtUtc")] DateTime ImportedAtUtc,
@@ -126,14 +139,18 @@ public sealed record ImportManifest(
     [property: JsonPropertyName("machinery")] IReadOnlyList<ImportSkippedRow> Machinery,
     [property: JsonPropertyName("links")]
     [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
-    IReadOnlyList<ImportLinkRow>? Links = null)
+    IReadOnlyList<ImportLinkRow>? Links = null,
+    [property: JsonPropertyName("projectionsSkipped")]
+    [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    IReadOnlyList<ImportSkippedRow>? ProjectionsSkipped = null)
 {
     /// <summary>
     /// The only version this build writes, and the only one <see cref="Read"/> accepts.
     /// <para>
-    /// <b>Not bumped when <see cref="Links"/> was added</b> (#1940 review round): the verb has never
-    /// shipped, so no version-1 manifest written by any released build exists to be misread, and the
-    /// field is optional in both directions — an older manifest reads back with no links and undoes its
+    /// <b>Not bumped when <see cref="Links"/> was added</b> (#1940 review round) <b>nor when
+    /// <see cref="ProjectionsSkipped"/> was</b> (#1852 phase C, review round two): the verb has never
+    /// shipped, so no version-1 manifest written by any released build exists to be misread, and both
+    /// fields are optional in both directions — an older manifest reads back with neither and undoes its
     /// entries exactly as before. The next change to this schema after the verb ships is a bump,
     /// because from then on a reader could genuinely meet a manifest an older build wrote.
     /// </para>

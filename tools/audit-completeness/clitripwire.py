@@ -69,7 +69,7 @@ VERB_RE = re.compile(r"\bbaton\s+([a-z][a-z0-9-]*)(?:\s+([a-z][a-z0-9-]*))?")
 # (#1852 phase B) it evicted `MemoryAuditOptionsParser` from the extraction, and the spec row naming
 # that parser then reported as citing one that does not exist. A FIXED set rather than "treat any
 # second word as a sub-verb", because a second word is usually a positional argument.
-VERB_GROUPS = frozenset({"ledger", "memory", "room", "rooms"})
+VERB_GROUPS = frozenset({"audit", "ledger", "memory", "room", "rooms"})
 
 USAGE_CONST_RE = re.compile(
     r'const\s+string\s+Usage\s*=\s*((?:"(?:[^"\\]|\\.)*"\s*\+?\s*)+);')

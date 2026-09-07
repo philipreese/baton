@@ -186,6 +186,19 @@ public static class RoleDispatch
             : vendorSwapped ? null
             : role.Effort;
 
+        // #1927: what this binding will actually run on, for the render surfaces -- NOT for the CLI.
+        // `model`/`effort` above are the dispatch inputs and are deliberately untouched here: the
+        // measured gap was a room showing a bare "AGY" on the glass, which is a display problem, and
+        // stamping a default onto `model` would instead change which argv the vendor is handed.
+        //
+        // The rungs, model: what was asked for, then the role's tier, then the vendor's measured CLI
+        // default. A vendor swap drops the tier's model above (that comment states why), which is
+        // exactly the dispatch shape -- `--adapter agy` with no `--model` -- that produced the bare
+        // vendor, so the adapter-default rung is what closes it. All three silent means null, never a
+        // guess.
+        var (modelResolved, modelSource) = ResolveModelStamp(adapter, modelOverride, model);
+        var (effortResolved, effortSource) = ResolveEffortStamp(adapter, effortOverride, effort, modelResolved);
+
         var grant = role.Grant;
         var grantAuditMode = GrantAuditMode.Enforced;
 
@@ -214,7 +227,7 @@ public static class RoleDispatch
         return new WorkerBindingConfigEntry(
             Adapter: adapter,
             Contract: contract,
-            PromptTemplate: BuildPrompt(role, spec, outputs, attachments, attachmentsDirectory, verifyResultsPath),
+            PromptTemplate: BuildPrompt(role, adapter, spec, outputs, attachments, attachmentsDirectory, verifyResultsPath),
             Timeout: timeoutOverride ?? role.Timeout,
             Model: model,
             PermissionGrant: grant,
@@ -253,8 +266,52 @@ public static class RoleDispatch
             // #1802: purely catalog-controlled, like DeliversBranch -- no dispatch-time override exists.
             AllowsSubagents: role.AllowsSubagents,
             // #1151: the NAMES, already proven resolvable and grant-satisfiable above.
-            Skills: resolvedSkills.Count == 0 ? null : resolvedSkills.Select(s => s.Name).ToList());
+            Skills: resolvedSkills.Count == 0 ? null : resolvedSkills.Select(s => s.Name).ToList(),
+            // #1927: display-only, resolved just above.
+            ModelResolved: modelResolved,
+            ModelSource: modelSource,
+            EffortResolved: effortResolved,
+            EffortSource: effortSource);
     }
+
+    /// <summary>
+    /// #1927: the model rungs, as one function so <c>RedispatchCommand</c> re-runs the IDENTICAL
+    /// resolution on a vendor swap rather than a second copy of it. In order: what the dispatcher asked
+    /// for (<paramref name="requestedModel"/>, source <see cref="BindingValueSource.Requested"/>), then
+    /// the value the role's tier already produced (<paramref name="tierModel"/>), then the vendor's
+    /// measured CLI default (<see cref="Domain.AdapterDefaultModels"/>). All three silent means null,
+    /// never a guess — see <see cref="WorkerBindingConfigEntry.ModelResolved"/>.
+    /// </summary>
+    public static (string? Resolved, string? Source) ResolveModelStamp(
+        string adapter, string? requestedModel, string? tierModel) =>
+        !string.IsNullOrWhiteSpace(requestedModel) ? (requestedModel, BindingValueSource.Requested)
+        : tierModel is { Length: > 0 } ? (tierModel, BindingValueSource.ResolvedDefault)
+        : Domain.AdapterDefaultModels.For(adapter) is { Length: > 0 } adapterDefault
+            ? (adapterDefault, BindingValueSource.ResolvedDefault)
+            : ((string?)null, (string?)null);
+
+    /// <summary>
+    /// #1927: the effort rungs, the same shape as <see cref="ResolveModelStamp"/>. The third rung is
+    /// NOT an adapter-wide default effort (none is measured — <see cref="WorkerBindingConfigEntry.EffortResolved"/>
+    /// says why nothing here invents one): it is agy's own <b>model-id suffix</b>, where effort is not
+    /// a separate axis at all but part of the model name (<c>gemini-3.8-flash-high</c> IS effort
+    /// <c>high</c>, the measured rule <c>AgyWorkerAdapter</c> already enforces agreement against). Read
+    /// off <paramref name="modelResolved"/> rather than the raw tier model, because the room this rung
+    /// exists for — <c>--adapter agy</c> with no <c>--model</c> — has no tier model at all: the vendor
+    /// swap dropped it and the adapter default is what named one.
+    /// <para>
+    /// Source is <see cref="BindingValueSource.ResolvedDefault"/> for the suffix rung: the dispatcher
+    /// did not name an effort, Baton read it back off the model id.
+    /// </para>
+    /// </summary>
+    public static (string? Resolved, string? Source) ResolveEffortStamp(
+        string adapter, string? requestedEffort, string? tierEffort, string? modelResolved) =>
+        !string.IsNullOrWhiteSpace(requestedEffort) ? (requestedEffort, BindingValueSource.Requested)
+        : tierEffort is { Length: > 0 } ? (tierEffort, BindingValueSource.ResolvedDefault)
+        : string.Equals(adapter, "agy", StringComparison.OrdinalIgnoreCase)
+          && AgyWorkerAdapter.GeminiEffortSuffix(modelResolved) is { Length: > 0 } suffix
+            ? (suffix, BindingValueSource.ResolvedDefault)
+            : ((string?)null, (string?)null);
 
     /// <summary>
     /// Whether <paramref name="adapter"/> is one of the vendors that streams JSON on stdout
@@ -319,7 +376,7 @@ public static class RoleDispatch
     /// enforces it at load), so the header is never emitted without lines under it.
     /// </summary>
     private static string BuildPrompt(
-        WorkerRole role, string spec, IReadOnlyList<WorkerRoleOutput>? outputs = null,
+        WorkerRole role, string adapter, string spec, IReadOnlyList<WorkerRoleOutput>? outputs = null,
         IReadOnlyList<string>? attachments = null, string? attachmentsDirectory = null,
         string? verifyResultsPath = null)
     {
@@ -332,6 +389,13 @@ public static class RoleDispatch
 
         var promptBuilder = new System.Text.StringBuilder();
         promptBuilder.Append(spec.TrimEnd());
+
+        // #1920: the review role is the one whose shell grant is scoped tightly enough that a reviewer
+        // discovers its edges by refusal; implement/janitor run unscoped and lose no steps to this.
+        if (role.Id == "review" && ReviewToolGuidance(adapter) is { } reviewToolGuidance)
+        {
+            promptBuilder.Append($"\n\n{reviewToolGuidance}");
+        }
 
         if (attachments is { Count: > 0 } && !string.IsNullOrEmpty(attachmentsDirectory))
         {
@@ -347,9 +411,47 @@ public static class RoleDispatch
             promptBuilder.Append($"\n\n{VerifyResultsParagraph(verifyResultsPath)}");
         }
 
-        promptBuilder.Append($"\n\nRequired outputs:\n{instructions}\n\n{OneShotContract}");
+        promptBuilder.Append($"\n\n{RequiredOutputsHeading}\n{instructions}\n\n{OneShotContract}");
         return promptBuilder.ToString();
     }
+
+    /// <summary>
+    /// #1920's ask, verbatim: the one line a codex review prompt carries so the granted read path is
+    /// known before the first turn rather than found by refusal. Measured on the issue's room: `rg` was
+    /// re-issued four times, and two more steps went to a Windows backslash path, before the model
+    /// reached <c>baton_search_text</c>. Both halves are true of the codex channel — the dynamic tools
+    /// are what read and search there, and <c>CodexDynamicToolPolicy</c> routes every shell line
+    /// through the matcher that refuses a backslash (<c>ShellCommandPatternMatcher</c>) and declares no
+    /// <c>rg</c> tool.
+    /// </summary>
+    private const string CodexReviewToolGuidance =
+        "search with baton_search_text, read with baton_read_text; rg and backslash paths are not granted";
+
+    /// <summary>
+    /// #1920, claude half. Written from the CLAUDE measurement in the issue's audit comment (46 of 97
+    /// refusals on that vendor), not transposed from the codex one: what a claude reviewer actually
+    /// loses steps to is <c>cd</c>, <c>cat</c>, <c>head</c>, <c>echo</c> and <c>git grep</c>, plus every
+    /// compound line that carries one of them, because a scoped grant judges each segment on its own
+    /// (<see cref="ShellCommandPatternMatcher.EvaluateChainedCommand"/>). It deliberately says nothing
+    /// about backslash paths: that rule is a property of the shell channel alone, and claude's own Read
+    /// and Grep take Windows paths.
+    /// </summary>
+    private const string ClaudeReviewToolGuidance =
+        "read with Read, search with Grep; the Bash grant is a read-only git/gh allowlist, so cd, cat, "
+        + "head, echo and git grep are refused, and a chained command (&&, |) is refused whole unless "
+        + "every segment is itself granted";
+
+    /// <summary>
+    /// #1920: vendor-specific because the tool names are. An adapter with no measured line returns
+    /// <see langword="null"/> and the prompt gains nothing rather than a guessed one — agy's own
+    /// measured friction in the same audit is repeat reads, not refusals, and is tracked at #1921.
+    /// </summary>
+    private static string? ReviewToolGuidance(string adapter) => adapter switch
+    {
+        "codex" => CodexReviewToolGuidance,
+        "claude" => ClaudeReviewToolGuidance,
+        _ => null,
+    };
 
     /// <summary>
     /// #1882: the one paragraph a review prompt gains when the engine ran a pre-turn verify step. It
@@ -364,8 +466,8 @@ public static class RoleDispatch
         + "exact command line, exit code, wall clock and output tail for each one, captured by the "
         + "engine rather than reported by anybody. A non-zero exit there is evidence for your review, "
         + "not a reason to stop reviewing. Every runtime claim your verdict makes — a test count, an "
-        + "exit code, whether something builds — must cite that file; if a claim you want to make is "
-        + "not answered there, say it was not measured rather than asserting it.";
+        + $"exit code, whether something builds — {VerifyResultsCitationClause}; if a claim you want to "
+        + "make is not answered there, say it was not measured rather than asserting it.";
 
     /// <summary>
     /// The paragraph's opening clause, shared by the builder above and
@@ -377,6 +479,25 @@ public static class RoleDispatch
         "Before your first turn the engine ran a set of allowlisted commands for you";
 
     /// <summary>
+    /// #1911 review, low: the paragraph's SECOND recognizable phrase, extracted for the same reason
+    /// <see cref="VerifyResultsParagraphOpening"/> was — written by the builder above and read by
+    /// <see cref="WithoutVerifyResultsParagraph"/>, so one literal, not two. The strip requires both,
+    /// which is what stops an operator block that merely opens with the clause from being removed when
+    /// position alone would have condemned it.
+    /// </summary>
+    private const string VerifyResultsCitationClause = "must cite that file";
+
+    /// <summary>
+    /// The outputs block's opening line, shared by <see cref="BuildPrompt"/> and
+    /// <see cref="WithoutVerifyResultsParagraph"/>. It is what makes the verify paragraph's POSITION
+    /// recognizable (#1911): the builder appends that paragraph immediately before this block and
+    /// nothing else ever goes between them, so "the block before the outputs block" identifies the
+    /// engine's own paragraph without having to trust its text — which the operator's brief may also
+    /// contain.
+    /// </summary>
+    private const string RequiredOutputsHeading = "Required outputs:";
+
+    /// <summary>
     /// #1895: the same prompt with <see cref="VerifyResultsParagraph"/> removed, or unchanged when it
     /// carries none. Its one caller is <c>RedispatchCommand.InheritBinding</c>, and spec/baton.md §9
     /// is the register for why a redispatched review must not inherit it — not restated here.
@@ -384,6 +505,31 @@ public static class RoleDispatch
     /// Matched on the opening clause and removed whole, paragraph-wise, because the sentence that
     /// carries the path is the second one — a path-substring match would leave the "the engine ran a
     /// set of allowlisted commands for you" claim standing with the citation requirement attached.
+    /// </para>
+    /// <para>
+    /// #1911: ANCHORED BY POSITION AND BY TWO PHRASES, not by the opening clause alone. The earliest
+    /// version removed every block opening with that clause, so a brief quoting the paragraph — the
+    /// operator's own words — lost it silently on redispatch. The engine appends its paragraph in
+    /// exactly one place, immediately before the <see cref="RequiredOutputsHeading"/> block, so only
+    /// that block is a candidate; and the candidate must also carry
+    /// <see cref="VerifyResultsCitationClause"/>, so a quoted OPENING adjacent to the outputs block is
+    /// not enough to condemn it. Position rather than a written marker because
+    /// <c>RedispatchCommand</c> reads prompts off rooms already on disk, none of which would carry a
+    /// marker introduced today.
+    /// </para>
+    /// <para>
+    /// <b>The residual case, stated rather than claimed away (#1911 review, low):</b> a brief that
+    /// reproduces the engine's paragraph closely enough to open with the clause AND contain the
+    /// citation phrase, as its LAST block before the outputs block, is still removed — nothing on
+    /// disk distinguishes it from the engine's own. Every other brief round-trips byte for byte,
+    /// including one that quotes the opening clause anywhere, and one whose quoting block is adjacent
+    /// to the outputs block.
+    /// </para>
+    /// <para>
+    /// A prompt with no outputs block was not written by <see cref="BuildPrompt"/> at all, and is
+    /// returned unchanged rather than guessed at: there is no position to anchor to, and mangling an
+    /// operator's hand-written prompt is the worse of the two failures. It is not the only unchanged
+    /// shape — see the paragraph above for the rest.
     /// </para>
     /// </summary>
     public static string WithoutVerifyResultsParagraph(string promptTemplate)
@@ -396,10 +542,25 @@ public static class RoleDispatch
         }
 
         // The same "\n\n" BuildPrompt joins its blocks with -- this only ever reads a prompt that
-        // builder wrote, so there is no other separator to consider.
-        var paragraphs = promptTemplate
-            .Split("\n\n")
-            .Where(paragraph => !paragraph.TrimStart().StartsWith(VerifyResultsParagraphOpening, StringComparison.Ordinal));
+        // builder wrote, so there is no other separator to consider. Removing exactly one element
+        // from the split removes exactly one separator, so every other byte round-trips unchanged.
+        var paragraphs = promptTemplate.Split("\n\n").ToList();
+        var outputsIndex = paragraphs.FindLastIndex(
+            paragraph => paragraph.StartsWith(RequiredOutputsHeading, StringComparison.Ordinal));
+        if (outputsIndex <= 0)
+        {
+            return promptTemplate;
+        }
+
+        var candidateIndex = outputsIndex - 1;
+        var candidate = paragraphs[candidateIndex];
+        if (!candidate.TrimStart().StartsWith(VerifyResultsParagraphOpening, StringComparison.Ordinal)
+            || !candidate.Contains(VerifyResultsCitationClause, StringComparison.Ordinal))
+        {
+            return promptTemplate;
+        }
+
+        paragraphs.RemoveAt(candidateIndex);
         return string.Join("\n\n", paragraphs);
     }
 

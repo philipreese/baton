@@ -56,7 +56,13 @@ bld/
 
 # `baton dispatch` per-run room dirs (artifacts, redirected .gemini_home, flow log) -- transient
 # per-invocation working state, never the deliverable.
-/.baton/
+#
+# `/.baton/*` rather than `/.baton/`, because git does not descend into an ignored DIRECTORY and a
+# `!` negation under one is never reached -- and `.baton/verify` below has to be tracked. It is the
+# one committed file in here: the engine's own verify declaration (#1958, spec/baton.md §3), which
+# only takes effect from the REVIEWED tree, so an untracked copy would grade nothing.
+/.baton/*
+!/.baton/verify
 
 # #1487: the vendor-drift grace-window clock (tools/Baton.VendorProbe/DriftGrace.cs). Machine-local
 # by design -- it times how long *this machine's* installed CLI has sat drifted from the committed

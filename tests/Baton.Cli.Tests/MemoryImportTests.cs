@@ -133,10 +133,22 @@ public sealed class MemoryImportTests : IDisposable
         !Directory.Exists(directory)
             ? new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase)
             : Directory.EnumerateFiles(directory, "*", SearchOption.AllDirectories)
-            .ToDictionary(
-                p => p,
-                p => Convert.ToHexString(SHA256.HashData(File.ReadAllBytes(p))),
-                StringComparer.OrdinalIgnoreCase);
+            .ToDictionary(p => p, Digest, StringComparer.OrdinalIgnoreCase);
+
+    /// <summary>One file's SHA-256, for the arms whose claim is about a single file's bytes.</summary>
+    private static string Digest(string filePath) =>
+        Convert.ToHexString(SHA256.HashData(File.ReadAllBytes(filePath)));
+
+    /// <summary>
+    /// The manifest a run wrote, read out of the run's own report rather than by listing the imports
+    /// directory: manifest file names are stamped to the millisecond, so picking "the newest file"
+    /// would silently pair an undo with the wrong import if two runs ever landed in one tick.
+    /// </summary>
+    private static string ManifestPathFrom(string output) =>
+        output
+            .Split('\n')
+            .Single(line => line.StartsWith("Manifest: ", StringComparison.Ordinal))["Manifest: ".Length..]
+            .Trim();
 
     // ---------------------------------------------------------------------------------------------
     // The acceptance lines.
@@ -492,6 +504,106 @@ public sealed class MemoryImportTests : IDisposable
     }
 
     /// <summary>
+    /// #1947: an undo removes exactly the supersession rows ITS import appended — an earlier import's
+    /// link survives it — and a manifest that appended no link at all leaves <c>links.jsonl</c>
+    /// byte-identical.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// The discriminating shape is a links file holding TWO rows recorded by two different imports,
+    /// undone through the manifest of the second. Run 2 is deliberately unfiltered so its manifest
+    /// carries the earlier link as <c>alreadyPresent</c> beside the one it appended: that is what makes
+    /// <c>ImportManifest.AppendedLinks</c>'s filter load-bearing, and an undo iterating <c>Links</c>
+    /// instead would tear out an earlier import's link while still passing any single-link test. The
+    /// manifest's own shape is asserted first, because without that already-present row the removal
+    /// arm below would be measuring nothing.
+    /// </para>
+    /// <para>
+    /// The control is the other polarity, and carries a positive control of its own: the run appends
+    /// entries and no link, its undo exits 0 with no INCOMPLETE line, and the entries it appended are
+    /// gone from the store afterwards — so "<c>links.jsonl</c> is byte-identical" is a statement about
+    /// a real undo rather than about one that did nothing. It runs while the links file already holds
+    /// a row, because a digest of an absent file compared to an absent file asserts nothing.
+    /// </para>
+    /// </remarks>
+    [Fact]
+    public async Task An_undo_removes_only_the_supersession_links_its_own_import_appended()
+    {
+        const string repository = "github.com/philipreese/baton";
+        await BuildStandardFixtureAsync();
+        var archivedWho = WriteArchivedRoot("c--baton-memory", ("user_who.md", "the older who"));
+        var archivedPlan = WriteArchivedRoot("c--plan-memory", ("project_plan.md", "an older plan"));
+
+        // Run 1: the live roots plus the first archive -- link A, from an import that is never undone.
+        var first = await RunAsync(
+            "--assert", $"{archivedWho}={repository}", "--asserted-by", "the-test");
+        Assert.Contains("Supersession links: 1   recorded: 1", first, StringComparison.Ordinal);
+        var linkA = Assert.Single(await LinksAsync(repository));
+
+        // Run 2: the second archive as well. Unfiltered, so link A is recomputed and lands in this
+        // manifest marked already-present -- the row the undo must leave alone.
+        var second = await RunAsync(
+            "--assert", $"{archivedWho}={repository}",
+            "--assert", $"{archivedPlan}={repository}",
+            "--asserted-by", "the-test");
+        Assert.Contains(
+            "Supersession links: 2   recorded: 1   already recorded: 1", second, StringComparison.Ordinal);
+
+        var manifestPath = ManifestPathFrom(second);
+        var manifest = ImportManifest.Read(manifestPath);
+        Assert.Equal(2, (manifest.Links ?? []).Count);
+        Assert.Equal(linkA.Id, Assert.Single(manifest.Links!, l => l.AlreadyPresent).LinkId);
+        var linkB = Assert.Single(manifest.AppendedLinks);
+        Assert.Equal(2, (await LinksAsync(repository)).Count);
+
+        var undone = await RunAsync("--undo", manifestPath);
+        Assert.DoesNotContain("INCOMPLETE", undone, StringComparison.Ordinal);
+
+        // Exactly one row removed, and it is link B: link A is still there, whole and unchanged. The
+        // file is read before the report line is, so this is what goes red on an undo that removed the
+        // wrong row rather than a report that miscounted a correct one.
+        var remaining = Assert.Single(await LinksAsync(repository));
+        Assert.Equal(linkA.Id, remaining.Id);
+        Assert.Equal(linkA.SupersedingId, remaining.SupersedingId);
+        Assert.Equal(linkA.SupersededId, remaining.SupersededId);
+        Assert.NotEqual(linkB.LinkId, remaining.Id);
+        Assert.Contains("1 supersession link(s)", undone, StringComparison.Ordinal);
+
+        // And link A still resolves on both sides, which is what "removed nothing else" has to mean
+        // for a reader of the store rather than for a reader of the links file.
+        var store = await StoreAsync(repository);
+        var note = Assert.Single(store, e => e.Text == "the older who");
+        var live = Assert.Single(store, e => e.Text == "who we are");
+        Assert.Equal([live.Id], note.SupersededBy);
+        Assert.Equal([note.Id], live.Supersedes);
+        Assert.DoesNotContain(store, e => e.Text == "an older plan");
+
+        // ---- The control: an import that appended no link leaves links.jsonl byte-identical. ----
+        var linksFile = BatonPaths.MemoryLinksFile(RepositoryIdentity.FileSlugFor(repository));
+        var linksBefore = Digest(linksFile);
+
+        var archivedNotes = WriteArchivedRoot("c--extra-memory", ("notes_extra.md", "no live counterpart"));
+        var third = await RunAsync(
+            "--root", archivedNotes, "--assert", $"{archivedNotes}={repository}", "--asserted-by", "the-test");
+        var controlManifest = ImportManifest.Read(ManifestPathFrom(third));
+        Assert.Empty(controlManifest.AppendedLinks);
+        var appendedIds = controlManifest.Appended.Select(r => r.EntryId).ToList();
+        Assert.NotEmpty(appendedIds);
+
+        var (controlCode, controlText) = await RunRawAsync("--undo", ManifestPathFrom(third));
+        Assert.Equal(0, controlCode);
+        Assert.DoesNotContain("INCOMPLETE", controlText, StringComparison.Ordinal);
+        Assert.Contains("0 supersession link(s)", controlText, StringComparison.Ordinal);
+
+        // The positive control: that undo really did remove its entries...
+        Assert.DoesNotContain(
+            await StoreAsync(repository), e => appendedIds.Contains(e.Id, StringComparer.Ordinal));
+
+        // ...and the links file it had no business touching is unchanged, byte for byte.
+        Assert.Equal(linksBefore, Digest(linksFile));
+    }
+
+    /// <summary>
     /// Two spellings of one repository asserted across two roots produce ONE store file, because the
     /// asserted identity goes through the same canonicalization a git probe's answer does.
     /// </summary>
@@ -543,6 +655,91 @@ public sealed class MemoryImportTests : IDisposable
         Assert.EndsWith("memories_1.sqlite", machinery.SourcePath, StringComparison.Ordinal);
         Assert.NotEmpty(machinery.Sha256);
         Assert.DoesNotContain(manifest.Entries, e => e.SourcePath.EndsWith(".sqlite", StringComparison.Ordinal));
+    }
+
+    /// <summary>
+    /// A Baton projection sitting in an importable root is skipped, and the skip SURVIVES THE MANIFEST
+    /// — read back off disk, the same round trip <see cref="ImportManifest.Machinery"/> gets, because a
+    /// population that only exists in a live object is one an undo or an audit can never see.
+    /// </summary>
+    /// <remarks>
+    /// The behaviour end to end (sync writes it, import refuses it, store bytes unchanged across two
+    /// cycles) is <c>MemoryProjectionTests</c>'s, which owns the pair of verbs. What this arm adds is
+    /// the serialization: the row, its digest, and the two negatives beside it — no entry from the
+    /// file, and nothing in <c>unfiled</c>, which is a different population meaning a different thing.
+    /// </remarks>
+    [Fact]
+    public async Task A_projection_in_an_importable_root_is_skipped_and_the_manifest_records_it()
+    {
+        WriteClaudeRoot(
+            "C--projected", Checkout("projected"),
+            ("user_real.md", "a memory a person wrote"),
+            (ClaudeProjectionTarget.ProjectionFileName, MemoryProjection.FormatMarker + "\n# a cache\n"));
+        var rootDirectory = Path.Combine(ClaudeHome, "projects", "C--projected", "memory");
+
+        var text = await RunAsync(
+            "--assert", $"{rootDirectory}=github.com/philipreese/projected", "--asserted-by", "the-test");
+
+        Assert.Contains("projection-skipped: 1", text, StringComparison.Ordinal);
+        Assert.Contains("Unfiled: 0", text, StringComparison.Ordinal);
+
+        var manifest = ImportManifest.Read(
+            Directory.GetFiles(Path.Combine(BatonPaths.Root, BatonPaths.MemoryImportsDirectoryName)).Single());
+
+        var skipped = Assert.Single(manifest.ProjectionsSkipped!);
+        Assert.EndsWith(ClaudeProjectionTarget.ProjectionFileName, skipped.SourcePath, StringComparison.Ordinal);
+        Assert.NotEmpty(skipped.Sha256);
+        Assert.Empty(manifest.Unfiled);
+
+        // The control that keeps this from passing over an import that read nothing at all: the
+        // ordinary memory in the SAME root did import.
+        Assert.Equal(
+            "a memory a person wrote",
+            Assert.Single(await StoreAsync("github.com/philipreese/projected")).Text);
+        Assert.DoesNotContain(
+            manifest.Entries,
+            e => e.SourcePath.EndsWith(ClaudeProjectionTarget.ProjectionFileName, StringComparison.Ordinal));
+    }
+
+    /// <summary>
+    /// The marker is a test on CONTENT: a projection carrying an ordinary memory's filename is skipped
+    /// all the same. Nothing else in either suite discriminates this from a filename comparison, since
+    /// every other fixture writes the projection under
+    /// <see cref="ClaudeProjectionTarget.ProjectionFileName"/> — so a rewrite of
+    /// <see cref="MemoryProjection.IsProjectedFile"/> into a name test would pass them and fail here.
+    /// </summary>
+    /// <remarks>
+    /// The case is not hypothetical: an operator who copies or renames a projection (or a backup tool
+    /// that does) reintroduces the feedback loop under any name-based rule, and the rule's own remarks
+    /// claim this coverage in three places.
+    /// </remarks>
+    [Fact]
+    public async Task A_projection_under_an_ordinary_filename_is_skipped_on_its_marker()
+    {
+        WriteClaudeRoot(
+            "C--renamed", Checkout("renamed"),
+            ("user_real.md", "a memory a person wrote"),
+            ("notes.md", MemoryProjection.FormatMarker + "\n# a cache someone renamed\n"));
+        var rootDirectory = Path.Combine(ClaudeHome, "projects", "C--renamed", "memory");
+
+        var text = await RunAsync(
+            "--assert", $"{rootDirectory}=github.com/philipreese/renamed", "--asserted-by", "the-test");
+
+        Assert.Contains("projection-skipped: 1", text, StringComparison.Ordinal);
+
+        var manifest = ImportManifest.Read(
+            Directory.GetFiles(Path.Combine(BatonPaths.Root, BatonPaths.MemoryImportsDirectoryName)).Single());
+
+        var skipped = Assert.Single(manifest.ProjectionsSkipped!);
+        Assert.EndsWith("notes.md", skipped.SourcePath, StringComparison.Ordinal);
+        Assert.DoesNotContain(
+            manifest.Entries, e => e.SourcePath.EndsWith("notes.md", StringComparison.Ordinal));
+
+        // The control, without which "no entry from notes.md" is indistinguishable from an import that
+        // read nothing at all: the ordinary memory in the SAME root did import.
+        Assert.Equal(
+            "a memory a person wrote",
+            Assert.Single(await StoreAsync("github.com/philipreese/renamed")).Text);
     }
 
     /// <summary>
@@ -755,6 +952,78 @@ public sealed class MemoryImportTests : IDisposable
         var undiscovered = Path.Combine(_root, "not-a-root");
         var refused = await Assert.ThrowsAsync<CliArgumentException>(() => RunAsync("--root", undiscovered));
         Assert.Contains("matches no memory root this verb can import", refused.Message, StringComparison.Ordinal);
+    }
+
+    /// <summary>
+    /// #1948: a source rewritten between the inventory walk and the read is recorded as one consistent
+    /// (mtime, digest, size) triple, all three describing the bytes that were actually read.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// <b>The stale row IS the inventory.</b> <see cref="MemoryImportCommand.ReadSourceFiles"/>'s own
+    /// remarks say why it is reached directly rather than through the verb; what the seam is used for is
+    /// this: the file row handed in carries the values the walk took from the old contents, which is
+    /// exactly what it would hold had the file been rewritten in the window. Asserting against a file
+    /// nobody touched cannot discriminate — with the defect present, an unchanged file's walk mtime and
+    /// its read mtime are the same value.
+    /// </para>
+    /// <para>
+    /// <b>The mtime difference is forced, not hoped for.</b> The old mtime is a distinctive sentinel a
+    /// year in the past rather than whatever a quick rewrite happens to produce: filesystem timestamp
+    /// granularity can make a rewritten file's before and after equal, and this arm would then pass with
+    /// the defect intact. Size and digest are asserted against the current bytes too, so a later change
+    /// that refreshes the mtime alone still fails here.
+    /// </para>
+    /// <para>
+    /// <b>What this arm does not pin.</b> Its oracle is the mtime by path, so it cannot tell a read from
+    /// the open handle apart from a second <c>stat</c> — nothing moves between the two here, and both
+    /// answer alike. #1948's window is what is covered; the same-handle property beside it is a
+    /// narrower claim the code makes and this does not measure. The <c>Kind</c> assertion is not
+    /// decoration: <c>Assert.Equal</c> on two <see cref="DateTime"/>s compares ticks and ignores
+    /// <see cref="DateTimeKind"/>, so slipping to the local-time overload would shift every recorded
+    /// mtime by the machine's offset and read as green on a UTC runner.
+    /// </para>
+    /// </remarks>
+    [Fact]
+    public void RereadsMtimeWithTheDigestWhenTheSourceChangedSinceTheWalk()
+    {
+        var directory = Path.Combine(_root, "rewritten");
+        Directory.CreateDirectory(directory);
+        var path = Path.Combine(directory, "user_who.md");
+
+        var staleBytes = System.Text.Encoding.UTF8.GetBytes("the memory the inventory walk saw");
+        var staleMtime = new DateTime(2025, 1, 2, 3, 4, 5, DateTimeKind.Utc);
+        var staleRow = new MemoryImportFile(
+            path,
+            "user_who.md",
+            Text: string.Empty,
+            Sha256: Convert.ToHexString(SHA256.HashData(staleBytes)).ToLowerInvariant(),
+            ModifiedUtc: staleMtime,
+            SizeBytes: staleBytes.Length);
+
+        // The rewrite: different bytes, a different length, and a last-write time that provably is not
+        // the walk's.
+        var currentBytes = System.Text.Encoding.UTF8.GetBytes("the memory that is actually on disk now");
+        File.WriteAllBytes(path, currentBytes);
+        File.SetLastWriteTimeUtc(path, new DateTime(2026, 6, 7, 8, 9, 10, DateTimeKind.Utc));
+        var currentMtime = File.GetLastWriteTimeUtc(path);
+        Assert.NotEqual(staleMtime, currentMtime);
+        Assert.NotEqual(staleRow.SizeBytes, currentBytes.Length);
+
+        var read = Assert.Single(MemoryImportCommand.ReadSourceFiles(new MemoryImportSource(
+            directory,
+            MemoryRootInventory.ClaudeVendor,
+            VendorMemoryScope.Vendor,
+            Archived: false,
+            "github.com/philipreese/baton",
+            UnfiledReason: null,
+            [staleRow])));
+
+        Assert.Equal("the memory that is actually on disk now", read.Text);
+        Assert.Equal(Convert.ToHexString(SHA256.HashData(currentBytes)).ToLowerInvariant(), read.Sha256);
+        Assert.Equal(currentBytes.Length, read.SizeBytes);
+        Assert.Equal(currentMtime, read.ModifiedUtc);
+        Assert.Equal(DateTimeKind.Utc, read.ModifiedUtc.Kind);
     }
 
     /// <summary>

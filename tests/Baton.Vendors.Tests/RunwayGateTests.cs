@@ -128,6 +128,13 @@ public class RunwayGateTests
 
     // ---- every unreadable shape holds -------------------------------------------------------------
 
+    /// <summary>
+    /// The no-attempt arm. Since #1923 the production evaluator always attempts a harvest before
+    /// reaching here for a gated vendor, so this is the wording a caller that does NOT harvest gets —
+    /// it is still the correct fail-closed answer, and it is deliberately not what a failed harvest
+    /// says. <see cref="A_missing_snapshot_after_a_failed_harvest_holds_and_names_the_failure"/> is
+    /// the arm production actually reaches.
+    /// </summary>
     [Fact]
     public void A_missing_snapshot_holds()
     {
@@ -137,6 +144,74 @@ public class RunwayGateTests
         Assert.Contains("no readable usage snapshot", decision.Reason);
         Assert.Empty(decision.Counters);
     }
+
+    /// <summary>
+    /// #1923: "never harvested" and "harvested and it failed" must be distinguishable in the refusal.
+    /// Both are Holds — the disposition is asserted on both sides so a future change that admits on a
+    /// failed harvest cannot pass by getting the wording right.
+    /// </summary>
+    [Fact]
+    public void A_missing_snapshot_after_a_failed_harvest_holds_and_names_the_failure()
+    {
+        var attempt = new RunwayHarvestAttempt(
+            new DateTimeOffset(2026, 9, 5, 15, 58, 0, TimeSpan.Zero), "agy exited 1: not logged in");
+
+        var decision = RunwayGate.Evaluate("agy", snapshot: null, new RunwayThresholds(), Now, attempt);
+
+        Assert.Equal(RunwayDisposition.Hold, decision.Disposition);
+        Assert.Equal("harvest attempted at 15:58 and failed: agy exited 1: not logged in", decision.Reason);
+        Assert.DoesNotContain("no readable usage snapshot", decision.Reason);
+    }
+
+    /// <summary>
+    /// A harvest that reported success and still left nothing readable — a persist that failed, or a
+    /// snapshot written and immediately unreadable. It is named as a harvest failure rather than
+    /// falling back to the never-harvested wording, because a harvest DID run.
+    /// </summary>
+    [Fact]
+    public void A_harvest_that_reported_success_but_left_no_snapshot_holds_as_a_failed_attempt()
+    {
+        var attempt = new RunwayHarvestAttempt(
+            new DateTimeOffset(2026, 9, 5, 15, 58, 0, TimeSpan.Zero), FailureReason: null);
+
+        var decision = RunwayGate.Evaluate("agy", snapshot: null, new RunwayThresholds(), Now, attempt);
+
+        Assert.Equal(RunwayDisposition.Hold, decision.Disposition);
+        Assert.Contains("harvest attempted at 15:58 and failed", decision.Reason);
+    }
+
+    /// <summary>
+    /// A harvest attempt changes the WORDING of the missing-snapshot hold and nothing else: handed a
+    /// readable snapshot under the thresholds, the gate admits whether or not one was made. Without
+    /// this, the parameter could be silently gating admission and every arm above would still pass.
+    /// </summary>
+    [Fact]
+    public void A_harvest_attempt_does_not_change_a_decision_taken_on_real_counters()
+    {
+        var attempt = new RunwayHarvestAttempt(Now, FailureReason: null);
+
+        var decision = RunwayGate.Evaluate("agy", Agy("50%", "50%"), new RunwayThresholds(), Now, attempt);
+
+        var withoutAttempt = Evaluate("agy", Agy("50%", "50%"));
+        Assert.Equal(RunwayDisposition.Admit, decision.Disposition);
+        Assert.Equal(withoutAttempt.Disposition, decision.Disposition);
+        Assert.Equal(withoutAttempt.Reason, decision.Reason);
+        Assert.Equal(withoutAttempt.HeadroomPoints, decision.HeadroomPoints);
+    }
+
+    /// <summary>
+    /// #1923's population guard: the on-demand harvest must only spend a <c>/usage</c> call where the
+    /// counters can actually decide. <c>codex</c> has a source and a snapshot file and is deliberately
+    /// NOT gated (#1904), so it must read false here — a check keyed on
+    /// <see cref="RunwayGate.MeasuredVendors"/> instead would say true and harvest it for nothing.
+    /// </summary>
+    [Theory]
+    [InlineData("claude", true)]
+    [InlineData("agy", true)]
+    [InlineData("codex", false)]
+    [InlineData("fake", false)]
+    public void Only_the_window_table_vendors_are_gated(string vendor, bool gated) =>
+        Assert.Equal(gated, RunwayGate.IsGated(vendor));
 
     [Fact]
     public void A_snapshot_whose_output_parsed_no_windows_holds()

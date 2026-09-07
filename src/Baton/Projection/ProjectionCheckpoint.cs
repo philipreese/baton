@@ -84,7 +84,8 @@ public sealed record ProjectionCheckpointState(
     Dictionary<StepId, string?>? VerifyNotRunReasonByStepId = null,
     HashSet<StepId>? ConductorRejectedStepIds = null,
     Dictionary<ExecutionId, string>? WorkspaceHeadShaAtStartByExecutionId = null,
-    Dictionary<ExecutionId, List<EnginePlacedFile>>? EnginePlacedFilesByExecutionId = null)
+    Dictionary<ExecutionId, List<EnginePlacedFile>>? EnginePlacedFilesByExecutionId = null,
+    HashSet<StepId>? FinishedDuringTeardownStepIds = null)
 {
     public Dictionary<StepId, int> ExecutionCountByStepId { get; init; } = ExecutionCountByStepId ?? new();
 
@@ -229,6 +230,16 @@ public sealed record ProjectionCheckpointState(
     /// </summary>
     public Dictionary<ExecutionId, List<EnginePlacedFile>> EnginePlacedFilesByExecutionId { get; init; } = EnginePlacedFilesByExecutionId ?? new();
 
+    /// <summary>
+    /// #1945: which steps' latest succeeded execution was flagged
+    /// <see cref="FlowEvent.ExecutionSucceeded.FinishedDuringTeardown"/>. Same trailing-optional
+    /// replay-safety shape as <see cref="RetryForeclosedStepIds"/> above, and the same
+    /// <see cref="DeepCopy"/> load-bearing note applies. Cleared on a fresh
+    /// <see cref="FlowEvent.ExecutionRequestAccepted"/> for the step, the same "the prior attempt's
+    /// diagnostic is stale" reasoning <see cref="VerifyNotRunReasonByStepId"/> already follows.
+    /// </summary>
+    public HashSet<StepId> FinishedDuringTeardownStepIds { get; init; } = FinishedDuringTeardownStepIds ?? new();
+
     public static ProjectionCheckpointState CreateEmpty() => new(
         new Dictionary<StepId, ExecutionId>(),
         new Dictionary<StepId, Dictionary<StepId, ExecutionId>>(),
@@ -299,5 +310,6 @@ public sealed record ProjectionCheckpointState(
         new Dictionary<StepId, string?>(VerifyNotRunReasonByStepId),
         new HashSet<StepId>(ConductorRejectedStepIds),
         new Dictionary<ExecutionId, string>(WorkspaceHeadShaAtStartByExecutionId),
-        EnginePlacedFilesByExecutionId.ToDictionary(kvp => kvp.Key, kvp => new List<EnginePlacedFile>(kvp.Value)));
+        EnginePlacedFilesByExecutionId.ToDictionary(kvp => kvp.Key, kvp => new List<EnginePlacedFile>(kvp.Value)),
+        new HashSet<StepId>(FinishedDuringTeardownStepIds));
 }

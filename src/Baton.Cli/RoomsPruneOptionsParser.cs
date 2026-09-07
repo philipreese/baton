@@ -4,7 +4,7 @@ namespace Baton.Cli;
 
 /// <summary>
 /// Parses <c>baton rooms prune</c>'s arguments: <c>baton rooms prune --terminal [--older-than &lt;days&gt;]
-/// [--state Succeeded|Failed|Cancelled|Indeterminate] [--dry-run] [--yes]</c>. Follows
+/// [--state Succeeded|FinishedDuringTeardown|Failed|Cancelled|Indeterminate] [--dry-run] [--yes]</c>. Follows
 /// <see cref="RoomDeleteOptionsParser"/>'s own error-handling contract — see its remarks.
 /// <c>--dry-run</c> and <c>--yes</c> are mutually exclusive — passing both is rejected here rather than
 /// silently letting <c>--yes</c> win, since a caller who typed <c>--dry-run</c> explicitly must not have
@@ -13,10 +13,18 @@ namespace Baton.Cli;
 public static class RoomsPruneOptionsParser
 {
     public const string Usage =
-        "Usage: baton rooms prune --terminal [--older-than <days>] [--state Succeeded|Failed|Cancelled|Indeterminate] [--dry-run] [--yes]";
+        "Usage: baton rooms prune --terminal [--older-than <days>] [--state Succeeded|FinishedDuringTeardown|Failed|Cancelled|Indeterminate] [--dry-run] [--yes]";
 
     private static readonly IReadOnlyList<string> AllowedStates =
-        [WorkflowOutcome.Succeeded, WorkflowOutcome.Failed, WorkflowOutcome.Cancelled, WorkflowOutcome.Indeterminate];
+    [
+        WorkflowOutcome.Succeeded,
+        // #1945: a terminal word like any other here — a room that settled it is prunable, and
+        // omitting it would leave one class of finished room unreachable by --state.
+        WorkflowOutcome.FinishedDuringTeardown,
+        WorkflowOutcome.Failed,
+        WorkflowOutcome.Cancelled,
+        WorkflowOutcome.Indeterminate,
+    ];
 
     public static RoomsPruneOptions Parse(IReadOnlyList<string> args)
     {

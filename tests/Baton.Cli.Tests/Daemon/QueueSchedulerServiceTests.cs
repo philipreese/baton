@@ -532,10 +532,32 @@ public sealed class QueueSchedulerServiceTests
     }
 
     [Fact]
-    public void A_settled_success_is_the_only_thing_that_is_done_and_it_keeps_no_error()
+    public void A_settled_success_is_done_and_keeps_no_error()
     {
         var word = WorkflowOutcome.Describe(TerminalState([Step("implement", StepStatus.Succeeded)]));
         Assert.Equal(WorkflowOutcome.Succeeded, word);
+
+        var (state, error) = QueueSchedulerService.ClassifyTerminal(
+            new WorkflowStatusView(word, [new WorkflowStatusStepView("implement", "Succeeded", "e1")], [], null),
+            @"C:\rooms\r1");
+
+        Assert.Equal(QueueItemState.Done, state);
+        Assert.Null(error);
+    }
+
+    /// <summary>
+    /// #1945: the second succeeded-shaped word. Read against the theory above, which is the control —
+    /// every non-succeeded word there lands Failed through the same call, so this arm cannot be
+    /// passing because <see cref="QueueSchedulerService.ClassifyTerminal"/> says Done to everything.
+    /// </summary>
+    [Fact]
+    public void A_room_that_finished_during_teardown_is_done_and_keeps_no_error()
+    {
+        // Derived through Describe, not hand-written: the step is Succeeded and carries the flag, so
+        // this pins the projector-to-classifier hop too, not merely the switch arm below.
+        var word = WorkflowOutcome.Describe(TerminalState(
+            [Step("implement", StepStatus.Succeeded) with { FinishedDuringTeardown = true }]));
+        Assert.Equal(WorkflowOutcome.FinishedDuringTeardown, word);
 
         var (state, error) = QueueSchedulerService.ClassifyTerminal(
             new WorkflowStatusView(word, [new WorkflowStatusStepView("implement", "Succeeded", "e1")], [], null),

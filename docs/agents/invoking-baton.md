@@ -282,6 +282,16 @@ own work looks clean and nothing checked it" — read the field before reporting
 your own workspace (`.baton/verify`, which must be **committed** to take effect), and for the
 `--verify <cmd>` override.
 
+**A repo whose CI already runs everything should declare the cheaper command, not the fuller one
+(#1958).** The engine verify runs *after* the worker's own build/test and after whatever its push
+hook did, so on a repo with CI it is routinely the third run of the same members over the same tree.
+Baton's own `.baton/verify` is the worked example — it declares `pixi run gates-fast-cover-quiet`,
+which runs only the gate members that tree holds no per-member receipt for. Two things a foreign
+workspace has to supply for that shape to mean anything: a gate runner that can be told to skip
+members already proven on this exact tree, and a lane that records them. What it costs — a room
+settling `Verified` on a set narrower than CI's — is spec/baton.md C-12's `#1958` paragraph, and it is
+only a fair trade where CI is genuinely the authority.
+
 **Giving a review lane real instruments instead of prose (`--verify-cmd`, #1882).** A `review`
 worker's shell grant is a read-only `git`/`gh` allowlist, so every runtime claim it might make ("3765
 passed", "selftest exit 0") otherwise reaches it as prose in a PR body. `baton dispatch review …
@@ -368,6 +378,47 @@ reads a memory file's bytes only to digest them and never reports what one says.
 an `ambiguous` root prints both candidates and picks neither, because deciding whose memory it is
 needs the entries' text. `--format json` is the machine contract: one object
 `{claudeHome, roots, findings, counts}`. See `spec/baton.md` §12.
+
+**Pushing the canonical store back out as a cache (`baton memory sync`).** Projects Baton's canonical
+memory into the markdown vendor memory roots that already exist:
+
+```
+baton memory sync [--repository <id>] [--apply] [--format text|json] [--repository-facts <dir>] [--help]
+```
+
+Without `--apply` it writes **nothing** — no file, and no directory either — and reports what would
+change. One generated file per root and nothing else in it: the vendor's own memories and its
+`MEMORY.md` index are left alone. **The output carries no timestamp on purpose**, so a diff means the
+store changed and not that time passed. Targets are **discovered, never constructed**, and they are
+markdown only — Codex's `memories_*.sqlite`, every Antigravity store and every archived Claude root
+(`~/.claude/memory-archive/<label>/`) are inventoried and never written, each listed in the report with
+the reason. A superseded entry, one the projection budget could not fit, and a vendor fact a checked-in
+repository fact outranks are each **named with their canonical id** in the report, never counted.
+**Running `sync` and `import` in a loop does not grow the store**: `import` recognises a projection by
+the marker on its first line and reports it as `projection-skipped` rather than filing it. The rulings
+behind each of those, and what a repository with nowhere to project into gets instead, are in
+`spec/baton.md` §12.
+
+**How much of a lane's step budget bought nothing (`baton audit lanes`).** The per-room read behind
+the cost-ledger fields `spec/baton.md` §7 defines, over the same captured room streams:
+
+```
+baton audit lanes [--since <duration>] [--vendor <name>] [--rooms-root <dir>] [--format text|json] [--help]
+```
+
+Per room and per vendor: tool calls, calls Baton's own permission grant **refused**, calls that
+**repeated** a tool+arguments pair the same execution had already issued, and calls that returned an
+**empty** payload. It never writes, which is why it has **no `--dry-run`**. `--since` is a *duration*
+(`90m`, `36h`, `7d`), not `baton ledger --since`'s instant, and it selects on a room's flow-log
+last-write time.
+
+Three readings the output does **not** support, each of which a reader's prior will otherwise supply.
+A room reporting **no counts at all** did not necessarily run zero tools — its stream may simply carry
+no tool activity this reader can parse, or `--vendor` may have excluded every execution it had, which
+the output discloses as its own count rather than as an unreadable stream. A **`refused 0`** is not evidence of a well-behaved lane on a
+room captured before this shipped: `spec/baton.md` §7 states which zero is false and why. And a
+**`repeated 0`** does not always mean distinct calls — on a vendor whose stream omits arguments there
+was nothing to compare, which is what the per-vendor breakdown exists to show.
 
 ---
 
@@ -461,10 +512,10 @@ already Failed, even a perfectly good resume exits 1; read the resumed step's ow
 
 | Code | Meaning |
 |---|---|
-| 0 | `Succeeded` — every step Succeeded. **Not the same as "the gates passed" (#1702).** A step can succeed with the engine's own verify command never having run — see `steps[].verify` below |
+| 0 | `Succeeded` — every step Succeeded. **Not the same as "the gates passed" (#1702).** A step can succeed with the engine's own verify command never having run — see `steps[].verify` below. **Exit 0 covers a second `state` word since #1945:** `FinishedDuringTeardown`, a room whose dispatch timeout killed the worker after its push had landed (clean workspace, nothing ahead of the tracking branch, declared outputs written). It is succeeded-shaped everywhere — treat it exactly as `Succeeded`; a harness matching `state == "Succeeded"` on an exit-0 room will otherwise fall through to its failure branch. `spec/baton.md` §3's terminal-vocabulary table is the register |
 | 1 | `Failed` — a step ran and failed for an ordinary reason (also the bucket a still-Running or still-Paused process falls into if it returns short of Terminal, e.g. no `--wait`) |
 | 2 | `ValidationRefused` — refused **before anything was dispatched**. Two causes: bindings/workflow validation or an unresolvable worker binding (bad adapter name, an incoherent grant, an unprovisioned worktree an `AuditedNotEnforced` grant needed, a project directory with no recorded `baton trust` ceiling — #1166, spec/baton.md §9), typically against a room with no ledger yet; or (#1608) a stale `terminal.json` from a prior attempt that could not be deleted — that one fires against a ledgered room too, and its message names the locked file, so read the message before assuming the bindings are at fault |
-| 3 | `Timeout` — the step(s) that failed did so because a dispatch hit its binding's `Timeout`, not because the worker ran and failed on its own; or (#1378) `baton run --wait --wait-timeout <minutes>` hit that bound before the room reached Terminal — the room itself is still Paused/Running in that case, check `baton status`. **Narrower since #1373:** a dispatch timeout whose workspace carries work exits **1**, because such a room settles `Indeterminate` rather than `Failed` — this code now means a timeout with nothing to salvage. Read `state`, not the exit code, to tell them apart |
+| 3 | `Timeout` — the step(s) that failed did so because a dispatch hit its binding's `Timeout`, not because the worker ran and failed on its own; or (#1378) `baton run --wait --wait-timeout <minutes>` hit that bound before the room reached Terminal — the room itself is still Paused/Running in that case, check `baton status`. **Narrower since #1373:** a dispatch timeout whose workspace carries work exits **1**, because such a room settles `Indeterminate` rather than `Failed` — this code now means a timeout with nothing to salvage. Narrower again since #1945: a timeout kill that landed after the lane's push, over a clean workspace with its outputs written, exits **0** as `FinishedDuringTeardown` (row 0). Read `state`, not the exit code, to tell all three apart |
 | 4 | `Cancelled` — the workflow settled via cancellation, not failure |
 | 5 | `RoomHeld` — another Flow instance already holds this room (a live pump, or a background component's brief lock). Not a terminal outcome and not written to `terminal.json`: the room may be perfectly healthy, so nothing here overwrites its real state. Retry later, or check `baton status`/the sentinel for what the room actually is |
 

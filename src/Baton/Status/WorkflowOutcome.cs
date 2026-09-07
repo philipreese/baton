@@ -4,9 +4,12 @@ namespace Baton.Status;
 
 /// <summary>
 /// The single coarse outcome word for a <see cref="FlowState"/> — "Running", "Paused", or, once
-/// <see cref="WorkflowStatus.Terminal"/> is reached, which of "Succeeded" / "Failed" / "Cancelled" /
-/// "Indeterminate" (#1608 — journal facts alone could not decide, see <see cref="Indeterminate"/>'s
-/// own remarks) it settled into. <see cref="WorkflowStatus"/> itself only says the pump reached its fixed point, not
+/// <see cref="WorkflowStatus.Terminal"/> is reached, whichever terminal word it settled into. The
+/// vocabulary itself is enumerated once, in <c>spec/baton.md</c> §3's table (and pinned by
+/// <c>WorkflowOutcomeAndExitCodeTests</c>'s vocabulary test) — deliberately NOT restated here, where a
+/// hand-written list went stale twice, on #1608's <see cref="Indeterminate"/> and again on #1945's
+/// <see cref="FinishedDuringTeardown"/>.
+/// <see cref="WorkflowStatus"/> itself only says the pump reached its fixed point, not
 /// which one — every other terminal-outcome consumer (<c>StatusCommand</c>'s <c>--json</c>,
 /// <c>RunExitCodeResolver</c>, the terminal sentinel) needs this same word, so it is computed here
 /// once rather than re-derived per caller (#1356).
@@ -18,6 +21,20 @@ public static class WorkflowOutcome
     public const string Succeeded = "Succeeded";
     public const string Failed = "Failed";
     public const string Cancelled = "Cancelled";
+
+    /// <summary>
+    /// #1945: every step succeeded, and at least one did so on
+    /// <see cref="Baton.Outcomes.OutcomeClassifier"/>'s arm for a dispatch timeout that killed a
+    /// worker <b>after its push had landed</b> — clean workspace, nothing ahead of the tracking
+    /// branch, contract satisfied. <b>A SUCCEEDED-shaped word, not a failure one</b>: every consumer
+    /// that asks "did this room finish?" accepts it exactly where it accepts <see cref="Succeeded"/>.
+    /// <para>
+    /// The full ruling — what the predicate means and does not mean, why it is a separate word rather
+    /// than a bare <see cref="Succeeded"/>, and the consumer list that owes it the succeeded reading —
+    /// is stated once, in <c>spec/baton.md</c> §3's terminal-vocabulary table. Not re-derived here.
+    /// </para>
+    /// </summary>
+    public const string FinishedDuringTeardown = "FinishedDuringTeardown";
 
     /// <summary>
     /// #1586 S1 (state-truth design, ratified 2026-09-01 amendment): journal facts alone cannot
@@ -84,7 +101,11 @@ public static class WorkflowOutcome
 
         if (steps.All(step => step.Status == StepStatus.Succeeded))
         {
-            return Succeeded;
+            // #1945: ahead of the plain Succeeded return, or it could never fire. A FLAG, never a
+            // reason-string prefix the way IsTimeoutFailure below has to work: StateProjector nulls
+            // LatestFailureReason on the succeeded path by construction, so no sentence survives that
+            // hop.
+            return steps.Any(step => step.FinishedDuringTeardown) ? FinishedDuringTeardown : Succeeded;
         }
 
         // #1608 / #1623: checked ahead of the ordinary Failed/Rejected read below — an unresolved

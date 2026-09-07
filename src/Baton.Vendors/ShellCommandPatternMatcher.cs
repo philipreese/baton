@@ -1,5 +1,6 @@
 using System.Linq;
 using System.Text.Json;
+using Baton.Domain;
 
 namespace Baton.Vendors;
 
@@ -59,9 +60,12 @@ public static class ShellCommandPatternMatcher
     /// The claude/agy tool names a shell command line can be read from — claude's <c>Bash</c> and
     /// agy's <c>run_command</c>. The one canonical list (record-once): the grant amender's
     /// pattern derivation and the gate UI's command display both gate on this rather than each
-    /// restating the pair, and any other tool name reads back no command line at all.
+    /// restating the pair, and any other tool name reads back no command line at all. The pairing is
+    /// canonical here; claude's half of it is spelled once in
+    /// <see cref="ClaudeCliVocabulary.BashToolName"/>, which is the same name the adapter puts on the
+    /// wire.
     /// </summary>
-    public static readonly string[] ShellToolNames = ["Bash", "run_command"];
+    public static readonly string[] ShellToolNames = [ClaudeCliVocabulary.BashToolName, "run_command"];
 
     /// <summary>
     /// Reads the raw shell command line (e.g. <c>"rm -rf build/"</c>) out of a shell tool's asked
@@ -426,6 +430,32 @@ public static class ShellCommandPatternMatcher
     /// <param name="Reason">A denial reason a person can act on; <see langword="null"/> when allowed.</param>
     public readonly record struct ScopedShellResult(ScopedShellVerdict Verdict, string? Segment, string? Reason)
     {
+        /// <summary>
+        /// A denial reason a person can act on, carrying <see cref="GrantRefusal.Marker"/> — this
+        /// matcher is one of #1921's producing sites, and every reason it emits ends up in a tool
+        /// RESULT: through <c>CodexDynamicToolResult.Refused</c> on the codex path, and wrapped inside
+        /// the claude/agy hook commands' own sentences on the other two.
+        /// <para>
+        /// <b>Stamped HERE, in the record, rather than at each <c>return</c>.</b> There are five refusal
+        /// texts in this file and nothing would fail if a sixth were added without the marker — which is
+        /// exactly the escape #1921 exists to close. A property initializer on the record cannot be
+        /// forgotten by a new construction site. <see cref="GrantRefusal.Stamp"/> is idempotent, so the
+        /// hook commands re-stamping the composed sentence adds nothing.
+        /// </para>
+        /// Null when allowed, and never stamped then: a marker on an allowed command's (absent) reason
+        /// would be counted as a refusal by every reader downstream.
+        /// <para>
+        /// <b>The one way past this initializer is a <c>with</c> expression</b> — an <c>init</c> setter
+        /// assigned through an object initializer runs the assignment, not this default. No caller does
+        /// (every construction in the tree goes through the primary constructor); one that did would
+        /// produce an unstamped, and therefore uncounted, refusal.
+        /// </para>
+        /// </summary>
+        public string? Reason { get; init; } =
+            Verdict != ScopedShellVerdict.Allowed && Reason is { Length: > 0 }
+                ? GrantRefusal.Stamp(Reason)
+                : Reason;
+
         public bool IsAllowed => Verdict == ScopedShellVerdict.Allowed;
     }
 
@@ -505,9 +535,14 @@ public static class ShellCommandPatternMatcher
 
                 if (segmentDenied)
                 {
+                    // #1920: a deny is standing, so the useful thing to say is that retrying a
+                    // variant of the same family cannot work — the measured lane spent a step on
+                    // `git remote -v` and had nothing to go on afterwards.
                     return new ScopedShellResult(
                         ScopedShellVerdict.DeniedSegment, segment,
-                        $"segment '{segment}' matches this session's standing deny list");
+                        $"segment '{segment}' matches this session's standing deny list, which is "
+                        + "permanently closed for this role — a variant of the same command will be "
+                        + $"denied too{RenderGrantedPatternSuffix(allowedPatterns)}");
                 }
             }
 
@@ -515,12 +550,40 @@ public static class ShellCommandPatternMatcher
             {
                 return new ScopedShellResult(
                     ScopedShellVerdict.DeniedSegment, segment,
-                    $"segment '{segment}' does not match any pattern this session's grant allows");
+                    $"segment '{segment}' does not match any pattern this session's grant allows"
+                    + RenderGrantedPatternSuffix(allowedPatterns));
             }
         }
 
         return new ScopedShellResult(ScopedShellVerdict.Allowed, null, null);
     }
+
+    /// <summary>
+    /// #1920: the granted allow list, rendered whole and in catalog order. Deliberately NOT ranked or
+    /// filtered by similarity to the refused segment — nothing here computes such a ranking, and a
+    /// message calling three of thirteen patterns the "closest" ones taught the model that the grant
+    /// was those three. The cap exists only so a pathologically long list cannot swamp the refusal,
+    /// and it says so when it bites rather than truncating silently. Empty on an unscoped grant,
+    /// where there is no allow list to name.
+    /// </summary>
+    private static string RenderGrantedPatternSuffix(IReadOnlyList<string>? allowedPatterns)
+    {
+        var patterns = (allowedPatterns ?? [])
+            .Where(pattern => !string.IsNullOrWhiteSpace(pattern))
+            .ToArray();
+        if (patterns.Length == 0)
+        {
+            return string.Empty;
+        }
+
+        return patterns.Length <= MaxRenderedGrantedPatterns
+            ? $"; this session's granted shell patterns are: {string.Join(", ", patterns)}"
+            : $"; this session's granted shell patterns include: "
+              + $"{string.Join(", ", patterns.Take(MaxRenderedGrantedPatterns))} "
+              + $"({MaxRenderedGrantedPatterns} of {patterns.Length} shown)";
+    }
+
+    private const int MaxRenderedGrantedPatterns = 24;
 
     /// <summary>
     /// The unscoped-grant deny match (#1731): compares a deny pattern's whitespace-tokenized head
@@ -702,7 +765,9 @@ public static class ShellCommandPatternMatcher
                     current.Append(c);
                     continue;
                 case '`' or '$' or '<' or '>' or '(' or ')' or '\\':
-                    unparseableReason = $"unparseable under scoped grant (unsupported character '{c}')";
+                    unparseableReason = c == '\\'
+                        ? "unparseable under scoped grant (unsupported character '\\'); use forward slashes"
+                        : $"unparseable under scoped grant (unsupported character '{c}')";
                     return false;
                 case '\n' or '\r' when permissiveMetacharacters:
                     // #1748 F1: an unquoted top-level newline IS a command separator in bash, so on

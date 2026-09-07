@@ -34,9 +34,11 @@ public sealed record WorkflowStatusStepView(
     [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
     ExecutionUsageView? LinkedFromUsage = null,
     // #1375/#1513: the SAME EngineLivenessProbe the human `baton status` rendering consults
-    // (StatusCommand.FormatStepStatus), never a second probe -- present for a Running step, and
-    // (#1513) for a Failed step still carrying a RetryNotBefore, FormatStepStatus's own gate (why
-    // every other step claims nothing: spec/baton.md §3). "alive" | "dead" | "unknown", lower-cased
+    // (StatusCommand.FormatStepStatus), never a second probe -- present for a Running step (except
+    // one frozen by a room-level sentinel, whose probe is dropped rather than frozen into the file:
+    // spec/baton.md §13, the one exception §3 names), and (#1513) for a Failed step still carrying
+    // a RetryNotBefore, FormatStepStatus's own gate (why every other step claims nothing:
+    // spec/baton.md §3). "alive" | "dead" | "unknown", lower-cased
     // from EngineLivenessStatus; omitted, never null, for every ungated step so the field's mere
     // presence already answers "does liveness apply here".
     [property: JsonPropertyName("liveness")]

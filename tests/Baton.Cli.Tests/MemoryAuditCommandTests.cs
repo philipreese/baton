@@ -254,6 +254,61 @@ public sealed class MemoryAuditCommandTests : IDisposable
     }
 
     /// <summary>
+    /// #1852 phase C: the cache <c>baton memory sync --apply</c> writes into a root is not evidence
+    /// about whose memory that root holds, so it produces no subject-ambiguity finding — even though it
+    /// is named after Baton in a root belonging to another repository, which is exactly the shape
+    /// <see cref="MemorySubjectVocabulary"/> exists to surface.
+    /// </summary>
+    /// <remarks>
+    /// End to end rather than in <c>MemoryAuditReportTests</c> because the claim spans two layers: the
+    /// report skips on <see cref="MemoryFile.IsBatonProjection"/>, and the flag has to arrive from the
+    /// file's own first line. Only a run over real bytes measures the second half. The control keeps it
+    /// from passing on a name test — a real <c>baton-*.md</c> memory in the same root still reports.
+    /// </remarks>
+    [Fact]
+    public async Task A_projection_baton_wrote_is_not_a_subject_ambiguity_and_a_real_baton_memory_is()
+    {
+        await InitGitRepoAsync(Checkout("consumer"), "https://github.com/philipreese/consumer.git");
+        var memory = Path.Combine(ClaudeHome, "projects", "C--consumer", "memory");
+        WriteRoot(
+            "C--consumer", Checkout("consumer"),
+            ("user_real.md", "a memory a person wrote"),
+            (ClaudeProjectionTarget.ProjectionFileName, MemoryProjection.FormatMarker + "\n# a cache\n"));
+
+        var json = await RunAsync(new MemoryAuditOptions(MemoryAuditOutputFormat.Json), ClaudeHome);
+        using (var document = JsonDocument.Parse(json))
+        {
+            var view = document.RootElement;
+
+            // Non-vacuity, and the reason it is needed: the subject check returns early on a root with
+            // no derived repository, so "no ambiguous finding" is also what an UNRESOLVED root looks
+            // like. Asserting the repository proves the check ran and declined.
+            var row = Assert.Single(view.GetProperty("roots").EnumerateArray());
+            Assert.Equal("github.com/philipreese/consumer", row.GetProperty("repository").GetString());
+
+            // The skip is scoped to findings: the projection is still walked, digested and counted, so
+            // an operator can see the file the report is silent about.
+            Assert.Equal(2, row.GetProperty("fileCount").GetInt32());
+
+            Assert.DoesNotContain(
+                view.GetProperty("findings").EnumerateArray(),
+                f => f.GetProperty("kind").GetString() == "ambiguous");
+        }
+
+        // The control: an ordinary memory named after Baton, in the SAME root, still reports. So the
+        // skip keys on the marker the projection carries and not on the `baton` token both files share.
+        File.WriteAllText(Path.Combine(memory, "project_baton_direction.md"), "direction");
+
+        var second = await RunAsync(new MemoryAuditOptions(MemoryAuditOutputFormat.Json), ClaudeHome);
+        using var control = JsonDocument.Parse(second);
+        var ambiguous = Assert.Single(
+            control.RootElement.GetProperty("findings").EnumerateArray(),
+            f => f.GetProperty("kind").GetString() == "ambiguous");
+        Assert.Contains(
+            "project_baton_direction.md", ambiguous.GetProperty("reason").GetString()!, StringComparison.Ordinal);
+    }
+
+    /// <summary>
     /// <paramref name="path"/> flattened the way Claude Code names a project directory — drive letter,
     /// then every separator as <c>-</c>. Derived rather than hard-coded because the fixture root is a
     /// fresh temp path per run.

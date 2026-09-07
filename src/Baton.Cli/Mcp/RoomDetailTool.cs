@@ -424,7 +424,14 @@ public sealed class RoomDetailTool : IMcpTool
             : null;
     }
 
-    private static async Task<RoomTimelineView?> ReadTimelineAsync(string roomDir, CancellationToken cancellationToken)
+    /// <summary>
+    /// One room's projected <c>flow.jsonl</c> timeline, or <see langword="null"/> where the room has no
+    /// ledger at all. <c>internal</c> rather than private since #1902: <see cref="Baton.Cli.Daemon.FleetProjectionWriter"/>
+    /// projects the SAME entries into the fleet projection file's <c>timelines</c> map, in-process,
+    /// rather than reaching this tool over MCP the way <c>pusher.py</c>'s derive path does — one
+    /// producer of timeline entries, two consumers.
+    /// </summary>
+    internal static async Task<RoomTimelineView?> ReadTimelineAsync(string roomDir, CancellationToken cancellationToken)
     {
         var logPath = Path.Combine(roomDir, BatonPaths.FlowLogFileName);
         if (!File.Exists(logPath))

@@ -191,7 +191,8 @@ public static class MemoryImportCommand
             plan.Unfiled,
             machinery,
             linkRows.OrderBy(l => l.LinksFilePath, StringComparer.OrdinalIgnoreCase)
-                .ThenBy(l => l.LinkId, StringComparer.Ordinal).ToList());
+                .ThenBy(l => l.LinkId, StringComparer.Ordinal).ToList(),
+            plan.ProjectionsSkipped);
 
         string? manifestPath = null;
         if (!options.DryRun)
@@ -421,20 +422,30 @@ public static class MemoryImportCommand
     }
 
     /// <summary>
-    /// The same file rows with their text read in, and <b>re-digested from the very bytes that text was
-    /// decoded from</b>. <b>The one place a memory's contents are read</b>, and they are read for
-    /// copying rather than for meaning — opened with <see cref="FileAccess.Read"/>, and never written
-    /// back.
+    /// The same file rows with their text read in, and <b>re-digested, re-sized and re-stamped from the
+    /// very bytes that text was decoded from</b>. <b>The one place a memory's contents are read</b>, and
+    /// they are read for copying rather than for meaning — opened with <see cref="FileAccess.Read"/>,
+    /// and never written back.
     /// </summary>
     /// <remarks>
     /// <para>
-    /// <b>One read, so digest and text describe the same file.</b> The inventory walk digests every
-    /// file it finds, minutes or milliseconds before this runs; taking the digest from there and the
-    /// text from here means a file edited in between is stored with text that does not match its
-    /// recorded <see cref="MemoryEntry.Sha256"/>, under an id derived from a version of it nobody kept.
-    /// Re-hashing the bytes in hand costs one pass over a file already in memory and removes the window
-    /// entirely. The inventory's digest still stands for the rows this never reads — unfiled files and
-    /// the machinery rows, neither of which is opened.
+    /// <b>One read, so text, digest, size and mtime describe the same file.</b> The inventory walk
+    /// digests and stats every file it finds, minutes or milliseconds before this runs; taking any of
+    /// the four from there and the rest from here means a file edited in between is stored with text
+    /// that does not match its recorded <see cref="MemoryEntry.Sha256"/>, under an id derived from a
+    /// version of it nobody kept, or with a <see cref="MemoryEntry.SourceMtimeUtc"/> that belongs to a
+    /// different version than the digest beside it (#1948). Re-hashing the bytes in hand costs one pass
+    /// over a file already in memory; the mtime comes from <b>the same open handle</b> those bytes came
+    /// from, read after them, rather than from a second <c>stat</c> a rename-over could answer for a
+    /// different file. The inventory's digest and mtime still stand for the machinery rows, which are
+    /// never opened.
+    /// </para>
+    /// <para>
+    /// <b>What that does not claim.</b> The handle is opened <see cref="FileShare.ReadWrite"/>, so a
+    /// writer active <i>during</i> the read is not excluded and the four values are not an atomic
+    /// snapshot: the recorded mtime is taken after the last byte, which makes it an upper bound on what
+    /// was hashed rather than a guarantee that nothing moved underneath. What is closed is the
+    /// inventory-to-read window, which is the one measured in minutes.
     /// </para>
     /// <para>
     /// <b>The text is a UTF-8 decode, not the bytes</b>, and <see cref="MemoryEntry"/>'s own doc says so
@@ -449,8 +460,14 @@ public static class MemoryImportCommand
     /// finished. It cannot silently become an empty entry — a dropped file contributes neither an
     /// entry nor a manifest row, so the import's own accounting shows it was not carried.
     /// </para>
+    /// <para>
+    /// <c>internal</c> rather than <c>private</c> only as a test seam (Baton.Cli.Tests, via
+    /// <c>InternalsVisibleTo</c>): the walk and this read happen back to back inside
+    /// <see cref="ImportAsync"/> with nothing between them to interpose on, so the arm that proves a
+    /// stale inventory row cannot survive the read has to hand one in directly.
+    /// </para>
     /// </remarks>
-    private static IReadOnlyList<MemoryImportFile> ReadSourceFiles(MemoryImportSource source)
+    internal static IReadOnlyList<MemoryImportFile> ReadSourceFiles(MemoryImportSource source)
     {
         var files = new List<MemoryImportFile>(source.Files.Count);
         foreach (var file in source.Files)
@@ -458,11 +475,13 @@ public static class MemoryImportCommand
             try
             {
                 byte[] bytes;
+                DateTime modifiedUtc;
                 using (var stream = new FileStream(file.Path, FileMode.Open, FileAccess.Read, FileShare.ReadWrite))
                 using (var buffer = new MemoryStream())
                 {
                     stream.CopyTo(buffer);
                     bytes = buffer.ToArray();
+                    modifiedUtc = File.GetLastWriteTimeUtc(stream.SafeFileHandle);
                 }
 
                 using var reader = new StreamReader(
@@ -473,6 +492,7 @@ public static class MemoryImportCommand
                     Text = reader.ReadToEnd(),
                     Sha256 = Convert.ToHexString(System.Security.Cryptography.SHA256.HashData(bytes)).ToLowerInvariant(),
                     SizeBytes = bytes.Length,
+                    ModifiedUtc = modifiedUtc,
                 });
             }
             catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
@@ -615,7 +635,10 @@ public static class MemoryImportCommand
         output.WriteLine(
             $"Entries: {manifest.Entries.Count}   {(options.DryRun ? "would append" : "appended")}: {appended}   " +
             $"already present: {manifest.Entries.Count - appended}");
-        output.WriteLine($"Unfiled: {manifest.Unfiled.Count}   machinery recorded: {manifest.Machinery.Count}");
+        var projectionsSkipped = manifest.ProjectionsSkipped ?? [];
+        output.WriteLine(
+            $"Unfiled: {manifest.Unfiled.Count}   machinery recorded: {manifest.Machinery.Count}   " +
+            $"projection-skipped: {projectionsSkipped.Count}");
 
         var links = manifest.Links ?? [];
         var appendedLinks = manifest.AppendedLinks.Count();
@@ -639,6 +662,21 @@ public static class MemoryImportCommand
             foreach (var reason in manifest.Unfiled.GroupBy(u => u.Reason).OrderBy(g => g.Key, StringComparer.Ordinal))
             {
                 output.WriteLine($"  [{reason.Count()} file(s)] {reason.Key}");
+            }
+        }
+
+        if (projectionsSkipped.Count > 0)
+        {
+            // Named, not counted, and named separately from the unfiled: these are Baton's own caches,
+            // and an operator who saw them only as a total would have no way to tell a projection this
+            // verb correctly refused from a memory it failed to file.
+            output.WriteLine();
+            output.WriteLine(
+                "Projection-skipped -- Baton's own generated caches, recognised by their format marker " +
+                "and imported NOWHERE. Re-importing one would feed the store its own contents:");
+            foreach (var row in projectionsSkipped.OrderBy(r => r.SourcePath, StringComparer.OrdinalIgnoreCase))
+            {
+                output.WriteLine($"  {row.SourcePath}");
             }
         }
 

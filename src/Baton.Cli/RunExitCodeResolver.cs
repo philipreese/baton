@@ -75,6 +75,11 @@ public static class RunExitCodeResolver
         return outcome switch
         {
             WorkflowOutcome.Succeeded => RunExitCode.Succeeded,
+            // #1945: exit 0, beside Succeeded. The room finished and its work is on the remote; the
+            // dispatch timeout landed after that push. Anything else would move the bug rather than
+            // fix it — spec/baton.md §3's terminal-vocabulary row lists every consumer that owes it
+            // this reading, and WorkflowOutcome.FinishedDuringTeardown glosses the word itself.
+            WorkflowOutcome.FinishedDuringTeardown => RunExitCode.Succeeded,
             WorkflowOutcome.Cancelled => RunExitCode.Cancelled,
             WorkflowOutcome.Failed => ResolveFailed(result.State.Steps),
             // #1608 / #1623: WorkflowOutcome.Describe returns this whenever a step reads
@@ -97,14 +102,16 @@ public static class RunExitCodeResolver
             // compiler cannot prove this switch exhaustive over the member set the way it would for
             // an actual enum — a silent wildcard here is exactly what let a hypothetical seventh
             // member fall through unnoticed. The `_` arm below throws instead of guessing, and
-            // WorkflowOutcomeAndExitCodeTests' vocabulary-pinning test asserts the six-member set so
+            // WorkflowOutcomeAndExitCodeTests' vocabulary-pinning test asserts the whole member set so
             // adding one without touching this switch fails at test time even though nothing catches
-            // it at compile time.
+            // it at compile time. Deliberately no COUNT here: #1945 added a seventh member and the
+            // count in this comment and the message below were both stale the moment it did.
             WorkflowOutcome.Running => RunExitCode.Failed,
             WorkflowOutcome.Paused => RunExitCode.Failed,
             _ => throw new UnreachableException(
-                $"WorkflowOutcome.Describe returned '{outcome}', which is not one of the six known " +
-                "WorkflowOutcome members (Succeeded, Failed, Cancelled, Indeterminate, Running, Paused). " +
+                $"WorkflowOutcome.Describe returned '{outcome}', which is not one of the known " +
+                "WorkflowOutcome members (Succeeded, FinishedDuringTeardown, Failed, Cancelled, " +
+                "Indeterminate, Running, Paused). " +
                 "A new member was added without sweeping this switch — also sweep RedispatchCommand's " +
                 "parent gate, StatusCommand, FleetStatusTool, glass.html's chipsHtml + render buckets, " +
                 "and spec/baton.md §3's table."),
