@@ -1764,9 +1764,8 @@ public class AgyWorkerAdapterTests
 
         // Prove the agy-bound tier (cheap, since #1861 moved standard off agy) still maps to the agy
         // adapter while keeping its gemini-3.8-flash-* model name -- the adapter is named "agy",
-        // never "gemini", and the model string is the vendor's own. #1863 (operator ruling,
-        // 2026-09-06) moved the pin off the 3.6 Flash family; docs/dispatch.md's tier paragraph
-        // carries the measurement behind the value.
+        // never "gemini", and the model string is the vendor's own. #1863 moved the pin off the 3.6
+        // Flash family; why this exact variant, and why it is provisional, is docs/dispatch.md.
         var tiersJsonPath = Path.Combine(AppContext.BaseDirectory, "..", "..", "..", "..", "..", "src", "Baton.Vendors", "WorkerTiers.json");
         Assert.True(File.Exists(tiersJsonPath), $"WorkerTiers.json must exist at {tiersJsonPath}");
 
