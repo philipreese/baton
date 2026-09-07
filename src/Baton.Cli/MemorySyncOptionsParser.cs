@@ -16,7 +16,7 @@ namespace Baton.Cli;
 public static class MemorySyncOptionsParser
 {
     public const string Usage =
-        "Usage: baton memory sync [--repository <id>] [--apply] [--format text|json] " +
+        "Usage: baton memory sync [--repository <id>] [--apply | --check] [--format text|json] " +
         "[--repository-facts <dir>] [--help]";
 
     /// <summary>
@@ -67,6 +67,16 @@ public static class MemorySyncOptionsParser
         "  --apply             Write the projections. Without it, nothing is written and the report says",
         "                      what would change. Writes happen under the canonical store's own lock, so a",
         "                      concurrent 'baton memory import' cannot land mid-projection.",
+        "  --check             Write nothing and EXIT 1 if any discovered target's disposition is not",
+        "                      'unchanged', so a CI step can gate on 'the projections match the store'.",
+        "                      Refused together with --apply: one asks whether the projections are current",
+        "                      and the other makes them current, and a run that repaired what it was",
+        "                      measuring could never report anything but success.",
+        "                      ITS POPULATION IS THE TARGETS THAT WERE DISCOVERED. A repository whose store",
+        "                      holds memories but whose machine holds no matching root has nothing that",
+        "                      could be rewritten, so it exits 0 -- 'nothing is stale' and 'nowhere to",
+        "                      write' are different answers, and the report prints the second one either",
+        "                      way. Use 'baton memory audit' to ask which roots exist.",
         "  --format text|json  Report format. Default text.",
         "  --repository-facts <dir>",
         "                      A directory of checked-in repository facts (*.md) to weigh against the",
@@ -95,6 +105,7 @@ public static class MemorySyncOptionsParser
         string? repository = null;
         string? repositoryFacts = null;
         var apply = false;
+        var check = false;
         var help = false;
         var format = MemoryAuditOutputFormat.Text;
 
@@ -111,6 +122,10 @@ public static class MemorySyncOptionsParser
                     break;
                 case "--apply":
                     apply = true;
+                    i++;
+                    break;
+                case "--check":
+                    check = true;
                     i++;
                     break;
                 case "--repository":
@@ -145,7 +160,20 @@ public static class MemorySyncOptionsParser
                 "add '--repository <id>' naming the repository those facts belong to.");
         }
 
-        return new MemorySyncOptions(repository, apply, format, repositoryFacts, help);
+        // Refused rather than ordered (#2040). '--check' asks whether the projections are already
+        // current and '--apply' makes them current, so a run carrying both would rewrite the very
+        // targets it was measuring and could never exit anything but 0 -- a gate that cannot fail. The
+        // '&& !help' is the same posture the guard below it takes: '--help' prints usage rather than
+        // adjudicating an invocation nobody is asking to run.
+        if (check && apply && !help)
+        {
+            throw new CliArgumentException(
+                $"'--check' and '--apply' are mutually exclusive: --check asks whether the projections " +
+                $"match the canonical store, and --apply would make them match while it asked. {Usage}",
+                "run '--check' to gate, then '--apply' to repair what it reported.");
+        }
+
+        return new MemorySyncOptions(repository, apply, check, format, repositoryFacts, help);
     }
 
     /// <summary>

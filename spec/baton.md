@@ -406,7 +406,7 @@ through `RoleDispatch.Materialize` against the real role catalog.
 | `unkeep` | `baton unkeep <room-dir>` | `UnkeepOptionsParser.cs` |
 | `memory` | `baton memory audit [--format text\|json] [--help]` | `MemoryAuditOptionsParser.cs` |
 | `memory` | `baton memory import [--dry-run] [--root <dir>]... [--assert <path>=<repository>]... [--asserted-by <who>] \| --undo <manifest> [--help]` | `MemoryImportOptionsParser.cs` |
-| `memory` | `baton memory sync [--repository <id>] [--apply] [--format text\|json] [--repository-facts <dir>] [--help]` | `MemorySyncOptionsParser.cs` |
+| `memory` | `baton memory sync [--repository <id>] [--apply \| --check] [--format text\|json] [--repository-facts <dir>] [--help]` | `MemorySyncOptionsParser.cs` |
 | `audit` | `baton audit lanes [--since <duration>] [--vendor <name>] [--rooms-root <dir>] [--format text\|json] [--help]` | `AuditLanesOptionsParser.cs` |
 
 `templates` narrows to the built-in catalog only (`Baton.Vendors`'s `BuiltInWorkflowTemplates`) —
@@ -5939,6 +5939,18 @@ so the same store on two machines projects two different files, and "an unchange
 diff" is a statement about one machine over time. **`--apply` is the only thing that puts a byte on
 disk**, and short of it the verb has no filesystem effect whatever — `MemorySyncCommand`'s remarks
 carry why that has to be said as a negative rather than left as "it only reports".
+
+**`--check` turns "would rewrite" from a disposition into an exit code (#2040), so a CI step can gate
+on the projections matching the store.** It writes nothing, and exits 1 when any discovered target's
+disposition is not `unchanged` — computed from the same byte comparison the report prints, so the gate
+and the report cannot disagree. It is **refused together with `--apply`**, because a run that repaired
+the targets while measuring them could not report anything but success. **Its population is the targets
+that were discovered, and that is where a reader's prior fills the gap wrongly**: a repository whose
+store holds memories but whose machine holds no matching root has nothing that could be rewritten, so
+it exits 0 with the report's `NO TARGET` line still printed — "nothing is stale" and "nowhere to write"
+are different answers, and `baton memory audit` is what asks the second one. The exit code is the
+verdict; the JSON report carries each target's disposition and a `check` field naming which run it was,
+never a second machine-readable restatement of the verdict itself.
 
 **The two verbs are not a loop: `import` recognises a projection and refuses to file it.** `sync`
 writes into a vendor root, and that root is `import`'s own population — so without a test the pair
