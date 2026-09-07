@@ -17,10 +17,18 @@ internal static class BatonProcessRunner
 {
     private const int DrainBufferSize = 8192;
 
+    /// <summary>
+    /// How often the timeout monitor re-reads an extensible budget (<see cref="BatonTask.WithTimeoutBudget"/>).
+    /// Only reached when a probe was supplied; with none, the monitor waits the configured timeout out
+    /// in one delay exactly as it did before #2019.
+    /// </summary>
+    private static readonly TimeSpan BudgetPollInterval = TimeSpan.FromSeconds(15);
+
     public static void Run(
         string program,
         string[] args,
         TimeSpan? timeout,
+        Func<TimeSpan>? timeoutBudget,
         bool captureOutput,
         IReadOnlyList<(string Key, string Value)> envVars,
         bool clearEnv,
@@ -130,16 +138,56 @@ internal static class BatonProcessRunner
                 registration = cancellationToken.Register(() => KillIfAlive(job, cancelKillFired));
             }
 
-            if (timeout is { } deadline)
+            if (timeout is { } configuredTimeout)
             {
                 timeoutMonitorCts = new CancellationTokenSource();
                 CancellationToken monitorToken = timeoutMonitorCts.Token;
                 timeoutMonitorTask = Task.Run(async () =>
                 {
+                    // Re-read, not delay-once (#2019): a budget the probe grows at minute 39 of a
+                    // 40-minute box has to move the kill, or crediting the wait would change nothing
+                    // for the lane it exists for. With no probe the loop is the single delay it
+                    // replaced -- one full-length wait, then the kill.
+                    Stopwatch elapsed = Stopwatch.StartNew();
                     try
                     {
-                        await Task.Delay(deadline, monitorToken).ConfigureAwait(false);
-                        KillIfAlive(job, timedOutKillFired);
+                        while (true)
+                        {
+                            TimeSpan budget = configuredTimeout;
+                            if (timeoutBudget is not null)
+                            {
+                                try
+                                {
+                                    TimeSpan probed = timeoutBudget();
+                                    if (probed > budget)
+                                    {
+                                        budget = probed;
+                                    }
+                                }
+                                catch (Exception ex)
+                                {
+                                    // Fails closed, and loudly enough to be findable: the probe is a
+                                    // MEASUREMENT, so one that cannot be taken credits nothing and
+                                    // leaves the configured box in force. Swallowed rather than
+                                    // rethrown because throwing here would leave the tree with no
+                                    // deadline at all -- the opposite of what a broken probe should
+                                    // cost.
+                                    Debug.WriteLine($"BatonTask timeout budget probe failed; falling back to the configured timeout: {ex}");
+                                }
+                            }
+
+                            TimeSpan remaining = budget - elapsed.Elapsed;
+                            if (remaining <= TimeSpan.Zero)
+                            {
+                                KillIfAlive(job, timedOutKillFired);
+                                return;
+                            }
+
+                            TimeSpan wait = timeoutBudget is not null && remaining > BudgetPollInterval
+                                ? BudgetPollInterval
+                                : remaining;
+                            await Task.Delay(wait, monitorToken).ConfigureAwait(false);
+                        }
                     }
                     catch (OperationCanceledException)
                     {

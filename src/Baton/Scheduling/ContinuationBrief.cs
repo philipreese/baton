@@ -36,7 +36,11 @@ public static class ContinuationBrief
     /// <param name="timeout">
     /// <c>WorkerBinding.Process.Timeout</c>. A killed attempt ran essentially its whole budget by
     /// definition, so the configured value IS the predecessor's duration — no per-execution timing
-    /// needs recording to say it.
+    /// needs recording to say it. Since #2019 that is a FLOOR rather than an equality: a predecessor
+    /// whose build-lock queueing was credited back ran up to
+    /// <see cref="Dispatch.BuildLockWaitCredit.MaxBudgetMultiplier"/>× this. The brief still quotes the
+    /// configured value, which stays exactly right for the sentence that matters to the next attempt —
+    /// its own budget is this, and the credit it may earn is not a plan it can spend.
     /// </param>
     public static string? ForRetryAfterTimeout(StepState stepState, int maxAttempts, TimeSpan timeout)
     {

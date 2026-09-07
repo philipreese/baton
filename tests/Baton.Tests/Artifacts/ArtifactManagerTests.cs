@@ -1,5 +1,6 @@
 using Baton.Tests.TestSupport;
 using Baton.Artifacts;
+using Baton.Dispatch;
 using Baton.Domain;
 
 namespace Baton.Tests.Artifacts;
@@ -135,6 +136,7 @@ public class ArtifactManagerTests
                 new EnvironmentVariable.BatonComputed("BATON_INPUT_1", Qualified("/artifacts/execution_B1/goal")),
                 new EnvironmentVariable.BatonComputed("BATON_OUTPUT_DIR", Qualified("/artifacts/execution_C1")),
                 new EnvironmentVariable.BatonComputed("BATON_ARTIFACTS_ROOT", Qualified("/artifacts")),
+                LockWaitLog("/artifacts/execution_C1"),
             ],
             variables);
     }
@@ -148,6 +150,7 @@ public class ArtifactManagerTests
             [
                 new EnvironmentVariable.BatonComputed("BATON_OUTPUT_DIR", Qualified("/artifacts/execution_C1")),
                 new EnvironmentVariable.BatonComputed("BATON_ARTIFACTS_ROOT", Qualified("/artifacts")),
+                LockWaitLog("/artifacts/execution_C1"),
             ],
             variables);
     }
@@ -162,10 +165,21 @@ public class ArtifactManagerTests
             [
                 new EnvironmentVariable.BatonComputed("BATON_OUTPUT_DIR", Qualified("/artifacts/execution_C1")),
                 new EnvironmentVariable.BatonComputed("BATON_ARTIFACTS_ROOT", Qualified("/artifacts")),
+                LockWaitLog("/artifacts/execution_C1"),
                 new EnvironmentVariable.BatonComputed("BATON_SUPPLEMENTARY_INPUT", Qualified("/artifacts/execution_S1")),
             ],
             variables);
     }
+
+    /// <summary>
+    /// #2019: the build-lock wait log every execution's commands append to, derived from the output
+    /// directory. Spelled through the constants rather than by hand so a rename of either cannot leave
+    /// these assertions agreeing with a file nothing writes.
+    /// </summary>
+    private static EnvironmentVariable.BatonComputed LockWaitLog(string posixOutputDirectory) =>
+        new(
+            BuildLockWaitCredit.LogEnvironmentVariable,
+            Path.Combine(Qualified(posixOutputDirectory), BuildLockWaitCredit.LogFileName));
 
     /// <summary>
     /// A fixture path that is fully qualified on both platforms. <c>"/artifacts/x"</c> is rooted

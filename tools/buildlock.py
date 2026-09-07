@@ -78,12 +78,20 @@ Priority classes: TWO, and the whole difference is whether the command can start
                   the caller this exists for: a push's receipt check is pure git and file reads, and
                   making it wait behind a lane's `dotnet test` was the largest single source of push
                   latency measured on 2026-09-05 (spec/baton.md C-12, ruling C).
-Wait accounting:  BATON_BUILDLOCK_WAIT_LOG -- when set, a `build`-class run that actually WAITED
-                  appends the milliseconds it waited, one integer per line, to that path. Unset by
-                  default and read by nothing else. `.githooks/pre-push` is the only intended setter,
-                  and the attribution is only honest because of that: this wrapper runs for every
-                  `dotnet` invocation in a lane, so a shell that exports this variable globally
-                  accumulates the lane's own build waits into whatever is reading the file.
+Wait accounting:  TWO sinks, both unset by default, both written by a `build`-class run that actually
+                  WAITED, and each measuring a different population -- neither reads the other's file.
+                  BATON_BUILDLOCK_WAIT_LOG -- the milliseconds waited, one integer per line.
+                  `.githooks/pre-push` is the only intended setter, and the attribution is only honest
+                  because of that: this wrapper runs for every `dotnet` invocation in a lane, so a
+                  shell that exports this variable globally accumulates the lane's own build waits
+                  into whatever is reading the file. That hook sums the file per push, into the cost
+                  ledger's `pushWaitMs` (spec/baton.md §7).
+                  BATON_LOCK_WAIT_LOG (#2019) -- the same wait as one `{"waitMs": n}` JSON line. Set
+                  by the ENGINE into the worker's environment, pointing at `lock-wait.jsonl` in the
+                  execution's own artifact directory, so here the lane-wide accumulation above is the
+                  POINT: every queue this lane paid for, its own builds and its pre-push gates alike,
+                  is credited back to its box. `Baton.Dispatch.BuildLockWaitCredit` is the reader and
+                  states what the file means and what the credit is capped at.
 Diagnostics:      a sidecar .info file (never locked) names the holder -- PID, command, start
                   time -- so the wait message can say WHO it is waiting on.
 Nesting:          a wrapped command that itself runs wrapped tasks would deadlock on its own
@@ -134,6 +142,9 @@ CLASS_BUILD = "build"
 CLASS_READONLY = "readonly"
 CLASSES = (CLASS_BUILD, CLASS_READONLY)
 WAIT_LOG_VAR = "BATON_BUILDLOCK_WAIT_LOG"
+# #2019: the second wait sink, in the engine's own JSONL shape. See the docstring's Wait accounting
+# section for who sets each of the two and why they stay separate.
+CREDIT_LOG_VAR = "BATON_LOCK_WAIT_LOG"
 REPLAY_MAX_AGE_S = 6 * 60 * 60
 REPLAY_TAIL_BYTES = 64 * 1024
 # Receipt format version. It is inside the KEY (so a bump orphans every existing file under a key
@@ -363,17 +374,25 @@ def starts_msbuild(command: list[str]) -> bool:
 
 
 def record_wait(waited_s: float) -> None:
-    """Append the milliseconds this run spent queued to BATON_BUILDLOCK_WAIT_LOG, if it is set.
+    """Append the milliseconds this run spent queued to whichever wait sinks are set.
+
+    Both sinks, their two setters and the two populations they measure are the module docstring's
+    Wait accounting section; this function only writes them.
 
     Best-effort like write_holder_info: a wait log that cannot be written is a lost measurement,
     never a reason to fail the build the caller is waiting on.
     """
-    path = os.environ.get(WAIT_LOG_VAR)
+    waited_ms = int(waited_s * 1000)
+    _append_wait(os.environ.get(WAIT_LOG_VAR), f"{waited_ms}\n")
+    _append_wait(os.environ.get(CREDIT_LOG_VAR), json.dumps({"waitMs": waited_ms}) + "\n")
+
+
+def _append_wait(path: "str | None", line: str) -> None:
     if not path:
         return
     try:
         with open(path, "a", encoding="utf-8") as f:
-            f.write(f"{int(waited_s * 1000)}\n")
+            f.write(line)
     except OSError:
         pass
 
@@ -624,10 +643,16 @@ def _selftest_env(**overrides: str) -> dict[str, str]:
     from the arms' nominal sleeps, and this docstring is where the figure lives. It landed on the
     fallback path only, which is one half of exactly the before/after comparison C-12's ruling C
     exists to drive. Arm 7 sets its own log path explicitly on top of this.
+
+    CREDIT_LOG_VAR (#2019): the same leak, with a worse consequence and a wider window. The engine
+    sets it for the WHOLE lane, not for one push, so every `gates --fast` a lane runs carries it --
+    and the fabricated queueing above would not just distort a ledger figure, it would buy the lane
+    real extra box time. Arm 8's sentinel is what keeps this pop honest.
     """
     env = dict(os.environ)
     env.pop(HELD_MARKER, None)
     env.pop(WAIT_LOG_VAR, None)
+    env.pop(CREDIT_LOG_VAR, None)
     env.update(overrides)
     return env
 
@@ -875,6 +900,11 @@ def selftest() -> int:
         inherited_log = os.path.join(td, "inherited-wait.log")
         prior_wait_log = os.environ.get(WAIT_LOG_VAR)
         os.environ[WAIT_LOG_VAR] = inherited_log
+        # #2019: the same sentinel for the second sink, whose leak buys a lane real box time rather
+        # than only distorting a ledger row (_selftest_env's docstring).
+        inherited_credit_log = os.path.join(td, "inherited-lock-wait.jsonl")
+        prior_credit_log = os.environ.get(CREDIT_LOG_VAR)
+        os.environ[CREDIT_LOG_VAR] = inherited_credit_log
 
         # 1. Two wrapped commands started together must serialize (no interval overlap).
         a = _spawn_selftest_child(_CHILD_HOLD_AND_STAMP, lock_file, stamps)
@@ -1098,18 +1128,26 @@ def selftest() -> int:
         # 7. #1910: the wait log records a run that WAITED and stays silent for one that did not.
         #    Both polarities: a log written unconditionally would make every uncontended build look
         #    like contention on the row the ledger reads.
+        #    #2019 rides the same two runs rather than paying for a second 10s hold: BOTH sinks are
+        #    set on the child, and each is asserted on both polarities and in its own shape -- the
+        #    engine's credit reader (Baton.Dispatch.BuildLockWaitCredit) ignores a line that is not an
+        #    object carrying `waitMs`, so a plain-integer line here would credit a lane nothing while
+        #    looking, in the file, exactly like a recorded wait.
         wait_log = os.path.join(td, "wait.log")
+        credit_log = os.path.join(td, "lock-wait.jsonl")
         env["BATON_BUILDLOCK_WAIT_LOG"] = wait_log
+        env[CREDIT_LOG_VAR] = credit_log
         env["BATON_BUILDLOCK_TIMEOUT_S"] = "20"
         env.pop(HELD_MARKER, None)
         uncontended = subprocess.run(
             [sys.executable, os.path.abspath(__file__), sys.executable, "-c", "pass"],
             env=env, capture_output=True, text=True, check=False, timeout=30,
         )
-        if uncontended.returncode != 0 or os.path.exists(wait_log):
+        if uncontended.returncode != 0 or os.path.exists(wait_log) or os.path.exists(credit_log):
             print(
                 f"  control FAILED: an uncontended acquire wrote a wait log -- exit "
-                f"{uncontended.returncode}, log present: {os.path.exists(wait_log)}"
+                f"{uncontended.returncode}, log present: {os.path.exists(wait_log)}, "
+                f"credit log present: {os.path.exists(credit_log)}"
             )
             ok = False
 
@@ -1137,13 +1175,26 @@ def selftest() -> int:
                     waits = [int(line) for line in f.read().split()]
             except (OSError, ValueError):
                 pass
+            credits = []
+            try:
+                with open(credit_log, encoding="utf-8") as f:
+                    credits = [json.loads(line)["waitMs"] for line in f.read().splitlines() if line]
+            except (OSError, ValueError, KeyError, TypeError):
+                pass
             if contended.returncode != 0 or not waits or waits[0] < int(POLL_S * 1000):
                 print(
                     f"  control FAILED: a contended acquire did not record its wait -- exit "
                     f"{contended.returncode}, log {waits}"
                 )
                 ok = False
+            if not credits or credits[0] < int(POLL_S * 1000):
+                print(
+                    f"  control FAILED: a contended acquire did not record a `waitMs` line the "
+                    f"engine's credit reader can use -- log {credits}"
+                )
+                ok = False
         env.pop(WAIT_LOG_VAR, None)
+        env.pop(CREDIT_LOG_VAR, None)
 
         # The inherited-log sentinel set at the top: every child spawned above ran with
         # BATON_BUILDLOCK_WAIT_LOG pointing here, and none of their fabricated waits may have
@@ -1153,14 +1204,19 @@ def selftest() -> int:
             os.environ.pop(WAIT_LOG_VAR, None)
         else:
             os.environ[WAIT_LOG_VAR] = prior_wait_log
-        if os.path.exists(inherited_log):
-            with open(inherited_log, encoding="utf-8") as f:
-                leaked = f.read().split()
-            print(
-                f"  control FAILED: this selftest's synthetic contention leaked into an inherited "
-                f"{WAIT_LOG_VAR} -- {leaked} ms"
-            )
-            ok = False
+        if prior_credit_log is None:
+            os.environ.pop(CREDIT_LOG_VAR, None)
+        else:
+            os.environ[CREDIT_LOG_VAR] = prior_credit_log
+        for leaked_var, leaked_path in ((WAIT_LOG_VAR, inherited_log), (CREDIT_LOG_VAR, inherited_credit_log)):
+            if os.path.exists(leaked_path):
+                with open(leaked_path, encoding="utf-8") as f:
+                    leaked = f.read().split()
+                print(
+                    f"  control FAILED: this selftest's synthetic contention leaked into an inherited "
+                    f"{leaked_var} -- {leaked} ms"
+                )
+                ok = False
 
     print("selftest: pass" if ok else "selftest: FAIL")
     return 0 if ok else 1
