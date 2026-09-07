@@ -20,6 +20,10 @@ narrowed daemon, and bindings/permissions. If this README and the spec disagree,
   ask, every claim observed rather than assumed.
 - [Runbooks](docs/runbooks/) - Manual, key-gated operational procedures not covered by CI.
 
+## Benchmarks
+
+The [arm comparator](benchmarks/comparator.md) records the matched-brief routing experiment and points to its raw rows.
+
 ## Verbs
 
 | Verb | What it does |
