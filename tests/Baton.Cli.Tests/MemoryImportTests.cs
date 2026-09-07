@@ -1353,7 +1353,23 @@ public sealed class MemoryImportTests : IDisposable
                 .SelectMany(r => r.Files))
             .Select(f => f.Path)
             .ToHashSet(StringComparer.OrdinalIgnoreCase);
-        Assert.Equal(4, walked.Count);
+
+        // Pinned as a SET rather than a count of four, for the reason the identity below is: a walk
+        // that one day picks up a fifth file — a family added to VendorMemoryRootTable, something under
+        // the Baton root — names it here instead of reporting "expected 4, actual 5". Such a file would
+        // break the identity honestly if the import consumes neither as a source nor as machinery, and
+        // that failure must not read as a fixture miscount.
+        Assert.Equal(
+            new[]
+            {
+                Path.Combine(ClaudeHome, "projects", "C--accounted", "memory", "user_who.md"),
+                Path.Combine(
+                    ClaudeHome, "projects", "C--accounted", "memory", ClaudeProjectionTarget.ProjectionFileName),
+                Path.Combine(ClaudeHome, "projects", "C--orphaned", "memory", "user_orphan.md"),
+                Path.Combine(UserHome, ".codex", "memories_1.sqlite"),
+            }.OrderBy(p => p, StringComparer.OrdinalIgnoreCase),
+            walked.OrderBy(p => p, StringComparer.OrdinalIgnoreCase),
+            StringComparer.OrdinalIgnoreCase);
 
         await RunAsync();
 
