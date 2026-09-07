@@ -35,19 +35,37 @@ public sealed class GlassPageTests
     }
 
     [Fact]
+    public void The_served_page_carries_exactly_one_marker_element_before_title()
+    {
+        // #2053, measured on the tailnet: the served bytes were byte-identical to glass.html, so
+        // DAEMON_SERVED was false and the board never rendered. The subject here is therefore
+        // GlassPage.Html() -- the actual embedded resource the `/` handler writes -- not a fixture,
+        // and not the disk file, because a fixture lacking the page's own two mentions of the name
+        // cannot reproduce the failure at all. Markup, not bytes: GlassMarkup owns why.
+        var served = GlassMarkup.Of(GlassPage.Html());
+
+        Assert.Single(Regex.Matches(served, Regex.Escape(GlassPage.SourceMetaTag)));
+        Assert.True(
+            served.IndexOf(GlassPage.SourceMetaTag, StringComparison.Ordinal)
+            < served.IndexOf("<title>", StringComparison.OrdinalIgnoreCase),
+            "The marker must precede <title> so it lands in the implied <head>.");
+    }
+
+    [Fact]
     public void Injection_puts_the_marker_in_the_head_and_never_twice()
     {
         var injected = GlassPage.Inject(RepoGlassHtml());
+        var markup = GlassMarkup.Of(injected);
 
-        Assert.Contains(GlassPage.SourceMetaTag, injected, StringComparison.Ordinal);
+        Assert.Single(Regex.Matches(markup, Regex.Escape(GlassPage.SourceMetaTag)));
         Assert.True(
-            injected.IndexOf(GlassPage.SourceMetaTag, StringComparison.Ordinal)
-            < injected.IndexOf("<title>", StringComparison.OrdinalIgnoreCase),
+            markup.IndexOf(GlassPage.SourceMetaTag, StringComparison.Ordinal)
+            < markup.IndexOf("<title>", StringComparison.OrdinalIgnoreCase),
             "The marker must precede <title> so it lands in the implied <head>.");
 
         // Idempotent: serving twice, or a source file that one day carries its own marker, must not
         // produce two metas -- the page's querySelector would still work, but the injected copy would
-        // then be unremovable by editing the source.
+        // then be unremovable by editing the source. Byte-identical, not merely marker-count-equal.
         Assert.Equal(injected, GlassPage.Inject(injected));
     }
 
