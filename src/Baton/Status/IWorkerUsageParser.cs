@@ -143,11 +143,16 @@ public interface IWorkerUsageParser
     /// <summary>
     /// #1921: the canonical <c>tool + arguments</c> keys <paramref name="rawLine"/> reports, for
     /// <see cref="ToolStepTally"/>'s repeat count. One entry per tool call the line announces (claude's
-    /// multi-tool turn reports several); <b>empty when the vendor's stream does not carry the
-    /// arguments</b>, which is a real gap rather than a shrug — codex names the <c>tool</c> of an
-    /// <c>mcp_tool_call</c> and never its arguments, so keying those on the name alone would report two
-    /// different reads of two different files as one file read twice. A vendor that cannot answer
-    /// contributes nothing to the repeat count rather than a fabricated one.
+    /// multi-tool turn reports several); <b>empty when the line does not carry the arguments</b>, which
+    /// is a real gap rather than a shrug — keying on the tool name alone would report two different
+    /// reads of two different files as one file read twice, so a line that cannot answer contributes
+    /// nothing to the repeat count rather than a fabricated one.
+    /// <para>
+    /// claude and agy carry the arguments natively. Codex's own <c>mcp_tool_call</c> names the
+    /// <c>tool</c> and nothing else, so on that vendor the key rests on a field Baton's own broker
+    /// stamps (<see cref="CodexUsageParser.ArgumentsDigestField"/>) — present since #1963, absent on
+    /// every codex stream captured before it, which is the population that still reads empty here.
+    /// </para>
     /// <para>
     /// The key is opaque and comparison is ordinal: only equality is ever asked of it, never its shape.
     /// </para>
@@ -168,9 +173,13 @@ public interface IWorkerUsageParser
     /// questions about the same tool names.
     /// </para>
     /// <para>
-    /// Empty for codex, and that is the same real gap <see cref="ToolInvocationKeys"/> states: an
-    /// <c>mcp_tool_call</c> names the tool and never its arguments, so no command line is derivable.
-    /// A vendor that cannot answer contributes nothing rather than a fabricated shape.
+    /// #2008: <b>codex answers here too</b>, and this seam is what "the three vendors are one query"
+    /// means — there is no JSON key the three streams share (claude's is <c>input.command</c>, agy's is
+    /// <c>tool_info.parameters.CommandLine</c>, and they already disagreed). codex's native
+    /// <c>mcp_tool_call</c> carries no arguments at all, so its command line rests on a field Baton's
+    /// own broker stamps (<see cref="CodexUsageParser.ArgumentsIdentityField"/>) and is empty on any
+    /// codex stream captured before that landed — the same "cannot answer contributes nothing"
+    /// <see cref="ToolInvocationKeys"/> states.
     /// </para>
     /// Default empty.
     /// </summary>

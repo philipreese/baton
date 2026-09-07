@@ -306,6 +306,77 @@ public sealed class CodexUsageParser : IWorkerUsageParser
     public const string ArgumentsDigestField = "argumentsDigest";
 
     /// <summary>
+    /// #2008: the sibling field carrying the call's NORMALISED INPUT IDENTITY — the command line of a
+    /// <see cref="RunCommandToolName"/> call, the path of a read/list/search/write, the declared output
+    /// name of a write-output, the patched paths of an <c>apply_patch</c>.
+    /// <c>Baton.Vendors.CodexDynamicToolPolicy.InputIdentity</c> is the one place that mapping lives and
+    /// states what it excludes (file contents, patch bodies) and its length cap; named here for the same
+    /// cross-project reason as <see cref="ArgumentsDigestField"/> above.
+    /// <para>
+    /// <b>Why a second field when the digest already identifies a call.</b> The digest answers only
+    /// "are these two calls the same one", which is all a repeat count needs; it cannot say WHAT was
+    /// run. claude's and agy's streams carry the arguments themselves
+    /// (<c>ClaudeUsageParser.ShellCommandLines</c> reads <c>input.command</c>,
+    /// <c>AgyUsageParser.ShellCommandLines</c> reads <c>tool_info.parameters.CommandLine</c>), so those
+    /// two vendors could always answer it and codex could not — the gap #2008 measured. There is no
+    /// shared JSON key across the three (the two that had one already disagree); what is shared is the
+    /// <see cref="IWorkerUsageParser"/> seam, and this field is what lets codex answer at it.
+    /// </para>
+    /// <para>
+    /// <b>Absent, never blank</b>, on a tool with no identifying argument — see
+    /// <c>Baton.Vendors.CodexAppServerBroker.Describe</c> — so a reader distinguishes "this shape names
+    /// no target" from "the target was empty".
+    /// </para>
+    /// </summary>
+    public const string ArgumentsIdentityField = "argumentsIdentity";
+
+    /// <summary>
+    /// #2008: codex's shell tool is <see cref="RunCommandToolName"/> and its command line arrives on
+    /// the <see cref="ArgumentsIdentityField"/> Baton's own broker stamps — codex's native
+    /// <c>item.started</c> names the tool and nothing else, so unlike the other two vendors there is no
+    /// arguments node to read and this is the whole of what makes the reading possible here.
+    /// <para>
+    /// <b>Anchored on <c>item.started</c>, the same single lifecycle line
+    /// <see cref="ToolInvocationKeys"/> uses</b>, even though the identity is now stamped on the
+    /// completed item too: both items of one call carry it, and reading both would report every codex
+    /// command twice into <c>Mutation.TokenBudgetMonitor</c>'s dominant-shape denominator.
+    /// </para>
+    /// <para>
+    /// Empty for a stream captured before this landed, exactly as <see cref="ToolInvocationKeys"/> is —
+    /// the field is what the reading rests on, and a vendor that cannot answer contributes nothing
+    /// rather than a fabricated shape.
+    /// </para>
+    /// </summary>
+    public IReadOnlyList<string> ShellCommandLines(string rawLine)
+    {
+        if (string.IsNullOrWhiteSpace(rawLine))
+        {
+            return [];
+        }
+
+        try
+        {
+            using var document = JsonDocument.Parse(rawLine);
+            var root = document.RootElement;
+            if (root.ValueKind != JsonValueKind.Object
+                || !root.TryGetProperty("type", out var eventType) || eventType.GetString() != "item.started"
+                || !root.TryGetProperty("item", out var item) || item.ValueKind != JsonValueKind.Object
+                || ReadString(item, "type") != "mcp_tool_call"
+                || ReadString(item, "tool") != RunCommandToolName
+                || ReadString(item, ArgumentsIdentityField) is not { Length: > 0 } commandLine)
+            {
+                return [];
+            }
+
+            return [commandLine];
+        }
+        catch (JsonException)
+        {
+            return [];
+        }
+    }
+
+    /// <summary>
     /// A completed dynamic-tool item — the one anchor <see cref="CountRefusedToolSteps"/> and
     /// <see cref="CountEmptyToolResults"/> share.
     /// </summary>

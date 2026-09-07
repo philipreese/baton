@@ -141,6 +141,121 @@ public sealed class CodexAppServerBrokerTests
     }
 
     /// <summary>
+    /// #2008, driven over the real emitter rather than a hand-written fixture: a codex app-server
+    /// transcript whose turn issues four dynamic-tool calls, and the assertion that EVERY
+    /// <c>mcp_tool_call</c> item the room's stream then carries — <c>item.started</c> and
+    /// <c>item.completed</c> alike, which is the half that carried no digest at all — names both the
+    /// arguments digest and the call's input identity.
+    /// <para>
+    /// <b><c>baton_run_command</c> is called on a grant that WITHHOLDS it</b>, on purpose. It keeps the
+    /// test from spawning a real process, and it pins the discrimination the issue asked about
+    /// directly: the identity is recorded because the call was ANNOUNCED, not because Baton executed
+    /// it, so a refused command line is as auditable as a permitted one.
+    /// </para>
+    /// <para>
+    /// The per-tool expectations are asserted by value, not just for presence: a
+    /// <c>Describe</c> that stamped the tool name into both fields would satisfy "present" and answer
+    /// nothing.
+    /// </para>
+    /// </summary>
+    [Fact]
+    public async Task Every_tool_item_in_the_room_carries_the_arguments_digest_and_the_input_identity()
+    {
+        var root = Path.Combine(Path.GetTempPath(), $"baton-codex-identity-{Guid.NewGuid():N}");
+        var workspace = Path.Combine(root, "workspace");
+        var output = Path.Combine(root, "output");
+        Directory.CreateDirectory(workspace);
+        Directory.CreateDirectory(output);
+        try
+        {
+            File.WriteAllText(Path.Combine(workspace, "controls.py"), "def control():\n    return False\n");
+            // Read and write, but deliberately NOT RunShellCommands -- see the doc comment.
+            var grant = new PermissionGrant(ReadFiles: true, WriteFiles: true);
+            var configuration = new CodexBrokerConfiguration(
+                workspace, "gpt-5.6-terra", "high", null, false, grant, ["report.md"], false);
+            var policy = new CodexDynamicToolPolicy(grant, workspace, output, [], ["report.md"]);
+            var patch = "*** Begin Patch\n*** Update File: controls.py\n"
+                + " def control():\n-    return False\n+    return True\n*** End Patch";
+            var transcript = string.Join('\n',
+            [
+                "{\"id\":1,\"result\":{\"userAgent\":\"fixture\"}}",
+                "{\"id\":2,\"result\":{\"thread\":{\"id\":\"thread-1\"}}}",
+                "{\"id\":3,\"result\":{\"turn\":{\"id\":\"turn-1\",\"status\":\"inProgress\",\"items\":[]}}}",
+                ToolCall(11, CodexDynamicToolPolicy.ReadTextTool, new JsonObject { ["path"] = "controls.py" }),
+                ToolCall(12, CodexDynamicToolPolicy.RunCommandTool,
+                    new JsonObject { ["command"] = "pixi run gates-fast" }),
+                ToolCall(13, CodexDynamicToolPolicy.ApplyPatchTool, new JsonObject { ["input"] = patch }),
+                ToolCall(14, CodexDynamicToolPolicy.WriteOutputTool,
+                    new JsonObject { ["name"] = "report.md", ["content"] = new string('x', 4096) }),
+                "{\"method\":\"turn/completed\",\"params\":{\"threadId\":\"thread-1\",\"turn\":{\"id\":\"turn-1\",\"status\":\"completed\",\"items\":[]}}}",
+            ]) + "\n";
+            using var serverOutput = new StringReader(transcript);
+            using var serverInput = new StringWriter();
+            using var batonOutput = new StringWriter();
+            using var error = new StringWriter();
+
+            var exitCode = await CodexAppServerBroker.RunProtocolAsync(
+                configuration, "Do the work.", policy, serverInput, serverOutput,
+                batonOutput, error, TestContext.Current.CancellationToken);
+
+            Assert.Equal(0, exitCode);
+            var stream = batonOutput.ToString();
+            var toolItems = Lines(batonOutput).Select(line => JsonNode.Parse(line)!)
+                .Where(node => node["item"]?["type"]?.GetValue<string>() == "mcp_tool_call")
+                .ToArray();
+            // Four calls, each announced twice: the control on "every item" actually being eight.
+            Assert.Equal(8, toolItems.Length);
+            foreach (var node in toolItems)
+            {
+                var item = node["item"]!;
+                Assert.Matches(
+                    "^[0-9a-f]{16}$",
+                    item[Baton.Status.CodexUsageParser.ArgumentsDigestField]!.GetValue<string>());
+                Assert.NotEmpty(item[Baton.Status.CodexUsageParser.ArgumentsIdentityField]!.GetValue<string>());
+            }
+
+            static string Identity(JsonNode[] items, string tool, string lifecycle) =>
+                items.Single(node => node["type"]!.GetValue<string>() == lifecycle
+                        && node["item"]!["tool"]!.GetValue<string>() == tool)
+                    ["item"]![Baton.Status.CodexUsageParser.ArgumentsIdentityField]!.GetValue<string>();
+
+            Assert.Equal("controls.py", Identity(toolItems, CodexDynamicToolPolicy.ReadTextTool, "item.started"));
+            Assert.Equal("controls.py", Identity(toolItems, CodexDynamicToolPolicy.ReadTextTool, "item.completed"));
+            Assert.Equal("pixi run gates-fast", Identity(toolItems, CodexDynamicToolPolicy.RunCommandTool, "item.started"));
+            Assert.Equal("controls.py", Identity(toolItems, CodexDynamicToolPolicy.ApplyPatchTool, "item.started"));
+            Assert.Equal("report.md", Identity(toolItems, CodexDynamicToolPolicy.WriteOutputTool, "item.started"));
+            // The withheld command was still recorded, and it was still refused.
+            Assert.Equal("failed", toolItems
+                .Single(node => node["type"]!.GetValue<string>() == "item.completed"
+                    && node["item"]!["tool"]!.GetValue<string>() == CodexDynamicToolPolicy.RunCommandTool)
+                ["item"]!["status"]!.GetValue<string>());
+            // The bound the digest exists to hold: neither the 4 KiB output body nor the patch body
+            // reaches the stream through the new field.
+            Assert.DoesNotContain(new string('x', 64), stream, StringComparison.Ordinal);
+            Assert.DoesNotContain("*** Begin Patch", stream, StringComparison.Ordinal);
+        }
+        finally
+        {
+            DirectoryCleanup.DeleteRecursively(root);
+        }
+    }
+
+    private static string ToolCall(int id, string tool, JsonObject arguments) =>
+        new JsonObject
+        {
+            ["id"] = id,
+            ["method"] = "item/tool/call",
+            ["params"] = new JsonObject
+            {
+                ["tool"] = tool,
+                ["arguments"] = arguments,
+                ["callId"] = $"call-{id}",
+                ["threadId"] = "thread-1",
+                ["turnId"] = "turn-1",
+            },
+        }.ToJsonString();
+
+    /// <summary>
     /// #1996 re-review MEDIUM, and the checker that drift had none of: the instruction constraining
     /// which tools the model may use must not exclude a tool the same payload declares. What it used
     /// to exclude, and why that mattered, is stated once beside the instruction itself in

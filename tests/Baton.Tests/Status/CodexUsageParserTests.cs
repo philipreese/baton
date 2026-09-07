@@ -255,6 +255,61 @@ public sealed class CodexUsageParserTests
         Assert.Null(usage);
     }
 
+    /// <summary>
+    /// #2008, the read-back half: a codex room stream built from a real room's shape (scrubbed) —
+    /// <c>dispatch-implement-26c16874</c>, whose every <c>item.started</c> carries the digest — with the
+    /// input identity #2008 adds, and the two cross-vendor readings taken over it.
+    /// <para>
+    /// The counting arms are the discrimination, not the presence: the identity is now stamped on BOTH
+    /// lifecycle items of a call, so a reader that stopped gating on <c>item.started</c> would report
+    /// each of these two commands twice. Two commands over four tool items is what pins that.
+    /// </para>
+    /// </summary>
+    [Fact]
+    public void A_codex_room_stream_yields_one_command_line_and_one_key_per_tool_call()
+    {
+        var parser = new CodexUsageParser();
+        string[] stream =
+        [
+            Started("baton_read_text", "aaaaaaaaaaaaaaaa", "spec/baton.md"),
+            Completed("baton_read_text", "aaaaaaaaaaaaaaaa", "spec/baton.md"),
+            Started("baton_run_command", "bbbbbbbbbbbbbbbb", "pixi run gates-fast"),
+            Completed("baton_run_command", "bbbbbbbbbbbbbbbb", "pixi run gates-fast"),
+            Started("baton_run_command", "cccccccccccccccc", "git push"),
+            Completed("baton_run_command", "cccccccccccccccc", "git push"),
+        ];
+
+        var commands = stream.SelectMany(parser.ShellCommandLines).ToArray();
+        var keys = stream.SelectMany(parser.ToolInvocationKeys).ToArray();
+
+        Assert.Equal(["pixi run gates-fast", "git push"], commands);
+        Assert.Equal(3, keys.Length);
+        Assert.Equal(3, keys.Distinct(StringComparer.Ordinal).Count());
+    }
+
+    /// <summary>
+    /// #2008 polarity: the reading rests on the field Baton's broker stamps, so a codex stream captured
+    /// before #2008 landed reports no command line rather than a fabricated one — the same "cannot
+    /// answer contributes nothing" <see cref="CodexUsageParser.ToolInvocationKeys"/> already applies to
+    /// a pre-#1963 stream's digest. Non-shell tools carry an identity too and are still not command
+    /// lines.
+    /// </summary>
+    [Theory]
+    [InlineData("""{"type":"item.started","item":{"type":"mcp_tool_call","tool":"baton_run_command","argumentsDigest":"bbbbbbbbbbbbbbbb"}}""")]
+    [InlineData("""{"type":"item.started","item":{"type":"mcp_tool_call","tool":"baton_read_text","argumentsDigest":"aaaaaaaaaaaaaaaa","argumentsIdentity":"spec/baton.md"}}""")]
+    [InlineData("""{"type":"item.completed","item":{"type":"mcp_tool_call","tool":"baton_run_command","argumentsDigest":"bbbbbbbbbbbbbbbb","argumentsIdentity":"git push","status":"completed","aggregated_output":""}}""")]
+    [InlineData("""{"type":"item.started","item":{"type":"agent_message","text":"git push"}}""")]
+    [InlineData("not json")]
+    [InlineData("")]
+    public void A_line_that_announces_no_codex_shell_command_reports_none(string rawLine) =>
+        Assert.Empty(new CodexUsageParser().ShellCommandLines(rawLine));
+
+    private static string Started(string tool, string digest, string identity) =>
+        $$$"""{"type":"item.started","item":{"type":"mcp_tool_call","tool":"{{{tool}}}","argumentsDigest":"{{{digest}}}","argumentsIdentity":"{{{identity}}}"}}""";
+
+    private static string Completed(string tool, string digest, string identity) =>
+        $$$"""{"type":"item.completed","item":{"type":"mcp_tool_call","tool":"{{{tool}}}","argumentsDigest":"{{{digest}}}","argumentsIdentity":"{{{identity}}}","status":"completed","aggregated_output":"ok"}}""";
+
     [Fact]
     public void A_partial_usage_object_preserves_absence_instead_of_fabricating_zeroes()
     {
