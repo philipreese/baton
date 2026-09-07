@@ -652,13 +652,19 @@ public class CoreDispatcherTests
     }
 
     /// <summary>
-    /// #2019, both polarities on one ~4s child: the dispatcher reads the room's own
+    /// #2019, both polarities on one ~7s child: the dispatcher reads the room's own
     /// <c>lock-wait.jsonl</c> and the recorded build-lock queueing moves the kill out past the
     /// configured box. The negative arm is the same dispatch with nothing recorded — without it, a
     /// dispatcher that had simply stopped enforcing the timeout would pass. The recorded wait is far
     /// wider than the box on purpose, so what the credited arm survives on is the
-    /// <see cref="BuildLockWaitCredit.MaxBudgetMultiplier"/> cap (6s here), not the raw 30s.
+    /// <see cref="BuildLockWaitCredit.MaxBudgetMultiplier"/> cap (10s here), not the raw 30s.
     /// </summary>
+    /// <remarks>
+    /// The margins are absolute seconds, not ratios, because this test runs inside `gates --fast` on a
+    /// machine the issue itself measured at three vendor CLIs and under a gigabyte free: the credited
+    /// arm has ~3s of slack (7s child against a 10s kill) and the negative arm's slack only grows under
+    /// load (a 5s kill against a child that cannot finish before 7s).
+    /// </remarks>
     [Theory]
     [InlineData(true, CoreExitReason.Natural)]
     [InlineData(false, CoreExitReason.TimedOut)]
@@ -681,11 +687,11 @@ public class CoreDispatcherTests
 
             var request = MakeRequest(
                 ArtifactManager.BuildEnvironment([], outputDirectory, artifactsRoot),
-                TimeSpan.FromSeconds(3));
+                TimeSpan.FromSeconds(5));
 
             await using var writer = new FlowEventLogWriter(logPath);
             var result = await new CoreDispatcher(writer, writer).DispatchAsync(
-                request, SleepsFourSeconds(), TestContext.Current.CancellationToken);
+                request, SleepsSevenSeconds(), TestContext.Current.CancellationToken);
 
             Assert.Equal(expected, result.Reason);
         }
@@ -696,8 +702,8 @@ public class CoreDispatcherTests
         }
     }
 
-    private static CoreDispatchTarget SleepsFourSeconds() =>
-        new("cmd", ["/c", "ping -n 5 127.0.0.1 > nul"]);
+    private static CoreDispatchTarget SleepsSevenSeconds() =>
+        new("cmd", ["/c", "ping -n 8 127.0.0.1 > nul"]);
 
     private static ExecutionRequest MakeRequest(
         IReadOnlyList<EnvironmentVariable> environment, TimeSpan timeout) =>
