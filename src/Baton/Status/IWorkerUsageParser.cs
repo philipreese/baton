@@ -158,8 +158,8 @@ public interface IWorkerUsageParser
     /// <summary>
     /// #2002: the raw SHELL command lines <paramref name="rawLine"/> announces — the argument of
     /// claude's <c>Bash</c> and of agy's <c>run_command</c>, and nothing else. Feeds
-    /// <c>Mutation.TokenBudgetMonitor</c>'s dominant-shape reading, so a tool-step-cap arrest can say
-    /// what the steps were spent on rather than only how many there were.
+    /// <c>Mutation.TokenBudgetMonitor</c>'s dominant-shape reading, which is rule 3 of spec/baton.md
+    /// §9's run-command rules.
     /// <para>
     /// <b>Each parser names its own vendor's shell tool</b> (Adapter Isolation), rather than reading
     /// <c>Baton.Vendors.ShellCommandPatternMatcher.ShellToolNames</c> — which this assembly cannot

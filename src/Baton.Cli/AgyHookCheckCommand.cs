@@ -320,11 +320,10 @@ public static class AgyHookCheckCommand
         if (toolName == "run_command")
         {
             // #2002 rule 1, the same rung the claude hook carries at its own `Bash` branch, from the
-            // same vendor-neutral detector. This is the vendor the polling was actually measured on:
-            // one arm-A lane spent 53.6 % of its run_command steps on `Get-Process -Id <n>` liveness
-            // polls of builds it had backgrounded itself. Unconditional and ahead of the pattern rungs
-            // because `implement` is an unscoped grant, which those rungs barely narrow. No ceiling
-            // clause: no Baton per-command ceiling applies on this path (spec/baton.md §9).
+            // same vendor-neutral detector; spec/baton.md §9 states the rule and the measurement.
+            // Unconditional and ahead of the pattern rungs because `implement` is an unscoped grant,
+            // which those rungs barely narrow. No ceiling clause: no Baton per-command ceiling applies
+            // on this path.
             if (Baton.Vendors.BackgroundingShapeDetector.Detect(commandLine) is { } backgrounding)
             {
                 return DenyJson(Baton.Vendors.BackgroundingShapeDetector.Refusal(backgrounding, null));
