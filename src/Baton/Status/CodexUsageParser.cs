@@ -6,7 +6,7 @@ namespace Baton.Status;
 /// <summary>
 /// Parses the per-turn usage on Codex CLI JSONL <c>turn.completed</c> events (#1853). Codex reports
 /// <c>input_tokens</c> inclusive of <c>cached_input_tokens</c>; Baton's additive shape keeps those
-/// dimensions disjoint, so <see cref="WorkerUsage.TokensIn"/> is the non-cached remainder.
+/// dimensions disjoint (as agy's input already is), so <see cref="WorkerUsage.TokensIn"/> is the non-cached remainder.
 /// <para>
 /// <b>No <see cref="IWorkerUsageParser.TryParseEchoedModel"/> override, because codex has no reachable
 /// source for one</b> (#1927 review HIGH). The absence is a DIFFERENT kind from agy's beside it: agy's
@@ -28,6 +28,35 @@ namespace Baton.Status;
 /// </summary>
 public sealed class CodexUsageParser : IWorkerUsageParser
 {
+    /// <summary>
+    /// Sums every completed turn in one execution's complete captured stream (#2020).
+    /// State belongs to this read, never the shared parser instance; absent dimensions stay absent.
+    /// </summary>
+    public WorkerUsage? ParseExecutionUsage(IEnumerable<string> lines)
+    {
+        WorkerUsage? total = null;
+        foreach (var line in lines)
+        {
+            if (!TryParse(line, out var turn) || turn is null)
+            {
+                continue;
+            }
+
+            total = total is null ? turn : new WorkerUsage(
+                TokensIn: Sum(total.TokensIn, turn.TokensIn),
+                TokensOut: Sum(total.TokensOut, turn.TokensOut),
+                Turns: total.Turns + turn.Turns,
+                CacheReadTokens: Sum(total.CacheReadTokens, turn.CacheReadTokens),
+                CacheCreationTokens: Sum(total.CacheCreationTokens, turn.CacheCreationTokens),
+                ThinkingTokens: Sum(total.ThinkingTokens, turn.ThinkingTokens));
+        }
+
+        return total;
+    }
+
+    private static long? Sum(long? left, long? right) =>
+        left is null && right is null ? null : (left ?? 0) + (right ?? 0);
+
     public bool TryParseFinalUsage(string rawLine, out WorkerUsage? usage) =>
         TryParse(rawLine, out usage);
 

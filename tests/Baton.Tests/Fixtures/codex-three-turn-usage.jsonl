@@ -1,0 +1,5 @@
+{"type":"thread.started","thread_id":"fixture"}
+{"type":"turn.completed","usage":{"input_tokens":1000,"cached_input_tokens":600,"output_tokens":100,"reasoning_output_tokens":20}}
+{"type":"item.started","item":{"type":"mcp_tool_call","tool":"baton_read_text"}}
+{"type":"turn.completed","usage":{"input_tokens":2000,"cached_input_tokens":1500,"output_tokens":200,"reasoning_output_tokens":40}}
+{"type":"turn.completed","usage":{"input_tokens":3000,"cached_input_tokens":2400,"output_tokens":300,"reasoning_output_tokens":60}}

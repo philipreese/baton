@@ -550,6 +550,8 @@ Two implementation constraints fall out:
 
 ## Usage, cost and quota
 
+Codex room usage sums completed turns across the captured execution stream; [CodexUsageParser's usage remark](../src/Baton/Status/CodexUsageParser.cs) defines its input/cache normalization (#2020).
+
 **Probed 2026-07-24, re-measured 2026-08-28.** An earlier pass concluded *"neither vendor exposes
 remaining quota or a reset time."* **That was wrong, and it was wrong for a methodological reason
 worth recording: it probed the CLI's `--help` and subcommand list, not the in-session slash

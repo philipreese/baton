@@ -176,6 +176,8 @@ public sealed record PriceCatalog(
     /// dimension the usage actually reports has no price in force. Deliberately all-or-nothing: a
     /// partial sum silently under-reports by whichever dimension was unpriced, and #1849 rules that
     /// an incomplete price is unknown rather than a smaller number.
+    /// Input and cache-read are priced separately; <see cref="Status.CodexUsageParser"/>'s usage
+    /// remark documents the normalization required before applying this formula to Codex input.
     /// </summary>
     public decimal? TryEstimateUsd(string? vendor, string? model, TokenDimensions tokens, DateTime at)
     {

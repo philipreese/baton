@@ -739,7 +739,9 @@ public static class ExecutionUsageProjector
         }
 
         WorkerUsage? terminal = null;
-        for (var i = lines.Length - 1; i >= 0; i--)
+        // Codex's execution total requires the complete stream; see ParseExecutionUsage below.
+        // Do not expose its last turn as a total on any of the incomplete-capture returns.
+        for (var i = lines.Length - 1; replayParser is not CodexUsageParser && i >= 0; i--)
         {
             var line = lines[i];
             if (string.IsNullOrWhiteSpace(line))
@@ -850,6 +852,11 @@ public static class ExecutionUsageProjector
         // the resolved adapter is still tried rather than skipping the replay outright.
         // #1691 merge: billedRateLimit is null here for the same reason budget/maxToolSteps are -- a
         // replay must not be able to arrest anything; it only reads.
+        if (replayParser is CodexUsageParser codexParser)
+        {
+            terminal = codexParser.ParseExecutionUsage(rolledLines.Concat(lines));
+        }
+
         var replayMonitor = new TokenBudgetMonitor(budget: null, maxToolSteps: null, billedRateLimit: null, replayParser);
         // #1921: fed from the same loops, off the same parser, so the step count and the billed Σ are
         // always over identical bytes. A separate object rather than another counter on the monitor
