@@ -42,18 +42,32 @@ public sealed class CodexUsageParser : IWorkerUsageParser
     /// the <c>usage</c> object on both line types. Absent on every stream captured before that
     /// emitter, which is exactly how a reader tells the two eras apart without a version stamp.
     /// <para>
-    /// <b>Why an index that restarts at 1 is safe to dedupe on</b> (#2020 review LOW): one captured
-    /// <c>.stdout.log</c> holds exactly one broker invocation, so it holds one monotone sequence rather
-    /// than two interleaved ones. Every dispatch site in <c>Mutation.MutationInterface</c> mints a
-    /// fresh <see cref="Domain.ExecutionId"/> (<c>new ExecutionId(Guid.NewGuid()…)</c>) and passes it to
-    /// <see cref="Artifacts.ArtifactManager.AllocateOutputDirectory"/>, which addresses the directory by
-    /// that id — a resume or a retry therefore gets its OWN <c>execution_{id}</c> directory and its own
-    /// capture file, never a second broker appending into an existing one. Not a property of
-    /// <c>Dispatch.ExecutionStreamLogger</c>'s file mode, which appends rather than truncates: a second
-    /// logger over one directory would in fact continue the same file (its own <c>#1724</c> remark
-    /// treats that as a contemplated shape), so the per-execution directory is what the claim rests on.
-    /// <c>Vendors.CodexWorkerAdapter.IsPostResponseTerminalLine</c>'s backward scan rests on the same
-    /// invariant and cites this passage rather than restating it.
+    /// <b>Why an index that restarts at 1 is safe to dedupe on, and the one shape where it is not</b>
+    /// (#2020 review LOW). It is safe because a capture file normally holds ONE broker invocation, so
+    /// one monotone sequence rather than two concatenated ones. Not for the reason it is tempting to
+    /// give: <c>Dispatch.ExecutionStreamLogger</c> does not truncate — both creates are guarded by
+    /// <c>File.Exists</c> and every later write is <c>FileMode.Append</c>, and its own <c>#1724</c>
+    /// remark treats a second logger over one directory as a contemplated shape. What holds instead is
+    /// the directory: an ordinary dispatch, a retry and a resume each mint a fresh
+    /// <see cref="Domain.ExecutionId"/> (<c>new ExecutionId(Guid.NewGuid()…)</c>) and pass it to
+    /// <see cref="Artifacts.ArtifactManager.AllocateOutputDirectory"/>, which addresses
+    /// <c>execution_{id}</c> by that id — so each gets its own capture file.
+    /// </para>
+    /// <para>
+    /// The exception, stated because it is invisible otherwise: <c>Mutation.MutationInterface</c>'s
+    /// M10 Phase 3 crash-recovery RESUBMIT re-dispatches an already-accepted request under its
+    /// EXISTING id ("the same attempt, not a retry", at that loop's own comment), so a resubmitted
+    /// execution's second broker appends into the first's <c>.stdout.log</c> and the index restarts at
+    /// 1 inside one file. Consequences, none of them new damage but none of them free: the fold above
+    /// is unaffected (it sums every <c>turn.usage</c> line and both attempts really were billed);
+    /// <c>Mutation.TokenBudgetMonitor</c>'s replay over such a concatenated file drops the resubmitted
+    /// round-trips whose index collides with the crashed attempt's, so its live figure reads LOW rather
+    /// than high — the fail-safe direction for an arrest, and the same direction the pre-#2020 code
+    /// erred in; and <c>Vendors.CodexWorkerAdapter.IsPostResponseTerminalLine</c>'s backward scan can
+    /// only reach the crashed attempt's final response if the resubmit produced no agent message of its
+    /// own, which is a captured answer where there would otherwise have been none. Closing the
+    /// collision needs an attempt discriminator the resubmit path does not currently write; nothing
+    /// here depends on it being closed.
     /// </para>
     /// </summary>
     public const string RoundTripField = "round_trip";

@@ -292,9 +292,10 @@ public sealed class CodexWorkerAdapter : IWorkerAdapter, IPermissionGrantTransla
     /// in this tree — nothing here establishes that a usage notification cannot follow the final agent
     /// message, and nothing establishes that it can. Treating it as a trailer is correct under either
     /// ordering; treating it as a boundary is correct under one and silently returns no capture at all
-    /// under the other. What stops the widened scan from walking back into an EARLIER turn's agent
-    /// message is that one capture file holds exactly one broker invocation — the invariant recorded on
-    /// <see cref="CodexUsageParser.RoundTripField"/>.
+    /// under the other. The scan is now a bounded backward walk over trailers rather than a look at the
+    /// single preceding line — what keeps it inside THIS turn is that a capture file normally holds one
+    /// broker invocation, together with the one shape where it does not (a crash-recovery resubmit),
+    /// both recorded on <see cref="CodexUsageParser.RoundTripField"/> rather than restated here.
     /// </para>
     /// </summary>
     public bool IsPostResponseTerminalLine(string rawLine) =>

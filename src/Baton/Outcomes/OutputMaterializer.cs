@@ -206,10 +206,14 @@ public static class OutputMaterializer
     /// Reads the execution's own <c>.stdout.log</c> (<see cref="ExecutionStreamLogger"/>) — the same,
     /// full-fidelity, per-execution capture <see cref="Status.ExecutionUsageProjector"/> already reads
     /// for token attribution — and reads the final non-blank line. A parser may explicitly recognize
-    /// a vendor-defined terminal trailer and permit the immediately preceding line to be considered;
-    /// Codex JSONL needs that because its final agent message precedes <c>turn.completed</c>. Any
-    /// unrecognized trailing line still refuses extraction instead of triggering an arbitrary
-    /// backward search.
+    /// vendor-defined terminal trailers, and the scan walks back over as MANY consecutive trailers as
+    /// it meets before requiring a response — one line on the shape codex had at #1594 (its final agent
+    /// message precedes <c>turn.completed</c>), two or more since #2020 put a <c>turn.usage</c> line
+    /// per model round-trip into the same stream. The walk is bounded by the trailer whitelist, not by
+    /// a line count: any unrecognized line still refuses extraction rather than triggering an arbitrary
+    /// backward search. What keeps a whitelist-bounded walk inside one turn is stated at
+    /// <c>Status.CodexUsageParser.RoundTripField</c>, which records both the normal case and the one
+    /// shape (a crash-recovery resubmit) where a capture file carries two invocations.
     /// Never <see cref="CoreDispatchResult.StdoutTail"/>: that field is capped at
     /// <see cref="CoreDispatcher.MaxRetainedStderrLength"/> (2000 characters), far short of a worker's
     /// real final report.
