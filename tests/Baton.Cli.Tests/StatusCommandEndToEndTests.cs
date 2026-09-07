@@ -928,8 +928,15 @@ public class StatusCommandEndToEndTests
             await writer.AppendAsync(
                 new FlowEvent.CancellationRequested(rejectedExecutionId, CancellationOrigin.Operator),
                 TestContext.Current.CancellationToken);
+            // #2045: the reason a LIVE producer still writes for this paired shape —
+            // SettleArrestIntentsAsync's drop of a marked intent ArrestableExecutions.Find no longer
+            // admits, which can land against a lifecycle an earlier CancellationRequested already
+            // opened (ArrestLedgerProjector's own CancellationRejected remarks). The poller's
+            // bounded-retry ceiling used to write one here too; #2045 removed that producer, so its
+            // wording would have left this fixture reading as coverage for something unreachable.
             await writer.AppendAsync(
-                new FlowEvent.CancellationRejected(rejectedExecutionId, "arrest requested but not yet confirmed settled after 5 polls"),
+                new FlowEvent.CancellationRejected(
+                    rejectedExecutionId, "arrest intent dropped (already settled; marked because: no live process registered for this target)"),
                 TestContext.Current.CancellationToken);
 
             // The orphan shape ArrestLedgerProjector.Project's own remarks on its CancellationRejected
@@ -972,7 +979,8 @@ public class StatusCommandEndToEndTests
             Assert.Contains("exec-delivered requested by operator @ ", text);
             Assert.Contains("— delivered", text);
             Assert.Contains("exec-rejected-paired requested by operator @ ", text);
-            Assert.Contains("rejected (arrest requested but not yet confirmed settled after 5 polls)", text);
+            Assert.Contains(
+                "rejected (arrest intent dropped (already settled; marked because: no live process registered for this target))", text);
             // The orphan rejection (no preceding CancellationRequested) must still render, not be
             // silently dropped -- the exact HIGH finding this fixture exists to close.
             Assert.Contains("exec-rejected-orphan requested by operator @ ", text);
@@ -1013,7 +1021,9 @@ public class StatusCommandEndToEndTests
 
             Assert.Equal("delivered", Find("exec-delivered").Outcome);
             Assert.Equal("rejected", Find("exec-rejected-paired").Outcome);
-            Assert.Equal("arrest requested but not yet confirmed settled after 5 polls", Find("exec-rejected-paired").Reason);
+            Assert.Equal(
+                "arrest intent dropped (already settled; marked because: no live process registered for this target)",
+                Find("exec-rejected-paired").Reason);
             Assert.Equal("rejected", Find("exec-rejected-orphan").Outcome);
             Assert.Equal(
                 "not currently in flight when this cancel.request was checked — too late (it already settled)",
@@ -1053,6 +1063,63 @@ public class StatusCommandEndToEndTests
             var text = output.ToString();
             Assert.Contains("Arrests: ledger unavailable", text);
             Assert.Contains("Workflow status:", text);
+        }
+        finally
+        {
+            DirectoryCleanup.DeleteRecursively(testRoot);
+        }
+    }
+
+    /// <summary>
+    /// #2045: the text rendering above was the only pinned side of the #1916 degrade — nothing pinned
+    /// <c>--json</c>'s own <c>arrestLedgerUnavailableReason</c>, the field whose whole job is to
+    /// separate a failed read from an un-arrested room (see
+    /// <see cref="Baton.Status.WorkflowStatusView.ArrestLedgerUnavailableReason"/> for that
+    /// distinction — <c>arrests</c> is absent either way). Both arms in one test: the clean read is
+    /// the polarity control, since a field that were always present would satisfy the failure arm
+    /// while telling a reader nothing.
+    /// </summary>
+    [Fact]
+    public async Task StatusCommand_json_carries_the_unavailable_reason_only_when_the_ledger_read_failed()
+    {
+        var testRoot = Path.Combine(Path.GetTempPath(), $"cli-e2e-{Guid.NewGuid():N}");
+        var roomDirectory = Path.Combine(testRoot, "task");
+        try
+        {
+            await WriteFullArrestLedgerFixtureAsync(roomDirectory);
+
+            // Control arm: the same fixture, read cleanly -- arrests present, no reason field at all.
+            var cleanOutput = new StringWriter();
+            await StatusCommand.ExecuteAsync(
+                new StatusOptions(roomDirectory, Json: true), cleanOutput, TestContext.Current.CancellationToken);
+
+            using (var cleanDocument = JsonDocument.Parse(cleanOutput.ToString()))
+            {
+                Assert.True(cleanDocument.RootElement.TryGetProperty("arrests", out _));
+                Assert.False(cleanDocument.RootElement.TryGetProperty("arrestLedgerUnavailableReason", out _));
+            }
+
+            // Failure arm: the same version-skew corruption the text-mode test above uses.
+            var roomLogPath = Path.Combine(roomDirectory, "room.jsonl");
+            await File.WriteAllTextAsync(
+                roomLogPath, """{"$type":"noSuchDiscriminator","foo":"bar"}""" + "\n", TestContext.Current.CancellationToken);
+
+            // The --json path also writes a diagnostic line to stderr (this class does not capture it,
+            // exactly as the text-mode degrade test above does not -- stdout is the contract here).
+            var degradedOutput = new StringWriter();
+            await StatusCommand.ExecuteAsync(
+                new StatusOptions(roomDirectory, Json: true), degradedOutput, TestContext.Current.CancellationToken);
+
+            using var degradedDocument = JsonDocument.Parse(degradedOutput.ToString());
+            Assert.True(
+                degradedDocument.RootElement.TryGetProperty("arrestLedgerUnavailableReason", out var reason),
+                "expected --json to carry the reason the ledger read failed");
+            Assert.False(string.IsNullOrWhiteSpace(reason.GetString()));
+
+            // The degrade is scoped to the ledger: `arrests` goes absent (it is not emitted as an
+            // empty array), and the rest of the view still projects.
+            Assert.False(degradedDocument.RootElement.TryGetProperty("arrests", out _));
+            Assert.True(degradedDocument.RootElement.TryGetProperty("steps", out _));
         }
         finally
         {
