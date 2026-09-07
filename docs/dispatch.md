@@ -478,6 +478,16 @@ directory. One schema, two files, both under `artifacts/execution_*/` and both f
 deliverable listing as engine mechanism. Reading a whole room means both — a hook-vendor room has no
 grant lines in its stream, and a codex room writes no `.baton-grants.ndjson` at all.
 
+Two limits, because a reader will otherwise fill them in wrongly. **The hook-side count can
+undercount.** A vendor issuing parallel tool calls runs parallel hook subprocesses, each appending to
+one file: a sharing violation loses that line silently (the write must never turn into a refused tool
+call), and two appends landing together can fuse into one line, which costs the following record as
+well — the same loss class `RepeatedToolCallHook` documents for its own ledger. The broker's stream
+has one writer and no such exposure. **And the identity digest resolves for shell commands, the
+write family, and a `Read`/`view_file` path — nothing else.** Every other tool records `input` as
+`-`, so two *different* refused `Grep` calls key alike: pairing "refused" with "re-issued" holds for
+the tools whose identifying argument this gate reads, and is a false positive outside them.
+
 ## The vendor premise
 
 AER spawns the vendor's **own** first-party CLI, which authenticates itself against a **subscription**

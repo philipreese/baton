@@ -73,6 +73,24 @@ public sealed class GrantDecisionStreamTests
                 .ToArray();
             Assert.Contains(denied["input"]!.GetValue<string>(), startedDigests);
             Assert.Contains(allowed["input"]!.GetValue<string>(), startedDigests);
+
+            // The refusal marker now appears TWICE in this stream for one refused call — in the
+            // item.completed's aggregated_output, and again in the grant line's reason — so the reader
+            // of the room's refusal count is asserted here rather than assumed. It anchors on the
+            // completed-item node (see CodexUsageParser.CountRefusedToolSteps), which is what keeps
+            // this at one; a reader widened to a whole-stream search would double it, and a refusal
+            // count that silently doubles is a correctly-computed wrong answer.
+            var parser = new Baton.Status.CodexUsageParser();
+            Assert.Equal(1, lines.Sum(parser.CountRefusedToolSteps));
+
+            // And the two readers that walk every line rather than partitioning by type ignore a line
+            // whose type they do not know, rather than throwing or folding it in.
+            foreach (var grantLine in grants)
+            {
+                Assert.False(parser.TryParseIncrementalUsage(grantLine.ToJsonString(), out _));
+            }
+
+            Assert.Null(parser.ParseExecutionUsage(lines));
         }
         finally
         {
