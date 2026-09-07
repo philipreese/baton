@@ -29,9 +29,9 @@ public static class ShellCommandCeilings
     public static readonly TimeSpan Other = TimeSpan.FromMinutes(5);
 
     /// <summary>
-    /// <c>pixi run gates-fast</c>'s wall clock, measured 2026-09-06 on the dispatch host. See this
-    /// class's own remark for why this is a constant rather than a value read from <c>tools/gates/</c>,
-    /// and for what it does not claim.
+    /// <c>pixi run gates-fast</c>'s wall clock: the figure #1998 and the dispatch brief both state
+    /// (2026-09-06), <b>cited rather than re-measured here</b>. See this class's own remark for why it
+    /// is a constant rather than a value read from <c>tools/gates/</c>, and for what it does not claim.
     /// </summary>
     public static readonly TimeSpan MeasuredGatesFastWallClock = TimeSpan.FromMinutes(5);
 

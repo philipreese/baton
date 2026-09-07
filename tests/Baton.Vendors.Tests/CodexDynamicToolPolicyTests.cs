@@ -267,9 +267,13 @@ public sealed class CodexDynamicToolPolicyTests
     /// this line as <see cref="ShellCommandClass.Other"/> would print the other figure and fail here —
     /// which is what makes the arm discriminate rather than merely reach the timeout.
     /// <para>
-    /// <b>No push can occur.</b> The fixture workspace is a fresh temp directory with no repository, so
-    /// the <c>git push</c> segment can only exit "not a git repository"; the <c>&amp;</c> makes the shell
-    /// run the hanging segment regardless, which is what carries the line to the ceiling.
+    /// <b>No push can occur, and the fixture's own directory is not what guarantees that.</b> It is a
+    /// fresh temp directory with no repository, but <c>git</c> walks UP — on Windows the temp root sits
+    /// under the user profile, and an ancestor that happens to be a repository would give a bare
+    /// <c>git push</c> a real upstream. What makes this inert is the command itself:
+    /// <c>--dry-run</c> against a remote name that exists nowhere. Its leading tokens are unchanged, so
+    /// it classifies exactly as a real push does; the <c>&amp;</c> makes the shell run the hanging
+    /// segment regardless, which is what carries the line to the ceiling.
     /// </para>
     /// </summary>
     [Fact]
@@ -286,7 +290,8 @@ public sealed class CodexDynamicToolPolicyTests
                 : TimeSpan.FromMilliseconds(100));
 
         var result = await fixture.ExecuteAsync(
-            CodexDynamicToolPolicy.RunCommandTool, new { command = $"git push & {hang}" });
+            CodexDynamicToolPolicy.RunCommandTool,
+            new { command = $"git push --dry-run nonexistent-remote-xyzzy & {hang}" });
 
         Assert.False(result.Success);
         Assert.Contains("shipping command ceiling (0.15 s)", result.Text, StringComparison.Ordinal);
