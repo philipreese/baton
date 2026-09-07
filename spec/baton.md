@@ -1436,14 +1436,34 @@ An override/repo-declared command line runs through the platform shell (`cmd.exe
 project ships Windows-only per #1405) rather than hand-tokenized; the role default stays a direct
 `pixi run <task>` spawn, unchanged from #1623.
 
-**A verify command is now a property of the workspace, not gated on the role declaring one.** Unlike
-pre-#1702, where no `VerifyPixiTask` meant no verify step full stop, `Resolve` can still produce an
-override or repo-declared command for a role that declares none (`review`/`advise`/every other
-non-`implement` shipped role) — a workspace's own `.baton/verify` speaks for that workspace regardless
-of which role is dispatched against it, the same way `--verify` does. This is deliberate, not a gap:
-the whole point of #1702 is that verify answers "does this workspace's own gate suite pass", which a
-role has no authority to opt a workspace out of. A red run through this arm settles `Indeterminate`
-exactly like any other running-and-red verify.
+**Arms 2 and 3 grade the roles that CHANGE the workspace; arm 1 grades any role (#2029).** Unlike
+pre-#1702, where no `VerifyPixiTask` meant no verify step full stop, `Resolve` can still produce a
+repo-declared command for a role that declares none — but only for a role whose
+`WorkerRole.VerifiesWorkspace` is true. **The two sets are stated in `WorkerRoles.json`**, one
+`verifies_workspace` key per role, and `MutationInterface.DispatchAndRecordOutcomeAsync` is the single
+place that reads it (withholding arms 2 and 3, never arm 1):
+
+- **true — `implement`, `janitor`.** The roles that write and commit. The workspace's own gate suite is
+  grading the lane's own work, which is what a verify verdict is for. A red run here settles
+  `Indeterminate` exactly like any other running-and-red verify.
+- **false — `review`, `advise`, `patch`, `fact-check`, `orchestrate`.** A read-shaped role writes
+  nothing to the workspace, so the audits would be grading the tree it was pointed at rather than
+  anything it did. Measured 2026-09-07 (room `dispatch-review-2aa39890`, reviewing PR #2023): the
+  review wrote its `report.md` and a `BLOCK` `verdict.json` — one of whose findings *was* the branch's
+  own red `audit-waitceiling` — and the room then settled `Failed — Verify failed (audit-waitceiling)`,
+  so the verdict had to be recovered by reading the room and closed by hand. What verifies such a role
+  is its own **output contract**, which already gates the `Succeeded` classification this whole verify
+  step hangs off: for `review` that is `verdict_schema: true` → `ContractValidator` →
+  `ReviewVerdictSchema.TryParse`, whose floor is stated at that type, not here. A verdict that carries
+  no `decision` still settles the room succeeded-shaped and reaches a person through the conductor
+  queue — §13's ruling, unchanged by this.
+
+This reverses #1702's own "a role has no authority to opt a workspace out of it" reading for the
+read-shaped half only. The reading was right about the roles it was measured on: a workspace's gate
+suite is not an `implement` lane's to decline, and `verifies_workspace` is a catalog fact with no
+dispatch-time override, so no lane can decline it. `--verify` stays role-independent for the reason it
+always was — an operator typed a command for this dispatch — and is the only arm that resolves for a
+read-shaped role.
 
 **Before running, the engine checks the resolved command is runnable** (`VerifyCommandResolver.CheckRunnableAsync`) —
 and after #1708 that probe exists for the `pixi run <task>` shape ONLY: a role-default task name checked
@@ -5656,6 +5676,8 @@ gate, median 160.2s of that queued on the build lock, and only 2 of the 23 skipp
 engine's post-exit verify then ran `pixi run gates-quiet` — the FULL set, the `implement` role's
 `verify_pixi_task` in `src/Baton.Vendors/WorkerRoles.json` — over the same tree a third time. Baton's own repo now
 commits a `.baton/verify` (§3's arm 2) declaring `pixi run gates-fast-cover-quiet`
+— for the roles arm 2 reaches, which since #2029 is the tree-changing half of the catalog and never a
+review lane (§3) —
 (`gates.py --fast --skip-covered --quiet`), so the engine verify runs only the fast members this exact
 tree holds no per-member receipt for; the covering rule and the "a partial run never mints a whole-run
 receipt" rule are gates.py's, unchanged and unwidened. The role default stays `gates-quiet` for every

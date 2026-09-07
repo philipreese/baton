@@ -95,6 +95,12 @@ namespace Baton.Cli;
 /// resolution (spec/baton.md §3), ahead of the workspace's own <c>.baton/verify</c> declaration and the
 /// role's <c>verify_pixi_task</c> default. Role dispatch only, rejected for a workflow template the same
 /// way <paramref name="TokenBudget"/> is. Null defers to the workspace/role resolution.
+/// <para>
+/// #2029: for a role that does not verify the workspace (<c>Baton.Vendors.WorkerRole.VerifiesWorkspace</c>
+/// — <c>review</c> and every other read-shaped role) this is the ONLY arm that resolves at all, so
+/// passing it is how an operator asks for a post-exit gate on such a dispatch. It is deliberately not
+/// suppressed there: the operator typed a command for this run.
+/// </para>
 /// </param>
 /// <param name="ExpectPr">
 /// The <c>--expect-pr</c> escape hatch (#1788) — whether the engine's post-exit delivery check

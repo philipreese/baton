@@ -191,6 +191,25 @@ public class WorkerBindingConfigWriterTests
         Assert.Equal(87, parsed["advisor"].RunwayOverride!.Counters.Single().PercentUsed);
     }
 
+    /// <summary>
+    /// #2029: the flag survives the serialized hop. This matters on its own because the default is
+    /// <see langword="true"/> — a writer that dropped the key would read back as "graded by the
+    /// workspace" rather than as absent — reinstating #2029's defect on the <c>baton resume</c> and
+    /// <c>redispatch</c> paths, which read this file rather than the catalog. Both arms, since a writer
+    /// that emitted a constant would pass a one-sided assertion.
+    /// </summary>
+    [Fact]
+    public void Serialize_round_trips_whether_a_binding_is_graded_by_the_workspace()
+    {
+        var config = TwoWorkerConfig();
+        config["architect"] = config["architect"] with { VerifiesWorkspace = false };
+
+        var parsed = WorkerBindingConfigParser.Parse(WorkerBindingConfigWriter.Serialize(config));
+
+        Assert.False(parsed["architect"].VerifiesWorkspace);
+        Assert.True(parsed["critic"].VerifiesWorkspace);
+    }
+
     [Fact]
     public void Serialize_emits_indented_human_editable_json()
     {

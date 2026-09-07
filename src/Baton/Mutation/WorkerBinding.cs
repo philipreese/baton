@@ -33,6 +33,13 @@ public abstract record WorkerBinding(WorkerContract Contract, GrantAuditMode Gra
     /// <param name="VerifyCommandOverride">
     /// #1702: this execution's <c>--verify</c> value, carried the same hop as <paramref name="VerifyPixiTask"/>.
     /// </param>
+    /// <param name="VerifiesWorkspace">
+    /// #2029: whether this execution's role is graded by the WORKSPACE's own gate suite — see
+    /// <c>Baton.Vendors.WorkerRole.VerifiesWorkspace</c>'s remarks for the two sets and why. Read at
+    /// the one call site in <c>MutationInterface.DispatchAndRecordOutcomeAsync</c>, which skips
+    /// <see cref="VerifyCommandResolver.Resolve"/>'s declaration and role-default arms when false;
+    /// <paramref name="VerifyCommandOverride"/> is deliberately outside its reach.
+    /// </param>
     /// <param name="TokenBudget">
     /// #1623: the per-execution token ceiling — see <c>Baton.Vendors.WorkerRole.TokenBudget</c>'s
     /// remarks. Null enforces no budget.
@@ -99,7 +106,12 @@ public abstract record WorkerBinding(WorkerContract Contract, GrantAuditMode Gra
         // whether to compute/attach workspaceChanged/hollow onto a Succeeded verdict at all.
         bool ChangesTree = false,
         bool DeliversBranch = false,
-        bool ExpectPr = false)
+        bool ExpectPr = false,
+        // #2029: Baton.Vendors.WorkerRole.VerifiesWorkspace, carried the same hop as VerifyPixiTask.
+        // Default TRUE, unlike every flag above: "no verify at all" is the direction that silently
+        // skips a gate, so a binding built by anything other than RoleDispatch.ToBinding keeps the
+        // pre-#2029 behaviour rather than opting itself out.
+        bool VerifiesWorkspace = true)
         : WorkerBinding(Contract, GrantAuditMode);
 
     /// <summary>

@@ -2235,9 +2235,15 @@ public static class MutationInterface
                     CancellationToken.None).ConfigureAwait(false);
             }
 
+            // #2029: which roles the workspace's own declaration and role-default arms apply to at all
+            // is Baton.Vendors.WorkerRole.VerifiesWorkspace's to say (spec/baton.md §3). False
+            // withholds both; only an operator's own `--verify` still resolves. Gated HERE rather than
+            // inside Resolve so that method's three-arm precedence contract stays one thing.
             ResolvedVerifyCommand? resolvedVerify = classification.Verdict == OutcomeVerdict.Succeeded
                 ? VerifyCommandResolver.Resolve(
-                    committedVerifyDeclaration, binding.VerifyCommandOverride, binding.VerifyPixiTask)
+                    binding.VerifiesWorkspace ? committedVerifyDeclaration : null,
+                    binding.VerifyCommandOverride,
+                    binding.VerifiesWorkspace ? binding.VerifyPixiTask : null)
                 : null;
 
             if (resolvedVerify is not null)

@@ -78,6 +78,19 @@ public sealed record WorkerTier([property: JsonRequired] string Adapter, string?
 /// the replacement: under baton dispatch the second reader is the conductor's own review lane, never an
 /// in-lane subagent.
 /// </param>
+/// <param name="VerifiesWorkspace">
+/// #2029 (contract: <c>spec/baton.md</c> §3, "Verify command resolution"): whether the engine's
+/// post-exit verify runs the WORKSPACE's own gate suite for this role — the <c>.baton/verify</c>
+/// declaration and <see cref="VerifyPixiTask"/> arms. True for the two roles that change the tree
+/// (<c>implement</c>, <c>janitor</c>): their own work is what the audits grade. False for every
+/// read-shaped role (<c>review</c>, <c>advise</c>, <c>patch</c>, <c>fact-check</c>,
+/// <c>orchestrate</c>), which writes nothing to the workspace and so would be graded on someone
+/// else's red tree — the measured defect. What a read-shaped role IS verified on is its own output
+/// contract (<see cref="ProducesVerdict"/> → <c>Domain.ReviewVerdictSchema.TryParse</c> via
+/// <c>Outcomes.ContractValidator</c>), which already gates the Succeeded classification this whole
+/// step hangs off. <b>Does not gate <c>--verify</c></b>: an operator who types a command for this
+/// dispatch gets it, whatever the role — spec/baton.md §3 states why arm 1 stays role-independent.
+/// </param>
 public sealed record WorkerRole(
     string Id,
     string Tier,
@@ -94,7 +107,8 @@ public sealed record WorkerRole(
     int? MaxToolSteps = null,
     long? BilledRateLimit = null,
     bool DeliversBranch = false,
-    bool AllowsSubagents = false);
+    bool AllowsSubagents = false,
+    bool VerifiesWorkspace = true);
 
 /// <summary>
 /// One file a role's dispatch produces in <c>BATON_OUTPUT_DIR</c> (#897) — the structured, per-role
@@ -283,7 +297,8 @@ public static class WorkerRoleCatalog
                 MaxToolSteps: raw.MaxToolSteps,
                 BilledRateLimit: raw.BilledRateLimit,
                 DeliversBranch: raw.DeliversBranch,
-                AllowsSubagents: raw.AllowsSubagents));
+                AllowsSubagents: raw.AllowsSubagents,
+                VerifiesWorkspace: raw.VerifiesWorkspace));
         }
 
         return roles;
@@ -451,7 +466,12 @@ public static class WorkerRoleCatalog
         bool DeliversBranch = false,
         // #1802: optional like the flags above -- omitting it is exactly "withhold the vendor's
         // subagent/fan-out tool", the WorkerRole default. Only advise's entry sets this true.
-        bool AllowsSubagents = false);
+        bool AllowsSubagents = false,
+        // #2029: the ONE optional flag here whose omission default is TRUE rather than false, and
+        // deliberately so -- a role that forgets the key is graded by the workspace's own gates
+        // (loud) rather than silently settling unverified. Every shipped role states it explicitly
+        // anyway; see WorkerRole.VerifiesWorkspace for the two sets and why.
+        bool VerifiesWorkspace = true);
 
     private sealed record RawOutput(
         [property: JsonRequired] string Name,

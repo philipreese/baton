@@ -246,6 +246,9 @@ public static class RoleDispatch
             // own remarks on WorkerBindingConfigEntry.
             VerifyPixiTask: role.VerifyPixiTask,
             VerifyCommandOverride: verifyCommandOverride,
+            // #2029: purely catalog-controlled, like DeliversBranch below -- no dispatch-time override
+            // exists for it, and --verify deliberately bypasses it rather than toggling it.
+            VerifiesWorkspace: role.VerifiesWorkspace,
             // #1745: --token-budget wins outright; otherwise the role's own spec is resolved against
             // THIS binding's winning adapter (the local `adapter` above, already normalized/overridden),
             // never role.Adapter -- a per-adapter map must answer for the vendor actually dispatched to.

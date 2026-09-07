@@ -48,6 +48,20 @@ public class WorkerBindingConfigParserTests
     }
 
     [Fact]
+    public void A_bindings_file_omitting_VerifiesWorkspace_reads_true()
+    {
+        // #2029 review: the fail-closed direction WorkerBindingConfigEntry.VerifiesWorkspace's own
+        // comment promises, on the baton run/resume/decide path -- a hand-authored bindings.json that
+        // never mentions the field keeps being graded by the workspace's declaration rather than
+        // silently skipping the gate. The writer always emits the key, so a round-trip test cannot
+        // fail if the record's declared default stops surviving deserialization; this can.
+        var config = WorkerBindingConfigParser.Parse(ValidJson);
+
+        var entry = Assert.Single(config).Value;
+        Assert.True(entry.VerifiesWorkspace);
+    }
+
+    [Fact]
     public void Model_and_permission_scope_are_optional()
     {
         const string json = """
