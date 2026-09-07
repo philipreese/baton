@@ -536,7 +536,70 @@ def _agy_tools_message_omits_name():
         yield
 
 
-def main() -> int:
+def run_control_arm(name, check, describe, fault, failures) -> bool:
+    """Run one arm, keeping a failed setup distinct from a check that went red."""
+    try:
+        arm = fault()
+        arm.__enter__()
+    except Exception as e:  # noqa: BLE001 -- a broken fixture makes the harness untrustworthy
+        failures.append(
+            f"{name}: control setup failed for arm {describe} ({type(e).__name__}: {e})")
+        print(f"   !! control setup failed for arm: {describe}")
+        print(f"      raised {type(e).__name__}: {e}")
+        return False
+
+    check_error = None
+    try:
+        check()
+    except Exception:  # noqa: BLE001 -- any check raise means the sabotage was noticed
+        check_error = sys.exc_info()
+
+    try:
+        arm.__exit__(*(check_error or (None, None, None)))
+    except Exception as e:  # noqa: BLE001 -- teardown is also harness work, never a red result
+        failures.append(
+            f"{name}: control teardown failed for arm {describe} ({type(e).__name__}: {e})")
+        print(f"   !! control teardown failed for arm: {describe}")
+        print(f"      raised {type(e).__name__}: {e}")
+        return False
+
+    if check_error is not None:
+        print(f"   OK  red under: {describe}")
+        return True
+
+    failures.append(f"{name}: STAYED GREEN under {describe}")
+    print(f"   !!  STAYED GREEN under: {describe}")
+    print("       the check does not discriminate against the defect it names")
+    return False
+
+
+def selftest() -> int:
+    """Prove a fixture that cannot set up fails the harness instead of looking red."""
+    class FixtureSetupError(Exception):
+        pass
+
+    @contextlib.contextmanager
+    def setup_raises():
+        raise FixtureSetupError("fixture setup failure")
+        yield
+
+    arm_name = "fixture control whose setup raises"
+    failures = []
+    run_control_arm("fixture check", lambda: None, arm_name, setup_raises, failures)
+    expected = f"FixtureSetupError: fixture setup failure"
+    if len(failures) != 1 or arm_name not in failures[0] or expected not in failures[0]:
+        print("!! setup-failure selftest did not report the fixture arm and its exception")
+        return 1
+    print("OK setup-failure selftest: fixture setup failure is a harness failure")
+    return 0
+
+
+def main(argv=None) -> int:
+    if argv is None:
+        argv = sys.argv[1:]
+    if "--selftest" in argv:
+        return selftest()
+
     print(__doc__.strip().splitlines()[0])
     print("=" * 78)
 
@@ -566,15 +629,7 @@ def main() -> int:
 
         for describe, fault in arms:
             total += 1
-            try:
-                with fault():
-                    checks[name]()
-            except Exception:  # noqa: BLE001 -- any raise means the check noticed
-                print(f"   OK  red under: {describe}")
-            else:
-                FAILURES.append(f"{name}: STAYED GREEN under {describe}")
-                print(f"   !!  STAYED GREEN under: {describe}")
-                print("       the check does not discriminate against the defect it names")
+            run_control_arm(name, checks[name], describe, fault, FAILURES)
 
     print("\n" + "=" * 78)
     for name in uncontrolled:
