@@ -37,8 +37,7 @@ public class OwnPullRequestOnlyRuleTests
     [InlineData("gh pr diff 1994", 2005)]
     [InlineData("gh pr checkout 1994", 2005)]
     [InlineData("gh pr view https://github.com/aer-works/baton/pull/1994", 2005)]
-    // ...and `gh pr list` never becomes allowed: it names no PR, so it is the sibling enumeration
-    // whatever this room owns. This is the call the contaminated lane made first.
+    // ...and `gh pr list` never becomes allowed, for the reason GovernedSubCommands states.
     [InlineData("gh pr list", 2005)]
     [InlineData("gh pr list --state open", 2005)]
     // A chained or piped call reaches the rule the same way -- the measured lane chained exactly so.
