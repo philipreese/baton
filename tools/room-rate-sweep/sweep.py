@@ -14,6 +14,19 @@ paragraph: the corpus grows, and the numbers move with it.
     python tools/room-rate-sweep/sweep.py --emit-fixture tests/Baton.Tests/Fixtures/billed-rate-rooms.json
     python tools/room-rate-sweep/sweep.py --selftest
 
+#2034 added a second mode to the same instrument, because it asks about the same corpus and the same
+accounting: `--budget-headroom` prints, per adapter and role, how the lanes that actually ran compare
+to the `token_budget` ceiling in `src/Baton.Vendors/WorkerRoles.json` that would have arrested them.
+
+    python tools/room-rate-sweep/sweep.py --budget-headroom
+    python tools/room-rate-sweep/sweep.py --budget-headroom --since 2026-09-07T09:55:46Z
+
+It reads each room's settled `terminal.json` usage rather than its `.stdout.log`, so the two modes do
+not share the reconstruction caveats below. Its comparison is against `liveBilledTokens` -- the Σ
+`Baton.Mutation.TokenBudgetMonitor` accumulated while the lane ran, which is the only quantity an
+arrest is ever made on -- with `billedTokens` (the post-hoc fold over the whole stream) beside it,
+because the ratio between them is what makes one number mean different things on different vendors.
+
 What it measures, and what it assumes
 -------------------------------------
 Billed tokens are #1682's accounting as corrected by #1706, and the correction is VENDOR-ASYMMETRIC:
@@ -424,6 +437,242 @@ def command_emit_fixture(args):
     return 0
 
 
+def role_ceiling(role, adapter):
+    """#2034: the token budget `role` enforces on `adapter`, from a WorkerRoles.json entry.
+
+    `token_budget` is either a scalar (one ceiling for every vendor) or a per-vendor map -- the shape
+    Baton.Vendors.WorkerRoleCatalog resolves in C#. This is the analysis copy of that resolution, and
+    it deliberately returns None rather than a fallback when a map does not name `adapter`: an
+    unnamed vendor has NO ceiling from that role, and printing one it does not enforce is the whole
+    defect this mode exists to measure.
+    """
+    budget = (role or {}).get("token_budget")
+    if isinstance(budget, dict):
+        value = budget.get(adapter)
+        return value if isinstance(value, int) else None
+    return budget if isinstance(budget, int) else None
+
+
+def room_arrests(room_dir):
+    """[(adapter, reason)] for every `executionArrested` this room journalled.
+
+    Read off the EVENT's own `Adapter` and `Reason` fields rather than off the room -- a mixed-vendor
+    room holds steps on more than one adapter, so crediting every arrest in it to every adapter the
+    room mentions is wrong in exactly the direction that invents arrests for the vendor under study.
+    """
+    path = os.path.join(room_dir, "flow.jsonl")
+    if not os.path.exists(path):
+        return []
+    arrests = []
+    with open(path, encoding="utf-8", errors="replace") as handle:
+        for line in handle:
+            try:
+                record = json.loads(line)
+            except ValueError:
+                continue
+            event = record.get("Event") or {}
+            if event.get("eventType") != "executionArrested":
+                continue
+            arrests.append((event.get("Adapter"), event.get("Reason")))
+    return arrests
+
+
+def settled_steps(rooms_dir, since=None):
+    """One row per settled step in the corpus: its adapter, role, state and recorded usage.
+
+    `since` filters on the room's own `terminalAt`, which is what makes "the rooms settled after a
+    fix landed" a one-flag question. Rows whose usage is absent entirely are still returned, with
+    None figures -- never a fabricated zero, following WorkerUsage's own convention -- so a caller
+    can tell "no lane ran" from "lanes ran and measured nothing".
+    """
+    rows = []
+    for name in sorted(os.listdir(rooms_dir)):
+        room_dir = os.path.join(rooms_dir, name)
+        bindings_path = os.path.join(room_dir, "bindings.json")
+        terminal_path = os.path.join(room_dir, "terminal.json")
+        if not (os.path.isfile(bindings_path) and os.path.isfile(terminal_path)):
+            continue
+        try:
+            with open(bindings_path, encoding="utf-8", errors="replace") as handle:
+                bindings = json.load(handle)
+            with open(terminal_path, encoding="utf-8", errors="replace") as handle:
+                terminal = json.load(handle)
+        except ValueError:
+            continue
+        settled_at = terminal.get("terminalAt")
+        if since is not None and (settled_at is None or _parse_time(settled_at) < since):
+            continue
+        for step in terminal.get("steps") or []:
+            binding = bindings.get(step.get("id")) or {}
+            usage = step.get("usage") or {}
+            rows.append({
+                "room": name,
+                "step": step.get("id"),
+                "adapter": binding.get("Adapter"),
+                "state": step.get("state"),
+                "settledAt": settled_at,
+                # What TokenBudgetMonitor actually arrests on (the running Σ it accumulated live) and
+                # what the post-hoc fold read off the whole stream. On claude the first is a FLOOR and
+                # the two differ by the under-read; on agy and on codex since #2022 they agree.
+                "live": usage.get("liveBilledTokens"),
+                "posthoc": usage.get("billedTokens"),
+            })
+    return rows
+
+
+def _percentile(values, percent):
+    ordered = sorted(v for v in values if v is not None)
+    if not ordered:
+        return None
+    index = min(len(ordered) - 1, int(round((percent / 100.0) * (len(ordered) - 1))))
+    return ordered[index]
+
+
+def budget_headroom_rows(steps, arrests, roles):
+    """#2034: per (adapter, role), the distribution of live billed tokens against that role's ceiling.
+
+    The comparison is against `live`, not against `posthoc`, because live is the quantity the arrest
+    is made on -- comparing a post-hoc total to a ceiling answers a question no monitor ever asks.
+    `ratio` (posthoc / live) is carried beside it because it is what makes one ceiling mean different
+    things on different vendors: a vendor whose live meter under-reads by 2.4x is protected by a 250k
+    ceiling at roughly 600k of real spend, and a vendor whose meter is complete is protected at 250k.
+    """
+    buckets = {}
+    for step in steps:
+        key = (step["adapter"], step["step"])
+        buckets.setdefault(key, []).append(step)
+    arrest_counts = {}
+    for adapter, reason in arrests:
+        arrest_counts[(adapter, reason)] = arrest_counts.get((adapter, reason), 0) + 1
+    rows = []
+    for (adapter, role_id), group in sorted(buckets.items(), key=lambda pair: (str(pair[0][0]), str(pair[0][1]))):
+        live = [s["live"] for s in group]
+        posthoc = [s["posthoc"] for s in group]
+        ratios = sorted(s["posthoc"] / s["live"] for s in group if s["live"] and s["posthoc"])
+        ceiling = role_ceiling(roles.get(role_id), adapter)
+        live_p95 = _percentile(live, 95)
+        rows.append({
+            "adapter": adapter,
+            "role": role_id,
+            "n": len(group),
+            "measured": len([v for v in live if v is not None]),
+            "liveP50": _percentile(live, 50),
+            "liveP95": live_p95,
+            "liveMax": _percentile(live, 100),
+            "posthocP95": _percentile(posthoc, 95),
+            "ratioP50": round(ratios[len(ratios) // 2], 2) if ratios else None,
+            "ceiling": ceiling,
+            # How much of the ceiling the p95 lane already spends. >= 100 % means the measured p95
+            # lane arrests; the closer to 100 the fewer lanes finish.
+            "p95PercentOfCeiling": (
+                round(100.0 * live_p95 / ceiling, 1) if ceiling and live_p95 is not None else None),
+            "arrestedOnBudget": arrest_counts.get((adapter, "TokenBudget"), 0),
+            "arrestedOnRate": arrest_counts.get((adapter, "BilledRate"), 0),
+            "arrestedOnToolSteps": arrest_counts.get((adapter, "ToolStepCap"), 0),
+        })
+    return rows
+
+
+def command_budget_headroom(args):
+    """The #2034 instrument: is each role's ceiling above the lanes that actually run under it?
+
+    Re-run it rather than trusting any table pasted into an issue -- the corpus grows, and a vendor
+    whose meter changes (codex, #2022) moves its whole column with one fix.
+    """
+    with open(args.roles, encoding="utf-8") as handle:
+        roles = {entry["id"]: entry for entry in json.load(handle)}
+    since = _parse_time(args.since) if args.since else None
+    steps = settled_steps(ROOMS, since)
+    arrests = []
+    for name in sorted(os.listdir(ROOMS)):
+        arrests.extend(room_arrests(os.path.join(ROOMS, name)))
+    rows = budget_headroom_rows(steps, arrests, roles)
+    if not rows:
+        print("no settled steps%s -- nothing to compare against a ceiling."
+              % (" since %s" % args.since if since else ""))
+        return 0
+    header = ("adapter/role", "n", "live p50", "live p95", "live max", "posthoc p95",
+              "ratio", "ceiling", "p95 % of ceiling", "arrests (budget/rate/steps)")
+    print("%-26s %4s %10s %10s %10s %12s %6s %10s %17s %s" % header)
+    for row in rows:
+        print("%-26s %4d %10s %10s %10s %12s %6s %10s %17s %d/%d/%d" % (
+            "%s/%s" % (row["adapter"], row["role"]), row["n"],
+            _cell(row["liveP50"]), _cell(row["liveP95"]), _cell(row["liveMax"]),
+            _cell(row["posthocP95"]), _cell(row["ratioP50"]), _cell(row["ceiling"]),
+            _cell(row["p95PercentOfCeiling"]),
+            row["arrestedOnBudget"], row["arrestedOnRate"], row["arrestedOnToolSteps"]))
+    print("\narrest columns are per ADAPTER, not per role: executionArrested carries the adapter it "
+          "fired on but no step id, so the same three counts repeat down a vendor's rows.")
+    return 0
+
+
+def _cell(value):
+    return "n/a" if value is None else str(value)
+
+
+def _selftest_ceiling_resolves_per_vendor_and_refuses_to_invent_one():
+    """#2034: a per-vendor `token_budget` map answers for the vendors it names and for NO others.
+
+    The control that discriminates is the third case: a role whose map omits `codex` must resolve to
+    None, not to some other vendor's number and not to a default. A resolver that fell back would
+    pass the first two arms and report a ceiling the engine does not enforce.
+    """
+    scalar = {"token_budget": 1200000}
+    per_vendor = {"token_budget": {"claude": 250000, "agy": 250000, "codex": 250000}}
+    partial = {"token_budget": {"claude": 250000}}
+    assert role_ceiling(scalar, "codex") == 1200000, "a scalar budget applies to every vendor"
+    assert role_ceiling(per_vendor, "codex") == 250000, "a map answers for the vendor it names"
+    assert role_ceiling(partial, "codex") is None, "a map must not invent a ceiling for an absent vendor"
+    assert role_ceiling({}, "codex") is None, "a role with no budget has no ceiling"
+
+
+def _selftest_arrests_are_credited_to_the_adapter_that_arrested():
+    """#2034: an arrest counts against the adapter on its OWN event, never against every adapter the
+    room mentions.
+
+    Both arms are needed. The positive arm alone passes under the naive "this room contains a codex
+    step, so its arrests are codex arrests" scan; the negative arm is what fails it -- the fixture
+    room holds one claude arrest and one codex step, and a correct reader credits codex with zero.
+    """
+    steps = [
+        {"room": "r", "step": "review", "adapter": "codex", "state": "Succeeded",
+         "settledAt": None, "live": 100, "posthoc": 100},
+    ]
+    arrests = [("claude", "TokenBudget")]
+    rows = budget_headroom_rows(steps, arrests, {"review": {"token_budget": {"codex": 250000}}})
+    assert len(rows) == 1 and rows[0]["adapter"] == "codex", rows
+    assert rows[0]["arrestedOnBudget"] == 0, \
+        "a claude arrest must not be credited to the codex row: %r" % rows[0]
+    rows = budget_headroom_rows(steps, [("codex", "TokenBudget")],
+                                {"review": {"token_budget": {"codex": 250000}}})
+    assert rows[0]["arrestedOnBudget"] == 1, "a codex arrest must be credited to the codex row"
+
+
+def _selftest_headroom_compares_the_live_meter_and_never_fabricates_a_zero():
+    """#2034: the ceiling comparison is against the LIVE Σ (what TokenBudgetMonitor arrests on), and a
+    step that recorded no usage is excluded from the distribution rather than counted as 0.
+
+    The discriminating arm is the third step: it has no figures at all. Counting it as zero would
+    drag p50 down and make a tight ceiling read as roomy -- the failure mode that makes this whole
+    measurement lie in the safe-looking direction.
+    """
+    steps = [
+        {"room": "a", "step": "review", "adapter": "claude", "state": "Succeeded",
+         "settledAt": None, "live": 100000, "posthoc": 240000},
+        {"room": "b", "step": "review", "adapter": "claude", "state": "Succeeded",
+         "settledAt": None, "live": 200000, "posthoc": 480000},
+        {"room": "c", "step": "review", "adapter": "claude", "state": "Failed",
+         "settledAt": None, "live": None, "posthoc": None},
+    ]
+    row = budget_headroom_rows(steps, [], {"review": {"token_budget": {"claude": 250000}}})[0]
+    assert row["n"] == 3 and row["measured"] == 2, row
+    assert row["liveP50"] == 100000 and row["liveMax"] == 200000, row
+    assert row["ratioP50"] == 2.4, row
+    # 200000 of a 250000 ceiling, off the LIVE figure. Off `posthoc` it would read 192 %, which is a
+    # different claim about a quantity no monitor compares to a budget.
+    assert row["p95PercentOfCeiling"] == 80.0, row
+
+
 def _selftest_dedupe_does_not_poison_on_a_missing_timestamp():
     """#1707 review F7: a first-sighting claude line with usage but no `timestamp` must be dropped
     WITHOUT blocking a later, timestamped repeat of the same message.id from being counted -- the same
@@ -515,7 +764,10 @@ def _selftest_claude_bills_cache_creation_alone_against_the_shared_gate():
 
 def command_selftest(_args):
     tests = [_selftest_dedupe_does_not_poison_on_a_missing_timestamp,
-             _selftest_claude_bills_cache_creation_alone_against_the_shared_gate]
+             _selftest_claude_bills_cache_creation_alone_against_the_shared_gate,
+             _selftest_ceiling_resolves_per_vendor_and_refuses_to_invent_one,
+             _selftest_arrests_are_credited_to_the_adapter_that_arrested,
+             _selftest_headroom_compares_the_live_meter_and_never_fabricates_a_zero]
     failed = 0
     for test in tests:
         name = test.__name__
@@ -535,6 +787,17 @@ def main(argv):
     parser.add_argument("--selftest", action="store_true",
                         help="run this script's own unit tests (no room corpus needed)")
     parser.add_argument("--sweep", action="store_true", help="print the per-room rate table")
+    parser.add_argument("--budget-headroom", action="store_true",
+                        help="#2034: print the per adapter/role table of live billed tokens against "
+                             "that role's token_budget ceiling, plus the arrest counts per adapter")
+    parser.add_argument("--since", metavar="ISO8601",
+                        help="with --budget-headroom, keep only rooms whose terminalAt is at or "
+                             "after this instant -- how you scope the table to the lanes that ran "
+                             "after a metering fix landed")
+    parser.add_argument("--roles", default=os.path.join(
+        os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))),
+        "src", "Baton.Vendors", "WorkerRoles.json"),
+        help="the role catalog the ceilings are read from (default: this repo's WorkerRoles.json)")
     parser.add_argument("--role-prefix", default="dispatch-implement",
                         help="which rooms to sweep (default: dispatch-implement)")
     parser.add_argument("--reference-room", default="38c24d11",
@@ -560,6 +823,8 @@ def main(argv):
         return 2
     if args.emit_fixture:
         return command_emit_fixture(args)
+    if args.budget_headroom:
+        return command_budget_headroom(args)
     if args.sweep:
         return command_sweep(args)
     parser.print_help()
