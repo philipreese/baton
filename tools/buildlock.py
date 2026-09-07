@@ -15,7 +15,8 @@ file in the machine's temp directory. The kernel releases it the instant the hol
 dies, however it dies -- so there is no stale-lock file to detect, no PID-liveness check, and no
 steal logic. A crashed holder frees the lock by crashing.
 
-Usage:            python tools/buildlock.py [--class build|readonly] <command> [args...]
+Usage:            python tools/buildlock.py [--no-replay] [--class build|readonly] <command> [args...]
+Replay:           see docs/dispatch.md (#2010) for receipt scope and forced execution.
 Priority classes: TWO, and the whole difference is whether the command can start an MSBuild (#1910).
                   `build` (the default, and what every pixi task that runs `dotnet` uses) queues for
                   the exclusive lock exactly as described above. `readonly` declares that the command
@@ -68,8 +69,11 @@ Selftest knob:    BATON_BUILDLOCK_SELFTEST_HOLDER_DELAY_S (default 0) -- only re
                   sleep as the ordering signal) and its arm 3 fails; the current code polls the
                   holder's .info sidecar instead and still passes.
 """
+import base64
+import hashlib
 import json
 import os
+from pathlib import Path
 import subprocess
 import sys
 import tempfile
@@ -87,6 +91,118 @@ CLASS_BUILD = "build"
 CLASS_READONLY = "readonly"
 CLASSES = (CLASS_BUILD, CLASS_READONLY)
 WAIT_LOG_VAR = "BATON_BUILDLOCK_WAIT_LOG"
+REPLAY_MAX_AGE_S = 6 * 60 * 60
+REPLAY_TAIL_BYTES = 64 * 1024
+
+
+def replay_inputs(command: list[str], priority_class: str) -> tuple[Path, str] | None:
+    """Fail closed on unreadable inputs; NUL porcelain preserves unusual/renamed paths."""
+    def git(*args: str) -> bytes:
+        return subprocess.run(["git", *args], check=True, stdout=subprocess.PIPE,
+                              stderr=subprocess.DEVNULL, timeout=30).stdout
+
+    try:
+        root_raw, git_dir_raw, head = git(
+            "rev-parse", "--show-toplevel", "--absolute-git-dir", "HEAD").splitlines()
+        root = Path(os.fsdecode(root_raw))
+        git_dir = Path(os.fsdecode(git_dir_raw))
+        identity = json.dumps([1, os.getcwd(), priority_class, command]).encode()
+        key = hashlib.sha256(identity).hexdigest()
+        status = git("-C", str(root), "status", "--porcelain=v1", "-z",
+                     "--untracked-files=all", "--ignore-submodules=none")
+        digest = hashlib.sha256(identity + head + hashlib.sha256(status).digest())
+        entries = iter(status.split(b"\0")[:-1])
+        paths = []
+        for entry in entries:
+            paths.append(entry[3:])
+            if b"R" in entry[:2] or b"C" in entry[:2]:
+                paths.append(next(entries))
+        for name in sorted(set(paths)):
+            path = root / os.fsdecode(name)
+            digest.update(name + b"\0")
+            if path.is_symlink():
+                digest.update(b"link\0" + os.fsencode(os.readlink(path)))
+            elif path.is_file():
+                with path.open("rb") as f:
+                    digest.update(b"file\0" + hashlib.file_digest(f, "sha256").digest())
+            elif not path.exists():
+                digest.update(b"missing\0")
+            else:
+                # Dirty submodules/directories need their own tree model; never guess a pass.
+                return None
+        return git_dir / "buildlock" / (key + ".json"), digest.hexdigest()
+    except (OSError, ValueError, StopIteration, subprocess.SubprocessError):
+        return None
+
+
+def replay_pass(inputs: tuple[Path, str] | None, command: list[str]) -> bool:
+    if inputs is None:
+        return False
+    path, fingerprint = inputs
+    try:
+        receipt = json.loads(path.read_text(encoding="utf-8"))
+        if (receipt["fingerprint"] != fingerprint or receipt["exit_code"] != 0
+                or not 0 <= time.time() - receipt["passed_at"] <= REPLAY_MAX_AGE_S):
+            return False
+        tail = base64.b64decode(receipt["stdout_tail"], validate=True)
+        passed = time.strftime("%H:%M:%S", time.localtime(receipt["passed_at"]))
+    except (OSError, ValueError, KeyError, TypeError, OverflowError):
+        return False
+    print(f"buildlock: replaying {subprocess.list2cmdline(command)} "
+          f"— unchanged since the pass at {passed}", flush=True)
+    sys.stdout.buffer.write(tail)
+    sys.stdout.buffer.flush()
+    return True
+
+
+def invalidate_pass(inputs: tuple[Path, str] | None) -> bool:
+    if inputs is None:
+        return False
+    try:
+        inputs[0].unlink(missing_ok=True)
+        return True
+    except OSError:
+        return False
+
+
+def run_recorded(command: list[str], env: dict[str, str], priority_class: str,
+                 inputs: tuple[Path, str] | None) -> int:
+    """Stream stdout unchanged, retaining a bounded byte tail; stderr stays inherited."""
+    before = replay_inputs(command, priority_class) if inputs is not None else None
+    # A previous holder may have published while this process queued.
+    if not invalidate_pass(inputs):
+        before = None
+    tail = bytearray()
+    with subprocess.Popen(command, env=env, stdout=subprocess.PIPE) as child:
+        assert child.stdout is not None
+        while chunk := child.stdout.read1(8192):
+            sys.stdout.buffer.write(chunk)
+            sys.stdout.buffer.flush()
+            tail.extend(chunk)
+            del tail[:-REPLAY_TAIL_BYTES]
+        code = child.wait()
+    after = replay_inputs(command, priority_class) if code == 0 and before else None
+    if after is not None and after == before:
+        path, fingerprint = after
+        temporary = None
+        try:
+            path.parent.mkdir(parents=True, exist_ok=True)
+            with tempfile.NamedTemporaryFile(mode="w", encoding="utf-8", dir=path.parent,
+                                             delete=False) as f:
+                temporary = f.name
+                json.dump({"fingerprint": fingerprint, "exit_code": 0,
+                           "passed_at": time.time(),
+                           "stdout_tail": base64.b64encode(tail).decode("ascii")}, f)
+            os.replace(temporary, path)
+        except OSError:
+            pass  # Losing an optimization must not turn a passing command into a failure.
+        finally:
+            if temporary is not None:
+                try:
+                    os.unlink(temporary)
+                except OSError:
+                    pass
+    return code
 
 # The verbs that make a `dotnet` invocation start an MSBuild, plus msbuild itself. Deliberately a
 # denylist of verbs rather than an allowlist of safe commands: the readonly class is for python and
@@ -243,13 +359,20 @@ def split_class(argv: list[str]) -> tuple[str, list[str]]:
 
 
 def main() -> int:
-    priority_class, command = split_class(sys.argv[1:])
+    argv = sys.argv[1:]
+    no_replay = bool(argv and argv[0] == "--no-replay")
+    if no_replay:
+        argv = argv[1:]
+    priority_class, command = split_class(argv)
+    if command and command[0] == "--no-replay":
+        no_replay = True
+        command = command[1:]
     if priority_class not in CLASSES:
         print(f"buildlock: unknown priority class {priority_class!r} -- one of {', '.join(CLASSES)}")
         return 2
     if not command:
         print("buildlock: no command given -- usage: python tools/buildlock.py "
-              "[--class build|readonly] <command> [args...]")
+              "[--no-replay] [--class build|readonly] <command> [args...]")
         return 2
 
     if priority_class == CLASS_READONLY:
@@ -261,7 +384,15 @@ def main() -> int:
             print(f"buildlock: refusing --class {CLASS_READONLY} for a command that starts an "
                   f"MSBuild ({' '.join(command)}) -- run it in the default {CLASS_BUILD} class")
             return 2
-        return subprocess.run(command, check=False).returncode
+
+    inputs = replay_inputs(command, priority_class)
+    if not no_replay and replay_pass(inputs, command):
+        return 0
+    # Delete BEFORE waiting/spawning: a failed or interrupted attempt voids the previous pass.
+    if not invalidate_pass(inputs):
+        inputs = None
+    if priority_class == CLASS_READONLY:
+        return run_recorded(command, dict(os.environ), priority_class, inputs)
 
     env = dict(os.environ)
     if env.get(HELD_MARKER):
@@ -270,13 +401,13 @@ def main() -> int:
         if handle is None:
             # Lock held -- by our ancestor, per the docstring's stated residual. Run inside
             # its exclusion.
-            return subprocess.run(command, env=env, check=False).returncode
+            return run_recorded(command, env, priority_class, inputs)
     else:
         timeout_s = float(env.get("BATON_BUILDLOCK_TIMEOUT_S", "1800"))
         handle = acquire(lock_path(), command, timeout_s)
     env[HELD_MARKER] = str(os.getpid())
     try:
-        return subprocess.run(command, env=env, check=False).returncode
+        return run_recorded(command, env, priority_class, inputs)
     finally:
         import msvcrt
 
@@ -294,7 +425,7 @@ def main() -> int:
 
 _CHILD_HOLD_AND_STAMP = """
 import os, sys, time
-sys.argv = [sys.argv[0], sys.executable, "-c",
+sys.argv = [sys.argv[0], "--no-replay", sys.executable, "-c",
     "import time,sys; open(sys.argv[1],'a').write(f'{time.monotonic()} start\\\\n'); "
     "time.sleep(0.6); open(sys.argv[1],'a').write(f'{time.monotonic()} end\\\\n')",
     sys.argv[1]]
@@ -376,8 +507,104 @@ def _spawn_selftest_child(code: str, lock_file: str, *args: str, hold_s: str | N
     )
 
 
+def _selftest_replay() -> bool:
+    """Real commands in an isolated tracked tree; the counter lives outside the inputs."""
+    with tempfile.TemporaryDirectory() as td:
+        repo = os.path.join(td, "repo")
+        os.mkdir(repo)
+        env = _selftest_env(BATON_BUILDLOCK_FILE=os.path.join(td, "replay.lock"))
+        for name in list(env):
+            if name.startswith("GIT_"):
+                env.pop(name)
+
+        def git(*args: str) -> None:
+            subprocess.run(["git", *args], cwd=repo, env=env, check=True,
+                           capture_output=True, timeout=30)
+
+        tracked = os.path.join(repo, "tracked file.txt")
+        with open(tracked, "w", encoding="utf-8") as f:
+            f.write("initial")
+        git("init", "-q")
+        git("add", ".")
+        git("-c", "user.name=Selftest", "-c", "user.email=selftest@example.invalid",
+            "-c", "core.hooksPath=/dev/null", "commit", "-qm", "fixture")
+        counter = os.path.join(td, "counter")
+        failure = os.path.join(td, "fail")
+        command = [sys.executable, "-c",
+                   "import os,sys; open(sys.argv[1],'a').write('run\\n'); "
+                   "print('receipt output'); sys.exit(3 if os.path.exists(sys.argv[2]) else 0)",
+                   counter, failure]
+
+        def run(*flags: str) -> subprocess.CompletedProcess:
+            return subprocess.run([sys.executable, os.path.abspath(__file__), *flags, *command],
+                                  cwd=repo, env=env, capture_output=True, text=True,
+                                  check=False, timeout=180)
+
+        def count() -> int:
+            with open(counter, encoding="utf-8") as f:
+                return len(f.readlines())
+
+        first, second = run(), run()
+        if (first.returncode != 0 or second.returncode != 0 or count() != 1
+                or "buildlock: replaying" not in second.stdout
+                or "receipt output" not in second.stdout):
+            print(f"  control FAILED: unchanged pass did not replay -- {second.stdout!r}")
+            return False
+        for content in ("edited", "edited again"):
+            before = count()
+            with open(tracked, "w", encoding="utf-8") as f:
+                f.write(content)
+            result = run()
+            if result.returncode != 0 or count() != before + 1:
+                print("  control FAILED: tracked content edit replayed")
+                return False
+        before = count()
+        forced = run("--no-replay")
+        if forced.returncode != 0 or count() != before + 1:
+            print("  control FAILED: --no-replay did not execute")
+            return False
+        with open(failure, "w", encoding="utf-8") as f:
+            f.write("fail")
+        failed = run("--no-replay")
+        before = count()
+        failed_again = run()
+        if failed.returncode != 3 or failed_again.returncode != 3 or count() != before + 1:
+            print("  control FAILED: last failure was replayed")
+            return False
+        os.remove(failure)
+        if run().returncode != 0 or count() != before + 2:
+            print("  control FAILED: execution did not recover after failure")
+            return False
+        # A replay must not even OPEN a lock file: this parent directory does not exist.
+        before = count()
+        env["BATON_BUILDLOCK_FILE"] = os.path.join(td, "missing", "cannot-open.lock")
+        unlocked = run()
+        env["BATON_BUILDLOCK_FILE"] = os.path.join(td, "replay.lock")
+        if unlocked.returncode != 0 or count() != before or "replaying" not in unlocked.stdout:
+            print("  control FAILED: replay touched the lock")
+            return False
+        # Discover the fixture's receipt without changing this process's working directory.
+        receipts = list(Path(repo, ".git", "buildlock").glob("*.json"))
+        if len(receipts) != 1:
+            print(f"  control FAILED: expected one fixture receipt, got {len(receipts)}")
+            return False
+        receipt_path = receipts[0]
+        receipt = json.loads(receipt_path.read_text(encoding="utf-8"))
+        receipt["passed_at"] = time.time() - REPLAY_MAX_AGE_S - 1
+        receipt_path.write_text(json.dumps(receipt), encoding="utf-8")
+        if run().returncode != 0 or count() != before + 1:
+            print("  control FAILED: expired receipt replayed")
+            return False
+        receipt_path.write_text("broken json", encoding="utf-8")
+        if run().returncode != 0 or count() != before + 2:
+            print("  control FAILED: corrupt receipt did not execute")
+            return False
+    print("  replay controls: pass")
+    return True
+
+
 def selftest() -> int:
-    ok = True
+    ok = _selftest_replay()
     with tempfile.TemporaryDirectory() as td:
         lock_file = os.path.join(td, "selftest.lock")
         stamps = os.path.join(td, "stamps.txt")
@@ -420,7 +647,7 @@ def selftest() -> int:
         crasher.communicate(timeout=30)
         env = _selftest_env(BATON_BUILDLOCK_FILE=lock_file, BATON_BUILDLOCK_TIMEOUT_S="3")
         after = subprocess.run(
-            [sys.executable, os.path.abspath(__file__), sys.executable, "-c", "pass"],
+            [sys.executable, os.path.abspath(__file__), "--no-replay", sys.executable, "-c", "pass"],
             env=env, capture_output=True, text=True, check=False, timeout=30,
         )
         if after.returncode != 0:
@@ -451,7 +678,7 @@ def selftest() -> int:
         else:
             env["BATON_BUILDLOCK_TIMEOUT_S"] = "1"
             waiter = subprocess.run(
-                [sys.executable, os.path.abspath(__file__), sys.executable, "-c", "pass"],
+                [sys.executable, os.path.abspath(__file__), "--no-replay", sys.executable, "-c", "pass"],
                 env=env, capture_output=True, text=True, check=False, timeout=30,
             )
             holder.terminate()
@@ -473,7 +700,7 @@ def selftest() -> int:
         env[HELD_MARKER] = "999999"  # nobody's pid; simulates a marker that outlived its setter
         env["BATON_BUILDLOCK_TIMEOUT_S"] = "5"
         stale = subprocess.run(
-            [sys.executable, os.path.abspath(__file__), sys.executable, "-c", "pass"],
+            [sys.executable, os.path.abspath(__file__), "--no-replay", sys.executable, "-c", "pass"],
             env=env, capture_output=True, text=True, check=False, timeout=30,
         )
         if stale.returncode != 0 or not os.path.exists(lock_file + ".info"):
@@ -512,7 +739,7 @@ def selftest() -> int:
 
             env["BATON_BUILDLOCK_TIMEOUT_S"] = "1"
             queued = subprocess.run(
-                [sys.executable, os.path.abspath(__file__), sys.executable, "-c", "pass"],
+                [sys.executable, os.path.abspath(__file__), "--no-replay", sys.executable, "-c", "pass"],
                 env=env, capture_output=True, text=True, check=False, timeout=30,
             )
             holder.terminate()
@@ -618,7 +845,7 @@ def selftest() -> int:
         env["BATON_BUILDLOCK_TIMEOUT_S"] = "20"
         env.pop(HELD_MARKER, None)
         uncontended = subprocess.run(
-            [sys.executable, os.path.abspath(__file__), sys.executable, "-c", "pass"],
+            [sys.executable, os.path.abspath(__file__), "--no-replay", sys.executable, "-c", "pass"],
             env=env, capture_output=True, text=True, check=False, timeout=30,
         )
         if uncontended.returncode != 0 or os.path.exists(wait_log):
@@ -642,7 +869,7 @@ def selftest() -> int:
         else:
             env["BATON_BUILDLOCK_TIMEOUT_S"] = "60"
             contended = subprocess.run(
-                [sys.executable, os.path.abspath(__file__), sys.executable, "-c", "pass"],
+                [sys.executable, os.path.abspath(__file__), "--no-replay", sys.executable, "-c", "pass"],
                 env=env, capture_output=True, text=True, check=False, timeout=90,
             )
             holder.communicate(timeout=30)

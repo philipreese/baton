@@ -306,6 +306,18 @@ answer on whether to retire or ratify it.
 
 **Rule for briefs:** Dispatched workers run in their own process and do not inherit the conducting session's loaded skills. Briefs must inline what they need; a named skill only works if the worker's roster shows it. Skill forwarding is not performed by dispatch.
 
+Buildlock replay (#2010): a successful wrapped command leaves a worktree-local receipt under its
+Git directory. The exact argument list, working directory and priority class identify the command;
+HEAD, NUL-delimited porcelain status and each dirty path's content identify its inputs (including
+untracked files, renames and deletions). An unchanged pass up to six hours old prints
+`buildlock: replaying <cmd> — unchanged since the pass at HH:MM:SS`, then its recorded stdout tail
+(last 64 KiB), and exits 0 without acquiring or probing the build lock. Execution streams stdout
+and inherits stderr; stderr is not replayed. A failed or interrupted attempt invalidates the previous
+pass, and inputs that change during execution do not earn a receipt. Put `--no-replay` before the
+command (before or after `--class`) to force execution, including when ignored build artifacts,
+environment variables or external inputs have changed: those are outside the fingerprint. Unreadable
+inputs, dirty directories/submodules and unusable receipts fall back to execution.
+
 ## Roles
 
 Each role declares what it must produce; those declarations become the contract the engine enforces,

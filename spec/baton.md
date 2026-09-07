@@ -1437,6 +1437,9 @@ it falls through as if runnable, so the real (already-cancelled) attempt below r
 cancellation the ordinary verify-window handling above already covers, rather than a second, divergent
 cancellation path.
 
+Unchanged-command replay in `tools/buildlock.py` is documented in
+[docs/dispatch.md](../docs/dispatch.md) (#2010).
+
 **A build-lock wait timeout is `BLOCKED`, not `FAIL` (#1796).** `tools/buildlock.py` serializes every
 MSBuild-owning `pixi` task on this machine (see that file's own docstring); a verify run whose gate
 suite includes `lint`/`fmt-check`/`test-no-build` can lose the race for that lock to an unrelated
