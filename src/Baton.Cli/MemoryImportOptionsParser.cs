@@ -62,7 +62,18 @@ public static class MemoryImportOptionsParser
         "                      never override a repository git actually answered for. <repository> is",
         "                      canonicalized the same way a git probe's answer is, so 'GitHub.com/Owner/Repo',",
         "                      'github.com/owner/repo' and 'https://github.com/Owner/Repo.git' are ONE store;",
-        "                      a string with no host-and-path in it is refused rather than made into a store.",
+        "                      a string with no host-and-path in it ('hello world') is refused rather than",
+        "                      made into a store, and so is one that canonicalizes fine but names no host.",
+        "                      NAME THE FORGE HOST: the first segment is taken for a host when it CARRIES",
+        "                      A DOT, and the value is refused when it does not. So 'example.com/repo' is",
+        "                      accepted, while 'owner/repo' and 'owner/repo.git' are refused -- no default",
+        "                      forge host is assumed for them. It is a count of dots and never of segments.",
+        "                      A DOTLESS HOST stays assertable wherever the value says where its host is:",
+        "                      write a scheme ('https://internal/owner/repo'), an scp remote",
+        @"                      ('git@internal:owner/repo') or a UNC authority (\\server\share\repo.git).",
+        "                      The dot is a HEURISTIC and knowingly one -- it refuses the single spelling",
+        "                      typed by habit, not every identity that could be wrong, so a dotted first",
+        "                      segment passes it whether or not that host is a forge ('my.group/repo').",
         "  --asserted-by <who> Who is asserting. Defaults to this machine's user name.",
         "  --undo <manifest>   Remove exactly the entries a previous run appended, per its manifest. Source",
         "                      files are untouched, because the import never touched them either. Entries an",
@@ -179,6 +190,14 @@ public static class MemoryImportOptionsParser
     /// A value that canonicalizes to nothing is refused rather than stored raw — the refusal is what
     /// keeps a store called <c>hello-world-&lt;digest&gt;</c> from existing.
     /// </para>
+    /// <para>
+    /// <b>A bare <c>owner/repo</c> is refused as well, and it is a SECOND refusal</b> because it
+    /// canonicalizes fine — <see cref="RepositoryIdentity.TryCanonicalize"/> supplies no host, as its
+    /// own remarks explain, so <c>owner/repo</c> becomes an identity no git probe can ever answer.
+    /// Storing it would give the operator a store that looks right, that the probe path never reaches,
+    /// and that no error ever mentions again. See <see cref="RequireAHostThatAProbeCouldAnswer"/> for
+    /// the discriminator.
+    /// </para>
     /// </remarks>
     private static MemoryImportAssertion ParseAssertion(string value)
     {
@@ -201,7 +220,105 @@ public static class MemoryImportOptionsParser
                 "and normalised to one.");
         }
 
+        RequireAHostThatAProbeCouldAnswer(repository, canonical);
+
         return new MemoryImportAssertion(value[..separator].Trim(), canonical);
+    }
+
+    /// <summary>
+    /// Refuses a schemeless repository whose host half names no host — <c>owner/repo</c>, which
+    /// canonicalizes to a well-formed identity that git can never produce.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// <b>The test is applied only where the operator did not say where the host is.</b> A value whose
+    /// FIRST path separator is preceded by a <c>:</c> has declared one — a scheme
+    /// (<c>https://internal/repo</c>), an scp remote (<c>git@internal:owner/repo</c>), or the
+    /// <c>gitdir:</c> tag — as has a UNC authority (<c>\\server\share\repo.git</c>), and a dotless host
+    /// is a real answer in all of those, so refusing them would make an intranet remote unassertable.
+    /// It is the position of the colon rather than its presence that decides: <c>owner/repo:main</c>
+    /// carries one and still declares no host, and reading presence alone would let that spelling
+    /// through.
+    /// </para>
+    /// <para>
+    /// A dot in the host is a heuristic and is knowingly one — a schemeless <c>my.group/repo</c> passes
+    /// it. It is sized to the failure: what this refuses is the ONE spelling an operator reaches for by
+    /// habit and Baton cannot mean, not every identity that could be wrong.
+    /// </para>
+    /// <para>
+    /// It deliberately does NOT live in <see cref="RepositoryIdentity"/>: that type canonicalizes what a
+    /// <i>probe</i> answered as well as what an operator typed, and a probe reading
+    /// <c>git@internal:repo</c> legitimately yields the dotless <c>internal/repo</c>. The ambiguity is a
+    /// property of operator input, so the refusal belongs on the operator's entry path.
+    /// </para>
+    /// </remarks>
+    private static void RequireAHostThatAProbeCouldAnswer(string repository, string canonical)
+    {
+        var raw = repository.Trim();
+        if (DeclaresWhereItsHostIs(raw))
+        {
+            return;
+        }
+
+        var host = canonical[..canonical.IndexOf('/')];
+        if (host.Contains('.', StringComparison.Ordinal))
+        {
+            return;
+        }
+
+        throw new CliArgumentException(
+            $"'{raw}' names no host: it canonicalizes to '{canonical}', and Baton assumes no default " +
+            $"forge, so that store is one no git probe could ever reach. {Usage}",
+            SuggestionFor(raw));
+    }
+
+    /// <summary>
+    /// What to try instead, for a value the refusal above rejected.
+    /// </summary>
+    /// <remarks>
+    /// <b>The filled-in <c>github.com/{raw}</c> template is offered only where it produces something the
+    /// refusal itself would accept AND a probe could reproduce</b> — an <c>owner/repo</c> whose one
+    /// separator makes it the path half of a GitHub identity. Prefixing anything else re-creates the very
+    /// harm: <c>github.com/owner/repo/extra</c> and <c>github.com/owner/repo:main</c> both canonicalize
+    /// to a dotted host and are accepted, filing a store no <c>git remote</c> can ever answer for. Two
+    /// spellings are excluded rather than one — a second path separator, and a colon anywhere, since a
+    /// colon that arrives after the first separator is what <c>owner/repo:main</c> carries.
+    /// </remarks>
+    private static string SuggestionFor(string raw) =>
+        raw.Count(c => c is '/' or '\\') == 1 && !raw.Contains(':', StringComparison.Ordinal)
+            ? $"name the host too, as 'github.com/{raw}' — or write a scheme " +
+                "('https://internal/owner/repo') for a host with no dot in it."
+            : "give the full '<host>/<owner>/<repository>' — or a clone URL " +
+                "('https://internal/owner/repo', 'git@internal:owner/repo.git'), which states its host " +
+                "even when that host carries no dot.";
+
+    /// <summary>
+    /// Whether <paramref name="raw"/> says where its host is, per the positional rule in
+    /// <see cref="RequireAHostThatAProbeCouldAnswer"/>'s remarks: a <c>:</c> before the first path
+    /// separator, or a UNC authority.
+    /// </summary>
+    /// <remarks>
+    /// <b>Both authority spellings are LOAD-BEARING, measured rather than assumed.</b>
+    /// <c>//server/share/repo</c> canonicalizes to <c>server/share/repo</c> — a dotless host — so
+    /// dropping the <c>//</c> arm would refuse it, which is a behaviour change and not a dead-branch
+    /// removal. Each spelling is pinned by its own accepted arm in
+    /// <c>MemoryImportTests.A_repository_that_names_its_host_is_accepted_unchanged</c>.
+    /// </remarks>
+    private static bool DeclaresWhereItsHostIs(string raw)
+    {
+        if (raw.StartsWith(@"\\", StringComparison.Ordinal) || raw.StartsWith("//", StringComparison.Ordinal))
+        {
+            return true;
+        }
+
+        var colon = raw.IndexOf(':');
+        if (colon < 0)
+        {
+            return false;
+        }
+
+        var separator = raw.AsSpan().IndexOfAny('/', '\\');
+        return separator < 0 || colon < separator;
     }
 
     private static string RequireValue(IReadOnlyList<string> args, int index)

@@ -36,7 +36,8 @@ public sealed record MemoryImportOptions(
 /// <param name="Repository">
 /// The canonical <c>RepositoryIdentity.Value</c> being asserted for it. Canonical <b>by construction</b>
 /// rather than by convention: <c>MemoryImportOptionsParser.ParseAssertion</c> puts the operator's string
-/// through <c>RepositoryIdentity.TryCanonicalize</c> and refuses one that canonicalizes to nothing, so
-/// nothing downstream has to wonder whether this field holds a canonical identity or a spelling of one.
+/// through <c>RepositoryIdentity.TryCanonicalize</c> and refuses both a string that canonicalizes to
+/// nothing and one that names no host at all (see that parser for which refusal is which), so nothing
+/// downstream has to wonder whether this field holds a canonical identity or a spelling of one.
 /// </param>
 public sealed record MemoryImportAssertion(string Path, string Repository);

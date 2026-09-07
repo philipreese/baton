@@ -891,10 +891,10 @@ public sealed class MemoryImportTests : IDisposable
 
         // Control: the well-formed spellings parse, so the arms above are keyed on what they claim.
         var ok = MemoryImportOptionsParser.Parse(
-            ["--dry-run", "--root", "r", "--assert", @"C:\a=b/c", "--asserted-by", "me"]);
+            ["--dry-run", "--root", "r", "--assert", @"C:\a=github.com/b/c", "--asserted-by", "me"]);
         Assert.True(ok.DryRun);
         Assert.Equal(["r"], ok.Roots);
-        Assert.Equal(new MemoryImportAssertion(@"C:\a", "b/c"), Assert.Single(ok.Assertions));
+        Assert.Equal(new MemoryImportAssertion(@"C:\a", "github.com/b/c"), Assert.Single(ok.Assertions));
         Assert.Equal("me", ok.AssertedBy);
 
         Assert.Throws<CliArgumentException>(() => MemoryImportOptionsParser.Parse(["--frobnicate"]));
@@ -929,6 +929,146 @@ public sealed class MemoryImportTests : IDisposable
         // scp separator -- 'gitdir/c:/...' would be a second store for a repository with no remote.
         var gitdir = MemoryImportOptionsParser.Parse(["--assert", @"C:\root=gitdir:C:\repos\x\.git"]);
         Assert.Equal("gitdir:c:/repos/x/.git", Assert.Single(gitdir.Assertions).Repository);
+    }
+
+    /// <summary>
+    /// A bare <c>owner/repo</c> is refused (#1949). It is a SEPARATE arm from the one above because it
+    /// does not canonicalize to nothing — it canonicalizes to the well-formed <c>owner/repo</c>, host
+    /// <c>owner</c>, which is exactly why the earlier refusal never fired on it: no default forge host
+    /// is assumed, so storing it would name a store the git probe can never reach.
+    /// </summary>
+    /// <remarks>
+    /// The second parameter is the WHOLE of the "Try" suggestion's claim, and it is polarised on
+    /// purpose: a filled-in <c>github.com/&lt;raw&gt;</c> is only correct where prefixing the host
+    /// produces a value this same refusal accepts and a probe could answer for. Suggesting it for
+    /// anything else advises the operator into the exact harm the refusal exists to stop, which is why
+    /// the suppressed arms assert the template's ABSENCE rather than merely a different string.
+    /// </remarks>
+    [Theory]
+    [InlineData("owner/repo", "github.com/owner/repo")]
+    [InlineData("philipreese/baton", "github.com/philipreese/baton")]
+    // A '.git' suffix is stripped before the host is read, so its dot sits in the wrong segment and
+    // buys nothing: the rule is a dot in the HOST, never a dot anywhere in the string.
+    [InlineData("owner/repo.git", "github.com/owner/repo.git")]
+    // No filled-in value for these two, per MemoryImportOptionsParser.SuggestionFor's remarks: prefixing
+    // a host onto either spelling produces a value this refusal ACCEPTS while naming a store no probe
+    // reproduces, so the suggestion would hand the operator the defect it just refused.
+    [InlineData("Owner/Repo/extra", null)]
+    // A colon that arrives AFTER the first separator declares no host, so presence of ':' cannot be
+    // what exempts a value -- reading it that way let this spelling through.
+    [InlineData("owner/repo:main", null)]
+    // The polarity pair for the arm below: this identity is accepted the moment a scheme states that
+    // 'internal' is the host, so the scheme is the operative condition rather than the dotless host.
+    [InlineData("internal/owner/repo", null)]
+    public void A_bare_owner_repo_with_no_forge_host_is_refused(string spelling, string? suggested)
+    {
+        var refused = Assert.Throws<CliArgumentException>(
+            () => MemoryImportOptionsParser.Parse(["--assert", $@"C:\root={spelling}"]));
+
+        Assert.Contains("names no host", refused.Message, StringComparison.Ordinal);
+
+        var suggestion = refused.TryInvocation ?? "";
+        if (suggested is null)
+        {
+            Assert.DoesNotContain("github.com/", suggestion, StringComparison.Ordinal);
+            Assert.Contains("<host>/<owner>/<repository>", suggestion, StringComparison.Ordinal);
+            return;
+        }
+
+        Assert.Contains($"'{suggested}'", suggestion, StringComparison.Ordinal);
+
+        // ...and the value it names is one the refusal accepts, canonicalizing to what a clone URL of
+        // that same repository would. A suggestion that is itself refused would be a loop.
+        var accepted = MemoryImportOptionsParser.Parse(["--assert", $@"C:\root={suggested}"]);
+        Assert.Equal(
+            RepositoryIdentity.TryCanonicalize($"https://{suggested}"),
+            Assert.Single(accepted.Assertions).Repository);
+    }
+
+    /// <summary>
+    /// The control arm for the refusal above, in both directions: a full identity is UNCHANGED by it,
+    /// and a dotless host stays assertable when the operator spelled the host out — otherwise the
+    /// refusal would be a ban on intranet remotes rather than on a missing host.
+    /// </summary>
+    [Theory]
+    [InlineData("github.com/owner/repo", "github.com/owner/repo")]
+    [InlineData("https://internal/owner/repo", "internal/owner/repo")]
+    [InlineData("git@internal:owner/repo.git", "internal/owner/repo")]
+    // The rule is a dot in the host and NOT a segment count, so a two-segment value with a dotted host
+    // is accepted -- the counterexample the help now states rather than leaving to a reader.
+    [InlineData("example.com/repo", "example.com/repo")]
+    // A UNC remote states its host in an authority rather than a scheme, and Windows is the only
+    // platform this ships on (#1405), so the refusal must not swallow one.
+    [InlineData(@"\\server\share\repo.git", "server/share/repo")]
+    // The forward-slash spelling of the same authority: the '//' arm of DeclaresWhereItsHostIs is
+    // load-bearing only if this canonicalizes at all, so it is pinned rather than left to a reading.
+    [InlineData("//server/share/repo", "server/share/repo")]
+    public void A_repository_that_names_its_host_is_accepted_unchanged(string spelling, string expected)
+    {
+        var parsed = MemoryImportOptionsParser.Parse(["--assert", $@"C:\root={spelling}"]);
+
+        Assert.Equal(expected, Assert.Single(parsed.Assertions).Repository);
+    }
+
+    /// <summary>
+    /// The help states the SHIPPED predicate, and one predicate only. It used to state the refusal as an
+    /// arity rule ('a bare owner/repo is refused') and as a dot rule in one breath, and both sentences
+    /// had live counterexamples: <c>my.group/repo</c> is bare and accepted, <c>internal/owner/repo</c>
+    /// names a host and is refused. So the arm pins the RULE and its two counterexamples, not a heading
+    /// — a heading survives any rewording, including a wrong one.
+    /// </summary>
+    [Fact]
+    public async Task Help_states_the_dot_in_the_host_rule_that_ships()
+    {
+        var text = await RunAsync("--help");
+
+        Assert.Contains("NAME THE FORGE HOST", text, StringComparison.Ordinal);
+        Assert.Contains("CARRIES", text, StringComparison.Ordinal);
+        Assert.Contains("It is a count of dots and never of segments.", text, StringComparison.Ordinal);
+        Assert.Contains("'example.com/repo' is", text, StringComparison.Ordinal);
+        Assert.Contains("'my.group/repo'", text, StringComparison.Ordinal);
+
+        // The arity sentence this replaced, as an explicit negative: it read as a rule about segment
+        // count, which is what the shipped predicate is not.
+        Assert.DoesNotContain("a bare 'owner/repo' is refused too", text, StringComparison.Ordinal);
+    }
+
+    /// <summary>
+    /// END TO END, for each accepted spelling: the store an assertion files under is the SAME store a
+    /// resolved checkout's probe derives. The parser arms above stop at the canonical string; this one
+    /// is about the bytes on disk, which is where "one repository, one store file" is either true or
+    /// not.
+    /// </summary>
+    /// <remarks>
+    /// Two roots per case, because an assertion can never displace a repository git answered for
+    /// (<see cref="An_assertion_cannot_override_a_repository_git_answered_for"/>): the assertion is made
+    /// on an ARCHIVED root whose checkout is gone, and the probe half is a live checkout whose origin is
+    /// a DIFFERENT spelling of the same repository. A single store file on disk is the discriminating
+    /// assertion — reading one store's entry count alone would pass while a second, near-identical store
+    /// sat beside it.
+    /// </remarks>
+    [Theory]
+    [InlineData("github.com/philipreese/widget", "git@github.com:PhilipReese/Widget.git", "github.com/philipreese/widget")]
+    [InlineData("https://internal/owner/repo", "git@internal:owner/repo.git", "internal/owner/repo")]
+    [InlineData("example.com/repo", "https://Example.com/Repo.git", "example.com/repo")]
+    public async Task An_asserted_identity_lands_in_the_same_store_a_probe_derives(
+        string asserted, string probedRemote, string expected)
+    {
+        var archived = WriteArchivedRoot("c--asserted-memory", ("user_who.md", "filed by assertion"));
+
+        var checkout = Checkout("probed");
+        await InitGitRepoAsync(checkout, probedRemote);
+        WriteClaudeRoot("C--probed", checkout, ("project_plan.md", "filed by probe"));
+
+        await RunAsync("--assert", $"{archived}={asserted}", "--asserted-by", "the-test");
+
+        Assert.Equal(
+            ["filed by assertion", "filed by probe"],
+            (await StoreAsync(expected)).Select(e => e.Text).Order(StringComparer.Ordinal));
+
+        // The negative, as bytes: ONE repository store under the storage root, not one per path.
+        Assert.Single(Directory.EnumerateFiles(
+            BatonPaths.Root, BatonPaths.MemoryEntriesFileName, SearchOption.AllDirectories));
     }
 
     /// <summary>
