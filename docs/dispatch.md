@@ -466,27 +466,44 @@ reports where each step stands.
 
 Every allow/deny a Baton gate takes about a tool call is one JSON line carrying
 `"type":"baton.grant"`, with the vendor, the tool, `"decision":"allow"|"deny"`, the rule id that
-decided, a digest of the call's identifying argument, and — on a deny only — the refusal sentence the
-worker was given. So "how many calls did this room refuse", "under which rule", and "did it re-issue
-one it was refused" are filters over those lines rather than a text search for refusal wording, which
-is what they used to be. **Where the line lands follows the enforcement point** (`spec/baton.md` §9,
+decided, a digest identifying the call, and — on a deny only — the refusal sentence the worker was
+given. So "how many calls did this room refuse", "under which rule", and "did it re-issue one it was
+refused" are filters over those lines rather than a text search for refusal wording, which is what
+they used to be. **On claude, though, a whole class of refusal never reaches a Baton gate and so
+produces no line at all:** `--disallowedTools` makes the CLI refuse a withheld tool name, and a
+standing denied shell family typed unchained, *before* the `PreToolUse` hook is consulted
+(`ClaudeWorkerAdapter.StandingShellDenials` states that ordering and what it buys), so a claude room's
+refusal share is a share over the rungs the hook can see — biased by role toward the hook-reachable
+ones, not merely a few short — while codex records the equivalent refusals in full. **Where the line
+lands follows the enforcement point** (`spec/baton.md` §9,
 *Where a tool rule is enforced*): the codex broker writes it into that execution's captured
 `.stdout.log`, beside the `item.completed` for the same call, because the broker is that stream's
 writer; the claude and agy `PreToolUse` hooks are subprocesses of the vendor CLI that cannot write
 that file, so they append the identical line to `.baton-grants.ndjson` in the same execution
-directory. One schema, two files, both under `artifacts/execution_*/` and both filtered out of any
-deliverable listing as engine mechanism. Reading a whole room means both — a hook-vendor room has no
+directory. One schema, two files, both under `artifacts/execution_*/`, both dot-prefixed so neither
+can be a declared output, and both registered in the stream-log filter a deliverable listing would
+read — a filter no production caller applies today, there being no such listing yet
+(`ReservedOutputNames` records that once). Reading a whole room means both — a hook-vendor room has no
 grant lines in its stream, and a codex room writes no `.baton-grants.ndjson` at all.
 
 Two limits, because a reader will otherwise fill them in wrongly. **The hook-side count can
 undercount.** A vendor issuing parallel tool calls runs parallel hook subprocesses, each appending to
-one file: a sharing violation loses that line silently (the write must never turn into a refused tool
-call), and two appends landing together can fuse into one line, which costs the following record as
-well — the same loss class `RepeatedToolCallHook` documents for its own ledger. The broker's stream
-has one writer and no such exposure. **And the identity digest resolves for shell commands, the
-write family, and a `Read`/`view_file` path — nothing else.** Every other tool records `input` as
-`-`, so two *different* refused `Grep` calls key alike: pairing "refused" with "re-issued" holds for
-the tools whose identifying argument this gate reads, and is a false positive outside them.
+one file, and the append opens it for writing with only readers shared: a second appender arriving
+mid-write takes a sharing violation and loses its line silently (the write must never turn into a
+refused tool call). That share mode is also what bounds the damage — the loss is whole lines only,
+never a torn one, so no record in this file is ever half-written and no *other* record is harmed by
+the one that was lost. `RepeatedToolCallLedger` loses differently under the same concurrency, worth
+knowing if you read both: it is replaced whole through an atomic move, so nothing tears there either,
+but the last writer's state wins outright and the other's entries are gone. The broker's stream has
+one writer and neither exposure. **And the identity digest resolves for shell
+commands, the write family, and a `Read`/`view_file` path — nothing else.** Every other tool records
+`input` as `-`, so two *different* refused `Grep` calls key alike: pairing "refused" with "re-issued"
+holds for the tools whose identifying argument this gate reads, and is a false positive outside them.
+*What* the digest covers also differs by enforcement point — the hooks digest that one identifying
+field, the broker digests codex's whole arguments object, `Baton.Domain.GrantDecision`'s `Input`
+states why — so on codex a re-issued write whose content changed by a byte keys as a *different* call
+while the same retry on claude or agy keys as the same one. Pair "refused" with "re-issued" within a
+vendor; comparing that pairing across vendors compares two populations.
 
 ## The vendor premise
 

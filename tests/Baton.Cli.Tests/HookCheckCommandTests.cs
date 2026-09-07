@@ -893,7 +893,7 @@ public class HookCheckCommandTests
             Assert.Equal("claude", line["vendor"]!.GetValue<string>());
             Assert.Equal("Bash", line["tool"]!.GetValue<string>());
             Assert.Equal("deny", line["decision"]!.GetValue<string>());
-            Assert.Equal(GrantRules.ShellPattern, line["rule"]!.GetValue<string>());
+            Assert.Equal(GrantRules.ShellPattern.Id, line["rule"]!.GetValue<string>());
             Assert.Contains(GrantRefusal.Marker, line["reason"]!.GetValue<string>());
             // The identity is a digest of the command line, so the same refused call re-issued keys
             // equal without the command itself being copied into the room a second time.
@@ -909,7 +909,7 @@ public class HookCheckCommandTests
             Assert.Equal(HookCheckCommand.AllowedExitCode, exitCode);
             var line = Assert.Single(Read());
             Assert.Equal("allow", line["decision"]!.GetValue<string>());
-            Assert.Equal(GrantRules.Allowed, line["rule"]!.GetValue<string>());
+            Assert.Equal(GrantRules.Allowed.Id, line["rule"]!.GetValue<string>());
             Assert.Null(line["reason"]);
         }
 
@@ -930,7 +930,7 @@ public class HookCheckCommandTests
             Assert.Equal(HookCheckCommand.DeniedExitCode, exitCode);
             var line = Assert.Single(Read());
             Assert.Equal("deny", line["decision"]!.GetValue<string>());
-            Assert.Equal(GrantRules.UnjudgeableCall, line["rule"]!.GetValue<string>());
+            Assert.Equal(GrantRules.UnjudgeableCall.Id, line["rule"]!.GetValue<string>());
             Assert.Equal(GrantDecision.UnknownTool, line["tool"]!.GetValue<string>());
             Assert.Equal(GrantDecision.NoInput, line["input"]!.GetValue<string>());
         }

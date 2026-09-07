@@ -38,8 +38,14 @@ public static class GrantDecisionLog
 {
     /// <summary>
     /// Dot-prefixed, like every other engine-owned artifact that lands in a worker's output directory,
-    /// so <see cref="ExecutionStreamLogger.IsStreamLogFileName"/> filters it out of a deliverable
-    /// listing rather than presenting Baton's own record as something the worker produced.
+    /// and registered in <see cref="ExecutionStreamLogger.IsStreamLogFileName"/> beside them.
+    /// <para>
+    /// <b>That registration is what a future listing will read, not something acting today</b> (#2009
+    /// review LOW). No production caller applies that filter yet, so what keeps this file out of a
+    /// deliverable listing today is that there is no such listing — the leading dot is what makes it
+    /// undeclarable as an output meanwhile. <see cref="Baton.Domain.ReservedOutputNames"/> records the
+    /// filter's caller-less state once (#1724); this comment does not restate it.
+    /// </para>
     /// </summary>
     public const string FileName = ".baton-grants.ndjson";
 
@@ -101,9 +107,9 @@ public sealed class GrantDecisionScribe(string vendor, string? outputDirectory, 
 
     public void Allow() => Write(true, GrantRules.Allowed, null);
 
-    public void Deny(string rule, string reason) => Write(false, rule, reason);
+    public void Deny(GrantRule rule, string reason) => Write(false, rule, reason);
 
-    private void Write(bool allowed, string rule, string? reason) =>
+    private void Write(bool allowed, GrantRule rule, string? reason) =>
         GrantDecisionLog.Append(outputDirectory, new GrantDecision(
             vendor, Tool, allowed, rule, reason, GrantDecision.Identify(Input), _clock.GetUtcNow()));
 }

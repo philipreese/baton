@@ -803,7 +803,7 @@ public static class AgyHookCheckCommand
     /// <c>HookCheckCommand.Refuse</c> states: a funnel cannot know which rung called it, and a guessed
     /// id is a count of nothing.
     /// </param>
-    private static string DenyJson(GrantDecisionScribe scribe, string rule, string reason)
+    private static string DenyJson(GrantDecisionScribe scribe, GrantRule rule, string reason)
     {
         var stamped = GrantRefusal.Stamp(reason);
         scribe.Deny(rule, stamped);

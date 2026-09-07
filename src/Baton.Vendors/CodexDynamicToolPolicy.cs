@@ -997,9 +997,9 @@ public sealed class CodexDynamicToolPolicy
 /// label every path boundary identically, which is the plausible-but-wrong answer this field exists to
 /// avoid.
 /// </param>
-internal sealed class CodexGrantRefusedException(string message, string rule) : Exception(message)
+internal sealed class CodexGrantRefusedException(string message, GrantRule rule) : Exception(message)
 {
-    public string Rule { get; } = rule;
+    public GrantRule Rule { get; } = rule;
 }
 
 /// <summary>
@@ -1020,7 +1020,7 @@ internal sealed class CodexGrantRefusedException(string message, string rule) : 
 /// <see cref="Failed"/> both carry <see cref="GrantRules.Allowed"/>, which is the same distinction the
 /// paragraph above draws: a failing allowed command is not a grant decision against it.
 /// </param>
-public sealed record CodexDynamicToolResult(bool Success, string Text, string Rule)
+public sealed record CodexDynamicToolResult(bool Success, string Text, GrantRule Rule)
 {
     public static CodexDynamicToolResult Allowed(string text) => new(true, text, GrantRules.Allowed);
 
@@ -1041,7 +1041,7 @@ public sealed record CodexDynamicToolResult(bool Success, string Text, string Ru
     /// handler.
     /// </para>
     /// </summary>
-    public static CodexDynamicToolResult Refused(string text, string rule) =>
+    public static CodexDynamicToolResult Refused(string text, GrantRule rule) =>
         new(false, GrantRefusal.Stamp(text), rule);
 
     /// <summary>

@@ -53,13 +53,13 @@ public sealed class GrantDecisionStreamTests
 
             var denied = Assert.Single(grants, line => line["decision"]!.GetValue<string>() == "deny");
             Assert.Equal(CodexDynamicToolPolicy.WriteTextTool, denied["tool"]!.GetValue<string>());
-            Assert.Equal(GrantRules.WithheldTool, denied["rule"]!.GetValue<string>());
+            Assert.Equal(GrantRules.WithheldTool.Id, denied["rule"]!.GetValue<string>());
             Assert.Equal("codex", denied["vendor"]!.GetValue<string>());
             Assert.Contains(GrantRefusal.Marker, denied["reason"]!.GetValue<string>());
 
             var allowed = Assert.Single(grants, line => line["decision"]!.GetValue<string>() == "allow");
             Assert.Equal(CodexDynamicToolPolicy.ReadTextTool, allowed["tool"]!.GetValue<string>());
-            Assert.Equal(GrantRules.Allowed, allowed["rule"]!.GetValue<string>());
+            Assert.Equal(GrantRules.Allowed.Id, allowed["rule"]!.GetValue<string>());
             // No reason on an allow: nothing refused it, and every byte here is a byte of the room's
             // stream (ExecutionStreamLogger's rollover bound).
             Assert.Null(allowed["reason"]);
@@ -126,7 +126,7 @@ public sealed class GrantDecisionStreamTests
 
             var line = Assert.Single(GrantLines(lines));
             Assert.Equal("allow", line["decision"]!.GetValue<string>());
-            Assert.Equal(GrantRules.Allowed, line["rule"]!.GetValue<string>());
+            Assert.Equal(GrantRules.Allowed.Id, line["rule"]!.GetValue<string>());
 
             // And the call really did fail, so this is the discriminating case rather than a happy path
             // wearing its name.

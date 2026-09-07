@@ -1229,7 +1229,7 @@ public class AgyHookCheckCommandTests
             Assert.Equal("agy", line["vendor"]!.GetValue<string>());
             Assert.Equal("run_command", line["tool"]!.GetValue<string>());
             Assert.Equal("deny", line["decision"]!.GetValue<string>());
-            Assert.Equal(GrantRules.ShellPattern, line["rule"]!.GetValue<string>());
+            Assert.Equal(GrantRules.ShellPattern.Id, line["rule"]!.GetValue<string>());
             Assert.Contains(GrantRefusal.Marker, line["reason"]!.GetValue<string>());
             Assert.Equal(GrantDecision.Identify("node --version"), line["input"]!.GetValue<string>());
         }
@@ -1241,7 +1241,7 @@ public class AgyHookCheckCommandTests
 
             var line = Assert.Single(Read());
             Assert.Equal("allow", line["decision"]!.GetValue<string>());
-            Assert.Equal(GrantRules.Allowed, line["rule"]!.GetValue<string>());
+            Assert.Equal(GrantRules.Allowed.Id, line["rule"]!.GetValue<string>());
             Assert.Null(line["reason"]);
             // The identity is the same digest the deny arm records for the same command line, which is
             // what lets a reader pair "refused" with "re-issued and allowed" across two lines.

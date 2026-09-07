@@ -488,7 +488,7 @@ public static class HookCheckCommand
     /// the argument that <c>--disallowedTools</c> independently covered the same tool names — which
     /// #649 made false for writes by moving them off that flag onto this hook alone.
     /// </summary>
-    private static int Deny(GrantDecisionScribe scribe, TextWriter stderr, string what, string rule) =>
+    private static int Deny(GrantDecisionScribe scribe, TextWriter stderr, string what, GrantRule rule) =>
         Refuse(scribe, stderr, $"AER: the permission gate {what} and denied this call rather than " +
                                "allowing it unchecked.", rule);
 
@@ -509,9 +509,10 @@ public static class HookCheckCommand
     /// #2009: which <see cref="GrantRules"/> member decided, recorded on the room's grant line beside
     /// the reason. Required rather than defaulted, and taken here rather than derived at the funnel,
     /// for the reason this method exists at all: a rung added without naming its rule would otherwise
-    /// be counted under whichever id the funnel happened to guess.
+    /// be counted under whichever id the funnel happened to guess. A <see cref="GrantRule"/> rather
+    /// than a string, so the id it names is one that exists.
     /// </param>
-    private static int Refuse(GrantDecisionScribe scribe, TextWriter stderr, string reason, string rule)
+    private static int Refuse(GrantDecisionScribe scribe, TextWriter stderr, string reason, GrantRule rule)
     {
         var stamped = GrantRefusal.Stamp(reason);
         stderr.WriteLine(stamped);

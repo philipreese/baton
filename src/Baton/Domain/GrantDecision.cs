@@ -34,8 +34,9 @@ namespace Baton.Domain;
 /// refused before it could read one — which is a real population (an empty or malformed payload).</param>
 /// <param name="Allowed">The decision itself. Rendered as <c>"allow"</c>/<c>"deny"</c>.</param>
 /// <param name="Rule">
-/// Which rule decided, from <see cref="GrantRules"/>. Several sites share an id on purpose: the id names
-/// the RULE, not the line, and <paramref name="Reason"/> separates the members.
+/// Which rule decided — a <see cref="GrantRule"/>, so the only ids that exist are the ones
+/// <see cref="GrantRules"/> declares. Several sites share one on purpose: the id names the RULE, not
+/// the line, and <paramref name="Reason"/> separates the members.
 /// </param>
 /// <param name="Reason">
 /// The sentence the worker was given, on a deny; null on an allow, where there is no reason to carry and
@@ -43,16 +44,27 @@ namespace Baton.Domain;
 /// rollover bound).
 /// </param>
 /// <param name="Input">
-/// The call's normalised input identity — <see cref="Identify"/>'s digest, never the arguments. Two
-/// lines with the same vendor, tool and input are the same call, which is what makes "the worker retried
-/// the refused call" answerable without carrying a file's contents into the stream twice.
+/// The call's input identity — <see cref="Identify"/>'s digest, never the text itself, so "the worker
+/// retried the refused call" is answerable without carrying a file's contents into the stream twice.
+/// <para>
+/// <b>What is digested is NOT the same on every enforcement point, and the name does not say so
+/// (#2009 review LOW).</b> The two hooks digest the ONE field that identifies the call, the one
+/// <see cref="Baton.Dispatch.GrantDecisionScribe.Input"/> names per tool; the codex broker digests the
+/// whole arguments object as codex serialized it, file content and all. That is deliberate: its line must key
+/// equal to the <c>item.started</c> digest it already emitted for the same call, which is
+/// arguments-wide, and two copies of one call under two identities would be worse than one identity
+/// that is wider on one vendor. The consequence a reader has to carry is that equality is STRICTER on
+/// codex: a write re-issued with one byte changed keys as a different call there and as the same call
+/// on claude/agy, so "did it re-issue the refused call" is comparable within a vendor and not across
+/// them. <c>docs/dispatch.md</c> states that limit where a reader meets the query.
+/// </para>
 /// </param>
 /// <param name="At">When the gate decided.</param>
 public sealed record GrantDecision(
     string Vendor,
     string Tool,
     bool Allowed,
-    string Rule,
+    GrantRule Rule,
     string? Reason,
     string Input,
     DateTimeOffset At)
@@ -96,7 +108,7 @@ public sealed record GrantDecision(
             ["vendor"] = Vendor,
             ["tool"] = Tool,
             ["decision"] = Allowed ? "allow" : "deny",
-            ["rule"] = Rule,
+            ["rule"] = Rule.Id,
             ["input"] = Input,
             ["at"] = At.ToUniversalTime().ToString("O"),
         };
@@ -118,9 +130,35 @@ public sealed record GrantDecision(
 }
 
 /// <summary>
+/// One member of the rule vocabulary <see cref="GrantRules"/> declares — the id a
+/// <see cref="GrantDecision"/> carries in its <c>rule</c> field, as a type rather than a bare string.
+/// <para>
+/// <b>Why a type.</b> The vocabulary is only closed if a call site cannot name an id that is not in it.
+/// A <c>string rule</c> parameter makes every refusal site name SOMETHING — which is what the three
+/// enforcement points already required — but a typo or an invented spelling compiles, and lands in a
+/// bucket nobody groups on. The constructor is <c>internal</c> and there is no public way to mint or
+/// derive a value (<see cref="Id"/> has no setter, so <c>with</c> cannot reach it), so
+/// <see cref="GrantRules"/>' members are the only instances the vendor and CLI layers can pass. This is
+/// the ONE enforcement of that closure: no test greps for rule literals, because the compiler is the
+/// stronger instrument and two enforcements of one rule is the drift this repo's record-once gate names.
+/// </para>
+/// </summary>
+public sealed record GrantRule
+{
+    internal GrantRule(string id) => Id = id;
+
+    /// <summary>The id as it is written on a grant line, and as a reader groups on it.</summary>
+    public string Id { get; }
+
+    /// <summary>The id, so a rule interpolates into a message as the reader will see it.</summary>
+    public override string ToString() => Id;
+}
+
+/// <summary>
 /// The rule ids a <see cref="GrantDecision"/> can name — the whole vocabulary, in one place, so a
 /// reader grouping a room's denials is grouping over a closed set rather than over whatever string each
-/// call site invented (#2009).
+/// call site invented (#2009). <see cref="GrantRule"/>'s own remarks state what makes the set closed
+/// rather than merely conventional.
 /// <para>
 /// <b>Deliberately coarse.</b> An id names the rule that decided, not the sentence it produced: the
 /// three shell rungs that refuse an unparseable line, a standing deny and a line outside a scoped grant
@@ -132,42 +170,42 @@ public sealed record GrantDecision(
 public static class GrantRules
 {
     /// <summary>No rule refused the call. The only id an allow line carries.</summary>
-    public const string Allowed = "allow";
+    public static readonly GrantRule Allowed = new("allow");
 
     /// <summary>The tool, or the whole category it belongs to, is withheld by this role's grant.</summary>
-    public const string WithheldTool = "withheld-tool";
+    public static readonly GrantRule WithheldTool = new("withheld-tool");
 
     /// <summary>A read whose path is outside every root this grant makes readable.</summary>
-    public const string PathOutsideRoots = "path-outside-roots";
+    public static readonly GrantRule PathOutsideRoots = new("path-outside-roots");
 
     /// <summary>A granted write whose target is outside both the workspace and the outbox.</summary>
-    public const string WriteOutsideBounds = "write-outside-bounds";
+    public static readonly GrantRule WriteOutsideBounds = new("write-outside-bounds");
 
     /// <summary>A path that crosses a symbolic link or reparse point.</summary>
-    public const string ReparsePoint = "reparse-point";
+    public static readonly GrantRule ReparsePoint = new("reparse-point");
 
     /// <summary>A shell command line refused by this role's allow/deny pattern set.</summary>
-    public const string ShellPattern = "shell-pattern";
+    public static readonly GrantRule ShellPattern = new("shell-pattern");
 
     /// <summary>A shell command carrying an option token this role denies outright (#1683).</summary>
-    public const string DeniedOptionToken = "denied-option-token";
+    public static readonly GrantRule DeniedOptionToken = new("denied-option-token");
 
     /// <summary>A command shaped to run in the background rather than to completion (#2002 rule 1).</summary>
-    public const string Backgrounding = "backgrounding";
+    public static readonly GrantRule Backgrounding = new("backgrounding");
 
     /// <summary>A repeat of a call whose answer cannot have changed (#2002 rules 2/2b).</summary>
-    public const string Repeat = "repeat";
+    public static readonly GrantRule Repeat = new("repeat");
 
     /// <summary>A <c>gh pr</c> read of a pull request this room did not open (#2001).</summary>
-    public const string OwnPullRequestOnly = "own-pr-only";
+    public static readonly GrantRule OwnPullRequestOnly = new("own-pr-only");
 
     /// <summary>
     /// The fail-closed population: a call the gate could not judge and refused rather than allowed
     /// unchecked — unreadable or empty stdin, malformed JSON, a missing tool name, an absent or
     /// wrong-vendor channel, an unmeasured argument, an outbox path it cannot resolve.
     /// </summary>
-    public const string UnjudgeableCall = "unjudgeable-call";
+    public static readonly GrantRule UnjudgeableCall = new("unjudgeable-call");
 
     /// <summary>The gate's own catch-all: a defect in the gate denied the call (#1921).</summary>
-    public const string GateInternalFailure = "gate-internal-failure";
+    public static readonly GrantRule GateInternalFailure = new("gate-internal-failure");
 }
