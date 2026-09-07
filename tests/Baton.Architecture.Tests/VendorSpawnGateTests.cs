@@ -115,6 +115,36 @@ public class VendorSpawnGateTests
             + string.Join("\n  ", bypasses));
     }
 
+    // The per-file check above is satisfied by a file that calls the factory ONCE and also constructs a
+    // bare ProcessStartInfo elsewhere in the same file — Contains() cannot tell one from two. This
+    // counts: the raw constructor is allowed to appear in exactly one file under src/, the seam itself,
+    // so a second bare construction anywhere else fails by name and line (#1967 review, MEDIUM).
+    [Fact]
+    public void The_raw_ProcessStartInfo_constructor_appears_only_inside_the_shared_seam()
+    {
+        var root = RepoRoot();
+        const string seam = "src/Baton/Core/ChildProcessStartInfo.cs";
+        var offenders = Directory.EnumerateFiles(Path.Combine(root, "src"), "*.cs", SearchOption.AllDirectories)
+            .Where(path => !path.Contains($"{Path.DirectorySeparatorChar}obj{Path.DirectorySeparatorChar}", StringComparison.Ordinal)
+                        && !path.Contains($"{Path.DirectorySeparatorChar}bin{Path.DirectorySeparatorChar}", StringComparison.Ordinal))
+            .SelectMany(path => File.ReadAllLines(path)
+                .Select((line, index) => (path, line, index))
+                .Where(entry => entry.line.Contains("new ProcessStartInfo", StringComparison.Ordinal))
+                .Select(entry => $"{Path.GetRelativePath(root, entry.path).Replace('\\', '/')}:{entry.index + 1}"))
+            .Where(anchor => !anchor.StartsWith(seam + ":", StringComparison.Ordinal))
+            .OrderBy(anchor => anchor, StringComparer.Ordinal)
+            .ToList();
+
+        Assert.True(
+            offenders.Count == 0,
+            "A bare 'new ProcessStartInfo' outside the shared seam ships a console window on hosts whose "
+            + "default terminal is Windows Terminal (#1967). Route it through ChildProcessStartInfo.Create:\n  "
+            + string.Join("\n  ", offenders));
+
+        // And the seam still constructs it, so this test cannot pass vacuously if the seam is renamed.
+        Assert.Contains("new ProcessStartInfo", File.ReadAllText(Path.Combine(root, seam)), StringComparison.Ordinal);
+    }
+
     private static string RepoRoot()
     {
         var dir = new DirectoryInfo(AppContext.BaseDirectory);
