@@ -4,10 +4,9 @@ using System.Text;
 namespace Baton.Cli.Daemon;
 
 /// <summary>
-/// #1946 — the bytes <see cref="GlassHttpService"/> serves at <c>/</c>: the embedded
-/// <c>tools/fleet-glass/glass.html</c> (the same file the Claude.ai artifact is published from; the
-/// csproj's <c>EmbeddedResource</c> comment carries why it is embedded rather than pathed) with one
-/// marker injected so the page can tell which delivery it is running under.
+/// #1946 — the bytes <see cref="GlassHttpService"/> serves at <c>/</c>: the embedded page (the
+/// csproj's <c>EmbeddedResource</c> comment names which file and carries why it is embedded rather
+/// than pathed) with one marker injected so the page can tell which delivery it is running under.
 /// </summary>
 internal static class GlassPage
 {

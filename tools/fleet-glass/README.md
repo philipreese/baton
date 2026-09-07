@@ -10,7 +10,7 @@ the write budget, the secret gate, and the page's own rendering rules are specif
 `glass.html` is also served by `baton daemon` over the operator's tailnet, off the same file — it is
 embedded in `Baton.Cli` from this directory, so a change here reaches both deliveries with no second
 copy to keep in step. The config keys, the bind rule and the `tailscale serve` recipe are in the
-repo README's "Opening the glass over your tailnet"; the decision is `spec/baton.md` §11 C-11.
+repo README's "Opening the glass over your tailnet"; it was ratified in `spec/baton.md` §11 C-11.
 
 **Publishing the Claude.ai artifact is now optional**, and the tailnet URL is the primary way to open
 the glass. The artifact and the mailbox behind it still work unchanged, and are still the only glass

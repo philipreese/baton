@@ -3717,8 +3717,8 @@ trigger is not registrable by a standard user and is not used (#1770).
   bind rule and the origination/arrest line are §11 C-11's and are not restated here; the config
   keys and the default port have their one home on `GlassListenerSettings`
   (`src/Baton.Vendors/DaemonSettingsStore.cs`), and the allowed bind addresses have theirs on
-  `GlassBindPolicy`. Off unless `settings.json` opts in. Slice 1 serves the fleet row only — the
-  same payload the mailbox carries; drill-down is slice 2.
+  `GlassBindPolicy`. Off unless `settings.json` opts in. What slice 1 may and may not carry is
+  C-11's ruling, not restated here.
 - **`DeliveryPoller`** (`Baton.Cli.Daemon`, a hosted service, #734) — a fifth kept responsibility, the
   same outbound-only ceiling as the fleet projection file above: a slow-cadence (default 5 min,
   `BATON_DELIVERY_POLL_INTERVAL_SECONDS`-configurable through `BatonEnvironmentSnapshot`, matching the
@@ -5318,13 +5318,13 @@ Revisit only if a genuinely interactive surface is ever ruled in — which §10'
 ruling currently forbids.
 
 **Slice 1 landed 2026-09-07 (#1946): the page, not yet the drill-down.** `GlassHttpService` (§7)
-serves `tools/fleet-glass/glass.html` — the same file the artifact is published from, embedded in
-`Baton.Cli` and marked with a `baton-glass-source` meta so the page reads same-origin — plus
-`{Root}/fleet/projection.json` as-is and an SSE stream of its changes. **What slice 1 deliberately
-does NOT carry is the whole reason this plane exists:** no stdout tail beyond what the projection
-file already holds, no room artifacts, no timeline endpoint. Those are slice 2, they may live on
-this plane ONLY, and adding any of them to the worker-served or artifact copies violates this entry
-rather than extending it. The read-only tripwire is enforced structurally: every route is a GET, a
+serves the repo's one `glass.html` — embedded in `Baton.Cli`, and marked with a `baton-glass-source`
+meta that switches the page onto a same-origin read — plus `{Root}/fleet/projection.json` as-is and
+an SSE stream of its changes. It carries the fleet row and nothing under it. **What slice 1
+deliberately withholds is the whole reason this plane exists:** no stdout tail beyond what the
+projection file already holds, no room artifacts, no timeline endpoint. Those are slice 2, they may
+live on this plane ONLY, and adding any of them to the worker-served or artifact copies violates this
+entry rather than extending it. The read-only tripwire is enforced structurally: every route is a GET, a
 non-GET is refused before routing, and `FleetGlassReadOnlyTests` pins that the page itself performs
 no non-GET request and reads no origin but the one that served it. That test's network-sink scan was
 narrowed by #1946 from "no network requests at all" to "no *mutating* network requests", which is the

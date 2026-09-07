@@ -134,9 +134,8 @@ tailscale serve --bg 8420
 ```
 
 The routes are `/` (the page), `/projection.json` (the fleet projection, as-is) and `/events` (a
-Server-Sent Events stream of its changes). All GET, all read-only. **This slice serves the fleet
-row only** — the same payload the mailbox carries; drill-down (stdout tail, room artifacts,
-timeline) is C-11's slice 2.
+Server-Sent Events stream of its changes). All GET, all read-only. **You get the fleet board and
+nothing beneath it** — stdout tails, room artifacts and timelines are C-11's next slice.
 
 ## Vendor authentication
 
