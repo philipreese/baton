@@ -34,6 +34,63 @@ namespace Baton.Cli;
 /// </remarks>
 public static class IssueWorktreeProvisioner
 {
+    /// <summary>
+    /// The branch <c>gh issue develop</c> is asked to create for <paramref name="issue"/>. <b>Derived,
+    /// never queried</b> — the name is this method's ruling (spec/baton.md §13), so a later reader that
+    /// needs it (a work item's <c>Branch</c>, the PR lookup) computes it here rather than asking
+    /// <c>gh</c> a question whose answer this file already fixed.
+    /// </summary>
+    public static string BranchNameFor(int issue)
+    {
+        ArgumentOutOfRangeException.ThrowIfNegativeOrZero(issue);
+        return $"{issue}-lane";
+    }
+
+    /// <summary>
+    /// The issue's title and body, for the implement brief <c>baton queue add --lifecycle</c> renders
+    /// when no <c>--spec</c> is given. Through the SAME runner every other spawn here uses, so this adds
+    /// no process-spawn site of its own.
+    /// </summary>
+    /// <returns>Title and body; the body is empty when the issue has none.</returns>
+    /// <exception cref="CliArgumentException"><c>gh</c> refused — the issue does not exist, or <c>gh</c> is not authenticated.</exception>
+    public static async Task<(string Title, string Body)> FetchIssueAsync(
+        int issue,
+        string repositoryDirectory,
+        Func<string, IReadOnlyList<string>, string, CancellationToken, Task<(int ExitCode, string Output)>>? runner = null,
+        CancellationToken cancellationToken = default)
+    {
+        ArgumentOutOfRangeException.ThrowIfNegativeOrZero(issue);
+        ArgumentException.ThrowIfNullOrEmpty(repositoryDirectory);
+
+        runner ??= RunAsync;
+        var (exit, output) = await runner(
+            "gh",
+            ["issue", "view", issue.ToString(System.Globalization.CultureInfo.InvariantCulture), "--json", "title,body"],
+            repositoryDirectory, cancellationToken).ConfigureAwait(false);
+        if (exit != 0)
+        {
+            throw new CliArgumentException(
+                $"'gh issue view {issue} --json title,body' failed (exit {exit}): {output.Trim()}",
+                "check that the issue exists and that 'gh' is authenticated, or pass '--spec <file>' to write "
+                + "the brief's \"## Do\" section yourself.");
+        }
+
+        try
+        {
+            using var document = System.Text.Json.JsonDocument.Parse(output);
+            var root = document.RootElement;
+            return (
+                root.TryGetProperty("title", out var title) ? title.GetString() ?? string.Empty : string.Empty,
+                root.TryGetProperty("body", out var body) ? body.GetString() ?? string.Empty : string.Empty);
+        }
+        catch (System.Text.Json.JsonException ex)
+        {
+            throw new CliArgumentException(
+                $"'gh issue view {issue}' returned output this could not read as JSON: {ex.Message}",
+                "run the command by hand to see what it printed, or pass '--spec <file>'.");
+        }
+    }
+
     /// <summary>Each spawn's wall-clock bound. <c>gh issue develop</c> touches the network, so the
     /// hang safety here is the time bound, not the environment — the same posture
     /// <see cref="WorkspaceDeliveryProbe"/> documents for its own <c>gh</c> spawns.</summary>
@@ -70,7 +127,7 @@ public static class IssueWorktreeProvisioner
                 "set Queue.WorktreeRoot in ~/.baton/settings.json to say where w<n> worktrees belong.");
 
         var workspace = Path.Combine(root, $"w{issue}");
-        var branch = $"{issue}-lane";
+        var branch = BranchNameFor(issue);
 
         if (Directory.Exists(workspace))
         {

@@ -38,6 +38,7 @@ public sealed class QueueSchedulerService : BackgroundService
     private readonly Func<CancellationToken, Task<double>> _liveWeight;
     private readonly Func<double?> _freeGb;
     private readonly Func<DateTimeOffset> _now;
+    private readonly WorkItemAdvancer _advancer;
 
     private DateTimeOffset? _lastLaunchAt;
     private string? _lastVerdictKey;
@@ -56,12 +57,14 @@ public sealed class QueueSchedulerService : BackgroundService
         Func<QueueLaunchRequest, CancellationToken, Task<QueueLaunchOutcome>>? launch,
         Func<CancellationToken, Task<double>>? liveWeight,
         Func<double?>? freeGb,
-        Func<DateTimeOffset>? now)
+        Func<DateTimeOffset>? now,
+        WorkItemAdvancer? advancer = null)
     {
         _launch = launch ?? QueueLauncher.LaunchAsync;
         _liveWeight = liveWeight ?? CountLiveWeightAsync;
         _freeGb = freeGb ?? FreePhysicalMemory.TryReadGiB;
         _now = now ?? (() => DateTimeOffset.UtcNow);
+        _advancer = advancer ?? new WorkItemAdvancer();
     }
 
     protected override async Task ExecuteAsync(CancellationToken stoppingToken)
@@ -138,6 +141,12 @@ public sealed class QueueSchedulerService : BackgroundService
         var interval = TimeSpan.FromSeconds(settings.EffectiveTickSeconds);
 
         await ResolveFinishedItemsAsync(cancellationToken).ConfigureAwait(false);
+
+        // The lifecycle advance runs BETWEEN done detection and the launch decision, and both
+        // orderings matter (#1934 slice 2). After resolve, because it acts on items resolve has just
+        // moved out of `launched`; before Decide, because an item it queues for its next round is a
+        // candidate this same tick rather than one tick later.
+        await AdvanceWorkItemsAsync(cancellationToken).ConfigureAwait(false);
 
         var snapshot = await QueueStore.LoadAsync(BatonPaths.QueueFile, cancellationToken).ConfigureAwait(false);
         var now = _now();
@@ -258,6 +267,40 @@ public sealed class QueueSchedulerService : BackgroundService
             CancellationToken.None).ConfigureAwait(false);
 
         return interval;
+    }
+
+    /// <summary>
+    /// Advances every settled work item one stage (#1934 slice 2) and records one fact per transition.
+    /// </summary>
+    /// <remarks>
+    /// <b>A failure here does not stop the tick.</b> The advance reads <c>gh</c> and a worktree — two
+    /// things that can be missing on a machine whose queue is otherwise fine — and letting that unwind
+    /// into <see cref="TickOnceAsync"/>'s catch-all would stop the scheduler launching anything at all.
+    /// Logged and recorded as a failed decision, never swallowed silently.
+    /// </remarks>
+    internal async Task AdvanceWorkItemsAsync(CancellationToken cancellationToken)
+    {
+        IReadOnlyList<QueueDecisionEntry> facts;
+        try
+        {
+            facts = await _advancer.AdvanceAsync(_now(), cancellationToken).ConfigureAwait(false);
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException || !cancellationToken.IsCancellationRequested)
+        {
+            Console.Error.WriteLine($"QueueSchedulerService: advancing work items failed: {ex.Message}");
+            await RecordAsync(
+                new QueueDecisionEntry(
+                    _now(), null, QueueDecisionEntry.Failed,
+                    $"the work-item advance failed, so no item changed stage this tick: {ex.Message}",
+                    LiveWeight: 0, FreeGb: null, FloorGb: 0),
+                CancellationToken.None).ConfigureAwait(false);
+            return;
+        }
+
+        foreach (var fact in facts)
+        {
+            await RecordAsync(fact, cancellationToken).ConfigureAwait(false);
+        }
     }
 
     /// <summary>
@@ -398,10 +441,12 @@ public sealed class QueueSchedulerService : BackgroundService
     /// <b>The room's own outcome word decides, in the same vocabulary the projector emits</b> —
     /// <see cref="WorkflowOutcome"/>'s constants, which <c>WorkflowStatusProjector</c> and
     /// <see cref="TerminalSentinelWriter.WriteValidationRefusedAsync"/> are the only producers of.
-    /// Only the two SUCCEEDED-shaped words — <see cref="WorkflowOutcome.Succeeded"/> and (#1945)
-    /// <see cref="WorkflowOutcome.FinishedDuringTeardown"/> — are <see cref="QueueItemState.Done"/>;
-    /// every other word is a failure carrying that word. spec/baton.md §13 has the ruling and what
-    /// reading the step list or <see cref="WorkflowStatusView.Error"/> instead cost.
+    /// The succeeded-shaped words are <see cref="QueueItemState.Done"/> and every other word is a
+    /// failure carrying that word. <b>Which words those are is asked of
+    /// <see cref="WorkflowOutcome.IsSucceededShaped"/>, never spelled here</b>: a consumer that spells
+    /// the membership itself is one that silently stops honouring it the day a third word is added.
+    /// What reading the step list or <see cref="WorkflowStatusView.Error"/> instead cost is in
+    /// spec/baton.md §13, with the ruling.
     /// </para>
     /// <para>
     /// <b>Fails closed on a word this assembly does not know</b>, including the null a hand-written
@@ -424,14 +469,19 @@ public sealed class QueueSchedulerService : BackgroundService
     {
         ArgumentNullException.ThrowIfNull(sentinel);
 
+        // Above the switch because a switch expression cannot call a predicate in a case pattern, and
+        // the predicate is the point: #1945's FinishedDuringTeardown is Done beside Succeeded — the
+        // room finished inside its box, its work is on the remote, and the timeout kill landed after
+        // that push — but naming the two words here is what WorkflowOutcome.IsSucceededShaped exists
+        // to stop.
+        if (WorkflowOutcome.IsSucceededShaped(sentinel.State))
+        {
+            return (QueueItemState.Done, null);
+        }
+
         var detail = sentinel.Error is { Length: > 0 } error ? $": {error}" : string.Empty;
         return sentinel.State switch
         {
-            WorkflowOutcome.Succeeded => (QueueItemState.Done, null),
-            // #1945: Done, beside Succeeded — the room finished inside its box, its work is on the
-            // remote, and the timeout kill landed after that push. Failing it here would leave the conductor doing exactly
-            // the manual worktree-and-remote inspection the new word exists to remove.
-            WorkflowOutcome.FinishedDuringTeardown => (QueueItemState.Done, null),
             WorkflowOutcome.Indeterminate => (QueueItemState.Failed,
                 $"room {roomDirectory} settled indeterminate{detail} — resolve it with 'baton resolve' and "
                 + "redispatch if you want it redone"),

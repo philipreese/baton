@@ -3,14 +3,23 @@ using System.Text.Json.Serialization;
 namespace Baton.Queue;
 
 /// <summary>
-/// One dispatch request in the conductor's queue (#1934 slice 1, Q2 answer (a)): a spec plus the
-/// parameters <c>baton dispatch</c> needs, and the state the scheduler has moved it through.
+/// One item in the conductor's queue, in either of the two shapes spec/baton.md §13 defines — a
+/// slice-1 dispatch request, or a slice-2 issue-anchored work item, which is the same record plus the
+/// lifecycle fields below.
 /// </summary>
 /// <remarks>
-/// <b>Deliberately not an issue-anchored work item</b> (Q2; spec/baton.md §13). The rule this puts on
-/// whoever edits this record: a field belongs here only if something in slice 1 reads or writes it.
-/// A field carrying a lifecycle no code advances reads to every consumer as a capability the product
-/// has.
+/// <para>
+/// <b><see cref="Stage"/> is the discriminator, and it is null for a dispatch request.</b> There is no
+/// second "kind" field: two fields answering one question is two answers to disagree with each other,
+/// and every reader that cares asks the same one — <c>Stage is null</c> means the operator asked for
+/// exactly one lane and the queue advances nothing.
+/// </para>
+/// <para>
+/// The rule this puts on whoever edits this record, unchanged from slice 1 and now satisfied rather
+/// than avoided: a field belongs here only if something reads or writes it. A field carrying a
+/// lifecycle no code advances reads to every consumer as a capability the product has —
+/// <c>WorkItemLifecycle</c> is the code that advances these.
+/// </para>
 /// </remarks>
 public sealed record QueueItem
 {
@@ -50,8 +59,53 @@ public sealed record QueueItem
     public string? Reason { get; init; }
 
     /// <summary>The GitHub issue this item's worktree was provisioned from, when it was. Recorded so
-    /// the room can be traced back; slice 1 derives no dispatch from it.</summary>
+    /// the room can be traced back; a work item (<see cref="Stage"/> non-null) is <em>anchored</em> on
+    /// it — every brief it renders and every PR it looks for is that issue's.</summary>
     public int? Issue { get; init; }
+
+    /// <summary>
+    /// Where this item is in the lifecycle, or <see langword="null"/> for a slice-1 dispatch request —
+    /// see this record's own remarks for why that null is the whole discriminator.
+    /// </summary>
+    public WorkStage? Stage { get; init; }
+
+    /// <summary>
+    /// The lane's branch — <c>&lt;issue&gt;-lane</c>, what <c>IssueWorktreeProvisioner</c> created.
+    /// Recorded rather than re-derived at read time so an item whose branch was renamed by hand still
+    /// says which branch its PR was looked for on.
+    /// </summary>
+    public string? Branch { get; init; }
+
+    /// <summary>The pull request the lifecycle is tracking, once one is open on <see cref="Branch"/>.</summary>
+    public int? PullRequest { get; init; }
+
+    /// <summary>
+    /// The verdict the last review produced, as an absolute path to that room's <c>verdict.json</c>.
+    /// <b>Recorded, never inlined into the next brief from here</b> — the brief carries the findings'
+    /// text, and spec/baton.md §13 says why a room path must not travel into one.
+    /// </summary>
+    public string? LastVerdict { get; init; }
+
+    /// <summary>
+    /// How many rounds the queue has run for this item: 0 at add time, and <c>WorkItemLifecycle</c>
+    /// raises it whenever it queues another, whatever the stage (spec/baton.md §13 has the counting rule
+    /// and why it is not per-fix). Names nothing on disk; it is what a brief's header and the transition
+    /// fact print, and what <see cref="WorkStages.MaxRounds"/> bounds.
+    /// </summary>
+    public int Round { get; init; }
+
+    /// <summary>
+    /// The issue's own instructions — the text that became the implement brief's "## Do" section,
+    /// captured once at add time.
+    /// </summary>
+    /// <remarks>
+    /// <b>Kept on the item rather than re-read from the brief.</b> <see cref="SpecFile"/> is REWRITTEN
+    /// every round, so parsing "## Do" back out of it returns the fix brief's own instructions from
+    /// round 2 onward — the issue's would survive exactly one round, and a continuation would be handed
+    /// "address each finding above" as if it were the work. Absent on an imported item and on every
+    /// item added before this field existed; a continuation renders without it rather than failing.
+    /// </remarks>
+    public string? Instructions { get; init; }
 
     /// <summary>The directory the worker runs in. Always set by the time an item is queued — an
     /// <c>--issue</c> item gets it from the worktree provisioned at add time.</summary>
@@ -75,6 +129,23 @@ public sealed record QueueItem
     public string? Error { get; init; }
 
     /// <summary>
+    /// True once the lifecycle has failed this work item with a reason a person has to act on —
+    /// <c>WorkItemLifecycle</c>'s <c>NeedsOperator</c> arms, including the
+    /// <see cref="WorkStages.MaxRounds"/> ceiling. <b>The flag the advance's candidate filter reads.</b>
+    /// </summary>
+    /// <remarks>
+    /// Distinct from <see cref="QueueItemState.Failed"/> deliberately: a room that settled badly leaves
+    /// the item failed too, and THAT item is exactly the one the advance still has to read (it is how a
+    /// timed-out lane reaches its continue round). Without a flag telling the two apart, an item the
+    /// queue had already given up on matched the candidate filter on every tick forever — same stage,
+    /// same failed state, same recorded room — re-spawning <c>gh</c> and <c>git</c> and rewriting
+    /// <c>queue.json</c> each time, and invisibly, for the reason spec/baton.md §13 gives (#2004
+    /// review). Nothing in the product clears it: see <c>WorkItemLifecycle</c>'s recovery
+    /// sentence, which says so to the operator rather than promising a verb that does not exist.
+    /// </remarks>
+    public bool Halted { get; init; }
+
+    /// <summary>
     /// True for an item the operator ran outside baton and recorded here only so its weight counts.
     /// Imported from the scratchpad shape's own <c>external</c> flag; never launched by the scheduler.
     /// </summary>
@@ -90,7 +161,12 @@ public sealed record QueueItem
     public bool PinModel { get; init; }
 }
 
-/// <summary>Where an item is. Four states, no lifecycle — see <see cref="QueueItem"/>'s remarks.</summary>
+/// <summary>
+/// Where an item is with respect to <em>launching</em>. Four states, and deliberately still four: the
+/// lifecycle a work item moves through is <see cref="WorkStage"/>, a separate axis, because "queued"
+/// and "fix round 2" are answers to different questions and folding them into one enum would make
+/// every state check ask both.
+/// </summary>
 [JsonConverter(typeof(JsonStringEnumConverter<QueueItemState>))]
 public enum QueueItemState
 {

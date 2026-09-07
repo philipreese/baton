@@ -36,6 +36,13 @@ public enum QueueVerb
 /// <param name="OverrideRunwayReason">Forwarded as <c>baton dispatch --override-runway</c>; the reason is mandatory when the flag is used.</param>
 /// <param name="Reason">Why the item's axes differ from its tier. Mandatory when any of adapter/model/effort is set alongside a scope class.</param>
 /// <param name="ImportFilePath">The scratchpad <c>queue.json</c> to import, for <see cref="QueueVerb.Import"/>.</param>
+/// <param name="Lifecycle">
+/// <c>--lifecycle</c> (#1934 slice 2): add an issue-anchored WORK ITEM rather than a single dispatch
+/// request — one the scheduler advances through implement → review → fix → re-review from the PR's and
+/// the verdict's state. <b>This flag is the one spelling of that choice</b>; there is no
+/// <c>--kind work</c> alias, because two ways to say one thing is one of them going stale. Requires
+/// <c>--issue</c>, refuses <c>--role</c> (the stage picks it), and makes <c>--spec</c> optional.
+/// </param>
 public sealed record QueueOptions(
     QueueVerb Verb,
     string? Tag = null,
@@ -52,4 +59,5 @@ public sealed record QueueOptions(
     long? TokenBudget = null,
     string? OverrideRunwayReason = null,
     string? Reason = null,
-    string? ImportFilePath = null);
+    string? ImportFilePath = null,
+    bool Lifecycle = false);

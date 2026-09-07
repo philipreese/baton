@@ -13,7 +13,7 @@ internal static class ModelWrittenVerdictFixture
 {
     internal const string Json =
         """
-        {"reviewedRef": "1882-lane", "summary": "all good", "findings": [],
+        {"reviewedRef": "1882-lane", "decision": "approve", "summary": "all good", "findings": [],
          "instruments": [{"command": "dotnet test", "exitCode": 0, "wallClockMs": 91002}]}
         """;
 

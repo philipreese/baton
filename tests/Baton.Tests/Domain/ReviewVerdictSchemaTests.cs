@@ -37,6 +37,60 @@ public class ReviewVerdictSchemaTests
         Assert.Null(verdict.Findings[1].Anchor);
     }
 
+    [Theory]
+    [InlineData(@"""decision"": ""approve"",", ReviewDecision.Approve)]
+    [InlineData(@"""decision"": ""BLOCK"",", ReviewDecision.Block)]
+    // Everything a reviewer might write that is not one of the two words, each landing on null rather
+    // than on an exception that would cost the whole document: a near-miss word, a shape that is not a
+    // string at all, an explicit null, and the field simply absent.
+    [InlineData(@"""decision"": ""approved"",", null)]
+    [InlineData(@"""decision"": true,", null)]
+    [InlineData(@"""decision"": {""value"": ""block""},", null)]
+    [InlineData(@"""decision"": null,", null)]
+    [InlineData("", null)]
+    public void A_decision_this_enum_does_not_have_reads_as_absent_and_never_loses_the_document(
+        string decisionField, ReviewDecision? expected)
+    {
+        var bytes = Encoding.UTF8.GetBytes($$"""{"reviewedRef": "main", {{decisionField}} "findings": []}""");
+
+        Assert.True(ReviewVerdictSchema.TryParse(bytes, out var verdict, out var error));
+        Assert.Null(error);
+        Assert.Equal(expected, verdict!.Decision);
+    }
+
+    /// <summary>
+    /// There is ONE parse, and a missing <c>decision</c> does not fail it (operator ruling,
+    /// spec/baton.md §13). The field is optional on the wire and required only by the conductor
+    /// queue's <c>WorkItemLifecycle</c>, which reads the null this leaves behind.
+    /// </summary>
+    /// <remarks>
+    /// Asserted with its findings intact, because "the document still reads" is the whole reason the
+    /// requirement does not live here: the cost ledger's counts and <c>baton watch</c>'s payload read
+    /// every verdict written before this field existed. The control is the with-decision document
+    /// below — same fixture, one field added — so the null above is about the absent field rather than
+    /// about a parse that never populates it.
+    /// </remarks>
+    [Fact]
+    public void A_verdict_with_no_decision_parses_with_its_findings_intact_and_a_null_decision()
+    {
+        var withoutDecision = Encoding.UTF8.GetBytes(
+            """{"reviewedRef": "main", "findings": [{"severity": "high", "claim": "x", "status": "confirmed"}]}""");
+
+        Assert.True(ReviewVerdictSchema.TryParse(withoutDecision, out var parsed, out var error));
+        Assert.Null(error);
+        Assert.Single(parsed!.Findings);
+        Assert.Null(parsed.Decision);
+
+        var withDecision = Encoding.UTF8.GetBytes(
+            """
+            {"reviewedRef": "main", "decision": "approve",
+             "findings": [{"severity": "high", "claim": "x", "status": "confirmed"}]}
+            """);
+
+        Assert.True(ReviewVerdictSchema.TryParse(withDecision, out var accepted, out _));
+        Assert.Equal(ReviewDecision.Approve, accepted!.Decision);
+    }
+
     [Fact]
     public void An_empty_findings_array_is_a_valid_verdict_meaning_nothing_was_found()
     {
@@ -120,12 +174,17 @@ public class ReviewVerdictSchemaTests
         var original = new ReviewVerdict(
             "main",
             [new ReviewFinding(ReviewFindingSeverity.Low, "x", ReviewFindingStatus.Confirmed)],
-            Instruments: [new VerifyInstrument("dotnet build", 0, 34300), new VerifyInstrument("dotnet test", null, 91002)]);
+            Instruments: [new VerifyInstrument("dotnet build", 0, 34300), new VerifyInstrument("dotnet test", null, 91002)],
+            Decision: ReviewDecision.Block);
 
         var bytes = Encoding.UTF8.GetBytes(JsonSerializer.Serialize(original));
 
         Assert.True(ReviewVerdictSchema.TryParse(bytes, out var verdict, out _));
         Assert.Equal(original.Instruments, verdict!.Instruments);
+
+        // The decision converter's write half, for the same reason: it is the only thing that renders
+        // the enum as the lower-case word the contract reads back, and a round trip is what runs it.
+        Assert.Equal(ReviewDecision.Block, verdict.Decision);
     }
 
     /// <summary>

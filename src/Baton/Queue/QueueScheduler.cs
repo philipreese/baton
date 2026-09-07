@@ -59,7 +59,11 @@ public static class QueueScheduler
             return QueueDecision.Wait(QueueWaitReason.Hold, null, liveWeight, freeGb, floorGb);
         }
 
-        var candidate = items.FirstOrDefault(i => i.State == QueueItemState.Queued && !i.External);
+        // The `ready` exclusion is HERE rather than left to the advancer that sets the stage (#1934
+        // slice 2). This is the only function that picks a candidate, so a guard anywhere else would
+        // be a second reader of the same rule with the launch still coming through this one.
+        var candidate = items.FirstOrDefault(i =>
+            i.State == QueueItemState.Queued && !i.External && !IsReady(i));
         if (candidate is null)
         {
             return QueueDecision.Wait(QueueWaitReason.NoItems, null, liveWeight, freeGb, floorGb);
@@ -88,6 +92,14 @@ public static class QueueScheduler
 
         return new QueueDecision(QueueDecisionKind.Launch, null, candidate, liveWeight, freeGb, floorGb);
     }
+
+    /// <summary>
+    /// A work item the reviewer approved. <b>Never launched</b>: spec/baton.md §13's "the queue records
+    /// ready and does nothing until the conductor merges or resolves it". A stage-less dispatch request
+    /// can never be one, which is why this is a stage read and not a state read.
+    /// </summary>
+    private static bool IsReady(QueueItem item) =>
+        item.Stage is { } stage && WorkStages.IsTerminal(stage);
 }
 
 /// <summary>What <see cref="QueueScheduler.Decide"/> concluded.</summary>

@@ -42,8 +42,8 @@ public static class QueueCommand
         QueueOptions options, TextWriter output, string? repositoryDirectory, CancellationToken cancellationToken)
     {
         var tag = options.Tag!;
-        var specSource = options.SpecFilePath!;
-        if (!File.Exists(specSource))
+        var specSource = options.SpecFilePath;
+        if (specSource is not null && !File.Exists(specSource))
         {
             throw new CliArgumentException(
                 $"Spec file '{specSource}' does not exist.",
@@ -55,7 +55,7 @@ public static class QueueCommand
         // would otherwise already have replaced the running lane's brief by the time the refusal was
         // raised, which is the exact record that refusal exists to protect. This read is the early
         // half; the mutate re-checks under the file lock, which is where the authority stays.
-        RefuseIfLaunched(
+        RefuseIfNotReplaceable(
             (await QueueStore.LoadAsync(BatonPaths.QueueFile, cancellationToken).ConfigureAwait(false))
                 .Items.FirstOrDefault(i => string.Equals(i.Tag, tag, StringComparison.Ordinal)),
             tag);
@@ -84,7 +84,6 @@ public static class QueueCommand
         // file had become is the failure this copy exists to stop.
         Directory.CreateDirectory(BatonPaths.QueueSpecsDirectory);
         var specDestination = BatonPaths.QueueSpecFile(tag);
-        File.Copy(specSource, specDestination, overwrite: true);
 
         var item = new QueueItem
         {
@@ -102,8 +101,37 @@ public static class QueueCommand
             OverrideRunwayReason = options.OverrideRunwayReason,
             Reason = options.Reason,
             Issue = options.Issue,
+            Stage = options.Lifecycle ? WorkStage.Implement : null,
+            Branch = options.Lifecycle ? IssueWorktreeProvisioner.BranchNameFor(options.Issue!.Value) : null,
             AddedAt = DateTimeOffset.UtcNow,
         };
+
+        if (options.Lifecycle)
+        {
+            // The templates are the product (operator ruling 2026-09-06): a work item's brief is
+            // RENDERED here, not written by hand and copied. A --spec is still honoured -- its text
+            // becomes the template's "## Do" section -- so an operator who has already written the
+            // instructions keeps them, and gets the standing rules and the ship block for free.
+            var (title, body) = specSource is null
+                ? await IssueWorktreeProvisioner.FetchIssueAsync(
+                    options.Issue!.Value, repositoryDirectory ?? Directory.GetCurrentDirectory(),
+                    cancellationToken: cancellationToken).ConfigureAwait(false)
+                : ($"Implement #{options.Issue}", await File.ReadAllTextAsync(specSource, cancellationToken).ConfigureAwait(false));
+
+            // Captured on the ITEM as well as rendered into the brief -- QueueItem.Instructions' own
+            // remarks say why the brief cannot be the register for this.
+            item = item with { Instructions = body.Trim() };
+
+            await File.WriteAllTextAsync(
+                specDestination,
+                QueueBriefTemplates.Compose(
+                    WorkStage.Implement, item, new QueueBriefTemplates.BriefContext(Title: title, Do: body.Trim())),
+                cancellationToken).ConfigureAwait(false);
+        }
+        else
+        {
+            File.Copy(specSource!, specDestination, overwrite: true);
+        }
 
         var replaced = false;
         await QueueStore.MutateAsync(BatonPaths.QueueFile, snapshot =>
@@ -113,7 +141,7 @@ public static class QueueCommand
             // operator is editing their list); re-adding one that has LAUNCHED is refused, because the
             // running lane's own record would be overwritten.
             var existing = snapshot.Items.FirstOrDefault(i => string.Equals(i.Tag, tag, StringComparison.Ordinal));
-            RefuseIfLaunched(existing, tag);
+            RefuseIfNotReplaceable(existing, tag);
 
             replaced = existing is not null;
             var items = snapshot.Items.Where(i => !string.Equals(i.Tag, tag, StringComparison.Ordinal)).ToList();
@@ -135,10 +163,18 @@ public static class QueueCommand
     }
 
     /// <summary>
-    /// The one refusal `add` makes twice — once before it touches anything, once under the file lock.
-    /// One method so the two can never word it differently.
+    /// Every refusal `add` makes twice — once before it touches anything, once under the file lock.
+    /// One method so the two can never word them differently.
     /// </summary>
-    private static void RefuseIfLaunched(QueueItem? existing, string tag)
+    /// <remarks>
+    /// <b>The second refusal is slice 2's</b> (#1934). A work item's tag defaults to <c>&lt;n&gt;-lane</c>,
+    /// so re-running the same <c>--lifecycle</c> add is an ordinary thing to type — and without this it
+    /// would replace an item at <c>fix</c> round 3 with a fresh <c>implement</c> round 0 and overwrite
+    /// its rendered brief, silently discarding the rounds and the findings that produced them. The
+    /// launched-tag refusal does not cover it: an item between rounds is <em>queued</em>, not launched.
+    /// An item still at <c>implement</c> is left replaceable, because there is no history to lose.
+    /// </remarks>
+    private static void RefuseIfNotReplaceable(QueueItem? existing, string tag)
     {
         if (existing is { State: QueueItemState.Launched })
         {
@@ -146,6 +182,15 @@ public static class QueueCommand
                 $"Item '{tag}' is already launched into room '{existing.RoomDirectory}'. Re-adding it would "
                 + "overwrite that lane's record.",
                 "pick a different tag, or wait for the lane to settle.");
+        }
+
+        if (existing?.Stage is { } stage && stage != WorkStage.Implement)
+        {
+            throw new CliArgumentException(
+                $"Item '{tag}' is a work item at stage '{WorkStages.Token(stage)}' (round {existing.Round}). "
+                + "Re-adding it would reset it to implement round 0 and overwrite the brief its next round "
+                + "runs, losing the reviewer's findings.",
+                "let the daemon advance it, or pick a different tag if this is genuinely new work.");
         }
     }
 
@@ -167,10 +212,23 @@ public static class QueueCommand
 
         foreach (var item in snapshot.Items)
         {
-            var state = item.State.ToString().ToLowerInvariant();
+            // `halted` in the status column: an item the queue has given up on and one that merely
+            // failed its lane and is still an advance candidate otherwise print identically, and
+            // halted is precisely the fact that tells the operator they must act — nothing in the
+            // product clears it (QueueItem.Halted).
+            var state = item.State.ToString().ToLowerInvariant() + (item.Halted ? " halted" : string.Empty);
             var where = item.RoomDirectory is { Length: > 0 } room ? $"  room: {room}" : string.Empty;
             var external = item.External ? "  (external — counted, never launched)" : string.Empty;
-            output.WriteLine($"{item.Tag}  {state}  {item.Role}{external}{where}");
+
+            // The stage, when there is one. A slice-1 dispatch request prints exactly what it printed
+            // before -- the absence of a stage is the absence of a lifecycle, and inventing a word for
+            // it ("none", "single") would read as a stage the product has.
+            var stage = item.Stage is { } workStage
+                ? $"  stage: {WorkStages.Token(workStage)}"
+                    + (item.Round > 0 ? $" (round {item.Round})" : string.Empty)
+                    + (item.PullRequest is { } pr ? $"  PR #{pr}" : string.Empty)
+                : string.Empty;
+            output.WriteLine($"{item.Tag}  {state}  {item.Role}{stage}{external}{where}");
             if (item.Error is { Length: > 0 } error)
             {
                 output.WriteLine($"  error: {error}");

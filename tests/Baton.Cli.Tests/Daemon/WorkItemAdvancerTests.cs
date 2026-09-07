@@ -1,0 +1,450 @@
+using Baton.Cli.Daemon;
+using Baton.Queue;
+using Baton.Status;
+using Baton.Tests.Shared;
+using Xunit;
+
+namespace Baton.Cli.Tests.Daemon;
+
+/// <summary>
+/// The four transitions #1934 slice 2 encodes, driven end to end against a FIXTURE ROOM — a real
+/// <c>terminal.json</c> and a real <c>verdict.json</c> on disk — with <c>gh</c> and <c>git</c> as
+/// delegates, so nothing here spawns a process or reaches the network.
+/// </summary>
+/// <remarks>
+/// Isolated by <c>BatonEnvironmentSnapshot.BeginScope</c> the way <c>QueueCommandTests</c> is, and
+/// torn down through <see cref="DirectoryCleanup"/>.
+/// </remarks>
+public sealed class WorkItemAdvancerTests
+{
+    private static CancellationToken Ct => TestContext.Current.CancellationToken;
+
+    private static readonly DateTimeOffset Now = new(2026, 9, 6, 12, 0, 0, TimeSpan.Zero);
+
+    private const string PushedSha = "aaaaaaaabbbbbbbbccccccccdddddddd";
+
+    private sealed class FakeGh(string stdout, int exitCode = 0) : IGhCliRunner
+    {
+        public Task<GhCliResult> RunAsync(
+            string workingDirectory, IReadOnlyList<string> args, CancellationToken cancellationToken) =>
+            Task.FromResult(new GhCliResult(Started: true, exitCode, stdout, string.Empty));
+    }
+
+    private static string PrJson(int number, string headSha) =>
+        $$"""{"number":{{number}},"headRefOid":"{{headSha}}","mergeStateStatus":"CLEAN"}""";
+
+    /// <summary>
+    /// A blocking verdict whose blocking-ness is its <c>decision</c> and nothing else. The finding is
+    /// a MEDIUM one on purpose — the deleted predicate would have advanced this PR to <c>ready</c>
+    /// (spec/baton.md §13).
+    /// </summary>
+    private const string BlockingVerdict = """
+        {"reviewedRef":"PR #77","decision":"block","summary":"one blocker","findings":[
+          {"claim":"the guard is never reached","severity":"medium","status":"confirmed",
+           "anchor":{"file":"src/Baton/Queue/QueueScheduler.cs","line":62},"detail":"Decide returns first"}]}
+        """;
+
+    /// <summary>The polarity partner, and crossed the other way: two CONFIRMED HIGHS the reviewer
+    /// nonetheless approved.</summary>
+    private const string ApprovingVerdict = """
+        {"reviewedRef":"PR #77","decision":"approve","summary":"nothing blocking","findings":[
+          {"claim":"a real one, already fixed on the branch","severity":"high","status":"confirmed"},
+          {"claim":"another","severity":"high","status":"confirmed"}]}
+        """;
+
+    /// <summary>A readable verdict the reviewer left no decision on — the arm that has to reach a
+    /// person rather than being guessed from the two confirmed highs in it.</summary>
+    private const string DecisionlessVerdict = """
+        {"reviewedRef":"PR #77","summary":"I could not decide","findings":[
+          {"claim":"maybe a problem","severity":"high","status":"confirmed"}]}
+        """;
+
+    /// <summary>Writes a settled room: the sentinel plus, when asked, the verdict the sentinel's own
+    /// <c>outputs</c> point at — the same path <c>WatchFireService</c> reads one from.</summary>
+    private static async Task<string> WriteSettledRoomAsync(string home, string outcome, string? verdictJson)
+    {
+        var room = Path.Combine(home, "rooms", "queue-1934-lane-" + Guid.NewGuid().ToString("n")[..8]);
+        Directory.CreateDirectory(room);
+
+        var outputs = new List<string>();
+        if (verdictJson is not null)
+        {
+            var verdictPath = Path.Combine(room, "verdict.json");
+            await File.WriteAllTextAsync(verdictPath, verdictJson, Ct);
+            outputs.Add(verdictPath);
+        }
+
+        await TerminalSentinelWriter.WriteAsync(room, new WorkflowStatusView(outcome, [], outputs, null), Ct);
+        return room;
+    }
+
+    private static async Task<QueueItem> SeedAsync(
+        string home, WorkStage stage, string room, QueueItemState state = QueueItemState.Done, int round = 0)
+    {
+        var workspace = Path.Combine(home, "w1934");
+        Directory.CreateDirectory(workspace);
+        Directory.CreateDirectory(BatonPaths.QueueSpecsDirectory);
+        await File.WriteAllTextAsync(
+            BatonPaths.QueueSpecFile("1934-lane"),
+            "# Implement #1934\n\n## Do\n\nBuild the lifecycle.\n\n## Standing rules\n\nbuildlock.\n", Ct);
+
+        var item = new QueueItem
+        {
+            Tag = "1934-lane",
+            Role = WorkStages.RoleFor(stage),
+            Workspace = workspace,
+            SpecFile = BatonPaths.QueueSpecFile("1934-lane"),
+            Issue = 1934,
+            Branch = "1934-lane",
+            Stage = stage,
+            Round = round,
+            State = state,
+            RoomDirectory = room,
+            Instructions = "Build the lifecycle.",
+        };
+
+        await QueueStore.MutateAsync(BatonPaths.QueueFile, s => s with { Items = [item] }, Ct);
+        return item;
+    }
+
+    private static async Task<QueueItem> ReadBackAsync() =>
+        (await QueueStore.LoadAsync(BatonPaths.QueueFile, Ct)).Items.Single();
+
+    private static string CreateTempHome()
+    {
+        var home = Path.Combine(Path.GetTempPath(), "baton_advancer_" + Guid.NewGuid().ToString("n"));
+        Directory.CreateDirectory(home);
+        return home;
+    }
+
+    [Fact]
+    public async Task A_succeeded_implement_lane_with_an_open_pr_is_queued_for_review()
+    {
+        var home = CreateTempHome();
+        using var scope = BatonEnvironmentSnapshot.BeginScope(BatonEnvironmentSnapshot.Blank with { HomeOverride = home });
+        try
+        {
+            var room = await WriteSettledRoomAsync(home, WorkflowOutcome.Succeeded, verdictJson: null);
+            await SeedAsync(home, WorkStage.Implement, room);
+
+            var facts = await new WorkItemAdvancer(new FakeGh(PrJson(77, PushedSha)), (_, _) => Task.FromResult<string?>(PushedSha))
+                .AdvanceAsync(Now, Ct);
+
+            var item = await ReadBackAsync();
+            Assert.Equal(WorkStage.Review, item.Stage);
+            Assert.Equal("review", item.Role);
+            Assert.Equal(QueueItemState.Queued, item.State);
+            Assert.Equal(77, item.PullRequest);
+            Assert.Null(item.RoomDirectory);
+
+            var fact = Assert.Single(facts);
+            Assert.Equal(QueueDecisionEntry.Advanced, fact.Decision);
+            Assert.Contains("implement → review", fact.Reason!, StringComparison.Ordinal);
+            Assert.Equal(room, fact.Room);
+        }
+        finally
+        {
+            DirectoryCleanup.DeleteRecursively(home);
+        }
+    }
+
+    [Fact]
+    public async Task A_blocking_verdict_queues_a_fix_round_whose_brief_carries_the_findings_and_no_room_path()
+    {
+        var home = CreateTempHome();
+        using var scope = BatonEnvironmentSnapshot.BeginScope(BatonEnvironmentSnapshot.Blank with { HomeOverride = home });
+        try
+        {
+            var room = await WriteSettledRoomAsync(home, WorkflowOutcome.Succeeded, BlockingVerdict);
+            await SeedAsync(home, WorkStage.Review, room);
+
+            var facts = await new WorkItemAdvancer(new FakeGh(PrJson(77, PushedSha)), (_, _) => Task.FromResult<string?>(PushedSha))
+                .AdvanceAsync(Now, Ct);
+
+            var item = await ReadBackAsync();
+            Assert.Equal(WorkStage.Fix, item.Stage);
+            Assert.Equal("implement", item.Role);
+            Assert.Equal(1, item.Round);
+            Assert.Equal(Path.Combine(room, "verdict.json"), item.LastVerdict);
+
+            var brief = await File.ReadAllTextAsync(item.SpecFile, Ct);
+            Assert.Contains("Fix round for PR #77", brief, StringComparison.Ordinal);
+            Assert.Contains("the guard is never reached", brief, StringComparison.Ordinal);
+            Assert.Contains("Decide returns first", brief, StringComparison.Ordinal);
+
+            // The findings travel as text; the room they came from must not (spec/baton.md §13). The
+            // room path is recorded on the ITEM instead, asserted above — which is also the control
+            // that this assertion is not passing because the room path is nowhere at all.
+            Assert.DoesNotContain(room, brief, StringComparison.OrdinalIgnoreCase);
+
+            Assert.Contains("review → fix", Assert.Single(facts).Reason!, StringComparison.Ordinal);
+        }
+        finally
+        {
+            DirectoryCleanup.DeleteRecursively(home);
+        }
+    }
+
+    [Fact]
+    public async Task An_approving_verdict_makes_the_item_ready_and_it_is_never_dispatched_again()
+    {
+        var home = CreateTempHome();
+        using var scope = BatonEnvironmentSnapshot.BeginScope(BatonEnvironmentSnapshot.Blank with { HomeOverride = home });
+        try
+        {
+            var room = await WriteSettledRoomAsync(home, WorkflowOutcome.Succeeded, ApprovingVerdict);
+            await SeedAsync(home, WorkStage.Review, room);
+            var advancer = new WorkItemAdvancer(
+                new FakeGh(PrJson(77, PushedSha)), (_, _) => Task.FromResult<string?>(PushedSha));
+
+            var facts = await advancer.AdvanceAsync(Now, Ct);
+
+            var item = await ReadBackAsync();
+            Assert.Equal(WorkStage.Ready, item.Stage);
+            Assert.Contains("approved", Assert.Single(facts).Reason!, StringComparison.Ordinal);
+
+            // The scheduler is what refuses to launch it (QueueSchedulerTests pins that arm); what this
+            // arm pins is the other half — the advancer never moves it on, so a ready item cannot walk
+            // itself into another round on the next tick.
+            var again = await advancer.AdvanceAsync(Now.AddMinutes(1), Ct);
+            Assert.Empty(again);
+            Assert.Equal(WorkStage.Ready, (await ReadBackAsync()).Stage);
+        }
+        finally
+        {
+            DirectoryCleanup.DeleteRecursively(home);
+        }
+    }
+
+    [Fact]
+    public async Task A_readable_verdict_with_no_decision_reaches_the_operator_rather_than_a_guess()
+    {
+        var home = CreateTempHome();
+        using var scope = BatonEnvironmentSnapshot.BeginScope(BatonEnvironmentSnapshot.Blank with { HomeOverride = home });
+        try
+        {
+            // Same room shape as the blocking and approving arms above; the ONE thing that differs is
+            // the verdict's `decision`, so this measures that field and not a broken room.
+            var room = await WriteSettledRoomAsync(home, WorkflowOutcome.Succeeded, DecisionlessVerdict);
+            await SeedAsync(home, WorkStage.Review, room);
+
+            var fact = Assert.Single(await new WorkItemAdvancer(
+                new FakeGh(PrJson(77, PushedSha)), (_, _) => Task.FromResult<string?>(PushedSha)).AdvanceAsync(Now, Ct));
+
+            var item = await ReadBackAsync();
+            Assert.Equal(QueueDecisionEntry.Failed, fact.Decision);
+            Assert.Equal(QueueItemState.Failed, item.State);
+            Assert.True(item.Halted);
+            Assert.Equal(WorkStage.Review, item.Stage);
+            Assert.Contains("carries no decision", item.Error!, StringComparison.Ordinal);
+        }
+        finally
+        {
+            DirectoryCleanup.DeleteRecursively(home);
+        }
+    }
+
+    [Fact]
+    public async Task A_re_review_after_a_fix_lane_carries_the_last_reviews_findings_not_an_empty_section()
+    {
+        var home = CreateTempHome();
+        using var scope = BatonEnvironmentSnapshot.BeginScope(BatonEnvironmentSnapshot.Blank with { HomeOverride = home });
+        try
+        {
+            // The whole chain, because the defect only appears at the end of it (#2004 review round 1):
+            // implement → review(block) → fix → re-review. A FIX room writes no verdict, so a re-review
+            // rendered from the room that just settled says "(no findings were recorded)" and then asks
+            // the reviewer whether the new head closes findings it was never shown.
+            var reviewRoom = await WriteSettledRoomAsync(home, WorkflowOutcome.Succeeded, BlockingVerdict);
+            await SeedAsync(home, WorkStage.Review, reviewRoom, round: 1);
+
+            var advancer = new WorkItemAdvancer(
+                new FakeGh(PrJson(77, PushedSha)), (_, _) => Task.FromResult<string?>(PushedSha));
+            await advancer.AdvanceAsync(Now, Ct);
+
+            var afterBlock = await ReadBackAsync();
+            Assert.Equal(WorkStage.Fix, afterBlock.Stage);
+            Assert.Equal(Path.Combine(reviewRoom, "verdict.json"), afterBlock.LastVerdict);
+
+            // That fix lane settles cleanly with its work pushed, and produces no verdict of its own.
+            var fixRoom = await WriteSettledRoomAsync(home, WorkflowOutcome.Succeeded, verdictJson: null);
+            await QueueStore.MutateAsync(
+                BatonPaths.QueueFile,
+                s => s with { Items = [afterBlock with { State = QueueItemState.Done, RoomDirectory = fixRoom }] },
+                Ct);
+
+            await advancer.AdvanceAsync(Now.AddMinutes(5), Ct);
+
+            var item = await ReadBackAsync();
+            Assert.Equal(WorkStage.Review, item.Stage);
+
+            var brief = await File.ReadAllTextAsync(item.SpecFile, Ct);
+            Assert.Contains("Re-review PR #77", brief, StringComparison.Ordinal);
+            Assert.Contains("the guard is never reached", brief, StringComparison.Ordinal);
+            Assert.Contains("Decide returns first", brief, StringComparison.Ordinal);
+
+            // The defect's own signature, and the reason the assertions above are not enough on their
+            // own: the empty-findings text is what the brief carried before.
+            Assert.DoesNotContain("no findings were recorded", brief, StringComparison.Ordinal);
+
+            // Still text, never the path it was read back from (spec/baton.md §13).
+            Assert.DoesNotContain(reviewRoom, brief, StringComparison.OrdinalIgnoreCase);
+        }
+        finally
+        {
+            DirectoryCleanup.DeleteRecursively(home);
+        }
+    }
+
+    [Fact]
+    public async Task A_stalled_lane_with_its_work_pushed_is_re_reviewed_and_an_unpushed_one_continues()
+    {
+        var home = CreateTempHome();
+        using var scope = BatonEnvironmentSnapshot.BeginScope(BatonEnvironmentSnapshot.Blank with { HomeOverride = home });
+        try
+        {
+            var room = await WriteSettledRoomAsync(home, WorkflowOutcome.Failed, verdictJson: null);
+            await SeedAsync(home, WorkStage.Implement, room, QueueItemState.Failed);
+
+            // Pushed: the workspace head IS the PR's head.
+            var pushedFacts = await new WorkItemAdvancer(
+                new FakeGh(PrJson(77, PushedSha)), (_, _) => Task.FromResult<string?>(PushedSha)).AdvanceAsync(Now, Ct);
+
+            Assert.Equal(WorkStage.ReReview, (await ReadBackAsync()).Stage);
+            Assert.Contains("re-review", Assert.Single(pushedFacts).Reason!, StringComparison.Ordinal);
+
+            // Unpushed: the ONE input that differs is the workspace head, which is what "the commit
+            // never reached the PR" means.
+            await SeedAsync(home, WorkStage.Implement, room, QueueItemState.Failed);
+            var unpushedFacts = await new WorkItemAdvancer(
+                new FakeGh(PrJson(77, PushedSha)), (_, _) => Task.FromResult<string?>("ffff0000ffff0000ffff0000ffff0000"))
+                .AdvanceAsync(Now, Ct);
+
+            var item = await ReadBackAsync();
+            Assert.Equal(WorkStage.Continue, item.Stage);
+            Assert.Contains("continue", Assert.Single(unpushedFacts).Reason!, StringComparison.Ordinal);
+
+            var brief = await File.ReadAllTextAsync(item.SpecFile, Ct);
+            Assert.Contains("Continue the work", brief, StringComparison.Ordinal);
+            Assert.Contains("Build the lifecycle.", brief, StringComparison.Ordinal);
+        }
+        finally
+        {
+            DirectoryCleanup.DeleteRecursively(home);
+        }
+    }
+
+    [Fact]
+    public async Task The_issues_own_instructions_survive_a_round_that_rewrote_the_brief()
+    {
+        var home = CreateTempHome();
+        using var scope = BatonEnvironmentSnapshot.BeginScope(BatonEnvironmentSnapshot.Blank with { HomeOverride = home });
+        try
+        {
+            // Round 1: the review blocks, so the spec file is REWRITTEN as a fix brief whose own
+            // "## Do" section is "address each finding above". Round 2 must still hand a continuation
+            // the ISSUE's instructions — which is only true because they live on the item rather than
+            // being parsed back out of a file that mutates every round.
+            var reviewRoom = await WriteSettledRoomAsync(home, WorkflowOutcome.Succeeded, BlockingVerdict);
+            await SeedAsync(home, WorkStage.Review, reviewRoom);
+            var advancer = new WorkItemAdvancer(
+                new FakeGh(PrJson(77, PushedSha)), (_, _) => Task.FromResult<string?>(PushedSha));
+            await advancer.AdvanceAsync(Now, Ct);
+
+            var fixBrief = await File.ReadAllTextAsync((await ReadBackAsync()).SpecFile, Ct);
+            Assert.DoesNotContain("Build the lifecycle.", fixBrief, StringComparison.Ordinal);
+
+            // Round 2: that fix lane stalls without pushing.
+            var fixRoom = await WriteSettledRoomAsync(home, WorkflowOutcome.Failed, verdictJson: null);
+            await QueueStore.MutateAsync(
+                BatonPaths.QueueFile,
+                s => s with
+                {
+                    Items = [s.Items.Single() with { State = QueueItemState.Failed, RoomDirectory = fixRoom }],
+                },
+                Ct);
+
+            await new WorkItemAdvancer(
+                new FakeGh(PrJson(77, PushedSha)), (_, _) => Task.FromResult<string?>("ffff0000ffff0000"))
+                .AdvanceAsync(Now.AddMinutes(5), Ct);
+
+            var item = await ReadBackAsync();
+            Assert.Equal(WorkStage.Continue, item.Stage);
+            Assert.Contains("Build the lifecycle.", await File.ReadAllTextAsync(item.SpecFile, Ct), StringComparison.Ordinal);
+        }
+        finally
+        {
+            DirectoryCleanup.DeleteRecursively(home);
+        }
+    }
+
+    [Fact]
+    public async Task An_item_the_queue_cannot_derive_fails_with_the_reason_on_it_and_is_never_re_read()
+    {
+        var home = CreateTempHome();
+        using var scope = BatonEnvironmentSnapshot.BeginScope(BatonEnvironmentSnapshot.Blank with { HomeOverride = home });
+        try
+        {
+            // A hand-edited item: staged, settled succeeded, and with no branch to look for a PR on. The
+            // fake gh is willing (it would answer with PR #77), so this arm measures the missing branch
+            // and not an unavailable gh — ReadPullRequestAsync short-circuits before it spawns anything.
+            var room = await WriteSettledRoomAsync(home, WorkflowOutcome.Succeeded, verdictJson: null);
+            var seeded = await SeedAsync(home, WorkStage.Implement, room);
+            await QueueStore.MutateAsync(
+                BatonPaths.QueueFile, s => s with { Items = [seeded with { Branch = null }] }, Ct);
+
+            var advancer = new WorkItemAdvancer(
+                new FakeGh(PrJson(77, PushedSha)), (_, _) => Task.FromResult<string?>(PushedSha));
+
+            var fact = Assert.Single(await advancer.AdvanceAsync(Now, Ct));
+            Assert.Equal(QueueDecisionEntry.Failed, fact.Decision);
+
+            var item = await ReadBackAsync();
+            Assert.Equal(QueueItemState.Failed, item.State);
+            Assert.True(item.Halted);
+            Assert.Equal(WorkStage.Implement, item.Stage);
+            Assert.Contains("no pull request is open", item.Error!, StringComparison.Ordinal);
+            // The recovery the message names has to be one the code actually allows: an item still at
+            // implement IS replaceable by a re-add (QueueCommand.RefuseIfNotReplaceable).
+            Assert.Contains("baton queue add", item.Error!, StringComparison.Ordinal);
+            // The room survives the failure, which is what the operator has to read (spec/baton.md §13).
+            Assert.Equal(room, item.RoomDirectory);
+
+            // The half that costs money: before `halted`, this same item matched the candidate filter on
+            // every tick forever — a gh spawn, a git spawn and a queue.json rewrite apiece.
+            Assert.Empty(await advancer.AdvanceAsync(Now.AddMinutes(1), Ct));
+            Assert.Equal(item.Error, (await ReadBackAsync()).Error);
+        }
+        finally
+        {
+            DirectoryCleanup.DeleteRecursively(home);
+        }
+    }
+
+    [Fact]
+    public async Task A_stage_less_dispatch_request_is_left_exactly_as_it_was()
+    {
+        var home = CreateTempHome();
+        using var scope = BatonEnvironmentSnapshot.BeginScope(BatonEnvironmentSnapshot.Blank with { HomeOverride = home });
+        try
+        {
+            var room = await WriteSettledRoomAsync(home, WorkflowOutcome.Succeeded, verdictJson: null);
+            var seeded = await SeedAsync(home, WorkStage.Implement, room);
+            await QueueStore.MutateAsync(
+                BatonPaths.QueueFile, s => s with { Items = [seeded with { Stage = null }] }, Ct);
+
+            var facts = await new WorkItemAdvancer(new FakeGh(PrJson(77, PushedSha)), (_, _) => Task.FromResult<string?>(PushedSha))
+                .AdvanceAsync(Now, Ct);
+
+            var item = await ReadBackAsync();
+            Assert.Empty(facts);
+            Assert.Null(item.Stage);
+            Assert.Equal(QueueItemState.Done, item.State);
+            Assert.Equal(room, item.RoomDirectory);
+        }
+        finally
+        {
+            DirectoryCleanup.DeleteRecursively(home);
+        }
+    }
+}

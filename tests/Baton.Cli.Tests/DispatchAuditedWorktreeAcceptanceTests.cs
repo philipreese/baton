@@ -289,7 +289,7 @@ public sealed class DispatchAuditedWorktreeAcceptanceTests : IDisposable
         var verdictFixture = Path.Combine(testRoot, "verdict-fixture.json");
         Directory.CreateDirectory(testRoot);
         await File.WriteAllTextAsync(
-            verdictFixture, """{"reviewedRef":"HEAD","findings":[]}""", TestContext.Current.CancellationToken);
+            verdictFixture, """{"reviewedRef":"HEAD","decision":"approve","findings":[]}""", TestContext.Current.CancellationToken);
 
         var outputFixtures = new Dictionary<string, string> { ["verdict.json"] = verdictFixture };
         IWorkerAdapter agyAdapter = translatesGrants

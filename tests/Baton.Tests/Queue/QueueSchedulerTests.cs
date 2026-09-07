@@ -49,6 +49,32 @@ public sealed class QueueSchedulerTests
     }
 
     [Fact]
+    public void A_ready_work_item_is_never_the_candidate_however_launchable_it_looks()
+    {
+        // The item as WorkItemAdvancer leaves an approved one: still QUEUED, because the conductor has
+        // yet to merge it. The control arm is the identical item one stage earlier — so this measures
+        // the READY stage and not, say, the presence of a stage at all.
+        var ready = Item() with { Stage = WorkStage.Ready };
+        var notReady = Item() with { Stage = WorkStage.Review };
+
+        var readyDecision = QueueScheduler.Decide(LocalAt(12), [ready], 0, 8.0, Defaults, null, held: false);
+        var reviewDecision = QueueScheduler.Decide(LocalAt(12), [notReady], 0, 8.0, Defaults, null, held: false);
+
+        Assert.Equal(QueueDecisionKind.Wait, readyDecision.Kind);
+        Assert.Equal(QueueWaitReason.NoItems, readyDecision.WaitReason);
+        Assert.Equal(QueueDecisionKind.Launch, reviewDecision.Kind);
+    }
+
+    [Fact]
+    public void A_stage_less_dispatch_request_is_unchanged_by_the_ready_guard()
+    {
+        var decision = QueueScheduler.Decide(LocalAt(12), [Item()], 0, 8.0, Defaults, null, held: false);
+
+        Assert.Equal(QueueDecisionKind.Launch, decision.Kind);
+        Assert.Null(decision.Item!.Stage);
+    }
+
+    [Fact]
     public void A_held_queue_waits_on_hold_even_with_a_launchable_item()
     {
         var items = new[] { Item() };

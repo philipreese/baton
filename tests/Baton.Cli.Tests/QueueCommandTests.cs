@@ -78,6 +78,121 @@ public sealed class QueueCommandTests
     }
 
     [Fact]
+    public async Task Re_adding_a_work_item_past_implement_is_refused_before_its_brief_is_overwritten()
+    {
+        var home = CreateTempHome();
+        using var scope = BatonEnvironmentSnapshot.BeginScope(BatonEnvironmentSnapshot.Blank with { HomeOverride = home });
+        try
+        {
+            // A work item between rounds is QUEUED, not launched, so slice 1's launched-tag refusal
+            // does not cover it — and a `--lifecycle` tag defaults to `<n>-lane`, so re-typing the same
+            // add is an ordinary thing to do. Without the refusal this resets fix round 2 to implement
+            // round 0 and overwrites the brief carrying the reviewer's findings.
+            var workspace = Path.Combine(home, "w1934");
+            Directory.CreateDirectory(workspace);
+            Directory.CreateDirectory(BatonPaths.QueueSpecsDirectory);
+            await File.WriteAllTextAsync(BatonPaths.QueueSpecFile("1934-lane"), "the fix brief with the findings", Ct);
+            await QueueStore.MutateAsync(
+                BatonPaths.QueueFile,
+                s => s with
+                {
+                    Items =
+                    [
+                        new QueueItem
+                        {
+                            Tag = "1934-lane",
+                            Role = "implement",
+                            Workspace = workspace,
+                            SpecFile = BatonPaths.QueueSpecFile("1934-lane"),
+                            Issue = 1934,
+                            Branch = "1934-lane",
+                            Stage = WorkStage.Fix,
+                            Round = 2,
+                            State = QueueItemState.Queued,
+                        },
+                    ],
+                },
+                Ct);
+
+            var newBrief = Path.Combine(home, "new-brief.md");
+            await File.WriteAllTextAsync(newBrief, "an implement brief", Ct);
+
+            var refusal = await Assert.ThrowsAsync<CliArgumentException>(() => QueueCommand.ExecuteAsync(
+                new QueueOptions(
+                    QueueVerb.Add, Tag: "1934-lane", Role: "implement", SpecFilePath: newBrief,
+                    WorkspaceDirectory: workspace),
+                TextWriter.Null,
+                Ct));
+
+            Assert.Contains("stage 'fix'", refusal.Message, StringComparison.Ordinal);
+            Assert.Equal(
+                "the fix brief with the findings",
+                await File.ReadAllTextAsync(BatonPaths.QueueSpecFile("1934-lane"), Ct));
+
+            var item = (await QueueStore.LoadAsync(BatonPaths.QueueFile, Ct)).Items.Single();
+            Assert.Equal(WorkStage.Fix, item.Stage);
+            Assert.Equal(2, item.Round);
+        }
+        finally
+        {
+            DirectoryCleanup.DeleteRecursively(home);
+        }
+    }
+
+    [Fact]
+    public async Task A_work_item_still_at_implement_is_replaceable_like_any_other_queued_item()
+    {
+        var home = CreateTempHome();
+        using var scope = BatonEnvironmentSnapshot.BeginScope(BatonEnvironmentSnapshot.Blank with { HomeOverride = home });
+        try
+        {
+            // The polarity control for the refusal above: the same re-add, one stage earlier, must
+            // still go through — there is no round history to lose at implement, and refusing here
+            // would make correcting a just-queued item impossible.
+            var workspace = Path.Combine(home, "w1934");
+            Directory.CreateDirectory(workspace);
+            Directory.CreateDirectory(BatonPaths.QueueSpecsDirectory);
+            await File.WriteAllTextAsync(BatonPaths.QueueSpecFile("1934-lane"), "the first brief", Ct);
+            await QueueStore.MutateAsync(
+                BatonPaths.QueueFile,
+                s => s with
+                {
+                    Items =
+                    [
+                        new QueueItem
+                        {
+                            Tag = "1934-lane",
+                            Role = "implement",
+                            Workspace = workspace,
+                            SpecFile = BatonPaths.QueueSpecFile("1934-lane"),
+                            Issue = 1934,
+                            Stage = WorkStage.Implement,
+                            State = QueueItemState.Queued,
+                        },
+                    ],
+                },
+                Ct);
+
+            var newBrief = Path.Combine(home, "new-brief.md");
+            await File.WriteAllTextAsync(newBrief, "a corrected brief", Ct);
+
+            var exit = await QueueCommand.ExecuteAsync(
+                new QueueOptions(
+                    QueueVerb.Add, Tag: "1934-lane", Role: "implement", SpecFilePath: newBrief,
+                    WorkspaceDirectory: workspace),
+                TextWriter.Null,
+                Ct);
+
+            Assert.Equal(0, exit);
+            Assert.Equal("a corrected brief", await File.ReadAllTextAsync(BatonPaths.QueueSpecFile("1934-lane"), Ct));
+        }
+        finally
+        {
+            DirectoryCleanup.DeleteRecursively(home);
+        }
+    }
+
+    [Fact]
     public async Task Re_adding_a_queued_tag_still_replaces_it_and_its_spec()
     {
         var home = CreateTempHome();
@@ -160,6 +275,63 @@ public sealed class QueueCommandTests
             await QueueCommand.ExecuteAsync(new QueueOptions(QueueVerb.List), output, Ct);
 
             Assert.DoesNotContain("Waiting on", output.ToString(), StringComparison.Ordinal);
+        }
+        finally
+        {
+            DirectoryCleanup.DeleteRecursively(home);
+        }
+    }
+
+    /// <summary>
+    /// A halted item is marked, and one that merely failed its lane is not — the distinction
+    /// <c>QueueCommand.ListAsync</c>'s comment states this token exists for.
+    /// </summary>
+    /// <remarks>
+    /// Both items are in ONE listing and both are <c>failed</c>, so the token cannot be tracking the
+    /// state word: a listing that printed <c>halted</c> for every failure would fail the second
+    /// assertion, and one that printed it for none would fail the first.
+    /// </remarks>
+    [Fact]
+    public async Task List_marks_the_item_the_queue_has_given_up_on()
+    {
+        var home = CreateTempHome();
+        using var scope = BatonEnvironmentSnapshot.BeginScope(BatonEnvironmentSnapshot.Blank with { HomeOverride = home });
+        try
+        {
+            Directory.CreateDirectory(BatonPaths.QueueSpecsDirectory);
+            await QueueStore.MutateAsync(
+                BatonPaths.QueueFile,
+                s => s with
+                {
+                    Items =
+                    [
+                        new QueueItem
+                        {
+                            Tag = "given-up",
+                            Role = "implement",
+                            Workspace = Path.Combine(home, "w1"),
+                            SpecFile = BatonPaths.QueueSpecFile("given-up"),
+                            State = QueueItemState.Failed,
+                            Halted = true,
+                        },
+                        new QueueItem
+                        {
+                            Tag = "retryable",
+                            Role = "implement",
+                            Workspace = Path.Combine(home, "w2"),
+                            SpecFile = BatonPaths.QueueSpecFile("retryable"),
+                            State = QueueItemState.Failed,
+                        },
+                    ],
+                },
+                Ct);
+
+            var output = new StringWriter();
+            await QueueCommand.ExecuteAsync(new QueueOptions(QueueVerb.List), output, Ct);
+
+            var lines = output.ToString().ReplaceLineEndings("\n").Split('\n');
+            Assert.Contains(lines, line => line.StartsWith("given-up  failed halted", StringComparison.Ordinal));
+            Assert.Contains(lines, line => line.StartsWith("retryable  failed  ", StringComparison.Ordinal));
         }
         finally
         {

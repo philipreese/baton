@@ -120,6 +120,8 @@ public static class ContractValidator
     {
         var error = schema switch
         {
+            // The bare parse. `decision` is deliberately not checked here — what it would cost every
+            // review room engine-wide is on ReviewVerdictSchema, and the ruling is spec/baton.md §13's.
             OutputSchema.ReviewVerdict =>
                 ReviewVerdictSchema.TryParse(File.ReadAllBytes(path), out _, out var parseError) ? null : parseError,
             OutputSchema.Diff =>

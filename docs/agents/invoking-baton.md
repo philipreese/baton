@@ -637,6 +637,14 @@ suppress it. Today that is exactly the write-withholding roles on `agy`:
 | `fact-check` | `findings.md` | works | works — auto-provisioned worktree |
 | `orchestrate` | `turn-actions.json` | works | works — auto-provisioned worktree |
 
+**`review`'s `verdict.json` should carry `"decision": "approve" | "block"`** — the reviewer's own call
+on the reviewed change, never derived from its findings. It is **not** part of the room's output
+contract: a verdict without one still parses and the room still settles succeeded-shaped, so a review
+room you dispatch by hand is unaffected either way. What requires it is the
+conductor queue: a `--lifecycle` item whose verdict names no decision stops for the operator instead
+of taking a round. `spec/baton.md` §13 is the ruling; the role's own prompt names the field and gives
+it in its example.
+
 **`advise`'s "works" on `agy` is not the same shape as `review`'s.** Unlike the other read-shaped
 roles, `advise` keeps an explicit `write_files: true` grant (pinned reason in `WorkerRoles.json`'s
 `advise` entry), so it never enters the `AuditedNotEnforced`/auto-provisioned-worktree path this
@@ -674,3 +682,33 @@ without `--model`/`--effort` drops the role tier's vendor-specific model.
 A role's declared outputs — the `Outputs`/`ProducedOutputs` pair you need for the `baton run` shape — are
 in `WorkerRoles.json`, and the table above lists them. `--output <path>` copies the primary one out to
 `<path>` once the room reaches Terminal; see `docs/dispatch.md` for its validation rules.
+
+## 7. Queueing work instead of dispatching it
+
+Everything above starts a lane **now**. `baton queue` instead records a durable request that the
+running daemon starts on its own schedule — nothing in the `queue` verbs launches anything, so a
+machine with no daemon accumulates a work list and runs none of it.
+
+Two shapes. A **dispatch request** is one lane, exactly as you would have dispatched it:
+
+```
+baton queue add my-tag --role review --spec ./brief.md --workspace /repos/thing --scope engine
+```
+
+A **work item** is anchored on a GitHub issue and has a lifecycle the daemon drives — implement, then
+review, then a fix round carrying the reviewer's findings, then a re-review, then `ready` for a person
+to merge:
+
+```
+baton queue add --issue 1934 --lifecycle --scope engine
+```
+
+`--lifecycle` provisions and trusts the worktree, renders the implement brief from the issue body into
+`~/.baton/queue/specs/`, and needs no `--role` (the stage picks it) and no tag (it defaults to
+`<n>-lane`). Pass `--spec <file>` to supply the brief's "## Do" section yourself instead of taking the
+issue body. The briefs come from `~/.baton/queue/templates/` — edit those files and your edits stick.
+
+`baton queue list` shows each item's state, stage and room. `baton queue hold` / `resume` pause new
+launches without stopping the daemon or touching live lanes. Every decision, including each stage
+change and the evidence it was derived from, lands in `~/.baton/fleet/queue.jsonl`.
+`spec/baton.md` §13 is the contract.

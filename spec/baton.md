@@ -4224,14 +4224,17 @@ comes back out of merge order. In the same spirit, a `gh` failure part-way throu
 "stopped early after N PRs" and keeps its counts: those rows ARE written, and the old wording said the
 half had been skipped while they were being appended.
 
-**No `verdict` field, and that is a finding rather than an omission.** #1901's phase-C1 text asks a
-review row to carry a `verdict` of `APPROVE`/`BLOCK`. **No such value exists anywhere in the product**:
-`ReviewVerdict` is `reviewedRef` + `findings` + optional `summary`/`instruments`, and decision 0043's
-ruling — severity and status are evidence surfaced to a person, never inputs to routing (Architecture
-Rule 1) — is why the schema deliberately makes no overall approve/block judgment. Synthesising one from
-the severity counts would be the ledger inventing a judgment the reviewed artifact declines to make. The
-counts, the ref and its parsed PR/head are what a verdict actually contains, and they are what the row
-records. A future issue that wants an approve/block reading has to change what a reviewer WRITES first.
+**No `verdict` field, and the ledger still reads no approve/block.** #1901's phase-C1 text asks a
+review row to carry a `verdict` of `APPROVE`/`BLOCK`. Since #1934 slice 2 such a value does exist —
+`ReviewVerdict` is `reviewedRef` + `findings` + optional `summary`/`instruments`/`decision`, the last
+being the reviewer's own word, and §13 has the ruling — but **it is read in exactly one place, the
+conductor queue's `WorkItemLifecycle`, and nowhere in this ledger.** What stays refused is the thing
+this paragraph was written about: *synthesising* a verdict from the severity counts, which would be the
+ledger inventing a judgment the reviewed artifact declines to make — decision 0043's ruling, that
+severity and status are evidence surfaced to a person and never inputs to routing (Architecture Rule
+1), is why the counts cannot become a judgment here. The counts, the ref and its parsed PR/head are
+what the row records. An issue that wants the ledger to carry the reviewer's own `decision` is now a
+question of whether a row should hold it, not of whether one is written.
 
 **Two estimates, both labelled, neither an invoice.** `apiEquivalentUsd` comes from `PriceCatalog`
 (vendor → model → dimension → effective ranges, each with a source); `planMeterEstimateUsd` re-weights
@@ -5810,7 +5813,7 @@ source" looks like on disk rather than as a promise.
 
 ---
 
-## §13 The conductor queue (#1934 slice 1)
+## §13 The conductor queue (#1934 slices 1–2)
 
 The conductor's dispatch queue was a PowerShell loop in a per-session scratchpad directory: a JSON
 item list, weighted concurrency slots, a time-of-day memory floor, per-vendor model defaults, and a
@@ -5818,9 +5821,13 @@ item list, weighted concurrency slots, a time-of-day memory floor, per-vendor mo
 loop's comments and nowhere in the product, and its launch log died with the session. This section is
 that loop, in Baton, with every decision recorded.
 
-**Slice 1 is a dispatch request queue and nothing more.** No issue-anchored lifecycle, no verdict
-reading, no automatic fix rounds — those are slice 2 (#1934 Q2, answer "(a) first, then (b)"). Adding
-a field here for a lifecycle no code advances would be a promise the product does not keep.
+**Two item shapes, and one field tells them apart.** A **dispatch request** (slice 1, Q2 answer (a))
+is a spec plus the parameters `baton dispatch` needs: the operator asked for one lane, and the queue
+runs exactly that lane. A **work item** (slice 2, answer (b)) is anchored on an issue and carries a
+`stage` the daemon advances. `stage` is null for the first and set for the second; there is no second
+"kind" field, because two fields answering one question is one of them going stale. Slice 1's rule —
+a field carrying a lifecycle no code advances is a promise the product does not keep — is now
+satisfied rather than avoided: `WorkItemLifecycle` is the code that advances these.
 
 ### Where it lives
 
@@ -5937,13 +5944,159 @@ was no tier to depart from.
 **`sonnet` is not promoted.** An item that asks for it gets it, and the launch fact says the tier was
 departed from. Nothing in the queue substitutes a model.
 
+### Work items: the lifecycle the queue drives (slice 2)
+
+`baton queue add --issue <n> --lifecycle [--spec <file>]` adds a **work item**. `--lifecycle` is the
+one spelling of that choice — no `--kind work` alias. It needs `--issue` (the issue is what its
+briefs are rendered from and what its PR is looked for on), refuses `--role` (the stage picks it), and
+defaults its tag to `<n>-lane`. The item carries `issue`, its worktree, `branch`, `stage`, `pr`,
+`lastVerdict` and `round` alongside every slice-1 field.
+
+The lifecycle is the one the conductor ran by hand roughly forty times in the week before it was
+written:
+
+| At stage | The lane settled | Then | Because |
+|---|---|---|---|
+| implement / fix / continue | succeeded-shaped, PR open | **review** | there is something to review |
+| implement / fix / continue | succeeded-shaped, no PR | **operator** | the queue never opens a PR |
+| review / re-review | succeeded-shaped, `decision: approve` | **ready** | the conductor merges; the queue never does |
+| review / re-review | succeeded-shaped, `decision: block` | **fix** | the brief is the findings |
+| review / re-review | succeeded-shaped, verdict with no decision | **operator** | never guessed from the findings |
+| review / re-review | succeeded-shaped, no readable verdict | **operator** | silence is not an approval |
+| implement / fix / continue | anything else, work pushed | **re-review** | the PR head is the workspace head |
+| implement / fix / continue | anything else, work unpushed | **continue** | finish and push it |
+| review / re-review | anything else | **re-review** | a reviewer has nothing to push |
+| any stage, round at the ceiling | anything | **operator** | two of those arms are cycles with no natural end |
+| ready | anything | nothing | it stops here |
+
+**"Succeeded-shaped" is the set, never the one word.** Both terminal words §3's table calls
+succeeded-shaped — `Succeeded` and `FinishedDuringTeardown` — take every row above identically, through
+`WorkflowOutcome.IsSucceededShaped`, which is where that membership is spelled. This lifecycle is one of
+the consumers §3 obliges, and an ordinal `== "Succeeded"` here discarded a readable `verdict.json` and
+re-dispatched a full review lane against the same head.
+
+**Every dispatch is counted, and the count is bounded** (`WorkStages.MaxRounds`, 4). `round` is one per
+dispatch the lifecycle issues — review, fix, re-review, continue alike — not one per BLOCK, because the
+two arms that can repeat forever are `re-review → re-review` (a review lane that keeps hitting its wall
+clock) and `continue → continue` (a lane whose work never reaches the PR), and neither passes through a
+verdict. The default permits the conductor's own practice — round 1 the first review, then
+fix → re-review → fix — and stops at the dispatch after that, naming the count and the stage in the
+reason. Unattended overnight running is the whole point of the daemon, so an unbounded cycle is a
+frontier lane per tick with nothing putting it in front of a person.
+
+**APPROVE and BLOCK are READ from the verdict's `decision`, never derived** (operator ruling,
+2026-09-06 evening). `verdict.json` carries `"decision": "approve" | "block"` — the reviewer's own
+call — and the lifecycle routes on that field alone. A verdict that names no decision, or names a word
+this enum does not have, is **the operator's**, not a guess: the reason says "carries no decision" and
+the round is left unmade.
+
+**This replaced a heuristic — `severity: high && status: confirmed` — that was wrong in practice.**
+Today's reviewers block on mediums routinely, and on judgments no enumerated field carries at all, so
+the predicate advanced blocked PRs to `ready`: a wrong branch taken confidently, which is worse than
+one not taken. Severity and status now route **nothing**; they are evidence for a person and text for
+the fixer's brief, which is what `ReviewVerdict` always said they were.
+
+**`decision` is optional on the wire and required by the queue to advance** (operator ruling,
+2026-09-06). It is **not** part of the review role's output contract: `ContractValidator` evaluates
+`OutputSchema.ReviewVerdict` through the bare `ReviewVerdictSchema.TryParse`, which tolerates a
+missing or unrecognised decision and yields `null`, so a review room settles succeeded-shaped exactly
+as it did before the field existed. Making it a contract requirement was tried and reverted in the
+same PR: `ContractValidator` runs for every review-shaped step engine-wide, so the requirement would
+have failed every room already in flight and every room whose prompt came from an operator's own
+`~/.baton/worker-roles.json` override — which is a wholesale replacement of the shipped
+`WorkerRoles.json` and therefore never mentions the field. The requirement lives in **one** place
+instead, `WorkItemLifecycle`, where a verdict with no decision is the operator's; the role's own
+prompt (`WorkerRoles.json`) and both queue review briefs still ask for it, because a decision written
+is a round carried. That split is also what lets the queue tell "the reviewer wrote no decision" apart
+from "there is no readable verdict at all", which are different messages with different recoveries.
+
+**Nothing reads the verdict's `summary` or a finding's `detail` to decide anything**, and that is the
+line this ruling draws: routing on a worker's prose is what Architecture Rule 1 forbids, and it stays
+forbidden. Routing on one *structured, enumerated* field the reviewer wrote its decision into is
+permitted **here and only here** — the conductor's queue is not the Flow engine, and it is the surface
+that was a PowerShell loop reading the same file with `jq` last week. `ReviewVerdict`'s "evidence for
+a person, never an input to routing" (decision 0043) continues to hold where it was written: inside
+the engine's own routing.
+
+**Pushed-ness, not a timeout word, discriminates re-review from continue.** A lane that runs out of
+wall clock settles `Failed` — `WorkflowOutcome` has no distinct word for it — so keying on one would
+mean string-matching an error message. The PR's `headRefOid` equal to the worktree's `HEAD` is work
+someone can review; anything else, including an absent PR or an unreadable head, is work to finish.
+`gh` goes through the daemon's existing `IGhCliRunner` seam and the head through
+`WorkspaceHead.CaptureAsync`: **the advance adds no process-spawn site.**
+
+**A `ready` item is parked in `queued`, not marked done**, because the conductor still has to merge it
+and it belongs in the operator's live list until then. What keeps it from launching is
+`QueueScheduler.Decide`'s own stage guard — the single load-bearing rule, so it cannot be a belt with
+a braces that silently takes over. An arm the queue cannot derive fails the item with the reason on
+it, where `baton queue list` shows it; it never guesses.
+
+**A failed work item is out of the advance for good** (`halted` on the item). It keeps its room and its
+stage — a failure with nowhere to look is not investigable — but the candidate filter skips it, because
+the same item otherwise matched on every tick forever: `gh` spawned, `git` spawned, `queue.json`
+rewritten, and the repeated fact hidden by the ledger's own `decision|reason|tag` collapse. What that
+costs is said out loud rather than worked around: an implement lane failed by a transient `gh` outage
+is no longer rescued by the next tick's re-read, and it needs the operator like any other halted item.
+**The reason names the recovery the product actually has** — a re-add for an item still at `implement`,
+and past that, the operator's own hand, since `baton queue` has no verb that reopens a failed item and
+a re-add is refused for any item past `implement`.
+
+### The brief templates (operator ruling, 2026-09-06)
+
+"Every brief the conductor writes by hand is friction to remove, so the templates are the product, not
+a convenience." Four, at **`~/.baton/queue/templates/{implement,review,fix,re-review}.md`**, shipped
+compiled-in and **materialized only when the file is absent** — an operator's edit survives every
+later `add`. `{{TOKEN}}` placeholders are substituted; an unknown one is left alone rather than
+blanked, since a hole a reader cannot see is worse than a token they can.
+
+The fix and re-review briefs mirror the conductor's own headers ("Fix round for PR #N",
+"Re-review PR #N at `<sha>`") and **inline the findings verbatim — never a room path**. That is the
+mechanism, not a preference: a lane's grant cannot read another room's directory, which is exactly
+why the findings were being copied by hand. `lastVerdict` keeps the path on the item for the
+operator's trace and nothing renders it.
+
+The implement template carries the standing lane rules **once** — buildlock, no `pixi run gates`, no
+sub-agents, no live vendor CLI, no issue filing, never `--no-verify`, checkpoint commits, the
+test-hygiene tripwires, record-once, the ship block, and `Closes #N` alone on the last line with no AI
+attribution. `continue` renders from that same template with one generated paragraph naming what the
+previous lane left behind: a continuation *is* the implement brief plus that sentence, and a file of
+its own would be the same text with one paragraph different, drifting the first time the rules changed.
+
+**The first review and a re-review do not share one, and the split is on the prior verdict rather than
+the stage.** A re-review brief asserts a round that happened — its header, its "what the previous round
+found" section, its instruction to say whether the new head closes each finding — so rendering it for
+the first review told the reviewer about findings that did not exist: every sentence true of the
+template, the reader's conclusion false. What decides is whether there is a verdict to carry
+(`lastVerdict`, or findings rendered for this brief), not the round number and not the stage, so a
+re-review of a review lane that stalled without writing one renders the first-review brief, which is
+the correct brief for it.
+
+**The findings a brief inlines come from the last REVIEW round, not from the room that just settled.**
+A fix lane writes no verdict, so the obvious reading — render what this room produced — handed a
+re-review "(no findings were recorded)" and then asked it whether the new head closed findings it was
+never shown. The advance falls back to `lastVerdict`, re-read through the same single verdict reader;
+the findings still travel as text and the path still does not.
+
+**Both review briefs carry the Verdict sentence** — the `decision` field, what the two words mean, and
+that a verdict without one stops the item for a person rather than carrying the round (never that it
+fails the room's contract, which it does not). Two files means two places for it, which is exactly why
+a test asserts it renders in both: the round it goes missing from is the round whose item then waits
+on the operator.
+
 ### The recorded fact (Q4)
 
 One line per evaluation in `~/.baton/fleet/queue.jsonl`, through the same `JsonLinesLedger` the burn
-and cost ledgers share. Fields: `at`, `tag`, `decision` (`launched` | `waited` | `failed`), `reason`
+and cost ledgers share. Fields: `at`, `tag`, `decision` (`launched` | `waited` | `failed` |
+`advanced`), `reason`
 (`slots` | `memory` | `gap` | `hold` | `runway-held` | `no-items`, or the error), `liveWeight`,
 `freeGb` (absent when unmeasured), `floorGb`, `tier`, `adapter`, `model`, `effort`, `tierOverride`,
 `overrideReason`, `room`.
+
+**`advanced` is one line per work-item stage change** (slice 2), naming the evidence it was derived
+from: the stage pair, the outcome word, the PR head, the verdict's counts. That is not decoration —
+the collapse rule below keys on `decision|reason|tag`, so two rounds whose reasons read alike would
+collapse into one row and the second transition would vanish from the file this queue exists to make
+auditable.
 
 **It records transitions, every launch and every failure — not a per-tick heartbeat.** A verdict
 identical to the one immediately before it is not re-appended, so a queue waiting on memory for three

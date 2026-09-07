@@ -37,6 +37,21 @@ public static class WorkflowOutcome
     public const string FinishedDuringTeardown = "FinishedDuringTeardown";
 
     /// <summary>
+    /// Membership in the SUCCEEDED-shaped set — <see cref="Succeeded"/> and
+    /// <see cref="FinishedDuringTeardown"/> — for the consumers spec/baton.md §3's terminal-vocabulary
+    /// table obliges to read the two the same way.
+    /// </summary>
+    /// <remarks>
+    /// The set lives here because the words do: a consumer that spells them itself is a consumer that
+    /// silently stops honouring the obligation the day a third one is added, which is exactly what
+    /// <c>WorkItemLifecycle.Decide</c>'s ordinal <c>== Succeeded</c> did to #1945's word (#2004 review).
+    /// Anything reading a room's outcome word to ask "did this finish?" asks here instead of comparing.
+    /// </remarks>
+    public static bool IsSucceededShaped(string? outcome) =>
+        string.Equals(outcome, Succeeded, StringComparison.Ordinal)
+        || string.Equals(outcome, FinishedDuringTeardown, StringComparison.Ordinal);
+
+    /// <summary>
     /// #1586 S1 (state-truth design, ratified 2026-09-01 amendment): journal facts alone cannot
     /// distinguish success from failure for this room — the two-predicate model (execution outcome vs
     /// contract completion) disagrees with itself, e.g. work-evidence contradicts contract-evidence

@@ -66,6 +66,19 @@ public sealed record QueueDecisionEntry(
     public const string Failed = "failed";
 
     /// <summary>
+    /// A work item moved from one <see cref="WorkStage"/> to the next (#1934 slice 2). A fourth
+    /// decision word rather than a launch: the transition and the launch it leads to are two facts, and
+    /// folding them would lose what the transition was derived from — spec/baton.md §13 enumerates it.
+    /// <para>
+    /// <b>Its <see cref="Reason"/> must name that evidence</b>, for the mechanical reason spec/baton.md
+    /// §13 states as well as the readable one: it feeds <see cref="VerdictKey"/>, which the collapse
+    /// below is keyed on. <c>WorkItemLifecycle</c>'s reasons carry the stage pair and the head sha for
+    /// exactly that purpose.
+    /// </para>
+    /// </summary>
+    public const string Advanced = "advanced";
+
+    /// <summary>
     /// The identity a repeated verdict is collapsed on — see
     /// <see cref="QueueDecisionLedgerStore.AppendAsync"/> for what that collapse is and is not.
     /// Deliberately excludes the counters: a wait that is still "slots" with a live weight of 3.0

@@ -170,7 +170,7 @@ public class SupplyCommandEndToEndTests
     /// </summary>
     private const string EngineStampedVerdictJson =
         """
-        {"reviewedRef": "1911-lane", "summary": "measured", "findings": [],
+        {"reviewedRef": "1911-lane", "decision": "approve", "summary": "measured", "findings": [],
          "instruments": [{"command": "pixi run test", "exitCode": 0, "wallClockMs": 41003}]}
         """;
 

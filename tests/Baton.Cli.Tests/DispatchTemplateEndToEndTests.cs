@@ -62,7 +62,7 @@ public sealed class DispatchTemplateEndToEndTests : IDisposable
             // schema is Baton.Domain.ReviewVerdict; this is the smallest document it accepts.
             var verdictFixture = Path.Combine(testRoot, "verdict-fixture.json");
             await File.WriteAllTextAsync(
-                verdictFixture, """{"reviewedRef":"HEAD","findings":[]}""", TestContext.Current.CancellationToken);
+                verdictFixture, """{"reviewedRef":"HEAD","decision":"approve","findings":[]}""", TestContext.Current.CancellationToken);
 
             var capture = new BaseRefCapturingWorkerAdapter();
             var adapters = new Dictionary<string, IWorkerAdapter>
@@ -126,7 +126,7 @@ public sealed class DispatchTemplateEndToEndTests : IDisposable
 
             var verdictFixture = Path.Combine(testRoot, "verdict-fixture.json");
             await File.WriteAllTextAsync(
-                verdictFixture, """{"reviewedRef":"HEAD","findings":[]}""", TestContext.Current.CancellationToken);
+                verdictFixture, """{"reviewedRef":"HEAD","decision":"approve","findings":[]}""", TestContext.Current.CancellationToken);
 
             var adapters = new Dictionary<string, IWorkerAdapter>
             {
@@ -172,7 +172,7 @@ public sealed class DispatchTemplateEndToEndTests : IDisposable
 
             var verdictFixture = Path.Combine(testRoot, "verdict-fixture.json");
             await File.WriteAllTextAsync(
-                verdictFixture, """{"reviewedRef":"HEAD","findings":[]}""", TestContext.Current.CancellationToken);
+                verdictFixture, """{"reviewedRef":"HEAD","decision":"approve","findings":[]}""", TestContext.Current.CancellationToken);
 
             var adapters = new Dictionary<string, IWorkerAdapter>
             {
@@ -400,7 +400,7 @@ public sealed class DispatchTemplateEndToEndTests : IDisposable
 
             var verdictFixture = Path.Combine(testRoot, "verdict-fixture.json");
             await File.WriteAllTextAsync(
-                verdictFixture, """{"reviewedRef":"HEAD","findings":[]}""", TestContext.Current.CancellationToken);
+                verdictFixture, """{"reviewedRef":"HEAD","decision":"approve","findings":[]}""", TestContext.Current.CancellationToken);
 
             var capture = new BaseRefCapturingWorkerAdapter();
             var adapters = new Dictionary<string, IWorkerAdapter>
