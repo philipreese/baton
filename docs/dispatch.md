@@ -306,6 +306,37 @@ answer on whether to retire or ratify it.
 
 **Rule for briefs:** Dispatched workers run in their own process and do not inherit the conducting session's loaded skills. Briefs must inline what they need; a named skill only works if the worker's roster shows it. Skill forwarding is not performed by dispatch.
 
+## Build-lock replay (#2010)
+
+`python tools/buildlock.py` can hand back a wrapped command's last successful run in place of
+executing it. **That is opt-in per call site**: the command runs unless its invocation carries
+`--replay`, and there is no negative twin flag, because execution is already the default. An
+invocation without the flag reads, writes and voids nothing, and behaves exactly as this wrapper did
+before #2010. `pixi.toml` is where the flagged call sites are; whether a given command is allowed to
+carry the flag is decided by the rule in `tools/buildlock.py`'s own docstring.
+
+A flagged run that exits 0 leaves a worktree-local receipt under its Git directory. The exact
+argument list, working directory and priority class identify the command; HEAD, NUL-delimited
+porcelain status and each dirty path's content identify its inputs (including untracked files,
+renames and deletions). An unchanged pass up to six hours old prints
+`buildlock: replaying <cmd> — unchanged since the pass at HH:MM:SS`, then its recorded stdout tail
+(last 64 KiB), and exits 0 without acquiring or probing the build lock. Execution streams stdout
+and inherits stderr; stderr is not replayed. A failed or interrupted flagged attempt voids the
+previous pass before the next one starts, and writing a receipt sweeps that directory's expired and
+format-orphaned siblings — together those are the only two things that ever delete one.
+
+Ignored build outputs (`bin/`, `obj/`), environment variables, the wall clock and everything outside
+the worktree are absent from the fingerprint, which is the reason a command whose verdict turns on
+any of them is never given the flag. Unreadable inputs, dirty directories/submodules and unusable
+receipts fall back to execution.
+
+**What the during-execution check actually checks.** The fingerprint is taken before the command
+starts and again after it exits, and a receipt is written only when the two match. It is a
+before-and-after comparison, not a watch: a file changed and then put back inside that window
+matches, so the receipt is written even though the tree the command read was never the tree the
+receipt describes. Nothing detects that, and it is written down here because the guarantee a reader
+would otherwise assume is stronger than the one the code gives.
+
 ## Roles
 
 Each role declares what it must produce; those declarations become the contract the engine enforces,

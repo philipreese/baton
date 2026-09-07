@@ -15,7 +15,50 @@ file in the machine's temp directory. The kernel releases it the instant the hol
 dies, however it dies -- so there is no stale-lock file to detect, no PID-liveness check, and no
 steal logic. A crashed holder frees the lock by crashing.
 
-Usage:            python tools/buildlock.py [--class build|readonly] <command> [args...]
+Usage:            python tools/buildlock.py [--replay] [--class build|readonly] <command> [args...]
+Replay:           OPT-IN, and the opt-in is the whole safety argument (#2010, 2026-09-07 review). A
+                  wrapped command EXECUTES unless its invocation carries `--replay`; only a flagged
+                  invocation reads, writes or voids a receipt, so an unflagged one behaves exactly as
+                  this wrapper did before #2010 (inherited stdout included). The rule for which call
+                  sites may carry the flag lives HERE, and pixi.toml cites it rather than restating
+                  it: a command whose whole output is a VERDICT over worktree content may opt in; a
+                  command that PRODUCES an artifact another command then reads, or whose verdict is a
+                  function of state this file cannot fingerprint, may NOT -- UNLESS that state is
+                  itself rebuilt from fingerprinted source by a leg that always executes immediately
+                  before it, in the same fixed task line. That exception is not a softening, and it
+                  is what makes the two `--no-build` test legs legal rather than something at their
+                  call site: `dotnet test --no-build` grades `bin/`, which is outside the
+                  fingerprint, so it qualifies ONLY because `test`'s own unflagged
+                  `dotnet build --no-incremental` leg and, for `test-no-build`,
+                  `lint` inside `gates` force that `bin/` from source on every run. A command that
+                  reads out-of-fingerprint state with no such leg in front of it -- `dotnet run
+                  --project …`, i.e. `vendor-check` -- may NOT opt in, and reading the clause as
+                  soft is exactly how that mistake gets made. The fingerprint is HEAD
+                  plus the porcelain status plus every dirty path's content -- `bin/`, `obj/`, the
+                  environment and the wall clock are all outside it. So every `dotnet build` line is
+                  excluded, `lint`'s and `test`'s especially: their `--no-incremental` is the #687 /
+                  #688 protection against MSBuild skipping a project whose source predates its
+                  assembly, and a replayed build performs no rebuild at all -- it would delete that
+                  protection on the exact commands those two issues named, unconditionally, not just
+                  in the branch-excursion case. What the receipt holds and what a reader sees:
+                  docs/dispatch.md (#2010).
+                  THE ALLOWLIST, and it is pinned rather than merely written: exactly three call
+                  sites carry `--replay` -- `test`'s TEST leg, `test-no-build`, and `fmt-check`.
+                  `REPLAY_ALLOWLIST` below holds their verbatim segments and a selftest arm reads
+                  pixi.toml and asserts the set of `--replay`-carrying segments equals it, so a
+                  fourth line, or the flag moved one leg left onto `test`'s `dotnet build`, fails
+                  `pixi run buildlock-selftest` naming the offender. Prose alone could not: `test`
+                  and `build` are outside diff-shape's PIXI_PROTECTED_TASK_RULE, so that move needs
+                  no operator merge.
+                  BOUNDARY, stated rather than guarded: the same argv run WITHOUT the flag leaves an
+                  existing receipt alone, so a pass can outlive a later unflagged failure of the same
+                  command. The pixi lines are fixed and each is flagged or not, so they cannot reach
+                  it. The path that IS open, named rather than closed: a `--verify-cmd` (its row in
+                  docs/dispatch.md) whose allowlisted `dotnet test …` reproduces an opted-in task's
+                  argv verbatim, in the same worktree -- the engine wraps it unflagged, so its
+                  failure would leave the earlier pass standing for the flagged caller to replay.
+                  Closing it needs an unflagged run to compute the key, which is the tree walk the
+                  opt-in exists to avoid paying for.
 Priority classes: TWO, and the whole difference is whether the command can start an MSBuild (#1910).
                   `build` (the default, and what every pixi task that runs `dotnet` uses) queues for
                   the exclusive lock exactly as described above. `readonly` declares that the command
@@ -68,8 +111,12 @@ Selftest knob:    BATON_BUILDLOCK_SELFTEST_HOLDER_DELAY_S (default 0) -- only re
                   sleep as the ordering signal) and its arm 3 fails; the current code polls the
                   holder's .info sidecar instead and still passes.
 """
+import base64
+import hashlib
 import json
 import os
+from pathlib import Path
+import re
 import subprocess
 import sys
 import tempfile
@@ -87,6 +134,208 @@ CLASS_BUILD = "build"
 CLASS_READONLY = "readonly"
 CLASSES = (CLASS_BUILD, CLASS_READONLY)
 WAIT_LOG_VAR = "BATON_BUILDLOCK_WAIT_LOG"
+REPLAY_MAX_AGE_S = 6 * 60 * 60
+REPLAY_TAIL_BYTES = 64 * 1024
+# Receipt format version. It is inside the KEY (so a bump orphans every existing file under a key
+# nothing asks for again) and, since the 2026-09-07 review, also inside the BODY -- which is what
+# lets prune_receipts recognise an orphan rather than leave it on disk forever.
+REPLAY_VERSION = 1
+
+# The `--replay` allowlist, mechanically pinned (#2010, 2026-09-07 re-review). The docstring's
+# "Replay" section is the RULE; this is the SET the rule currently admits, as (pixi task, verbatim
+# command segment) pairs. `_selftest_replay_allowlist` below asserts pixi.toml's flagged segments
+# equal it exactly, which is what stops the two failures prose cannot: a fourth line opting in, and
+# the flag moving from `test`'s test leg onto its `dotnet build --no-incremental` leg -- neither
+# task name is under diff-shape's PIXI_PROTECTED_TASK_RULE, so neither move needs an operator merge.
+REPLAY_ALLOWLIST = {
+    ("test",
+     "python tools/buildlock.py --replay dotnet test --no-build --minimum-expected-tests 1"),
+    ("test-no-build",
+     "python tools/buildlock.py --replay dotnet test --no-build "
+     "--max-parallel-test-modules 1 --minimum-expected-tests 1"),
+    ("fmt-check",
+     "python tools/buildlock.py --replay dotnet format --verify-no-changes"),
+}
+
+
+def replay_call_sites(pixi_toml: str) -> set[tuple[str, str]]:
+    """Every `--replay`-carrying command segment in a pixi.toml, as (task name, segment).
+
+    Pure over text so the selftest can feed it a fixture and prove the arm discriminates; a
+    checker that only ever sees the real file cannot tell "the set matches" from "I found
+    nothing". Comment lines are skipped -- pixi.toml discusses the flag more often than it
+    carries it -- and a chained `cmd` is split on `&&` so a per-LEG answer is possible at all.
+    """
+    sites: set[tuple[str, str]] = set()
+    current_table = ""
+    for raw in pixi_toml.splitlines():
+        line = raw.strip()
+        table = re.match(r"^\[tasks\.([A-Za-z0-9_-]+)\]", line)
+        if table:
+            current_table = table.group(1)
+            continue
+        if line.startswith("#") or "--replay" not in line:
+            continue
+        key = re.match(r"^([A-Za-z0-9_-]+)\s*=", line)
+        name = current_table if (not key or key.group(1) == "cmd") else key.group(1)
+        body = re.search(r'cmd\s*=\s*"([^"]*)"', line)
+        for segment in (body.group(1) if body else line).split("&&"):
+            if "--replay" in segment:
+                sites.add((name, " ".join(segment.split())))
+    return sites
+
+
+def replay_inputs(command: list[str], priority_class: str) -> tuple[Path, str] | None:
+    """Fail closed on unreadable inputs; NUL porcelain preserves unusual/renamed paths."""
+    def git(*args: str) -> bytes:
+        return subprocess.run(["git", *args], check=True, stdout=subprocess.PIPE,
+                              stderr=subprocess.DEVNULL, timeout=30).stdout
+
+    try:
+        root_raw, git_dir_raw, head = git(
+            "rev-parse", "--show-toplevel", "--absolute-git-dir", "HEAD").splitlines()
+        root = Path(os.fsdecode(root_raw))
+        git_dir = Path(os.fsdecode(git_dir_raw))
+        identity = json.dumps([REPLAY_VERSION, os.getcwd(), priority_class, command]).encode()
+        key = hashlib.sha256(identity).hexdigest()
+        status = git("-C", str(root), "status", "--porcelain=v1", "-z",
+                     "--untracked-files=all", "--ignore-submodules=none")
+        digest = hashlib.sha256(identity + head + hashlib.sha256(status).digest())
+        entries = iter(status.split(b"\0")[:-1])
+        paths = []
+        for entry in entries:
+            paths.append(entry[3:])
+            if b"R" in entry[:2] or b"C" in entry[:2]:
+                paths.append(next(entries))
+        for name in sorted(set(paths)):
+            path = root / os.fsdecode(name)
+            digest.update(name + b"\0")
+            if path.is_symlink():
+                digest.update(b"link\0" + os.fsencode(os.readlink(path)))
+            elif path.is_file():
+                with path.open("rb") as f:
+                    digest.update(b"file\0" + hashlib.file_digest(f, "sha256").digest())
+            elif not path.exists():
+                digest.update(b"missing\0")
+            else:
+                # Dirty submodules/directories need their own tree model; never guess a pass.
+                return None
+        return git_dir / "buildlock" / (key + ".json"), digest.hexdigest()
+    except (OSError, ValueError, StopIteration, subprocess.SubprocessError):
+        return None
+
+
+def replay_pass(inputs: tuple[Path, str] | None, command: list[str]) -> bool:
+    if inputs is None:
+        return False
+    path, fingerprint = inputs
+    try:
+        receipt = json.loads(path.read_text(encoding="utf-8"))
+        if (receipt.get("version") != REPLAY_VERSION
+                or receipt["fingerprint"] != fingerprint or receipt["exit_code"] != 0
+                or not 0 <= time.time() - receipt["passed_at"] <= REPLAY_MAX_AGE_S):
+            return False
+        tail = base64.b64decode(receipt["stdout_tail"], validate=True)
+        passed = time.strftime("%H:%M:%S", time.localtime(receipt["passed_at"]))
+    except (OSError, ValueError, KeyError, TypeError, OverflowError):
+        return False
+    print(f"buildlock: replaying {subprocess.list2cmdline(command)} "
+          f"— unchanged since the pass at {passed}", flush=True)
+    sys.stdout.buffer.write(tail)
+    sys.stdout.buffer.flush()
+    return True
+
+
+def invalidate_pass(inputs: tuple[Path, str] | None) -> bool:
+    if inputs is None:
+        return False
+    try:
+        inputs[0].unlink(missing_ok=True)
+        return True
+    except OSError:
+        return False
+
+
+def prune_receipts(directory: Path, keep: Path) -> None:
+    """Drop this directory's expired and version-orphaned receipts. Bounded, best-effort.
+
+    Runs only on a WRITE, and only over the receipt directory being written to -- one worktree's
+    own, holding one file per distinct (cwd, class, argv) that has opted in, at up to
+    REPLAY_TAIL_BYTES plus change each. Nothing else ever deletes one: `invalidate_pass` removes
+    only the exact key being re-run, and a format bump (REPLAY_VERSION) orphans every existing file
+    under a key that is never read again, so without this the main checkout's `.git/buildlock` grows
+    for the life of the clone. Never a reason to fail the command that just passed.
+    """
+    for sibling in directory.glob("*.json"):
+        if sibling == keep:
+            continue
+        try:
+            receipt = json.loads(sibling.read_text(encoding="utf-8"))
+            live = (receipt.get("version") == REPLAY_VERSION
+                    and 0 <= time.time() - receipt["passed_at"] <= REPLAY_MAX_AGE_S)
+        except (OSError, ValueError, KeyError, TypeError):
+            live = False  # unreadable is unusable: replay_pass would refuse it too
+        if not live:
+            try:
+                sibling.unlink()
+            except OSError:
+                pass
+
+
+def run_recorded(command: list[str], env: dict[str, str], priority_class: str,
+                 inputs: tuple[Path, str] | None) -> int:
+    """Stream stdout unchanged, retaining a bounded byte tail; stderr stays inherited."""
+    if inputs is None:
+        # Not replay-eligible (no `--replay`, or unreadable inputs): nothing to record, so stdout
+        # stays the INHERITED handle it was before #2010 rather than a pipe this process pumps.
+        # That is most of the pipe's blast radius removed -- see the remark on the read loop below
+        # for the part that necessarily remains.
+        return subprocess.run(command, env=env).returncode
+    before = replay_inputs(command, priority_class)
+    # A previous holder may have published while this process queued.
+    if not invalidate_pass(inputs):
+        before = None
+    tail = bytearray()
+    # UNVERIFIED RESIDUAL, and it is on the MSBuild-owning commands specifically (2026-09-07 review):
+    # a pipe ends at EOF, which arrives only when every process holding the write handle has closed
+    # it, so a grandchild that outlives the wrapped command would stall this loop after the build
+    # finished -- in the file whose Timeout section exists to stop exactly that hang class, and this
+    # loop has no bound of its own. MSBuild's handle-inheritance behaviour was not measured. The
+    # opted-in set is what bounds the exposure: it is `dotnet format --verify-no-changes` and the
+    # `--no-build` test legs, which do own MSBuild, so this is narrowed rather than gone.
+    # `pixi.toml`'s activation env (MSBUILDDISABLENODEREUSE, UseSharedCompilation=false) is what
+    # stops node reuse leaving such a process behind, and it does not apply outside a pixi shell.
+    with subprocess.Popen(command, env=env, stdout=subprocess.PIPE) as child:
+        assert child.stdout is not None
+        while chunk := child.stdout.read1(8192):
+            sys.stdout.buffer.write(chunk)
+            sys.stdout.buffer.flush()
+            tail.extend(chunk)
+            del tail[:-REPLAY_TAIL_BYTES]
+        code = child.wait()
+    after = replay_inputs(command, priority_class) if code == 0 and before else None
+    if after is not None and after == before:
+        path, fingerprint = after
+        temporary = None
+        try:
+            path.parent.mkdir(parents=True, exist_ok=True)
+            with tempfile.NamedTemporaryFile(mode="w", encoding="utf-8", dir=path.parent,
+                                             delete=False) as f:
+                temporary = f.name
+                json.dump({"version": REPLAY_VERSION, "fingerprint": fingerprint, "exit_code": 0,
+                           "passed_at": time.time(),
+                           "stdout_tail": base64.b64encode(tail).decode("ascii")}, f)
+            os.replace(temporary, path)
+            prune_receipts(path.parent, path)
+        except OSError:
+            pass  # Losing an optimization must not turn a passing command into a failure.
+        finally:
+            if temporary is not None:
+                try:
+                    os.unlink(temporary)
+                except OSError:
+                    pass
+    return code
 
 # The verbs that make a `dotnet` invocation start an MSBuild, plus msbuild itself. Deliberately a
 # denylist of verbs rather than an allowlist of safe commands: the readonly class is for python and
@@ -243,13 +492,24 @@ def split_class(argv: list[str]) -> tuple[str, list[str]]:
 
 
 def main() -> int:
-    priority_class, command = split_class(sys.argv[1:])
+    argv = sys.argv[1:]
+    # OPT-IN (see the docstring's Replay section for the rule this flag encodes). There is
+    # deliberately no negative twin: the default IS forced execution, so `--no-replay` would be a
+    # second flag on one axis whose only use -- defeating a task line's baked-in `--replay` -- is
+    # unreachable, since `pixi run <task>` cannot insert a flag ahead of the command.
+    replay = bool(argv and argv[0] == "--replay")
+    if replay:
+        argv = argv[1:]
+    priority_class, command = split_class(argv)
+    if command and command[0] == "--replay":
+        replay = True
+        command = command[1:]
     if priority_class not in CLASSES:
         print(f"buildlock: unknown priority class {priority_class!r} -- one of {', '.join(CLASSES)}")
         return 2
     if not command:
         print("buildlock: no command given -- usage: python tools/buildlock.py "
-              "[--class build|readonly] <command> [args...]")
+              "[--replay] [--class build|readonly] <command> [args...]")
         return 2
 
     if priority_class == CLASS_READONLY:
@@ -261,7 +521,17 @@ def main() -> int:
             print(f"buildlock: refusing --class {CLASS_READONLY} for a command that starts an "
                   f"MSBuild ({' '.join(command)}) -- run it in the default {CLASS_BUILD} class")
             return 2
-        return subprocess.run(command, check=False).returncode
+
+    # Unflagged: no key computed, no tree walked, no receipt read, written or voided -- which is
+    # also what keeps this file's own selftest out of the real repository's receipt store.
+    inputs = replay_inputs(command, priority_class) if replay else None
+    if replay_pass(inputs, command):
+        return 0
+    # Delete BEFORE waiting/spawning: a failed or interrupted attempt voids the previous pass.
+    if not invalidate_pass(inputs):
+        inputs = None
+    if priority_class == CLASS_READONLY:
+        return run_recorded(command, dict(os.environ), priority_class, inputs)
 
     env = dict(os.environ)
     if env.get(HELD_MARKER):
@@ -270,13 +540,13 @@ def main() -> int:
         if handle is None:
             # Lock held -- by our ancestor, per the docstring's stated residual. Run inside
             # its exclusion.
-            return subprocess.run(command, env=env, check=False).returncode
+            return run_recorded(command, env, priority_class, inputs)
     else:
         timeout_s = float(env.get("BATON_BUILDLOCK_TIMEOUT_S", "1800"))
         handle = acquire(lock_path(), command, timeout_s)
     env[HELD_MARKER] = str(os.getpid())
     try:
-        return subprocess.run(command, env=env, check=False).returncode
+        return run_recorded(command, env, priority_class, inputs)
     finally:
         import msvcrt
 
@@ -376,8 +646,223 @@ def _spawn_selftest_child(code: str, lock_file: str, *args: str, hold_s: str | N
     )
 
 
+def _selftest_replay() -> bool:
+    """Real commands in an isolated tracked tree; the counter lives outside the inputs."""
+    with tempfile.TemporaryDirectory() as td:
+        repo = os.path.join(td, "repo")
+        os.mkdir(repo)
+        env = _selftest_env(BATON_BUILDLOCK_FILE=os.path.join(td, "replay.lock"))
+        for name in list(env):
+            if name.startswith("GIT_"):
+                env.pop(name)
+
+        def git(*args: str) -> None:
+            subprocess.run(["git", *args], cwd=repo, env=env, check=True,
+                           capture_output=True, timeout=30)
+
+        tracked = os.path.join(repo, "tracked file.txt")
+        with open(tracked, "w", encoding="utf-8") as f:
+            f.write("initial")
+        git("init", "-q")
+        git("add", ".")
+        git("-c", "user.name=Selftest", "-c", "user.email=selftest@example.invalid",
+            "-c", "core.hooksPath=/dev/null", "commit", "-qm", "fixture")
+        counter = os.path.join(td, "counter")
+        failure = os.path.join(td, "fail")
+        command = [sys.executable, "-c",
+                   "import os,sys; open(sys.argv[1],'a').write('run\\n'); "
+                   "print('receipt output'); sys.exit(3 if os.path.exists(sys.argv[2]) else 0)",
+                   counter, failure]
+
+        def run(*flags: str) -> subprocess.CompletedProcess:
+            """An OPTED-IN invocation -- what a pixi task line that carries `--replay` looks like."""
+            return subprocess.run(
+                [sys.executable, os.path.abspath(__file__), "--replay", *flags, *command],
+                cwd=repo, env=env, capture_output=True, text=True, check=False, timeout=180)
+
+        def run_unflagged() -> subprocess.CompletedProcess:
+            """The DEFAULT invocation: no `--replay`, so no receipt is read, written or voided."""
+            return subprocess.run([sys.executable, os.path.abspath(__file__), *command],
+                                  cwd=repo, env=env, capture_output=True, text=True,
+                                  check=False, timeout=180)
+
+        def count() -> int:
+            with open(counter, encoding="utf-8") as f:
+                return len(f.readlines())
+
+        first, second = run(), run()
+        if (first.returncode != 0 or second.returncode != 0 or count() != 1
+                or "buildlock: replaying" not in second.stdout
+                or "receipt output" not in second.stdout):
+            print(f"  control FAILED: unchanged pass did not replay -- {second.stdout!r}")
+            return False
+        for content in ("edited", "edited again"):
+            before = count()
+            with open(tracked, "w", encoding="utf-8") as f:
+                f.write(content)
+            result = run()
+            if result.returncode != 0 or count() != before + 1:
+                print("  control FAILED: tracked content edit replayed")
+                return False
+        # THE OPT-IN (2026-09-07 review). A live receipt is sitting next to an unchanged tree right
+        # now -- the arm above just proved a flagged run replays in exactly this state -- and an
+        # UNFLAGGED command must still execute, twice running. Both halves discriminate: "executes
+        # once" would also pass under an inversion that merely stopped WRITING receipts, and the
+        # absence of the replay line is what separates executing from replaying silently.
+        before = count()
+        unflagged_first, unflagged_second = run_unflagged(), run_unflagged()
+        if (unflagged_first.returncode != 0 or unflagged_second.returncode != 0
+                or count() != before + 2
+                or "replaying" in unflagged_first.stdout + unflagged_second.stdout):
+            print(f"  control FAILED: an unflagged command did not execute twice -- "
+                  f"{count() - before} run(s), {unflagged_second.stdout!r}")
+            return False
+        # ... and left that receipt untouched: the docstring's stated BOUNDARY, pinned so a future
+        # change that starts voiding receipts from unflagged runs updates the claim with the code.
+        before = count()
+        still_valid = run()
+        if still_valid.returncode != 0 or count() != before or "replaying" not in still_valid.stdout:
+            print("  control FAILED: an unflagged run consumed the receipt")
+            return False
+        # ... and WROTE none either -- the third verb, and the one the two arms above cannot reach.
+        # The key is (cwd, class, argv), identical for the flagged and unflagged forms, so a receipt
+        # written by an unflagged run would land on the same path with the same fingerprint and every
+        # later arm would read identically. Emptying the store first is what makes the write visible.
+        # Load-bearing beyond the docstring: gates.py's OVERLAP justification for running this
+        # selftest beside lint's build rests on unflagged runs never touching the real
+        # `.git/buildlock`, and arms 2-7 use the REAL repository as cwd.
+        store = Path(repo, ".git", "buildlock")
+        for existing in store.glob("*.json"):
+            existing.unlink()
+        before = count()
+        wrote_nothing = run_unflagged()
+        left_behind = sorted(p.name for p in store.glob("*.json"))
+        if wrote_nothing.returncode != 0 or count() != before + 1 or left_behind:
+            print(f"  control FAILED: an unflagged run wrote a receipt -- {left_behind}")
+            return False
+        with open(failure, "w", encoding="utf-8") as f:
+            f.write("fail")
+        with open(tracked, "w", encoding="utf-8") as f:
+            f.write("edited before the failure")  # moves off the receipted fingerprint
+        failed = run()
+        before = count()
+        failed_again = run()
+        if failed.returncode != 3 or failed_again.returncode != 3 or count() != before + 1:
+            print("  control FAILED: last failure was replayed")
+            return False
+        os.remove(failure)
+        if run().returncode != 0 or count() != before + 2:
+            print("  control FAILED: execution did not recover after failure")
+            return False
+        # A replay must not even OPEN a lock file: this parent directory does not exist.
+        before = count()
+        env["BATON_BUILDLOCK_FILE"] = os.path.join(td, "missing", "cannot-open.lock")
+        unlocked = run()
+        env["BATON_BUILDLOCK_FILE"] = os.path.join(td, "replay.lock")
+        if unlocked.returncode != 0 or count() != before or "replaying" not in unlocked.stdout:
+            print("  control FAILED: replay touched the lock")
+            return False
+        # Discover the fixture's receipt without changing this process's working directory.
+        receipts = list(Path(repo, ".git", "buildlock").glob("*.json"))
+        if len(receipts) != 1:
+            print(f"  control FAILED: expected one fixture receipt, got {len(receipts)}")
+            return False
+        receipt_path = receipts[0]
+        receipt = json.loads(receipt_path.read_text(encoding="utf-8"))
+        receipt["passed_at"] = time.time() - REPLAY_MAX_AGE_S - 1
+        receipt_path.write_text(json.dumps(receipt), encoding="utf-8")
+        if run().returncode != 0 or count() != before + 1:
+            print("  control FAILED: expired receipt replayed")
+            return False
+        receipt_path.write_text("broken json", encoding="utf-8")
+        if run().returncode != 0 or count() != before + 2:
+            print("  control FAILED: corrupt receipt did not execute")
+            return False
+        # Pruning on write, both polarities: an EXPIRED sibling and a VERSION-ORPHANED one go, the
+        # live receipt this write just produced stays. Without the negative half a prune that
+        # emptied the directory would look identical from here.
+        store = receipt_path.parent
+        stale = {
+            store / "expired.json": {"version": REPLAY_VERSION, "fingerprint": "x", "exit_code": 0,
+                                     "passed_at": time.time() - REPLAY_MAX_AGE_S - 1,
+                                     "stdout_tail": ""},
+            store / "orphan.json": {"version": REPLAY_VERSION + 1, "fingerprint": "x",
+                                    "exit_code": 0, "passed_at": time.time(), "stdout_tail": ""},
+        }
+        for planted, body in stale.items():
+            planted.write_text(json.dumps(body), encoding="utf-8")
+        with open(tracked, "w", encoding="utf-8") as f:
+            f.write("edited for the prune arm")
+        if run().returncode != 0:
+            print("  control FAILED: the prune arm's own run did not pass")
+            return False
+        survivors = sorted(p.name for p in store.glob("*.json"))
+        if survivors != [receipt_path.name]:
+            print(f"  control FAILED: prune left {survivors}, want just the live receipt")
+            return False
+    print("  replay controls: pass")
+    return True
+
+
+def _selftest_replay_allowlist() -> bool:
+    """pixi.toml's `--replay` set is exactly REPLAY_ALLOWLIST -- membership, not just the default.
+
+    The rest of this file's replay arms pin what the flag DOES. This one pins WHO CARRIES IT, which
+    was prose plus a partial line-level protection: `test` and `build` are outside diff-shape's
+    PIXI_PROTECTED_TASK_RULE, so moving the flag from `test`'s `--no-build` leg onto its
+    `dotnet build --no-incremental` leg trips no gate and silently deletes #687/#688's protection.
+    Exact-segment equality catches that move (the segment text changes) as well as a fourth opt-in.
+    """
+    pixi = Path(__file__).resolve().parent.parent / "pixi.toml"
+    try:
+        text = pixi.read_text(encoding="utf-8")
+    except OSError as exc:
+        print(f"  control FAILED: could not read {pixi} -- {exc}")
+        return False
+    found = replay_call_sites(text)
+    if found != REPLAY_ALLOWLIST:
+        for extra in sorted(found - REPLAY_ALLOWLIST):
+            print(f"  control FAILED: unallowlisted --replay call site {extra[0]}: {extra[1]!r}")
+        for missing in sorted(REPLAY_ALLOWLIST - found):
+            print(f"  control FAILED: allowlisted --replay call site gone {missing[0]}: "
+                  f"{missing[1]!r}")
+        print("  (the allowlist and the rule behind it: REPLAY_ALLOWLIST and this module's "
+              "docstring, 'Replay')")
+        return False
+    # The discriminating control: on a fixture carrying a fourth opt-in and the flag moved onto a
+    # build leg, the same reader must report both. Without it, a parser that silently matched
+    # nothing would pass the equality above only by accident of an empty allowlist -- and would
+    # keep passing after someone did opt a build line in.
+    fixture = (
+        '[tasks]\n'
+        '# discussion of --replay in a comment must not count\n'
+        'lint = { cmd = "python tools/buildlock.py --replay dotnet build -warnaserror" }\n'
+        'test = { cmd = "python tools/buildlock.py dotnet build --no-incremental && '
+        'python tools/buildlock.py --replay dotnet test --no-build --minimum-expected-tests 1" }\n'
+    )
+    intruders = replay_call_sites(fixture)
+    expected_intruders = {
+        ("lint", "python tools/buildlock.py --replay dotnet build -warnaserror"),
+        ("test",
+         "python tools/buildlock.py --replay dotnet test --no-build --minimum-expected-tests 1"),
+    }
+    if intruders != expected_intruders:
+        print(f"  control FAILED: the allowlist reader missed a planted opt-in -- {intruders}")
+        return False
+    # The docstring names the same three in prose, which is a second copy of the set and the one a
+    # reader meets first. Pinned too, cheaply: a legitimate future change to REPLAY_ALLOWLIST must
+    # update that sentence or fail here, rather than leaving it stale and green.
+    unnamed = sorted(task for task, _ in REPLAY_ALLOWLIST if f"`{task}`" not in (__doc__ or ""))
+    if unnamed:
+        print(f"  control FAILED: allowlisted task(s) unnamed in the module docstring -- {unnamed}")
+        return False
+    print("  replay allowlist: pass")
+    return True
+
+
 def selftest() -> int:
-    ok = True
+    ok = _selftest_replay()
+    ok = _selftest_replay_allowlist() and ok
     with tempfile.TemporaryDirectory() as td:
         lock_file = os.path.join(td, "selftest.lock")
         stamps = os.path.join(td, "stamps.txt")

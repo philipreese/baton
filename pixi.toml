@@ -40,6 +40,17 @@ UseSharedCompilation = "false"
 # `gates`/`gates-fast` themselves -- they hold no MSBuild directly; their MSBuild-owning legs
 # (fmt-check, lint, test-no-build) are each wrapped, which serializes exactly the dangerous
 # fraction and lets the python audit legs of two gates runs still overlap.
+#
+# #2010: replay is OPT-IN -- a wrapped line executes unless it carries `--replay`. The rule for
+# which lines may carry it is stated once, in tools/buildlock.py's docstring ("Replay"), and cited
+# here rather than restated: a VERDICT over worktree content may opt in, a producer of artifacts
+# another command reads may not. The SET admitted under that rule is pinned mechanically, not by
+# this comment: `REPLAY_ALLOWLIST` in that same file, asserted against these lines by
+# `pixi run buildlock-selftest`, so a fourth opt-in -- or the flag moved onto `test`'s build leg --
+# fails a gate naming it. No `dotnet build` line below opts in, for the reason that docstring
+# gives; the saving those lines would have bought already exists, and against an authenticated
+# per-member store rather than as a second path to the same skip -- C-12 ruling C's
+# `gates-fast-cover`.
 build = { cmd = "python tools/buildlock.py dotnet build" }
 # The rebuild is FORCED and then the test run is told not to build again (#688). MSBuild skips a
 # project whose source is older than the assembly built from it, so a plain `dotnet test` can run the
@@ -66,8 +77,20 @@ build = { cmd = "python tools/buildlock.py dotnet build" }
 # which case a leg that somehow ran no tests at all would otherwise exit 0 -- this flag turns that
 # into exit 9, a hard failure, at the cost of nothing when the leg is healthy. Bare `dotnet test`
 # (no `--solution`) resolves the one `.slnx` in the cwd the same way VSTest's did.
-test = { cmd = "python tools/buildlock.py dotnet build --no-incremental && python tools/buildlock.py dotnet test --no-build --minimum-expected-tests 1" }
+# #2010, the chained-leg choice, stated: the legs receipt INDEPENDENTLY, so "leg 1 replays, leg 2
+# executes" would be an ordinary state after any leg-2 failure -- and leg 2 grades whatever is in
+# `bin/`, which is ignored and outside the fingerprint, so a build leg that replayed instead of
+# rebuilding would hand it a stale assembly. Only the TEST leg opts in, and only because it runs
+# `--no-build` behind a build leg that always executes: bin/ is freshly forced every time, and a
+# replayed test leg is then a genuine earlier pass over the same source. Same shape one level up, in
+# `gates`: `lint` always executes, so `test-no-build` below never grades a build that did not happen.
+test = { cmd = "python tools/buildlock.py dotnet build --no-incremental && python tools/buildlock.py --replay dotnet test --no-build --minimum-expected-tests 1" }
 # Sharded test tasks for CI (#1363) — see .github/workflows/ci.yml
+#
+# #2010: neither leg of either shard opts into replay, unlike `test` above. These two run in CI and
+# nowhere else, and a fresh checkout has no receipt to replay, so the flag would buy nothing here
+# while widening what it is carried on. Both legs execute, which is the other of the two honest
+# shapes for a chained task.
 #
 # #1833: no longer `--filter` (VSTest syntax `dotnet test` no longer parses under MTP for xUnit --
 # it needs xunit's own `--filter-namespace` et al., MEASURED to still exit 8 per zero-matched
@@ -94,7 +117,7 @@ test-other = { cmd = "python tools/buildlock.py dotnet build --no-incremental &&
 # spec/baton.md §11 C-13 measured for the VSTest-era knob); in-assembly parallelism is still
 # untouched. `--minimum-expected-tests 1` joins it for the same zero-test-leg guard `test` above
 # carries.
-test-no-build = { cmd = "python tools/buildlock.py dotnet test --no-build --max-parallel-test-modules 1 --minimum-expected-tests 1" }
+test-no-build = { cmd = "python tools/buildlock.py --replay dotnet test --no-build --max-parallel-test-modules 1 --minimum-expected-tests 1" }
 # Coverage report (#199): collects per-test-project Cobertura via Microsoft.Testing.Extensions.
 # CodeCoverage (MTP's own coverage extension, #1833 -- coverlet.collector was a VSTest data
 # collector with no MTP equivalent; Microsoft's extension was picked over the coverlet.MTP
@@ -110,8 +133,10 @@ test-no-build = { cmd = "python tools/buildlock.py dotnet test --no-build --max-
 # measured evidence and the earlier command-line-validation discrepancy (#1846).
 coverage = { cmd = "rm -rf artifacts/coverage && dotnet tool restore && python tools/buildlock.py dotnet test --coverage --coverage-settings coverage.settings.xml --coverage-output-format cobertura --results-directory artifacts/coverage --minimum-expected-tests 1 && dotnet reportgenerator -reports:artifacts/coverage/*.cobertura.xml -targetdir:artifacts/coverage/report \"-reporttypes:Html;TextSummary\" \"-assemblyfilters:+Baton.*\"" }
 
+# #2010: `fmt` REWRITES the tree, so it never opts into replay -- replaying it would print a pass
+# and format nothing. `fmt-check` is the verdict-only half and does opt in.
 fmt = "python tools/buildlock.py dotnet format"
-fmt-check = { cmd = "python tools/buildlock.py dotnet format --verify-no-changes" }
+fmt-check = { cmd = "python tools/buildlock.py --replay dotnet format --verify-no-changes" }
 
 # --no-incremental is load-bearing, not a purity knob (#687). MSBuild decides a project is up to date
 # by comparing timestamps, so a source file OLDER than the assembly built from it is silently skipped
@@ -333,6 +358,12 @@ gate-sabotage = { cmd = "python -u tools/gates/sabotage.py" }
 # reads, so it runs immediately instead of queueing behind a lane's `dotnet test`. The class's guard
 # is a tripwire on this line, not a sandbox -- exactly how far it reaches is stated once, in
 # tools/buildlock.py's header under "Priority classes", and this line is the caller it names.
+#
+# #2010: NEVER opts into replay, and the read-only class is no exemption -- it reaches the same
+# replay block. What it computes IS a staleness decision, over `.git` state and the wall clock that
+# no `git status` reports: caching it would compose this line's own six-hour bound with C-12's, and
+# would make a receipt DELETED because gates failed (gates.py's whole re-run-for-real mechanism)
+# unobservable to the next push.
 gates-check-receipt = { cmd = "python -u tools/buildlock.py --class readonly python -u tools/gates/gates.py --check-receipt" }
 
 # One-time per clone: point git at the committed hooks. .git/hooks is not version-controlled, so a
@@ -346,6 +377,11 @@ setup-hooks = { cmd = "git config core.hooksPath .githooks" }
 # actually makes a vendor self-update surface, but this is the layer that PRINTS: within the 7-day
 # grace window drift is a loud WARN and exit 0, past it or on unreadable bookkeeping it is a FAIL, and
 # with no vendor CLI present to inspect it says so plainly without failing.
+#
+# #2010: NEVER opts into replay. Its verdict is a function of the WALL CLOCK and a gitignored
+# machine-local file (the grace window above, `docs/vendor-probe.drift.local.json`), neither of which
+# tools/buildlock.py can fingerprint -- so drift that merely aged past the window, on a byte-identical
+# tree, would replay as a pass and this gate would never fire.
 vendor-check = { cmd = "python tools/buildlock.py dotnet run --project tools/Baton.VendorProbe -- --check" }
 
 # #1413: pure-Python red/green check that the fleet-glass pusher's secret gate fails CLOSED (a
