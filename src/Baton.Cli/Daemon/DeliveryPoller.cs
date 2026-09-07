@@ -1,3 +1,4 @@
+using System.Diagnostics;
 using System.Globalization;
 using System.Text.Json;
 using Baton.Cli.Mcp;
@@ -65,6 +66,7 @@ public sealed class DeliveryPoller : BackgroundService
     {
         while (!stoppingToken.IsCancellationRequested)
         {
+            var started = Stopwatch.GetTimestamp();
             try
             {
                 await PollOnceAsync(stoppingToken).ConfigureAwait(false);
@@ -77,6 +79,10 @@ public sealed class DeliveryPoller : BackgroundService
             {
                 Console.Error.WriteLine($"DeliveryPoller: sweep iteration failed: {ex.Message}");
             }
+
+            // #1981: DaemonTickLedger owns what this report is for.
+            DaemonTickLedger.Instance.RecordTick(
+                nameof(DeliveryPoller), Stopwatch.GetElapsedTime(started), GetInterval());
 
             try
             {

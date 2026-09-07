@@ -3216,6 +3216,42 @@ line; on that fallback cycle only, the pushed body carries one more optional top
 `staleness: {daemon_derived_at, age_s, stale}` (absent on every ordinary push, same convention as
 `pusher.writeBudgetExhaustedUntil`), and `glass.html` renders it as one more absent-safe banner,
 checked at the same priority rung as the write-budget one, never a new banner mechanism.
+**#1981 — a hung daemon is a first-class reading, on both surfaces, well before that 900s fallback.**
+On 2026-09-06 the daemon stopped writing the projection for thirteen minutes with its process alive
+and its scheduled task reporting Running; every consumer kept serving the frozen picture as current,
+and the `staleness` field above never fired because 900s had not elapsed. Two fields; **three ticks of
+`FleetProjectionWriter.GetInterval()`** is the threshold, stated once as
+`FleetProjectionWriter.StaleAfterTicks`. Its C# consumers derive from that symbol; the JS side cannot
+reach it and transcribes it as `PROJECTION_STALE_AFTER_MS` (`worker.core.mjs`), which says at its own
+declaration that it is a transcription and what widening `BATON_FLEET_PROJECTION_INTERVAL_SECONDS`
+therefore costs. **A second, unrelated threshold lives on the JS side only** and has its own home: the
+"nothing fresh has reached the mailbox at all" arm is measured against the cadence `pusher.py` reports
+in its ping body (`derived_ping_interval_s`, `heartbeat_ping_payload`), never against a constant —
+that cadence is adaptive, and a reader holding `DERIVED_PING_INTERVAL_SECONDS` holds its floor, which
+is the false-fire the 2026-09-06 review caught before deploy. No cadence reported, no arm:
+- **`fleet_status` gains `projectionAgeSeconds` (omitted when unknown) and `stale` (serialized only
+  when true)** — seconds since the projection file's own `derived_at`, read at call time by
+  `Baton.Cli.Mcp.FleetProjectionStaleness`, whose doc comment owns the fail-closed rules for a file it
+  cannot read — the same posture `read_projection_file` above already takes. They describe the **daemon**, never the response's own `rooms[]`, which that tool re-scans
+  live on every call — a conductor reading the tool programmatically sees the same fact the operator's
+  banner does. Off the pushed body by construction: `build_wrapped` copies named keys only, so neither
+  field reaches `pusher.py`'s change-gate hash.
+- **The pushed snapshot gains `projection: {stale, reason, ageMs}`**, merged in by `worker.js` at read
+  time (like `heartbeat_at`/`derived_at`/`pending_push_age_s`, and for the same change-gate reason)
+  from `projectionStaleness` in `worker.core.mjs` — that function's own comment is the canonical record
+  of why there are **two** arms and why their thresholds have different homes, and `worker.selftest.mjs`
+  holds both polarities of each plus the healthy-quiet-fleet false-fire fixture. `glass.html` renders it
+  as a banner above the fleet table, ranked below the pusher-liveness banners (a dead pusher explains a
+  frozen `derived_at` with no daemon fault) and **below** the two other `derived_at`-keyed banners: arm
+  (a) fires at 90s on the same state those two need at ten minutes, so any higher rung makes them dead
+  code (it did, before the 2026-09-06 review). One consequence of that ranking, recorded in full in
+  that table: on **the page**, an `unreachable` verdict reaches the neutral #1829 banner rather than
+  its own, so that arm's own wording is read through `fleet_status` alone. The chain's own precedence
+  table beside it in `glass.html` is the record of which state reaches each row — that page has no test harness, which is
+  why the table is written down. It is computed in the Worker, not the page, because the page is an
+  artifact that cannot import that module and a copy there would be a second implementation nothing
+  tests.
+
 `python pusher.py --compare-projection` runs BOTH sources once against the live rooms and diffs them
 field-by-field after canonical (sorted-keys) JSON serialization, exiting 0 identical / 1 with the
 diff printed on mismatch — `derived_at` (differs by construction), `rooms[].live.lastActivityAt`
@@ -3693,6 +3729,23 @@ trigger is not registrable by a standard user and is not used (#1770).
   heartbeat entry (§2) already gives for its own field, at at most four transitions per room's entire
   lifetime. Polling for a room stops the moment its own journal already carries a `DeliveryMerged` fact.
 - **The singleton mutex is per-home, not per-user** — `DaemonHost.MutexName` (#1773) owns why.
+- **The daemon watches itself, and dies loudly rather than hanging quietly (#1981).** Every hosted
+  service above reports each completed pass to `DaemonTickLedger` (duration, and its own interval);
+  `FleetProjectionWriter` renders that ledger to `BatonPaths.FleetHeartbeatFile`
+  (`{Root}/fleet/heartbeat.json` — `tickCompletedAt` plus per-service last-tick durations) at the end
+  of every projection tick, and `DaemonWatchdog` kills the process with a non-zero code once the
+  daemon has gone silent for the bound that type states, so the scheduled task's restart policy brings
+  it back.
+  Those types' own doc comments carry the rules — what the watchdog deliberately does not catch (one
+  wedged service beside healthy ones; §6's projection-staleness reading covers that), and why its loop
+  runs on a dedicated thread rather than the thread pool. **The scheduled task's action has to end in
+  `; exit $LASTEXITCODE`** for any of this to reach the scheduler: a `powershell.exe -Command "& { …
+  *>> 'daemon.log' }"` swallows the exit code (measured, PowerShell 5.1, 2026-09-06), which would leave
+  a watchdog-killed daemon dead instead of restarted — `register-daemon-task.ps1` sets it, and an
+  existing registration keeps the old action until an operator re-runs that script.
+  Occasioned by a thirteen-minute silent hang on 2026-09-06 (#1981): process alive, task Running,
+  every consumer serving a frozen picture, noticed by a person. The root cause of that hang is not
+  addressed by any of this — the instrumentation is what makes the next one diagnosable.
 
 Explicitly **not** kept: pairing (`PairedClientsStore`), WebSocket broadcast (`/api/ws`,
 `/api/ws/progress`), sidecar/Tailscale supervision, a desktop-owner-only auth tier, template-picker

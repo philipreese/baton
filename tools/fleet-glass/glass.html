@@ -46,6 +46,15 @@
   stale or absent, falling back to its own derivation for that cycle -- checked right after the
   write-budget banner above (both are the pusher explaining a self-diagnosed source problem, not a
   KV/heartbeat symptom).
+
+  `projection` (#1981, same absent-safe convention) is `{stale, reason, ageMs}`, computed by
+  worker.js at read time from `projectionStaleness` in worker.core.mjs -- the DAEMON's own staleness,
+  not the pusher's. It is the finer-grained sibling of `staleness` above: that one only rides in once
+  the projection file is 900s old and the pusher has already fallen back to deriving the snapshot
+  itself, whereas this fires at three of the daemon's own tick intervals, which is what #1981's
+  thirteen-minute silent hang needed. The thresholds and the reason codes are documented on
+  `projectionStaleness` itself; this file only renders the verdict, and where it renders it in the
+  banner chain is the precedence table beside that chain.
 -->
 <title>Fleet Glass</title>
 <link rel="preconnect" href="https://fonts.googleapis.com">
@@ -2039,6 +2048,55 @@ window.addEventListener("hashchange", applyRoute);
         // are the pusher explaining a self-diagnosed source problem, not a downstream KV/heartbeat
         // symptom the banners below would otherwise misdiagnose.
         const staleness = snap.staleness && typeof snap.staleness === "object" ? snap.staleness : null;
+        // #1981: `projection` is computed by worker.js from projectionStaleness() in
+        // worker.core.mjs (which worker.selftest.mjs exercises), never here -- this page is an
+        // artifact and cannot import that module, so re-deriving the thresholds inline would be a
+        // second implementation nothing tests. Absent-safe like every other optional field: a
+        // Worker not yet redeployed for #1981 simply never sends it.
+        const projection = snap.projection && typeof snap.projection === "object" && snap.projection.stale
+          ? snap.projection : null;
+        // BANNER PRECEDENCE — one chain, first match wins, and every row below must stay REACHABLE.
+        // Written out because that property is not otherwise checkable: this page is an artifact
+        // with no test harness (see the `projection` note above), so the only instrument on the
+        // ordering is a reader with this table beside the chain. #1981's branch was inserted in the
+        // wrong rung once and silently killed rows 8 and 9; that is the failure this table exists
+        // for, and a new row goes in only with the state that reaches it written down.
+        //
+        //  1 kvWriteCapResetsAt      Cloudflare answered 429. The one real cap signal (#1829).
+        //  2 budgetExhaustedUntil    The pusher stopped ITSELF at its own daily ledger (#1690).
+        //  3 staleness.stale         The pusher read the daemon's projection file and found it >900s
+        //                            old, so it derived its own this cycle (#1557). Names the daemon.
+        //  4 hbMs == null            No heartbeat ever recorded (unredeployed worker/pusher).
+        //  5 hbMs > HEARTBEAT_DEAD_MS  Pusher likely dead (2.5h). Everything below assumes a LIVE
+        //                            pusher, which is why nothing below may name the pusher's death.
+        //  6 derivedMs == null       No derived_at ever recorded (unredeployed pusher).
+        //  7 pendingPushMs > PUSH_FAILING_MS  Derivation healthy, PUSH failing (413/5xx/network).
+        //  8 hb & derived aging together, |diff| < KV_CAP_SYNC_MS  The #1829 NEUTRAL line. Reached
+        //                            when the ping cadence has widened on an idle fleet: hbMs and
+        //                            derivedMs both > 10min. Not an alarm, deliberately.
+        //                            ALSO catches every reason==="unreachable" verdict — see row 10.
+        //  9 running && derivedMs > RUNNING_SUSPICION_MS  Derivation stuck while rooms are Running.
+        //                            Reached when the heartbeat is FRESH (or row 8's |diff| test
+        //                            fails) and derivation is not.
+        // 10 projection (#1981)      The daemon may be hung. Last of the derived_at-keyed rows: its
+        //                            arm (a) fires at 90s on the same state rows 8 and 9 need at ten
+        //                            minutes, so any higher rung makes both of them dead code.
+        //                            REACHED ONLY BY reason==="hung" (2026-09-06 round-3 review).
+        //                            Arm (b) implies arm (a) stayed quiet, i.e. derivedMs - hbMs is
+        //                            in [0, 90s], AND now - derivedAt > 3x the ping cadence (>= 15
+        //                            min) — which is row 8's condition exactly (both ages past
+        //                            RUNNING_SUSPICION_MS, |diff| < KV_CAP_SYNC_MS), checked first;
+        //                            past 2.5h row 5 takes it instead. So this row's second detail
+        //                            string ("nothing fresher has reached this page at all") is
+        //                            DEAD on this page and reachable only through fleet_status,
+        //                            which serves the same `projection` object with no chain over
+        //                            it. Recorded rather than fixed by reordering: ranking arm (b)
+        //                            above row 8 is what the round-2 review's finding B was, and
+        //                            folding the detail into row 8's text would re-promote the
+        //                            #1829 false positive from the other side, since arm (b) itself
+        //                            false-fires for the length of a hard-429 cap window
+        //                            (worker.core.mjs, PROJECTION_UNREACHABLE_CADENCE_MULTIPLE).
+        // 11 else                    Clear the banner.
         if(kvWriteCapResetsAt){
           banner(`<b>The worker is refusing writes</b> (Cloudflare's daily KV write cap, confirmed by a live 429; writes resume ${esc(kvWriteCapResetsAt)}). Data below is from the last push before the cap hit.`);
         } else if(budgetExhaustedUntil){
@@ -2068,7 +2126,27 @@ window.addEventListener("hashchange", applyRoute);
           // the ping cadence; the REAL cap signal is kvWriteCapResetsAt, checked above.
           banner(`<b>No fresh write since ${esc(age(snap.heartbeat_at))} ago.</b> The derived-freshness ping's cadence has widened (idle fleet) — this is expected, not necessarily a cap. Data below is from the last push.`);
         } else if(running && isFinite(derivedMs) && derivedMs > RUNNING_SUSPICION_MS){
-          banner(`<b>Snapshot derivation may be stuck.</b> The pusher is alive (heartbeat ${esc(age(snap.heartbeat_at))} ago) but its last successful derivation was ${esc(age(snap.derived_at))} ago while rooms show Running — derive_snapshot_and_timelines may be failing every cycle.`);
+          // The parenthetical is #1981's: this branch cannot tell FLEET_GLASS_PROJECTION_SOURCE
+          // apart, and in the default `file` mode derived_at is the DAEMON's write stamp, not the
+          // pusher's derivation -- so it must not send an operator to pusher.log alone.
+          banner(`<b>Snapshot derivation may be stuck.</b> The pusher is alive (heartbeat ${esc(age(snap.heartbeat_at))} ago) but the last successful derivation was ${esc(age(snap.derived_at))} ago while rooms show Running — derive_snapshot_and_timelines may be failing every cycle (or, in the default FLEET_GLASS_PROJECTION_SOURCE=file mode, this stamp is the daemon's own: check <span class='mono'>baton daemon</span> too).`);
+        } else if(projection){
+          // #1981: the daemon hung for 13 minutes on 2026-09-06 with its process alive, its
+          // scheduled task reporting Running, and this page showing the frozen picture as if it
+          // were current -- the operator noticed from the board, nothing in baton did.
+          //
+          // Ranked LAST among the derived_at-keyed banners, which is the correction the 2026-09-06
+          // review forced: this branch first shipped above the two above it, and because arm (a)
+          // fires at 90s on exactly the state they need (fresh contact, stale derivation) it made
+          // both of them dead code -- re-promoting the #1829 false positive that was deliberately
+          // demoted to a neutral line. Ranking it here costs nothing at the moment that matters:
+          // arm (a) fires at 90s, more than eight minutes before either banner above can, so a
+          // watching operator sees the daemon diagnosis FIRST and only a stall nobody looked at for
+          // ten minutes degrades into the coarser wording above (whose text now says so).
+          const detail = projection.reason === "hung"
+            ? "the fleet machine was already serving that frozen projection when it last reported in"
+            : "nothing fresher has reached this page at all — the fleet machine, the pusher, or the daemon";
+          banner(`<b>Projection is ${esc(dur(projection.ageMs) || "?")} stale — the daemon may be hung.</b> ${esc(detail)}. Every room below is that old picture; check <span class='mono'>~/.baton/daemon.log</span> and the <span class='mono'>baton-daemon</span> scheduled task.`);
         } else {
           banner("");
         }

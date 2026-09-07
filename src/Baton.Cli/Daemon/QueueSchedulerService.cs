@@ -1,3 +1,4 @@
+using System.Diagnostics;
 using Baton.Core.Internal;
 using Baton.Cli.Mcp;
 using Baton.Queue;
@@ -67,6 +68,7 @@ public sealed class QueueSchedulerService : BackgroundService
     {
         while (!stoppingToken.IsCancellationRequested)
         {
+            var started = Stopwatch.GetTimestamp();
             TimeSpan interval;
             try
             {
@@ -81,6 +83,12 @@ public sealed class QueueSchedulerService : BackgroundService
                 Console.Error.WriteLine($"QueueSchedulerService: iteration failed: {ex.Message}");
                 interval = TimeSpan.FromSeconds(QueueSettings.DefaultTickSeconds);
             }
+
+            // #1981 (rules: DaemonTickLedger). `interval` here is this tick's OWN next-delay decision,
+            // which TickOnceAsync returns -- so the heartbeat file reports the cadence this service is
+            // actually running at rather than a fixed default it may not be using.
+            DaemonTickLedger.Instance.RecordTick(
+                nameof(QueueSchedulerService), Stopwatch.GetElapsedTime(started), interval);
 
             try
             {

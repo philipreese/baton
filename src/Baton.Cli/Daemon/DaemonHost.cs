@@ -51,6 +51,29 @@ public static class DaemonHost
             }
         }
 
+        // #1981: from here on, every line this process writes to either console stream reaches
+        // `daemon.log` with a UTC timestamp in front of it -- see TimestampedLineWriter for why this
+        // is one seam over Console rather than a prefix at each call site. Installed AFTER the
+        // second-instance refusal above, so a refused instance leaves the process streams untouched,
+        // and restored in the finally below: in production the process exits either way, but a test
+        // driving this method must not leave the whole test host's console wrapped behind it.
+        var originalOut = Console.Out;
+        var originalError = Console.Error;
+        Console.SetOut(new TimestampedLineWriter(originalOut));
+        Console.SetError(new TimestampedLineWriter(originalError));
+        try
+        {
+            await RunHostAsync(args, onHostBuilt, mutex).ConfigureAwait(false);
+        }
+        finally
+        {
+            Console.SetOut(originalOut);
+            Console.SetError(originalError);
+        }
+    }
+
+    private static async Task RunHostAsync(string[] args, Action<IHost>? onHostBuilt, Mutex? mutex)
+    {
         // Setup local data directory ~/.baton
         var batonDir = BatonPaths.Root;
         Directory.CreateDirectory(batonDir);
@@ -89,6 +112,11 @@ public static class DaemonHost
         // settings.json's `Queue` block on every tick rather than the daemonSettings captured above, so
         // a policy change (a floor, the cap, the tier table) takes effect without a daemon restart.
         builder.Services.AddHostedService<QueueSchedulerService>();
+
+        // #1981: the self-watchdog, registered LAST so its supervision thread starts after every
+        // service it watches has had its StartAsync run -- DaemonWatchdog's own doc comment carries
+        // what it trips on, what it deliberately does not, and why it does not run on the thread pool.
+        builder.Services.AddHostedService<DaemonWatchdog>();
 
         var host = builder.Build();
         onHostBuilt?.Invoke(host);

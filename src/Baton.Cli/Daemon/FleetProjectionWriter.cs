@@ -1,3 +1,4 @@
+using System.Diagnostics;
 using System.Globalization;
 using System.Text;
 using System.Text.Json;
@@ -47,6 +48,18 @@ public sealed class FleetProjectionWriter : BackgroundService
 
     public static readonly TimeSpan DefaultInterval = TimeSpan.FromSeconds(30);
 
+    /// <summary>
+    /// #1981: how many missed ticks make the projection "stale" — the one place that multiple is
+    /// stated. Three, not one: a single tick that runs long (a room walk under IO contention) is
+    /// ordinary, and a reader that shouted on every one of those would be the false-firing banner
+    /// #1613 already had to pull out of <c>glass.html</c> once. Every consumer derives its own
+    /// threshold from <see cref="StaleAfter"/> rather than transcribing 90 seconds:
+    /// <c>FleetStatusTool</c>'s <c>stale</c> flag, and — across the language boundary, where a
+    /// literal is unavoidable — <c>PROJECTION_STALE_AFTER_MS</c> in
+    /// <c>tools/fleet-glass/worker.core.mjs</c>, which names this symbol as its source.
+    /// </summary>
+    public const int StaleAfterTicks = 3;
+
     // Same reasoning as RoomRetentionSweep.MinInterval/MaxInterval: bounded so a pathological env value
     // can neither overflow TimeSpan.FromSeconds nor hot-loop ExecuteAsync.
     public static readonly TimeSpan MinInterval = TimeSpan.FromSeconds(1);
@@ -90,10 +103,17 @@ public sealed class FleetProjectionWriter : BackgroundService
         return DefaultInterval;
     }
 
+    /// <summary>#1981: the age past which <see cref="BatonPaths.FleetProjectionFile"/> is stale —
+    /// <see cref="StaleAfterTicks"/> ticks of whatever interval is actually in effect, so an operator
+    /// who widens <see cref="IntervalSecondsEnvironmentVariable"/> widens the staleness threshold with
+    /// it instead of arming a permanent alarm.</summary>
+    public static TimeSpan StaleAfter() => GetInterval() * StaleAfterTicks;
+
     protected override async Task ExecuteAsync(CancellationToken stoppingToken)
     {
         while (!stoppingToken.IsCancellationRequested)
         {
+            var started = Stopwatch.GetTimestamp();
             try
             {
                 await WriteOnceAsync(stoppingToken).ConfigureAwait(false);
@@ -107,6 +127,15 @@ public sealed class FleetProjectionWriter : BackgroundService
                 Console.Error.WriteLine($"FleetProjectionWriter: iteration failed: {ex.Message}");
             }
 
+            // #1981: recorded even when the tick above threw -- what the watchdog measures is whether
+            // the LOOP is still turning over, and a tick that fails loudly every 30s is a different
+            // fault from one that never comes back. The heartbeat file is written from here, at the end
+            // of the projection tick, because this is the daemon's fastest-cadence full pass over the
+            // rooms: DaemonTickLedger and BatonPaths.FleetHeartbeatFile carry the rest of the rules.
+            DaemonTickLedger.Instance.RecordTick(
+                nameof(FleetProjectionWriter), Stopwatch.GetElapsedTime(started), GetInterval());
+            WriteHeartbeat();
+
             try
             {
                 await Task.Delay(GetInterval(), stoppingToken).ConfigureAwait(false);
@@ -115,6 +144,26 @@ public sealed class FleetProjectionWriter : BackgroundService
             {
                 return;
             }
+        }
+    }
+
+    /// <summary>
+    /// #1981 — <see cref="BatonPaths.FleetHeartbeatFile"/>, rewritten at the end of every projection
+    /// tick from whatever every service has most recently reported. Best-effort by construction: a
+    /// heartbeat that cannot be written must never take down the tick that produced it (the same
+    /// posture <see cref="WriteAtomic"/> already takes for the projection itself), and the in-process
+    /// watchdog reads the ledger rather than this file, so a failed write costs an outside reader its
+    /// view and costs the self-check nothing.
+    /// </summary>
+    private static void WriteHeartbeat()
+    {
+        try
+        {
+            WriteAtomic(BatonPaths.FleetHeartbeatFile, DaemonTickLedger.Instance.RenderHeartbeatJson());
+        }
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
+        {
+            Console.Error.WriteLine($"FleetProjectionWriter: heartbeat write failed: {ex.Message}");
         }
     }
 

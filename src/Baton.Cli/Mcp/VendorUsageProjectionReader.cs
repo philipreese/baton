@@ -156,8 +156,22 @@ public sealed record VendorUsageWindowView(
 /// is omitted, never an empty array, whenever <see cref="VendorUsageProjectionReader.ReadAll"/> finds
 /// nothing to report.
 /// </summary>
+/// <remarks>
+/// <see cref="ProjectionAgeSeconds"/>/<see cref="Stale"/> (#1981) describe the DAEMON's projection
+/// file, not this response's own <see cref="Rooms"/> — those are scanned live on every call.
+/// <c>Baton.Cli.Mcp.FleetProjectionStaleness</c> is where both come from and where the fail-closed
+/// rules live; spec/baton.md §6 carries the wire row. <see cref="Stale"/> is serialized only when
+/// true, so an ordinary healthy response is byte-identical to a pre-#1981 one apart from
+/// <c>projectionAgeSeconds</c>.
+/// </remarks>
 public sealed record FleetStatusResponse(
     [property: JsonPropertyName("rooms")] IReadOnlyList<FleetRoomStatusView> Rooms,
     [property: JsonPropertyName("vendors")]
     [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
-    IReadOnlyList<VendorUsageProjectionView>? Vendors);
+    IReadOnlyList<VendorUsageProjectionView>? Vendors,
+    [property: JsonPropertyName("projectionAgeSeconds")]
+    [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    double? ProjectionAgeSeconds = null,
+    [property: JsonPropertyName("stale")]
+    [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingDefault)]
+    bool Stale = false);

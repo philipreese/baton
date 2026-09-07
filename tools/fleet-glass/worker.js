@@ -48,13 +48,13 @@
  *                          inflates the everyday response; a paged call reads it out of this same
  *                          value instead of a separate key.
  *  - "heartbeat_at"      : JSON `{"at": ISO-8601, "derived_at"?: ISO-8601, "pending_push_age_s"?:
- *                          number}` (#1613 item 2 widened this from a bare ISO-8601 string;
- *                          `pending_push_age_s` was added by a 2026-09-01 review finding; a bare
+ *                          number, "derived_ping_interval_s"?: number}` (#1613 item 2 widened this
+ *                          from a bare ISO-8601 string; `pending_push_age_s` was added by a
+ *                          2026-09-01 review finding, `derived_ping_interval_s` by #1981's; a bare
  *                          string still reads back as a legacy `at` value, self-healing the moment
  *                          the next heartbeat lands). Deliberately NOT part of the "snapshot" value
- *                          or its hash -- none of `at`/`derived_at`/`pending_push_age_s` may ever
- *                          count as a snapshot content change and trigger the change-gate (#1457)
- *                          to push early.
+ *                          or its hash -- none of these fields may ever count as a snapshot content
+ *                          change and trigger the change-gate (#1457) to push early.
  *  - "inbox:index"       : JSON array of deliverable METADATA (no content), newest-first, capped at
  *                          INBOX_CAP entries -- what deliverables_list returns. Each entry carries a
  *                          `batch_id` (#1690 item 2) naming which "inbox:batch:<id>" blob holds its
@@ -83,6 +83,7 @@ import {
   deliverableReadOutcome,
   isValidFleetStatusPage,
   maxIsoOrNull,
+  projectionStaleness,
   classifyKvError,
   nextUtcMidnightIso,
 } from "./worker.core.mjs";
@@ -93,7 +94,7 @@ const TOOLS = [
   {
     name: "fleet_status",
     description:
-      "Read-only snapshot of room statuses across the operator's baton fleet, as last pushed by the fleet machine. Includes pushed_at for snapshot staleness, heartbeat_at for pusher liveness, derived_at for snapshot-derivation health, and pending_push_age_s for push-delivery health -- these are independent (#1486, #1613 item 2, 2026-09-01 review): a quiet fleet lets pushed_at go stale on purpose (heartbeat_at tells that apart from a dead pusher), a fleet whose derivation keeps failing lets derived_at go stale even while heartbeat_at stays fresh, and a fleet whose PUSHES keep failing (derivation healthy) grows pending_push_age_s even while derived_at stays fresh. With no arguments, `rooms` carries every non-terminal room plus only the newest N terminal ones (terminal_total names the full terminal count) -- pass `page` (0-based) and optionally `limit` (default 50, max 200) to page through the REST of the terminal archive instead; a paged call's response carries rooms/page/limit/terminal_total/next_page (null once exhausted) and omits every other top-level field.",
+      "Read-only snapshot of room statuses across the operator's baton fleet, as last pushed by the fleet machine. Includes pushed_at for snapshot staleness, heartbeat_at for pusher liveness, derived_at for snapshot-derivation health, and pending_push_age_s for push-delivery health -- these are independent (#1486, #1613 item 2, 2026-09-01 review): a quiet fleet lets pushed_at go stale on purpose (heartbeat_at tells that apart from a dead pusher), a fleet whose derivation keeps failing lets derived_at go stale even while heartbeat_at stays fresh, and a fleet whose PUSHES keep failing (derivation healthy) grows pending_push_age_s even while derived_at stays fresh. With no arguments, `rooms` carries every non-terminal room plus only the newest N terminal ones (terminal_total names the full terminal count) -- pass `page` (0-based) and optionally `limit` (default 50, max 200) to page through the REST of the terminal archive instead; a paged call's response carries rooms/page/limit/terminal_total/next_page (null once exhausted) and omits every other top-level field. `projection` (#1981, absent when derived_at is unknown) is `{stale, reason, ageMs}` for the DAEMON's own projection file: `stale` with reason `hung` means the fleet machine was already serving a frozen projection when it last reported in, and `unreachable` means nothing fresh has arrived here at all -- in either case the rooms below are an old picture.",
     inputSchema: {
       type: "object",
       properties: {
@@ -174,18 +175,20 @@ function readStoredHeartbeat(raw) {
         at: parsed.at ?? null,
         derivedAt: parsed.derived_at ?? null,
         pendingPushAgeS: typeof parsed.pending_push_age_s === "number" ? parsed.pending_push_age_s : null,
+        derivedPingIntervalS: typeof parsed.derived_ping_interval_s === "number"
+          ? parsed.derived_ping_interval_s : null,
       };
     }
   } catch {
     // Falls through to the legacy bare-string reading below.
   }
-  return { at: raw, derivedAt: null, pendingPushAgeS: null };
+  return { at: raw, derivedAt: null, pendingPushAgeS: null, derivedPingIntervalS: null };
 }
 
 async function readHeartbeat(env) {
   const raw = await env.FLEET.get("heartbeat_at");
-  const { at, derivedAt, pendingPushAgeS } = readStoredHeartbeat(raw);
-  return { heartbeatAt: at, derivedAt, pendingPushAgeS };
+  const { at, derivedAt, pendingPushAgeS, derivedPingIntervalS } = readStoredHeartbeat(raw);
+  return { heartbeatAt: at, derivedAt, pendingPushAgeS, derivedPingIntervalS };
 }
 
 async function readInboxIndex(env) {
@@ -304,7 +307,8 @@ async function handleMcp(request, env) {
         return json(rpcResult(id, toolText(JSON.stringify(computeFleetStatusPage(archive, args.page, args.limit)))));
       }
       const stored = await env.FLEET.get("snapshot");
-      const { heartbeatAt, derivedAt: derivedAtFromHeartbeat, pendingPushAgeS } = await readHeartbeat(env);
+      const { heartbeatAt, derivedAt: derivedAtFromHeartbeat, pendingPushAgeS, derivedPingIntervalS } =
+        await readHeartbeat(env);
       const storedSnapshot = stored === null ? null : JSON.parse(stored);
       // derived_at (#1613 item 2, spec/baton.md §6) can reach this Worker by two independent
       // routes: a snapshot push's own body, or a dedicated /heartbeat ping (see readHeartbeat).
@@ -328,7 +332,18 @@ async function handleMcp(request, env) {
       // heartbeat_at/derived_at/pending_push_age_s are merged in at read time, never written into
       // the "snapshot" value itself -- that keeps them out of pusher.py's change-gate hash (see
       // this file's header).
+      // #1981: computed HERE, not in glass.html, so the two thresholds and the arithmetic live in
+      // one place (worker.core.mjs, exercised by worker.selftest.mjs) -- the page is an artifact
+      // that cannot import a module, so a copy over there would be a second implementation nothing
+      // tests. Merged in at read time like the three fields above, for the same reason: it must not
+      // enter pusher.py's change-gate hash. Absent when derived_at is missing/unparseable.
+      // The cadence argument is the pusher's own reported ping interval (2026-09-06 review finding
+      // A): without it the "nothing fresh has arrived at all" arm stays unarmed rather than guessing.
+      const projection = projectionStaleness(
+        derivedAt, heartbeatDisplayAt, Date.now(),
+        derivedPingIntervalS === null ? null : derivedPingIntervalS * 1000);
       const snapshot = { ...restSnapshot, heartbeat_at: heartbeatDisplayAt, derived_at: derivedAt, pending_push_age_s: pendingPushAgeS };
+      if (projection) snapshot.projection = projection;
       return json(rpcResult(id, toolText(JSON.stringify(snapshot))));
     }
     if (name === "deliverables_list") {
@@ -447,8 +462,12 @@ export default {
       // OWN derivation last completed; how long ITS OWN content has been waiting to push), which
       // this Worker has no other way to learn. A missing/unparseable body (including the
       // pre-#1613 literal "{}") degrades to neither field on this ping -- still a valid heartbeat.
+      // #1981 (2026-09-06 review): `derived_ping_interval_s` rides the same rule -- the cadence this
+      // ping was paced to is a fact only the pusher knows, and it is what makes fleet_status's
+      // `projection` arm (b) decidable at all (worker.core.mjs). Absent from an unredeployed pusher.
       let derivedAt = null;
       let pendingPushAgeS = null;
+      let derivedPingIntervalS = null;
       try {
         const body = await request.text();
         if (body) {
@@ -459,6 +478,10 @@ export default {
           if (parsed && typeof parsed.pending_push_age_s === "number" && isFinite(parsed.pending_push_age_s)) {
             pendingPushAgeS = parsed.pending_push_age_s;
           }
+          if (parsed && typeof parsed.derived_ping_interval_s === "number"
+              && isFinite(parsed.derived_ping_interval_s) && parsed.derived_ping_interval_s > 0) {
+            derivedPingIntervalS = parsed.derived_ping_interval_s;
+          }
         }
       } catch {
         // Malformed body -- treat exactly like an absent one; still a valid liveness ping.
@@ -466,6 +489,7 @@ export default {
       const stored = { at: new Date().toISOString() };
       if (derivedAt) stored.derived_at = derivedAt;
       if (pendingPushAgeS !== null) stored.pending_push_age_s = pendingPushAgeS;
+      if (derivedPingIntervalS !== null) stored.derived_ping_interval_s = derivedPingIntervalS;
       try {
         await env.FLEET.put("heartbeat_at", JSON.stringify(stored));
       } catch (err) {
