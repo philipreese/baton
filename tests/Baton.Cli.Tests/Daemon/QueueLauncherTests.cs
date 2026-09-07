@@ -113,6 +113,72 @@ public sealed class QueueLauncherTests : IDisposable
     }
 
     /// <summary>
+    /// A held ledger is a transient projection failure, unlike the corrupt-ledger arm below. The
+    /// bounded retry must wait for the holder to release and then freeze the room's real projection,
+    /// not prematurely write a bare sentinel.
+    /// </summary>
+    [Fact]
+    public async Task A_held_ledger_is_projected_after_its_holder_releases()
+    {
+        var root = CreateTempRoot();
+        try
+        {
+            var room = await RunTwoStepRoomAsync(root);
+            var ledgerPath = Path.Combine(room, BatonPaths.FlowLogFileName);
+
+            using var holder = new FileStream(ledgerPath, FileMode.Open, FileAccess.Read, FileShare.None);
+            var record = QueueLauncher.RecordPostLaunchFaultAsync("held", room, "the pump threw BatonFlowException");
+
+            // Give the first read a bounded opportunity to meet the holder. If the implementation
+            // degrades immediately instead of retrying, this task will already have completed.
+            await Task.Delay(TimeSpan.FromMilliseconds(100), Ct);
+            Assert.False(record.IsCompleted);
+            holder.Dispose();
+
+            await record;
+
+            var sentinel = await TerminalSentinelWriter.TryReadAsync(room, Ct);
+            Assert.NotNull(sentinel);
+            Assert.Equal(["a", "b"], sentinel.Steps.Select(step => step.Id).Order().ToArray());
+            Assert.DoesNotContain("bare sentinel", sentinel.Error!, StringComparison.Ordinal);
+        }
+        finally
+        {
+            DirectoryCleanup.DeleteRecursively(root);
+        }
+    }
+
+    /// <summary>
+    /// A malformed ledger cannot recover by waiting. The fallback is deliberately bare, but its
+    /// serialized terminal fact must tell an operator that corrupt projection data caused it.
+    /// </summary>
+    [Fact]
+    public async Task A_corrupt_ledger_leaves_a_bare_sentinel_that_names_the_reason()
+    {
+        var root = CreateTempRoot();
+        try
+        {
+            var room = await RunTwoStepRoomAsync(root);
+            await File.WriteAllTextAsync(
+                Path.Combine(room, BatonPaths.FlowLogFileName), "{ not valid json }\n", Ct);
+
+            await QueueLauncher.RecordPostLaunchFaultAsync("corrupt", room, "the pump threw BatonFlowException");
+
+            var sentinel = await TerminalSentinelWriter.TryReadAsync(room, Ct);
+            Assert.NotNull(sentinel);
+            Assert.Empty(sentinel.Steps);
+            Assert.Contains("bare sentinel because the ledger or projection data was corrupt or unreadable", sentinel.Error!, StringComparison.Ordinal);
+
+            var serialized = await File.ReadAllTextAsync(Path.Combine(room, "terminal.json"), Ct);
+            Assert.Contains("corrupt or unreadable", serialized, StringComparison.Ordinal);
+        }
+        finally
+        {
+            DirectoryCleanup.DeleteRecursively(root);
+        }
+    }
+
+    /// <summary>
     /// The shape the fault path actually meets — a step still in flight when the pump threw. Its
     /// recorded <c>Running</c> is kept and the projection's live <c>liveness</c> probe is dropped —
     /// see spec/baton.md §13 (the same bullet the arm above cites) for the argument separating them.
