@@ -399,8 +399,9 @@ fleet-glass-worker-selftest = { cmd = "node tools/fleet-glass/worker.selftest.mj
 
 # #1912: the conductor panel's own row kinds, over glass.html's SHIPPED bytes -- that file's marked
 # block is extracted and evaluated rather than reimplemented, and the harness exits 1 if the markers
-# are gone, so it cannot go quietly vacuous. Same "operator tool, not CI-wired" posture as the two
-# selftests above.
+# are gone, so it cannot go quietly vacuous. WIRED INTO THE GATES, like fleet-glass-worker-selftest
+# immediately above and unlike fleet-glass-pusher-selftest: gates.py's membership is the register for
+# which of the three run and why.
 fleet-glass-selftest = { cmd = "node tools/fleet-glass/glass.selftest.mjs" }
 
 # M13 Phase 4 (#110), the milestone's completion gate: unlike smoke-claude/smoke-mixed-vendor

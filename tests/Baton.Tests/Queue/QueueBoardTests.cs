@@ -106,7 +106,10 @@ public sealed class QueueBoardTests
         var stages = Enum.GetValues<WorkStage>();
         var items = stages
             .Select(s => Item($"tag-{WorkStages.Token(s)}", stage: s, round: (int)s))
-            .Append(Item("tag-halted", stage: WorkStage.Fix, halted: true))
+            // Halted the way the lifecycle actually writes it -- WorkItemAdvancer sets `Halted` and
+            // `Failed` together, never `Halted` on a still-queued item, so a fixture that left the
+            // state Queued would be asserting about a shape only the fixture can build.
+            .Append(Item("tag-halted", stage: WorkStage.Fix, halted: true, state: QueueItemState.Failed))
             .ToList();
 
         var board = Project(items);
@@ -286,6 +289,30 @@ public sealed class QueueBoardTests
         ]);
 
         Assert.Equal(["waiting"], board.Pending.Select(p => p.Tag));
+    }
+
+    /// <summary>
+    /// The board's whole point is showing what needs a person, and the item that most needs one is a
+    /// halted implement lane with no PR — it has no PR row to appear on, so if the pending filter
+    /// excluded it, it would be on the board nowhere at all.
+    /// </summary>
+    [Fact]
+    public void A_halted_item_with_no_pull_request_is_still_on_the_board()
+    {
+        var board = Project(
+            [Item("stuck", stage: WorkStage.Implement, halted: true, state: QueueItemState.Failed)]);
+
+        var row = Assert.Single(board.Pending);
+        Assert.Equal("stuck", row.Tag);
+        Assert.Equal(QueueBoardWaitReasons.Halted, row.Reason);
+        Assert.False(row.IsNext);
+        Assert.Empty(board.PullRequests);
+
+        // Control: an item that merely FAILED without being halted is not a pending row -- so the arm
+        // above is about the flag and not about `Failed` items being listed generally. (The lifecycle
+        // re-reads exactly that item on its next tick; it is not waiting on anybody.)
+        Assert.Empty(Project(
+            [Item("retryable", stage: WorkStage.Implement, state: QueueItemState.Failed)]).Pending);
     }
 
     [Theory]

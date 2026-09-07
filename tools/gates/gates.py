@@ -86,6 +86,11 @@ OVERLAP = [
     # and a silent revert going undetected (the F2 finding this fixes: reverting the merge broke
     # nothing in CI before this).
     "fleet-glass-worker-selftest",
+    # #1912: same shape, and wired in for the same reason -- plain `node`, no network, no MSBuild.
+    # It is the only thing between the conductor panel's row kinds and a silent break, and it reads
+    # the SHIPPED glass.html bytes rather than a copy, so it also fails when the markers it slices on
+    # are renamed away.
+    "fleet-glass-selftest",
     # #1670 F2: exercises baton.cmd/baton.ps1 against a mock exe fixture built with the legacy
     # Framework csc.exe (ships with Windows, no MSBuild involved) -- entirely under a temp
     # BATON_HOME, never the live tools root, same overlap-safety shape as tool-refresh-selftest

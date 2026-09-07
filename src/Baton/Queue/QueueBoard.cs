@@ -84,7 +84,15 @@ public static class QueueBoard
         var pending = new List<QueuePendingView>();
         foreach (var item in OrderTwinsAdjacent(items))
         {
-            if (item.State != QueueItemState.Queued || (item.Stage is { } s && WorkStages.IsTerminal(s)))
+            // Queued, OR halted. The second half is not a convenience: the lifecycle only ever writes
+            // `Halted` together with `QueueItemState.Failed` (WorkItemAdvancer's own fail arm), so a
+            // filter on Queued alone would put every item the queue has given up on nowhere at all
+            // unless it happened to have a PR open -- and an implement lane halted before it opened one
+            // is exactly the item a person has to act on. It is listed here rather than launched: the
+            // candidate predicate below is untouched, so nothing about this admits it to a dispatch.
+            var stuck = item.Halted;
+            if ((item.State != QueueItemState.Queued && !stuck)
+                || (item.Stage is { } s && WorkStages.IsTerminal(s)))
             {
                 continue;
             }
