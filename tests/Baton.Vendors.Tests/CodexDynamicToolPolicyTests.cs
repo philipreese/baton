@@ -474,13 +474,15 @@ public sealed class CodexDynamicToolPolicyTests
         Assert.Contains(expectedAlternative, result.Text, StringComparison.Ordinal);
     }
 
-    // The polarity arm for the rows above: every SHELL refusal also names the granted read path,
-    // which is #1920's literal ask (the measured loop was `rg` four times before baton_search_text).
+    // The polarity arm for the rows above: a SHELL refusal a respelling could get past also names the
+    // granted read path, which is #1920's literal ask (the measured loop was `rg` four times before
+    // baton_search_text). #1972 removed the standing-deny row from this theory and gave it the
+    // opposite assertion below: that rung is permanently closed, so a read tool is no answer to it.
     [Theory]
     [InlineData("unsupported-backslash")]
-    [InlineData("standing-deny")]
     [InlineData("ungranted-pattern")]
-    public async Task Every_shell_refusal_names_the_granted_read_tools(string refusalShape)
+    public async Task Every_shell_refusal_a_respelling_could_pass_names_the_granted_read_tools(
+        string refusalShape)
     {
         using var fixture = new PolicyFixture(ReviewShapedGrant, ["report.md"]);
 
@@ -489,6 +491,24 @@ public sealed class CodexDynamicToolPolicyTests
         Assert.False(result.Success);
         Assert.Contains(CodexDynamicToolPolicy.ReadTextTool, result.Text, StringComparison.Ordinal);
         Assert.Contains(CodexDynamicToolPolicy.SearchTextTool, result.Text, StringComparison.Ordinal);
+    }
+
+    // #1972: the third producing site of the same clause, corrected with both PreToolUse hooks. codex's
+    // review role reads the SAME WorkerRoles.json deny list, which is mostly write-shaped, so this rung
+    // was answering `gh pr comment …` with two read tools — the refusal shape the issue opens with. The
+    // theory above is the control: same fixture, same declared tools, refused on a rung a respelling
+    // could pass, clause present.
+    [Fact]
+    public async Task A_standing_deny_names_no_read_tool_because_that_rung_is_permanently_closed()
+    {
+        using var fixture = new PolicyFixture(ReviewShapedGrant, ["report.md"]);
+
+        var result = await ExecuteRefusalShapeAsync(fixture, "standing-deny");
+
+        Assert.False(result.Success);
+        Assert.Contains("permanently closed for this role", result.Text, StringComparison.Ordinal);
+        Assert.DoesNotContain(CodexDynamicToolPolicy.ReadTextTool, result.Text, StringComparison.Ordinal);
+        Assert.DoesNotContain(CodexDynamicToolPolicy.SearchTextTool, result.Text, StringComparison.Ordinal);
     }
 
     // The negative arm the rows above need to discriminate: the clause is derived from the tools this
@@ -524,6 +544,28 @@ public sealed class CodexDynamicToolPolicyTests
         Assert.DoesNotContain(CodexDynamicToolPolicy.WriteTextTool, onReview.Text, StringComparison.Ordinal);
         Assert.Contains(CodexDynamicToolPolicy.WriteTextTool, onImplement.Text, StringComparison.Ordinal);
         Assert.DoesNotContain("cannot edit workspace files", onImplement.Text, StringComparison.Ordinal);
+    }
+
+    // #1972: LooksLikeWriteAttempt's narrowing was enforced by a comment alone -- re-adding "update" to
+    // WriteAttemptFragments failed nothing. codex's own update_plan is not a file write, so answering it
+    // about the write path is the same non-responsive guidance in the other direction. Both polarities
+    // under ONE grant (review-shaped: no WriteFiles, one declared output, so DescribeWritePath reaches
+    // the baton_write_output branch and the string under test is the one it emits), which is what makes
+    // the negative row about the name rather than about the fixture.
+    [Theory]
+    [InlineData("update_plan", false)]
+    [InlineData("str_replace_editor", true)]
+    public async Task Only_a_write_shaped_unknown_tool_name_is_answered_about_the_write_path(
+        string toolName, bool expectsWritePath)
+    {
+        using var fixture = new PolicyFixture(ReviewShapedGrant, ["report.md"]);
+
+        var result = await fixture.ExecuteAsync(toolName, new { path = "src/file.cs", content = "x" });
+
+        Assert.False(result.Success);
+        Assert.Equal(
+            expectsWritePath,
+            result.Text.Contains("cannot edit workspace files", StringComparison.Ordinal));
     }
 
     /// <summary>The shipped review role's shape: reads, a scoped read-only shell, no workspace write.</summary>

@@ -1226,6 +1226,47 @@ public class ClaudeWorkerAdapterTests
     }
 
     /// <summary>
+    /// #1972: Grep returns matching LINES, so a grant that withholds reads and leaves Grep reachable
+    /// withholds the name and not the category — the defect AgyWorkerAdapter's ReadTools already
+    /// avoids by withholding all four of agy's read-shaped tools together. Both channels, because a
+    /// name on only one of them is enforced on only one path (#649).
+    /// </summary>
+    [Fact]
+    public void Withholding_reads_withholds_grep_alongside_read_because_grep_returns_file_content()
+    {
+        var grant = new PermissionGrant(
+            ReadFiles: false, WriteFiles: true, RunShellCommands: false, NetworkAccess: false);
+        var target = new ClaudeWorkerAdapter().Resolve(
+            new WorkerInvocation("Draft a plan.", PermissionGrant: grant), ArchitectContract);
+
+        var flag = ArgValue(target, "--disallowedTools")!;
+        var hookList = target.Environment!.Single(v => v.Name == ClaudeWorkerAdapter.DeniedToolsVariable).Value;
+
+        Assert.Contains("Grep", flag, StringComparison.Ordinal);
+        Assert.Contains("Grep", hookList, StringComparison.Ordinal);
+    }
+
+    /// <summary>
+    /// The control for the arm above: Grep rides ReadFiles, so a grant that GRANTS reads must not
+    /// withhold it. Without this, withholding Grep unconditionally passes the assertion above while
+    /// taking the search tool away from every reviewing role in the catalog.
+    /// </summary>
+    [Fact]
+    public void Granting_reads_leaves_grep_on_neither_withheld_channel()
+    {
+        var grant = new PermissionGrant(
+            ReadFiles: true, WriteFiles: false, RunShellCommands: false, NetworkAccess: false);
+        var target = new ClaudeWorkerAdapter().Resolve(
+            new WorkerInvocation("Draft a plan.", PermissionGrant: grant), ArchitectContract);
+
+        var flag = ArgValue(target, "--disallowedTools") ?? string.Empty;
+        var hookList = target.Environment!.Single(v => v.Name == ClaudeWorkerAdapter.DeniedToolsVariable).Value;
+
+        Assert.DoesNotContain("Grep", flag, StringComparison.Ordinal);
+        Assert.DoesNotContain("Grep", hookList, StringComparison.Ordinal);
+    }
+
+    /// <summary>
     /// #801: a dispatch that does not opt in must see today's exact `--mcp-config` -- the shared,
     /// deliberately empty `claude-mcp.json` -- with no silent behaviour change from this issue's work.
     /// </summary>

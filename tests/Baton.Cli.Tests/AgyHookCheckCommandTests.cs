@@ -90,14 +90,29 @@ public class AgyHookCheckCommandTests
         Assert.DoesNotContain("grep_search", readsWithheld, StringComparison.Ordinal);
     }
 
-    private static string DenyReason(string stdinText, string? denied, string? shellPatterns)
+    // #1972: the same correction the claude hook took, on the site that cross-referenced its reasoning.
+    // The arm above is the control -- same scoped grant, same withheld-tool list, refused on the
+    // allow-list rung instead -- so a change that deleted the clause outright cannot pass both.
+    [Fact]
+    public void A_standing_deny_is_not_answered_with_agys_read_tools_even_under_a_scoped_grant()
+    {
+        var reason = DenyReason(
+            RunPayload("git push --force"), "agy:", shellPatterns: "agy:git diff*",
+            deniedShellPatterns: "agy:git push*");
+
+        Assert.DoesNotContain("grep_search", reason, StringComparison.Ordinal);
+        Assert.DoesNotContain("view_file", reason, StringComparison.Ordinal);
+    }
+
+    private static string DenyReason(
+        string stdinText, string? denied, string? shellPatterns, string deniedShellPatterns = "agy:")
     {
         using var stdin = new StringReader(stdinText);
         using var stdout = new StringWriter();
 
         AgyHookCheckCommand.Execute(
             stdin, stdout, denied, shellPatternsRaw: shellPatterns,
-            deniedShellPatternsRaw: "agy:", deniedShellOptionTokensRaw: "agy:");
+            deniedShellPatternsRaw: deniedShellPatterns, deniedShellOptionTokensRaw: "agy:");
 
         using var doc = JsonDocument.Parse(stdout.ToString());
         Assert.Equal("deny", doc.RootElement.GetProperty("decision").GetString());

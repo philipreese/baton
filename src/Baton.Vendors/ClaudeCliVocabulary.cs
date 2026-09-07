@@ -28,6 +28,12 @@ public static class ClaudeCliVocabulary
     /// <summary>claude's file-read tool.</summary>
     public const string ReadToolName = "Read";
 
+    /// <summary>
+    /// claude's content-search tool — withheld with <see cref="ReadToolName"/> rather than beside it,
+    /// because its matches are file CONTENT (#1972). See <c>ClaudeWorkerAdapter.WithheldToolNames</c>.
+    /// </summary>
+    public const string GrepToolName = "Grep";
+
     /// <summary>claude's in-place file-edit tool.</summary>
     public const string EditToolName = "Edit";
 

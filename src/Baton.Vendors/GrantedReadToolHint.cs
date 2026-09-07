@@ -27,7 +27,8 @@ public static class GrantedReadToolHint
 
     /// <summary>
     /// Agy's read/search tools, two of the four names <c>AgyWorkerAdapter</c>'s <c>ReadTools</c>
-    /// withholds together when a grant denies reads.
+    /// withholds together when a grant denies reads — the same togetherness claude's own mapping now
+    /// has for this pair (#1972).
     /// </summary>
     private const string AgyReadTool = "view_file";
     private const string AgySearchTool = "grep_search";
@@ -41,11 +42,13 @@ public static class GrantedReadToolHint
     {
         ArgumentNullException.ThrowIfNull(isWithheld);
 
-        // Grep is not a name claude's grant translation ever withholds (ClaudeWorkerAdapter's
-        // WithheldToolNames withholds Read on !ReadFiles and nothing else read-shaped), so the pair
-        // stands or falls on Read: a role that may not read is told nothing rather than pointed at a
-        // search tool, which would be teaching a way around the grant.
-        return isWithheld(ClaudeReadTool) ? null : Clause(ClaudeReadTool, ClaudeSearchTool);
+        // Both names are tested, exactly as ForAgy tests all of its own: since #1972
+        // ClaudeWorkerAdapter.WithheldToolNames withholds Grep alongside Read on !ReadFiles, so the
+        // pair no longer stands or falls on Read, and a half-clause naming a search tool on a role
+        // whose reads are withheld would teach a way around the grant.
+        return Clause(
+            isWithheld(ClaudeReadTool) ? null : ClaudeReadTool,
+            isWithheld(ClaudeSearchTool) ? null : ClaudeSearchTool);
     }
 
     /// <summary>The agy clause, or <see langword="null"/> when either agy read tool is withheld.</summary>
