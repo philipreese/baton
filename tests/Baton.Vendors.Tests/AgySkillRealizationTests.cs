@@ -31,7 +31,7 @@ public sealed class AgySkillRealizationTests
                 """);
 
             var prompt = "Base prompt instructions.";
-            var inlined = AgyWorkerAdapter.InlineSkills(prompt, tempWorkspace);
+            var inlined = SkillInlining.InlineSkills(prompt, tempWorkspace);
 
             Assert.Contains("Base prompt instructions.", inlined);
             Assert.Contains("\n\n# Skill: first-skill\n", inlined);
@@ -59,7 +59,7 @@ public sealed class AgySkillRealizationTests
         try
         {
             var prompt = "Original prompt untouched.";
-            var inlined = AgyWorkerAdapter.InlineSkills(prompt, tempWorkspace);
+            var inlined = SkillInlining.InlineSkills(prompt, tempWorkspace);
 
             Assert.Equal(prompt, inlined);
         }
@@ -97,7 +97,7 @@ public sealed class AgySkillRealizationTests
 
     /// <summary>
     /// The size the roster prints is the size the prompt actually gains — measured on the same string
-    /// <see cref="AgyWorkerAdapter.InlineSkills"/> appends, so front matter cannot inflate it.
+    /// <see cref="SkillInlining.InlineSkills"/> appends, so front matter cannot inflate it.
     /// </summary>
     [Fact]
     public async Task DiscoverCapabilities_SizeExcludesTheStrippedFrontmatter()

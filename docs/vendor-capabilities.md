@@ -98,6 +98,15 @@ disabled; workspace-write remains fixture-tested rather than live-measured. See 
 in the history row for the exact command grammar, event shapes, cache-miss resume evidence, and open
 measurements.
 
+**Skills.** Codex reads its own skills from `CODEX_HOME`, which Baton deliberately points at a private
+root so a broker inherits neither the operator's config nor their skills (the probe's `codex login`
+section states that isolation), and nothing writes a canonical package into it. Since #2044 a codex
+binding's **declared** skills are realized the way agy's are — the `SKILL.md` body inlined into the
+prompt — rather than dropped. Whether the CLI would load a package placed under that root, and whether
+the model activates one under `codex exec`, are both **unmeasured**. `spec/baton.md` §9 is the register
+for the realization; `docs/dispatch.md` describes it, and codex's declared-only asymmetry, for an
+operator.
+
 ## Prompt delivery splits the vendors (#932)
 
 **Measured 2026-08-02, live, control-armed.** A worker's prompt is passed today as the `-p` argument,

@@ -12,9 +12,9 @@ namespace Baton.Vendors;
 /// </summary>
 /// <remarks>
 /// <para>
-/// <b>Scope: claude only, and every caller of <c>Resolve</c>.</b> agy's realization inlines the package
-/// body into the prompt and writes nothing, so a declared set genuinely does not need a working
-/// directory there (<c>AgyWorkerAdapter.InlineSkills</c> states that reasoning). Because
+/// <b>Scope: claude only, and every caller of <c>Resolve</c>.</b> the agy and codex realizations inline
+/// the package body into the prompt and write nothing, so a declared set genuinely does not need a
+/// working directory there (<see cref="SkillInlining.InlineSkills"/> states that reasoning). Because
 /// <c>ClaudeWorkerAdapter.Resolve</c> is reached from <c>baton decide</c>/<c>run</c>/<c>resume</c> for
 /// bindings that may never dispatch, this refusal fires on those verbs too — which is the point: a
 /// binding whose skills cannot be placed is broken whether or not anyone dispatches it today.

@@ -13,8 +13,8 @@ namespace Baton.Vendors;
 ///   name only: on the other vendor the literal text reaches the model. <b>No placeholder is a
 ///   substitute for it today.</b> <see cref="BatonSkillDirectoryPlaceholder"/> is RESERVED for that
 ///   portable substitution and <b>no realization performs it</b> — claude copies the package's files
-///   byte-for-byte (<see cref="SkillProjection"/>) and agy inlines the body verbatim
-///   (<c>AgyWorkerAdapter.InlinedSkillBody</c>), so a package carrying it ships the literal token to
+///   byte-for-byte (<see cref="SkillProjection"/>) and agy and codex inline the body verbatim
+///   (<see cref="SkillInlining.InlinedSkillBody"/>), so a package carrying it ships the literal token to
 ///   the model exactly as the vendor-native one would. Substituting it is #1151's S3/S4 work
 ///   (spec/baton.md §9's "recorded but does not act yet"); until then the refusal's remedy is prose,
 ///   not a token, which is what it says (#1941 review HIGH — the remedy previously promised a

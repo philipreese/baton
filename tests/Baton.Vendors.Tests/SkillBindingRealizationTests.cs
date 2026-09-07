@@ -169,6 +169,36 @@ public sealed class SkillBindingRealizationTests : IDisposable
         Assert.Contains(agyTarget.Args, arg => arg.Contains("# Skill: house-style", StringComparison.Ordinal));
     }
 
+    /// <summary>
+    /// #2044: two declared packages reach a codex worker as inlined bodies, in the order the binding
+    /// declared them (not the order the library happens to enumerate) and without their front matter.
+    /// </summary>
+    [Fact]
+    public void A_codex_binding_inlines_its_declared_skills_in_declaration_order()
+    {
+        WriteAccountPackage("alpha-skill", "---\ndescription: Alpha\n---\nAlpha body.");
+        WriteAccountPackage("beta-skill", "---\ndescription: Beta\n---\nBeta body.");
+        using var scope = AccountLibraryScope();
+
+        // Declared reverse-alphabetically on purpose: alphabetical output would be indistinguishable
+        // from declaration order otherwise.
+        var entry = new WorkerBindingConfigEntry(
+            Adapter: "codex", Contract: Contract, PromptTemplate: "Do the work.",
+            Timeout: TimeSpan.FromMinutes(5), WorkingDirectory: _workspace,
+            Skills: ["beta-skill", "alpha-skill"]);
+
+        var bindings = WorkerBindingResolver.Resolve(
+            new Dictionary<string, WorkerBindingConfigEntry> { ["worker"] = entry },
+            new Dictionary<string, IWorkerAdapter> { ["codex"] = new CodexWorkerAdapter() });
+        var prompt = Assert.IsType<Baton.Mutation.WorkerBinding.Process>(bindings["worker"]).Target.PromptText!;
+
+        var beta = prompt.IndexOf("\n\n# Skill: beta-skill\nBeta body.", StringComparison.Ordinal);
+        var alpha = prompt.IndexOf("\n\n# Skill: alpha-skill\nAlpha body.", StringComparison.Ordinal);
+        Assert.True(beta >= 0 && alpha > beta, $"both bodies, beta first; got:\n{prompt}");
+        Assert.DoesNotContain("description:", prompt, StringComparison.Ordinal);
+        Assert.DoesNotContain("---", prompt, StringComparison.Ordinal);
+    }
+
     [Fact]
     public void An_unknown_skill_on_a_hand_authored_binding_refuses_at_resolve()
     {
@@ -181,6 +211,12 @@ public sealed class SkillBindingRealizationTests : IDisposable
         Assert.Throws<UnknownSkillPackageException>(() => WorkerBindingResolver.Resolve(
             new Dictionary<string, WorkerBindingConfigEntry> { ["worker"] = entry },
             new Dictionary<string, IWorkerAdapter> { ["agy"] = new AgyWorkerAdapter() }));
+
+        // #2044: codex refuses on the same shared path -- the resolution that fails is the binding's,
+        // not the adapter's, so there is no codex-only arm to get this wrong.
+        Assert.Throws<UnknownSkillPackageException>(() => WorkerBindingResolver.Resolve(
+            new Dictionary<string, WorkerBindingConfigEntry> { ["worker"] = entry with { Adapter = "codex" } },
+            new Dictionary<string, IWorkerAdapter> { ["codex"] = new CodexWorkerAdapter() }));
     }
 
     [Fact]
@@ -285,7 +321,7 @@ public sealed class SkillBindingRealizationTests : IDisposable
         Assert.Equal(SkillRealization.Floor, plain.Realization);
 
         Assert.Equal(
-            AgyWorkerAdapter.InlineSkills("Brief.", null, [plain]).Replace("plain", "opt-in", StringComparison.Ordinal),
-            AgyWorkerAdapter.InlineSkills("Brief.", null, [optIn]));
+            SkillInlining.InlineSkills("Brief.", null, [plain]).Replace("plain", "opt-in", StringComparison.Ordinal),
+            SkillInlining.InlineSkills("Brief.", null, [optIn]));
     }
 }

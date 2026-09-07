@@ -217,14 +217,14 @@ can actually consume, and nothing else about #1151 ships yet:
 |---|---|---|
 | claude | the package's files are **projected** into `<workspace>/.claude/skills/<name>/`, where the CLI reads project skills — **inside the operator's own checkout**, see "Where the projection lands" below | `<name> (to be projected)` |
 | agy | the `SKILL.md` body is **inlined** into the dispatch prompt under a `# Skill: <name>` header AER emits, since #1572 measured that agy does not read `.agents/skills` on its own | `<name> (inlined, <size>)` |
-| codex | **none.** No codex path reads a canonical package, so a codex binding in a repository carrying `skills/` reports `Skills: none discovered` and receives nothing — a realization for it is unbuilt work under #1151, not an omission this doc glosses over. A codex binding that *names* skills says so on stderr when it resolves (`Skills: codex has no skill realization …`) rather than accepting the names in silence | — |
+| codex | the `SKILL.md` body is **inlined** exactly as agy's is — same helper, same header, same order (#2044) — but for a **declared** set only (`--skill`, or a binding's `Skills`). codex runs no `<workspace>/skills/` scan, so a repository's own `skills/` reaches a codex worker only when the binding names it — `CodexWorkerAdapter.BuildPrompt`'s `declaredSkills` parameter is the register for why | `Skills (declared): <names>` — never `(inlined, <size>)`, which only the scanning path can measure |
 
 **Both realizations are predictions at roster time**, and only claude's is written in the future tense.
 Neither has happened when the line is printed: the projection is placed later, by the dispatcher, and
-agy's inlining happens later still, at prompt build. Claude's is tensed because it is the one whose
+the inlining happens later still, at prompt build. Claude's is tensed because it is the one whose
 prediction can come out *false* — a destination holding different bytes is kept, so a declared file may
-not be placed (#1929 review). Agy's cannot: the size it reports is measured on the same string the
-prompt gets (`AgyWorkerAdapter.InlinedSkillBody`), so `(inlined, <size>)` is a prediction that a
+not be placed (#1929 review). Inlining's cannot: the size it reports is measured on the same string the
+prompt gets (`SkillInlining.InlinedSkillBody`), so `(inlined, <size>)` is a prediction that a
 dispatch cannot contradict.
 
 **When the projection happens, and what it will not do.** Nothing is written while a binding is merely
@@ -300,7 +300,8 @@ the native realizations are S3 (claude) and S4 (agy), each gated on the S2 measu
 whether either vendor's model actually *invokes* a skill under `-p` — is unmeasured on both vendors;
 the roster's `(to be projected)`/`(inlined)` is a claim about **placement**, never about activation.
 There is no pass-through rung for an existing `SKILL.md` directory (S5) and no role-carried skill set
-(S6), so `--skill` is refused for a workflow template. codex still receives nothing. And the
+(S6), so `--skill` is refused for a workflow template. codex receives a declared set only, never a
+`<workspace>/skills/` scan (the table above). And the
 `<workspace>/skills/` rung itself is unratified: it is kept as the lowest rung pending an operator
 answer on whether to retire or ratify it.
 
