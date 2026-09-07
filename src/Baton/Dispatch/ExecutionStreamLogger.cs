@@ -132,6 +132,9 @@ public sealed class ExecutionStreamLogger
         || string.Equals(fileName, StderrRolloverFileName, StringComparison.Ordinal)
         || string.Equals(fileName, AgyHookVerdictLedgerFileName, StringComparison.Ordinal)
         || string.Equals(fileName, RepeatedToolCallLedgerFileName, StringComparison.Ordinal)
+        // #2009: the hooks' grant-decision log. Unlike the two constants above, its name is declared in
+        // this layer (GrantDecisionLog.FileName), so it is referenced rather than duplicated.
+        || string.Equals(fileName, GrantDecisionLog.FileName, StringComparison.Ordinal)
         || string.Equals(fileName, StdoutTruncationMarkerFileName, StringComparison.Ordinal)
         || string.Equals(fileName, StderrTruncationMarkerFileName, StringComparison.Ordinal)
         || string.Equals(fileName, StdoutWriteFailureMarkerFileName, StringComparison.Ordinal)

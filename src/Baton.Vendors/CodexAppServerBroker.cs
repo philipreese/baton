@@ -2,6 +2,7 @@ using System.Diagnostics;
 using System.Text;
 using System.Text.Json;
 using System.Text.Json.Nodes;
+using Baton.Domain;
 using Baton.Status;
 
 namespace Baton.Vendors;
@@ -425,7 +426,30 @@ public static class CodexAppServerBroker
             ["type"] = "item.completed",
             ["item"] = completed,
         }).ConfigureAwait(false);
+
+        // #2009: the grant decision itself, as its own structured line. Emitted through the same
+        // EmitAsync every other room fact uses, so it lands in this execution's captured `.stdout.log`
+        // beside the call it judged — this broker IS that stream's writer, which is why the codex
+        // enforcement point needs no file of its own (the two hooks' does: GrantDecisionLog).
+        //
+        // The decision is read off `result.Rule`, never off the refusal text: a Failed result is an
+        // ALLOWED call that did not succeed (a non-zero exit, a missing file), and counting it as a
+        // refusal is the exact over-count CodexDynamicToolResult's own remarks were written to end.
+        // The digest is the one already emitted on item.started above, from the same function, so the
+        // two lines describing one call carry the same identity.
+        var allowed = result.Rule == GrantRules.Allowed;
+        await EmitAsync(batonOutput, new GrantDecision(
+            VendorTag, tool, allowed, result.Rule, allowed ? null : result.Text,
+            ArgumentsDigest(argumentsDocument.RootElement), DateTimeOffset.UtcNow).ToJsonNode())
+            .ConfigureAwait(false);
     }
+
+    /// <summary>
+    /// This broker's vendor, as a <see cref="GrantDecision"/> line spells it — the same lowercase
+    /// spelling <c>CodexWorkerAdapter</c> reports in its capabilities and the two hooks use for their
+    /// own env-var vendor tags.
+    /// </summary>
+    private const string VendorTag = "codex";
 
     /// <summary>
     /// #2008: one <c>mcp_tool_call</c> item's identifying fields, stamped on BOTH lifecycle items of a
@@ -484,12 +508,14 @@ public static class CodexAppServerBroker
     /// every vendor's key — that comment names what goes uncounted and why none of it is normalised.
     /// </para>
     /// </summary>
-    private static string ArgumentsDigest(JsonElement arguments)
-    {
-        var bytes = System.Security.Cryptography.SHA256.HashData(
-            System.Text.Encoding.UTF8.GetBytes(arguments.GetRawText()));
-        return Convert.ToHexStringLower(bytes)[..16];
-    }
+    /// <remarks>
+    /// #2009 moved the construction itself to <see cref="GrantDecision.Identify"/>, which is where the
+    /// same fingerprint is now taken of a hook's command line or path — one digest rule for every
+    /// enforcement point, so an <c>item.started</c> and the grant line beside it agree by construction
+    /// rather than by two copies of a hash.
+    /// </remarks>
+    private static string ArgumentsDigest(JsonElement arguments) =>
+        GrantDecision.Identify(arguments.GetRawText());
 
     private static async Task EmitCompletedItemAsync(JsonObject message, TextWriter output)
     {

@@ -4631,6 +4631,17 @@ callers each have a deny arm (`HookCheckCommandTests.A_backgrounded_command_is_d
 caller (`CodexDynamicToolPolicy.RunCommandAsync`) is covered only by the detector's own unit tests —
 which is the half-shipped shape this rule names, recorded here rather than fixed by this docs change.
 
+**Every decision any of the three takes is a structured room fact (#2009).** `Baton.Domain
+.GrantDecision` is the one record and the one schema; its fields, its two sinks and what querying them
+buys are written down once, in `docs/dispatch.md` under "Grant decisions". What belongs here is the
+rule rather than the format: each enforcement point records its decision where that point can
+actually write, so a lane cannot ship the recording for one vendor and call it done. The broker's own
+emitter is its sink; both hooks share `Baton.Dispatch.GrantDecisionLog`, because a hook subprocess
+writing `.stdout.log` would break that file's prefix invariant (§3), and the agy verdict ledger
+counts every line it holds as a #1680 canary verdict. Naming a `GrantRules` id is mandatory at every
+refusal site — ids are coarse, several sites share one, and the reason text is what separates the
+members — so a rung added later cannot be counted under whichever id a funnel would have guessed.
+
 **The hook is binary: allow / deny, nothing else.** The ask band that once made it ternary
 (`BATON_HOOK_ASK_TOOLS`, the `permissionDecision: "ask"` STDOUT envelope) was part of the mid-lane
 ask machinery and is DELETED (#1417) — lanes are fully pre-cleared, so an ungranted capability

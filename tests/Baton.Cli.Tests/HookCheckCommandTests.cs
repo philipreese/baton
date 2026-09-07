@@ -1,3 +1,5 @@
+using Baton.Domain;
+
 namespace Baton.Cli.Tests;
 
 /// <summary>
@@ -857,5 +859,102 @@ public class HookCheckCommandTests
             Json(inputValue) + (extraArgs is null ? string.Empty : ", " + extraArgs) + "}}";
 
         private static string Json(string value) => System.Text.Json.JsonSerializer.Serialize(value);
+    }
+
+    /// <summary>
+    /// #2009, the claude enforcement point (spec/baton.md §9's second of three). This hook cannot write
+    /// the room's captured stream — it is a subprocess of the vendor CLI, and that file is
+    /// <c>ExecutionStreamLogger</c>'s — so its decisions land in the per-execution NDJSON
+    /// <see cref="Baton.Dispatch.GrantDecisionLog"/> owns, reached through the same
+    /// <c>BATON_OUTPUT_DIR</c> the repeat ledger already uses.
+    /// </summary>
+    public sealed class GrantLines : IDisposable
+    {
+        private string Root { get; }
+        private string Outbox { get; }
+
+        public GrantLines()
+        {
+            Root = Path.Combine(Path.GetTempPath(), $"baton-hook-grant-{Guid.NewGuid():N}");
+            Outbox = Path.Combine(Root, "outbox");
+            Directory.CreateDirectory(Outbox);
+        }
+
+        public void Dispose() => Baton.Tests.Shared.DirectoryCleanup.DeleteRecursively(Root);
+
+        [Fact]
+        public void A_denied_command_writes_exactly_one_deny_line_naming_the_rule_that_decided()
+        {
+            var exitCode = Run("curl https://example.com");
+
+            Assert.Equal(HookCheckCommand.DeniedExitCode, exitCode);
+            var line = Assert.Single(Read());
+            Assert.Equal(GrantDecision.EventType, line["type"]!.GetValue<string>());
+            Assert.Equal("claude", line["vendor"]!.GetValue<string>());
+            Assert.Equal("Bash", line["tool"]!.GetValue<string>());
+            Assert.Equal("deny", line["decision"]!.GetValue<string>());
+            Assert.Equal(GrantRules.ShellPattern.Id, line["rule"]!.GetValue<string>());
+            Assert.Contains(GrantRefusal.Marker, line["reason"]!.GetValue<string>());
+            // The identity is a digest of the command line, so the same refused call re-issued keys
+            // equal without the command itself being copied into the room a second time.
+            Assert.Equal(
+                GrantDecision.Identify("curl https://example.com"), line["input"]!.GetValue<string>());
+        }
+
+        [Fact]
+        public void An_allowed_command_writes_exactly_one_allow_line_and_no_reason()
+        {
+            var exitCode = Run("git status");
+
+            Assert.Equal(HookCheckCommand.AllowedExitCode, exitCode);
+            var line = Assert.Single(Read());
+            Assert.Equal("allow", line["decision"]!.GetValue<string>());
+            Assert.Equal(GrantRules.Allowed.Id, line["rule"]!.GetValue<string>());
+            Assert.Null(line["reason"]);
+        }
+
+        /// <summary>
+        /// The fail-closed population is a decision too: a payload this gate cannot judge denies, and
+        /// the room records that denial under its own rule id rather than losing it — a refusal share
+        /// computed without these would understate exactly the calls nobody can explain later.
+        /// </summary>
+        [Fact]
+        public void A_payload_the_gate_cannot_judge_is_recorded_as_an_unjudgeable_deny()
+        {
+            using var stdin = new StringReader("not json at all");
+            using var stderr = new StringWriter();
+
+            var exitCode = HookCheckCommand.Execute(
+                stdin, stderr, "claude:", outboxDirectory: Outbox, workspaceDirectory: Root);
+
+            Assert.Equal(HookCheckCommand.DeniedExitCode, exitCode);
+            var line = Assert.Single(Read());
+            Assert.Equal("deny", line["decision"]!.GetValue<string>());
+            Assert.Equal(GrantRules.UnjudgeableCall.Id, line["rule"]!.GetValue<string>());
+            Assert.Equal(GrantDecision.UnknownTool, line["tool"]!.GetValue<string>());
+            Assert.Equal(GrantDecision.NoInput, line["input"]!.GetValue<string>());
+        }
+
+        private int Run(string command)
+        {
+            var payload = "{\"tool_name\": \"Bash\", \"tool_input\": {\"command\": "
+                + System.Text.Json.JsonSerializer.Serialize(command) + "}}";
+            using var stdin = new StringReader(payload);
+            using var stderr = new StringWriter();
+            // A scoped shell grant, which is what puts the pattern rung in play on both polarities.
+            return HookCheckCommand.Execute(
+                stdin, stderr, "claude:Edit,Write", outboxDirectory: Outbox, workspaceDirectory: Root,
+                shellPatternsRaw: "claude:git status*", deniedShellPatternsRaw: "claude:");
+        }
+
+        private System.Text.Json.Nodes.JsonObject[] Read()
+        {
+            var path = Path.Combine(Outbox, Baton.Dispatch.GrantDecisionLog.FileName);
+            Assert.True(File.Exists(path), $"no grant log was written to {path}");
+            return File.ReadAllLines(path)
+                .Where(line => line.Trim().Length > 0)
+                .Select(line => System.Text.Json.Nodes.JsonNode.Parse(line)!.AsObject())
+                .ToArray();
+        }
     }
 }
