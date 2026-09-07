@@ -5,6 +5,7 @@ using Baton.Cli.Tests.TestSupport;
 using Baton.Domain;
 using Baton.Queue;
 using Baton.Status;
+using Baton.Tests.Shared;
 using Baton.Store;
 using Baton.Templates;
 using Baton.Vendors;
@@ -502,7 +503,7 @@ public sealed class QueueLauncherTests : IDisposable
             }
             else
             {
-                File.Delete(ledgerPath);
+                FileCleanup.EnsureDeleted(ledgerPath);
             }
 
             // A retry bound no absent room may pay, the same discriminator the corrupt arm uses.
@@ -543,7 +544,7 @@ public sealed class QueueLauncherTests : IDisposable
         try
         {
             var room = await RunTwoStepRoomAsync(root);
-            File.Delete(Path.Combine(room, "snapshot.json"));
+            FileCleanup.EnsureDeleted(Path.Combine(room, "snapshot.json"));
 
             await QueueLauncher.RecordPostLaunchFaultAsync("t12", room, "the pump threw BatonFlowException");
 
