@@ -5948,11 +5948,20 @@ roles and `review-<scope>` for `review`. The shipped table is the operator's 202
 | Key | Adapter | Model | Effort |
 |---|---|---|---|
 | `engine` | claude | opus | high |
-| `tooling` | claude | opus | medium |
+| `tooling` | *follows the `standard` tier* | | |
 | `docs` | claude | opus | medium |
 | `review-engine` | claude | opus | high |
 | `review-tooling` | codex | gpt-5.6-sol | high |
 | `review-docs` | codex | gpt-5.6-sol | high |
+
+`tooling` states no triple of its own **on purpose** (#1863): it and `WorkerTiers.json`'s `standard`
+tier describe the same work, and this table said so a second time until the 2026-09-06 ruling moved
+`standard` and left this row behind on a retired pin. `src/Baton.Vendors/WorkerTiers.json` is the
+register for what that row resolves to — read it there, not here — and a `tooling` item fails closed if
+that tier is missing rather than falling back to some other row's model. The other rows keep their
+triples because they name no tier that exists: `review-tooling`/`review-docs` correspond to nothing in
+`WorkerTiers.json`, and whether `engine` and `docs` should follow `frontier`/`standard` is a ruling
+about what those scopes mean, still unmade.
 
 The three axes stay independent (decision 0017), so overriding one keeps the tier's other two. An item
 that overrides any axis **must** carry `--reason`, and the reason reaches the room as its

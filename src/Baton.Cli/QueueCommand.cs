@@ -150,7 +150,7 @@ public static class QueueCommand
         }, cancellationToken).ConfigureAwait(false);
 
         var settings = await DaemonSettingsStore.LoadAsync(BatonPaths.SettingsFile, cancellationToken).ConfigureAwait(false);
-        var tier = QueueTierTable.Resolve(item, settings.Queue);
+        var tier = QueueTierTable.Resolve(item, settings.Queue, WorkerRoleCatalog.QueueTierFor);
         output.WriteLine($"{(replaced ? "Replaced" : "Queued")} '{tag}' ({item.Role}) in {workspace}");
         output.WriteLine($"  spec: {specDestination}");
         output.WriteLine($"  tier: {DescribeTier(tier)}");

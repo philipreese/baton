@@ -174,11 +174,55 @@ public static class WorkerRoleCatalog
                 $"No worker role '{id}' in the catalog. Known roles: {string.Join(", ", All.Select(r => r.Id))}.");
     }
 
+    /// <summary>
+    /// The tier named <paramref name="tierName"/>, in the shape the conductor queue's tier table
+    /// consumes, or null when the tier map defines no such tier. Case-sensitive, matching how a role's
+    /// own <c>tier</c> key resolves in <see cref="Load"/> — a tier name is a catalog identifier, not
+    /// something an operator types per item.
+    /// </summary>
+    /// <remarks>
+    /// #1863: the bridge <c>Baton.Queue.QueueTierTable</c>'s <c>tooling</c> row crosses. That table
+    /// lives in <c>Baton</c>, which does not reference this project, so it takes this method as a
+    /// delegate rather than calling it — which is what lets the queue's tooling pin BE the
+    /// <c>standard</c> tier instead of a second copy of it. Null is a fail-closed answer there, not a
+    /// fallback.
+    /// <para>
+    /// A tier FILE that is absent or unreadable throws out of <see cref="ReadJson"/> instead of
+    /// answering null, exactly as it does for a role lookup, because a queue that cannot read the
+    /// register must not guess a tier is merely missing. Where that throw lands is worth being precise
+    /// about, since "fail closed" invites the wrong reading: from <c>QueueSchedulerService</c> it
+    /// escapes the whole evaluation, so <c>TickOnceAsync</c> ledgers the tick <c>failed</c> with the
+    /// exception message and <c>ExecuteAsync</c> logs it and ticks again — nothing launches and the
+    /// ledger says why, but the ITEM is not marked failed and is retried each tick. Only a tier the
+    /// file genuinely does not define (null, here) reaches the per-item fail-closed path that marks it.
+    /// </para>
+    /// </remarks>
+    public static Queue.QueueTierSettings? QueueTierFor(string tierName)
+    {
+        ArgumentException.ThrowIfNullOrWhiteSpace(tierName);
+        return LoadTiers().TryGetValue(tierName, out var tier)
+            ? new Queue.QueueTierSettings
+            {
+                Tier = tierName,
+                Adapter = tier.Adapter,
+                Model = tier.Model,
+                Effort = tier.Effort,
+            }
+            : null;
+    }
+
+    private static Dictionary<string, WorkerTier> LoadTiers() =>
+        ReadJson<Dictionary<string, WorkerTier>>(
+            ResolvePath(
+                BatonEnvironmentSnapshot.Current.WorkerTiersPathOverride,
+                TiersOverrideFileName,
+                TiersDefaultFileName),
+            "tier map");
+
     private static IReadOnlyList<WorkerRole> Load()
     {
         var snapshot = BatonEnvironmentSnapshot.Current;
-        var tiers = ReadJson<Dictionary<string, WorkerTier>>(
-            ResolvePath(snapshot.WorkerTiersPathOverride, TiersOverrideFileName, TiersDefaultFileName), "tier map");
+        var tiers = LoadTiers();
         var rawRoles = ReadJson<List<RawRole>>(
             ResolvePath(snapshot.WorkerRolesPathOverride, RolesOverrideFileName, RolesDefaultFileName), "role list");
 
