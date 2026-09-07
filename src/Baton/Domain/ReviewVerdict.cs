@@ -31,11 +31,12 @@ namespace Baton.Domain;
 /// </param>
 /// <param name="Decision">
 /// <b>The reviewer's own APPROVE/BLOCK, and the only thing the conductor queue routes on</b>
-/// (operator ruling, spec/baton.md §13). Null when the document names no decision or names one this
-/// enum does not have — the parse survives that, so a decision-less verdict is still readable by the
-/// ledger and by a person, and <c>WorkItemLifecycle</c> can say "carries no decision" rather than
-/// being handed a guess. What refuses it instead is
-/// <see cref="ReviewVerdictSchema.TryParseForReviewContract"/>.
+/// (operator ruling, spec/baton.md §13). <b>Optional on the wire, required by the conductor queue to
+/// advance</b>: nothing about a review room's output contract asks for it, so a verdict without one
+/// still settles its room succeeded-shaped and is still readable by the ledger and by a person — and
+/// <c>Baton.Queue.WorkItemLifecycle</c> is the one place that requires it, routing a decision-less
+/// verdict to the operator with "carries no decision" rather than being handed a guess. Null when the
+/// document names no decision or names one this enum does not have.
 /// </param>
 public sealed record ReviewVerdict(
     string ReviewedRef,
@@ -66,14 +67,14 @@ public enum ReviewDecision
 /// or a word this enum does not have.
 /// </summary>
 /// <remarks>
-/// <b>Tolerant on purpose, and the tolerance is what makes the requirement enforceable.</b> The plain
+/// <b>Tolerant on purpose, and the tolerance is what keeps the document readable.</b> The plain
 /// <see cref="JsonStringEnumConverter{T}"/> throws on an unknown value, which would make a reviewer's
 /// typo ("approved") indistinguishable from a file that is not JSON at all: both would fail
 /// <see cref="ReviewVerdictSchema.TryParse"/>, and every downstream reader — the cost ledger's finding
 /// counts, <c>baton watch</c>'s payload, the conductor's own operator message — would lose the whole
-/// document over one word. Null instead, refused one layer up by
-/// <see cref="ReviewVerdictSchema.TryParseForReviewContract"/>, so the document still reads and the
-/// refusal still happens.
+/// document over one word. Null instead, which <c>Baton.Queue.WorkItemLifecycle</c> reads as "the
+/// reviewer wrote no decision" and routes to a person: the document still reads and the round is still
+/// not guessed.
 /// </remarks>
 internal sealed class TolerantReviewDecisionConverter : JsonConverter<ReviewDecision?>
 {
@@ -368,36 +369,10 @@ public static class ReviewVerdictSchema
         return true;
     }
 
-    /// <summary>
-    /// <see cref="TryParse"/> plus the one thing the review ROLE requires beyond a readable document:
-    /// a <see cref="ReviewVerdict.Decision"/>. This is what <c>ContractValidator</c> evaluates for
-    /// <c>OutputSchema.ReviewVerdict</c>; spec/baton.md §13 is the ruling that makes the field
-    /// mandatory and says what it costs.
-    /// </summary>
-    /// <remarks>
-    /// <b>A second method rather than a check inside <see cref="TryParse"/>, and the split is the
-    /// point.</b> "Valid verdict" is still defined once, here, in this class — this method is that
-    /// definition plus a role requirement, not a second reader. What the extra layer buys the readers
-    /// downstream is spec/baton.md §13's paragraph, not restated here. What it buys the code is the
-    /// contrast with severity and status, which ARE refused inside <see cref="TryParse"/>: a null
-    /// there is silently WRONG rather than absent, since their enum defaults read as <c>high</c> and
-    /// <c>confirmed</c>. A null decision reads as exactly what it is.
-    /// </remarks>
-    public static bool TryParseForReviewContract(byte[] bytes, out ReviewVerdict? verdict, out string? error)
-    {
-        if (!TryParse(bytes, out verdict, out error))
-        {
-            return false;
-        }
-
-        if (verdict!.Decision is null)
-        {
-            verdict = null;
-            error = "'decision' must be \"approve\" or \"block\" — the review's own routing decision, "
-                + "which nothing derives from the findings.";
-            return false;
-        }
-
-        return true;
-    }
+    // No second, stricter parse for the review ROLE, and the absence is a ruling rather than an
+    // omission: `decision` is optional on the wire, and spec/baton.md §13 has what a parse refusing it
+    // was measured to break. The requirement lives in exactly one place instead,
+    // `Baton.Queue.WorkItemLifecycle`. Contrast severity and status, which ARE refused inside
+    // TryParse: a null there is silently WRONG rather than absent, since their enum defaults read as
+    // `high` and `confirmed`. A null decision reads as exactly what it is.
 }

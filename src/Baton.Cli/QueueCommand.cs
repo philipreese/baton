@@ -212,7 +212,11 @@ public static class QueueCommand
 
         foreach (var item in snapshot.Items)
         {
-            var state = item.State.ToString().ToLowerInvariant();
+            // `halted` in the status column: an item the queue has given up on and one that merely
+            // failed its lane and is still an advance candidate otherwise print identically, and
+            // halted is precisely the fact that tells the operator they must act — nothing in the
+            // product clears it (QueueItem.Halted).
+            var state = item.State.ToString().ToLowerInvariant() + (item.Halted ? " halted" : string.Empty);
             var where = item.RoomDirectory is { Length: > 0 } room ? $"  room: {room}" : string.Empty;
             var external = item.External ? "  (external — counted, never launched)" : string.Empty;
 

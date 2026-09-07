@@ -341,15 +341,17 @@ public class ContractValidatorTests
     }
 
     /// <summary>
-    /// The review role's own requirement beyond a readable document: <c>decision</c>. spec/baton.md
-    /// §13 is the ruling; what this pins is that the validator enforces it.
+    /// A verdict naming no <c>decision</c>, or a word the enum does not have, satisfies this contract:
+    /// <c>ReviewVerdictSchema</c> holds the ruling and what refusing it would have cost.
     /// </summary>
     /// <remarks>
-    /// The polarity partner is the arm above, whose identical fixture DOES carry a decision and IS
-    /// satisfied. Without that pairing this would pass against a validator that refused every verdict.
+    /// The discriminating control is the third document below: a verdict whose finding has no
+    /// <c>severity</c> IS refused by the same validator, on the same fixture shape, so the two
+    /// acceptances above are about the decision field rather than about a validator that waves every
+    /// file through.
     /// </remarks>
     [Fact]
-    public void A_verdict_with_no_decision_does_not_satisfy_the_review_contract()
+    public void A_verdict_with_no_decision_still_satisfies_the_review_contract()
     {
         var directory = CreateTempDirectory();
         try
@@ -368,17 +370,20 @@ public class ContractValidatorTests
                 ]}
                 """);
 
-            var result = ContractValidator.Validate(contract, directory);
-
-            var unsatisfied = Assert.Single(result.UnsatisfiedOutputs);
-            Assert.Equal(UnsatisfiedOutputReason.SchemaViolation, unsatisfied.Reason);
-            Assert.Contains("decision", unsatisfied.Detail!, StringComparison.Ordinal);
+            Assert.Empty(ContractValidator.Validate(contract, directory).UnsatisfiedOutputs);
 
             // A near-miss word lands identically: the converter reads it as absent rather than
-            // throwing, and this is where it is refused.
+            // throwing, and nothing here refuses that either.
             File.WriteAllText(
                 Path.Combine(directory, "verdict.json"),
                 """{"reviewedRef": "branch-x", "decision": "approved", "findings": []}""");
+
+            Assert.Empty(ContractValidator.Validate(contract, directory).UnsatisfiedOutputs);
+
+            // The control: a document this schema DOES refuse, so the acceptances above discriminate.
+            File.WriteAllText(
+                Path.Combine(directory, "verdict.json"),
+                """{"reviewedRef": "branch-x", "findings": [{"claim": "x", "status": "confirmed"}]}""");
 
             Assert.Equal(
                 UnsatisfiedOutputReason.SchemaViolation,

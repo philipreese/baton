@@ -111,9 +111,10 @@ public static class WorkItemLifecycle
         }
 
         // Never a guess from the findings. A decision-less verdict reaches a person with the findings
-        // intact and the round unmade — spec/baton.md §13 has the operator ruling this arm exists for,
-        // and the review role's contract is what normally stops one arriving here at all
-        // (ReviewVerdictSchema.TryParseForReviewContract).
+        // intact and the round unmade — spec/baton.md §13 has the operator ruling this arm exists for.
+        // This is the ONLY place the field is required: the room's output contract takes any readable
+        // verdict (ReviewVerdictSchema.TryParse), so a room whose reviewer wrote no decision settles
+        // normally and stops here rather than failing its lane.
         if (verdict.Decision is not { } decision)
         {
             return WorkItemTransition.NeedsOperator(

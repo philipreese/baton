@@ -4148,14 +4148,17 @@ comes back out of merge order. In the same spirit, a `gh` failure part-way throu
 "stopped early after N PRs" and keeps its counts: those rows ARE written, and the old wording said the
 half had been skipped while they were being appended.
 
-**No `verdict` field, and that is a finding rather than an omission.** #1901's phase-C1 text asks a
-review row to carry a `verdict` of `APPROVE`/`BLOCK`. **No such value exists anywhere in the product**:
-`ReviewVerdict` is `reviewedRef` + `findings` + optional `summary`/`instruments`, and decision 0043's
-ruling — severity and status are evidence surfaced to a person, never inputs to routing (Architecture
-Rule 1) — is why the schema deliberately makes no overall approve/block judgment. Synthesising one from
-the severity counts would be the ledger inventing a judgment the reviewed artifact declines to make. The
-counts, the ref and its parsed PR/head are what a verdict actually contains, and they are what the row
-records. A future issue that wants an approve/block reading has to change what a reviewer WRITES first.
+**No `verdict` field, and the ledger still reads no approve/block.** #1901's phase-C1 text asks a
+review row to carry a `verdict` of `APPROVE`/`BLOCK`. Since #1934 slice 2 such a value does exist —
+`ReviewVerdict` is `reviewedRef` + `findings` + optional `summary`/`instruments`/`decision`, the last
+being the reviewer's own word, and §13 has the ruling — but **it is read in exactly one place, the
+conductor queue's `WorkItemLifecycle`, and nowhere in this ledger.** What stays refused is the thing
+this paragraph was written about: *synthesising* a verdict from the severity counts, which would be the
+ledger inventing a judgment the reviewed artifact declines to make — decision 0043's ruling, that
+severity and status are evidence surfaced to a person and never inputs to routing (Architecture Rule
+1), is why the counts cannot become a judgment here. The counts, the ref and its parsed PR/head are
+what the row records. An issue that wants the ledger to carry the reviewer's own `decision` is now a
+question of whether a row should hold it, not of whether one is written.
 
 **Two estimates, both labelled, neither an invoice.** `apiEquivalentUsd` comes from `PriceCatalog`
 (vendor → model → dimension → effective ranges, each with a source); `planMeterEstimateUsd` re-weights
@@ -5917,14 +5920,19 @@ the predicate advanced blocked PRs to `ready`: a wrong branch taken confidently,
 one not taken. Severity and status now route **nothing**; they are evidence for a person and text for
 the fixer's brief, which is what `ReviewVerdict` always said they were.
 
-**`decision` is required for a review room to settle succeeded-shaped**, the same way `report.md` is —
-it is part of the review role's output contract, refused by
-`ReviewVerdictSchema.TryParseForReviewContract` and named in the role's own prompt
-(`WorkerRoles.json`) and in both queue review briefs. The bare `ReviewVerdictSchema.TryParse` stays
-tolerant of a missing or unrecognised one and yields `null`, deliberately: the cost ledger's finding
-counts and `baton watch`'s payload still read every verdict written before this field existed, and the
-queue can tell "the reviewer wrote no decision" apart from "there is no readable verdict at all",
-which are different messages with different recoveries.
+**`decision` is optional on the wire and required by the queue to advance** (operator ruling,
+2026-09-06). It is **not** part of the review role's output contract: `ContractValidator` evaluates
+`OutputSchema.ReviewVerdict` through the bare `ReviewVerdictSchema.TryParse`, which tolerates a
+missing or unrecognised decision and yields `null`, so a review room settles succeeded-shaped exactly
+as it did before the field existed. Making it a contract requirement was tried and reverted in the
+same PR: `ContractValidator` runs for every review-shaped step engine-wide, so the requirement would
+have failed every room already in flight and every room whose prompt came from an operator's own
+`~/.baton/worker-roles.json` override — which is a wholesale replacement of the shipped
+`WorkerRoles.json` and therefore never mentions the field. The requirement lives in **one** place
+instead, `WorkItemLifecycle`, where a verdict with no decision is the operator's; the role's own
+prompt (`WorkerRoles.json`) and both queue review briefs still ask for it, because a decision written
+is a round carried. That split is also what lets the queue tell "the reviewer wrote no decision" apart
+from "there is no readable verdict at all", which are different messages with different recoveries.
 
 **Nothing reads the verdict's `summary` or a finding's `detail` to decide anything**, and that is the
 line this ruling draws: routing on a worker's prose is what Architecture Rule 1 forbids, and it stays
@@ -5994,9 +6002,10 @@ never shown. The advance falls back to `lastVerdict`, re-read through the same s
 the findings still travel as text and the path still does not.
 
 **Both review briefs carry the Verdict sentence** — the `decision` field, what the two words mean, and
-that a verdict without one fails the room's contract. Two files means two places for it, which is
-exactly why a test asserts it renders in both: the round it goes missing from is the round whose room
-then fails to settle.
+that a verdict without one stops the item for a person rather than carrying the round (never that it
+fails the room's contract, which it does not). Two files means two places for it, which is exactly why
+a test asserts it renders in both: the round it goes missing from is the round whose item then waits
+on the operator.
 
 ### The recorded fact (Q4)
 

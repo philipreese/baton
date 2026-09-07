@@ -137,7 +137,7 @@ public sealed class QueueBriefTemplatesTests
 
         // BOTH templates, because they are two separate files since #2004's first round: a sentence
         // added to one of them is a reviewer told about `decision` in some rounds and not others, and
-        // the round it goes missing in is the one whose room then fails its contract.
+        // the round it goes missing in is the one whose item then waits on the operator.
         var brief = QueueBriefTemplates.Compose(
             stage, Item() with { Stage = stage, LastVerdict = lastVerdict },
             new QueueBriefTemplates.BriefContext(
@@ -147,7 +147,45 @@ public sealed class QueueBriefTemplatesTests
 
         Assert.Contains(@"""decision"": ""approve""", brief, StringComparison.Ordinal);
         Assert.Contains(@"""decision"": ""block""", brief, StringComparison.Ordinal);
-        Assert.Contains("this room's contract", brief, StringComparison.Ordinal);
+        Assert.Contains("this item for a person rather than carrying the round", brief, StringComparison.Ordinal);
+    }
+
+    /// <summary>
+    /// The unreadable-verdict sentence <c>Compose</c> renders in place of the hollow fallback — its
+    /// own comment has the gap this closes and why no path is named.
+    /// </summary>
+    /// <remarks>
+    /// The polarity partner is the second half of this arm: the same item, with findings that DID
+    /// render, and the sentence absent.
+    /// </remarks>
+    [Fact]
+    public void A_re_review_whose_verdict_file_is_gone_says_so_rather_than_rendering_hollow()
+    {
+        using var templates = new TempDirectory("baton_templates_");
+
+        var brief = QueueBriefTemplates.Compose(
+            WorkStage.ReReview,
+            Item() with { Stage = WorkStage.ReReview, LastVerdict = @"C:\baton\rooms\queue-1934-abcd\verdict.json" },
+            new QueueBriefTemplates.BriefContext(PullRequest: 1941, HeadSha: "deadbeef", Round: 3, Findings: null),
+            templates.Path);
+
+        Assert.Contains("Re-review PR #1941", brief, StringComparison.Ordinal);
+        Assert.Contains("could not be read", brief, StringComparison.Ordinal);
+        Assert.DoesNotContain("no findings were recorded", brief, StringComparison.Ordinal);
+        Assert.DoesNotContain(@"queue-1934-abcd", brief, StringComparison.Ordinal);
+
+        // The control, one input different: the same item WITH readable findings renders them and
+        // says nothing about an unreadable file, so the sentence above tracks the gap rather than the
+        // template.
+        var withFindings = QueueBriefTemplates.Compose(
+            WorkStage.ReReview,
+            Item() with { Stage = WorkStage.ReReview, LastVerdict = @"C:\baton\rooms\queue-1934-abcd\verdict.json" },
+            new QueueBriefTemplates.BriefContext(
+                PullRequest: 1941, HeadSha: "deadbeef", Round: 3,
+                Findings: QueueBriefTemplates.RenderFindings(Verdict())),
+            templates.Path);
+
+        Assert.DoesNotContain("could not be read", withFindings, StringComparison.Ordinal);
     }
 
     [Fact]

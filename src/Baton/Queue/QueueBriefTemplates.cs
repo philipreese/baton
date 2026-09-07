@@ -209,7 +209,17 @@ public static class QueueBriefTemplates
             ["PR"] = context.PullRequest?.ToString(System.Globalization.CultureInfo.InvariantCulture) ?? "?",
             ["SHA"] = context.HeadSha ?? "the current head",
             ["ROUND"] = context.Round.ToString(System.Globalization.CultureInfo.InvariantCulture),
-            ["FINDINGS"] = context.Findings ?? "(no findings were recorded)",
+            // A re-review whose findings could not be read says so, rather than rendering "What the
+            // previous round found" over "(no findings were recorded)" and then asking the reviewer to
+            // check each finding above: every sentence true, the reader's conclusion false. The two
+            // reads differ — the split above accepts the item's recorded verdict path, while the text
+            // comes from re-reading that file, which is gone when the room was moved or swept. The
+            // path itself is deliberately NOT named, under the never-a-room-path rule in this type's
+            // remarks: it would be a pointer this reader cannot follow.
+            ["FINDINGS"] = context.Findings ?? (hasPriorRound
+                ? "The previous review's verdict file could not be read, so its findings are not "
+                    + "carried here — review this head on its own and say what you find."
+                : "(no findings were recorded)"),
         });
 
         return stage == WorkStage.Continue
@@ -343,8 +353,8 @@ public static class QueueBriefTemplates
         ## Verdict
 
         Write `"decision": "approve"` or `"decision": "block"` in `verdict.json`: it is YOUR call on
-        whether this PR is ready, nothing derives it from the findings, and a verdict without it fails
-        this room's contract.
+        whether this PR is ready, nothing derives it from the findings, and a verdict without it stops
+        this item for a person rather than carrying the round.
         """;
 
     private const string ReReviewDefault = """
@@ -370,7 +380,7 @@ public static class QueueBriefTemplates
         ## Verdict
 
         Write `"decision": "approve"` or `"decision": "block"` in `verdict.json`: it is YOUR call on
-        whether this PR is ready, nothing derives it from the findings, and a verdict without it fails
-        this room's contract.
+        whether this PR is ready, nothing derives it from the findings, and a verdict without it stops
+        this item for a person rather than carrying the round.
         """;
 }

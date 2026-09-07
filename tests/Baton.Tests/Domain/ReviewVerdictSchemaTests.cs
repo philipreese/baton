@@ -58,34 +58,36 @@ public class ReviewVerdictSchemaTests
         Assert.Equal(expected, verdict!.Decision);
     }
 
+    /// <summary>
+    /// There is ONE parse, and a missing <c>decision</c> does not fail it (operator ruling,
+    /// spec/baton.md §13). The field is optional on the wire and required only by the conductor
+    /// queue's <c>WorkItemLifecycle</c>, which reads the null this leaves behind.
+    /// </summary>
+    /// <remarks>
+    /// Asserted with its findings intact, because "the document still reads" is the whole reason the
+    /// requirement does not live here: the cost ledger's counts and <c>baton watch</c>'s payload read
+    /// every verdict written before this field existed. The control is the with-decision document
+    /// below — same fixture, one field added — so the null above is about the absent field rather than
+    /// about a parse that never populates it.
+    /// </remarks>
     [Fact]
-    public void The_review_contract_requires_a_decision_that_the_bare_parse_tolerates()
+    public void A_verdict_with_no_decision_parses_with_its_findings_intact_and_a_null_decision()
     {
-        // The two layers, on ONE document: the parse reads it (so the cost ledger's counts and a
-        // person still get everything in it), and the review role's own contract refuses it. Asserted
-        // as a pair because either half alone is consistent with the wrong design — a tolerant parse
-        // with no contract check lets a decision-less verdict settle a room, and a strict parse makes
-        // the whole document unreadable over one missing field.
         var withoutDecision = Encoding.UTF8.GetBytes(
             """{"reviewedRef": "main", "findings": [{"severity": "high", "claim": "x", "status": "confirmed"}]}""");
 
-        Assert.True(ReviewVerdictSchema.TryParse(withoutDecision, out var parsed, out _));
+        Assert.True(ReviewVerdictSchema.TryParse(withoutDecision, out var parsed, out var error));
+        Assert.Null(error);
         Assert.Single(parsed!.Findings);
         Assert.Null(parsed.Decision);
 
-        Assert.False(ReviewVerdictSchema.TryParseForReviewContract(withoutDecision, out var refused, out var error));
-        Assert.Null(refused);
-        Assert.Contains("decision", error!, StringComparison.Ordinal);
-
-        // The control: the same document WITH a decision satisfies the contract, so the refusal above
-        // is about that field and not about some other part of this fixture.
         var withDecision = Encoding.UTF8.GetBytes(
             """
             {"reviewedRef": "main", "decision": "approve",
              "findings": [{"severity": "high", "claim": "x", "status": "confirmed"}]}
             """);
 
-        Assert.True(ReviewVerdictSchema.TryParseForReviewContract(withDecision, out var accepted, out _));
+        Assert.True(ReviewVerdictSchema.TryParse(withDecision, out var accepted, out _));
         Assert.Equal(ReviewDecision.Approve, accepted!.Decision);
     }
 

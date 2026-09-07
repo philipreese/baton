@@ -59,9 +59,9 @@ numbers and the tier table live in `~/.baton/settings.json` under `Queue`.
 An item added with `--lifecycle` carries a **stage** as well as a state, and the daemon advances it:
 a settled lane's room, its `verdict.json` and `gh pr view` decide whether the next round is a review,
 a fix round carrying the reviewer's findings verbatim, a re-review, or a continuation of work that
-never reached the PR. The review role's `verdict.json` carries a required `decision` of `approve` or
-`block` — **the reviewer's own call, read and never derived from its findings** — and a verdict
-without one stops for the operator rather than being guessed at. An approved item stops at `ready` —
+never reached the PR. The review role's `verdict.json` carries a `decision` of `approve` or `block` —
+**the reviewer's own call, read and never derived from its findings** — and a verdict without one
+stops for the operator rather than being guessed at. An approved item stops at `ready` —
 **the queue never merges**.
 
 `spec/baton.md` §13 is the contract — the shipped defaults, the recorded fact's shape, what happens

@@ -362,7 +362,7 @@ public static class BatonPaths
 
     /// <summary>
     /// <c>{Root}/queue/templates</c> — the brief templates <c>baton queue</c> renders a work item's
-    /// spec from (#1934 slice 2). <b>Operator-editable and never overwritten</b>: the three shipped
+    /// spec from (#1934 slice 2). <b>Operator-editable and never overwritten</b>: the four shipped
     /// defaults are written here only when the file is absent, so an edit survives every later add.
     /// <c>Baton.Queue.QueueBriefTemplates</c> is the register for what each one holds and why it is
     /// the product rather than a convenience.
@@ -375,8 +375,9 @@ public static class BatonPaths
     /// <summary>
     /// <c>{Root}/queue/templates/&lt;name&gt;.md</c> — one brief template.
     /// </summary>
-    /// <param name="name">A <c>Baton.Queue.QueueBriefTemplates</c> name (<c>implement</c>, <c>fix</c>,
-    /// <c>re-review</c>) — already a slug, so this does not re-check it.</param>
+    /// <param name="name">A <c>Baton.Queue.QueueBriefTemplates</c> name (<c>implement</c>,
+    /// <c>review</c>, <c>fix</c>, <c>re-review</c>) — already a slug, so this does not re-check
+    /// it.</param>
     public static string QueueTemplateFile(string name)
     {
         ArgumentException.ThrowIfNullOrEmpty(name);
