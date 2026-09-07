@@ -5031,8 +5031,10 @@ backgrounding shape is **refused before anything is spawned**, on every vendor �
 the codex broker each call it, because claude and agy run their own shells and a broker-only rule would
 never have reached the vendor this was measured on. (2) A byte-identical repeat is **replayed once and
 then refused**, judged on a 60-second clock for commands and on the file's own mtime-and-length for
-reads, with a named exemption list for commands whose output is expected to move
-(`RepeatedToolCallLedger.VolatileCommandPrefixes` states which and why). (3) A tool-step-cap arrest
+reads — of the *same requested window*, since a read tool taking a range answers a different question
+per range and `RepeatedToolCallLedger.ReadKey` states why keying past that argument would make the
+denial's own sentence false — with a named exemption list for commands whose output is expected to
+move (`RepeatedToolCallLedger.VolatileCommandPrefixes` states which and why). (3) A tool-step-cap arrest
 **names the dominant shape** when one normalised command line held more than half the shell commands,
 so a conductor reads what the steps were spent on rather than only how many there were. What none of
 this changes is the budget itself; #1749's arrest-rule question stays separate.
@@ -5059,7 +5061,11 @@ a `PreToolUse` hook can only allow or deny: the codex broker **replays** the pre
 tool's result and then refuses, while on claude and agy the second byte-identical ask is **denied**
 and the deny reason is where the previous answer goes — it carries the cached output when the room's
 ledger holds one, and names how long ago the command ran and points at the model's own transcript
-when it does not. The third ask is denied plainly on every vendor. Which of those two hook wordings
+when it does not. **That is for a command; a repeated read is always answered with the transcript
+pointer**, because the ledger stores a read's stat pair and never its bytes, so on that half there is
+nothing to carry by construction rather than by today's wiring — and pasting a re-read file back into
+a deny reason would spend precisely the tokens this rung exists to save. The third ask is denied
+plainly on every vendor. Which of those two hook wordings
 a reader will actually see today is the transcript one: **neither vendor has a `PostToolUse` hook
 wired in this repository**, so nothing on a hook-only room ever records an output, and the
 output-carrying branch is reachable only from a ledger some other writer filled (the file is per
