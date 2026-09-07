@@ -123,6 +123,24 @@ public class StandardHandleInheritanceTests
     }
 
     /// <summary>
+    /// #2030 review (LOW): the failure path now writes one stderr line naming the handle and the
+    /// Win32 error, and a line reading "Win32 error 0" would be worse than no line — it would say the
+    /// call failed for no reason. The code is only readable in the window between the P/Invoke
+    /// returning false and any other managed call, so this pins that it is actually captured there:
+    /// a handle value that cannot be a real one must come back false with ERROR_INVALID_HANDLE (6),
+    /// not with the zero <c>win32Error</c> is initialised to.
+    /// </summary>
+    [Fact]
+    public void DisableFor_OnAnUnusableHandle_ReportsTheWin32ErrorRatherThanZero()
+    {
+        Assert.SkipUnless(OperatingSystem.IsWindows(), "SetHandleInformation is Windows-only.");
+
+        const int ErrorInvalidHandle = 6;
+        Assert.False(StandardHandleInheritance.DisableFor(unchecked((nint)0x7FFF_FFFF), out int win32Error));
+        Assert.Equal(ErrorInvalidHandle, win32Error);
+    }
+
+    /// <summary>
     /// Spawned exactly the way Baton spawns: through the shared start-info seam, with all three
     /// streams redirected. That the child STILL inherits the pipe in the control arm above is the
     /// finding — .NET passes <c>bInheritHandles: true</c> whenever anything is redirected, so

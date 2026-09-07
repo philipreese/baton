@@ -35,9 +35,13 @@ namespace Baton.Core.Internal;
 /// children and whatever they leave behind.
 /// </para>
 /// <para>
-/// <b>Never throws.</b> Called for its effect on the way into a command; a host where the call fails
-/// is exactly the host that behaved this way before, so there is nothing to report and nothing to
-/// abort for.
+/// <b>Never fatal, but not silent.</b> Called for its effect on the way into a command; a host where
+/// the call fails is exactly the host that behaved this way before, so there is nothing to abort for.
+/// It is still reported: the observable consequence of a failed clear is the precise #2030 symptom —
+/// a wrapper shell wedged for an hour — and the next occurrence is only diagnosable if the log says
+/// the mitigation did not take. One stderr line per process, naming the handle and the Win32 error,
+/// then quiet: this runs on the way into every lane and a repeated line would be noise on a stream a
+/// wrapper is reading.
 /// </para>
 /// </remarks>
 public static class StandardHandleInheritance
@@ -45,6 +49,10 @@ public static class StandardHandleInheritance
     private const int StdOutputHandle = -11;
     private const int StdErrorHandle = -12;
     private const uint HandleFlagInherit = 0x00000001;
+
+    // Loud ONCE, per the remark above: the first failure in this process prints, the rest are
+    // swallowed. Not thread-safe by design -- the worst a race costs is a second identical line.
+    private static bool _failureReported;
 
     /// <summary>
     /// Makes this process's stdout and stderr non-inheritable. Idempotent, and a no-op off Windows.
@@ -80,7 +88,14 @@ public static class StandardHandleInheritance
                 continue;
             }
 
-            DisableFor(handle);
+            if (!DisableFor(handle, out int win32Error) && !_failureReported)
+            {
+                _failureReported = true;
+                Console.Error.WriteLine(
+                    $"baton: could not clear HANDLE_FLAG_INHERIT on {(id == StdOutputHandle ? "stdout" : "stderr")} "
+                    + $"(Win32 error {win32Error}). A child that outlives this process can still hold a duplicate of "
+                    + "it open, which is what keeps a wrapper shell's redirected stream from reaching EOF (#2030).");
+            }
         }
     }
 
@@ -89,8 +104,18 @@ public static class StandardHandleInheritance
     /// arbitrary handle, so the two-arm test can prove the mechanism against a pipe it owns instead
     /// of mutating the test host's real standard streams. Returns false when the call failed.
     /// </summary>
-    internal static bool DisableFor(nint handle)
+    internal static bool DisableFor(nint handle) => DisableFor(handle, out _);
+
+    /// <summary>
+    /// The same clear, reporting the Win32 error the caller needs to say anything useful about a
+    /// failure. Read via <see cref="Marshal.GetLastPInvokeError"/> immediately after the call and
+    /// before any other managed work, because anything in between can overwrite it; that is why this
+    /// is an out parameter rather than something <see cref="Disable"/> reads for itself. Zero when
+    /// the P/Invoke never ran at all (off Windows, or kernel32 missing the entry point).
+    /// </summary>
+    internal static bool DisableFor(nint handle, out int win32Error)
     {
+        win32Error = 0;
         if (!OperatingSystem.IsWindows())
         {
             return false;
@@ -98,7 +123,13 @@ public static class StandardHandleInheritance
 
         try
         {
-            return SetHandleInformation(handle, HandleFlagInherit, 0);
+            if (SetHandleInformation(handle, HandleFlagInherit, 0))
+            {
+                return true;
+            }
+
+            win32Error = Marshal.GetLastPInvokeError();
+            return false;
         }
         catch (Exception ex) when (ex is DllNotFoundException or EntryPointNotFoundException)
         {
