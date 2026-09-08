@@ -14,11 +14,9 @@ namespace Baton.Cli.Daemon;
 /// one of those hypotheses made readable after the fact; none of them is a verdict on its own.
 /// </para>
 /// <para>
-/// Every reading is a cheap in-process counter (<see cref="ThreadPool.PendingWorkItemCount"/>,
+/// The readings use <see cref="ThreadPool.PendingWorkItemCount"/>,
 /// <see cref="ThreadPool.ThreadCount"/>, <see cref="GC.GetTotalMemory(bool)"/> without a collection,
-/// <see cref="Environment.WorkingSet"/>): no file, no P/Invoke, nothing that needs a pool thread — so
-/// <see cref="DaemonWatchdog"/> can take one on its dedicated thread while the pool is exactly the
-/// thing that has wedged.
+/// and <see cref="Environment.WorkingSet"/>. The measurement scope is recorded in spec/baton.md §7.
 /// </para>
 /// </summary>
 internal sealed record HostLoadSample(
@@ -49,7 +47,7 @@ internal sealed record HostLoadSample(
     };
 
     /// <summary>The inverse of <see cref="ToJson"/>: null when <paramref name="node"/> is not an object
-    /// carrying every field, so a reader of an older heartbeat (written before this object existed)
+    /// carrying every field with its expected type and a valid timestamp, so an older heartbeat
     /// gets "no sample" rather than a half-filled one.</summary>
     internal static HostLoadSample? FromJson(JsonNode? node)
     {
@@ -58,24 +56,24 @@ internal sealed record HostLoadSample(
             return null;
         }
 
-        if (obj["sampledAt"]?.GetValue<string>() is not { } sampledAt
+        if (obj["sampledAt"] is not JsonValue stamp || !stamp.TryGetValue<string>(out var sampledAt)
             || !DateTimeOffset.TryParse(sampledAt, null, System.Globalization.DateTimeStyles.RoundtripKind, out var at)
-            || obj["threadPoolPendingWorkItems"] is not { } pending
-            || obj["threadPoolThreads"] is not { } threads
-            || obj["gcTotalMemoryBytes"] is not { } gc
-            || obj["workingSetBytes"] is not { } workingSet)
+            || obj["threadPoolPendingWorkItems"] is not JsonValue pending || !pending.TryGetValue<long>(out var pendingCount)
+            || obj["threadPoolThreads"] is not JsonValue threads || !threads.TryGetValue<int>(out var threadCount)
+            || obj["gcTotalMemoryBytes"] is not JsonValue gc || !gc.TryGetValue<long>(out var gcBytes)
+            || obj["workingSetBytes"] is not JsonValue workingSet || !workingSet.TryGetValue<long>(out var workingSetBytes))
         {
             return null;
         }
 
         return new HostLoadSample(
-            at, pending.GetValue<long>(), threads.GetValue<int>(), gc.GetValue<long>(), workingSet.GetValue<long>());
+            at, pendingCount, threadCount, gcBytes, workingSetBytes);
     }
 
     /// <summary>One clause for a log line: the verdict names the pool's state beside the silence it is
     /// diagnosing, because a backlog of hundreds beside zero threads and a backlog of zero say
     /// different things about the same silence.</summary>
     internal string Describe() =>
-        $"thread pool {ThreadPoolPendingWorkItems} pending on {ThreadPoolThreads} threads, "
+        $"sampled at {SampledAt:O}: thread pool {ThreadPoolPendingWorkItems} pending on {ThreadPoolThreads} threads, "
         + $"GC heap {GcTotalMemoryBytes / (1024 * 1024)} MiB, working set {WorkingSetBytes / (1024 * 1024)} MiB";
 }

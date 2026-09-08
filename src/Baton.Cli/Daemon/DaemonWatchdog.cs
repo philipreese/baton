@@ -21,13 +21,11 @@ namespace Baton.Cli.Daemon;
 /// <para>
 /// <b>Why the fleet-silence arm (#2082).</b> On 2026-09-08 at 03:12Z the projection writer's tick had
 /// grown to 10.97 s against its 30 s interval, then every service's last recorded tick fell inside one
-/// 30 s window; the surviving loop (<see cref="WatchSweep"/>, 15 s) ticked until 03:19:23Z and the
+/// 30 s window; the surviving loop (<see cref="WatchSweep"/>) ticked until 03:19:23Z and the
 /// projection arm fired 194 s after that, 619 s after the projection had gone stale. "No service at
 /// all has ticked" is a stronger fact than "the newest tick is older than five projection intervals":
-/// the fastest loop in the process is 15 s and does nothing but read a directory, so its silence for
-/// two of its own periods is already a frozen process, not a slow one. The floor keeps a re-timed
-/// 1 s service from turning a GC pause into a restart that today kills every queue-launched lane
-/// (finding 2 of the same issue).
+/// the fleet arm uses that distinction. See <see cref="FleetSilenceFloor"/> for the floor's
+/// justification and spec/baton.md §7 for the current service count and cadence.
 /// </para>
 /// <para>
 /// <b>What it does NOT catch, deliberately:</b> one service wedging while its siblings keep ticking.
@@ -38,7 +36,7 @@ namespace Baton.Cli.Daemon;
 /// covers instead: it keys on the projection file's own <c>derived_at</c>, at three ticks. The cost
 /// of that ruling is visible in the incident above: <c>heartbeat.json</c> is written by the projection
 /// tick, so it froze at 03:12:42Z while <see cref="WatchSweep"/> kept going for seven more minutes,
-/// and read as "six services stopped at once" when one had not.
+/// and made the surviving loop look stopped too.
 /// </para>
 /// <para>
 /// <b>Its own loop runs on a dedicated <see cref="Thread"/> waiting on a
@@ -65,8 +63,9 @@ internal sealed class DaemonWatchdog : IHostedService
     internal const int FleetSilenceMultiplier = 2;
 
     /// <summary>The fleet-silence arm never trips inside this, whatever the shortest interval is —
-    /// the class doc has why. Sixty seconds is also what the arm resolves to today with
-    /// <see cref="WatchSweep"/>'s 15 s cadence as the shortest.</summary>
+    /// it preserves the issue's requested bound rather than twice the current shortest cadence
+    /// (the figures and service count are in spec/baton.md §7). The false-positive rate under
+    /// host contention is unmeasured.</summary>
     internal static readonly TimeSpan FleetSilenceFloor = TimeSpan.FromSeconds(60);
 
     /// <summary>
@@ -208,9 +207,8 @@ internal sealed class DaemonWatchdog : IHostedService
     {
         var now = _clock();
         var interval = _interval();
-        // The sample is taken BEFORE the verdict is judged, on this dedicated thread: it is the one
-        // reading of the frozen host that nothing on the pool has to run for (#2082). Cheap enough to
-        // take on every healthy pass too, and doing so means a trip never runs code for the first time.
+        // Capture before judging, on every pass, so a trip never runs this code for the first time.
+        // spec/baton.md §7 records the measurement scope of capture on this dedicated thread.
         var verdict = Evaluate(_ledger, now, interval, _sampleLoad(now));
         if (verdict is null)
         {
@@ -229,6 +227,8 @@ internal sealed class DaemonWatchdog : IHostedService
     /// <see cref="BatonPaths.FleetWatchdogVerdictFile"/>, which owns why it is a file of its own.
     /// Best-effort — a diagnosis that cannot be written must not stop the exit that recovers the
     /// daemon, and the log line and exit code below it are the other two copies.
+    /// The prefix stamps the write; the host-load clause stamps capture. See spec/baton.md §7
+    /// for interpreting a delayed verdict.
     /// <para>
     /// <c>internal</c> rather than private so a test can drive the real writer against a temp
     /// <see cref="BatonPaths.Root"/> (2026-09-06 round-3 review): the internal constructor defaults
@@ -313,7 +313,8 @@ internal sealed class DaemonWatchdog : IHostedService
         DaemonTickLedger ledger, DateTimeOffset now, TimeSpan interval, HostLoadSample? load = null)
     {
         var projectionLimit = interval * MissedTickAllowance;
-        var fleetLimit = FleetSilenceLimit(ledger.ShortestInterval());
+        var shortestInterval = ledger.ShortestInterval();
+        var fleetLimit = FleetSilenceLimit(shortestInterval);
         var ticks = ledger.Snapshot();
 
         // No service has completed a tick at all yet: measured from process start, so a daemon that
@@ -325,7 +326,7 @@ internal sealed class DaemonWatchdog : IHostedService
         if (fleetLimit is { } fleet && silence > fleet)
         {
             bound = $"limit {fleet.TotalSeconds:F0}s = {FleetSilenceMultiplier} x the shortest service interval "
-                    + $"({ledger.ShortestInterval()!.Value.TotalSeconds:F0}s), floored at {FleetSilenceFloor.TotalSeconds:F0}s";
+                    + $"({shortestInterval!.Value.TotalSeconds:F0}s), floored at {FleetSilenceFloor.TotalSeconds:F0}s";
         }
         else if (silence > projectionLimit)
         {

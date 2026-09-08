@@ -33,11 +33,9 @@ public class DaemonWatchdogTests
         return (watchdog, ledger, log, exits);
     }
 
-    /// <summary>The six services the daemon hosts today, at the cadences `heartbeat.json` recorded on
-    /// 2026-09-08 — except that the fixture's shortest is 30 s rather than WatchSweep's real 15 s, so
-    /// the fleet arm's "2 x the shortest" lands exactly on the 60 s floor and both halves of the rule
-    /// are exercised by one number.</summary>
-    private static readonly (string Service, TimeSpan Interval)[] SixServices =
+    /// <summary>The hosted services (spec/baton.md §7), with fixture cadences selected independently
+    /// of production timing. The multiplier arm below raises the shortest cadence above the floor.</summary>
+    private static readonly (string Service, TimeSpan Interval)[] HostedServices =
     [
         (nameof(FleetProjectionWriter), TimeSpan.FromSeconds(30)),
         (nameof(WatchSweep), TimeSpan.FromSeconds(30)),
@@ -45,6 +43,7 @@ public class DaemonWatchdogTests
         (nameof(VendorUsageHarvester), TimeSpan.FromSeconds(30)),
         (nameof(DeliveryPoller), TimeSpan.FromSeconds(300)),
         (nameof(RoomRetentionSweep), TimeSpan.FromSeconds(300)),
+        (nameof(DeadPumpProbe), TimeSpan.FromSeconds(300)),
     ];
 
     private static void TickAll(DaemonTickLedger ledger, IEnumerable<(string Service, TimeSpan Interval)> services)
@@ -61,15 +60,18 @@ public class DaemonWatchdogTests
     /// (150 s here) and nowhere near the 778 s the incident's verdict line quoted for DeliveryPoller.
     /// </summary>
     [Fact]
-    public void AllSixServicesStalling_TripsAtTwiceTheShortestInterval()
+    public void AllServicesStalling_TripsAtTwiceTheShortestInterval()
     {
         var clock = new FixtureClock(T0);
         var (watchdog, ledger, log, exits) = Build(clock);
-        TickAll(ledger, SixServices);
+        TickAll(ledger, HostedServices.Select(s =>
+            (s.Service, s.Interval < TimeSpan.FromSeconds(45) ? TimeSpan.FromSeconds(45) : s.Interval)));
 
         // At the bound itself: not yet. The arm is "longer than", so a service completing exactly on
         // its second period is still on time.
-        clock.Advance(TimeSpan.FromSeconds(60));
+        clock.Advance(TimeSpan.FromSeconds(61));
+        Assert.False(watchdog.CheckOnce());
+        clock.Advance(TimeSpan.FromSeconds(29));
         Assert.False(watchdog.CheckOnce());
         Assert.Empty(exits);
 
@@ -78,24 +80,24 @@ public class DaemonWatchdogTests
         Assert.Equal(DaemonWatchdog.HungExitCode, Assert.Single(exits));
 
         var line = Assert.Single(log);
-        Assert.Contains("in 61s", line);
-        Assert.Contains("2 x the shortest service interval (30s)", line);
+        Assert.Contains("in 91s", line);
+        Assert.Contains("2 x the shortest service interval (45s)", line);
         Assert.DoesNotContain("projection interval", line);
     }
 
     /// <summary>The control for the arm above, and the ruling the class doc states: one service
-    /// stalling beside five that keep ticking never trips, however long it stays silent. Without this
+    /// stalling beside siblings that keep ticking never trips, however long it stays silent. Without this
     /// the arm above would pass against a watchdog keyed on the QUIETEST service.</summary>
     [Fact]
-    public void FiveServicesTicking_WhileOneStalls_NeverTrips()
+    public void OtherServicesTicking_WhileOneStalls_NeverTrips()
     {
         var clock = new FixtureClock(T0);
         var (watchdog, ledger, _, exits) = Build(clock);
-        TickAll(ledger, SixServices);
+        TickAll(ledger, HostedServices);
 
         // Two hours: only DeliveryPoller falls silent -- longer than either arm's bound many times
-        // over -- while the other five keep completing on their own cadences.
-        var healthy = SixServices.Where(s => s.Service != nameof(DeliveryPoller)).ToArray();
+        // over -- while its siblings keep completing.
+        var healthy = HostedServices.Where(s => s.Service != nameof(DeliveryPoller)).ToArray();
         for (var i = 0; i < 240; i++)
         {
             clock.Advance(TimeSpan.FromSeconds(30));
@@ -275,8 +277,7 @@ public class DaemonWatchdogTests
         Assert.Contains("5 x the 30s projection interval", line);
     }
 
-    /// <summary>#2082: the verdict carries the host as the watchdog's own thread sees it at the trip —
-    /// the one reading of a frozen process that no pool thread has to run for.</summary>
+    /// <summary>#2082: the verdict preserves capture time even when its write is delayed.</summary>
     [Fact]
     public void TheVerdict_CarriesTheHostLoadSampleTakenAtTheTrip()
     {
@@ -284,8 +285,14 @@ public class DaemonWatchdogTests
         var ledger = new DaemonTickLedger(() => clock.Now);
         var log = new List<string>();
         var sampledAt = new List<DateTimeOffset>();
+        var writtenAt = new List<DateTimeOffset>();
         var watchdog = new DaemonWatchdog(
             ledger, () => clock.Now, () => Interval, log.Add, _ => { },
+            writeVerdictFile: _ =>
+            {
+                clock.Advance(TimeSpan.FromMinutes(14));
+                writtenAt.Add(clock.Now);
+            },
             sampleLoad: now =>
             {
                 sampledAt.Add(now);
@@ -297,6 +304,8 @@ public class DaemonWatchdogTests
         Assert.True(watchdog.CheckOnce());
 
         Assert.Equal(T0.AddSeconds(90), Assert.Single(sampledAt));
+        Assert.Equal(T0.AddSeconds(90).AddMinutes(14), Assert.Single(writtenAt));
+        Assert.Contains($"sampled at {T0.AddSeconds(90):O}", Assert.Single(log));
         Assert.Contains("thread pool 412 pending on 3 threads, GC heap 48 MiB, working set 96 MiB", Assert.Single(log));
     }
 
@@ -312,13 +321,26 @@ public class DaemonWatchdogTests
         Assert.Null(HostLoadSample.FromJson(null));
         Assert.Null(HostLoadSample.FromJson(JsonNode.Parse("""{"sampledAt":"2026-09-08T03:12:42+00:00"}""")));
 
-        // The live capture reads real counters: a thread count of zero would mean the reading is a
-        // stub, since the test itself is running on one.
         var live = HostLoadSample.Capture(T0);
         Assert.Equal(T0, live.SampledAt);
-        Assert.True(live.ThreadPoolThreads >= 0);
         Assert.True(live.GcTotalMemoryBytes > 0);
         Assert.True(live.WorkingSetBytes > 0);
+    }
+
+    [Theory]
+    [InlineData("sampledAt", "42")]
+    [InlineData("sampledAt", "\"invalid\"")]
+    [InlineData("threadPoolPendingWorkItems", "\"412\"")]
+    [InlineData("threadPoolThreads", "1.5")]
+    [InlineData("threadPoolThreads", "2147483648")]
+    [InlineData("gcTotalMemoryBytes", "{}")]
+    [InlineData("workingSetBytes", "[]")]
+    [InlineData("workingSetBytes", "null")]
+    public void MalformedHostLoadFields_ReadAsNoSample(string field, string value)
+    {
+        var body = new HostLoadSample(T0, 412, 3, 48, 96).ToJson();
+        body[field] = JsonNode.Parse(value);
+        Assert.Null(HostLoadSample.FromJson(JsonNode.Parse(body.ToJsonString())));
     }
 
     /// <summary>Both polarities of the over-interval line <see cref="DaemonTickLedger.RecordTick"/>
