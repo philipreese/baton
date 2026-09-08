@@ -362,6 +362,20 @@ public sealed class QueueSchedulerService : BackgroundService
                     : i)
                 .ToList(),
         }, cancellationToken).ConfigureAwait(false);
+
+        // Resolution is a state transition, so a terminal failure is a queue fact too. The counters
+        // were not sampled on this read-only sweep; preserve that absence rather than invent values.
+        foreach (var item in launched)
+        {
+            if (resolved.TryGetValue(item.Tag, out var outcome) && outcome.State == QueueItemState.Failed)
+            {
+                await RecordAsync(
+                    new QueueDecisionEntry(
+                        _now(), item.Tag, QueueDecisionEntry.Failed, outcome.Error!,
+                        LiveWeight: 0, FreeGb: null, FloorGb: 0, Room: item.RoomDirectory),
+                    cancellationToken).ConfigureAwait(false);
+            }
+        }
     }
 
     /// <summary>

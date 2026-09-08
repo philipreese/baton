@@ -6002,7 +6002,11 @@ and each is closed where the fact exists:
   long after that engine exited. A room with no
   ledger, no bound snapshot, or an unreadable one still gets the bare sentinel — the write is
   unconditional, because an unprojectable room is exactly the one that would otherwise wedge its item
-  in `launched` forever.
+  in `launched` forever. A ledger read refused solely because the ledger is **held** is not treated as
+  corrupt: the launcher retries projection with a short, bounded backoff before it degrades. If that
+  hold outlasts the bound, the bare sentinel's `error` says it was held; a missing, malformed, or
+  otherwise unreadable room record says that instead. The queue's failure fact carries that same
+  terminal error, so the durable fact does not erase which degraded path occurred.
 
   Keeping a mid-lane `Running` step is safe at both readers that key on one, and each for its own
   reason. The live-weight tally behind `MaxLiveWeight` skips any room carrying a sentinel at all

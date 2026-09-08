@@ -112,6 +112,82 @@ public sealed class QueueLauncherTests : IDisposable
         }
     }
 
+    [Fact]
+    public async Task A_held_ledger_is_projected_after_its_brief_hold_releases()
+    {
+        var root = CreateTempRoot();
+        try
+        {
+            var room = await RunTwoStepRoomAsync(root);
+            var logPath = Path.Combine(room, BatonPaths.FlowLogFileName);
+            using var holder = new FileStream(
+                logPath, FileMode.Append, FileAccess.Write, FileShare.Read, bufferSize: 1, useAsync: true);
+
+            var recording = Task.Run(
+                () => QueueLauncher.RecordPostLaunchFaultAsync("held", room, "the pump threw BatonFlowException"), Ct);
+            await Task.Delay(TimeSpan.FromMilliseconds(100), Ct);
+            await holder.DisposeAsync();
+
+            await recording;
+
+            var sentinel = await TerminalSentinelWriter.TryReadAsync(room, Ct);
+            Assert.NotNull(sentinel);
+            Assert.Equal(["a", "b"], sentinel.Steps.Select(step => step.Id).Order().ToArray());
+            Assert.DoesNotContain("bare sentinel", sentinel.Error!, StringComparison.Ordinal);
+        }
+        finally
+        {
+            DirectoryCleanup.DeleteRecursively(root);
+        }
+    }
+
+    [Fact]
+    public async Task A_corrupt_ledger_leaves_a_bare_sentinel_that_names_the_projection_failure()
+    {
+        var root = CreateTempRoot();
+        try
+        {
+            var room = await RunTwoStepRoomAsync(root);
+            await File.WriteAllTextAsync(Path.Combine(room, BatonPaths.FlowLogFileName), "{ not json\n", Ct);
+
+            await QueueLauncher.RecordPostLaunchFaultAsync("corrupt", room, "the pump threw BatonFlowException");
+
+            var sentinel = await TerminalSentinelWriter.TryReadAsync(room, Ct);
+            Assert.NotNull(sentinel);
+            Assert.Empty(sentinel.Steps);
+            Assert.Contains("bare sentinel", sentinel.Error!, StringComparison.Ordinal);
+            Assert.Contains("missing or could not be projected", sentinel.Error, StringComparison.Ordinal);
+
+            await QueueStore.MutateAsync(BatonPaths.QueueFile, queue => queue with
+            {
+                Items =
+                [
+                    new QueueItem
+                    {
+                        Tag = "corrupt",
+                        Role = "implement",
+                        Workspace = root,
+                        SpecFile = Path.Combine(root, "spec.md"),
+                        State = QueueItemState.Launched,
+                        RoomDirectory = room,
+                    },
+                ],
+            }, Ct);
+            var scheduler = new QueueSchedulerService(
+                (_, _) => Task.FromResult(new QueueLaunchOutcome(null)),
+                _ => Task.FromResult(0d), () => null, () => DateTimeOffset.UtcNow);
+            await scheduler.ResolveFinishedItemsAsync(Ct);
+
+            var fact = Assert.Single(await QueueDecisionLedgerStore.ReadAllAsync(BatonPaths.QueueDecisionLedgerFile, Ct));
+            Assert.Equal(QueueDecisionEntry.Failed, fact.Decision);
+            Assert.Contains("bare sentinel", fact.Reason!, StringComparison.Ordinal);
+        }
+        finally
+        {
+            DirectoryCleanup.DeleteRecursively(root);
+        }
+    }
+
     /// <summary>
     /// The shape the fault path actually meets — a step still in flight when the pump threw. Its
     /// recorded <c>Running</c> is kept and the projection's live <c>liveness</c> probe is dropped —

@@ -55,6 +55,11 @@ public sealed record QueueLaunchOutcome(string? RoomDirectory, bool RunwayHeld =
 /// </remarks>
 public static class QueueLauncher
 {
+    // The bounded retry is for the reader's sharing-violation tail only. The behavioral ruling and
+    // degraded-sentinel vocabulary live in spec/baton.md §13.
+    private static readonly TimeSpan PostLaunchProjectionRetryDelay = TimeSpan.FromMilliseconds(50);
+    private const int PostLaunchProjectionAttempts = 5;
+
     /// <summary>
     /// Starts <paramref name="request"/> and returns as soon as the outcome is known: a refusal
     /// (hold or error) or a provisioned room whose pump is now running detached.
@@ -222,14 +227,25 @@ public static class QueueLauncher
             }
 
             var projected = await TryProjectRoomAsync(roomDirectory).ConfigureAwait(false);
+            for (var attempt = 1;
+                 projected.Kind == PostLaunchProjectionKind.LedgerHeld && attempt < PostLaunchProjectionAttempts;
+                 attempt++)
+            {
+                await Task.Delay(PostLaunchProjectionRetryDelay).ConfigureAwait(false);
+                projected = await TryProjectRoomAsync(roomDirectory).ConfigureAwait(false);
+            }
 
             var error = $"the queue-launched lane '{tag}' did not complete after launch: {reason}";
-            if (projected?.Error is { Length: > 0 } recordedFailure)
+            if (projected.View?.Error is { Length: > 0 } recordedFailure)
             {
                 error += $" — the room's own last recorded failure: {recordedFailure}";
             }
+            else if (projected.Kind is not PostLaunchProjectionKind.Projected)
+            {
+                error += $" — bare sentinel: {DescribeBareSentinelCause(projected.Kind)}";
+            }
 
-            var view = (projected ?? new WorkflowStatusView(WorkflowOutcome.Failed, [], [], null)) with
+            var view = (projected.View ?? new WorkflowStatusView(WorkflowOutcome.Failed, [], [], null)) with
             {
                 State = WorkflowOutcome.Failed,
                 Error = error,
@@ -253,11 +269,9 @@ public static class QueueLauncher
     /// than shared with <c>FleetStatusTool.ProcessRoomAsync</c>'s identical block, which is a seam worth
     /// extracting on its own rather than inside this fix.
     /// <para>
-    /// Returns null — never throws — for a room this cannot project: no real ledger yet
-    /// (<see cref="RoomLedgerProbe"/>, which is also why the ledger-less room in
-    /// <c>QueueLauncherTests</c> still gets the bare view), no bound snapshot, or a read/parse failure.
-    /// The caller writes the bare <c>Failed</c> sentinel in that case: a degraded record still resolves
-    /// the item, where a throw out of the discarded continuation this runs in would resolve nothing.
+    /// Returns an explicit degraded result — never throws — for a room this cannot project. The caller
+    /// distinguishes a briefly held ledger from a missing or corrupt room record before writing a bare
+    /// <c>Failed</c> sentinel; see spec/baton.md §13 for that ruling.
     /// </para>
     /// <para>
     /// <b><see cref="WorkflowStatusStepView.Liveness"/> is dropped from every step</b>, while each
@@ -265,12 +279,12 @@ public static class QueueLauncher
     /// spec/baton.md §13's post-launch bullet has why the two are treated differently.
     /// </para>
     /// </summary>
-    private static async Task<WorkflowStatusView?> TryProjectRoomAsync(string roomDirectory)
+    private static async Task<PostLaunchProjection> TryProjectRoomAsync(string roomDirectory)
     {
         var snapshotPath = Path.Combine(roomDirectory, BatonPaths.SnapshotFileName);
         if (!RoomLedgerProbe.HasLedger(roomDirectory) || !File.Exists(snapshotPath))
         {
-            return null;
+            return new(null, PostLaunchProjectionKind.LedgerUnavailable);
         }
 
         try
@@ -292,7 +306,12 @@ public static class QueueLauncher
             var view = WorkflowStatusProjector.Project(
                 state, snapshot, roomDirectory, entries, WorkerAdapterRegistry.Default);
 
-            return view with { Steps = [.. view.Steps.Select(step => step with { Liveness = null })] };
+            return new(view with { Steps = [.. view.Steps.Select(step => step with { Liveness = null })] },
+                PostLaunchProjectionKind.Projected);
+        }
+        catch (FlowJournalHeldException)
+        {
+            return new(null, PostLaunchProjectionKind.LedgerHeld);
         }
         catch (Exception ex) when (ex is BatonFlowException or IOException or UnauthorizedAccessException)
         {
@@ -302,9 +321,25 @@ public static class QueueLauncher
             Console.Error.WriteLine(
                 $"QueueLauncher: could not project '{roomDirectory}' for its post-launch fault record, "
                 + $"so its sentinel carries no steps or outputs: {ex.Message}");
-            return null;
+            return new(null, PostLaunchProjectionKind.LedgerUnavailable);
         }
     }
+
+    private static string DescribeBareSentinelCause(PostLaunchProjectionKind kind) => kind switch
+    {
+        PostLaunchProjectionKind.LedgerHeld => "the room ledger remained held after the bounded projection retry",
+        PostLaunchProjectionKind.LedgerUnavailable => "the room ledger or bound snapshot was missing or could not be projected",
+        _ => throw new ArgumentOutOfRangeException(nameof(kind), kind, "A projected room has no bare-sentinel cause."),
+    };
+
+    private enum PostLaunchProjectionKind
+    {
+        Projected,
+        LedgerHeld,
+        LedgerUnavailable,
+    }
+
+    private sealed record PostLaunchProjection(WorkflowStatusView? View, PostLaunchProjectionKind Kind);
 
     /// <summary>
     /// The room a queued item dispatches into: <c>queue-&lt;tag&gt;-&lt;8 hex&gt;</c> under
