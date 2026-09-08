@@ -69,6 +69,7 @@ public static class QueueCommand
                 repositoryDirectory ?? Directory.GetCurrentDirectory(),
                 (await DaemonSettingsStore.LoadAsync(BatonPaths.SettingsFile, cancellationToken).ConfigureAwait(false))
                     .Queue.WorktreeRoot,
+                output: output,
                 cancellationToken: cancellationToken).ConfigureAwait(false)
             : Path.GetFullPath(options.WorkspaceDirectory!);
 

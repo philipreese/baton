@@ -33,6 +33,16 @@ namespace Baton.Cli;
 /// whole job is being an outer bound.
 /// </para>
 /// <para>
+/// <b>Every caller must print what <see cref="TryRecordAsync"/> returns, adjacent to the call.</b> This
+/// is the canonical statement of that rule; the two call sites cite it rather than restating it. A
+/// ceiling that appeared without an operator typing <c>baton trust</c> is the kind of widening that
+/// must not be silent, and #2076 asks for it to be said once in the room. <b>The window is one call
+/// wide</b>: the moment the entry is written, every later call for that workspace takes the
+/// already-recorded early exit below and returns <see langword="null"/>, so a returned line that is
+/// dropped — thrown away, or skipped by a refusal between the call and a distant print — is not merely
+/// late. It is gone, on every path, forever.
+/// </para>
+/// <para>
 /// <b>What it costs, and why the cost is bounded.</b> Finding a source means probing git for each
 /// recorded path, which is a process spawn per candidate — so it runs only for a workspace that has NO
 /// recorded ceiling at all, and the entry it writes is what stops it running again for that workspace

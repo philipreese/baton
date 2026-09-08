@@ -119,6 +119,11 @@ public static class IssueWorktreeProvisioner
     /// Test seam for the trust step's repository-identity lookup (#2076) — the same injected-probe shape
     /// <see cref="InheritedProjectCeiling.TryRecordAsync"/> takes. Null uses git.
     /// </param>
+    /// <param name="output">
+    /// Where the inheritance line goes when the worktree picks a ceiling up (#2076) — the <c>queue
+    /// add</c>'s own writer. Null is <see cref="Console.Out"/>. See <see cref="TrustAsync"/> for why the
+    /// line cannot be left to the later dispatch.
+    /// </param>
     /// <exception cref="CliArgumentException">Any of the three steps failed, with the tool's own output in the message.</exception>
     public static async Task<string> ProvisionAsync(
         int issue,
@@ -126,6 +131,7 @@ public static class IssueWorktreeProvisioner
         string? worktreeRoot,
         Func<string, IReadOnlyList<string>, string, CancellationToken, Task<(int ExitCode, string Output)>>? runner = null,
         Func<string, CancellationToken, Task<RepositoryIdentity?>>? probe = null,
+        TextWriter? output = null,
         CancellationToken cancellationToken = default)
     {
         ArgumentOutOfRangeException.ThrowIfNegativeOrZero(issue);
@@ -146,7 +152,7 @@ public static class IssueWorktreeProvisioner
             // Not an error: the runner's own habit is to re-queue against a worktree that already
             // exists. Trust it and hand it back rather than failing the add -- `git worktree add` would
             // refuse anyway, and refusing here would make a re-add of a live lane impossible.
-            await TrustAsync(workspace, probe, cancellationToken: cancellationToken).ConfigureAwait(false);
+            await TrustAsync(workspace, probe, output: output, cancellationToken: cancellationToken).ConfigureAwait(false);
             return workspace;
         }
 
@@ -169,7 +175,7 @@ public static class IssueWorktreeProvisioner
                 $"the branch '{branch}' exists on the remote now — remove any stale worktree at '{workspace}' and retry.");
         }
 
-        await TrustAsync(workspace, probe, cancellationToken: cancellationToken).ConfigureAwait(false);
+        await TrustAsync(workspace, probe, output: output, cancellationToken: cancellationToken).ConfigureAwait(false);
         return workspace;
     }
 
@@ -181,18 +187,31 @@ public static class IssueWorktreeProvisioner
     /// inherited"), which is what makes a re-add of a live lane leave its ceiling as the operator last
     /// set it rather than resetting it to <c>all</c>.
     /// </summary>
+    /// <remarks>
+    /// <b>The inheritance is announced HERE, not by the later dispatch</b>, under the print-adjacent
+    /// rule <see cref="InheritedProjectCeiling"/> states. This site is the one where dropping the line
+    /// is least obviously fatal and most actually is: the lane provisioned here goes on to dispatch, so
+    /// it reads as though the dispatch could say it instead — and it cannot, because that dispatch finds
+    /// the workspace already trusted.
+    /// </remarks>
     internal static async Task TrustAsync(
         string workspace,
         Func<string, CancellationToken, Task<RepositoryIdentity?>>? probe = null,
         string? storePath = null,
+        TextWriter? output = null,
         CancellationToken cancellationToken = default)
     {
         storePath ??= ProjectCeilingStore.DefaultPath;
         probe ??= RepositoryIdentityResolver.TryResolveAsync;
 
         if (await InheritedProjectCeiling.TryRecordAsync(workspace, storePath, probe, cancellationToken)
-                .ConfigureAwait(false) is not null
-            || ProjectCeilingStore.TryGet(workspace, storePath) is not null)
+                .ConfigureAwait(false) is { } inheritedFact)
+        {
+            (output ?? Console.Out).WriteLine(inheritedFact);
+            return;
+        }
+
+        if (ProjectCeilingStore.TryGet(workspace, storePath) is not null)
         {
             return;
         }

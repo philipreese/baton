@@ -29,15 +29,21 @@ public sealed class IssueWorktreeProvisionerTrustTests : IDisposable
         var noNetwork = new ProjectCeiling(ReadFiles: true, WriteFiles: true, RunShellCommands: true, NetworkAccess: false);
         ProjectCeilingStore.Set(repository, noNetwork, ProjectCeilingStore.DefaultPath);
 
+        var output = new StringWriter();
         var provisioned = await IssueWorktreeProvisioner.ProvisionAsync(
             2076, repository, _root, Runner(worktree), Probe(commonDir, repository, worktree),
-            TestContext.Current.CancellationToken);
+            output, TestContext.Current.CancellationToken);
 
         Assert.Equal(worktree, provisioned);
         var recorded = ProjectCeilingStore.TryGet(worktree, ProjectCeilingStore.DefaultPath);
         Assert.NotNull(recorded);
         Assert.False(recorded.NetworkAccess);
         Assert.Equal(ProjectCeilingStore.CanonicalKey(repository), recorded.InheritedFrom);
+
+        // The `add` is the ONLY place this can be said: by the time this lane dispatches, the workspace
+        // is already trusted and TryRecordAsync returns null, so a line dropped here is dropped for good.
+        Assert.Contains(repository, output.ToString(), StringComparison.OrdinalIgnoreCase);
+        Assert.Contains("inherited", output.ToString(), StringComparison.OrdinalIgnoreCase);
     }
 
     [Fact]
@@ -50,14 +56,19 @@ public sealed class IssueWorktreeProvisionerTrustTests : IDisposable
 
         // Deliberately NOT trusted: this is the repository an operator has never run `baton trust`
         // against, and the verb's own pre-#2076 widening is what it still gets.
+        var output = new StringWriter();
         var provisioned = await IssueWorktreeProvisioner.ProvisionAsync(
             2076, repository, _root, Runner(worktree), Probe(commonDir, repository, worktree),
-            TestContext.Current.CancellationToken);
+            output, TestContext.Current.CancellationToken);
 
         var recorded = ProjectCeilingStore.TryGet(provisioned, ProjectCeilingStore.DefaultPath);
         Assert.NotNull(recorded);
         Assert.True(recorded.IsUnrestricted);
         Assert.Null(recorded.InheritedFrom);
+
+        // The other half of the polarity: nothing was inherited, so nothing is announced. A line here
+        // would tell an operator a ceiling was derived when the verb's own fallback is what wrote it.
+        Assert.Equal(string.Empty, output.ToString());
     }
 
     /// <summary>Reports both spawns successful and creates the worktree the way <c>git worktree add</c> would.</summary>
