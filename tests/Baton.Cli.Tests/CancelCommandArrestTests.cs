@@ -74,6 +74,8 @@ public sealed class CancelCommandArrestTests : IDisposable
             Assert.Equal(StepStatus.Cancelled, result.State.Steps.Single().Status);
             Assert.False(result.CancellationQueued, "the pump applied it; this is not the queued arm");
             Assert.False(result.CancelWasNoOp);
+            Assert.True(result.CancelApplied);
+            Assert.Equal(MutationExitCodeResolver.Success, MutationExitCodeResolver.Resolve(result));
         }
 
         var intent = Assert.Single((await new RoomEventLogReader(roomLogPath).ReadAllRoomEventsAsync(TestContext.Current.CancellationToken))
@@ -126,6 +128,9 @@ public sealed class CancelCommandArrestTests : IDisposable
         Assert.Equal(WorkflowStatus.Terminal, result.State.Status);
         Assert.False(result.CancellationQueued);
         Assert.False(result.CancelWasNoOp);
+        // #2103: the process exit code a script sees for the invocation that arrested is 0.
+        Assert.True(result.CancelApplied);
+        Assert.Equal(MutationExitCodeResolver.Success, MutationExitCodeResolver.Resolve(result));
 
         var failed = Assert.Single((await ReadEventsAsync(roomDir)).OfType<FlowEvent.ExecutionFailed>());
         Assert.Equal(executionId, failed.ExecutionId);

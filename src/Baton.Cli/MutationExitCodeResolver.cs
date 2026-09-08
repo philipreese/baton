@@ -5,7 +5,9 @@ namespace Baton.Cli;
 /// <summary>
 /// The 0/1 exit-code contract <c>baton cancel</c>/<c>baton decide</c>/<c>baton supply</c> keep —
 /// deliberately not <see cref="RunExitCodeResolver"/>'s richer table, which #1356 scoped to
-/// <c>run</c>/<c>dispatch</c>/<c>resume</c> and which widening here was never asked for.
+/// <c>run</c>/<c>dispatch</c>/<c>resume</c> and which widening here was never asked for. For
+/// <c>cancel</c> the table is three flags read ahead of the state: queued is 1, no-op is 0, applied
+/// is 0 (#2103); spec/baton.md §2's <c>baton cancel</c> paragraph states that contract once.
 /// <para>
 /// Pure and side-effect free for the same reason <see cref="RunExitCodeResolver"/> is:
 /// <c>MutationExitCodeResolverTests</c> asserts every arm against a hand-built
@@ -50,6 +52,17 @@ public static class MutationExitCodeResolver
         // Cancelled room reads 1 below, and a re-run cancel against it must not look like a new
         // failure to a scripted caller. CancelCommand's own output says which no-op it was.
         if (result.CancelWasNoOp)
+        {
+            return Success;
+        }
+
+        // #2103: the arm the two above were arguing for all along. A cancel that succeeded leaves the
+        // room Terminal with its target Cancelled or Failed (cause `operator cancel`), which the
+        // state-based arm below reads as 1 — so before this arm the invocation that arrested exited 1
+        // and the no-op exited 0, the signal inverted. Same rule as the queued arm: the exit code is
+        // a verdict on THIS invocation, and this one did what it was asked. Cancel-specific on
+        // purpose; decide/supply/resolve never set the flag and keep the state-based arm unchanged.
+        if (result.CancelApplied)
         {
             return Success;
         }

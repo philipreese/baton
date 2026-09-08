@@ -38,6 +38,9 @@ namespace Baton.Cli;
 /// <c>flow.lock</c>. If a pump still holds that lock once the kill is done, it records its own
 /// worker's exit and this command reports <see cref="CommandResult.CancellationQueued"/> instead.</item>
 /// </list>
+/// Exit code (#2103): a cancel that got the target settled — by the pump's answer or by this command's
+/// own terminal fact — reports <see cref="CommandResult.CancelApplied"/> and exits 0; the queued arm
+/// exits 1; the no-op exits 0. <see cref="MutationExitCodeResolver"/> is the table.
 /// </summary>
 /// <remarks>
 /// <b>What this retired</b> — spec/baton.md §2's <c>baton cancel</c> paragraph is the record; in
@@ -214,7 +217,7 @@ public static class CancelCommand
             {
                 var answered = await ProjectAsync(reader, snapshot, roomDirectoryPath, cancellationToken).ConfigureAwait(false);
                 Console.Out.WriteLine($"Arrested — the live pump settled execution '{targetExecutionId.Value}'.");
-                return new CommandResult(answered, snapshot, RoomDirectoryPath: roomDirectoryPath);
+                return new CommandResult(answered, snapshot, RoomDirectoryPath: roomDirectoryPath, CancelApplied: true);
             }
 
             // No pump answered inside the window. Kill by the recorded pid, probe-gated, then give the
@@ -229,7 +232,7 @@ public static class CancelCommand
             {
                 var settledByPump = await ProjectAsync(reader, snapshot, roomDirectoryPath, cancellationToken).ConfigureAwait(false);
                 Console.Out.WriteLine($"Arrested — the live pump recorded execution '{targetExecutionId.Value}' settling after the kill.");
-                return new CommandResult(settledByPump, snapshot, RoomDirectoryPath: roomDirectoryPath);
+                return new CommandResult(settledByPump, snapshot, RoomDirectoryPath: roomDirectoryPath, CancelApplied: true);
             }
 
             guard = TryAcquire(roomDirectoryPath, out lockedBy);
@@ -262,7 +265,10 @@ public static class CancelCommand
             if (target is null)
             {
                 Console.Out.WriteLine($"Execution '{targetExecutionId.Value}' settled while this command was waiting for the lock — nothing further to write.");
-                return new CommandResult(freshState, snapshot, RoomDirectoryPath: roomDirectoryPath);
+                // Applied, not a no-op: the intent fact is on record and the target is settled, which
+                // is the outcome the operator asked for — who wrote the terminal fact is the ledger's
+                // business (ArrestLedgerProjector reads it as Delivered either way).
+                return new CommandResult(freshState, snapshot, RoomDirectoryPath: roomDirectoryPath, CancelApplied: true);
             }
 
             kill ??= KillRecordedWorker(freshEntries, targetExecutionId, killWorker);
@@ -316,7 +322,7 @@ public static class CancelCommand
         }
 
         var settled = await ProjectAsync(reader, snapshot, roomDirectoryPath, cancellationToken).ConfigureAwait(false);
-        return new CommandResult(settled, snapshot, RoomDirectoryPath: roomDirectoryPath);
+        return new CommandResult(settled, snapshot, RoomDirectoryPath: roomDirectoryPath, CancelApplied: true);
     }
 
     /// <summary>
