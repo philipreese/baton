@@ -209,6 +209,52 @@ public class ArrestLedgerViewTests
         Assert.Equal(T2, entry.ForwardedAtUtc!.Value.UtcDateTime);
     }
 
+    // #2108 re-review M1: cancelling twice against a target nobody has settled yet writes two intents
+    // for one execution. With NO pump answer they must still be one row, carrying the later reason
+    // and stamp -- before the fix the intent-only path never registered a builder, so the second
+    // intent opened a second row (dropping the `order.Add`/`builders[...]` registration in the
+    // intent-only arm reproduces that: this arm then sees two entries).
+    [Fact]
+    public void Two_intents_with_no_pump_answer_merge_into_one_entry_keeping_the_later_reason_and_time()
+    {
+        var roomEvents = new RoomEvent[]
+        {
+            new RoomEvent.ArrestIntentRecorded(ExecA.Value, "operator", "first", T1),
+            new RoomEvent.ArrestIntentRecorded(ExecA.Value, "operator", "second", T2),
+        };
+
+        var entry = Assert.Single(ArrestLedgerProjector.Project([], roomEvents));
+
+        Assert.Null(entry.Outcome);
+        Assert.Equal("second", entry.Reason);
+        Assert.Equal(T2, entry.RequestedAtUtc.UtcDateTime);
+        Assert.Null(entry.ForwardedAtUtc);
+    }
+
+    // Second arm: two intents, then the pump answers. Still one row; the later intent wins the merge
+    // and the pump's stamp is ForwardedAtUtc.
+    [Fact]
+    public void Two_intents_then_a_pump_answer_merge_into_one_entry()
+    {
+        var flowEntries = new LogEntry[]
+        {
+            Flow(new FlowEvent.CancellationRequested(ExecA, CancellationOrigin.Operator), T3),
+            Flow(new FlowEvent.ExecutionCancelled(ExecA), T3),
+        };
+        var roomEvents = new RoomEvent[]
+        {
+            new RoomEvent.ArrestIntentRecorded(ExecA.Value, "operator", "first", T1),
+            new RoomEvent.ArrestIntentRecorded(ExecA.Value, "operator", "second", T2),
+        };
+
+        var entry = Assert.Single(ArrestLedgerProjector.Project(flowEntries, roomEvents));
+
+        Assert.Equal(ArrestOutcome.Delivered, entry.Outcome);
+        Assert.Equal("second", entry.Reason);
+        Assert.Equal(T2, entry.RequestedAtUtc.UtcDateTime);
+        Assert.Equal(T3, entry.ForwardedAtUtc!.Value.UtcDateTime);
+    }
+
     [Fact]
     public void Entries_are_ordered_by_RequestedAtUtc_across_both_logs()
     {

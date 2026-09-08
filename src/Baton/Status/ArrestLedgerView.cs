@@ -54,8 +54,9 @@ public enum ArrestOutcome
 /// its own, because <c>baton status</c> renders this field as <c>rejected (&lt;Reason&gt;)</c> — the
 /// explanation of the outcome, not of the request. Several intents for one execution (a second
 /// <c>baton cancel</c> re-run while the first is still queued — <c>CancelCommand</c>'s idempotency
-/// check only stops one against a target that already settled) merge last-write-wins: the latest
-/// intent's reason is the one kept, and so is its stamp in <see cref="RequestedAtUtc"/>.
+/// check only stops one against a target that already settled) merge last-write-wins into the one
+/// entry — whether a pump answered or not: the latest intent's reason is the one kept, and so is its
+/// stamp in <see cref="RequestedAtUtc"/>.
 /// </param>
 /// <param name="RequestedAtUtc">
 /// When the operator asked: the <see cref="RoomEvent.ArrestIntentRecorded"/> stamp when one exists
@@ -65,8 +66,8 @@ public enum ArrestOutcome
 /// has), else the rejection's own stamp for an orphaned <see cref="FlowEvent.CancellationRejected"/>.
 /// </param>
 /// <param name="ForwardedAtUtc">
-/// #2104: the <see cref="FlowEvent.CancellationRequested"/> stamp — the instant a pump forwarded the
-/// request into Flow (that event's own doc: it records only that Flow forwarded the intent; the
+/// #2104: the <see cref="FlowEvent.CancellationRequested"/> stamp — the instant Flow forwarded the
+/// request toward Core (that event's own doc: it records only that forwarding; the
 /// signal reaching a token is <see cref="FlowEvent.CancellationDelivered"/>, which this ledger does
 /// not report, and the settlement is <see cref="ResolvedAtUtc"/>, a different fact's stamp — this
 /// field is never that instant). Set exactly when such a line exists for this execution and carries a
@@ -74,8 +75,10 @@ public enum ArrestOutcome
 /// epoch). Null on every other shape: an intent no pump ever forwarded (<c>baton cancel</c> settled
 /// the room itself, or is still waiting), an orphaned <see cref="FlowEvent.CancellationRejected"/>
 /// (the pump answered by refusing, and never forwarded anything), and the two room-event-sourced
-/// shapes. When no intent fact exists, <see cref="RequestedAtUtc"/> carries this same stamp, since
-/// the forwarding is then the only request-shaped instant there is.
+/// shapes. When a stamped <see cref="FlowEvent.CancellationRequested"/> opened the entry and no
+/// intent fact exists, <see cref="RequestedAtUtc"/> carries this same stamp, since the forwarding
+/// is then the only request-shaped instant there is (the orphaned rejection, having no forwarding,
+/// carries the rejection's own stamp there instead).
 /// </param>
 /// <param name="ResolvedAtUtc">Null while <see cref="Outcome"/> is null (still pending).</param>
 public sealed record ArrestLedgerEntry(
@@ -205,10 +208,11 @@ public static class ArrestLedgerProjector
         // So the intent merges into that builder — its reason and its stamp win, the pump's stamp
         // moves to ForwardedAtUtc — rather than being listed twice or dropped. When no pump answered
         // (baton cancel settled the room itself, or is still waiting on a holder that never let go),
-        // the intent is the only request-shaped fact there is, so it gets its own entry: Delivered
+        // the intent is the only request-shaped fact there is, so it opens its own builder: Delivered
         // once any arrest-shaped terminal fact for that execution lands at or after the intent
         // (ExecutionCancelled, ExecutionFailed, or a StepRetryForeclosed naming it — whoever wrote
-        // it), pending otherwise.
+        // it), pending otherwise. Either way there is one builder per execution, so a repeat intent
+        // merges into it (last-write-wins) instead of opening a second row.
         // "At or after" is what keeps a pre-existing settle from being credited to a later intent;
         // CancelCommand never writes an intent for an already-settled target, so in practice the
         // pending arm is the still-held-lock case and nothing else.
@@ -251,7 +255,8 @@ public static class ArrestLedgerProjector
                         // `rejected (<Reason>)`, the explanation of the outcome (ArrestLedgerEntry.Reason).
                         // A second intent for the same id (a re-run `baton cancel` while the first is
                         // still queued) lands here again and overwrites: last-write-wins, stated on
-                        // ArrestLedgerEntry.Reason / RequestedAtUtc.
+                        // ArrestLedgerEntry.Reason / RequestedAtUtc. It lands here whether the builder
+                        // was opened by the pump's CancellationRequested or by the first intent below.
                         builders[intentExecutionId] = answered with
                         {
                             Reason = answered.Outcome == ArrestOutcome.Rejected ? answered.Reason : intent.Reason,
@@ -260,12 +265,18 @@ public static class ArrestLedgerProjector
                         break;
                     }
 
+                    // No pump answered: this intent opens the builder itself, so a repeat intent for
+                    // the same id (no CancellationRequested ever landing) takes the merge above and
+                    // yields ONE row, not two. Outcome is settled off the FIRST intent's stamp and is
+                    // not recomputed on a repeat — CancelCommand never writes an intent for a target
+                    // that already settled, so a repeat can only land while the first is still pending.
                     DateTimeOffset? settledAtUtc = terminalStampsByExecutionId.TryGetValue(intentExecutionId, out var candidates)
                         ? candidates.Where(stamp => stamp >= intent.RecordedAtUtc).Cast<DateTimeOffset?>().Min()
                         : null;
-                    results.Add(new ArrestLedgerEntry(
-                        intent.Target, intentExecutionId, settledAtUtc is null ? null : ArrestOutcome.Delivered, intent.RequestedBy,
-                        intent.Reason, intent.RecordedAtUtc, settledAtUtc));
+                    order.Add(intentExecutionId);
+                    builders[intentExecutionId] = (
+                        intent.RequestedBy, intent.Reason, settledAtUtc is null ? null : ArrestOutcome.Delivered,
+                        RequestedAtUtc: intent.RecordedAtUtc, ResolvedAtUtc: settledAtUtc, ForwardedAtUtc: null);
                     break;
 
                 case RoomEvent.ArrestRequestUnresolvable unresolvable:
