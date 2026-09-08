@@ -344,7 +344,6 @@ def original(mod, name):
     return getattr(mod, name)
 
 
-
 RECORDONCE = "the record-once checker fires on restated prose, not on text the register prescribes"
 RECORDONCE_PIN = "the record-once checker still finds the passages it found in a real merge"
 RECORDONCE_APPLIES = "the record-once checker applies every exclusion reason to its changed-file population"
