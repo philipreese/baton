@@ -12,7 +12,7 @@ namespace Baton.Cli.Daemon;
 /// and its scheduled task reporting Running. Nothing recovered it; a person did. This service exits
 /// the process non-zero when no hosted service has completed a tick in
 /// <see cref="MissedTickAllowance"/> × the projection interval, so the <c>baton-daemon</c> scheduled
-/// task's restart policy (<c>-RestartCount 3 -RestartInterval 5m</c>, registered by
+/// task's repeating five-minute trigger (registered by
 /// <c>tools/tool-refresh/register-daemon-task.ps1</c>) brings it back. Same principle as the build
 /// lock's own timeout: a stuck holder that dies is recoverable, a stuck holder that waits is not.
 /// </para>
@@ -278,7 +278,7 @@ internal sealed class DaemonWatchdog : IHostedService
         return $"DaemonWatchdog: no service has completed a tick in {silence.TotalSeconds:F0}s "
                + $"(limit {limit.TotalSeconds:F0}s = {MissedTickAllowance} x the {interval.TotalSeconds:F0}s projection interval). "
                + $"Last to complete: {lastCompleted}. Longest silent: {quietest}. "
-               + $"Exiting {HungExitCode} so the baton-daemon scheduled task's restart policy brings the daemon back; "
+               + $"Exiting {HungExitCode} so the baton-daemon scheduled task's repeating trigger relaunches the daemon; "
                + $"{BatonPaths.FleetHeartbeatFile} holds the per-service durations as of the last tick that finished.";
     }
 }

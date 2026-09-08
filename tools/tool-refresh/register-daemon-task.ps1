@@ -3,7 +3,7 @@
 # §7) are both hosted services inside `baton daemon` -- they only do anything while some process
 # is actually running that verb, and nothing before this script registered one. This is the
 # `baton-daemon` sibling of the `fleet-glass-pusher` task `tools/fleet-glass/deploy.ps1` (step 5)
-# registers -- same convention (idempotent `Register-ScheduledTask -Force`, restart-on-failure,
+# registers -- same convention (idempotent `Register-ScheduledTask -Force`, repeating relaunch,
 # `IgnoreNew` against overlap), different action.
 #
 # One-time, run manually by the operator (or by the deploy conductor after a PR that touches this
@@ -26,10 +26,9 @@ $batonHome = if ($env:BATON_HOME) { $env:BATON_HOME } else { Join-Path $HOME ".b
 # `; exit $LASTEXITCODE` (#1981) is load-bearing, not tidiness: measured on this machine (PowerShell
 # 5.1, 2026-09-06), `powershell.exe -Command "& { <thing that exits 70> *>> 'x.log' }"` itself exits
 # 0 -- the script block's redirect swallows the code -- while the same command with the trailing
-# `exit $LASTEXITCODE` exits 70. Task Scheduler's restart-on-failure below keys on the task's exit
-# code, so without this the daemon's own watchdog (DaemonWatchdog, which exits 70 when no service has
-# completed a tick in five intervals) would kill a hung daemon and leave it dead: strictly worse than
-# the hang it is curing. An existing registration keeps the old action until this script is re-run.
+# `exit $LASTEXITCODE` exits 70. The repeating trigger below is the relaunch mechanism (#2083), but
+# the scheduler's Last Run Result and the exit record below still need the daemon's real code.
+# See spec/baton.md §7 (#1770, #2083) for why an existing registration keeps the old action until it is replaced.
 #
 # #2036: the exit is now RECORDED before it is returned. On 2026-09-07 the daemon's last log line was
 # at 04:57:06Z and the next thing in `daemon.log` was the operator's hand-start 8.7 hours later --
@@ -58,35 +57,27 @@ $action = New-ScheduledTaskAction -Execute "powershell.exe" `
     -Argument '-NoProfile -WindowStyle Hidden -Command "& { baton daemon *>> ''daemon.log'' }; $c = $LASTEXITCODE; if ($null -eq $c) { $c = 1 }; (''['' + [DateTime]::UtcNow.ToString(''yyyy-MM-ddTHH:mm:ss.fffZ'', [cultureinfo]::InvariantCulture) + ''] baton daemon exited '' + $c) | Out-File -FilePath ''daemon.log'' -Append -Encoding unicode; exit $c"' `
     -WorkingDirectory $batonHome
 
-# This script registers unelevated, as the operator (#1770): a boot (`-AtStartup`) trigger runs
-# before any logon and is denied to a standard user, and an unscoped `-AtLogOn` trigger is an
-# any-user trigger, also denied. The daemon needs the interactive user's PATH and `~/.baton`
-# regardless, so a logon trigger scoped to that same user is both the only trigger a standard user
-# can register here and the only one that makes sense for what the daemon needs to run.
+# See spec/baton.md §7 (#1770, #2083) for the unelevated trigger constraints and relaunch mechanism.
+# Keep the user-scoped logon trigger beside the repeating trigger when replacing the definition.
 $triggerLogon = New-ScheduledTaskTrigger -AtLogOn -User "$env:USERDOMAIN\$env:USERNAME"
+$triggerRepeat = New-ScheduledTaskTrigger -Once -At (Get-Date) `
+    -RepetitionInterval (New-TimeSpan -Minutes 5)
 
-# Same shape as fleet-glass-pusher's settings (deploy.ps1 step 5): IgnoreNew means a due trigger
-# is skipped outright while a launched instance is still alive, so a healthy daemon never sees a
-# second launch; RestartCount/RestartInterval is the self-heal against a daemon that exited (crash,
-# an operator's `taskkill`, or -- since #1981 -- its own watchdog) without a fresh trigger due yet.
-# Three restarts, five minutes apart: a daemon that hangs again immediately after each restart is
-# down for good after ~15 minutes rather than looping forever, and that is the intended trade -- a
-# repeat hang is a bug to look at, not a condition to paper over.
+# IgnoreNew keeps the repeating trigger from overlapping a healthy daemon. A repeat hang is still
+# observable in daemon.log rather than being papered over by a rapid restart loop.
 $taskSettings = New-ScheduledTaskSettingsSet `
     -MultipleInstances IgnoreNew `
-    -RestartCount 3 -RestartInterval (New-TimeSpan -Minutes 5) -StartWhenAvailable `
+    -StartWhenAvailable `
     -ExecutionTimeLimit ([TimeSpan]::Zero) -Hidden
 
-Register-ScheduledTask -TaskName $taskName -Action $action -Trigger $triggerLogon `
+Register-ScheduledTask -TaskName $taskName -Action $action -Trigger @($triggerLogon, $triggerRepeat) `
     -Settings $taskSettings -Force | Out-Null
 
-# #2036: turn the Task Scheduler operational log on, so the NEXT time the restart policy above does
-# or does not fire there is a record of it. On 2026-09-07 the daemon exited and no restart appeared
-# in `daemon.log`; whether Task Scheduler attempted one could not be established after the fact
-# because this channel was disabled on the host, so the question "did the restart run and fail, or
-# never run at all" is still OPEN -- it needs the deliberate measurement the issue describes (end
-# the daemon with a known code and watch), and nothing here has performed it. This line only makes
-# that measurement, and the next real outage, readable.
+# #2036: turn the Task Scheduler operational log on, so the next scheduled relaunch has a record.
+# On 2026-09-07 the daemon exited and no subsequent launch appeared in `daemon.log`; the disabled
+# channel could not establish whether the scheduler attempted one. #2083 replaces the ineffective
+# restart count with the repeating trigger above; the channel makes the next trigger and any failed
+# action readable.
 #
 # Best-effort by construction, and that is the whole reason it is a try/catch under an
 # $ErrorActionPreference of "Stop": `wevtutil sl` needs elevation, this script deliberately runs

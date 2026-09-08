@@ -369,6 +369,36 @@ try {
     Assert-Contains $wrapperLogText $wrapperStderrLine "the action captures the daemon's stderr through the launcher"
     Assert-Contains $wrapperLogText "baton daemon exited 70" "the action records the exit code in daemon.log"
 
+    # 9. #2083: keep first launch at logon and indefinite repeating relaunch. This checks the script's
+    # AST only; it does not register a task or measure scheduler behaviour or relaunch latency.
+    Write-Host "Test 9: baton-daemon has logon and indefinite repeating relaunch triggers..."
+    $daemonTaskScript = [System.IO.Path]::Combine($repoRoot, "tools", "tool-refresh", "register-daemon-task.ps1")
+    $daemonAst = [System.Management.Automation.Language.Parser]::ParseFile($daemonTaskScript, [ref]$null, [ref]$null)
+    $daemonScriptText = Get-Content -LiteralPath $daemonTaskScript -Raw
+    $triggerCalls = $daemonAst.FindAll({
+        param($node)
+        $node -is [System.Management.Automation.Language.CommandAst] -and
+        $node.GetCommandName() -eq "New-ScheduledTaskTrigger"
+    }, $true)
+    Assert-Equal 2 $triggerCalls.Count "baton-daemon has exactly two scheduled-task triggers"
+    $logonCalls = @($triggerCalls | Where-Object { $_.Extent.Text -match '-AtLogOn\b' })
+    $repeatCalls = @($triggerCalls | Where-Object { $_.Extent.Text -match '-Once\b' })
+    Assert-Equal 1 $logonCalls.Count "baton-daemon has one logon trigger"
+    Assert-Equal 1 $repeatCalls.Count "baton-daemon has one repeating trigger"
+    Assert-Contains $logonCalls[0].Extent.Text '-User "$env:USERDOMAIN\$env:USERNAME"' "logon is scoped to the registering user"
+    $triggerText = $repeatCalls[0].Extent.Text
+    Assert-Contains $triggerText "-At (Get-Date)" "repetition starts at registration"
+    Assert-Contains $triggerText "-RepetitionInterval (New-TimeSpan -Minutes 5)" "repetition uses a five-minute interval"
+    if ($triggerText.Contains("-RepetitionDuration")) {
+        throw "Assertion failed: baton-daemon must omit RepetitionDuration for indefinite repetition"
+    }
+    Assert-Contains $daemonScriptText '-Trigger @($triggerLogon, $triggerRepeat)' "registration includes both triggers"
+    Assert-Contains $daemonScriptText '-Settings $taskSettings -Force' "re-registration replaces the definition without duplicates"
+    Assert-Contains $daemonScriptText "-MultipleInstances IgnoreNew" "due triggers do not overlap a live daemon"
+    if ($daemonScriptText.Contains("-RestartCount") -or $daemonScriptText.Contains("-RestartInterval")) {
+        throw "Assertion failed: baton-daemon still relies on RestartCount/RestartInterval instead of its repeating trigger"
+    }
+
     Write-Host "All launcher tests PASSED!"
 } finally {
     Remove-Item -LiteralPath $tempDir -Recurse -Force -ErrorAction SilentlyContinue
