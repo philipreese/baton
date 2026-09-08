@@ -215,7 +215,8 @@ public static class QueueLauncher
     /// register says why that room in particular cannot be skipped.
     /// </para>
     /// </remarks>
-    internal static async Task RecordPostLaunchFaultAsync(string tag, string roomDirectory, string reason)
+    internal static async Task RecordPostLaunchFaultAsync(
+        string tag, string roomDirectory, string reason, Action<int>? onProjectionRetry = null)
     {
         try
         {
@@ -231,6 +232,8 @@ public static class QueueLauncher
                  projected.Kind == PostLaunchProjectionKind.LedgerHeld && attempt < PostLaunchProjectionAttempts;
                  attempt++)
             {
+                // Observe the held retry before waiting, so tests can release a real colliding hold.
+                onProjectionRetry?.Invoke(attempt);
                 await Task.Delay(PostLaunchProjectionRetryDelay).ConfigureAwait(false);
                 projected = await TryProjectRoomAsync(roomDirectory).ConfigureAwait(false);
             }
@@ -242,7 +245,7 @@ public static class QueueLauncher
             }
             else if (projected.Kind is not PostLaunchProjectionKind.Projected)
             {
-                error += $" — bare sentinel: {DescribeBareSentinelCause(projected.Kind)}";
+                error += $" — bare sentinel: {projected.Cause ?? DescribeBareSentinelCause(projected.Kind)}";
             }
 
             var view = (projected.View ?? new WorkflowStatusView(WorkflowOutcome.Failed, [], [], null)) with
@@ -321,7 +324,10 @@ public static class QueueLauncher
             Console.Error.WriteLine(
                 $"QueueLauncher: could not project '{roomDirectory}' for its post-launch fault record, "
                 + $"so its sentinel carries no steps or outputs: {ex.Message}");
-            return new(null, PostLaunchProjectionKind.LedgerUnavailable);
+            var cause = ex is FlowEventLogReadException
+                ? $"the room ledger is corrupt: {ex.Message}"
+                : $"the room record could not be projected: {ex.Message}";
+            return new(null, PostLaunchProjectionKind.LedgerUnavailable, cause);
         }
     }
 
@@ -339,7 +345,8 @@ public static class QueueLauncher
         LedgerUnavailable,
     }
 
-    private sealed record PostLaunchProjection(WorkflowStatusView? View, PostLaunchProjectionKind Kind);
+    private sealed record PostLaunchProjection(
+        WorkflowStatusView? View, PostLaunchProjectionKind Kind, string? Cause = null);
 
     /// <summary>
     /// The room a queued item dispatches into: <c>queue-&lt;tag&gt;-&lt;8 hex&gt;</c> under

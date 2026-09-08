@@ -114,15 +114,32 @@ public class FlowEventLogReaderTests
         }
     }
 
-    [Fact]
-    public async Task ReadAllAsync_throws_a_FlowEventLogReadException_for_a_complete_but_malformed_line()
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task A_malformed_line_reports_its_physical_line_number_including_empty_lines(bool snapshot)
     {
         var path = Path.Combine(Path.GetTempPath(), $"flow-{Guid.NewGuid():N}.jsonl");
         try
         {
-            await File.WriteAllTextAsync(path, "{ not valid json }\n", Encoding.UTF8, TestContext.Current.CancellationToken);
+            var intact = JsonSerializer.Serialize(
+                (LogEntry)new LogEntry.FlowLogEntry(MakeEvent("exec-1")), typeof(LogEntry), FlowEventLogJson.Options);
+            await File.WriteAllTextAsync(path, intact + "\n\n{ not valid json }\n", Encoding.UTF8, TestContext.Current.CancellationToken);
 
-            await Assert.ThrowsAsync<FlowEventLogReadException>(() => new FlowEventLogReader(path).ReadAllAsync(TestContext.Current.CancellationToken));
+            var reader = new FlowEventLogReader(path);
+            var exception = await Assert.ThrowsAsync<FlowEventLogReadException>(async () =>
+            {
+                if (snapshot)
+                {
+                    await reader.ReadSnapshotAsync(TestContext.Current.CancellationToken);
+                }
+                else
+                {
+                    await reader.ReadAllEntriesWithTimestampsAsync(TestContext.Current.CancellationToken);
+                }
+            });
+            Assert.Contains("Malformed line 3", exception.Message, StringComparison.Ordinal);
+            Assert.Contains("{ not valid json }", exception.Message, StringComparison.Ordinal);
         }
         finally
         {

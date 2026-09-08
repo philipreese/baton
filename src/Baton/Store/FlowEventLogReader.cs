@@ -185,13 +185,19 @@ public sealed class FlowEventLogReader(string logFilePath) : IEventLogReader
 
         var lastNewline = text.LastIndexOf('\n');
         var completeText = lastNewline >= 0 ? text[..(lastNewline + 1)] : string.Empty;
-        var lines = completeText.Split('\n', StringSplitOptions.RemoveEmptyEntries);
+        var lines = completeText.Split('\n');
 
         var result = new List<LogEntry>(lines.Length);
         var unknownCount = 0;
         string? firstUnknownKind = null;
-        foreach (var line in lines)
+        for (var index = 0; index < lines.Length; index++)
         {
+            var line = lines[index];
+            if (line.Length == 0)
+            {
+                continue;
+            }
+
             LogEntry entry;
             try
             {
@@ -199,7 +205,7 @@ public sealed class FlowEventLogReader(string logFilePath) : IEventLogReader
             }
             catch (JsonException ex)
             {
-                throw new FlowEventLogReadException($"Malformed line in the ledger: {line}", ex);
+                throw new FlowEventLogReadException($"Malformed line {index + 1} in the ledger: {line}", ex);
             }
 
             if (TryGetUnknownKind(entry, out var kind))
@@ -272,15 +278,21 @@ public sealed class FlowEventLogReader(string logFilePath) : IEventLogReader
         var lastNewline = text.LastIndexOf('\n');
         var completeText = lastNewline >= 0 ? text[..(lastNewline + 1)] : string.Empty;
         var completeByteCount = Encoding.UTF8.GetByteCount(completeText);
-        var lines = completeText.Split('\n', StringSplitOptions.RemoveEmptyEntries);
+        var lines = completeText.Split('\n');
 
         var flowEvents = new List<FlowEvent>(lines.Length);
         var coreEvents = new List<CoreEvent>(lines.Length);
         var unknownCount = 0;
         string? firstUnknownKind = null;
 
-        foreach (var line in lines)
+        for (var index = 0; index < lines.Length; index++)
         {
+            var line = lines[index];
+            if (line.Length == 0)
+            {
+                continue;
+            }
+
             LogEntry entry;
             try
             {
@@ -288,7 +300,7 @@ public sealed class FlowEventLogReader(string logFilePath) : IEventLogReader
             }
             catch (JsonException ex)
             {
-                throw new FlowEventLogReadException($"Malformed line in the ledger: {line}", ex);
+                throw new FlowEventLogReadException($"Malformed line {index + 1} in the ledger: {line}", ex);
             }
 
             if (TryGetUnknownKind(entry, out var kind))

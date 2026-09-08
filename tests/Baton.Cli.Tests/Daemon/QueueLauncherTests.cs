@@ -121,20 +121,51 @@ public sealed class QueueLauncherTests : IDisposable
             var room = await RunTwoStepRoomAsync(root);
             var logPath = Path.Combine(room, BatonPaths.FlowLogFileName);
             using var holder = new FileStream(
-                logPath, FileMode.Append, FileAccess.Write, FileShare.Read, bufferSize: 1, useAsync: true);
+                logPath, FileMode.Append, FileAccess.Write, FileShare.None, bufferSize: 1, useAsync: true);
+            await Assert.ThrowsAsync<FlowJournalHeldException>(
+                () => new FlowEventLogReader(logPath).ReadAllEntriesWithTimestampsAsync(Ct));
 
-            var recording = Task.Run(
-                () => QueueLauncher.RecordPostLaunchFaultAsync("held", room, "the pump threw BatonFlowException"), Ct);
-            // wait-ok: injected ledger-release interleaving, not a wait on child-process or external work.
-            await Task.Delay(TimeSpan.FromMilliseconds(100), Ct);
-            await holder.DisposeAsync();
+            var retries = new List<int>();
+            await QueueLauncher.RecordPostLaunchFaultAsync("held", room, "the pump threw BatonFlowException", attempt =>
+            {
+                retries.Add(attempt);
+                holder.Dispose();
+            });
 
-            await recording;
+            Assert.Equal([1], retries);
 
             var sentinel = await TerminalSentinelWriter.TryReadAsync(room, Ct);
             Assert.NotNull(sentinel);
             Assert.Equal(["a", "b"], sentinel.Steps.Select(step => step.Id).Order().ToArray());
             Assert.DoesNotContain("bare sentinel", sentinel.Error!, StringComparison.Ordinal);
+        }
+        finally
+        {
+            DirectoryCleanup.DeleteRecursively(root);
+        }
+    }
+
+    [Fact]
+    public async Task A_ledger_held_past_the_retry_budget_leaves_a_sentinel_naming_the_hold()
+    {
+        var root = CreateTempRoot();
+        try
+        {
+            var room = await RunTwoStepRoomAsync(root);
+            using var holder = new FileStream(
+                Path.Combine(room, BatonPaths.FlowLogFileName), FileMode.Append, FileAccess.Write,
+                FileShare.None, bufferSize: 1, useAsync: true);
+            var retries = new List<int>();
+
+            await QueueLauncher.RecordPostLaunchFaultAsync("held", room, "the pump threw", retries.Add);
+
+            Assert.Equal([1, 2, 3, 4], retries);
+            var sentinel = await TerminalSentinelWriter.TryReadAsync(room, Ct);
+            Assert.NotNull(sentinel);
+            Assert.Equal(WorkflowOutcome.Failed, sentinel.State);
+            Assert.Empty(sentinel.Steps);
+            Assert.Contains("bare sentinel: the room ledger remained held after the bounded projection retry",
+                sentinel.Error!, StringComparison.Ordinal);
         }
         finally
         {
@@ -151,13 +182,16 @@ public sealed class QueueLauncherTests : IDisposable
             var room = await RunTwoStepRoomAsync(root);
             await File.WriteAllTextAsync(Path.Combine(room, BatonPaths.FlowLogFileName), "{ not json\n", Ct);
 
-            await QueueLauncher.RecordPostLaunchFaultAsync("corrupt", room, "the pump threw BatonFlowException");
+            var retries = new List<int>();
+            await QueueLauncher.RecordPostLaunchFaultAsync("corrupt", room, "the pump threw BatonFlowException", retries.Add);
 
+            Assert.Empty(retries);
             var sentinel = await TerminalSentinelWriter.TryReadAsync(room, Ct);
             Assert.NotNull(sentinel);
             Assert.Empty(sentinel.Steps);
             Assert.Contains("bare sentinel", sentinel.Error!, StringComparison.Ordinal);
-            Assert.Contains("missing or could not be projected", sentinel.Error, StringComparison.Ordinal);
+            Assert.Contains("the room ledger is corrupt", sentinel.Error, StringComparison.Ordinal);
+            Assert.Contains("line 1", sentinel.Error, StringComparison.Ordinal);
 
             await QueueStore.MutateAsync(BatonPaths.QueueFile, queue => queue with
             {
@@ -179,9 +213,10 @@ public sealed class QueueLauncherTests : IDisposable
                 _ => Task.FromResult(0d), () => null, () => DateTimeOffset.UtcNow);
             await scheduler.ResolveFinishedItemsAsync(Ct);
 
-            var fact = Assert.Single(await QueueDecisionLedgerStore.ReadAllAsync(BatonPaths.QueueDecisionLedgerFile, Ct));
-            Assert.Equal(QueueDecisionEntry.Failed, fact.Decision);
-            Assert.Contains("bare sentinel", fact.Reason!, StringComparison.Ordinal);
+            var item = Assert.Single((await QueueStore.LoadAsync(BatonPaths.QueueFile, Ct)).Items);
+            Assert.Equal(QueueItemState.Failed, item.State);
+            Assert.Contains(sentinel.Error!, item.Error!, StringComparison.Ordinal);
+            Assert.Empty(await QueueDecisionLedgerStore.ReadAllAsync(BatonPaths.QueueDecisionLedgerFile, Ct));
         }
         finally
         {
