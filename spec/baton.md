@@ -3843,6 +3843,48 @@ trigger is not registrable by a standard user and is not used (#1770).
   regardless (above) — the same "changes a push's contents, never its count" accounting the #1549
   heartbeat entry (§2) already gives for its own field, at at most four transitions per room's entire
   lifetime. Polling for a room stops the moment its own journal already carries a `DeliveryMerged` fact.
+- **`DeadPumpProbe`** (`Baton.Cli.Daemon`, a hosted service, #2072 — slice one of #1530) — a sixth kept
+  responsibility, and the one that breaks the outbound-only ceiling the two bullets above state: it
+  appends a **terminal** fact to a room's `flow.jsonl`. That is not new capability in kind —
+  `DeliveryPoller` above already writes that journal — but it is new in consequence, because a terminal
+  fact settles the room, so it is bounded here: **one fact per still-arrestable target, in one room,
+  under that room's own `flow.lock`, and nothing else.** No sentinel, no `terminal.json`, no retry, no
+  dispatch. Which fact is decided by which shape `ArrestableExecutions.All` returned —
+  `ExecutionFailed(Permanent)` for a Running step or a step-less execution, and `StepRetryForeclosed`
+  for a quota-parked one, whose latest execution has already settled and whose still-open thing is the
+  retry obligation instead. Getting that split wrong is not cosmetic: a second `ExecutionFailed` on the
+  parked arm leaves `RetryNotBefore` set, so the room keeps reading Running (the arrest invisible, this
+  entry's whole purpose) and keeps re-matching the probe on every tick. The predicate (a free lock, a
+  still-arrestable target, a journal quiet past the threshold), why the free lock is conclusive, why the
+  classification is `Permanent` rather than crash recovery's `Retryable`, and why the whole decision is
+  re-read from inside the guard all live on `DeadPumpProbe`'s own doc comments; the operator's threshold
+  key is `DaemonSettings.DeadPumpQuietMinutes`, whose default and reason live on that type beside the
+  heartbeat cadence they are derived from.
+  - **The readers, and the two that do not see it.** Both facts are existing vocabulary — no new
+    `FlowEvent`, no new `FailureClassification`, no new `WorkflowOutcome` — so the projection readers
+    already turn the room's *word* with no arm added: `StateProjector` →
+    `WorkflowOutcome.DescribeTerminal` (`baton status`) and `FleetStatusTool.ProcessRoomAsync`
+    (`fleet_status`, `FleetProjectionWriter`, and therefore the glass). The *cause* is a different
+    matter on the quota-parked arm: `StateProjector`'s `StepRetryForeclosed` arm stores no reason (it
+    is shared with `resolve --close`, #1877, and is not widened here), so `LatestFailureReason` keeps
+    the park's own text. `baton status`'s human step line reads the foreclosure's author and cause
+    off the journal event itself (`StatusCommand.FormatStepStatus`, "retry foreclosed by …"); every
+    other reason surface — `--json`'s `error`, `baton run`'s own settle output, the fleet
+    row — still shows the park's reason, and the dead-pump cause is journal-only there.
+    `tools/room-rate-sweep/sweep.py` sees neither fact: it drops any room whose journal has no
+    `executionExited` (a pump killed mid-step never wrote one), keys arrests on `executionArrested`,
+    and has no branch for `stepRetryForeclosed` — the probe's rooms are absent from its accounting
+    before and after the fact lands. The other is the **arrest
+    ledger** (`ArrestLedgerProjector`): it is request-sourced by construction — it projects
+    `CancellationRequested`/`ExecutionCancelled`/`CancellationRejected` and the two `room.jsonl` shapes,
+    all of which answer "who asked for an arrest, and how was it settled". A dead pump filed no request,
+    so this arrest correctly does not appear there and the ledger is not extended to invent one.
+  - **The backlog, measured before it shipped** (2026-09-08, over `~/.baton/rooms`; predicate: no
+    `terminal.json`, `flow.lock` acquirable `FileShare.None`, and ≥1 accepted execution with no terminal
+    event of its own). Of **456** rooms, 5 carried no sentinel, 3 of those had a free lock, and **2**
+    matched in full — both lanes from a single daemon exit at `2026-09-08T03:12Z`, quiet ~1.4h. Two is
+    the backlog the first run closes, so it needs no bound. A dated one-time observation, not a live
+    quantity: re-running it is re-measuring a different day.
 - **The singleton mutex is per-home, not per-user** — `DaemonHost.MutexName` (#1773) owns why.
 - **The daemon watches itself, and dies loudly rather than hanging quietly (#1981).** Every hosted
   service above reports each completed pass to `DaemonTickLedger` (duration, and its own interval);
@@ -3867,13 +3909,20 @@ Explicitly **not** kept: pairing (`PairedClientsStore`), WebSocket broadcast (`/
 endpoints, orchestrator reassignment, and the permission REST answerer (§5) — all of that existed to
 serve `Baton.Ui`/`Baton.Mobile` and dies with them (Appendix).
 
-**No daemon reaper (#1513).** None of the kept surface above — the room-watcher, `RoomRetentionSweep`,
-or the concurrency-cap apply — ever re-drives a room's own pending retry or reaps a room whose pump
-has died. `MutationInterface`'s scheduling loop is the only thing that ever acts on a
+**No daemon reaper (#1513), and what #2072 changed about it.** None of the kept surface above ever
+*re-drives* a room's own pending retry — that half is unchanged and is the part "reaper" names.
+`MutationInterface`'s scheduling loop is still the only thing that ever acts on a
 `StepRetryScheduled`/`RetryNotBefore` wait: it `Task.Delay`s that wait **in-process**, inside the same
-`baton run`/`baton dispatch` invocation that recorded it. If that process exits or is killed, nothing
-else in the system will ever complete the room — it does not go terminal on its own. Recovery is
-`baton resume`, an operator-driven action, never automatic.
+`baton run`/`baton dispatch` invocation that recorded it, and if that process exits or is killed
+nothing will resume the room. Recovery is still `baton resume` (or a fresh `baton run`), an
+operator-driven action, never automatic.
+
+What this paragraph used to also say — "it does not go terminal on its own" — is **false since #2072**,
+deliberately: `DeadPumpProbe` (the bullet above) records the arrest that already happened. Recording is
+not reaping. The probe never dispatches, never retries, never resumes; it writes one fact per still-open
+execution and stops. The distinction is the whole ruling: #1513's danger was a background process
+*acting* on a room it does not own, while #1530 Residual 1's defect was an arrest no observer could
+see. A room whose pump was killed is no longer a room that quietly reads Running forever.
 
 ### The quota ledger — what is new build, stated correctly
 

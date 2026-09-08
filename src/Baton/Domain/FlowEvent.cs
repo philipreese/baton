@@ -241,9 +241,12 @@ public abstract record FlowEvent
     /// </param>
     /// <param name="Reason">Why the retry was foreclosed — a diagnostic, never parsed back.</param>
     /// <param name="ForeclosedBy">
-    /// Attribution for who/what recorded the foreclosure (e.g. <c>"settle"</c> once S2's verb exists).
-    /// Nullable — this slice writes no producer, so every foreclosure a test fabricates today may
-    /// legitimately omit it.
+    /// Attribution for who/what recorded the foreclosure. Two producers write it today —
+    /// <c>"resolve --close"</c> (#1877's administrative foreclosure) and
+    /// <c>Baton.Cli.Daemon.DeadPumpProbe.DiagnosticName</c> (#2072, a quota-parked step whose pump
+    /// died) — which is why it is worth reading rather than merely present. Still nullable, and this
+    /// paragraph is the only reason to expect a value: #1586 S1 shipped the event with no producer at
+    /// all, so a pre-#1877 line and a foreclosure a test fabricates may both legitimately omit it.
     /// </param>
     public sealed record StepRetryForeclosed(
         StepId StepId,

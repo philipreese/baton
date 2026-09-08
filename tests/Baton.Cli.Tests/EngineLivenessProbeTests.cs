@@ -153,6 +153,29 @@ public class EngineLivenessProbeTests
     }
 
     [Fact]
+    public void FormatStepStatus_names_the_journal_foreclosure_instead_of_the_park_it_replaced()
+    {
+        // #2072 (second-reader finding): StateProjector stores no reason for a StepRetryForeclosed,
+        // so the step still carries the park's "quota" -- rendered as-is, a dead-pump arrest reads as
+        // a vendor failure. The polarity partner is the test above: same step, no journal event,
+        // plain "Failed".
+        var emptyUpstreams = new Dictionary<StepId, ExecutionId>();
+        var foreclosedStep = new StepState(
+            StepId, StepStatus.Failed, LatestExecutionId: ExecutionId, emptyUpstreams,
+            LatestFailureClassification: FailureClassification.ExhaustedUntil,
+            LatestFailureReason: "quota",
+            RetryNotBefore: null,
+            RetryForeclosed: true);
+        var foreclosure = new FlowEvent.StepRetryForeclosed(
+            StepId, ExecutionId, "Arrested: pump dead — worker pid 4242", Baton.Cli.Daemon.DeadPumpProbe.DiagnosticName);
+
+        var rendered = StatusCommand.FormatStepStatus(foreclosedStep, [foreclosure]);
+
+        Assert.Equal("Failed — retry foreclosed by dead-pump probe: Arrested: pump dead — worker pid 4242", rendered);
+        Assert.DoesNotContain("quota", rendered, StringComparison.Ordinal);
+    }
+
+    [Fact]
     public void FormatStepStatus_still_renders_the_unfireable_park_when_not_foreclosed()
     {
         // Polarity partner: identical fixture, RetryForeclosed false -- proves the guard above is

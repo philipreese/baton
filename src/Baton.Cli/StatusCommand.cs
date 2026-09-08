@@ -799,8 +799,7 @@ public static class StatusCommand
         // (StateProjector), so without this guard a foreclosed step (settled Terminal, nothing will
         // ever dispatch it again) would render as still waiting on an unknown vendor reset -- the
         // exact opposite of what foreclosure means, and the same misreport class #1513/#1582 were
-        // paid for. Falls through to plain "Failed" below; a foreclosure-specific rendering is S2's
-        // to add once a verb produces one in practice.
+        // paid for. The foreclosure-specific rendering is the RetryForeclosed branch below (#2072).
         if (step.Status == StepStatus.Failed)
         {
             if (step.LatestFailureClassification == FailureClassification.ExhaustedUntil
@@ -817,6 +816,19 @@ public static class StatusCommand
             if (step.RetryNotBefore is not null)
             {
                 return FormatParkedStatus(step, events);
+            }
+
+            // #2072: the projector keeps the park's own text in LatestFailureReason after a
+            // foreclosure (spec/baton.md §7, the DeadPumpProbe readers bullet, names which surface
+            // shows what and why the projector arm was left alone), so read the cause off the journal
+            // event here or a dead-pump arrest reads as a vendor-quota failure. Newest foreclosure for
+            // the step wins; a foreclosed step whose journal carries none (a fabricated fixture) stays
+            // plain "Failed".
+            if (step.RetryForeclosed
+                && events.OfType<FlowEvent.StepRetryForeclosed>().LastOrDefault(f => f.StepId == step.StepId) is { } foreclosure)
+            {
+                var by = foreclosure.ForeclosedBy is null ? string.Empty : $" by {foreclosure.ForeclosedBy}";
+                return $"Failed — retry foreclosed{by}: {foreclosure.Reason}";
             }
         }
 
