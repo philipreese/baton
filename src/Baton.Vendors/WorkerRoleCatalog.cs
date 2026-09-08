@@ -100,7 +100,7 @@ public sealed record WorkerTier([property: JsonRequired] string Adapter, string?
 /// are resolved and requirement-checked in <see cref="RoleDispatch.ToBinding"/> exactly as an
 /// operator-named skill is; an unresolvable default is refused before any room exists, with this
 /// role's id in the message, rather than dispatched without. Where the shipped three resolve from
-/// is the <c>Baton.Vendors.csproj</c> copy of the repository's <c>skills/</c> tree, which lands them on
+/// is the <c>Baton.Vendors.csproj</c> copy of its own <c>Skills/</c> tree, which lands them on
 /// <see cref="SkillPackageResolver"/>'s next-to-the-assembly rung.
 /// </param>
 public sealed record WorkerRole(

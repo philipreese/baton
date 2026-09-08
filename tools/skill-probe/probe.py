@@ -41,7 +41,8 @@ override rung `SkillPackageResolver` documents as "a one-off experiment", which 
 ``default_skills`` names it. The script writes a copy of the shipped ``WorkerRoles.json`` whose
 ``implement`` entry declares ``["marker-probe"]`` and points ``BATON_WORKER_ROLES_PATH`` at it, so the
 shipped ``baton-implement`` default is displaced for the run and the marker is the whole signal. The
-control arm is unchanged (no skill from any source). ``--adapter`` runs the same measurement on
+control arm names no skill on the command line and uses the shipped catalog, so the lane receives the
+role's shipped default (``baton-implement``) and never the marker. ``--adapter`` runs the same measurement on
 codex or agy, where the realization is inlining rather than projection, so ``projected`` reads
 ``False`` there by construction and the roster line plus the marker are the evidence.
 

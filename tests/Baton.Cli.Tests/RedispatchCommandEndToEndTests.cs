@@ -1034,6 +1034,61 @@ public sealed class RedispatchCommandEndToEndTests : IDisposable
         }
     }
 
+    /// <summary>
+    /// #2118 review M1: on the inherit path the opt-out subtracts the role's defaults from the parent's
+    /// INHERITED list only (the condition in <c>RedispatchCommand</c> states why) — otherwise
+    /// <c>--skill baton-advise --no-default-skills</c> keeps the package on <c>baton dispatch</c> and
+    /// silently drops it on <c>baton redispatch</c>. Both arms run against the real inherit path
+    /// (no <c>--spec</c>), which the direct <c>WithoutRoleDefaultSkills</c> unit test cannot reach.
+    /// </summary>
+    [Fact]
+    public async Task An_inherit_redispatch_opting_out_keeps_a_skill_the_operator_named_and_subtracts_only_inherited_defaults()
+    {
+        var testRoot = Path.Combine(Path.GetTempPath(), $"redispatch-e2e-{Guid.NewGuid():N}");
+        try
+        {
+            var library = Path.Combine(testRoot, "library");
+            Directory.CreateDirectory(Path.Combine(library, "house-style"));
+            await File.WriteAllTextAsync(
+                Path.Combine(library, "house-style", "SKILL.md"),
+                "---\ndescription: house-style\n---\n# house-style\nBe brief.",
+                TestContext.Current.CancellationToken);
+            using var skillsScope = BatonEnvironmentSnapshot.BeginScope(
+                BatonEnvironmentSnapshot.Current with { SkillsPathOverride = library });
+
+            var parentRoom = await DispatchTerminalParentAsync(
+                testRoot, "Weigh the options for X.", skills: ["house-style"]);
+
+            async Task<IReadOnlyList<string>?> RedispatchSkillsAsync(
+                string childName, IReadOnlyList<string>? skills, bool skillsSpecified)
+            {
+                var childRoom = Path.Combine(testRoot, childName);
+                var options = new RedispatchOptions(
+                    parentRoom, childRoom, Skills: skills, SkillsSpecified: skillsSpecified, NoDefaultSkills: true);
+
+                await RedispatchCommand.ExecuteAsync(options, Adapters, TestContext.Current.CancellationToken);
+
+                var bindings = await WorkerBindingConfigParser.LoadFromFileAsync(
+                    Path.Combine(childRoom, "bindings.json"), TestContext.Current.CancellationToken);
+                return bindings["advise"].Skills;
+            }
+
+            // Control: the parent recorded ["baton-advise", "house-style"]; inheriting under the opt-out
+            // subtracts the default and keeps the operator's own name.
+            Assert.Equal(
+                ["house-style"],
+                (await RedispatchSkillsAsync("child-inherit-no-defaults", null, skillsSpecified: false))!.ToArray());
+            // The finding: the operator typed the default's own name; it is kept, not subtracted.
+            Assert.Equal(
+                ["baton-advise"],
+                (await RedispatchSkillsAsync("child-named-default-no-defaults", ["baton-advise"], skillsSpecified: true))!.ToArray());
+        }
+        finally
+        {
+            DirectoryCleanup.DeleteRecursively(testRoot);
+        }
+    }
+
     private static async Task<string> DispatchTerminalParentAsync(
         string testRoot, string spec, string adapter = "fake", TimeSpan? timeout = null, string? label = null,
         string? workstream = null, IReadOnlyList<string>? skills = null, string? model = null)

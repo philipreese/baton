@@ -15,8 +15,8 @@ namespace Baton.Vendors.Tests;
 /// <remarks>
 /// Reads the shipped catalog off <c>BatonEnvironmentSnapshot.Current</c> the way <see cref="RoleDispatchTests"/>
 /// does, so it joins the same non-parallel collection. The shipped packages resolve from the
-/// next-to-the-assembly rung (<c>Baton.Vendors.csproj</c> copies <c>skills/</c> there), which is the
-/// rung a role default has to be found on for a dispatch against any workspace.
+/// next-to-the-assembly rung (<c>Baton.Vendors.csproj</c> copies its <c>Skills/</c> tree there), which
+/// is the rung a role default has to be found on for a dispatch against any workspace.
 /// </remarks>
 [Collection(WorkerRoleCatalogCollection.Name)]
 public sealed class RoleDefaultSkillsTests : IDisposable

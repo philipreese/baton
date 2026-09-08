@@ -39,7 +39,8 @@ namespace Baton.Cli;
 /// <param name="NoDefaultSkills">
 /// <c>--no-default-skills</c> (#2110), the same opt-out <c>baton dispatch</c> takes. On the amended-spec
 /// path it reaches <c>RoleDispatch.ToBinding</c>, which is where the defaults would otherwise be
-/// re-attached; on the inherit path <c>RedispatchCommand.WithoutRoleDefaultSkills</c> subtracts them.
+/// re-attached; on the inherit path <c>RedispatchCommand.WithoutRoleDefaultSkills</c> subtracts them
+/// from the inherited list, and only then — a <see cref="Skills"/> list given alongside is kept whole.
 /// What an opt-out-less redispatch inherits is spec/baton.md §2's to say, not restated here.
 /// </param>
 public sealed record RedispatchOptions(

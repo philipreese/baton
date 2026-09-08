@@ -401,17 +401,23 @@ typo. The dispatch roster prints the merged list as its declared set. A redispat
 inherits the parent's recorded list verbatim, defaults included, since the binding records the merged
 list and never which names were defaults; `--no-default-skills` there removes the names the role's
 catalog entry declares *today*. The three shipped defaults — `implement` → `baton-implement`, `review`
-→ `baton-review`, `advise` → `baton-advise` — live under the repository's `skills/` and are copied
+→ `baton-review`, `advise` → `baton-advise` — live under `src/Baton.Vendors/Skills/` and are copied
 next to the engine at build time (`Baton.Vendors.csproj`), which puts them on §9's next-to-the-assembly
-rung so they resolve against any workspace. One cost is inherited rather than new: on the two
+rung so they resolve against any workspace. They live there and not at the repository root because
+`<repo>/skills/` is §9's `<workspace>/skills/` scan rung: a lane that declares no skill set — every
+role without `default_skills`, or one dispatched `--no-default-skills` with no `--skill` — keeps that
+scan, and a package at the root would reach all of them whenever the workspace is a checkout of this
+repository. No role without a declared default receives these packages. One cost is inherited rather than new: on the two
 inlining vendors a *declared* set is bounded at `CoreDispatcher.OversizePromptThreshold` (§9,
 `SkillInlining`'s remark is the register), and a role default is a declared skill — so the shipped
 packages are kept well under it (`RoleDefaultSkillsTests` pins the headroom), and what a `--skill`
-addition can bring on codex or agy is the remainder. **Each package is the sole register of the lane
-constraints it states** (what a lane never does, the delivery and review shapes, the two
-`AGENTS.md`-derived checks, the public-repository rules): a brief carries only what is task-specific,
-and no other document restates the package. What the defaults do NOT carry is the conductor's own
-merging rules, which are the conductor's and never a lane's.
+addition can bring on codex or agy is the remainder. **Each package is the sole register, for a
+dispatched lane, of the lane constraints it states** (what a lane never does, the delivery and review
+shapes, the two `AGENTS.md`-derived checks, the public-repository rules): a brief carries only what is
+task-specific, and no other lane-facing document restates the package. The workspace's own contributor
+file (`CLAUDE.md`/`AGENTS.md`) is a separate register, read by people and interactive sessions rather
+than by a lane; where a rule is both, the contributor file cites the package. What the defaults do NOT
+carry is the conductor's own merging rules, which are the conductor's and never a lane's.
 
 ### §2 schema — the CLI argument table
 

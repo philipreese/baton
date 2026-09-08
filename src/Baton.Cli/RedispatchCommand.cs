@@ -175,8 +175,12 @@ public static class RedispatchCommand
             var parentWorkflowPath = Path.Combine(options.ParentRoomDirectoryPath, WorkflowFileName);
             definition = await WorkflowDefinitionParser.LoadFromFileAsync(parentWorkflowPath, cancellationToken).ConfigureAwait(false);
             entry = InheritBinding(parentEntry, options);
-            if (options.NoDefaultSkills)
+            if (options.NoDefaultSkills && !options.SkillsSpecified)
             {
+                // Only the parent's INHERITED list can hide a default: a --skill list typed on this
+                // command line replaced it wholesale, and a name the operator typed is never a default
+                // to subtract, however it is spelled -- the same rule ToBinding applies on a fresh
+                // dispatch, where the flag suppresses the role's own list and nothing else.
                 entry = WithoutRoleDefaultSkills(entry, workerName);
             }
 
@@ -452,7 +456,8 @@ public static class RedispatchCommand
     /// names its role's <c>default_skills</c> declares TODAY. The amended-spec path needs no counterpart
     /// — there <c>RoleDispatch.ToBinding</c> is what attaches the defaults, and the flag reaches it. Read
     /// off the current catalog rather than the parent's binding because the binding records only the
-    /// merged list, never which names were defaults (spec/baton.md §2).
+    /// merged list, never which names were defaults (spec/baton.md §2). The caller applies this to an
+    /// inherited list only, never to one <c>--skill</c> replaced on the same command line.
     /// </summary>
     internal static WorkerBindingConfigEntry WithoutRoleDefaultSkills(WorkerBindingConfigEntry entry, string workerName)
     {
