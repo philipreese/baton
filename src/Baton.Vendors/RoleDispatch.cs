@@ -393,11 +393,16 @@ public static class RoleDispatch
         var promptBuilder = new System.Text.StringBuilder();
         promptBuilder.Append(spec.TrimEnd());
 
-        // #1920: the review role is the one whose shell grant is scoped tightly enough that a reviewer
-        // discovers its edges by refusal; implement/janitor run unscoped and lose no steps to this.
-        if (role.Id == "review" && ReviewToolGuidance(adapter) is { } reviewToolGuidance)
+        // #1920, re-keyed by #2043: on the GRANT, not the role id — a SCOPED shell allowlist is what
+        // makes cd/cat/head/git grep (and, on codex, rg and backslash paths) come back refused, so
+        // every role that holds one gets the line and implement/janitor, which run an unscoped shell
+        // and lose no steps to this, still get nothing. The predicate said `role.Id == "review"` and
+        // asserted review was the only such role; `consolidate`, whose allowlist is a strict subset of
+        // review's, falsified that and paid the rediscovery cost the sentence exists to remove.
+        if (role.Grant.ShellCommandPatterns is { Count: > 0 }
+            && ScopedShellToolGuidance(adapter) is { } scopedShellToolGuidance)
         {
-            promptBuilder.Append($"\n\n{reviewToolGuidance}");
+            promptBuilder.Append($"\n\n{scopedShellToolGuidance}");
         }
 
         // #1996: keyed on the GRANT, not the role id — the same condition that decides whether the
@@ -427,27 +432,29 @@ public static class RoleDispatch
     }
 
     /// <summary>
-    /// #1920's ask, verbatim: the one line a codex review prompt carries so the granted read path is
-    /// known before the first turn rather than found by refusal. Measured on the issue's room: `rg` was
+    /// #1920's ask, verbatim: the one line a codex prompt with a scoped shell carries so the granted
+    /// read path is known before the first turn rather than found by refusal. Measured on the issue's
+    /// room (a <c>review</c> lane, which was the only scoped-shell role then): `rg` was
     /// re-issued four times, and two more steps went to a Windows backslash path, before the model
     /// reached <c>baton_search_text</c>. Both halves are true of the codex channel — the dynamic tools
     /// are what read and search there, and <c>CodexDynamicToolPolicy</c> routes every shell line
     /// through the matcher that refuses a backslash (<c>ShellCommandPatternMatcher</c>) and declares no
     /// <c>rg</c> tool.
     /// </summary>
-    private const string CodexReviewToolGuidance =
+    private const string CodexScopedShellToolGuidance =
         "search with baton_search_text, read with baton_read_text; rg and backslash paths are not granted";
 
     /// <summary>
     /// #1920, claude half. Written from the CLAUDE measurement in the issue's audit comment (46 of 97
-    /// refusals on that vendor), not transposed from the codex one: what a claude reviewer actually
+    /// refusals on that vendor, measured on a <c>review</c> lane), not transposed from the codex one:
+    /// what a claude worker on a scoped shell actually
     /// loses steps to is <c>cd</c>, <c>cat</c>, <c>head</c>, <c>echo</c> and <c>git grep</c>, plus every
     /// compound line that carries one of them, because a scoped grant judges each segment on its own
     /// (<see cref="ShellCommandPatternMatcher.EvaluateChainedCommand"/>). It deliberately says nothing
     /// about backslash paths: that rule is a property of the shell channel alone, and claude's own Read
     /// and Grep take Windows paths.
     /// </summary>
-    private const string ClaudeReviewToolGuidance =
+    private const string ClaudeScopedShellToolGuidance =
         "read with Read, search with Grep; the Bash grant is a read-only git/gh allowlist, so cd, cat, "
         + "head, echo and git grep are refused, and a chained command (&&, |) is refused whole unless "
         + "every segment is itself granted";
@@ -481,10 +488,10 @@ public static class RoleDispatch
     /// <see langword="null"/> and the prompt gains nothing rather than a guessed one — agy's own
     /// measured friction in the same audit is repeat reads, not refusals, and is tracked at #1921.
     /// </summary>
-    private static string? ReviewToolGuidance(string adapter) => adapter switch
+    private static string? ScopedShellToolGuidance(string adapter) => adapter switch
     {
-        "codex" => CodexReviewToolGuidance,
-        "claude" => ClaudeReviewToolGuidance,
+        "codex" => CodexScopedShellToolGuidance,
+        "claude" => ClaudeScopedShellToolGuidance,
         _ => null,
     };
 

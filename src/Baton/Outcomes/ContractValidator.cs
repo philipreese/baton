@@ -126,6 +126,17 @@ public static class ContractValidator
                 ReviewVerdictSchema.TryParse(File.ReadAllBytes(path), out _, out var parseError) ? null : parseError,
             OutputSchema.Diff =>
                 UnifiedDiffSchema.TryParse(File.ReadAllBytes(path), out _, out var parseError) ? null : parseError,
+            // #2043: the whole check is "did the worker say anything". Whitespace-only counts as
+            // nothing — a lane that wrote a lone newline has produced no consolidation — and the
+            // sentence below is the diagnostic a person reads, so it names the file's real state
+            // rather than repeating "unsatisfied".
+            // Read as TEXT, not bytes like the two parse arms above: a lone byte-order mark is not
+            // content, and only decoding strips it (File.ReadAllText consumes a BOM; the bytes would
+            // have counted it as three non-whitespace characters and passed a file saying nothing).
+            OutputSchema.NonEmptyText =>
+                string.IsNullOrWhiteSpace(File.ReadAllText(path))
+                    ? "the file has no non-whitespace content, and this output declares non_empty_text."
+                    : null,
             _ => throw new ArgumentOutOfRangeException(nameof(schema), schema, "Unknown OutputSchema case."),
         };
 

@@ -56,27 +56,41 @@ public class RoleDispatchTests
     // #1920: each vendor's line is written from that vendor's own measured refusals — codex's is the
     // issue's Ask verbatim, claude's names what the audit comment measured on claude (cd/cat/head/
     // echo/git grep and compound lines), never rg, which is not a claude refusal.
+    // #2043: EVERY role holding a scoped shell allowlist gets it, not `review` alone — the line is
+    // about the grant, and `consolidate`'s allowlist is a strict subset of review's, so both vendors'
+    // sentences are as true of it. The `review` rows are byte-identical to before this issue.
     [Theory]
-    [InlineData("codex", "search with baton_search_text, read with baton_read_text; rg and backslash paths are not granted")]
-    [InlineData("claude", "read with Read, search with Grep; the Bash grant is a read-only git/gh allowlist, so cd, cat, head, echo and git grep are refused, and a chained command (&&, |) is refused whole unless every segment is itself granted")]
-    public void Review_prompt_names_the_vendor_specific_granted_read_tools_once(
-        string adapter, string expectedGuidance)
+    [InlineData("review", "codex", "search with baton_search_text, read with baton_read_text; rg and backslash paths are not granted")]
+    [InlineData("review", "claude", "read with Read, search with Grep; the Bash grant is a read-only git/gh allowlist, so cd, cat, head, echo and git grep are refused, and a chained command (&&, |) is refused whole unless every segment is itself granted")]
+    [InlineData("consolidate", "codex", "search with baton_search_text, read with baton_read_text; rg and backslash paths are not granted")]
+    [InlineData("consolidate", "claude", "read with Read, search with Grep; the Bash grant is a read-only git/gh allowlist, so cd, cat, head, echo and git grep are refused, and a chained command (&&, |) is refused whole unless every segment is itself granted")]
+    public void A_scoped_shell_prompt_names_the_vendor_specific_granted_read_tools_once(
+        string roleId, string adapter, string expectedGuidance)
     {
+        var role = WorkerRoleCatalog.For(roleId);
+        Assert.NotEmpty(role.Grant.ShellCommandPatterns!); // the fact the predicate keys on
+
         var prompt = RoleDispatch.ToBinding(
-            Review, "Review the change.", adapterOverride: adapter).PromptTemplate;
+            role, "Read the thread.", adapterOverride: adapter).PromptTemplate;
 
         Assert.Contains(expectedGuidance, prompt, StringComparison.Ordinal);
         Assert.Equal(1, prompt.Split(expectedGuidance, StringSplitOptions.None).Length - 1);
     }
 
-    // The two false arms of the same predicate (`role.Id == "review"` and the adapter switch, whose
-    // default returns null): without these the feature could fire on every role and every vendor and
-    // the theory above would still pass.
+    // The two false arms of the same predicate (a non-empty `ShellCommandPatterns` allowlist, and the
+    // adapter switch, whose default returns null): without these the feature could fire on every role
+    // and every vendor and the theory above would still pass. `implement` is the discriminating arm
+    // for the grant half — it holds a shell grant, but an UNSCOPED one, so nothing comes back refused
+    // and there is no granted read path to name.
     [Fact]
-    public void No_review_tool_guidance_reaches_another_role_or_an_unmeasured_adapter()
+    public void No_scoped_shell_tool_guidance_reaches_an_unscoped_role_or_an_unmeasured_adapter()
     {
+        var implement = WorkerRoleCatalog.For("implement");
+        Assert.True(implement.Grant.RunShellCommands); // it holds a shell grant …
+        Assert.True(implement.Grant.ShellCommandPatterns is null or { Count: 0 }); // … an unscoped one
+
         var implementPrompt = RoleDispatch.ToBinding(
-            WorkerRoleCatalog.For("implement"), "Make the change.", adapterOverride: "claude").PromptTemplate;
+            implement, "Make the change.", adapterOverride: "claude").PromptTemplate;
         var agyReviewPrompt = RoleDispatch.ToBinding(
             Review, "Review the change.", adapterOverride: "agy").PromptTemplate;
 
@@ -396,6 +410,9 @@ public class RoleDispatchTests
             ["fact-check"] = false,
             ["janitor"] = true,
             ["orchestrate"] = false,
+            // #2043: read-shaped despite holding a shell grant -- the derivation is write AND shell,
+            // and `consolidate`'s shell is scoped read-only with write_files false.
+            ["consolidate"] = false,
         };
 
         var actualRoleIds = WorkerRoleCatalog.All.Select(role => role.Id).OrderBy(id => id, StringComparer.Ordinal).ToList();

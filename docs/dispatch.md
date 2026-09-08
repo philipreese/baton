@@ -102,9 +102,9 @@ an ambiguous captured-response outcome does (spec/baton.md §3).
 
 ### The per-execution token budget (#1623, per-adapter default #1745)
 
-`implement`/`review`/`advise` carry default budgets; every other role runs unwatched unless `--token-budget` is passed.
+`implement`/`review`/`advise`/`consolidate` carry default budgets; every other role runs unwatched unless `--token-budget` is passed.
 A role's catalog entry is either one figure that applies no matter which adapter runs it (today's
-shape, and still what `implement`/`advise` use) or a map keyed by adapter name (`review`'s shape, both
+shape, and still what `implement`/`advise`/`consolidate` use) or a map keyed by adapter name (`review`'s shape, both
 values presently equal — spec/baton.md §3 has why and states the resolution rule for an
 unconfigured adapter). Usage is read incrementally from the vendor's own `stream-json` output
 as it arrives, not just the terminal line, so a poll loop or a runaway tool-call sequence is caught
@@ -380,10 +380,12 @@ path stays open for. Only a conductor's own recorded resolution — `baton resol
 contract, or explicitly refuse one.
 
 The prose-safe/all-or-nothing rules that gate what the engine ever wrote also gate what a capture MAY
-later be resolved into: a plain-text output (`.md`/`.txt`/no extension, no declared
-`Schema`/`Condition` — `advice.md`, `changes.md`, `findings.md` above) can honestly be resolved from a
-captured response; a structured output (`verdict.json`, `patch.diff`, `turn-actions.json` above) can
-not — prose can't honestly stand in for a declared shape. `janitor`'s two outputs (`janitor.md`,
+later be resolved into: a plain-text output (`.md`/`.txt`/no extension, no declared `Condition` and no
+declared shape that prose cannot BE — `advice.md`, `changes.md`, `findings.md` above, and #2043's
+`consolidation.md`, whose `non_empty_text` asserts only that the worker said something, which a
+capture does by construction since a whitespace-only response is never captured) can honestly be
+resolved from a captured response; a structured output (`verdict.json`, `patch.diff`,
+`turn-actions.json` above) can not — prose can't honestly stand in for a declared shape. `janitor`'s two outputs (`janitor.md`,
 `branch.diff`) are a mixed pair under this rule: `branch.diff` is not prose-safe, so a capture never
 fires while it is among the missing outputs (an all-or-nothing capture that could only ever resolve
 `janitor.md` is refused entirely) — a capture for this role is only possible when `janitor.md` alone is
@@ -401,6 +403,7 @@ declared name(s) — `baton resolve` is the one permitted writer here (spec/bato
 | `advise` | standard | `advice.md` | Weighing an open design question before building — a second opinion. |
 | `implement` | standard | `changes.md` | A bounded change whose approach is already decided; exercises the write path. |
 | `review` | frontier | `report.md`, `verdict.json` | Adversarial review of a claim; the default for a PR touching `src/` or asserting something in `docs/`. |
+| `consolidate` | frontier | `consolidation.md` | Reading one issue's thread and merged PRs against the code and writing the current-state block a person rewrites the body from (#2043). Read-only over `gh` and the tree — a strict narrowing of `review`'s grant — and it opens no PR. |
 | `patch` | frontier | `patch.diff` | Proposing code changes as an applyable diff without mutating the workspace. |
 | `fact-check` | minimal | `findings.md` | Confirming an exhaustive, supplied list of facts against the repo — not for noticing what the list omits. |
 | `janitor` | cheap | `janitor.md`, `branch.diff` | Running named mechanical checkers to green after an implementer, without changing behaviour. |

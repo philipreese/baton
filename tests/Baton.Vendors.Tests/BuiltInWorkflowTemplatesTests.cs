@@ -20,7 +20,7 @@ public class BuiltInWorkflowTemplatesTests
     public void GetRoleTemplates_ContainsEveryCatalogRole_WithValidFields()
     {
         var roles = BuiltInWorkflowTemplates.GetRoleTemplates();
-        Assert.Equal(7, roles.Count);
+        Assert.Equal(8, roles.Count);
         Assert.True(roles.ContainsKey("advise"));
         Assert.True(roles.ContainsKey("implement"));
         Assert.True(roles.ContainsKey("review"));
@@ -28,6 +28,7 @@ public class BuiltInWorkflowTemplatesTests
         Assert.True(roles.ContainsKey("janitor"));
         Assert.True(roles.ContainsKey("orchestrate"));
         Assert.True(roles.ContainsKey("patch"));
+        Assert.True(roles.ContainsKey("consolidate"));
 
         foreach (var (id, role) in roles)
         {

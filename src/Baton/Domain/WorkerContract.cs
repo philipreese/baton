@@ -122,6 +122,15 @@ public enum OutputSchema
 
     /// <summary>The output must parse per <see cref="UnifiedDiffSchema.TryParse"/>.</summary>
     Diff,
+
+    /// <summary>
+    /// #2043: the output must exist AND carry at least one non-whitespace character. The floor
+    /// <see cref="None"/> does not provide — a zero-byte or whitespace-only file satisfies
+    /// existence, so a role whose whole deliverable is prose (a consolidation, a report) settles
+    /// <c>Succeeded</c> having said nothing. <c>spec/baton.md</c> §9 rules why this stays inside the
+    /// parse-only boundary the type remarks above draw, and what it costs the capture path.
+    /// </summary>
+    NonEmptyText,
 }
 
 /// <summary>

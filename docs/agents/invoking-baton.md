@@ -650,6 +650,7 @@ suppress it. Today that is exactly the write-withholding roles on `agy`:
 | `implement` | `changes.md` | works | works |
 | `janitor` | `janitor.md`, `branch.diff` | works | works |
 | `review` | `report.md`, `verdict.json` | works | works — auto-provisioned worktree |
+| `consolidate` | `consolidation.md` | works | works — auto-provisioned worktree |
 | `patch` | `patch.diff` | works | works — auto-provisioned worktree |
 | `fact-check` | `findings.md` | works | works — auto-provisioned worktree |
 | `orchestrate` | `turn-actions.json` | works | works — auto-provisioned worktree |
