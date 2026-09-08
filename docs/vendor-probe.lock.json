@@ -1,20 +1,20 @@
 {
-  "WrittenAt": "2026-09-05T15:44:36.933152-04:00",
+  "WrittenAt": "2026-09-08T15:09:29.3075324-04:00",
   "Vendors": [
     {
       "Vendor": "agy",
       "RecordedVersion": "1.1.27",
-      "RecordedAt": "2026-09-05T15:44:36.9156443-04:00"
+      "RecordedAt": "2026-09-08T15:09:29.3020163-04:00"
     },
     {
       "Vendor": "claude",
-      "RecordedVersion": "2.1.258 (Claude Code)",
-      "RecordedAt": "2026-09-04T16:27:01.6872432-04:00"
+      "RecordedVersion": "2.1.263 (Claude Code)",
+      "RecordedAt": "2026-09-08T15:09:29.3018819-04:00"
     },
     {
       "Vendor": "codex",
       "RecordedVersion": "codex-cli 0.153.2",
-      "RecordedAt": "2026-09-04T16:52:17.3939804-04:00"
+      "RecordedAt": "2026-09-08T15:09:29.3020191-04:00"
     }
   ]
 }

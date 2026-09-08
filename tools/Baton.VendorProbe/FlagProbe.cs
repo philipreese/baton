@@ -15,7 +15,7 @@ namespace Baton.VendorProbe;
 /// decision 0015's entire mechanism inverted to a blocking MCP tool on that premise. Measured with a
 /// control: <c>claude --definitely-not-a-real-flag-xyz</c> exits 1 with
 /// <c>error: unknown option</c>, while <c>claude --permission-prompt-tool noop</c> exits 0 and runs
-/// the turn normally. The flag is accepted; it is simply undocumented in <c>--help</c>.
+/// the turn normally. The flag is accepted; it was undocumented in <c>--help</c> through 2.1.258 (see docs/vendor-capabilities.md#probe-2026-09-08).
 /// </para>
 /// </remarks>
 public static class FlagProbe

@@ -49,9 +49,9 @@ On channels: *"Neither `--channels` nor `--dangerously-load-development-channels
 `claude --help` while the feature is in preview. **The flags work even though they aren't listed.**"*
 So "not in `--help`" is not evidence of absence on **either** vendor — the vendor says so directly.
 
-### 3. `--permission-prompt-tool` is documented in the CLI reference, just absent from `--help`
+### 3. `--permission-prompt-tool` is documented in the CLI reference; was absent from `--help` through 2.1.258
 
-Those are different claims. The documentation states two constraints not otherwise measured:
+See the [later help-surface reading](vendor-capabilities.md#probe-2026-09-08). The documentation states two constraints not otherwise measured:
 
 > "Claude Code waits for that tool's MCP server to connect before running the first turn, up to the
 > `MCP_TIMEOUT` startup timeout of **30 seconds**. The prompt tool **can't approve an MCP tool marked
