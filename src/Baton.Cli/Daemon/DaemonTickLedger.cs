@@ -78,13 +78,32 @@ internal sealed class DaemonTickLedger
     internal IReadOnlyList<ServiceTick> Snapshot() =>
         [.. _ticks.Select(kv => kv.Value with { Service = kv.Key }).OrderByDescending(t => t.CompletedAt)];
 
+    /// <summary>The shortest cadence any service has reported so far, or null before the first tick.
+    /// What <see cref="DaemonWatchdog"/>'s fleet-silence arm is keyed on (#2082): read from the ticks
+    /// themselves rather than a list of registered services, so a service that is added, removed or
+    /// re-timed changes the bound without anyone remembering to update a constant.</summary>
+    internal TimeSpan? ShortestInterval()
+    {
+        TimeSpan? shortest = null;
+        foreach (var tick in _ticks.Values)
+        {
+            if (tick.Interval > TimeSpan.Zero && (shortest is null || tick.Interval < shortest))
+            {
+                shortest = tick.Interval;
+            }
+        }
+
+        return shortest;
+    }
+
     /// <summary>
-    /// The heartbeat file's body: <c>tickCompletedAt</c> (the most recent completion across every
-    /// service — the single field an outside reader needs to answer "is this daemon still turning
-    /// over") plus, per service, the duration of its own last tick in milliseconds and when it
-    /// finished.
+    /// The heartbeat file's body — spec/baton.md §7 ("The daemon watches itself") is the schema's one
+    /// statement. <c>tickCompletedAt</c> is the most recent completion across every service (the
+    /// single field an outside reader needs to answer "is this daemon still turning over"); per
+    /// service, the duration of its own last tick in milliseconds beside when it finished; and
+    /// <paramref name="load"/> as <c>hostLoad</c>, the host as it looked when this body was rendered.
     /// </summary>
-    internal string RenderHeartbeatJson()
+    internal string RenderHeartbeatJson(HostLoadSample load)
     {
         var services = new JsonObject();
         DateTimeOffset? newest = null;
@@ -106,6 +125,7 @@ internal sealed class DaemonTickLedger
             ["tickCompletedAt"] = (newest ?? _startedAt).ToString("O"),
             ["startedAt"] = _startedAt.ToString("O"),
             ["services"] = services,
+            ["hostLoad"] = load.ToJson(),
         }.ToJsonString();
     }
 
