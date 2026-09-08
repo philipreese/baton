@@ -1103,4 +1103,152 @@ public class ProjectionCheckpointTests
             DirectoryCleanup.DeleteRecursively(tempDir);
         }
     }
+
+    /// <summary>
+    /// #2069: a checkpoint the current reader will never accept — a room whose file predates the
+    /// current shape and which nothing will ever rewrite — used to cost one stderr line per projection
+    /// tick. Measured 2026-09-07: 308 identical lines in one daemon's stderr, all naming the same room.
+    /// Reverting <c>ReportFallbackLoudly</c>'s memo makes this arm read 5.
+    /// </summary>
+    [Fact]
+    public void Repeated_identical_rejection_of_one_checkpoint_reports_once_per_process()
+    {
+        var tempDir = Path.Combine(Path.GetTempPath(), "baton_2069_repeat_" + Guid.NewGuid().ToString("n"));
+        try
+        {
+            WriteVersionRejectedCheckpoint(tempDir);
+
+            using var sw = new StringWriter();
+            var originalErr = Console.Error;
+            Console.SetError(sw);
+
+            var loads = new List<ProjectionCheckpoint?>();
+            try
+            {
+                for (var i = 0; i < 5; i++)
+                {
+                    loads.Add(ProjectionCheckpointStore.Load(tempDir));
+                }
+            }
+            finally
+            {
+                Console.SetError(originalErr);
+            }
+
+            // The line is rate-limited; the fallback is not. Every tick still replays in full.
+            Assert.All(loads, Assert.Null);
+            Assert.Equal(1, CountLoudLines(sw.ToString()));
+        }
+        finally
+        {
+            DirectoryCleanup.DeleteRecursively(tempDir);
+        }
+    }
+
+    /// <summary>
+    /// #2069 control arm: the memo is keyed per checkpoint file, not global. Without this, a memo that
+    /// reported the very first rejection of the process and then went silent forever would pass the
+    /// arm above while hiding every other room — which is the failure the loud line exists to prevent.
+    /// </summary>
+    [Fact]
+    public void Two_rooms_with_rejected_checkpoints_each_report_once()
+    {
+        var tempDirA = Path.Combine(Path.GetTempPath(), "baton_2069_roomA_" + Guid.NewGuid().ToString("n"));
+        var tempDirB = Path.Combine(Path.GetTempPath(), "baton_2069_roomB_" + Guid.NewGuid().ToString("n"));
+        try
+        {
+            WriteVersionRejectedCheckpoint(tempDirA);
+            WriteVersionRejectedCheckpoint(tempDirB);
+
+            using var sw = new StringWriter();
+            var originalErr = Console.Error;
+            Console.SetError(sw);
+            try
+            {
+                Assert.Null(ProjectionCheckpointStore.Load(tempDirA));
+                Assert.Null(ProjectionCheckpointStore.Load(tempDirB));
+                Assert.Null(ProjectionCheckpointStore.Load(tempDirA));
+                Assert.Null(ProjectionCheckpointStore.Load(tempDirB));
+            }
+            finally
+            {
+                Console.SetError(originalErr);
+            }
+
+            var errOutput = sw.ToString();
+            Assert.Equal(2, CountLoudLines(errOutput));
+            Assert.Contains(ProjectionCheckpointStore.GetCheckpointFilePath(tempDirA), errOutput);
+            Assert.Contains(ProjectionCheckpointStore.GetCheckpointFilePath(tempDirB), errOutput);
+        }
+        finally
+        {
+            DirectoryCleanup.DeleteRecursively(tempDirA);
+            DirectoryCleanup.DeleteRecursively(tempDirB);
+        }
+    }
+
+    /// <summary>
+    /// #2069, the polarity the memo must NOT swallow: the same file rejected for a DIFFERENT reason is
+    /// a different fallback, and silencing it would make this fix cause the harm it was written to end.
+    /// <c>ProjectionCheckpointStore.ReportedRejections</c>' remarks are where that rule and the
+    /// suppressed count's one and only outlet are recorded.
+    /// </summary>
+    [Fact]
+    public void A_changed_rejection_reason_for_the_same_checkpoint_reports_again_with_the_suppressed_count()
+    {
+        var tempDir = Path.Combine(Path.GetTempPath(), "baton_2069_reasonchange_" + Guid.NewGuid().ToString("n"));
+        try
+        {
+            WriteVersionRejectedCheckpoint(tempDir);
+            var checkpointFile = ProjectionCheckpointStore.GetCheckpointFilePath(tempDir);
+
+            using var sw = new StringWriter();
+            var originalErr = Console.Error;
+            Console.SetError(sw);
+            try
+            {
+                // One reported, two suppressed.
+                Assert.Null(ProjectionCheckpointStore.Load(tempDir));
+                Assert.Null(ProjectionCheckpointStore.Load(tempDir));
+                Assert.Null(ProjectionCheckpointStore.Load(tempDir));
+
+                // Same file, new reason: the unparseable arm rather than the shape arm.
+                File.WriteAllText(checkpointFile, "{ corrupt json ... }}}");
+                Assert.Null(ProjectionCheckpointStore.Load(tempDir));
+            }
+            finally
+            {
+                Console.SetError(originalErr);
+            }
+
+            var errOutput = sw.ToString();
+            Assert.Equal(2, CountLoudLines(errOutput));
+            Assert.Contains("is missing version/aggregates", errOutput);
+            Assert.Contains("Failed to load checkpoint from", errOutput);
+            Assert.Contains("suppressed 2 further time(s)", errOutput);
+        }
+        finally
+        {
+            DirectoryCleanup.DeleteRecursively(tempDir);
+        }
+    }
+
+    /// <summary>
+    /// #2069: a well-formed checkpoint one version behind the reader's gate — the arm all 61 Version-4
+    /// files measured under <c>~/.baton/rooms</c> on 2026-09-07 land in, and the one the observed 308
+    /// repeats came from. Written through <see cref="ProjectionCheckpointStore.Save"/> rather than as
+    /// hand-rolled JSON on purpose: <c>FlowEventLogJson.Options</c> sets
+    /// <c>RespectRequiredConstructorParameters</c>, so a JSON literal missing <c>state</c> throws and
+    /// lands in the <i>unparseable</i> arm instead, which is a different reason and would not
+    /// discriminate.
+    /// </summary>
+    private static void WriteVersionRejectedCheckpoint(string roomDirectoryPath)
+    {
+        var (_, checkpoint) = StateProjector.ProjectAndCheckpoint([], TestSnapshot());
+        ProjectionCheckpointStore.Save(
+            roomDirectoryPath, checkpoint with { Version = ProjectionCheckpoint.CurrentVersion - 1 });
+    }
+
+    private static int CountLoudLines(string errOutput) =>
+        errOutput.Split('\n').Count(line => line.Contains("Fallback to full replay LOUDLY", StringComparison.Ordinal));
 }
