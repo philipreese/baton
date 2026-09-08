@@ -33,6 +33,110 @@ public class DaemonWatchdogTests
         return (watchdog, ledger, log, exits);
     }
 
+    /// <summary>The six services the daemon hosts today, at the cadences `heartbeat.json` recorded on
+    /// 2026-09-08 — except that the fixture's shortest is 30 s rather than WatchSweep's real 15 s, so
+    /// the fleet arm's "2 x the shortest" lands exactly on the 60 s floor and both halves of the rule
+    /// are exercised by one number.</summary>
+    private static readonly (string Service, TimeSpan Interval)[] SixServices =
+    [
+        (nameof(FleetProjectionWriter), TimeSpan.FromSeconds(30)),
+        (nameof(WatchSweep), TimeSpan.FromSeconds(30)),
+        (nameof(QueueSchedulerService), TimeSpan.FromSeconds(30)),
+        (nameof(VendorUsageHarvester), TimeSpan.FromSeconds(30)),
+        (nameof(DeliveryPoller), TimeSpan.FromSeconds(300)),
+        (nameof(RoomRetentionSweep), TimeSpan.FromSeconds(300)),
+    ];
+
+    private static void TickAll(DaemonTickLedger ledger, IEnumerable<(string Service, TimeSpan Interval)> services)
+    {
+        foreach (var (service, interval) in services)
+        {
+            ledger.RecordTick(service, TimeSpan.FromMilliseconds(100), interval);
+        }
+    }
+
+    /// <summary>
+    /// #2082: the 2026-09-08 shape. Every service's last tick lands in one window, then nothing —
+    /// and the trip has to come at twice the shortest interval, not at 5 x the projection interval
+    /// (150 s here) and nowhere near the 778 s the incident's verdict line quoted for DeliveryPoller.
+    /// </summary>
+    [Fact]
+    public void AllSixServicesStalling_TripsAtTwiceTheShortestInterval()
+    {
+        var clock = new FixtureClock(T0);
+        var (watchdog, ledger, log, exits) = Build(clock);
+        TickAll(ledger, SixServices);
+
+        // At the bound itself: not yet. The arm is "longer than", so a service completing exactly on
+        // its second period is still on time.
+        clock.Advance(TimeSpan.FromSeconds(60));
+        Assert.False(watchdog.CheckOnce());
+        Assert.Empty(exits);
+
+        clock.Advance(TimeSpan.FromSeconds(1));
+        Assert.True(watchdog.CheckOnce());
+        Assert.Equal(DaemonWatchdog.HungExitCode, Assert.Single(exits));
+
+        var line = Assert.Single(log);
+        Assert.Contains("in 61s", line);
+        Assert.Contains("2 x the shortest service interval (30s)", line);
+        Assert.DoesNotContain("projection interval", line);
+    }
+
+    /// <summary>The control for the arm above, and the ruling the class doc states: one service
+    /// stalling beside five that keep ticking never trips, however long it stays silent. Without this
+    /// the arm above would pass against a watchdog keyed on the QUIETEST service.</summary>
+    [Fact]
+    public void FiveServicesTicking_WhileOneStalls_NeverTrips()
+    {
+        var clock = new FixtureClock(T0);
+        var (watchdog, ledger, _, exits) = Build(clock);
+        TickAll(ledger, SixServices);
+
+        // Two hours: only DeliveryPoller falls silent -- longer than either arm's bound many times
+        // over -- while the other five keep completing on their own cadences.
+        var healthy = SixServices.Where(s => s.Service != nameof(DeliveryPoller)).ToArray();
+        for (var i = 0; i < 240; i++)
+        {
+            clock.Advance(TimeSpan.FromSeconds(30));
+            TickAll(ledger, healthy);
+            Assert.False(watchdog.CheckOnce());
+        }
+
+        Assert.Empty(exits);
+    }
+
+    /// <summary>The floor: a 5 s service does not make the fleet arm a 10 s trigger — a GC pause
+    /// would then cost a restart, which today kills every queue-launched lane.</summary>
+    [Fact]
+    public void TheFleetArm_NeverTripsInsideTheFloor_WhateverTheShortestInterval()
+    {
+        Assert.Equal(DaemonWatchdog.FleetSilenceFloor, DaemonWatchdog.FleetSilenceLimit(TimeSpan.FromSeconds(5)));
+        Assert.Equal(TimeSpan.FromSeconds(60), DaemonWatchdog.FleetSilenceLimit(TimeSpan.FromSeconds(30)));
+        Assert.Equal(TimeSpan.FromMinutes(4), DaemonWatchdog.FleetSilenceLimit(TimeSpan.FromMinutes(2)));
+        Assert.Null(DaemonWatchdog.FleetSilenceLimit(null));
+
+        var clock = new FixtureClock(T0);
+        var (watchdog, ledger, _, exits) = Build(clock);
+        ledger.RecordTick(nameof(WatchSweep), TimeSpan.FromMilliseconds(1), TimeSpan.FromSeconds(5));
+
+        clock.Advance(TimeSpan.FromSeconds(59));
+        Assert.False(watchdog.CheckOnce());
+        clock.Advance(TimeSpan.FromSeconds(2));
+        Assert.True(watchdog.CheckOnce());
+        Assert.Single(exits);
+    }
+
+    /// <summary>The supervision thread's own cadence never stretches past half the floor, or a
+    /// projection interval of five minutes would make the 60 s arm a five-minute one in practice.</summary>
+    [Fact]
+    public void TheWakeCadence_FollowsTheProjectionInterval_ButNeverPastHalfTheFloor()
+    {
+        Assert.Equal(TimeSpan.FromSeconds(10), DaemonWatchdog.WakeCadence(TimeSpan.FromSeconds(10)));
+        Assert.Equal(TimeSpan.FromSeconds(30), DaemonWatchdog.WakeCadence(TimeSpan.FromSeconds(30)));
+        Assert.Equal(TimeSpan.FromSeconds(30), DaemonWatchdog.WakeCadence(TimeSpan.FromMinutes(5)));
+    }
+
     [Fact]
     public void ATickThatNeverCompletes_TripsTheExitPath()
     {
@@ -40,15 +144,16 @@ public class DaemonWatchdogTests
         var (watchdog, ledger, log, exits) = Build(clock);
 
         // One healthy round first, so the trip below is about the SILENCE that follows and not about
-        // a ledger that never held anything.
+        // a ledger that never held anything. Shortest interval 15 s, so the fleet arm sits at its
+        // 60 s floor -- well inside the projection arm's 150 s, which is the whole point of #2082.
         ledger.RecordTick(nameof(FleetProjectionWriter), TimeSpan.FromSeconds(2), Interval);
         ledger.RecordTick(nameof(WatchSweep), TimeSpan.FromSeconds(1), TimeSpan.FromSeconds(15));
 
-        clock.Advance(Interval * DaemonWatchdog.MissedTickAllowance);
+        clock.Advance(DaemonWatchdog.FleetSilenceFloor);
         Assert.False(watchdog.CheckOnce());
         Assert.Empty(exits);
 
-        // ... and one tick past the allowance, with still nothing completing.
+        // ... and one wake past the floor, with still nothing completing.
         clock.Advance(Interval);
         Assert.True(watchdog.CheckOnce());
 
@@ -152,18 +257,68 @@ public class DaemonWatchdogTests
         Assert.Contains("none has ever reported a tick", Assert.Single(log));
     }
 
-    /// <summary>The bound is 5 x whatever interval is actually in effect, not a pinned 150 seconds:
-    /// an operator who widens the projection interval widens this with it.</summary>
+    /// <summary>The projection arm's bound is 5 x whatever interval is actually in effect, not a pinned
+    /// 150 seconds: an operator who widens the projection interval widens this with it. Three minutes
+    /// of silence sits inside the fleet arm too (2 x 2 min), so it is the projection arm alone that
+    /// separates the two calls.</summary>
     [Fact]
-    public void TheBoundTracksTheIntervalInEffect()
+    public void TheProjectionArmsBound_TracksTheIntervalInEffect()
     {
         var clock = new FixtureClock(T0);
         var ledger = new DaemonTickLedger(() => clock.Now);
         ledger.RecordTick(nameof(FleetProjectionWriter), TimeSpan.FromSeconds(1), TimeSpan.FromMinutes(2));
 
-        clock.Advance(TimeSpan.FromMinutes(9));
+        clock.Advance(TimeSpan.FromMinutes(3));
         Assert.Null(DaemonWatchdog.Evaluate(ledger, clock.Now, TimeSpan.FromMinutes(2)));
-        Assert.NotNull(DaemonWatchdog.Evaluate(ledger, clock.Now, TimeSpan.FromSeconds(30)));
+        var line = DaemonWatchdog.Evaluate(ledger, clock.Now, TimeSpan.FromSeconds(30));
+        Assert.NotNull(line);
+        Assert.Contains("5 x the 30s projection interval", line);
+    }
+
+    /// <summary>#2082: the verdict carries the host as the watchdog's own thread sees it at the trip —
+    /// the one reading of a frozen process that no pool thread has to run for.</summary>
+    [Fact]
+    public void TheVerdict_CarriesTheHostLoadSampleTakenAtTheTrip()
+    {
+        var clock = new FixtureClock(T0);
+        var ledger = new DaemonTickLedger(() => clock.Now);
+        var log = new List<string>();
+        var sampledAt = new List<DateTimeOffset>();
+        var watchdog = new DaemonWatchdog(
+            ledger, () => clock.Now, () => Interval, log.Add, _ => { },
+            sampleLoad: now =>
+            {
+                sampledAt.Add(now);
+                return new HostLoadSample(now, 412, 3, 48L * 1024 * 1024, 96L * 1024 * 1024);
+            });
+        ledger.RecordTick(nameof(WatchSweep), TimeSpan.FromMilliseconds(1), TimeSpan.FromSeconds(15));
+
+        clock.Advance(TimeSpan.FromSeconds(90));
+        Assert.True(watchdog.CheckOnce());
+
+        Assert.Equal(T0.AddSeconds(90), Assert.Single(sampledAt));
+        Assert.Contains("thread pool 412 pending on 3 threads, GC heap 48 MiB, working set 96 MiB", Assert.Single(log));
+    }
+
+    [Fact]
+    public void TheHostLoadSample_RoundTripsThroughItsJson_AndAnOlderBodyReadsAsNoSample()
+    {
+        var sample = new HostLoadSample(T0.AddSeconds(42), 17, 9, 123_456_789, 987_654_321);
+
+        var body = JsonNode.Parse(sample.ToJson().ToJsonString());
+        Assert.Equal(sample, HostLoadSample.FromJson(body));
+
+        // A heartbeat written before #2082 has no hostLoad at all; a half-written one is no better.
+        Assert.Null(HostLoadSample.FromJson(null));
+        Assert.Null(HostLoadSample.FromJson(JsonNode.Parse("""{"sampledAt":"2026-09-08T03:12:42+00:00"}""")));
+
+        // The live capture reads real counters: a thread count of zero would mean the reading is a
+        // stub, since the test itself is running on one.
+        var live = HostLoadSample.Capture(T0);
+        Assert.Equal(T0, live.SampledAt);
+        Assert.True(live.ThreadPoolThreads >= 0);
+        Assert.True(live.GcTotalMemoryBytes > 0);
+        Assert.True(live.WorkingSetBytes > 0);
     }
 
     /// <summary>Both polarities of the over-interval line <see cref="DaemonTickLedger.RecordTick"/>
@@ -196,7 +351,8 @@ public class DaemonWatchdogTests
         clock.Advance(TimeSpan.FromSeconds(5));
         ledger.RecordTick(nameof(FleetProjectionWriter), TimeSpan.FromSeconds(3), Interval);
 
-        var root = JsonNode.Parse(ledger.RenderHeartbeatJson())!.AsObject();
+        var load = new HostLoadSample(clock.Now, 5, 12, 40_000_000, 60_000_000);
+        var root = JsonNode.Parse(ledger.RenderHeartbeatJson(load))!.AsObject();
 
         // tickCompletedAt is the NEWEST completion across services, so a reader needs no knowledge of
         // which services exist (DaemonTickLedger's doc has why that field is shaped that way).
@@ -209,6 +365,10 @@ public class DaemonWatchdogTests
         Assert.Equal(
             T0.AddSeconds(10).ToString("O"),
             services[nameof(WatchSweep)]!["completedAt"]!.GetValue<string>());
+
+        // #2082: the load sample rides beside the services, under the field name spec §7 states.
+        Assert.Equal(load, HostLoadSample.FromJson(root["hostLoad"]));
+        Assert.Equal(TimeSpan.FromSeconds(15), ledger.ShortestInterval());
     }
 
     /// <summary>Before any tick has landed the heartbeat reports the process start time, never a
@@ -220,9 +380,10 @@ public class DaemonWatchdogTests
         var ledger = new DaemonTickLedger(() => clock.Now);
         clock.Advance(TimeSpan.FromMinutes(20));
 
-        var root = JsonNode.Parse(ledger.RenderHeartbeatJson())!.AsObject();
+        var root = JsonNode.Parse(ledger.RenderHeartbeatJson(HostLoadSample.Capture(clock.Now)))!.AsObject();
         Assert.Equal(T0.ToString("O"), root["tickCompletedAt"]!.GetValue<string>());
         Assert.Empty(root["services"]!.AsObject());
+        Assert.Null(ledger.ShortestInterval());
     }
 
     /// <summary>2026-09-06 round-3 review: the PRODUCTION verdict writer, driven against a temp

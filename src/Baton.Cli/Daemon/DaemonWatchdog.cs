@@ -10,19 +10,35 @@ namespace Baton.Cli.Daemon;
 /// On 2026-09-06 at 14:51 the daemon stopped writing anything — the log, the projection, the pusher's
 /// upstream — and stayed that way for thirteen minutes with its process alive, a 6.6 MB working set,
 /// and its scheduled task reporting Running. Nothing recovered it; a person did. This service exits
-/// the process non-zero when no hosted service has completed a tick in
-/// <see cref="MissedTickAllowance"/> × the projection interval, so the <c>baton-daemon</c> scheduled
-/// task's repeating five-minute trigger (registered by
+/// the process non-zero once the whole daemon has been silent past the bound spec/baton.md §7 ("The
+/// daemon watches itself") states — two arms, either trips: <see cref="FleetSilenceMultiplier"/>
+/// × the shortest service interval the ledger has seen, floored at <see cref="FleetSilenceFloor"/>
+/// (#2082), or <see cref="MissedTickAllowance"/> × the projection interval (#1981) — so the
+/// <c>baton-daemon</c> scheduled task's repeating five-minute trigger (registered by
 /// <c>tools/tool-refresh/register-daemon-task.ps1</c>) brings it back. Same principle as the build
 /// lock's own timeout: a stuck holder that dies is recoverable, a stuck holder that waits is not.
 /// </para>
 /// <para>
+/// <b>Why the fleet-silence arm (#2082).</b> On 2026-09-08 at 03:12Z the projection writer's tick had
+/// grown to 10.97 s against its 30 s interval, then every service's last recorded tick fell inside one
+/// 30 s window; the surviving loop (<see cref="WatchSweep"/>, 15 s) ticked until 03:19:23Z and the
+/// projection arm fired 194 s after that, 619 s after the projection had gone stale. "No service at
+/// all has ticked" is a stronger fact than "the newest tick is older than five projection intervals":
+/// the fastest loop in the process is 15 s and does nothing but read a directory, so its silence for
+/// two of its own periods is already a frozen process, not a slow one. The floor keeps a re-timed
+/// 1 s service from turning a GC pause into a restart that today kills every queue-launched lane
+/// (finding 2 of the same issue).
+/// </para>
+/// <para>
 /// <b>What it does NOT catch, deliberately:</b> one service wedging while its siblings keep ticking.
-/// The trip reads the NEWEST completion across every service, so a stalled
+/// Both arms read the NEWEST completion across every service, so a stalled
 /// <see cref="FleetProjectionWriter"/> beside a healthy <see cref="WatchSweep"/> stays quiet here —
 /// killing the whole daemon over one stuck loop would be a worse trade than the stale projection it
 /// would be curing. That case is what the same issue's <c>fleet_status</c>/glass staleness reading
-/// covers instead: it keys on the projection file's own <c>derived_at</c>, at three ticks.
+/// covers instead: it keys on the projection file's own <c>derived_at</c>, at three ticks. The cost
+/// of that ruling is visible in the incident above: <c>heartbeat.json</c> is written by the projection
+/// tick, so it froze at 03:12:42Z while <see cref="WatchSweep"/> kept going for seven more minutes,
+/// and read as "six services stopped at once" when one had not.
 /// </para>
 /// <para>
 /// <b>Its own loop runs on a dedicated <see cref="Thread"/> waiting on a
@@ -42,6 +58,16 @@ internal sealed class DaemonWatchdog : IHostedService
     /// on the build lock), and this action is to kill the process — the false-positive costs a
     /// restart, so the bar sits well above ordinary slowness.</summary>
     internal const int MissedTickAllowance = 5;
+
+    /// <summary>The fleet-silence arm (#2082): no service at all has completed a tick in this many
+    /// of the SHORTEST service interval. Two, not five: the class doc has why a whole-process silence
+    /// earns a lower bar than one slow loop.</summary>
+    internal const int FleetSilenceMultiplier = 2;
+
+    /// <summary>The fleet-silence arm never trips inside this, whatever the shortest interval is —
+    /// the class doc has why. Sixty seconds is also what the arm resolves to today with
+    /// <see cref="WatchSweep"/>'s 15 s cadence as the shortest.</summary>
+    internal static readonly TimeSpan FleetSilenceFloor = TimeSpan.FromSeconds(60);
 
     /// <summary>
     /// Non-zero, and specifically not 1: an exit code an operator finds in the scheduled task's Last
@@ -87,20 +113,22 @@ internal sealed class DaemonWatchdog : IHostedService
     private readonly Action<int> _exit;
     private readonly Action<string> _writeVerdictFile;
     private readonly Action _armLastResortKill;
+    private readonly Func<DateTimeOffset, HostLoadSample> _sampleLoad;
     private readonly CancellationTokenSource _stopping = new();
     private Thread? _thread;
 
     public DaemonWatchdog()
         : this(DaemonTickLedger.Instance, () => DateTimeOffset.UtcNow, FleetProjectionWriter.GetInterval,
-               Console.Error.WriteLine, Environment.Exit, WriteVerdictFile, ArmLastResortKill)
+               Console.Error.WriteLine, Environment.Exit, WriteVerdictFile, ArmLastResortKill, HostLoadSample.Capture)
     {
     }
 
     /// <summary>Test-only seam (Baton.Cli.Tests, via <c>InternalsVisibleTo</c>): a fixture clock and a
     /// captured exit, so both polarities can be driven without waiting real minutes or killing the
-    /// test host. The last two default to no-ops precisely so a test can never get the real
-    /// <see cref="Process.Kill()"/> timer or write into a real <c>~/.baton</c>; a test that wants to
-    /// observe the ordering passes recorders.</summary>
+    /// test host. The verdict-file and kill seams default to no-ops precisely so a test can never get
+    /// the real <see cref="Process.Kill()"/> timer or write into a real <c>~/.baton</c>; a test that
+    /// wants to observe the ordering passes recorders. <paramref name="sampleLoad"/> defaults to the
+    /// live counters, which are harmless to read from a test.</summary>
     internal DaemonWatchdog(
         DaemonTickLedger ledger,
         Func<DateTimeOffset> clock,
@@ -108,7 +136,8 @@ internal sealed class DaemonWatchdog : IHostedService
         Action<string> log,
         Action<int> exit,
         Action<string>? writeVerdictFile = null,
-        Action? armLastResortKill = null)
+        Action? armLastResortKill = null,
+        Func<DateTimeOffset, HostLoadSample>? sampleLoad = null)
     {
         _ledger = ledger;
         _clock = clock;
@@ -117,7 +146,14 @@ internal sealed class DaemonWatchdog : IHostedService
         _exit = exit;
         _writeVerdictFile = writeVerdictFile ?? (_ => { });
         _armLastResortKill = armLastResortKill ?? (() => { });
+        _sampleLoad = sampleLoad ?? HostLoadSample.Capture;
     }
+
+    /// <summary>How long the supervision thread sleeps between passes: the projection interval, but
+    /// never more than half <see cref="FleetSilenceFloor"/> — an operator who widens the projection
+    /// interval to minutes must not widen the fleet-silence arm's reaction time with it.</summary>
+    internal static TimeSpan WakeCadence(TimeSpan projectionInterval) =>
+        projectionInterval < FleetSilenceFloor / 2 ? projectionInterval : FleetSilenceFloor / 2;
 
     public Task StartAsync(CancellationToken cancellationToken)
     {
@@ -142,7 +178,7 @@ internal sealed class DaemonWatchdog : IHostedService
         {
             // WaitHandle.WaitOne, not Thread.Sleep: same "no thread-pool continuation" property, and a
             // stopping daemon does not have to wait out a whole interval before its thread returns.
-            if (_stopping.Token.WaitHandle.WaitOne(_interval()))
+            if (_stopping.Token.WaitHandle.WaitOne(WakeCadence(_interval())))
             {
                 return;
             }
@@ -172,7 +208,10 @@ internal sealed class DaemonWatchdog : IHostedService
     {
         var now = _clock();
         var interval = _interval();
-        var verdict = Evaluate(_ledger, now, interval);
+        // The sample is taken BEFORE the verdict is judged, on this dedicated thread: it is the one
+        // reading of the frozen host that nothing on the pool has to run for (#2082). Cheap enough to
+        // take on every healthy pass too, and doing so means a trip never runs code for the first time.
+        var verdict = Evaluate(_ledger, now, interval, _sampleLoad(now));
         if (verdict is null)
         {
             return false;
@@ -247,23 +286,52 @@ internal sealed class DaemonWatchdog : IHostedService
         killer.Start();
     }
 
+    /// <summary>The fleet-silence arm's bound for a ledger that has seen <paramref name="shortestInterval"/>
+    /// as its fastest cadence, or null before any service has ticked (the projection arm, measured from
+    /// process start, covers a daemon that wedges during its first pass). The rule itself is stated in
+    /// spec/baton.md §7; this is its arithmetic.</summary>
+    internal static TimeSpan? FleetSilenceLimit(TimeSpan? shortestInterval)
+    {
+        if (shortestInterval is not { } shortest)
+        {
+            return null;
+        }
+
+        var scaled = shortest * FleetSilenceMultiplier;
+        return scaled > FleetSilenceFloor ? scaled : FleetSilenceFloor;
+    }
+
     /// <summary>
     /// The judgment, pure over a ledger snapshot: null when the daemon is still turning over, otherwise
-    /// the single line to log before exiting. The line names the last service that DID complete a tick
-    /// and the one that has been silent longest, because "the daemon is hung" alone is what
-    /// <c>daemon.log</c> already effectively said on 2026-09-06 — the next stall needs to say which
-    /// loop stopped.
+    /// the single line to log before exiting. The line names which arm tripped, the last service that
+    /// DID complete a tick, the one that has been silent longest, and <paramref name="load"/> — the
+    /// host as it looks right now, from the thread that is still running — because "the daemon is
+    /// hung" alone is what <c>daemon.log</c> already effectively said on 2026-09-06, and "every loop
+    /// stopped at 03:12" is what it said on 2026-09-08 without saying why.
     /// </summary>
-    internal static string? Evaluate(DaemonTickLedger ledger, DateTimeOffset now, TimeSpan interval)
+    internal static string? Evaluate(
+        DaemonTickLedger ledger, DateTimeOffset now, TimeSpan interval, HostLoadSample? load = null)
     {
-        var limit = interval * MissedTickAllowance;
+        var projectionLimit = interval * MissedTickAllowance;
+        var fleetLimit = FleetSilenceLimit(ledger.ShortestInterval());
         var ticks = ledger.Snapshot();
 
         // No service has completed a tick at all yet: measured from process start, so a daemon that
         // wedges during its first pass trips too rather than being read as "nothing due yet".
         var newestAt = ticks.Count > 0 ? ticks[0].CompletedAt : ledger.StartedAt;
         var silence = now - newestAt;
-        if (silence <= limit)
+
+        string bound;
+        if (fleetLimit is { } fleet && silence > fleet)
+        {
+            bound = $"limit {fleet.TotalSeconds:F0}s = {FleetSilenceMultiplier} x the shortest service interval "
+                    + $"({ledger.ShortestInterval()!.Value.TotalSeconds:F0}s), floored at {FleetSilenceFloor.TotalSeconds:F0}s";
+        }
+        else if (silence > projectionLimit)
+        {
+            bound = $"limit {projectionLimit.TotalSeconds:F0}s = {MissedTickAllowance} x the {interval.TotalSeconds:F0}s projection interval";
+        }
+        else
         {
             return null;
         }
@@ -274,11 +342,11 @@ internal sealed class DaemonWatchdog : IHostedService
         var quietest = ticks.Count > 0
             ? $"{ticks[^1].Service}, last completed {ticks[^1].CompletedAt:O} ({(now - ticks[^1].CompletedAt).TotalSeconds:F0}s ago, its interval is {ticks[^1].Interval.TotalSeconds:F0}s)"
             : "every registered service — none has ever reported a tick";
+        var host = load is null ? "" : $"Host now: {load.Describe()}. ";
 
-        return $"DaemonWatchdog: no service has completed a tick in {silence.TotalSeconds:F0}s "
-               + $"(limit {limit.TotalSeconds:F0}s = {MissedTickAllowance} x the {interval.TotalSeconds:F0}s projection interval). "
-               + $"Last to complete: {lastCompleted}. Longest silent: {quietest}. "
+        return $"DaemonWatchdog: no service has completed a tick in {silence.TotalSeconds:F0}s ({bound}). "
+               + $"Last to complete: {lastCompleted}. Longest silent: {quietest}. {host}"
                + $"Exiting {HungExitCode} so the baton-daemon scheduled task's repeating trigger relaunches the daemon; "
-               + $"{BatonPaths.FleetHeartbeatFile} holds the per-service durations as of the last tick that finished.";
+               + $"{BatonPaths.FleetHeartbeatFile} holds the per-service durations and the host-load sample as of the last projection tick that finished.";
     }
 }

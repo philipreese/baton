@@ -354,8 +354,9 @@ public static class BatonPaths
 
     /// <summary>
     /// <c>{Root}/fleet/heartbeat.json</c> — the daemon's own liveness record (#1981), rewritten at the
-    /// end of every projection tick: when the last tick completed, and how long each hosted service's
-    /// most recent tick took. <c>Baton.Cli.Daemon.DaemonTickLedger</c> owns the shape and the rules.
+    /// end of every projection tick: when the last tick completed, how long each hosted service's
+    /// most recent tick took, and (#2082) a host-load sample. spec/baton.md §7 states the schema;
+    /// <c>Baton.Cli.Daemon.DaemonTickLedger</c> renders it.
     /// <para>
     /// Distinct from <see cref="FleetProjectionFile"/> beside it, and the distinction is the point: the
     /// projection answers "what is the fleet doing", this answers "is the process that writes it still

@@ -3965,16 +3965,37 @@ code 2147942470 (exit 70), followed by ten minutes without a restart (#2083).
     the backlog the first run closes, so it needs no bound. A dated one-time observation, not a live
     quantity: re-running it is re-measuring a different day.
 - **The singleton mutex is per-home, not per-user** — `DaemonHost.MutexName` (#1773) owns why.
-- **The daemon watches itself, and dies loudly rather than hanging quietly (#1981).** Every hosted
-  service above reports each completed pass to `DaemonTickLedger` (duration, and its own interval);
-  `FleetProjectionWriter` renders that ledger to `BatonPaths.FleetHeartbeatFile`
-  (`{Root}/fleet/heartbeat.json` — `tickCompletedAt` plus per-service last-tick durations) at the end
-  of every projection tick, and `DaemonWatchdog` kills the process with a non-zero code once the
-  daemon has gone silent for the bound that type states, so the scheduled task's repeating trigger
-  relaunches it (#2083, above).
-  Those types' own doc comments carry the rules — what the watchdog deliberately does not catch (one
-  wedged service beside healthy ones; §6's projection-staleness reading covers that), and why its loop
-  runs on a dedicated thread rather than the thread pool. **The scheduled task's action must preserve
+- **The daemon watches itself, and dies loudly rather than hanging quietly (#1981, #2082).** Every
+  hosted service above reports each completed pass to `DaemonTickLedger` (duration, and its own
+  interval); `FleetProjectionWriter` renders that ledger to `BatonPaths.FleetHeartbeatFile`
+  (`{Root}/fleet/heartbeat.json`) at the end of every projection tick, and `DaemonWatchdog` kills
+  the process with a non-zero code once the daemon has gone silent, so the scheduled task's repeating
+  trigger relaunches it (#2083, above).
+  **The watchdog's rule, stated here once and cited from `DaemonWatchdog`:** it trips when no hosted
+  service has completed a tick within *either* of two bounds, measured from the newest completion
+  across every service (or from process start before any has completed one). The fleet-silence arm
+  (#2082): 2 × the shortest service interval the ledger has seen, never less than 60 s — 60 s today,
+  `WatchSweep`'s 15 s being the shortest. The projection arm (#1981): 5 × the projection interval —
+  150 s at the default, and the only arm in force before the first tick lands. Both read the newest
+  completion, so one wedged service beside healthy siblings trips neither; that case is §6's
+  projection-staleness reading, and `DaemonWatchdog`'s own doc has why killing the daemon over one
+  loop is the worse trade. The supervision thread wakes every projection interval or every 30 s,
+  whichever is shorter, so a widened projection interval does not widen the fleet arm's reaction.
+  **The heartbeat's schema, stated here once:** `tickCompletedAt` (newest completion across
+  services), `startedAt` (process start), `services` (per service: `lastTickMs`, `completedAt`,
+  `intervalMs`), and `hostLoad` (#2082: `sampledAt`, `threadPoolPendingWorkItems`,
+  `threadPoolThreads`, `gcTotalMemoryBytes`, `workingSetBytes` — the process's own counters at the
+  moment the body was rendered, cheap enough to take on a dedicated thread while the pool is wedged).
+  A service's `lastTickMs` against its `intervalMs` is the host-load signal that predates the freeze:
+  on 2026-09-08 `FleetProjectionWriter` had reached 10.97 s against 30 s in the last body written
+  before every loop stopped. The watchdog's verdict line (`{Root}/fleet/watchdog.txt`) carries a
+  fresh `hostLoad` reading taken at the trip, from the one thread still running. The file is written
+  only by the projection tick, so a heartbeat frozen at time T says the *writer* stopped at T; the
+  verdict line, not the file, says when the last service stopped. Its only reader outside this
+  process is `tools/fleet-glass/pusher.py`'s `read_daemon_heartbeat_age_s`, which reads
+  `tickCompletedAt` alone and ignores every other field.
+  Those types' own doc comments carry the rest — what the watchdog deliberately does not catch, and
+  why its loop runs on a dedicated thread rather than the thread pool. **The scheduled task's action must preserve
   the daemon's exit code for diagnosis:** a `powershell.exe -Command "& { … *>> 'daemon.log' }"`
   swallows it without an explicit exit (measured, PowerShell 5.1, 2026-09-06). The wrapper in
   `register-daemon-task.ps1` captures `$LASTEXITCODE`, records it in daemon.log, and returns it with

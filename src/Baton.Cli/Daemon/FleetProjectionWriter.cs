@@ -203,7 +203,11 @@ public sealed class FleetProjectionWriter : BackgroundService
     {
         try
         {
-            WriteAtomic(BatonPaths.FleetHeartbeatFile, DaemonTickLedger.Instance.RenderHeartbeatJson());
+            // #2082: the host-load sample rides the same write, so the last heartbeat a frozen daemon
+            // managed to produce also says what its pool and heap looked like at the time.
+            WriteAtomic(
+                BatonPaths.FleetHeartbeatFile,
+                DaemonTickLedger.Instance.RenderHeartbeatJson(HostLoadSample.Capture(DateTimeOffset.UtcNow)));
         }
         catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
         {
