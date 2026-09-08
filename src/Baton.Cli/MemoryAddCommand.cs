@@ -43,6 +43,13 @@ public static class MemoryAddCommand
     /// <param name="repositoryProbe">
     /// Test seam for the git probe behind the default subject. Production callers pass nothing and get
     /// <see cref="RepositoryIdentityResolver.TryResolveAsync"/> at the working directory.
+    /// <para>
+    /// <b>A probe's answer is used as it comes, while <c>--repository</c> is held to a host refusal —
+    /// and that asymmetry is deliberate, not an omission.</b>
+    /// <see cref="MemoryImportOptionsParser.RequireAHostThatAProbeCouldAnswer"/>'s own remarks say why:
+    /// a probe reading an intranet remote legitimately yields a dotless identity, so the refusal is a
+    /// property of what an operator TYPED. Applying it here would refuse a store that git itself named.
+    /// </para>
     /// </param>
     public static async Task<int> ExecuteAsync(
         MemoryAddOptions options,
