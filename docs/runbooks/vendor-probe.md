@@ -25,7 +25,8 @@ further.
 
 Two findings in `docs/vendor-capabilities.md` exist only because someone pushed back on a confident
 negative: `/usage`, which is absent from `--help` and works perfectly as a slash command, and
-`--permission-prompt-tool`, which is undocumented and accepted.
+`--permission-prompt-tool`, which was undocumented through 2.1.258 and accepted
+([later help-surface reading](../vendor-capabilities.md#probe-2026-09-08)).
 
 ## The two commands, and why they are separate
 
