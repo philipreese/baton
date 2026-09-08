@@ -16,6 +16,11 @@ namespace Baton.Memory;
 /// members accordingly have no import-time producer at all: nothing in the observed filename
 /// vocabulary maps to <see cref="Hypothesis"/> or <see cref="ExecutionDerivedSummary"/>, and inventing
 /// a mapping to fill the table would be exactly that inference.
+/// <para>
+/// <b>Those two are reachable, just not by the import</b> (#2071): <c>baton memory add</c> takes a
+/// declared <c>--kind</c> and writes any of the five, since there the writer is present to state one.
+/// What it will not accept is <see cref="Unknown"/> — see <c>MemoryAddOptionsParser.Kinds</c>.
+/// </para>
 /// </remarks>
 [JsonConverter(typeof(JsonStringEnumConverter<MemoryKind>))]
 public enum MemoryKind
@@ -87,8 +92,15 @@ public enum MemoryKindSource
 /// checkout is keyed to Baton and still records the checkout it came from. The import in this phase
 /// only ever files an entry under the identity the source root <i>derived</i>, because deciding
 /// otherwise requires reading the entry and adjudicating it: <see cref="AssertedBy"/> is the field
-/// that would carry such an adjudication, and <b>this phase ships no writer for it</b> — stated so a
-/// reader does not read the field's existence as a capability.
+/// that would carry such an adjudication, and <b>the IMPORT ships no writer for it</b> — stated so a
+/// reader does not read the field's existence as a capability of that verb.
+/// </para>
+/// <para>
+/// <b>An entry can also be authored rather than imported</b> (#2071, <see cref="AuthoredMemory"/>):
+/// <c>baton memory add</c> writes one row per call, with <see cref="AssertedBy"/> naming whoever ran
+/// it, a declared <see cref="Kind"/>, and a <see cref="SourcePath"/> that is a content-addressed key
+/// rather than a file — that type's remarks state which fields mean something different on such a row
+/// and why. It is the same row shape and the same store, so every reader of one reads the other.
 /// </para>
 /// <para>
 /// <b><see cref="Id"/> is derived, not minted</b>, and that is what makes a re-import a no-op:
@@ -120,8 +132,14 @@ public enum MemoryKindSource
 /// <paramref name="Text"/> — not from the earlier inventory walk, so a file edited between the two
 /// cannot be stored under a digest that describes a version of it nobody kept.
 /// </param>
-/// <param name="SourcePath">The absolute path the text was read from.</param>
-/// <param name="SourceVendor">Which vendor's root it sat in (<c>claude</c>, <c>codex</c>).</param>
+/// <param name="SourcePath">
+/// The absolute path the text was read from — <b>on an authored row, an absolute path no file was
+/// ever written to</b>, standing in as the id's third fact; see <see cref="AuthoredMemory.SourcePathFor"/>.
+/// </param>
+/// <param name="SourceVendor">
+/// Which vendor's root it sat in (<c>claude</c>, <c>codex</c>), or <see cref="AuthoredMemory.Vendor"/>
+/// for a row no vendor file is behind. This field, never the path, is what tells the two apart.
+/// </param>
 /// <param name="SourceScope">Whether that root is the vendor's own or Baton-managed.</param>
 /// <param name="SourceMtimeUtc">
 /// The source file's last-write time, taken from <b>the same open handle</b> that produced
@@ -146,8 +164,12 @@ public enum MemoryKindSource
 /// so a later phase's writer does not need a schema change to say what it always was.
 /// </param>
 /// <param name="AssertedBy">
-/// Who adjudicated <paramref name="Repository"/>, when it was asserted rather than derived. Absent
-/// means derived, which is every entry this phase writes.
+/// Who asserted this entry, when it was asserted rather than derived. <b>Absent means derived, which
+/// is every IMPORTED entry</b>: the import files a row under the identity the source root derived and
+/// never adjudicates one. An <b>authored</b> row (#2071, <see cref="AuthoredMemory"/>) always carries
+/// it, because there is no root to derive a subject from — <c>operator</c> outside a lane, or the
+/// lane's <c>role/vendor/room</c> inside one, which <c>MemoryLaneAssertion</c> states is a reading of
+/// the environment rather than a credential.
 /// </param>
 public sealed record MemoryEntry(
     [property: JsonPropertyName("id")]

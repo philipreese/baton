@@ -857,6 +857,30 @@ public sealed class MemoryProjectionTests : IDisposable
         new(entry, MemoryFactOrigin.Vendor);
 
     /// <summary>
+    /// An authored entry (#2071) names its asserter where an imported one names its file. The imported
+    /// arm is the control: without it this would pass on a projector that printed no provenance at all,
+    /// and the claim is that the two READ differently, not that one of them is quiet.
+    /// </summary>
+    [Fact]
+    public void An_authored_entry_names_its_asserter_and_never_its_stand_in_path()
+    {
+        var authored = AuthoredMemory.Create(
+            Repository, "fixture alpha", MemoryKind.DurableFact, "implement/claude/queue-2071", addedAtUtc: default);
+        var imported = Entry("feedback_a.md", "fixture beta");
+
+        var text = Encoding.UTF8.GetString(MemoryProjection.Build(
+                Repository, "store.jsonl", [Vendor(authored), Vendor(imported)], ProjectionBudget.Default)
+            .Bytes);
+
+        Assert.Contains($"authored through `baton memory add` by `implement/claude/queue-2071`", text, StringComparison.Ordinal);
+        Assert.DoesNotContain(authored.SourcePath, text, StringComparison.Ordinal);
+        Assert.Contains(authored.Id, text, StringComparison.Ordinal);
+
+        // Control: an imported entry still prints the real file it was projected from.
+        Assert.Contains($"projected from `{imported.SourcePath}`", text, StringComparison.Ordinal);
+    }
+
+    /// <summary>
     /// One entry with a derived id, exactly as an import would build it. No clock reaches
     /// <see cref="MemoryEntry.ImportedAtUtc"/>: nothing in a projection reads it, and a clock in a
     /// fixture that feeds a byte-identity assertion is the first thing that would make one flake.

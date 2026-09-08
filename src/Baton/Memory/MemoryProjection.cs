@@ -366,11 +366,20 @@ public static class MemoryProjection
     /// imported. Printing "canonical entry" over one would send an operator into the store after an id
     /// that is not there, which is a back-pointer that resolves to nothing dressed as one that
     /// resolves.
+    /// <para>
+    /// <b>An authored entry (<c>baton memory add</c>, #2071) names its asserter instead of a path.</b>
+    /// Its <see cref="MemoryEntry.SourcePath"/> is a content-addressed key rather than a location and
+    /// no such file exists (<see cref="AuthoredMemory"/>), so printing it here would send a reader to
+    /// open a file that was never written — the same resolves-to-nothing back-pointer the paragraph
+    /// above refuses for a repository-origin id. The id is still the store row, so the sentence still
+    /// reads "canonical entry".
+    /// </para>
     /// </remarks>
     private static string RenderSection(MemoryProjectionCandidate candidate)
     {
         var entry = candidate.Entry;
-        var fileName = Path.GetFileName(entry.SourcePath);
+        var authored = AuthoredMemory.IsAuthored(entry);
+        var fileName = authored ? $"authored:{entry.Id}" : Path.GetFileName(entry.SourcePath);
         var builder = new StringBuilder();
 
         builder.Append("---\n\n");
@@ -386,6 +395,12 @@ public static class MemoryProjection
                 $"Checked-in repository fact `{entry.Id}` ({MemoryJsonNames.Of(entry.Kind)}), read from " +
                 $"`{entry.SourcePath}` in the checkout. **Not a canonical store row** -- this id is derived " +
                 $"for reference and will not be found in the store file named above.\n\n")
+            : authored
+            ? string.Create(
+                CultureInfo.InvariantCulture,
+                $"Canonical entry `{entry.Id}` ({MemoryJsonNames.Of(entry.Kind)}), authored through " +
+                $"`baton memory add` by `{entry.AssertedBy}`. **No source file** -- it was written into the " +
+                $"canonical store directly.\n\n")
             : string.Create(
                 CultureInfo.InvariantCulture,
                 $"Canonical entry `{entry.Id}` ({MemoryJsonNames.Of(entry.Kind)}), projected from `{entry.SourcePath}`.\n\n");

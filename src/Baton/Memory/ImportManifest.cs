@@ -9,7 +9,12 @@ namespace Baton.Memory;
 /// became. The three together are what make an import reversible <b>and</b> checkable — the entry id
 /// says what to remove, and the digest says whether the source is still the file that was read.
 /// </summary>
-/// <param name="SourcePath">Absolute path of the file that was read.</param>
+/// <param name="SourcePath">
+/// Absolute path of the file that was read — or, on the one-row manifest <c>baton memory add</c>
+/// writes (#2071), the authored entry's content-addressed stand-in, which names no file
+/// (<see cref="AuthoredMemory.SourcePathFor"/>). An undo reads <see cref="EntryId"/> and never this,
+/// so the reversal is the same either way.
+/// </param>
 /// <param name="Sha256">Lower-case hex SHA-256 of its bytes at import time.</param>
 /// <param name="SourceMtimeUtc">
 /// Its last-write time at import time — the entry's own, so see <see cref="MemoryEntry.SourceMtimeUtc"/>

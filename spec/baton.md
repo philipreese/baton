@@ -407,6 +407,7 @@ through `RoleDispatch.Materialize` against the real role catalog.
 | `memory` | `baton memory audit [--format text\|json] [--help]` | `MemoryAuditOptionsParser.cs` |
 | `memory` | `baton memory import [--dry-run] [--root <dir>]... [--assert <path>=<repository>]... [--asserted-by <who>] \| --undo <manifest> [--help]` | `MemoryImportOptionsParser.cs` |
 | `memory` | `baton memory sync [--repository <id>] [--apply \| --check] [--format text\|json] [--repository-facts <dir>] [--help]` | `MemorySyncOptionsParser.cs` |
+| `memory` | `baton memory add --text <text> --kind <kind> [--repository <id>] [--dry-run] [--help]` | `MemoryAddOptionsParser.cs` |
 | `audit` | `baton audit lanes [--since <duration>] [--vendor <name>] [--rooms-root <dir>] [--format text\|json] [--help]` | `AuditLanesOptionsParser.cs` |
 
 `templates` narrows to the built-in catalog only (`Baton.Vendors`'s `BuiltInWorkflowTemplates`) —
@@ -5967,6 +5968,30 @@ the archived side of each pair, and two `--root` runs recorded neither side. The
 over **the store plus the incoming run**, never over one run's plan alone, and
 `MemoryStore.ReadResolvedAsync` projects them back onto `supersedes`/`supersededBy` for a reader,
 dropping any whose endpoints are not both in the store it is reading.
+
+**`baton memory add` is the ongoing write path, and the vendor files are projections of what it wrote
+(operator, 2026-09-07 on #1852; built by #2071).** `import` is a one-time backfill of what those files
+held before Baton owned them, not the path new memories arrive by. One entry per call, appended
+through `MemoryStore` — the same writer the import uses, because a canonical store with two writers
+has two ideas of idempotence and the projections would be a cache of whichever won. **An entry
+byte-identical to one already stored is refused with exit 1**, and that refusal is the id rather than a
+comparison pass: `AuthoredMemory` gives an authored row a content-addressed stand-in where an imported
+one has a source path, so `MemoryEntry.Derive`'s three facts collapse to (subject, text). That type's
+remarks carry what the stand-in buys and the two things it is not — no file is written at it, and
+`SourceVendor` rather than the path is what tells an authored row from an imported one. The row is
+reversed by the manifest machinery that already exists (`baton memory import --undo`), one row per add,
+rather than a second reversal format. **`add` does not regenerate the projections**; it prints the
+`baton memory sync … --apply` that does, because sync writes into vendor roots and an add that put
+bytes there unasked is the surprising half of the pair.
+
+**Every authored entry records who asserted it, and `operator` never stands in for a lane that could
+not be read.** `AssertedBy` is `operator` outside a lane and the lane's `role/vendor/room` inside one,
+read from `BATON_ARTIFACTS_ROOT` and the room's sole binding; a lane whose room or bindings will not
+resolve records `lane/<room>` or `lane/unknown`. `MemoryLaneAssertion` carries what keeping those two
+states apart buys and what collapsing them would cost in an append-only store; the ruling this register
+owns is that they are two states rather than one. **It is a reading of the
+environment, not a credential**: which roles may add and what an entry may contain is #1852's next
+write-path decision and is deliberately not built here.
 
 **`baton memory import` — phase B, shipped. Non-destructive by construction, and reversible.** Every
 source is opened read-only and left byte-identical; the verb writes in exactly two places, both under
