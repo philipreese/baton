@@ -539,6 +539,10 @@ def arrests_in_window(arrests, since):
       * `unattributed` -- a null `Adapter`, which every ledger line written before #1745 carries
         (Baton.Domain.FlowEvent's ExecutionArrested.Adapter). Those key on (None, reason) and so can
         never land on any adapter's row, with or without a window.
+
+    Both counts are themselves SCOPED, because they are reported beside a scoped table: under a window
+    they tally only the arrests that window covers, so an unattributable arrest from outside it is not
+    announced as something this table is hiding. Unwindowed, they cover the corpus.
     """
     kept, undated, unattributed = [], 0, 0
     for adapter, reason, when in arrests:
@@ -910,21 +914,28 @@ def _selftest_undated_and_unattributed_arrests_are_dropped_and_counted():
 
     Polarity in both directions on the undated arm: it is kept when there is no window to violate and
     dropped when there is one. A filter that always dropped it would pass a one-sided assertion.
+
+    The two null-Adapter arrests are the other discriminating pair -- one inside the window and one
+    outside it. Both counts are reported beside a SCOPED table, so a windowed run must tally only the
+    one its window covers rather than announcing an arrest from outside the window as something the
+    table is hiding.
     """
     since = _parse_time("2026-09-05T00:00:00Z")
     inside = ("codex", "TokenBudget", _parse_time("2026-09-06T00:00:00Z"))
     undated_arrest = ("codex", "TokenBudget", None)
-    prehistoric = (None, "TokenBudget", _parse_time("2026-09-06T00:00:00Z"))
+    null_adapter_inside = (None, "TokenBudget", _parse_time("2026-09-06T00:00:00Z"))
+    null_adapter_outside = (None, "TokenBudget", _parse_time("2026-09-04T00:00:00Z"))
+    every = [inside, undated_arrest, null_adapter_inside, null_adapter_outside]
 
-    kept, undated, unattributed = arrests_in_window([inside, undated_arrest, prehistoric], None)
-    assert (len(kept), undated, unattributed) == (2, 0, 1), (
-        "unwindowed: the undated arrest is kept (no scope to violate) and only the null-Adapter one "
-        "is dropped -- %r" % (kept,))
+    kept, undated, unattributed = arrests_in_window(every, None)
+    assert (len(kept), undated, unattributed) == (2, 0, 2), (
+        "unwindowed: the undated arrest is kept (no scope to violate) and both null-Adapter arrests "
+        "are dropped and counted -- %r" % (kept,))
 
-    kept, undated, unattributed = arrests_in_window([inside, undated_arrest, prehistoric], since)
+    kept, undated, unattributed = arrests_in_window(every, since)
     assert (len(kept), undated, unattributed) == (1, 1, 1), (
         "windowed: the undated arrest is dropped and counted, not printed under a scope it may not "
-        "belong to -- %r" % (kept,))
+        "belong to; and only the IN-window null-Adapter arrest is announced -- %r" % (kept,))
 
 
 def _selftest_headroom_compares_the_live_meter_and_never_fabricates_a_zero():
