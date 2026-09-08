@@ -233,13 +233,11 @@ public static class IssueWorktreeProvisioner
                     workspace,
                     "the repository-identity probe answered nothing (git missing, timed out, or exited non-zero).");
             case InheritanceOutcome.CandidateUnknown:
-                // #2121: a recorded path that cannot be identified might be the tombstone, so the
-                // never-trusted fallback below is not known to apply. The path is named so the operator
-                // can repair it or `baton trust <path> --forget` the record.
-                throw new ProjectNotTrustedException(
-                    workspace,
-                    $"recorded path '{result.CandidatePath}' could not be identified: {result.ProbeFailure}. "
-                    + $"Repair that checkout, or 'baton trust \"{result.CandidatePath}\" --forget' to drop its record if it is gone.");
+                // #2121: nothing live matched and a recorded path that cannot be identified might be the
+                // tombstone, so the never-trusted fallback below is not known to apply. The exception's
+                // own remedy names that path (not the workspace, which probed fine) so the operator can
+                // repair it or `baton trust <path> --forget` the record.
+                throw new ProjectNotTrustedException(workspace, result.CandidatePath!, result.ProbeFailure!);
             case InheritanceOutcome.Revoked:
                 // #2121: the fallback below is for a repository the operator never trusted, and this one
                 // the operator revoked. The refusal names the tombstone so the operator knows which

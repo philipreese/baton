@@ -170,13 +170,10 @@ public sealed class InheritedProjectCeilingTests : IDisposable
         ProjectCeilingStore.Set(main, ProjectCeiling.Unrestricted, Store);
         ProjectCeilingStore.Set(unrelated, ProjectCeiling.Unrestricted, Store);
 
-        // Every directory the scan will see is identifiable: since #2121 a recorded path the probe
-        // cannot identify ends the lookup as CandidateUnknown rather than being skipped.
         var probe = ProbeOf(new()
         {
             [main] = (null, commonDir),
             [worktree] = (null, commonDir),
-            [grandchild] = (null, commonDir),
             [unrelated] = ("https://github.com/philipreese/basis", null),
         });
 
@@ -335,6 +332,46 @@ public sealed class InheritedProjectCeilingTests : IDisposable
         Assert.Null(silent.Fact);
         Assert.Null(throwing.Fact);
         Assert.Equal(InheritanceOutcome.Inherited, identified.Outcome);
+    }
+
+    /// <summary>
+    /// #2121 re-review: an unidentifiable recorded path does not abort the scan. With a live matching
+    /// source also in the store the worktree inherits from it — one stale record anywhere on the machine
+    /// must not block every dispatch — and the scan runs PAST the unknown in ordinal order (the unknown
+    /// sorts first here). The control is the same store with the live source revoked: the same unknown
+    /// candidate is then what the lookup reports, so the arm above and this one are one condition apart.
+    /// </summary>
+    [Fact]
+    public async Task An_unidentifiable_candidate_does_not_block_inheritance_from_a_live_matching_source()
+    {
+        var archived = MakeDirectory("archived-w2100");
+        var main = MakeDirectory("baton");
+        var worktree = MakeDirectory("w2121");
+        var commonDir = Path.Combine(main, ".git");
+        ProjectCeilingStore.Set(archived, ProjectCeiling.Unrestricted, Store);
+        ProjectCeilingStore.Set(main, ProjectCeiling.Unrestricted, Store);
+        var probe = ProbeOf(new() { [main] = (null, commonDir), [worktree] = (null, commonDir) });
+
+        var withLiveSource = await InheritedProjectCeiling.TryInheritAsync(
+            worktree, Store, probe, TestContext.Current.CancellationToken);
+
+        Assert.Equal(InheritanceOutcome.Inherited, withLiveSource.Outcome);
+        Assert.Equal(ProjectCeilingStore.CanonicalKey(main), ProjectCeilingStore.TryGet(worktree, Store)?.InheritedFrom);
+
+        ProjectCeilingStore.Forget(worktree, Store);
+        ProjectCeilingStore.Revoke(main, Store);
+        var withoutLiveSource = await InheritedProjectCeiling.TryInheritAsync(
+            worktree, Store, probe, TestContext.Current.CancellationToken);
+
+        // A matching tombstone is known, so Revoked outranks the unknown; forget the tombstone too and
+        // the unknown is all that is left to report.
+        Assert.Equal(InheritanceOutcome.Revoked, withoutLiveSource.Outcome);
+        ProjectCeilingStore.Forget(main, Store);
+        var onlyTheUnknown = await InheritedProjectCeiling.TryInheritAsync(
+            worktree, Store, probe, TestContext.Current.CancellationToken);
+        Assert.Equal(InheritanceOutcome.CandidateUnknown, onlyTheUnknown.Outcome);
+        Assert.Equal(ProjectCeilingStore.CanonicalKey(archived), onlyTheUnknown.CandidatePath);
+        Assert.Null(ProjectCeilingStore.TryGet(worktree, Store));
     }
 
     [Fact]

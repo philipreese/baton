@@ -48,6 +48,33 @@ public sealed class ProjectNotTrustedException : BatonFlowException
     }
 
     /// <summary>
+    /// The unidentifiable-candidate refusal (#2121): the workspace itself probed fine, but git could
+    /// not identify <paramref name="candidatePath"/> and nothing live matched (the lookup's
+    /// <c>CandidateUnknown</c> outcome; spec/baton.md §9 has the rule). The remedy names the candidate,
+    /// not the workspace, because the workspace is not what failed: checking that it is a git checkout
+    /// would send the operator to the wrong directory.
+    /// </summary>
+    /// <param name="projectPath">The workspace that was being trusted.</param>
+    /// <param name="candidatePath">The recorded path the probe could not identify.</param>
+    /// <param name="probeFailure">What that probe could not do, in the lookup's own words.</param>
+    public ProjectNotTrustedException(string projectPath, string candidatePath, string probeFailure)
+        : base(
+            $"'{projectPath}' was not given a permission ceiling: recorded path '{candidatePath}' could not be " +
+            $"identified ({probeFailure}), so whether this repository was never trusted or was revoked is unknown. " +
+            "The unrestricted fallback is refused rather than taken on an unidentified record, so the workspace fails closed.")
+    {
+        ProjectPath = projectPath;
+        CandidatePath = candidatePath;
+        TryInvocation =
+            $"repair '{candidatePath}' so 'git' can identify it, or baton trust \"{candidatePath}\" --forget to drop " +
+            $"its record if that checkout is gone, then retry — or baton trust \"{projectPath}\" --ceiling all (or a " +
+            "comma-separated subset of ReadFiles,WriteFiles,RunShellCommands,NetworkAccess) to record one by hand.";
+    }
+
+    /// <summary>The recorded path that could not be identified — set only by the unidentifiable-candidate refusal.</summary>
+    public string? CandidatePath { get; }
+
+    /// <summary>
     /// The revoked-repository refusal (#2121): <paramref name="projectPath"/> is, or is in the same
     /// repository as, a path whose ceiling <c>baton trust --revoke</c> withdrew, and no path of that
     /// repository has been trusted since. Refuses rather than falling back to <c>all</c> or reporting

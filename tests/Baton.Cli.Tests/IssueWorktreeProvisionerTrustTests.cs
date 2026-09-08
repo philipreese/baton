@@ -226,7 +226,16 @@ public sealed class IssueWorktreeProvisionerTrustTests : IDisposable
         Assert.Equal(worktree, refusal.ProjectPath);
         Assert.Contains(ProjectCeilingStore.CanonicalKey(repository), refusal.Message, StringComparison.OrdinalIgnoreCase);
         Assert.Contains("git rev-parse timed out after 10s", refusal.Message, StringComparison.Ordinal);
-        Assert.Contains("--forget", refusal.Message, StringComparison.Ordinal);
+        // The remedy names the RECORDED path, not the workspace: the workspace probed fine, and the
+        // try-line is what the operator acts on (#2121 re-review, L2).
+        Assert.Equal(ProjectCeilingStore.CanonicalKey(repository), refusal.CandidatePath);
+        Assert.Equal(
+            $"repair '{ProjectCeilingStore.CanonicalKey(repository)}' so 'git' can identify it, or baton trust "
+            + $"\"{ProjectCeilingStore.CanonicalKey(repository)}\" --forget to drop its record if that checkout is gone, "
+            + $"then retry — or baton trust \"{worktree}\" --ceiling all (or a comma-separated subset of "
+            + "ReadFiles,WriteFiles,RunShellCommands,NetworkAccess) to record one by hand.",
+            refusal.TryInvocation);
+        Assert.DoesNotContain($"'{worktree}' is a git checkout", refusal.TryInvocation, StringComparison.Ordinal);
         Assert.Null(ProjectCeilingStore.TryGetRecord(worktree, ProjectCeilingStore.DefaultPath));
         Assert.Equal(string.Empty, output.ToString());
     }

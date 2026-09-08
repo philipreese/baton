@@ -4859,21 +4859,29 @@ fallback cannot take it. A tombstone matches the same way a live entry does, thr
 own identity: one whose directory has been deleted matches nothing, so a repository whose every
 checkout was removed after the revoke reads as never trusted again, which is the boundary the
 path-keyed store has always had and not a new one. One whose directory exists but that git cannot
-identify (the probe answered nothing or threw) is not skipped as "no match": the lookup reports
-`CandidateUnknown` naming the path, and a caller with a never-trusted fallback refuses on it, because
-an unidentified record might be the tombstone — the same fail-closed rule the workspace's own probe
-already had, applied to each recorded path. `baton trust <path> --ceiling …` on **any** path of
+identify (the probe answered nothing or threw) is not skipped as "no match", but it does not end the
+scan either: when **no live entry matched**, the lookup reports `CandidateUnknown` naming the first
+such path, and a caller with a never-trusted fallback refuses on it, because an unidentified record
+might be the tombstone — the same fail-closed rule the workspace's own probe already had. When a
+live entry does match, the workspace inherits from it and the unknown is not reported: once one
+matches the repository cannot be `Revoked` whatever the unknown was, and refusing there would let
+one stale record anywhere in the store block every dispatch on the machine. The residual is bounded:
+if the unknown was a narrower live entry of the same repository, what is inherited is wider than the
+operator's narrowest, but still a ceiling they recorded for that repository, never `all`. `baton
+trust <path> --ceiling …` on **any** path of
 the repository ends the revocation: the path itself is overwritten, and the register verb probes each
 remaining tombstone whose directory exists and clears the ones sharing the new path's identity, naming
 each. `trust --list` shows a tombstone as `revoked <timestamp>` with its provenance clause kept, and a
 second `--revoke` of the same path says it is already revoked, with that timestamp, and changes
 nothing. **Two verbs, two leftovers:** `baton trust <path> --revoke` withdraws the grant and leaves
 the tombstone; `baton trust <path> --forget` deletes the record outright, tombstone or live, announces
-the path and what the record was, and is the only verb that removes one — after it the path reads as
-never trusted, and it does not cascade (forgetting a live source leaves its inherited copies granting
-what they did; withdrawing is `--revoke`'s job). A tombstone for a deleted checkout is therefore
-permanent until forgotten, which is what a throwaway-workspace script (`tools/skill-probe/probe.py`)
-runs to leave the store as it found it.
+the path and what the record was, and is the only verb whose purpose is removal — after it the path
+reads as never trusted, and it does not cascade (forgetting a live source leaves its inherited copies
+granting what they did; withdrawing is `--revoke`'s job). Re-trusting with `--ceiling` clears a
+tombstone only by replacing it with a live record of the same repository, as above, so it never
+removes one whose directory is gone. A tombstone for a deleted checkout is therefore permanent until
+forgotten, which is what a throwaway-workspace script (`tools/skill-probe/probe.py`) runs to leave
+the store as it found it.
 Otherwise the effective grant is `ceiling.Cap(roleGrant)` — each category survives only when both the
 role's own grant and the ceiling carry it, re-checked against
 `PermissionGrant.CategoriesDefeatedByTheShell` so a coherent role grant that becomes incoherent once
@@ -6476,8 +6484,9 @@ own output: the inheritance line names the source path, and the fallback prints 
 trusted repository to inherit from; recorded ceiling all`, because the fallback is a real widening and
 a silent one is the shape the announcement exists to rule out. Two other populations refuse instead,
 with `ProjectNotTrustedException` naming the cause, before anything is queued: the identity probe
-answering nothing (git missing, timed out, or exited non-zero) — for the workspace, or for any
-recorded path whose directory exists (§9's `CandidateUnknown`, named in the refusal) — since "git
+answering nothing (git missing, timed out, or exited non-zero) — for the workspace, or for a
+recorded path whose directory exists when no live entry matched (§9's `CandidateUnknown`, named in
+the refusal's remedy) — since "git
 said nothing" is not "no repository is trusted" and stamping `all` on it would let a transient
 failure widen a deliberately narrowed ceiling or hide a tombstone; and a **revoked** repository
 (#2121) — every recorded path of it a tombstone — since
