@@ -109,7 +109,7 @@ def run_dispatch(*, room_dir: Path, workspace: Path, with_skill: bool, model: st
         env=env, cwd=str(REPO_ROOT), timeout=(timeout_minutes + 10) * 60)
 
 
-def make_workspace(root: Path, label: str) -> Path:
+def make_workspace(root: Path, label: str, *, preflight: bool) -> Path:
     """A throwaway git repository. Git, because `implement` delivers a branch and the engine
     provisions a worktree from the workspace before the worker starts."""
     ws = root / label
@@ -123,7 +123,21 @@ def make_workspace(root: Path, label: str) -> Path:
                   "commit", "-q", "-m", "chore: seed"]):
         subprocess.run(["git", *args], cwd=str(ws), check=True,
                        capture_output=True, text=True)
+
+    # Decision 0004's project ceiling: a headless dispatch against an unseen directory fails closed
+    # rather than prompting, so the throwaway has to be trusted before it can be dispatched against.
+    # Revoked again in `main`'s finally, so a run leaves nothing in project-ceilings.json.
+    if not preflight:
+        baton_exe(["trust", str(ws), "--ceiling", "all"])
     return ws
+
+
+def baton_exe(args: list[str]) -> subprocess.CompletedProcess[str]:
+    baton = shutil.which("baton")
+    if baton is None:
+        raise SystemExit("baton is not on PATH -- see README's 'Installing baton'.")
+    return subprocess.run([baton, *args], capture_output=True, text=True,
+                          encoding="utf-8", errors="replace")
 
 
 def worker_working_directory(room_dir: Path, fallback: Path) -> Path:
@@ -206,7 +220,7 @@ def skills_line(console: str) -> str:
 
 def measure(root: Path, label: str, *, with_skill: bool, model: str, timeout_minutes: int,
             preflight: bool) -> dict:
-    workspace = make_workspace(root, f"ws-{label}")
+    workspace = make_workspace(root, f"ws-{label}", preflight=preflight)
     room_dir = root / f"room-{label}"
     started = time.time()
     proc = run_dispatch(room_dir=room_dir, workspace=workspace, with_skill=with_skill,
@@ -242,6 +256,9 @@ def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--runs", type=int, default=3,
                         help="runs per arm (default 3, i.e. the six runs #2079 authorizes)")
+    parser.add_argument("--start", type=int, default=1,
+                        help="first run index, so a stopped-and-inspected first pair can be resumed "
+                             "without re-spending on it")
     parser.add_argument("--model", default="opus",
                         help="claude model. Defaults to the frontier tier's, because a result "
                              "measured on a weaker model would not scope to the lanes that ship.")
@@ -255,7 +272,7 @@ def main() -> int:
     root = Path(tempfile.mkdtemp(prefix="skill-probe-"))
     results = []
     try:
-        for index in range(1, args.runs + 1):
+        for index in range(args.start, args.start + args.runs):
             for with_skill in (True, False):
                 label = f"{'probe' if with_skill else 'control'}-{index}"
                 print(f"== {label} ==", flush=True)
@@ -269,6 +286,10 @@ def main() -> int:
     finally:
         if args.out:
             Path(args.out).write_text(json.dumps(results, indent=1), encoding="utf-8")
+        for result in results:
+            # The trust `make_workspace` recorded is scoped to a directory that is about to stop
+            # existing; leaving it behind would grow project-ceilings.json once per run forever.
+            baton_exe(["trust", result["workspace"], "--revoke"])
         if not args.keep and not results:
             shutil.rmtree(root, ignore_errors=True)
 
