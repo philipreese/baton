@@ -112,6 +112,58 @@ public sealed class QueueLauncherTests : IDisposable
         }
     }
 
+    [Fact]
+    public async Task A_held_ledger_is_projected_after_its_holder_releases()
+    {
+        var root = CreateTempRoot();
+        try
+        {
+            var room = await RunTwoStepRoomAsync(root);
+            var logPath = Path.Combine(room, BatonPaths.FlowLogFileName);
+            await using var holder = new FileStream(logPath, FileMode.Open, FileAccess.ReadWrite, FileShare.None);
+
+            var recording = QueueLauncher.RecordPostLaunchFaultAsync("held", room, "the pump threw");
+            await Task.Delay(TimeSpan.FromMilliseconds(75), Ct);
+            await holder.DisposeAsync();
+            await recording;
+
+            var sentinel = await TerminalSentinelWriter.TryReadAsync(room, Ct);
+            Assert.NotNull(sentinel);
+            Assert.Equal(["a", "b"], sentinel.Steps.Select(step => step.Id).Order().ToArray());
+            Assert.DoesNotContain("bare sentinel because the room ledger remained held", sentinel.Error!, StringComparison.Ordinal);
+        }
+        finally
+        {
+            DirectoryCleanup.DeleteRecursively(root);
+        }
+    }
+
+    [Fact]
+    public async Task A_corrupt_ledger_writes_a_bare_sentinel_that_names_the_degradation_in_its_JSON_fact()
+    {
+        var root = CreateTempRoot();
+        try
+        {
+            var room = await RunTwoStepRoomAsync(root);
+            await File.WriteAllTextAsync(Path.Combine(room, BatonPaths.FlowLogFileName), "{ corrupt jsonl }\n", Ct);
+
+            await QueueLauncher.RecordPostLaunchFaultAsync("corrupt", room, "the pump threw");
+
+            var sentinel = await TerminalSentinelWriter.TryReadAsync(room, Ct);
+            Assert.NotNull(sentinel);
+            Assert.Empty(sentinel.Steps);
+            Assert.Empty(sentinel.Outputs);
+            Assert.Contains("bare sentinel because the room ledger or snapshot is corrupt or unreadable", sentinel.Error!, StringComparison.Ordinal);
+
+            var jsonFact = await File.ReadAllTextAsync(Path.Combine(room, TerminalSentinelWriter.TerminalSentinelFileName), Ct);
+            Assert.Contains("bare sentinel because the room ledger or snapshot is corrupt or unreadable", jsonFact, StringComparison.Ordinal);
+        }
+        finally
+        {
+            DirectoryCleanup.DeleteRecursively(root);
+        }
+    }
+
     /// <summary>
     /// The shape the fault path actually meets — a step still in flight when the pump threw. Its
     /// recorded <c>Running</c> is kept and the projection's live <c>liveness</c> probe is dropped —

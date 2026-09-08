@@ -6002,7 +6002,11 @@ and each is closed where the fact exists:
   long after that engine exited. A room with no
   ledger, no bound snapshot, or an unreadable one still gets the bare sentinel — the write is
   unconditional, because an unprojectable room is exactly the one that would otherwise wedge its item
-  in `launched` forever.
+  in `launched` forever. A ledger held by a conflicting file lock is not that corruption arm: the
+  launcher retries its projection with a short bounded backoff, then writes a bare sentinel that says
+  the ledger remained held if the holder does not release. Missing/corrupt/unreadable records degrade
+  immediately, and every bare sentinel's `error` names that cause so its terminal JSON fact preserves
+  the distinction.
 
   Keeping a mid-lane `Running` step is safe at both readers that key on one, and each for its own
   reason. The live-weight tally behind `MaxLiveWeight` skips any room carrying a sentinel at all
