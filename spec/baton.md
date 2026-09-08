@@ -6834,26 +6834,30 @@ measurement it rests on, and §7's reaper paragraph the line it must not cross.
 - *Launch.* The lane process is started with **no job of the daemon's and no breakaway flag**, with
   the daemon's own stdout/stderr made non-inheritable first (§7's wrapper shell relaunches the daemon
   only once its redirected output reaches EOF, so a surviving lane holding that handle would have
-  wedged the very restart this exists to survive). Measured 2026-09-08 on the operator's box: the
-  daemon runs inside Task Scheduler's own job, and a plainly spawned child of a throwaway scheduled
-  task survived both the task's process exiting and `Stop-ScheduledTask`; the only thing that ever
-  killed a lane on daemon exit was the kill-on-close job the daemon itself owned per worker, which a
-  separate process does not sit in. `Baton.Tests`' `DetachedProcessTests` pins both arms against a
-  killed parent. While the launching daemon lives, the lane's stdout/stderr are relayed into
-  `daemon.log` with `[lane <tag>]` in front; once that daemon dies those lines are lost and the room
-  is the record. So a daemon exit — orderly, watchdog, or crash — orphans the lane's *supervision*
+  wedged the very restart this exists to survive). Why neither a job nor a breakaway is needed is
+  the 2026-09-08 Task Scheduler measurement `DetachedProcess`'s remarks record, pinned in both arms
+  by `DetachedProcessTests`. While the launching daemon lives, the lane's stdout/stderr are relayed
+  into `daemon.log` with `[lane <tag>]` in front, decoded as UTF-8 on the daemon's side; once that
+  daemon dies those lines are lost and the room is the record. So a daemon exit — orderly, watchdog, or crash — orphans the lane's *supervision*
   and nothing else: the worker keeps running and the room keeps journaling.
 - *Adopt.* On start, before its first tick, the scheduler walks every `launched` row that names a
   room, reads the engine pid and start time the room's journal already stamps on
   `ExecutionRequestAccepted`, and asks the ONE liveness probe (`EngineLivenessProbe`, the same one
-  `baton status` and `baton resume` ask). **Alive**: the daemon attaches to that process and
-  supervises it exactly as if it had launched it. **Dead**: the row is left as found — the dead-pump
-  probe (§7) records the arrest, and `baton resolve`/`baton redispatch` are the operator's verbs from
-  there. **Unknown** (no ledger yet, no pid stamped, an unreadable journal): left as found, and done
-  detection still reads the room. Adoption changes no row and writes no sentinel; one line per row
-  lands in `daemon.log` saying which of the three it found. The queue-row vocabulary gains nothing:
-  `launched` already means "not terminal yet, read the room", which is what each of these rows still
-  is.
+  `baton status` and `baton resume` ask). **Alive**: the daemon attaches to that process, re-confirms
+  the start time on the handle it actually holds (a pid alone is a number, and the OS can reuse one
+  in the gap after the probe), and supervises it exactly as if it had launched it. **Dead**: the row
+  is left as found — the dead-pump probe (§7) records the arrest, and `baton resolve`/`baton
+  redispatch` are the operator's verbs from there. **Unknown** (no ledger yet, no pid stamped, an
+  unreadable journal): left as found, and what closes it depends on what the room goes on to write.
+  A lane that was mid-provision and then runs writes its ledger and snapshot, so the dead-pump probe
+  sees it on a later tick and it degrades onto the Dead path above. **A room that exists but never
+  gets a ledger — the lane died before its first journal write — has no closer at all**: the
+  roomless sweep needs the room to be absent, the probe needs a ledger and a snapshot, and adoption
+  runs once per daemon start. That row reads `launched` until the operator resolves it by hand; the
+  adoption line in `daemon.log` naming a room with no ledger is the only signal, and it says so.
+  Adoption changes no row and writes no sentinel; one line per row lands in `daemon.log` saying which
+  of the three it found. The queue-row vocabulary gains nothing: `launched` already means "not
+  terminal yet, read the room", which is what each of these rows still is.
 - *What stays true.* Stopping the daemon still does not arrest a launched lane, and the daemon still
   never re-drives a room (§7). The cost that remains, stated: a lane whose engine died between two
   daemons is closed out by the dead-pump probe's fact plus an operator verb, not by the queue on its

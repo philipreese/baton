@@ -53,6 +53,17 @@ public class SpawnOutputRedirectionTests
             + "blocks the command at 4 KB. Safe under #2030 because it is unreachable from a lane verb: its "
             + "only callers are WatchCommand (verb `watch`) and Daemon/WatchSweep (verb `daemon`), and "
             + "neither is in Program.cs's IsLaneVerb set, so the inherit flag is still set when it spawns.",
+        ["src/Baton/Core/DetachedProcess.cs"] =
+            "#2082 / #2117 review: a SEAM, not a site. Its one ChildProcessStartInfo.Create call is the "
+            + "convenience overload that hands the start info to the caller's configure lambda, so this "
+            + "file's own redirect count is zero by construction and the decision lives in the caller: the "
+            + "daemon's lane spawn builds its start info in QueueLauncher.cs (both streams, UTF-8), which "
+            + "this scan reads directly, and the only remaining caller of the convenience overload is the "
+            + "test-only Baton.CrashTestHost sleeper, whose output is not wanted. The hazard this scan "
+            + "exists for is worse here than anywhere -- DetachedProcess clears HANDLE_FLAG_INHERIT for the "
+            + "caller on every call, so a mixed shape loses a stream silently -- which is why "
+            + "DetachedProcess.Start(ProcessStartInfo) refuses a start info that redirects one output stream "
+            + "without the other, and its class remarks state the rule.",
     };
 
     private const string SeamCall = "ChildProcessStartInfo.Create";

@@ -1,6 +1,7 @@
 using System.ComponentModel;
 using System.Diagnostics;
 using System.Globalization;
+using System.Text;
 using Baton.Core;
 using Baton.Domain;
 using Baton.Outcomes;
@@ -113,25 +114,11 @@ public static class QueueLauncher
         Process process;
         try
         {
-            process = DetachedProcess.Start(fileName, startInfo =>
-            {
-                foreach (var argument in leadingArguments)
-                {
-                    startInfo.ArgumentList.Add(argument);
-                }
-
-                foreach (var argument in arguments)
-                {
-                    startInfo.ArgumentList.Add(argument);
-                }
-
-                // Relayed into daemon.log with the tag in front, so a queue lane's own lines land
-                // where the operator already reads. The redirect is safe to outlive: DetachedProcess
-                // made the daemon's own handles non-inheritable first, and a child whose reader has
-                // gone writes into a broken pipe the console layer drops rather than throws on.
-                startInfo.RedirectStandardOutput = true;
-                startInfo.RedirectStandardError = true;
-            });
+            // Built here rather than inside DetachedProcess: the per-file spawn scans
+            // (SpawnOutputRedirectionTests, RedirectedProcessEncodingTests) read redirects and decode
+            // off whichever file sets them, and DetachedProcess only refuses what they would refuse.
+            process = DetachedProcess.Start(
+                ChildProcessStartInfo.Create(fileName, startInfo => ConfigureLaneStartInfo(startInfo, leadingArguments, arguments)));
         }
         catch (Exception ex) when (ex is Win32Exception or InvalidOperationException or IOException)
         {
@@ -183,10 +170,13 @@ public static class QueueLauncher
     /// <para>
     /// <b>Nothing here changes a row.</b> A dead engine is left exactly as found for the dead-pump
     /// probe (<c>DeadPumpProbe</c>, #2094) to record, and for done detection to resolve once a
-    /// sentinel exists; a room with no probeable identity — a lane still in pre-provision when the
-    /// last daemon died, or a journal this cannot read — is left for the same two readers. No new
-    /// <see cref="QueueItemState"/> for any of them: spec/baton.md §13's adopt clause says why the
-    /// existing word still fits each row.
+    /// sentinel exists. A room with no probeable identity — a lane still in pre-provision when the
+    /// last daemon died, or a journal this cannot read — is left as found too, and what that costs
+    /// is stated rather than assumed: a lane that goes on to write its ledger and snapshot is seen by
+    /// the same probe on a later tick, but a room that exists and never gets a ledger has NO closer
+    /// (the roomless sweep needs the room absent, the probe needs a ledger, adoption runs once per
+    /// daemon start) and is resolved only by the operator. spec/baton.md §13's adopt clause is the
+    /// one home for that ruling and for why no new <see cref="QueueItemState"/> is needed.
     /// </para>
     /// <para>
     /// One line per row on the daemon's stderr, whatever the answer, so <c>daemon.log</c> says on
@@ -216,7 +206,8 @@ public static class QueueLauncher
                     + $"{adoption.EnginePid}); left launched for the dead-pump probe to record",
                 _ =>
                     $"QueueLauncher: lane '{adoption.Tag}' in '{adoption.RoomDirectory}' has no probeable engine "
-                    + $"identity ({adoption.Why}); left launched — done detection reads the room",
+                    + $"identity ({adoption.Why}); left launched — if the room never gets a ledger nothing closes "
+                    + "it, and only the operator can resolve it",
             });
         }
 
@@ -229,6 +220,16 @@ public static class QueueLauncher
     /// <see cref="EngineLivenessProbe"/> and, for an alive one, resumes <see cref="SuperviseAsync"/>
     /// on that process.
     /// </summary>
+    /// <remarks>
+    /// The probe answers by pid and start time, but the attach that follows opens a fresh handle by
+    /// pid number alone, and a pid is a number rather than an identity (<c>WorkerProcessArrest</c>'s
+    /// own doc): in the microseconds between the two the lane can exit and the OS can hand its pid
+    /// to an unrelated process, which this daemon would then supervise and, when it exited, settle
+    /// the room off. So the start time is read again off the handle actually held and compared to
+    /// the journal's, with the probe's own tolerance; a mismatch is the lane having exited, reported
+    /// as such. The window is not steerable from a test, so this is asserted by construction rather
+    /// than measured.
+    /// </remarks>
     internal static async Task<QueueLaneAdoption> AdoptAsync(QueueItem item, CancellationToken cancellationToken)
     {
         ArgumentNullException.ThrowIfNull(item);
@@ -258,8 +259,35 @@ public static class QueueLauncher
             return new QueueLaneAdoption(item.Tag, roomDirectory, EngineLivenessStatus.Dead, pid, "exited while being adopted");
         }
 
+        if (!StartTimeMatches(process, startTime!.Value))
+        {
+            process.Dispose();
+            return new QueueLaneAdoption(
+                item.Tag, roomDirectory, EngineLivenessStatus.Dead, pid,
+                "exited while being adopted; its pid now belongs to another process");
+        }
+
         _ = SuperviseAsync(process, item.Tag, roomDirectory);
         return new QueueLaneAdoption(item.Tag, roomDirectory, EngineLivenessStatus.Alive, pid, null);
+    }
+
+    /// <summary>
+    /// Whether the handle actually held is the process the journal recorded — its start time within
+    /// the same one-second tolerance <see cref="EngineLivenessProbe"/> applies. False for a handle
+    /// whose start time cannot be read at all: that is a process already gone, or one this daemon may
+    /// not inspect, and neither is something to supervise as if it were the lane.
+    /// </summary>
+    private static bool StartTimeMatches(Process process, DateTimeOffset recordedStart)
+    {
+        try
+        {
+            var actual = new DateTimeOffset(process.StartTime).ToUniversalTime();
+            return Math.Abs((actual - recordedStart.ToUniversalTime()).TotalMilliseconds) <= 1000;
+        }
+        catch (Exception ex) when (ex is InvalidOperationException or Win32Exception or UnauthorizedAccessException)
+        {
+            return false;
+        }
     }
 
     /// <summary>
@@ -297,13 +325,24 @@ public static class QueueLauncher
     /// whatever it left. Never throws out — it runs on nobody's await, so a throw here would surface,
     /// if at all, as a process-level unobserved exception far from the lane it concerned.
     /// </summary>
+    /// <remarks>
+    /// Two waits, deliberately of different kinds. The first (<see cref="WaitForOsExitAsync"/>) is
+    /// unbounded in TIME — a lane runs for as long as its own <c>--timeout</c> allows, enforced inside
+    /// the lane, and nothing daemon-side should end it sooner — but it waits on the OS exit signal
+    /// only, never on the redirected streams. <see cref="Process.WaitForExitAsync(CancellationToken)"/>
+    /// would have waited for both: for a process with async readers attached it does not return until
+    /// the streams reach EOF, which a straggler holding a duplicated pipe end can postpone forever,
+    /// and that made <see cref="StreamDrainBound"/> unreachable on this path (#2117 review, finding 4).
+    /// The second wait, inside <see cref="ExitCodeAsync"/>, is the stream drain, and it is the one
+    /// that is bounded.
+    /// </remarks>
     private static async Task SuperviseAsync(Process process, string tag, string roomDirectory)
     {
         try
         {
             using (process)
             {
-                await process.WaitForExitAsync(CancellationToken.None).ConfigureAwait(false);
+                await WaitForOsExitAsync(process).ConfigureAwait(false);
                 var exitCode = await ExitCodeAsync(process).ConfigureAwait(false);
                 await SettleExitedLaneAsync(exitCode, tag, roomDirectory).ConfigureAwait(false);
             }
@@ -313,6 +352,30 @@ public static class QueueLauncher
             Console.Error.WriteLine(
                 $"QueueLauncher: supervising lane '{tag}' in '{roomDirectory}' failed: {ex.Message}");
         }
+    }
+
+    /// <summary>
+    /// Completes when the OS reports <paramref name="process"/> exited — the <see cref="Process.Exited"/>
+    /// signal off the process handle — and never waits for a redirected stream. Works for an adopted
+    /// process as well as a launched one: both are handles, and the exit signal is a property of the
+    /// handle, not of who spawned it. <see cref="SuperviseAsync"/>'s remarks say why this is not
+    /// <see cref="Process.WaitForExitAsync(CancellationToken)"/>.
+    /// </summary>
+    private static Task WaitForOsExitAsync(Process process)
+    {
+        var exited = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        process.EnableRaisingEvents = true;
+        process.Exited += (_, _) => exited.TrySetResult();
+
+        // Enabling the event on a process that already exited still raises it (the registered wait
+        // fires on an already-signalled handle), but the check costs nothing and does not depend on
+        // that: whichever of the two runs second is a no-op.
+        if (process.HasExited)
+        {
+            exited.TrySetResult();
+        }
+
+        return exited.Task;
     }
 
     /// <summary>
@@ -435,6 +498,54 @@ public static class QueueLauncher
             && entryAssembly is { Length: > 0 }
             && entryAssembly.EndsWith(".dll", StringComparison.OrdinalIgnoreCase);
         return viaMuxer ? (processPath, [entryAssembly!]) : (processPath, []);
+    }
+
+    /// <summary>
+    /// Shapes the lane process's start info: the argv, and both output streams redirected with their
+    /// decode pinned to UTF-8. Internal so <c>QueueLauncherTests</c> can assert the shape without a
+    /// spawn — the source-scan tripwire (<c>RedirectedProcessEncodingTests</c>) fails on the same
+    /// revert, but only by counting text; this is the same claim read off the object.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// The streams are relayed into <c>daemon.log</c> with the tag in front, so a queue lane's own
+    /// lines land where the operator already reads. The redirect is safe to outlive: <see cref="DetachedProcess"/>
+    /// makes the daemon's own handles non-inheritable first, and a child whose reader has gone
+    /// writes into a broken pipe the console layer drops rather than throws on. Both streams, never
+    /// one: <see cref="DetachedProcess.Start(ProcessStartInfo)"/> refuses the mixed shape.
+    /// </para>
+    /// <para>
+    /// <b>The decode is pinned on the start info because that is where the reader takes it from</b>:
+    /// the async readers <see cref="LaneOutputRelay"/> starts decode with
+    /// <see cref="ProcessStartInfo.StandardOutputEncoding"/>/<see cref="ProcessStartInfo.StandardErrorEncoding"/>,
+    /// and with those null .NET decodes the pipe with whatever console code page the daemon has —
+    /// OEM under the Task Scheduler wrapper — which is the nondeterminism #466 removed from every
+    /// other redirecting site in <c>src/</c>. What this pins is the daemon's half. The lane's own
+    /// write encoding is the child's, a lane verb's console setting rather than anything this start
+    /// info can reach, and the same bytes the #2030 wrapper shell reads; it is not changed here.
+    /// </para>
+    /// </remarks>
+    internal static void ConfigureLaneStartInfo(
+        ProcessStartInfo startInfo, IReadOnlyList<string> leadingArguments, IReadOnlyList<string> arguments)
+    {
+        ArgumentNullException.ThrowIfNull(startInfo);
+        ArgumentNullException.ThrowIfNull(leadingArguments);
+        ArgumentNullException.ThrowIfNull(arguments);
+
+        foreach (var argument in leadingArguments)
+        {
+            startInfo.ArgumentList.Add(argument);
+        }
+
+        foreach (var argument in arguments)
+        {
+            startInfo.ArgumentList.Add(argument);
+        }
+
+        startInfo.RedirectStandardOutput = true;
+        startInfo.RedirectStandardError = true;
+        startInfo.StandardOutputEncoding = Encoding.UTF8;
+        startInfo.StandardErrorEncoding = Encoding.UTF8;
     }
 
     /// <summary>

@@ -2,6 +2,7 @@ using System.Text.Json;
 using Baton.Cli.Daemon;
 using Baton.Cli.Mcp;
 using Baton.Cli.Tests.TestSupport;
+using Baton.Core;
 using Baton.Domain;
 using Baton.Queue;
 using Baton.Runway;
@@ -704,6 +705,38 @@ public sealed class QueueLauncherTests : IDisposable
         Assert.DoesNotContain("--token-budget", minimal);
         Assert.DoesNotContain("--max-tool-steps", minimal);
         Assert.DoesNotContain("--override-runway", minimal);
+    }
+
+    /// <summary>
+    /// #2117 review, finding 2: the lane's redirected streams decode as UTF-8 on the daemon's side,
+    /// set on the start info, which is what hands <c>BeginOutputReadLine</c> its decoder.
+    /// <c>RedirectedProcessEncodingTests</c> catches a revert of this as a text count; here the
+    /// claim is read off the object instead, including that both streams are
+    /// redirected (the shape <c>DetachedProcess.Start(ProcessStartInfo)</c> requires) and that the argv
+    /// lands in order behind the muxer's leading arguments.
+    /// </summary>
+    [Fact]
+    public void The_lane_start_info_redirects_both_streams_and_pins_their_decode_to_UTF8()
+    {
+        var startInfo = ChildProcessStartInfo.Create(
+            "baton.exe",
+            psi => QueueLauncher.ConfigureLaneStartInfo(psi, ["Baton.Cli.dll"], ["dispatch", "implement", "--room-dir", @"C:\r"]));
+
+        Assert.True(startInfo.RedirectStandardOutput);
+        Assert.True(startInfo.RedirectStandardError);
+        Assert.Same(System.Text.Encoding.UTF8, startInfo.StandardOutputEncoding);
+        Assert.Same(System.Text.Encoding.UTF8, startInfo.StandardErrorEncoding);
+        Assert.Equal(["Baton.Cli.dll", "dispatch", "implement", "--room-dir", @"C:\r"], startInfo.ArgumentList);
+
+        // The polarity control: the factory alone pins nothing, so the assertions above are about
+        // ConfigureLaneStartInfo and not about a default .NET happens to apply.
+        var bare = ChildProcessStartInfo.Create("baton.exe");
+        Assert.False(bare.RedirectStandardOutput);
+        Assert.Null(bare.StandardOutputEncoding);
+        Assert.Null(bare.StandardErrorEncoding);
+
+        // And the shape is the one the detached seam accepts.
+        Assert.Null(DetachedProcess.Refusal(startInfo));
     }
 
     /// <summary>

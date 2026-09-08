@@ -72,6 +72,8 @@ static async Task<int> SpawnArmAsync(string mode, string pidFile)
     string[] sleeperArgs = ["-n", "9999", "127.0.0.1"];
     if (mode == "spawn-detached")
     {
+        // The convenience overload, with nothing redirected: the sleeper's output is not wanted, and
+        // DetachedProcess refuses the one-stream shape that would lose it silently.
         using var child = Baton.Core.DetachedProcess.Start("ping", startInfo =>
         {
             foreach (var arg in sleeperArgs)
@@ -79,8 +81,7 @@ static async Task<int> SpawnArmAsync(string mode, string pidFile)
                 startInfo.ArgumentList.Add(arg);
             }
         });
-        await File.WriteAllTextAsync(pidFile, child.Id.ToString(System.Globalization.CultureInfo.InvariantCulture))
-            .ConfigureAwait(false);
+        WritePidAtomically(pidFile, child.Id);
 
         // Killed from outside; never returns on its own.
         await Task.Delay(Timeout.InfiniteTimeSpan).ConfigureAwait(false);
@@ -92,13 +93,23 @@ static async Task<int> SpawnArmAsync(string mode, string pidFile)
     {
         if (e.Kind == Baton.Core.BatonTaskEventKind.Started)
         {
-            File.WriteAllText(pidFile, e.Pid.ToString(System.Globalization.CultureInfo.InvariantCulture));
+            WritePidAtomically(pidFile, e.Pid);
         }
     };
 
     // Blocks until the sleeper exits, which the test never lets happen: it kills this host first.
     task.Run();
     return 0;
+}
+
+// Written beside and renamed into place, so the test's poll never sees the file exist while this
+// host still holds it open for writing: a direct write is created empty first, and a reader that
+// opens it in that window gets a sharing violation (CI run 34243412086, windows-shard-flow).
+static void WritePidAtomically(string pidFile, long pid)
+{
+    var staging = pidFile + ".tmp";
+    File.WriteAllText(staging, pid.ToString(System.Globalization.CultureInfo.InvariantCulture));
+    File.Move(staging, pidFile, overwrite: true);
 }
 
 static async Task WatchForCancelSignalAsync(
