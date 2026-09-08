@@ -28,9 +28,10 @@ namespace Baton.Vendors.Tests;
 /// (<c>RunCommand.cs</c>/<c>DispatchCommand.cs</c>) — <see cref="RoleDispatch.ToBinding"/>, then
 /// <see cref="WorktreeWorkspaces.Provision"/> (a real <c>git worktree add</c> against a throwaway repo,
 /// not a double), then <see cref="WorkerBindingResolver.Resolve"/> against the real
-/// <see cref="WorkerAdapterRegistry.Default"/>. Skipping the middle call would be dishonest: three of
-/// the seven roles (<c>review</c>, <c>patch</c>, <c>fact-check</c>) — plus <c>orchestrate</c> — withhold
-/// <c>WriteFiles</c> and are tiered to a vendor other than <c>agy</c>, so forcing them onto <c>agy</c>
+/// <see cref="WorkerAdapterRegistry.Default"/>. Skipping the middle call would be dishonest: every role
+/// whose catalog entry withholds <c>WriteFiles</c> — stated as the rule rather than a count, because
+/// the count here was already short by one before #2043 added a role to the set — is tiered to a
+/// vendor other than <c>agy</c>, so forcing those roles onto <c>agy</c>
 /// (#1759's own "for each real adapter") makes <see cref="RoleDispatch.ToBinding"/> widen the grant to
 /// <see cref="GrantAuditMode.AuditedNotEnforced"/> (#901) — a mode <see cref="WorkerBindingResolver"/>
 /// refuses outright (<see cref="UnisolatedGrantAuditException"/>) unless the worktree it demands was
