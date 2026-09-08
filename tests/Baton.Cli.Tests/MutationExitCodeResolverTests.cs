@@ -84,6 +84,19 @@ public class MutationExitCodeResolverTests
         Assert.Throws<ArgumentNullException>(() => MutationExitCodeResolver.Resolve(null!));
     }
 
+    /// <summary>
+    /// #2073: the idempotent arm. A re-run cancel against an already-Failed room writes nothing and
+    /// must exit 0 — the state alone reads 1 here, which is exactly what the flag exists to override.
+    /// </summary>
+    [Fact]
+    public void A_no_op_cancel_is_exit_0_even_when_the_room_itself_reads_terminal_and_failed()
+    {
+        var state = State(WorkflowStatus.Terminal, Step(StepStatus.Failed));
+
+        Assert.Equal(MutationExitCodeResolver.Failure, MutationExitCodeResolver.Resolve(Result(state)));
+        Assert.Equal(MutationExitCodeResolver.Success, MutationExitCodeResolver.Resolve(Result(state, cancelWasNoOp: true)));
+    }
+
     private static FlowState State(WorkflowStatus status, params StepState[] steps) =>
         new(SnapshotId, steps, status);
 
@@ -91,8 +104,9 @@ public class MutationExitCodeResolverTests
         new(new StepId(Guid.NewGuid().ToString("N")), status, new ExecutionId(Guid.NewGuid().ToString("N")),
             new Dictionary<StepId, ExecutionId>());
 
-    private static CommandResult Result(FlowState state, bool cancellationQueued = false) => new(
+    private static CommandResult Result(FlowState state, bool cancellationQueued = false, bool cancelWasNoOp = false) => new(
         state,
         new WorkflowDefinitionSnapshot(SnapshotId, new WorkflowTemplateId("t"), 1, []),
-        CancellationQueued: cancellationQueued);
+        CancellationQueued: cancellationQueued,
+        CancelWasNoOp: cancelWasNoOp);
 }

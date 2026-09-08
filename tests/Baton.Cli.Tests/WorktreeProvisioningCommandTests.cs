@@ -155,8 +155,14 @@ public class WorktreeProvisioningCommandTests : IDisposable
         }
     }
 
+    /// <summary>
+    /// Inverted by #2073: <c>baton cancel</c> no longer reads bindings at all (nothing in it
+    /// dispatches), so worktree bindings handed to it provision nothing — the paused room here has no
+    /// arrestable target, the cancel is a no-op, and the worktree only appears once <c>decide</c>
+    /// (which does dispatch) provisions it, and is torn down on Terminal as before.
+    /// </summary>
     [Fact]
-    public async Task CancelCommand_provisions_worktree_and_tears_down_on_terminal()
+    public async Task CancelCommand_does_not_provision_a_worktree_and_decide_still_tears_it_down_on_terminal()
     {
         var testRoot = Path.Combine(Path.GetTempPath(), $"cli-worktree-cancel-{Guid.NewGuid():N}");
         var repository = Path.Combine(testRoot, "repo");
@@ -181,9 +187,10 @@ public class WorktreeProvisioningCommandTests : IDisposable
 
             var cancelResult = await CancelCommand.ExecuteAsync(cancelOptions, Adapters, cancellationToken: TestContext.Current.CancellationToken);
             Assert.Equal(WorkflowStatus.Paused, cancelResult.State.Status);
+            Assert.True(cancelResult.CancelWasNoOp, "a paused step's execution has already settled; nothing to arrest");
 
-            // CancelCommand with worktreeBindingsFilePath provisioned worktreePath for worker 'b'
-            Assert.True(Directory.Exists(worktreePath), "CancelCommand must provision worktree when given worktree bindings");
+            // #2073: bindings are never read by cancel, so nothing was provisioned.
+            Assert.False(Directory.Exists(worktreePath), "CancelCommand must not provision a worktree — it reads no bindings since #2073");
 
             var decideOptions = new DecideOptions(
                 roomDirectory, pausedExecutionId.Value, DecisionType.Resume, TargetStepId: null,

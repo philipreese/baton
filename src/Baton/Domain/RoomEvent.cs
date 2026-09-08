@@ -26,6 +26,7 @@ namespace Baton.Domain;
 [JsonDerivedType(typeof(OrchestratorAssigned), "orchestratorAssigned")]
 [JsonDerivedType(typeof(ArrestRequestUnresolvable), "arrestRequestUnresolvable")]
 [JsonDerivedType(typeof(ArrestRequestExpired), "arrestRequestExpired")]
+[JsonDerivedType(typeof(ArrestIntentRecorded), "arrestIntentRecorded")]
 public abstract record RoomEvent
 {
     private RoomEvent()
@@ -244,6 +245,27 @@ public abstract record RoomEvent
     public sealed record ArrestRequestExpired(
         string Target,
         DateTimeOffset RequestedAtUtc,
+        DateTimeOffset RecordedAtUtc) : RoomEvent;
+
+    /// <summary>
+    /// #2073 (slice two of #1530): an operator's arrest INTENT, written by <c>Baton.Cli.CancelCommand</c>
+    /// before it does anything else — before the <c>cancel.request</c> write, before any kill, before
+    /// the terminal fact. Lives in <c>room.jsonl</c> rather than <c>flow.jsonl</c> for a structural
+    /// reason, not a stylistic one: a live pump holds <c>flow.jsonl</c> open <c>FileShare.Read</c> for
+    /// its whole run (<c>Baton.Store.FlowEventLogWriter</c>), so the one journal a second process can
+    /// always append to while a pump is alive is this one. The pump's own
+    /// <see cref="FlowEvent.CancellationRequested"/> stays the flow-side fact for the delivery; this is
+    /// the record of who asked and why, which existed nowhere before (an operator who killed a process
+    /// and ran <c>baton resolve --reject</c> recorded the outcome, never the intent).
+    /// </summary>
+    /// <param name="Target">The resolved <see cref="ExecutionId"/>'s value — always resolved before this is written, never <c>latest</c>.</param>
+    /// <param name="RequestedBy">Who asked. <c>Baton.Cli.CancelCommand</c> writes <c>"operator"</c>; there is no other producer.</param>
+    /// <param name="Reason">The operator's own <c>--reason</c>, verbatim; <c>null</c> when none was given.</param>
+    /// <param name="RecordedAtUtc">When the intent was written.</param>
+    public sealed record ArrestIntentRecorded(
+        string Target,
+        string RequestedBy,
+        string? Reason,
         DateTimeOffset RecordedAtUtc) : RoomEvent;
 }
 

@@ -22,7 +22,16 @@ public abstract record CoreEvent
     }
 
     /// <summary>The Core-managed process for this execution has started.</summary>
-    public sealed record ExecutionStarted(ExecutionId ExecutionId, uint Pid) : CoreEvent;
+    /// <param name="ProcessStartTimeUtc">
+    /// #2073: the worker process's own OS start time, read right after spawn — the ±1s pid-recycling
+    /// discriminator <c>Baton.Outcomes.EngineLivenessProbe</c> needs before anyone may treat
+    /// <paramref name="Pid"/> as still meaning this worker, which is what lets <c>baton cancel</c> kill
+    /// it by pid rather than merely name it. Nullable: every line written before this field existed
+    /// carries none, and a spawn whose start time could not be read (the child exited inside the read)
+    /// records none either. A null here is exactly the probe's <c>Unknown</c>, and a caller must treat
+    /// it as "do not kill", never as "not alive".
+    /// </param>
+    public sealed record ExecutionStarted(ExecutionId ExecutionId, uint Pid, DateTime? ProcessStartTimeUtc = null) : CoreEvent;
 
     /// <summary>The Core-managed process for this execution has exited.</summary>
     public sealed record ExecutionExited(ExecutionId ExecutionId, int ExitCode, CoreExitReason Reason, string? StderrTail = null) : CoreEvent;

@@ -18,7 +18,9 @@ public enum ArrestOutcome
 /// <summary>
 /// One entry in a room's arrest history: an operator (or the pump's own host-stop wind-down) asked
 /// for <paramref name="ExecutionId"/> (or the raw <paramref name="Target"/> string, for the two
-/// shapes that never resolved one) to be arrested, and this is how it was settled.
+/// shapes that never resolved one) to be arrested, and this is how it was settled. Since #2073 an
+/// operator's <c>baton cancel</c> is visible here even when no pump ever saw a request — the
+/// <see cref="RoomEvent.ArrestIntentRecorded"/> arm in <see cref="ArrestLedgerProjector.Project"/>.
 /// </summary>
 /// <param name="Target">
 /// The literal target as written — <see cref="Domain.ExecutionId.Value"/> for every entry that
@@ -43,7 +45,11 @@ public enum ArrestOutcome
 /// copy and run themselves, so every arrest this ledger can see was, from the engine's perspective,
 /// requested by the CLI.
 /// </param>
-/// <param name="Reason">Populated only for <see cref="ArrestOutcome.Rejected"/>.</param>
+/// <param name="Reason">
+/// The rejection reason for <see cref="ArrestOutcome.Rejected"/>; for an entry sourced from
+/// <see cref="RoomEvent.ArrestIntentRecorded"/> (#2073), the operator's own <c>--reason</c>, whatever
+/// the outcome. Null otherwise.
+/// </param>
 /// <param name="ResolvedAtUtc">Null while <see cref="Outcome"/> is null (still pending).</param>
 public sealed record ArrestLedgerEntry(
     string Target,
@@ -166,10 +172,62 @@ public static class ArrestLedgerProjector
             results.Add(new ArrestLedgerEntry(executionId.Value, executionId, b.Outcome, b.RequestedBy, b.Reason, b.RequestedAtUtc, b.ResolvedAtUtc));
         }
 
+        // #2073: the operator's intent fact. When the pump answered, a flow-side CancellationRequested
+        // for the same id already opened a builder above and that entry tells the whole story, so the
+        // intent is absorbed rather than listed twice. When no pump answered (baton cancel settled the
+        // room itself, or is still waiting on a holder that never let go), the intent is the only
+        // request-shaped fact there is, so it gets its own entry: Delivered once any arrest-shaped
+        // terminal fact for that execution lands at or after the intent (ExecutionCancelled,
+        // ExecutionFailed, or a StepRetryForeclosed naming it — whoever wrote it), pending otherwise.
+        // "At or after" is what keeps a pre-existing settle from being credited to a later intent;
+        // CancelCommand never writes an intent for an already-settled target, so in practice the
+        // pending arm is the still-held-lock case and nothing else.
+        var terminalStampsByExecutionId = new Dictionary<ExecutionId, List<DateTimeOffset>>();
+        foreach (var entry in flowLogEntries)
+        {
+            if (entry is not LogEntry.FlowLogEntry { WriterUtcTimestamp: { } stampedUtc } flowLogEntry)
+            {
+                continue;
+            }
+
+            var settledId = flowLogEntry.Event switch
+            {
+                FlowEvent.ExecutionCancelled cancelled => cancelled.ExecutionId,
+                FlowEvent.ExecutionFailed failed => failed.ExecutionId,
+                FlowEvent.StepRetryForeclosed foreclosed => foreclosed.ForExecutionId,
+                _ => (ExecutionId?)null,
+            };
+            if (settledId is { } id)
+            {
+                if (!terminalStampsByExecutionId.TryGetValue(id, out var stamps))
+                {
+                    stamps = [];
+                    terminalStampsByExecutionId[id] = stamps;
+                }
+
+                stamps.Add(new DateTimeOffset(DateTime.SpecifyKind(stampedUtc, DateTimeKind.Utc)));
+            }
+        }
+
         foreach (var roomEvent in roomEvents)
         {
             switch (roomEvent)
             {
+                case RoomEvent.ArrestIntentRecorded intent:
+                    var intentExecutionId = new ExecutionId(intent.Target);
+                    if (builders.ContainsKey(intentExecutionId))
+                    {
+                        break;
+                    }
+
+                    DateTimeOffset? settledAtUtc = terminalStampsByExecutionId.TryGetValue(intentExecutionId, out var candidates)
+                        ? candidates.Where(stamp => stamp >= intent.RecordedAtUtc).Cast<DateTimeOffset?>().Min()
+                        : null;
+                    results.Add(new ArrestLedgerEntry(
+                        intent.Target, intentExecutionId, settledAtUtc is null ? null : ArrestOutcome.Delivered, intent.RequestedBy,
+                        intent.Reason, intent.RecordedAtUtc, settledAtUtc));
+                    break;
+
                 case RoomEvent.ArrestRequestUnresolvable unresolvable:
                     results.Add(new ArrestLedgerEntry(
                         unresolvable.Target, ExecutionId: null, ArrestOutcome.Rejected, RequestedBy: "operator",

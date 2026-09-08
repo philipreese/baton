@@ -31,6 +31,15 @@ public sealed record DaemonSettings
     public int? DeadPumpQuietMinutes { get; init; }
 
     /// <summary>
+    /// #2073: how long <c>baton cancel</c> waits for a live pump to answer its <c>cancel.request</c>
+    /// before it kills the worker process itself. Null (the default) means
+    /// <c>Baton.Cli.CancelCommand.DefaultPumpAnswerWindow</c> applies — the default and its derivation
+    /// from the poller's own cadence live there rather than being transcribed into this file. A
+    /// non-positive value falls back the same way.
+    /// </summary>
+    public int? CancelPumpAnswerSeconds { get; init; }
+
+    /// <summary>
     /// #1848: the runway hold's thresholds, read by <c>baton dispatch</c> before it admits new vendor
     /// spend. Never null — an absent <c>RunwayHold</c> key in <c>settings.json</c> leaves the
     /// operator-approved defaults (week ≥85%, session ≥90%) in force, so the gate exists on a machine

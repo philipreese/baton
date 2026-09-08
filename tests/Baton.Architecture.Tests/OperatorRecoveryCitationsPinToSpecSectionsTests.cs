@@ -32,27 +32,31 @@ public sealed class OperatorRecoveryCitationsPinToSpecSectionsTests
 
     private static readonly Pin[] Pins =
     [
-        // CancelCommand.cs: a confirmed-Dead holder is pointed straight at the section 3 --room-dir recovery.
+        // CancelCommand.cs (#2073 retired the dead-holder gate the three earlier pins sat on; these are the
+        // verb's operator-facing cites now): a pump still holding flow.lock after the kill is told the
+        // terminal fact is left to it or to the daemon's dead-pump probe -- section 7, whose DeadPumpProbe
+        // bullet bounds what that probe writes.
         new(
             "src/Baton.Cli/CancelCommand.cs",
-            "$\"{RecoveryGuidance.RunRoomDirInstruction} (see spec/baton.md §3).\"",
-            Section: 3,
-            RoomDirRecoveryProcedure),
-        // CancelCommand.cs: an Unknown-liveness holder gets the same section 3 recovery, conditioned on the
-        // operator's own confirmation that no pump is actually running.
+            "settles a room whose pump is gone (spec/baton.md §7). The intent fact is on record either way.\");",
+            Section: 7,
+            "one fact per still-arrestable target, in one room, under that room's own `flow.lock`, and nothing else."),
+        // CancelCommand.cs: a free lock whose flow.jsonl is nonetheless held open (#816's shape) is told to
+        // retry or leave the room to the same probe -- section 7 again, whose bullet names the predicate
+        // that probe settles on.
         new(
             "src/Baton.Cli/CancelCommand.cs",
-            "{RecoveryGuidance.RunRoomDirInstruction} (see \" + \"spec/baton.md §3); if a pump IS confirmed",
-            Section: 3,
-            RoomDirRecoveryProcedure),
-        // CancelCommand.cs: the same Unknown-liveness branch also cites section 2 for *why* no verb exists
-        // for a still-alive, unconfirmable pump -- not a recovery, but still an operator-facing cite.
+            "\"ledger, or leave it to the daemon's dead-pump probe (spec/baton.md §7).\");",
+            Section: 7,
+            "The predicate (a free lock, a still-arrestable target, a journal quiet past the threshold)"),
+        // CancelCommand.cs: the room-level ambiguity refusal (a Running step plus a quota-parked sibling)
+        // cites section 2 for *why* the resolver refuses rather than guesses -- not a recovery, but still
+        // an operator-facing cite.
         new(
             "src/Baton.Cli/CancelCommand.cs",
-            "holder record can't be confirmed (see spec/baton.md §2).",
+            "for each step's current status; why this refuses rather than guesses is spec/baton.md §2.\");",
             Section: 2,
-            "There is currently no verb that reaches a still-alive pump whose holder record can't be " +
-            "confirmed"),
+            "guessing is exactly what this resolver exists to refuse to do"),
         // ResolveCommand.cs: a ContractFailure Indeterminate is pointed at `baton resolve --reject`.
         new(
             "src/Baton.Cli/ResolveCommand.cs",

@@ -124,7 +124,26 @@ internal static class BatonProcessRunner
             // ERROR_BROKEN_PIPE here, where a real NUL device would have silently accepted the write.
             process.StandardInput.Close();
 
-            raiseEvent(new BatonEventArgs { Kind = BatonTaskEventKind.Started, Pid = (uint)process.Id });
+            // #2073: the start time is what makes the pid reusable as an identity later (see
+            // BatonEventArgs.ProcessStartTimeUtc). A child that has already exited by the time this
+            // reads throws here; that is recorded as "no start time" rather than failing the run, and
+            // reads as Unknown to every liveness probe downstream, which is the fail-closed direction.
+            DateTime? processStartTimeUtc;
+            try
+            {
+                processStartTimeUtc = process.StartTime.ToUniversalTime();
+            }
+            catch (Exception ex) when (ex is InvalidOperationException or System.ComponentModel.Win32Exception)
+            {
+                processStartTimeUtc = null;
+            }
+
+            raiseEvent(new BatonEventArgs
+            {
+                Kind = BatonTaskEventKind.Started,
+                Pid = (uint)process.Id,
+                ProcessStartTimeUtc = processStartTimeUtc,
+            });
 
             // TOCTOU note (mirrors aer-core's CancelHandle.cancel() / timeout monitor doc comments):
             // probe-then-kill narrows but cannot fully close the race between "tree observed alive"

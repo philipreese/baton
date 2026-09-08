@@ -201,9 +201,10 @@ public class ResolveRejectTerminalCloseEndToEndTests
     }
 
     /// <summary>
-    /// The third verb the issue found refusing, asserted here as the CORRECT refusal rather than a
+    /// The third verb the issue found refusing, asserted here as the CORRECT outcome rather than a
     /// defect: once the room is settled there is genuinely nothing for <c>baton cancel</c> to target,
-    /// and it says so. Pinned so a later widening of `cancel`'s targeting cannot quietly start
+    /// and it says so. Since #2073 "says so" is the idempotent no-op arm (exit 0, nothing written)
+    /// rather than a refusal — pinned so a later widening of `cancel`'s targeting cannot quietly start
     /// journaling a cancellation against a settled room.
     /// </summary>
     [Fact]
@@ -215,13 +216,16 @@ public class ResolveRejectTerminalCloseEndToEndTests
             var (_, executionId) = await SeedIndeterminateRoomAsync(roomDirectory);
             await AppendPreFixRejectionAsync(roomDirectory, executionId);
             var bindingsFilePath = await WriteBindingsAsync(roomDirectory);
+            var journalBefore = await File.ReadAllTextAsync(Path.Combine(roomDirectory, "flow.jsonl"), TestContext.Current.CancellationToken);
 
-            var ex = await Assert.ThrowsAsync<CliArgumentException>(() => CancelCommand.ExecuteAsync(
+            var result = await CancelCommand.ExecuteAsync(
                 new CancelOptions(roomDirectory, ExecutionId: null, bindingsFilePath),
                 Adapters,
-                TestContext.Current.CancellationToken));
+                TestContext.Current.CancellationToken);
 
-            Assert.Contains("no currently-Running or quota-parked step to target", ex.Message, StringComparison.Ordinal);
+            Assert.True(result.CancelWasNoOp);
+            Assert.Equal(MutationExitCodeResolver.Success, MutationExitCodeResolver.Resolve(result));
+            Assert.Equal(journalBefore, await File.ReadAllTextAsync(Path.Combine(roomDirectory, "flow.jsonl"), TestContext.Current.CancellationToken));
         }
         finally
         {

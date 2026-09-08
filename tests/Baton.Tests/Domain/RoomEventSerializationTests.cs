@@ -45,6 +45,9 @@ public class RoomEventSerializationTests
         // #1530
         new RoomEvent.ArrestRequestUnresolvable("latest", "ambiguous — 2 candidates", FixedInstant, FixedInstant),
         new RoomEvent.ArrestRequestExpired("exec-1", FixedInstant, FixedInstant),
+        // #2073: both Reason shapes -- a bare `baton cancel` records null, `--reason` records the text.
+        new RoomEvent.ArrestIntentRecorded("exec-1", "operator", "lane is looping", FixedInstant),
+        new RoomEvent.ArrestIntentRecorded("exec-1", "operator", null, FixedInstant),
     ];
 
     [Theory]
