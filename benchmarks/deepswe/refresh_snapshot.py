@@ -20,10 +20,13 @@ import csv
 import io
 import json
 import math
+import os
 import re
 import sys
 import tempfile
+import time
 import urllib.request
+from collections.abc import Callable
 from contextlib import redirect_stderr
 from datetime import date
 from pathlib import Path
@@ -474,6 +477,47 @@ def latest_snapshot(root: Path) -> Path | None:
     return snapshots[-1] if snapshots else None
 
 
+# Windows refuses a directory rename with [WinError 5] while any handle into the tree is still open,
+# and a handle held by an indexer or antivirus scan on a file closed milliseconds earlier is enough.
+# Measured on the conductor host with no other load (#2095): 0-5 of 200 renames refuse, and every
+# refusal cleared within 10-30 ms. The schedule below doubles from 10 ms to a 200 ms cap and gives
+# up after ~1 s of cumulative waiting, the Windows convention for this class of retry.
+SWAP_RETRY_FIRST_DELAY_S = 0.01
+SWAP_RETRY_MAX_DELAY_S = 0.2
+SWAP_RETRY_BUDGET_S = 1.0
+
+
+def replace_with_retry(
+    source: Path,
+    target: Path,
+    replace: Callable[[Path, Path], object] = os.replace,
+    sleep: Callable[[float], object] = time.sleep,
+) -> int:
+    """Atomic-swap rename that retries a PermissionError with backoff; returns the attempt count.
+
+    Any other failure propagates on the first attempt. Once the budget is spent the ORIGINAL
+    PermissionError escapes, carrying a note naming this rename as the failing step so the
+    top-level message reads as the swap, not as the collector. The swap is all-or-nothing on every
+    attempt, so a retry never observes a half-moved tree."""
+    attempts, waited, delay = 0, 0.0, SWAP_RETRY_FIRST_DELAY_S
+    while True:
+        attempts += 1
+        try:
+            replace(source, target)
+            return attempts
+        except PermissionError as error:
+            if waited >= SWAP_RETRY_BUDGET_S:
+                error.add_note(
+                    f"atomic-swap rename of {source} -> {target} still refused after {attempts} "
+                    f"attempts over {waited:.2f} s (#2095); the snapshot was staged completely and "
+                    "only the final rename failed"
+                )
+                raise
+            sleep(delay)
+            waited += delay
+            delay = min(delay * 2, SWAP_RETRY_MAX_DELAY_S)
+
+
 def model_set(rows: list[dict[str, str]]) -> set[str]:
     return {row["model"] for row in rows}
 
@@ -748,7 +792,7 @@ def create_snapshot(
             newline="\n",
         )
         derive_scores.write_or_check(staging, derive_scores.DEFAULT_LAMBDA, check=False)
-        staging.replace(target)
+        replace_with_retry(staging, target)
     # Publication follows the snapshot landing, never precedes it: a missing allowlist entry is a
     # loud docsbudget failure, while an entry naming a directory that was never written is silent.
     if allowlist_path:
@@ -1200,6 +1244,46 @@ def selftest() -> int:
             assert not (atomic_root / "2026-09-05").exists()
         finally:
             derive_scores.write_or_check = real_derive
+    # The swap rename retries a Windows access refusal (#2095). Fake clock: no real waiting.
+    refusal = PermissionError(5, "Access is denied", "staging")
+    slept: list[float] = []
+    calls = 0
+
+    def refuse_then_succeed(_source: Path, _target: Path) -> None:
+        nonlocal calls
+        calls += 1
+        if calls <= 3:
+            raise refusal
+
+    assert replace_with_retry(Path("s"), Path("t"), refuse_then_succeed, slept.append) == 4
+    assert calls == 4 and slept == [0.01, 0.02, 0.04]
+    # Never succeeds: the ORIGINAL error escapes once ~1 s has been waited, naming the rename.
+    slept.clear()
+
+    def always_refuse(_source: Path, _target: Path) -> None:
+        raise refusal
+
+    try:
+        replace_with_retry(Path("s"), Path("t"), always_refuse, slept.append)
+    except PermissionError as error:
+        assert error is refusal
+        assert len(slept) == 9 and slept[-1] == SWAP_RETRY_MAX_DELAY_S
+        assert 1.0 <= sum(slept) < 1.2, slept
+        assert any("atomic-swap rename" in note and "10 attempts" in note for note in error.__notes__)
+    else:
+        raise AssertionError("an unending access refusal was retried forever or swallowed")
+    # Polarity: only an access refusal is retried; any other failure escapes on the first attempt.
+    slept.clear()
+
+    def missing(_source: Path, _target: Path) -> None:
+        raise FileNotFoundError(2, "No such file", "staging")
+
+    try:
+        replace_with_retry(Path("s"), Path("t"), missing, slept.append)
+    except FileNotFoundError:
+        assert slept == []
+    else:
+        raise AssertionError("a non-refusal rename failure was retried")
     print("refresh_snapshot selftest: pass")
     return 0
 
@@ -1281,5 +1365,7 @@ if __name__ == "__main__":
     try:
         raise SystemExit(main(sys.argv[1:]))
     except (OSError, ValueError, json.JSONDecodeError) as error:
-        print(f"refresh_snapshot: {error}", file=sys.stderr)
+        # Notes name the failing step (replace_with_retry adds one); str(error) alone does not.
+        print("refresh_snapshot: " + "; ".join([str(error), *getattr(error, "__notes__", [])]),
+              file=sys.stderr)
         raise SystemExit(1)
