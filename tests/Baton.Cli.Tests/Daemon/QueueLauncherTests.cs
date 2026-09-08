@@ -124,6 +124,12 @@ public sealed class QueueLauncherTests : IDisposable
 
             var recording = QueueLauncher.RecordPostLaunchFaultAsync("held", room, "the pump threw");
             await Task.Delay(TimeSpan.FromMilliseconds(75), Ct);
+
+            // Control: while the exclusive holder is still alive, the retry arm has started but has
+            // not degraded. Without it, a delayed test task could first enter after the release and
+            // make an implementation with no held-ledger retry look correct.
+            Assert.False(recording.IsCompleted);
+            Assert.Null(await TerminalSentinelWriter.TryReadAsync(room, Ct));
             await holder.DisposeAsync();
             await recording;
 
