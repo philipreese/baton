@@ -27,8 +27,8 @@ $batonHome = if ($env:BATON_HOME) { $env:BATON_HOME } else { Join-Path $HOME ".b
 # 5.1, 2026-09-06), `powershell.exe -Command "& { <thing that exits 70> *>> 'x.log' }"` itself exits
 # 0 -- the script block's redirect swallows the code -- while the same command with the trailing
 # `exit $LASTEXITCODE` exits 70. The repeating trigger below is the relaunch mechanism (#2083), but
-# the scheduler's Last Run Result and the exit record below still need the daemon's real code. An
-# existing registration keeps the old action until this script is re-run.
+# the scheduler's Last Run Result and the exit record below still need the daemon's real code.
+# See spec/baton.md §7 (#1770, #2083) for why an existing registration keeps the old action until it is replaced.
 #
 # #2036: the exit is now RECORDED before it is returned. On 2026-09-07 the daemon's last log line was
 # at 04:57:06Z and the next thing in `daemon.log` was the operator's hand-start 8.7 hours later --
