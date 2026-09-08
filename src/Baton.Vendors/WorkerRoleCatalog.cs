@@ -227,6 +227,19 @@ public static class WorkerRoleCatalog
             : null;
     }
 
+    /// <summary>The resolved tier for a role, for callers that need the role's actual dispatch axes.</summary>
+    public static Queue.QueueTierSettings QueueTierForRole(string roleName)
+    {
+        var role = For(roleName);
+        return new Queue.QueueTierSettings
+        {
+            Tier = role.Tier,
+            Adapter = role.Adapter,
+            Model = role.Model,
+            Effort = role.Effort,
+        };
+    }
+
     private static Dictionary<string, WorkerTier> LoadTiers() =>
         ReadJson<Dictionary<string, WorkerTier>>(
             ResolvePath(

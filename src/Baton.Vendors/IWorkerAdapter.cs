@@ -80,6 +80,13 @@ public interface IWorkerAdapter : Baton.Outcomes.IFailureClassifier, Baton.Statu
     CoreDispatchTarget Resolve(WorkerInvocation invocation, WorkerContract contract);
 
     /// <summary>
+    /// Checks an explicit model using this adapter's offline rules, throwing a
+    /// <see cref="BatonFlowException"/> on refusal. The default validates nothing; adapters without
+    /// model rules inherit it. See <c>spec/baton.md</c> §13 for queue add's candidate checks.
+    /// </summary>
+    void ValidateRequestedModel(string model) { }
+
+    /// <summary>
     /// Discovers the capabilities (skills, commands, models) this vendor's CLI actually supports
     /// (M24 Phase 2). Implementations that need to shell out to the CLI itself (e.g. Gemini's
     /// <c>agy models</c>) must do so here, not on the caller's thread — this is async precisely so

@@ -71,7 +71,7 @@ public sealed class QueueTierFollowsWorkerTiersTests
             """);
 
         var resolved = QueueTierTable.Resolve(
-            ToolingItem(), new QueueSettings(), WorkerRoleCatalog.QueueTierFor);
+            ToolingItem(), new QueueSettings(), WorkerRoleCatalog.QueueTierFor, WorkerRoleCatalog.QueueTierForRole);
 
         Assert.Equal("tooling", resolved.TierKey);
         Assert.Equal("agy", resolved.Adapter);
@@ -113,7 +113,7 @@ public sealed class QueueTierFollowsWorkerTiersTests
         });
 
         var resolved = QueueTierTable.Resolve(
-            ToolingItem(), new QueueSettings(), WorkerRoleCatalog.QueueTierFor);
+            ToolingItem(), new QueueSettings(), WorkerRoleCatalog.QueueTierFor, WorkerRoleCatalog.QueueTierForRole);
 
         Assert.Equal("codex", resolved.Adapter);
         Assert.Equal("gpt-6-astra", resolved.Model);

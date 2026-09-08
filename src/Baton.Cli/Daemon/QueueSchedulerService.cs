@@ -167,7 +167,21 @@ public sealed class QueueSchedulerService : BackgroundService
         }
 
         var item = decision.Item!;
-        var tier = QueueTierTable.Resolve(item, settings, WorkerRoleCatalog.QueueTierFor);
+        QueueTierResolution tier;
+        try
+        {
+            _ = WorkerRoleCatalog.For(item.Role);
+            tier = QueueTierTable.Resolve(
+                item, settings, WorkerRoleCatalog.QueueTierFor, WorkerRoleCatalog.QueueTierForRole);
+        }
+        catch (KeyNotFoundException ex)
+        {
+            await FailAsync(
+                item, ex.Message, room: null, now, decision,
+                new QueueTierResolution(null, item.Adapter, item.Model, item.Effort, false, null),
+                cancellationToken).ConfigureAwait(false);
+            return interval;
+        }
 
         // Fail closed, per spec/baton.md §13's tier-resolution ruling. Reachable only through a
         // hand-edited queue file, since QueueOptionsParser already refuses the scope class -- which is

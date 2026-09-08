@@ -114,12 +114,17 @@ public static class QueueTierTable
     /// resolving the same item differently. <c>Baton.Vendors.WorkerRoleCatalog.QueueTierFor</c> is the
     /// one production implementation.
     /// </param>
+    /// <param name="roleTiers">Resolves the role's dispatch tier when the item names no scope, adapter, or model.</param>
     public static QueueTierResolution Resolve(
-        QueueItem item, QueueSettings settings, Func<string, QueueTierSettings?> namedTiers)
+        QueueItem item,
+        QueueSettings settings,
+        Func<string, QueueTierSettings?> namedTiers,
+        Func<string, QueueTierSettings?> roleTiers)
     {
         ArgumentNullException.ThrowIfNull(item);
         ArgumentNullException.ThrowIfNull(settings);
         ArgumentNullException.ThrowIfNull(namedTiers);
+        ArgumentNullException.ThrowIfNull(roleTiers);
 
         string? key = null;
         QueueTierSettings? tier = null;
@@ -127,6 +132,10 @@ public static class QueueTierTable
         {
             key = KeyFor(item.Role, scopeClass);
             tier = LookupTier(key, settings, namedTiers);
+        }
+        else if (item.Adapter is null && item.Model is null)
+        {
+            tier = roleTiers(item.Role);
         }
 
         var adapter = item.Adapter ?? tier?.Adapter;
@@ -138,10 +147,9 @@ public static class QueueTierTable
             model = LookupAdapterDefaultModel(adapter, settings);
         }
 
-        // An override is an axis the ITEM set to something the tier did not say. An item with no scope
-        // class has no tier to differ from, so its explicit axes are not overrides -- there was nothing
-        // to override. Ordinal comparison: a model string is a vendor token, not prose.
-        var isOverride = tier is not null && (
+        // An override is an axis the ITEM set to something the scope tier did not say. A role tier
+        // fills an unscoped item's defaults, but is not a scope tier an item can depart from.
+        var isOverride = key is not null && tier is not null && (
             Differs(item.Adapter, tier.Adapter)
             || Differs(item.Model, tier.Model)
             || Differs(item.Effort, tier.Effort));
@@ -237,9 +245,9 @@ public static class QueueTierTable
 /// room's bindings to record it.
 /// </summary>
 /// <param name="TierKey">The <see cref="QueueTierTable.KeyFor"/> key consulted, or null when the item named no scope class.</param>
-/// <param name="Adapter">The adapter to dispatch on; null defers to the role's own tier.</param>
-/// <param name="Model">The model to dispatch on; null defers to the role's own tier.</param>
-/// <param name="Effort">The effort to dispatch at; null defers to the role's own tier.</param>
+/// <param name="Adapter">The adapter to dispatch on.</param>
+/// <param name="Model">The model to dispatch on.</param>
+/// <param name="Effort">The effort to dispatch at.</param>
 /// <param name="IsOverride">True when the item set an axis to something its tier did not say.</param>
 /// <param name="OverrideReason">
 /// The item's <c>--reason</c>, present only when <paramref name="IsOverride"/> is true. It lands on

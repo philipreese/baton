@@ -16,11 +16,196 @@ public sealed class QueueCommandTests
 {
     private static CancellationToken Ct => TestContext.Current.CancellationToken;
 
+    [Theory]
+    [InlineData("agy", null, "gemini-3.8-flash-high")]
+    [InlineData("claude", null, "role default model")]
+    [InlineData("codex", null, "role default model")]
+    [InlineData("claude", "claude-opus-4-8", "claude-opus-4-8")]
+    [InlineData("claude", "sonnet[1m]", "sonnet[1m]")]
+    [InlineData("agy", "future-agy-model", "future-agy-model")]
+    [InlineData("claude", "claude-sonnet-4-6", "claude-sonnet-4-6")]
+    [InlineData("agy", "claude-sonnet-4-6", "claude-sonnet-4-6")]
+    public async Task Add_honours_an_unscoped_adapters_own_model_rules(
+        string adapter, string? model, string displayedModel)
+    {
+        var home = CreateTempHome();
+        using var scope = BatonEnvironmentSnapshot.BeginScope(BatonEnvironmentSnapshot.Blank with { HomeOverride = home });
+        try
+        {
+            var brief = Path.Combine(home, "brief.md");
+            await File.WriteAllTextAsync(brief, "implement this", Ct);
+            var output = new StringWriter();
+
+            var exit = await QueueCommand.ExecuteAsync(
+                new QueueOptions(QueueVerb.Add, Tag: "explicit", Role: "implement",
+                    SpecFilePath: brief, WorkspaceDirectory: home, Adapter: adapter, Model: model),
+                output, Ct);
+
+            Assert.Equal(0, exit);
+            Assert.Contains($"tier: {adapter} / {displayedModel} / role default effort",
+                output.ToString(), StringComparison.Ordinal);
+            var item = Assert.Single((await QueueStore.LoadAsync(BatonPaths.QueueFile, Ct)).Items);
+            Assert.Equal(adapter, item.Adapter);
+            Assert.Equal(model, item.Model);
+            Assert.Null(item.Effort);
+        }
+        finally
+        {
+            DirectoryCleanup.DeleteRecursively(home);
+        }
+    }
+
+    [Theory]
+    [InlineData(null, "claude-sonnet-4-6", "multiple candidate adapters: claude, agy; specify --adapter")]
+    [InlineData("codex", "opus", "absent from the recorded Codex capability snapshot")]
+    [InlineData("claude", "claude-opus-4.8", "cannot use the requested --model")]
+    [InlineData("agy", "gpt-5.6-sol", "cannot use it")]
+    public async Task Add_refuses_ambiguous_or_invalid_models_before_any_queue_side_effect(
+        string? adapter, string model, string message)
+    {
+        var home = CreateTempHome();
+        using var scope = BatonEnvironmentSnapshot.BeginScope(BatonEnvironmentSnapshot.Blank with { HomeOverride = home });
+        try
+        {
+            var brief = Path.Combine(home, "brief.md");
+            await File.WriteAllTextAsync(brief, "implement this", Ct);
+            var refusal = await Assert.ThrowsAsync<CliArgumentException>(() => QueueCommand.ExecuteAsync(
+                new QueueOptions(QueueVerb.Add, Tag: "refused", Role: "implement",
+                    SpecFilePath: brief, Issue: 2077, Adapter: adapter, Model: model),
+                TextWriter.Null, Ct));
+
+            Assert.Contains(message, refusal.Message, StringComparison.Ordinal);
+            Assert.False(File.Exists(BatonPaths.QueueFile));
+            Assert.False(Directory.Exists(BatonPaths.QueueSpecsDirectory));
+        }
+        finally
+        {
+            DirectoryCleanup.DeleteRecursively(home);
+        }
+    }
+
+
     private static string CreateTempHome()
     {
         var home = Path.Combine(Path.GetTempPath(), "baton_queue_cmd_" + Guid.NewGuid().ToString("n"));
         Directory.CreateDirectory(home);
         return home;
+    }
+
+    [Fact]
+    public async Task Add_resolves_an_unscoped_models_unique_adapter_before_writing_the_item()
+    {
+        var home = CreateTempHome();
+        using var scope = BatonEnvironmentSnapshot.BeginScope(BatonEnvironmentSnapshot.Blank with { HomeOverride = home });
+        try
+        {
+            var workspace = Path.Combine(home, "workspace");
+            var brief = Path.Combine(home, "brief.md");
+            Directory.CreateDirectory(workspace);
+            await File.WriteAllTextAsync(brief, "implement this", Ct);
+
+            var output = new StringWriter();
+            var exit = await QueueCommand.ExecuteAsync(
+                new QueueOptions(
+                    QueueVerb.Add, Tag: "model-route", Role: "implement", SpecFilePath: brief,
+                    WorkspaceDirectory: workspace, Model: "opus", Effort: "high"),
+                output,
+                Ct);
+
+            Assert.Equal(0, exit);
+            Assert.Contains("tier: claude (from --model opus) / opus / high", output.ToString(), StringComparison.Ordinal);
+            Assert.Equal("claude", (await QueueStore.LoadAsync(BatonPaths.QueueFile, Ct)).Items.Single().Adapter);
+        }
+        finally
+        {
+            DirectoryCleanup.DeleteRecursively(home);
+        }
+    }
+
+    [Fact]
+    public async Task Add_refuses_an_unknown_model_before_creating_a_queue_row()
+    {
+        var home = CreateTempHome();
+        using var scope = BatonEnvironmentSnapshot.BeginScope(BatonEnvironmentSnapshot.Blank with { HomeOverride = home });
+        try
+        {
+            var workspace = Path.Combine(home, "workspace");
+            var brief = Path.Combine(home, "brief.md");
+            Directory.CreateDirectory(workspace);
+            await File.WriteAllTextAsync(brief, "implement this", Ct);
+
+            var refusal = await Assert.ThrowsAsync<CliArgumentException>(() => QueueCommand.ExecuteAsync(
+                new QueueOptions(
+                    QueueVerb.Add, Tag: "unknown-model", Role: "implement", SpecFilePath: brief,
+                    WorkspaceDirectory: workspace, Model: "not-a-model"),
+                TextWriter.Null,
+                Ct));
+
+            Assert.Contains("no recorded adapter candidate", refusal.Message, StringComparison.Ordinal);
+            Assert.False(File.Exists(BatonPaths.QueueFile));
+            Assert.False(Directory.Exists(BatonPaths.QueueSpecsDirectory));
+        }
+        finally
+        {
+            DirectoryCleanup.DeleteRecursively(home);
+        }
+    }
+
+    [Fact]
+    public async Task Add_refuses_a_model_the_scopes_resolved_adapter_cannot_use_before_creating_a_queue_row()
+    {
+        var home = CreateTempHome();
+        using var scope = BatonEnvironmentSnapshot.BeginScope(BatonEnvironmentSnapshot.Blank with { HomeOverride = home });
+        try
+        {
+            var workspace = Path.Combine(home, "workspace");
+            var brief = Path.Combine(home, "brief.md");
+            Directory.CreateDirectory(workspace);
+            await File.WriteAllTextAsync(brief, "implement this", Ct);
+
+            var refusal = await Assert.ThrowsAsync<CliArgumentException>(() => QueueCommand.ExecuteAsync(
+                new QueueOptions(
+                    QueueVerb.Add, Tag: "model-mismatch", Role: "implement", SpecFilePath: brief,
+                    WorkspaceDirectory: workspace, ScopeClass: "tooling", Model: "opus", Reason: "deliberate"),
+                TextWriter.Null,
+                Ct));
+
+            Assert.Contains("resolved codex adapter cannot use it", refusal.Message, StringComparison.Ordinal);
+            Assert.False(File.Exists(BatonPaths.QueueFile));
+        }
+        finally
+        {
+            DirectoryCleanup.DeleteRecursively(home);
+        }
+    }
+
+    [Fact]
+    public async Task Add_prints_an_unscoped_roles_resolved_adapter_without_a_model()
+    {
+        var home = CreateTempHome();
+        using var scope = BatonEnvironmentSnapshot.BeginScope(BatonEnvironmentSnapshot.Blank with { HomeOverride = home });
+        try
+        {
+            var workspace = Path.Combine(home, "workspace");
+            var brief = Path.Combine(home, "brief.md");
+            Directory.CreateDirectory(workspace);
+            await File.WriteAllTextAsync(brief, "implement this", Ct);
+
+            var output = new StringWriter();
+            await QueueCommand.ExecuteAsync(
+                new QueueOptions(
+                    QueueVerb.Add, Tag: "role-route", Role: "implement", SpecFilePath: brief,
+                    WorkspaceDirectory: workspace),
+                output,
+                Ct);
+
+            Assert.Contains("tier: codex / gpt-6-astra / medium", output.ToString(), StringComparison.Ordinal);
+            Assert.DoesNotContain("role default adapter", output.ToString(), StringComparison.Ordinal);
+        }
+        finally
+        {
+            DirectoryCleanup.DeleteRecursively(home);
+        }
     }
 
     [Fact]

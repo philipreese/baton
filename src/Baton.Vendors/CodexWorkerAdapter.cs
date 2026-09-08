@@ -48,6 +48,9 @@ public sealed class CodexWorkerAdapter : IWorkerAdapter, IPermissionGrantTransla
     private static IReadOnlyDictionary<string, IReadOnlyList<string>> KnownEffortsByModel =>
         RecordedEffortsByModel.Value.EffortsByModel;
 
+    /// <summary>Whether the recorded capability snapshot described above contains <paramref name="model"/>.</summary>
+    public static bool KnowsRecordedModel(string model) => KnownEffortsByModel.ContainsKey(model);
+
     /// <summary>
     /// How the recorded snapshot names itself when it refuses a model: the resource (which carries the
     /// date) plus the CLI version its <c>initialize</c> line recorded, so an operator reading the
@@ -740,6 +743,8 @@ public sealed class CodexWorkerAdapter : IWorkerAdapter, IPermissionGrantTransla
                 "codex", "the raw permission scope must be 'read-only' or 'workspace-write'; danger-full-access is never emitted by Baton."),
         };
     }
+
+    public void ValidateRequestedModel(string model) => ValidateModel(model);
 
     private static void ValidateModel(string? model)
     {
