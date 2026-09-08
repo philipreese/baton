@@ -47,8 +47,8 @@ public sealed class TokenBudgetReplayTests
     private const long Pre2034ImplementBudget = 1_200_000;
     private const int ShippedImplementMaxToolSteps = 322;
 
-    // #2034: `implement`'s claude ceiling today -- 3x the rolling live p95 (201,858 on 2026-09-08),
-    // floored at 400,000; the derivation is spec/baton.md §3's "Ceiling rule (#2034)" paragraph.
+    // #2034: `implement`'s operator-rounded claude ceiling; see spec/baton.md §3's
+    // "Ceiling rule (#2034)" derivation paragraph for the pin's origin.
     private const long ShippedClaudeImplementBudget = 600_000;
 
     // #1686 review F1: the OLD (pre-#1682, i.e. pre-THIS-PR) `implement` tool-step cap, in the OLD

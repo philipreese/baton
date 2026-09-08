@@ -24,9 +24,10 @@ to the ceiling that would have arrested them -- the resolved `TokenBudget` on ea
     python tools/room-rate-sweep/sweep.py --budget-headroom --since 2026-09-07T09:55:46Z
 
 `--propose-ceilings` (the #2034 ruling) applies spec/baton.md SS3's ceiling rule -- 3 x the rolling
-live p95 per adapter/role over the last 14 days, floored at 400k -- to the same rows and prints the
-proposal beside the value pinned in WorkerRoles.json today, so a re-pin is this one command plus an
-edit. `--since` overrides the 14-day default; the rule's constants live here, its statement lives in
+live p95 per (adapter, step id) over the last 14 days, floored at 400k -- to the same rows and prints the
+proposal beside the value pinned in WorkerRoles.json today; role equivalence requires a dispatch-only
+corpus, and re-pins follow that section's window and recording procedure. `--since` overrides the
+14-day default; the rule's constants live here, its statement lives in
 the spec, and the numbers that moved a value live on the issue that moved it.
 
     python tools/room-rate-sweep/sweep.py --propose-ceilings
@@ -120,6 +121,7 @@ CEILING_MIXED = "mixed"
 # analysis constants, applied by the proposal calculation, sample guard, and command window.
 PROPOSAL_FACTOR = 3
 PROPOSAL_FLOOR = 400000
+# Engineering minimum: see spec/baton.md SS3 "Ceiling rule (#2034)" for the sample rationale.
 PROPOSAL_MINIMUM_SAMPLE = 5
 PROPOSAL_WINDOW = timedelta(days=14)
 
@@ -1186,8 +1188,9 @@ def _selftest_propose_ceilings_applies_the_rule_against_a_fixture_ledger():
             "PIN: the catalog's claude figure, never the 999,999 on the bindings -- %r" % claude)
 
         codex = rows[("codex", "implement")]
-        assert (codex["liveP95"], codex["proposed"], codex["delta"]) == (50000, 400000, -200000), (
-            "FLOOR: 3 x 50,000 is under the floor, so the floor is the proposal -- %r" % codex)
+        assert (codex["measured"], codex["liveP95"], codex["proposed"], codex["delta"]) == (
+            5, 50000, 400000, -200000), (
+            "FLOOR: n=5 meets the minimum and 3 x 50,000 is under the floor -- %r" % codex)
 
         agy = rows[("agy", "implement")]
         assert (agy["measured"], agy["liveP95"], agy["proposed"], agy["pinned"], agy["delta"]) == (
@@ -1360,8 +1363,9 @@ def main(argv):
                              "that role's token_budget ceiling, plus the arrest counts per adapter")
     parser.add_argument("--propose-ceilings", action="store_true",
                         help="#2034: apply spec/baton.md SS3's ceiling rule (3 x live p95 over the last "
-                             "14 days, floor 400k) per adapter/role and print it beside the value "
-                             "pinned in WorkerRoles.json today; --since overrides the window")
+                             "14 days, floor 400k) per (adapter, step id), equivalent to roles only "
+                             "over a verified dispatch-only corpus (see that section), and print it "
+                             "beside the value pinned in WorkerRoles.json today; --since overrides the window")
     parser.add_argument("--since", metavar="ISO8601",
                         help="with --budget-headroom or --propose-ceilings, scope the whole table to this instant -- how "
                              "you ask about the lanes that ran after a metering fix landed. Step rows "

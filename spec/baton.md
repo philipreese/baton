@@ -2230,6 +2230,8 @@ The p95 is per (adapter, step id), over rooms whose `terminalAt` falls inside th
 rooms use the role id as the step id, so this is the same population over a dispatch-only corpus
 (the sweep ignores `--role-prefix`, so verify that corpus before using a row to re-pin a role).
 A proposal requires n >= 5 steps with live billed figures; below that minimum sample, withhold it.
+Five is the #2034 review fix's engineering minimum against thin samples, not an operator-derived
+statistical cutoff; at that sample size the sweep's p95 still selects the maximum.
 3× is the margin between "the tail lane finishes" and "a runaway is caught", and the 400,000 floor keeps a
 quiet fortnight from ratcheting a ceiling down to a number a single ordinary lane crosses. **Re-derive
 it by running `python tools/room-rate-sweep/sweep.py --propose-ceilings`** (which applies exactly this
@@ -2255,7 +2257,7 @@ effective real ceiling of `600,000 ÷ seen`, and one delivered pre-#2022 claude 
 whole-tree total (884,568) already sits above the new figure while its live Σ does not —
 `TokenBudgetReplayTests.HONEST_neither_delivered_claude_room_arrests_LIVE_at_the_2034_claude_implement_budget_though_one_terminal_total_exceeds_it`
 pins both halves so the cost stays visible. `review`/`advise`/`consolidate` are untouched by this
-ruling: the rule is stated for every adapter/role, but only `implement`'s values were re-pinned on it.
+ruling: the rule is stated for every adapter/step id, but only `implement`'s values were re-pinned on it.
 
 **The shared mechanism.** All four producers (engine-run verify, the token budget, #1682's tool-step
 cap, and #1691's billed-rate limit) route through the one `StateProjector.ApplyIndeterminate` helper — flag, reason text,
