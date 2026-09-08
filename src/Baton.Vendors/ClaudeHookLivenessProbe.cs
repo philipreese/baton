@@ -73,6 +73,7 @@ internal sealed class ProcessClaudeHookLivenessProbe : IClaudeHookLivenessProbe
         ClaudeWorkerAdapter.ShellPatternsVariable,
         ClaudeWorkerAdapter.DeniedShellPatternsVariable,
         ClaudeWorkerAdapter.DeniedShellOptionTokensVariable,
+        ClaudeWorkerAdapter.DeniedShellExceptionsVariable,
         WorkerEnvironment.WorkspaceVariable,
         "BATON_OUTPUT_DIR",
     ];

@@ -71,7 +71,7 @@ public class ReferenceDirectionTests
 
     private static (IReadOnlyCollection<string> ProjectRefs, IReadOnlyCollection<string> PackageRefs) ReadReferences(string project)
     {
-        var path = Path.Combine(RepoRoot(), "src", project, project + ".csproj");
+        var path = Path.Combine(RepoRoot.Locate(), "src", project, project + ".csproj");
         var doc = XDocument.Load(path);
 
         var projectRefs = doc.Descendants("ProjectReference")
@@ -89,22 +89,5 @@ public class ReferenceDirectionTests
             .ToHashSet(StringComparer.OrdinalIgnoreCase);
 
         return (projectRefs, packageRefs);
-    }
-
-    private static string RepoRoot()
-    {
-        var dir = new DirectoryInfo(AppContext.BaseDirectory);
-        while (dir is not null)
-        {
-            if (File.Exists(Path.Combine(dir.FullName, "Baton.slnx")))
-            {
-                return dir.FullName;
-            }
-
-            dir = dir.Parent;
-        }
-
-        throw new FileNotFoundException(
-            "Could not locate the repo root (Baton.slnx) by walking up from " + AppContext.BaseDirectory);
     }
 }

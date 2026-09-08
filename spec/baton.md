@@ -5466,21 +5466,39 @@ claims and does not derive.
 create or apply a label, merge a PR, or call `gh api`, on either vendor; the label itself is applied
 by the operator, per C-15 (#1730), not restated here.**
 
-**#2114 (console decision round, 2026-09-08): a lane is contained by its role grant, not by the
-daemon's write gate — and that same deny list is where the containment lives.** The tailnet page's
-write gate (C-11) identifies *tailnet* callers by the Tailscale identity header; *loopback* callers
-are trusted as the operator's own machine; a lane is a loopback caller, so the gate cannot tell it
-from the operator. `implement`/`janitor`'s standing deny list therefore also closes the daemon's write
-verbs (every mutating `baton` verb) and the shell HTTP clients a lane could reach the daemon port
-with; `WorkerRoles.json`'s two deny lists are the enumeration, and reads such as `baton status` stay
-admitted. `LaneRoleDaemonWriteVerbTests`
+**#2114 (console decision round, 2026-09-08; this paragraph is the ruling's one record — the issue
+body transcribes it, C-11 points here): a lane is contained by its role grant, not by the daemon's
+write gate — and that same deny list is where the containment lives.** The tailnet page's write gate
+(C-11's plane) identifies *tailnet* callers by the Tailscale identity header; *loopback* callers are
+trusted as the operator's own machine; a lane is a loopback caller, so the gate cannot tell it from
+the operator. `implement`/`janitor`'s standing deny list therefore also closes the daemon's write
+verbs and the shell HTTP clients a lane could reach the daemon port with. **The shape is a deny on the
+whole `baton` head with an explicit read allowlist, not a list of write verbs** (#2128 review H1/H2):
+`denied_shell_command_patterns` carries `baton *`, and the new `denied_shell_command_exceptions`
+names the reads that stay open — `baton status`, `templates`, `audit lanes`, `memory audit`,
+`ledger` (with `ledger --rebuild`/`backfill`/`export` re-denied beneath it), `trust --list`,
+`--version` — so a verb added tomorrow is closed the day it ships and only a read someone
+deliberately names is open. Where both match, the longer tokenized match decides and a tie is a
+deny; deny heads compare case-insensitively (the shells resolve `IWR`/`CURL` to the lowercase
+program) while exception heads compare ordinally, because `Program.cs` dispatches ordinally and
+`baton Status` is its default arm — `supply`, a write. On claude a deny an exception carves into is
+withheld from `--disallowedTools` (that flag has no carve-out) and rests on the hook alone;
+`ClaudeWorkerAdapter.StandingShellDenials` records the trade. **Shell wrappers are folded** (H3): a
+PowerShell, `cmd`, or POSIX shell invocation carrying its command as an argument (the heads
+`ShellCommandPatternMatcher.ShellWrapperHeads` lists) segments cleanly, so before this its body never
+reached the fold's every-offset scan and `pwsh -c "baton cancel x"` walked past on head `pwsh`;
+`ShellCommandPatternMatcher.IsSegmentDenied` now re-matches a wrapper's
+body at every offset, on both scopes, and a wrapper whose body the matcher cannot read — a
+PowerShell `-EncodedCommand`, or a bare wrapper — is denied outright. `LaneRoleDaemonWriteVerbTests`
 (`tests/Baton.Architecture.Tests`) is the tripwire: its probe list is the one canonical set of command
-lines, judged against every role's grant through the real matcher, so a deny that does not match under
-the tokenized-head grammar above fails there rather than passing on its spelling. **The negative, stated so a reader does not infer a wall:** an `implement` lane running
-arbitrary test code can still open a socket to the daemon port — a deny pattern binds a spelling, and
-compiled code has none — and that exposure equals the one the lane already has through the CLI on its
-own machine; it is accepted as such, not closed, and the test's own remarks record the spellings
-(`curl.exe`, `python3 -c`, `node --eval`) it knowingly leaves past.
+lines — every mutating verb, the HTTP clients, the wrappers, the mixed-case spellings — judged against
+every role's grant through the real matcher, each read pinned individually per unscoped role, and its
+verb table read from `Program.cs` so an unclassified new verb fails there too. **The negative, stated
+so a reader does not infer a wall:** an `implement` lane running arbitrary test code can still open a
+socket to the daemon port — a deny pattern binds a spelling, and compiled code has none — and that
+exposure equals the one the lane already has through the CLI on its own machine; it is accepted as
+such, not closed, and the test's own remarks record the spellings (`baton.exe`, `curl.exe`,
+`python3 -c`, `node --eval`, a script file behind `pwsh -File`) it knowingly leaves past.
 
 **#1731 found-while-fixing, same PR: `EvaluateChainedCommand`'s fail-closed metacharacter set was
 never exercised against a broad, unscoped grant before this issue, and (before the operator ruling
@@ -5531,7 +5549,9 @@ before either pattern list is consulted (harmless in effect, but not "no longer 
 that whole-line fold, the deny match (#1748 F2) scans every token offset in the folded segment, not
 only its head, and strips a leading backtick/`$(`/`(`/quote off each compared token — a denied
 command riding inside a hiding construct, or sitting in a genuine segment elsewhere on a line an
-unrelated construct folded, still denies. **This reopens one family of bypasses on purpose, and
+unrelated construct folded, still denies (#2114 extended that scan to a shell wrapper's body and made
+the deny-side compare case-insensitive — the #2114 paragraph above is the record, not this one).
+**This reopens one family of bypasses on purpose, and
 accepts it — anything that moves `gh` off a segment's head without folding the line**:
 `>out.txt gh label create x` (leading redirection), `gh${IFS}label create x` and the escaped-space
 form `gh\ label create x` (neither tokenizes to a leading `gh`), and `gh $'\''; gh label create x #'`
@@ -5951,7 +5971,10 @@ redispatch-unchanged — behind confirm, executed through the same engine verbs 
 recorded as room facts, so every observer sees the transition through the room record. The
 conductor/orchestrator remains the only **originator** of work: dispatch-new-lane, amended re-briefs,
 and gate approvals stay closed from the page (§10's remote-dispatch ruling, unamended). If the page
-grows an origination affordance, this entry has been violated, not extended.
+grows an origination affordance, this entry has been violated, not extended. How the eventual write
+verbs identify their caller — tailnet callers by identity header, loopback trusted as the operator —
+and why that makes the role grant, not this gate, what contains a lane, is ruled in §9's #2114
+paragraph (2026-09-08), not here; a lane implementing the write gate reads that first.
 
 **Why this is not the pairing infrastructure §10 archived.** `PairedClientsStore`, the WebSocket
 broadcast, and the tsnet sidecar existed to give a *paired remote client* a registry, reassignment,

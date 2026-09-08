@@ -95,6 +95,13 @@ public static class AgyHookCheckCommand
         Baton.Vendors.AgyWorkerAdapter.DeniedShellOptionTokensVariable;
 
     /// <summary>
+    /// Mirror-name for <see cref="Baton.Vendors.AgyWorkerAdapter.DeniedShellExceptionsVariable"/>
+    /// (#2114), same shape as the two above.
+    /// </summary>
+    public const string DeniedShellExceptionsEnvironmentVariable =
+        Baton.Vendors.AgyWorkerAdapter.DeniedShellExceptionsVariable;
+
+    /// <summary>
     /// Mirror-name for <see cref="Baton.Vendors.AgyWorkerAdapter.VerdictLedgerVariable"/> (#1680) —
     /// owned there because that adapter emits it, read here. See it and
     /// <see cref="Baton.Vendors.AgyHookVerdictLedger"/> for what the ledger is for.
@@ -154,7 +161,7 @@ public static class AgyHookCheckCommand
         TextReader stdin, TextWriter stdout, string? deniedToolsRaw, string? shellPatternsRaw = null,
         string? outboxDirectory = null, string? workspaceDirectory = null,
         string? deniedShellPatternsRaw = null, string? deniedShellOptionTokensRaw = null,
-        string? verdictLedgerPath = null)
+        string? verdictLedgerPath = null, string? deniedShellExceptionsRaw = null)
     {
         ArgumentNullException.ThrowIfNull(stdin);
         ArgumentNullException.ThrowIfNull(stdout);
@@ -167,7 +174,7 @@ public static class AgyHookCheckCommand
         {
             stdout.Write(Decide(
                 scribe, stdin, deniedToolsRaw, shellPatternsRaw, outboxDirectory, workspaceDirectory,
-                deniedShellPatternsRaw, deniedShellOptionTokensRaw));
+                deniedShellPatternsRaw, deniedShellOptionTokensRaw, deniedShellExceptionsRaw));
         }
         catch
         {
@@ -236,7 +243,7 @@ public static class AgyHookCheckCommand
     private static string Decide(
         GrantDecisionScribe scribe, TextReader stdin, string? deniedToolsRaw, string? shellPatternsRaw,
         string? outboxDirectory, string? workspaceDirectory, string? deniedShellPatternsRaw,
-        string? deniedShellOptionTokensRaw)
+        string? deniedShellOptionTokensRaw, string? deniedShellExceptionsRaw)
     {
         // Drain stdin first and unconditionally: agy is the writer on the other end of this pipe,
         // and exiting before reading its full payload risks a blocked write on its side for any
@@ -454,8 +461,12 @@ public static class AgyHookCheckCommand
                         "in the hook payload and denied this call rather than allowing it unchecked.");
                 }
 
+                // #2114: exceptions ride their own channel; an Absent one is an empty list on this
+                // path, which leaves every deny standing -- the fail-closed direction.
+                var deniedShellExceptionList = ShellPatternList.Parse(deniedShellExceptionsRaw, VendorTag);
                 var result = Baton.Vendors.ShellCommandPatternMatcher.EvaluateChainedCommand(
-                    commandLine, shellPatternList.Patterns, deniedShellPatternList.Patterns);
+                    commandLine, shellPatternList.Patterns, deniedShellPatternList.Patterns,
+                    deniedShellExceptionList.Patterns);
 
                 if (!result.IsAllowed)
                 {

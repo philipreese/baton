@@ -306,6 +306,11 @@ public sealed partial class ClaudeWorkerAdapter : IWorkerAdapter, IPermissionGra
             // reason the denied-pattern channel is: that string has no deny concept to parse out of it.
             (DeniedShellOptionTokensVariable,
                 $"{ShellPatternsVendorTag}:{AgyWorkerAdapter.BuildDeniedShellOptionTokens(invocation.PermissionGrant)}"),
+            // #2114: exceptions. Hook-only on this vendor by construction -- the flag cannot express
+            // one, so StandingShellDenials keeps the narrowed deny off the flag and this channel is
+            // what lets the hook admit the read beneath it.
+            (DeniedShellExceptionsVariable,
+                $"{ShellPatternsVendorTag}:{AgyWorkerAdapter.BuildDeniedShellExceptions(invocation.PermissionGrant)}"),
         };
 
         // record-once-ok: #1524 src/Baton/Status/BatonEnvironmentSnapshot.cs
@@ -416,6 +421,15 @@ public sealed partial class ClaudeWorkerAdapter : IWorkerAdapter, IPermissionGra
     /// </summary>
     public const string DeniedShellOptionTokensVariable =
         AgyWorkerAdapter.DeniedShellOptionTokensVariable;
+
+    /// <summary>
+    /// #2114's read-allowlist channel, same literal as
+    /// <c>AgyWorkerAdapter.DeniedShellExceptionsVariable</c> (record-once: declared there, referenced
+    /// here). Read alongside <see cref="StandingShellDenials"/>: a deny this list carves into is
+    /// withheld from <c>--disallowedTools</c>, so for that deny the hook is claude's only enforcement,
+    /// exactly as it is for <see cref="DeniedShellOptionTokensVariable"/>'s rung.
+    /// </summary>
+    public const string DeniedShellExceptionsVariable = AgyWorkerAdapter.DeniedShellExceptionsVariable;
 
     /// <summary>
     /// The environment variable name Claude Code reads for its subagent fan-out depth cap.
@@ -1121,11 +1135,57 @@ public sealed partial class ClaudeWorkerAdapter : IWorkerAdapter, IPermissionGra
     /// <c>ClaudeWorkerAdapterTests.Denied_option_tokens_ride_the_hook_channel_and_deliberately_reach_no_vendor_flag</c>,
     /// so wiring it onto the flag fails a test rather than passing quietly.
     /// </para>
+    /// <para>
+    /// <b>A deny that a <see cref="PermissionGrant.DeniedShellCommandExceptions"/> entry carves into
+    /// is withheld from the flag too (#2114).</b> <c>--disallowedTools Bash(baton *)</c> would refuse
+    /// <c>baton status</c> before the hook ever saw it — the flag has precedence over every allow and
+    /// no carve-out of its own — so such a deny rides the hook alone, where the exception can be
+    /// honoured. "Carves into" is tokenized-head containment: an exception whose head tokens start
+    /// with the deny's (<c>baton status*</c> under <c>baton *</c>). A deny no exception reaches
+    /// (<c>gh label*</c>, and a re-deny beneath an exception such as <c>baton ledger --rebuild*</c>)
+    /// stays on the flag exactly as before. What this trades: for the carved deny, a silently-dead
+    /// hook (#530) is the same exposure the option-token rung already carries, which is why the hook
+    /// is probed live before a lane runs.
+    /// </para>
     /// </summary>
-    private static IEnumerable<string> StandingShellDenials(PermissionGrant? grant) =>
-        grant?.DeniedShellCommandPatterns is { Count: > 0 } denied
-            ? denied.Select(pattern => $"{ClaudeCliVocabulary.BashToolName}({pattern})")
-            : [];
+    private static IEnumerable<string> StandingShellDenials(PermissionGrant? grant)
+    {
+        if (grant?.DeniedShellCommandPatterns is not { Count: > 0 } denied)
+        {
+            return [];
+        }
+
+        var exceptions = grant.DeniedShellCommandExceptions ?? [];
+        return denied
+            .Where(pattern => !exceptions.Any(exception => CarvesInto(exception, pattern)))
+            .Select(pattern => $"{ClaudeCliVocabulary.BashToolName}({pattern})");
+    }
+
+    /// <summary>
+    /// Whether <paramref name="exception"/>'s tokenized head begins with <paramref name="deny"/>'s —
+    /// the containment test <see cref="StandingShellDenials"/> withholds a deny from the flag on.
+    /// Case-insensitive on the deny side, as the hook's own deny match is
+    /// (<c>ShellCommandPatternMatcher.IsDeniedByTokenizedHead</c>).
+    /// </summary>
+    private static bool CarvesInto(string exception, string deny)
+    {
+        var denyTokens = deny.TrimEnd('*').Split((char[]?)null, StringSplitOptions.RemoveEmptyEntries);
+        var exceptionTokens = exception.TrimEnd('*').Split((char[]?)null, StringSplitOptions.RemoveEmptyEntries);
+        if (denyTokens.Length == 0 || exceptionTokens.Length < denyTokens.Length)
+        {
+            return false;
+        }
+
+        for (int i = 0; i < denyTokens.Length; i++)
+        {
+            if (!exceptionTokens[i].Equals(denyTokens[i], StringComparison.OrdinalIgnoreCase))
+            {
+                return false;
+            }
+        }
+
+        return true;
+    }
 
     /// <summary>
     /// The withheld tool names carried to the <c>PreToolUse</c> hook — the same list

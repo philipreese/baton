@@ -38,9 +38,13 @@ if (args.Length >= 1 && args[0] == "hook-check")
     // --disallowedTools entry expresses it (ShellCommandPatternMatcher.IsDeniedByOptionToken).
     var deniedShellOptionTokens = Environment.GetEnvironmentVariable(
         HookCheckCommand.DeniedShellOptionTokensEnvironmentVariable);
+    // #2114: the exception channel, read the same way as the three above. For any deny it narrows,
+    // this hook is claude's only enforcement (ClaudeWorkerAdapter.StandingShellDenials).
+    var deniedShellExceptions = Environment.GetEnvironmentVariable(
+        HookCheckCommand.DeniedShellExceptionsEnvironmentVariable);
     return HookCheckCommand.Execute(
         Console.In, Console.Error, deniedTools, outputDir, workspaceDir, shellPatterns, deniedShellPatterns,
-        deniedShellOptionTokens);
+        deniedShellOptionTokens, deniedShellExceptions);
 }
 
 // #554: the same idea for agy, and a separate command because the two vendors share none of the
@@ -67,9 +71,12 @@ if (args.Length >= 1 && args[0] == "agy-hook-check")
     // line to, so AgyWorkerAdapter's caller can later confirm the hook fired at all.
     var agyVerdictLedgerPath = Environment.GetEnvironmentVariable(
         AgyHookCheckCommand.VerdictLedgerEnvironmentVariable);
+    // #2114: agy's exception channel, fetched like its deny channel above.
+    var agyDeniedShellExceptions = Environment.GetEnvironmentVariable(
+        AgyHookCheckCommand.DeniedShellExceptionsEnvironmentVariable);
     return AgyHookCheckCommand.Execute(
         Console.In, Console.Out, deniedTools, shellPatterns, agyOutputDir, agyWorkspaceDir, deniedShellPatterns,
-        agyDeniedShellOptionTokens, agyVerdictLedgerPath);
+        agyDeniedShellOptionTokens, agyVerdictLedgerPath, agyDeniedShellExceptions);
 }
 
 // #1853: hidden bidirectional app-server broker. Like hook-check above, this is a vendor subprocess

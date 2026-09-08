@@ -31,8 +31,12 @@
     "network_access": true,
     "denied_shell_command_patterns": [
       "gh label*", "gh pr merge*", "gh api*",
-      "baton queue*", "baton resolve*", "baton cancel*", "baton dispatch*", "baton redispatch*", "baton trust*", "baton memory add*",
+      "baton *", "baton ledger --rebuild*", "baton ledger backfill*", "baton ledger export*",
       "curl*", "wget*", "Invoke-WebRequest*", "Invoke-RestMethod*", "iwr*", "irm*", "python -c*", "python -m http.client*", "node -e*"
+    ],
+    "denied_shell_command_exceptions": [
+      "baton status*", "baton templates*", "baton audit lanes*", "baton memory audit*", "baton ledger*",
+      "baton trust --list*", "baton --version*"
     ],
     "denied_shell_option_tokens": ["--add-label", "--remove-label", "--label"],
     "timeout_minutes": 40,
@@ -181,8 +185,12 @@
     "network_access": true,
     "denied_shell_command_patterns": [
       "gh label*", "gh pr merge*", "gh api*",
-      "baton queue*", "baton resolve*", "baton cancel*", "baton dispatch*", "baton redispatch*", "baton trust*", "baton memory add*",
+      "baton *", "baton ledger --rebuild*", "baton ledger backfill*", "baton ledger export*",
       "curl*", "wget*", "Invoke-WebRequest*", "Invoke-RestMethod*", "iwr*", "irm*", "python -c*", "python -m http.client*", "node -e*"
+    ],
+    "denied_shell_command_exceptions": [
+      "baton status*", "baton templates*", "baton audit lanes*", "baton memory audit*", "baton ledger*",
+      "baton trust --list*", "baton --version*"
     ],
     "denied_shell_option_tokens": ["--add-label", "--remove-label", "--label"],
     "timeout_minutes": 15,

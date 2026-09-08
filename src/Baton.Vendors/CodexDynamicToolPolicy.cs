@@ -694,7 +694,8 @@ public sealed class CodexDynamicToolPolicy
         }
 
         var decision = ShellCommandPatternMatcher.EvaluateChainedCommand(
-            commandLine, _grant.ShellCommandPatterns, _grant.DeniedShellCommandPatterns);
+            commandLine, _grant.ShellCommandPatterns, _grant.DeniedShellCommandPatterns,
+            _grant.DeniedShellCommandExceptions);
         if (!decision.IsAllowed)
         {
             // #1920: the matcher's reason states the rule; this site knows the vendor, so it is where

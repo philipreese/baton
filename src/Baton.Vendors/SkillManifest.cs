@@ -159,16 +159,20 @@ public sealed record SkillRequirements(
 
         var granted = grant.ShellCommandPatterns ?? Array.Empty<string>();
         var denied = grant.DeniedShellCommandPatterns ?? Array.Empty<string>();
+        var excepted = grant.DeniedShellCommandExceptions ?? Array.Empty<string>();
         var unsatisfied = new List<string>();
         foreach (var pattern in required)
         {
             var allowed = grant.RunShellCommands
                 && (granted.Count == 0 || granted.Contains(pattern, StringComparer.Ordinal));
             // Exact membership OR the gate's own predicate on the shortest line the pattern admits --
-            // the remark above states why both, and why neither alone is enough.
+            // the remark above states why both, and why neither alone is enough. #2114: a pattern the
+            // grant's read allowlist lists or covers is carved back out of the deny, by the same pair.
             var deniedByGrant = denied.Contains(pattern, StringComparer.Ordinal)
                 || ShellCommandPatternMatcher.IsDenied(pattern.TrimEnd('*'), denied);
-            if (!allowed || deniedByGrant)
+            var exceptedByGrant = excepted.Contains(pattern, StringComparer.Ordinal)
+                || ShellCommandPatternMatcher.IsDenied(pattern.TrimEnd('*'), excepted);
+            if (!allowed || (deniedByGrant && !exceptedByGrant))
             {
                 unsatisfied.Add(pattern);
             }

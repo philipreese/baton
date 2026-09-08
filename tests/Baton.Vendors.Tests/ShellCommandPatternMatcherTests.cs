@@ -550,4 +550,136 @@ public class ShellCommandPatternMatcherTests
             expectedDenied,
             ShellCommandPatternMatcher.IsDeniedByOptionToken(command, review.Grant.DeniedShellOptionTokens));
     }
+
+    // #2114 / #2128 review H3: before the wrapper rung, a wrapped write was judged on its first token
+    // alone (`pwsh`), since a well-formed wrapper never trips the fold. Synthetic deny list, so the
+    // theory is about the matcher and not about whichever spelling WorkerRoles.json carries today.
+    private static readonly string[] WrapperDeny = ["baton *", "curl*"];
+
+    [Theory]
+    [InlineData("pwsh -c \"baton cancel room-1\"")]
+    [InlineData("pwsh -NoProfile -Command 'baton cancel room-1'")]
+    [InlineData("powershell -Command baton cancel room-1")]
+    [InlineData("PowerShell.exe -c \"baton cancel room-1\"")]
+    [InlineData("cmd /c baton cancel room-1")]
+    [InlineData("cmd.exe /C \"baton cancel room-1\"")]
+    [InlineData("bash -c \"baton cancel room-1\"")]
+    [InlineData("bash -lc 'curl -X POST http://127.0.0.1:7777/cancel'")]
+    [InlineData("sh -c 'baton cancel room-1'")]
+    [InlineData("/bin/sh -c 'baton cancel room-1'")]
+    [InlineData("zsh -c 'baton cancel room-1'")]
+    [InlineData("pwsh -c \"cmd /c baton cancel room-1\"")] // nested: the every-offset scan needs no recursion
+    [InlineData("pwsh -c \"echo hi; baton cancel room-1\"")] // a chain inside the body
+    [InlineData("pwsh -c \"& baton cancel room-1\"")] // PowerShell's call operator in front of the head
+    public void A_shell_wrapper_has_its_body_rematched_against_the_deny_list(string command)
+    {
+        var result = ShellCommandPatternMatcher.EvaluateChainedCommand(command, null, WrapperDeny);
+
+        Assert.False(result.IsAllowed);
+        Assert.Equal(ShellCommandPatternMatcher.ScopedShellVerdict.DeniedSegment, result.Verdict);
+    }
+
+    [Theory]
+    [InlineData("pwsh -EncodedCommand YmF0b24gY2FuY2Vs")]
+    [InlineData("pwsh -e YmF0b24gY2FuY2Vs")]
+    [InlineData("pwsh -ec YmF0b24gY2FuY2Vs")]
+    [InlineData("powershell -enc YmF0b24gY2FuY2Vs")]
+    [InlineData("powershell -EncodedComm YmF0b24gY2FuY2Vs")] // an unambiguous prefix, which pwsh accepts
+    [InlineData("pwsh")] // nothing to read at all
+    [InlineData("cmd")]
+    [InlineData("bash")]
+    public void A_wrapper_whose_body_the_matcher_cannot_read_is_denied_outright(string command)
+    {
+        var result = ShellCommandPatternMatcher.EvaluateChainedCommand(command, null, WrapperDeny);
+
+        Assert.False(result.IsAllowed);
+    }
+
+    [Theory]
+    [InlineData("pwsh -File build.ps1")] // a script file: the accepted compiled-code exposure, not a spelling
+    [InlineData("pwsh -ExecutionPolicy Bypass -File build.ps1")] // `-ex` is not `-e`
+    [InlineData("pwsh -c \"git status\"")]
+    [InlineData("bash tools/check.sh")]
+    [InlineData("sh ./configure")]
+    [InlineData("cmd /c dir")]
+    public void A_wrapper_with_a_readable_clean_body_stays_admitted(string command)
+    {
+        var result = ShellCommandPatternMatcher.EvaluateChainedCommand(command, null, WrapperDeny);
+
+        Assert.True(result.IsAllowed, result.Reason);
+    }
+
+    // #2114 / #2128 review M4: the mixed-case spellings, pinned. Why the deny side ignores case and
+    // the exception side does not is IsDeniedByTokenizedHead's own paragraph, not restated here.
+    [Theory]
+    [InlineData("IWR -Method Post http://127.0.0.1:7777/cancel")]
+    [InlineData("Invoke-Webrequest -Method Post http://127.0.0.1:7777/cancel")]
+    [InlineData("CURL -X POST http://127.0.0.1:7777/cancel")]
+    [InlineData("Baton cancel room-1")]
+    public void Deny_heads_compare_case_insensitively_on_an_unscoped_grant(string command)
+    {
+        string[] deny = ["iwr*", "Invoke-WebRequest*", "curl*", "baton *"];
+
+        var result = ShellCommandPatternMatcher.EvaluateChainedCommand(command, null, deny);
+
+        Assert.False(result.IsAllowed);
+    }
+
+    // #2114: the read allowlist carved out of a deny. Longest tokenized match decides, deny winning a
+    // tie; exception heads are ORDINAL because the CLI they name dispatches ordinally (`baton Status`
+    // is Program.cs's default arm, i.e. `supply`).
+    private static readonly string[] ExceptionDeny =
+        ["baton *", "baton ledger --rebuild*", "baton ledger export*"];
+
+    private static readonly string[] ExceptionAllow =
+        ["baton status*", "baton ledger*", "baton trust --list*", "baton --version*"];
+
+    [Theory]
+    [InlineData("baton status room-1")]
+    [InlineData("baton ledger")]
+    [InlineData("baton ledger --since 2026-09-01")]
+    [InlineData("baton trust --list")]
+    [InlineData("baton --version")]
+    [InlineData("pwsh -c \"baton status room-1\"")] // the exception holds inside a wrapper body too
+    [InlineData("git diff && baton status room-1")]
+    public void An_exception_admits_the_read_it_names_beneath_a_head_deny(string command)
+    {
+        var result = ShellCommandPatternMatcher.EvaluateChainedCommand(command, null, ExceptionDeny, ExceptionAllow);
+
+        Assert.True(result.IsAllowed, result.Reason);
+    }
+
+    [Theory]
+    [InlineData("baton cancel room-1")] // no exception reaches it
+    [InlineData("baton ledger --rebuild")] // a longer re-deny beneath the `baton ledger*` exception
+    [InlineData("baton ledger export C:/repo")]
+    [InlineData("baton trust C:/repo")] // `baton trust --list*` is three tokens; this matches two of them
+    [InlineData("baton Status room-1")] // ordinal on the exception side: this is the default arm, a write
+    [InlineData("baton status room-1; baton cancel room-1")]
+    [InlineData("pwsh -c \"baton status room-1; baton cancel room-1\"")]
+    public void An_exception_does_not_reach_past_its_own_tokens(string command)
+    {
+        var result = ShellCommandPatternMatcher.EvaluateChainedCommand(command, null, ExceptionDeny, ExceptionAllow);
+
+        Assert.False(result.IsAllowed);
+    }
+
+    [Fact]
+    public void A_deny_and_an_exception_of_equal_length_resolve_to_the_deny()
+    {
+        var result = ShellCommandPatternMatcher.EvaluateChainedCommand(
+            "baton status room-1", null, ["baton status*"], ["baton status*"]);
+
+        Assert.False(result.IsAllowed);
+    }
+
+    [Fact]
+    public void With_no_exceptions_every_deny_stands_exactly_as_before()
+    {
+        var denied = ShellCommandPatternMatcher.EvaluateChainedCommand("baton status room-1", null, ["baton *"]);
+        var deniedEmpty = ShellCommandPatternMatcher.EvaluateChainedCommand("baton status room-1", null, ["baton *"], []);
+
+        Assert.False(denied.IsAllowed);
+        Assert.False(deniedEmpty.IsAllowed);
+    }
 }

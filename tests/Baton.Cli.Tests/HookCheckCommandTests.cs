@@ -292,6 +292,29 @@ public class HookCheckCommandTests
             deniedShellPatternsRaw: "claude:" + string.Join(",", review.Grant.DeniedShellCommandPatterns!));
     }
 
+    // #2114: the read-allowlist channel reaches the matcher through this hook. Under `baton *` the
+    // read is admitted only when the exception channel carries it -- the same command, the same deny,
+    // two channel values, two verdicts -- and a wrapped write is refused through the same path.
+    [Theory]
+    [InlineData("baton status room-1", "claude:baton status*", 0)]
+    [InlineData("baton status room-1", "claude:", HookCheckCommand.DeniedExitCode)]
+    [InlineData("baton cancel room-1", "claude:baton status*", HookCheckCommand.DeniedExitCode)]
+    [InlineData("pwsh -c \"baton cancel room-1\"", "claude:baton status*", HookCheckCommand.DeniedExitCode)]
+    public void The_denied_shell_exceptions_channel_carves_a_read_out_of_a_head_deny(
+        string command, string exceptionsRaw, int expectedExitCode)
+    {
+        var payload = """{"tool_name": "Bash", "tool_input": {"command": COMMAND_JSON}}"""
+            .Replace("COMMAND_JSON", System.Text.Json.JsonSerializer.Serialize(command));
+        using var stdin = new StringReader(payload);
+        using var stderr = new StringWriter();
+
+        var exitCode = HookCheckCommand.Execute(
+            stdin, stderr, "claude:Edit", shellPatternsRaw: "claude:",
+            deniedShellPatternsRaw: "claude:baton *", deniedShellExceptionsRaw: exceptionsRaw);
+
+        Assert.Equal(expectedExitCode, exitCode);
+    }
+
     private static int RunBashWithDeniedTools(
         string command, string deniedToolsRaw, TextWriter stderr,
         string? shellPatternsRaw = "claude:git diff*", string? deniedShellPatternsRaw = null)

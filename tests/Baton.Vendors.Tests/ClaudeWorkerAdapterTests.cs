@@ -388,6 +388,54 @@ public class ClaudeWorkerAdapterTests
     }
 
     [Fact]
+    public void A_deny_an_exception_carves_into_rides_the_hook_channel_and_is_withheld_from_the_flag()
+    {
+        // #2114: pins both halves of the trade ClaudeWorkerAdapter.StandingShellDenials records -- the
+        // carved deny reaches the hook channel and NOT the flag, while an uncarved deny and a re-deny
+        // beneath an exception still reach the flag. Wiring the carved one onto the flag would refuse
+        // the read the exception exists to admit, and this is what fails then.
+        var grant = new PermissionGrant(
+            ReadFiles: true, WriteFiles: true, RunShellCommands: true, NetworkAccess: true,
+            DeniedShellCommandPatterns: ["gh label*", "baton *", "baton ledger --rebuild*"],
+            DeniedShellCommandExceptions: ["baton status*", "baton ledger*"]);
+        var target = new ClaudeWorkerAdapter().Resolve(
+            new WorkerInvocation("Draft a plan.", PermissionGrant: grant), ArchitectContract);
+
+        Assert.Contains(
+            target.Environment!,
+            env => env.Name == ClaudeWorkerAdapter.DeniedShellExceptionsVariable
+                && env.Value == "claude:baton status*,baton ledger*");
+        Assert.Contains(
+            target.Environment!,
+            env => env.Name == ClaudeWorkerAdapter.DeniedShellPatternsVariable
+                && env.Value == "claude:gh label*,baton *,baton ledger --rebuild*");
+
+        var denied = ArgValue(target, "--disallowedTools")!;
+        Assert.Contains("Bash(gh label*)", denied);
+        Assert.Contains("Bash(baton ledger --rebuild*)", denied);
+        Assert.DoesNotContain("Bash(baton *)", denied, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void The_shipped_implement_role_keeps_its_uncarved_denies_on_the_flag()
+    {
+        // The real catalog, not a synthetic grant: what ships is what is pinned. `baton *` is carved by
+        // the role's read allowlist and so is hook-only; the HTTP-client and gh denies are not.
+        var implement = WorkerRoleCatalog.For("implement");
+        var target = new ClaudeWorkerAdapter().Resolve(
+            new WorkerInvocation("Draft a plan.", PermissionGrant: implement.Grant), ArchitectContract);
+
+        var denied = ArgValue(target, "--disallowedTools")!;
+        Assert.Contains("Bash(curl*)", denied);
+        Assert.Contains("Bash(gh api*)", denied);
+        Assert.DoesNotContain("Bash(baton *)", denied, StringComparison.Ordinal);
+        Assert.Contains(
+            target.Environment!,
+            env => env.Name == ClaudeWorkerAdapter.DeniedShellExceptionsVariable
+                && env.Value.StartsWith("claude:baton status*", StringComparison.Ordinal));
+    }
+
+    [Fact]
     public void A_raw_permission_scope_with_no_structured_grant_emits_no_disallowed_list()
     {
         // The Advanced escape hatch carries no categories to deny — a hand-typed scope is taken as-is.

@@ -87,6 +87,7 @@ internal sealed class ProcessAgyHookLivenessProbe : IAgyHookLivenessProbe
         AgyWorkerAdapter.ShellPatternsVariable,
         AgyWorkerAdapter.DeniedShellPatternsVariable,
         AgyWorkerAdapter.DeniedShellOptionTokensVariable,
+        AgyWorkerAdapter.DeniedShellExceptionsVariable,
         // #1732 review F7: a dogfooding outer lane's own hook may have BATON_HOOK_VERDICT_LEDGER set
         // in this process's environment (this probe's subprocess inherits it by default) -- without
         // this the probe's own guaranteed-deny verdict would append a line to the OUTER lane's ledger,

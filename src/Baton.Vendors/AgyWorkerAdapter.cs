@@ -166,6 +166,15 @@ public sealed partial class AgyWorkerAdapter : IWorkerAdapter, IPermissionGrantT
     public const string DeniedShellOptionTokensVariable = "BATON_HOOK_DENIED_SHELL_OPTION_TOKENS";
 
     /// <summary>
+    /// The environment variable carrying this invocation's <b>denied shell command exceptions</b>
+    /// (<see cref="PermissionGrant.DeniedShellCommandExceptions"/>, #2114). A fourth channel for the
+    /// reason the second and third are separate: this list is the opposite sign of
+    /// <see cref="DeniedShellPatternsVariable"/>'s, and a hook reading one list cannot tell a carve-out
+    /// from a deny. On this vendor the hook is, as for every deny rung, the only enforcement.
+    /// </summary>
+    public const string DeniedShellExceptionsVariable = "BATON_HOOK_DENIED_SHELL_EXCEPTIONS";
+
+    /// <summary>
     /// The environment variable naming the file <see cref="AgyHookVerdictLedger"/> counts (#1680) —
     /// the hook subprocess (<c>AgyHookCheckCommand</c>, via <c>baton agy-hook-check</c>) appends one
     /// line to this path every time it reaches a verdict. Per-EXECUTION (#1732 review F2):
@@ -383,6 +392,18 @@ public sealed partial class AgyWorkerAdapter : IWorkerAdapter, IPermissionGrantT
     /// comma-joined, empty when none. Mirror of <see cref="BuildDeniedShellPatterns"/> over
     /// <see cref="PermissionGrant.DeniedShellOptionTokens"/> (#1683 F2).
     /// </summary>
+    /// <summary>
+    /// The reads a role names beneath its deny list, for <see cref="DeniedShellExceptionsVariable"/>
+    /// — comma-joined, empty when none. Mirror of <see cref="BuildDeniedShellPatterns"/> over
+    /// <see cref="PermissionGrant.DeniedShellCommandExceptions"/> (#2114).
+    /// </summary>
+    internal static string BuildDeniedShellExceptions(PermissionGrant? grant)
+    {
+        return grant?.DeniedShellCommandExceptions is { Count: > 0 } exceptions
+            ? string.Join(',', exceptions)
+            : string.Empty;
+    }
+
     internal static string BuildDeniedShellOptionTokens(PermissionGrant? grant)
     {
         return grant?.DeniedShellOptionTokens is { Count: > 0 } tokens
@@ -653,6 +674,8 @@ public sealed partial class AgyWorkerAdapter : IWorkerAdapter, IPermissionGrantT
             (DeniedShellPatternsVariable, $"{ShellPatternsVendorTag}:{BuildDeniedShellPatterns(invocation.PermissionGrant)}"),
             (DeniedShellOptionTokensVariable,
                 $"{ShellPatternsVendorTag}:{BuildDeniedShellOptionTokens(invocation.PermissionGrant)}"),
+            (DeniedShellExceptionsVariable,
+                $"{ShellPatternsVendorTag}:{BuildDeniedShellExceptions(invocation.PermissionGrant)}"),
         };
 
         // #1680 (F2, #1732 review): the first-verdict canary's write side. Per-EXECUTION, not

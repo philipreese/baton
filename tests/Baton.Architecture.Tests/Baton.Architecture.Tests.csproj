@@ -34,6 +34,14 @@
       a vendor CLI actually exists.
     -->
     <ProjectReference Include="..\..\tools\Baton.VendorProbe\Baton.VendorProbe.csproj" />
+    <!--
+      #2114: LaneRoleDaemonWriteVerbTests judges the shipped role grants through the real matcher
+      (Baton.Vendors) under a catalog path override (Baton). Both used to arrive transitively through
+      the VendorProbe reference above; stating them here keeps the tripwire compiling for the reason it
+      exists rather than for the probe's (#2128 review L8).
+    -->
+    <ProjectReference Include="..\..\src\Baton\Baton.csproj" />
+    <ProjectReference Include="..\..\src\Baton.Vendors\Baton.Vendors.csproj" />
   </ItemGroup>
 
   <ItemGroup>

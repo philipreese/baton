@@ -58,6 +58,17 @@ namespace Baton.Vendors;
 /// consequence a reader of THIS type needs: it is the field standing between an author's
 /// <see cref="ShellCommandsAreReadOnly"/> assertion and a shell that can in fact write a file.
 /// </param>
+/// <param name="DeniedShellCommandExceptions">
+/// #2114: the explicit read allowlist carved out of <see cref="DeniedShellCommandPatterns"/> — same
+/// glob form, opposite sign, and only meaningful beside a deny it narrows. This is what lets a role
+/// deny a whole command head (<c>baton *</c>, so a verb that does not exist yet is already refused)
+/// while still admitting the reads it names (<c>baton status*</c>). Which of the two wins when both
+/// match, and why an exception's spelling is matched more strictly than a deny's, is stated once on
+/// <c>ShellCommandPatternMatcher.IsDeniedByTokenizedHead</c>. Enforced by the two <c>PreToolUse</c>
+/// hooks and the codex policy through <c>EvaluateChainedCommand</c>; on claude, any deny an
+/// exception narrows stays off the vendor flag and rests on the hook —
+/// <c>ClaudeWorkerAdapter.StandingShellDenials</c> records that trade.
+/// </param>
 public sealed record PermissionGrant(
     bool ReadFiles = false,
     bool WriteFiles = false,
@@ -66,7 +77,8 @@ public sealed record PermissionGrant(
     bool NetworkAccess = false,
     IReadOnlyList<string>? DeniedShellCommandPatterns = null,
     bool ShellCommandsAreReadOnly = false,
-    IReadOnlyList<string>? DeniedShellOptionTokens = null)
+    IReadOnlyList<string>? DeniedShellOptionTokens = null,
+    IReadOnlyList<string>? DeniedShellCommandExceptions = null)
 {
     /// <summary>
     /// True when every category is unset — the structured equivalent of a blank
