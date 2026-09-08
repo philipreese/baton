@@ -374,6 +374,35 @@ public sealed class InheritedProjectCeilingTests : IDisposable
         Assert.Null(ProjectCeilingStore.TryGet(worktree, Store));
     }
 
+    /// <summary>
+    /// The residual spec/baton.md §9 accepts, pinned in its own polarity: an unknown that happens to be
+    /// the narrower sibling loses to the identifiable match (here `all`). The arm above records both entries as `all` and so
+    /// cannot tell "inherited the match" from "inherited the narrowest"; this one can, and a later
+    /// "hardening" that intersects the found source with an unknown's recorded ceiling goes red here
+    /// while <see cref="The_narrowest_matching_ceiling_wins"/> (both identifiable) stays green.
+    /// </summary>
+    [Fact]
+    public async Task The_residual_inherits_the_match_not_the_unidentifiable_narrower_sibling()
+    {
+        var archived = MakeDirectory("archived-w2100");
+        var main = MakeDirectory("baton");
+        var worktree = MakeDirectory("w2121");
+        var commonDir = Path.Combine(main, ".git");
+        var readOnly = new ProjectCeiling(ReadFiles: true, WriteFiles: false, RunShellCommands: false, NetworkAccess: false);
+        ProjectCeilingStore.Set(archived, readOnly, Store);
+        ProjectCeilingStore.Set(main, ProjectCeiling.Unrestricted, Store);
+        var probe = ProbeOf(new() { [main] = (null, commonDir), [worktree] = (null, commonDir) });
+
+        var outcome = await InheritedProjectCeiling.TryInheritAsync(
+            worktree, Store, probe, TestContext.Current.CancellationToken);
+
+        Assert.Equal(InheritanceOutcome.Inherited, outcome.Outcome);
+        var recorded = ProjectCeilingStore.TryGet(worktree, Store);
+        Assert.NotNull(recorded);
+        Assert.True(recorded.IsUnrestricted);
+        Assert.Equal(ProjectCeilingStore.CanonicalKey(main), recorded.InheritedFrom);
+    }
+
     [Fact]
     public async Task The_narrowest_matching_ceiling_wins()
     {

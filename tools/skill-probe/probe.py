@@ -126,8 +126,9 @@ def make_workspace(root: Path, label: str, *, preflight: bool) -> Path:
 
     # Decision 0004's project ceiling: a headless dispatch against an unseen directory fails closed
     # rather than prompting, so the throwaway has to be trusted before it can be dispatched against.
-    # Forgotten again in `main`'s finally (`baton trust <ws> --forget`, the one verb that deletes a
-    # record; `--revoke` would leave a tombstone), so a run leaves nothing in project-ceilings.json.
+    # Forgotten again in `main`'s finally (`baton trust <ws> --forget`, the only verb whose purpose is
+    # removal; `--revoke` would leave a tombstone, and `--ceiling` re-trust deletes tombstones only by
+    # replacing them with a live record), so a run leaves nothing in project-ceilings.json.
     if not preflight:
         baton_exe(["trust", str(ws), "--ceiling", "all"])
     return ws

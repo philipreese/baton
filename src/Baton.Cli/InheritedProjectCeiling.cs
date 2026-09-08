@@ -111,7 +111,7 @@ internal static class InheritedProjectCeiling
 
     /// <summary>
     /// Records the ceiling <paramref name="workspacePath"/> inherits from an already-trusted path in the
-    /// same repository, and says which of the five ways the lookup ended.
+    /// same repository, and says which way the lookup ended (<see cref="InheritanceOutcome"/> enumerates them).
     /// </summary>
     /// <param name="workspacePath">The workspace a dispatch is about to run in.</param>
     /// <param name="storePath">The ceiling store to read and write — <see cref="ProjectCeilingStore.DefaultPath"/> in production.</param>

@@ -141,7 +141,9 @@ public static class TrustCommand
     }
 
     /// <summary>
-    /// <c>--forget</c> (#2121): the one verb that deletes a record. The line names the canonical path
+    /// <c>--forget</c> (#2121): the only verb whose purpose is removal (<c>--ceiling</c> re-trust also
+    /// deletes same-repository tombstones, but only by replacing them with a live record — spec/baton.md
+    /// §9). The line names the canonical path
     /// and what the record was — a tombstone with its timestamp, or a live ceiling — so the operator
     /// learns which state just left the store; a forgotten tombstone means the repository reads as
     /// never trusted again, which is the fallback <c>queue add --issue</c> takes (spec/baton.md §9).

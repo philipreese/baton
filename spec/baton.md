@@ -4867,7 +4867,10 @@ live entry does match, the workspace inherits from it and the unknown is not rep
 matches the repository cannot be `Revoked` whatever the unknown was, and refusing there would let
 one stale record anywhere in the store block every dispatch on the machine. The residual is bounded:
 if the unknown was a narrower live entry of the same repository, what is inherited is wider than the
-operator's narrowest, but still a ceiling they recorded for that repository, never `all`. `baton
+operator's narrowest, but still a ceiling they recorded for that repository — which is `all` exactly when
+the entry that matched was recorded `all`; the bound is "recorded by the operator", not "narrower than
+`all`" (`InheritedProjectCeilingTests.The_residual_inherits_the_match_not_the_unidentifiable_narrower_sibling`
+pins that polarity). `baton
 trust <path> --ceiling …` on **any** path of
 the repository ends the revocation: the path itself is overwritten, and the register verb probes each
 remaining tombstone whose directory exists and clears the ones sharing the new path's identity, naming
