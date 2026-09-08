@@ -580,10 +580,18 @@ the same event now carries (`ProcessStartTimeUtc`, added by #2073 — a pre-#207
 the settle (it records its own worker's exit) and the command reports `CancellationQueued` (exit 1,
 "queued, not applied"). **Exit code, stated once (#2103):** a cancel whose target settled before it
 returned — the pump answered, or this command wrote the terminal fact — reports
-`CommandResult.CancelApplied` and exits 0; queued exits 1; the no-op of (a) exits 0. The three flags
-exist because the room a successful cancel leaves behind (Terminal, target Cancelled or Failed) reads
-as exit 1 to `MutationExitCodeResolver`'s state-based arm, which `decide`/`supply`/`resolve` keep
-unchanged. The intent is readable: `ArrestLedgerProjector` lists it (`baton status
+`CommandResult.CancelApplied` and exits 0; queued exits 1; the no-op of (a) exits 0. Each flag is
+read by `MutationExitCodeResolver` ahead of its state-based arm (which `decide`/`supply`/`resolve`
+keep unchanged) because that arm gets the verdict on **this invocation** wrong in a flag-specific
+direction: `CancellationQueued` (#1650) corrects a 0 to a 1 — a Terminal, all-succeeded room reads 0
+for a command that only dropped a `cancel.request` file (or, since #2073, could not write the terminal
+fact) and applied nothing; `CancelWasNoOp` (#2073) corrects a 1 to a 0 — an already-Failed or
+Cancelled room reads 1 for a re-run cancel that wrote nothing; `CancelApplied` (#2103) corrects a 1
+to a 0 — the room a successful cancel leaves behind (Terminal, target Cancelled or Failed) reads 1 for
+the invocation that arrested. The applied set is exactly `CancelCommand`'s four settled returns: the
+live pump answered the request inside the window; the pump recorded the settle after this command's
+kill; the target settled while this command waited for `flow.lock`; this command wrote the terminal
+fact itself. The intent is readable: `ArrestLedgerProjector` lists it (`baton status
 --json`'s `arrests`, `fleet_status`) — absorbed into the flow-side entry when the pump answered,
 its own entry otherwise, `Delivered` once an arrest-shaped terminal fact lands at or after it.
 
