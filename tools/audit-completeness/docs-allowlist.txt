@@ -56,4 +56,5 @@ docs/vendor-coverage.md
 docs/vendor-doc-audit.md
 spec/baton.md
 tools/fleet-glass/README.md
+tools/skill-probe/skills/marker-probe/SKILL.md
 tools/vendor-verify/README.md
