@@ -97,8 +97,9 @@ public static class LedgerBackfillCommand
 
     /// <param name="ghRunner">Defaults to the real <see cref="GhCliRunner"/> — the one seam #734 already owns.</param>
     /// <param name="ledgerDirectoryOverride">
-    /// Test seam — production always writes under <c>CostLedgerLocation.Resolve</c>. A test must never be
-    /// one mis-resolved identity away from appending to the operator's real ledger.
+    /// Test seam — production always goes through <see cref="CostLedgerLocation"/> instead, writing where
+    /// its <c>ResolveForWrite</c> says and reading where its <c>Probe</c> says on a dry run. A test must
+    /// never be one mis-resolved identity away from appending to the operator's real ledger.
     /// </param>
     /// <param name="repositoryProbe">Test seam — see <see cref="RepositoryProbe"/>.</param>
     internal static async Task<int> ExecuteAsync(
@@ -129,11 +130,15 @@ public static class LedgerBackfillCommand
         var branchByRoom = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
         var pending = new Dictionary<string, List<CostLedgerEntry>>(StringComparer.OrdinalIgnoreCase);
 
-        await WalkRoomsAsync(options, probe, ledgerDirectoryOverride, pending, branchByRoom, report, cancellationToken)
+        // One ledger-location resolution per repository for the whole run -- see LedgerFilePathFor.
+        var resolvedBySlug = new Dictionary<string, string?>(StringComparer.OrdinalIgnoreCase);
+
+        await WalkRoomsAsync(
+                options, probe, ledgerDirectoryOverride, pending, branchByRoom, report, resolvedBySlug, cancellationToken)
             .ConfigureAwait(false);
         await CollectMergedPullRequestsAsync(
                 options, probe, ghRunner ?? new GhCliRunner(), ledgerDirectoryOverride, pending, branchByRoom, report,
-                cancellationToken)
+                resolvedBySlug, cancellationToken)
             .ConfigureAwait(false);
 
         // PLAN, then DISCLOSE, then WRITE -- and that order is the operator's ruling of 2026-09-05
@@ -194,6 +199,7 @@ public static class LedgerBackfillCommand
         Dictionary<string, List<CostLedgerEntry>> pending,
         Dictionary<string, string> branchByRoom,
         BackfillReport report,
+        Dictionary<string, string?> resolvedBySlug,
         CancellationToken cancellationToken)
     {
         // The room half's window is the view command's, not a second one: LedgerQuery already decides
@@ -286,7 +292,8 @@ public static class LedgerBackfillCommand
                 continue;
             }
 
-            if (LedgerFilePathFor(repository, ledgerDirectoryOverride, options.DryRun, report) is { } ledgerFilePath)
+            if (LedgerFilePathFor(repository, ledgerDirectoryOverride, options.DryRun, report, resolvedBySlug)
+                is { } ledgerFilePath)
             {
                 Accumulate(pending, ledgerFilePath, rows);
             }
@@ -387,6 +394,7 @@ public static class LedgerBackfillCommand
         Dictionary<string, List<CostLedgerEntry>> pending,
         Dictionary<string, string> branchByRoom,
         BackfillReport report,
+        Dictionary<string, string?> resolvedBySlug,
         CancellationToken cancellationToken)
     {
         var workingDirectory = Environment.CurrentDirectory;
@@ -520,7 +528,8 @@ public static class LedgerBackfillCommand
                 pullRequest with { Room = room }, repository, RepositoryIdentitySource.WorkingDirectory));
         }
 
-        if (LedgerFilePathFor(repository, ledgerDirectoryOverride, options.DryRun, report) is { } ledgerFilePath)
+        if (LedgerFilePathFor(repository, ledgerDirectoryOverride, options.DryRun, report, resolvedBySlug)
+            is { } ledgerFilePath)
         {
             Accumulate(pending, ledgerFilePath, rows);
         }
@@ -697,37 +706,71 @@ public static class LedgerBackfillCommand
     /// pending relocation it reports is disclosed in the report instead.
     /// </para>
     /// <para>
+    /// <b>A real run still relocates here, inside the walk, before that report is printed</b> — kept
+    /// deliberately (the #2041 review offered "probe without relocating on the dry-run path, OR disclose
+    /// the relocation in the report"; this does both, and the dry run is where the false claim was). What
+    /// the ordering ruling protects is the operator's chance to see a PLAN before rows are appended, and
+    /// the relocation appends no row: it is a one-time move of bytes that already existed, idempotent and
+    /// non-destructive, and the report names it — in the past tense on a real run, because by then it has
+    /// happened. Moving it into <see cref="CommitAsync"/> would buy a stricter ordering at the price of
+    /// planning against one file and appending to another.
+    /// </para>
+    /// <para>
     /// The override branch deliberately does NOT go through <see cref="CostLedgerLocation"/> at all: a
     /// test seam pointed at a scratch directory has no legacy location to relocate from, and routing it
     /// through the resolver would make a fixture's flat <c>&lt;slug&gt;.jsonl</c> silently unreadable.
     /// </para>
     /// </summary>
     private static string? LedgerFilePathFor(
-        RepositoryIdentity repository, string? ledgerDirectoryOverride, bool dryRun, BackfillReport report)
+        RepositoryIdentity repository,
+        string? ledgerDirectoryOverride,
+        bool dryRun,
+        BackfillReport report,
+        Dictionary<string, string?> resolvedBySlug)
     {
         if (ledgerDirectoryOverride is { Length: > 0 } directory)
         {
             return Path.Combine(directory, $"{repository.FileSlug}.jsonl");
         }
 
-        var probe = CostLedgerLocation.Probe(repository.FileSlug);
-        if (probe.RelocatesTo is { } destination)
+        // Once per repository per RUN, not once per room. Resolving can wait out the legacy file's lock,
+        // and a fleet whose rooms all key to one repository would otherwise pay that wait -- and reprint
+        // its outcome -- once per room.
+        if (resolvedBySlug.TryGetValue(repository.FileSlug, out var already))
         {
-            report.PendingRelocation(probe.Path, destination);
+            return already;
         }
 
+        var probe = CostLedgerLocation.Probe(repository.FileSlug);
+        string? resolved;
         if (dryRun)
         {
-            return probe.Path;
+            resolved = probe.Path;
+            if (probe.RelocatesTo is { } pending)
+            {
+                report.PendingRelocation(probe.Path, pending);
+            }
         }
-
-        var target = CostLedgerLocation.ResolveForWrite(repository.FileSlug);
-        if (target.Path is null)
+        else
         {
-            report.LedgerUnavailable(repository, target.Refusal);
+            var target = CostLedgerLocation.ResolveForWrite(repository.FileSlug);
+            resolved = target.Path;
+            if (target.Path is null)
+            {
+                report.LedgerUnavailable(repository, target.Refusal);
+            }
+            else if (probe.RelocatesTo is { } destination)
+            {
+                // Disclosed only on the arm where the move ACTUALLY happened. Recording it off the probe
+                // alone would print "was relocated ... recorded in ledger-migrations.jsonl" over a run
+                // whose relocation was refused -- the same false operator-facing claim about a durable
+                // file that the dry-run half of this method exists to stop making.
+                report.PendingRelocation(probe.Path, destination);
+            }
         }
 
-        return target.Path;
+        resolvedBySlug[repository.FileSlug] = resolved;
+        return resolved;
     }
 
     private static void Accumulate(
