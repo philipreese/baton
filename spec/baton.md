@@ -592,8 +592,12 @@ the invocation that arrested. The applied set is exactly `CancelCommand`'s settl
 live pump answered the request inside the window; the pump recorded the settle after this command's
 kill; the target settled while this command waited for `flow.lock`; this command wrote the terminal
 fact itself. The intent is readable: `ArrestLedgerProjector` lists it (`baton status
---json`'s `arrests`, `fleet_status`) — absorbed into the flow-side entry when the pump answered,
-its own entry otherwise, `Delivered` once an arrest-shaped terminal fact lands at or after it.
+--json`'s `arrests`, `fleet_status`) — merged into the flow-side entry when the pump answered (#2104:
+the operator's reason and request time win, the pump's own `CancellationRequested` stamp is the
+entry's `forwardedAt` — the forwarding toward Core, not the settlement), its own entry otherwise,
+`Delivered` once an arrest-shaped terminal fact lands at or after it. Several intents for one
+execution merge last-write-wins into that one entry whether the pump answered or not: the latest
+`--reason` and stamp are what the entry shows.
 
 What #2073 retired, and why the dead-holder gate below is history: before it, `cancel` against an
 idle room was itself a pump (`MutationInterface.RequestCancellationAsync`), which against a Running

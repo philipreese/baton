@@ -249,7 +249,14 @@ public sealed record ArrestLedgerEntryView(
     [property: JsonPropertyName("requestedAt")] string RequestedAt,
     [property: JsonPropertyName("resolvedAt")]
     [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
-    string? ResolvedAt)
+    string? ResolvedAt,
+    // #2104: when a pump forwarded the request into Flow (the CancellationRequested stamp) -- absent
+    // on every shape with no such stamped line. Not the settlement instant (that is resolvedAt), and
+    // not CancellationDelivered, which the ledger does not report. See ArrestLedgerEntry.ForwardedAtUtc's
+    // own remarks for the per-shape rule.
+    [property: JsonPropertyName("forwardedAt")]
+    [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    string? ForwardedAt = null)
 {
     public static ArrestLedgerEntryView From(ArrestLedgerEntry entry) => new(
         entry.Target,
@@ -258,7 +265,8 @@ public sealed record ArrestLedgerEntryView(
         entry.RequestedBy,
         entry.Reason,
         entry.RequestedAtUtc.ToString("O"),
-        entry.ResolvedAtUtc?.ToString("O"));
+        entry.ResolvedAtUtc?.ToString("O"),
+        entry.ForwardedAtUtc?.ToString("O"));
 }
 
 /// <summary>
