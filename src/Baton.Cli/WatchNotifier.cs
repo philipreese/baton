@@ -62,8 +62,11 @@ public sealed class WatchNotifier : IWatchNotifier
     /// <summary>How long a spawned notify command is given to exit before this stops waiting on it
     /// (and reports that on stderr) — it is not killed on THIS path, since "spawned once" (spec/baton.md
     /// §2) means exactly that: a command that exits on its own within the budget still runs to
-    /// completion, this process just stops blocking on it (its output relay is closed at that point,
-    /// so whatever it prints afterwards reaches nobody). Generous: a webhook-posting script or an
+    /// completion, this process just stops blocking on it. Its stdout and stderr are pipes this process
+    /// owns (redirected since the #2082 fix round), and disposing the <c>Process</c> on return closes
+    /// their read ends, so whatever the command prints afterwards reaches nobody and its next write
+    /// can fail — spec/baton.md §2 states what that costs a command that keeps going, and why the
+    /// redirect is worth it. Generous: a webhook-posting script or an
     /// ntfy curl call is the expected shape, never a long-running watcher of its own. The SAME budget
     /// also bounds the stdin write below, where the command IS killed on timeout — spec/baton.md §2
     /// (H1) states why the two branches differ.</summary>

@@ -449,7 +449,11 @@ command that never reads stdin — the documented `curl -X POST …` shape above
 wedge the sweep once the payload exceeds the OS pipe buffer (~4 KB on Windows). A write that has not
 drained by the deadline gets the process tree killed and the failure logged, since a command that never
 consumed the first byte was never going to finish reading the rest; a command that exits after its own
-work is left to keep running past the timeout unkilled, as before. This is a deliberate decision *not*
+work is left to keep running past the timeout unkilled, as before — with one change the #2082 redirect
+brought: its stdout and stderr are now pipes the daemon owns, closed the moment the wait returns, so a
+command that treats a failed write as fatal (curl exits 23; a `set -e` script dies on the statement)
+ends at its next print rather than finishing silently. A command that must outlive the budget writes to
+its own file or redirects its output away. This is a deliberate decision *not*
 to gate the stdin write on payload size or fall back to a temp file: `BATON_WATCH_EVENT` already
 carries the identical payload with no blocking risk (set at spawn time, not written to a stream), so a
 command that only wants the common case can read from there and skip stdin entirely — the timeout is
