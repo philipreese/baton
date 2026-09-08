@@ -28,17 +28,25 @@ namespace Baton.Vendors;
 public static class ProjectCeilingStore
 {
     /// <summary>
-    /// #1166 review finding H1: <see cref="Set"/>/<see cref="Revoke"/> are load-then-modify-then-save
-    /// with no lock of their own, so two in-process callers racing the same <paramref name="path"/>
-    /// can lose an update (last writer wins) even though <see cref="Save"/>'s own write is atomic. A
-    /// plain in-process lock is what the callers this store actually has need: every caller today —
-    /// <c>baton trust</c> (one process, one call) and this assembly's own tests — is a single
-    /// .NET process, never two OS processes writing the same file at once. The cross-process primitive
-    /// (<c>Baton.Status.MutexGuardedFileLock</c>, #1781) exists for the append-only stores that DO have
-    /// concurrent processes; switch this store onto it the day a second process writes ceilings
-    /// (e.g. a daemon-side trust flow) — until then it would be a named OS mutex guarding nothing.
+    /// #1166 review finding H1: <see cref="Set"/>/<see cref="Revoke"/> are load-then-modify-then-save,
+    /// so two callers racing the same <paramref name="path"/> can lose an update (last writer wins)
+    /// even though <see cref="Save"/>'s own write is atomic. That started as a plain in-process lock,
+    /// whose own note named the condition for replacing it: <i>"switch this store onto
+    /// <c>MutexGuardedFileLock</c> the day a second process writes ceilings (e.g. a daemon-side trust
+    /// flow)"</i>. #2076 is that day — <c>baton dispatch</c> now records an inherited ceiling
+    /// (<c>Baton.Cli.InheritedProjectCeiling</c>), so the daemon's launches and an operator's
+    /// <c>baton trust</c> are concurrent OS processes writing one file. A lost update here is not a
+    /// cosmetic race: the entry that vanishes is a lane's only trust record, and that lane then fails
+    /// closed with the "has no recorded permission ceiling" refusal this issue exists to remove.
     /// </summary>
-    private static readonly object SyncRoot = new();
+    private const string LockNamePrefix = "baton-project-ceilings";
+
+    /// <summary>
+    /// How long a writer waits for the lock above. The critical section is one small read, one
+    /// dictionary edit and one atomic rewrite — the same shape and the same 30 seconds
+    /// <c>QueueStore</c> allows its own snapshot mutations.
+    /// </summary>
+    private static readonly TimeSpan LockTimeout = TimeSpan.FromSeconds(30);
 
     /// <summary>
     /// The production location: <c>project-ceilings.json</c> under <see cref="BatonPaths.Root"/>. A
@@ -104,14 +112,14 @@ public static class ProjectCeilingStore
         ArgumentException.ThrowIfNullOrEmpty(projectPath);
         ArgumentNullException.ThrowIfNull(ceiling);
 
-        lock (SyncRoot)
+        MutexGuardedFileLock.RunUnderLock(path, LockNamePrefix, LockTimeout, () =>
         {
             var ceilings = new Dictionary<string, ProjectCeiling>(Load(path), BatonPaths.RecordKeyComparer)
             {
                 [CanonicalKey(projectPath)] = ceiling,
             };
             Save(ceilings, path);
-        }
+        });
     }
 
     /// <summary>Removes <paramref name="projectPath"/>'s ceiling. Returns false when none was recorded.</summary>
@@ -119,7 +127,7 @@ public static class ProjectCeilingStore
     {
         ArgumentException.ThrowIfNullOrEmpty(projectPath);
 
-        lock (SyncRoot)
+        return MutexGuardedFileLock.RunUnderLock(path, LockNamePrefix, LockTimeout, () =>
         {
             var ceilings = new Dictionary<string, ProjectCeiling>(Load(path), BatonPaths.RecordKeyComparer);
             if (!ceilings.Remove(CanonicalKey(projectPath)))
@@ -129,6 +137,6 @@ public static class ProjectCeilingStore
 
             Save(ceilings, path);
             return true;
-        }
+        });
     }
 }

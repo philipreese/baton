@@ -1,4 +1,5 @@
 using System.Diagnostics;
+using Baton.Accounting;
 using Baton.Queue;
 using Baton.Vendors;
 
@@ -25,11 +26,17 @@ namespace Baton.Cli;
 /// the verb does.
 /// </para>
 /// <para>
-/// <b>The ceiling is deliberately <c>all</c>, and that is a real widening.</b> It is what the runner
-/// did and what an implement lane in a fresh worktree needs; it is named here rather than left
-/// implicit so a reader does not have to infer that queueing an issue grants its workspace an
-/// unrestricted grant ceiling. <c>ProjectCeiling</c>'s own doc has what a ceiling does and does not
-/// bound.
+/// <b>The ceiling is the SOURCE REPOSITORY'S, falling back to <c>all</c> (#2076).</b> It used to be
+/// <c>all</c> unconditionally — what the runner did, and a real widening — which silently re-opened
+/// every category on a worktree of a repository whose ceiling the operator had deliberately narrowed.
+/// A worktree of a trusted repository now inherits that repository's own ceiling
+/// (<see cref="InheritedProjectCeiling"/>), and only a workspace with no trusted sibling to inherit
+/// from falls back to unrestricted, which is the pre-#2076 behaviour kept for the repository an
+/// operator has never trusted at all: <c>queue add --issue n</c> provisions a worktree of the checkout
+/// the operator is standing in, so refusing there would break the verb rather than protect anything.
+/// Named here rather than left implicit so a reader does not have to infer that queueing an issue can
+/// grant its workspace an unrestricted grant ceiling. <c>ProjectCeiling</c>'s own doc has what a
+/// ceiling does and does not bound.
 /// </para>
 /// </remarks>
 public static class IssueWorktreeProvisioner
@@ -108,12 +115,17 @@ public static class IssueWorktreeProvisioner
     /// a different layout sets.
     /// </param>
     /// <param name="runner">Test seam: runs one command and returns (exit code, stdout+stderr).</param>
+    /// <param name="probe">
+    /// Test seam for the trust step's repository-identity lookup (#2076) — the same injected-probe shape
+    /// <see cref="InheritedProjectCeiling.TryRecordAsync"/> takes. Null uses git.
+    /// </param>
     /// <exception cref="CliArgumentException">Any of the three steps failed, with the tool's own output in the message.</exception>
     public static async Task<string> ProvisionAsync(
         int issue,
         string repositoryDirectory,
         string? worktreeRoot,
         Func<string, IReadOnlyList<string>, string, CancellationToken, Task<(int ExitCode, string Output)>>? runner = null,
+        Func<string, CancellationToken, Task<RepositoryIdentity?>>? probe = null,
         CancellationToken cancellationToken = default)
     {
         ArgumentOutOfRangeException.ThrowIfNegativeOrZero(issue);
@@ -134,7 +146,7 @@ public static class IssueWorktreeProvisioner
             // Not an error: the runner's own habit is to re-queue against a worktree that already
             // exists. Trust it and hand it back rather than failing the add -- `git worktree add` would
             // refuse anyway, and refusing here would make a re-add of a live lane impossible.
-            Trust(workspace);
+            await TrustAsync(workspace, probe, cancellationToken: cancellationToken).ConfigureAwait(false);
             return workspace;
         }
 
@@ -157,12 +169,36 @@ public static class IssueWorktreeProvisioner
                 $"the branch '{branch}' exists on the remote now — remove any stale worktree at '{workspace}' and retry.");
         }
 
-        Trust(workspace);
+        await TrustAsync(workspace, probe, cancellationToken: cancellationToken).ConfigureAwait(false);
         return workspace;
     }
 
-    private static void Trust(string workspace) =>
-        ProjectCeilingStore.Set(workspace, ProjectCeiling.Unrestricted, ProjectCeilingStore.DefaultPath);
+    /// <summary>
+    /// Records <paramref name="workspace"/>'s ceiling: the source repository's own, when a path in that
+    /// repository is already trusted, and unrestricted otherwise — see the type remarks for why the
+    /// fallback is a widening rather than a refusal. Writes nothing when the workspace already carries
+    /// an entry (<see cref="InheritedProjectCeiling.TryRecordAsync"/> reports that as "nothing
+    /// inherited"), which is what makes a re-add of a live lane leave its ceiling as the operator last
+    /// set it rather than resetting it to <c>all</c>.
+    /// </summary>
+    internal static async Task TrustAsync(
+        string workspace,
+        Func<string, CancellationToken, Task<RepositoryIdentity?>>? probe = null,
+        string? storePath = null,
+        CancellationToken cancellationToken = default)
+    {
+        storePath ??= ProjectCeilingStore.DefaultPath;
+        probe ??= RepositoryIdentityResolver.TryResolveAsync;
+
+        if (await InheritedProjectCeiling.TryRecordAsync(workspace, storePath, probe, cancellationToken)
+                .ConfigureAwait(false) is not null
+            || ProjectCeilingStore.TryGet(workspace, storePath) is not null)
+        {
+            return;
+        }
+
+        ProjectCeilingStore.Set(workspace, ProjectCeiling.Unrestricted, storePath);
+    }
 
     /// <summary>
     /// The production runner. Spawns <c>gh</c>/<c>git</c> — read-and-write forge and repo commands,

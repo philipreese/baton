@@ -4688,7 +4688,12 @@ explicit operator verb instead — the PR that built this states that reading as
 correction to 0004's text. `ProjectCeilingGate` (`src/Baton.Vendors/`) is the one choke point both
 `ClaudeWorkerAdapter.Resolve` and `AgyWorkerAdapter.Resolve` call at the top of `Resolve`, before
 either reads `WorkerInvocation.PermissionGrant`: a `WorkingDirectory` with no recorded ceiling refuses
-before any worker spawns (`ProjectNotTrustedException`, naming the `baton trust` verb and the path);
+before any worker spawns (`ProjectNotTrustedException`, naming the `baton trust` verb and the path) —
+with one narrowing since #2076, ahead of the gate rather than inside it: `baton dispatch` first lets a
+workspace whose **repository identity** (`RepositoryIdentity`) matches an already-trusted path inherit
+that path's ceiling (`InheritedProjectCeiling`, which has the derivation, the narrowest-wins rule and
+the cost), so a worktree or clone of a trusted repository is trusted before the gate reads the store
+and one whose repository is trusted nowhere still refuses exactly as above;
 otherwise the effective grant is `ceiling.Cap(roleGrant)` — each category survives only when both the
 role's own grant and the ceiling carry it, re-checked against
 `PermissionGrant.CategoriesDefeatedByTheShell` so a coherent role grant that becomes incoherent once
