@@ -1,7 +1,5 @@
-using Baton.Vendors;
-using Baton.Artifacts;
+using System.Diagnostics;
 using Baton.Concurrency;
-using Baton.Dispatch;
 using Baton.Domain;
 using Baton.Mutation;
 using Baton.Outcomes;
@@ -9,63 +7,95 @@ using Baton.Projection;
 using Baton.Status;
 using Baton.Store;
 using Baton.Templates;
-using Baton.Workspaces;
+using Baton.Vendors;
 
 namespace Baton.Cli;
 
 /// <summary>
-/// <c>baton cancel</c> (M12 Phase 2): exposes <see cref="MutationInterface.RequestCancellationAsync"/>
-/// on the CLI. Unlike <see cref="RunCommand"/>, this never binds a fresh snapshot — mutation commands
-/// only ever act against a room <c>baton run</c> has already started — and, like
-/// every mutation entry point, is itself a pump: recording the cancellation intent resumes driving
-/// the rest of the workflow to its next fixed point.
-/// #1495 adds two things this room-idle description does not cover: room-level targeting (no
-/// <c>--execution</c> resolves "the target lane" via <see cref="RunningExecutionResolver"/>, fail
-/// closed on zero or more than one candidate) and a live-pump fall-through — catching
-/// <see cref="WorkflowLockedException"/> from the guarded call above and writing
-/// <see cref="CancelRequestFile"/> instead (writing <c>latest</c> to re-resolve the target at poll
-/// time per spec/baton.md §2, unlike the idle room's command-time resolution), so a room whose <c>baton run</c>
-/// is genuinely still live is reachable too, not just the idle-room path the rest of this type's doc
-/// still describes accurately on its own.
-/// </para>
-/// <para>
-/// #1607 widened the <c>--execution</c>-omitted path beyond <see cref="StepStatus.Running"/>:
-/// <see cref="RunningExecutionResolver"/> now also resolves a quota-parked step (<c>Failed</c> with a
-/// scheduled <c>RetryNotBefore</c>) as a candidate, retiring #802 §"doesn't work alone" objection
-/// now that PR #1605 gave a parked mark a real delivery point
-/// (<c>InFlightExecutionRegistry.MarkArrestIntent</c>, generalized by #1556 from that PR's narrower
-/// <c>MarkParkedCancelIntent</c>). A parked candidate resolved here still
-/// only reaches the pump through the SAME two paths this method already had: the direct call below
-/// (only ever reachable against an already-*overdue* park when a live pump is confirmed, since a
-/// genuinely still-future one is refused by the dead-holder check above before the resolver ever
-/// runs — that check was widened in this same change from Dead-only to "anything but confirmed
-/// Alive", specifically because the resolver widening above would otherwise let a room with no
-/// holder record at all reach a still-future park directly, which nothing would ever drain), or the
-/// <see cref="WorkflowLockedException"/> fall-through, which re-resolves <c>latest</c> at poll time via
-/// the identical widened resolver.
-/// </para>
-/// <para>
-/// #1607 review finding (F1): the dead-holder gate below sits before target resolution, so its
-/// Unknown-liveness widening is deliberately NOT scoped to room-level targeting — it refuses an
-/// explicit <c>--execution &lt;id&gt;</c> just as readily. See spec/baton.md §2 for why (narrowing it
-/// would reopen #1586's hang from the explicit path) and what that costs a genuinely-alive pump.
-/// </para>
+/// <c>baton cancel &lt;room-dir&gt; [--execution &lt;id&gt;] [--reason &lt;why&gt;]</c> — the operator's arrest
+/// verb, rebuilt by #2073 (slice two of #1530) around one ordering rule: <b>the intent fact is written
+/// first, and everything that can stop the worker comes after it.</b> In order:
+/// <list type="number">
+/// <item><b>Idempotency.</b> Nothing left to arrest (the room is Terminal, or the named execution
+/// settled earlier) is said aloud and exits 0 with no append at all, intent included
+/// (<see cref="CommandResult.CancelWasNoOp"/>). Re-running a cancel is never a new failure.</item>
+/// <item><b>Target.</b> An explicit <c>--execution</c> is validated against the room's accepted
+/// requests; a bare invocation resolves "the target lane" via <see cref="RunningExecutionResolver"/>
+/// (#1495/#1607 — exactly one Running or quota-parked step, fail closed otherwise).</item>
+/// <item><b>The intent fact</b> — <see cref="RoomEvent.ArrestIntentRecorded"/>, appended to
+/// <c>room.jsonl</c> (the choice of journal is explained on that record).</item>
+/// <item><b>Arrest through the existing channel.</b> Whether a pump is alive is answered by trying
+/// <c>flow.lock</c> without waiting (<c>Baton.Cli.Daemon.DeadPumpProbe</c> reads liveness the same
+/// way): a live pump holds that lock for its whole run, so a held lock means write
+/// <see cref="CancelRequestFile"/> (#1528's channel, which #1825's pump-side seam settles) and give the
+/// target <see cref="ResolvePumpAnswerWindow"/> to leave <see cref="ArrestableExecutions"/>. A free
+/// lock means there is no pump to answer.</item>
+/// <item><b>The kill, only if no pump answered.</b> <see cref="WorkerProcessArrest"/> is handed the
+/// pid and start time <see cref="CoreEvent.ExecutionStarted"/> recorded and kills on nothing short
+/// of <see cref="EngineLivenessProbe"/>'s Alive verdict for that pair.</item>
+/// <item><b>The terminal fact</b>, slice one's two shapes with cause <c>operator cancel</c>
+/// (spec/baton.md §7's <c>DeadPumpProbe</c> bullet owns the Running/parked split), appended under
+/// <c>flow.lock</c>. If a pump still holds that lock once the kill is done, it records its own
+/// worker's exit and this command reports <see cref="CommandResult.CancellationQueued"/> instead.</item>
+/// </list>
 /// </summary>
+/// <remarks>
+/// <b>What this retired</b> — spec/baton.md §2's <c>baton cancel</c> paragraph is the record; in
+/// one clause each: the pre-#2073 direct <c>MutationInterface.RequestCancellationAsync</c> call (against
+/// a dead pump's Running execution it ran crash recovery and the retry engine spawned the worker
+/// again — the verb undid itself); the #1586/#1607 dead-holder gate (a parked room with no
+/// confirmed-live pump was refused for want of a settling verb, and this is now that verb: a free
+/// lock is settled, with the holder sidecar's record carried into the terminal fact's reason); and
+/// bindings loading (<c>--bindings</c>/<c>--workflow-id</c> are accepted and ignored — nothing here
+/// dispatches).
+/// </remarks>
 public static class CancelCommand
 {
-    private const string ArtifactsDirectoryName = ArtifactManager.ArtifactsDirectoryName;
+    /// <summary>
+    /// Attribution written onto <see cref="FlowEvent.StepRetryForeclosed.ForeclosedBy"/> and named in
+    /// every terminal reason this verb writes, so an operator cancel is tellable from
+    /// <c>resolve --close</c>'s and from the dead-pump probe's.
+    /// </summary>
+    public const string DiagnosticName = "baton cancel";
+
+    /// <summary>What <see cref="RoomEvent.ArrestIntentRecorded.RequestedBy"/> carries. This verb is the only producer.</summary>
+    public const string OperatorRequestedBy = "operator";
+
+    /// <summary>The fixed opening of every terminal reason this verb writes — the cause, in the words #2073 ruled.</summary>
+    public const string ArrestReasonPrefix = "Arrested: operator cancel";
+
+    /// <summary>
+    /// How long a live pump gets to answer the <c>cancel.request</c> before the worker is killed by
+    /// pid. Derived from the pump's own poll cadence rather than transcribed: the poller's bounded
+    /// retry gives up after five ticks (<c>CancelRequestPoller.TickAsync</c>), the pump's arrest-intent
+    /// drain needs a round after that, and a process-tree kill plus outcome record takes a few seconds
+    /// more — fifteen ticks covers all three with margin. Overridable per machine via
+    /// <see cref="DaemonSettings.CancelPumpAnswerSeconds"/>.
+    /// </summary>
+    public static readonly TimeSpan DefaultPumpAnswerWindow = CancelRequestPoller.DefaultPollInterval * 15;
+
+    /// <summary>How often the answer wait re-projects the room. Cheap (one journal read), and a quarter of the poller's own tick so a settle is noticed promptly.</summary>
+    private static readonly TimeSpan AnswerPollInterval = TimeSpan.FromMilliseconds(250);
+
+    /// <summary>
+    /// <see cref="DaemonSettings.CancelPumpAnswerSeconds"/>, or <see cref="DefaultPumpAnswerWindow"/>
+    /// when it is absent or non-positive — the same fall-back-rather-than-honour posture
+    /// <c>DeadPumpProbe.ResolveQuietWindow</c> takes for its own key.
+    /// </summary>
+    public static TimeSpan ResolvePumpAnswerWindow(DaemonSettings settings)
+    {
+        ArgumentNullException.ThrowIfNull(settings);
+        return settings.CancelPumpAnswerSeconds is { } seconds && seconds > 0
+            ? TimeSpan.FromSeconds(seconds)
+            : DefaultPumpAnswerWindow;
+    }
 
     /// <exception cref="SnapshotLoadException">
     /// record-once-ok: #443 src/Baton.Cli/DecideCommand.cs
     /// The room directory has no persisted snapshot yet (never started via <c>baton run</c>), or its
     /// persisted snapshot is malformed.
     /// </exception>
-    /// <exception cref="WorkerBindingConfigException">The worker-binding config is malformed.</exception>
-    /// <exception cref="UnknownWorkerAdapterException">
-    /// The worker-binding config names an adapter not present in <paramref name="adapters"/>, for a
-    /// worker the pump this call drives actually looks up (<see cref="WorkerBindingResolver.ResolveLazily"/>, #662).
-    /// </exception>
-    /// <exception cref="Baton.Mutation.UnknownExecutionIdException">
+    /// <exception cref="UnknownExecutionIdException">
     /// <paramref name="options"/>'s <c>ExecutionId</c> was never admitted for execution.
     /// </exception>
     /// <exception cref="CliArgumentException">
@@ -74,282 +104,219 @@ public static class CancelCommand
     /// <see cref="StepStatus.Running"/> step or a quota-parked one (#1607) — fail closed rather than
     /// guess; the message names every candidate found.
     /// </exception>
-    /// <exception cref="Baton.Store.FlowJournalHeldException">
-    /// #816: only from one of this method's ledger <em>reads</em>, never its append — the rare read-open
-    /// collision that doc's own remarks describe (a killed process whose handle the OS has not finished
-    /// tearing down), not the live-pump case. Three reads can raise it, and none is inside the try:
-    /// the #1586 dead-holder pre-check, the room-level target resolution
-    /// (<see cref="ResolveRunningExecutionAsync"/>), and the re-projection inside the catch itself —
-    /// which would escape after the <see cref="CancelRequestFile"/> was already written, reporting
-    /// failure for a cancellation that was in fact queued. All three go through
-    /// <c>FlowEventLogReader</c>, which opens <see cref="FileShare.ReadWrite"/>, so all three are
-    /// near-unreachable in practice; this is a statement of the surface, not of an observed failure. The
-    /// far more common append-open collision — this room's <c>FlowEventLogWriter</c> losing to the SAME
-    /// live pump's own long-lived writer — is caught inside <see cref="ExecuteAsync"/> and folded into the
-    /// same fall-through as <see cref="Baton.Concurrency.WorkflowLockedException"/> below (#1646).
-    /// </exception>
-    /// <remarks>
-    /// #1495: <see cref="Baton.Concurrency.WorkflowLockedException"/> — previously the terminal failure
-    /// this command threw whenever a live <c>baton run</c> pump already held this room directory's lock
-    /// — is now caught internally and turned into a <see cref="CancelRequestFile"/> write instead, so it
-    /// no longer escapes this method at all.
-    /// <para>
-    /// #1646: <see cref="Baton.Store.FlowJournalHeldException"/> joined the same catch for its append-open
-    /// shape once <see cref="WorktreeWorkspaces.Walk"/> stopped touching <c>flow.lock</c> for a binding
-    /// with nothing to provision — before that fix, <c>WorktreeWorkspaces.ProvisionLazily</c>'s own
-    /// gratuitous <c>flow.lock</c> acquire always lost to a live pump first, so this method never actually
-    /// reached the <c>FlowEventLogWriter</c> open far enough to hit the live pump's own journal handle.
-    /// </para>
-    /// </remarks>
+    /// <param name="adapters">
+    /// Unused since #2073 — kept so <c>Program.cs</c> and the mutation-verb call shape stay uniform.
+    /// This verb never dispatches, so it never resolves a worker adapter.
+    /// </param>
+    /// <param name="pumpAnswerWindow">
+    /// Test seam: overrides <see cref="ResolvePumpAnswerWindow"/>'s settings read. Production callers
+    /// pass <c>null</c>.
+    /// </param>
+    /// <param name="killWorker">
+    /// Test seam: replaces <see cref="WorkerProcessArrest.Kill"/> so the kill's ORDER relative to the
+    /// intent fact can be observed without a live process. Production callers pass <c>null</c>.
+    /// </param>
     public static async Task<CommandResult> ExecuteAsync(
         CancelOptions options,
         IReadOnlyDictionary<string, IWorkerAdapter> adapters,
-        CancellationToken cancellationToken = default)
+        CancellationToken cancellationToken = default,
+        TimeSpan? pumpAnswerWindow = null,
+        Func<uint, DateTimeOffset?, WorkerKillResult>? killWorker = null)
     {
         ArgumentNullException.ThrowIfNull(options);
         ArgumentNullException.ThrowIfNull(adapters);
 
-        var snapshotPath = Path.Combine(options.RoomDirectoryPath, BatonPaths.SnapshotFileName);
-        var logPath = Path.Combine(options.RoomDirectoryPath, BatonPaths.FlowLogFileName);
-        var artifactsRootPath = Path.Combine(options.RoomDirectoryPath, ArtifactsDirectoryName);
+        var roomDirectoryPath = options.RoomDirectoryPath;
+        var snapshotPath = Path.Combine(roomDirectoryPath, BatonPaths.SnapshotFileName);
+        var logPath = Path.Combine(roomDirectoryPath, BatonPaths.FlowLogFileName);
+        var roomLogPath = Path.Combine(roomDirectoryPath, BatonPaths.RoomLogFileName);
 
         if (!File.Exists(snapshotPath))
         {
             throw new SnapshotLoadException(
-                $"Room directory '{options.RoomDirectoryPath}' has no bound snapshot — 'baton cancel' " +
+                $"Room directory '{roomDirectoryPath}' has no bound snapshot — 'baton cancel' " +
                 "targets a room 'baton run' has already started, and never binds one fresh.");
         }
 
         var snapshot = await SnapshotBinder.LoadFromFileAsync(snapshotPath, cancellationToken).ConfigureAwait(false);
         var reader = new FlowEventLogReader(logPath);
+        killWorker ??= WorkerProcessArrest.Kill;
 
-        // #1586: measured against a copy of a real quota-parked room whose engine died — 'baton
-        // cancel' acquired flow.lock (the OS releases a crashed holder's lock immediately, so the
-        // acquire itself never fails), overwrote flow.lock.holder (destroying the record of which
-        // engine died), journalled a CancellationRequested, and then hung: PumpToFixedPointAsync
-        // re-enters the identical Task.Delay for the same doomed retry (MutationInterface.cs's
-        // pendingDeferrals branch), because the whole premise of this room's shape is that nothing
-        // will ever service it. That hang is specifically a FUTURE RetryNotBefore with nothing alive
-        // to act on it -- a dead holder whose room has already reached a fixed point (nothing
-        // pending, or a deadline already past) would NOT hang; refusing it anyway would send a
-        // recoverable-by-cancel room to 'baton run --room-dir' instead, which redispatches the step
-        // rather than cancelling it. So both conditions gate the refusal, not the holder alone.
-        // Reading the sidecar BEFORE any acquire -- the same EngineLivenessProbe StatusCommand's
-        // parked-status line already consults, never a second liveness mechanism -- lets this refuse
-        // the hang instead of producing it, without ever touching the holder record.
-        //
-        // #1604 F1/F3: this used to gate on ConcurrencyGuard.IsHeld(...) first, and fed the probe
-        // AcquiredAtUtc (when this lock was won) as if it were the holder's PROCESS start time --
-        // EngineLivenessProbe.Probe's second parameter is a ±1s pid-recycling discriminator against
-        // the OS process's own StartTime, and a lock is essentially never won within 1s of its own
-        // holder's process starting, so that fed value made the Alive arm unreachable: every real pump read
-        // Dead, and IsHeld was the only thing standing between that misread and a false refusal.
-        // IsHeld itself opened flow.lock with FileShare.None to test it -- a momentary exclusive
-        // hold that could itself steal the lock out from under a concurrent, legitimate
-        // 'baton run --room-dir' (the exact recovery this refusal points at). Now that the sidecar
-        // carries the holder's actual process start time (ConcurrencyGuard.CreateWithSidecar) and
-        // Probe is fed that instead, the probe is directly trustworthy on its own -- a live holder's
-        // own pid, start time, and HasExited are all consulted -- so IsHeld's lock-stealing
-        // pre-check bought nothing further and is deleted. A genuinely live holder is still caught
-        // the same way it always was for every other contended acquire: this command's own Acquire
-        // call below loses the race, and WorkflowLockedException falls through unchanged to the
-        // handling below.
-        var (recordedHolderDescription, holderPid, _, holderProcessStartTimeUtc) = ConcurrencyGuard.ReadHolderInfo(options.RoomDirectoryPath);
-        var holderProcessStartTime = holderProcessStartTimeUtc is { } startTimeUtc
-            ? new DateTimeOffset(DateTime.SpecifyKind(startTimeUtc, DateTimeKind.Utc))
-            : (DateTimeOffset?)null;
-        var liveness = EngineLivenessProbe.Probe(holderPid, holderProcessStartTime);
-        // #1607 (second-reader finding): widened from Dead-only to "anything but confirmed Alive".
-        // Before #1607, a room whose only step was quota-parked could never reach this far via
-        // room-level (--execution-omitted) targeting at all -- RunningExecutionResolver saw no
-        // Running step and refused first, so an Unknown-liveness room got an accidental second line
-        // of defense against exactly the hang this gate exists to prevent. Widening the resolver to
-        // resolve a parked candidate removed that accidental defense: a room with no holder sidecar
-        // at all (EngineLivenessProbe.Probe's Unknown, e.g. ConcurrencyGuard.Dispose() deleting it on
-        // a clean unwind, a best-effort sidecar write that never landed, or a pre-#1604 sidecar with
-        // no ProcessStartTimeUtc) now resolves a still-future park and would otherwise fall straight
-        // into MutationInterface's own pump, which nothing ever drains. Fail closed rather than risk
-        // that: Unknown is treated the same as Dead here.
-        //
-        // This gate runs BEFORE targetExecutionId is resolved below, so it applies identically to
-        // room-level (--execution omitted) AND explicit (--execution <id>) targeting -- deliberately,
-        // not an oversight (#1607 review finding F1). See this type's own class-level doc and
-        // spec/baton.md §2 for why, and for what that costs the explicit path.
-        if (liveness.Status != EngineLivenessStatus.Alive)
+        var (entries, flowEvents) = await ReadJournalAsync(reader, cancellationToken).ConfigureAwait(false);
+        var state = StateProjector.Project(flowEvents, snapshot, ProjectionCheckpointStore.Load(roomDirectoryPath));
+
+        // An explicit id is validated the way MutationInterface.RequestCancellationAsync validated it
+        // (same exception, same message) BEFORE the idempotency read below: a typo is a caller error
+        // whatever state the room is in, and turning it into a quiet exit 0 would hide it.
+        ExecutionId? explicitTargetExecutionId = null;
+        if (options.ExecutionId is { } explicitExecutionId)
         {
-            var preCheckEvents = await reader.ReadAllAsync(cancellationToken).ConfigureAwait(false);
-            var preCheckState = StateProjector.Project(preCheckEvents, snapshot);
-            var now = DateTimeOffset.UtcNow;
-            var hasFutureDeferral = preCheckState.Steps.Any(s => s.RetryNotBefore is { } retryNotBefore && retryNotBefore > now);
-            if (hasFutureDeferral)
-            {
-                var holderClause = liveness.Status == EngineLivenessStatus.Dead
-                    ? $"the last recorded holder (pid {holderPid}) is no longer running"
-                    : "its holder record cannot confirm one exists"
-                        + (recordedHolderDescription is not null ? $" (last recorded: '{recordedHolderDescription}')" : " (no holder record at all)");
-                // F2 (#1607 review): a Dead verdict is confirmed, so re-running against --room-dir is
-                // unconditionally the right pointer. An Unknown verdict is not a confirmation of death
-                // (see the gate comment above for the causes) -- pointing that case at the SAME
-                // instruction tells an operator whose pump is genuinely still running to run a command
-                // that only contends its lock. `baton status` is not offered as an alternative here: it
-                // reads the identical EngineLivenessProbe (StatusCommand.FormatStepStatus), so it would
-                // report the same Unknown rather than resolving it.
-                var tryInvocation = liveness.Status == EngineLivenessStatus.Dead
-                    ? $"{RecoveryGuidance.RunRoomDirInstruction} (see spec/baton.md §3)."
-                    : "if you can independently confirm (Task Manager/`ps`) that no pump is actually " +
-                        $"running against this room, {RecoveryGuidance.RunRoomDirInstruction} (see " +
-                        "spec/baton.md §3); if a pump IS confirmed still running, retry this command in a " +
-                        "moment — a lost or delayed sidecar write is the one Unknown cause that clears on " +
-                        "its own, and there is currently no verb that reaches a still-alive pump whose " +
-                        "holder record can't be confirmed (see spec/baton.md §2).";
-                throw new CliArgumentException(
-                    $"Room '{options.RoomDirectoryPath}' has no live pump — {holderClause}, and " +
-                    "this room still has a step waiting on a future retry. Acquiring the lock here would " +
-                    "journal a cancellation nothing will ever act on, then hang waiting for that retry with " +
-                    "nothing confirmed alive to deliver it — and, if a dead engine's holder record is still " +
-                    "present, would overwrite it, destroying the record of which engine died. Left " +
-                    "untouched. No verb terminates a parked room with no confirmed live pump today — that " +
-                    "is #1586's tracked 'baton settle' design — so the pointer below resumes it rather than " +
-                    "stopping it, deliberately.",
-                    tryInvocation);
-            }
+            explicitTargetExecutionId = new ExecutionId(explicitExecutionId);
+            var knownExecutionIds = flowEvents
+                .OfType<FlowEvent.ExecutionRequestAccepted>()
+                .Select(e => e.Request.ExecutionId)
+                .ToHashSet();
+            CancellationValidator.Validate(knownExecutionIds, explicitTargetExecutionId.Value);
         }
 
-        IReadOnlyDictionary<string, WorkerBindingConfigEntry> bindingConfig;
-        try
+        // 1. Idempotency, before anything is written. Projected state, not terminal.json: the
+        // sentinel is a fact about a settle Program already recorded, the projection is the room.
+        if (state.Status == WorkflowStatus.Terminal)
         {
-            bindingConfig = await WorkerBindingConfigParser.LoadFromFileAsync(options.BindingsFilePath, cancellationToken)
+            Console.Out.WriteLine(
+                $"Room '{roomDirectoryPath}' is already terminal ({WorkflowOutcome.Describe(state)}) — nothing to cancel, nothing written.");
+            return new CommandResult(state, snapshot, RoomDirectoryPath: roomDirectoryPath, CancelWasNoOp: true);
+        }
+
+        // 2. The target.
+        var targetExecutionId = explicitTargetExecutionId ?? ResolveRunningExecution(state, roomDirectoryPath);
+
+        if (ArrestableExecutions.Find(state, snapshot, targetExecutionId) is null)
+        {
+            Console.Out.WriteLine(
+                $"Execution '{targetExecutionId.Value}' in room '{roomDirectoryPath}' has already settled — nothing to arrest, nothing written.");
+            return new CommandResult(state, snapshot, RoomDirectoryPath: roomDirectoryPath, CancelWasNoOp: true);
+        }
+
+        // 3. The intent fact — FIRST. Every line below that can stop the worker comes after this
+        // append returns, and CancelCommandArrestTests pins that order with a kill seam that reads
+        // room.jsonl at the moment it is invoked.
+        var intentRecordedAtUtc = DateTimeOffset.UtcNow;
+        await using (var roomWriter = new RoomEventLogWriter(roomLogPath))
+        {
+            await roomWriter.AppendAsync(
+                    new RoomEvent.ArrestIntentRecorded(targetExecutionId.Value, OperatorRequestedBy, options.Reason, intentRecordedAtUtc),
+                    cancellationToken)
                 .ConfigureAwait(false);
         }
-        catch (WorkerBindingConfigException ex)
-            when (string.Equals(options.BindingsFilePath, BatonPaths.RoomBindingsFile(options.RoomDirectoryPath), StringComparison.Ordinal))
+
+        // 4. Arrest through the existing channel. The lock try is the liveness question — see the
+        // class doc. The sidecar is read BEFORE the try only so the terminal reason can name the
+        // holder that died; ConcurrencyGuard.Acquire overwrites and Dispose deletes that sidecar, so
+        // the journal is where the record survives from here on.
+        var (recordedHolderDescription, holderPid, _, _) = ConcurrencyGuard.ReadHolderInfo(roomDirectoryPath);
+        WorkerKillResult? kill = null;
+        var guard = TryAcquire(roomDirectoryPath, out var lockedBy);
+        if (guard is null)
         {
-            // F3 (#1607 review): CancelOptionsParser defaults an omitted --bindings to this exact
-            // path, so a missing file here is most likely "this room was never dispatched, so it has
-            // no bindings.json of its own" rather than a mistyped explicit argument. The generic
-            // WorkerBindingConfigException already names the path; this augments it with which
-            // command produced that default and that --bindings is still available to point elsewhere
-            // — without touching WorkerBindingConfigParser's message for run/decide/supply, which
-            // never default this path and so never hit this arm (their --bindings is required, so a
-            // missing file there really is an explicit mistake).
-            throw new WorkerBindingConfigException(
-                $"{ex.Message} This is 'baton cancel's default --bindings path, used because --bindings " +
-                "was not given — if this room's bindings file lives elsewhere (e.g. it was started via a " +
-                "bare 'baton run --bindings <path>' rather than 'dispatch'/'redispatch'), pass --bindings " +
-                "explicitly naming it.",
-                ex);
-        }
-        var profiles = await BatonProfileStore.LoadAsync(BatonProfileStore.DefaultPath, cancellationToken).ConfigureAwait(false);
-
-        var workflowId = new WorkflowId(options.WorkflowId ?? snapshot.WorkflowTemplateId.Value);
-
-        // #1495: room-level targeting when --execution is omitted — resolve "the target lane" from
-        // the room's own projected state rather than a caller-named id. A plain read, safe regardless
-        // of whether a pump is live (FlowEventLogReader always opens FileShare.ReadWrite) or idle.
-        var targetExecutionId = options.ExecutionId is { } explicitExecutionId
-            ? new ExecutionId(explicitExecutionId)
-            : await ResolveRunningExecutionAsync(reader, snapshot, options.RoomDirectoryPath, cancellationToken)
-                .ConfigureAwait(false);
-
-        FlowState state;
-        // #1650 F2: this call queued the cancellation instead of applying it — see CommandResult's
-        // own doc for why the projected state cannot say so on its own.
-        var cancellationQueued = false;
-        // Defaulted here, not inside the catch below: WorktreeWorkspaces.ProvisionLazily can succeed
-        // (assigning a real list) and STILL have the later mutation call below lose the guard race, in
-        // which case the catch must not discard what was actually provisioned. Only a throw from
-        // ProvisionLazily itself leaves this at its true default of "nothing provisioned yet".
-        IReadOnlyList<ProvisionedWorktree> provisionedWorktrees = [];
-        try
-        {
-            // #1495 finding, as amended by #1646: WorktreeWorkspaces.ProvisionLazily can take the SAME
-            // flow.lock guard (WorktreeWorkspaces.Walk, "worktree provisioning" holder) as the mutation
-            // call below, so a live pump contends this call too and both must share one catch — else
-            // the fall-through would cover only half of what contends the lock. What changed is the
-            // scope of "can": #1646 stopped Walk touching flow.lock at all when no binding declares a
-            // worktree, which is the common shape, so this call now contends only for a bindings file
-            // that actually declares one. The catch stays shared regardless — see the #1646 note in it
-            // for what reaching further down the try block newly exposed.
-            var (provisionedConfig, walkedProvisionedWorktrees, _) =
-                WorktreeWorkspaces.ProvisionLazily(bindingConfig, options.RoomDirectoryPath);
-            provisionedWorktrees = walkedProvisionedWorktrees;
-
-            // Lazy (#662): cancel targets a room 'baton run' already started — it does not need to know
-            // how to dispatch a worker it will never dispatch, so a bindings file naming an unresolvable
-            // one must not block cancelling a different, already-dispatched execution.
-            var workerBindings = WorkerBindingResolver.ResolveLazily(
-                provisionedConfig, adapters, profiles, Path.GetDirectoryName(options.BindingsFilePath));
-
-            await using var writer = new FlowEventLogWriter(logPath);
-            var dispatcher = new CoreDispatcher(writer, writer);
-
-            state = await MutationInterface.RequestCancellationAsync(
-                    workflowId,
-                    options.RoomDirectoryPath,
-                    snapshot,
-                    workerBindings,
-                    artifactsRootPath,
-                    reader,
-                    writer,
-                    dispatcher,
-                    targetExecutionId,
-                    cancellationToken: cancellationToken)
-                .ConfigureAwait(false);
-        }
-        catch (Exception ex) when (ex is WorkflowLockedException or FlowJournalHeldException)
-        {
-            // #1495: the live-pump fall-through — this room's flow.lock is held by another Flow
-            // instance, so nothing above could ever win the guard. Deliver the same intent out-of-band
-            // instead: a room-scoped request file the pump's own CancelRequestPoller polls without ever
-            // contending flow.lock, consumed the next time that poller ticks.
-            //
-            // The holder is NOT necessarily a live 'baton run' pump — WorkflowLockedException's own
-            // message names a second cause (a background component's brief hold, e.g. a memory-proposal
-            // sweep or a concurrent 'baton cancel' contending the SAME worktree-provisioning guard above).
-            // Against that case this still writes the request file (matching this method's own doc:
-            // "catch that specific case and fall through"), but nothing may ever consume it — named as a
-            // known limitation in report-1495.md rather than silently asserted away here. What CAN be
-            // done cheaply: report the ACTUAL holder the exception already carries, rather than a blanket
-            // claim of "live pump" the exception does not itself make.
-            //
-            // #1646: FlowJournalHeldException joined this catch alongside WorkflowLockedException once
-            // WorktreeWorkspaces.Walk stopped touching flow.lock for a binding with nothing to provision
-            // (the common case, and this test's own shape) — before that fix, ProvisionLazily's own
-            // gratuitous flow.lock acquire always lost to a live pump FIRST, so this method never actually
-            // reached the FlowEventLogWriter open below far enough to observe a live pump's OWN long-lived
-            // journal handle refuse it too. Both exceptions name the same fact — a live pump (or another
-            // transient holder) has this room busy — so both take the identical fall-through; only the
-            // holder-description text differs, since FlowJournalHeldException carries none structured.
             var explicitTarget = options.ExecutionId is not null;
             var fileTarget = explicitTarget ? targetExecutionId.Value : CancelRequestFile.LatestTarget;
-            await CancelRequestFile.WriteAsync(options.RoomDirectoryPath, fileTarget, cancellationToken)
-                .ConfigureAwait(false);
+            await CancelRequestFile.WriteAsync(roomDirectoryPath, fileTarget, cancellationToken).ConfigureAwait(false);
 
-            // #1650 F4: purpose-written per arm, never ex.Message wholesale. FlowJournalHeldException's
-            // own message is written for a caller whose command was REFUSED — it ends "retry once
-            // nothing else holds the ledger; for a decision, the workflow's latest attempt must be
-            // Paused…", which is decide-oriented advice, wrong for a cancel that was in fact accepted
-            // and queued, and it terminates with a holder list rather than a period, so it ran straight
-            // into the sentence below. Telling an operator to retry something that already succeeded is
-            // the documentation defect CLAUDE.md names ("a reader's wrong conclusion").
-            var holderClause = ex is WorkflowLockedException lockedException
-                ? $"'{options.RoomDirectoryPath}'s {BatonPaths.FlowLockFileName} is currently held by '{lockedException.HolderDescription ?? "an unnamed holder"}'."
-                : $"'{logPath}' is held open by another process.";
+            var window = pumpAnswerWindow
+                ?? ResolvePumpAnswerWindow(await DaemonSettingsStore.LoadAsync(BatonPaths.SettingsFile, cancellationToken).ConfigureAwait(false));
             Console.Out.WriteLine(
-                $"Requested — {holderClause} " +
-                "If that is a live pump, it will act on this cancellation the next time its cancel.request poll " +
-                "ticks; if the hold is brief and unrelated, this request may sit unconsumed until one starts.");
+                $"Requested — '{roomDirectoryPath}'s {BatonPaths.FlowLockFileName} is held by '{lockedBy ?? "an unnamed holder"}', " +
+                $"so this is being delivered through {CancelRequestFile.FileName} for the live pump to act on; waiting up to " +
+                $"{window.TotalSeconds:0}s for it to answer.");
 
-            var events = await reader.ReadAllAsync(cancellationToken).ConfigureAwait(false);
-            state = StateProjector.Project(events, snapshot);
-            cancellationQueued = true;
+            if (await WaitForSettleAsync(reader, snapshot, targetExecutionId, window, cancellationToken).ConfigureAwait(false))
+            {
+                var answered = await ProjectAsync(reader, snapshot, roomDirectoryPath, cancellationToken).ConfigureAwait(false);
+                Console.Out.WriteLine($"Arrested — the live pump settled execution '{targetExecutionId.Value}'.");
+                return new CommandResult(answered, snapshot, RoomDirectoryPath: roomDirectoryPath);
+            }
+
+            // No pump answered inside the window. Kill by the recorded pid, probe-gated, then give the
+            // pump (if it is a pump and not a transient holder) one more window to record the exit it
+            // just observed — a live pump settles its own worker's death, and that record is the
+            // settle; this process only writes the terminal fact if it can win the lock afterwards.
+            kill = KillRecordedWorker(entries, targetExecutionId, killWorker);
+            Console.Out.WriteLine($"No pump answered within {window.TotalSeconds:0}s — {kill.Detail}.");
+
+            if (kill.Outcome == WorkerKillOutcome.Killed
+                && await WaitForSettleAsync(reader, snapshot, targetExecutionId, window, cancellationToken).ConfigureAwait(false))
+            {
+                var settledByPump = await ProjectAsync(reader, snapshot, roomDirectoryPath, cancellationToken).ConfigureAwait(false);
+                Console.Out.WriteLine($"Arrested — the live pump recorded execution '{targetExecutionId.Value}' settling after the kill.");
+                return new CommandResult(settledByPump, snapshot, RoomDirectoryPath: roomDirectoryPath);
+            }
+
+            guard = TryAcquire(roomDirectoryPath, out lockedBy);
+            if (guard is null)
+            {
+                var stillHeld = await ProjectAsync(reader, snapshot, roomDirectoryPath, cancellationToken).ConfigureAwait(false);
+                Console.Out.WriteLine(
+                    $"Not settled by this command: '{lockedBy ?? "an unnamed holder"}' still holds {BatonPaths.FlowLockFileName}, so the " +
+                    "terminal fact is left to it — a live pump records its worker's exit itself, and the daemon's dead-pump probe " +
+                    "settles a room whose pump is gone (spec/baton.md §7). The intent fact is on record either way.");
+                return new CommandResult(stillHeld, snapshot, RoomDirectoryPath: roomDirectoryPath, CancellationQueued: true);
+            }
+        }
+        else
+        {
+            var holderClause = holderPid is { } deadPid
+                ? $"the last recorded holder was '{recordedHolderDescription ?? $"pid {deadPid}"}', no longer holding it"
+                : "no holder record at all";
+            Console.Out.WriteLine(
+                $"No live pump holds '{roomDirectoryPath}'s {BatonPaths.FlowLockFileName} ({holderClause}) — settling the room directly.");
         }
 
-        var worktreeTeardowns = WorktreeProvisioner.TeardownIfTerminal(state.Status, provisionedWorktrees);
+        // 5/6. Under the lock: re-read, re-check, kill if not already attempted, then the terminal
+        // fact — the same "decide on THIS round's own fresh projection" rule DeadPumpProbe follows.
+        using (guard)
+        {
+            var (freshEntries, freshFlowEvents) = await ReadJournalAsync(reader, cancellationToken).ConfigureAwait(false);
+            var freshState = StateProjector.Project(freshFlowEvents, snapshot, ProjectionCheckpointStore.Load(roomDirectoryPath));
+            var target = ArrestableExecutions.Find(freshState, snapshot, targetExecutionId);
+            if (target is null)
+            {
+                Console.Out.WriteLine($"Execution '{targetExecutionId.Value}' settled while this command was waiting for the lock — nothing further to write.");
+                return new CommandResult(freshState, snapshot, RoomDirectoryPath: roomDirectoryPath);
+            }
 
-        return new CommandResult(
-            state, snapshot, RoomDirectoryPath: options.RoomDirectoryPath, WorktreeTeardowns: worktreeTeardowns,
-            CancellationQueued: cancellationQueued);
+            kill ??= KillRecordedWorker(freshEntries, targetExecutionId, killWorker);
+
+            var reasonClause = string.IsNullOrWhiteSpace(options.Reason) ? string.Empty : $" ({options.Reason.Trim()})";
+            var holderClause = holderPid is { } deadPid
+                ? $"; last recorded {BatonPaths.FlowLockFileName} holder '{recordedHolderDescription ?? $"pid {deadPid}"}' was no longer holding it"
+                : string.Empty;
+            var reason =
+                $"{ArrestReasonPrefix}{reasonClause} — intent recorded by '{DiagnosticName}' at {intentRecordedAtUtc:O}; " +
+                $"no pump answered, so this command settled the room{holderClause}; {kill.Detail}.";
+
+            FlowEventLogWriter writer;
+            try
+            {
+                writer = new FlowEventLogWriter(logPath);
+            }
+            catch (FlowJournalHeldException ex)
+            {
+                // #816's population, with the lock FREE: a killed process whose journal handle the OS
+                // has not finished tearing down, or a sibling command mid-append. Not a pump (a pump
+                // holds flow.lock), so no cancel.request; the intent is on record and the kill above
+                // has happened, only the terminal fact is missing. Said plainly and left to a retry
+                // or the dead-pump probe, rather than escaping as a crash after the kill.
+                Console.Out.WriteLine(
+                    $"Not settled by this command: {kill.Detail}, but '{logPath}' is held open by another process, so the " +
+                    $"terminal fact was not written ({ex.Message}). The intent fact is on record; retry once nothing holds the " +
+                    "ledger, or leave it to the daemon's dead-pump probe (spec/baton.md §7).");
+                return new CommandResult(freshState, snapshot, RoomDirectoryPath: roomDirectoryPath, CancellationQueued: true);
+            }
+
+            await using var _ = writer;
+            // Two shapes, one fact each — slice one's split, for slice one's reasons (DeadPumpProbe's
+            // own remarks at the same fork are the register; not restated here).
+            if (target is { StepId: { } parkedStepId, Status: StepStatus.Failed })
+            {
+                await writer.AppendAsync(
+                        new FlowEvent.StepRetryForeclosed(parkedStepId, targetExecutionId, reason, ForeclosedBy: DiagnosticName),
+                        cancellationToken)
+                    .ConfigureAwait(false);
+            }
+            else
+            {
+                await writer.AppendAsync(
+                        new FlowEvent.ExecutionFailed(targetExecutionId, FailureClassification.Permanent, reason),
+                        cancellationToken)
+                    .ConfigureAwait(false);
+            }
+
+            Console.Out.WriteLine($"Arrested — {kill.Detail}; terminal fact recorded for execution '{targetExecutionId.Value}'.");
+        }
+
+        var settled = await ProjectAsync(reader, snapshot, roomDirectoryPath, cancellationToken).ConfigureAwait(false);
+        return new CommandResult(settled, snapshot, RoomDirectoryPath: roomDirectoryPath);
     }
 
     /// <summary>
@@ -357,11 +324,8 @@ public static class CancelCommand
     /// <see cref="CliArgumentException"/> when the room state does not contain exactly one candidate —
     /// a currently-<see cref="StepStatus.Running"/> step or a quota-parked one (#1607).
     /// </summary>
-    private static async Task<ExecutionId> ResolveRunningExecutionAsync(
-        FlowEventLogReader reader, WorkflowDefinitionSnapshot snapshot, string roomDirectoryPath, CancellationToken cancellationToken)
+    private static ExecutionId ResolveRunningExecution(FlowState state, string roomDirectoryPath)
     {
-        var events = await reader.ReadAllAsync(cancellationToken).ConfigureAwait(false);
-        var state = StateProjector.Project(events, snapshot);
         var resolved = RunningExecutionResolver.Resolve(state);
 
         if (resolved.Single is { } single)
@@ -379,10 +343,10 @@ public static class CancelCommand
         }
 
         // F5 (#1607 review): name which candidate is which, not just their ids -- the ambiguity is
-        // newly reachable (a Running step plus any sibling in ordinary retry backoff, spec/baton.md
-        // §2), so this message is now an operator's first encounter with the widened behaviour rather
-        // than a rare edge case, and "Running or quota-parked" alone forces them to go find out which
-        // is which some other way.
+        // reachable (a Running step plus any sibling in ordinary retry backoff, spec/baton.md §2), so
+        // this message is an operator's first encounter with the widened behaviour rather than a rare
+        // edge case, and "Running or quota-parked" alone forces them to go find out which is which
+        // some other way.
         var labeledCandidates = resolved.RunningExecutionIds.Select(id =>
         {
             var step = state.Steps.First(s => s.LatestExecutionId == id);
@@ -395,6 +359,122 @@ public static class CancelCommand
             + $"currently-Running or quota-parked steps ({string.Join(", ", labeledCandidates)}) "
             + "— 'baton cancel' refuses to guess which one.",
             $"pass --execution explicitly, naming the one to cancel — see `baton status {roomDirectoryPath} --json` "
-            + "for each step's current status.");
+            + "for each step's current status; why this refuses rather than guesses is spec/baton.md §2.");
+    }
+
+    /// <summary>
+    /// Fail-fast acquire. <c>null</c> means another process holds it — a live pump, or a transient
+    /// holder (a memory sweep, a concurrent cancel); <paramref name="lockedBy"/> carries whatever the
+    /// exception knew about who.
+    /// </summary>
+    private static ConcurrencyGuard? TryAcquire(string roomDirectoryPath, out string? lockedBy)
+    {
+        try
+        {
+            lockedBy = null;
+            return ConcurrencyGuard.Acquire(roomDirectoryPath, $"{DiagnosticName} (pid {Environment.ProcessId})");
+        }
+        catch (WorkflowLockedException ex)
+        {
+            lockedBy = ex.HolderDescription;
+            return null;
+        }
+    }
+
+    /// <summary>
+    /// The worker pid the journal recorded for <paramref name="targetExecutionId"/>, handed to
+    /// <paramref name="killWorker"/> with its recorded start time. No <see cref="CoreEvent.ExecutionStarted"/>
+    /// at all (a non-process worker, or a spawn that never happened) and an
+    /// <see cref="CoreEvent.ExecutionExited"/> already on record both mean there is nothing to kill.
+    /// </summary>
+    private static WorkerKillResult KillRecordedWorker(
+        IReadOnlyList<LogEntry> entries, ExecutionId targetExecutionId, Func<uint, DateTimeOffset?, WorkerKillResult> killWorker)
+    {
+        CoreEvent.ExecutionStarted? started = null;
+        var exited = false;
+        foreach (var entry in entries)
+        {
+            if (entry is not LogEntry.CoreLogEntry core)
+            {
+                continue;
+            }
+
+            switch (core.Event)
+            {
+                case CoreEvent.ExecutionStarted s when s.ExecutionId == targetExecutionId:
+                    started = s;
+                    exited = false;
+                    break;
+                case CoreEvent.ExecutionExited e when e.ExecutionId == targetExecutionId:
+                    exited = true;
+                    break;
+            }
+        }
+
+        if (started is null)
+        {
+            return new WorkerKillResult(WorkerKillOutcome.AlreadyExited, "no worker process was ever recorded for this execution, so there was nothing to kill");
+        }
+
+        if (exited)
+        {
+            return new WorkerKillResult(WorkerKillOutcome.AlreadyExited, $"worker pid {started.Pid} had already recorded its exit, so there was nothing to kill");
+        }
+
+        var startTime = started.ProcessStartTimeUtc is { } utc
+            ? new DateTimeOffset(DateTime.SpecifyKind(utc, DateTimeKind.Utc))
+            : (DateTimeOffset?)null;
+        return killWorker(started.Pid, startTime);
+    }
+
+    /// <summary>
+    /// True once <paramref name="targetExecutionId"/> is no longer admitted by
+    /// <see cref="ArrestableExecutions.Find"/> — whoever settled it, and however. Bounded by
+    /// <paramref name="window"/>; a monotonic clock, not wall time, for the reason
+    /// <c>ConcurrencyGuard.AcquireWithinCore</c> gives.
+    /// </summary>
+    private static async Task<bool> WaitForSettleAsync(
+        FlowEventLogReader reader, WorkflowDefinitionSnapshot snapshot, ExecutionId targetExecutionId, TimeSpan window, CancellationToken cancellationToken)
+    {
+        var started = Stopwatch.GetTimestamp();
+        while (true)
+        {
+            var events = await reader.ReadAllAsync(cancellationToken).ConfigureAwait(false);
+            var state = StateProjector.Project(events, snapshot);
+            if (ArrestableExecutions.Find(state, snapshot, targetExecutionId) is null)
+            {
+                return true;
+            }
+
+            if (Stopwatch.GetElapsedTime(started) >= window)
+            {
+                return false;
+            }
+
+            await Task.Delay(AnswerPollInterval, cancellationToken).ConfigureAwait(false); // wait-ok: bounded by `window` above (#1804)
+        }
+    }
+
+    private static async Task<(IReadOnlyList<LogEntry> Entries, IReadOnlyList<FlowEvent> FlowEvents)> ReadJournalAsync(
+        FlowEventLogReader reader, CancellationToken cancellationToken)
+    {
+        var entries = await reader.ReadAllEntriesWithTimestampsAsync(cancellationToken).ConfigureAwait(false);
+        var flowEvents = new List<FlowEvent>(entries.Count);
+        foreach (var entry in entries)
+        {
+            if (entry is LogEntry.FlowLogEntry flowLogEntry)
+            {
+                flowEvents.Add(flowLogEntry.Event);
+            }
+        }
+
+        return (entries, flowEvents);
+    }
+
+    private static async Task<FlowState> ProjectAsync(
+        FlowEventLogReader reader, WorkflowDefinitionSnapshot snapshot, string roomDirectoryPath, CancellationToken cancellationToken)
+    {
+        var events = await reader.ReadAllAsync(cancellationToken).ConfigureAwait(false);
+        return StateProjector.Project(events, snapshot, ProjectionCheckpointStore.Load(roomDirectoryPath));
     }
 }

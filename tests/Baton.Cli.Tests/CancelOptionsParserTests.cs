@@ -61,6 +61,14 @@ public class CancelOptionsParserTests
     }
 
     [Fact]
+    public void A_reason_option_is_carried_verbatim_and_defaults_to_null_2073()
+    {
+        Assert.Null(CancelOptionsParser.Parse(["task"]).Reason);
+        Assert.Equal("lane is looping", CancelOptionsParser.Parse(["task", "--reason", "lane is looping"]).Reason);
+        Assert.Throws<CliArgumentException>(() => CancelOptionsParser.Parse(["task", "--reason"]));
+    }
+
+    [Fact]
     public void An_option_missing_its_value_throws()
     {
         Assert.Throws<CliArgumentException>(() => CancelOptionsParser.Parse(["task", "--execution", "exec-1", "--bindings"]));

@@ -41,6 +41,14 @@ namespace Baton.Cli;
 /// room there itself. <see cref="MutationExitCodeResolver"/> is what reads it.
 /// </para>
 /// </param>
+/// <param name="CancelWasNoOp">
+/// #2073: true when <see cref="CancelCommand"/> found nothing to arrest — the room was already
+/// Terminal, or the named execution had already settled — and so wrote nothing at all, not even the
+/// intent fact. The idempotency the verb promises ("says so, exits 0") needs its own flag for the same
+/// reason <paramref name="CancellationQueued"/> does: the state alone reads exit 1 for an already-Failed
+/// room, which would make re-running a cancel look like a fresh failure. Only <see cref="CancelCommand"/>
+/// sets it; <see cref="MutationExitCodeResolver"/> reads it.
+/// </param>
 public sealed record CommandResult(
     FlowState State,
     WorkflowDefinitionSnapshot Snapshot,
@@ -48,7 +56,8 @@ public sealed record CommandResult(
     string? RoomDirectoryPath = null,
     IReadOnlyList<WorktreeTeardownResult>? WorktreeTeardowns = null,
     bool WaitTimedOut = false,
-    bool CancellationQueued = false)
+    bool CancellationQueued = false,
+    bool CancelWasNoOp = false)
 {
     /// <summary>Defaults to empty rather than <c>null</c> for callers that omit the argument.</summary>
     public IReadOnlyList<WorktreeTeardownResult> WorktreeTeardowns { get; init; } = WorktreeTeardowns ?? [];

@@ -107,6 +107,61 @@ public class ArrestLedgerViewTests
         Assert.Null(entry.Reason);
     }
 
+    // #2073: the operator's intent fact (RoomEvent.ArrestIntentRecorded), three arms.
+
+    [Fact]
+    public void An_intent_with_a_later_arrest_shaped_terminal_fact_reports_Delivered_with_the_operator_reason()
+    {
+        var flowEntries = new LogEntry[]
+        {
+            Flow(new FlowEvent.ExecutionFailed(ExecA, FailureClassification.Permanent, "Arrested: operator cancel"), T2),
+        };
+        var roomEvents = new RoomEvent[] { new RoomEvent.ArrestIntentRecorded(ExecA.Value, "operator", "looping", T1) };
+
+        var entry = Assert.Single(ArrestLedgerProjector.Project(flowEntries, roomEvents));
+
+        Assert.Equal(ExecA, entry.ExecutionId);
+        Assert.Equal(ArrestOutcome.Delivered, entry.Outcome);
+        Assert.Equal("operator", entry.RequestedBy);
+        Assert.Equal("looping", entry.Reason);
+        Assert.Equal(T1, entry.RequestedAtUtc.UtcDateTime);
+        Assert.Equal(T2, entry.ResolvedAtUtc!.Value.UtcDateTime);
+    }
+
+    // Polarity: a terminal fact that PRECEDES the intent is not this intent's delivery, and an intent
+    // with nothing after it is pending — neither may read Delivered.
+    [Fact]
+    public void An_intent_whose_only_terminal_fact_predates_it_reports_no_outcome()
+    {
+        var flowEntries = new LogEntry[]
+        {
+            Flow(new FlowEvent.ExecutionFailed(ExecA, FailureClassification.Permanent, "earlier"), T1),
+        };
+        var roomEvents = new RoomEvent[] { new RoomEvent.ArrestIntentRecorded(ExecA.Value, "operator", null, T2) };
+
+        var entry = Assert.Single(ArrestLedgerProjector.Project(flowEntries, roomEvents));
+
+        Assert.Null(entry.Outcome);
+        Assert.Null(entry.ResolvedAtUtc);
+        Assert.Null(entry.Reason);
+    }
+
+    [Fact]
+    public void An_intent_the_pump_answered_is_absorbed_into_the_flow_side_entry_not_listed_twice()
+    {
+        var flowEntries = new LogEntry[]
+        {
+            Flow(new FlowEvent.CancellationRequested(ExecA, CancellationOrigin.Operator), T2),
+            Flow(new FlowEvent.ExecutionCancelled(ExecA), T2),
+        };
+        var roomEvents = new RoomEvent[] { new RoomEvent.ArrestIntentRecorded(ExecA.Value, "operator", null, T1) };
+
+        var entry = Assert.Single(ArrestLedgerProjector.Project(flowEntries, roomEvents));
+
+        Assert.Equal(ArrestOutcome.Delivered, entry.Outcome);
+        Assert.Equal(T2, entry.RequestedAtUtc.UtcDateTime);
+    }
+
     [Fact]
     public void Entries_are_ordered_by_RequestedAtUtc_across_both_logs()
     {

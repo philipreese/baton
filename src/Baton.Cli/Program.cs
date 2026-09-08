@@ -103,7 +103,7 @@ if (args.Length == 0 || !knownSubcommands.Contains(args[0]))
     Console.Error.WriteLine($"       {DispatchOptionsParser.Usage[7..]}");
     Console.Error.WriteLine($"       {RedispatchOptionsParser.Usage[7..]}");
     Console.Error.WriteLine(
-        "       baton cancel <room-dir> [--execution <execution-id>] [--bindings <bindings-file>] [--workflow-id <id>]");
+        "       baton cancel <room-dir> [--execution <execution-id>] [--reason <why>] [--bindings <bindings-file>] [--workflow-id <id>]");
     Console.Error.WriteLine(
         "       baton decide <room-dir> --execution <execution-id> --type resume|reject|retry-with-revision|supersede " +
         "[--target-step <step-id>] [--supplementary <execution-id>] --bindings <bindings-file> [--workflow-id <id>]");

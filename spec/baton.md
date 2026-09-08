@@ -398,7 +398,7 @@ through `RoleDispatch.Materialize` against the real role catalog.
 | `decide` | `baton decide <room-dir> --execution <execution-id> --type resume\|reject\|retry-with-revision\|supersede [--target-step <step-id>] [--supplementary <execution-id>] --bindings <bindings-file> [--workflow-id <id>]` | `DecideOptionsParser.cs` |
 | `resolve` | `baton resolve <room-dir> [--execution <execution-id>] --accept-capture \| --reject --reason <text> \| --close --reason <text>` | `ResolveOptionsParser.cs` |
 | `supply` | `baton supply <room-dir> --worker <role> --output <name> --file <source-path> --bindings <bindings-file> [--workflow-id <id>]` | `SupplyOptionsParser.cs` |
-| `cancel` | `baton cancel <room-dir> [--execution <execution-id>] [--bindings <bindings-file>] [--workflow-id <id>]` | `CancelOptionsParser.cs` |
+| `cancel` | `baton cancel <room-dir> [--execution <execution-id>] [--reason <why>] [--bindings <bindings-file>] [--workflow-id <id>]` | `CancelOptionsParser.cs` |
 | `status` | `baton status <room-dir> [--follow] [--json] [--repo <checkout-dir>]` | `StatusOptionsParser.cs` |
 | `watch` | `baton watch <room-dir> --notify <command\|url>` \| `baton watch --list` \| `baton watch --clear-fired` | `WatchOptionsParser.cs` |
 | `templates` | `baton templates [--json]` | `Program.cs` |
@@ -535,30 +535,75 @@ it a second candidate. Deliberately pinned
 (`RunningExecutionResolverTests.A_Running_step_and_a_quota_parked_step_together_are_ambiguous`): the
 resolver cannot tell "the operator means the one that's actually running" from "the operator means
 the one closest to being retried" without guessing, and guessing is exactly what this resolver exists
-to refuse to do. Against a room whose `baton run` pump is still live, the direct
-mutation call cannot win `flow.lock` — `cancel` catches that specific `WorkflowLockedException` and
-writes a room-scoped `cancel.request` file instead (`CancelRequestFile.cs`), which the pump itself
-polls at a modest cadence without ever contending the lock (`CancelRequestPoller.cs`) and delivers
-through the same `FlowEvent.CancellationRequested` path `MutationInterface` already uses. The
-fall-through path re-resolves `latest` at poll time (arresting whatever is running or parked then),
-whereas the direct path cancels the execution resolved at command time; on the fall-through path, zero
-or more than one candidate at act time lands as a `.rejected` record in the room (with the diagnostic
-reason written in its body), rather than a terminal command-line refusal. This is the arrest half of
-§10's "only cancellation-then-restart" ruling, not a reopening of it: nothing here reaches into a
-running worker to redirect it — it only makes the existing stop-then-`redispatch` sequence reachable
-from outside the lane's own process. **Ordering guarantee (#1649):** `RunCommand`'s own startup sweep
-of a leftover `cancel.request` cannot claim a live write from a `cancel` racing that same startup
-window — the discriminating rule lives on `CancelRequestFile.DeleteStalePendingRequestAsync` itself,
-not restated here.
+to refuse to do. Against a room whose `baton run` pump is still live, `cancel` never contends
+`flow.lock` — a held lock means it writes a room-scoped `cancel.request` file instead
+(`CancelRequestFile.cs`), which the pump itself polls at a modest cadence without ever contending the
+lock (`CancelRequestPoller.cs`) and delivers through the same `FlowEvent.CancellationRequested` path
+`MutationInterface` already uses. That path re-resolves `latest` at poll time (arresting whatever is
+running or parked then); zero or more than one candidate at act time lands as a `.rejected` record in
+the room (with the diagnostic reason written in its body), rather than a terminal command-line
+refusal. This is the arrest half of §10's "only cancellation-then-restart" ruling, not a reopening of
+it: nothing here reaches into a running worker to redirect it — it only makes the existing
+stop-then-`redispatch` sequence reachable from outside the lane's own process. **Ordering guarantee
+(#1649):** `RunCommand`'s own startup sweep of a leftover `cancel.request` cannot claim a live write
+from a `cancel` racing that same startup window — the discriminating rule lives on
+`CancelRequestFile.DeleteStalePendingRequestAsync` itself, not restated here.
 
-A parked candidate reached through the **direct** path (no live pump contending the lock) is
-reachable only when its `RetryNotBefore` has already elapsed AND a live pump is confirmed — a
-genuinely still-future park is refused outright by the dead-holder check below before the resolver
-ever runs, since that check scans every step for a future deferral, not just the one being targeted.
-That check itself was widened in the same change (#1607) from firing only on a confirmed-`Dead`
-holder to firing on anything but a confirmed-`Alive` one — see `CancelCommand.cs`'s own dead-holder
-gate comment for which `EngineLivenessProbe.Unknown` cases motivate this and why leaving it at
-`Dead`-only would have reopened #1586's hang from a new entry point. An already-overdue park raced
+**`baton cancel <room-dir> [--execution <id>] [--reason <why>]` (#2073, slice two of #1530) — the
+intent fact first, then the arrest; and the three arrest origins, listed once.** An arrest has exactly
+three origins, and this paragraph is the only place the list lives: **(1) the engine's own budget/rate
+monitor** — `TokenBudgetMonitor` arresting a live execution on its token budget, tool-step cap, or
+billed-token rate (`FlowEvent.ExecutionArrested`, §3's "three arrest triggers" section, which owns
+the three *triggers* of that one origin); **(2) the daemon's dead-pump probe** — `DeadPumpProbe`
+recording an arrest that already happened when a pump died out from under an open execution (§7);
+**(3) the operator** — `baton cancel`, this paragraph. The first is engine-initiated and never
+operator intent; the other two write slice one's terminal fact shape (§7's `DeadPumpProbe` bullet
+owns the shape and the parked/Running split) with a cause that names which of the two it was.
+
+What `baton cancel` does, in order — `CancelCommand.cs`'s class doc is the canonical account, the
+ordering rule is what this register pins: **(a) idempotency** — a room already Terminal, or a named
+execution already settled, is reported as such, nothing is written (not even the intent), exit 0
+(`CommandResult.CancelWasNoOp`); an unknown `--execution` id is still a typed refusal ahead of that
+check, so a typo never becomes a quiet exit 0. **(b) the intent fact** —
+`RoomEvent.ArrestIntentRecorded` (who: `operator`; the `--reason`; timestamp), appended to
+**`room.jsonl`** before anything that can stop the worker; that record's own remarks say why that
+journal and not `flow.jsonl` (a live pump holds the flow journal open). **(c) the existing channel** —
+the fail-fast `flow.lock` try IS the liveness question, exactly as `DeadPumpProbe` reads it: held
+means write `cancel.request` and wait up to `DaemonSettings.CancelPumpAnswerSeconds` (default and
+derivation on `CancelCommand.DefaultPumpAnswerWindow`, from the poller's own cadence) for the target
+to leave `ArrestableExecutions`; free means no pump exists to answer. **(d) the kill, only if no pump
+answered** — the worker pid `CoreEvent.ExecutionStarted` recorded, killed through
+`WorkerProcessArrest` on `EngineLivenessProbe`'s `Alive` verdict against that pid AND the start time
+the same event now carries (`ProcessStartTimeUtc`, added by #2073 — a pre-#2073 line has none, reads
+`Unknown`, and is **not** killed; the terminal fact says so). **(e) the terminal fact**, cause
+`operator cancel`, written under `flow.lock`: a pump that still holds the lock after the kill keeps
+the settle (it records its own worker's exit) and the command reports `CancellationQueued` (exit 1,
+"queued, not applied"). The intent is readable: `ArrestLedgerProjector` lists it (`baton status
+--json`'s `arrests`, `fleet_status`) — absorbed into the flow-side entry when the pump answered,
+its own entry otherwise, `Delivered` once an arrest-shaped terminal fact lands at or after it.
+
+What #2073 retired, and why the dead-holder gate below is history: before it, `cancel` against an
+idle room was itself a pump (`MutationInterface.RequestCancellationAsync`), which against a Running
+execution whose pump had died ran crash recovery — `ExecutionFailed(Retryable)`, then the retry
+engine **redispatched the worker**. A cancel that redispatches is the opposite of a cancel. The same
+verb carried the #1586/#1607 dead-holder gate, which refused a parked room with no confirmed-live
+pump because settling one needed "the tracked `baton settle` design" that did not exist. This is
+that verb: a free lock is settled with `StepRetryForeclosed(ForeclosedBy: "baton cancel")`, never
+refused, and the stale `flow.lock.holder`'s record is carried into the fact's reason (acquiring the
+lock overwrites and releasing it deletes that sidecar, for `cancel` as for `DeadPumpProbe`).
+`--bindings`/`--workflow-id` are accepted and ignored — nothing dispatches, so a missing
+`bindings.json` is no longer a refusal either. The paragraphs below on that gate describe #1607's
+reasoning as it stood; they are kept for the record of *why* the gate was widened, not as a
+description of a branch that still runs.
+
+A parked candidate reached through the **direct** path (no live pump contending the lock) was,
+between #1607 and #2073, reachable only when its `RetryNotBefore` had already elapsed AND a live pump
+was confirmed — a genuinely still-future park was refused outright by the dead-holder check before
+the resolver ever ran, since that check scanned every step for a future deferral, not just the one
+being targeted. That check was widened in #1607 from firing only on a confirmed-`Dead` holder to
+firing on anything but a confirmed-`Alive` one — which `EngineLivenessProbe.Unknown` cases motivated
+that and why leaving it at `Dead`-only would have reopened #1586's hang from a new entry point were
+on `CancelCommand.cs`'s then dead-holder gate comment. An already-overdue park raced
 against a poller-less pump used to lose to `MutationInterface`'s own retry-obligation check, which
 redispatched it before the parked-cancel-intent wait (armed only by `CancelRequestPoller.TickAsync`,
 which a poller-less pump never runs) was ever reached — the same outcome explicit `--execution`
@@ -592,7 +637,8 @@ closed terminal), would replay `CancellationRequested` on the *next* `baton run`
 apart.** The distinction is made durable, not a flag: `FlowEvent.CancellationRequested` carries
 `Origin` (`CancellationOrigin`: `Operator` or `HostStop`), nullable, defaulting to `null` on replay of
 any line written before this field existed. `RequestStopAsync` writes `HostStop`. Every other
-appender — `CancelCommand`'s direct path (`MutationInterface.RequestCancellationAsync`), the poller's
+appender — the direct `MutationInterface.RequestCancellationAsync` path (which `CancelCommand` took
+until #2073 and no verb takes now; the method stays for in-process callers), the poller's
 in-process live delivery (`InFlightExecutionRegistry.RequestCancellationAsync`), and the pump's own
 arrest-intent settle (`SettleArrestIntentsAsync`, #1556 PR 2 — the poller's marked intents drain
 through it) — writes `Operator`. The ledger-read rule now
@@ -606,36 +652,24 @@ cross-process leak before the rule that has the leak ever reaches an operator. T
 stays too, alongside the `Origin` filter — cheap, and it stops the same-process case one round
 earlier than waiting for the accumulator to simply never contain a `HostStop` id.
 
-**The dead-holder gate applies to both targeting modes, deliberately, with a real cost on the
-explicit one.** The gate runs before `--execution` is even inspected, so `cancel <room> --execution
-<id>` against a still-future park is refused on Unknown liveness exactly like the bare `cancel
-<room>` form — not because the two paths share reasoning about *which* candidate to pick (they
-don't), but because the hang the gate prevents follows from the room holding any pending future
-`RetryNotBefore` once `flow.lock` is won, regardless of which execution the caller named. Scoping the
-refusal to room-level targeting only would leave the explicit path free to reopen #1586's hang from
-the one entry point #1607 widened this gate to close, which would defeat the point of widening it at
-all. The accepted cost: before #1607, `Dead` was the only liveness value this gate refused on, so a
-genuinely-alive pump with a failed or missing sidecar write (`Unknown`, not `Dead`) still had a
-working path — `--execution <id>` would proceed, lose the lock race to the real pump, and fall
-through to the `WorkflowLockedException` handling that writes `cancel.request`. Since #1607 widened
-`Dead`-only to "anything but confirmed `Alive`," that fall-through is no longer reachable either: an
-`Unknown` verdict now refuses both paths up front, even when the pump is genuinely alive. There is
-currently no verb that reaches a still-alive pump whose holder record can't be confirmed — the
-refusal's own hint (`CancelCommand.cs`) says so rather than pointing at a recovery that does not
-exist; `baton status` is not offered as one, since it consults the identical `EngineLivenessProbe`
-and would report the same `Unknown`.
+**The dead-holder gate applied to both targeting modes, deliberately, with a real cost on the
+explicit one (#1607; retired by #2073, above).** The gate ran before `--execution` was even inspected,
+so `cancel <room> --execution <id>` against a still-future park was refused on Unknown liveness
+exactly like the bare `cancel <room>` form — not because the two paths shared reasoning about *which*
+candidate to pick (they don't), but because the hang the gate prevented followed from the room
+holding any pending future `RetryNotBefore` once `flow.lock` was won, regardless of which execution
+the caller named. The accepted cost was that an `Unknown` verdict refused both paths up front even
+when the pump was genuinely alive, and no verb reached a still-alive pump whose holder record could
+not be confirmed. #2073 dissolved both halves rather than tuning them: the lock try replaced the
+sidecar read as the liveness question (a live pump always holds the lock; a stale or missing sidecar
+no longer decides anything), and a free lock is settled instead of pumped, so there is no hang to
+guard against.
 
-**`cancel`'s `--bindings` is now optional too** (#1607 friction fix): omitted, it defaults to
-`<room-dir>/bindings.json` — the file a room dispatched via `dispatch`/`redispatch` already holds,
-since both write one there (`CancelOptionsParser.cs`). A room started via bare `baton run --bindings
-<elsewhere>` never gets one copied in, so the default there simply won't exist; a nonexistent default
-surfaces through the same "file not found" `WorkerBindingConfigException` `WorkerBindingConfigParser`
-already raises for a bad explicit path — no new failure mode, and the operator falls back to passing
-`--bindings` explicitly as before. One fewer argument to retype for the common (dispatched-room) case.
-`CancelCommand` augments that exception's message for exactly this default-path case (never for
-run/decide/supply, whose `--bindings` is required rather than defaulted) — naming the defaulted path
-as a default rather than a mistyped explicit argument, and saying `--bindings` is still available for
-a room whose bindings file lives elsewhere.
+**`cancel`'s `--bindings` is optional** (#1607 friction fix) and, since #2073, unread: omitted, it
+still defaults to `<room-dir>/bindings.json` (`CancelOptionsParser.cs`) so the record's field stays
+non-null and a script passing the flag keeps working, but a nonexistent or malformed file is no longer
+a refusal — nothing in the verb dispatches, so it has no worker to resolve a binding for
+(`CancelCommandEndToEndTests` pins the inversion).
 
 ---
 
@@ -755,21 +789,18 @@ paragraph's own caveat (briefly misreported as still `"Stalled"` while a live pu
 is the accurate scoping of what this recovers and what it does not.
 
 **`baton cancel` was also checked rather than assumed, and originally left the room worse than it
-found it — closed by #1586.** Without `--execution`, a room with no `Running` step used to refuse
-outright (`RunningExecutionResolver` had no notion of a parked candidate) — #1607 widened the
-resolver so a genuinely-still-parked room now targets that step the same way an explicit
-`--execution` always could (§2 above). With the parked execution's id (explicit or resolved), it
-used to take the room's lock, clobber the one artifact
-naming which engine died, and never come back — `CancelCommand`'s own dead-holder-check comment is
-the canonical account of that old failure and today's guard against it, not restated here. #1586's fix
-runs before any acquire: `CancelCommand` reuses the same `EngineLivenessProbe` arbiter this section's
-`baton status` line already relies on — the two verbs share the probe, not the recorded identity it
-probes. `baton status` probes the event-recorded engine identity (`ExecutionRequestAccepted`'s
-`EnginePid`/`EngineStartTime`); `CancelCommand` probes the lock-holder sidecar's recorded pid and
-process start time instead, since a dead-mid-park room's own `flow.lock.holder` is the only place
-that identity survives. So a dead holder with a step still owed a future retry is refused outright,
-pointed at the `baton run --room-dir` recovery above, sidecar untouched. A holder the lock is still
-genuinely OS-held by (a live pump) falls through unchanged to the pre-existing behaviour.
+found it — closed by #1586, and then made the verb that settles this shape by #2073.** Without
+`--execution`, a room with no `Running` step used to refuse outright (`RunningExecutionResolver` had
+no notion of a parked candidate) — #1607 widened the resolver so a genuinely-still-parked room now
+targets that step the same way an explicit `--execution` always could (§2 above). With the parked
+execution's id (explicit or resolved), it used to take the room's lock, clobber the one artifact
+naming which engine died, and never come back. #1586's fix refused that room outright before any
+acquire, off the lock-holder sidecar's recorded pid and start time through `EngineLivenessProbe` (the
+same arbiter this section's `baton status` line relies on for the event-recorded engine identity),
+and pointed at the `baton run --room-dir` recovery above. Since #2073 the refusal is gone: a free
+lock is settled by foreclosure with the dead holder's record carried into the fact's reason (§2's
+`baton cancel` paragraph), so `"Stalled"` has two recoveries — re-drive it with `baton run
+--room-dir`, or end it with `baton cancel`.
 
 **#1586 also closed the discoverability half: `baton redispatch`'s own missing-`terminal.json`
 refusal, and `baton status`'s dead-engine parked line, now cite the identical `baton run --room-dir`
@@ -3876,9 +3907,12 @@ trigger is not registrable by a standard user and is not used (#1770).
     and has no branch for `stepRetryForeclosed` — the probe's rooms are absent from its accounting
     before and after the fact lands. The other is the **arrest
     ledger** (`ArrestLedgerProjector`): it is request-sourced by construction — it projects
-    `CancellationRequested`/`ExecutionCancelled`/`CancellationRejected` and the two `room.jsonl` shapes,
+    `CancellationRequested`/`ExecutionCancelled`/`CancellationRejected` and the `room.jsonl` shapes,
     all of which answer "who asked for an arrest, and how was it settled". A dead pump filed no request,
-    so this arrest correctly does not appear there and the ledger is not extended to invent one.
+    so this arrest correctly does not appear there and the ledger is not extended to invent one. The
+    operator's `baton cancel` (#2073) writes the same two fact shapes with cause `operator cancel` and
+    DOES file a request — its intent fact — so that arrest is the one that appears there (§2's
+    `baton cancel` paragraph, which is also where the three arrest origins are listed).
   - **The backlog, measured before it shipped** (2026-09-08, over `~/.baton/rooms`; predicate: no
     `terminal.json`, `flow.lock` acquirable `FileShare.None`, and ≥1 accepted execution with no terminal
     event of its own). Of **456** rooms, 5 carried no sentinel, 3 of those had a free lock, and **2**

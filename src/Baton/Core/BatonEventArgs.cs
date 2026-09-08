@@ -13,6 +13,14 @@ public sealed class BatonEventArgs : EventArgs
     /// <summary>Process ID of the child. Meaningful when <see cref="Kind"/> is <see cref="BatonTaskEventKind.Started"/>.</summary>
     public uint Pid { get; init; }
 
+    /// <summary>
+    /// #2073: the child's OS start time (UTC), read immediately after spawn; the pid-recycling
+    /// discriminator that lets a later process confirm <see cref="Pid"/> still names this child.
+    /// Meaningful when <see cref="Kind"/> is <see cref="BatonTaskEventKind.Started"/>; <c>null</c> when
+    /// the read failed (the child had already exited).
+    /// </summary>
+    public DateTime? ProcessStartTimeUtc { get; init; }
+
     /// <summary>Exit code of the child, or -1 if it was killed. Meaningful when <see cref="Kind"/> is <see cref="BatonTaskEventKind.Exited"/>.</summary>
     public int ExitCode { get; init; }
 

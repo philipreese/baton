@@ -13,13 +13,14 @@ namespace Baton.Domain;
 public enum CancellationOrigin
 {
     /// <summary>
-    /// An operator named this execution: <c>CancelCommand</c>'s direct path
-    /// (<see cref="Mutation.MutationInterface.RequestCancellationAsync"/>), its live-pump
-    /// fall-through poller's marked arrest intent settling
+    /// An operator named this execution: the pump's poller settling a marked arrest intent
     /// (<c>MutationInterface.SettleArrestIntentsAsync</c>, #1556 — generalized from #1563's
-    /// narrower <c>SettleParkedCancelIntentsAsync</c>), or
+    /// narrower <c>SettleParkedCancelIntentsAsync</c>),
     /// <see cref="Mutation.InFlightExecutionRegistry.RequestCancellationAsync"/> delivering to a
-    /// still-registered in-process execution.
+    /// still-registered in-process execution, or a direct
+    /// <see cref="Mutation.MutationInterface.RequestCancellationAsync"/> call (no CLI verb takes that
+    /// path since #2073 — <c>Baton.Cli.CancelCommand</c> writes its intent to <c>room.jsonl</c> and
+    /// settles without a pump; the method stays for in-process callers and tests).
     /// </summary>
     Operator,
 

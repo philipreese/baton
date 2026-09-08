@@ -1057,7 +1057,7 @@ public sealed class CoreDispatcher(ICoreEventLogWriter coreEventLogWriter, IStre
                     lock (pendingLogWritesLock)
                     {
                         pendingLogWrites.Add(coreEventLogWriter.AppendAsync(
-                            new CoreEvent.ExecutionStarted(request.ExecutionId, e.Pid), CancellationToken.None));
+                            new CoreEvent.ExecutionStarted(request.ExecutionId, e.Pid, e.ProcessStartTimeUtc), CancellationToken.None));
                     }
 
                     break;

@@ -45,6 +45,15 @@ public static class MutationExitCodeResolver
             return Failure;
         }
 
+        // #2073: the idempotent arm — nothing to arrest, nothing written. Ahead of the state
+        // classification for the mirror-image reason the queued arm above is: an already-Failed or
+        // Cancelled room reads 1 below, and a re-run cancel against it must not look like a new
+        // failure to a scripted caller. CancelCommand's own output says which no-op it was.
+        if (result.CancelWasNoOp)
+        {
+            return Success;
+        }
+
         return result.State.Status == WorkflowStatus.Terminal && result.State.Steps.All(step => step.Status == StepStatus.Succeeded)
             ? Success
             : Failure;

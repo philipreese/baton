@@ -57,6 +57,9 @@ public class RoomEventLogJsonTests
         // #1530
         new RoomEvent.ArrestRequestUnresolvable("latest", "ambiguous — 2 candidates", FixedInstant, FixedInstant),
         new RoomEvent.ArrestRequestExpired("exec-1", FixedInstant, FixedInstant),
+        // #2073: both Reason polarities, same pairing as WorkerJoined's rows above.
+        new RoomEvent.ArrestIntentRecorded("exec-1", "operator", "lane is looping", FixedInstant),
+        new RoomEvent.ArrestIntentRecorded("exec-1", "operator", null, FixedInstant),
     ];
 
 

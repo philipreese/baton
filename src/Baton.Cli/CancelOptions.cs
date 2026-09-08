@@ -16,15 +16,24 @@ namespace Baton.Cli;
 /// one (fail closed, no guessing).
 /// </param>
 /// <param name="BindingsFilePath">
-/// The worker-binding config file (M11 Phase 1's sidecar shape). Optional at the CLI layer (#1607):
-/// <see cref="CancelOptionsParser"/> defaults an omitted <c>--bindings</c> to the room's own
-/// <c>bindings.json</c> before this record is ever constructed, so this field is never null.
+/// The worker-binding config file. Accepted for compatibility and <b>never read</b> since #2073:
+/// <c>baton cancel</c> no longer drives a pump of its own, so there is no worker whose binding it
+/// would look up. <see cref="CancelOptionsParser"/> still defaults an omitted <c>--bindings</c> to the
+/// room's own <c>bindings.json</c> (#1607), so this field is never null and a script that passes the
+/// flag keeps working; a missing file no longer refuses (spec/baton.md §2).
 /// </param>
 /// <param name="WorkflowId">
-/// Defaults to the bound snapshot's <c>WorkflowTemplateId</c> when not given, same as <c>baton run</c>.
+/// Accepted for compatibility and never read since #2073, for the same reason as
+/// <paramref name="BindingsFilePath"/>: nothing here dispatches.
+/// </param>
+/// <param name="Reason">
+/// #2073: the operator's stated reason, recorded verbatim on the intent fact
+/// (<see cref="Baton.Domain.RoomEvent.ArrestIntentRecorded"/>) and echoed into the terminal fact's
+/// reason. Optional; <c>null</c> when <c>--reason</c> was not given.
 /// </param>
 public sealed record CancelOptions(
     string RoomDirectoryPath,
     string? ExecutionId,
     string BindingsFilePath,
-    string? WorkflowId = null);
+    string? WorkflowId = null,
+    string? Reason = null);
