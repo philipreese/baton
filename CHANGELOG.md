@@ -9,6 +9,48 @@ that carried them: `git show v0.35.0:src/Baton.Cli/CHANGELOG.md` (likewise `src/
 `release-please-config.json`. Everything below this line predates the split: the repo's single
 shared version through `0.14.0`.
 
+## [0.39.0](https://github.com/philipreese/baton/compare/v0.38.0...v0.39.0) (2026-09-08)
+
+
+### Features
+
+* **cli:** Add baton cancel to write the intent fact and then arrest ([#2101](https://github.com/philipreese/baton/issues/2101)) ([3c2e44d](https://github.com/philipreese/baton/commit/3c2e44d288f8d97c65199a7ede44841561d607b9))
+* **daemon:** Append the dead-pump terminal fact from the liveness probe ([#2094](https://github.com/philipreese/baton/issues/2094)) ([7dd9835](https://github.com/philipreese/baton/commit/7dd98359a1dd7af838cf549adb20e312434e2f10))
+* **dispatch:** Give a conductor-side read lane its own role and a non-empty output check ([#2068](https://github.com/philipreese/baton/issues/2068)) ([781adac](https://github.com/philipreese/baton/commit/781adac5be96ce015a2500652cbf78f705f11479))
+* **memory:** Gate on projection freshness with 'baton memory sync --check' ([#2064](https://github.com/philipreese/baton/issues/2064)) ([25d5d21](https://github.com/philipreese/baton/commit/25d5d21145602acc9bdbd221a7acff7f4c4b25c6))
+* **memory:** Make 'baton memory add' the canonical write path ([#2087](https://github.com/philipreese/baton/issues/2087)) ([87cab23](https://github.com/philipreese/baton/commit/87cab23b97caffd402c5ea2c5a61fb584e40b2f5))
+* **memory:** Relocate the cost ledger under ~/.baton/&lt;slug&gt;/ ([#2066](https://github.com/philipreese/baton/issues/2066)) ([21bb89a](https://github.com/philipreese/baton/commit/21bb89a28978abf7de5893a2b7f26b3e93d36a75))
+
+
+### Bug Fixes
+
+* **cli:** Exit 0 when baton cancel succeeds ([#2105](https://github.com/philipreese/baton/issues/2105)) ([4f32e35](https://github.com/philipreese/baton/commit/4f32e35a5d3ee0eaec98cc6eb0cf2437b8e41bf1))
+* **daemon:** Report a rejected projection checkpoint once per room per process ([#2070](https://github.com/philipreese/baton/issues/2070)) ([175b243](https://github.com/philipreese/baton/commit/175b243eec15531700eece05524f7fba5dd70a26))
+* **deepswe:** Retry the snapshot swap rename on a Windows access refusal ([#2106](https://github.com/philipreese/baton/issues/2106)) ([2a04153](https://github.com/philipreese/baton/commit/2a04153bc696df97bdce8a31c8d6019d81f5b7df))
+* **dispatch:** Clear stdout/stderr inheritance before a lane's first spawn ([#2059](https://github.com/philipreese/baton/issues/2059)) ([7d7e1a9](https://github.com/philipreese/baton/commit/7d7e1a91a3bb3f51f89404a171c1a33dcf992a9c))
+* **dispatch:** Credit a lane's build-lock wait back to its box ([#2058](https://github.com/philipreese/baton/issues/2058)) ([e56b22c](https://github.com/philipreese/baton/commit/e56b22c37589688f258b44bcb35b59664eab60ca))
+* **dispatch:** Grade a lane on the workspace it changed, not the tree it read ([#2063](https://github.com/philipreese/baton/issues/2063)) ([98d6fde](https://github.com/philipreese/baton/commit/98d6fde61ed33ffa90c28337549b416a94cf1e2e))
+* **flow:** Arrest ledger loose ends — a rejection the pump still owes, and three things that lied about it ([#2057](https://github.com/philipreese/baton/issues/2057)) ([d390876](https://github.com/philipreese/baton/commit/d390876da28d7dd4abad616a974c187245e361dd))
+* **infra:** Make the daemon's ending readable, and page when its projection goes stale ([#2062](https://github.com/philipreese/baton/issues/2062)) ([a487030](https://github.com/philipreese/baton/commit/a4870307eb01965f001519caada13804be9e4d25))
+* **infra:** Read gates-selftest's --bogus refusal as a property, not a stopwatch ([#2060](https://github.com/philipreese/baton/issues/2060)) ([e3c4c07](https://github.com/philipreese/baton/commit/e3c4c07470d38fc69190d75ad30592be0d528f0f))
+* **infra:** Relaunch the daemon from a repeating trigger ([#2097](https://github.com/philipreese/baton/issues/2097)) ([2540922](https://github.com/philipreese/baton/commit/2540922557a8fd518a36f00c09a3661688fccbc6))
+* **memory:** Validate the .git entry IsWorkTreeRoot accepts, and cite the cwd-bound test ([#2065](https://github.com/philipreese/baton/issues/2065)) ([bee8854](https://github.com/philipreese/baton/commit/bee88541941d9cfdb8cd483108f1f0b58a9ce7a1))
+* **queue:** Resolve the adapter from --model at queue add ([#2096](https://github.com/philipreese/baton/issues/2096)) ([7e24bef](https://github.com/philipreese/baton/commit/7e24befb5984f37d44e52574507d11a22729451b))
+* **status:** Keep the operator's cancel reason when the pump answers ([#2108](https://github.com/philipreese/baton/issues/2108)) ([76f46c1](https://github.com/philipreese/baton/commit/76f46c181929ba298422b8704021a1638be771cd))
+* **verify:** Put Git's sh on the daemon-launched verify PATH ([#2102](https://github.com/philipreese/baton/issues/2102)) ([1f6f7b4](https://github.com/philipreese/baton/commit/1f6f7b4f52f2b635f95fa0f3df333ffe3e21d636))
+
+
+### Documentation
+
+* **benchmarks:** Record the S7/S8 comparator reruns ([#2099](https://github.com/philipreese/baton/issues/2099)) ([2b3f5db](https://github.com/philipreese/baton/commit/2b3f5dbc0333e7d7892efe970ab9f2a36e031f8c))
+* **spec:** State each cancel exit-code flag's direction once ([#2109](https://github.com/philipreese/baton/issues/2109)) ([38bd35f](https://github.com/philipreese/baton/commit/38bd35fba12a897d4c7ba36457966c12ded4b64b))
+
+
+### Miscellaneous
+
+* **dispatch:** Measure a role's ceiling against the meter that arrests on it ([#2067](https://github.com/philipreese/baton/issues/2067)) ([92a8d7b](https://github.com/philipreese/baton/commit/92a8d7b61785779bcec0026a40b4512307b26afb))
+* **skills:** Measure claude's activation of a projected skill under -p ([#2086](https://github.com/philipreese/baton/issues/2086)) ([9cbc653](https://github.com/philipreese/baton/commit/9cbc65369560a807029b003d451ee3f2778de6f0))
+
 ## [0.38.0](https://github.com/philipreese/baton/compare/v0.37.0...v0.38.0) (2026-09-07)
 
 
