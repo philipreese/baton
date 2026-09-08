@@ -33,32 +33,26 @@ namespace Baton.Cli;
 /// #1650 F2: true when <see cref="CancelCommand"/> took its live-pump fall-through — the cancellation
 /// was written to a <c>cancel.request</c> file for some other pump to consume, not applied by this
 /// call. Only <see cref="CancelCommand"/> ever sets it; every other command leaves it at its default,
-/// so the shared exit-code path is unchanged for <c>decide</c> and <c>supply</c>.
-/// <para>
-/// It exists because <see cref="State"/> alone cannot tell the two outcomes apart: the fall-through
-/// re-projects the room and returns whatever it finds, so a cancel that did nothing but drop a request
-/// file into an already-Terminal, all-succeeded room is indistinguishable from one that carried the
-/// room there itself. <see cref="MutationExitCodeResolver"/> is what reads it.
-/// </para>
+/// so the shared exit-code path is unchanged for <c>decide</c> and <c>supply</c>. It exists because
+/// <see cref="State"/> alone cannot tell this outcome from an applied one — the fall-through
+/// re-projects the room and returns whatever it finds. The exit code it maps to, and the direction
+/// it corrects, live in one place: the "Exit code, stated once (#2103)" sentence under spec/baton.md
+/// §2; <see cref="MutationExitCodeResolver"/> is what reads it.
 /// </param>
 /// <param name="CancelWasNoOp">
 /// #2073: true when <see cref="CancelCommand"/> found nothing to arrest — the room was already
 /// Terminal, or the named execution had already settled — and so wrote nothing at all, not even the
-/// intent fact. The idempotency the verb promises ("says so, exits 0") needs its own flag for the same
-/// reason <paramref name="CancellationQueued"/> does: the state alone reads exit 1 for an already-Failed
-/// room, which would make re-running a cancel look like a fresh failure. Only <see cref="CancelCommand"/>
-/// sets it; <see cref="MutationExitCodeResolver"/> reads it.
+/// intent fact. Only <see cref="CancelCommand"/> sets it; <see cref="MutationExitCodeResolver"/> reads
+/// it, and the same spec sentence states its exit code and the direction it corrects.
 /// </param>
 /// <param name="CancelApplied">
 /// #2103: true when <see cref="CancelCommand"/> did what it was asked — the intent fact is written and
-/// the target left <c>ArrestableExecutions</c> before this call returned, whether a live pump answered
-/// the request, the kill was recorded by the pump, or this command wrote the terminal fact itself.
-/// The third flag cancel needs, for the same reason the other two exist: a cancel that succeeds leaves
-/// the room Terminal with the step Cancelled or Failed, which the state alone reads as exit 1 — the
-/// invocation that arrested would exit 1 while the no-op exits 0. Mutually exclusive with
-/// <paramref name="CancellationQueued"/> and <paramref name="CancelWasNoOp"/> by construction. Only
-/// <see cref="CancelCommand"/> sets it; <see cref="MutationExitCodeResolver"/> reads it, so
-/// <c>decide</c>/<c>supply</c>/<c>resolve</c> keep the unchanged state-based arm.
+/// the target left <c>ArrestableExecutions</c> before this call returned. Which of
+/// <see cref="CancelCommand"/>'s returns set it, its exit code, and the direction it corrects are in the
+/// same spec sentence. Mutually exclusive with <paramref name="CancellationQueued"/> and
+/// <paramref name="CancelWasNoOp"/> by construction. Only <see cref="CancelCommand"/> sets it;
+/// <see cref="MutationExitCodeResolver"/> reads it, so <c>decide</c>/<c>supply</c>/<c>resolve</c> keep
+/// the unchanged state-based arm.
 /// </param>
 public sealed record CommandResult(
     FlowState State,

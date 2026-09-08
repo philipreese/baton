@@ -38,9 +38,11 @@ namespace Baton.Cli;
 /// <c>flow.lock</c>. If a pump still holds that lock once the kill is done, it records its own
 /// worker's exit and this command reports <see cref="CommandResult.CancellationQueued"/> instead.</item>
 /// </list>
-/// Exit code (#2103): a cancel that got the target settled — by the pump's answer or by this command's
-/// own terminal fact — reports <see cref="CommandResult.CancelApplied"/> and exits 0; the queued arm
-/// exits 1; the no-op exits 0. <see cref="MutationExitCodeResolver"/> is the table.
+/// Exit code (#2103): <see cref="CommandResult.CancelApplied"/> means the target settled before this
+/// command returned, whichever of the settled returns below reported it. Which value that flag,
+/// <see cref="CommandResult.CancellationQueued"/>, and <see cref="CommandResult.CancelWasNoOp"/> each
+/// map to, and the applied set, live in one place: the <c>baton cancel</c> paragraph of spec/baton.md
+/// §2, its "Exit code" sentence (#2103); <see cref="MutationExitCodeResolver"/> is what reads them.
 /// </summary>
 /// <remarks>
 /// <b>What this retired</b> — spec/baton.md §2's <c>baton cancel</c> paragraph is the record; in

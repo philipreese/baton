@@ -6,8 +6,10 @@ namespace Baton.Cli;
 /// The 0/1 exit-code contract <c>baton cancel</c>/<c>baton decide</c>/<c>baton supply</c> keep —
 /// deliberately not <see cref="RunExitCodeResolver"/>'s richer table, which #1356 scoped to
 /// <c>run</c>/<c>dispatch</c>/<c>resume</c> and which widening here was never asked for. For
-/// <c>cancel</c> the table is three flags read ahead of the state: queued is 1, no-op is 0, applied
-/// is 0 (#2103); spec/baton.md §2's <c>baton cancel</c> paragraph states that contract once.
+/// <c>cancel</c>, three <see cref="CommandResult"/> flags are read ahead of the state-based arm;
+/// which value each maps to, the direction each corrects, and the applied set are stated once in
+/// spec/baton.md §2's <c>baton cancel</c> paragraph ("Exit code, stated once (#2103)") — not restated
+/// in this summary; each arm's comment below says only what that arm's own tests pin.
 /// <para>
 /// Pure and side-effect free for the same reason <see cref="RunExitCodeResolver"/> is:
 /// <c>MutationExitCodeResolverTests</c> asserts every arm against a hand-built
