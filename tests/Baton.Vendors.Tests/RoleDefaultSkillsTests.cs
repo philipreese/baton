@@ -36,6 +36,61 @@ public sealed class RoleDefaultSkillsTests : IDisposable
 
     private static string ShippedSkillsDirectory => Path.Combine(AppContext.BaseDirectory, "skills");
 
+    // spec/baton.md §2, "Role default skills", owns the shipped-body budget.
+    private const int ShippedDefaultHeadroom = 400;
+
+    [Fact]
+    public void Every_catalog_role_resolves_only_its_declared_defaults_against_this_checkout()
+    {
+        var directory = new DirectoryInfo(AppContext.BaseDirectory);
+        while (directory is not null && !File.Exists(Path.Combine(directory.FullName, "Baton.slnx")))
+        {
+            directory = directory.Parent;
+        }
+        Assert.NotNull(directory);
+        var workspace = directory.FullName;
+        using var scope = BatonEnvironmentSnapshot.BeginScope(BatonEnvironmentSnapshot.Blank with
+        {
+            WorkerRolesPathOverride = Path.Combine(workspace, "src", "Baton.Vendors", "WorkerRoles.json"),
+            WorkerTiersPathOverride = Path.Combine(workspace, "src", "Baton.Vendors", "WorkerTiers.json"),
+            HomeOverride = Path.Combine(_root, "home"),
+        });
+
+        Assert.NotEmpty(WorkerRoleCatalog.All);
+        foreach (var role in WorkerRoleCatalog.All)
+        {
+            var binding = RoleDispatch.ToBinding(role, "Do the work.", workingDirectory: workspace);
+            var declared = SkillPackageResolver.ResolveAll(binding.Skills, workspace);
+            var prompt = SkillInlining.InlineSkills("Task", workspace, declared);
+            var projection = declared.Count > 0
+                ? SkillProjection.PlanFor(declared, Path.Combine(_root, "projection"))
+                : SkillProjection.Plan(workspace, Path.Combine(_root, "projection"));
+
+            Assert.Equal(role.DefaultSkills, declared.Select(package => package.Name));
+            foreach (var name in ShippedDefaults.Values)
+            {
+                var expected = role.DefaultSkills.Contains(name);
+                Assert.Equal(expected, prompt.Contains($"# Skill: {name}\n", StringComparison.Ordinal));
+                Assert.Equal(expected, projection.Entries.Any(entry => entry.Package.Name == name));
+            }
+        }
+    }
+
+    [Theory]
+    [InlineData("baton-implement")]
+    [InlineData("baton-review")]
+    [InlineData("baton-advise")]
+    public void Package_line_endings_do_not_change_the_body_length_or_inlined_prompt(string name)
+    {
+        var package = SkillPackageReader.LoadPackage(Path.Combine(ShippedSkillsDirectory, name));
+        var lf = package with { Content = package.Content.Replace("\r\n", "\n", StringComparison.Ordinal) };
+        var crlf = package with { Content = lf.Content.Replace("\n", "\r\n", StringComparison.Ordinal) };
+
+        Assert.Equal(SkillInlining.InlinedSkillBody(lf).Length, SkillInlining.InlinedSkillBody(crlf).Length);
+        Assert.Equal(SkillInlining.InlinedSkillBody(lf), SkillInlining.InlinedSkillBody(crlf));
+        Assert.Equal(SkillInlining.InlineSkills("Task", null, [lf]), SkillInlining.InlineSkills("Task", null, [crlf]));
+    }
+
     [Theory]
     [InlineData("implement")]
     [InlineData("review")]
@@ -187,10 +242,10 @@ public sealed class RoleDefaultSkillsTests : IDisposable
         Assert.InRange(lines.Length, 1, 120);
         Assert.DoesNotMatch(new Regex(@"#\d{3,}"), package.Content);
         Assert.DoesNotMatch(new Regex(@"\bPR #|\bissue #", RegexOptions.IgnoreCase), package.Content);
-        // The inlining vendors bound a DECLARED set at CoreDispatcher.OversizePromptThreshold (the
-        // SkillInlining remark is the register): a default over it turns every codex/agy dispatch of
-        // the role into a refusal, and headroom under it is what a `--skill` addition has to fit in.
-        Assert.InRange(SkillInlining.InlinedSkillBody(package).Length, 1, Baton.Dispatch.CoreDispatcher.OversizePromptThreshold - 400);
+        // spec/baton.md §2, "Role default skills": additions must fit strictly within the reserved
+        // headroom because SkillInlining refuses a declared set that reaches the threshold.
+        Assert.InRange(SkillInlining.InlinedSkillBody(package).Length, 1,
+            Baton.Dispatch.CoreDispatcher.OversizePromptThreshold - ShippedDefaultHeadroom);
     }
 
     /// <summary>

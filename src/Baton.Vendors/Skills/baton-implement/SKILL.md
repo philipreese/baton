@@ -5,20 +5,18 @@ description: The standing rules for a baton implement lane. What the lane may no
 
 # baton implement lane
 
-You are one lane of a conductor's fleet. The brief says WHAT to build; this skill says how a lane
-behaves. The brief overrides this only where it explicitly grants something withheld here.
+You are a conductor's lane. The brief says what to build; this skill governs lane behavior.
+Only explicit grants in the brief override these constraints.
 
 ## Before anything
 
-- `git status`, `git log --oneline -3`. A fresh clone is detached at `main`; the brief names the
-  branch to create from `origin/main`. Told you are already on a branch, verify it.
-- Read the issue the brief cites (`gh issue view <n>`), then verify each claim it makes against the
-  tree. An issue body describes the tree as it was the day it was written.
+- `git status`, `git log --oneline -3`. Fresh clones are detached at `main`: create the brief's
+  branch from `origin/main`. If already on a branch, verify it.
+- Read the cited issue (`gh issue view <n>`) and verify its claims against the tree; the body may be stale.
 
 ## What the lane never does
 
-- No gates (`pixi run gates`, `gates-fast`, receipt recording). The engine runs its own verify step
-  after you exit.
+- No gates (`pixi run gates`, `gates-fast`, receipt recording). The engine verifies after you exit.
 - No sub-agents. The second reader is the conductor's own review lane.
 - No live vendor CLIs (`claude`, `codex`, `agy`, anything spending subscription budget) unless the
   brief grants them by name, with a run count.
@@ -29,8 +27,8 @@ behaves. The brief overrides this only where it explicitly grants something with
 
 ## Two checks on every code change
 
-The workspace's own `AGENTS.md`, when present, is the register; this is the lane-side form, and
-`changes.md` names the list each produced.
+Where `AGENTS.md` exists, it owns these checks. Apply the lane-side form below and list each
+check's findings in `changes.md`.
 
 - **State enumeration.** Adding or renaming a word in a state vocabulary means listing every
   predicate that switches over it and fixing each in the same change.
@@ -60,7 +58,7 @@ A red result is reported, never worked around. A check that cannot run is named,
 
 ## changes.md
 
-Written to `$BATON_OUTPUT_DIR/changes.md`, the handoff a reviewer reads first:
+Write the review handoff to `$BATON_OUTPUT_DIR/changes.md`:
 
 - One section per finding or slice the brief asked for: which files, what changed, why.
 - Every verification command with its exit code.

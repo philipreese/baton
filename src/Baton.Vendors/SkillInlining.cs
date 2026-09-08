@@ -19,11 +19,13 @@ public static class SkillInlining
     /// <remarks>
     /// One function so the roster's per-package size and the prompt's actual content are measured on the
     /// same string — a size computed off the raw file would over-report by the front matter this drops.
+    /// CRLF is normalized to LF before trimming and inlining. Length counts UTF-16 code units in that
+    /// body, including each LF and any internal whitespace; front matter and outer whitespace do not count.
     /// </remarks>
     public static string InlinedSkillBody(SkillPackage package)
     {
         ArgumentNullException.ThrowIfNull(package);
-        return SkillScanner.StripFrontmatter(package.Content).Trim();
+        return SkillScanner.StripFrontmatter(package.Content).Replace("\r\n", "\n", StringComparison.Ordinal).Trim();
     }
 
     /// <summary>
@@ -45,7 +47,8 @@ public static class SkillInlining
     /// — <c>OversizePromptWrapper</c> swaps the inline prompt for a <c>BATON_PROMPT_FILE</c> reference far
     /// below the platform ceiling, so neither arm has an argv hazard — it is the one ceiling on record,
     /// borrowed here for a cost that is undisclosed rather than merely large. The predicate counts
-    /// characters, the unit the threshold is in; the message renders bytes, the unit the roster prints. A
+    /// UTF-16 code units in <see cref="InlinedSkillBody"/>'s normalized body; the message renders UTF-8
+    /// bytes of that same body, the unit the roster prints. A
     /// per-package budget of its own belongs with the manifest #1151's slice 1 still owes, not here.
     /// </remarks>
     /// <param name="workingDirectory">

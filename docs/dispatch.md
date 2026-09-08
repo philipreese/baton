@@ -296,8 +296,7 @@ where a bottom-rung name behaves differently. The names land on the binding's `S
 **A binding that names skills gets exactly those**: the declared set replaces the `<workspace>/skills/`
 scan rather than adding to it, so a lane cannot silently also pick up whatever is checked into the
 repository it was pointed at. A binding that names none keeps the scan, unchanged. Since #2110 that
-population is every role whose catalog entry declares no `default_skills` — `consolidate`, `patch`,
-`fact-check`, `janitor`, `orchestrate` in the shipped `WorkerRoles.json`, which is the authority — plus a
+population is every role whose entry in `WorkerRoles.json` (the register) declares no `default_skills`, plus a
 role with defaults dispatched `--no-default-skills` and no `--skill`. The three shipped packages sit on
 no scan rung (`spec/baton.md` §2 states where and why), so no role without a declared default receives
 them, not even against a checkout of this repository.

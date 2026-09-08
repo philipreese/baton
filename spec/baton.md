@@ -410,8 +410,12 @@ scan, and a package at the root would reach all of them whenever the workspace i
 repository. No role without a declared default receives these packages. One cost is inherited rather than new: on the two
 inlining vendors a *declared* set is bounded at `CoreDispatcher.OversizePromptThreshold` (§9,
 `SkillInlining`'s remark is the register), and a role default is a declared skill — so the shipped
-packages are kept well under it (`RoleDefaultSkillsTests` pins the headroom), and what a `--skill`
-addition can bring on codex or agy is the remainder. **Each package is the sole register, for a
+packages have an inlined-body cap of `OversizePromptThreshold - 400` (currently 3600 UTF-16 code
+units after `InlinedSkillBody` normalizes CRLF to LF, strips front matter and trims outer whitespace).
+`RoleDefaultSkillsTests.ShippedDefaultHeadroom` encodes that reserve and derives the cap from the
+threshold. A `--skill` addition's body must be strictly shorter than the remaining space to the
+threshold: at the package cap, fewer than 400 code units, since reaching the threshold refuses.
+**Each package is the sole register, for a
 dispatched lane, of the lane constraints it states** (what a lane never does, the delivery and review
 shapes, the two `AGENTS.md`-derived checks, the public-repository rules): a brief carries only what is
 task-specific, and no other lane-facing document restates the package. The workspace's own contributor

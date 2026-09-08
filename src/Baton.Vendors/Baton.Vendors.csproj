@@ -30,7 +30,7 @@
          package in the account library (the rung above) still wins, with no rebuild. The source
          tree sits under this project, NOT at the repository root: <repo>/skills/ is the resolver's
          <workspace>/skills/ scan rung, and a package there is inhaled by every lane that declares no
-         skill set (the five roles without default_skills, and any opted-out one) when dispatched
+         skill set (WorkerRoles.json registers which roles have default_skills) when dispatched
          against this repository. The Link keeps the output directory name lowercase on a
          case-sensitive filesystem, which is what the resolver's rung path spells. -->
     <None Include="Skills\**\*" Link="skills\%(RecursiveDir)%(Filename)%(Extension)" CopyToOutputDirectory="PreserveNewest" />
