@@ -585,6 +585,53 @@ public sealed class QueueSchedulerServiceTests
         Assert.Contains(@"C:\rooms\r1", error!, StringComparison.Ordinal);
     }
 
+    /// <summary>
+    /// #1951: when an item finishes and resolves to Failed (such as from a corrupt ledger in the
+    /// fault projection), ResolveFinishedItemsAsync writes a failed decision entry to queue.jsonl
+    /// carrying the failure reason.
+    /// </summary>
+    [Fact]
+    public async Task A_resolved_item_whose_sentinel_recorded_a_corrupt_ledger_fault_writes_a_failed_decision_fact_carrying_the_reason()
+    {
+        var home = CreateTempHome();
+        using var scope = BatonEnvironmentSnapshot.BeginScope(BatonEnvironmentSnapshot.Blank with { HomeOverride = home });
+        try
+        {
+            var room = Path.Combine(home, "rooms", "queue-t1-corrupt");
+            Directory.CreateDirectory(room);
+            var sentinelError = "the queue-launched lane 't1' did not complete after launch: lane faulted "
+                + "— could not project room: corrupt ledger: Malformed line in the ledger";
+            await File.WriteAllTextAsync(
+                Path.Combine(room, TerminalSentinelWriter.TerminalSentinelFileName),
+                $$"""{"state":"Failed","steps":[],"outputs":[],"error":"{{sentinelError}}"}""",
+                Ct);
+
+            await QueueStore.MutateAsync(
+                BatonPaths.QueueFile,
+                s => s with { Items = [Item() with { State = QueueItemState.Launched, RoomDirectory = room }] },
+                Ct);
+
+            var now = DateTimeOffset.UtcNow;
+            await Service((_, _) => Task.FromResult(new QueueLaunchOutcome(null)), now: now)
+                .ResolveFinishedItemsAsync(Ct);
+
+            var item = Assert.Single((await QueueStore.LoadAsync(BatonPaths.QueueFile, Ct)).Items);
+            Assert.Equal(QueueItemState.Failed, item.State);
+            Assert.Contains("corrupt ledger", item.Error!, StringComparison.Ordinal);
+
+            var fact = Assert.Single(await QueueDecisionLedgerStore.ReadAllAsync(BatonPaths.QueueDecisionLedgerFile, Ct));
+            Assert.Equal("failed", fact.Decision);
+            Assert.Equal("t1", fact.Tag);
+            Assert.Equal(room, fact.Room);
+            Assert.Contains("corrupt ledger", fact.Reason!, StringComparison.Ordinal);
+            Assert.Contains("Malformed line in the ledger", fact.Reason, StringComparison.Ordinal);
+        }
+        finally
+        {
+            Cleanup(home);
+        }
+    }
+
     private static readonly WorkflowDefinitionSnapshotId SnapshotId = new(Guid.NewGuid().ToString("N"));
 
     private static FlowState TerminalState(IReadOnlyList<StepState> steps) =>

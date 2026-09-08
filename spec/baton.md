@@ -5975,7 +5975,8 @@ sentinel carrying none — are **failed, with the room id and that word**. Not f
 step list or its error field: a cancelled lane has no failed step and a rejected one carries no
 failure reason, so both read as a clean completion under either. Resolving and redispatching stay
 operator verbs in slice 1: nothing here retries. A resolution is recorded on the *item*; the ledger
-records decisions, and reading a room that finished is not one.
+records decisions, and reading a room that finished cleanly is not one — but an item that settles
+**failed** records a failure fact to `queue.jsonl` carrying its error (#1951).
 
 **No item stays launched with nothing to read.** Two paths would otherwise leave one there forever,
 and each is closed where the fact exists:
@@ -6003,6 +6004,11 @@ and each is closed where the fact exists:
   ledger, no bound snapshot, or an unreadable one still gets the bare sentinel — the write is
   unconditional, because an unprojectable room is exactly the one that would otherwise wedge its item
   in `launched` forever.
+
+  **#1951: on a projection failure**, the launcher distinguishes a held ledger (lock contention) from
+  a corrupt or missing one. It retries the contention case with a bounded backoff before degrading;
+  when degraded, the bare sentinel's `error` field states which condition caused the degradation
+  (missing, held, or corrupt) and includes the specific diagnostic reason.
 
   Keeping a mid-lane `Running` step is safe at both readers that key on one, and each for its own
   reason. The live-weight tally behind `MaxLiveWeight` skips any room carrying a sentinel at all

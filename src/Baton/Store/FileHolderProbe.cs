@@ -26,7 +26,7 @@ namespace Baton.Store;
 /// throwing, so a diagnostic can never turn a flake into a hard error or mask the original exception.
 /// </para>
 /// </remarks>
-internal static class FileHolderProbe
+public static class FileHolderProbe
 {
     /// <summary>
     /// The Win32 HRESULT for ERROR_SHARING_VIOLATION. .NET assigns this same HRESULT to the

@@ -319,6 +319,11 @@ public sealed class QueueSchedulerService : BackgroundService
     /// launched item <c>QueueImport</c>'s own remarks say the operator clears by hand, and it must not
     /// be swept as if the queue had launched it.
     /// </para>
+    /// <para>
+    /// <b>#1951: Failed items record to the decision ledger.</b> When an item resolves as
+    /// <see cref="QueueItemState.Failed"/>, <see cref="RecordAsync"/> records the failure fact so the
+    /// decision ledger carries the resolution reason.
+    /// </para>
     /// </remarks>
     internal async Task ResolveFinishedItemsAsync(CancellationToken cancellationToken)
     {
@@ -362,6 +367,19 @@ public sealed class QueueSchedulerService : BackgroundService
                     : i)
                 .ToList(),
         }, cancellationToken).ConfigureAwait(false);
+
+        foreach (var (tag, outcome) in resolved)
+        {
+            if (outcome.State == QueueItemState.Failed)
+            {
+                var item = launched.First(i => i.Tag == tag);
+                await RecordAsync(
+                    new QueueDecisionEntry(
+                        _now(), item.Tag, QueueDecisionEntry.Failed, outcome.Error,
+                        LiveWeight: 0, FreeGb: null, FloorGb: 0, Room: item.RoomDirectory),
+                    cancellationToken).ConfigureAwait(false);
+            }
+        }
     }
 
     /// <summary>
