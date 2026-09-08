@@ -6348,9 +6348,15 @@ The three axes stay independent (decision 0017), so overriding one keeps the tie
 that overrides any axis **must** carry `--reason`, and the reason reaches the room as its
 `bindings.json` label alongside the tag. A scope class the table has no entry for **fails the item**
 rather than falling back — silently launching on the role's own default model is the failure the table
-exists to prevent. An item that names no scope class resolves to nulls, which means "whatever the
-role's own tier says", exactly as a bare `baton dispatch` does; that is not an override, because there
-was no tier to depart from.
+exists to prevent. An unscoped item naming neither adapter nor model resolves the role's tier for
+display and launch accounting. If it names either, no role model or effort is filled in: an explicit
+adapter with no model uses that adapter's queue default, if configured, otherwise defers to dispatch.
+Neither case is a scope override. An unknown role fails that item and leaves later items eligible.
+At `queue add`, an explicit model is validated by the named adapter's offline rules. Without an
+adapter, model hints must identify one candidate; zero or multiple candidates require `--adapter`,
+with multiple candidates named in the refusal. A scoped item's resolved adapter must match that
+candidate. These refusals precede row writes, spec copies, and worktree provisioning. Import does
+not perform this add-time validation.
 
 **`sonnet` is not promoted.** An item that asks for it gets it, and the launch fact says the tier was
 departed from. Nothing in the queue substitutes a model.

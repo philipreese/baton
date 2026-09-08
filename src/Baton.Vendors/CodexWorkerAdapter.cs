@@ -744,6 +744,8 @@ public sealed class CodexWorkerAdapter : IWorkerAdapter, IPermissionGrantTransla
         };
     }
 
+    public void ValidateRequestedModel(string model) => ValidateModel(model);
+
     private static void ValidateModel(string? model)
     {
         if (model is { Length: > 0 } && !KnownEffortsByModel.ContainsKey(model))

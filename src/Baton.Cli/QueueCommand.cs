@@ -291,11 +291,32 @@ public static class QueueCommand
     private static (string? Adapter, QueueTierResolution Tier, bool AdapterFromModel) ResolveTierForAdd(
         QueueOptions options, QueueSettings settings)
     {
-        var adapters = options.Model is null ? Array.Empty<string>() : WorkerModelCatalog.AdaptersFor(options.Model);
-        if (options.Model is not null && adapters.Count == 0)
+        try
+        {
+            _ = WorkerRoleCatalog.For(options.Role!);
+        }
+        catch (KeyNotFoundException ex)
+        {
+            throw new CliArgumentException(ex.Message);
+        }
+
+        if (options.Adapter is not null && options.Model is not null)
+        {
+            ValidateAdapterModel(options.Adapter, options.Model);
+        }
+
+        var adapters = options.Model is null || options.Adapter is not null
+            ? Array.Empty<string>() : WorkerModelCatalog.AdaptersFor(options.Model);
+        if (options.Model is not null && options.Adapter is null && adapters.Count == 0)
         {
             throw new CliArgumentException(
-                $"--model '{options.Model}' is not known by any recorded adapter capability snapshot.");
+                $"--model '{options.Model}' has no recorded adapter candidate; specify --adapter to use its model validation.");
+        }
+
+        if (options.Adapter is null && adapters.Count > 1)
+        {
+            throw new CliArgumentException(
+                $"--model '{options.Model}' has multiple candidate adapters: {string.Join(", ", adapters)}; specify --adapter.");
         }
 
         var adapterFromModel = options.ScopeClass is null && options.Adapter is null && adapters.Count == 1;
@@ -316,14 +337,39 @@ public static class QueueCommand
             WorkerRoleCatalog.QueueTierFor,
             WorkerRoleCatalog.QueueTierForRole);
 
-        if (options.Model is not null && (tier.Adapter is null || !adapters.Contains(tier.Adapter, StringComparer.OrdinalIgnoreCase)))
+        if (options.Model is not null && options.Adapter is null
+            && (tier.Adapter is null || !adapters.Contains(tier.Adapter, StringComparer.OrdinalIgnoreCase)))
         {
             var actualAdapter = tier.Adapter ?? "unconfigured";
             throw new CliArgumentException(
                 $"--model '{options.Model}' is known by {string.Join(", ", adapters)}, but the resolved {actualAdapter} adapter cannot use it.");
         }
 
+        if (options.Model is not null && options.Adapter is null && tier.Adapter is not null)
+        {
+            ValidateAdapterModel(tier.Adapter, options.Model);
+        }
+
         return (adapter, tier, adapterFromModel);
+    }
+
+    private static void ValidateAdapterModel(string adapter, string model)
+    {
+        var worker = WorkerAdapterRegistry.Default
+            .FirstOrDefault(pair => string.Equals(pair.Key, adapter, StringComparison.OrdinalIgnoreCase)).Value;
+        if (worker is null)
+        {
+            throw new CliArgumentException($"Unknown adapter '{adapter}'.");
+        }
+
+        try
+        {
+            worker.ValidateRequestedModel(model);
+        }
+        catch (BatonFlowException ex)
+        {
+            throw new CliArgumentException(ex.Message);
+        }
     }
 
     private static string DescribeTier(QueueTierResolution tier, bool adapterFromModel)

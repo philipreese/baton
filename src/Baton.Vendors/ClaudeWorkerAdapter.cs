@@ -1386,6 +1386,8 @@ public sealed partial class ClaudeWorkerAdapter : IWorkerAdapter, IPermissionGra
     private static readonly Regex DotDelimitedClaudeVersion =
         new(@"^claude-.*\d\.\d", RegexOptions.IgnoreCase | RegexOptions.Compiled);
 
+    public void ValidateRequestedModel(string model) => RefuseDotDelimitedClaudeModelId(model);
+
     private static void RefuseDotDelimitedClaudeModelId(string model)
     {
         if (DotDelimitedClaudeVersion.IsMatch(model))

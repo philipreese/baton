@@ -79,6 +79,9 @@ public interface IWorkerAdapter : Baton.Outcomes.IFailureClassifier, Baton.Statu
     /// </summary>
     CoreDispatchTarget Resolve(WorkerInvocation invocation, WorkerContract contract);
 
+    /// <summary>Checks an explicit model using this adapter's offline validation rules.</summary>
+    void ValidateRequestedModel(string model) { }
+
     /// <summary>
     /// Discovers the capabilities (skills, commands, models) this vendor's CLI actually supports
     /// (M24 Phase 2). Implementations that need to shell out to the CLI itself (e.g. Gemini's

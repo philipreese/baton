@@ -16,6 +16,74 @@ public sealed class QueueCommandTests
 {
     private static CancellationToken Ct => TestContext.Current.CancellationToken;
 
+    [Theory]
+    [InlineData("agy", null, "gemini-3.8-flash-high")]
+    [InlineData("claude", null, "role default model")]
+    [InlineData("codex", null, "role default model")]
+    [InlineData("claude", "claude-opus-4-8", "claude-opus-4-8")]
+    [InlineData("claude", "sonnet[1m]", "sonnet[1m]")]
+    [InlineData("agy", "future-agy-model", "future-agy-model")]
+    [InlineData("claude", "claude-sonnet-4-6", "claude-sonnet-4-6")]
+    [InlineData("agy", "claude-sonnet-4-6", "claude-sonnet-4-6")]
+    public async Task Add_honours_an_unscoped_adapters_own_model_rules(
+        string adapter, string? model, string displayedModel)
+    {
+        var home = CreateTempHome();
+        using var scope = BatonEnvironmentSnapshot.BeginScope(BatonEnvironmentSnapshot.Blank with { HomeOverride = home });
+        try
+        {
+            var brief = Path.Combine(home, "brief.md");
+            await File.WriteAllTextAsync(brief, "implement this", Ct);
+            var output = new StringWriter();
+
+            var exit = await QueueCommand.ExecuteAsync(
+                new QueueOptions(QueueVerb.Add, Tag: "explicit", Role: "implement",
+                    SpecFilePath: brief, WorkspaceDirectory: home, Adapter: adapter, Model: model),
+                output, Ct);
+
+            Assert.Equal(0, exit);
+            Assert.Contains($"tier: {adapter} / {displayedModel} / role default effort",
+                output.ToString(), StringComparison.Ordinal);
+            var item = Assert.Single((await QueueStore.LoadAsync(BatonPaths.QueueFile, Ct)).Items);
+            Assert.Equal(adapter, item.Adapter);
+            Assert.Equal(model, item.Model);
+            Assert.Null(item.Effort);
+        }
+        finally
+        {
+            DirectoryCleanup.DeleteRecursively(home);
+        }
+    }
+
+    [Theory]
+    [InlineData(null, "claude-sonnet-4-6", "multiple candidate adapters: claude, agy; specify --adapter")]
+    [InlineData("codex", "opus", "absent from the recorded Codex capability snapshot")]
+    [InlineData("claude", "claude-opus-4.8", "cannot use the requested --model")]
+    public async Task Add_refuses_ambiguous_or_invalid_models_before_any_queue_side_effect(
+        string? adapter, string model, string message)
+    {
+        var home = CreateTempHome();
+        using var scope = BatonEnvironmentSnapshot.BeginScope(BatonEnvironmentSnapshot.Blank with { HomeOverride = home });
+        try
+        {
+            var brief = Path.Combine(home, "brief.md");
+            await File.WriteAllTextAsync(brief, "implement this", Ct);
+            var refusal = await Assert.ThrowsAsync<CliArgumentException>(() => QueueCommand.ExecuteAsync(
+                new QueueOptions(QueueVerb.Add, Tag: "refused", Role: "implement",
+                    SpecFilePath: brief, Issue: 2077, Adapter: adapter, Model: model),
+                TextWriter.Null, Ct));
+
+            Assert.Contains(message, refusal.Message, StringComparison.Ordinal);
+            Assert.False(File.Exists(BatonPaths.QueueFile));
+            Assert.False(Directory.Exists(BatonPaths.QueueSpecsDirectory));
+        }
+        finally
+        {
+            DirectoryCleanup.DeleteRecursively(home);
+        }
+    }
+
+
     private static string CreateTempHome()
     {
         var home = Path.Combine(Path.GetTempPath(), "baton_queue_cmd_" + Guid.NewGuid().ToString("n"));
@@ -72,8 +140,9 @@ public sealed class QueueCommandTests
                 TextWriter.Null,
                 Ct));
 
-            Assert.Contains("not known by any recorded adapter capability snapshot", refusal.Message, StringComparison.Ordinal);
+            Assert.Contains("no recorded adapter candidate", refusal.Message, StringComparison.Ordinal);
             Assert.False(File.Exists(BatonPaths.QueueFile));
+            Assert.False(Directory.Exists(BatonPaths.QueueSpecsDirectory));
         }
         finally
         {

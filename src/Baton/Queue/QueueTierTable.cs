@@ -114,7 +114,7 @@ public static class QueueTierTable
     /// resolving the same item differently. <c>Baton.Vendors.WorkerRoleCatalog.QueueTierFor</c> is the
     /// one production implementation.
     /// </param>
-    /// <param name="roleTiers">Resolves the role's dispatch tier when the item names no scope class.</param>
+    /// <param name="roleTiers">Resolves the role's dispatch tier when the item names no scope, adapter, or model.</param>
     public static QueueTierResolution Resolve(
         QueueItem item,
         QueueSettings settings,
@@ -133,7 +133,7 @@ public static class QueueTierTable
             key = KeyFor(item.Role, scopeClass);
             tier = LookupTier(key, settings, namedTiers);
         }
-        else
+        else if (item.Adapter is null && item.Model is null)
         {
             tier = roleTiers(item.Role);
         }
@@ -156,14 +156,6 @@ public static class QueueTierTable
 
         return new QueueTierResolution(key, adapter, model, effort, isOverride, isOverride ? item.Reason : null);
     }
-
-    /// <summary>
-    /// Resolves a scope tier only. Callers that can dispatch an unscoped item use the overload with
-    /// the role-tier resolver so its recorded result is the dispatch result.
-    /// </summary>
-    public static QueueTierResolution Resolve(
-        QueueItem item, QueueSettings settings, Func<string, QueueTierSettings?> namedTiers) =>
-        Resolve(item, settings, namedTiers, _ => null);
 
     private static bool Differs(string? itemValue, string? tierValue) =>
         itemValue is not null && !string.Equals(itemValue, tierValue, StringComparison.OrdinalIgnoreCase);

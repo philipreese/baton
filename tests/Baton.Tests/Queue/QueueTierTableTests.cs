@@ -58,7 +58,7 @@ public sealed class QueueTierTableTests
     {
         // NoNamedTiers on purpose: a row that states its own triple must not need the tier register at
         // all, which is the control for the two arms below.
-        var resolved = QueueTierTable.Resolve(Item(role, scope), new QueueSettings(), NoNamedTiers);
+        var resolved = QueueTierTable.Resolve(Item(role, scope), new QueueSettings(), NoNamedTiers, NoNamedTiers);
 
         Assert.Equal(adapter, resolved.Adapter);
         Assert.Equal(model, resolved.Model);
@@ -76,10 +76,10 @@ public sealed class QueueTierTableTests
     public void The_tooling_row_follows_whatever_the_standard_tier_says()
     {
         var shipped = QueueTierTable.Resolve(
-            Item("implement", "tooling"), new QueueSettings(), NamedTiers());
+            Item("implement", "tooling"), new QueueSettings(), NamedTiers(), NoNamedTiers);
         var moved = QueueTierTable.Resolve(
             Item("implement", "tooling"), new QueueSettings(),
-            NamedTiers(adapter: "claude", model: "opus", effort: "low"));
+            NamedTiers(adapter: "claude", model: "opus", effort: "low"), NoNamedTiers);
 
         Assert.Equal(("codex", "gpt-6-astra", "medium"), (shipped.Adapter, shipped.Model, shipped.Effort));
         Assert.Equal(("claude", "opus", "low"), (moved.Adapter, moved.Model, moved.Effort));
@@ -116,7 +116,7 @@ public sealed class QueueTierTableTests
             },
         };
 
-        var resolved = QueueTierTable.Resolve(Item("implement", "tooling"), settings, NamedTiers());
+        var resolved = QueueTierTable.Resolve(Item("implement", "tooling"), settings, NamedTiers(), NoNamedTiers);
 
         Assert.Equal("codex", resolved.Adapter);
         Assert.Equal("gpt-6-astra", resolved.Model);
@@ -126,11 +126,11 @@ public sealed class QueueTierTableTests
     [Fact]
     public void An_item_that_overrides_an_axis_is_marked_an_override_and_carries_its_reason()
     {
-        var tiered = QueueTierTable.Resolve(Item("implement", "engine"), new QueueSettings(), NoNamedTiers);
+        var tiered = QueueTierTable.Resolve(Item("implement", "engine"), new QueueSettings(), NoNamedTiers, NoNamedTiers);
         var overridden = QueueTierTable.Resolve(
             Item("implement", "engine", model: "sonnet", reason: "cheap sweep, no judgment needed"),
             new QueueSettings(),
-            NoNamedTiers);
+            NoNamedTiers, NoNamedTiers);
 
         // Control: the same item without the override is NOT marked one, so the flag is measuring the
         // override rather than the presence of a scope class.
@@ -149,11 +149,11 @@ public sealed class QueueTierTableTests
     public void An_override_on_a_tier_following_row_is_judged_against_the_tier_it_followed()
     {
         var matching = QueueTierTable.Resolve(
-            Item("implement", "tooling", adapter: "codex"), new QueueSettings(), NamedTiers());
+            Item("implement", "tooling", adapter: "codex"), new QueueSettings(), NamedTiers(), NoNamedTiers);
         var departing = QueueTierTable.Resolve(
             Item("implement", "tooling", adapter: "claude", reason: "deliberate"),
             new QueueSettings(),
-            NamedTiers());
+            NamedTiers(), NoNamedTiers);
 
         Assert.False(matching.IsOverride);
         Assert.True(departing.IsOverride);
@@ -166,7 +166,7 @@ public sealed class QueueTierTableTests
         var resolved = QueueTierTable.Resolve(
             Item("implement", "engine", model: "sonnet", reason: "deliberate"),
             new QueueSettings(),
-            NoNamedTiers);
+            NoNamedTiers, NoNamedTiers);
 
         // The whole point: an item that asks for sonnet GETS sonnet, and the resolution says the tier
         // was departed from so the launch fact records it.
@@ -178,7 +178,7 @@ public sealed class QueueTierTableTests
     public void The_axes_stay_independent_so_overriding_one_keeps_the_tiers_other_two()
     {
         var resolved = QueueTierTable.Resolve(
-            Item("implement", "engine", effort: "low", reason: "trivial"), new QueueSettings(), NoNamedTiers);
+            Item("implement", "engine", effort: "low", reason: "trivial"), new QueueSettings(), NoNamedTiers, NoNamedTiers);
 
         Assert.Equal("claude", resolved.Adapter);
         Assert.Equal("opus", resolved.Model);
@@ -188,9 +188,11 @@ public sealed class QueueTierTableTests
     [Fact]
     public void An_agy_item_with_no_model_gets_the_shipped_agy_default()
     {
-        var resolved = QueueTierTable.Resolve(Item(adapter: "agy"), new QueueSettings(), NoNamedTiers);
+        var resolved = QueueTierTable.Resolve(Item(adapter: "agy"), new QueueSettings(), NoNamedTiers, _ =>
+            new QueueTierSettings { Adapter = "codex", Model = "gpt-6-astra", Effort = "medium" });
 
         Assert.Equal("gemini-3.8-flash-high", resolved.Model);
+        Assert.Null(resolved.Effort);
     }
 
     /// <summary>
@@ -204,7 +206,7 @@ public sealed class QueueTierTableTests
     [Fact]
     public void A_codex_item_with_no_model_is_left_for_the_cli_to_decide_rather_than_given_a_frozen_default()
     {
-        var resolved = QueueTierTable.Resolve(Item(adapter: "codex"), new QueueSettings(), NoNamedTiers);
+        var resolved = QueueTierTable.Resolve(Item(adapter: "codex"), new QueueSettings(), NoNamedTiers, NoNamedTiers);
 
         Assert.Equal("codex", resolved.Adapter);
         Assert.Null(resolved.Model);
@@ -213,7 +215,7 @@ public sealed class QueueTierTableTests
     [Fact]
     public void An_item_with_no_scope_class_resolves_to_nulls_and_is_not_an_override()
     {
-        var resolved = QueueTierTable.Resolve(Item(), new QueueSettings(), NoNamedTiers);
+        var resolved = QueueTierTable.Resolve(Item(), new QueueSettings(), NoNamedTiers, NoNamedTiers);
 
         // Nulls are the legitimate "defer to the role" result, and IsOverride must stay false with
         // them — an item flagged as departing from a tier it never consulted would put a fabricated
@@ -250,13 +252,13 @@ public sealed class QueueTierTableTests
         };
 
         Assert.Equal(
-            "codex", QueueTierTable.Resolve(Item("implement", "engine"), settings, NamedTiers()).Adapter);
+            "codex", QueueTierTable.Resolve(Item("implement", "engine"), settings, NamedTiers(), NoNamedTiers).Adapter);
         // The five keys the operator did not name keep their shipped values, rather than the table
         // replacing the whole default — `tooling` among them, still following `standard`.
         Assert.Equal(
-            "codex", QueueTierTable.Resolve(Item("implement", "tooling"), settings, NamedTiers()).Adapter);
+            "codex", QueueTierTable.Resolve(Item("implement", "tooling"), settings, NamedTiers(), NoNamedTiers).Adapter);
         Assert.Equal(
-            "claude", QueueTierTable.Resolve(Item("implement", "docs"), settings, NamedTiers()).Adapter);
+            "claude", QueueTierTable.Resolve(Item("implement", "docs"), settings, NamedTiers(), NoNamedTiers).Adapter);
     }
 
     [Fact]

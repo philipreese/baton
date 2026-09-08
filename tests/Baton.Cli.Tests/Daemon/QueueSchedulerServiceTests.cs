@@ -19,6 +19,51 @@ public sealed class QueueSchedulerServiceTests
 {
     private static CancellationToken Ct => TestContext.Current.CancellationToken;
 
+    [Fact]
+    public async Task An_unknown_unscoped_role_fails_one_item_and_the_next_unscoped_item_launches()
+    {
+        var home = CreateTempHome();
+        using var scope = BatonEnvironmentSnapshot.BeginScope(BatonEnvironmentSnapshot.Blank with { HomeOverride = home });
+        try
+        {
+            await QueueStore.MutateAsync(BatonPaths.QueueFile, s => s with
+            {
+                Items = [Item("bad", role: "unknown-role", scope: null), Item("good", scope: null)],
+            }, Ct);
+            var launches = new List<QueueLaunchRequest>();
+            var service = Service((request, _) =>
+            {
+                launches.Add(request);
+                return Task.FromResult(new QueueLaunchOutcome(request.RoomDirectory));
+            });
+
+            await service.TickOnceAsync(Ct);
+            Assert.Empty(launches);
+            var failed = (await QueueStore.LoadAsync(BatonPaths.QueueFile, Ct)).Items[0];
+            Assert.Equal(QueueItemState.Failed, failed.State);
+            Assert.Contains("unknown-role", failed.Error!, StringComparison.Ordinal);
+            Assert.Null(failed.RoomDirectory);
+            Assert.Null(failed.LaunchedAt);
+
+            await service.TickOnceAsync(Ct);
+            var launch = Assert.Single(launches);
+            Assert.Equal("good", launch.Item.Tag);
+            Assert.Equal(("codex", "gpt-6-astra", "medium"),
+                (launch.Tier.Adapter, launch.Tier.Model, launch.Tier.Effort));
+            var items = (await QueueStore.LoadAsync(BatonPaths.QueueFile, Ct)).Items;
+            Assert.Equal(QueueItemState.Launched, items[1].State);
+            var facts = await QueueDecisionLedgerStore.ReadAllAsync(BatonPaths.QueueDecisionLedgerFile, Ct);
+            Assert.Collection(facts,
+                fact => Assert.Equal(QueueDecisionEntry.Failed, fact.Decision),
+                fact => Assert.Equal(QueueDecisionEntry.Launched, fact.Decision));
+        }
+        finally
+        {
+            Cleanup(home);
+        }
+    }
+
+
     private static string CreateTempHome()
     {
         var home = Path.Combine(Path.GetTempPath(), "baton_queue_svc_" + Guid.NewGuid().ToString("n"));
