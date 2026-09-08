@@ -123,7 +123,8 @@ public class ProjectCeilingStoreTests
 
             var revoked = ProjectCeilingStore.Revoke(projectPath, path);
 
-            Assert.True(revoked);
+            Assert.True(revoked.Revoked);
+            Assert.Empty(revoked.CascadedPaths);
             Assert.Null(ProjectCeilingStore.TryGet(projectPath, path));
         }
         finally
@@ -139,7 +140,8 @@ public class ProjectCeilingStoreTests
 
         var revoked = ProjectCeilingStore.Revoke(Path.Combine(Path.GetTempPath(), "never-trusted"), path);
 
-        Assert.False(revoked);
+        Assert.False(revoked.Revoked);
+        Assert.Empty(revoked.CascadedPaths);
     }
 
     [Fact]

@@ -38,7 +38,12 @@ public static class TrustCommand
 
         foreach (var (path, ceiling) in ceilings.OrderBy(kv => kv.Key, StringComparer.OrdinalIgnoreCase))
         {
-            output.WriteLine($"{path}  {Describe(ceiling)}");
+            // #2076: an inherited entry says where it came from. An operator reading this list is
+            // deciding what to revoke, and "Baton copied this from the repository root" and "I typed
+            // this" are different facts about the same line — the second half is omitted, rather than
+            // printed empty, for the entries an operator did type.
+            var provenance = ceiling.InheritedFrom is { Length: > 0 } source ? $"  (inherited from {source})" : string.Empty;
+            output.WriteLine($"{path}  {ceiling.Describe()}{provenance}");
         }
 
         return 0;
@@ -47,47 +52,28 @@ public static class TrustCommand
     private static int Register(TrustOptions options, TextWriter output)
     {
         ProjectCeilingStore.Set(options.ProjectPath!, options.Ceiling!, ProjectCeilingStore.DefaultPath);
-        output.WriteLine($"Trusted '{options.ProjectPath}' with ceiling {Describe(options.Ceiling!)}.");
+        output.WriteLine($"Trusted '{options.ProjectPath}' with ceiling {options.Ceiling!.Describe()}.");
         return 0;
     }
 
     private static int Revoke(TrustOptions options, TextWriter output)
     {
-        var revoked = ProjectCeilingStore.Revoke(options.ProjectPath!, ProjectCeilingStore.DefaultPath);
-        output.WriteLine(revoked
-            ? $"Revoked the ceiling for '{options.ProjectPath}'."
-            : $"No ceiling was recorded for '{options.ProjectPath}' — nothing to revoke.");
+        var revocation = ProjectCeilingStore.Revoke(options.ProjectPath!, ProjectCeilingStore.DefaultPath);
+        if (!revocation.Revoked)
+        {
+            output.WriteLine($"No ceiling was recorded for '{options.ProjectPath}' — nothing to revoke.");
+            return 0;
+        }
+
+        output.WriteLine($"Revoked the ceiling for '{options.ProjectPath}'.");
+        // #2076: the entries that were copied from this one go with it (ProjectCeilingStore.Revoke says
+        // why), and each is named so the operator learns which worktrees just lost their ceiling.
+        foreach (var derived in revocation.CascadedPaths)
+        {
+            output.WriteLine($"Also revoked '{derived}', which had inherited it.");
+        }
+
         return 0;
     }
 
-    private static string Describe(ProjectCeiling ceiling)
-    {
-        if (ceiling.IsUnrestricted)
-        {
-            return "all";
-        }
-
-        List<string> categories = [];
-        if (ceiling.ReadFiles)
-        {
-            categories.Add("ReadFiles");
-        }
-
-        if (ceiling.WriteFiles)
-        {
-            categories.Add("WriteFiles");
-        }
-
-        if (ceiling.RunShellCommands)
-        {
-            categories.Add("RunShellCommands");
-        }
-
-        if (ceiling.NetworkAccess)
-        {
-            categories.Add("NetworkAccess");
-        }
-
-        return categories.Count == 0 ? "none" : string.Join(',', categories);
-    }
 }

@@ -1,4 +1,5 @@
 using System.Diagnostics;
+using Baton.Accounting;
 using Baton.Queue;
 using Baton.Vendors;
 
@@ -7,8 +8,9 @@ namespace Baton.Cli;
 /// <summary>
 /// What <c>baton queue add --issue &lt;n&gt;</c> does before the item is queued: the three steps the
 /// scratchpad runner did by hand — <c>gh issue develop &lt;n&gt; --name &lt;n&gt;-lane</c>,
-/// <c>git worktree add &lt;root&gt;/w&lt;n&gt;</c>, then trust the workspace at the <c>all</c> ceiling
-/// (#1934 slice 1, item 1).
+/// <c>git worktree add &lt;root&gt;/w&lt;n&gt;</c>, then trust the workspace (#1934 slice 1, item 1) —
+/// with its repository's own ceiling since #2076, <c>all</c> only as the fallback the remarks below
+/// bound.
 /// </summary>
 /// <remarks>
 /// <para>
@@ -25,11 +27,22 @@ namespace Baton.Cli;
 /// the verb does.
 /// </para>
 /// <para>
-/// <b>The ceiling is deliberately <c>all</c>, and that is a real widening.</b> It is what the runner
-/// did and what an implement lane in a fresh worktree needs; it is named here rather than left
-/// implicit so a reader does not have to infer that queueing an issue grants its workspace an
-/// unrestricted grant ceiling. <c>ProjectCeiling</c>'s own doc has what a ceiling does and does not
-/// bound.
+/// <b>The ceiling is the SOURCE REPOSITORY'S, falling back to <c>all</c> (#2076).</b> It used to be
+/// <c>all</c> unconditionally — what the runner did, and a real widening — which silently re-opened
+/// every category on a worktree of a repository whose ceiling the operator had deliberately narrowed.
+/// A worktree of a trusted repository now inherits that repository's own ceiling
+/// (<see cref="InheritedProjectCeiling"/>), and only a workspace whose repository is trusted nowhere
+/// falls back to unrestricted, which is the pre-#2076 behaviour kept for the repository an operator
+/// has never trusted at all: <c>queue add --issue n</c> provisions a worktree of the checkout the
+/// operator is standing in, so refusing there would break the verb rather than protect anything. The
+/// fallback is <b>announced on the verb's own output</b>, the same line the inheritance is, so the
+/// widening is never silent. <c>ProjectCeiling</c>'s own doc has what a ceiling does and does not bound.
+/// </para>
+/// <para>
+/// <b>The fallback is NOT taken on a probe failure.</b> "No trusted repository" is a fact git
+/// established; "git answered nothing" (missing, timed out, exited non-zero) is not. That path throws
+/// <see cref="ProjectNotTrustedException"/> naming the probe failure instead, and the add is refused
+/// before anything is queued — spec/baton.md §13 has why the alternative is a widening.
 /// </para>
 /// </remarks>
 public static class IssueWorktreeProvisioner
@@ -108,12 +121,24 @@ public static class IssueWorktreeProvisioner
     /// a different layout sets.
     /// </param>
     /// <param name="runner">Test seam: runs one command and returns (exit code, stdout+stderr).</param>
+    /// <param name="probe">
+    /// Test seam for the trust step's repository-identity lookup (#2076) — the same injected-probe shape
+    /// <see cref="InheritedProjectCeiling.TryRecordAsync"/> takes. Null uses git.
+    /// </param>
+    /// <param name="output">
+    /// Where the inheritance line goes when the worktree picks a ceiling up (#2076) — the <c>queue
+    /// add</c>'s own writer. Null is <see cref="Console.Out"/>. See <see cref="TrustAsync"/> for why the
+    /// line cannot be left to the later dispatch.
+    /// </param>
     /// <exception cref="CliArgumentException">Any of the three steps failed, with the tool's own output in the message.</exception>
+    /// <exception cref="ProjectNotTrustedException">The trust step's identity probe answered nothing, so no ceiling was recorded — see the type remarks.</exception>
     public static async Task<string> ProvisionAsync(
         int issue,
         string repositoryDirectory,
         string? worktreeRoot,
         Func<string, IReadOnlyList<string>, string, CancellationToken, Task<(int ExitCode, string Output)>>? runner = null,
+        Func<string, CancellationToken, Task<RepositoryIdentity?>>? probe = null,
+        TextWriter? output = null,
         CancellationToken cancellationToken = default)
     {
         ArgumentOutOfRangeException.ThrowIfNegativeOrZero(issue);
@@ -134,7 +159,7 @@ public static class IssueWorktreeProvisioner
             // Not an error: the runner's own habit is to re-queue against a worktree that already
             // exists. Trust it and hand it back rather than failing the add -- `git worktree add` would
             // refuse anyway, and refusing here would make a re-add of a live lane impossible.
-            Trust(workspace);
+            await TrustAsync(workspace, probe, output: output, cancellationToken: cancellationToken).ConfigureAwait(false);
             return workspace;
         }
 
@@ -157,12 +182,57 @@ public static class IssueWorktreeProvisioner
                 $"the branch '{branch}' exists on the remote now — remove any stale worktree at '{workspace}' and retry.");
         }
 
-        Trust(workspace);
+        await TrustAsync(workspace, probe, output: output, cancellationToken: cancellationToken).ConfigureAwait(false);
         return workspace;
     }
 
-    private static void Trust(string workspace) =>
-        ProjectCeilingStore.Set(workspace, ProjectCeiling.Unrestricted, ProjectCeilingStore.DefaultPath);
+    /// <summary>
+    /// Records <paramref name="workspace"/>'s ceiling: the source repository's own, when a path in that
+    /// repository is already trusted, and unrestricted when the repository is trusted nowhere — see the
+    /// type remarks for why that fallback is a widening rather than a refusal, and why a probe that
+    /// answers nothing is a refusal rather than the fallback. Writes nothing when the workspace already
+    /// carries an entry (<see cref="InheritanceOutcome.AlreadyTrusted"/>), which is what makes a re-add
+    /// of a live lane leave its ceiling as the operator last set it rather than resetting it to <c>all</c>.
+    /// </summary>
+    /// <remarks>
+    /// <b>The inheritance is announced HERE, not by the later dispatch</b>, under the print-adjacent
+    /// rule <see cref="InheritedProjectCeiling"/> states. This site is the one where dropping the line
+    /// is least obviously fatal and most actually is: the lane provisioned here goes on to dispatch, so
+    /// it reads as though the dispatch could say it instead — and it cannot, because that dispatch finds
+    /// the workspace already trusted.
+    /// </remarks>
+    internal static async Task TrustAsync(
+        string workspace,
+        Func<string, CancellationToken, Task<RepositoryIdentity?>>? probe = null,
+        string? storePath = null,
+        TextWriter? output = null,
+        CancellationToken cancellationToken = default)
+    {
+        storePath ??= ProjectCeilingStore.DefaultPath;
+        probe ??= RepositoryIdentityResolver.TryResolveAsync;
+
+        var result = await InheritedProjectCeiling.TryInheritAsync(workspace, storePath, probe, cancellationToken)
+            .ConfigureAwait(false);
+        switch (result.Outcome)
+        {
+            case InheritanceOutcome.Inherited:
+                (output ?? Console.Out).WriteLine(result.Fact);
+                return;
+            case InheritanceOutcome.AlreadyTrusted:
+                return;
+            case InheritanceOutcome.NoIdentity:
+                throw new ProjectNotTrustedException(
+                    workspace,
+                    "the repository-identity probe answered nothing (git missing, timed out, or exited non-zero).");
+            case InheritanceOutcome.NoTrustedSource:
+                ProjectCeilingStore.Set(workspace, ProjectCeiling.Unrestricted, storePath);
+                (output ?? Console.Out).WriteLine(
+                    $"workspace {ProjectCeilingStore.CanonicalKey(workspace)}: no trusted repository to inherit from; recorded ceiling all");
+                return;
+            default:
+                throw new ArgumentOutOfRangeException(nameof(result), result.Outcome, "Unhandled inheritance outcome.");
+        }
+    }
 
     /// <summary>
     /// The production runner. Spawns <c>gh</c>/<c>git</c> — read-and-write forge and repo commands,

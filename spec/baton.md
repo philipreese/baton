@@ -4807,7 +4807,19 @@ last-used-file fallback the CLI path is ever subject to.
 `bindings.json` is only the **room ∩ step** half of that intersection. The **project ceiling** — the
 owner's own control on what any harness-authored `bindings.json` can grant in the first place — lives
 in Baton's own app-level config, never inside the project tree, so a compromised or over-permissive
-project cannot author its own way past it. Built (#1166): `ProjectCeilingStore` (`src/Baton.Vendors/`),
+project cannot author its own way past it. **One inheritance exception, ruled 2026-09-08 (#2076):**
+a worktree or clone whose `RepositoryIdentity` (the `origin` URL, else the git common directory)
+matches an already-trusted repository inherits that repository's recorded ceiling — and the identity
+is what the directory's own `.git/config` reports, so a directory that merely *claims* the same
+origin (`git init` plus `git remote add origin <trusted url>`, neither a worktree nor a clone of
+anything) inherits too. That is accepted, not overlooked: the ceiling record itself still lives
+outside every project tree, and creating a directory on the operator's machine is the operator's own
+act or a lane's — a lane already running as the operator's user under a role grant does not need to
+forge an origin to escalate, it has the shell, and lanes are contained by that grant and the shell
+allowlist, not by trust lookups. Origin-string matching is the inheritance boundary;
+`InheritedProjectCeiling` cites this passage rather than restating it, and names the test that pins
+the claimed-origin shape against real git and the real probe.
+Built (#1166): `ProjectCeilingStore` (`src/Baton.Vendors/`),
 a flat JSON map at `{BatonPaths.Root}/project-ceilings.json`, canonical project path →
 `ProjectCeiling` (`ReadFiles`/`WriteFiles`/`RunShellCommands`/`NetworkAccess` — decision 0004 names no
 closed set of ceiling levels, so this reuses the category vocabulary `ClaudeWorkerAdapter.TryTranslatePermissionGrant`
@@ -4818,8 +4830,20 @@ explicit operator verb instead — the PR that built this states that reading as
 correction to 0004's text. `ProjectCeilingGate` (`src/Baton.Vendors/`) is the one choke point both
 `ClaudeWorkerAdapter.Resolve` and `AgyWorkerAdapter.Resolve` call at the top of `Resolve`, before
 either reads `WorkerInvocation.PermissionGrant`: a `WorkingDirectory` with no recorded ceiling refuses
-before any worker spawns (`ProjectNotTrustedException`, naming the `baton trust` verb and the path);
-otherwise the effective grant is `ceiling.Cap(roleGrant)` — each category survives only when both the
+before any worker spawns (`ProjectNotTrustedException`, naming the `baton trust` verb and the path) —
+with one narrowing since #2076, ahead of the gate rather than inside it: `baton dispatch` first lets a
+workspace whose **repository identity** (`RepositoryIdentity`) matches an already-trusted path inherit
+that path's ceiling (`InheritedProjectCeiling`, which has the derivation, the narrowest-wins rule and
+the cost; what that match does and does not authenticate is the inheritance exception stated above,
+once), so a worktree or clone of a trusted repository is trusted before the gate reads the store
+and one whose repository is trusted nowhere still refuses exactly as above. An inherited entry is a
+**one-time persisted snapshot** of its source, taken at the first dispatch or `queue add --issue` for
+that workspace and never re-evaluated: re-trusting the source narrower later does not re-narrow its
+copies, and the operator narrows those by hand (`trust --list` marks each `(inherited from <path>)`).
+**Revoke cascades**: `baton trust <path> --revoke` removes every entry whose `InheritedFrom` names it,
+transitively, and names each one it removed — a copy that outlived the decision it was derived from
+would keep granting what the operator just withdrew, which is the wrong default for a permission
+record. Otherwise the effective grant is `ceiling.Cap(roleGrant)` — each category survives only when both the
 role's own grant and the ceiling carry it, re-checked against
 `PermissionGrant.CategoriesDefeatedByTheShell` so a coherent role grant that becomes incoherent once
 narrowed (writes capped away while an unscoped shell stays granted) still refuses rather than shipping
@@ -6412,12 +6436,21 @@ poller keep running and live lanes are untouched, the same "work already running
 posture the runway hold (§7) takes.
 
 `--issue <n>` provisions at **add** time, not launch time: `gh issue develop <n> --name <n>-lane`,
-`git worktree add <root>/w<n> <n>-lane`, then the workspace is trusted at the `all` ceiling (§9). Add
-time because an operator queueing eight items at 23:00 should learn immediately that the issue does
-not exist, and because it keeps `gh`/`git` spawning in the CLI rather than in the background host.
-`<root>` — which the issue left undefined — is `Queue.WorktreeRoot`, defaulting to **the parent
-directory of the checkout the verb was invoked from**, which is the sibling-repos layout the runner
-assumed. The `all` ceiling is a real widening and is stated rather than left to be inferred.
+`git worktree add <root>/w<n> <n>-lane`, then the workspace is trusted (§9) — **at the ceiling its
+repository already carries**, inherited through `InheritedProjectCeiling` exactly as `baton dispatch`
+inherits (#2076), and at `all` only as the fallback for a repository no path of which is trusted, which
+is the verb's pre-#2076 behaviour kept for the checkout an operator has never run `baton trust`
+against. Either way the add says which on its own output: the inheritance line names the source path,
+and the fallback prints `workspace <path>: no trusted repository to inherit from; recorded ceiling all`,
+because the fallback is a real widening and a silent one is the shape the announcement exists to rule
+out. The fallback is **not** taken when the identity probe answers nothing (git missing, timed out, or
+exited non-zero): that add is refused with `ProjectNotTrustedException` naming the probe failure, since
+"git said nothing" is not "no repository is trusted" and stamping `all` on it would let a transient
+failure widen a deliberately narrowed ceiling. Add time because an operator queueing eight items at
+23:00 should learn immediately that the issue does not exist, and because it keeps `gh`/`git` spawning
+in the CLI rather than in the background host. `<root>` — which the issue left undefined — is
+`Queue.WorktreeRoot`, defaulting to **the parent directory of the checkout the verb was invoked from**,
+which is the sibling-repos layout the runner assumed.
 
 `import <file>` reads the runner's own shape (`{tag, role, model, effort, timeout, workspace|issue,
 adapter, maxToolSteps, tokenBudget, overrideRunway, reason, pinModel, external}`) for Q7's cutover. A

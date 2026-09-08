@@ -175,6 +175,22 @@ public static class DispatchCommand
             workspaceFact = $"Workspace: worktree of {workspace} at HEAD ({shortSha}) — {visibility}";
         }
 
+        // #2076: the inheritance InheritedProjectCeiling defines runs here, ahead of the gate that
+        // would otherwise settle this lane Failed on "has no recorded permission ceiling" — what it
+        // does and does not copy is that type's own doc, not restated here, and so is the rule that
+        // the returned line is printed adjacent to the call. Adjacent matters at this particular site:
+        // ApplyRunwayGateAsync sits between here and the output block below and refuses by throwing,
+        // which is exactly the dropped-line window that doc describes. Placed at the dispatch rather
+        // than in QueueLauncher because the queue launches THROUGH this method, so one site serves
+        // both — which does mean a hand-typed `baton dispatch` inherits on the same terms, and that is
+        // the same operator decision being honoured either way.
+        if (await InheritedProjectCeiling.TryRecordAsync(
+                workspace, ProjectCeilingStore.DefaultPath, RepositoryIdentityResolver.TryResolveAsync, cancellationToken)
+                .ConfigureAwait(false) is { } inheritedCeilingFact)
+        {
+            Console.Out.WriteLine(inheritedCeilingFact);
+        }
+
         // #1442: warn-don't-refuse above the caution threshold — rationale in spec/baton.md §2.
         if (options.Timeout is { } timeoutOverride && timeoutOverride > TimeSpan.FromMinutes(DispatchOptionsParser.WarnTimeoutMinutes))
         {
