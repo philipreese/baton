@@ -1,3 +1,4 @@
+using System.Diagnostics;
 using Baton.Accounting;
 using Baton.Cli.Tests.TestSupport;
 using Baton.Vendors;
@@ -111,6 +112,43 @@ public sealed class InheritedProjectCeilingTests : IDisposable
 
         Assert.Null(fact);
         Assert.Null(ProjectCeilingStore.TryGet(stranger, Store));
+    }
+
+    /// <summary>
+    /// Pins the shape the #2076 inheritance ruling in spec/baton.md §9 accepts (2026-09-08): a directory
+    /// that is neither a worktree nor a clone of anything, only a fresh <c>git init</c> whose
+    /// <c>remote.origin.url</c> names a trusted repository, inherits that repository's ceiling. Against
+    /// REAL git and the REAL probe (<see cref="RepositoryIdentityResolver.TryResolveAsync"/>) rather
+    /// than a fake, because a fake would only restate the ruling — what is pinned is that git echoes
+    /// the config string the directory supplies, which is the fact the ruling accepts. No network:
+    /// <c>git remote add</c> writes config and fetches nothing. The control is the same directory one
+    /// config line earlier: before the remote is added its identity is its own git directory, and it
+    /// inherits nothing.
+    /// </summary>
+    [Fact]
+    public async Task A_directory_claiming_a_trusted_origin_inherits_by_ruling()
+    {
+        const string trustedOrigin = "https://github.com/philipreese/baton";
+        var main = MakeDirectory("baton");
+        var claimant = MakeDirectory("claims-to-be-baton");
+        await RunGitAsync(main, "init", "-q");
+        await RunGitAsync(main, "remote", "add", "origin", trustedOrigin);
+        await RunGitAsync(claimant, "init", "-q");
+        ProjectCeilingStore.Set(main, ProjectCeiling.Unrestricted, Store);
+
+        var beforeClaim = await InheritedProjectCeiling.TryInheritAsync(
+            claimant, Store, RepositoryIdentityResolver.TryResolveAsync, TestContext.Current.CancellationToken);
+        await RunGitAsync(claimant, "remote", "add", "origin", trustedOrigin);
+        var afterClaim = await InheritedProjectCeiling.TryInheritAsync(
+            claimant, Store, RepositoryIdentityResolver.TryResolveAsync, TestContext.Current.CancellationToken);
+
+        Assert.Equal(InheritanceOutcome.NoTrustedSource, beforeClaim.Outcome);
+        Assert.Equal(InheritanceOutcome.Inherited, afterClaim.Outcome);
+        var recorded = ProjectCeilingStore.TryGet(claimant, Store);
+        Assert.NotNull(recorded);
+        Assert.True(recorded.IsUnrestricted);
+        Assert.Equal(ProjectCeilingStore.CanonicalKey(main), recorded.InheritedFrom);
+        Assert.Contains("github.com/philipreese/baton", afterClaim.Fact, StringComparison.Ordinal);
     }
 
     /// <summary>
@@ -274,6 +312,30 @@ public sealed class InheritedProjectCeilingTests : IDisposable
         Assert.Null(ProjectCeilingStore.TryGet(typed, Store)?.InheritedFrom);
         var json = File.ReadAllText(Store);
         Assert.Equal(1, json.Split("InheritedFrom").Length - 1);
+    }
+
+    private static async Task RunGitAsync(string workingDirectory, params string[] args)
+    {
+        var startInfo = new ProcessStartInfo("git")
+        {
+            WorkingDirectory = workingDirectory,
+            RedirectStandardOutput = true,
+            RedirectStandardError = true,
+            UseShellExecute = false,
+        };
+        foreach (var arg in args)
+        {
+            startInfo.ArgumentList.Add(arg);
+        }
+
+        using var process = Process.Start(startInfo)
+            ?? throw new InvalidOperationException("Could not start git — is it on PATH? This test needs git.");
+        var (stdout, stderr) = await BoundedProcessWait.RunToExitAsync(
+            process, TimeSpan.FromSeconds(30), TestContext.Current.CancellationToken);
+        if (process.ExitCode != 0)
+        {
+            throw new InvalidOperationException($"git {string.Join(' ', args)} failed: {stdout} {stderr.Trim()}");
+        }
     }
 
     public void Dispose()

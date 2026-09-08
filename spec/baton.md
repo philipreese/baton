@@ -4677,7 +4677,19 @@ last-used-file fallback the CLI path is ever subject to.
 `bindings.json` is only the **room ∩ step** half of that intersection. The **project ceiling** — the
 owner's own control on what any harness-authored `bindings.json` can grant in the first place — lives
 in Baton's own app-level config, never inside the project tree, so a compromised or over-permissive
-project cannot author its own way past it. Built (#1166): `ProjectCeilingStore` (`src/Baton.Vendors/`),
+project cannot author its own way past it. **One inheritance exception, ruled 2026-09-08 (#2076):**
+a worktree or clone whose `RepositoryIdentity` (the `origin` URL, else the git common directory)
+matches an already-trusted repository inherits that repository's recorded ceiling — and the identity
+is what the directory's own `.git/config` reports, so a directory that merely *claims* the same
+origin (`git init` plus `git remote add origin <trusted url>`, neither a worktree nor a clone of
+anything) inherits too. That is accepted, not overlooked: the ceiling record itself still lives
+outside every project tree, and creating a directory on the operator's machine is the operator's own
+act or a lane's — a lane already running as the operator's user under a role grant does not need to
+forge an origin to escalate, it has the shell, and lanes are contained by that grant and the shell
+allowlist, not by trust lookups. Origin-string matching is the inheritance boundary;
+`InheritedProjectCeiling` cites this passage rather than restating it, and names the test that pins
+the claimed-origin shape against real git and the real probe.
+Built (#1166): `ProjectCeilingStore` (`src/Baton.Vendors/`),
 a flat JSON map at `{BatonPaths.Root}/project-ceilings.json`, canonical project path →
 `ProjectCeiling` (`ReadFiles`/`WriteFiles`/`RunShellCommands`/`NetworkAccess` — decision 0004 names no
 closed set of ceiling levels, so this reuses the category vocabulary `ClaudeWorkerAdapter.TryTranslatePermissionGrant`
@@ -4692,7 +4704,8 @@ before any worker spawns (`ProjectNotTrustedException`, naming the `baton trust`
 with one narrowing since #2076, ahead of the gate rather than inside it: `baton dispatch` first lets a
 workspace whose **repository identity** (`RepositoryIdentity`) matches an already-trusted path inherit
 that path's ceiling (`InheritedProjectCeiling`, which has the derivation, the narrowest-wins rule and
-the cost), so a worktree or clone of a trusted repository is trusted before the gate reads the store
+the cost; what that match does and does not authenticate is the inheritance exception stated above,
+once), so a worktree or clone of a trusted repository is trusted before the gate reads the store
 and one whose repository is trusted nowhere still refuses exactly as above. An inherited entry is a
 **one-time persisted snapshot** of its source, taken at the first dispatch or `queue add --issue` for
 that workspace and never re-evaluated: re-trusting the source narrower later does not re-narrow its

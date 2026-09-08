@@ -32,8 +32,16 @@ namespace Baton.Cli;
 /// cost ledger and the memory store key on, so a linked worktree (which shares its main checkout's git
 /// common directory) and a separate clone (which shares its <c>origin</c> URL) both resolve to the one
 /// identity their sibling was recorded under. Nothing here compares directory names or looks for a
-/// parent directory: <c>C:\repos\w2069</c> is a worktree of <c>C:\repos\baton</c> because git says so,
-/// not because the paths look related.
+/// parent directory: <c>C:\repos\w2069</c> matches <c>C:\repos\baton</c> because the two report the
+/// same repository, not because the paths look related.
+/// </para>
+/// <para>
+/// <b>The match is on the repository's self-reported origin, accepted by spec/baton.md §9's ruling.</b>
+/// The origin URL is a string the directory's own <c>.git/config</c> supplies, so git verifies no
+/// structural relationship here: a fresh <c>git init</c> with <c>remote.origin.url</c> set to a trusted
+/// repository's URL inherits exactly as a clone does. That section's inheritance exception (ruled
+/// 2026-09-08, #2076) is the one statement of why this is the accepted boundary and not a gap; it is
+/// not restated here, and <c>A_directory_claiming_a_trusted_origin_inherits_by_ruling</c> pins the shape.
 /// </para>
 /// <para>
 /// <b>The narrowest matching ceiling wins</b>, ties broken by the ordinal path order the store already
