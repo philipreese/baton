@@ -369,6 +369,27 @@ try {
     Assert-Contains $wrapperLogText $wrapperStderrLine "the action captures the daemon's stderr through the launcher"
     Assert-Contains $wrapperLogText "baton daemon exited 70" "the action records the exit code in daemon.log"
 
+    # 9. #2083: the daemon task is relaunched by a real repeating trigger, not RestartCount. The
+    # wrapper test above proves a non-zero daemon exit reaches the task action; this AST assertion
+    # pins the separate scheduler contract that gives such an exit another launch opportunity.
+    Write-Host "Test 9: baton-daemon has a repeating relaunch trigger..."
+    $triggerCalls = $daemonAst.FindAll({
+        param($node)
+        $node -is [System.Management.Automation.Language.CommandAst] -and
+        $node.GetCommandName() -eq "New-ScheduledTaskTrigger"
+    }, $true)
+    Assert-Equal 1 $triggerCalls.Count "baton-daemon has exactly one scheduled-task trigger"
+    $triggerText = $triggerCalls[0].Extent.Text
+    Assert-Contains $triggerText "-Once" "baton-daemon trigger starts its repetition schedule now"
+    Assert-Contains $triggerText "-RepetitionInterval" "baton-daemon trigger repeats after a daemon exit"
+    Assert-Contains $triggerText "-RepetitionDuration" "baton-daemon trigger has a bounded repetition schedule"
+    if ($daemonScriptText.Contains("-AtLogOn")) {
+        throw "Assertion failed: baton-daemon uses a logon-only trigger instead of a repeating relaunch trigger"
+    }
+    if ($daemonScriptText.Contains("-RestartCount") -or $daemonScriptText.Contains("-RestartInterval")) {
+        throw "Assertion failed: baton-daemon still relies on RestartCount/RestartInterval instead of its repeating trigger"
+    }
+
     Write-Host "All launcher tests PASSED!"
 } finally {
     Remove-Item -LiteralPath $tempDir -Recurse -Force -ErrorAction SilentlyContinue
