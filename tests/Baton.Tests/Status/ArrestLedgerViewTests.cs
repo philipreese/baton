@@ -15,6 +15,7 @@ public class ArrestLedgerViewTests
     private static readonly ExecutionId ExecA = new("exec-a");
     private static readonly DateTime T1 = new(2026, 9, 1, 10, 0, 0, DateTimeKind.Utc);
     private static readonly DateTime T2 = new(2026, 9, 1, 10, 0, 2, DateTimeKind.Utc);
+    private static readonly DateTime T3 = new(2026, 9, 1, 10, 0, 4, DateTimeKind.Utc);
 
     private static LogEntry.FlowLogEntry Flow(FlowEvent e, DateTime at) => new(e, at);
 
@@ -146,20 +147,66 @@ public class ArrestLedgerViewTests
         Assert.Null(entry.Reason);
     }
 
+    // #2104: the designed happy path -- `baton cancel --reason` against a live pump that answers.
+    // Both facts exist for one execution; the ONE entry keeps the operator's reason and request time,
+    // and the pump's own CancellationRequested stamp moves to DeliveredAtUtc. Pre-#2104 this arm
+    // asserted the pump's stamp as RequestedAtUtc and never looked at Reason.
     [Fact]
-    public void An_intent_the_pump_answered_is_absorbed_into_the_flow_side_entry_not_listed_twice()
+    public void An_intent_the_pump_answered_merges_into_one_entry_keeping_the_operator_reason_and_time()
     {
         var flowEntries = new LogEntry[]
         {
             Flow(new FlowEvent.CancellationRequested(ExecA, CancellationOrigin.Operator), T2),
-            Flow(new FlowEvent.ExecutionCancelled(ExecA), T2),
+            Flow(new FlowEvent.ExecutionCancelled(ExecA), T3),
         };
-        var roomEvents = new RoomEvent[] { new RoomEvent.ArrestIntentRecorded(ExecA.Value, "operator", null, T1) };
+        var roomEvents = new RoomEvent[] { new RoomEvent.ArrestIntentRecorded(ExecA.Value, "operator", "lane is looping", T1) };
 
         var entry = Assert.Single(ArrestLedgerProjector.Project(flowEntries, roomEvents));
 
         Assert.Equal(ArrestOutcome.Delivered, entry.Outcome);
+        Assert.Equal("lane is looping", entry.Reason);
+        Assert.Equal(T1, entry.RequestedAtUtc.UtcDateTime);
+        Assert.Equal(T2, entry.DeliveredAtUtc!.Value.UtcDateTime);
+        Assert.Equal(T3, entry.ResolvedAtUtc!.Value.UtcDateTime);
+    }
+
+    // The one merge where the operator's reason does NOT win: a Rejected entry renders its Reason as
+    // `rejected (<Reason>)`, so the rejection's own explanation stays. The operator's stamp still wins.
+    [Fact]
+    public void An_intent_the_pump_rejected_keeps_the_rejection_reason_but_the_operator_time()
+    {
+        var flowEntries = new LogEntry[]
+        {
+            Flow(new FlowEvent.CancellationRejected(ExecA, "too late (it already settled)"), T2),
+        };
+        var roomEvents = new RoomEvent[] { new RoomEvent.ArrestIntentRecorded(ExecA.Value, "operator", "lane is looping", T1) };
+
+        var entry = Assert.Single(ArrestLedgerProjector.Project(flowEntries, roomEvents));
+
+        Assert.Equal(ArrestOutcome.Rejected, entry.Outcome);
+        Assert.Equal("too late (it already settled)", entry.Reason);
+        Assert.Equal(T1, entry.RequestedAtUtc.UtcDateTime);
+        Assert.Null(entry.DeliveredAtUtc);
+    }
+
+    // Polarity control for the merge: with only the flow-side fact (a pre-#2073 line, or a host-stop),
+    // the entry renders as before -- the pump's stamp is both RequestedAtUtc and DeliveredAtUtc, and
+    // there is no reason to carry.
+    [Fact]
+    public void A_flow_side_request_with_no_intent_fact_still_renders_the_pump_stamp_as_requested_at()
+    {
+        var flowEntries = new LogEntry[]
+        {
+            Flow(new FlowEvent.CancellationRequested(ExecA, CancellationOrigin.Operator), T2),
+            Flow(new FlowEvent.ExecutionCancelled(ExecA), T3),
+        };
+
+        var entry = Assert.Single(ArrestLedgerProjector.Project(flowEntries, []));
+
+        Assert.Equal(ArrestOutcome.Delivered, entry.Outcome);
+        Assert.Null(entry.Reason);
         Assert.Equal(T2, entry.RequestedAtUtc.UtcDateTime);
+        Assert.Equal(T2, entry.DeliveredAtUtc!.Value.UtcDateTime);
     }
 
     [Fact]

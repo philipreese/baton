@@ -46,9 +46,24 @@ public enum ArrestOutcome
 /// requested by the CLI.
 /// </param>
 /// <param name="Reason">
-/// The rejection reason for <see cref="ArrestOutcome.Rejected"/>; for an entry sourced from
-/// <see cref="RoomEvent.ArrestIntentRecorded"/> (#2073), the operator's own <c>--reason</c>, whatever
-/// the outcome. Null otherwise.
+/// The rejection reason for <see cref="ArrestOutcome.Rejected"/> — on the flow side a reason is
+/// populated only for Rejected. For every other outcome, the operator's own <c>--reason</c> when a
+/// <see cref="RoomEvent.ArrestIntentRecorded"/> (#2073) exists for this execution — whether the pump
+/// answered it (#2104: the intent MERGES into the flow-side entry rather than being dropped) or not.
+/// Null otherwise. A Rejected entry keeps the rejection's reason even when an intent carries one of
+/// its own, because <c>baton status</c> renders this field as <c>rejected (&lt;Reason&gt;)</c> — the
+/// explanation of the outcome, not of the request.
+/// </param>
+/// <param name="RequestedAtUtc">
+/// When the operator asked: the <see cref="RoomEvent.ArrestIntentRecorded"/> stamp when one exists
+/// for this execution, else the flow-side <see cref="FlowEvent.CancellationRequested"/> stamp (the
+/// pump's own delivery time, the only request-shaped instant a pre-#2073 line or a host-stop has).
+/// </param>
+/// <param name="DeliveredAtUtc">
+/// #2104: when a pump took the request — the flow-side <see cref="FlowEvent.CancellationRequested"/>
+/// stamp. Null for an entry no pump ever answered (an intent <c>baton cancel</c> settled itself, or
+/// one still waiting), and for the two room-event-sourced shapes. Equal to
+/// <see cref="RequestedAtUtc"/> when no intent fact exists to distinguish the two.
 /// </param>
 /// <param name="ResolvedAtUtc">Null while <see cref="Outcome"/> is null (still pending).</param>
 public sealed record ArrestLedgerEntry(
@@ -58,7 +73,8 @@ public sealed record ArrestLedgerEntry(
     string RequestedBy,
     string? Reason,
     DateTimeOffset RequestedAtUtc,
-    DateTimeOffset? ResolvedAtUtc);
+    DateTimeOffset? ResolvedAtUtc,
+    DateTimeOffset? DeliveredAtUtc = null);
 
 /// <summary>
 /// Projects a room's full arrest history from the two logs a <c>cancel.request</c> can durably land
@@ -83,7 +99,7 @@ public static class ArrestLedgerProjector
         // either 'latest', re-resolved at delivery time, or the SAME still-Running execution it
         // already named), so one builder per id is exactly one ledger entry per request.
         var order = new List<ExecutionId>();
-        var builders = new Dictionary<ExecutionId, (string RequestedBy, string? Reason, ArrestOutcome? Outcome, DateTimeOffset RequestedAtUtc, DateTimeOffset? ResolvedAtUtc)>();
+        var builders = new Dictionary<ExecutionId, (string RequestedBy, string? Reason, ArrestOutcome? Outcome, DateTimeOffset RequestedAtUtc, DateTimeOffset? ResolvedAtUtc, DateTimeOffset? DeliveredAtUtc)>();
 
         foreach (var entry in flowLogEntries)
         {
@@ -104,7 +120,8 @@ public static class ArrestLedgerProjector
                         order.Add(requested.ExecutionId);
                         builders[requested.ExecutionId] = (
                             RenderRequestedBy(requested.Origin), Reason: null, Outcome: null,
-                            RequestedAtUtc: timestamp ?? DateTimeOffset.UnixEpoch, ResolvedAtUtc: null);
+                            RequestedAtUtc: timestamp ?? DateTimeOffset.UnixEpoch, ResolvedAtUtc: null,
+                            DeliveredAtUtc: timestamp);
                     }
 
                     break;
@@ -158,7 +175,8 @@ public static class ArrestLedgerProjector
                         order.Add(rejected.ExecutionId);
                         builders[rejected.ExecutionId] = (
                             RequestedBy: "operator", Reason: rejected.Reason, Outcome: ArrestOutcome.Rejected,
-                            RequestedAtUtc: timestamp ?? DateTimeOffset.UnixEpoch, ResolvedAtUtc: timestamp);
+                            RequestedAtUtc: timestamp ?? DateTimeOffset.UnixEpoch, ResolvedAtUtc: timestamp,
+                            DeliveredAtUtc: null);
                     }
 
                     break;
@@ -166,19 +184,19 @@ public static class ArrestLedgerProjector
         }
 
         var results = new List<ArrestLedgerEntry>(order.Count + roomEvents.Count);
-        foreach (var executionId in order)
-        {
-            var b = builders[executionId];
-            results.Add(new ArrestLedgerEntry(executionId.Value, executionId, b.Outcome, b.RequestedBy, b.Reason, b.RequestedAtUtc, b.ResolvedAtUtc));
-        }
 
         // #2073: the operator's intent fact. When the pump answered, a flow-side CancellationRequested
-        // for the same id already opened a builder above and that entry tells the whole story, so the
-        // intent is absorbed rather than listed twice. When no pump answered (baton cancel settled the
-        // room itself, or is still waiting on a holder that never let go), the intent is the only
-        // request-shaped fact there is, so it gets its own entry: Delivered once any arrest-shaped
-        // terminal fact for that execution lands at or after the intent (ExecutionCancelled,
-        // ExecutionFailed, or a StepRetryForeclosed naming it — whoever wrote it), pending otherwise.
+        // for the same id already opened a builder above, and the two are ONE request seen from both
+        // sides: the flow side knows the outcome and when the pump took it, but its Reason is only
+        // ever a rejection's and its stamp is the pump's, not the operator's (#2104 — the #2101 review's
+        // M2: `baton cancel --reason` against a live pump rendered with no reason and the wrong time).
+        // So the intent merges into that builder — its reason and its stamp win, the pump's stamp
+        // moves to DeliveredAtUtc — rather than being listed twice or dropped. When no pump answered
+        // (baton cancel settled the room itself, or is still waiting on a holder that never let go),
+        // the intent is the only request-shaped fact there is, so it gets its own entry: Delivered
+        // once any arrest-shaped terminal fact for that execution lands at or after the intent
+        // (ExecutionCancelled, ExecutionFailed, or a StepRetryForeclosed naming it — whoever wrote
+        // it), pending otherwise.
         // "At or after" is what keeps a pre-existing settle from being credited to a later intent;
         // CancelCommand never writes an intent for an already-settled target, so in practice the
         // pending arm is the still-held-lock case and nothing else.
@@ -215,8 +233,15 @@ public static class ArrestLedgerProjector
             {
                 case RoomEvent.ArrestIntentRecorded intent:
                     var intentExecutionId = new ExecutionId(intent.Target);
-                    if (builders.ContainsKey(intentExecutionId))
+                    if (builders.TryGetValue(intentExecutionId, out var answered))
                     {
+                        // A Rejected builder keeps the rejection's reason: that field renders as
+                        // `rejected (<Reason>)`, the explanation of the outcome (ArrestLedgerEntry.Reason).
+                        builders[intentExecutionId] = answered with
+                        {
+                            Reason = answered.Outcome == ArrestOutcome.Rejected ? answered.Reason : intent.Reason,
+                            RequestedAtUtc = intent.RecordedAtUtc,
+                        };
                         break;
                     }
 
@@ -240,6 +265,14 @@ public static class ArrestLedgerProjector
                         Reason: null, expired.RequestedAtUtc, expired.RecordedAtUtc));
                     break;
             }
+        }
+
+        // Built AFTER the room-event pass so a merged intent's reason and stamp are what lands here.
+        foreach (var executionId in order)
+        {
+            var b = builders[executionId];
+            results.Add(new ArrestLedgerEntry(
+                executionId.Value, executionId, b.Outcome, b.RequestedBy, b.Reason, b.RequestedAtUtc, b.ResolvedAtUtc, b.DeliveredAtUtc));
         }
 
         return results.OrderBy(e => e.RequestedAtUtc).ToList();

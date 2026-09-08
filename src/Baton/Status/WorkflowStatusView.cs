@@ -249,7 +249,12 @@ public sealed record ArrestLedgerEntryView(
     [property: JsonPropertyName("requestedAt")] string RequestedAt,
     [property: JsonPropertyName("resolvedAt")]
     [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
-    string? ResolvedAt)
+    string? ResolvedAt,
+    // #2104: when the pump took the request -- absent for an entry no pump answered. See
+    // ArrestLedgerEntry.DeliveredAtUtc's own remarks.
+    [property: JsonPropertyName("deliveredAt")]
+    [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    string? DeliveredAt = null)
 {
     public static ArrestLedgerEntryView From(ArrestLedgerEntry entry) => new(
         entry.Target,
@@ -258,7 +263,8 @@ public sealed record ArrestLedgerEntryView(
         entry.RequestedBy,
         entry.Reason,
         entry.RequestedAtUtc.ToString("O"),
-        entry.ResolvedAtUtc?.ToString("O"));
+        entry.ResolvedAtUtc?.ToString("O"),
+        entry.DeliveredAtUtc?.ToString("O"));
 }
 
 /// <summary>
