@@ -3868,7 +3868,7 @@ trigger is not registrable by a standard user and is not used (#1770).
     is shared with `resolve --close`, #1877, and is not widened here), so `LatestFailureReason` keeps
     the park's own text. `baton status`'s human step line reads the foreclosure's author and cause
     off the journal event itself (`StatusCommand.FormatStepStatus`, "retry foreclosed by …"); every
-    other reason surface — `--json`'s `failureReason`, `baton run`'s own settle output, the fleet
+    other reason surface — `--json`'s `error`, `baton run`'s own settle output, the fleet
     row — still shows the park's reason, and the dead-pump cause is journal-only there.
     `tools/room-rate-sweep/sweep.py` sees neither fact: it drops any room whose journal has no
     `executionExited` (a pump killed mid-step never wrote one), keys arrests on `executionArrested`,
