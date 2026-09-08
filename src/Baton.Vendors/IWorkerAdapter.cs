@@ -79,7 +79,11 @@ public interface IWorkerAdapter : Baton.Outcomes.IFailureClassifier, Baton.Statu
     /// </summary>
     CoreDispatchTarget Resolve(WorkerInvocation invocation, WorkerContract contract);
 
-    /// <summary>Checks an explicit model using this adapter's offline validation rules.</summary>
+    /// <summary>
+    /// Checks an explicit model using this adapter's offline rules, throwing a
+    /// <see cref="BatonFlowException"/> on refusal. The default validates nothing; adapters without
+    /// model rules inherit it. See <c>spec/baton.md</c> §13 for queue add's candidate checks.
+    /// </summary>
     void ValidateRequestedModel(string model) { }
 
     /// <summary>

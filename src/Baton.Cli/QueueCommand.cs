@@ -305,7 +305,7 @@ public static class QueueCommand
             ValidateAdapterModel(options.Adapter, options.Model);
         }
 
-        var adapters = options.Model is null || options.Adapter is not null
+        var adapters = options.Model is null
             ? Array.Empty<string>() : WorkerModelCatalog.AdaptersFor(options.Model);
         if (options.Model is not null && options.Adapter is null && adapters.Count == 0)
         {
@@ -337,7 +337,7 @@ public static class QueueCommand
             WorkerRoleCatalog.QueueTierFor,
             WorkerRoleCatalog.QueueTierForRole);
 
-        if (options.Model is not null && options.Adapter is null
+        if (adapters.Count > 0
             && (tier.Adapter is null || !adapters.Contains(tier.Adapter, StringComparer.OrdinalIgnoreCase)))
         {
             var actualAdapter = tier.Adapter ?? "unconfigured";

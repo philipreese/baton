@@ -213,13 +213,12 @@ public sealed class QueueTierTableTests
     }
 
     [Fact]
-    public void An_item_with_no_scope_class_resolves_to_nulls_and_is_not_an_override()
+    public void An_unscoped_item_with_no_role_tier_resolves_to_nulls_and_is_not_an_override()
     {
         var resolved = QueueTierTable.Resolve(Item(), new QueueSettings(), NoNamedTiers, NoNamedTiers);
 
-        // Nulls are the legitimate "defer to the role" result, and IsOverride must stay false with
-        // them — an item flagged as departing from a tier it never consulted would put a fabricated
-        // override on the launch fact.
+        // With no role tier available, nulls defer to dispatch. IsOverride stays false because
+        // the item has no scope tier to depart from.
         Assert.Null(resolved.TierKey);
         Assert.Null(resolved.Adapter);
         Assert.Null(resolved.Model);

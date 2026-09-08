@@ -6352,11 +6352,14 @@ exists to prevent. An unscoped item naming neither adapter nor model resolves th
 display and launch accounting. If it names either, no role model or effort is filled in: an explicit
 adapter with no model uses that adapter's queue default, if configured, otherwise defers to dispatch.
 Neither case is a scope override. An unknown role fails that item and leaves later items eligible.
-At `queue add`, an explicit model is validated by the named adapter's offline rules. Without an
-adapter, model hints must identify one candidate; zero or multiple candidates require `--adapter`,
-with multiple candidates named in the refusal. A scoped item's resolved adapter must match that
-candidate. These refusals precede row writes, spec copies, and worktree provisioning. Import does
-not perform this add-time validation.
+At `queue add`, an explicit model is checked by the named adapter's offline rules, if any; adapters
+without model rules validate nothing (currently agy, noop, capture, and command; four of six registered
+adapters). Without an adapter, model hints must identify one candidate; zero or multiple candidates
+require `--adapter`, with multiple candidates named in the refusal, even when a scope is supplied.
+Whenever model hints identify any candidates, the resolved adapter must belong to that set, including
+when `--adapter` is named. With zero candidates, a named adapter's own validation alone decides.
+The resolved adapter's offline rules also check models when no adapter was named. These refusals
+precede row writes, spec copies, and worktree provisioning. Import does not perform this add-time validation.
 
 **`sonnet` is not promoted.** An item that asks for it gets it, and the launch fact says the tier was
 departed from. Nothing in the queue substitutes a model.
