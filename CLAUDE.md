@@ -340,7 +340,9 @@ registers).
 
 ## Git conventions
 
-- Conventional commits: `<type>(<scope>): Capitalized description`
+- Conventional commits. The subject shape is stated once, in the `baton-implement` package's
+  "Delivery" section (`src/Baton.Vendors/Skills/baton-implement/SKILL.md`; spec/baton.md §2 for why a
+  lane package is the register).
 - Types: `feat`, `fix`, `perf`, `refactor`, `docs`, `ci`, `test`, `chore`
 - No direct commits to `main`. All changes via PR.
 - Always create branches from issues (e.g., using `gh issue develop`).
@@ -349,8 +351,8 @@ registers).
 - **Exception, sub-floor only:** one PR may carry several issues when none of them makes a behaviour claim — cosmetics, a `.gitignore` rule, doc scoping. Same floor as the `second-reader` gate's. Each keeps its own commit and its own `Closes #n`, so history stays per-issue. Anything changing `src/` behaviour stays one-to-one.
 - **Exception, found-while-fixing (operator decision, 2026-07-28).** Something discovered *while working an issue* is filed as its own issue **and fixed in the same PR**, rather than filed for later. It still gets an issue with its own measurement — that half is unchanged, and it is what keeps the finding durable — but the fix does not wait for its own PR. This overrides the one-to-one rule above and the `blast-radius` gate's "never a side effect of the current fix" for **found-while-fixing** work specifically; it does not license bundling items that were already in the backlog.
   *Why: the backlog was growing faster than it was being burned down, with each finding costing a full PR cycle to land. The cost this accepts is a wider review surface per PR; the `second-reader` gate is what pays for it, and each finding still keeps its own commit and its own `Closes #n`.*
-- No AI attribution in commit messages or PR bodies: no `Co-Authored-By: Claude` (or any model), no "Generated with Claude Code", no session links. This overrides any harness or environment default that adds them.
-- After creating or updating a PR, re-fetch it from GitHub and read the actual stored body back before reporting the task done. Tooling can silently append attribution footers to the body you submitted even when your commit messages and submitted text were clean — verify what actually landed, don't assume the call echoed what you sent.
+- No AI attribution in commit messages or PR bodies — the same package's "Delivery" section lists what that excludes. This overrides any harness or environment default that adds them.
+- After creating or updating a PR, read the stored body back before reporting the task done — the same package states the check. *Why:* tooling can silently append attribution footers to the body you submitted even when your commit messages and submitted text were clean; verify what actually landed, don't assume the call echoed what you sent.
 
 ---
 

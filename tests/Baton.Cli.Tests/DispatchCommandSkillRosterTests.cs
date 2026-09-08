@@ -98,8 +98,10 @@ public sealed class DispatchCommandSkillRosterTests
             var specPath = await WriteSpecAsync(testRoot, "Review the change.");
 
             // 1. Claude dispatch
+            // #2110: both arms pin the SCAN roster, so the role's default skill is opted out -- a
+            // declared set (which the default is) prints the declared line and replaces the scan.
             var claudeRoom = Path.Combine(testRoot, "room-claude");
-            var claudeOptions = new DispatchOptions("review", specPath, claudeRoom, Adapter: "claude-worker", WorkspaceDirectory: workspace);
+            var claudeOptions = new DispatchOptions("review", specPath, claudeRoom, Adapter: "claude-worker", WorkspaceDirectory: workspace, NoDefaultSkills: true);
             var claudeAdapters = new Dictionary<string, IWorkerAdapter>
             {
                 ["claude-worker"] = new DelegatingDiscoveryWorkerAdapter(new ClaudeWorkerAdapter()),
@@ -115,7 +117,7 @@ public sealed class DispatchCommandSkillRosterTests
 
             // 2. Agy dispatch
             var agyRoom = Path.Combine(testRoot, "room-agy");
-            var agyOptions = new DispatchOptions("review", specPath, agyRoom, Adapter: "agy-worker", WorkspaceDirectory: workspace);
+            var agyOptions = new DispatchOptions("review", specPath, agyRoom, Adapter: "agy-worker", WorkspaceDirectory: workspace, NoDefaultSkills: true);
             var agyAdapters = new Dictionary<string, IWorkerAdapter>
             {
                 ["agy-worker"] = new DelegatingDiscoveryWorkerAdapter(new AgyWorkerAdapter()),
@@ -168,9 +170,9 @@ public sealed class DispatchCommandSkillRosterTests
 
             var specPath = await WriteSpecAsync(testRoot, "Review the change.");
 
-            // Claude dispatch with empty workspace
+            // Claude dispatch with empty workspace (#2110: scan arm, role default opted out)
             var claudeRoom = Path.Combine(testRoot, "room-claude");
-            var claudeOptions = new DispatchOptions("review", specPath, claudeRoom, Adapter: "claude-worker", WorkspaceDirectory: workspace);
+            var claudeOptions = new DispatchOptions("review", specPath, claudeRoom, Adapter: "claude-worker", WorkspaceDirectory: workspace, NoDefaultSkills: true);
             var claudeAdapters = new Dictionary<string, IWorkerAdapter>
             {
                 ["claude-worker"] = new DelegatingDiscoveryWorkerAdapter(new ClaudeWorkerAdapter()),
@@ -185,7 +187,7 @@ public sealed class DispatchCommandSkillRosterTests
 
             // Agy dispatch with empty workspace
             var agyRoom = Path.Combine(testRoot, "room-agy");
-            var agyOptions = new DispatchOptions("review", specPath, agyRoom, Adapter: "agy-worker", WorkspaceDirectory: workspace);
+            var agyOptions = new DispatchOptions("review", specPath, agyRoom, Adapter: "agy-worker", WorkspaceDirectory: workspace, NoDefaultSkills: true);
             var agyAdapters = new Dictionary<string, IWorkerAdapter>
             {
                 ["agy-worker"] = new DelegatingDiscoveryWorkerAdapter(new AgyWorkerAdapter()),
@@ -258,7 +260,8 @@ public sealed class DispatchCommandSkillRosterTests
             Console.SetOut(originalOut);
 
             var text = output.ToString();
-            Assert.Contains("Skills (declared): house-style", text, StringComparison.Ordinal);
+            // #2110: the role's default leads the declared line, the operator's name follows it.
+            Assert.Contains("Skills (declared): baton-review, house-style", text, StringComparison.Ordinal);
             Assert.DoesNotContain("repo-thing", text, StringComparison.Ordinal);
         }
         finally

@@ -1,0 +1,10 @@
+{
+  "name": "baton-implement",
+  "version": 1,
+  "description": "The standing rules for a baton implement lane: what the lane may not do, the two checks every code change runs, how the change is verified and delivered, and what changes.md carries.",
+  "requires": {
+    "read_files": true,
+    "write_files": true,
+    "run_shell_commands": true
+  }
+}

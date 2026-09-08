@@ -36,10 +36,24 @@ future no-``--skill`` claude lane run against this repository, telling each work
 under ``tools/skill-probe/skills/`` instead and is reached through ``BATON_SKILLS_PATH``, the
 override rung `SkillPackageResolver` documents as "a one-off experiment", which is exactly this.
 
+**The role-default arm (#2110).** ``--role-default`` measures the OTHER attachment path: no
+``--skill`` at all, and the marker package reaches the lane only because a worker role's
+``default_skills`` names it. The script writes a copy of the shipped ``WorkerRoles.json`` whose
+``implement`` entry declares ``["marker-probe"]`` and points ``BATON_WORKER_ROLES_PATH`` at it, so the
+shipped ``baton-implement`` default is displaced for the run and the marker is the whole signal. The
+control arm names no skill on the command line and uses the shipped catalog, so the lane receives the
+role's shipped default (``baton-implement``) and never the marker. ``--adapter`` runs the same measurement on
+codex or agy, where the realization is inlining rather than projection, so ``projected`` reads
+``False`` there by construction and the roster line plus the marker are the evidence.
+
 Usage::
 
     python tools/skill-probe/probe.py --runs 3            # the full six-run measurement
     python tools/skill-probe/probe.py --preflight         # free: resolve the binding, dispatch nothing
+    python tools/skill-probe/probe.py --role-default --runs 1 --adapter codex --baton "dotnet <Baton.Cli.dll>"
+
+``--baton`` names the engine to drive when the one on PATH predates the feature under measurement
+(a ``dotnet <path to Baton.Cli.dll>`` from a fresh build, say); it defaults to the ``baton`` on PATH.
 
 This spends real subscription budget on the vendor CLI. `--preflight` does not.
 """
@@ -51,6 +65,7 @@ import glob
 import json
 import os
 import re
+import shlex
 import shutil
 import subprocess
 import sys
@@ -72,37 +87,71 @@ BRIEF = (
 )
 
 ROLE = "implement"
+SHIPPED_ROLES = REPO_ROOT / "src" / "Baton.Vendors" / "WorkerRoles.json"
+
+# The engine command line. Resolved once in `main` from `--baton`; the default is the `baton` on PATH.
+BATON_CMD: list[str] = []
 
 
-def run_dispatch(*, room_dir: Path, workspace: Path, with_skill: bool, model: str,
-                 timeout_minutes: int, preflight: bool) -> subprocess.CompletedProcess[str]:
+def resolve_baton(spec: str | None) -> list[str]:
+    if spec:
+        return shlex.split(spec, posix=False) if os.name == "nt" else shlex.split(spec)
     baton = shutil.which("baton")
     if baton is None:
-        raise SystemExit("baton is not on PATH -- see README's 'Installing baton'.")
+        raise SystemExit("baton is not on PATH -- see README's 'Installing baton', or pass --baton.")
+    return [baton]
 
+
+def write_role_default_catalog(root: Path) -> Path:
+    """The shipped role catalog with `implement`'s default_skills replaced by the marker package --
+    the #2110 arm's whole intervention. Written beside the throwaways, read through
+    BATON_WORKER_ROLES_PATH, and never touching the operator's own worker-roles.json."""
+    roles = json.loads(SHIPPED_ROLES.read_text(encoding="utf-8"))
+    for role in roles:
+        if role.get("id") == ROLE:
+            role["default_skills"] = [SKILL_NAME]
+            break
+    else:
+        raise SystemExit(f"{SHIPPED_ROLES} has no '{ROLE}' role")
+    path = root / "WorkerRoles.json"
+    path.write_text(json.dumps(roles, indent=2), encoding="utf-8")
+    return path
+
+
+def run_dispatch(*, room_dir: Path, workspace: Path, with_skill: bool, model: str | None,
+                 timeout_minutes: int, preflight: bool, adapter: str,
+                 role_default_catalog: Path | None) -> subprocess.CompletedProcess[str]:
     cmd = [
-        baton, "dispatch", ROLE,
+        *BATON_CMD, "dispatch", ROLE,
         "--spec-text", BRIEF,
-        "--adapter", "claude",
-        "--model", model,
+        "--adapter", adapter,
         "--workspace", str(workspace),
         "--room-dir", str(room_dir),
         "--expect-pr", "false",
         "--verify", "git --version",
         "--timeout", str(timeout_minutes),
     ]
+    if model:
+        cmd += ["--model", model]
     if preflight:
         # A name no rung holds. `SkillPackageResolver.Resolve` refuses it in `RoleDispatch.ToBinding`,
         # before a room directory exists and before the vendor CLI is spawned, and the refusal names
         # every rung it searched -- so this asks, for free, whether BATON_SKILLS_PATH is actually
         # being read on this machine. It is the free half of the measurement, not a rehearsal of it.
         cmd += ["--skill", f"{SKILL_NAME}-absent"]
-    elif with_skill:
+    elif with_skill and role_default_catalog is None:
         cmd += ["--skill", SKILL_NAME]
 
     env = dict(os.environ)
     # The override rung. See this module's docstring for why the fixture is not on the repo-local one.
     env["BATON_SKILLS_PATH"] = str(FIXTURE_SKILLS_DIR)
+    if with_skill and role_default_catalog is not None:
+        # #2110: the marker arrives through the role's default_skills and NOTHING on the command line.
+        env["BATON_WORKER_ROLES_PATH"] = str(role_default_catalog)
+    elif role_default_catalog is not None:
+        # The control arm of the role-default measurement must not inherit the probe arm's catalog:
+        # the shipped one attaches baton-implement, not the marker, so the marker stays impossible.
+        env.pop("BATON_WORKER_ROLES_PATH", None)
 
     return subprocess.run(
         cmd, capture_output=True, text=True, encoding="utf-8", errors="replace",
@@ -133,10 +182,7 @@ def make_workspace(root: Path, label: str, *, preflight: bool) -> Path:
 
 
 def baton_exe(args: list[str]) -> subprocess.CompletedProcess[str]:
-    baton = shutil.which("baton")
-    if baton is None:
-        raise SystemExit("baton is not on PATH -- see README's 'Installing baton'.")
-    return subprocess.run([baton, *args], capture_output=True, text=True,
+    return subprocess.run([*BATON_CMD, *args], capture_output=True, text=True,
                           encoding="utf-8", errors="replace")
 
 
@@ -208,23 +254,29 @@ def ledger_rows(ids: list[str]) -> list[dict]:
     return rows
 
 
-SKILLS_LINE = re.compile(r"^.*\bSkills:.*$", re.MULTILINE)
+# Both roster forms: the scan line (`Skills: ...`, and claude's projection announcement) and the
+# declared line a binding with Skills prints (`Skills (declared): ...`, #1941), which is the form
+# every role-default run produces -- the first measurement of that arm recorded `(none printed)`
+# for codex and agy because the pattern predated it.
+SKILLS_LINE = re.compile(r"^.*\bSkills(?: \([^)]*\))?:.*$", re.MULTILINE)
 
 
 def skills_line(console: str) -> str:
     """`ClaudeWorkerAdapter.AnnounceSkillProjection` writes this to the dispatch console, not to the
-    room -- so it is read back from the captured process output."""
+    room -- so it is read back from the captured process output. The room's own `bindings.json`
+    carries the declared list durably (`Skills`), which is the evidence to cite when the console is gone."""
     matches = SKILLS_LINE.findall(console)
     return matches[0].strip() if matches else "(none printed)"
 
 
-def measure(root: Path, label: str, *, with_skill: bool, model: str, timeout_minutes: int,
-            preflight: bool) -> dict:
+def measure(root: Path, label: str, *, with_skill: bool, model: str | None, timeout_minutes: int,
+            preflight: bool, adapter: str, role_default_catalog: Path | None) -> dict:
     workspace = make_workspace(root, f"ws-{label}", preflight=preflight)
     room_dir = root / f"room-{label}"
     started = time.time()
     proc = run_dispatch(room_dir=room_dir, workspace=workspace, with_skill=with_skill,
-                        model=model, timeout_minutes=timeout_minutes, preflight=preflight)
+                        model=model, timeout_minutes=timeout_minutes, preflight=preflight,
+                        adapter=adapter, role_default_catalog=role_default_catalog)
     console = (proc.stdout or "") + "\n" + (proc.stderr or "")
     cwd = worker_working_directory(room_dir, workspace)
     ids = execution_ids(room_dir)
@@ -232,9 +284,11 @@ def measure(root: Path, label: str, *, with_skill: bool, model: str, timeout_min
 
     marker_path = cwd / MARKER_FILE
     projected = cwd / ".claude" / "skills" / SKILL_NAME / "SKILL.md"
+    arm = "control" if not with_skill else ("role-default" if role_default_catalog else "probe")
     return {
         "run": label,
-        "arm": "probe" if with_skill else "control",
+        "arm": arm,
+        "adapter": adapter,
         "exit": proc.returncode,
         "workspace": str(workspace),
         "worker_cwd": str(cwd),
@@ -259,9 +313,19 @@ def main() -> int:
     parser.add_argument("--start", type=int, default=1,
                         help="first run index, so a stopped-and-inspected first pair can be resumed "
                              "without re-spending on it")
-    parser.add_argument("--model", default="opus",
-                        help="claude model. Defaults to the frontier tier's, because a result "
-                             "measured on a weaker model would not scope to the lanes that ship.")
+    parser.add_argument("--model", default=None,
+                        help="vendor model. On claude defaults to the frontier tier's (opus), because a "
+                             "result measured on a weaker model would not scope to the lanes that ship; "
+                             "on other adapters defaults to the role's tier model.")
+    parser.add_argument("--adapter", default="claude", choices=["claude", "codex", "agy"],
+                        help="which vendor to dispatch to (default claude)")
+    parser.add_argument("--baton", default=None,
+                        help="the engine command line to drive (default: the baton on PATH)")
+    parser.add_argument("--role-default", action="store_true",
+                        help="#2110: attach the marker through the implement role's default_skills, "
+                             "with no --skill on the command line")
+    parser.add_argument("--no-control", action="store_true",
+                        help="skip the control arm (only when an earlier run already measured it)")
     parser.add_argument("--timeout", type=int, default=6, help="per-run timeout in minutes")
     parser.add_argument("--preflight", action="store_true",
                         help="resolve the binding and print the roster; dispatch nothing, spend nothing")
@@ -269,15 +333,23 @@ def main() -> int:
     parser.add_argument("--keep", action="store_true", help="keep the throwaway workspaces")
     args = parser.parse_args()
 
+    global BATON_CMD
+    BATON_CMD = resolve_baton(args.baton)
+    model = args.model if args.model else ("opus" if args.adapter == "claude" else None)
+
     root = Path(tempfile.mkdtemp(prefix="skill-probe-"))
+    role_default_catalog = write_role_default_catalog(root) if args.role_default else None
+    arms = (True,) if args.no_control else (True, False)
     results = []
     try:
         for index in range(args.start, args.start + args.runs):
-            for with_skill in (True, False):
-                label = f"{'probe' if with_skill else 'control'}-{index}"
+            for with_skill in arms:
+                arm = "control" if not with_skill else ("role-default" if role_default_catalog else "probe")
+                label = f"{arm}-{args.adapter}-{index}"
                 print(f"== {label} ==", flush=True)
-                result = measure(root, label, with_skill=with_skill, model=args.model,
-                                 timeout_minutes=args.timeout, preflight=args.preflight)
+                result = measure(root, label, with_skill=with_skill, model=model,
+                                 timeout_minutes=args.timeout, preflight=args.preflight,
+                                 adapter=args.adapter, role_default_catalog=role_default_catalog)
                 results.append(result)
                 print(json.dumps({k: v for k, v in result.items() if k != "console_tail"},
                                  indent=1), flush=True)
@@ -293,11 +365,11 @@ def main() -> int:
         if not args.keep and not results:
             shutil.rmtree(root, ignore_errors=True)
 
-    print("\n| run | arm | projected | marker | CLI listed skill | tokensIn |")
-    print("|---|---|---|---|---|---|")
+    print("\n| run | arm | adapter | projected | marker | CLI listed skill | roster line | tokensIn |")
+    print("|---|---|---|---|---|---|---|---|")
     for r in results:
-        print(f"| {r['run']} | {r['arm']} | {r['projected']} | {r['marker']} | "
-              f"{r['cli_listed_skill']} | {r['tokens_in']} |")
+        print(f"| {r['run']} | {r['arm']} | {r['adapter']} | {r['projected']} | {r['marker']} | "
+              f"{r['cli_listed_skill']} | {r['skills_line']} | {r['tokens_in']} |")
     print(f"\nartifacts kept under {root}")
     return 0
 

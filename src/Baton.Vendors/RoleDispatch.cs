@@ -125,6 +125,14 @@ public static class RoleDispatch
     /// its verdict's runtime claims to cite it. Null (every dispatch without <c>--verify-cmd</c>) adds
     /// nothing at all — the prompt must not mention a file that does not exist.
     /// </param>
+    /// <param name="attachDefaultSkills">
+    /// #2110 (spec/baton.md §2, "Role default skills"): whether <see cref="WorkerRole.DefaultSkills"/>
+    /// is attached AHEAD of <paramref name="skills"/>. True is every ordinary dispatch; false is the
+    /// <c>--no-default-skills</c> opt-out, after which the binding carries only what
+    /// <paramref name="skills"/> names. A default that resolves in no rung refuses here, before a
+    /// room exists, with <see cref="UnknownSkillPackageException.DeclaredByRole"/> set so the message
+    /// says where the name came from.
+    /// </param>
     public static WorkerBindingConfigEntry ToBinding(
         WorkerRole role, string spec, string? adapterOverride = null, string? workerName = null,
         string? workingDirectory = null, string? modelOverride = null, string? effortOverride = null,
@@ -134,7 +142,7 @@ public static class RoleDispatch
         long? tokenBudgetOverride = null, int? maxToolStepsOverride = null,
         long? billedRateLimitOverride = null, string? verifyCommandOverride = null,
         bool? expectPrOverride = null, string? verifyResultsPath = null,
-        IReadOnlyList<string>? skills = null)
+        IReadOnlyList<string>? skills = null, bool attachDefaultSkills = true)
     {
         ArgumentNullException.ThrowIfNull(role);
         ArgumentNullException.ThrowIfNull(spec);
@@ -142,7 +150,9 @@ public static class RoleDispatch
         // #1151 (spec/baton.md §9), the ergonomic half: resolve and check before anything is provisioned. The
         // load-bearing copy of both refusals lives in WorkerBindingResolver.Resolve, the seam the
         // `baton run` path also crosses -- this one exists so a typo'd --skill costs nothing.
-        var resolvedSkills = SkillPackageResolver.ResolveAll(skills, workingDirectory);
+        // #2110: the role's defaults come first, then the operator's list; ResolveAll drops an exact
+        // duplicate, so naming a default again with --skill attaches it once, in the default's slot.
+        var resolvedSkills = ResolveSkillsWithRoleDefaults(role, skills, workingDirectory, attachDefaultSkills);
         WorkerBindingResolver.RefuseIfASkillRequiresMoreThanTheGrant(
             string.IsNullOrWhiteSpace(workerName) ? role.Id : workerName, resolvedSkills, role.Grant);
 
@@ -278,6 +288,40 @@ public static class RoleDispatch
     }
 
     /// <summary>
+    /// #2110: the role's <see cref="WorkerRole.DefaultSkills"/> (when <paramref name="attachDefaultSkills"/>)
+    /// followed by <paramref name="skills"/>, resolved through the same ladder. The defaults are resolved
+    /// on their own first so an unresolvable one is reported as the role's, not as a typo the operator
+    /// never made; the combined list then goes through <see cref="SkillPackageResolver.ResolveAll"/>
+    /// once, which is what de-duplicates a default the operator also named.
+    /// </summary>
+    private static IReadOnlyList<SkillPackage> ResolveSkillsWithRoleDefaults(
+        WorkerRole role, IReadOnlyList<string>? skills, string? workingDirectory, bool attachDefaultSkills)
+    {
+        var defaults = attachDefaultSkills ? role.DefaultSkills : [];
+        foreach (var name in defaults)
+        {
+            try
+            {
+                SkillPackageResolver.Resolve(name, workingDirectory);
+            }
+            catch (UnknownSkillPackageException ex)
+            {
+                throw new UnknownSkillPackageException(
+                    ex.SkillName, SkillPackageResolver.Rungs(workingDirectory), declaredByRole: role.Id);
+            }
+        }
+
+        var names = new List<string>(defaults.Count + (skills?.Count ?? 0));
+        names.AddRange(defaults);
+        if (skills is { Count: > 0 })
+        {
+            names.AddRange(skills);
+        }
+
+        return SkillPackageResolver.ResolveAll(names, workingDirectory);
+    }
+
+    /// <summary>
     /// #1927: the model rungs, as one function so <c>RedispatchCommand</c> re-runs the IDENTICAL
     /// resolution on a vendor swap rather than a second copy of it. In order: what the dispatcher asked
     /// for (<paramref name="requestedModel"/>, source <see cref="BindingValueSource.Requested"/>), then
@@ -339,7 +383,7 @@ public static class RoleDispatch
         TimeSpan? timeoutOverride = null, IReadOnlyList<string>? attachments = null,
         string? attachmentsDirectory = null, long? tokenBudgetOverride = null, int? maxToolStepsOverride = null,
         long? billedRateLimitOverride = null, string? verifyCommandOverride = null, bool? expectPrOverride = null,
-        string? verifyResultsPath = null, IReadOnlyList<string>? skills = null)
+        string? verifyResultsPath = null, IReadOnlyList<string>? skills = null, bool attachDefaultSkills = true)
     {
         ArgumentNullException.ThrowIfNull(role);
 
@@ -350,7 +394,7 @@ public static class RoleDispatch
             tokenBudgetOverride: tokenBudgetOverride, maxToolStepsOverride: maxToolStepsOverride,
             billedRateLimitOverride: billedRateLimitOverride,
             verifyCommandOverride: verifyCommandOverride, expectPrOverride: expectPrOverride,
-            verifyResultsPath: verifyResultsPath, skills: skills);
+            verifyResultsPath: verifyResultsPath, skills: skills, attachDefaultSkills: attachDefaultSkills);
 
         var stepOutputs = binding.Contract.ProducedOutputs.Select(o => o.Name).ToList();
 

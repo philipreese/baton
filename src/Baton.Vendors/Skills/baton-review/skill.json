@@ -1,0 +1,8 @@
+{
+  "name": "baton-review",
+  "version": 1,
+  "description": "The standing rules for a baton review lane: read-only, verdict first, findings by severity with file:line and a concrete failure scenario.",
+  "requires": {
+    "read_files": true
+  }
+}

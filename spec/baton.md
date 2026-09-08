@@ -387,13 +387,49 @@ a fresh dispatch of the same role+adapter would never produce; the command print
 every such swap, and an operator who needs the grant re-derived passes `--spec`, which rebuilds
 through `RoleDispatch.Materialize` against the real role catalog.
 
+**Role default skills (#2110).** A role's catalog entry may carry `default_skills`, a list of
+canonical skill package names (§9, "Canonical skill packages"). Every materialization of that role —
+`baton dispatch <role>`, a template phase bound to it, and the amended-spec path of `baton redispatch`
+— attaches those packages **ahead of** whatever `--skill` names, so the binding's `Skills` records the
+defaults first and the operator's additions after; a default the operator also names is attached once,
+in the default's slot. `--no-default-skills` is the opt-out, on both verbs: the binding then carries
+only the `--skill` list. Defaults resolve, lint, and requirement-check through the same ladder and the
+same two check sites an operator-named skill does, with one difference in the refusal: a default no
+rung holds refuses at bind time naming the **role** as well as the package
+(`UnknownSkillPackageException.DeclaredByRole`), because the operator typed nothing that could be a
+typo. The dispatch roster prints the merged list as its declared set. A redispatch without `--spec`
+inherits the parent's recorded list verbatim, defaults included, since the binding records the merged
+list and never which names were defaults; `--no-default-skills` there removes the names the role's
+catalog entry declares *today*. The three shipped defaults — `implement` → `baton-implement`, `review`
+→ `baton-review`, `advise` → `baton-advise` — live under `src/Baton.Vendors/Skills/` and are copied
+next to the engine at build time (`Baton.Vendors.csproj`), which puts them on §9's next-to-the-assembly
+rung so they resolve against any workspace. They live there and not at the repository root because
+`<repo>/skills/` is §9's `<workspace>/skills/` scan rung: a lane that declares no skill set — every
+role without `default_skills`, or one dispatched `--no-default-skills` with no `--skill` — keeps that
+scan, and a package at the root would reach all of them whenever the workspace is a checkout of this
+repository. No role without a declared default receives these packages. One cost is inherited rather than new: on the two
+inlining vendors a *declared* set is bounded at `CoreDispatcher.OversizePromptThreshold` (§9,
+`SkillInlining`'s remark is the register), and a role default is a declared skill — so the shipped
+packages have an inlined-body cap of `OversizePromptThreshold - 400` (currently 3600 UTF-16 code
+units after `InlinedSkillBody` normalizes CRLF to LF, strips front matter and trims outer whitespace).
+`RoleDefaultSkillsTests.ShippedDefaultHeadroom` encodes that reserve and derives the cap from the
+threshold. A `--skill` addition's body must be strictly shorter than the remaining space to the
+threshold: at the package cap, fewer than 400 code units, since reaching the threshold refuses.
+**Each package is the sole register, for a
+dispatched lane, of the lane constraints it states** (what a lane never does, the delivery and review
+shapes, the two `AGENTS.md`-derived checks, the public-repository rules): a brief carries only what is
+task-specific, and no other lane-facing document restates the package. The workspace's own contributor
+file (`CLAUDE.md`/`AGENTS.md`) is a separate register, read by people and interactive sessions rather
+than by a lane; where a rule is both, the contributor file cites the package. What the defaults do NOT
+carry is the conductor's own merging rules, which are the conductor's and never a lane's.
+
 ### §2 schema — the CLI argument table
 
 | Verb | Usage | Source |
 |---|---|---|
 | `run` | `baton run <workflow-file> --bindings <bindings-file> [--room-dir <dir>] [--workflow-id <id>] [--echo-worker] [--register] [--wait] [--wait-timeout <minutes>]` | `RunOptionsParser.cs` |
-| `dispatch` | `baton dispatch <name> [--spec <spec-file> \| --spec - \| --spec-text <text>] [--attach <file>] [--skill <name>] [--adapter <name>] [--model <name>] [--effort <name>] [--room-dir <dir>] [--workspace <dir>] [--workflow-id <id>] [--output <path>] [--timeout <minutes>] [--token-budget <n>] [--max-tool-steps <n>] [--billed-rate-limit <n>] [--verify <cmd>] [--verify-cmd <cmd>] [--verify-timeout <minutes>] [--expect-pr <true\|false>] [--continue <room-dir>] [--override-runway <reason>] [--label <text>] [--workstream <slug>] [--repo <checkout-dir>] [--list-capabilities]` | `DispatchOptionsParser.cs` |
-| `redispatch` | `baton redispatch <room-dir> [--spec <amended-brief>] [--attach <file>] [--adapter <name>] [--model <name>] [--effort <name>] [--workspace <dir>] [--output <path>] [--timeout <minutes>] [--token-budget <n>] [--max-tool-steps <n>] [--billed-rate-limit <n>] [--verify <cmd>] [--skill <name>] [--label <text>] [--workstream <slug>]` | `RedispatchOptionsParser.cs` |
+| `dispatch` | `baton dispatch <name> [--spec <spec-file> \| --spec - \| --spec-text <text>] [--attach <file>] [--skill <name>] [--no-default-skills] [--adapter <name>] [--model <name>] [--effort <name>] [--room-dir <dir>] [--workspace <dir>] [--workflow-id <id>] [--output <path>] [--timeout <minutes>] [--token-budget <n>] [--max-tool-steps <n>] [--billed-rate-limit <n>] [--verify <cmd>] [--verify-cmd <cmd>] [--verify-timeout <minutes>] [--expect-pr <true\|false>] [--continue <room-dir>] [--override-runway <reason>] [--label <text>] [--workstream <slug>] [--repo <checkout-dir>] [--list-capabilities]` | `DispatchOptionsParser.cs` |
+| `redispatch` | `baton redispatch <room-dir> [--spec <amended-brief>] [--attach <file>] [--adapter <name>] [--model <name>] [--effort <name>] [--workspace <dir>] [--output <path>] [--timeout <minutes>] [--token-budget <n>] [--max-tool-steps <n>] [--billed-rate-limit <n>] [--verify <cmd>] [--skill <name>] [--no-default-skills] [--label <text>] [--workstream <slug>]` | `RedispatchOptionsParser.cs` |
 | `resume` | `baton resume <room-dir> --worker <role> (--message <text> \| --message-file <path>) --bindings <bindings-file> [--workflow-id <id>]` | `ResumeOptionsParser.cs` |
 | `decide` | `baton decide <room-dir> --execution <execution-id> --type resume\|reject\|retry-with-revision\|supersede [--target-step <step-id>] [--supplementary <execution-id>] --bindings <bindings-file> [--workflow-id <id>]` | `DecideOptionsParser.cs` |
 | `resolve` | `baton resolve <room-dir> [--execution <execution-id>] --accept-capture \| --reject --reason <text> \| --close --reason <text>` | `ResolveOptionsParser.cs` |
@@ -5581,8 +5617,8 @@ the resolved packages ride to the adapter on `WorkerInvocation.Skills`. `baton r
 the parent's list; `--skill ""` clears it; any `--skill <name>` replaces it **wholesale** rather than
 appending — append has no removal syntax, and a lane whose skill set can only grow across redispatches
 is a worse default than one the operator restates. A workflow template refuses `--skill` outright: it
-binds one worker per phase, so a single flag names no phase to attach to (role-carried skills are
-#1151's S6, unbuilt).
+binds one worker per phase, so a single flag names no phase to attach to; the role-carried set each
+phase does get is §2's "Role default skills" (#2110).
 
 **Where a name resolves.** Four rungs, first match by name wins. `SkillPackageResolver`'s own remarks
 are the register for the ladder — its order and its literal paths are stated there and nowhere else,

@@ -1,0 +1,8 @@
+{
+  "name": "baton-advise",
+  "version": 1,
+  "description": "The standing rules for a baton advise lane: answer from the context you were given, weigh real options and recommend one, say what you could not know.",
+  "requires": {
+    "read_files": true
+  }
+}

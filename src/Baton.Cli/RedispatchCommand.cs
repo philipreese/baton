@@ -175,6 +175,15 @@ public static class RedispatchCommand
             var parentWorkflowPath = Path.Combine(options.ParentRoomDirectoryPath, WorkflowFileName);
             definition = await WorkflowDefinitionParser.LoadFromFileAsync(parentWorkflowPath, cancellationToken).ConfigureAwait(false);
             entry = InheritBinding(parentEntry, options);
+            if (options.NoDefaultSkills && !options.SkillsSpecified)
+            {
+                // Only the parent's INHERITED list can hide a default: a --skill list typed on this
+                // command line replaced it wholesale, and a name the operator typed is never a default
+                // to subtract, however it is spelled -- the same rule ToBinding applies on a fresh
+                // dispatch, where the flag suppresses the role's own list and nothing else.
+                entry = WithoutRoleDefaultSkills(entry, workerName);
+            }
+
             if (!string.Equals(entry.Adapter, parentEntry.Adapter.Trim().ToLowerInvariant(), StringComparison.Ordinal))
             {
                 // Loud, not silent — the one inheritance rule that differs from a fresh dispatch
@@ -442,6 +451,36 @@ public static class RedispatchCommand
     internal static IReadOnlyList<string>? ResolveSkills(WorkerBindingConfigEntry parentEntry, RedispatchOptions options) =>
         options.SkillsSpecified ? options.Skills : parentEntry.Skills;
 
+    /// <summary>
+    /// #2110, the inherit path's half of <c>--no-default-skills</c>: the parent's recorded list minus the
+    /// names its role's <c>default_skills</c> declares TODAY. The amended-spec path needs no counterpart
+    /// — there <c>RoleDispatch.ToBinding</c> is what attaches the defaults, and the flag reaches it. Read
+    /// off the current catalog rather than the parent's binding because the binding records only the
+    /// merged list, never which names were defaults (spec/baton.md §2). The caller applies this to an
+    /// inherited list only, never to one <c>--skill</c> replaced on the same command line.
+    /// </summary>
+    internal static WorkerBindingConfigEntry WithoutRoleDefaultSkills(WorkerBindingConfigEntry entry, string workerName)
+    {
+        WorkerRole role;
+        try
+        {
+            role = WorkerRoleCatalog.For(workerName);
+        }
+        catch (Exception ex) when (ex is FileNotFoundException or JsonException or InvalidOperationException or KeyNotFoundException)
+        {
+            throw new CliArgumentException(
+                $"--no-default-skills needs the worker's role catalog entry to know which skills are defaults: {ex.Message}");
+        }
+
+        if (entry.Skills is not { Count: > 0 } || role.DefaultSkills.Count == 0)
+        {
+            return entry;
+        }
+
+        var kept = entry.Skills.Where(name => !role.DefaultSkills.Contains(name, StringComparer.Ordinal)).ToList();
+        return entry with { Skills = kept.Count == 0 ? null : kept };
+    }
+
     /// <summary>The <c>--spec</c>-given path: rebuilds through <see cref="RoleDispatch.Materialize"/>, spec/baton.md §2's named primitive.</summary>
     private static async Task<(WorkflowDefinition Definition, WorkerBindingConfigEntry Entry)> RebuildFromAmendedSpecAsync(
         string workerName, WorkerBindingConfigEntry parentEntry, RedispatchOptions options, CancellationToken cancellationToken)
@@ -484,7 +523,9 @@ public static class RedispatchCommand
                 // #1151: resolved and requirement-checked by RoleDispatch.ToBinding on this path too,
                 // so an amended-spec redispatch inheriting a parent's skill that has since been deleted
                 // refuses here rather than dispatching without it.
-                skills: ResolveSkills(parentEntry, options));
+                skills: ResolveSkills(parentEntry, options),
+                // #2110: ToBinding re-attaches the role's defaults on this path unless opted out.
+                attachDefaultSkills: !options.NoDefaultSkills);
 
             // #1927 review HIGH: both paths re-resolve the display stamps through the same rule --
             // ToBinding stamped them from the inherited axes above, which reach it as overrides and so

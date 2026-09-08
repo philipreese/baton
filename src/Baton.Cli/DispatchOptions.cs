@@ -153,6 +153,12 @@ namespace Baton.Cli;
 /// <paramref name="TokenBudget"/> is. Null keeps the dispatch skill-less; the contract is
 /// spec/baton.md §9.
 /// </param>
+/// <param name="NoDefaultSkills">
+/// <c>--no-default-skills</c> (#2110): dispatch the role WITHOUT the <c>default_skills</c> its catalog
+/// entry declares, leaving only what <paramref name="Skills"/> names. False is every ordinary
+/// dispatch. Applies to a template dispatch too, since every phase is a role. The rule is
+/// spec/baton.md §2, "Role default skills".
+/// </param>
 public sealed record DispatchOptions(
     string Name,
     string? SpecFilePath,
@@ -180,4 +186,5 @@ public sealed record DispatchOptions(
     IReadOnlyList<string>? VerifyCommands = null,
     TimeSpan? VerifyTimeout = null,
     string? OverrideRunwayReason = null,
-    IReadOnlyList<string>? Skills = null);
+    IReadOnlyList<string>? Skills = null,
+    bool NoDefaultSkills = false);

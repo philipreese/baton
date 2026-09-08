@@ -23,6 +23,20 @@
   </ItemGroup>
 
   <ItemGroup>
+    <!-- #2110: the shipped role-default skill packages (Skills/<name>/), copied next to the engine as
+         skills/<name>/ so they sit on SkillPackageResolver's next-to-the-assembly rung and a role's
+         default_skills resolve against ANY workspace, not only a checkout of this repository. Copied,
+         not embedded, for the same reason the catalog files above are: an operator's same-named
+         package in the account library (the rung above) still wins, with no rebuild. The source
+         tree sits under this project, NOT at the repository root: <repo>/skills/ is the resolver's
+         <workspace>/skills/ scan rung, and a package there is inhaled by every lane that declares no
+         skill set (WorkerRoles.json registers which roles have default_skills) when dispatched
+         against this repository. The Link keeps the output directory name lowercase on a
+         case-sensitive filesystem, which is what the resolver's rung path spells. -->
+    <None Include="Skills\**\*" Link="skills\%(RecursiveDir)%(Filename)%(Extension)" CopyToOutputDirectory="PreserveNewest" />
+  </ItemGroup>
+
+  <ItemGroup>
     <!-- #1875: the opposite call from the three files above, for the opposite reason. Those are
          operator-tunable policy, so they are copied and re-readable at runtime. This is a dated
          recording of what `codex app-server model/list` answered (codex-cli 0.153.2, 2026-09-04) —

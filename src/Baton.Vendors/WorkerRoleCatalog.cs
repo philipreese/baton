@@ -93,6 +93,16 @@ public sealed record WorkerTier([property: JsonRequired] string Adapter, string?
 /// step hangs off. <b>Does not gate <c>--verify</c></b>: an operator who types a command for this
 /// dispatch gets it, whatever the role — spec/baton.md §3 states why arm 1 stays role-independent.
 /// </param>
+/// <param name="DefaultSkills">
+/// #2110 (contract: <c>spec/baton.md</c> §2, "Role default skills"): the canonical skill package
+/// names every dispatch of this role attaches before any <c>--skill</c> the operator adds. Empty
+/// (the default, and what an omitted <c>default_skills</c> key parses to) attaches nothing. The names
+/// are resolved and requirement-checked in <see cref="RoleDispatch.ToBinding"/> exactly as an
+/// operator-named skill is; an unresolvable default is refused before any room exists, with this
+/// role's id in the message, rather than dispatched without. Where the shipped three resolve from
+/// is the <c>Baton.Vendors.csproj</c> copy of its own <c>Skills/</c> tree, which lands them on
+/// <see cref="SkillPackageResolver"/>'s next-to-the-assembly rung.
+/// </param>
 public sealed record WorkerRole(
     string Id,
     string Tier,
@@ -110,7 +120,12 @@ public sealed record WorkerRole(
     long? BilledRateLimit = null,
     bool DeliversBranch = false,
     bool AllowsSubagents = false,
-    bool VerifiesWorkspace = true);
+    bool VerifiesWorkspace = true,
+    IReadOnlyList<string>? DefaultSkills = null)
+{
+    /// <summary>The role's default skill package names, never null — see the <c>DefaultSkills</c> parameter.</summary>
+    public IReadOnlyList<string> DefaultSkills { get; init; } = DefaultSkills ?? [];
+}
 
 /// <summary>
 /// One file a role's dispatch produces in <c>BATON_OUTPUT_DIR</c> (#897) — the structured, per-role
@@ -288,6 +303,15 @@ public static class WorkerRoleCatalog
                     "file the worker writes to BATON_OUTPUT_DIR — the floor that catches a silent no-op.");
             }
 
+            // #2110: a blank entry would resolve to nothing in SkillPackageResolver.ResolveAll (it skips
+            // blanks) and so ship a role whose declared default silently attaches nothing -- the same
+            // silent-no-op shape the outputs guard above refuses. Named here, at load, by role.
+            if (raw.DefaultSkills is { } declaredDefaults && declaredDefaults.Any(string.IsNullOrWhiteSpace))
+            {
+                throw new InvalidOperationException(
+                    $"Worker role '{raw.Id}' declares a blank entry in 'default_skills'. Every entry names a canonical skill package.");
+            }
+
             roles.Add(new WorkerRole(
                 Id: raw.Id,
                 Tier: raw.Tier,
@@ -313,7 +337,8 @@ public static class WorkerRoleCatalog
                 BilledRateLimit: raw.BilledRateLimit,
                 DeliversBranch: raw.DeliversBranch,
                 AllowsSubagents: raw.AllowsSubagents,
-                VerifiesWorkspace: raw.VerifiesWorkspace));
+                VerifiesWorkspace: raw.VerifiesWorkspace,
+                DefaultSkills: raw.DefaultSkills));
         }
 
         return roles;
@@ -487,7 +512,10 @@ public static class WorkerRoleCatalog
         // deliberately so -- a role that forgets the key is graded by the workspace's own gates
         // (loud) rather than silently settling unverified. Every shipped role states it explicitly
         // anyway; see WorkerRole.VerifiesWorkspace for the two sets and why.
-        bool VerifiesWorkspace = true);
+        bool VerifiesWorkspace = true,
+        // #2110: optional like the flags above -- omitting it is exactly "this role attaches no skill
+        // of its own", the WorkerRole default. See WorkerRole.DefaultSkills.
+        IReadOnlyList<string>? DefaultSkills = null);
 
     private sealed record RawOutput(
         [property: JsonRequired] string Name,

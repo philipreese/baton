@@ -18,9 +18,9 @@ namespace Baton.Vendors;
 ///   with a <c>skills/</c> inside;</item>
 /// <item><c>{BatonPaths.Root}/skills/</c> — the operator's durable, rebuild-free, account-wide library.
 ///   This is what Q3 ratified for slice 1;</item>
-/// <item><c>{AppContext.BaseDirectory}/skills/</c> — packages shipped next to the assembly. Nothing
-///   ships there today; the rung exists so a future starter library has a home that needs no operator
-///   setup;</item>
+/// <item><c>{AppContext.BaseDirectory}/skills/</c> — packages shipped next to the assembly. Since #2110
+///   this is where the three role-default packages live (<c>Baton.Vendors.csproj</c> copies them there
+///   from <c>src/Baton.Vendors/Skills/</c>, a path on no rung), needing no operator setup;</item>
 /// <item><c>{workspace}/skills/</c> — <b>the repo-local overlay, and it is the LOWEST rung.</b> That
 ///   inverts the prior a reader brings, so spec/baton.md §9 states the negative and the reason; the one
 ///   consequence for a caller here is that a package in the account library is never shadowed by
