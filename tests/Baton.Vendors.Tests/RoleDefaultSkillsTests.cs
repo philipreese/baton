@@ -36,7 +36,8 @@ public sealed class RoleDefaultSkillsTests : IDisposable
 
     private static string ShippedSkillsDirectory => Path.Combine(AppContext.BaseDirectory, "skills");
 
-    // spec/baton.md §2, "Role default skills", owns the shipped-body budget.
+    // Owns the reserve the shipped packages leave below CoreDispatcher.OversizePromptThreshold for
+    // --skill additions; spec/baton.md §2, "Role default skills", cites this constant rather than the number.
     private const int ShippedDefaultHeadroom = 400;
 
     [Fact]
