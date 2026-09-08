@@ -9,7 +9,7 @@ namespace Baton.Cli;
 /// <c>cancel</c>, three <see cref="CommandResult"/> flags are read ahead of the state-based arm;
 /// which value each maps to, the direction each corrects, and the applied set are stated once in
 /// spec/baton.md §2's <c>baton cancel</c> paragraph ("Exit code, stated once (#2103)") — not restated
-/// here, so the arms below only say what their own tests pin.
+/// in this summary; each arm's comment below says only what that arm's own tests pin.
 /// <para>
 /// Pure and side-effect free for the same reason <see cref="RunExitCodeResolver"/> is:
 /// <c>MutationExitCodeResolverTests</c> asserts every arm against a hand-built

@@ -588,7 +588,7 @@ for a command that only dropped a `cancel.request` file (or, since #2073, could 
 fact) and applied nothing; `CancelWasNoOp` (#2073) corrects a 1 to a 0 — an already-Failed or
 Cancelled room reads 1 for a re-run cancel that wrote nothing; `CancelApplied` (#2103) corrects a 1
 to a 0 — the room a successful cancel leaves behind (Terminal, target Cancelled or Failed) reads 1 for
-the invocation that arrested. The applied set is exactly `CancelCommand`'s four settled returns: the
+the invocation that arrested. The applied set is exactly `CancelCommand`'s settled returns: the
 live pump answered the request inside the window; the pump recorded the settle after this command's
 kill; the target settled while this command waited for `flow.lock`; this command wrote the terminal
 fact itself. The intent is readable: `ArrestLedgerProjector` lists it (`baton status
