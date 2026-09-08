@@ -23,6 +23,14 @@ to the ceiling that would have arrested them -- the resolved `TokenBudget` on ea
     python tools/room-rate-sweep/sweep.py --budget-headroom
     python tools/room-rate-sweep/sweep.py --budget-headroom --since 2026-09-07T09:55:46Z
 
+`--propose-ceilings` (the #2034 ruling) applies spec/baton.md SS3's ceiling rule -- 3 x the rolling
+live p95 per adapter/role over the last 14 days, floored at 400k -- to the same rows and prints the
+proposal beside the value pinned in WorkerRoles.json today, so a re-pin is this one command plus an
+edit. `--since` overrides the 14-day default; the rule's constants live here, its statement lives in
+the spec, and the numbers that moved a value live on the issue that moved it.
+
+    python tools/room-rate-sweep/sweep.py --propose-ceilings
+
 It reads each room's settled `terminal.json` usage rather than its `.stdout.log`, so the two modes do
 not share the reconstruction caveats below. Its comparison is against `liveBilledTokens` -- the Σ
 `Baton.Mutation.TokenBudgetMonitor` accumulated while the lane ran, which is the only quantity an
@@ -89,7 +97,7 @@ import glob
 import json
 import os
 import sys
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 
 ROOMS = os.path.join(os.path.expanduser("~"), ".baton", "rooms")
 
@@ -106,6 +114,13 @@ KNOWN_TOKEN_BUDGET_ADAPTERS = ("claude", "agy", "codex")
 # because they support opposite operational conclusions. See `role_ceiling` and `budget_headroom_rows`.
 CEILING_REFUSED = "refused"
 CEILING_MIXED = "mixed"
+
+# spec/baton.md SS3 "Ceiling rule (#2034)": ceiling = PROPOSAL_FACTOR x the live p95 over the last
+# PROPOSAL_WINDOW, never below PROPOSAL_FLOOR. The spec states the rule and why; these are its
+# analysis constants, and `propose_ceiling` is the only place they are applied.
+PROPOSAL_FACTOR = 3
+PROPOSAL_FLOOR = 400000
+PROPOSAL_WINDOW = timedelta(days=14)
 
 
 def _parse_time(raw):
@@ -795,6 +810,71 @@ def command_budget_headroom(args):
     return 0
 
 
+def propose_ceiling(live_p95):
+    """The #2034 rule applied to one p95: `max(PROPOSAL_FLOOR, PROPOSAL_FACTOR * p95)`, or None when
+    there is no p95 to apply it to. Never a fabricated floor for an unmeasured row: a row with no live
+    figures has no proposal, because printing 400,000 there would read as a measurement."""
+    if live_p95 is None:
+        return None
+    return max(PROPOSAL_FLOOR, PROPOSAL_FACTOR * live_p95)
+
+
+def propose_ceiling_rows(steps, roles):
+    """#2034: per (adapter, step), the rule's proposal beside the value pinned in the catalog TODAY.
+
+    The comparison column is deliberately the CATALOG figure and not the binding's -- the opposite
+    choice from `budget_headroom_rows`, and for the opposite reason: headroom asks what ceiling those
+    lanes actually ran under, a re-pin asks what value the next edit to WorkerRoles.json replaces.
+    `pinnedFrom` still names the source so the two tables cannot be misread as one. `n` is the sample
+    count the p95 stands on, printed because the rule wants a distribution and a single-sample p95 is
+    just that sample -- why #2034 left agy/implement (n=1) pinned where it was.
+    """
+    rows = []
+    for row in budget_headroom_rows(steps, [], roles):
+        pinned = role_ceiling(roles.get(row["step"]), row["adapter"])
+        proposed = propose_ceiling(row["liveP95"])
+        rows.append({
+            "adapter": row["adapter"],
+            "step": row["step"],
+            "measured": row["measured"],
+            "liveP95": row["liveP95"],
+            "proposed": proposed,
+            "pinned": pinned,
+            "pinnedFrom": "catalog",
+            # Only ever computed between two NUMBERS -- a refused or absent pin has no delta.
+            "delta": (proposed - pinned) if isinstance(pinned, int) and proposed is not None else None,
+        })
+    return rows
+
+
+def command_propose_ceilings(args):
+    """The #2034 re-pin command: one table, the rule's output per adapter/role beside today's pin."""
+    with open(args.roles, encoding="utf-8") as handle:
+        roles = {entry["id"]: entry for entry in json.load(handle)}
+    since = _parse_time(args.since) if args.since else datetime.now(tz=timezone.utc) - PROPOSAL_WINDOW
+    steps, skipped = settled_steps(ROOMS, since)
+    rows = propose_ceiling_rows(steps, roles)
+    print("rule: ceiling = %d x live p95 over rooms settled since %s, floor %d (spec/baton.md SS3, #2034)"
+          % (PROPOSAL_FACTOR, since.isoformat(), PROPOSAL_FLOOR))
+    if not rows:
+        print("no settled steps in the window -- nothing to propose.")
+        _print_corpus_coverage(skipped)
+        return 0
+    header = ("adapter/step", "n", "live p95", "proposed", "pinned", "from", "delta")
+    print("%-26s %4s %10s %10s %10s %-8s %10s" % header)
+    for row in rows:
+        print("%-26s %4d %10s %10s %10s %-8s %10s" % (
+            "%s/%s" % (row["adapter"], row["step"]), row["measured"], _cell(row["liveP95"]),
+            _cell(row["proposed"]), _cell(row["pinned"]), row["pinnedFrom"], _cell(row["delta"])))
+    print("\n`pinned` is today's %s re-resolved for that adapter -- the value a re-pin edits -- not the "
+          "figure that armed those lanes (--budget-headroom has that). `n` is the live-billed steps "
+          "the p95 stands on: a proposal off one sample is not a distribution, and #2034 left such a "
+          "row pinned rather than moved. A proposal is never printed for a row with no live figures."
+          % os.path.basename(args.roles))
+    _print_corpus_coverage(skipped)
+    return 0
+
+
 def _print_corpus_coverage(skipped):
     """What the corpus walk could not read -- printed even when the table is empty, because an empty
     table is precisely when someone is about to read it as "no lane of that vendor has run" (#2034
@@ -1043,6 +1123,74 @@ def _selftest_ceiling_prefers_the_figure_that_actually_armed_the_monitor():
         "an unwatched lane must not hide inside a watched row's percentage: %r" % row)
 
 
+def _selftest_propose_ceilings_applies_the_rule_against_a_fixture_ledger():
+    """#2034: `--propose-ceilings` prints `max(floor, 3 x live p95)` beside today's catalog pin, per
+    adapter/role, over a fixture ledger walked through the SAME calls the command makes (settled_steps
+    -> propose_ceiling_rows), so a command that forgot the walk or the window could not pass.
+
+    Four arms, each discriminating something the others do not:
+      * the FACTOR arm -- twenty claude/implement rooms whose p95 is 200,000 must propose 600,000 (3x),
+        not 200,000 (a resolver printing the p95 itself) and not 400,000 (the floor applied wrongly);
+      * the FLOOR arm -- codex/implement at a p95 of 50,000 must propose 400,000, never 150,000;
+      * the UNMEASURED arm -- an agy/implement room with no live figure proposes NOTHING, because
+        400,000 printed there would read as a measurement;
+      * the PIN arm -- `pinned` is the CATALOG's per-adapter figure (claude 600,000, agy 1,200,000),
+        not the 999,999 the rooms' own bindings.json carried, and the delta is proposal minus pin.
+    The control is the window: the same walk with a `--since` after every room settles yields no rows.
+    """
+    import shutil
+    import tempfile
+
+    root = tempfile.mkdtemp()
+    try:
+        def room(name, adapter, live, settled="2026-09-06T00:00:00Z"):
+            path = os.path.join(root, name)
+            os.mkdir(path)
+            usage = {"liveBilledTokens": live, "billedTokens": live} if live is not None else {}
+            with open(os.path.join(path, "bindings.json"), "w", encoding="utf-8") as handle:
+                json.dump({"implement": {"Adapter": adapter, "TokenBudget": 999999}}, handle)
+            with open(os.path.join(path, "terminal.json"), "w", encoding="utf-8") as handle:
+                json.dump({"terminalAt": settled,
+                           "steps": [{"id": "implement", "state": "Succeeded", "usage": usage}]}, handle)
+
+        # Eighteen at 100,000 and two at 200,000: `_percentile`'s nearest rank over 20 values is index
+        # 18, which sits on the 200,000 tail, so the p95 the FACTOR arm multiplies is unambiguous.
+        for i in range(18):
+            room("claude-%02d" % i, "claude", 100000)
+        room("claude-18", "claude", 200000)
+        room("claude-19", "claude", 200000)
+        room("codex-0", "codex", 50000)
+        room("codex-1", "codex", 40000)
+        room("agy-0", "agy", None)
+
+        roles = {"implement": {"token_budget": {"claude": 600000, "agy": 1200000, "codex": 600000}}}
+
+        steps, _skipped = settled_steps(root, _parse_time("2026-09-01T00:00:00Z"))
+        rows = {(r["adapter"], r["step"]): r for r in propose_ceiling_rows(steps, roles)}
+        assert set(rows) == {("claude", "implement"), ("codex", "implement"), ("agy", "implement")}, rows
+
+        claude = rows[("claude", "implement")]
+        assert (claude["measured"], claude["liveP95"], claude["proposed"]) == (20, 200000, 600000), (
+            "FACTOR: 3 x the live p95, not the p95 and not the floor -- %r" % claude)
+        assert (claude["pinned"], claude["pinnedFrom"], claude["delta"]) == (600000, "catalog", 0), (
+            "PIN: the catalog's claude figure, never the 999,999 on the bindings -- %r" % claude)
+
+        codex = rows[("codex", "implement")]
+        assert (codex["liveP95"], codex["proposed"], codex["delta"]) == (50000, 400000, -200000), (
+            "FLOOR: 3 x 50,000 is under the floor, so the floor is the proposal -- %r" % codex)
+
+        agy = rows[("agy", "implement")]
+        assert (agy["measured"], agy["liveP95"], agy["proposed"], agy["pinned"], agy["delta"]) == (
+            0, None, None, 1200000, None), (
+            "UNMEASURED: no live figure, no proposal, no delta; the pin still prints -- %r" % agy)
+
+        steps, _skipped = settled_steps(root, _parse_time("2026-09-07T00:00:00Z"))
+        assert propose_ceiling_rows(steps, roles) == [], (
+            "control: a window after every room settled proposes nothing")
+    finally:
+        shutil.rmtree(root, ignore_errors=True)
+
+
 def _selftest_dedupe_does_not_poison_on_a_missing_timestamp():
     """#1707 review F7: a first-sighting claude line with usage but no `timestamp` must be dropped
     WITHOUT blocking a later, timestamped repeat of the same message.id from being counted -- the same
@@ -1141,7 +1289,8 @@ def command_selftest(_args):
              _selftest_undated_and_unattributed_arrests_are_dropped_and_counted,
              _selftest_the_corpus_walk_counts_every_room_it_could_not_read,
              _selftest_ceiling_prefers_the_figure_that_actually_armed_the_monitor,
-             _selftest_headroom_compares_the_live_meter_and_never_fabricates_a_zero]
+             _selftest_headroom_compares_the_live_meter_and_never_fabricates_a_zero,
+             _selftest_propose_ceilings_applies_the_rule_against_a_fixture_ledger]
     failed = 0
     for test in tests:
         name = test.__name__
@@ -1164,8 +1313,12 @@ def main(argv):
     parser.add_argument("--budget-headroom", action="store_true",
                         help="#2034: print the per adapter/role table of live billed tokens against "
                              "that role's token_budget ceiling, plus the arrest counts per adapter")
+    parser.add_argument("--propose-ceilings", action="store_true",
+                        help="#2034: apply spec/baton.md SS3's ceiling rule (3 x live p95 over the last "
+                             "14 days, floor 400k) per adapter/role and print it beside the value "
+                             "pinned in WorkerRoles.json today; --since overrides the window")
     parser.add_argument("--since", metavar="ISO8601",
-                        help="with --budget-headroom, scope the whole table to this instant -- how "
+                        help="with --budget-headroom or --propose-ceilings, scope the whole table to this instant -- how "
                              "you ask about the lanes that ran after a metering fix landed. Step rows "
                              "are kept per ROOM (its terminalAt), arrest columns per EVENT (each "
                              "arrest's own WriterUtcTimestamp); the two granularities are printed "
@@ -1203,6 +1356,8 @@ def main(argv):
         return command_emit_fixture(args)
     if args.budget_headroom:
         return command_budget_headroom(args)
+    if args.propose_ceilings:
+        return command_propose_ceilings(args)
     if args.sweep:
         return command_sweep(args)
     parser.print_help()

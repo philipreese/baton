@@ -34,7 +34,7 @@
     "verdict_schema": false,
     "verifies_workspace": true,
     "verify_pixi_task": "gates-quiet",
-    "token_budget": 1200000,
+    "token_budget": { "claude": 600000, "agy": 1200000, "codex": 600000 },
     "max_tool_steps": 610,
     "billed_rate_limit": null,
     "delivers_branch": true,

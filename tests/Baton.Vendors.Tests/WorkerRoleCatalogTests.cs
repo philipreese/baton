@@ -750,14 +750,31 @@ public class WorkerRoleCatalogTests
         Assert.Equal(250_000, budget.ByAdapter["codex"]);
     }
 
+    /// <summary>
+    /// #2034: `implement` is the first role whose per-adapter map carries DIFFERENT values. spec/baton.md
+    /// §3 ("Ceiling rule (#2034)") has the rule that produced 600,000 and why agy alone stays at
+    /// 1,200,000; this pins the three figures so a future re-pin is a visible edit here too.
+    /// </summary>
+    [Fact]
+    public void The_shipped_implement_role_carries_the_2034_per_adapter_ceilings()
+    {
+        using var env = ShippedDefault();
+
+        var budget = Assert.IsType<TokenBudgetSpec.PerAdapter>(WorkerRoleCatalog.For("implement").TokenBudget);
+        Assert.Equal(600_000, budget.ByAdapter["claude"]);
+        Assert.Equal(600_000, budget.ByAdapter["codex"]);
+        Assert.Equal(1_200_000, budget.ByAdapter["agy"]);
+        Assert.Equal(3, budget.ByAdapter.Count);
+    }
+
     /// <summary>#1745: every other shipped role keeps today's single-number shape unchanged.</summary>
     [Fact]
     public void Every_other_shipped_role_keeps_a_single_number_token_budget()
     {
         using var env = ShippedDefault();
 
-        Assert.Equal(1_200_000L, ((TokenBudgetSpec.Fixed)WorkerRoleCatalog.For("implement").TokenBudget!).Value);
         Assert.Equal(150_000L, ((TokenBudgetSpec.Fixed)WorkerRoleCatalog.For("advise").TokenBudget!).Value);
+        Assert.Equal(250_000L, ((TokenBudgetSpec.Fixed)WorkerRoleCatalog.For("consolidate").TokenBudget!).Value);
     }
 
     // #2043: the `consolidate` role. spec/baton.md §9 says what the role is for and what it deliberately
