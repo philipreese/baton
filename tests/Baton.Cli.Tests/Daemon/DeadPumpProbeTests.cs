@@ -126,13 +126,15 @@ public sealed class DeadPumpProbeTests : IDisposable
         await new FlowEventLogReader(Path.Combine(roomDir, BatonPaths.FlowLogFileName))
             .ReadAllAsync(TestContext.Current.CancellationToken);
 
-    private static async Task<string> DescribeOutcomeAsync(string roomDir)
+    private static async Task<FlowState> ProjectAsync(string roomDir)
     {
         var snapshot = await SnapshotBinder.LoadFromFileAsync(
             Path.Combine(roomDir, BatonPaths.SnapshotFileName), TestContext.Current.CancellationToken);
-        var events = await ReadEventsAsync(roomDir);
-        return WorkflowOutcome.Describe(StateProjector.Project(events, snapshot));
+        return StateProjector.Project(await ReadEventsAsync(roomDir), snapshot);
     }
+
+    private static async Task<string> DescribeOutcomeAsync(string roomDir) =>
+        WorkflowOutcome.Describe(await ProjectAsync(roomDir));
 
     [Fact]
     public async Task A_free_lock_over_a_quiet_open_execution_records_the_arrest()
@@ -287,6 +289,13 @@ public sealed class DeadPumpProbeTests : IDisposable
 
         // The arrest is only operator-visible if the room leaves Running. Polarity, not shape.
         Assert.Equal(WorkflowOutcome.Failed, await DescribeOutcomeAsync(roomDir));
+
+        // The reader-level half the ExecutionFailed arm's fleet test already has: `baton status`'s
+        // step line must name the pump, not the quota park the foreclosure settled.
+        var rendered = StatusCommand.FormatStepStatus(
+            Assert.Single((await ProjectAsync(roomDir)).Steps), await ReadEventsAsync(roomDir));
+        Assert.Contains("pump dead", rendered);
+        Assert.DoesNotContain("quota", rendered);
 
         // No second ExecutionFailed piled onto an execution that already settled ExhaustedUntil.
         Assert.Single((await ReadEventsAsync(roomDir)).OfType<FlowEvent.ExecutionFailed>());

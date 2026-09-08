@@ -3859,12 +3859,21 @@ trigger is not registrable by a standard user and is not used (#1770).
   re-read from inside the guard all live on `DeadPumpProbe`'s own doc comments; the operator's threshold
   key is `DaemonSettings.DeadPumpQuietMinutes`, whose default and reason live on that type beside the
   heartbeat cadence they are derived from.
-  - **The readers, and the one that deliberately does not see it.** Both facts are existing
-    vocabulary — no new `FlowEvent`, no new `FailureClassification`, no new `WorkflowOutcome` — so every
-    terminal-fact reader already handles them with no arm added: `StateProjector` →
-    `WorkflowOutcome.DescribeTerminal` (`baton status`), `FleetStatusTool.ProcessRoomAsync`
-    (`fleet_status`, `FleetProjectionWriter`, and therefore the glass), and
-    `tools/room-rate-sweep/sweep.py`, which reads `flow.jsonl` directly. The exception is the **arrest
+  - **The readers, and the two that do not see it.** Both facts are existing vocabulary — no new
+    `FlowEvent`, no new `FailureClassification`, no new `WorkflowOutcome` — so the projection readers
+    already turn the room's *word* with no arm added: `StateProjector` →
+    `WorkflowOutcome.DescribeTerminal` (`baton status`) and `FleetStatusTool.ProcessRoomAsync`
+    (`fleet_status`, `FleetProjectionWriter`, and therefore the glass). The *cause* is a different
+    matter on the quota-parked arm: `StateProjector`'s `StepRetryForeclosed` arm stores no reason (it
+    is shared with `resolve --close`, #1877, and is not widened here), so `LatestFailureReason` keeps
+    the park's own text. `baton status`'s human step line reads the foreclosure's author and cause
+    off the journal event itself (`StatusCommand.FormatStepStatus`, "retry foreclosed by …"); every
+    other reason surface — `--json`'s `failureReason`, `baton run`'s own settle output, the fleet
+    row — still shows the park's reason, and the dead-pump cause is journal-only there.
+    `tools/room-rate-sweep/sweep.py` sees neither fact: it drops any room whose journal has no
+    `executionExited` (a pump killed mid-step never wrote one), keys arrests on `executionArrested`,
+    and has no branch for `stepRetryForeclosed` — the probe's rooms are absent from its accounting
+    before and after the fact lands. The other is the **arrest
     ledger** (`ArrestLedgerProjector`): it is request-sourced by construction — it projects
     `CancellationRequested`/`ExecutionCancelled`/`CancellationRejected` and the two `room.jsonl` shapes,
     all of which answer "who asked for an arrest, and how was it settled". A dead pump filed no request,
