@@ -68,6 +68,31 @@ public sealed class TrustCommandTests
         Assert.Null(ProjectCeilingStore.TryGet(project, ProjectCeilingStore.DefaultPath));
     }
 
+    /// <summary>
+    /// #2076: revoking a source prints one line per inherited entry removed with it — the cascade
+    /// <see cref="ProjectCeilingStore.Revoke"/> defines, seen from the verb's output.
+    /// </summary>
+    [Fact]
+    public async Task ExecuteAsync_Revoke_NamesTheInheritedEntriesRemovedWithTheSource()
+    {
+        using var home = new IsolatedBatonHome();
+        var source = Path.Combine(Path.GetTempPath(), $"trust-cmd-cascade-{Guid.NewGuid():N}");
+        var derived = Path.Combine(source + "-w1", "lane");
+        ProjectCeilingStore.Set(source, ProjectCeiling.Unrestricted, ProjectCeilingStore.DefaultPath);
+        ProjectCeilingStore.Set(
+            derived,
+            ProjectCeiling.Unrestricted with { InheritedFrom = ProjectCeilingStore.CanonicalKey(source) },
+            ProjectCeilingStore.DefaultPath);
+        var output = new StringWriter();
+
+        var exitCode = await TrustCommand.ExecuteAsync(
+            new TrustOptions(TrustMode.Revoke, source, null), output, TestContext.Current.CancellationToken);
+
+        Assert.Equal(0, exitCode);
+        Assert.Contains($"Also revoked '{ProjectCeilingStore.CanonicalKey(derived)}', which had inherited it.", output.ToString(), StringComparison.Ordinal);
+        Assert.Null(ProjectCeilingStore.TryGet(derived, ProjectCeilingStore.DefaultPath));
+    }
+
     [Fact]
     public async Task ExecuteAsync_Revoke_NeverTrusted_SaysNothingToRevoke()
     {

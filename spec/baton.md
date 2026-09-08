@@ -4693,8 +4693,14 @@ with one narrowing since #2076, ahead of the gate rather than inside it: `baton 
 workspace whose **repository identity** (`RepositoryIdentity`) matches an already-trusted path inherit
 that path's ceiling (`InheritedProjectCeiling`, which has the derivation, the narrowest-wins rule and
 the cost), so a worktree or clone of a trusted repository is trusted before the gate reads the store
-and one whose repository is trusted nowhere still refuses exactly as above;
-otherwise the effective grant is `ceiling.Cap(roleGrant)` — each category survives only when both the
+and one whose repository is trusted nowhere still refuses exactly as above. An inherited entry is a
+**one-time persisted snapshot** of its source, taken at the first dispatch or `queue add --issue` for
+that workspace and never re-evaluated: re-trusting the source narrower later does not re-narrow its
+copies, and the operator narrows those by hand (`trust --list` marks each `(inherited from <path>)`).
+**Revoke cascades**: `baton trust <path> --revoke` removes every entry whose `InheritedFrom` names it,
+transitively, and names each one it removed — a copy that outlived the decision it was derived from
+would keep granting what the operator just withdrew, which is the wrong default for a permission
+record. Otherwise the effective grant is `ceiling.Cap(roleGrant)` — each category survives only when both the
 role's own grant and the ceiling carry it, re-checked against
 `PermissionGrant.CategoriesDefeatedByTheShell` so a coherent role grant that becomes incoherent once
 narrowed (writes capped away while an unscoped shell stays granted) still refuses rather than shipping
@@ -6263,12 +6269,21 @@ poller keep running and live lanes are untouched, the same "work already running
 posture the runway hold (§7) takes.
 
 `--issue <n>` provisions at **add** time, not launch time: `gh issue develop <n> --name <n>-lane`,
-`git worktree add <root>/w<n> <n>-lane`, then the workspace is trusted at the `all` ceiling (§9). Add
-time because an operator queueing eight items at 23:00 should learn immediately that the issue does
-not exist, and because it keeps `gh`/`git` spawning in the CLI rather than in the background host.
-`<root>` — which the issue left undefined — is `Queue.WorktreeRoot`, defaulting to **the parent
-directory of the checkout the verb was invoked from**, which is the sibling-repos layout the runner
-assumed. The `all` ceiling is a real widening and is stated rather than left to be inferred.
+`git worktree add <root>/w<n> <n>-lane`, then the workspace is trusted (§9) — **at the ceiling its
+repository already carries**, inherited through `InheritedProjectCeiling` exactly as `baton dispatch`
+inherits (#2076), and at `all` only as the fallback for a repository no path of which is trusted, which
+is the verb's pre-#2076 behaviour kept for the checkout an operator has never run `baton trust`
+against. Either way the add says which on its own output: the inheritance line names the source path,
+and the fallback prints `workspace <path>: no trusted repository to inherit from; recorded ceiling all`,
+because the fallback is a real widening and a silent one is the shape the announcement exists to rule
+out. The fallback is **not** taken when the identity probe answers nothing (git missing, timed out, or
+exited non-zero): that add is refused with `ProjectNotTrustedException` naming the probe failure, since
+"git said nothing" is not "no repository is trusted" and stamping `all` on it would let a transient
+failure widen a deliberately narrowed ceiling. Add time because an operator queueing eight items at
+23:00 should learn immediately that the issue does not exist, and because it keeps `gh`/`git` spawning
+in the CLI rather than in the background host. `<root>` — which the issue left undefined — is
+`Queue.WorktreeRoot`, defaulting to **the parent directory of the checkout the verb was invoked from**,
+which is the sibling-repos layout the runner assumed.
 
 `import <file>` reads the runner's own shape (`{tag, role, model, effort, timeout, workspace|issue,
 adapter, maxToolSteps, tokenBudget, overrideRunway, reason, pinModel, external}`) for Q7's cutover. A

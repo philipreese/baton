@@ -22,8 +22,9 @@ public enum QueueVerb
 /// <param name="SpecFilePath">The operator's spec file, copied into baton's own specs directory at add time.</param>
 /// <param name="Issue">
 /// <c>--issue &lt;n&gt;</c>: provision a worktree from this GitHub issue. See
-/// <see cref="IssueWorktreeProvisioner"/> for when that happens and why then. Mutually exclusive with
-/// <paramref name="WorkspaceDirectory"/>.
+/// <see cref="IssueWorktreeProvisioner"/> for when that happens and why then, and for the ceiling the
+/// worktree is trusted at — its repository's own, inherited, with <c>all</c> only as the announced
+/// fallback. Mutually exclusive with <paramref name="WorkspaceDirectory"/>.
 /// </param>
 /// <param name="WorkspaceDirectory">An already-existing directory the worker runs in. Mutually exclusive with <paramref name="Issue"/>.</param>
 /// <param name="ScopeClass">The tier table's scope class; validated against <c>QueueTierTable.ScopeClasses</c> by the parser.</param>

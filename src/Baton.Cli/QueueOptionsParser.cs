@@ -16,7 +16,9 @@ public static class QueueOptionsParser
         "[--lifecycle] [--scope engine|tooling|docs] [--adapter <a>] [--model <m>] [--effort <e>] " +
         "[--timeout <minutes>] " +
         "[--max-tool-steps <n>] [--token-budget <n>] [--override-runway <reason>] [--reason <why>] | " +
-        "baton queue list | baton queue hold | baton queue resume | baton queue import <file>";
+        "baton queue list | baton queue hold | baton queue resume | baton queue import <file>. " +
+        "A worktree provisioned by --issue inherits its repository's recorded ceiling; " +
+        "when no path in that repository is trusted it is recorded at 'all', and the add says which.";
 
     public static QueueOptions Parse(IReadOnlyList<string> args)
     {

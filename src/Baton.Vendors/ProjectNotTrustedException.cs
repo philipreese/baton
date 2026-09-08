@@ -26,4 +26,24 @@ public sealed class ProjectNotTrustedException : BatonFlowException
             $"baton trust \"{projectPath}\" --ceiling all (or a comma-separated subset of " +
             "ReadFiles,WriteFiles,RunShellCommands,NetworkAccess), then re-run the dispatch.";
     }
+
+    /// <summary>
+    /// The provisioning-side refusal (#2076 re-review): a workspace whose ceiling would have been
+    /// inherited, except that the repository-identity probe answered nothing. Refuses rather than
+    /// taking the <c>all</c> fallback — spec/baton.md §13 states why the two are not the same case.
+    /// </summary>
+    /// <param name="projectPath">The workspace that was being trusted.</param>
+    /// <param name="probeFailure">What the probe could not do, in the caller's own words.</param>
+    public ProjectNotTrustedException(string projectPath, string probeFailure)
+        : base(
+            $"'{projectPath}' was not given a permission ceiling: {probeFailure} A ceiling that would " +
+            "have been inherited cannot be, and the unrestricted fallback is refused rather than taken " +
+            "on a probe failure, so the workspace fails closed.")
+    {
+        ProjectPath = projectPath;
+        TryInvocation =
+            $"check that 'git' is on PATH and that '{projectPath}' is a git checkout, then retry — or " +
+            $"baton trust \"{projectPath}\" --ceiling all (or a comma-separated subset of " +
+            "ReadFiles,WriteFiles,RunShellCommands,NetworkAccess) to record one by hand.";
+    }
 }

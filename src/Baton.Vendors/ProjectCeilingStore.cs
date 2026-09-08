@@ -122,8 +122,21 @@ public static class ProjectCeilingStore
         });
     }
 
-    /// <summary>Removes <paramref name="projectPath"/>'s ceiling. Returns false when none was recorded.</summary>
-    public static bool Revoke(string projectPath, string path)
+    /// <summary>
+    /// Removes <paramref name="projectPath"/>'s ceiling, and every entry whose
+    /// <see cref="ProjectCeiling.InheritedFrom"/> names it — transitively, so a chain of copies falls
+    /// with its root. <see cref="ProjectCeilingRevocation.Revoked"/> is false when none was recorded
+    /// for <paramref name="projectPath"/> itself, and then nothing else is touched either.
+    /// </summary>
+    /// <remarks>
+    /// <b>Revoke cascades (#2076 re-review).</b> An inherited entry is a one-time snapshot of its
+    /// source, written by <c>Baton.Cli.InheritedProjectCeiling</c> without an operator typing anything.
+    /// Left in place, it would keep granting what the operator has just withdrawn, discoverable only by
+    /// reading <c>baton trust --list</c> for the provenance clause — the wrong default for a permission
+    /// record. The cascade is one direction only: a source later NARROWED (re-trusted, not revoked) does
+    /// not re-narrow its copies, and spec/baton.md §9 states that gap.
+    /// </remarks>
+    public static ProjectCeilingRevocation Revoke(string projectPath, string path)
     {
         ArgumentException.ThrowIfNullOrEmpty(projectPath);
 
@@ -132,11 +145,32 @@ public static class ProjectCeilingStore
             var ceilings = new Dictionary<string, ProjectCeiling>(Load(path), BatonPaths.RecordKeyComparer);
             if (!ceilings.Remove(CanonicalKey(projectPath)))
             {
-                return false;
+                return new ProjectCeilingRevocation(Revoked: false, CascadedPaths: []);
+            }
+
+            var cascaded = new List<string>();
+            var sources = new Queue<string>([CanonicalKey(projectPath)]);
+            while (sources.TryDequeue(out var source))
+            {
+                foreach (var derived in ceilings
+                    .Where(pair => pair.Value.InheritedFrom is { Length: > 0 } origin
+                        && BatonPaths.RecordKeyComparer.Equals(CanonicalKey(origin), source))
+                    .Select(pair => pair.Key)
+                    .ToList())
+                {
+                    ceilings.Remove(derived);
+                    cascaded.Add(derived);
+                    sources.Enqueue(derived);
+                }
             }
 
             Save(ceilings, path);
-            return true;
+            return new ProjectCeilingRevocation(Revoked: true, CascadedPaths: cascaded);
         });
     }
 }
+
+/// <summary>What <see cref="ProjectCeilingStore.Revoke"/> removed.</summary>
+/// <param name="Revoked">Whether the named path had an entry to remove.</param>
+/// <param name="CascadedPaths">The canonical paths of the inherited entries removed with it, in removal order — empty when <paramref name="Revoked"/> is false.</param>
+public sealed record ProjectCeilingRevocation(bool Revoked, IReadOnlyList<string> CascadedPaths);

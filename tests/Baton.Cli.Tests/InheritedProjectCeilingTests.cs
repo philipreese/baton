@@ -113,11 +113,19 @@ public sealed class InheritedProjectCeilingTests : IDisposable
         Assert.Null(ProjectCeilingStore.TryGet(stranger, Store));
     }
 
+    /// <summary>
+    /// Revokes the SOURCE only. The earlier shape of this arm revoked the derived entry by hand too,
+    /// which made the "nothing re-inherited" assertion pass whether or not the derived entry had
+    /// survived — it could not discriminate. What is asserted now is what revoke actually does to the
+    /// copy: it goes with its source (the cascade <see cref="ProjectCeilingStore.Revoke"/> states), a
+    /// copy of the copy goes too, an unrelated entry stays, and nothing is re-inherited afterwards.
+    /// </summary>
     [Fact]
-    public async Task A_revoked_parent_does_not_propagate()
+    public async Task Revoking_the_source_removes_its_inherited_entries_and_nothing_re_inherits()
     {
         var main = MakeDirectory("baton");
         var worktree = MakeDirectory("w2076");
+        var grandchild = MakeDirectory("w2077");
         var unrelated = MakeDirectory("basis");
         var commonDir = Path.Combine(main, ".git");
         ProjectCeilingStore.Set(main, ProjectCeiling.Unrestricted, Store);
@@ -134,15 +142,51 @@ public sealed class InheritedProjectCeilingTests : IDisposable
         // refusal below is the revoke, not a fixture that never matched anything.
         Assert.NotNull(await InheritedProjectCeiling.TryRecordAsync(
             worktree, Store, probe, TestContext.Current.CancellationToken));
+        // A second-generation copy, recorded as TryRecordAsync would when the worktree was the
+        // narrowest match: InheritedFrom names the worktree, not the root.
+        ProjectCeilingStore.Set(
+            grandchild, ProjectCeiling.Unrestricted with { InheritedFrom = ProjectCeilingStore.CanonicalKey(worktree) }, Store);
 
-        Assert.True(ProjectCeilingStore.Revoke(main, Store));
-        Assert.True(ProjectCeilingStore.Revoke(worktree, Store));
+        var revocation = ProjectCeilingStore.Revoke(main, Store);
+
+        Assert.True(revocation.Revoked);
+        Assert.Equal(
+            [ProjectCeilingStore.CanonicalKey(worktree), ProjectCeilingStore.CanonicalKey(grandchild)],
+            revocation.CascadedPaths);
+        Assert.Null(ProjectCeilingStore.TryGet(worktree, Store));
+        Assert.Null(ProjectCeilingStore.TryGet(grandchild, Store));
+        Assert.NotNull(ProjectCeilingStore.TryGet(unrelated, Store));
 
         var afterRevoke = await InheritedProjectCeiling.TryRecordAsync(
             worktree, Store, probe, TestContext.Current.CancellationToken);
 
         Assert.Null(afterRevoke);
         Assert.Null(ProjectCeilingStore.TryGet(worktree, Store));
+    }
+
+    /// <summary>
+    /// The two <see langword="null"/>s <see cref="InheritedProjectCeiling.TryRecordAsync"/> collapses
+    /// are told apart by <see cref="InheritedProjectCeiling.TryInheritAsync"/>: a probe that answers
+    /// nothing is <see cref="InheritanceOutcome.NoIdentity"/>, an identity no trusted path shares is
+    /// <see cref="InheritanceOutcome.NoTrustedSource"/>. Both against an EMPTY store, which used to
+    /// short-circuit before the probe and so could not have told them apart at all.
+    /// </summary>
+    [Fact]
+    public async Task A_probe_that_answers_nothing_is_reported_apart_from_no_trusted_source()
+    {
+        var stranger = MakeDirectory("some-other-project");
+
+        var noIdentity = await InheritedProjectCeiling.TryInheritAsync(
+            stranger, Store, ProbeOf(new()), TestContext.Current.CancellationToken);
+        var noSource = await InheritedProjectCeiling.TryInheritAsync(
+            stranger, Store, ProbeOf(new() { [stranger] = ("https://github.com/philipreese/basis", null) }),
+            TestContext.Current.CancellationToken);
+
+        Assert.Equal(InheritanceOutcome.NoIdentity, noIdentity.Outcome);
+        Assert.Equal(InheritanceOutcome.NoTrustedSource, noSource.Outcome);
+        Assert.Null(noIdentity.Fact);
+        Assert.Null(noSource.Fact);
+        Assert.Null(ProjectCeilingStore.TryGet(stranger, Store));
     }
 
     [Fact]

@@ -58,10 +58,21 @@ public static class TrustCommand
 
     private static int Revoke(TrustOptions options, TextWriter output)
     {
-        var revoked = ProjectCeilingStore.Revoke(options.ProjectPath!, ProjectCeilingStore.DefaultPath);
-        output.WriteLine(revoked
-            ? $"Revoked the ceiling for '{options.ProjectPath}'."
-            : $"No ceiling was recorded for '{options.ProjectPath}' — nothing to revoke.");
+        var revocation = ProjectCeilingStore.Revoke(options.ProjectPath!, ProjectCeilingStore.DefaultPath);
+        if (!revocation.Revoked)
+        {
+            output.WriteLine($"No ceiling was recorded for '{options.ProjectPath}' — nothing to revoke.");
+            return 0;
+        }
+
+        output.WriteLine($"Revoked the ceiling for '{options.ProjectPath}'.");
+        // #2076: the entries that were copied from this one go with it (ProjectCeilingStore.Revoke says
+        // why), and each is named so the operator learns which worktrees just lost their ceiling.
+        foreach (var derived in revocation.CascadedPaths)
+        {
+            output.WriteLine($"Also revoked '{derived}', which had inherited it.");
+        }
+
         return 0;
     }
 

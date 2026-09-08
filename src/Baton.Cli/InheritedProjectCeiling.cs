@@ -15,7 +15,17 @@ namespace Baton.Cli;
 /// "never ask in headless" (spec/baton.md §9) is untouched, and a workspace whose repository has no
 /// recorded ceiling anywhere still reaches <c>ProjectCeilingGate</c> with nothing to find and refuses.
 /// A revoked parent propagates nothing for the same reason: <c>baton trust --revoke</c> removes the
-/// entry, and what is not in the store cannot be a source.
+/// entry, and what is not in the store cannot be a source — and it removes every entry that was copied
+/// FROM that source too (<see cref="ProjectCeilingStore.Revoke"/>), because the copy is a one-time
+/// snapshot that would otherwise outlive the decision it was derived from.
+/// </para>
+/// <para>
+/// <b>A probe that answers nothing is not "no match".</b> <see cref="TryInheritAsync"/> reports the two
+/// apart (<see cref="InheritanceOutcome.NoIdentity"/> versus
+/// <see cref="InheritanceOutcome.NoTrustedSource"/>) because a caller with a fallback of its own —
+/// <c>queue add --issue</c>'s <c>all</c> — must not take it on a git that is missing, timed out, or
+/// exited non-zero: that is the one path on which a transient failure would widen a ceiling the
+/// operator deliberately narrowed, and it fails closed instead.
 /// </para>
 /// <para>
 /// <b>Repository identity, not path shape</b> — <see cref="RepositoryIdentity"/>, the same resolver the
@@ -65,7 +75,20 @@ internal static class InheritedProjectCeiling
     /// <summary>
     /// Records the ceiling <paramref name="workspacePath"/> inherits from an already-trusted path in the
     /// same repository, and returns the one line the caller prints — or <see langword="null"/> when
-    /// nothing was inherited and nothing was written.
+    /// nothing was inherited and nothing was written. The dispatch-side shape: a caller that has no
+    /// fallback of its own and needs no more than the line, because <c>ProjectCeilingGate</c> refuses
+    /// behind it either way. <see cref="TryInheritAsync"/> is the same lookup with the outcome kept.
+    /// </summary>
+    public static async Task<string?> TryRecordAsync(
+        string workspacePath,
+        string storePath,
+        Func<string, CancellationToken, Task<RepositoryIdentity?>> probe,
+        CancellationToken cancellationToken = default) =>
+        (await TryInheritAsync(workspacePath, storePath, probe, cancellationToken).ConfigureAwait(false)).Fact;
+
+    /// <summary>
+    /// Records the ceiling <paramref name="workspacePath"/> inherits from an already-trusted path in the
+    /// same repository, and says which of the four ways the lookup ended.
     /// </summary>
     /// <param name="workspacePath">The workspace a dispatch is about to run in.</param>
     /// <param name="storePath">The ceiling store to read and write — <see cref="ProjectCeilingStore.DefaultPath"/> in production.</param>
@@ -76,11 +99,11 @@ internal static class InheritedProjectCeiling
     /// exercisable against a temp store with no repository on disk and no process spawned.
     /// </param>
     /// <returns>
-    /// The fact line for the dispatch's own output, or <see langword="null"/> when the workspace was
-    /// already trusted, has no repository identity, or matches no trusted path. Silence is the normal
-    /// case: nothing is said when nothing was decided.
+    /// <see cref="InheritanceOutcome.Inherited"/> with the fact line for the caller's own output; any other
+    /// outcome with no line, because nothing was written. Silence is the normal case: nothing is said
+    /// when nothing was decided.
     /// </returns>
-    public static async Task<string?> TryRecordAsync(
+    public static async Task<InheritanceResult> TryInheritAsync(
         string workspacePath,
         string storePath,
         Func<string, CancellationToken, Task<RepositoryIdentity?>> probe,
@@ -91,22 +114,23 @@ internal static class InheritedProjectCeiling
 
         if (string.IsNullOrWhiteSpace(workspacePath))
         {
-            return null;
+            return new InheritanceResult(InheritanceOutcome.NoIdentity);
         }
 
         var ceilings = ProjectCeilingStore.Load(storePath);
         var key = ProjectCeilingStore.CanonicalKey(workspacePath);
 
-        // Already trusted, or nothing to inherit from: both exit before the probe, so the common case
-        // (a repeat lane in a workspace that already has an entry) spawns no git at all.
-        if (ceilings.Count == 0 || ceilings.ContainsKey(key))
+        // Already trusted exits before the probe, so the common case (a repeat lane in a workspace that
+        // already has an entry) spawns no git at all. An EMPTY store does not short-circuit: the probe
+        // has to run so that "git answered nothing" is reported as that, not as "no trusted source".
+        if (ceilings.ContainsKey(key))
         {
-            return null;
+            return new InheritanceResult(InheritanceOutcome.AlreadyTrusted);
         }
 
         if (await probe(workspacePath, cancellationToken).ConfigureAwait(false) is not { } identity)
         {
-            return null;
+            return new InheritanceResult(InheritanceOutcome.NoIdentity);
         }
 
         string? sourcePath = null;
@@ -133,7 +157,7 @@ internal static class InheritedProjectCeiling
 
         if (source is null || sourcePath is null)
         {
-            return null;
+            return new InheritanceResult(InheritanceOutcome.NoTrustedSource);
         }
 
         // InheritedFrom is overwritten rather than carried through: a chain of inheritances names the
@@ -141,8 +165,10 @@ internal static class InheritedProjectCeiling
         var inherited = source with { InheritedFrom = sourcePath };
         ProjectCeilingStore.Set(workspacePath, inherited, storePath);
 
-        return $"Project ceiling: '{key}' inherited '{inherited.Describe()}' from '{sourcePath}' "
-            + $"(same repository: {identity.Value}) — no 'baton trust' was needed.";
+        return new InheritanceResult(
+            InheritanceOutcome.Inherited,
+            $"Project ceiling: '{key}' inherited '{inherited.Describe()}' from '{sourcePath}' "
+            + $"(same repository: {identity.Value}) — no 'baton trust' was needed.");
     }
 
     /// <summary>How many of the four categories a ceiling leaves open — the "narrowest wins" ordering.</summary>
@@ -152,3 +178,23 @@ internal static class InheritedProjectCeiling
         + (ceiling.RunShellCommands ? 1 : 0)
         + (ceiling.NetworkAccess ? 1 : 0);
 }
+
+/// <summary>How <see cref="InheritedProjectCeiling.TryInheritAsync"/> ended. Only <see cref="Inherited"/> wrote anything.</summary>
+internal enum InheritanceOutcome
+{
+    /// <summary>The workspace already carries an entry; nothing was probed and nothing was touched.</summary>
+    AlreadyTrusted,
+
+    /// <summary>The probe yielded no identity — git missing, timed out, exited non-zero, or no path to probe. A caller with a fallback must fail closed here, not take it.</summary>
+    NoIdentity,
+
+    /// <summary>The workspace has an identity, and no trusted path shares it.</summary>
+    NoTrustedSource,
+
+    /// <summary>A ceiling was copied and recorded; <see cref="InheritanceResult.Fact"/> is the line to print.</summary>
+    Inherited,
+}
+
+/// <param name="Outcome">Which way the lookup ended.</param>
+/// <param name="Fact">The line for the caller's output — set only for <see cref="InheritanceOutcome.Inherited"/>.</param>
+internal sealed record InheritanceResult(InheritanceOutcome Outcome, string? Fact = null);
