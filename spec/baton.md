@@ -2166,7 +2166,7 @@ populations disagree, and a single cross-vendor scalar cannot be sized from eith
   placeholder columns and read against the terminal whole-tree line (#1706's table above) they are
   **884,568 and 294,769**. Applying "2× the higher" to the corrected pair would give ~1,769,000, not
   1,200,000. On this population 1,200,000 false-arrests nothing: 884,568 sits under it with ~26% margin
-  (`TokenBudgetReplayTests.HONEST_neither_delivered_claude_room_arrests_at_the_shipped_implement_budget_live_or_terminal`),
+  (`TokenBudgetReplayTests.HONEST_neither_delivered_claude_room_arrests_at_the_pre_2034_implement_budget_live_or_terminal`),
   making the shipped value **~1.36× the higher corrected normal room** — TIGHTER than the "2×" the old
   text claimed, not looser. Tighter in intent than in effect, since what a live claude budget is
   actually compared against is the floor, not these corrected figures (see the effective-ceiling
@@ -2222,22 +2222,31 @@ the shape is exercised on a real shipped role with no behavioural change, not a 
 calibration. A future issue that DOES re-derive `implement`'s value now has a shape to put it in.
 
 **Ceiling rule (#2034, operator ruling 2026-09-08): `ceiling = 3 × rolling p95 of live billed tokens
-per adapter/role over the last 14 days, floored at 400,000`.** This is the value decision the two
+per adapter/step id over the last 14 days, floored at 400,000`.** This is the value decision the two
 paragraphs above left open, and it is stated here once. "Live billed tokens" is `liveBilledTokens` on
 the room's settled `terminal.json` — the Σ `TokenBudgetMonitor` actually arrested on, never the
 post-hoc fold — because a ceiling sized from a quantity no monitor compares to is sized for nothing.
-The p95 is per (adapter, role), over rooms whose `terminalAt` falls inside the window; 3× is the
-margin between "the tail lane finishes" and "a runaway is caught", and the 400,000 floor keeps a
+The p95 is per (adapter, step id), over rooms whose `terminalAt` falls inside the window; dispatch
+rooms use the role id as the step id, so this is the same population over a dispatch-only corpus
+(the sweep ignores `--role-prefix`, so verify that corpus before using a row to re-pin a role).
+A proposal requires n >= 5 steps with live billed figures; below that minimum sample, withhold it.
+3× is the margin between "the tail lane finishes" and "a runaway is caught", and the 400,000 floor keeps a
 quiet fortnight from ratcheting a ceiling down to a number a single ordinary lane crosses. **Re-derive
 it by running `python tools/room-rate-sweep/sweep.py --propose-ceilings`** (which applies exactly this
 rule, defaulting the window to the last 14 days, and prints the proposal beside the pinned catalog
 value), and record the numbers on the issue that moves a value; a re-pin is an edit to
 `WorkerRoles.json` plus `WorkerRoleCatalogTests`'s pin of it, never a change to the rule here.
+Today's 600,000 operator pin uses `--since 2026-09-07T09:55:46Z`, the post-#2022 derivation window,
+because pre-#2022 codex rows are mis-metered; the default 14-day window proposes higher today
+(claude/implement 772,206, n=166). The operator pin governs when it differs from a proposal; a future
+re-pin uses the rolling 14-day window clipped to that meter-fix cutoff (pass the later start via
+`--since`) and records the proposal and any operator rounding on the issue before editing the pin.
 *What produced today's values (#2034 head, measured 2026-09-08 05:25 ET over every room settled
 after #2022's codex meter fix): codex/implement live p95 181,492 (n=6) and claude/implement live p95
-201,858 (n=52), both against a 1,200,000 ceiling, so both ~15–17% of it; 3× either rounds to
-600,000, and `implement`'s `token_budget` is now the map `{"claude": 600000, "agy": 1200000,
-"codex": 600000}`.* **agy stays at 1,200,000 on purpose:** its window holds one sample (736,040, the
+201,858 (n=52), both against a 1,200,000 ceiling, so both ~15–17% of it; their exact 3× proposals
+are 544,476 and 605,574, operator-rounded to 600,000, and `implement`'s `token_budget` is now the
+map `{"claude": 600000, "agy": 1200000, "codex": 600000}`.* **agy stays at 1,200,000 on purpose:**
+its window holds one sample (736,040, the
 S7 rerun, itself a budget arrest), and one sample is not a distribution — the rule is applied to a
 p95, and a p95 of one point is that point. It is re-derived when agy `implement` has a population,
 not before. `WorkerRoles.json` is plain JSON and carries no comments, so this paragraph is where that

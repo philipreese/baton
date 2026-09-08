@@ -117,9 +117,10 @@ CEILING_MIXED = "mixed"
 
 # spec/baton.md SS3 "Ceiling rule (#2034)": ceiling = PROPOSAL_FACTOR x the live p95 over the last
 # PROPOSAL_WINDOW, never below PROPOSAL_FLOOR. The spec states the rule and why; these are its
-# analysis constants, and `propose_ceiling` is the only place they are applied.
+# analysis constants, applied by the proposal calculation, sample guard, and command window.
 PROPOSAL_FACTOR = 3
 PROPOSAL_FLOOR = 400000
+PROPOSAL_MINIMUM_SAMPLE = 5
 PROPOSAL_WINDOW = timedelta(days=14)
 
 
@@ -826,13 +827,13 @@ def propose_ceiling_rows(steps, roles):
     choice from `budget_headroom_rows`, and for the opposite reason: headroom asks what ceiling those
     lanes actually ran under, a re-pin asks what value the next edit to WorkerRoles.json replaces.
     `pinnedFrom` still names the source so the two tables cannot be misread as one. `n` is the sample
-    count the p95 stands on, printed because the rule wants a distribution and a single-sample p95 is
-    just that sample -- why #2034 left agy/implement (n=1) pinned where it was.
+    count the p95 stands on; proposals and deltas are withheld below the rule's minimum sample.
     """
     rows = []
     for row in budget_headroom_rows(steps, [], roles):
         pinned = role_ceiling(roles.get(row["step"]), row["adapter"])
-        proposed = propose_ceiling(row["liveP95"])
+        proposed = (propose_ceiling(row["liveP95"])
+                    if row["measured"] >= PROPOSAL_MINIMUM_SAMPLE else None)
         rows.append({
             "adapter": row["adapter"],
             "step": row["step"],
@@ -848,7 +849,7 @@ def propose_ceiling_rows(steps, roles):
 
 
 def command_propose_ceilings(args):
-    """The #2034 re-pin command: one table, the rule's output per adapter/role beside today's pin."""
+    """The #2034 re-pin command: one table, the rule's output per adapter/step beside today's pin."""
     with open(args.roles, encoding="utf-8") as handle:
         roles = {entry["id"]: entry for entry in json.load(handle)}
     since = _parse_time(args.since) if args.since else datetime.now(tz=timezone.utc) - PROPOSAL_WINDOW
@@ -861,16 +862,18 @@ def command_propose_ceilings(args):
         _print_corpus_coverage(skipped)
         return 0
     header = ("adapter/step", "n", "live p95", "proposed", "pinned", "from", "delta")
-    print("%-26s %4s %10s %10s %10s %-8s %10s" % header)
+    print("%-26s %4s %10s %20s %10s %-8s %10s" % header)
     for row in rows:
-        print("%-26s %4d %10s %10s %10s %-8s %10s" % (
+        print("%-26s %4d %10s %20s %10s %-8s %10s" % (
             "%s/%s" % (row["adapter"], row["step"]), row["measured"], _cell(row["liveP95"]),
-            _cell(row["proposed"]), _cell(row["pinned"]), row["pinnedFrom"], _cell(row["delta"])))
+            ("below minimum sample" if row["measured"] < PROPOSAL_MINIMUM_SAMPLE
+             else _cell(row["proposed"])),
+            _cell(row["pinned"]), row["pinnedFrom"], _cell(row["delta"])))
     print("\n`pinned` is today's %s re-resolved for that adapter -- the value a re-pin edits -- not the "
           "figure that armed those lanes (--budget-headroom has that). `n` is the live-billed steps "
-          "the p95 stands on: a proposal off one sample is not a distribution, and #2034 left such a "
-          "row pinned rather than moved. A proposal is never printed for a row with no live figures."
-          % os.path.basename(args.roles))
+          "the p95 stands on: proposals and deltas are withheld below n=%d, including rows with no "
+          "live figures."
+          % (os.path.basename(args.roles), PROPOSAL_MINIMUM_SAMPLE))
     _print_corpus_coverage(skipped)
     return 0
 
@@ -1125,10 +1128,9 @@ def _selftest_ceiling_prefers_the_figure_that_actually_armed_the_monitor():
 
 def _selftest_propose_ceilings_applies_the_rule_against_a_fixture_ledger():
     """#2034: `--propose-ceilings` prints `max(floor, 3 x live p95)` beside today's catalog pin, per
-    adapter/role, over a fixture ledger walked through the SAME calls the command makes (settled_steps
-    -> propose_ceiling_rows), so a command that forgot the walk or the window could not pass.
+    adapter/step, over a fixture ledger, including the command's default and explicit windows.
 
-    Four arms, each discriminating something the others do not:
+    Arms, each discriminating something the others do not:
       * the FACTOR arm -- twenty claude/implement rooms whose p95 is 200,000 must propose 600,000 (3x),
         not 200,000 (a resolver printing the p95 itself) and not 400,000 (the floor applied wrongly);
       * the FLOOR arm -- codex/implement at a p95 of 50,000 must propose 400,000, never 150,000;
@@ -1137,9 +1139,15 @@ def _selftest_propose_ceilings_applies_the_rule_against_a_fixture_ledger():
       * the PIN arm -- `pinned` is the CATALOG's per-adapter figure (claude 600,000, agy 1,200,000),
         not the 999,999 the rooms' own bindings.json carried, and the delta is proposal minus pin.
     The control is the window: the same walk with a `--since` after every room settles yields no rows.
+    MINIMUM checks n=1 and n=4 are withheld, while FLOOR checks n=5 is enough. WINDOW runs the
+    command with a fixed clock: two-day-old rooms count, twenty-day-old rooms do not.
     """
+    import contextlib
+    import io
     import shutil
     import tempfile
+    from types import SimpleNamespace
+    from unittest.mock import patch
 
     root = tempfile.mkdtemp()
     try:
@@ -1161,6 +1169,8 @@ def _selftest_propose_ceilings_applies_the_rule_against_a_fixture_ledger():
         room("claude-19", "claude", 200000)
         room("codex-0", "codex", 50000)
         room("codex-1", "codex", 40000)
+        for i in range(2, 5):
+            room("codex-%d" % i, "codex", 40000)
         room("agy-0", "agy", None)
 
         roles = {"implement": {"token_budget": {"claude": 600000, "agy": 1200000, "codex": 600000}}}
@@ -1187,6 +1197,41 @@ def _selftest_propose_ceilings_applies_the_rule_against_a_fixture_ledger():
         steps, _skipped = settled_steps(root, _parse_time("2026-09-07T00:00:00Z"))
         assert propose_ceiling_rows(steps, roles) == [], (
             "control: a window after every room settled proposes nothing")
+
+        for i in range(4):
+            room("agy-live-%d" % i, "agy", 736040)
+            if i in (0, 3):
+                steps, _skipped = settled_steps(root, None)
+                agy = next(r for r in propose_ceiling_rows(steps, roles) if r["adapter"] == "agy")
+                assert (agy["measured"], agy["proposed"], agy["delta"]) == (i + 1, None, None), (
+                    "MINIMUM: thin samples have no proposal or delta -- %r" % agy)
+
+        room("claude-old", "claude", 9000000, "2026-08-19T00:00:00Z")
+        roles_path = os.path.join(root, "roles.json")
+        with open(roles_path, "w", encoding="utf-8") as handle:
+            json.dump([dict(id=key, **value) for key, value in roles.items()], handle)
+
+        class FixedDateTime(datetime):
+            @classmethod
+            def now(cls, tz=None):
+                return cls(2026, 9, 8, tzinfo=timezone.utc)
+
+        assert PROPOSAL_WINDOW == timedelta(days=14), "WINDOW: the default is fourteen days"
+        with patch.dict(command_propose_ceilings.__globals__, ROOMS=root, datetime=FixedDateTime):
+            output = io.StringIO()
+            with contextlib.redirect_stdout(output):
+                assert command_propose_ceilings(SimpleNamespace(roles=roles_path, since=None)) == 0
+            printed = output.getvalue()
+            assert "2026-08-25T00:00:00+00:00" in printed, printed
+            claude_line = next(line for line in printed.splitlines() if line.startswith("claude/implement"))
+            assert claude_line.split()[1:4] == ["20", "200000", "600000"], printed
+            agy_line = next(line for line in printed.splitlines() if line.startswith("agy/implement"))
+            assert agy_line.split()[1] == "4" and "below minimum sample" in agy_line, printed
+            output = io.StringIO()
+            with contextlib.redirect_stdout(output):
+                assert command_propose_ceilings(SimpleNamespace(
+                    roles=roles_path, since="2026-09-07T00:00:00Z")) == 0
+            assert "no settled steps in the window" in output.getvalue(), output.getvalue()
     finally:
         shutil.rmtree(root, ignore_errors=True)
 
