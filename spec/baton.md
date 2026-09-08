@@ -593,8 +593,10 @@ live pump answered the request inside the window; the pump recorded the settle a
 kill; the target settled while this command waited for `flow.lock`; this command wrote the terminal
 fact itself. The intent is readable: `ArrestLedgerProjector` lists it (`baton status
 --json`'s `arrests`, `fleet_status`) — merged into the flow-side entry when the pump answered (#2104:
-the operator's reason and request time win, the pump's own stamp is the entry's `deliveredAt`),
-its own entry otherwise, `Delivered` once an arrest-shaped terminal fact lands at or after it.
+the operator's reason and request time win, the pump's own `CancellationRequested` stamp is the
+entry's `forwardedAt` — the forwarding into Flow, not the settlement; several intents for one
+execution merge last-write-wins, the latest `--reason` and stamp are what the entry shows), its own
+entry otherwise, `Delivered` once an arrest-shaped terminal fact lands at or after it.
 
 What #2073 retired, and why the dead-holder gate below is history: before it, `cancel` against an
 idle room was itself a pump (`MutationInterface.RequestCancellationAsync`), which against a Running

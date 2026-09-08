@@ -149,7 +149,7 @@ public class ArrestLedgerViewTests
 
     // #2104: the designed happy path -- `baton cancel --reason` against a live pump that answers.
     // Both facts exist for one execution; the ONE entry keeps the operator's reason and request time,
-    // and the pump's own CancellationRequested stamp moves to DeliveredAtUtc. Pre-#2104 this arm
+    // and the pump's own CancellationRequested stamp moves to ForwardedAtUtc. Pre-#2104 this arm
     // asserted the pump's stamp as RequestedAtUtc and never looked at Reason.
     [Fact]
     public void An_intent_the_pump_answered_merges_into_one_entry_keeping_the_operator_reason_and_time()
@@ -166,7 +166,7 @@ public class ArrestLedgerViewTests
         Assert.Equal(ArrestOutcome.Delivered, entry.Outcome);
         Assert.Equal("lane is looping", entry.Reason);
         Assert.Equal(T1, entry.RequestedAtUtc.UtcDateTime);
-        Assert.Equal(T2, entry.DeliveredAtUtc!.Value.UtcDateTime);
+        Assert.Equal(T2, entry.ForwardedAtUtc!.Value.UtcDateTime);
         Assert.Equal(T3, entry.ResolvedAtUtc!.Value.UtcDateTime);
     }
 
@@ -186,11 +186,11 @@ public class ArrestLedgerViewTests
         Assert.Equal(ArrestOutcome.Rejected, entry.Outcome);
         Assert.Equal("too late (it already settled)", entry.Reason);
         Assert.Equal(T1, entry.RequestedAtUtc.UtcDateTime);
-        Assert.Null(entry.DeliveredAtUtc);
+        Assert.Null(entry.ForwardedAtUtc);
     }
 
     // Polarity control for the merge: with only the flow-side fact (a pre-#2073 line, or a host-stop),
-    // the entry renders as before -- the pump's stamp is both RequestedAtUtc and DeliveredAtUtc, and
+    // the entry renders as before -- the pump's stamp is both RequestedAtUtc and ForwardedAtUtc, and
     // there is no reason to carry.
     [Fact]
     public void A_flow_side_request_with_no_intent_fact_still_renders_the_pump_stamp_as_requested_at()
@@ -206,7 +206,7 @@ public class ArrestLedgerViewTests
         Assert.Equal(ArrestOutcome.Delivered, entry.Outcome);
         Assert.Null(entry.Reason);
         Assert.Equal(T2, entry.RequestedAtUtc.UtcDateTime);
-        Assert.Equal(T2, entry.DeliveredAtUtc!.Value.UtcDateTime);
+        Assert.Equal(T2, entry.ForwardedAtUtc!.Value.UtcDateTime);
     }
 
     [Fact]
