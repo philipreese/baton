@@ -366,7 +366,7 @@ public class DaemonWatchdogTests
             T0.AddSeconds(10).ToString("O"),
             services[nameof(WatchSweep)]!["completedAt"]!.GetValue<string>());
 
-        // #2082: the load sample rides beside the services, under the field name spec §7 states.
+        // #2082: the load sample rides beside the services, under the field name spec/baton.md §7 states.
         Assert.Equal(load, HostLoadSample.FromJson(root["hostLoad"]));
         Assert.Equal(TimeSpan.FromSeconds(15), ledger.ShortestInterval());
     }
