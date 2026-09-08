@@ -388,12 +388,7 @@ public sealed partial class AgyWorkerAdapter : IWorkerAdapter, IPermissionGrantT
     }
 
     /// <summary>
-    /// The standing denied option tokens for <see cref="DeniedShellOptionTokensVariable"/> —
-    /// comma-joined, empty when none. Mirror of <see cref="BuildDeniedShellPatterns"/> over
-    /// <see cref="PermissionGrant.DeniedShellOptionTokens"/> (#1683 F2).
-    /// </summary>
-    /// <summary>
-    /// The reads a role names beneath its deny list, for <see cref="DeniedShellExceptionsVariable"/>
+    /// The verbs a role excepts beneath its deny list, for <see cref="DeniedShellExceptionsVariable"/>
     /// — comma-joined, empty when none. Mirror of <see cref="BuildDeniedShellPatterns"/> over
     /// <see cref="PermissionGrant.DeniedShellCommandExceptions"/> (#2114).
     /// </summary>
@@ -404,6 +399,11 @@ public sealed partial class AgyWorkerAdapter : IWorkerAdapter, IPermissionGrantT
             : string.Empty;
     }
 
+    /// <summary>
+    /// The standing denied option tokens for <see cref="DeniedShellOptionTokensVariable"/> —
+    /// comma-joined, empty when none. Mirror of <see cref="BuildDeniedShellPatterns"/> over
+    /// <see cref="PermissionGrant.DeniedShellOptionTokens"/> (#1683 F2).
+    /// </summary>
     internal static string BuildDeniedShellOptionTokens(PermissionGrant? grant)
     {
         return grant?.DeniedShellOptionTokens is { Count: > 0 } tokens

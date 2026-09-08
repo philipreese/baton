@@ -664,6 +664,28 @@ public class ShellCommandPatternMatcherTests
         Assert.False(result.IsAllowed);
     }
 
+    [Theory]
+    [InlineData("baton trust --list", true)]
+    [InlineData("baton trust --list --revoke C:/repo", false)]
+    [InlineData("baton trust --list --ceiling all C:/repo", false)]
+    [InlineData("baton trust --list C:/repo", false)]
+    [InlineData("baton trust --list-extra", false)]
+    [InlineData("pwsh -c \"baton trust --list\"", true)]
+    [InlineData("pwsh -c \"baton trust --list --revoke C:/repo\"", false)]
+    public void An_exact_exception_accepts_only_the_complete_command(string command, bool expected)
+    {
+        var result = ShellCommandPatternMatcher.EvaluateChainedCommand(
+            command, null, ["baton *"], ["baton trust --list"]);
+
+        Assert.Equal(expected, result.IsAllowed);
+        // The old wildcard spelling discriminates the mixed-list regression.
+        if (command == "baton trust --list --revoke C:/repo")
+        {
+            Assert.True(ShellCommandPatternMatcher.EvaluateChainedCommand(
+                command, null, ["baton *"], ["baton trust --list*"]).IsAllowed);
+        }
+    }
+
     [Fact]
     public void A_deny_and_an_exception_of_equal_length_resolve_to_the_deny()
     {

@@ -261,10 +261,12 @@ def matched_statements(parsers: dict[str, ParserContract],
     ]
 
 
-def parse_known_subcommands(program_cs_text: str) -> set[str]:
-    """`Program.cs`'s own `knownSubcommands` array -- the verb list, including ones with no
+def parse_known_subcommands(program_cs_text: str, verb_table_text: str = "") -> set[str]:
+    """The CLI's verb table (or the inline array used by historical fixtures), including verbs with no
     dedicated `*OptionsParser` (`templates`), which the parser-file scan cannot see at all.
     """
+    if re.search(r"knownSubcommands\s*=\s*CliVerbTable\.KnownSubcommands\s*;", program_cs_text):
+        return set(re.findall(r'new\("([^"]+)",\s*false\s*,', verb_table_text))
     m = re.search(r"knownSubcommands\s*=\s*new\s*\[\]\s*\{([^}]*)\}", program_cs_text)
     if not m:
         return set()
@@ -361,7 +363,9 @@ def main(argv: list[str]) -> int:
         total_flags += len(contract.all_flags)
 
     program_cs_text = PROGRAM_CS.read_text(encoding="utf-8")
-    known_verbs = parse_known_subcommands(program_cs_text)
+    verb_table = CLI_DIR / "CliVerbTable.cs"
+    known_verbs = parse_known_subcommands(
+        program_cs_text, verb_table.read_text(encoding="utf-8") if verb_table.is_file() else "")
     help_lines = parse_help_lines(program_cs_text)
     if not SPEC.is_file():
         print(f" !! {SPEC.relative_to(ROOT)}: missing -- this check's target moved without it")
@@ -419,6 +423,18 @@ def _selftest() -> int:
     this proves the RULES discriminate independently of whatever invoking-baton.md says today.
     """
     failures = []
+
+    table_program = "var knownSubcommands = CliVerbTable.KnownSubcommands;"
+    table_fixture = 'new("run", false, [], []), new("templates", false, [], []), new("hook-check", true, [], [])'
+    table_verbs = parse_known_subcommands(table_program, table_fixture)
+    if table_verbs != {"run", "templates"}:
+        failures.append("CLI table extraction missed a public verb or included a hidden endpoint")
+    if parse_known_subcommands(table_program):
+        failures.append("missing CLI table must yield no verbs so the population floor fails")
+    if parse_known_subcommands('var knownSubcommands = new[] { "run", "status" };') != {"run", "status"}:
+        failures.append("historical inline-array fixture extraction broke")
+    if not find_drift({}, table_verbs, parse_doc("see `baton retired`")):
+        failures.append("a verb absent from the CLI table was not reported as drift")
 
     fake_run_usage = (
         'public const string Usage =\n'

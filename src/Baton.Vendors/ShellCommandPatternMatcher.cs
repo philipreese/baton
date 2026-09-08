@@ -734,7 +734,9 @@ public static class ShellCommandPatternMatcher
     /// such program exists, costs nothing. An exception is the opposite sign, and it names a CLI whose
     /// own dispatch IS ordinal: <c>baton Status</c> is not <c>baton status</c> to <c>Program.cs</c>, it
     /// is the default arm, which is <c>baton supply</c> — a write. So an exception admits only the
-    /// exact spelling the CLI reads as the read it names.
+    /// exact spelling the CLI reads as the read it names. Exceptions without a trailing <c>*</c>
+    /// require the remaining tokens to match exactly, so <c>baton trust --list</c> cannot admit
+    /// additional options; deny patterns retain their fail-closed prefix semantics.
     /// </para>
     /// <para>
     /// <b>The longer match decides, deny winning a tie.</b> At each offset the longest deny match and
@@ -777,7 +779,7 @@ public static class ShellCommandPatternMatcher
                 continue;
             }
 
-            int exceptionLength = LongestTokenizedMatch(tokens, start, deniedExceptions, StringComparison.Ordinal);
+            int exceptionLength = LongestTokenizedMatch(tokens, start, deniedExceptions, StringComparison.Ordinal, exactUnlessWildcard: true);
             if (denyLength >= exceptionLength)
             {
                 return true;
@@ -793,7 +795,8 @@ public static class ShellCommandPatternMatcher
     /// The grammar is <see cref="IsDeniedByTokenizedHead"/>'s; this only measures it.
     /// </summary>
     private static int LongestTokenizedMatch(
-        string[] tokens, int start, IReadOnlyList<string>? patterns, StringComparison comparison)
+        string[] tokens, int start, IReadOnlyList<string>? patterns, StringComparison comparison,
+        bool exactUnlessWildcard = false)
     {
         if (patterns is null)
         {
@@ -810,6 +813,11 @@ public static class ShellCommandPatternMatcher
 
             var patternBody = pattern.EndsWith('*') ? pattern[..^1] : pattern;
             var patternTokens = patternBody.Split((char[]?)null, StringSplitOptions.RemoveEmptyEntries);
+            if (exactUnlessWildcard && !pattern.EndsWith('*') && patternTokens.Length != tokens.Length - start)
+            {
+                continue;
+            }
+
             if (patternTokens.Length == 0 || patternTokens.Length <= longest
                 || patternTokens.Length > tokens.Length - start)
             {

@@ -42,6 +42,7 @@
     -->
     <ProjectReference Include="..\..\src\Baton\Baton.csproj" />
     <ProjectReference Include="..\..\src\Baton.Vendors\Baton.Vendors.csproj" />
+    <ProjectReference Include="..\..\src\Baton.Cli\Baton.Cli.csproj" />
   </ItemGroup>
 
   <ItemGroup>

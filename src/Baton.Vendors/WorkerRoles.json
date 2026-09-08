@@ -36,7 +36,7 @@
     ],
     "denied_shell_command_exceptions": [
       "baton status*", "baton templates*", "baton audit lanes*", "baton memory audit*", "baton ledger*",
-      "baton trust --list*", "baton --version*"
+      "baton trust --list", "baton --version*"
     ],
     "denied_shell_option_tokens": ["--add-label", "--remove-label", "--label"],
     "timeout_minutes": 40,
@@ -190,7 +190,7 @@
     ],
     "denied_shell_command_exceptions": [
       "baton status*", "baton templates*", "baton audit lanes*", "baton memory audit*", "baton ledger*",
-      "baton trust --list*", "baton --version*"
+      "baton trust --list", "baton --version*"
     ],
     "denied_shell_option_tokens": ["--add-label", "--remove-label", "--label"],
     "timeout_minutes": 15,

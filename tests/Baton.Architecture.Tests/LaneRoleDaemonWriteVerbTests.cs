@@ -1,4 +1,5 @@
 using System.Text.RegularExpressions;
+using Baton.Cli;
 using Baton.Status;
 using Baton.Vendors;
 
@@ -27,7 +28,8 @@ namespace Baton.Architecture.Tests;
 /// <c>Invoke-WebRequest</c>/<c>Invoke-RestMethod</c> and their <c>iwr</c>/<c>irm</c> aliases,
 /// <c>python -c</c>/<c>python -m http</c>, <c>node -e</c>); and the SHELL WRAPPERS that carry either
 /// (the heads <c>ShellCommandPatternMatcher.ShellWrapperHeads</c> names), whose bodies the matcher
-/// re-matches (#2128 review H3). Reads stay admitted, each pinned individually:
+/// re-matches (#2128 review H3), accepting false denials even for valid wrapper syntax
+/// (spec/baton.md §9, #2114). Reads stay admitted, each pinned individually:
 /// <see cref="UnscopedRoleReadControls"/> below.
 /// </para>
 /// <para>
@@ -45,7 +47,8 @@ namespace Baton.Architecture.Tests;
 /// <b>What this does not close, stated so the reader's prior does not fill it in.</b> A deny pattern
 /// binds a spelling: <c>baton.exe</c>, <c>curl.exe</c>, <c>python3 -c</c>, <c>py -c</c>,
 /// <c>node --eval</c>, a script file run through a wrapper (<c>pwsh -File x.ps1</c>, pinned admitted
-/// below), or an HTTP call from inside a test the lane compiles and runs are all past it. An
+/// below), <c>eval</c>, <c>iex</c>/<c>Invoke-Expression</c> (arbitrary code, deliberately
+/// unfolded under #2114\'s accepted exposure; containment concerns the CLI path), or an HTTP call from inside a test the lane compiles and runs are all past it. An
 /// <c>implement</c> lane running arbitrary test code can open a socket to the daemon port regardless;
 /// that exposure is the same one it has through the CLI on its own machine, and spec/baton.md §9
 /// records it as accepted rather than closed. This test is a tripwire on the casual path, not a wall.
@@ -66,39 +69,27 @@ public sealed class LaneRoleDaemonWriteVerbTests
     /// <c>WorkerRoles.json</c>. Every mutating verb in <c>Program.cs</c>'s table appears at least once,
     /// so a verb-list regression is a red row, not a missing one.
     /// </summary>
-    public static TheoryData<string> DaemonWriteCommands =>
+    public static TheoryData<string> DaemonWriteCommands
+    {
+        get
+        {
+            var commands = new TheoryData<string>();
+            foreach (var command in CliVerbTable.DaemonWriteCommands.Concat(OtherDeniedCommands.Select(row => row.Data)))
+            {
+                commands.Add(command);
+            }
+
+            return commands;
+        }
+    }
+
+    private static IEnumerable<CliVerbTable.ReadOnlyVerb> ReadOnlyVerbs => CliVerbTable.ReadOnlyVerbs;
+
+    // The accepted arbitrary-code exposure, recorded alongside the fold population (spec/baton.md §9, #2114).
+    private static readonly string[] UnfoldedWrapperHeads = ["eval", "iex", "Invoke-Expression"];
+
+    private static TheoryData<string> OtherDeniedCommands =>
     [
-        // The CLI's mutating verbs, one probe per verb (or per mutating sub-verb of a noun group).
-        "baton run C:/rooms/other-room --workflow wf.json",
-        "baton dispatch --role implement --spec brief.md",
-        "baton redispatch room-1",
-        "baton cancel room-1",
-        "baton decide C:/rooms/other-room --execution e1 --type resume --bindings b.json",
-        "baton resolve room-1 --accept-capture",
-        "baton supply room-1 --worker implement --output changes.md --file x.md --bindings b.json",
-        "baton resume room-1",
-        "baton watch room-1 --command notify.exe",
-        "baton deliver --title x --file y.md",
-        "baton keep room-1",
-        "baton unkeep room-1",
-        "baton trust C:/repo",
-        "baton trust C:/repo --revoke",
-        "baton room delete room-1",
-        "baton rooms prune",
-        "baton ledger --rebuild",
-        "baton ledger backfill",
-        "baton ledger export C:/repo",
-        "baton memory import",
-        "baton memory sync --apply",
-        "baton memory add --text x",
-        "baton queue add fix-2114 --role implement --spec brief.md --issue 2114",
-        "baton queue hold",
-        "baton mcp --memory-proposal-tool",
-        "baton daemon",
-        // Vendor subprocess endpoints, not operator verbs, but reachable from a shell all the same.
-        "baton hook-check",
-        "baton agy-hook-check",
-        "baton codex-broker",
         // Program.cs dispatches ordinally: `Status` is not `status`, it is the default arm — supply.
         "baton Status room-1 --worker implement --output x.md --file y.md --bindings b.json",
         // Case on the deny side: the shell resolves these to the same program.
@@ -137,6 +128,10 @@ public sealed class LaneRoleDaemonWriteVerbTests
         "powershell -enc YmF0b24gY2FuY2VsIHJvb20tMQ==",
         "pwsh",
         "cmd",
+        "pwsh -c \"git log --grep baton\"",
+        "bash -c \"dotnet test --filter baton\"",
+        "baton trust --list-extra",
+        "baton trust --list C:/repo",
     ];
 
     /// <summary>
@@ -254,43 +249,110 @@ public sealed class LaneRoleDaemonWriteVerbTests
         Assert.True(Admits(sevenVerbs, "baton room delete room-1"));
     }
 
-    /// <summary>
-    /// Reads <c>Program.cs</c>'s own verb table (<c>knownSubcommands</c>) and requires every verb in it
-    /// to be the second token of at least one write probe or one read control above. A verb added to
-    /// the CLI without a row here fails this rather than silently riding whichever side the deny
-    /// happens to put it on.
-    /// </summary>
     [Fact]
     public void Every_cli_verb_is_classified_by_this_test()
     {
         var program = File.ReadAllText(Path.Combine(RepoRoot.Locate(), "src", "Baton.Cli", "Program.cs"));
-        var table = Regex.Match(program, @"knownSubcommands\s*=\s*new\[\]\s*\{([^}]*)\}");
-        Assert.True(table.Success, "Program.cs no longer declares `knownSubcommands` as an inline array.");
-
-        var verbs = Regex.Matches(table.Groups[1].Value, "\"([^\"]+)\"")
-            .Select(m => m.Groups[1].Value)
-            .ToList();
-        Assert.NotEmpty(verbs);
-
-        var classified = BatonVerbsIn(DaemonWriteCommands)
-            .Concat(BatonVerbsIn(UnscopedRoleReadControls))
+        Assert.Contains("var knownSubcommands = CliVerbTable.KnownSubcommands;", program);
+        Assert.Equal(CliVerbTable.All.Count, CliVerbTable.All.Select(verb => verb.Name).Distinct().Count());
+        var dispatched = Regex.Matches(program, """args\[0\] == "([^"]+)"|case "([^"]+)":""")
+            .Select(match => match.Groups[1].Success ? match.Groups[1].Value : match.Groups[2].Value)
             .ToHashSet(StringComparer.Ordinal);
-
-        var unclassified = verbs.Where(verb => !classified.Contains(verb)).ToList();
-        Assert.True(
-            unclassified.Count == 0,
-            $"CLI verb(s) [{string.Join(", ", unclassified)}] have no probe in {nameof(DaemonWriteCommands)} "
-            + $"and no control in {nameof(UnscopedRoleReadControls)}. Classify each: a write gets a probe "
-            + "(the `baton *` deny already closes it), a read gets a control AND an entry in both roles' "
-            + "denied_shell_command_exceptions.");
+        Assert.True(dispatched.SetEquals(CliVerbTable.All.Select(verb => verb.Name)),
+            "Every Program.cs dispatch arm must be classified in CliVerbTable, including hidden verbs.");
+        foreach (var verb in CliVerbTable.All)
+        {
+            Assert.True(verb.Reads.Length + verb.Writes.Length > 0,
+                $"Classify {verb.Name} in the CLI table: writes get probes; reads get handler declarations and controls. "
+                + "The exception field is for deliberately excepted verbs (today reads; #2100 widens it).");
+            Assert.All(verb.Reads, read => Assert.StartsWith($"baton {verb.Name}", read.Pattern));
+            Assert.All(verb.Writes, write => Assert.StartsWith($"baton {verb.Name} ", write + " "));
+        }
     }
 
-    private static IEnumerable<string> BatonVerbsIn(TheoryData<string> commands) =>
-        commands
-            .Select(row => row.Data)
-            .Select(command => command.Split((char[]?)null, StringSplitOptions.RemoveEmptyEntries))
-            .Where(tokens => tokens.Length > 1 && tokens[0] == "baton")
-            .Select(tokens => tokens[1]);
+    [Fact]
+    public void Every_excepted_verb_is_declared_read_only_by_the_cli()
+    {
+        using var env = ShippedCatalogFromSource();
+        var declared = ReadOnlyVerbs.Select(read => read.Pattern).ToHashSet(StringComparer.Ordinal);
+        Assert.NotEmpty(declared);
+        foreach (var role in UnscopedShellRoles())
+        {
+            Assert.NotNull(role.Grant.DeniedShellCommandExceptions);
+            foreach (var exception in role.Grant.DeniedShellCommandExceptions)
+            {
+                Assert.Contains(exception, declared);
+                Assert.Contains(UnscopedRoleReadControls, row =>
+                    ShellCommandPatternMatcher.IsAllowed(row.Data, [exception]));
+            }
+        }
+
+        var program = File.ReadAllText(Path.Combine(RepoRoot.Locate(), "src", "Baton.Cli", "Program.cs"));
+        foreach (var read in ReadOnlyVerbs)
+        {
+            // Bind the declaration to a handler actually called by the CLI, not a test-owned noun list.
+            Assert.Matches($@"\b{read.Handler.Name}\s*\.", program);
+        }
+
+        foreach (var read in UnscopedRoleReadControls.Select(row => row.Data).Where(command => command.StartsWith("baton ", StringComparison.Ordinal)))
+        {
+            Assert.True(ShellCommandPatternMatcher.IsAllowed(read, declared.ToArray()),
+                $"Read control '{read}' has no CLI read-only handler declaration.");
+        }
+    }
+
+    [Fact]
+    public void Trust_sub_verbs_are_coupled_to_the_write_probes()
+    {
+        var modes = new HashSet<TrustMode> { TrustOptionsParser.Parse(["--list"]).Mode };
+        foreach (var command in CliVerbTable.DaemonWriteCommands.Where(command => command.StartsWith("baton trust ", StringComparison.Ordinal)))
+        {
+            var args = command.Split(' ')[2..];
+            try
+            {
+                modes.Add(TrustOptionsParser.Parse(args).Mode);
+            }
+            catch (CliArgumentException)
+            {
+                // Mixed --list/write probes are intentionally invalid today, but must still deny.
+            }
+        }
+
+        Assert.Equal(Enum.GetValues<TrustMode>().Order(), modes.Order());
+        var parser = File.ReadAllText(Path.Combine(RepoRoot.Locate(), "src", "Baton.Cli", "TrustOptionsParser.cs"));
+        var options = Regex.Matches(parser, "case \"(--[^\"]+)\":")
+            .Select(match => match.Groups[1].Value).ToHashSet(StringComparer.Ordinal);
+        var covered = CliVerbTable.DaemonWriteCommands.Where(command => command.StartsWith("baton trust ", StringComparison.Ordinal))
+            .SelectMany(command => command.Split(' ')).ToHashSet(StringComparer.Ordinal);
+        Assert.NotEmpty(options);
+        Assert.All(options, option => Assert.Contains(option, covered));
+        Assert.Throws<CliArgumentException>(() => TrustOptionsParser.Parse(["--list", "--revoke", "C:/repo"]));
+        Assert.Throws<CliArgumentException>(() => TrustOptionsParser.Parse(["--list", "--ceiling", "all", "C:/repo"]));
+    }
+
+    [Fact]
+    public void Folded_and_recorded_unfolded_wrappers_partition_the_spec_spellings()
+    {
+        var root = RepoRoot.Locate();
+        var matcher = File.ReadAllText(Path.Combine(root, "src", "Baton.Vendors", "ShellCommandPatternMatcher.cs"));
+        var table = Regex.Match(matcher, @"ShellWrapperHeads\s*=\s*\[([^\]]+)\]");
+        Assert.True(table.Success);
+        var folded = Regex.Matches(table.Groups[1].Value, "\"([^\"]+)\"")
+            .Select(match => match.Groups[1].Value).ToHashSet(StringComparer.OrdinalIgnoreCase);
+        Assert.NotEmpty(folded);
+        Assert.Empty(folded.Intersect(UnfoldedWrapperHeads, StringComparer.OrdinalIgnoreCase));
+        var spec = File.ReadAllText(Path.Combine(root, "spec", "baton.md"));
+        var population = Regex.Match(spec, @"The wrapper spellings classified by the test are ([\s\S]+?);");
+        Assert.True(population.Success);
+        var named = Regex.Matches(population.Groups[1].Value, "`([^`]+)`")
+            .Select(match => match.Groups[1].Value).ToHashSet(StringComparer.OrdinalIgnoreCase);
+        Assert.True(named.SetEquals(folded.Concat(UnfoldedWrapperHeads)));
+        using var env = ShippedCatalogFromSource();
+        foreach (var head in UnfoldedWrapperHeads)
+        {
+            Assert.All(UnscopedShellRoles(), role => Assert.True(Admits(role.Grant, $"{head} 'baton cancel room-1'")));
+        }
+    }
 
     private static IEnumerable<WorkerRole> UnscopedShellRoles() =>
         WorkerRoleCatalog.All

@@ -59,7 +59,8 @@ namespace Baton.Vendors;
 /// <see cref="ShellCommandsAreReadOnly"/> assertion and a shell that can in fact write a file.
 /// </param>
 /// <param name="DeniedShellCommandExceptions">
-/// #2114: the explicit read allowlist carved out of <see cref="DeniedShellCommandPatterns"/> — same
+/// #2114: verbs excepted from the head deny (today: reads only; #2100 widens this to deliberately
+/// granted writes), carved out of <see cref="DeniedShellCommandPatterns"/> — same
 /// glob form, opposite sign, and only meaningful beside a deny it narrows. This is what lets a role
 /// deny a whole command head (<c>baton *</c>, so a verb that does not exist yet is already refused)
 /// while still admitting the reads it names (<c>baton status*</c>). Which of the two wins when both

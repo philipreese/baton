@@ -5475,10 +5475,12 @@ the operator. `implement`/`janitor`'s standing deny list therefore also closes t
 verbs and the shell HTTP clients a lane could reach the daemon port with. **The shape is a deny on the
 whole `baton` head with an explicit read allowlist, not a list of write verbs** (#2128 review H1/H2):
 `denied_shell_command_patterns` carries `baton *`, and the new `denied_shell_command_exceptions`
-names the reads that stay open — `baton status`, `templates`, `audit lanes`, `memory audit`,
+names verbs excepted from the `baton` head deny (today: reads only; #2100 is the intended
+widening to deliberately granted writes) — `baton status`, `templates`, `audit lanes`, `memory audit`,
 `ledger` (with `ledger --rebuild`/`backfill`/`export` re-denied beneath it), `trust --list`,
-`--version` — so a verb added tomorrow is closed the day it ships and only a read someone
-deliberately names is open. Where both match, the longer tokenized match decides and a tie is a
+`--version` — so a verb added tomorrow is closed the day it ships and only a verb someone
+deliberately excepts is open. `trust --list` is exact, without additional arguments; exceptions
+without a trailing `*` require an exact token match. Where both match, the longer tokenized match decides and a tie is a
 deny; deny heads compare case-insensitively (the shells resolve `IWR`/`CURL` to the lowercase
 program) while exception heads compare ordinally, because `Program.cs` dispatches ordinally and
 `baton Status` is its default arm — `supply`, a write. On claude a deny an exception carves into is
@@ -5489,16 +5491,22 @@ PowerShell, `cmd`, or POSIX shell invocation carrying its command as an argument
 reached the fold's every-offset scan and `pwsh -c "baton cancel x"` walked past on head `pwsh`;
 `ShellCommandPatternMatcher.IsSegmentDenied` now re-matches a wrapper's
 body at every offset, on both scopes, and a wrapper whose body the matcher cannot read — a
-PowerShell `-EncodedCommand`, or a bare wrapper — is denied outright. `LaneRoleDaemonWriteVerbTests`
+PowerShell `-EncodedCommand`, or a bare wrapper — is denied outright. Well-formed wrapper input
+pays the over-deny cost too, by design: a bare `baton` token anywhere in its body denies the line
+(for example, `pwsh -c "git log --grep baton"`). `LaneRoleDaemonWriteVerbTests`
 (`tests/Baton.Architecture.Tests`) is the tripwire: its probe list is the one canonical set of command
 lines — every mutating verb, the HTTP clients, the wrappers, the mixed-case spellings — judged against
 every role's grant through the real matcher, each read pinned individually per unscoped role, and its
-verb table read from `Program.cs` so an unclassified new verb fails there too. **The negative, stated
+read-only handler declarations and write probes derived from `CliVerbTable`, the CLI table
+`Program.cs` uses, so an unclassified new verb fails there too. **The negative, stated
 so a reader does not infer a wall:** an `implement` lane running arbitrary test code can still open a
 socket to the daemon port — a deny pattern binds a spelling, and compiled code has none — and that
 exposure equals the one the lane already has through the CLI on its own machine; it is accepted as
 such, not closed, and the test's own remarks record the spellings (`baton.exe`, `curl.exe`,
 `python3 -c`, `node --eval`, a script file behind `pwsh -File`) it knowingly leaves past.
+The wrapper spellings classified by the test are `pwsh`, `powershell`, `cmd`, `bash`, `sh`, `zsh`,
+`eval`, `iex`, and `Invoke-Expression`; the last three execute arbitrary code and remain unfolded
+under #2114's accepted exposure. The containment claim concerns the CLI path.
 
 **#1731 found-while-fixing, same PR: `EvaluateChainedCommand`'s fail-closed metacharacter set was
 never exercised against a broad, unscoped grant before this issue, and (before the operator ruling

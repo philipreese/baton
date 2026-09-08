@@ -103,7 +103,7 @@ if (args.Length >= 1 && args[0] == "daemon")
     return 0;
 }
 
-var knownSubcommands = new[] { "run", "dispatch", "redispatch", "cancel", "decide", "resolve", "supply", "resume", "status", "watch", "deliver", "templates", "keep", "unkeep", "trust", "room", "rooms", "ledger", "memory", "audit", "queue", "mcp", "daemon" };
+var knownSubcommands = CliVerbTable.KnownSubcommands;
 if (args.Length == 0 || !knownSubcommands.Contains(args[0]))
 {
     Console.Error.WriteLine(RunOptionsParser.Usage);
@@ -451,6 +451,7 @@ try
                 break;
             }
 
+        case "supply":
         default:
             {
                 var options = SupplyOptionsParser.Parse(args[1..]);
