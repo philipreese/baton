@@ -5466,6 +5466,22 @@ claims and does not derive.
 create or apply a label, merge a PR, or call `gh api`, on either vendor; the label itself is applied
 by the operator, per C-15 (#1730), not restated here.**
 
+**#2114 (console decision round, 2026-09-08): a lane is contained by its role grant, not by the
+daemon's write gate — and that same deny list is where the containment lives.** The tailnet page's
+write gate (C-11) identifies *tailnet* callers by the Tailscale identity header; *loopback* callers
+are trusted as the operator's own machine; a lane is a loopback caller, so the gate cannot tell it
+from the operator. `implement`/`janitor`'s standing deny list therefore also closes the daemon's write
+verbs (every mutating `baton` verb) and the shell HTTP clients a lane could reach the daemon port
+with; `WorkerRoles.json`'s two deny lists are the enumeration, and reads such as `baton status` stay
+admitted. `LaneRoleDaemonWriteVerbTests`
+(`tests/Baton.Architecture.Tests`) is the tripwire: its probe list is the one canonical set of command
+lines, judged against every role's grant through the real matcher, so a deny that does not match under
+the tokenized-head grammar above fails there rather than passing on its spelling. **The negative, stated so a reader does not infer a wall:** an `implement` lane running
+arbitrary test code can still open a socket to the daemon port — a deny pattern binds a spelling, and
+compiled code has none — and that exposure equals the one the lane already has through the CLI on its
+own machine; it is accepted as such, not closed, and the test's own remarks record the spellings
+(`curl.exe`, `python3 -c`, `node --eval`) it knowingly leaves past.
+
 **#1731 found-while-fixing, same PR: `EvaluateChainedCommand`'s fail-closed metacharacter set was
 never exercised against a broad, unscoped grant before this issue, and (before the operator ruling
 below) it denied ordinary commands outright.** `implement`/`janitor` are the first unscoped roles with

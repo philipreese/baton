@@ -33,6 +33,10 @@
          see that type's own remarks for why). WorkerRoleCatalogTests, WorkflowTemplateCatalogTests,
          CatalogNamespaceTests, and ClaudeWorkerAdapterTests need BeginScope the same way. -->
     <InternalsVisibleTo Include="Baton.Vendors.Tests" />
+    <!-- #2114: LaneRoleDaemonWriteVerbTests reads the SOURCE WorkerRoles.json through the real
+         WorkerRoleCatalog (so the grant it measures is the one dispatch resolves), which means
+         pointing the catalog at that file through the same BeginScope seam the projects above use. -->
+    <InternalsVisibleTo Include="Baton.Architecture.Tests" />
   </ItemGroup>
 
 </Project>
