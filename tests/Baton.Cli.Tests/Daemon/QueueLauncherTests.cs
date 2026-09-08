@@ -125,6 +125,7 @@ public sealed class QueueLauncherTests : IDisposable
 
             var recording = Task.Run(
                 () => QueueLauncher.RecordPostLaunchFaultAsync("held", room, "the pump threw BatonFlowException"), Ct);
+            // wait-ok: injected ledger-release interleaving, not a wait on child-process or external work.
             await Task.Delay(TimeSpan.FromMilliseconds(100), Ct);
             await holder.DisposeAsync();
 
