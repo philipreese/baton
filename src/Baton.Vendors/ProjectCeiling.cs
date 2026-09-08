@@ -60,11 +60,9 @@ public sealed record ProjectCeiling(
     /// <b>Not a ceiling.</b> A tombstone permits nothing: <see cref="Tombstone"/> closes all four
     /// categories, so a reader that consults the booleans without checking <see cref="IsRevoked"/>
     /// still reads <c>none</c> rather than whatever was revoked — fail-closed by shape, not only by the
-    /// checks around it. Readers that need to tell "revoked" from "never trusted"
-    /// (<see cref="ProjectCeilingGate"/>, <c>Baton.Cli.InheritedProjectCeiling</c>, <c>baton trust
-    /// --list</c>) read this field; <see cref="ProjectCeilingStore.TryGet"/> hides tombstones so the
-    /// question "what ceiling applies" never gets a tombstone as its answer. Omitted from the JSON when
-    /// null for the same reason <see cref="InheritedFrom"/> is.
+    /// checks around it. Readers that must tell "revoked" from "never trusted" read this field;
+    /// spec/baton.md §9 says which they are and what each does. Omitted from the JSON when null for the
+    /// same reason <see cref="InheritedFrom"/> is.
     /// </remarks>
     [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
     public DateTimeOffset? RevokedAt { get; init; }

@@ -163,6 +163,74 @@ public sealed class IssueWorktreeProvisionerTrustTests : IDisposable
         Assert.Contains("inherited", output.ToString(), StringComparison.OrdinalIgnoreCase);
     }
 
+    /// <summary>
+    /// #2121: <c>--forget</c> after the revoke is the other way out of the revoked state — it deletes the
+    /// tombstone, so the same add that refused above now takes the never-trusted fallback and announces
+    /// it, byte-for-byte the line the never-trusted arm pins. Together with the revoked arm this is the
+    /// discriminating pair: same fixture, same call, only the tombstone's presence differs.
+    /// </summary>
+    [Fact]
+    public async Task Provision_falls_back_and_announces_never_trusted_once_the_revoked_repository_is_forgotten()
+    {
+        using var home = new IsolatedBatonHome();
+        var repository = MakeDirectory("baton");
+        var worktree = Path.Combine(_root, "w2121");
+        var commonDir = Path.Combine(repository, ".git");
+        ProjectCeilingStore.Set(repository, ProjectCeiling.Unrestricted, ProjectCeilingStore.DefaultPath);
+        ProjectCeilingStore.Revoke(repository, ProjectCeilingStore.DefaultPath);
+        var forget = new StringWriter();
+        await TrustCommand.ExecuteAsync(
+            new TrustOptions(TrustMode.Forget, repository, null), forget, TestContext.Current.CancellationToken);
+        Assert.Contains("Forgot", forget.ToString(), StringComparison.Ordinal);
+
+        var output = new StringWriter();
+        var provisioned = await IssueWorktreeProvisioner.ProvisionAsync(
+            2121, repository, _root, Runner(worktree), Probe(commonDir, repository, worktree),
+            output, TestContext.Current.CancellationToken);
+
+        var recorded = ProjectCeilingStore.TryGet(provisioned, ProjectCeilingStore.DefaultPath);
+        Assert.NotNull(recorded);
+        Assert.True(recorded.IsUnrestricted);
+        Assert.Null(recorded.InheritedFrom);
+        var line = Assert.Single(output.ToString().Split(Environment.NewLine, StringSplitOptions.RemoveEmptyEntries));
+        Assert.Equal(
+            $"workspace {ProjectCeilingStore.CanonicalKey(worktree)}: no trusted repository to inherit from; recorded ceiling all",
+            line);
+    }
+
+    /// <summary>
+    /// #2121: a recorded path the probe cannot identify is not skipped as "no match" — it might be the
+    /// tombstone. With the repository revoked and its own probe THROWING, the add refuses naming that
+    /// path and the probe's error, records nothing and announces nothing, instead of reaching the
+    /// never-trusted fallback the revoked arm exists to keep it from.
+    /// </summary>
+    [Fact]
+    public async Task Provision_refuses_rather_than_falling_back_when_a_recorded_path_cannot_be_identified()
+    {
+        using var home = new IsolatedBatonHome();
+        var repository = MakeDirectory("baton");
+        var worktree = Path.Combine(_root, "w2121");
+        var commonDir = Path.Combine(repository, ".git");
+        ProjectCeilingStore.Set(repository, ProjectCeiling.Unrestricted, ProjectCeilingStore.DefaultPath);
+        ProjectCeilingStore.Revoke(repository, ProjectCeilingStore.DefaultPath);
+        Func<string, CancellationToken, Task<RepositoryIdentity?>> probe = (path, _) =>
+            path.Equals(repository, StringComparison.OrdinalIgnoreCase)
+                ? throw new InvalidOperationException("git rev-parse timed out after 10s")
+                : Task.FromResult<RepositoryIdentity?>(RepositoryIdentity.From(null, commonDir));
+
+        var output = new StringWriter();
+        var refusal = await Assert.ThrowsAsync<ProjectNotTrustedException>(() => IssueWorktreeProvisioner.ProvisionAsync(
+            2121, repository, _root, Runner(worktree), probe,
+            output, TestContext.Current.CancellationToken));
+
+        Assert.Equal(worktree, refusal.ProjectPath);
+        Assert.Contains(ProjectCeilingStore.CanonicalKey(repository), refusal.Message, StringComparison.OrdinalIgnoreCase);
+        Assert.Contains("git rev-parse timed out after 10s", refusal.Message, StringComparison.Ordinal);
+        Assert.Contains("--forget", refusal.Message, StringComparison.Ordinal);
+        Assert.Null(ProjectCeilingStore.TryGetRecord(worktree, ProjectCeilingStore.DefaultPath));
+        Assert.Equal(string.Empty, output.ToString());
+    }
+
     /// <summary>Reports both spawns successful and creates the worktree the way <c>git worktree add</c> would.</summary>
     private static Func<string, IReadOnlyList<string>, string, CancellationToken, Task<(int ExitCode, string Output)>> Runner(
         string worktree) =>

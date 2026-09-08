@@ -63,6 +63,27 @@ public sealed class TrustOptionsParserTests
         Assert.Null(options.Ceiling);
     }
 
+    /// <summary>#2121: <c>--forget</c> is its own mode, and cannot ride along with either of the other two path-taking shapes.</summary>
+    [Fact]
+    public void Parse_ProjectPathAndForget_ParsesAsForgetWithNoCeiling()
+    {
+        var options = TrustOptionsParser.Parse(["/repo", "--forget"]);
+
+        Assert.Equal(TrustMode.Forget, options.Mode);
+        Assert.Equal("/repo", options.ProjectPath);
+        Assert.Null(options.Ceiling);
+    }
+
+    [Fact]
+    public void Parse_ForgetCombinedWithRevokeOrCeiling_Throws()
+    {
+        var withRevoke = Assert.Throws<CliArgumentException>(() => TrustOptionsParser.Parse(["/repo", "--revoke", "--forget"]));
+        var withCeiling = Assert.Throws<CliArgumentException>(() => TrustOptionsParser.Parse(["/repo", "--ceiling", "all", "--forget"]));
+
+        Assert.Contains("'--revoke' cannot be combined with '--forget'", withRevoke.Message, StringComparison.Ordinal);
+        Assert.Contains("'--forget' cannot be combined with '--ceiling'", withCeiling.Message, StringComparison.Ordinal);
+    }
+
     [Fact]
     public void Parse_MissingProjectPath_Throws()
     {

@@ -40,13 +40,17 @@ namespace Baton.Cli;
 /// </para>
 /// <para>
 /// <b>The fallback is NOT taken on a probe failure, and NOT on a revoked repository.</b> "Never
-/// trusted" is a fact git established against a store with no trace of the repository. "Git answered
-/// nothing" (missing, timed out, exited non-zero) is not that fact, and neither is "every path of this
-/// repository carries a tombstone" (#2121, <see cref="InheritanceOutcome.Revoked"/>): the first is a
-/// transient the operator did not decide, the second is a decision the operator did make. Both throw
-/// <see cref="ProjectNotTrustedException"/> — naming the probe failure or the revocation — and the add
-/// is refused before anything is queued. spec/baton.md §13 states the three populations; §9 has the
-/// revoked state itself.
+/// trusted" is a fact git established against a store with no trace of the repository
+/// (<see cref="InheritanceOutcome.NoTrustedSource"/> says what the scan had to identify to reach it,
+/// once). "Git answered nothing" for
+/// the workspace (missing, timed out, exited non-zero) is not that fact; neither is a recorded path
+/// git could not identify (<see cref="InheritanceOutcome.CandidateUnknown"/>, #2121 — it might be the
+/// tombstone); and neither is "every path of this repository carries a tombstone"
+/// (<see cref="InheritanceOutcome.Revoked"/>): the first two are transients the operator did not
+/// decide, the third is a decision the operator did make. All three throw
+/// <see cref="ProjectNotTrustedException"/> — naming the probe failure (and the path it failed on) or
+/// the revocation — and the add is refused before anything is queued. spec/baton.md §13 states the
+/// populations; §9 has the revoked state itself.
 /// </para>
 /// </remarks>
 public static class IssueWorktreeProvisioner
@@ -135,7 +139,7 @@ public static class IssueWorktreeProvisioner
     /// line cannot be left to the later dispatch.
     /// </param>
     /// <exception cref="CliArgumentException">Any of the three steps failed, with the tool's own output in the message.</exception>
-    /// <exception cref="ProjectNotTrustedException">The trust step's identity probe answered nothing, or the repository is revoked (#2121), so no ceiling was recorded — see the type remarks.</exception>
+    /// <exception cref="ProjectNotTrustedException">The trust step's identity probe answered nothing (for the workspace or for a recorded path), or the repository is revoked (#2121), so no ceiling was recorded — see the type remarks.</exception>
     public static async Task<string> ProvisionAsync(
         int issue,
         string repositoryDirectory,
@@ -228,6 +232,14 @@ public static class IssueWorktreeProvisioner
                 throw new ProjectNotTrustedException(
                     workspace,
                     "the repository-identity probe answered nothing (git missing, timed out, or exited non-zero).");
+            case InheritanceOutcome.CandidateUnknown:
+                // #2121: a recorded path that cannot be identified might be the tombstone, so the
+                // never-trusted fallback below is not known to apply. The path is named so the operator
+                // can repair it or `baton trust <path> --forget` the record.
+                throw new ProjectNotTrustedException(
+                    workspace,
+                    $"recorded path '{result.CandidatePath}' could not be identified: {result.ProbeFailure}. "
+                    + $"Repair that checkout, or 'baton trust \"{result.CandidatePath}\" --forget' to drop its record if it is gone.");
             case InheritanceOutcome.Revoked:
                 // #2121: the fallback below is for a repository the operator never trusted, and this one
                 // the operator revoked. The refusal names the tombstone so the operator knows which

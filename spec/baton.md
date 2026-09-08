@@ -4825,7 +4825,8 @@ a flat JSON map at `{BatonPaths.Root}/project-ceilings.json`, canonical project 
 closed set of ceiling levels, so this reuses the category vocabulary `ClaudeWorkerAdapter.TryTranslatePermissionGrant`
 already maps rather than inventing a second one). Decision 0004's "first presented as a trust prompt"
 has no interactive shape in a headless dispatch, so `baton trust <project-path> --ceiling
-all|none|<categories>` (list/revoke: `baton trust --list`, `baton trust <path> --revoke`) is the
+all|none|<categories>` (list/revoke/forget: `baton trust --list`, `baton trust <path> --revoke`,
+`baton trust <path> --forget`) is the
 explicit operator verb instead — the PR that built this states that reading as the assumption, not a
 correction to 0004's text. `ProjectCeilingGate` (`src/Baton.Vendors/`) is the one choke point both
 `ClaudeWorkerAdapter.Resolve` and `AgyWorkerAdapter.Resolve` call at the top of `Resolve`, before
@@ -4857,10 +4858,22 @@ reports `Revoked` rather than `NoTrustedSource` — a distinct outcome so a call
 fallback cannot take it. A tombstone matches the same way a live entry does, through its directory's
 own identity: one whose directory has been deleted matches nothing, so a repository whose every
 checkout was removed after the revoke reads as never trusted again, which is the boundary the
-path-keyed store has always had and not a new one. `baton trust <path> --ceiling …` on **any** path of
+path-keyed store has always had and not a new one. One whose directory exists but that git cannot
+identify (the probe answered nothing or threw) is not skipped as "no match": the lookup reports
+`CandidateUnknown` naming the path, and a caller with a never-trusted fallback refuses on it, because
+an unidentified record might be the tombstone — the same fail-closed rule the workspace's own probe
+already had, applied to each recorded path. `baton trust <path> --ceiling …` on **any** path of
 the repository ends the revocation: the path itself is overwritten, and the register verb probes each
 remaining tombstone whose directory exists and clears the ones sharing the new path's identity, naming
-each. `trust --list` shows a tombstone as `revoked <timestamp>` with its provenance clause kept.
+each. `trust --list` shows a tombstone as `revoked <timestamp>` with its provenance clause kept, and a
+second `--revoke` of the same path says it is already revoked, with that timestamp, and changes
+nothing. **Two verbs, two leftovers:** `baton trust <path> --revoke` withdraws the grant and leaves
+the tombstone; `baton trust <path> --forget` deletes the record outright, tombstone or live, announces
+the path and what the record was, and is the only verb that removes one — after it the path reads as
+never trusted, and it does not cascade (forgetting a live source leaves its inherited copies granting
+what they did; withdrawing is `--revoke`'s job). A tombstone for a deleted checkout is therefore
+permanent until forgotten, which is what a throwaway-workspace script (`tools/skill-probe/probe.py`)
+runs to leave the store as it found it.
 Otherwise the effective grant is `ceiling.Cap(roleGrant)` — each category survives only when both the
 role's own grant and the ceiling carry it, re-checked against
 `PermissionGrant.CategoriesDefeatedByTheShell` so a coherent role grant that becomes incoherent once
@@ -6463,9 +6476,11 @@ own output: the inheritance line names the source path, and the fallback prints 
 trusted repository to inherit from; recorded ceiling all`, because the fallback is a real widening and
 a silent one is the shape the announcement exists to rule out. Two other populations refuse instead,
 with `ProjectNotTrustedException` naming the cause, before anything is queued: the identity probe
-answering nothing (git missing, timed out, or exited non-zero), since "git said nothing" is not "no
-repository is trusted" and stamping `all` on it would let a transient failure widen a deliberately
-narrowed ceiling; and a **revoked** repository (#2121) — every recorded path of it a tombstone — since
+answering nothing (git missing, timed out, or exited non-zero) — for the workspace, or for any
+recorded path whose directory exists (§9's `CandidateUnknown`, named in the refusal) — since "git
+said nothing" is not "no repository is trusted" and stamping `all` on it would let a transient
+failure widen a deliberately narrowed ceiling or hide a tombstone; and a **revoked** repository
+(#2121) — every recorded path of it a tombstone — since
 that is the operator's own withdrawal and the fallback would undo it at the next add. §9's revoked
 state paragraph is the one statement of what a tombstone is and how it clears; this section only
 names which population it puts the add in. Add time because an operator queueing eight items at

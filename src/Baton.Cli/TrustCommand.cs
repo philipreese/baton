@@ -6,7 +6,7 @@ namespace Baton.Cli;
 /// <summary>
 /// <c>baton trust</c> (#1166): decision 0004's project ceiling has no interactive first-use trust
 /// prompt in a headless dispatch, so this is the explicit operator verb the scope ruling calls for —
-/// list/register/revoke against <see cref="ProjectCeilingStore"/>. Not a
+/// list/register/revoke/forget against <see cref="ProjectCeilingStore"/>. Not a
 /// <see cref="CommandResult"/>/<see cref="FlowStateReporter"/> command (no workflow pump, no projected
 /// state to report): joins <c>watch</c>/<c>keep</c>/<c>unkeep</c> in <c>Program.cs</c>'s own carve-out
 /// for exactly that shape.
@@ -36,6 +36,7 @@ public static class TrustCommand
             TrustMode.List => Task.FromResult(List(output)),
             TrustMode.Register => RegisterAsync(options, output, probe ?? RepositoryIdentityResolver.TryResolveAsync, cancellationToken),
             TrustMode.Revoke => Task.FromResult(Revoke(options, output)),
+            TrustMode.Forget => Task.FromResult(Forget(options, output)),
             _ => throw new ArgumentOutOfRangeException(nameof(options)),
         };
     }
@@ -117,7 +118,14 @@ public static class TrustCommand
         var revocation = ProjectCeilingStore.Revoke(options.ProjectPath!, ProjectCeilingStore.DefaultPath);
         if (!revocation.Revoked)
         {
-            output.WriteLine($"No ceiling is recorded for '{options.ProjectPath}' — nothing to revoke.");
+            // #2121: "nothing to revoke" has two causes, and `--list` shows one of them as `revoked
+            // <timestamp>` — saying "no ceiling is recorded" for that one would contradict the list the
+            // operator reads next. The tombstone's timestamp is the one the first revoke wrote; the
+            // store left it alone.
+            output.WriteLine(
+                ProjectCeilingStore.TryGetRecord(options.ProjectPath!, ProjectCeilingStore.DefaultPath) is { RevokedAt: { } revokedAt }
+                    ? $"'{options.ProjectPath}' is already revoked ({revokedAt:u}) - nothing to revoke."
+                    : $"No ceiling is recorded for '{options.ProjectPath}' — nothing to revoke.");
             return 0;
         }
 
@@ -132,4 +140,25 @@ public static class TrustCommand
         return 0;
     }
 
+    /// <summary>
+    /// <c>--forget</c> (#2121): the one verb that deletes a record. The line names the canonical path
+    /// and what the record was — a tombstone with its timestamp, or a live ceiling — so the operator
+    /// learns which state just left the store; a forgotten tombstone means the repository reads as
+    /// never trusted again, which is the fallback <c>queue add --issue</c> takes (spec/baton.md §9).
+    /// </summary>
+    private static int Forget(TrustOptions options, TextWriter output)
+    {
+        var key = ProjectCeilingStore.CanonicalKey(options.ProjectPath!);
+        var forgotten = ProjectCeilingStore.Forget(options.ProjectPath!, ProjectCeilingStore.DefaultPath);
+        if (forgotten is null)
+        {
+            output.WriteLine($"No ceiling is recorded for '{key}' — nothing to forget.");
+            return 0;
+        }
+
+        var was = forgotten.RevokedAt is { } revokedAt ? $"revoked {revokedAt:u}" : $"ceiling {forgotten.Describe()}";
+        var provenance = forgotten.InheritedFrom is { Length: > 0 } source ? $", inherited from {source}" : string.Empty;
+        output.WriteLine($"Forgot '{key}' (was {was}{provenance}); it now reads as never trusted.");
+        return 0;
+    }
 }

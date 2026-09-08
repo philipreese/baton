@@ -24,12 +24,18 @@ namespace Baton.Cli;
 /// repository the operator deliberately withdrew.
 /// </para>
 /// <para>
-/// <b>A probe that answers nothing is not "no match".</b> <see cref="TryInheritAsync"/> reports the two
-/// apart (<see cref="InheritanceOutcome.NoIdentity"/> versus
-/// <see cref="InheritanceOutcome.NoTrustedSource"/>) because a caller with a fallback of its own —
-/// <c>queue add --issue</c>'s <c>all</c> — must not take it on a git that is missing, timed out, or
-/// exited non-zero: that is the one path on which a transient failure would widen a ceiling the
-/// operator deliberately narrowed, and it fails closed instead.
+/// <b>A probe that answers nothing is not "no match" — for the workspace or for a candidate.</b>
+/// <see cref="TryInheritAsync"/> reports the two apart (<see cref="InheritanceOutcome.NoIdentity"/>
+/// versus <see cref="InheritanceOutcome.NoTrustedSource"/>) because a caller with a fallback of its
+/// own — <c>queue add --issue</c>'s <c>all</c> — must not take it on a git that is missing, timed out,
+/// or exited non-zero: that is the one path on which a transient failure would widen a ceiling the
+/// operator deliberately narrowed, and it fails closed instead. The same holds for a <b>recorded</b>
+/// path whose probe answers nothing or throws (<see cref="InheritanceOutcome.CandidateUnknown"/>,
+/// #2121): a candidate that cannot be identified might be the tombstone that makes this repository
+/// revoked, so skipping it as "no match" would let the fallback reach a repository the operator
+/// withdrew. The outcome names the path so the operator can repair the checkout or
+/// <c>baton trust &lt;path&gt; --forget</c> the record; a recorded path whose directory is gone is
+/// still skipped without a probe, which spec/baton.md §9 states as the store's boundary.
 /// </para>
 /// <para>
 /// <b>Repository identity, not path shape</b> — <see cref="RepositoryIdentity"/>, the same resolver the
@@ -159,8 +165,28 @@ internal static class InheritedProjectCeiling
                 continue;
             }
 
-            var candidate = await probe(recordedPath, cancellationToken).ConfigureAwait(false);
-            if (candidate is null || !string.Equals(candidate.Value, identity.Value, StringComparison.Ordinal))
+            RepositoryIdentity? candidate;
+            try
+            {
+                candidate = await probe(recordedPath, cancellationToken).ConfigureAwait(false);
+            }
+            catch (Exception ex) when (ex is not OperationCanceledException)
+            {
+                // Mapped to a structured outcome rather than swallowed: the caller refuses with the
+                // path and this message, and a thrown probe is the same "cannot identify" as a null one.
+                return new InheritanceResult(
+                    InheritanceOutcome.CandidateUnknown, CandidatePath: recordedPath, ProbeFailure: $"the repository-identity probe threw: {ex.Message}");
+            }
+
+            if (candidate is null)
+            {
+                return new InheritanceResult(
+                    InheritanceOutcome.CandidateUnknown,
+                    CandidatePath: recordedPath,
+                    ProbeFailure: "the repository-identity probe answered nothing (git missing, timed out, exited non-zero, or the directory is no longer a git checkout)");
+            }
+
+            if (!string.Equals(candidate.Value, identity.Value, StringComparison.Ordinal))
             {
                 continue;
             }
@@ -218,8 +244,17 @@ internal enum InheritanceOutcome
     /// <summary>The probe yielded no identity — git missing, timed out, exited non-zero, or no path to probe. A caller with a fallback must fail closed here, not take it.</summary>
     NoIdentity,
 
-    /// <summary>The workspace has an identity, no trusted path shares it, and no revoked path does either — the never-trusted repository.</summary>
+    /// <summary>The workspace has an identity, no trusted path shares it, and no revoked path does either — the never-trusted repository. Every recorded path whose directory exists was identified to reach this.</summary>
     NoTrustedSource,
+
+    /// <summary>
+    /// #2121: a recorded path whose directory exists could not be identified — its probe answered
+    /// nothing or threw — so whether it shares the workspace's identity (and whether it is the tombstone
+    /// that makes the repository revoked) is unknown. Nothing is written. A caller with a fallback must
+    /// refuse here, naming <see cref="InheritanceResult.CandidatePath"/> and
+    /// <see cref="InheritanceResult.ProbeFailure"/>; the type remarks have why this is not "no match".
+    /// </summary>
+    CandidateUnknown,
 
     /// <summary>
     /// #2121: the workspace has an identity, no live entry shares it, and at least one tombstone does —
@@ -237,5 +272,12 @@ internal enum InheritanceOutcome
 /// <param name="Fact">The line for the caller's output — set only for <see cref="InheritanceOutcome.Inherited"/>.</param>
 /// <param name="RevokedPath">The first tombstoned path (ordinal order) sharing the workspace's identity — set only for <see cref="InheritanceOutcome.Revoked"/>.</param>
 /// <param name="RevokedAt">When <paramref name="RevokedPath"/> was revoked — set only for <see cref="InheritanceOutcome.Revoked"/>.</param>
+/// <param name="CandidatePath">The recorded path whose probe failed — set only for <see cref="InheritanceOutcome.CandidateUnknown"/>.</param>
+/// <param name="ProbeFailure">What that probe could not do, in words the caller's refusal can quote — set only for <see cref="InheritanceOutcome.CandidateUnknown"/>.</param>
 internal sealed record InheritanceResult(
-    InheritanceOutcome Outcome, string? Fact = null, string? RevokedPath = null, DateTimeOffset? RevokedAt = null);
+    InheritanceOutcome Outcome,
+    string? Fact = null,
+    string? RevokedPath = null,
+    DateTimeOffset? RevokedAt = null,
+    string? CandidatePath = null,
+    string? ProbeFailure = null);

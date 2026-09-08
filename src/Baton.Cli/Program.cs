@@ -233,7 +233,7 @@ try
         return 0;
     }
 
-    // #1166 (TrustCommand's own doc has why this verb exists): list/register/revoke against
+    // #1166 (TrustCommand's own doc has why this verb exists): list/register/revoke/forget against
     // ProjectCeilingStore produces no CommandResult (no workflow pump), so this joins keep/unkeep/watch
     // above rather than the CommandResult/FlowStateReporter switch below.
     if (args[0] == "trust")

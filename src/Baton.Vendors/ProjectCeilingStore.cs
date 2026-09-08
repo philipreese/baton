@@ -200,6 +200,32 @@ public static class ProjectCeilingStore
     }
 
     /// <summary>
+    /// Deletes <paramref name="projectPath"/>'s record outright — tombstone or live — and returns what
+    /// was deleted, or <see langword="null"/> when nothing was recorded. The <c>baton trust &lt;path&gt;
+    /// --forget</c> write path (#2121), and the <b>only</b> remover an operator has: <see cref="Revoke"/>
+    /// withdraws and leaves a tombstone, and nothing else in the product deletes an entry whose
+    /// directory is gone. <b>No cascade:</b> this removes one record and says nothing about the entries
+    /// copied from it — withdrawing a grant is <see cref="Revoke"/>'s job, and forgetting a live source
+    /// leaves its live copies granting exactly what they did. spec/baton.md §9 states the two verbs once.
+    /// </summary>
+    public static ProjectCeiling? Forget(string projectPath, string path)
+    {
+        ArgumentException.ThrowIfNullOrEmpty(projectPath);
+
+        return MutexGuardedFileLock.RunUnderLock(path, LockNamePrefix, LockTimeout, () =>
+        {
+            var ceilings = new Dictionary<string, ProjectCeiling>(Load(path), BatonPaths.RecordKeyComparer);
+            if (!ceilings.Remove(CanonicalKey(projectPath), out var forgotten))
+            {
+                return null;
+            }
+
+            Save(ceilings, path);
+            return forgotten;
+        });
+    }
+
+    /// <summary>
     /// Removes the tombstones at <paramref name="projectPaths"/> (#2121) — the <c>baton trust</c>
     /// register path clearing the revocation of every other path in the repository it just re-trusted.
     /// A path that is not a tombstone is left alone: a live ceiling is never removed by this, and one
@@ -233,7 +259,7 @@ public static class ProjectCeilingStore
     }
 }
 
-/// <summary>What <see cref="ProjectCeilingStore.Revoke"/> removed.</summary>
-/// <param name="Revoked">Whether the named path had an entry to remove.</param>
-/// <param name="CascadedPaths">The canonical paths of the inherited entries removed with it, in removal order — empty when <paramref name="Revoked"/> is false.</param>
+/// <summary>What <see cref="ProjectCeilingStore.Revoke"/> tombstoned.</summary>
+/// <param name="Revoked">Whether the named path had a live ceiling to tombstone.</param>
+/// <param name="CascadedPaths">The canonical paths of the inherited entries tombstoned with it, in order — empty when <paramref name="Revoked"/> is false.</param>
 public sealed record ProjectCeilingRevocation(bool Revoked, IReadOnlyList<string> CascadedPaths);

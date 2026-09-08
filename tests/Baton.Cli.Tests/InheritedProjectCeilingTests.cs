@@ -170,10 +170,13 @@ public sealed class InheritedProjectCeilingTests : IDisposable
         ProjectCeilingStore.Set(main, ProjectCeiling.Unrestricted, Store);
         ProjectCeilingStore.Set(unrelated, ProjectCeiling.Unrestricted, Store);
 
+        // Every directory the scan will see is identifiable: since #2121 a recorded path the probe
+        // cannot identify ends the lookup as CandidateUnknown rather than being skipped.
         var probe = ProbeOf(new()
         {
             [main] = (null, commonDir),
             [worktree] = (null, commonDir),
+            [grandchild] = (null, commonDir),
             [unrelated] = ("https://github.com/philipreese/basis", null),
         });
 
@@ -296,6 +299,42 @@ public sealed class InheritedProjectCeilingTests : IDisposable
         Assert.Null(noIdentity.Fact);
         Assert.Null(noSource.Fact);
         Assert.Null(ProjectCeilingStore.TryGet(stranger, Store));
+    }
+
+    /// <summary>
+    /// #2121: a recorded path whose directory exists but whose probe answers nothing, or throws, ends
+    /// the lookup as <see cref="InheritanceOutcome.CandidateUnknown"/> naming that path — never as
+    /// <see cref="InheritanceOutcome.NoTrustedSource"/>, which is the outcome a fallback-taking caller
+    /// would widen on. The control is the same store with the candidate identified: it inherits.
+    /// </summary>
+    [Fact]
+    public async Task A_recorded_path_the_probe_cannot_identify_is_reported_unknown_not_unmatched()
+    {
+        var main = MakeDirectory("baton");
+        var worktree = MakeDirectory("w2121");
+        var commonDir = Path.Combine(main, ".git");
+        ProjectCeilingStore.Set(main, ProjectCeiling.Unrestricted, Store);
+
+        var silent = await InheritedProjectCeiling.TryInheritAsync(
+            worktree, Store, ProbeOf(new() { [worktree] = (null, commonDir) }), TestContext.Current.CancellationToken);
+        var throwing = await InheritedProjectCeiling.TryInheritAsync(
+            worktree, Store,
+            (path, _) => path == worktree
+                ? Task.FromResult<RepositoryIdentity?>(RepositoryIdentity.From(null, commonDir))
+                : throw new InvalidOperationException("boom"),
+            TestContext.Current.CancellationToken);
+        var identified = await InheritedProjectCeiling.TryInheritAsync(
+            worktree, Store, ProbeOf(new() { [main] = (null, commonDir), [worktree] = (null, commonDir) }), TestContext.Current.CancellationToken);
+
+        Assert.Equal(InheritanceOutcome.CandidateUnknown, silent.Outcome);
+        Assert.Equal(ProjectCeilingStore.CanonicalKey(main), silent.CandidatePath);
+        Assert.Contains("answered nothing", silent.ProbeFailure, StringComparison.Ordinal);
+        Assert.Equal(InheritanceOutcome.CandidateUnknown, throwing.Outcome);
+        Assert.Equal(ProjectCeilingStore.CanonicalKey(main), throwing.CandidatePath);
+        Assert.Contains("boom", throwing.ProbeFailure, StringComparison.Ordinal);
+        Assert.Null(silent.Fact);
+        Assert.Null(throwing.Fact);
+        Assert.Equal(InheritanceOutcome.Inherited, identified.Outcome);
     }
 
     [Fact]
