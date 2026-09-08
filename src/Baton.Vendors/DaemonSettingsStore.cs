@@ -22,6 +22,15 @@ public sealed record DaemonSettings
     public int? RoomsRetentionDays { get; init; }
 
     /// <summary>
+    /// #2072: how long a room's journal must have been quiet before
+    /// <c>Baton.Cli.Daemon.DeadPumpProbe</c> will call its still-open execution arrested. Null (the
+    /// default) means that type's own <c>DefaultQuietWindow</c> applies — the default and the reason it
+    /// is the number it is live there, beside the heartbeat cadence they are derived from, rather than
+    /// being transcribed into this file.
+    /// </summary>
+    public int? DeadPumpQuietMinutes { get; init; }
+
+    /// <summary>
     /// #1848: the runway hold's thresholds, read by <c>baton dispatch</c> before it admits new vendor
     /// spend. Never null — an absent <c>RunwayHold</c> key in <c>settings.json</c> leaves the
     /// operator-approved defaults (week ≥85%, session ≥90%) in force, so the gate exists on a machine
