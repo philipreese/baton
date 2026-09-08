@@ -278,7 +278,7 @@ internal sealed class DaemonWatchdog : IHostedService
         return $"DaemonWatchdog: no service has completed a tick in {silence.TotalSeconds:F0}s "
                + $"(limit {limit.TotalSeconds:F0}s = {MissedTickAllowance} x the {interval.TotalSeconds:F0}s projection interval). "
                + $"Last to complete: {lastCompleted}. Longest silent: {quietest}. "
-               + $"Exiting {HungExitCode} so the baton-daemon scheduled task's restart policy brings the daemon back; "
+               + $"Exiting {HungExitCode} so the baton-daemon scheduled task's repeating trigger relaunches the daemon; "
                + $"{BatonPaths.FleetHeartbeatFile} holds the per-service durations as of the last tick that finished.";
     }
 }

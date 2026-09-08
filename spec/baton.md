@@ -3785,8 +3785,16 @@ than silently dropping out with the rest of the deleted daemon surface. All of t
 `baton daemon` is actually running persistently; it is kept running by the `baton-daemon` scheduled
 task (`tools/tool-refresh/register-daemon-task.ps1`, #1557), cycled onto each newly refreshed tool
 head the same way `tools/tool-refresh/refresh.py` already cycles `fleet-glass-pusher`. That script
-registers unelevated, so its only trigger is a logon trigger scoped to the registering user; a boot
-trigger is not registrable by a standard user and is not used (#1770).
+registers unelevated with two triggers: a logon trigger scoped to the registering user for first
+launch at each logon, and a one-time trigger starting at registration that repeats every five minutes
+indefinitely (#2083). Omitting RepetitionDuration gives indefinite repetition; the operator measured
+that [TimeSpan]::MaxValue is rejected. With MultipleInstances IgnoreNew, each repeat skips a live
+daemon and relaunches a dead one while the operator is logged on. Re-registration replaces the full
+definition with these same two triggers, preserving the operator's hand fix without duplicates.
+A boot trigger and an any-user logon trigger are not registrable by a standard user and are not used;
+the daemon needs the interactive user's PATH and ~/.baton (#1770). RestartCount never fired on the
+measured non-zero exit: Operational log event 201 recorded successful action completion with return
+code 2147942470 (exit 70), followed by ten minutes without a restart (#2083).
 
 - **`RoomRetentionSweep`** (`Program.cs`, a hosted service) — it prunes execution directories, and
   `ExecutionUsageProjector` has an explicit pruned-path fallback specifically because the sweep moves
@@ -3848,15 +3856,16 @@ trigger is not registrable by a standard user and is not used (#1770).
   `FleetProjectionWriter` renders that ledger to `BatonPaths.FleetHeartbeatFile`
   (`{Root}/fleet/heartbeat.json` — `tickCompletedAt` plus per-service last-tick durations) at the end
   of every projection tick, and `DaemonWatchdog` kills the process with a non-zero code once the
-  daemon has gone silent for the bound that type states, so the scheduled task's restart policy brings
-  it back.
+  daemon has gone silent for the bound that type states, so the scheduled task's repeating trigger
+  relaunches it (#2083, above).
   Those types' own doc comments carry the rules — what the watchdog deliberately does not catch (one
   wedged service beside healthy ones; §6's projection-staleness reading covers that), and why its loop
-  runs on a dedicated thread rather than the thread pool. **The scheduled task's action has to end in
-  `; exit $LASTEXITCODE`** for any of this to reach the scheduler: a `powershell.exe -Command "& { …
-  *>> 'daemon.log' }"` swallows the exit code (measured, PowerShell 5.1, 2026-09-06), which would leave
-  a watchdog-killed daemon dead instead of restarted — `register-daemon-task.ps1` sets it, and an
-  existing registration keeps the old action until an operator re-runs that script.
+  runs on a dedicated thread rather than the thread pool. **The scheduled task's action must preserve
+  the daemon's exit code for diagnosis:** a `powershell.exe -Command "& { … *>> 'daemon.log' }"`
+  swallows it without an explicit exit (measured, PowerShell 5.1, 2026-09-06). The wrapper in
+  `register-daemon-task.ps1` captures `$LASTEXITCODE`, records it in daemon.log, and returns it with
+  `exit $c` so Last Run Result also reflects it. Relaunch comes from the repeating trigger regardless
+  of exit code (#2083); an existing registration keeps the old action until the script is re-run.
   Occasioned by a thirteen-minute silent hang on 2026-09-06 (#1981): process alive, task Running,
   every consumer serving a frozen picture, noticed by a person. The root cause of that hang is not
   addressed by any of this — the instrumentation is what makes the next one diagnosable.

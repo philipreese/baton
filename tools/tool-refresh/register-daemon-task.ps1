@@ -57,13 +57,11 @@ $action = New-ScheduledTaskAction -Execute "powershell.exe" `
     -Argument '-NoProfile -WindowStyle Hidden -Command "& { baton daemon *>> ''daemon.log'' }; $c = $LASTEXITCODE; if ($null -eq $c) { $c = 1 }; (''['' + [DateTime]::UtcNow.ToString(''yyyy-MM-ddTHH:mm:ss.fffZ'', [cultureinfo]::InvariantCulture) + ''] baton daemon exited '' + $c) | Out-File -FilePath ''daemon.log'' -Append -Encoding unicode; exit $c"' `
     -WorkingDirectory $batonHome
 
-# A logon trigger can only launch once, and Task Scheduler's RestartCount does not relaunch this
-# task after its non-zero daemon exit (#2083). A one-time trigger with repetition is the durable
-# relaunch mechanism: every five minutes it starts a dead daemon, while IgnoreNew skips a due
-# trigger while the healthy daemon is still alive. The 10-year duration is the same bounded form
-# as fleet-glass-pusher's trigger (deploy.ps1 step 5), rather than an unbounded scheduler setting.
+# See spec/baton.md §7 (#1770, #2083) for the unelevated trigger constraints and relaunch mechanism.
+# Keep the user-scoped logon trigger beside the repeating trigger when replacing the definition.
+$triggerLogon = New-ScheduledTaskTrigger -AtLogOn -User "$env:USERDOMAIN\$env:USERNAME"
 $triggerRepeat = New-ScheduledTaskTrigger -Once -At (Get-Date) `
-    -RepetitionInterval (New-TimeSpan -Minutes 5) -RepetitionDuration (New-TimeSpan -Days 3650)
+    -RepetitionInterval (New-TimeSpan -Minutes 5)
 
 # IgnoreNew keeps the repeating trigger from overlapping a healthy daemon. A repeat hang is still
 # observable in daemon.log rather than being papered over by a rapid restart loop.
@@ -72,7 +70,7 @@ $taskSettings = New-ScheduledTaskSettingsSet `
     -StartWhenAvailable `
     -ExecutionTimeLimit ([TimeSpan]::Zero) -Hidden
 
-Register-ScheduledTask -TaskName $taskName -Action $action -Trigger $triggerRepeat `
+Register-ScheduledTask -TaskName $taskName -Action $action -Trigger @($triggerLogon, $triggerRepeat) `
     -Settings $taskSettings -Force | Out-Null
 
 # #2036: turn the Task Scheduler operational log on, so the next scheduled relaunch has a record.
