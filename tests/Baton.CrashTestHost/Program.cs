@@ -11,6 +11,17 @@ using Baton.Store;
 //
 // args: <pausePoint> <roomDirectory> <artifactsRoot> <logPath> <pauseSignalPath> <cancelSignalPath>
 //   pausePoint: "none" | "before-dispatch" | "after-dispatch" (see DispatchPausePoint).
+//
+// #2082: a second, unrelated use of the same killable host -- the two arms of Baton.Tests'
+// DetachedProcessTests. `spawn-contained <pidFile>` starts a long sleeper through BatonTask (the
+// job-contained path every worker takes); `spawn-detached <pidFile>` starts one through
+// DetachedProcess (the path a queue-launched lane takes). Either way the host writes the sleeper's
+// pid to <pidFile> and then waits to be killed; the test asserts the sleeper's fate.
+if (args.Length == 2 && args[0] is "spawn-contained" or "spawn-detached")
+{
+    return await SpawnArmAsync(args[0], args[1]);
+}
+
 if (args.Length != 6)
 {
     await Console.Error.WriteLineAsync(
@@ -53,6 +64,42 @@ await MutationInterface.StartWorkflowAsync(
     inFlightExecutions: inFlightExecutions);
 
 return 0;
+
+// The #2082 arms described at the top of this file. The sleeper is the same `ping -n 9999` the
+// process-tree tests use: long enough that "still alive" is never in question inside a test.
+static async Task<int> SpawnArmAsync(string mode, string pidFile)
+{
+    string[] sleeperArgs = ["-n", "9999", "127.0.0.1"];
+    if (mode == "spawn-detached")
+    {
+        using var child = Baton.Core.DetachedProcess.Start("ping", startInfo =>
+        {
+            foreach (var arg in sleeperArgs)
+            {
+                startInfo.ArgumentList.Add(arg);
+            }
+        });
+        await File.WriteAllTextAsync(pidFile, child.Id.ToString(System.Globalization.CultureInfo.InvariantCulture))
+            .ConfigureAwait(false);
+
+        // Killed from outside; never returns on its own.
+        await Task.Delay(Timeout.InfiniteTimeSpan).ConfigureAwait(false);
+        return 0;
+    }
+
+    using var task = new Baton.Core.BatonTask("ping", sleeperArgs);
+    task.EventRaised += (_, e) =>
+    {
+        if (e.Kind == Baton.Core.BatonTaskEventKind.Started)
+        {
+            File.WriteAllText(pidFile, e.Pid.ToString(System.Globalization.CultureInfo.InvariantCulture));
+        }
+    };
+
+    // Blocks until the sleeper exits, which the test never lets happen: it kills this host first.
+    task.Run();
+    return 0;
+}
 
 static async Task WatchForCancelSignalAsync(
     string cancelSignalPath, IEventLogReader reader, InFlightExecutionRegistry inFlightExecutions)
