@@ -189,30 +189,65 @@ public static class BatonPaths
     public const string QuotaLedgerFileName = "quota-ledger.jsonl";
 
     /// <summary>
-    /// <c>{Root}/ledger/&lt;repository-slug&gt;.jsonl</c> — the repository-keyed cost ledger (#1849,
-    /// spec/baton.md §7). One file per canonical repository identity, so every worktree of one
-    /// repository appends to one ledger; see <c>Baton.Accounting.CostLedgerStore</c> for what a row
-    /// holds and <c>Baton.Accounting.RepositoryIdentity.FileSlug</c> for why the key is slugged rather
-    /// than used verbatim as a filename. Distinct from <see cref="QuotaLedgerFile"/>, which stays the
+    /// <c>{Root}/&lt;repository-slug&gt;/cost-ledger.jsonl</c> — the repository-keyed cost ledger
+    /// (#1849, spec/baton.md §7), <b>inside</b> the per-repository directory since #2041 rather than
+    /// under a per-concern directory keyed by slug. One file per canonical repository identity, so
+    /// every worktree of one repository appends to one ledger; see
+    /// <c>Baton.Accounting.CostLedgerStore</c> for what a row holds and
+    /// <c>Baton.Accounting.RepositoryIdentity.FileSlug</c> for why the key is slugged rather than used
+    /// verbatim as a path component. Distinct from <see cref="QuotaLedgerFile"/>, which stays the
     /// per-execution burn source this ledger consumes.
+    /// <para>
+    /// <b>This is the canonical path, not necessarily the file to open.</b> A machine that ran an
+    /// older build still has one at <see cref="LegacyCostLedgerFile"/>, and
+    /// <c>Baton.Accounting.CostLedgerLocation</c> is the one resolver that decides between the two —
+    /// every production reader goes through its <c>ResolveForRead</c> and every writer through its
+    /// <c>ResolveForWrite</c>, rather than through this property.
+    /// </para>
     /// </summary>
     /// <param name="repositorySlug"><c>RepositoryIdentity.FileSlug</c> — never a raw identity or a checkout path.</param>
-    public static string CostLedgerFile(string repositorySlug)
+    public static string CostLedgerFile(string repositorySlug) =>
+        Path.Combine(RepositoryDirectory(repositorySlug), CostLedgerFileName);
+
+    /// <summary>Filename of <see cref="CostLedgerFile"/> relative to <see cref="RepositoryDirectory"/>.</summary>
+    public const string CostLedgerFileName = "cost-ledger.jsonl";
+
+    /// <summary>
+    /// <c>{Root}/ledger/&lt;repository-slug&gt;.jsonl</c> — where the cost ledger lived before #2041
+    /// moved it under the per-repository directory. Named here rather than spelled inline at the one
+    /// site that reads it, because a path this type stopped writing is still a path this type owns:
+    /// <c>Baton.Accounting.CostLedgerLocation</c> relocates it on first sight and nothing else may
+    /// open it.
+    /// </summary>
+    /// <param name="repositorySlug"><c>RepositoryIdentity.FileSlug</c> — never a raw identity or a checkout path.</param>
+    public static string LegacyCostLedgerFile(string repositorySlug)
     {
         ArgumentException.ThrowIfNullOrEmpty(repositorySlug);
-        return Path.Combine(Root, CostLedgerDirectoryName, $"{repositorySlug}.jsonl");
+        return Path.Combine(Root, LegacyCostLedgerDirectoryName, $"{repositorySlug}.jsonl");
     }
 
-    /// <summary>Directory name <see cref="CostLedgerFile"/> lives under, relative to a root.</summary>
-    public const string CostLedgerDirectoryName = "ledger";
+    /// <summary>Directory name <see cref="LegacyCostLedgerFile"/> lives under, relative to a root.</summary>
+    public const string LegacyCostLedgerDirectoryName = "ledger";
+
+    /// <summary>
+    /// <c>{Root}/ledger-migrations.jsonl</c> — one append-only line per cost ledger actually relocated
+    /// out of <see cref="LegacyCostLedgerFile"/> (#2041). Machine-wide rather than inside the
+    /// repository directory it moved into, for the reason <see cref="MemoryImportManifestFile"/> is:
+    /// the record of a move has to be findable without already knowing where the move landed.
+    /// <c>Baton.Accounting.CostLedgerLocation</c> owns what a line holds.
+    /// </summary>
+    public static string CostLedgerMigrationFile => Path.Combine(Root, CostLedgerMigrationFileName);
+
+    /// <summary>Filename of <see cref="CostLedgerMigrationFile"/> relative to a root.</summary>
+    public const string CostLedgerMigrationFileName = "ledger-migrations.jsonl";
 
     /// <summary>
     /// <c>{Root}/&lt;repository-slug&gt;</c> — the per-repository directory (#1852 phase B). Q3
     /// (operator, 2026-09-05) made the repository directory the unit, so anything filed per repository
     /// from here on lives <b>inside</b> one of these rather than under a per-concern directory keyed by
-    /// slug. <see cref="CostLedgerFile"/> is the one existing exception and stays where it is: moving
-    /// it is a later phase's work with a reader that accepts both paths during the transition
-    /// (spec/baton.md §12).
+    /// slug. <see cref="CostLedgerFile"/> was the one exception until #2041 moved it here too; the
+    /// reader that accepts both paths during the transition is
+    /// <c>Baton.Accounting.CostLedgerLocation</c> (spec/baton.md §7).
     /// </summary>
     /// <param name="repositorySlug"><c>RepositoryIdentity.FileSlug</c> — never a raw identity or a checkout path.</param>
     public static string RepositoryDirectory(string repositorySlug)

@@ -20,7 +20,8 @@ public static class LedgerBackfillOptionsParser
     public static IReadOnlyList<string> HelpLines { get; } =
     [
         "",
-        "Recovers rows the repository-keyed COST ledger (~/.baton/ledger/<repository>.jsonl) never got:",
+        "Recovers rows the repository-keyed COST ledger (~/.baton/<repository>/cost-ledger.jsonl) never",
+        "got:",
         "",
         "  Rooms on disk    Every settled execution in a room that has no ledger row yet -- tokens from",
         "                   the captured stream through the same projector a settle uses, and the same",

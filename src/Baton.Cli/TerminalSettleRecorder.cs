@@ -89,7 +89,19 @@ public static class TerminalSettleRecorder
                 .TryResolveForRoomAsync(terminalRoomDirectoryPath, CancellationToken.None).ConfigureAwait(false);
             if (repository is not null)
             {
-                var costLedgerPath = BatonPaths.CostLedgerFile(repository.FileSlug);
+                // #2041: the write side of the resolver fails CLOSED. A relocation this process could
+                // not settle costs THIS row and says so, rather than handing back the pre-#2041 path --
+                // which a later append (a separate critical section from the decision) could recreate
+                // after another process moved it, splitting the ledger permanently. Same fail-open
+                // posture toward the run either way: a lost accounting row never fails a settled run.
+                var writeTarget = CostLedgerLocation.ResolveForWrite(repository.FileSlug);
+                if (writeTarget.Path is not { } costLedgerPath)
+                {
+                    Console.Error.WriteLine(
+                        $"{writeTarget.Refusal} No cost ledger row was written for room "
+                        + $"'{terminalRoomDirectoryPath}'.");
+                    return;
+                }
 
                 // #1848's audited runway override and #1499's dispatch --label, both read back off this
                 // room's own bindings.json in ONE parse (RoomBindingStamps' own remarks say why one

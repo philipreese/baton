@@ -775,9 +775,18 @@ public static class DispatchCommand
 
     /// <summary>
     /// This repository's cost-ledger rows for the reservation policy, or empty when there are none to be
-    /// had. Never throws and never blocks a dispatch: an unresolvable repository identity, an absent
-    /// ledger, or an unreadable one all resolve to no evidence, which the policy reads as "use the flat
-    /// default" — the same fail-open posture <see cref="RepositoryIdentityResolver"/> itself documents.
+    /// had. Never throws: an unresolvable repository identity, an absent ledger, or an unreadable one all
+    /// resolve to no evidence, which the policy reads as "use the flat default" — the same fail-open
+    /// posture <see cref="RepositoryIdentityResolver"/> itself documents.
+    /// <para>
+    /// <b>It can, however, delay one</b> (#2041). On a machine that still has a pre-#2041 ledger at
+    /// <c>BatonPaths.LegacyCostLedgerFile</c>, <c>CostLedgerLocation.ResolveForRead</c> performs that
+    /// one-time relocation — a <c>File.Move</c> plus a line appended to the migration manifest — under
+    /// the legacy file's mutex, so this read can wait out that lock's timeout before returning. Bounded,
+    /// once per machine per repository, and outside <c>ReserveAndRecordAsync</c>'s synchronous critical
+    /// section (spec/baton.md §7's "anything slow the decision needs happens before the lock is taken"),
+    /// so what it costs is dispatch latency, never an admission decision.
+    /// </para>
     /// </summary>
     /// <remarks>
     /// Falls back to <paramref name="workspace"/>, never to the process's current directory, for the case
@@ -795,7 +804,7 @@ public static class DispatchCommand
         return identity is null
             ? []
             : await CostLedgerStore
-                .ReadAllAsync(BatonPaths.CostLedgerFile(identity.FileSlug), cancellationToken).ConfigureAwait(false);
+                .ReadAllAsync(CostLedgerLocation.ResolveForRead(identity.FileSlug), cancellationToken).ConfigureAwait(false);
     }
 
     /// <summary>

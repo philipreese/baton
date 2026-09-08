@@ -182,6 +182,83 @@ public sealed class LedgerBackfillCommandTests : IDisposable
     }
 
     /// <summary>
+    /// #2041 review MEDIUM: <c>--dry-run</c> must not RELOCATE either. The walk runs before the report
+    /// is printed, so a dry run that resolved for writing would move the operator's pre-#2041 ledger and
+    /// append a manifest line under a first line reading "nothing was written" — false on its face, and
+    /// a write on the wrong side of this command's PLAN-then-DISCLOSE-then-WRITE ordering.
+    /// <para>
+    /// Asserted on the FILES for the same reason the arm above is: the legacy file is still there, no
+    /// canonical file was created, and the migration manifest does not exist. The report is asserted too
+    /// — a dry run that quietly said nothing about a relocation a real run WILL perform would leave the
+    /// operator to discover it by finding <c>~/.baton/ledger</c> empty. The control is the
+    /// <c>Assert.Contains("Rows this would write: 1")</c>: without it this could pass against a run that
+    /// walked nothing at all.
+    /// </para>
+    /// </summary>
+    [Fact]
+    public async Task A_dry_run_relocates_no_pre_2041_ledger_and_says_a_real_run_would()
+    {
+        using var scope = BatonEnvironmentSnapshot.BeginScope(
+            BatonEnvironmentSnapshot.Blank with { HomeOverride = Path.Combine(_sandbox, "home") });
+
+        var legacy = BatonPaths.LegacyCostLedgerFile(Repository.FileSlug);
+        await CostLedgerStore.AppendAsync(
+            [new CostLedgerEntry(
+                SourceKind: CostSourceKind.BatonExecution, Repository: Repository.Value, Execution: "exec-earlier")],
+            legacy,
+            TestContext.Current.CancellationToken);
+        await WriteSettledRoomAsync("settled", "exec-settled");
+
+        var output = await RunAsync(
+            new LedgerBackfillOptions(DryRun: true, RoomsRoot: RoomsRoot), useRealLedgerLocation: true);
+
+        Assert.True(File.Exists(legacy));
+        Assert.False(File.Exists(BatonPaths.CostLedgerFile(Repository.FileSlug)));
+        Assert.False(File.Exists(BatonPaths.CostLedgerMigrationFile));
+        Assert.Contains("Rows this would write: 1", output, StringComparison.Ordinal);
+        Assert.Contains("A real run would relocate it to", output, StringComparison.Ordinal);
+        Assert.Contains("moved nothing", output, StringComparison.Ordinal);
+    }
+
+    /// <summary>
+    /// The other half of the same rule, on the REAL run: a relocation that was refused must not be
+    /// reported as one that happened — the same false claim about a durable file the dry-run arm above
+    /// exists to stop making. <c>LedgerBackfillCommand.LedgerFilePathFor</c> states which arm the
+    /// disclosure is recorded on and why; this pins it.
+    /// <para>
+    /// The refusal is provoked by making the move itself fail — a DIRECTORY sitting where the canonical
+    /// file goes — rather than by holding the legacy file's mutex: the backfill's production path takes
+    /// the 30-second budget, and a test that waited it out would buy the same assertion 30 seconds later.
+    /// </para>
+    /// </summary>
+    [Fact]
+    public async Task A_real_run_whose_relocation_failed_reports_the_refusal_and_no_relocation()
+    {
+        using var scope = BatonEnvironmentSnapshot.BeginScope(
+            BatonEnvironmentSnapshot.Blank with { HomeOverride = Path.Combine(_sandbox, "home") });
+
+        var legacy = BatonPaths.LegacyCostLedgerFile(Repository.FileSlug);
+        await CostLedgerStore.AppendAsync(
+            [new CostLedgerEntry(
+                SourceKind: CostSourceKind.BatonExecution, Repository: Repository.Value, Execution: "exec-earlier")],
+            legacy,
+            TestContext.Current.CancellationToken);
+        Directory.CreateDirectory(BatonPaths.CostLedgerFile(Repository.FileSlug));
+        await WriteSettledRoomAsync("settled", "exec-settled");
+
+        var output = await RunAsync(useRealLedgerLocation: true);
+
+        Assert.Contains("could not be opened for writing", output, StringComparison.Ordinal);
+        Assert.DoesNotContain("was relocated", output, StringComparison.Ordinal);
+        Assert.True(File.Exists(legacy));
+        Assert.False(File.Exists(BatonPaths.CostLedgerMigrationFile));
+
+        // The rows were dropped rather than written somewhere else, and the report says so rather than
+        // counting them as written.
+        Assert.Contains("Rows to write, appended after this report: 0", output, StringComparison.Ordinal);
+    }
+
+    /// <summary>
     /// A room that yields no row is reported with its own reason rather than vanishing into a count —
     /// the half of <c>--dry-run</c> <see cref="LedgerBackfillCommand"/>'s report exists for.
     /// </summary>
@@ -567,14 +644,21 @@ public sealed class LedgerBackfillCommandTests : IDisposable
             numbers.Select(n =>
                 $$"""{"number":{{n}},"headRefName":"branch-{{n}}","mergedAt":"{{new DateTime(2026, 9, 1, 0, 0, 0, DateTimeKind.Utc).AddHours(n):yyyy-MM-ddTHH:mm:ssZ}}"}""")) + "]";
 
-    private async Task<string> RunAsync(LedgerBackfillOptions? options = null, IGhCliRunner? gh = null)
+    /// <param name="useRealLedgerLocation">
+    /// Drops the ledger-directory seam so the run goes through <see cref="CostLedgerLocation"/> the way
+    /// production does — only for the tests that are ABOUT that resolver, and only under a
+    /// <c>HomeOverride</c> scope, which is what keeps the seam's own "never one mis-resolved identity
+    /// away from the operator's real ledger" promise intact.
+    /// </param>
+    private async Task<string> RunAsync(
+        LedgerBackfillOptions? options = null, IGhCliRunner? gh = null, bool useRealLedgerLocation = false)
     {
         var writer = new StringWriter();
         var exitCode = await LedgerBackfillCommand.ExecuteAsync(
             options ?? new LedgerBackfillOptions(RoomsRoot: RoomsRoot),
             writer,
             gh ?? new StubGh("[]"),
-            LedgerDirectory,
+            useRealLedgerLocation ? null : LedgerDirectory,
             (_, _) => Task.FromResult<RepositoryIdentity?>(Repository),
             TestContext.Current.CancellationToken);
 

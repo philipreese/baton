@@ -92,10 +92,11 @@ public static class LedgerViewCommand
     /// Which repository's ledger file this reading is over.
     /// <list type="bullet">
     /// <item><c>--repo-identity</c> names it explicitly, in either spelling an operator has to hand: the
-    /// file's own stem (what <c>ls ~/.baton/ledger</c> shows) when a file by that name exists, else the
-    /// canonical identity a row records (<c>github.com/owner/repo</c>), slugged the way the writer
-    /// slugged it. Case-folded first, because <c>RepositoryIdentity.From</c> case-folds before hashing
-    /// and an unfolded key would digest to a different — and empty — file.</item>
+    /// repository directory's own name (what <c>ls ~/.baton</c> shows, and what the ledger file's stem
+    /// was before #2041) when a ledger by that key exists, else the canonical identity a row records
+    /// (<c>github.com/owner/repo</c>), slugged the way the writer slugged it. Case-folded first,
+    /// because <c>RepositoryIdentity.From</c> case-folds before hashing and an unfolded key would
+    /// digest to a different — and empty — file.</item>
     /// <item>With a <c>&lt;room-dir&gt;</c> and no explicit key, the ROOM's own repository, off its
     /// registry entry — not the working directory's. A room is read from wherever the operator happens
     /// to be standing, including outside any repository at all.</item>
@@ -116,10 +117,26 @@ public static class LedgerViewCommand
         if (repositoryIdentityKey is { Length: > 0 } key)
         {
             var trimmed = key.Trim();
-            var byFileStem = Path.Combine(BatonPaths.Root, BatonPaths.CostLedgerDirectoryName, $"{trimmed}.jsonl");
-            return File.Exists(byFileStem)
-                ? byFileStem
-                : BatonPaths.CostLedgerFile(RepositoryIdentity.FileSlugFor(trimmed.ToLowerInvariant()));
+            // This arm reaches the resolver too (#2041) -- a `--repo-identity` naming an unmigrated
+            // ledger must not be the one path that still opens the old location -- but only AFTER a
+            // read-only probe says a file by that key is really there. `trimmed` is raw operator input,
+            // and CostLedgerLocation.ResolveForRead creates a directory and moves a file, where the
+            // check it replaced only ever called File.Exists. What the probe buys, precisely: the
+            // resolver is only reached for a key whose derived path ALREADY names an existing ledger
+            // file, so a relocation cannot be conjured by a key that names nothing. It is not a
+            // sanitizer -- RepositoryIdentity's own remarks say Value can carry separators and a drive
+            // letter, and Path.Combine resolves a rooted string away from the storage root, so a key for
+            // which both derived paths exist would relocate outside {Root}. That is the operator's own
+            // argument on their own machine naming their own files, which the pre-#2041 code let them do
+            // to pick a file to read; the probe is what keeps it a read. The other arm's input is a
+            // FileSlug, sanitized by construction.
+            if (File.Exists(BatonPaths.CostLedgerFile(trimmed))
+                || File.Exists(BatonPaths.LegacyCostLedgerFile(trimmed)))
+            {
+                return CostLedgerLocation.ResolveForRead(trimmed);
+            }
+
+            return CostLedgerLocation.ResolveForRead(RepositoryIdentity.FileSlugFor(trimmed.ToLowerInvariant()));
         }
 
         var repository = roomDirectoryPath is { Length: > 0 } room
@@ -139,7 +156,7 @@ public static class LedgerViewCommand
                 "baton ledger --repo-identity github.com/owner/repo");
         }
 
-        return BatonPaths.CostLedgerFile(repository.FileSlug);
+        return CostLedgerLocation.ResolveForRead(repository.FileSlug);
     }
 
     private static void WriteText(TextWriter output, LedgerRollup rollup, string ledgerFilePath)
