@@ -212,7 +212,15 @@ public static class VerifyRunner
         string text;
         try
         {
-            (exitCode, text) = await CaptureAsync(program, args, workingDirectory, cancellationToken).ConfigureAwait(false);
+            // #2098: the verify spawn's PATH is composed by VerifyProcessPath (contract in
+            // spec/baton.md §3, "The verify process's PATH"), on top of the inherit-everything
+            // default CaptureAsync documents -- a daemon-launched engine inherits the scheduled
+            // task's PATH, which carries `git` but not the `sh` an interactive shell resolves.
+            var verifyPath = VerifyProcessPath.Compose(Environment.GetEnvironmentVariable("PATH"));
+            (exitCode, text) = await CaptureAsync(
+                program, args, workingDirectory, cancellationToken,
+                environmentOverrides: new Dictionary<string, string> { ["PATH"] = verifyPath })
+                .ConfigureAwait(false);
         }
         catch (BatonCancelException ex)
         {

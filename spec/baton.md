@@ -1366,6 +1366,26 @@ Worker briefs no longer ask for the full gate suite themselves; the prompt-level
 from #1625 (`AgyWorkerAdapter.ForegroundGateInstructionText`) stays as belt (any slow command, not just
 gates, should run in the foreground) now that this is the braces.
 
+**The verify process's PATH (#2098).** The verify command inherits the engine's own ambient
+environment (`VerifyRunner.CaptureAsync`'s inherit-everything default — `pixi` needs its host
+toolchain), with one composition applied to `PATH` alone, by `Baton.Mutation.VerifyProcessPath` and
+nowhere else: when no entry on the ambient `PATH` holds an `sh.exe`, Git for Windows' own `usr\bin`
+is prepended, located by walking up from the directory of the first `git.exe` the ambient `PATH`
+resolves (at most three ancestors, which covers `cmd\`, `bin\` and `mingw64\bin\`), and only when
+that `usr\bin` actually holds an `sh.exe`. Never a hard-coded `C:\Program Files\Git` path, never a
+directory added on a guess, and never a change when `sh` already resolves or no `git` does. Measured
+2026-09-08 (rooms `queue-2077cx-06368280`, `queue-cmprows-b86b9a29`, codex and claude alike): the
+daemon is launched by the `baton-daemon` scheduled task and so inherits the registry `PATH`, which on
+the operator's machine carries `C:\Program Files\Git\cmd` but not `C:\Program Files\Git\usr\bin`;
+`git` resolves there and `sh` does not. A lane's own `git push` never sees that gap because git runs
+its hooks under its bundled `sh`, which prepends its own `usr/bin` — so the pre-push hook passed all 35
+members in the lane and the engine verify, spawned straight from the daemon through `cmd.exe`, then
+failed exactly `gates-selftest`'s pre-push control (`no sh on PATH`), a real member failure settling
+the room `Indeterminate` for a difference in the engine's environment rather than in the tree.
+Skipping that control inside lanes was rejected: it is the only check that the pre-push hook still
+runs. `VerifyCommandResolver`'s hardened `git` spawns are untouched by this — their `PATH` is scrubbed
+for a different reason and they spawn `git`, not a shell.
+
 **Verify command resolution, and the not-run outcome (#1702).** The verify command run above is a
 property of the WORKSPACE being worked on, not of the role — a role's `verify_pixi_task` bakes in an
 assumption (that the workspace is this repo, or shares its task names) which fails by construction
