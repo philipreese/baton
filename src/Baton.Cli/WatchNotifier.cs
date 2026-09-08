@@ -4,6 +4,7 @@ using System.Net.Http;
 using System.Text;
 using System.Text.Json;
 using System.Text.Json.Serialization;
+using Baton.Cli.Daemon;
 
 namespace Baton.Cli;
 
@@ -38,6 +39,22 @@ public interface IWatchNotifier
 /// entirely, so a room path with a space or an error message with a quote cannot reshape what the
 /// operator's own command actually runs.
 /// </summary>
+/// <remarks>
+/// <b>The command's stdout and stderr are redirected and drained, never inherited</b> (#2117 re-review,
+/// finding 1). Until then this spawn redirected stdin only and let the command write to this
+/// process's own console by inheritance, which is fine only while that console handle is
+/// inheritable — and inside the daemon it stops being so at the first queue-lane launch, because
+/// <see cref="Baton.Core.DetachedProcess"/> clears the inherit flag process-wide and for good (its
+/// remarks say why). A command spawned after that with stdin-only redirection is handed a stdout it
+/// cannot inherit and its writes vanish with no error. So both streams are piped and relayed line by
+/// line into <see cref="Console.Out"/>/<see cref="Console.Error"/> (or the writers the constructor
+/// was given), which is where the inherited output landed before — <c>daemon.log</c> under the
+/// daemon, the operator's console under <c>baton watch</c>. The relay starts before the stdin write
+/// and runs until the drain below ends, so a command that emits more than the pipe buffer (~4 KB)
+/// is never blocked on an unread pipe — the reason redirecting was previously avoided, and the
+/// reason the drain is not optional. <c>SpawnOutputRedirectionTests</c> is what keeps this site
+/// redirecting both streams.
+/// </remarks>
 public sealed class WatchNotifier : IWatchNotifier
 {
     public const string NotifyEventEnvironmentVariable = "BATON_WATCH_EVENT";
@@ -45,7 +62,8 @@ public sealed class WatchNotifier : IWatchNotifier
     /// <summary>How long a spawned notify command is given to exit before this stops waiting on it
     /// (and reports that on stderr) — it is not killed on THIS path, since "spawned once" (spec/baton.md
     /// §2) means exactly that: a command that exits on its own within the budget still runs to
-    /// completion, this process just stops blocking on it. Generous: a webhook-posting script or an
+    /// completion, this process just stops blocking on it (its output relay is closed at that point,
+    /// so whatever it prints afterwards reaches nobody). Generous: a webhook-posting script or an
     /// ntfy curl call is the expected shape, never a long-running watcher of its own. The SAME budget
     /// also bounds the stdin write below, where the command IS killed on timeout — spec/baton.md §2
     /// (H1) states why the two branches differ.</summary>
@@ -63,11 +81,25 @@ public sealed class WatchNotifier : IWatchNotifier
 
     private readonly HttpClient _httpClient;
     private readonly TimeSpan _commandTimeout;
+    private readonly TextWriter? _commandOutput;
+    private readonly TextWriter? _commandError;
 
-    public WatchNotifier(HttpClient? httpClient = null, TimeSpan? commandTimeout = null)
+    /// <param name="httpClient">The URL arm's client; the shared one when null.</param>
+    /// <param name="commandTimeout"><see cref="CommandTimeout"/> when null.</param>
+    /// <param name="commandOutput">Where a spawned command's stdout lines are relayed;
+    /// <see cref="Console.Out"/> when null, resolved at spawn time.</param>
+    /// <param name="commandError">Where its stderr lines are relayed; <see cref="Console.Error"/> when
+    /// null, resolved at spawn time.</param>
+    public WatchNotifier(
+        HttpClient? httpClient = null,
+        TimeSpan? commandTimeout = null,
+        TextWriter? commandOutput = null,
+        TextWriter? commandError = null)
     {
         _httpClient = httpClient ?? SharedHttpClient;
         _commandTimeout = commandTimeout ?? CommandTimeout;
+        _commandOutput = commandOutput;
+        _commandError = commandError;
     }
 
     public async Task NotifyAsync(string target, WatchNotifyPayload payload, CancellationToken cancellationToken)
@@ -100,12 +132,20 @@ public sealed class WatchNotifier : IWatchNotifier
         }
     }
 
-    private static async Task SpawnCommandAsync(
+    private async Task SpawnCommandAsync(
         string command, string json, TimeSpan commandTimeout, CancellationToken cancellationToken)
     {
         var psi = ChildProcessStartInfo.Create(string.Empty, psi =>
         {
             psi.RedirectStandardInput = true;
+
+            // Both output streams, or the daemon's cleared inherit flag eats one of them -- the class
+            // remarks. The decode is pinned for the same reason every other redirecting site pins it
+            // (#466, RedirectedProcessEncodingTests).
+            psi.RedirectStandardOutput = true;
+            psi.RedirectStandardError = true;
+            psi.StandardOutputEncoding = Encoding.UTF8;
+            psi.StandardErrorEncoding = Encoding.UTF8;
         });
 
         if (OperatingSystem.IsWindows())
@@ -134,6 +174,28 @@ public sealed class WatchNotifier : IWatchNotifier
             Console.Error.WriteLine($"baton watch: failed to spawn notify command '{command}'.");
             return;
         }
+
+        // The relay is attached BEFORE the stdin write: a command that prints first and reads later
+        // would otherwise fill its 4 KB output pipe and block, and the stdin write below would then
+        // time out against a command that was never going to read -- a self-inflicted wedge.
+        var output = _commandOutput ?? Console.Out;
+        var error = _commandError ?? Console.Error;
+        process.OutputDataReceived += (_, e) =>
+        {
+            if (e.Data is not null)
+            {
+                output.WriteLine(e.Data);
+            }
+        };
+        process.ErrorDataReceived += (_, e) =>
+        {
+            if (e.Data is not null)
+            {
+                error.WriteLine(e.Data);
+            }
+        };
+        process.BeginOutputReadLine();
+        process.BeginErrorReadLine();
 
         // The timeout is armed BEFORE the stdin write starts, and the write itself runs under it
         // (`.WaitAsync`) -- arming it only around WaitForExitAsync below, as this used to, guards
@@ -169,18 +231,38 @@ public sealed class WatchNotifier : IWatchNotifier
         // why the timeout branch kills the process tree instead.
         process.StandardInput.Close();
 
+        // Two waits of different kinds, the shape QueueLauncher.SuperviseAsync's remarks explain: the
+        // OS exit signal first, under the command's own budget, and only then the redirected streams,
+        // under the supervisor's drain bound -- because WaitForExitAsync on a process with async readers
+        // also waits for the pipes to reach EOF, which a grandchild the command left behind can hold
+        // open long after the command itself has exited.
         try
         {
-            await process.WaitForExitAsync(timeoutSource.Token).ConfigureAwait(false);
-            if (process.ExitCode != 0)
-            {
-                Console.Error.WriteLine($"baton watch: notify command '{command}' exited {process.ExitCode}.");
-            }
+            await QueueLauncher.WaitForOsExitAsync(process).WaitAsync(timeoutSource.Token).ConfigureAwait(false);
         }
         catch (OperationCanceledException) when (!cancellationToken.IsCancellationRequested)
         {
             Console.Error.WriteLine(
                 $"baton watch: notify command '{command}' did not exit within {commandTimeout} — leaving it running.");
+            return;
+        }
+
+        try
+        {
+            using var drainBound = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
+            drainBound.CancelAfter(QueueLauncher.StreamDrainBound);
+            await process.WaitForExitAsync(drainBound.Token).ConfigureAwait(false);
+        }
+        catch (OperationCanceledException) when (!cancellationToken.IsCancellationRequested)
+        {
+            Console.Error.WriteLine(
+                $"baton watch: notify command '{command}' exited, but something it started still holds its output "
+                + $"open; stopped reading it after {QueueLauncher.StreamDrainBound}.");
+        }
+
+        if (process.ExitCode != 0)
+        {
+            Console.Error.WriteLine($"baton watch: notify command '{command}' exited {process.ExitCode}.");
         }
     }
 

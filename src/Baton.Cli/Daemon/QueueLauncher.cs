@@ -273,16 +273,17 @@ public static class QueueLauncher
 
     /// <summary>
     /// Whether the handle actually held is the process the journal recorded — its start time within
-    /// the same one-second tolerance <see cref="EngineLivenessProbe"/> applies. False for a handle
-    /// whose start time cannot be read at all: that is a process already gone, or one this daemon may
-    /// not inspect, and neither is something to supervise as if it were the lane.
+    /// <see cref="EngineLivenessProbe.StartTimeTolerance"/>, read from the probe so the two can never
+    /// disagree. False for a handle whose start time cannot be read at all: that is a process already
+    /// gone, or one this daemon may not inspect, and neither is something to supervise as if it were
+    /// the lane.
     /// </summary>
     private static bool StartTimeMatches(Process process, DateTimeOffset recordedStart)
     {
         try
         {
             var actual = new DateTimeOffset(process.StartTime).ToUniversalTime();
-            return Math.Abs((actual - recordedStart.ToUniversalTime()).TotalMilliseconds) <= 1000;
+            return (actual - recordedStart.ToUniversalTime()).Duration() <= EngineLivenessProbe.StartTimeTolerance;
         }
         catch (Exception ex) when (ex is InvalidOperationException or Win32Exception or UnauthorizedAccessException)
         {
@@ -359,9 +360,11 @@ public static class QueueLauncher
     /// signal off the process handle — and never waits for a redirected stream. Works for an adopted
     /// process as well as a launched one: both are handles, and the exit signal is a property of the
     /// handle, not of who spawned it. <see cref="SuperviseAsync"/>'s remarks say why this is not
-    /// <see cref="Process.WaitForExitAsync(CancellationToken)"/>.
+    /// <see cref="Process.WaitForExitAsync(CancellationToken)"/>. Internal because
+    /// <see cref="WatchNotifier"/>'s command spawn has the same two-wait shape and reads this one
+    /// rather than carrying a copy.
     /// </summary>
-    private static Task WaitForOsExitAsync(Process process)
+    internal static Task WaitForOsExitAsync(Process process)
     {
         var exited = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
         process.EnableRaisingEvents = true;
@@ -762,8 +765,9 @@ public static class QueueLauncher
     /// How long an exited lane's redirected streams get to drain before its exit code is read anyway.
     /// The child is already gone by then; only a straggler holding a duplicated pipe end can extend
     /// this, and <c>baton dispatch</c> clears its own inheritable handles before spawning anything.
+    /// Internal for the same reason <see cref="WaitForOsExitAsync"/> is.
     /// </summary>
-    private static readonly TimeSpan StreamDrainBound = TimeSpan.FromSeconds(10);
+    internal static readonly TimeSpan StreamDrainBound = TimeSpan.FromSeconds(10);
 
     /// <summary>
     /// The room's <em>actual</em> state, projected the way <see cref="TerminalSettleRecorder"/> and

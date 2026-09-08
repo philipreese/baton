@@ -37,17 +37,28 @@ namespace Baton.Core;
 /// the spawn (idempotent, a no-op off Windows).
 /// </para>
 /// <para>
-/// <b>That clear is done for the caller, and it has a cost the caller must price: redirect both
-/// output streams or neither.</b> The clear is process-wide, not per spawn, and .NET sets
-/// <c>STARTF_USESTDHANDLES</c> the moment any one stream is redirected, filling the streams the
-/// caller did NOT redirect with this process's own standard handles. After the clear those are
-/// non-inheritable, so a child handed one cannot inherit it and everything it writes on that stream
-/// is discarded — no exception, no exit code, a lane log with lines missing. With nothing redirected
-/// there is no <c>STARTF_USESTDHANDLES</c> and the child simply gets the hidden console below, where
-/// its output reaches nobody, which is the shape a caller that does not want the output should use.
-/// <see cref="Start(ProcessStartInfo)"/> refuses the mixed shape outright rather than documenting it
-/// away: <c>SpawnOutputRedirectionTests</c> is the same rule as a source scan, and this is the same
-/// rule at the seam, for the callers a per-file scan cannot see.
+/// <b>That clear is process-wide and permanent: from the first call on, for the rest of this
+/// process's life, every spawn from it — this seam's or anyone else's — must redirect both output
+/// streams or neither.</b> .NET sets <c>STARTF_USESTDHANDLES</c> the moment any one stream is
+/// redirected, filling the streams the caller did NOT redirect with this process's own standard
+/// handles. After the clear those are non-inheritable: the child receives a handle it cannot use,
+/// and whatever it writes on that stream is thrown away — no exception, no exit code, a log with
+/// lines missing. With nothing redirected there is no <c>STARTF_USESTDHANDLES</c> and the child simply
+/// gets the hidden console below, where its output reaches nobody, which is the shape a caller that
+/// does not want the output should use. In the daemon this is not hypothetical: <c>WatchNotifier</c>'s
+/// operator command used to redirect stdin only and read its stdout by inheritance, and after the
+/// daemon's first queue launch that output would have vanished (#2117 re-review, finding 1) — it now
+/// redirects and drains both. Two per-spawn alternatives were weighed and rejected there. A
+/// <c>PROC_THREAD_ATTRIBUTE_HANDLE_LIST</c> on the spawn is not reachable through
+/// <see cref="Process"/> and would need a <c>CreateProcess</c> P/Invoke of Baton's own, which
+/// CLAUDE.md's Architecture Rule 3 forbids. Clearing and restoring the flag around this one spawn
+/// would reopen, for the width of that window, exactly the leak this clear exists to close: any
+/// other spawn racing it (a <c>git</c> or <c>gh</c> child, a notify command) would duplicate the
+/// daemon's stdout into a child that may outlive the daemon, and the wrapper shell's restart would
+/// wedge on it again. Permanent is the safe shape, and what it costs is enforced rather than asked
+/// for: <see cref="Start(ProcessStartInfo)"/> refuses the mixed shape at this seam, and
+/// <c>SpawnOutputRedirectionTests</c> requires both streams at every <c>src/</c> spawn site, with
+/// this seam its only exception.
 /// </para>
 /// <para>
 /// A console of its own: <see cref="ChildProcessStartInfo.Create"/>'s <c>CreateNoWindow</c> maps to

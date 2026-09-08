@@ -6834,7 +6834,10 @@ measurement it rests on, and §7's reaper paragraph the line it must not cross.
 - *Launch.* The lane process is started with **no job of the daemon's and no breakaway flag**, with
   the daemon's own stdout/stderr made non-inheritable first (§7's wrapper shell relaunches the daemon
   only once its redirected output reaches EOF, so a surviving lane holding that handle would have
-  wedged the very restart this exists to survive). Why neither a job nor a breakaway is needed is
+  wedged the very restart this exists to survive). That clear is process-wide and lasts for the rest
+  of the daemon's life, so every daemon spawn redirects both output streams or neither —
+  `SpawnOutputRedirectionTests` enforces it, and `DetachedProcess`'s remarks say why per-spawn was
+  rejected (#2117). Why neither a job nor a breakaway is needed is
   the 2026-09-08 Task Scheduler measurement `DetachedProcess`'s remarks record, pinned in both arms
   by `DetachedProcessTests`. While the launching daemon lives, the lane's stdout/stderr are relayed
   into `daemon.log` with `[lane <tag>]` in front, decoded as UTF-8 on the daemon's side; once that
