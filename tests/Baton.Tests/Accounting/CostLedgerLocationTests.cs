@@ -38,7 +38,7 @@ public sealed class CostLedgerLocationTests
             BatonEnvironmentSnapshot.Blank with { HomeOverride = home });
         try
         {
-            var resolved = CostLedgerLocation.Resolve(Repository.FileSlug);
+            var resolved = Assert.IsType<string>(CostLedgerLocation.ResolveForWrite(Repository.FileSlug).Path);
 
             Assert.Equal(BatonPaths.CostLedgerFile(Repository.FileSlug), resolved);
             Assert.Equal(
@@ -79,7 +79,7 @@ public sealed class CostLedgerLocationTests
                 [Row("exec-legacy")], legacy, TestContext.Current.CancellationToken);
             Assert.True(File.Exists(legacy));
 
-            var resolved = CostLedgerLocation.Resolve(Repository.FileSlug);
+            var resolved = Assert.IsType<string>(CostLedgerLocation.ResolveForWrite(Repository.FileSlug).Path);
 
             Assert.Equal(BatonPaths.CostLedgerFile(Repository.FileSlug), resolved);
             Assert.False(File.Exists(legacy));
@@ -117,8 +117,8 @@ public sealed class CostLedgerLocationTests
                 BatonPaths.LegacyCostLedgerFile(Repository.FileSlug),
                 TestContext.Current.CancellationToken);
 
-            var first = CostLedgerLocation.Resolve(Repository.FileSlug);
-            var second = CostLedgerLocation.Resolve(Repository.FileSlug);
+            var first = Assert.IsType<string>(CostLedgerLocation.ResolveForWrite(Repository.FileSlug).Path);
+            var second = CostLedgerLocation.ResolveForRead(Repository.FileSlug);
 
             Assert.Equal(first, second);
             Assert.Single(await CostLedgerStore.ReadAllAsync(second, TestContext.Current.CancellationToken));
@@ -150,7 +150,7 @@ public sealed class CostLedgerLocationTests
             await CostLedgerStore.AppendAsync([Row("exec-current")], canonical, TestContext.Current.CancellationToken);
             var legacyBytes = await File.ReadAllBytesAsync(legacy, TestContext.Current.CancellationToken);
 
-            var resolved = CostLedgerLocation.Resolve(Repository.FileSlug);
+            var resolved = CostLedgerLocation.ResolveForRead(Repository.FileSlug);
 
             Assert.Equal(canonical, resolved);
             Assert.Equal(legacyBytes, await File.ReadAllBytesAsync(legacy, TestContext.Current.CancellationToken));
@@ -181,12 +181,154 @@ public sealed class CostLedgerLocationTests
             var other = RepositoryIdentity.From("https://github.com/aer-works/other.git", null)!;
 
             Assert.NotEqual(
-                CostLedgerLocation.Resolve(Repository.FileSlug),
-                CostLedgerLocation.Resolve(other.FileSlug));
+                CostLedgerLocation.ResolveForRead(Repository.FileSlug),
+                CostLedgerLocation.ResolveForRead(other.FileSlug));
         }
         finally
         {
             DirectoryCleanup.DeleteRecursively(home);
+        }
+    }
+
+    /// <summary>
+    /// The #2041 review's HIGH, pinned as the interleaving it describes: this process decides where to
+    /// write while another holds the legacy file's mutex, THEN that holder completes the move, THEN this
+    /// process appends. A resolver that answered the failed acquisition with the legacy path — including
+    /// the incomplete "re-probe and return whichever exists" fix, whose probe is equally outside the
+    /// append's critical section — recreates <c>{Root}/ledger/&lt;slug&gt;.jsonl</c> here and splits the
+    /// repository's ledger for good.
+    /// <para>
+    /// So the assertion is on the FILES, not on the returned path: no legacy file exists afterwards, and
+    /// the canonical one still holds exactly the row the move carried. Asserting only that the refusal
+    /// came back would pass against a fix that still handed out a writable legacy path.
+    /// </para>
+    /// </summary>
+    [Fact]
+    public async Task A_write_resolved_while_another_holder_owns_the_lock_is_refused_and_recreates_no_legacy_file()
+    {
+        var home = NewHome();
+        using var scope = BatonEnvironmentSnapshot.BeginScope(
+            BatonEnvironmentSnapshot.Blank with { HomeOverride = home });
+        try
+        {
+            var legacy = BatonPaths.LegacyCostLedgerFile(Repository.FileSlug);
+            var canonical = BatonPaths.CostLedgerFile(Repository.FileSlug);
+            await CostLedgerStore.AppendAsync(
+                [Row("exec-legacy")], legacy, TestContext.Current.CancellationToken);
+
+            using var holder = new LegacyLockHolder(legacy);
+
+            // (1) A decides where to write while B holds the lock. The budget is a test-only overload of
+            // the production one: 30 seconds of real waiting would buy nothing this assertion needs.
+            var target = CostLedgerLocation.ResolveForWrite(Repository.FileSlug, TimeSpan.FromMilliseconds(150));
+
+            Assert.Null(target.Path);
+            Assert.NotNull(target.Refusal);
+            Assert.Contains("could split this repository's ledger", target.Refusal, StringComparison.Ordinal);
+
+            // (2) B completes the relocation and releases -- exactly the state A could not distinguish
+            // from "the move never happened" while it was waiting.
+            holder.RelocateAndRelease(canonical);
+
+            // (3) A's caller honours the refusal. This is the whole contract: no path, no append.
+            if (target.Path is { } path)
+            {
+                await CostLedgerStore.AppendAsync([Row("exec-after-refusal")], path, TestContext.Current.CancellationToken);
+            }
+
+            Assert.False(File.Exists(legacy));
+            Assert.Equal(
+                "exec-legacy",
+                Assert.Single(await CostLedgerStore.ReadAllAsync(canonical, TestContext.Current.CancellationToken)).Execution);
+        }
+        finally
+        {
+            DirectoryCleanup.DeleteRecursively(home);
+        }
+    }
+
+    /// <summary>
+    /// Both files present is a permanent, unchanging state — the legacy file is deliberately never
+    /// removed — so resolving must not pay a lock acquisition for it on every command. Measured by
+    /// holding that lock: an answer arrives anyway. The control is the test above, which holds the same
+    /// lock in the one state where the resolver genuinely has something to move and is refused for it.
+    /// </summary>
+    [Fact]
+    public async Task Both_files_present_answers_without_taking_the_legacy_lock()
+    {
+        var home = NewHome();
+        using var scope = BatonEnvironmentSnapshot.BeginScope(
+            BatonEnvironmentSnapshot.Blank with { HomeOverride = home });
+        try
+        {
+            var legacy = BatonPaths.LegacyCostLedgerFile(Repository.FileSlug);
+            var canonical = BatonPaths.CostLedgerFile(Repository.FileSlug);
+            await CostLedgerStore.AppendAsync([Row("exec-old")], legacy, TestContext.Current.CancellationToken);
+            await CostLedgerStore.AppendAsync([Row("exec-current")], canonical, TestContext.Current.CancellationToken);
+
+            using var holder = new LegacyLockHolder(legacy);
+
+            var target = CostLedgerLocation.ResolveForWrite(Repository.FileSlug, TimeSpan.FromMilliseconds(150));
+
+            Assert.Equal(canonical, target.Path);
+            Assert.Null(target.Refusal);
+            Assert.True(File.Exists(legacy));
+        }
+        finally
+        {
+            DirectoryCleanup.DeleteRecursively(home);
+        }
+    }
+
+    /// <summary>
+    /// Another process holding the legacy file's cost-ledger mutex, from a thread of its own —
+    /// <see cref="Mutex"/> ownership is thread-affine, so the acquire and the release have to happen on
+    /// one thread that is not the test's.
+    /// </summary>
+    private sealed class LegacyLockHolder : IDisposable
+    {
+        private readonly ManualResetEventSlim _release = new(false);
+        private readonly Thread _thread;
+        private string? _relocateTo;
+
+        public LegacyLockHolder(string legacyFilePath)
+        {
+            var acquired = new ManualResetEventSlim(false);
+            _thread = new Thread(() =>
+            {
+                using var mutex = new Mutex(
+                    initiallyOwned: false,
+                    name: MutexGuardedFileLock.BuildMutexName(legacyFilePath, CostLedgerStore.Ledger.LockNamePrefix));
+                mutex.WaitOne();
+                acquired.Set();
+                _release.Wait();
+                if (_relocateTo is { } destination)
+                {
+                    Directory.CreateDirectory(Path.GetDirectoryName(destination)!);
+                    File.Move(legacyFilePath, destination);
+                }
+
+                mutex.ReleaseMutex();
+            })
+            { IsBackground = true };
+
+            _thread.Start();
+            acquired.Wait();
+        }
+
+        /// <summary>Completes the racing process's move, then releases — step (2) of the interleaving.</summary>
+        public void RelocateAndRelease(string canonicalFilePath)
+        {
+            _relocateTo = canonicalFilePath;
+            _release.Set();
+            _thread.Join();
+        }
+
+        public void Dispose()
+        {
+            _release.Set();
+            _thread.Join();
+            _release.Dispose();
         }
     }
 

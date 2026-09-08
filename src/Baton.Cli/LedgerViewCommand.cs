@@ -119,19 +119,24 @@ public static class LedgerViewCommand
             var trimmed = key.Trim();
             // This arm reaches the resolver too (#2041) -- a `--repo-identity` naming an unmigrated
             // ledger must not be the one path that still opens the old location -- but only AFTER a
-            // read-only probe says a file by that key is really there. `trimmed` is raw operator
-            // input, and CostLedgerLocation.Resolve creates a directory and moves a file, where the
-            // check it replaced only ever called File.Exists. RepositoryIdentity's own remarks say
-            // Value can carry separators and a drive letter, either of which Path.Combine resolves
-            // away from the storage root -- so nothing unsanitized gets to drive a relocation. The
-            // other arm's input is a FileSlug, which is sanitized by construction.
+            // read-only probe says a file by that key is really there. `trimmed` is raw operator input,
+            // and CostLedgerLocation.ResolveForRead creates a directory and moves a file, where the
+            // check it replaced only ever called File.Exists. What the probe buys, precisely: the
+            // resolver is only reached for a key whose derived path ALREADY names an existing ledger
+            // file, so a relocation cannot be conjured by a key that names nothing. It is not a
+            // sanitizer -- RepositoryIdentity's own remarks say Value can carry separators and a drive
+            // letter, and Path.Combine resolves a rooted string away from the storage root, so a key for
+            // which both derived paths exist would relocate outside {Root}. That is the operator's own
+            // argument on their own machine naming their own files, which the pre-#2041 code let them do
+            // to pick a file to read; the probe is what keeps it a read. The other arm's input is a
+            // FileSlug, sanitized by construction.
             if (File.Exists(BatonPaths.CostLedgerFile(trimmed))
                 || File.Exists(BatonPaths.LegacyCostLedgerFile(trimmed)))
             {
-                return CostLedgerLocation.Resolve(trimmed);
+                return CostLedgerLocation.ResolveForRead(trimmed);
             }
 
-            return CostLedgerLocation.Resolve(RepositoryIdentity.FileSlugFor(trimmed.ToLowerInvariant()));
+            return CostLedgerLocation.ResolveForRead(RepositoryIdentity.FileSlugFor(trimmed.ToLowerInvariant()));
         }
 
         var repository = roomDirectoryPath is { Length: > 0 } room
@@ -151,7 +156,7 @@ public static class LedgerViewCommand
                 "baton ledger --repo-identity github.com/owner/repo");
         }
 
-        return CostLedgerLocation.Resolve(repository.FileSlug);
+        return CostLedgerLocation.ResolveForRead(repository.FileSlug);
     }
 
     private static void WriteText(TextWriter output, LedgerRollup rollup, string ledgerFilePath)

@@ -200,8 +200,9 @@ public static class BatonPaths
     /// <para>
     /// <b>This is the canonical path, not necessarily the file to open.</b> A machine that ran an
     /// older build still has one at <see cref="LegacyCostLedgerFile"/>, and
-    /// <c>Baton.Accounting.CostLedgerLocation.Resolve</c> is the one resolver that decides between the
-    /// two — every production reader and writer goes through it rather than through this property.
+    /// <c>Baton.Accounting.CostLedgerLocation</c> is the one resolver that decides between the two —
+    /// every production reader goes through its <c>ResolveForRead</c> and every writer through its
+    /// <c>ResolveForWrite</c>, rather than through this property.
     /// </para>
     /// </summary>
     /// <param name="repositorySlug"><c>RepositoryIdentity.FileSlug</c> — never a raw identity or a checkout path.</param>

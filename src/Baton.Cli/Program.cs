@@ -525,27 +525,39 @@ try
                 .TryResolveForRoomAsync(resolvedRoomDirectoryPath, CancellationToken.None).ConfigureAwait(false);
             if (repository is not null)
             {
-                var costLedgerPath = CostLedgerLocation.Resolve(repository.FileSlug);
-                var existingRows = await CostLedgerStore.ReadAllAsync(costLedgerPath, CancellationToken.None).ConfigureAwait(false);
-                var resolutionRow = CostLedgerStore.BuildResolutionRow(
-                    existingRows,
-                    BatonPaths.RecordKey(resolvedRoomDirectoryPath),
-                    recordedResolution.Accept
-                        ? ConductorResolution.AcceptCapture
-                        : recordedResolution.Close ? ConductorResolution.Close : ConductorResolution.Reject,
-                    recordedResolution.Reason);
-                if (resolutionRow is not null)
+                // ONE write-side resolution for both the read below and the append after it (#2041): a
+                // read resolved separately from the write could name a different file the instant a
+                // concurrent process relocates, and the refusal arm is fail-closed on purpose -- see
+                // CostLedgerLocation's remarks for why a refused write costs this row instead.
+                var writeTarget = CostLedgerLocation.ResolveForWrite(repository.FileSlug);
+                if (writeTarget.Path is not { } costLedgerPath)
                 {
-                    await CostLedgerStore.AppendAsync([resolutionRow], costLedgerPath, CancellationToken.None).ConfigureAwait(false);
+                    Console.Error.WriteLine(
+                        $"{writeTarget.Refusal} This resolution was recorded on the room but not in the cost ledger.");
                 }
                 else
                 {
-                    // Said out loud rather than swallowed: a room with no cost-ledger row of its own
-                    // (settled before #1849 shipped, or never settled at all) has nothing to correct,
-                    // and a silently-missing resolution would read as "no one intervened".
-                    Console.Error.WriteLine(
-                        $"No cost ledger row exists for room '{resolvedRoomDirectoryPath}', so this resolution "
-                        + "was recorded on the room but not in the cost ledger.");
+                    var existingRows = await CostLedgerStore.ReadAllAsync(costLedgerPath, CancellationToken.None).ConfigureAwait(false);
+                    var resolutionRow = CostLedgerStore.BuildResolutionRow(
+                        existingRows,
+                        BatonPaths.RecordKey(resolvedRoomDirectoryPath),
+                        recordedResolution.Accept
+                            ? ConductorResolution.AcceptCapture
+                            : recordedResolution.Close ? ConductorResolution.Close : ConductorResolution.Reject,
+                        recordedResolution.Reason);
+                    if (resolutionRow is not null)
+                    {
+                        await CostLedgerStore.AppendAsync([resolutionRow], costLedgerPath, CancellationToken.None).ConfigureAwait(false);
+                    }
+                    else
+                    {
+                        // Said out loud rather than swallowed: a room with no cost-ledger row of its own
+                        // (settled before #1849 shipped, or never settled at all) has nothing to correct,
+                        // and a silently-missing resolution would read as "no one intervened".
+                        Console.Error.WriteLine(
+                            $"No cost ledger row exists for room '{resolvedRoomDirectoryPath}', so this resolution "
+                            + "was recorded on the room but not in the cost ledger.");
+                    }
                 }
             }
         }

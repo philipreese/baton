@@ -4126,7 +4126,8 @@ failed.
 **Inside the repository directory since #2041, and relocated rather than read from both places.** The
 file was `{Root}/ledger/<repository-slug>.jsonl` until #2041 moved it under §12's Q3 layout, beside
 that repository's memory store, so one repository's state stops living in two roots.
-`CostLedgerLocation.Resolve` is the **one** resolver every production reader and writer goes through,
+`CostLedgerLocation` is the **one** resolver every production reader (`ResolveForRead`) and writer
+(`ResolveForWrite`) goes through,
 and its own remarks carry the mechanism; what the register owns is the choice and its cost. A reader
 that fell back to the old path while the writer appended to the new one would split a repository's
 ledger across two files the instant anything settled — so the legacy file is **moved** onto the
@@ -4136,7 +4137,19 @@ would silently lose some of it while the row count still matched), with one line
 `{Root}/ledger-migrations.jsonl` recording where it went. **The accepted loss:** if a legacy file
 exists *while* a canonical one already does — reachable only from a pre-#2041 build writing after the
 move, or from a restored backup — the old file is left in place, unread and unmerged, and named on
-stderr. Merging it would mean the re-serialization the move exists to avoid.
+stderr (once per process, with the remedy). Merging it would mean the re-serialization the move exists
+to avoid.
+
+**The second accepted loss: a write refused rather than misplaced.** Reads and writes fail
+*differently* here, which is the one place this ledger departs from "fails open, logged on stderr"
+above. A read whose relocation could not be settled — the legacy file's lock held past its timeout, or
+the move itself failing — falls back to whichever file holds the rows, because reading creates nothing.
+A **write** in that state is refused outright, and `CostLedgerLocation`'s own remarks carry the
+interleaving that forces it. What the register owns is the trade: the settle site loses **that one
+row** and says so on stderr, the run is unaffected, and that deterministic cost is chosen over a
+low-probability but permanent split of durable price provenance, which nothing could later repair.
+`baton ledger backfill` reports the same refusal per repository; `--dry-run` never relocates at all,
+and discloses the move a real run would make.
 
 **One row per settled execution attempt.** `CostLedgerStore.BuildEntries` reuses
 `ExecutionUsageProjector.BuildByExecutionId` and `ExecutionBindingResolver.Resolve` — the same two

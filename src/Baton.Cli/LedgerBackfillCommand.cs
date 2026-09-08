@@ -286,7 +286,10 @@ public static class LedgerBackfillCommand
                 continue;
             }
 
-            Accumulate(pending, LedgerFilePathFor(repository, ledgerDirectoryOverride), rows);
+            if (LedgerFilePathFor(repository, ledgerDirectoryOverride, options.DryRun, report) is { } ledgerFilePath)
+            {
+                Accumulate(pending, ledgerFilePath, rows);
+            }
         }
     }
 
@@ -517,7 +520,10 @@ public static class LedgerBackfillCommand
                 pullRequest with { Room = room }, repository, RepositoryIdentitySource.WorkingDirectory));
         }
 
-        Accumulate(pending, LedgerFilePathFor(repository, ledgerDirectoryOverride), rows);
+        if (LedgerFilePathFor(repository, ledgerDirectoryOverride, options.DryRun, report) is { } ledgerFilePath)
+        {
+            Accumulate(pending, ledgerFilePath, rows);
+        }
     }
 
     /// <summary>
@@ -678,13 +684,51 @@ public static class LedgerBackfillCommand
         }
     }
 
-    // The override branch deliberately does NOT go through CostLedgerLocation: a test seam pointed at
-    // a scratch directory has no legacy location to relocate from, and routing it through the resolver
-    // would make a fixture's flat <slug>.jsonl silently unreadable.
-    private static string LedgerFilePathFor(RepositoryIdentity repository, string? ledgerDirectoryOverride) =>
-        ledgerDirectoryOverride is { Length: > 0 } directory
-            ? Path.Combine(directory, $"{repository.FileSlug}.jsonl")
-            : CostLedgerLocation.Resolve(repository.FileSlug);
+    /// <summary>
+    /// Which file this repository's rows belong in, or <see langword="null"/> when nothing may be
+    /// written for it — reported, never silent.
+    /// <para>
+    /// <b>A dry run PROBES; it does not relocate</b> (#2041 review MEDIUM). This method is reached from
+    /// the walk, which runs before <see cref="BackfillReport.Print"/>, so resolving for write here on a
+    /// dry run would move the operator's ledger and append a manifest line under a report whose first
+    /// line says nothing was written — a false claim, and a write on the wrong side of the
+    /// PLAN-then-DISCLOSE-then-WRITE ordering <see cref="ExecuteAsync(LedgerBackfillOptions, TextWriter, IGhCliRunner?, string?, RepositoryProbe?, CancellationToken)"/>
+    /// states. <see cref="CostLedgerLocation.Probe"/> is two existence checks and no lock, and the
+    /// pending relocation it reports is disclosed in the report instead.
+    /// </para>
+    /// <para>
+    /// The override branch deliberately does NOT go through <see cref="CostLedgerLocation"/> at all: a
+    /// test seam pointed at a scratch directory has no legacy location to relocate from, and routing it
+    /// through the resolver would make a fixture's flat <c>&lt;slug&gt;.jsonl</c> silently unreadable.
+    /// </para>
+    /// </summary>
+    private static string? LedgerFilePathFor(
+        RepositoryIdentity repository, string? ledgerDirectoryOverride, bool dryRun, BackfillReport report)
+    {
+        if (ledgerDirectoryOverride is { Length: > 0 } directory)
+        {
+            return Path.Combine(directory, $"{repository.FileSlug}.jsonl");
+        }
+
+        var probe = CostLedgerLocation.Probe(repository.FileSlug);
+        if (probe.RelocatesTo is { } destination)
+        {
+            report.PendingRelocation(probe.Path, destination);
+        }
+
+        if (dryRun)
+        {
+            return probe.Path;
+        }
+
+        var target = CostLedgerLocation.ResolveForWrite(repository.FileSlug);
+        if (target.Path is null)
+        {
+            report.LedgerUnavailable(repository, target.Refusal);
+        }
+
+        return target.Path;
+    }
 
     private static void Accumulate(
         Dictionary<string, List<CostLedgerEntry>> pending, string ledgerFilePath, IReadOnlyList<CostLedgerEntry> rows)
@@ -715,6 +759,14 @@ public static class LedgerBackfillCommand
 
         private readonly List<string> _unattributedRooms = [];
         private readonly List<string> _unattributedPullRequests = [];
+
+        /// <summary>
+        /// Pending or performed relocations, keyed by the legacy path so the walk's one call per room
+        /// discloses one line per FILE rather than one per room that shares it.
+        /// </summary>
+        private readonly Dictionary<string, string> _relocations = new(StringComparer.OrdinalIgnoreCase);
+
+        private readonly List<string> _unwritableLedgers = [];
 
         public int RoomsWalked { get; set; }
 
@@ -748,6 +800,23 @@ public static class LedgerBackfillCommand
         private int _unattributedRoomCount;
 
         private int _unattributedPullRequestCount;
+
+        /// <summary>
+        /// A pre-#2041 ledger at <paramref name="from"/> that this repository's rows belong under
+        /// <paramref name="to"/> instead — <b>would be</b> moved on a dry run, <b>was</b> moved on a
+        /// real one, and <see cref="Print"/> says which. Recorded on both so the operator is told about
+        /// a one-time move of their own billing history rather than finding <c>~/.baton/ledger</c> empty.
+        /// </summary>
+        public void PendingRelocation(string from, string to) => _relocations[from] = to;
+
+        /// <summary>
+        /// A repository whose ledger could not be resolved for writing, so its rows were collected and
+        /// then dropped. Named here rather than swallowed: the alternative to refusing is a permanently
+        /// split ledger (<see cref="CostLedgerLocation.ResolveForWrite(string)"/>), and a silent drop
+        /// would make this run's totals wrong with nothing on screen to say so.
+        /// </summary>
+        public void LedgerUnavailable(RepositoryIdentity repository, string? refusal) =>
+            _unwritableLedgers.Add($"    {repository.Value} -- {refusal}");
 
         public void UnattributedRoom(string roomDirectoryPath, string reason)
         {
@@ -852,6 +921,29 @@ public static class LedgerBackfillCommand
             foreach (var (path, count) in Files.OrderBy(p => p.Key, StringComparer.OrdinalIgnoreCase))
             {
                 Write(output, $"    {path}: {count}");
+            }
+
+            // #2041, and stated in the tense that is actually true of THIS run: a dry run has relocated
+            // nothing (the paths above are the pre-#2041 ones it read), while a real run already moved
+            // the file before this report was printed.
+            foreach (var (from, to) in _relocations.OrderBy(p => p.Key, StringComparer.OrdinalIgnoreCase))
+            {
+                Write(
+                    output,
+                    dryRun
+                        ? $"    NOTE: '{from}' is a pre-#2041 cost ledger. A real run would relocate it to "
+                            + $"'{to}' and append there; this dry run read it where it is and moved nothing."
+                        : $"    NOTE: the pre-#2041 cost ledger at '{from}' was relocated to '{to}' (a one-time "
+                            + $"move, bytes unchanged, recorded in '{BatonPaths.CostLedgerMigrationFile}').");
+            }
+
+            if (_unwritableLedgers.Count > 0)
+            {
+                Write(output, $"  Repositories whose ledger could not be opened for writing: {_unwritableLedgers.Count}");
+                foreach (var line in _unwritableLedgers)
+                {
+                    Write(output, line);
+                }
             }
 
             if (VerdictsThatPredateTheirRow > 0)
