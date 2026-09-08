@@ -46,6 +46,14 @@ CONTROLS: dict[str, list] = {}
 FAILURES: list[str] = []
 
 
+class ControlSetupError(Exception):
+    """A control could not APPLY its fault, so the arm that follows it compared nothing.
+
+    Distinct from the check raising: that means the sabotage landed and the check saw it. This means
+    the sabotage never landed, and treating the two alike is what #1943 fixed -- see `run_arms`.
+    """
+
+
 def control(check_name: str, describe: str):
     """Register a fault for a named check. The decorated function is a context manager body."""
     def deco(fn):
@@ -299,11 +307,41 @@ def replacing(mod, name, value):
     `audit-controls` caught it, one layer up, which is the only reason it is not still there.
 
     Bare `setattr` cannot tell a rename from a working control, and neither can a reader. This can.
+
+    Raises `ControlSetupError` rather than asserting, because `_loading_recordonce_as` defers the
+    mutation until the check itself calls `selfcheck.load`: the raise surfaces from INSIDE
+    `checks[name]()`, where a bare exception is indistinguishable from the check noticing the fault.
+    The type is what lets `run_arms` tell those apart whether the un-applied sabotage surfaces from
+    `__enter__` or from inside `check()`.
+
+    What that does NOT cover: a replacement closure that reads some OTHER attribute of `mod` lazily,
+    at call time -- `buggy_main` in `_recordonce_ignores_exclusion_reason` reads four. A rename there
+    still surfaces as a bare `AttributeError` from inside the check, which `run_arms` reads as the
+    check noticing the fault. Use `original` for anything read BEFORE `replacing`; the lazy reads are
+    known residue, not covered here.
     """
-    assert hasattr(mod, name), (
-        f"control tried to replace {mod.__name__}.{name}, which does not exist -- renamed? "
-        "A mutation of an attribute nothing reads is not a control.")
+    if not hasattr(mod, name):
+        raise ControlSetupError(
+            f"control tried to replace {mod.__name__}.{name}, which does not exist -- renamed? "
+            "A mutation of an attribute nothing reads is not a control.")
     setattr(mod, name, value)
+
+
+def original(mod, name):
+    """getattr, under `replacing`'s contract: a missing attribute is a SETUP failure, not a red arm.
+
+    A fault that WRAPS what it replaces has to read the original before it can build the replacement,
+    and a bare `mod.exemptions` one line above `replacing(mod, "exemptions", ...)` raises
+    `AttributeError` on a rename -- from inside `check()`, where `run_arms` reads any non-
+    `ControlSetupError` raise as the check noticing the sabotage, and prints `OK  red under` over an
+    arm that compared nothing. Failing OPEN, in the file that exists to catch that shape.
+    """
+    if not hasattr(mod, name):
+        raise ControlSetupError(
+            f"control tried to wrap {mod.__name__}.{name}, which does not exist -- renamed? "
+            "A control that cannot read what it wraps applied no fault.")
+    return getattr(mod, name)
+
 
 
 RECORDONCE = "the record-once checker fires on restated prose, not on text the register prescribes"
@@ -356,7 +394,7 @@ def _recordonce_marker_mutes_file():
     # a marker placed for one deliberate second copy stopped every other passage the change added to
     # that file from being compared, and nothing said so.
     def file_granular(mod):
-        real = mod.exemptions
+        real = original(mod, "exemptions")
 
         def whole_file(path, at):
             shingles, notes, bad = real(path, at)
@@ -385,7 +423,7 @@ def _recordonce_marker_ignores_context():
     unanchored = re.compile(r"record-once-ok:\s*#(\d{3,})\s+(?:canonical\s+is\s+)?(\S+)")
 
     def raw_lines(mod):
-        real = mod.marked_runs
+        real = original(mod, "marked_runs")
 
         def marks_anything(path, hunks):
             runs = real(path, hunks)
@@ -536,6 +574,92 @@ def _agy_tools_message_omits_name():
         yield
 
 
+def _setup_failed(name: str, describe: str, exc: BaseException, phase: str,
+                  failures: list[str], emit) -> None:
+    failures.append(f"{name}: control {phase} RAISED under {describe} "
+                    f"({type(exc).__name__}: {exc})")
+    emit(f"   !!  control {phase} RAISED under: {describe}")
+    emit(f"       {type(exc).__name__}: {exc}")
+    emit("       the fault was never applied, so this arm compared nothing")
+
+
+def _teardown(cm, name: str, describe: str, failures: list[str], emit) -> bool:
+    """Close a fault, reporting a raise rather than propagating it. False if the tree may be dirty."""
+    try:
+        cm.__exit__(None, None, None)
+    except Exception as e:  # noqa: BLE001 -- reported as a harness failure, never swallowed
+        failures.append(f"{name}: control TEARDOWN RAISED under {describe} "
+                        f"({type(e).__name__}: {e})")
+        emit(f"   !!  control TEARDOWN RAISED under: {describe}")
+        emit(f"       {type(e).__name__}: {e}")
+        return False
+    return True
+
+
+def run_arms(name: str, check, arms, failures: list[str], emit=print) -> int:
+    """Run one check's control arms, appending to `failures`. Returns how many arms were exercised.
+
+    THE DISTINCTION THIS FUNCTION EXISTS TO MAKE (#1943). An arm is `with fault(): check()`, and
+    both halves can raise. Only one of them means anything: the CHECK raising is the check noticing
+    the sabotage. The FAULT raising -- in `__enter__`, before the sabotage is applied, or deferred
+    into the check itself via `replacing` -- means no sabotage was applied at all, so the check just
+    ran against an unmutated tree. A single `try/except` around the whole `with` reads the second as
+    the first and prints `OK red under <control>` over an arm that compared nothing, which is the
+    same "green means nothing" failure this whole file exists to catch, in the harness that catches
+    it. So the fault's setup is entered separately, and its failures are named and counted red.
+
+    Shared with `_selftest` rather than copied, because a fixture proving a copy of this logic would
+    prove nothing about the copy that runs.
+    """
+    total = 0
+    restored = True
+    for describe, fault in arms:
+        total += 1
+        # Once a teardown has failed, every arm after it runs against a fixture this harness KNOWS it
+        # did not put back, so its verdict may be about the contamination rather than its own fault.
+        # The run already exits non-zero through the TEARDOWN entry; the qualifier is so a red arm
+        # under a dirty tree does not read as a discriminating one -- the same "an arm that compared
+        # nothing prints as a verdict" shape this function exists to remove, one step out.
+        # Scoped to this check, and safe to reset at the next one only because `main` runs a GREEN
+        # BASELINE per check: a mutation that leaked past the boundary surfaces there as "baseline is
+        # not green", not as an unqualified verdict under a tree nobody put back.
+        qualified = describe if restored else f"{describe} (fixture not restored)"
+        cm = fault()
+        try:
+            cm.__enter__()
+        except Exception as e:  # noqa: BLE001 -- classified and re-reported, never swallowed
+            _setup_failed(name, qualified, e, "SETUP", failures, emit)
+            # A fault with several steps can raise AFTER its first mutation, and a partial fault must
+            # not leak into the next arm. What actually restores it today is the generator unwinding
+            # its own nested `with` blocks (every fault here mutates through `swap`,
+            # `TemporaryDirectory`, or `_loading_recordonce_as`), which has already happened by the
+            # time this line runs. `__exit__` is the backstop for a fault that is NOT a plain
+            # generator -- a hand-written context manager that mutated before raising in `__enter__`.
+            # Residue neither covers: a fault that mutates by bare `setattr` and then raises.
+            restored = _teardown(cm, name, qualified, failures, emit) and restored
+            continue
+
+        try:
+            try:
+                check()
+            except ControlSetupError as e:
+                # A mutation deferred into the check (see `replacing`): still an unapplied fault.
+                _setup_failed(name, qualified, e, "SETUP", failures, emit)
+            except Exception:  # noqa: BLE001 -- any other raise means the check noticed
+                emit(f"   OK  red under: {qualified}")
+            else:
+                failures.append(f"{name}: STAYED GREEN under {qualified}")
+                emit(f"   !!  STAYED GREEN under: {qualified}")
+                emit("       the check does not discriminate against the defect it names")
+        finally:
+            # Every fault here is `try: yield finally: restore`, so a plain exit restores whether or
+            # not the check raised. A raise from teardown is a harness failure like a setup raise --
+            # the next arm now runs against a tree this one failed to put back -- so it is reported
+            # rather than suppressed, and rather than left to propagate and cancel the arms after it.
+            restored = _teardown(cm, name, qualified, failures, emit) and restored
+    return total
+
+
 def main() -> int:
     print(__doc__.strip().splitlines()[0])
     print("=" * 78)
@@ -564,17 +688,7 @@ def main() -> int:
             print(f"   !! baseline is not green, so no arm below can mean anything: {e}")
             continue
 
-        for describe, fault in arms:
-            total += 1
-            try:
-                with fault():
-                    checks[name]()
-            except Exception:  # noqa: BLE001 -- any raise means the check noticed
-                print(f"   OK  red under: {describe}")
-            else:
-                FAILURES.append(f"{name}: STAYED GREEN under {describe}")
-                print(f"   !!  STAYED GREEN under: {describe}")
-                print("       the check does not discriminate against the defect it names")
+        total += run_arms(name, checks[name], arms, FAILURES)
 
     print("\n" + "=" * 78)
     for name in uncontrolled:
