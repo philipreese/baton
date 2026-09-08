@@ -31,6 +31,7 @@ interrupted, leave behind precisely the fault it was injecting -- a change that 
 from __future__ import annotations
 
 import contextlib
+import io
 import os
 import re
 import sys
@@ -566,11 +567,20 @@ def main() -> int:
 
         for describe, fault in arms:
             total += 1
+            sabotage_applied = False
             try:
                 with fault():
+                    sabotage_applied = True
                     checks[name]()
-            except Exception:  # noqa: BLE001 -- any raise means the check noticed
-                print(f"   OK  red under: {describe}")
+            except Exception as e:  # noqa: BLE001 -- the harness reports every arm failure
+                if not sabotage_applied:
+                    FAILURES.append(
+                        f"{name}: control setup FAILED under {describe} "
+                        f"({type(e).__name__}: {e})")
+                    print(f"   !! SETUP FAILED under: {describe} "
+                          f"({type(e).__name__}: {e})")
+                else:
+                    print(f"   OK  red under: {describe}")
             else:
                 FAILURES.append(f"{name}: STAYED GREEN under {describe}")
                 print(f"   !!  STAYED GREEN under: {describe}")
@@ -591,7 +601,44 @@ def main() -> int:
     return 0
 
 
+def _fixture_setup_raises():
+    raise RuntimeError("fixture setup error")
+    yield
+
+
+def _selftest() -> int:
+    """Prove a control that cannot finish setup fails the harness instead of reading as red."""
+    fixture_name = "fixture check"
+    fixture_arm = "fixture control setup raises"
+    original_checks = list(selfcheck.CHECKS)
+    original_failures = list(FAILURES)
+    had_fixture_control = fixture_name in CONTROLS
+    original_fixture_control = CONTROLS.get(fixture_name)
+    selfcheck.CHECKS.append((fixture_name, lambda: None))
+    CONTROLS[fixture_name] = [(fixture_arm, contextlib.contextmanager(_fixture_setup_raises))]
+
+    try:
+        output = io.StringIO()
+        with contextlib.redirect_stdout(output):
+            exit_code = main()
+    finally:
+        selfcheck.CHECKS[:] = original_checks
+        if had_fixture_control:
+            CONTROLS[fixture_name] = original_fixture_control
+        else:
+            CONTROLS.pop(fixture_name)
+        FAILURES[:] = original_failures
+
+    observed = output.getvalue()
+    expected = f"SETUP FAILED under: {fixture_arm} (RuntimeError: fixture setup error)"
+    if exit_code == 0 or fixture_name not in observed or expected not in observed:
+        print(" !! controls selftest FAILED: setup exception did not fail and name its fixture arm")
+        return 1
+    print("controls: selftest OK")
+    return 0
+
+
 if __name__ == "__main__":
-    raise SystemExit(main())
+    raise SystemExit(_selftest() if sys.argv[1:] == ["--selftest"] else main())
 
 
