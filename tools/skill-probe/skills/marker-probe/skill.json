@@ -1,0 +1,10 @@
+{
+  "name": "marker-probe",
+  "version": 1,
+  "description": "Use whenever you are asked to write a workspace orientation note for a repository.",
+  "instructions": "SKILL.md",
+  "requires": {
+    "read_files": true,
+    "write_files": true
+  }
+}
