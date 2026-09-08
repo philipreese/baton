@@ -1884,11 +1884,13 @@ fan-out, and this register does not name a mechanism it has not measured. #1709'
 population is where a real answer would come from.
 
 **The product consequence, stated rather than left to inference.** A budget is compared against the
-floor, so `implement`'s shipped 1,200,000 is an effective ceiling of `1,200,000 ÷ seen` in real tokens:
+floor, so a claude `implement` ceiling of `B` is an effective ceiling of `B ÷ seen` in real tokens. At
+the 1,200,000 `implement` shipped when this was measured (#1682; agy's figure still, #2034 below):
 ~1.55M on the best-seen of the two evidence rooms, ~3.1M on the worse, and **~4.26M** on the worst room
-in the whole 126-room sweep (`dispatch-review-b4f33edb`, seen 0.282).
+in the whole 126-room sweep (`dispatch-review-b4f33edb`, seen 0.282); at the 600,000 claude carries
+since #2034, half each.
 `TokenBudgetReplayTests.The_live_floor_widens_the_effective_claude_ceiling_by_the_room_s_own_under_read_factor`
-pins the two evidence rooms' figures so this paragraph and the code cannot drift; the 4.26M is the
+pins the two evidence rooms' figures at 1,200,000 so this paragraph and the code cannot drift; the 4.26M is the
 sweep's, and the sweep is not a committed instrument (see the note on `tools/room-rate-sweep` below).
 The token trigger is therefore materially looser on claude than on agy, whose incremental usage IS its
 real usage; closing that asymmetry needs a live figure this vendor does not emit, so it is a bound to
@@ -2028,8 +2030,8 @@ comfortably under 610, so the measured false-arrest rate on this population at t
 `--max-tool-steps` (below) remains the escape hatch for.
 
 **Honest replay result: under this measured, false-positive-safe cap, neither evidence room is caught
-by the tool-step trigger, and neither is caught by the token trigger at the shipped 1,200,000 budget
-either.** `38c24d11` made only 69 real tool calls in its whole captured stream and `f7b24a80` only 85 —
+by the tool-step trigger, and neither is caught by the token trigger at the 1,200,000 budget shipped
+then (agy's still, #2034 below) either.** `38c24d11` made only 69 real tool calls in its whole captured stream and `f7b24a80` only 85 —
 both well under any cap wide enough to avoid false-arresting the population above (`implement`'s normal
 range alone reaches 482). This is not a case of "raise the cap until it stops firing" being wrong in
 principle — the SAME 2×-normal method the token budget already used — it is that this specific pair of
@@ -2200,7 +2202,7 @@ populations disagree, and a single cross-vendor scalar cannot be sized from eith
   placeholder columns and read against the terminal whole-tree line (#1706's table above) they are
   **884,568 and 294,769**. Applying "2× the higher" to the corrected pair would give ~1,769,000, not
   1,200,000. On this population 1,200,000 false-arrests nothing: 884,568 sits under it with ~26% margin
-  (`TokenBudgetReplayTests.HONEST_neither_delivered_claude_room_arrests_at_the_shipped_implement_budget_live_or_terminal`),
+  (`TokenBudgetReplayTests.HONEST_neither_delivered_claude_room_arrests_at_the_pre_2034_implement_budget_live_or_terminal`),
   making the shipped value **~1.36× the higher corrected normal room** — TIGHTER than the "2×" the old
   text claimed, not looser. Tighter in intent than in effect, since what a live claude budget is
   actually compared against is the floor, not these corrected figures (see the effective-ceiling
@@ -2254,6 +2256,44 @@ closed (the live-floor paragraph above). Only `review` demonstrates the new map 
 values (`{"claude": 250000, "agy": 250000}`) are deliberately equal to the pre-#1745 single figure —
 the shape is exercised on a real shipped role with no behavioural change, not a fresh per-vendor
 calibration. A future issue that DOES re-derive `implement`'s value now has a shape to put it in.
+
+**Ceiling rule (#2034, operator ruling 2026-09-08): `ceiling = 3 × rolling p95 of live billed tokens
+per adapter/step id over the last 14 days, floored at 400,000`.** This is the value decision the two
+paragraphs above left open, and it is stated here once. "Live billed tokens" is `liveBilledTokens` on
+the room's settled `terminal.json` — the Σ `TokenBudgetMonitor` actually arrested on, never the
+post-hoc fold — because a ceiling sized from a quantity no monitor compares to is sized for nothing.
+The p95 is per (adapter, step id), over rooms whose `terminalAt` falls inside the window; dispatch
+rooms use the role id as the step id, so this is the same population over a dispatch-only corpus
+(the sweep ignores `--role-prefix`, so verify that corpus before using a row to re-pin a role).
+A proposal requires n >= 5 steps with live billed figures; below that minimum sample, withhold it.
+Five is the #2034 review fix's engineering minimum against thin samples, not an operator-derived
+statistical cutoff; at that sample size the sweep's p95 still selects the maximum.
+3× is the margin between "the tail lane finishes" and "a runaway is caught", and the 400,000 floor keeps a
+quiet fortnight from ratcheting a ceiling down to a number a single ordinary lane crosses. **Re-derive
+it by running `python tools/room-rate-sweep/sweep.py --propose-ceilings`** (which applies exactly this
+rule, defaulting the window to the last 14 days, and prints the proposal beside the pinned catalog
+value), and record the numbers on the issue that moves a value; a re-pin is an edit to
+`WorkerRoles.json` plus `WorkerRoleCatalogTests`'s pin of it, never a change to the rule here.
+Today's 600,000 operator pin uses `--since 2026-09-07T09:55:46Z`, the post-#2022 derivation window,
+because pre-#2022 codex rows are mis-metered; the default 14-day window proposes higher today
+(claude/implement 772,206, n=166). The operator pin governs when it differs from a proposal; a future
+re-pin uses the rolling 14-day window clipped to that meter-fix cutoff (pass the later start via
+`--since`) and records the proposal and any operator rounding on the issue before editing the pin.
+*What produced today's values (#2034 head, measured 2026-09-08 05:25 ET over every room settled
+after #2022's codex meter fix): codex/implement live p95 181,492 (n=6) and claude/implement live p95
+201,858 (n=52), both against a 1,200,000 ceiling, so both ~15–17% of it; their exact 3× proposals
+are 544,476 and 605,574, operator-rounded to 600,000, and `implement`'s `token_budget` is now the
+map `{"claude": 600000, "agy": 1200000, "codex": 600000}`.* **agy stays at 1,200,000 on purpose:**
+its window holds one sample (736,040, the
+S7 rerun, itself a budget arrest), and one sample is not a distribution — the rule is applied to a
+p95, and a p95 of one point is that point. It is re-derived when agy `implement` has a population,
+not before. `WorkerRoles.json` is plain JSON and carries no comments, so this paragraph is where that
+exception lives. The claude side of this rule inherits the FLOOR caveat above: 600,000 live is an
+effective real ceiling of `600,000 ÷ seen`, and one delivered pre-#2022 claude room's terminal
+whole-tree total (884,568) already sits above the new figure while its live Σ does not —
+`TokenBudgetReplayTests.HONEST_neither_delivered_claude_room_arrests_LIVE_at_the_2034_claude_implement_budget_though_one_terminal_total_exceeds_it`
+pins both halves so the cost stays visible. `review`/`advise`/`consolidate` are untouched by this
+ruling: the rule is stated for every adapter/step id, but only `implement`'s values were re-pinned on it.
 
 **The shared mechanism.** All four producers (engine-run verify, the token budget, #1682's tool-step
 cap, and #1691's billed-rate limit) route through the one `StateProjector.ApplyIndeterminate` helper — flag, reason text,

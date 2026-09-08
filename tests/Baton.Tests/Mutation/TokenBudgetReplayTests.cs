@@ -33,15 +33,23 @@ public sealed class TokenBudgetReplayTests
     ];
 
     // #1686 review F3: this was named `OldAndNewDefaultBudget` and its comment claimed 600,000 was
-    // "still-in-force" -- both false as of this diff. `implement`'s SHIPPED budget is 1,200,000
-    // (`ShippedImplementBudget` below); 600,000 is the SUPERSEDED figure the original #1682 acceptance
-    // criterion asked a replay to arrest under, kept only so that criterion still has a runnable test.
+    // "still-in-force" -- both false as of that diff. 600,000 is the SUPERSEDED pre-#1682 figure the
+    // original #1682 acceptance criterion asked a replay to arrest under, kept only so that criterion
+    // still has a runnable test. That #2034 later re-pinned claude/codex `implement` to the same number
+    // (`ShippedClaudeImplementBudget` below) is a coincidence of two different derivations -- the old
+    // level-based default versus 3x the live billed p95 -- not a return to this one.
     private const long SupersededPre1682AcceptanceBudget = 600_000;
 
-    // #1686 review F3: the configuration this PR actually ships for `implement`
-    // (`src/Baton.Vendors/WorkerRoles.json`) -- what the "honest replay result" tests below exercise.
-    private const long ShippedImplementBudget = 1_200_000;
+    // #1686 review F3: the `implement` budget #1682 shipped as a single scalar
+    // (`src/Baton.Vendors/WorkerRoles.json`) -- what the "honest replay result" tests below were
+    // measured against. #2034 moved claude and codex off it; it is still agy's figure today, and the
+    // agy replays below (room 38c24d11) are therefore still replays at the shipped agy ceiling.
+    private const long Pre2034ImplementBudget = 1_200_000;
     private const int ShippedImplementMaxToolSteps = 322;
+
+    // #2034: `implement`'s operator-rounded claude ceiling; see spec/baton.md §3's
+    // "Ceiling rule (#2034)" derivation paragraph for the pin's origin.
+    private const long ShippedClaudeImplementBudget = 600_000;
 
     // #1686 review F1: the OLD (pre-#1682, i.e. pre-THIS-PR) `implement` tool-step cap, in the OLD
     // double-counted unit (ACTIVE + terminal lifecycle line per real call) -- kept only for the
@@ -145,11 +153,11 @@ public sealed class TokenBudgetReplayTests
         // -billed-token stream -- far under a tool-step cap wide enough to avoid false-arresting normal
         // `implement` traffic (322, and even that is exceeded by 2 of 26 real normal rooms measured for
         // this PR -- spec/baton.md §3). And 794,940 sits under the recalibrated 1,200,000 token budget
-        // by the SAME sound "2x normal" method. Neither trigger fires. This is not a bug in this
+        // (still agy's ceiling after #2034; this is an agy room) by the SAME sound "2x normal" method. Neither trigger fires. This is not a bug in this
         // replay -- it is the honest result of fixing F1/F2 correctly, and it is recorded here as a
         // durable fact rather than left to only exist in a PR body that will drift out of sync with the
         // code the moment either constant changes again.
-        var monitor = new TokenBudgetMonitor(budget: ShippedImplementBudget, maxToolSteps: ShippedImplementMaxToolSteps, billedRateLimit: null, new AgyUsageParser());
+        var monitor = new TokenBudgetMonitor(budget: Pre2034ImplementBudget, maxToolSteps: ShippedImplementMaxToolSteps, billedRateLimit: null, new AgyUsageParser());
 
         var arrestedAtLine = ReplayRoom38c24d11(monitor);
 
@@ -166,7 +174,7 @@ public sealed class TokenBudgetReplayTests
         // #1686 review F3's second, independently satisfiable assertion: isolated from the tool-step
         // axis entirely (maxToolSteps: null), the token trigger alone never crosses 1,200,000 on this
         // room's real 794,940-token total.
-        var monitor = new TokenBudgetMonitor(budget: ShippedImplementBudget, maxToolSteps: null, billedRateLimit: null, new AgyUsageParser());
+        var monitor = new TokenBudgetMonitor(budget: Pre2034ImplementBudget, maxToolSteps: null, billedRateLimit: null, new AgyUsageParser());
 
         foreach (var (inTokens, outTokens) in Room38c24d11Turns)
         {
@@ -175,7 +183,7 @@ public sealed class TokenBudgetReplayTests
 
         Assert.False(monitor.Arrested);
         Assert.Equal(794_940, monitor.SnapshotUsage().BilledTokens);
-        Assert.True(monitor.SnapshotUsage().BilledTokens < ShippedImplementBudget);
+        Assert.True(monitor.SnapshotUsage().BilledTokens < Pre2034ImplementBudget);
     }
 
     [Fact]
@@ -450,17 +458,32 @@ public sealed class TokenBudgetReplayTests
     }
 
     [Fact]
-    public void HONEST_neither_delivered_claude_room_arrests_at_the_shipped_implement_budget_live_or_terminal()
+    public void HONEST_neither_delivered_claude_room_arrests_at_the_pre_2034_implement_budget_live_or_terminal()
     {
-        // The budget re-derivation's own evidence (spec/baton.md §3): both rooms delivered their work
-        // and neither crosses 1,200,000 on EITHER figure -- 884,568 is the higher of the two corrected
-        // totals. So the shipped value does not false-arrest a delivered claude room and is left where
-        // it is; what changes is the derivation text, which claimed a "~2x the higher measured normal
-        // room" method against figures that method was never applied to.
-        Assert.False(ReplayClaudeRoom(Room3dc5e21aMessages, ShippedImplementBudget).Arrested);
-        Assert.False(ReplayClaudeRoom(Room5d9686ddMessages, ShippedImplementBudget).Arrested);
-        Assert.True(TerminalBilled(Room3dc5e21aResultLine) < ShippedImplementBudget);
-        Assert.True(TerminalBilled(Room5d9686ddResultLine) < ShippedImplementBudget);
+        // The #1706 budget re-derivation's own evidence (spec/baton.md §3): both rooms delivered their
+        // work and neither crosses 1,200,000 on EITHER figure -- 884,568 is the higher of the two
+        // corrected totals. So the value shipped then did not false-arrest a delivered claude room and
+        // was left where it was; what changed was the derivation text, which claimed a "~2x the higher
+        // measured normal room" method against figures that method was never applied to.
+        Assert.False(ReplayClaudeRoom(Room3dc5e21aMessages, Pre2034ImplementBudget).Arrested);
+        Assert.False(ReplayClaudeRoom(Room5d9686ddMessages, Pre2034ImplementBudget).Arrested);
+        Assert.True(TerminalBilled(Room3dc5e21aResultLine) < Pre2034ImplementBudget);
+        Assert.True(TerminalBilled(Room5d9686ddResultLine) < Pre2034ImplementBudget);
+    }
+
+    [Fact]
+    public void HONEST_neither_delivered_claude_room_arrests_LIVE_at_the_2034_claude_implement_budget_though_one_terminal_total_exceeds_it()
+    {
+        // #2034 halves claude's ceiling to 600,000. The arrest is made on the LIVE Σ (the floor), and
+        // both delivered rooms stay under it live (their live Σ are the denominators the effective-
+        // ceiling test above divides by), so the re-pin false-arrests neither. The third assertion is the honest cost, stated rather than left to inference:
+        // 3dc5e21a's terminal whole-tree total (884,568) is ABOVE the new ceiling, so a claude meter
+        // that ever read its real spend live would arrest this room. It does not today, and the
+        // effective-ceiling arithmetic in the test above is what says how far apart the two are.
+        Assert.False(ReplayClaudeRoom(Room3dc5e21aMessages, ShippedClaudeImplementBudget).Arrested);
+        Assert.False(ReplayClaudeRoom(Room5d9686ddMessages, ShippedClaudeImplementBudget).Arrested);
+        Assert.True(TerminalBilled(Room3dc5e21aResultLine) > ShippedClaudeImplementBudget);
+        Assert.True(TerminalBilled(Room5d9686ddResultLine) < ShippedClaudeImplementBudget);
     }
 
     [Fact]
@@ -469,9 +492,9 @@ public sealed class TokenBudgetReplayTests
         // What shipping a floor costs the budget in real tokens. spec/baton.md §3 argues it and cites
         // this test by name; the assertions exist so that section and the code cannot drift apart.
         var effectiveCeiling3dc5e21a =
-            (double)ShippedImplementBudget * TerminalBilled(Room3dc5e21aResultLine) / ReplayClaudeRoom(Room3dc5e21aMessages, budget: null).SnapshotUsage().BilledTokens!.Value;
+            (double)Pre2034ImplementBudget * TerminalBilled(Room3dc5e21aResultLine) / ReplayClaudeRoom(Room3dc5e21aMessages, budget: null).SnapshotUsage().BilledTokens!.Value;
         var effectiveCeiling5d9686dd =
-            (double)ShippedImplementBudget * TerminalBilled(Room5d9686ddResultLine) / ReplayClaudeRoom(Room5d9686ddMessages, budget: null).SnapshotUsage().BilledTokens!.Value;
+            (double)Pre2034ImplementBudget * TerminalBilled(Room5d9686ddResultLine) / ReplayClaudeRoom(Room5d9686ddMessages, budget: null).SnapshotUsage().BilledTokens!.Value;
 
         Assert.InRange(effectiveCeiling3dc5e21a, 3_090_000, 3_110_000);
         Assert.InRange(effectiveCeiling5d9686dd, 1_550_000, 1_560_000);
