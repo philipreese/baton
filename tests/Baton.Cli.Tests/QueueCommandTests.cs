@@ -24,6 +24,121 @@ public sealed class QueueCommandTests
     }
 
     [Fact]
+    public async Task Add_resolves_an_unscoped_models_unique_adapter_before_writing_the_item()
+    {
+        var home = CreateTempHome();
+        using var scope = BatonEnvironmentSnapshot.BeginScope(BatonEnvironmentSnapshot.Blank with { HomeOverride = home });
+        try
+        {
+            var workspace = Path.Combine(home, "workspace");
+            var brief = Path.Combine(home, "brief.md");
+            Directory.CreateDirectory(workspace);
+            await File.WriteAllTextAsync(brief, "implement this", Ct);
+
+            var output = new StringWriter();
+            var exit = await QueueCommand.ExecuteAsync(
+                new QueueOptions(
+                    QueueVerb.Add, Tag: "model-route", Role: "implement", SpecFilePath: brief,
+                    WorkspaceDirectory: workspace, Model: "opus", Effort: "high"),
+                output,
+                Ct);
+
+            Assert.Equal(0, exit);
+            Assert.Contains("tier: claude (from --model opus) / opus / high", output.ToString(), StringComparison.Ordinal);
+            Assert.Equal("claude", (await QueueStore.LoadAsync(BatonPaths.QueueFile, Ct)).Items.Single().Adapter);
+        }
+        finally
+        {
+            DirectoryCleanup.DeleteRecursively(home);
+        }
+    }
+
+    [Fact]
+    public async Task Add_refuses_an_unknown_model_before_creating_a_queue_row()
+    {
+        var home = CreateTempHome();
+        using var scope = BatonEnvironmentSnapshot.BeginScope(BatonEnvironmentSnapshot.Blank with { HomeOverride = home });
+        try
+        {
+            var workspace = Path.Combine(home, "workspace");
+            var brief = Path.Combine(home, "brief.md");
+            Directory.CreateDirectory(workspace);
+            await File.WriteAllTextAsync(brief, "implement this", Ct);
+
+            var refusal = await Assert.ThrowsAsync<CliArgumentException>(() => QueueCommand.ExecuteAsync(
+                new QueueOptions(
+                    QueueVerb.Add, Tag: "unknown-model", Role: "implement", SpecFilePath: brief,
+                    WorkspaceDirectory: workspace, Model: "not-a-model"),
+                TextWriter.Null,
+                Ct));
+
+            Assert.Contains("not known by any recorded adapter capability snapshot", refusal.Message, StringComparison.Ordinal);
+            Assert.False(File.Exists(BatonPaths.QueueFile));
+        }
+        finally
+        {
+            DirectoryCleanup.DeleteRecursively(home);
+        }
+    }
+
+    [Fact]
+    public async Task Add_refuses_a_model_the_scopes_resolved_adapter_cannot_use_before_creating_a_queue_row()
+    {
+        var home = CreateTempHome();
+        using var scope = BatonEnvironmentSnapshot.BeginScope(BatonEnvironmentSnapshot.Blank with { HomeOverride = home });
+        try
+        {
+            var workspace = Path.Combine(home, "workspace");
+            var brief = Path.Combine(home, "brief.md");
+            Directory.CreateDirectory(workspace);
+            await File.WriteAllTextAsync(brief, "implement this", Ct);
+
+            var refusal = await Assert.ThrowsAsync<CliArgumentException>(() => QueueCommand.ExecuteAsync(
+                new QueueOptions(
+                    QueueVerb.Add, Tag: "model-mismatch", Role: "implement", SpecFilePath: brief,
+                    WorkspaceDirectory: workspace, ScopeClass: "tooling", Model: "opus", Reason: "deliberate"),
+                TextWriter.Null,
+                Ct));
+
+            Assert.Contains("resolved codex adapter cannot use it", refusal.Message, StringComparison.Ordinal);
+            Assert.False(File.Exists(BatonPaths.QueueFile));
+        }
+        finally
+        {
+            DirectoryCleanup.DeleteRecursively(home);
+        }
+    }
+
+    [Fact]
+    public async Task Add_prints_an_unscoped_roles_resolved_adapter_without_a_model()
+    {
+        var home = CreateTempHome();
+        using var scope = BatonEnvironmentSnapshot.BeginScope(BatonEnvironmentSnapshot.Blank with { HomeOverride = home });
+        try
+        {
+            var workspace = Path.Combine(home, "workspace");
+            var brief = Path.Combine(home, "brief.md");
+            Directory.CreateDirectory(workspace);
+            await File.WriteAllTextAsync(brief, "implement this", Ct);
+
+            var output = new StringWriter();
+            await QueueCommand.ExecuteAsync(
+                new QueueOptions(
+                    QueueVerb.Add, Tag: "role-route", Role: "implement", SpecFilePath: brief,
+                    WorkspaceDirectory: workspace),
+                output,
+                Ct);
+
+            Assert.Contains("tier: codex / gpt-6-astra / medium", output.ToString(), StringComparison.Ordinal);
+            Assert.DoesNotContain("role default adapter", output.ToString(), StringComparison.Ordinal);
+        }
+        finally
+        {
+            DirectoryCleanup.DeleteRecursively(home);
+        }
+    }
+
+    [Fact]
     public async Task Re_adding_a_launched_tag_is_refused_before_the_spec_copy_is_overwritten()
     {
         var home = CreateTempHome();

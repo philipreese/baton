@@ -50,6 +50,9 @@ public static class QueueCommand
                 "pass an existing file to --spec; the queue copies it, so the original may be deleted afterwards.");
         }
 
+        var settings = await DaemonSettingsStore.LoadAsync(BatonPaths.SettingsFile, cancellationToken).ConfigureAwait(false);
+        var (adapter, tier, adapterFromModel) = ResolveTierForAdd(options, settings.Queue);
+
         // The launched-tag refusal is raised HERE, before the spec copy and before any worktree is
         // provisioned — not only inside the mutate below (#1939 review). File.Copy(overwrite: true)
         // would otherwise already have replaced the running lane's brief by the time the refusal was
@@ -92,7 +95,7 @@ public static class QueueCommand
             Workspace = workspace,
             SpecFile = specDestination,
             ScopeClass = options.ScopeClass?.ToLowerInvariant(),
-            Adapter = options.Adapter,
+            Adapter = adapter,
             Model = options.Model,
             Effort = options.Effort,
             TimeoutMinutes = options.TimeoutMinutes,
@@ -149,11 +152,9 @@ public static class QueueCommand
             return snapshot with { Items = items };
         }, cancellationToken).ConfigureAwait(false);
 
-        var settings = await DaemonSettingsStore.LoadAsync(BatonPaths.SettingsFile, cancellationToken).ConfigureAwait(false);
-        var tier = QueueTierTable.Resolve(item, settings.Queue, WorkerRoleCatalog.QueueTierFor);
         output.WriteLine($"{(replaced ? "Replaced" : "Queued")} '{tag}' ({item.Role}) in {workspace}");
         output.WriteLine($"  spec: {specDestination}");
-        output.WriteLine($"  tier: {DescribeTier(tier)}");
+        output.WriteLine($"  tier: {DescribeTier(tier, adapterFromModel)}");
         if (tier.IsOverride)
         {
             output.WriteLine($"  override: {tier.OverrideReason}");
@@ -287,7 +288,45 @@ public static class QueueCommand
         return 0;
     }
 
-    private static string DescribeTier(QueueTierResolution tier)
+    private static (string? Adapter, QueueTierResolution Tier, bool AdapterFromModel) ResolveTierForAdd(
+        QueueOptions options, QueueSettings settings)
+    {
+        var adapters = options.Model is null ? Array.Empty<string>() : WorkerModelCatalog.AdaptersFor(options.Model);
+        if (options.Model is not null && adapters.Count == 0)
+        {
+            throw new CliArgumentException(
+                $"--model '{options.Model}' is not known by any recorded adapter capability snapshot.");
+        }
+
+        var adapterFromModel = options.ScopeClass is null && options.Adapter is null && adapters.Count == 1;
+        var adapter = adapterFromModel ? adapters[0] : options.Adapter;
+        var tier = QueueTierTable.Resolve(
+            new QueueItem
+            {
+                Tag = options.Tag!,
+                Role = options.Role!,
+                Workspace = "",
+                SpecFile = "",
+                ScopeClass = options.ScopeClass?.ToLowerInvariant(),
+                Adapter = adapter,
+                Model = options.Model,
+                Effort = options.Effort,
+            },
+            settings,
+            WorkerRoleCatalog.QueueTierFor,
+            WorkerRoleCatalog.QueueTierForRole);
+
+        if (options.Model is not null && (tier.Adapter is null || !adapters.Contains(tier.Adapter, StringComparer.OrdinalIgnoreCase)))
+        {
+            var actualAdapter = tier.Adapter ?? "unconfigured";
+            throw new CliArgumentException(
+                $"--model '{options.Model}' is known by {string.Join(", ", adapters)}, but the resolved {actualAdapter} adapter cannot use it.");
+        }
+
+        return (adapter, tier, adapterFromModel);
+    }
+
+    private static string DescribeTier(QueueTierResolution tier, bool adapterFromModel)
     {
         var parts = new List<string>();
         if (tier.TierKey is { Length: > 0 } key)
@@ -295,7 +334,9 @@ public static class QueueCommand
             parts.Add(key);
         }
 
-        parts.Add(tier.Adapter ?? "role default adapter");
+        parts.Add(tier.Adapter is null
+            ? "unconfigured adapter"
+            : adapterFromModel ? $"{tier.Adapter} (from --model {tier.Model})" : tier.Adapter);
         parts.Add(tier.Model ?? "role default model");
         parts.Add(tier.Effort ?? "role default effort");
         return string.Join(" / ", parts) + (tier.IsOverride ? " (overridden)" : string.Empty);

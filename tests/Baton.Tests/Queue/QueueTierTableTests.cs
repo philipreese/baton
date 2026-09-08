@@ -225,6 +225,20 @@ public sealed class QueueTierTableTests
     }
 
     [Fact]
+    public void An_unscoped_item_resolves_the_role_tier_without_becoming_a_scope_override()
+    {
+        var resolved = QueueTierTable.Resolve(
+            Item(),
+            new QueueSettings(),
+            NoNamedTiers,
+            _ => new QueueTierSettings { Adapter = "codex", Model = "gpt-6-astra", Effort = "medium" });
+
+        Assert.Null(resolved.TierKey);
+        Assert.Equal(("codex", "gpt-6-astra", "medium"), (resolved.Adapter, resolved.Model, resolved.Effort));
+        Assert.False(resolved.IsOverride);
+    }
+
+    [Fact]
     public void An_operators_table_overlays_the_shipped_one_entry_by_entry()
     {
         var settings = new QueueSettings
