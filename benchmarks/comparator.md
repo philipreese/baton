@@ -31,7 +31,7 @@ branch name or a sibling PR number voids the arm.
 The operator ruled these before the last samples closed:
 
 1. Per role, the tier pin goes to the vendor whose arm produced the merged PR most often across that role's samples. A tie goes to the cheaper arm by measured cost.
-2. A run that made no edit, was arrested, or was voided counts as a loss for that sample when the cause was the vendor's. When the cause was Baton's own tooling (#1996, #1998, #2001, #2002), the sample is voided for that vendor and rerun after the fix lands, so every vendor gets a fair run.
+2. A run that made no edit, was arrested, or was voided counts as a loss for that sample when the cause was the vendor's. When the cause was Baton's own tooling (#1996, #1998, #2001, #2002, #2076, #2098), the sample is voided for that vendor and rerun after the fix lands, so every vendor gets a fair run.
 3. Between two merged arms, fewer fix rounds ranks higher.
 4. Arm C (native subagent) replaces arm B only if it wins at least two of the three claude samples.
 5. No tier changes from this experiment until the reruns in rule 2 have happened.
@@ -39,7 +39,7 @@ The operator ruled these before the last samples closed:
 Standing principle, in the operator's words: “measure before deciding.” ([ruling][rule])
 
 One observation that bears on rule 5, on the `agy` arms: sample 7 supports "C over B" (APPROVE vs BLOCK);
-sample 8 does not discriminate (B approved clean, C approved with an owed fix round). Input to the tier-pin
+sample 8 does not discriminate (B approved with no owed fix round, C approved with an owed fix round). Input to the tier-pin
 question, not a decision.
 
 ## Ledger
@@ -109,20 +109,20 @@ raw measurement in its linked comment.
 | 7 | #1951 | A | `codex` | `baton-room` | #1997 | per-last-event, unusable ([#2020](https://github.com/philipreese/baton/issues/2020), open) | BLOCK, 4 medium / 5 low; hand-pushed after #1998 — scored a LOSS, not a voided run. A rerun ran after #2013 anyway and landed PR #2023: BLOCK, 3 medium, closed unmerged | no | [row][s7], [rerun][s7r] |
 | 7 | #1951 | A | `agy` | `baton-room` | — | 1,203,170 billed (rerun, room `queue-cmpa2-1951-agy-r2`); first run's 1,214,223 in [row][s7] | first run arrested with no commit or PR. Rerun 2026-09-08 (base 23d9b5ad): first attempt (`queue-cmpa2-1951-agy`) failed closed at launch on a missing trust ceiling — #2076, Baton's cause, void; second attempt (`queue-cmpa2-1951-agy-r2`) arrested at the token budget, no commit, no PR. LOSS (vendor's cause: budget) | no | [row][s7], [rerun][s7r2] |
 | 7 | #1951 | B | `claude` | `hand-recorded` | — | — | not run | no | [row][s7] |
-| 7 | #1951 | B | `codex` | `headless-stream` | #2084 | See row | BLOCK, 1 high | no | [rerun][s7r2] |
-| 7 | #1951 | B | `agy` | `headless-stream` | #2080 | See row | BLOCK, 1 high | no | [rerun][s7r2] |
+| 7 | #1951 | B | `codex` | `headless-stream` | #2084 | 5,766,418 (5,567,232 cached) | BLOCK, 1 high | no | [rerun][s7r2] |
+| 7 | #1951 | B | `agy` | `headless-stream` | #2080 | 1,517,302 | BLOCK, 1 high | no | [rerun][s7r2] |
 | 7 | #1951 | C | `claude` | `hand-recorded` | — | — | not run | no | [row][s7] |
-| 7 | #1951 | C | `codex` | `headless-stream` | #2085 | See row | BLOCK, 1 medium / 6 low | no | [rerun][s7r2] |
-| 7 | #1951 | C | `agy` | `headless-stream` | #2081 | See row | APPROVE, 2 medium / 4 low | no | [rerun][s7r2] |
+| 7 | #1951 | C | `codex` | `headless-stream` | #2085 | 8,550,346 (8,347,648 cached) | BLOCK, 1 medium / 6 low | no | [rerun][s7r2] |
+| 7 | #1951 | C | `agy` | `headless-stream` | #2081 | 1,035,741 | APPROVE, 2 medium / 4 low | no | [rerun][s7r2] |
 | 8 | #1943 | A | `claude` | `baton-room` | #1994 | See row | APPROVE → bounded fix | yes | [row][s8] |
 | 8 | #1943 | A | `codex` | `baton-room` | #2021 | per-last-event, unusable ([#2020](https://github.com/philipreese/baton/issues/2020), open) | first run void: no edit under the grant (#1996). Rerun after #2013 landed PR #2021: BLOCK, 1 high / 2 medium, closed unmerged | no | [row][s8], [rerun][s8r] |
-| 8 | #1943 | A | `agy` | `baton-room` | #1999 | See row | first run void: sibling contamination (#2001), repeated steps (#2002). Rerun 2026-09-08 (`queue-cmpa2-1943-agy`, base 156682aa): verify failed on `gates-selftest`; the failing member is the pre-push control, `no sh on PATH` (#2098, Baton's verify environment); 34/34 other members passed; no commit, no PR. Void under rule 2: Baton's cause (#2098); rerun owed | no | [row][s8], [rerun][s8r2] |
+| 8 | #1943 | A | `agy` | `baton-room` | #1999 | not captured (rerun room `queue-cmpa2-1943-agy` carries no billed figure); first run's figure in [row][s8] | first run void: sibling contamination (#2001), repeated steps (#2002). Rerun 2026-09-08 (`queue-cmpa2-1943-agy`, base 156682aa): the room journal shows executionExited, then verifyStarted, then verifyFailed. The agy execution ended on its own with one uncommitted edit (`tools/audit-completeness/controls.py`) and no commit — the absent commit is the vendor's. The engine verify that followed failed on the `gates-selftest` pre-push control, `no sh on PATH` (#2098, Baton's verify environment; 34/34 other members passed), which is real but not the cause of the absent commit. LOSS under rule 2 (vendor's cause: no commit); #2098 noted, not causal | no | [row][s8], [rerun][s8r2] |
 | 8 | #1943 | B | `claude` | `hand-recorded` | — | — | not run | no | [row][s8] |
-| 8 | #1943 | B | `codex` | `headless-stream` | #2090 | See row | BLOCK, 2 high / 1 medium / 2 low | no | [rerun][s8r2] |
-| 8 | #1943 | B | `agy` | `headless-stream` | #2088 | See row | APPROVE, 1 medium / 3 low | no | [rerun][s8r2] |
+| 8 | #1943 | B | `codex` | `headless-stream` | #2090 | 2,383,184 (2,280,192 cached) | BLOCK, 2 high / 1 medium / 2 low | no | [rerun][s8r2] |
+| 8 | #1943 | B | `agy` | `headless-stream` | #2088 | 1,022,639 | APPROVE, 1 medium / 3 low | no | [rerun][s8r2] |
 | 8 | #1943 | C | `claude` | `hand-recorded` | — | — | not run | no | [row][s8] |
-| 8 | #1943 | C | `codex` | `headless-stream` | #2092 | See row | APPROVE, 2 low + 1 disclosed residual | no | [rerun][s8r2] |
-| 8 | #1943 | C | `agy` | `headless-stream` | #2089 | See row | APPROVE on paper; one finding confirmed HIGH after the verdict (`swap()` invents attributes) — scored APPROVE with an owed fix round | no | [rerun][s8r2] |
+| 8 | #1943 | C | `codex` | `headless-stream` | #2092 | 4,353,683 (4,225,792 cached) | APPROVE, 2 low + 1 disclosed residual | no | [rerun][s8r2] |
+| 8 | #1943 | C | `agy` | `headless-stream` | #2089 | 565,065 | APPROVE on paper; one finding confirmed HIGH after the verdict (`swap()` invents attributes) — scored APPROVE with an owed fix round | no | [rerun][s8r2] |
 
 The eight sample-7/8 B and C PRs above (#2080, #2081, #2084, #2085, #2088, #2089, #2090, #2092) ran on
 2026-09-08 from the pre-merge bases (sample 7: 23d9b5ad; sample 8: 156682aa) and are all
@@ -137,9 +137,9 @@ isolation section applies to all eight. None of them merges, and the `Merged` co
 - `codex` arm C did not use its multi-agent feature in either of the two runs it made: #1988 (sample 1 — its only non-file, non-shell calls are three empty `wait` calls, [row][s1]) and #2007 (sample 6 — `0 collab_tool_call`, [row][s6]). Every other `codex` arm C cell is `not run`.
 - Across the three `claude` arm B/C comparisons (samples 4, 5, 6), arm C cost more than arm B every time and won two of the three merges; the ratios and the dollar figures they come from are in the sample-6 row ([row][s6]), not copied here.
 - The `agy` rows before 2026-09-07 were not a model measurement while #2002 was open; #2002 closed 2026-09-07, and the 2026-09-08 `agy` reruns above ran after it.
-- What samples 7 and 8 still owe, arm by arm — `codex` owes no rerun anywhere after the 2026-09-08 reruns; `agy` owes one (sample 8 arm A):
+- What samples 7 and 8 still owe, arm by arm — neither `codex` nor `agy` owes a rerun anywhere after the 2026-09-08 reruns:
   - Sample 7 arm A `agy`: rerun 2026-09-08 arrested at the token budget; scored a LOSS (vendor's cause), no further rerun owed. Its first attempt that day was void (#2076, Baton's cause).
-  - Sample 8 arm A `agy`: rerun 2026-09-08 failed verify on the `gates-selftest` pre-push control (`no sh on PATH`, #2098, Baton's cause); void under rule 2, rerun owed after #2098 lands.
+  - Sample 8 arm A `agy`: rerun 2026-09-08 exited on its own with one uncommitted edit and no commit before verify ran; scored a LOSS (vendor's cause: no commit), no further rerun owed. The engine verify that followed failed on the `gates-selftest` pre-push control (`no sh on PATH`, #2098, Baton's cause) — real, not causal.
   - Sample 7 arm A `codex`: settled as a LOSS on #1997's own findings, not a rerun; the post-#2013 rerun (#2023) landed anyway.
   - Sample 8 arm A `codex`: the rerun landed as #2021 (BLOCK, closed unmerged), so that arm carries a verdict, not a debt.
   - Samples 7 and 8, arms B and C `agy`/`codex`: ran 2026-09-08 (rows above, DIRTY (GitHub `mergeStateStatus`) against `main`). The `claude` B/C cells are still not run.
