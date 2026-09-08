@@ -56,6 +56,7 @@ public sealed class QueueLauncherTests : IDisposable
             Assert.Equal(WorkflowOutcome.Failed, sentinel.State);
             Assert.Contains("did not complete after launch", sentinel.Error!, StringComparison.Ordinal);
             Assert.Contains("BatonFlowException", sentinel.Error, StringComparison.Ordinal);
+            Assert.Contains("bare sentinel (missing ledger)", sentinel.Error, StringComparison.Ordinal);
             Assert.Empty(sentinel.Steps);
 
             // The whole point: the classifier the scheduler runs over this file now fails the item.
@@ -252,6 +253,147 @@ public sealed class QueueLauncherTests : IDisposable
             await QueueLauncher.SettleFinishedPumpAsync(Task.FromResult(result), "t5", room);
 
             Assert.Null(await TerminalSentinelWriter.TryReadAsync(room, Ct));
+        }
+        finally
+        {
+            DirectoryCleanup.DeleteRecursively(root);
+        }
+    }
+
+    /// <summary>
+    /// #1951: on a post-launch fault, a held ledger (lock contention) is retried with bounded backoff
+    /// rather than degrading immediately to a bare sentinel. Once the holder releases the ledger,
+    /// the room is projected with its real steps and outputs.
+    /// </summary>
+    [Fact]
+    public async Task A_lane_whose_ledger_is_held_retries_and_is_projected_once_the_holder_releases()
+    {
+        var root = CreateTempRoot();
+        try
+        {
+            var room = await RunTwoStepRoomAsync(root);
+            var logPath = Path.Combine(room, BatonPaths.FlowLogFileName);
+
+            // Hold flow.jsonl exclusively to create lock contention
+            var holder = new FileStream(logPath, FileMode.Open, FileAccess.Read, FileShare.None);
+            try
+            {
+                // Release the hold after a short delay so the retry loop can succeed
+                _ = Task.Run(
+                    async () =>
+                    {
+                        await Task.Delay(TimeSpan.FromMilliseconds(100), Ct);
+                        holder.Dispose();
+                    },
+                    Ct);
+
+                await QueueLauncher.RecordPostLaunchFaultAsync("t-held", room, "the pump threw BatonFlowException");
+
+                var sentinel = await TerminalSentinelWriter.TryReadAsync(room, Ct);
+                Assert.NotNull(sentinel);
+                Assert.Equal(WorkflowOutcome.Failed, sentinel.State);
+                Assert.DoesNotContain("bare sentinel", sentinel.Error!, StringComparison.Ordinal);
+
+                // Projected after release: steps and outputs are preserved
+                Assert.Equal(["a", "b"], sentinel.Steps.Select(step => step.Id).Order().ToArray());
+                Assert.All(sentinel.Steps, step => Assert.Equal(nameof(StepStatus.Succeeded), step.State));
+                Assert.Contains(sentinel.Outputs, path => path.EndsWith("out_a", StringComparison.Ordinal));
+                Assert.Contains(sentinel.Outputs, path => path.EndsWith("out_b", StringComparison.Ordinal));
+
+                Assert.Equal(QueueItemState.Failed, QueueSchedulerService.ClassifyTerminal(sentinel, room).State);
+            }
+            finally
+            {
+                holder.Dispose();
+            }
+        }
+        finally
+        {
+            DirectoryCleanup.DeleteRecursively(root);
+        }
+    }
+
+    /// <summary>
+    /// The control for the held retry above: if the ledger remains held past the retry budget,
+    /// it degrades to the bare sentinel and its Error records the held ledger cause.
+    /// </summary>
+    [Fact]
+    public async Task A_lane_whose_ledger_remains_held_past_retry_budget_degrades_to_bare_sentinel_recording_held_cause()
+    {
+        var root = CreateTempRoot();
+        try
+        {
+            var room = await RunTwoStepRoomAsync(root);
+            var logPath = Path.Combine(room, BatonPaths.FlowLogFileName);
+
+            var holder = new FileStream(logPath, FileMode.Open, FileAccess.Read, FileShare.None);
+            try
+            {
+                await QueueLauncher.RecordPostLaunchFaultAsync(
+                    "t-held-exhausted",
+                    room,
+                    "the pump threw BatonFlowException",
+                    backoffStep: TimeSpan.FromMilliseconds(10),
+                    maxAttempts: 3);
+
+                var sentinel = await TerminalSentinelWriter.TryReadAsync(room, Ct);
+                Assert.NotNull(sentinel);
+                Assert.Equal(WorkflowOutcome.Failed, sentinel.State);
+                Assert.Empty(sentinel.Steps);
+                Assert.Contains("bare sentinel (held ledger)", sentinel.Error!, StringComparison.Ordinal);
+
+                var (state, error) = QueueSchedulerService.ClassifyTerminal(sentinel, room);
+                Assert.Equal(QueueItemState.Failed, state);
+                Assert.Contains("bare sentinel (held ledger)", error!, StringComparison.Ordinal);
+            }
+            finally
+            {
+                holder.Dispose();
+            }
+        }
+        finally
+        {
+            DirectoryCleanup.DeleteRecursively(root);
+        }
+    }
+
+    /// <summary>
+    /// #1951: a corrupt ledger cannot resolve through backoff, so it degrades immediately to a bare sentinel.
+    /// The sentinel's Error records that the ledger is corrupt and carries the reason from the corrupt JSONL fact.
+    /// </summary>
+    [Fact]
+    public async Task A_lane_with_a_corrupt_ledger_degrades_to_bare_sentinel_recording_corrupt_reason_from_jsonl()
+    {
+        var root = CreateTempRoot();
+        try
+        {
+            var room = Path.Combine(root, "queue-t-corrupt");
+            Directory.CreateDirectory(room);
+
+            var stepDef = new WorkflowStepDefinition(new StepId("step-a"), "architect", [], [], [], new RetryPolicy(1));
+            var snapshot = SnapshotBinder.Bind(new WorkflowDefinition(new WorkflowTemplateId("wf"), 1, [stepDef]));
+            await SnapshotBinder.PersistAsync(snapshot, Path.Combine(room, BatonPaths.SnapshotFileName), Ct);
+
+            // Write a corrupt JSONL fact into flow.jsonl
+            var corruptFact = "{\"kind\":\"unknown_event_kind\",\"invalid\":true}";
+            await File.WriteAllTextAsync(Path.Combine(room, BatonPaths.FlowLogFileName), corruptFact + "\n", Ct);
+
+            await QueueLauncher.RecordPostLaunchFaultAsync("t-corrupt", room, "the pump threw BatonFlowException");
+
+            var sentinel = await TerminalSentinelWriter.TryReadAsync(room, Ct);
+            Assert.NotNull(sentinel);
+            Assert.Equal(WorkflowOutcome.Failed, sentinel.State);
+            Assert.Empty(sentinel.Steps);
+
+            // Bare sentinel records that the ledger is corrupt and carries the reason naming the corrupt JSONL fact
+            Assert.Contains("bare sentinel (corrupt ledger)", sentinel.Error!, StringComparison.Ordinal);
+            Assert.Contains(corruptFact, sentinel.Error, StringComparison.Ordinal);
+
+            // The scheduler classifier carries the bare sentinel reason as well
+            var (state, error) = QueueSchedulerService.ClassifyTerminal(sentinel, room);
+            Assert.Equal(QueueItemState.Failed, state);
+            Assert.Contains("bare sentinel (corrupt ledger)", error!, StringComparison.Ordinal);
+            Assert.Contains(corruptFact, error, StringComparison.Ordinal);
         }
         finally
         {

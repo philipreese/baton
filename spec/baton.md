@@ -6000,7 +6000,9 @@ and each is closed where the fact exists:
   rather than replacing it; and each step's live `liveness` probe is dropped (the one exception to
   §3's step-presence rule), since a value read at projection time would be frozen into a file read
   long after that engine exited. A room with no
-  ledger, no bound snapshot, or an unreadable one still gets the bare sentinel — the write is
+  ledger, no bound snapshot, or an unreadable one still gets the bare sentinel — retrying a held ledger
+  with bounded backoff before degrading (#1951), and recording the degradation cause in its error — the
+  write is
   unconditional, because an unprojectable room is exactly the one that would otherwise wedge its item
   in `launched` forever.
 
