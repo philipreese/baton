@@ -62,8 +62,14 @@ public static class WorkflowTemplateComposer
     /// role dispatched as a template phase gets the same repo read access #1083 gave a role dispatched
     /// on its own. The spliced capture step pins its own working directory separately (it diffs the tree).
     /// </param>
+    /// <param name="attachDefaultSkills">
+    /// #2110: forwarded to every phase's <see cref="RoleDispatch.ToBinding"/> — a phase is a role, so
+    /// its <see cref="WorkerRole.DefaultSkills"/> attach here as on a direct dispatch, and
+    /// <c>--no-default-skills</c> opts every phase out at once.
+    /// </param>
     public static (WorkflowDefinition Definition, IReadOnlyDictionary<string, WorkerBindingConfigEntry> Bindings) Materialize(
-        WorkflowTemplate template, string? adapterOverride = null, string? workingDirectory = null)
+        WorkflowTemplate template, string? adapterOverride = null, string? workingDirectory = null,
+        bool attachDefaultSkills = true)
     {
         ArgumentNullException.ThrowIfNull(template);
 
@@ -133,7 +139,8 @@ public static class WorkflowTemplateComposer
             // replace.
             bindings[phase.Name] = RoleDispatch.ToBinding(
                 role, phase.Instruction, adapterOverride, workerName: phase.Name, workingDirectory: workingDirectory,
-                requiredInputs: blockerOutputs, autoProvisionWorktree: false);
+                requiredInputs: blockerOutputs, autoProvisionWorktree: false,
+                attachDefaultSkills: attachDefaultSkills);
 
             blockerId = stepId;
             blockerOutputs = outputs;

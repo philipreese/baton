@@ -97,4 +97,36 @@ public sealed class SkillFlagTests
         Assert.Contains("--skill", DispatchOptionsParser.Usage, StringComparison.Ordinal);
         Assert.Contains("--skill", RedispatchOptionsParser.Usage, StringComparison.Ordinal);
     }
+
+    // #2110: the opt-out from a role's default_skills, on both verbs, value-less like --list-capabilities.
+    [Fact]
+    public void Both_verbs_parse_the_no_default_skills_opt_out_and_advertise_it()
+    {
+        Assert.False(DispatchOptionsParser.Parse(["review", "--spec-text", "look at it"]).NoDefaultSkills);
+        Assert.True(DispatchOptionsParser.Parse(["review", "--spec-text", "look at it", "--no-default-skills"]).NoDefaultSkills);
+        Assert.False(RedispatchArgs().NoDefaultSkills);
+        Assert.True(RedispatchArgs("--no-default-skills", "--skill", "house-style").NoDefaultSkills);
+
+        Assert.Contains("--no-default-skills", DispatchOptionsParser.Usage, StringComparison.Ordinal);
+        Assert.Contains("--no-default-skills", RedispatchOptionsParser.Usage, StringComparison.Ordinal);
+    }
+
+    /// <summary>
+    /// #2110, the inherit path: the parent recorded the merged list (defaults first), so opting out on
+    /// a no-spec redispatch has to subtract the role's defaults from it and keep the rest — and a
+    /// list that was ONLY defaults lands as null, the same "attach none" the fresh dispatch records.
+    /// Uses the shipped <c>review</c> role, whose default is <c>baton-review</c>.
+    /// </summary>
+    [Fact]
+    public void Opting_out_on_the_inherit_path_removes_the_roles_defaults_and_keeps_the_operators_skills()
+    {
+        var mixed = RedispatchCommand.WithoutRoleDefaultSkills(ParentEntry(["baton-review", "house-style"]), "review");
+        Assert.Equal(["house-style"], mixed.Skills!.ToArray());
+
+        var onlyDefaults = RedispatchCommand.WithoutRoleDefaultSkills(ParentEntry(["baton-review"]), "review");
+        Assert.Null(onlyDefaults.Skills);
+
+        var none = RedispatchCommand.WithoutRoleDefaultSkills(ParentEntry(null), "review");
+        Assert.Null(none.Skills);
+    }
 }

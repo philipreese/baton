@@ -420,9 +420,11 @@ public sealed class DispatchTemplateEndToEndTests : IDisposable
             Console.SetOut(originalOut);
 
             var output = consoleOutput.ToString();
-            Assert.Contains("Skills (implement): none discovered", output);
+            // #2110: a phase whose role carries default_skills prints the declared line; janitor
+            // declares none and keeps the scan line. This is also the roster half of that rule.
+            Assert.Contains("Skills (implement, declared): baton-implement", output);
             Assert.Contains("Skills (janitor): none discovered", output);
-            Assert.Contains("Skills (review): none discovered", output);
+            Assert.Contains("Skills (review, declared): baton-review", output);
             // #1512 M6: this test previously asserted only presence, not absence -- it would have
             // passed unchanged if a fourth "Skills (capture...)" line had been printed, so the
             // exclusion itself was never actually tested.

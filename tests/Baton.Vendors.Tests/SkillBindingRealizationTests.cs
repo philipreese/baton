@@ -306,7 +306,9 @@ public sealed class SkillBindingRealizationTests : IDisposable
         var entry = RoleDispatch.ToBinding(
             role, "Review the diff.", workingDirectory: _workspace, skills: ["house-style"]);
 
-        Assert.Equal(["house-style"], entry.Skills!.ToArray());
+        // #2110: the role's own default rides ahead of the operator's name (RoleDefaultSkillsTests
+        // is where that rule is exercised); this test's claim is that the operator's name is recorded.
+        Assert.Equal(["baton-review", "house-style"], entry.Skills!.ToArray());
 
         // A typo refuses HERE -- before DispatchCommand creates a room directory.
         Assert.Throws<UnknownSkillPackageException>(() => RoleDispatch.ToBinding(

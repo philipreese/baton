@@ -36,6 +36,12 @@ namespace Baton.Cli;
 /// list replaces the parent's <b>wholesale</b> rather than appending.
 /// </param>
 /// <param name="SkillsSpecified">True when <c>--skill</c> was explicitly provided, even if blank — mirrors <see cref="LabelSpecified"/>.</param>
+/// <param name="NoDefaultSkills">
+/// <c>--no-default-skills</c> (#2110), the same opt-out <c>baton dispatch</c> takes. On the amended-spec
+/// path it reaches <c>RoleDispatch.ToBinding</c>, which is where the defaults would otherwise be
+/// re-attached; on the inherit path <c>RedispatchCommand.WithoutRoleDefaultSkills</c> subtracts them.
+/// What an opt-out-less redispatch inherits is spec/baton.md §2's to say, not restated here.
+/// </param>
 public sealed record RedispatchOptions(
     string ParentRoomDirectoryPath,
     string RoomDirectoryPath,
@@ -56,4 +62,5 @@ public sealed record RedispatchOptions(
     long? BilledRateLimit = null,
     string? VerifyCommand = null,
     IReadOnlyList<string>? Skills = null,
-    bool SkillsSpecified = false);
+    bool SkillsSpecified = false,
+    bool NoDefaultSkills = false);

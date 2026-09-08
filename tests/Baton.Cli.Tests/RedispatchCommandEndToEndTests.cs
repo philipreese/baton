@@ -971,7 +971,9 @@ public sealed class RedispatchCommandEndToEndTests : IDisposable
     /// path (<c>RedispatchCommand.RebuildFromAmendedSpecAsync</c>) failed nothing, which is precisely
     /// the hole #1686 review F2 found for <c>--max-tool-steps</c> and the reason the shared predicate
     /// exists. All three arms of the rule run through the amended-spec path here: absent inherits, an
-    /// empty flag clears, a named one replaces wholesale.
+    /// empty flag clears, a named one replaces wholesale. #2110: the role's own default (<c>advise</c>
+    /// → <c>baton-advise</c>) rides ahead of each of those, since this path re-materializes the role;
+    /// <c>--no-default-skills</c> is the fourth arm, and what makes the clear land as null again.
     /// </summary>
     [Fact]
     public async Task An_amended_spec_redispatch_inherits_clears_and_replaces_the_parents_skills()
@@ -998,12 +1000,12 @@ public sealed class RedispatchCommandEndToEndTests : IDisposable
                 amendedSpecPath, "Weigh the options for Y instead.", TestContext.Current.CancellationToken);
 
             async Task<IReadOnlyList<string>?> RedispatchSkillsAsync(
-                string childName, IReadOnlyList<string>? skills, bool skillsSpecified)
+                string childName, IReadOnlyList<string>? skills, bool skillsSpecified, bool noDefaultSkills = false)
             {
                 var childRoom = Path.Combine(testRoot, childName);
                 var options = new RedispatchOptions(
                     parentRoom, childRoom, SpecFilePath: amendedSpecPath, Adapter: "fake",
-                    Skills: skills, SkillsSpecified: skillsSpecified);
+                    Skills: skills, SkillsSpecified: skillsSpecified, NoDefaultSkills: noDefaultSkills);
 
                 await RedispatchCommand.ExecuteAsync(options, Adapters, TestContext.Current.CancellationToken);
 
@@ -1013,12 +1015,18 @@ public sealed class RedispatchCommandEndToEndTests : IDisposable
             }
 
             Assert.Equal(
-                ["house-style"],
+                ["baton-advise", "house-style"],
                 (await RedispatchSkillsAsync("child-inherit", null, skillsSpecified: false))!.ToArray());
-            Assert.Null(await RedispatchSkillsAsync("child-clear", null, skillsSpecified: true));
+            Assert.Equal(
+                ["baton-advise"],
+                (await RedispatchSkillsAsync("child-clear", null, skillsSpecified: true))!.ToArray());
+            Assert.Equal(
+                ["baton-advise", "thorough-review"],
+                (await RedispatchSkillsAsync("child-replace", ["thorough-review"], skillsSpecified: true))!.ToArray());
+            Assert.Null(await RedispatchSkillsAsync("child-clear-no-defaults", null, skillsSpecified: true, noDefaultSkills: true));
             Assert.Equal(
                 ["thorough-review"],
-                (await RedispatchSkillsAsync("child-replace", ["thorough-review"], skillsSpecified: true))!.ToArray());
+                (await RedispatchSkillsAsync("child-replace-no-defaults", ["thorough-review"], skillsSpecified: true, noDefaultSkills: true))!.ToArray());
         }
         finally
         {

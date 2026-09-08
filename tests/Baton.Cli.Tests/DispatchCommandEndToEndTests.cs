@@ -1466,7 +1466,9 @@ public sealed class DispatchCommandEndToEndTests : IDisposable
         {
             var specPath = await WriteSpecAsync(testRoot, "Weigh the options for X.");
             var roomDirectory = Path.Combine(testRoot, "task");
-            var options = new DispatchOptions("advise", specPath, roomDirectory, Adapter: "fake");
+            // #2110: the scan arm is what this test pins, so the role's own default is opted out --
+            // with it attached the roster prints the declared line instead.
+            var options = new DispatchOptions("advise", specPath, roomDirectory, Adapter: "fake", NoDefaultSkills: true);
 
             using var consoleOutput = new StringWriter();
             Console.SetOut(consoleOutput);
@@ -1640,7 +1642,8 @@ public sealed class DispatchCommandEndToEndTests : IDisposable
         {
             var specPath = await WriteSpecAsync(testRoot, "Weigh the options for X.");
             var roomDirectory = Path.Combine(testRoot, "task");
-            var options = new DispatchOptions("advise", specPath, roomDirectory, Adapter: "fake-skills");
+            // #2110: scan arm, so the role default is opted out (see the test above).
+            var options = new DispatchOptions("advise", specPath, roomDirectory, Adapter: "fake-skills", NoDefaultSkills: true);
             var adapters = new Dictionary<string, IWorkerAdapter>
             {
                 ["fake-skills"] = new ContractOutputWorkerAdapter(
@@ -1695,7 +1698,9 @@ public sealed class DispatchCommandEndToEndTests : IDisposable
 
             var output = consoleOutput.ToString();
             var grantIndex = output.IndexOf("Grant:", StringComparison.Ordinal);
-            var skillsIndex = output.IndexOf("Skills:", StringComparison.Ordinal);
+            // #2110: `review` carries a default skill, so the line is the declared form
+            // (`Skills (declared): baton-review`); the ordering claim is the same either way.
+            var skillsIndex = output.IndexOf("Skills (declared):", StringComparison.Ordinal);
             Assert.True(grantIndex >= 0, "expected a Grant line");
             Assert.True(skillsIndex >= 0, "expected a Skills line");
             Assert.True(grantIndex < skillsIndex, "the Grant line must print before the Skills line");

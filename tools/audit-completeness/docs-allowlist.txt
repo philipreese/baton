@@ -54,6 +54,9 @@ docs/vendor-capabilities.probe.md
 docs/vendor-codex-probe-2026-09-04.md
 docs/vendor-coverage.md
 docs/vendor-doc-audit.md
+skills/baton-advise/SKILL.md
+skills/baton-implement/SKILL.md
+skills/baton-review/SKILL.md
 spec/baton.md
 tools/fleet-glass/README.md
 tools/skill-probe/skills/marker-probe/SKILL.md

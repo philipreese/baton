@@ -37,7 +37,8 @@ internal static class RoleSpecMaterializer
         string? verifyCommandOverride,
         bool? expectPrOverride = null,
         string? verifyResultsPath = null,
-        IReadOnlyList<string>? skills = null)
+        IReadOnlyList<string>? skills = null,
+        bool attachDefaultSkills = true)
     {
         ValidateAttachments(attachments);
 
@@ -72,7 +73,7 @@ internal static class RoleSpecMaterializer
             tokenBudgetOverride: tokenBudgetOverride, maxToolStepsOverride: maxToolStepsOverride,
             billedRateLimitOverride: billedRateLimitOverride,
             verifyCommandOverride: verifyCommandOverride, expectPrOverride: expectPrOverride,
-            verifyResultsPath: verifyResultsPath, skills: skills);
+            verifyResultsPath: verifyResultsPath, skills: skills, attachDefaultSkills: attachDefaultSkills);
     }
 
     /// <summary>

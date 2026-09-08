@@ -21,12 +21,31 @@ public sealed class UnknownSkillPackageException : BatonFlowException
     public string SkillName { get; }
 
     public UnknownSkillPackageException(string skillName, IReadOnlyList<string> rungsSearched)
-        : base($"No canonical skill package named '{skillName}'.")
+        : this(skillName, rungsSearched, declaredByRole: null)
+    {
+    }
+
+    /// <summary>
+    /// #2110: the same refusal for a name that came from a ROLE's <c>default_skills</c> rather than
+    /// from <c>--skill</c>. The message names the role: the command line carried no such name, so the
+    /// remedy is the catalog entry or the missing package, and the opt-out is offered as the third.
+    /// </summary>
+    public UnknownSkillPackageException(string skillName, IReadOnlyList<string> rungsSearched, string? declaredByRole)
+        : base(declaredByRole is null
+            ? $"No canonical skill package named '{skillName}'."
+            : $"No canonical skill package named '{skillName}', which worker role '{declaredByRole}' declares as a default skill.")
     {
         SkillName = skillName;
+        DeclaredByRole = declaredByRole;
         TryInvocation = rungsSearched.Count == 0
             ? null
             : $"create '{Path.Combine(rungsSearched[0], skillName)}' holding a SKILL.md (searched, in precedence order: "
-              + $"{string.Join(", ", rungsSearched)}).";
+              + $"{string.Join(", ", rungsSearched)})"
+              + (declaredByRole is null
+                  ? "."
+                  : ", or pass --no-default-skills to dispatch the role without its defaults.");
     }
+
+    /// <summary>The role whose <c>default_skills</c> named the package, or null when <c>--skill</c> did.</summary>
+    public string? DeclaredByRole { get; }
 }

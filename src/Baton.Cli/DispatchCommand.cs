@@ -1089,7 +1089,8 @@ public static class DispatchCommand
         // #1151: refused rather than silently dropped, the same shape as --attach immediately above. A
         // template binds one worker per phase, and a single flag naming no phase cannot say which of
         // them the skill is for -- attaching it to all of them would be a guess. Role-catalog skills
-        // (#1151 S6) are the shape that answers this for a template, and they are not this slice.
+        // (#2110's default_skills, spec/baton.md §2) are the shape that answers this for a template:
+        // each phase's role carries its own, attached by WorkflowTemplateComposer below.
         if (options.Skills is { Count: > 0 })
         {
             throw new CliArgumentException(
@@ -1200,7 +1201,10 @@ public static class DispatchCommand
         // #1083: hand every phase the workspace too, so a role run as a template phase can read the repo
         // exactly as a directly-dispatched role now can.
         var (definition, bindings) = WorkflowTemplateComposer.Materialize(
-            template, options.Adapter, workingDirectory: workspaceDirectory);
+            template, options.Adapter, workingDirectory: workspaceDirectory,
+            // #2110: forwarded per phase -- WorkflowTemplateComposer.Materialize's own parameter doc
+            // says what a phase gets. --skill stays refused above: a single flag names no phase.
+            attachDefaultSkills: !options.NoDefaultSkills);
         bindings = await InjectCaptureBaseRefAsync(bindings, workspaceDirectory, cancellationToken).ConfigureAwait(false);
         return (definition, bindings);
     }
@@ -1270,7 +1274,9 @@ public static class DispatchCommand
             verifyResultsPath: VerifyResultsPath(options),
             // #1151: resolved and requirement-checked inside ToBinding, which runs before
             // Directory.CreateDirectory below -- so an unknown --skill leaves no room behind.
-            skills: options.Skills);
+            skills: options.Skills,
+            // #2110: the role's own default_skills ride ahead of --skill unless opted out.
+            attachDefaultSkills: !options.NoDefaultSkills);
     }
 
     /// <summary>

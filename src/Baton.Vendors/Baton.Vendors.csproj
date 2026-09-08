@@ -23,6 +23,15 @@
   </ItemGroup>
 
   <ItemGroup>
+    <!-- #2110: the repository's own canonical skill packages (skills/<name>/), copied next to the
+         engine so they sit on SkillPackageResolver's next-to-the-assembly rung and a role's
+         default_skills resolve against ANY workspace, not only a checkout of this repository. Copied,
+         not embedded, for the same reason the catalog files above are: an operator's same-named
+         package in the account library (the rung above) still wins, with no rebuild. -->
+    <None Include="..\..\skills\**\*" LinkBase="skills" CopyToOutputDirectory="PreserveNewest" />
+  </ItemGroup>
+
+  <ItemGroup>
     <!-- #1875: the opposite call from the three files above, for the opposite reason. Those are
          operator-tunable policy, so they are copied and re-readable at runtime. This is a dated
          recording of what `codex app-server model/list` answered (codex-cli 0.153.2, 2026-09-04) —
