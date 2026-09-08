@@ -123,6 +123,7 @@ public sealed class QueueLauncherTests : IDisposable
             await using var holder = new FileStream(logPath, FileMode.Open, FileAccess.ReadWrite, FileShare.None);
 
             var recording = QueueLauncher.RecordPostLaunchFaultAsync("held", room, "the pump threw");
+            // wait-ok: waits just over one 25ms retry while staying below the bounded 175ms retry window.
             await Task.Delay(TimeSpan.FromMilliseconds(75), Ct);
 
             // Control: while the exclusive holder is still alive, the retry arm has started but has
