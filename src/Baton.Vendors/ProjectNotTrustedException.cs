@@ -46,4 +46,25 @@ public sealed class ProjectNotTrustedException : BatonFlowException
             $"baton trust \"{projectPath}\" --ceiling all (or a comma-separated subset of " +
             "ReadFiles,WriteFiles,RunShellCommands,NetworkAccess) to record one by hand.";
     }
+
+    /// <summary>
+    /// The revoked-repository refusal (#2121): <paramref name="projectPath"/> is, or is in the same
+    /// repository as, a path whose ceiling <c>baton trust --revoke</c> withdrew, and no path of that
+    /// repository has been trusted since. Refuses rather than falling back to <c>all</c> or reporting
+    /// "never trusted" — spec/baton.md §9 states the revoked state once.
+    /// </summary>
+    /// <param name="projectPath">The workspace that was being trusted or dispatched into.</param>
+    /// <param name="revokedPath">The tombstoned path that made the repository revoked — <paramref name="projectPath"/> itself, or a sibling.</param>
+    /// <param name="revokedAt">When it was revoked.</param>
+    public ProjectNotTrustedException(string projectPath, string revokedPath, DateTimeOffset revokedAt)
+        : base(
+            $"'{projectPath}' is in a repository whose ceiling was revoked: 'baton trust --revoke' withdrew " +
+            $"'{revokedPath}' at {revokedAt:u} and no path of that repository has been trusted since. A revoked " +
+            "repository is refused rather than treated as never trusted, so the unrestricted fallback is not taken.")
+    {
+        ProjectPath = projectPath;
+        TryInvocation =
+            $"baton trust \"{projectPath}\" --ceiling all (or a comma-separated subset of " +
+            "ReadFiles,WriteFiles,RunShellCommands,NetworkAccess) to trust it again on purpose, then retry.";
+    }
 }

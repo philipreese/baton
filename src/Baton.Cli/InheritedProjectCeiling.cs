@@ -14,10 +14,14 @@ namespace Baton.Cli;
 /// copies a ceiling an operator already recorded, from a path in the SAME repository — decision 0004's
 /// "never ask in headless" (spec/baton.md §9) is untouched, and a workspace whose repository has no
 /// recorded ceiling anywhere still reaches <c>ProjectCeilingGate</c> with nothing to find and refuses.
-/// A revoked parent propagates nothing for the same reason: <c>baton trust --revoke</c> removes the
-/// entry, and what is not in the store cannot be a source — and it removes every entry that was copied
-/// FROM that source too (<see cref="ProjectCeilingStore.Revoke"/>), because the copy is a one-time
-/// snapshot that would otherwise outlive the decision it was derived from.
+/// A revoked parent propagates nothing either: <c>baton trust --revoke</c> leaves a tombstone
+/// (<see cref="ProjectCeiling.RevokedAt"/>), which is never a source — and it tombstones every entry
+/// that was copied FROM that source too (<see cref="ProjectCeilingStore.Revoke"/>), because the copy is
+/// a one-time snapshot that would otherwise outlive the decision it was derived from. When the only
+/// entries sharing the workspace's identity are tombstones, the outcome is
+/// <see cref="InheritanceOutcome.Revoked"/> rather than <see cref="InheritanceOutcome.NoTrustedSource"/>
+/// (#2121): the two are told apart so the provisioner's unrestricted default is unreachable from a
+/// repository the operator deliberately withdrew.
 /// </para>
 /// <para>
 /// <b>A probe that answers nothing is not "no match".</b> <see cref="TryInheritAsync"/> reports the two
@@ -96,7 +100,7 @@ internal static class InheritedProjectCeiling
 
     /// <summary>
     /// Records the ceiling <paramref name="workspacePath"/> inherits from an already-trusted path in the
-    /// same repository, and says which of the four ways the lookup ended.
+    /// same repository, and says which of the five ways the lookup ended.
     /// </summary>
     /// <param name="workspacePath">The workspace a dispatch is about to run in.</param>
     /// <param name="storePath">The ceiling store to read and write — <see cref="ProjectCeilingStore.DefaultPath"/> in production.</param>
@@ -131,7 +135,10 @@ internal static class InheritedProjectCeiling
         // Already trusted exits before the probe, so the common case (a repeat lane in a workspace that
         // already has an entry) spawns no git at all. An EMPTY store does not short-circuit: the probe
         // has to run so that "git answered nothing" is reported as that, not as "no trusted source".
-        if (ceilings.ContainsKey(key))
+        // A tombstone at the key (#2121) is not "already trusted": it falls through to the scan, where
+        // it is one of the candidates, so a revoked workspace whose repository has since been
+        // re-trusted elsewhere inherits again, and one whose repository has not is reported Revoked.
+        if (ceilings.TryGetValue(key, out var own) && !own.IsRevoked)
         {
             return new InheritanceResult(InheritanceOutcome.AlreadyTrusted);
         }
@@ -143,6 +150,8 @@ internal static class InheritedProjectCeiling
 
         string? sourcePath = null;
         ProjectCeiling? source = null;
+        string? revokedPath = null;
+        DateTimeOffset? revokedAt = null;
         foreach (var (recordedPath, recorded) in ceilings.OrderBy(pair => pair.Key, StringComparer.OrdinalIgnoreCase))
         {
             if (!Directory.Exists(recordedPath))
@@ -156,6 +165,17 @@ internal static class InheritedProjectCeiling
                 continue;
             }
 
+            // Tombstones are matched by the Directory.Exists + probe above, the same filter a live entry
+            // passed through (spec/baton.md §9 has why a deleted checkout's tombstone therefore matches
+            // nothing). A tombstone is never a source; it only makes the repository Revoked when no live
+            // entry matches.
+            if (recorded.IsRevoked)
+            {
+                revokedPath ??= recordedPath;
+                revokedAt ??= recorded.RevokedAt;
+                continue;
+            }
+
             if (source is null || OpenCategories(recorded) < OpenCategories(source))
             {
                 sourcePath = recordedPath;
@@ -165,7 +185,9 @@ internal static class InheritedProjectCeiling
 
         if (source is null || sourcePath is null)
         {
-            return new InheritanceResult(InheritanceOutcome.NoTrustedSource);
+            return revokedPath is not null && revokedAt is { } at
+                ? new InheritanceResult(InheritanceOutcome.Revoked, RevokedPath: revokedPath, RevokedAt: at)
+                : new InheritanceResult(InheritanceOutcome.NoTrustedSource);
         }
 
         // InheritedFrom is overwritten rather than carried through: a chain of inheritances names the
@@ -196,8 +218,16 @@ internal enum InheritanceOutcome
     /// <summary>The probe yielded no identity — git missing, timed out, exited non-zero, or no path to probe. A caller with a fallback must fail closed here, not take it.</summary>
     NoIdentity,
 
-    /// <summary>The workspace has an identity, and no trusted path shares it.</summary>
+    /// <summary>The workspace has an identity, no trusted path shares it, and no revoked path does either — the never-trusted repository.</summary>
     NoTrustedSource,
+
+    /// <summary>
+    /// #2121: the workspace has an identity, no live entry shares it, and at least one tombstone does —
+    /// every recorded path of this repository was revoked. Nothing is written. A caller with a fallback
+    /// must refuse here (<see cref="ProjectNotTrustedException"/> naming the revocation), never take it.
+    /// spec/baton.md §9 has the tombstone's definition.
+    /// </summary>
+    Revoked,
 
     /// <summary>A ceiling was copied and recorded; <see cref="InheritanceResult.Fact"/> is the line to print.</summary>
     Inherited,
@@ -205,4 +235,7 @@ internal enum InheritanceOutcome
 
 /// <param name="Outcome">Which way the lookup ended.</param>
 /// <param name="Fact">The line for the caller's output — set only for <see cref="InheritanceOutcome.Inherited"/>.</param>
-internal sealed record InheritanceResult(InheritanceOutcome Outcome, string? Fact = null);
+/// <param name="RevokedPath">The first tombstoned path (ordinal order) sharing the workspace's identity — set only for <see cref="InheritanceOutcome.Revoked"/>.</param>
+/// <param name="RevokedAt">When <paramref name="RevokedPath"/> was revoked — set only for <see cref="InheritanceOutcome.Revoked"/>.</param>
+internal sealed record InheritanceResult(
+    InheritanceOutcome Outcome, string? Fact = null, string? RevokedPath = null, DateTimeOffset? RevokedAt = null);

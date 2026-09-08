@@ -25,7 +25,8 @@ internal static class ProjectCeilingGate
     /// <exception cref="ProjectNotTrustedException">
     /// The ceiling lookup key (<see cref="WorkerInvocation.WorktreeSourceRepository"/> when set,
     /// otherwise <see cref="WorkerInvocation.WorkingDirectory"/>) is set and carries no recorded
-    /// <see cref="ProjectCeilingStore"/> entry.
+    /// <see cref="ProjectCeilingStore"/> entry — or carries a tombstone (#2121), which refuses the same
+    /// way with the revocation named.
     /// </exception>
     /// <exception cref="ProjectCeilingRequiresStructuredGrantException">
     /// The recorded ceiling withholds a category but the invocation has no structured
@@ -67,10 +68,17 @@ internal static class ProjectCeilingGate
             return invocation;
         }
 
-        var ceiling = ProjectCeilingStore.TryGet(ceilingKey, ProjectCeilingStore.DefaultPath);
+        // #2121: the raw record, so a revoked path is refused by name rather than as "never trusted".
+        // Either way the refusal is the same fail-closed exception; only the message differs.
+        var ceiling = ProjectCeilingStore.TryGetRecord(ceilingKey, ProjectCeilingStore.DefaultPath);
         if (ceiling is null)
         {
             throw new ProjectNotTrustedException(ceilingKey);
+        }
+
+        if (ceiling.RevokedAt is { } revokedAt)
+        {
+            throw new ProjectNotTrustedException(ceilingKey, ceilingKey, revokedAt);
         }
 
         if (ceiling.IsUnrestricted)

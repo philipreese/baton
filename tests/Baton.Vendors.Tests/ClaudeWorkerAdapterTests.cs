@@ -1725,8 +1725,14 @@ public class ClaudeWorkerAdapterTests
 
         ProjectCeilingStore.Revoke(project, ProjectCeilingStore.DefaultPath);
 
-        Assert.Throws<ProjectNotTrustedException>(() => new ClaudeWorkerAdapter().Resolve(
+        var ex = Assert.Throws<ProjectNotTrustedException>(() => new ClaudeWorkerAdapter().Resolve(
             new WorkerInvocation("Draft a plan.", WorkingDirectory: project), ArchitectContract));
+
+        // #2121: the refusal names the revocation rather than reading as "never trusted" -- the
+        // tombstone the revoke left is what the gate saw, and the message says so.
+        Assert.Equal(project, ex.ProjectPath);
+        Assert.Contains("revoked", ex.Message, StringComparison.OrdinalIgnoreCase);
+        Assert.DoesNotContain("has no recorded permission ceiling", ex.Message, StringComparison.Ordinal);
     }
 
     /// <summary>

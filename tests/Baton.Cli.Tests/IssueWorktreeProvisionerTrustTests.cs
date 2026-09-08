@@ -103,6 +103,66 @@ public sealed class IssueWorktreeProvisionerTrustTests : IDisposable
         Assert.Equal(string.Empty, output.ToString());
     }
 
+    /// <summary>
+    /// #2121: the fallback is for a repository that was NEVER trusted, not one the operator revoked.
+    /// Trust the root, revoke it (every recorded path of the repository is now a tombstone), then queue
+    /// an issue against it: the add refuses with the revocation named, records nothing and announces
+    /// nothing. The positive control is the fallback arm above: the same call, the same fixture, only
+    /// the store differs (empty there, tombstoned here) — so the refusal is the tombstone's doing.
+    /// </summary>
+    [Fact]
+    public async Task Provision_refuses_rather_than_falling_back_when_the_repository_was_revoked()
+    {
+        using var home = new IsolatedBatonHome();
+        var repository = MakeDirectory("baton");
+        var worktree = Path.Combine(_root, "w2121");
+        var commonDir = Path.Combine(repository, ".git");
+        ProjectCeilingStore.Set(repository, ProjectCeiling.Unrestricted, ProjectCeilingStore.DefaultPath);
+        ProjectCeilingStore.Revoke(repository, ProjectCeilingStore.DefaultPath);
+
+        var output = new StringWriter();
+        var refusal = await Assert.ThrowsAsync<ProjectNotTrustedException>(() => IssueWorktreeProvisioner.ProvisionAsync(
+            2121, repository, _root, Runner(worktree), Probe(commonDir, repository, worktree),
+            output, TestContext.Current.CancellationToken));
+
+        Assert.Equal(worktree, refusal.ProjectPath);
+        Assert.Contains("revoked", refusal.Message, StringComparison.OrdinalIgnoreCase);
+        Assert.Contains(ProjectCeilingStore.CanonicalKey(repository), refusal.Message, StringComparison.OrdinalIgnoreCase);
+        Assert.Null(ProjectCeilingStore.TryGetRecord(worktree, ProjectCeilingStore.DefaultPath));
+        Assert.Equal(string.Empty, output.ToString());
+    }
+
+    /// <summary>
+    /// #2121: <c>baton trust</c> after the revoke ends it. The same add that refused above inherits the
+    /// re-trusted ceiling — narrowed here, so the assertion cannot be satisfied by the <c>all</c>
+    /// fallback — and announces the inheritance.
+    /// </summary>
+    [Fact]
+    public async Task Provision_inherits_again_once_the_revoked_repository_is_re_trusted()
+    {
+        using var home = new IsolatedBatonHome();
+        var repository = MakeDirectory("baton");
+        var worktree = Path.Combine(_root, "w2121");
+        var commonDir = Path.Combine(repository, ".git");
+        ProjectCeilingStore.Set(repository, ProjectCeiling.Unrestricted, ProjectCeilingStore.DefaultPath);
+        ProjectCeilingStore.Revoke(repository, ProjectCeilingStore.DefaultPath);
+        var noNetwork = new ProjectCeiling(ReadFiles: true, WriteFiles: true, RunShellCommands: true, NetworkAccess: false);
+        await TrustCommand.ExecuteAsync(
+            new TrustOptions(TrustMode.Register, repository, noNetwork), new StringWriter(),
+            Probe(commonDir, repository, worktree), TestContext.Current.CancellationToken);
+
+        var output = new StringWriter();
+        var provisioned = await IssueWorktreeProvisioner.ProvisionAsync(
+            2121, repository, _root, Runner(worktree), Probe(commonDir, repository, worktree),
+            output, TestContext.Current.CancellationToken);
+
+        var recorded = ProjectCeilingStore.TryGet(provisioned, ProjectCeilingStore.DefaultPath);
+        Assert.NotNull(recorded);
+        Assert.False(recorded.NetworkAccess);
+        Assert.Equal(ProjectCeilingStore.CanonicalKey(repository), recorded.InheritedFrom);
+        Assert.Contains("inherited", output.ToString(), StringComparison.OrdinalIgnoreCase);
+    }
+
     /// <summary>Reports both spawns successful and creates the worktree the way <c>git worktree add</c> would.</summary>
     private static Func<string, IReadOnlyList<string>, string, CancellationToken, Task<(int ExitCode, string Output)>> Runner(
         string worktree) =>

@@ -50,6 +50,42 @@ public sealed record ProjectCeiling(
     public string? InheritedFrom { get; init; }
 
     /// <summary>
+    /// #2121: when <c>baton trust --revoke</c> withdrew this entry, or <see langword="null"/> for a live
+    /// ceiling. Revoking keeps the entry and sets this field (a <b>tombstone</b>) instead of deleting it,
+    /// which is what lets "the operator withdrew this" be told from "nobody ever trusted this" —
+    /// spec/baton.md §9 defines the state and what each reader does with it; this field is only its
+    /// storage.
+    /// </summary>
+    /// <remarks>
+    /// <b>Not a ceiling.</b> A tombstone permits nothing: <see cref="Tombstone"/> closes all four
+    /// categories, so a reader that consults the booleans without checking <see cref="IsRevoked"/>
+    /// still reads <c>none</c> rather than whatever was revoked — fail-closed by shape, not only by the
+    /// checks around it. Readers that need to tell "revoked" from "never trusted"
+    /// (<see cref="ProjectCeilingGate"/>, <c>Baton.Cli.InheritedProjectCeiling</c>, <c>baton trust
+    /// --list</c>) read this field; <see cref="ProjectCeilingStore.TryGet"/> hides tombstones so the
+    /// question "what ceiling applies" never gets a tombstone as its answer. Omitted from the JSON when
+    /// null for the same reason <see cref="InheritedFrom"/> is.
+    /// </remarks>
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    public DateTimeOffset? RevokedAt { get; init; }
+
+    /// <summary>True for a tombstone — see <see cref="RevokedAt"/>.</summary>
+    [JsonIgnore]
+    public bool IsRevoked => RevokedAt is not null;
+
+    /// <summary>
+    /// The tombstone <see cref="ProjectCeilingStore.Revoke"/> leaves in place of <paramref name="revoked"/>:
+    /// every category closed, <see cref="RevokedAt"/> set to <paramref name="at"/>, and the entry's
+    /// <see cref="InheritedFrom"/> kept so <c>baton trust --list</c> can still say where the revoked
+    /// copy came from.
+    /// </summary>
+    public static ProjectCeiling Tombstone(ProjectCeiling revoked, DateTimeOffset at)
+    {
+        ArgumentNullException.ThrowIfNull(revoked);
+        return new ProjectCeiling(false, false, false, false) { InheritedFrom = revoked.InheritedFrom, RevokedAt = at };
+    }
+
+    /// <summary>
     /// The ceiling in <c>baton trust --ceiling</c>'s own vocabulary — <c>all</c>, <c>none</c>, or the
     /// comma-separated open categories. The spelling <c>Baton.Cli.TrustOptionsParser</c> accepts,
     /// stated once here because two readers print it: <c>baton trust --list</c> and the inheritance note

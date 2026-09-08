@@ -156,7 +156,8 @@ public sealed class InheritedProjectCeilingTests : IDisposable
     /// which made the "nothing re-inherited" assertion pass whether or not the derived entry had
     /// survived — it could not discriminate. What is asserted now is what revoke actually does to the
     /// copy: it goes with its source (the cascade <see cref="ProjectCeilingStore.Revoke"/> states), a
-    /// copy of the copy goes too, an unrelated entry stays, and nothing is re-inherited afterwards.
+    /// copy of the copy goes too, an unrelated entry stays, and nothing is re-inherited afterwards —
+    /// the lookup reports the repository revoked (#2121).
     /// </summary>
     [Fact]
     public async Task Revoking_the_source_removes_its_inherited_entries_and_nothing_re_inherits()
@@ -195,11 +196,81 @@ public sealed class InheritedProjectCeilingTests : IDisposable
         Assert.Null(ProjectCeilingStore.TryGet(grandchild, Store));
         Assert.NotNull(ProjectCeilingStore.TryGet(unrelated, Store));
 
-        var afterRevoke = await InheritedProjectCeiling.TryRecordAsync(
+        var afterRevoke = await InheritedProjectCeiling.TryInheritAsync(
             worktree, Store, probe, TestContext.Current.CancellationToken);
 
-        Assert.Null(afterRevoke);
+        // #2121: not NoTrustedSource. The repository was revoked, and the outcome says so, naming the
+        // tombstone that made it revoked (the root, ordinal-first among the tombstones that match).
+        Assert.Equal(InheritanceOutcome.Revoked, afterRevoke.Outcome);
+        Assert.Null(afterRevoke.Fact);
+        Assert.Equal(ProjectCeilingStore.CanonicalKey(main), afterRevoke.RevokedPath);
+        Assert.Equal(ProjectCeilingStore.TryGetRecord(main, Store)?.RevokedAt, afterRevoke.RevokedAt);
         Assert.Null(ProjectCeilingStore.TryGet(worktree, Store));
+    }
+
+    /// <summary>
+    /// #2121, both polarities of "every recorded path revoked": with the root revoked but a hand-typed
+    /// sibling still live, the repository is not revoked and the worktree inherits the sibling's
+    /// ceiling; revoke that sibling too and the same call reports <see cref="InheritanceOutcome.Revoked"/>.
+    /// </summary>
+    [Fact]
+    public async Task A_repository_is_revoked_only_when_no_live_path_of_it_remains()
+    {
+        var main = MakeDirectory("baton");
+        var sibling = MakeDirectory("w1999");
+        var worktree = MakeDirectory("w2121");
+        var commonDir = Path.Combine(main, ".git");
+        var readOnly = new ProjectCeiling(ReadFiles: true, WriteFiles: false, RunShellCommands: false, NetworkAccess: false);
+        ProjectCeilingStore.Set(main, ProjectCeiling.Unrestricted, Store);
+        ProjectCeilingStore.Set(sibling, readOnly, Store);
+        ProjectCeilingStore.Revoke(main, Store);
+        var probe = ProbeOf(new() { [main] = (null, commonDir), [sibling] = (null, commonDir), [worktree] = (null, commonDir) });
+
+        var withLiveSibling = await InheritedProjectCeiling.TryInheritAsync(
+            worktree, Store, probe, TestContext.Current.CancellationToken);
+
+        Assert.Equal(InheritanceOutcome.Inherited, withLiveSibling.Outcome);
+        Assert.Equal(readOnly with { InheritedFrom = ProjectCeilingStore.CanonicalKey(sibling) }, ProjectCeilingStore.TryGet(worktree, Store));
+
+        ProjectCeilingStore.Revoke(sibling, Store);
+        var fresh = MakeDirectory("w2122");
+        var everyPathRevoked = await InheritedProjectCeiling.TryInheritAsync(
+            fresh, Store,
+            ProbeOf(new() { [main] = (null, commonDir), [sibling] = (null, commonDir), [worktree] = (null, commonDir), [fresh] = (null, commonDir) }),
+            TestContext.Current.CancellationToken);
+
+        Assert.Equal(InheritanceOutcome.Revoked, everyPathRevoked.Outcome);
+        Assert.Null(ProjectCeilingStore.TryGet(fresh, Store));
+    }
+
+    /// <summary>
+    /// #2121: a tombstone at the workspace's own key is not "already trusted". Revoke the root (the
+    /// worktree's copy goes with it), re-trust the root, and the worktree — still tombstoned — inherits
+    /// again and its tombstone is overwritten by the new copy.
+    /// </summary>
+    [Fact]
+    public async Task A_tombstoned_workspace_inherits_again_once_its_repository_is_re_trusted()
+    {
+        var main = MakeDirectory("baton");
+        var worktree = MakeDirectory("w2121");
+        var commonDir = Path.Combine(main, ".git");
+        var probe = ProbeOf(new() { [main] = (null, commonDir), [worktree] = (null, commonDir) });
+        ProjectCeilingStore.Set(main, ProjectCeiling.Unrestricted, Store);
+        Assert.NotNull(await InheritedProjectCeiling.TryRecordAsync(worktree, Store, probe, TestContext.Current.CancellationToken));
+        ProjectCeilingStore.Revoke(main, Store);
+        Assert.True(ProjectCeilingStore.TryGetRecord(worktree, Store)?.IsRevoked);
+
+        var narrowed = new ProjectCeiling(ReadFiles: true, WriteFiles: true, RunShellCommands: true, NetworkAccess: false);
+        ProjectCeilingStore.Set(main, narrowed, Store);
+        var afterReTrust = await InheritedProjectCeiling.TryInheritAsync(
+            worktree, Store, probe, TestContext.Current.CancellationToken);
+
+        Assert.Equal(InheritanceOutcome.Inherited, afterReTrust.Outcome);
+        var recorded = ProjectCeilingStore.TryGet(worktree, Store);
+        Assert.NotNull(recorded);
+        Assert.False(recorded.IsRevoked);
+        Assert.False(recorded.NetworkAccess);
+        Assert.Equal(ProjectCeilingStore.CanonicalKey(main), recorded.InheritedFrom);
     }
 
     /// <summary>

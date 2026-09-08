@@ -58,7 +58,12 @@ public static class ProjectCeilingStore
     /// <summary>The canonical key a project path resolves to — <see cref="BatonPaths.RecordKey"/> verbatim.</summary>
     public static string CanonicalKey(string projectPath) => BatonPaths.RecordKey(projectPath);
 
-    /// <summary>Loads the ceiling map from <paramref name="path"/>; a missing file resolves to an empty map.</summary>
+    /// <summary>
+    /// Loads the ceiling map from <paramref name="path"/>; a missing file resolves to an empty map.
+    /// <b>Tombstones included</b> (#2121, <see cref="ProjectCeiling.RevokedAt"/>): this is the raw
+    /// record, for the readers that must tell a revoked path from a never-recorded one. A reader asking
+    /// what ceiling applies to one path uses <see cref="TryGet"/>, which hides them.
+    /// </summary>
     /// <exception cref="ProjectCeilingStoreException">The file exists but is not valid JSON, or is not a JSON object of ceiling values.</exception>
     public static IReadOnlyDictionary<string, ProjectCeiling> Load(string path)
     {
@@ -98,8 +103,16 @@ public static class ProjectCeilingStore
         AtomicLaunchConfigWriter.Write(path, json);
     }
 
-    /// <summary>The recorded ceiling for <paramref name="projectPath"/>, or null when the project has never been trusted.</summary>
-    public static ProjectCeiling? TryGet(string projectPath, string path)
+    /// <summary>
+    /// The live ceiling for <paramref name="projectPath"/>, or null when none applies — never trusted,
+    /// or revoked (#2121: a tombstone is not a ceiling; <see cref="TryGetRecord"/> is the reader that
+    /// tells those two apart).
+    /// </summary>
+    public static ProjectCeiling? TryGet(string projectPath, string path) =>
+        TryGetRecord(projectPath, path) is { IsRevoked: false } ceiling ? ceiling : null;
+
+    /// <summary>The raw entry for <paramref name="projectPath"/> — a live ceiling, a tombstone, or null when nothing was ever recorded.</summary>
+    public static ProjectCeiling? TryGetRecord(string projectPath, string path)
     {
         ArgumentException.ThrowIfNullOrEmpty(projectPath);
 
@@ -123,42 +136,59 @@ public static class ProjectCeilingStore
     }
 
     /// <summary>
-    /// Removes <paramref name="projectPath"/>'s ceiling, and every entry whose
+    /// Replaces <paramref name="projectPath"/>'s live ceiling with a tombstone
+    /// (<see cref="ProjectCeiling.Tombstone"/>), and does the same to every live entry whose
     /// <see cref="ProjectCeiling.InheritedFrom"/> names it — transitively, so a chain of copies falls
-    /// with its root. <see cref="ProjectCeilingRevocation.Revoked"/> is false when none was recorded
-    /// for <paramref name="projectPath"/> itself, and then nothing else is touched either.
+    /// with its root. <see cref="ProjectCeilingRevocation.Revoked"/> is false when no live ceiling was
+    /// recorded for <paramref name="projectPath"/> itself (never trusted, or already a tombstone), and
+    /// then nothing else is touched either.
     /// </summary>
     /// <remarks>
+    /// <para>
     /// <b>Revoke cascades (#2076 re-review).</b> An inherited entry is a one-time snapshot of its
     /// source, written by <c>Baton.Cli.InheritedProjectCeiling</c> without an operator typing anything.
     /// Left in place, it would keep granting what the operator has just withdrawn, discoverable only by
     /// reading <c>baton trust --list</c> for the provenance clause — the wrong default for a permission
     /// record. The cascade is one direction only: a source later NARROWED (re-trusted, not revoked) does
     /// not re-narrow its copies, and spec/baton.md §9 states that gap.
+    /// </para>
+    /// <para>
+    /// <b>Revoke leaves a tombstone, not an absence (#2121).</b> Removing the entry outright left no way
+    /// to tell a fully revoked repository from one never trusted, and the provisioner's unrestricted
+    /// default for the latter then re-widened the former at its next <c>queue add --issue</c>. What
+    /// the tombstone changes for each reader is spec/baton.md §9's, stated once there.
+    /// </para>
     /// </remarks>
-    public static ProjectCeilingRevocation Revoke(string projectPath, string path)
+    public static ProjectCeilingRevocation Revoke(string projectPath, string path) => Revoke(projectPath, path, DateTimeOffset.UtcNow);
+
+    /// <summary>The <see cref="Revoke(string, string)"/> overload with the tombstone's timestamp injected — for tests that read it back.</summary>
+    public static ProjectCeilingRevocation Revoke(string projectPath, string path, DateTimeOffset revokedAt)
     {
         ArgumentException.ThrowIfNullOrEmpty(projectPath);
 
         return MutexGuardedFileLock.RunUnderLock(path, LockNamePrefix, LockTimeout, () =>
         {
             var ceilings = new Dictionary<string, ProjectCeiling>(Load(path), BatonPaths.RecordKeyComparer);
-            if (!ceilings.Remove(CanonicalKey(projectPath)))
+            var key = CanonicalKey(projectPath);
+            if (!ceilings.TryGetValue(key, out var live) || live.IsRevoked)
             {
                 return new ProjectCeilingRevocation(Revoked: false, CascadedPaths: []);
             }
 
+            ceilings[key] = ProjectCeiling.Tombstone(live, revokedAt);
+
             var cascaded = new List<string>();
-            var sources = new Queue<string>([CanonicalKey(projectPath)]);
+            var sources = new Queue<string>([key]);
             while (sources.TryDequeue(out var source))
             {
                 foreach (var derived in ceilings
-                    .Where(pair => pair.Value.InheritedFrom is { Length: > 0 } origin
+                    .Where(pair => !pair.Value.IsRevoked
+                        && pair.Value.InheritedFrom is { Length: > 0 } origin
                         && BatonPaths.RecordKeyComparer.Equals(CanonicalKey(origin), source))
                     .Select(pair => pair.Key)
                     .ToList())
                 {
-                    ceilings.Remove(derived);
+                    ceilings[derived] = ProjectCeiling.Tombstone(ceilings[derived], revokedAt);
                     cascaded.Add(derived);
                     sources.Enqueue(derived);
                 }
@@ -166,6 +196,39 @@ public static class ProjectCeilingStore
 
             Save(ceilings, path);
             return new ProjectCeilingRevocation(Revoked: true, CascadedPaths: cascaded);
+        });
+    }
+
+    /// <summary>
+    /// Removes the tombstones at <paramref name="projectPaths"/> (#2121) — the <c>baton trust</c>
+    /// register path clearing the revocation of every other path in the repository it just re-trusted.
+    /// A path that is not a tombstone is left alone: a live ceiling is never removed by this, and one
+    /// that was never recorded has nothing to remove.
+    /// </summary>
+    /// <returns>The canonical paths whose tombstone was removed, in the order given.</returns>
+    public static IReadOnlyList<string> ClearRevocations(IEnumerable<string> projectPaths, string path)
+    {
+        ArgumentNullException.ThrowIfNull(projectPaths);
+
+        return MutexGuardedFileLock.RunUnderLock(path, LockNamePrefix, LockTimeout, () =>
+        {
+            var ceilings = new Dictionary<string, ProjectCeiling>(Load(path), BatonPaths.RecordKeyComparer);
+            var cleared = new List<string>();
+            foreach (var projectPath in projectPaths)
+            {
+                var key = CanonicalKey(projectPath);
+                if (ceilings.TryGetValue(key, out var record) && record.IsRevoked && ceilings.Remove(key))
+                {
+                    cleared.Add(key);
+                }
+            }
+
+            if (cleared.Count > 0)
+            {
+                Save(ceilings, path);
+            }
+
+            return (IReadOnlyList<string>)cleared;
         });
     }
 }
