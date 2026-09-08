@@ -49,6 +49,17 @@ namespace Baton.Cli;
 /// room, which would make re-running a cancel look like a fresh failure. Only <see cref="CancelCommand"/>
 /// sets it; <see cref="MutationExitCodeResolver"/> reads it.
 /// </param>
+/// <param name="CancelApplied">
+/// #2103: true when <see cref="CancelCommand"/> did what it was asked — the intent fact is written and
+/// the target left <c>ArrestableExecutions</c> before this call returned, whether a live pump answered
+/// the request, the kill was recorded by the pump, or this command wrote the terminal fact itself.
+/// The third flag cancel needs, for the same reason the other two exist: a cancel that succeeds leaves
+/// the room Terminal with the step Cancelled or Failed, which the state alone reads as exit 1 — the
+/// invocation that arrested would exit 1 while the no-op exits 0. Mutually exclusive with
+/// <paramref name="CancellationQueued"/> and <paramref name="CancelWasNoOp"/> by construction. Only
+/// <see cref="CancelCommand"/> sets it; <see cref="MutationExitCodeResolver"/> reads it, so
+/// <c>decide</c>/<c>supply</c>/<c>resolve</c> keep the unchanged state-based arm.
+/// </param>
 public sealed record CommandResult(
     FlowState State,
     WorkflowDefinitionSnapshot Snapshot,
@@ -57,7 +68,8 @@ public sealed record CommandResult(
     IReadOnlyList<WorktreeTeardownResult>? WorktreeTeardowns = null,
     bool WaitTimedOut = false,
     bool CancellationQueued = false,
-    bool CancelWasNoOp = false)
+    bool CancelWasNoOp = false,
+    bool CancelApplied = false)
 {
     /// <summary>Defaults to empty rather than <c>null</c> for callers that omit the argument.</summary>
     public IReadOnlyList<WorktreeTeardownResult> WorktreeTeardowns { get; init; } = WorktreeTeardowns ?? [];

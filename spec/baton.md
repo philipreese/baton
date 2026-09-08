@@ -578,7 +578,12 @@ the same event now carries (`ProcessStartTimeUtc`, added by #2073 — a pre-#207
 `Unknown`, and is **not** killed; the terminal fact says so). **(e) the terminal fact**, cause
 `operator cancel`, written under `flow.lock`: a pump that still holds the lock after the kill keeps
 the settle (it records its own worker's exit) and the command reports `CancellationQueued` (exit 1,
-"queued, not applied"). The intent is readable: `ArrestLedgerProjector` lists it (`baton status
+"queued, not applied"). **Exit code, stated once (#2103):** a cancel whose target settled before it
+returned — the pump answered, or this command wrote the terminal fact — reports
+`CommandResult.CancelApplied` and exits 0; queued exits 1; the no-op of (a) exits 0. The three flags
+exist because the room a successful cancel leaves behind (Terminal, target Cancelled or Failed) reads
+as exit 1 to `MutationExitCodeResolver`'s state-based arm, which `decide`/`supply`/`resolve` keep
+unchanged. The intent is readable: `ArrestLedgerProjector` lists it (`baton status
 --json`'s `arrests`, `fleet_status`) — absorbed into the flow-side entry when the pump answered,
 its own entry otherwise, `Delivered` once an arrest-shaped terminal fact lands at or after it.
 

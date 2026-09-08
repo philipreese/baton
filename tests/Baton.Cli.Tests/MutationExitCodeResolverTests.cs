@@ -97,6 +97,35 @@ public class MutationExitCodeResolverTests
         Assert.Equal(MutationExitCodeResolver.Success, MutationExitCodeResolver.Resolve(Result(state, cancelWasNoOp: true)));
     }
 
+    /// <summary>
+    /// #2103: the applied arm. Cancelled is what a pump's answer leaves behind, Failed is what this
+    /// command's own terminal fact leaves; the state alone reads 1 for both. The resolver's own
+    /// comment carries the inversion this arm exists to fix.
+    /// </summary>
+    [Theory]
+    [InlineData(StepStatus.Cancelled)]
+    [InlineData(StepStatus.Failed)]
+    public void An_applied_cancel_is_exit_0_even_when_the_room_reads_terminal_with_the_target_arrested(StepStatus arrested)
+    {
+        var state = State(WorkflowStatus.Terminal, Step(StepStatus.Succeeded), Step(arrested));
+
+        Assert.Equal(MutationExitCodeResolver.Failure, MutationExitCodeResolver.Resolve(Result(state)));
+        Assert.Equal(MutationExitCodeResolver.Success, MutationExitCodeResolver.Resolve(Result(state, cancelApplied: true)));
+    }
+
+    [Fact]
+    public void The_applied_flag_does_not_outrank_the_queued_verdict()
+    {
+        // CancelCommand never sets both, but the order of the arms is part of the contract: "queued,
+        // not applied" must win if the two ever collide, since it is the one that says the caller's
+        // cancel is NOT yet done.
+        var state = State(WorkflowStatus.Terminal, Step(StepStatus.Cancelled));
+
+        Assert.Equal(
+            MutationExitCodeResolver.Failure,
+            MutationExitCodeResolver.Resolve(Result(state, cancellationQueued: true, cancelApplied: true)));
+    }
+
     private static FlowState State(WorkflowStatus status, params StepState[] steps) =>
         new(SnapshotId, steps, status);
 
@@ -104,9 +133,10 @@ public class MutationExitCodeResolverTests
         new(new StepId(Guid.NewGuid().ToString("N")), status, new ExecutionId(Guid.NewGuid().ToString("N")),
             new Dictionary<StepId, ExecutionId>());
 
-    private static CommandResult Result(FlowState state, bool cancellationQueued = false, bool cancelWasNoOp = false) => new(
+    private static CommandResult Result(FlowState state, bool cancellationQueued = false, bool cancelWasNoOp = false, bool cancelApplied = false) => new(
         state,
         new WorkflowDefinitionSnapshot(SnapshotId, new WorkflowTemplateId("t"), 1, []),
         CancellationQueued: cancellationQueued,
-        CancelWasNoOp: cancelWasNoOp);
+        CancelWasNoOp: cancelWasNoOp,
+        CancelApplied: cancelApplied);
 }
