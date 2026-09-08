@@ -134,6 +134,7 @@ if (args.Length == 0 || !knownSubcommands.Contains(args[0]))
     Console.Error.WriteLine(
         "              ('ledger --rebuild' is a different FILE from the other three -- 'baton ledger --help' says which)");
     Console.Error.WriteLine($"       {MemoryAuditOptionsParser.Usage[7..]}");
+    Console.Error.WriteLine($"       {MemoryAddOptionsParser.Usage[7..]}");
     Console.Error.WriteLine($"       {AuditLanesOptionsParser.Usage[7..]}");
     Console.Error.WriteLine($"       {QueueOptionsParser.Usage[7..]}");
     // #1934: the one thing the grammar does not say — the queue does not launch anything; the daemon
@@ -311,7 +312,8 @@ try
 
     // #1852: a noun-first verb group like `room`/`rooms` above -- `audit` (phase A, read-only) and
     // `import` (phase B, which writes only under BatonPaths.Root) and `sync` (phase C, the projection
-    // half, which writes only into vendor memory roots that already exist and only under `--apply`).
+    // half, which writes only into vendor memory roots that already exist and only under `--apply`)
+    // and `add` (#2071, the ongoing write path -- one entry per call, under BatonPaths.Root only).
     // None produces a CommandResult, so they join the groups here rather than the switch below.
     if (args[0] == "memory")
     {
@@ -336,8 +338,16 @@ try
                 .ExecuteAsync(memorySyncOptions, Console.Out, cancellationToken: hostStopSource.Token).ConfigureAwait(false);
         }
 
+        if (args.Length >= 2 && args[1] == "add")
+        {
+            var memoryAddOptions = MemoryAddOptionsParser.Parse(args[2..]);
+            return await MemoryAddCommand
+                .ExecuteAsync(memoryAddOptions, Console.Out, cancellationToken: hostStopSource.Token).ConfigureAwait(false);
+        }
+
         throw new CliArgumentException(
-            $"Unknown 'baton memory' sub-verb. {MemoryAuditOptionsParser.Usage} " +
+            $"Unknown 'baton memory' sub-verb. {MemoryAddOptionsParser.Usage} " +
+            $"{MemoryAuditOptionsParser.Usage} " +
             $"{MemoryImportOptionsParser.Usage} {MemorySyncOptionsParser.Usage}");
     }
 

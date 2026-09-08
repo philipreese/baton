@@ -220,7 +220,7 @@ public static class MemoryImportOptionsParser
                 "and normalised to one.");
         }
 
-        RequireAHostThatAProbeCouldAnswer(repository, canonical);
+        RequireAHostThatAProbeCouldAnswer(repository, canonical, Usage);
 
         return new MemoryImportAssertion(value[..separator].Trim(), canonical);
     }
@@ -252,7 +252,15 @@ public static class MemoryImportOptionsParser
     /// property of operator input, so the refusal belongs on the operator's entry path.
     /// </para>
     /// </remarks>
-    private static void RequireAHostThatAProbeCouldAnswer(string repository, string canonical)
+    /// <param name="repository">What the operator typed.</param>
+    /// <param name="canonical">Its canonical form.</param>
+    /// <param name="usage">
+    /// The calling verb's own usage line, appended to the refusal. <b>Internal and parameterised rather
+    /// than copied</b> (#2071): <c>baton memory add --repository</c> is the second operator write path
+    /// onto a store file and needs this same refusal, and a second copy is a second place for the rule
+    /// to drift (CLAUDE.md, <c>record-once</c>).
+    /// </param>
+    internal static void RequireAHostThatAProbeCouldAnswer(string repository, string canonical, string usage)
     {
         var raw = repository.Trim();
         if (DeclaresWhereItsHostIs(raw))
@@ -268,7 +276,7 @@ public static class MemoryImportOptionsParser
 
         throw new CliArgumentException(
             $"'{raw}' names no host: it canonicalizes to '{canonical}', and Baton assumes no default " +
-            $"forge, so that store is one no git probe could ever reach. {Usage}",
+            $"forge, so that store is one no git probe could ever reach. {usage}",
             SuggestionFor(raw));
     }
 
