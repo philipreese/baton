@@ -1,5 +1,6 @@
 using System.Net;
 using System.Net.Sockets;
+using System.IO.Compression;
 using System.Text;
 using System.Text.Json;
 using System.Text.RegularExpressions;
@@ -217,7 +218,7 @@ public sealed class GlassHttpServiceTests : IDisposable
                 Assert.Equal(HttpStatusCode.OK, response.StatusCode);
                 Assert.Equal("image/png", response.Content.Headers.ContentType?.MediaType);
                 Assert.Equal("no-store", response.Headers.CacheControl?.ToString());
-                AssertPngDimensions(
+                AssertPngIsExpectedIcon(
                     await response.Content.ReadAsByteArrayAsync(cts.Token),
                     int.Parse(icon.GetProperty("sizes").GetString()![..3],
                         System.Globalization.CultureInfo.InvariantCulture));
@@ -439,11 +440,114 @@ public sealed class GlassHttpServiceTests : IDisposable
         Assert.Equal(dimension, int.Parse(size[..3], System.Globalization.CultureInfo.InvariantCulture));
     }
 
-    private static void AssertPngDimensions(byte[] png, int dimension)
+    private static void AssertPngIsExpectedIcon(byte[] png, int dimension)
     {
-        Assert.True(png.AsSpan().StartsWith(new byte[] { 137, 80, 78, 71, 13, 10, 26, 10 }));
-        Assert.Equal(dimension, System.Buffers.Binary.BinaryPrimitives.ReadInt32BigEndian(png.AsSpan(16, 4)));
-        Assert.Equal(dimension, System.Buffers.Binary.BinaryPrimitives.ReadInt32BigEndian(png.AsSpan(20, 4)));
+        ReadOnlySpan<byte> signature = [137, 80, 78, 71, 13, 10, 26, 10];
+        Assert.True(png.AsSpan().StartsWith(signature), "PNG signature is invalid.");
+
+        var position = signature.Length;
+        var idat = new MemoryStream();
+        var sawHeader = false;
+        var sawEnd = false;
+        while (position < png.Length)
+        {
+            Assert.True(png.Length - position >= 12, "PNG chunk is truncated.");
+            var length = System.Buffers.Binary.BinaryPrimitives.ReadUInt32BigEndian(png.AsSpan(position, 4));
+            Assert.True(length <= int.MaxValue && length <= png.Length - position - 12, "PNG chunk length is invalid.");
+            var dataLength = (int)length;
+            var type = png.AsSpan(position + 4, 4);
+            var data = png.AsSpan(position + 8, dataLength);
+            var expectedCrc = System.Buffers.Binary.BinaryPrimitives.ReadUInt32BigEndian(
+                png.AsSpan(position + 8 + dataLength, 4));
+            Assert.Equal(expectedCrc, PngCrc32(type, data));
+
+            if (type.SequenceEqual("IHDR"u8))
+            {
+                Assert.False(sawHeader, "PNG has more than one IHDR chunk.");
+                Assert.Equal(signature.Length, position);
+                Assert.Equal(13, dataLength);
+                Assert.Equal(dimension, System.Buffers.Binary.BinaryPrimitives.ReadInt32BigEndian(data));
+                Assert.Equal(dimension, System.Buffers.Binary.BinaryPrimitives.ReadInt32BigEndian(data[4..]));
+                Assert.Equal((byte)8, data[8]);
+                Assert.Equal((byte)6, data[9]);
+                Assert.Equal((byte)0, data[10]);
+                Assert.Equal((byte)0, data[11]);
+                Assert.Equal((byte)0, data[12]);
+                sawHeader = true;
+            }
+            else if (type.SequenceEqual("IDAT"u8))
+            {
+                Assert.True(sawHeader && !sawEnd, "PNG IDAT chunk is out of order.");
+                idat.Write(data);
+            }
+            else if (type.SequenceEqual("IEND"u8))
+            {
+                Assert.Equal(0, dataLength);
+                Assert.True(sawHeader, "PNG IEND chunk appears before IHDR.");
+                sawEnd = true;
+                Assert.Equal(png.Length, position + 12);
+            }
+
+            position += dataLength + 12;
+        }
+
+        Assert.True(sawHeader && sawEnd && idat.Length > 0, "PNG must contain IHDR, IDAT, and IEND chunks.");
+        byte[] scanlines;
+        using (var compressed = new MemoryStream(idat.ToArray()))
+        using (var decompressor = new ZLibStream(compressed, CompressionMode.Decompress))
+        using (var decoded = new MemoryStream())
+        {
+            decompressor.CopyTo(decoded);
+            scanlines = decoded.ToArray();
+        }
+
+        var stride = (dimension * 4) + 1;
+        Assert.Equal(dimension * stride, scanlines.Length);
+        var edge = dimension * 3 / 16;
+        var paneStart = dimension * 5 / 16;
+        var paneEnd = dimension * 11 / 16;
+        for (var y = 0; y < dimension; y++)
+        {
+            var row = y * stride;
+            Assert.Equal((byte)0, scanlines[row]);
+            for (var x = 0; x < dimension; x++)
+            {
+                var offset = row + 1 + (x * 4);
+                var inGlass = x >= edge && x < dimension - edge && y >= edge && y < dimension - edge;
+                var inPane = x >= paneStart && x < paneEnd && y >= paneStart && y < paneEnd;
+                Assert.Equal(inPane ? (byte)250 : inGlass ? (byte)96 : (byte)35, scanlines[offset]);
+                Assert.Equal(inPane ? (byte)250 : inGlass ? (byte)213 : (byte)40, scanlines[offset + 1]);
+                Assert.Equal(inPane ? (byte)248 : inGlass ? (byte)208 : (byte)48, scanlines[offset + 2]);
+                Assert.Equal(byte.MaxValue, scanlines[offset + 3]);
+            }
+        }
+    }
+
+    private static uint PngCrc32(ReadOnlySpan<byte> type, ReadOnlySpan<byte> data)
+    {
+        var crc = uint.MaxValue;
+        foreach (var value in type)
+        {
+            crc = PngCrc32Step(crc, value);
+        }
+
+        foreach (var value in data)
+        {
+            crc = PngCrc32Step(crc, value);
+        }
+
+        return ~crc;
+    }
+
+    private static uint PngCrc32Step(uint crc, byte value)
+    {
+        crc ^= value;
+        for (var bit = 0; bit < 8; bit++)
+        {
+            crc = (crc >> 1) ^ ((crc & 1) == 0 ? 0U : 0xEDB88320U);
+        }
+
+        return crc;
     }
 
     private static string RepoGlassHtmlPath()
