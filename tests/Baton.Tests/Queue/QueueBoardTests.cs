@@ -186,6 +186,14 @@ public sealed class QueueBoardTests
         Assert.True(roomy.Pending[0].IsNext);
         Assert.False(roomy.Pending[1].IsNext);
         Assert.Equal(QueueBoardWaitReasons.Behind, roomy.Pending[1].Reason);
+
+        // With nothing in the ledger about the head, its reason is still `slots` — the token `next`
+        // belongs to the passer alone (the rule and its reason live at QueueBoard.WaitReasonFor).
+        var unlogged = Project([head, review], lanes: AtCap(), lastDecision: null);
+        Assert.Equal("slots", unlogged.Pending[0].Reason);
+        Assert.False(unlogged.Pending[0].IsNext);
+        Assert.Equal(QueueBoardWaitReasons.Next, unlogged.Pending[1].Reason);
+        Assert.True(unlogged.Pending[1].IsNext);
     }
 
     [Theory]
