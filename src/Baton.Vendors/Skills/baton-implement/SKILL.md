@@ -16,7 +16,9 @@ Only explicit grants in the brief override these constraints.
 
 ## What the lane never does
 
-- No gates (`pixi run gates`, `gates-fast`, receipt recording). The engine verifies after you exit.
+- No gates (`pixi run gates`, `gates-fast`, receipt recording). The engine verifies after you exit —
+  excluding `.githooks/pre-push`, which still runs `gates-lane-fast` on your own push. Expected, not a
+  violation; fix a real failure and retry.
 - No sub-agents. The second reader is the conductor's own review lane.
 - No live vendor CLIs (`claude`, `codex`, `agy`, anything spending subscription budget) unless the
   brief grants them by name, with a run count.

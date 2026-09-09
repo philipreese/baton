@@ -137,6 +137,7 @@ public class ArtifactManagerTests
                 new EnvironmentVariable.BatonComputed("BATON_OUTPUT_DIR", Qualified("/artifacts/execution_C1")),
                 new EnvironmentVariable.BatonComputed("BATON_ARTIFACTS_ROOT", Qualified("/artifacts")),
                 LockWaitLog("/artifacts/execution_C1"),
+                new EnvironmentVariable.BatonComputed("BATON_LANE", "1"),
             ],
             variables);
     }
@@ -151,12 +152,13 @@ public class ArtifactManagerTests
                 new EnvironmentVariable.BatonComputed("BATON_OUTPUT_DIR", Qualified("/artifacts/execution_C1")),
                 new EnvironmentVariable.BatonComputed("BATON_ARTIFACTS_ROOT", Qualified("/artifacts")),
                 LockWaitLog("/artifacts/execution_C1"),
+                new EnvironmentVariable.BatonComputed("BATON_LANE", "1"),
             ],
             variables);
     }
 
     [Fact]
-    public void BuildEnvironment_with_a_supplement_appends_BATON_SUPPLEMENTARY_INPUT_after_BATON_ARTIFACTS_ROOT()
+    public void BuildEnvironment_with_a_supplement_appends_BATON_SUPPLEMENTARY_INPUT_after_BATON_LANE()
     {
         var variables = ArtifactManager.BuildEnvironment(
             [], Qualified("/artifacts/execution_C1"), Qualified("/artifacts"), Qualified("/artifacts/execution_S1"));
@@ -166,6 +168,7 @@ public class ArtifactManagerTests
                 new EnvironmentVariable.BatonComputed("BATON_OUTPUT_DIR", Qualified("/artifacts/execution_C1")),
                 new EnvironmentVariable.BatonComputed("BATON_ARTIFACTS_ROOT", Qualified("/artifacts")),
                 LockWaitLog("/artifacts/execution_C1"),
+                new EnvironmentVariable.BatonComputed("BATON_LANE", "1"),
                 new EnvironmentVariable.BatonComputed("BATON_SUPPLEMENTARY_INPUT", Qualified("/artifacts/execution_S1")),
             ],
             variables);

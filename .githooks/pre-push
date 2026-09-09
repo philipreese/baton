@@ -83,10 +83,23 @@ if pixi run gates-check-receipt; then
     exit 0
 fi
 
+# Baton.Artifacts.ArtifactManager.BuildEnvironment sets BATON_LANE on every dispatched worker,
+# unconditionally, and it survives into that worker's own `git push`; a human at a keyboard never
+# carries it (#2129, spec/baton.md C-12 has the incident and the ruling this answers). The receipt
+# check above already skipped both kinds of push alike on a still-valid receipt; only the fallback
+# below tells them apart. CI is untouched -- it always runs everything, on either kind of push.
+if [ -n "$BATON_LANE" ]; then
+    fallback_task=gates-lane-fast
+else
+    fallback_task=gates-fast
+fi
+
 # NOT `exec`: the timing line above has to be written after the run, so the status is captured and
-# re-raised by hand. gates-fast's own exit code is still the only thing this hook exits with --
-# tools/gates/gates.py's selftest runs this hook against a stub that exits 7 and asserts on 7.
-pixi run gates-fast
+# re-raised by hand. The fallback task's own exit code is still the only thing this hook exits
+# with -- tools/gates/gates.py's selftest runs this hook against a stub that exits 7 on the human
+# (gates-fast) branch and a distinct 8 on the lane (gates-lane-fast) branch, proving the lane path
+# actually ran rather than falling back to the human one.
+pixi run "$fallback_task"
 status=$?
 record_push_timing
 exit $status
