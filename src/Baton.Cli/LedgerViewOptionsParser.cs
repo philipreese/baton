@@ -1,6 +1,7 @@
 using System.Globalization;
 using System.Text.Json;
 using Baton.Accounting;
+using Baton.Memory;
 using Baton.Status;
 
 namespace Baton.Cli;
@@ -149,6 +150,7 @@ public static class LedgerViewOptionsParser
                     break;
                 case "--repo-identity":
                     repositoryIdentityKey = RequireValue(args, i);
+                    RefuseFleet(repositoryIdentityKey);
                     i += 2;
                     break;
                 case "--format":
@@ -185,6 +187,23 @@ public static class LedgerViewOptionsParser
         }
 
         return new LedgerViewOptions(roomDirectoryPath, query, repositoryIdentityKey, format, drill, help);
+    }
+
+    /// <summary>
+    /// <c>--repo-identity fleet</c> is refused (#2112): the cost ledger is keyed by what git answered
+    /// for a checkout, and the reserved memory slug is the one subject git never answers. Shared with
+    /// <see cref="LedgerExportOptionsParser"/>, which takes the same key.
+    /// </summary>
+    internal static void RefuseFleet(string repositoryIdentityKey)
+    {
+        if (FleetMemory.IsFleet(repositoryIdentityKey))
+        {
+            throw new CliArgumentException(
+                FleetMemory.GitIdentityRefusal(
+                    "--repo-identity",
+                    "the cost ledger is filed only under identities git answered for, so there is no fleet ledger to read."),
+                "pass the repository's canonical identity, or the ledger file's own stem.");
+        }
     }
 
     private static string RequireValue(IReadOnlyList<string> args, int index)

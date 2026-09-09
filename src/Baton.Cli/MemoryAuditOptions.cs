@@ -23,6 +23,13 @@ public enum MemoryAuditOutputFormat
 /// <c>--help</c>: print the grammar and what each finding kind means, then exit 0 without scanning
 /// anything.
 /// </param>
+/// <param name="Repository">
+/// <c>--repository &lt;id&gt;|fleet</c> (#2112): restrict the CANONICAL STORES section to one store.
+/// <see langword="null"/> reports every store found. The root inventory is machine-wide and is never
+/// filtered by it — a vendor root's mapping is what the findings are about, and hiding roots would
+/// hide findings.
+/// </param>
 public sealed record MemoryAuditOptions(
     MemoryAuditOutputFormat Format = MemoryAuditOutputFormat.Text,
-    bool Help = false);
+    bool Help = false,
+    string? Repository = null);

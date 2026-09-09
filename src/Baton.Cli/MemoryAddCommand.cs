@@ -80,7 +80,7 @@ public static class MemoryAddCommand
                 "will not guess a subject — run it inside the checkout the memory is about, or name " +
                 "the repository. " + MemoryAddOptionsParser.Usage);
 
-        var slug = RepositoryIdentity.FileSlugFor(repository);
+        var slug = FleetMemory.SlugFor(repository);
         var entriesFile = BatonPaths.MemoryEntriesFile(slug);
         var entry = AuthoredMemory.Create(
             repository, options.Text, options.Kind, assertedByOverride ?? MemoryLaneAssertion.Resolve(),

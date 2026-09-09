@@ -235,6 +235,31 @@ public sealed class MemoryAddTests : IDisposable
                 ["--text", "x", "--kind", "durable-fact", "--repository", "github.com/owner/repo"]).Repository);
     }
 
+    /// <summary>
+    /// <c>--repository fleet</c> (#2112) files under <c>{Root}/fleet/memory/</c> — the bare word, no
+    /// digest — with the subject recorded as <c>fleet</c>. The control is the repository add above:
+    /// its store carries a digest suffix, so the two never share a directory.
+    /// </summary>
+    [Fact]
+    public async Task Add_to_fleet_files_under_the_reserved_slug_and_not_under_any_repository()
+    {
+        var (exitCode, output) = await RunAsync(
+            AuthoredMemory.Operator,
+            "--text", "fixture device fact", "--kind", "operator-preference", "--repository", "fleet");
+
+        Assert.Equal(0, exitCode);
+
+        var fleetEntries = Path.Combine(BatonPaths.Root, "fleet", "memory", "entries.jsonl");
+        Assert.True(File.Exists(fleetEntries));
+        Assert.Equal(FleetMemory.EntriesFile, fleetEntries);
+        Assert.False(File.Exists(EntriesFile));
+
+        var entry = Assert.Single(await MemoryStore.ReadAllAsync(fleetEntries, TestContext.Current.CancellationToken));
+        Assert.Equal("fleet", entry.Repository);
+        Assert.Equal(MemoryKind.OperatorPreference, entry.Kind);
+        Assert.Contains("baton memory sync --repository fleet --apply", output, StringComparison.Ordinal);
+    }
+
     [Fact]
     public async Task Help_writes_nothing_and_names_the_write_path()
     {

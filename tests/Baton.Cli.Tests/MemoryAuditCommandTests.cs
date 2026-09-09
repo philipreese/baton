@@ -1,6 +1,7 @@
 using System.Diagnostics;
 using System.Text.Json;
 using Baton.Memory;
+using Baton.Status;
 using Baton.Tests.Shared;
 
 namespace Baton.Cli.Tests;
@@ -19,12 +20,26 @@ namespace Baton.Cli.Tests;
 public sealed class MemoryAuditCommandTests : IDisposable
 {
     private readonly string _root = Path.Combine(Path.GetTempPath(), $"baton-1852-cli-{Guid.NewGuid():N}");
+    private readonly IDisposable _scope;
+
+    /// <summary>
+    /// <see cref="BatonPaths.Root"/> is pointed at <see cref="BatonRoot"/> for the whole class, so the
+    /// store-writing helpers (#2112) land under the same fixture root the seam reads — and so no test
+    /// here can reach the operator's real <c>~/.baton</c> through a defaulted path.
+    /// </summary>
+    public MemoryAuditCommandTests() =>
+        _scope = BatonEnvironmentSnapshot.BeginScope(
+            BatonEnvironmentSnapshot.Blank with { HomeOverride = Path.Combine(_root, "baton-root") });
 
     private string ClaudeHome => Path.Combine(_root, "claude");
 
     private string Checkout(string name) => Path.Combine(_root, "checkouts", name);
 
-    public void Dispose() => DirectoryCleanup.DeleteRecursively(_root);
+    public void Dispose()
+    {
+        _scope.Dispose();
+        DirectoryCleanup.DeleteRecursively(_root);
+    }
 
     /// <summary>
     /// The fixture, mirroring the four shapes the #1852 survey found on the real machine: a root whose
@@ -153,6 +168,58 @@ public sealed class MemoryAuditCommandTests : IDisposable
         var text = await RunAsync(new MemoryAuditOptions(), ClaudeHome);
         Assert.Contains("Non-Claude memory roots", text, StringComparison.Ordinal);
         Assert.Contains("family=codex-sqlite vendor=codex scope=vendor presence=populated", text, StringComparison.Ordinal);
+    }
+
+    /// <summary>
+    /// #2112: the canonical stores are reported beside the roots — the fleet store first and labelled,
+    /// the repository's beside it — in both views, and <c>--repository</c> selects one. The polarity
+    /// arms: selecting a store nobody created prints an ABSENT line (the command's own remarks say why
+    /// that beats an empty list), and the store rows never join <c>roots</c> or <c>counts</c>.
+    /// </summary>
+    [Fact]
+    public async Task The_canonical_stores_section_reports_the_fleet_store_beside_a_repository_store()
+    {
+        await BuildFixtureAsync();
+        const string repository = "github.com/philipreese/baton";
+        await MemoryStore.AppendAsync(
+            [AuthoredMemory.Create("fleet", "fixture device fact", MemoryKind.OperatorPreference, AuthoredMemory.Operator, default)],
+            FleetMemory.EntriesFile,
+            TestContext.Current.CancellationToken);
+        await MemoryStore.AppendAsync(
+            [
+                AuthoredMemory.Create(repository, "fixture alpha", MemoryKind.DurableFact, AuthoredMemory.Operator, default),
+                AuthoredMemory.Create(repository, "fixture beta", MemoryKind.DurableFact, AuthoredMemory.Operator, default),
+            ],
+            BatonPaths.MemoryEntriesFile(FleetMemory.SlugFor(repository)),
+            TestContext.Current.CancellationToken);
+
+        var text = await RunAsync(new MemoryAuditOptions(), ClaudeHome);
+        Assert.Contains("Canonical stores under", text, StringComparison.Ordinal);
+        Assert.Contains("FLEET slug=fleet entries=1", text, StringComparison.Ordinal);
+        Assert.Contains($"repository={repository} slug={FleetMemory.SlugFor(repository)} entries=2", text, StringComparison.Ordinal);
+        Assert.DoesNotContain("fixture device fact", text, StringComparison.Ordinal);
+        Assert.Contains("Roots: 4", text, StringComparison.Ordinal);
+
+        var json = await RunAsync(new MemoryAuditOptions(MemoryAuditOutputFormat.Json), ClaudeHome);
+        using var document = JsonDocument.Parse(json);
+        var stores = document.RootElement.GetProperty("canonicalStores").EnumerateArray().ToList();
+        Assert.Equal(2, stores.Count);
+        Assert.True(stores[0].GetProperty("isFleet").GetBoolean());
+        Assert.Equal("fleet", stores[0].GetProperty("repository").GetString());
+        Assert.Equal(1, stores[0].GetProperty("entryCount").GetInt32());
+        Assert.Equal(repository, stores[1].GetProperty("repository").GetString());
+        Assert.Equal(2, stores[1].GetProperty("entryCount").GetInt32());
+        Assert.Equal(4, document.RootElement.GetProperty("counts").GetProperty("roots").GetInt32());
+
+        var selected = await RunAsync(new MemoryAuditOptions(Repository: "fleet"), ClaudeHome);
+        Assert.Contains("FLEET slug=fleet entries=1", selected, StringComparison.Ordinal);
+        // The root inventory still prints this repository (the fixture's checkout resolves to it), so
+        // the exclusion is keyed on the store's slug line, which only this section writes.
+        Assert.DoesNotContain($"slug={FleetMemory.SlugFor(repository)}", selected, StringComparison.Ordinal);
+        Assert.Contains("Roots: 4", selected, StringComparison.Ordinal);
+
+        var absent = await RunAsync(new MemoryAuditOptions(Repository: "github.com/philipreese/nowhere"), ClaudeHome);
+        Assert.Contains("ABSENT -- no store has been created for 'github.com/philipreese/nowhere'", absent, StringComparison.Ordinal);
     }
 
     [Fact]

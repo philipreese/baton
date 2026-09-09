@@ -1,4 +1,5 @@
 using Baton.Accounting;
+using Baton.Memory;
 using Baton.Status;
 
 namespace Baton.Cli;
@@ -11,7 +12,7 @@ namespace Baton.Cli;
 public static class MemoryImportOptionsParser
 {
     public const string Usage =
-        "Usage: baton memory import [--dry-run] [--root <dir>]... [--assert <path>=<repository>]... " +
+        "Usage: baton memory import [--dry-run] [--root <dir>]... [--assert <path>=<repository>|fleet]... " +
         "[--asserted-by <who>] | baton memory import --undo <manifest> [--help]";
 
     /// <summary>
@@ -56,6 +57,9 @@ public static class MemoryImportOptionsParser
         "  --assert <path>=<repository>",
         "                      Assert which repository a root belongs to, when git cannot answer -- an",
         "                      archived root, a root whose checkout is gone, a per-machine vendor root.",
+        "                      '<path>=fleet' files the root under the reserved FLEET store instead",
+        "                      (~/.baton/fleet/memory/): operator and machine facts that belong to no",
+        "                      repository, merged into every repository's projection (spec/baton.md §12).",
         "                      Repeatable. <path> is the memory root directory or the checkout it came",
         $"                      from; the assertion is appended to {BatonPaths.MemoryAliasFileName} and reused by",
         "                      later runs. It is CONSULTED ONLY where the probe produced nothing and can",
@@ -210,6 +214,15 @@ public static class MemoryImportOptionsParser
         }
 
         var repository = value[(separator + 1)..];
+
+        // '<path>=fleet' files a per-machine root (a Codex memories directory, say) under the reserved
+        // fleet store (#2112): what such a root holds is machine facts, which is exactly what the fleet
+        // store is for. Answered before canonicalization, as MemoryAddOptionsParser does.
+        if (FleetMemory.IsFleet(repository))
+        {
+            return new MemoryImportAssertion(value[..separator].Trim(), FleetMemory.Slug);
+        }
+
         if (RepositoryIdentity.TryCanonicalize(repository) is not { Length: > 0 } canonical)
         {
             throw new CliArgumentException(

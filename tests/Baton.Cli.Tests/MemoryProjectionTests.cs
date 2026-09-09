@@ -167,6 +167,86 @@ public sealed class MemoryProjectionTests : IDisposable
     }
 
     /// <summary>
+    /// The merge rule (#2112, spec/baton.md §12): fleet entries come FIRST in the total order, and
+    /// neither store shadows the other — a fleet entry and a repository entry sharing a filename and
+    /// a text are both in the body. The budget arm is the mechanism made visible: with room for one
+    /// entry, the repository entry is the one dropped. The control is the same repository entry with
+    /// no fleet store handed in: no fleet wording anywhere in its bytes.
+    /// </summary>
+    [Fact]
+    public void Fleet_entries_are_projected_first_and_neither_store_shadows_the_other()
+    {
+        var fleetEntry = Entry("feedback_rules.md", "shared words", sourceDirectory: "C:/machine/memories", repository: "fleet");
+        var repositoryEntry = Entry("feedback_rules.md", "shared words");
+        Assert.NotEqual(fleetEntry.Id, repositoryEntry.Id);
+
+        var projection = MemoryProjection.Build(
+            Repository,
+            "store.jsonl",
+            [Vendor(repositoryEntry), new MemoryProjectionCandidate(fleetEntry, MemoryFactOrigin.Fleet)],
+            ProjectionBudget.Default,
+            fleetStorePath: "fleet-store.jsonl");
+
+        Assert.Equal([fleetEntry.Id, repositoryEntry.Id], projection.ProjectedEntryIds);
+        Assert.Empty(projection.Overridden);
+        var text = Encoding.UTF8.GetString(projection.Bytes);
+        Assert.Contains("origin=fleet", text, StringComparison.Ordinal);
+        Assert.Contains("fleet-store.jsonl", text, StringComparison.Ordinal);
+        Assert.Contains("An operator or machine fact, not this repository's", text, StringComparison.Ordinal);
+
+        // Budget: a suffix drops, and the suffix is the repository's entry, never the fleet's.
+        var bounded = MemoryProjection.Build(
+            Repository,
+            "store.jsonl",
+            [Vendor(repositoryEntry), new MemoryProjectionCandidate(fleetEntry, MemoryFactOrigin.Fleet)],
+            new ProjectionBudget(MaxBodyBytes: 1_000_000, MaxEntries: 1),
+            fleetStorePath: "fleet-store.jsonl");
+        Assert.Equal([fleetEntry.Id], bounded.ProjectedEntryIds);
+        Assert.Equal(repositoryEntry.Id, Assert.Single(bounded.Dropped).EntryId);
+
+        // Control: with no fleet store handed in, the header says nothing about one.
+        var without = MemoryProjection.Build(Repository, "store.jsonl", [Vendor(repositoryEntry)], ProjectionBudget.Default);
+        Assert.DoesNotContain("origin=fleet", Encoding.UTF8.GetString(without.Bytes), StringComparison.Ordinal);
+        Assert.DoesNotContain("fleet-store.jsonl", Encoding.UTF8.GetString(without.Bytes), StringComparison.Ordinal);
+    }
+
+    /// <summary>
+    /// End to end (#2112): a repository's vendor file carries the fleet store's entries ahead of the
+    /// repository's own, and names the fleet store in its header. The fleet store's own projection is
+    /// reported with no target rather than written anywhere, since no root is asserted to it.
+    /// </summary>
+    [Fact]
+    public async Task Sync_merges_the_fleet_store_into_a_repository_projection_ahead_of_its_own_entries()
+    {
+        var root = await SeedStoreAndClaudeRootAsync();
+        var fleetEntry = AuthoredMemory.Create(
+            "fleet", "fixture device fact", MemoryKind.OperatorPreference, AuthoredMemory.Operator, default);
+        await MemoryStore.AppendAsync([fleetEntry], FleetMemory.EntriesFile, TestContext.Current.CancellationToken);
+
+        var output = await RunAsync("--apply");
+
+        var text = File.ReadAllText(Path.Combine(root, ClaudeProjectionTarget.ProjectionFileName));
+        Assert.Contains(fleetEntry.Id, text, StringComparison.Ordinal);
+        Assert.Contains("fixture device fact", text, StringComparison.Ordinal);
+        Assert.Contains("the vendor's copy", text, StringComparison.Ordinal);
+        Assert.Contains(FleetMemory.EntriesFile, text, StringComparison.Ordinal);
+        Assert.True(
+            text.IndexOf(fleetEntry.Id, StringComparison.Ordinal)
+                < text.IndexOf(Entry("feedback_rules.md", "the vendor's copy").Id, StringComparison.Ordinal),
+            "the fleet section precedes the repository's");
+
+        // Both stores were walked: the repository's report has three projected entries, and the fleet's
+        // own report says it has no file of its own rather than inventing one.
+        Assert.Contains("projected=3", output, StringComparison.Ordinal);
+        Assert.Contains("no vendor memory root on this machine is asserted to the fleet store", output, StringComparison.Ordinal);
+        Assert.Contains("still reach EVERY repository's projection", output, StringComparison.Ordinal);
+
+        // Idempotent with the merge in place: a second apply rewrites nothing.
+        var again = await RunAsync("--repository", Repository, "--apply");
+        Assert.Contains("[unchanged]", again, StringComparison.Ordinal);
+    }
+
+    /// <summary>
     /// A superseded entry is omitted from the bytes and named in the report — the rule
     /// <see cref="MemoryProjection"/> states. The control is the same entry with the link removed: it
     /// projects, which is what proves the omission is the link's doing and not the fixture's.
@@ -961,7 +1041,8 @@ public sealed class MemoryProjectionTests : IDisposable
     /// <see cref="MemoryEntry.ImportedAtUtc"/>: nothing in a projection reads it, and a clock in a
     /// fixture that feeds a byte-identity assertion is the first thing that would make one flake.
     /// </summary>
-    private static MemoryEntry Entry(string fileName, string text, string sourceDirectory = "C:/vendor/memory")
+    private static MemoryEntry Entry(
+        string fileName, string text, string sourceDirectory = "C:/vendor/memory", string repository = Repository)
     {
         var path = $"{sourceDirectory}/{fileName}";
         var sha256 = Convert.ToHexString(
@@ -969,8 +1050,8 @@ public sealed class MemoryProjectionTests : IDisposable
         var (kind, kindSource) = MemoryKindInference.Infer(Path.GetFileName(fileName), text);
 
         return new MemoryEntry(
-            MemoryEntry.Derive(Repository, path, sha256),
-            Repository,
+            MemoryEntry.Derive(repository, path, sha256),
+            repository,
             kind,
             kindSource,
             text,

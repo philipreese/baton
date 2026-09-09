@@ -1,3 +1,6 @@
+using Baton.Accounting;
+using Baton.Memory;
+
 namespace Baton.Cli;
 
 /// <summary>
@@ -7,7 +10,7 @@ namespace Baton.Cli;
 /// </summary>
 public static class MemoryAuditOptionsParser
 {
-    public const string Usage = "Usage: baton memory audit [--format text|json] [--help]";
+    public const string Usage = "Usage: baton memory audit [--repository <id>|fleet] [--format text|json] [--help]";
 
     /// <summary>
     /// What <c>--help</c> prints under <see cref="Usage"/>. Every line is a place a reader's prior
@@ -40,10 +43,18 @@ public static class MemoryAuditOptionsParser
         "has declared no longer true. Not a finding: a retraction is a recorded decision, not a question",
         "left open. The retracted entry's own row is still in its store; history is never deleted.",
         "",
+        "It also lists Baton's own CANONICAL STORES under ~/.baton/<slug>/memory/ -- the reserved FLEET",
+        "store first (operator and machine facts that belong to no repository, #2112), then one per",
+        "repository -- with each store's entry count. Rows are counted, never printed.",
+        "",
+        "  --repository <id>|fleet",
+        "                      Report only this canonical store in the CANONICAL STORES section. The root",
+        "                      inventory above it is machine-wide and is NOT filtered: hiding a root would",
+        "                      hide its findings.",
         "  --format json       One object: {claudeHome, userHome, roots, findings, counts, vendorRoots,",
-        "                      retractions}. Field names are the report record's own; an absent field is",
-        "                      absent, never null. vendorRoots and retractions are separate from roots and",
-        "                      are not counted in counts.",
+        "                      retractions, canonicalStores}. Field names are the report record's own; an",
+        "                      absent field is absent, never null. vendorRoots, retractions and",
+        "                      canonicalStores are separate from roots and are not counted in counts.",
         "",
         "Finding kinds, and what each one does NOT claim:",
         "  duplicate      One identical file (same SHA-256) in two or more roots. Not a ruling about",
@@ -67,6 +78,7 @@ public static class MemoryAuditOptionsParser
 
         var format = MemoryAuditOutputFormat.Text;
         var help = false;
+        string? repository = null;
 
         var i = 0;
         while (i < args.Count)
@@ -81,6 +93,10 @@ public static class MemoryAuditOptionsParser
                     break;
                 case "--format":
                     format = ParseFormat(RequireValue(args, i));
+                    i += 2;
+                    break;
+                case "--repository":
+                    repository = ParseRepository(RequireValue(args, i));
                     i += 2;
                     break;
                 // Named rather than left to the unknown-option branch below: an operator reaching for
@@ -99,8 +115,23 @@ public static class MemoryAuditOptionsParser
             }
         }
 
-        return new MemoryAuditOptions(format, help);
+        return new MemoryAuditOptions(format, help, repository);
     }
+
+    /// <summary>
+    /// The store selector: the reserved word, or a canonical identity — the same read-path half
+    /// <see cref="MemorySyncOptionsParser"/> applies, for the same reason (a raw casing would name a
+    /// store that does not exist and report it as empty).
+    /// </summary>
+    private static string ParseRepository(string value) =>
+        FleetMemory.IsFleet(value)
+            ? FleetMemory.Slug
+            : RepositoryIdentity.TryCanonicalize(value) is { Length: > 0 } canonical
+            ? canonical
+            : throw new CliArgumentException(
+                $"'{value.Trim()}' is not a repository identity or '{FleetMemory.Slug}': it has no " +
+                $"host-and-path to canonicalize, so no store could be named for it. {Usage}",
+                "pass a canonical identity such as 'github.com/owner/repo', or 'fleet'.");
 
     private static string RequireValue(IReadOnlyList<string> args, int index)
     {

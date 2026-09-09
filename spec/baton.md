@@ -440,10 +440,10 @@ carry is the conductor's own merging rules, which are the conductor's and never 
 | `templates` | `baton templates [--json]` | `Program.cs` |
 | `keep` | `baton keep <room-dir>` | `KeepOptionsParser.cs` |
 | `unkeep` | `baton unkeep <room-dir>` | `UnkeepOptionsParser.cs` |
-| `memory` | `baton memory audit [--format text\|json] [--help]` | `MemoryAuditOptionsParser.cs` |
-| `memory` | `baton memory import [--dry-run] [--root <dir>]... [--assert <path>=<repository>]... [--asserted-by <who>] \| --undo <manifest> [--help]` | `MemoryImportOptionsParser.cs` |
-| `memory` | `baton memory sync [--repository <id>] [--apply \| --check] [--format text\|json] [--repository-facts <dir>] [--help]` | `MemorySyncOptionsParser.cs` |
-| `memory` | `baton memory add --text <text> --kind <kind> [--repository <id>] [--dry-run] [--help]` | `MemoryAddOptionsParser.cs` |
+| `memory` | `baton memory audit [--repository <id>\|fleet] [--format text\|json] [--help]` | `MemoryAuditOptionsParser.cs` |
+| `memory` | `baton memory import [--dry-run] [--root <dir>]... [--assert <path>=<repository>\|fleet]... [--asserted-by <who>] \| --undo <manifest> [--help]` | `MemoryImportOptionsParser.cs` |
+| `memory` | `baton memory sync [--repository <id>\|fleet] [--apply \| --check] [--format text\|json] [--repository-facts <dir>] [--help]` | `MemorySyncOptionsParser.cs` |
+| `memory` | `baton memory add --text <text> --kind <kind> [--repository <id>\|fleet] [--dry-run] [--help]` | `MemoryAddOptionsParser.cs` |
 | `audit` | `baton audit lanes [--since <duration>] [--vendor <name>] [--rooms-root <dir>] [--format text\|json] [--help]` | `AuditLanesOptionsParser.cs` |
 
 `templates` narrows to the built-in catalog only (`Baton.Vendors`'s `BuiltInWorkflowTemplates`) —
@@ -6345,6 +6345,27 @@ states apart buys and what collapsing them would cost in an append-only store; t
 owns is that they are two states rather than one. **It is a reading of the
 environment, not a credential**: which roles may add and what an entry may contain is #1852's next
 write-path decision and is deliberately not built here.
+
+**The reserved `fleet` slug is the one store that belongs to no repository (operator, 2026-09-08 on
+#2112).** It lives at `~/.baton/fleet/memory/` — the bare word, where every repository slug carries a
+digest suffix, which is what makes the word safe to reserve: no git identity can slug to it, and
+`FleetMemory` is the one seam where the two derivations meet. **What may be fleet-scoped is what no
+repository could derive**: operator preferences, devices, standing lane rules, machine facts. **What
+may not is anything derivable from a repository** — a checked-in fact, a repository's own conventions,
+a cost-ledger row — and the verbs enforce the boundary at the parser: `add`, `sync`, `audit` and
+`import --assert` take `fleet` as a subject, while `--repository-facts` and `ledger --repo-identity`
+refuse it by name, because each of those is a thing a repository defines. **The merge rule, stated
+once: every repository's projection is the union of the fleet store and that repository's store,
+fleet entries first, and neither shadows the other.** The two subjects are disjoint by construction,
+so no id and no conflict key can collide across them; a repository entry whose text or filename
+matches a fleet entry's is projected beside it, never in its place; and the budget truncates the union
+in that order, so a repository entry drops before a fleet one does and every drop is named as before.
+The fleet store's own projection is the fleet store alone, written only into roots an operator asserted
+to `fleet` — a machine-wide fact already reaches every repository's file, so a fleet-only file is an
+option rather than the mechanism, and `sync` says so in the fleet's `NO TARGET` line. `audit` reports
+both kinds of store under one heading, counts only, the fleet store first; `CanonicalStoreInventory`
+is the enumeration `sync` walks and `audit` prints, and `MemoryFactOrigin.Fleet` is how a projected
+section says which store it came from.
 
 **`baton memory import` — phase B, shipped. Non-destructive by construction, and reversible.** Every
 source is opened read-only and left byte-identical; the verb writes in exactly two places, both under

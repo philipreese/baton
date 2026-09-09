@@ -132,7 +132,7 @@ public static class AuthoredMemory
         ArgumentException.ThrowIfNullOrEmpty(sha256);
 
         return Path.Combine(
-            BatonPaths.MemoryDirectory(Accounting.RepositoryIdentity.FileSlugFor(repository)),
+            BatonPaths.MemoryDirectory(FleetMemory.SlugFor(repository)),
             SourceDirectoryName,
             $"{sha256}.md");
     }
