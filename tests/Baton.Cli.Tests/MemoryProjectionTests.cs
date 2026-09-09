@@ -204,6 +204,44 @@ public sealed class MemoryProjectionTests : IDisposable
     }
 
     /// <summary>
+    /// A link naming a retracted endpoint is dropped by the existing dangling-link rule (#2113) --
+    /// <see cref="MemoryStore.Resolve"/> removes retracted entries from the present set BEFORE links are
+    /// applied, so the same "either endpoint absent" check that already handles a superseded/removed
+    /// entry handles a retracted one too, with no separate retraction-aware branch in the link logic.
+    /// Both directions are asserted, because the check is `!present.Contains(SupersedingId) ||
+    /// !present.Contains(SupersededId)` -- either side alone should trip it.
+    /// </summary>
+    [Fact]
+    public void A_link_naming_a_retracted_endpoint_is_dropped_in_either_direction()
+    {
+        var live = Entry("feedback_a.md", "current");
+        var archived = Entry("archived/feedback_a.md", "older");
+        var link = new MemorySupersessionLink(
+            MemorySupersessionLink.Derive(live.Id, archived.Id), live.Id, archived.Id, Repository, default);
+
+        // Retracted target (the superseded side): the link is dropped, and archived is gone entirely
+        // (retraction already removed it), so only `live` survives, unlinked.
+        var targetRetracted = new MemoryRetraction(archived.Id, Repository, "fixture retraction", "test", default);
+        var resolvedTargetRetracted = MemoryStore.Resolve([live, archived], [link], [targetRetracted]);
+        var survivorA = Assert.Single(resolvedTargetRetracted);
+        Assert.Equal(live.Id, survivorA.Id);
+        Assert.Empty(survivorA.Supersedes ?? []);
+
+        // Retracted source (the superseding side): symmetric -- only `archived` survives, unlinked.
+        var sourceRetracted = new MemoryRetraction(live.Id, Repository, "fixture retraction", "test", default);
+        var resolvedSourceRetracted = MemoryStore.Resolve([live, archived], [link], [sourceRetracted]);
+        var survivorB = Assert.Single(resolvedSourceRetracted);
+        Assert.Equal(archived.Id, survivorB.Id);
+        Assert.Empty(survivorB.SupersededBy ?? []);
+
+        // Control: with neither endpoint retracted, the link applies as MemoryProjectionTests' own
+        // superseded test already pins -- both entries present, archived carries the SupersededBy link.
+        var resolvedNeitherRetracted = MemoryStore.Resolve([live, archived], [link], []);
+        Assert.Equal(2, resolvedNeitherRetracted.Count);
+        Assert.Contains(live.Id, resolvedNeitherRetracted.Single(e => e.Id == archived.Id).SupersededBy ?? []);
+    }
+
+    /// <summary>
     /// A checked-in repository fact and a vendor-memory fact of the same name: the checked-in text is
     /// what reaches the bytes, the losing row comes back in the report carrying its canonical id, and
     /// the two are not combined. The control is a vendor entry nothing collides with — it survives, which is
@@ -727,6 +765,47 @@ public sealed class MemoryProjectionTests : IDisposable
             "would rewrite",
             document.RootElement.GetProperty("repositories")[0].GetProperty("targets")[0]
                 .GetProperty("disposition").GetString());
+    }
+
+    /// <summary>
+    /// Every stored entry retracted (#2113): <c>sync</c> must not crash reading `resolved[0]` (empty,
+    /// since Resolve drops every retracted entry) when it needs the repository name -- the fix reads
+    /// `stored[0]` instead. Report-shape checks ride along: the text report names both retractions under
+    /// "omitted as RETRACTED" with their reasons, the JSON `retracted` array carries both with the
+    /// `retracted` property name, and the projected file itself is empty of both entries' text.
+    /// </summary>
+    [Fact]
+    public async Task Sync_over_an_entirely_retracted_store_reports_both_retractions_and_projects_nothing()
+    {
+        var root = await SeedStoreAndClaudeRootAsync();
+        var stored = await MemoryStore.ReadAllAsync(BatonPaths.MemoryEntriesFile(Slug), TestContext.Current.CancellationToken);
+        Assert.Equal(2, stored.Count);
+
+        await MemoryStore.AppendRetractionsAsync(
+            [
+                new MemoryRetraction(stored[0].Id, Repository, "first fixture retraction", "test", default),
+                new MemoryRetraction(stored[1].Id, Repository, "second fixture retraction", "test", default),
+            ],
+            BatonPaths.MemoryRetractionsFile(Slug),
+            TestContext.Current.CancellationToken);
+
+        var (exitCode, output) = await RunForExitAsync("--repository", Repository, "--apply");
+
+        Assert.Equal(0, exitCode);
+        Assert.Contains("omitted as RETRACTED", output, StringComparison.Ordinal);
+        Assert.Contains("first fixture retraction", output, StringComparison.Ordinal);
+        Assert.Contains("second fixture retraction", output, StringComparison.Ordinal);
+
+        var target = Path.Combine(root, ClaudeProjectionTarget.ProjectionFileName);
+        var projected = File.ReadAllText(target);
+        Assert.DoesNotContain("the vendor's copy", projected, StringComparison.Ordinal);
+        Assert.DoesNotContain("where this is going", projected, StringComparison.Ordinal);
+
+        var (jsonExit, json) = await RunForExitAsync("--repository", Repository, "--check", "--format", "json");
+        Assert.Equal(0, jsonExit);
+        using var document = JsonDocument.Parse(json);
+        var retracted = document.RootElement.GetProperty("repositories")[0].GetProperty("retracted");
+        Assert.Equal(2, retracted.GetArrayLength());
     }
 
     /// <summary>
