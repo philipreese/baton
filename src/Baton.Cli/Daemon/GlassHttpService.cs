@@ -35,15 +35,16 @@ namespace Baton.Cli.Daemon;
 /// reachability and nothing else.
 /// </para>
 /// <para>
-/// <b>On Windows any prefix can end up needing a URL reservation.</b> Measured 2026-09-07 on the
-/// operator's machine: an unelevated process binds <c>http://127.0.0.1:PORT/</c> fine and gets
-/// "Access is denied" for <c>http://100.x.y.z:PORT/</c> with no reservation at all. That looked like
-/// a loopback-is-always-free rule, and it is not one: measured again 2026-09-08, after the operator
-/// granted urlacl reservations for the two tailnet prefixes, the same unelevated process started
-/// getting "Access is denied" for <c>http://127.0.0.1:PORT/</c> too — a prefix that had bound cleanly
-/// for the prior day. Whatever changed on the reservation table, loopback is not exempt from needing
-/// one once other reservations exist on the port, so no prefix here is treated as needing no
-/// reservation. Each is a one-time elevated <c>netsh http add urlacl</c>, which the per-prefix
+/// <b>On Windows, loopback was observed to need a URL reservation too, not just the tailnet
+/// prefixes.</b> Measured 2026-09-07 on the operator's machine: an unelevated process binds
+/// <c>http://127.0.0.1:PORT/</c> fine and gets "Access is denied" for <c>http://100.x.y.z:PORT/</c>
+/// with no reservation at all. That looked like a loopback-is-always-free rule; measured again
+/// 2026-09-08, after the operator granted urlacl reservations for the two tailnet prefixes, the
+/// same unelevated process started getting "Access is denied" for <c>http://127.0.0.1:PORT/</c>
+/// too — a prefix that had bound cleanly for the prior day. This is one operator machine on one
+/// day, not an independently verified account of HTTP.sys's ACL mechanics, but it is enough that
+/// no prefix here is treated as needing no reservation. Each is a one-time elevated
+/// <c>netsh http add urlacl</c>, which the per-prefix
 /// failure log below prints verbatim for whichever prefix actually failed; a bind refusal on one
 /// prefix costs only that prefix's reachability, never the daemon.
 /// </para>

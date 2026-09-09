@@ -4078,8 +4078,8 @@ code 2147942470 (exit 70), followed by ten minutes without a restart (#2083).
   `threadPoolThreads`, `gcTotalMemoryBytes`, `workingSetBytes` — the process's own counters at the
   sample's capture instant), and `glassBoundPrefixes` (#2130: the prefixes `GlassHttpService`
   actually bound, as reported to `DaemonTickLedger.RecordGlassBoundPrefixes`; omitted, not an empty
-  array, until that service has completed its first tick — the listener off reads differently from
-  the listener on with every prefix refused). These are process-counter reads; capture has been
+  array, until that service has completed its one-time bind pass — the listener off reads
+  differently from the listener on with every prefix refused). These are process-counter reads; capture has been
   tested on a healthy pool, not drilled against a wedged pool.
   A service's `lastTickMs` against its `intervalMs` is the host-load signal that predates the freeze:
   on 2026-09-08 `FleetProjectionWriter` had reached 10.97 s against 30 s in the last body written

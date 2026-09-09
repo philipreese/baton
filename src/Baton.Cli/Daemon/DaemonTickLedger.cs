@@ -104,6 +104,7 @@ internal sealed class DaemonTickLedger
     /// service, the duration of its own last tick in milliseconds beside when it finished; and
     /// <paramref name="load"/> as <c>hostLoad</c>, the host as it looked when this body was rendered.
     /// </summary>
+
     /// <summary>The prefixes <see cref="GlassHttpService"/> actually bound, last reported -- #2130,
     /// spec/baton.md §7 states why a reverse proxy needs this. Null until that service has run at
     /// least once (off, or not yet at its first tick); empty once it has run with every bind
