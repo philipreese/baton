@@ -5745,7 +5745,7 @@ same night on `queue-b985-e52959a0` against a target repository (basis) whose pr
 underlying repository also changed). Before this ruling `git commit` fell through to `other` and was
 killed at that class's flat 300 s (`ShellCommandCeilings.Other`), twice, on a room whose every change
 had already been made — the same failure shape #1998 fixed for `git push`, on the verb #1998 did not
-yet name. `git commit` shares `gh push`'s allowance (`ShellCommandCeilings.PushTransferAllowance`)
+yet name. `git commit` shares `git push`'s allowance (`ShellCommandCeilings.PushTransferAllowance`)
 rather than a separately measured one: neither hook shape's transfer cost was measured on its own, and
 inventing a fourth number a ruling never sized would be exactly the drift `record-once` forbids. This
 enforcement remains scoped to the one path that holds the stopwatch (`baton_run_command`, above) — a

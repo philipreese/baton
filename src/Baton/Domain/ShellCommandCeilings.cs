@@ -99,9 +99,13 @@ public static class ShellCommandCeilings
     /// The room-facing half of the same fact: why a delivery check found no branch on origin (#1998).
     /// Reads the TABLE value rather than any injected one, deliberately — the room is not the process
     /// that ran the command, and a test seam's one-second ceiling is not what a lane ran under.
+    /// Names no single command (#2135): the shipping class covers <c>git push</c>, <c>git commit</c>,
+    /// and <c>gh pr create</c> alike, and <see cref="ShippingCeilingMarker"/>'s own reader carries none
+    /// of them forward — only that a shipping-class command was killed, the same generalization
+    /// <see cref="DescribeTimeout"/> already applies to the worker-facing text.
     /// </summary>
     public static string ShippingBreachReason() =>
-        $"the push exceeded the shipping ceiling ({Seconds(Shipping)} s) during the pre-push gate";
+        $"the publication command exceeded the shipping ceiling ({Seconds(Shipping)} s) while the repository hook was still running";
 
     /// <summary>
     /// Whether <paramref name="text"/> is a shipping-class ceiling timeout this build produced —
