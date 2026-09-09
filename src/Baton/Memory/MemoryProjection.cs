@@ -106,10 +106,11 @@ public sealed record MemoryProjectionResult(
 /// is derived from) without changing when nothing else did.
 /// </description></item>
 /// <item><description>
-/// <b>A total order, applied before anything else.</b> <c>(repository, kind, id)</c>, all three
-/// ordinal: the first two group the file the way a reader reads it, and the id is what makes the order
-/// total — without it two entries of one kind sort equal and their relative order is whatever the
-/// caller's enumeration happened to be.
+/// <b>A total order, applied before anything else.</b> Fleet-origin candidates sort ahead of every
+/// repository one (#2112 — this is the merge rule's mechanism, not a preference), then
+/// <c>(repository, kind, id)</c>, all three ordinal within each tier: the first two group the file the
+/// way a reader reads it, and the id is what makes the order total — without it two entries of one
+/// kind sort equal and their relative order is whatever the caller's enumeration happened to be.
 /// </description></item>
 /// <item><description>
 /// <b><c>\n</c>, UTF-8, no BOM — pinned, not inherited.</b> <c>Environment.NewLine</c>,
@@ -321,7 +322,8 @@ public static class MemoryProjection
     /// <b>The key is case-INSENSITIVE, and two repository facts that collide under it are not an
     /// error.</b> The lookup groups rather than throwing: both repository facts are projected (a
     /// repository-origin candidate is never overridden), and the one a colliding vendor copy is reported
-    /// as outranked by is the first in the caller's already-total <c>(repository, kind, id)</c> order.
+    /// as outranked by is the first in the caller's already-total order — fleet tier first (#2112), then
+    /// <c>(repository, kind, id)</c> within it.
     /// So <c>Rules.md</c> and <c>rules.md</c> in one facts directory on a case-sensitive filesystem give
     /// a deterministic answer where <c>ToDictionary</c> threw <see cref="ArgumentException"/> out of a
     /// public pure function.
@@ -372,8 +374,9 @@ public static class MemoryProjection
 
     private static string BudgetReason(ProjectionBudget budget) =>
         $"beyond the projection budget ({budget.Describe()}). Truncation stops at the first entry that " +
-        "does not fit and drops the rest of the order, so this entry and everything after it in " +
-        "(repository, kind, id) are absent from the cache and present in the canonical store.";
+        "does not fit and drops the rest of the order, so this entry and everything after it in the " +
+        "fleet-first, then (repository, kind, id) order are absent from the cache and present in the " +
+        "canonical store.";
 
     /// <summary>
     /// One entry's section. The HTML comment is the machine-readable back-pointer; the line beside it
