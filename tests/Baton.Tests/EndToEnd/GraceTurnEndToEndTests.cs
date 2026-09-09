@@ -110,6 +110,46 @@ public sealed class GraceTurnEndToEndTests
         }
     }
 
+    [Fact]
+    public async Task A_grace_turn_spawn_failure_is_recorded_and_the_room_still_settles_Indeterminate()
+    {
+        var run = await RunArrestedLaneAsync(graceShouldCommit: false, graceSpawnFails: true);
+        try
+        {
+            Assert.Equal(WorkflowOutcome.Indeterminate, WorkflowOutcome.Describe(run.FinalState));
+            Assert.Single(run.Events.OfType<FlowEvent.ExecutionArrested>());
+
+            var grace = Assert.Single(run.Events.OfType<FlowEvent.GraceTurnAttempted>());
+            Assert.False(grace.WorkspaceCleanAfter);
+            Assert.Equal(CoreExitReason.CancelRequested, grace.ExitReason);
+            Assert.Null(grace.ArrestReason);
+
+            Assert.Equal(2, run.Dispatcher.CallCount);
+            Assert.False(RepositoryIsClean(run.Workspace));
+        }
+        finally
+        {
+            run.Cleanup();
+        }
+    }
+
+    [Fact]
+    public async Task A_grace_turn_preserves_the_binding_stdout_sink()
+    {
+        var receivedLines = new List<string>();
+        var run = await RunArrestedLaneAsync(
+            graceShouldCommit: true,
+            onStdoutLine: receivedLines.Add);
+        try
+        {
+            Assert.Contains("grace turn output", receivedLines);
+        }
+        finally
+        {
+            run.Cleanup();
+        }
+    }
+
     private sealed record LaneRun(
         FlowState FinalState,
         IReadOnlyList<FlowEvent> Events,
@@ -117,7 +157,11 @@ public sealed class GraceTurnEndToEndTests
         GraceTurnCoreDispatcher Dispatcher,
         Action Cleanup);
 
-    private static async Task<LaneRun> RunArrestedLaneAsync(bool graceShouldCommit, bool verifiesWorkspace = true)
+    private static async Task<LaneRun> RunArrestedLaneAsync(
+        bool graceShouldCommit,
+        bool verifiesWorkspace = true,
+        bool graceSpawnFails = false,
+        Action<string>? onStdoutLine = null)
     {
         var roomDirectory = Path.Combine(Path.GetTempPath(), $"task-{Guid.NewGuid():N}");
         var workspace = Path.Combine(roomDirectory, "lane");
@@ -137,7 +181,9 @@ public sealed class GraceTurnEndToEndTests
         {
             ["implement"] = new WorkerBinding.Process(
                 new WorkerContract("implement", [], [new ProducedOutput("pr.md")], []),
-                new CoreDispatchTarget("vendor-cli", ["-p", "ORIGINAL BRIEF"], WorkingDirectory: workspace, PromptText: "ORIGINAL BRIEF"),
+                new CoreDispatchTarget(
+                    "vendor-cli", ["-p", "ORIGINAL BRIEF"], WorkingDirectory: workspace,
+                    OnStdoutLine: onStdoutLine, PromptText: "ORIGINAL BRIEF"),
                 TimeSpan.FromSeconds(30),
                 Adapter: "claude",
                 TokenBudget: 1000,
@@ -145,7 +191,8 @@ public sealed class GraceTurnEndToEndTests
                 VerifiesWorkspace: verifiesWorkspace),
         };
 
-        var dispatcher = new GraceTurnCoreDispatcher(workspace, PrimaryArrestingUsageLine, graceShouldCommit, GraceExceedingUsageLine);
+        var dispatcher = new GraceTurnCoreDispatcher(
+            workspace, PrimaryArrestingUsageLine, graceShouldCommit, GraceExceedingUsageLine, graceSpawnFails);
 
         await using var writer = new FlowEventLogWriter(logPath);
         var reader = new FlowEventLogReader(logPath);
@@ -219,7 +266,11 @@ public sealed class GraceTurnEndToEndTests
     /// which.
     /// </summary>
     private sealed class GraceTurnCoreDispatcher(
-        string workspace, string primaryUsageLine, bool graceShouldCommit, string graceExceedingUsageLine) : ICoreDispatcher
+        string workspace,
+        string primaryUsageLine,
+        bool graceShouldCommit,
+        string graceExceedingUsageLine,
+        bool graceSpawnFails) : ICoreDispatcher
     {
         public int CallCount { get; private set; }
 
@@ -235,8 +286,14 @@ public sealed class GraceTurnEndToEndTests
                 return new CoreDispatchResult(-1, CoreExitReason.CancelRequested);
             }
 
+            if (graceSpawnFails)
+            {
+                throw new InvalidOperationException("grace worker could not be spawned");
+            }
+
             if (graceShouldCommit)
             {
+                target.OnStdoutLine?.Invoke("grace turn output");
                 RunGit(workspace, "add", ".");
                 RunGit(workspace, "commit", "-m", "fix: commit incomplete work under grace turn");
                 return new CoreDispatchResult(0, CoreExitReason.Natural);

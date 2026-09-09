@@ -2178,6 +2178,19 @@ public static class MutationInterface
                 return;
             }
 
+            // #2134: a box timeout is an engine arrest just as a token/tool-step/billed-rate monitor
+            // arrest is. It gets the same one bounded courtesy turn when the workspace is dirty; the
+            // ordinary timeout classification below still records the primary execution's outcome.
+            if (dispatchResult.Reason == CoreExitReason.TimedOut
+                && binding.VerifiesWorkspace
+                && mutationProbePath is not null
+                && !Workspaces.WorktreeProvisioner.Audit(mutationProbePath).IsClean)
+            {
+                await RunGraceTurnAsync(
+                        prepared, binding, mutationProbePath, dispatcher, eventLogWriter, dispatchCancellationToken)
+                    .ConfigureAwait(false);
+            }
+
             // The request's mode was set from this binding at preparation; null can only mean a
             // request shape that predates the mode, and those were never promised an audit.
             var grantAuditMode = prepared.Request.GrantAuditMode ?? GrantAuditMode.Enforced;
@@ -2492,13 +2505,25 @@ public static class MutationInterface
             ? new TokenBudgetMonitor(GraceTurn.TokenBudget, GraceTurn.MaxToolSteps, billedRateLimit: null, graceUsageParser)
             : null;
 
-        var graceTarget = binding.Target.WithReplacedPrompt(GraceTurn.PromptText) with
+        var graceTarget = binding.Target.WithReplacedPrompt(GraceTurn.PromptText);
+        if (graceMonitor is not null)
         {
-            OnStdoutLine = graceMonitor is null ? null : graceMonitor.OnStdoutLine,
-            // Nothing new to seed or journal on this dispatch -- both are the primary dispatch's own
-            // pre-spawn concerns (FlowEvent.EngineFilesPlaced), already durable from that spawn.
-            OnEngineFilesPlaced = null,
-        };
+            // #2162: the binding target can already capture a session id and mirror --echo-worker
+            // output. The grace monitor joins that sink; it must not replace it.
+            var innerOnStdoutLine = graceTarget.OnStdoutLine;
+            graceTarget = graceTarget with
+            {
+                OnStdoutLine = line =>
+                {
+                    innerOnStdoutLine?.Invoke(line);
+                    graceMonitor.OnStdoutLine(line);
+                },
+            };
+        }
+
+        // Nothing new to seed or journal on this dispatch -- both are the primary dispatch's own
+        // pre-spawn concerns (FlowEvent.EngineFilesPlaced), already durable from that spawn.
+        graceTarget = graceTarget with { OnEngineFilesPlaced = null };
 
         var graceRequest = prepared.Request with
         {
