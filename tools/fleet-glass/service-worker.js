@@ -34,7 +34,8 @@ async function networkNavigation(request, fetchImpl = fetch, timeoutMs = NAVIGAT
 
 async function navigationResponse(request, fetchImpl = fetch, timeoutMs = NAVIGATION_TIMEOUT_MS){
   try {
-    return await networkNavigation(request, fetchImpl, timeoutMs);
+    const response = await networkNavigation(request, fetchImpl, timeoutMs);
+    return response.ok ? response : unavailableResponse();
   } catch {
     return unavailableResponse();
   }

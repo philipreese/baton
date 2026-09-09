@@ -37,6 +37,15 @@ const success = await worker.navigationResponse(
   });
 check("a successful navigation returns the real network response", success.status === 200 && await success.text() === "real dashboard");
 
+for (const status of [502, 503, 504]) {
+  const failedResponse = await worker.navigationResponse(
+    { url: "https://private.example/", mode: "navigate" },
+    async () => new Response(`proxy ${status}`, { status }));
+  const failedResponseHtml = await failedResponse.text();
+  check(`a resolved ${status} navigation returns the self-contained Baton Retry page`,
+    failedResponse.status === 503 && failedResponseHtml.includes("Baton cannot be reached") && failedResponseHtml.includes("Retry"));
+}
+
 const failed = await worker.navigationResponse(
   { url: "https://private.example/", mode: "navigate" },
   async () => { throw new TypeError("network down"); });
