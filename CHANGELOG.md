@@ -9,6 +9,15 @@ that carried them: `git show v0.35.0:src/Baton.Cli/CHANGELOG.md` (likewise `src/
 `release-please-config.json`. Everything below this line predates the split: the repo's single
 shared version through `0.14.0`.
 
+## [0.42.1](https://github.com/philipreese/baton/compare/v0.42.0...v0.42.1) (2026-09-09)
+
+
+### Bug Fixes
+
+* **queue:** No adapter gets a lighter lane weight than any other ([#2164](https://github.com/philipreese/baton/issues/2164)) ([62db9d8](https://github.com/philipreese/baton/commit/62db9d8a1750f010e28a0746bcf718b8fb606227))
+* **vendor-probe:** Clear the drift clock on re-pin, not just at probe time ([#2154](https://github.com/philipreese/baton/issues/2154)) ([9baaf5f](https://github.com/philipreese/baton/commit/9baaf5fb736707a12a2ed6fbae005c80db7afee3))
+* **vendors:** Re-pin codex's recorded model catalog to the 2026-09-08 probe, dropping gpt-5.4-mini ([#2155](https://github.com/philipreese/baton/issues/2155)) ([6fa03d4](https://github.com/philipreese/baton/commit/6fa03d45ee20e10249d25a5ee1dcf395547b09ff))
+
 ## [0.42.0](https://github.com/philipreese/baton/compare/v0.41.0...v0.42.0) (2026-09-09)
 
 
