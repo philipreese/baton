@@ -137,6 +137,41 @@ public sealed record CoreDispatchTarget(
         args[promptArgIndex] = prefixed;
         return this with { Args = args, PromptText = prefixed };
     }
+
+    /// <summary>
+    /// #2134: returns this target with its prompt REPLACED wholesale by <paramref name="newPrompt"/> —
+    /// unlike <see cref="WithPromptPreamble"/>, which prepends to the existing prompt, this drops it
+    /// entirely. Built for <c>Mutation.GraceTurn</c>: a bounded, self-contained follow-up dispatch that
+    /// deliberately does not carry the original task's prompt forward, only the same grant (program,
+    /// args, working directory). Same invariant and failure mode as <see cref="WithPromptPreamble"/>:
+    /// <see cref="PromptText"/> and the <see cref="Args"/> element carrying it must stay identical.
+    /// </summary>
+    /// <exception cref="PromptPreambleException">
+    /// <see cref="PromptText"/> is set but no <see cref="Args"/> element equals it.
+    /// </exception>
+    public CoreDispatchTarget WithReplacedPrompt(string newPrompt)
+    {
+        ArgumentException.ThrowIfNullOrWhiteSpace(newPrompt);
+
+        if (PromptText is not { } promptText)
+        {
+            // Same no-op reading WithPromptPreamble takes for an adapter with no prose prompt at all.
+            return this;
+        }
+
+        var args = Args.ToList();
+        var promptArgIndex = args.IndexOf(promptText);
+        if (promptArgIndex < 0)
+        {
+            throw new PromptPreambleException(
+                $"Cannot replace the prompt for '{Program}': its PromptText is set but no argument " +
+                "equals it, so the replacement would reach prompt.txt and never the worker. An adapter " +
+                "must pass the same prompt string as both an argument and PromptText.");
+        }
+
+        args[promptArgIndex] = newPrompt;
+        return this with { Args = args, PromptText = newPrompt };
+    }
 }
 
 /// <summary>

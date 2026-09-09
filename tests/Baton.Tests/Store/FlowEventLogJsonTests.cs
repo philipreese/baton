@@ -56,6 +56,9 @@ public class FlowEventLogJsonTests
         new FlowEvent.EngineFilesPlaced(
             ExecutionId, [new EnginePlacedFile(@"C:\repo\.claude\skills\audit-tool\SKILL.md", "9f2b1c")], ["audit-tool"]),
         new FlowEvent.ExecutionArrested(ExecutionId, new WorkerUsage(TokensIn: 500_000, TokensOut: 120_000), ["manage_task"]),
+        // #2134: both GraceTurnAttempted.ArrestReason polarities on the wire (FlowEvent.cs's own doc).
+        new FlowEvent.GraceTurnAttempted(ExecutionId, WorkspaceCleanAfter: true, CoreExitReason.Natural),
+        new FlowEvent.GraceTurnAttempted(ExecutionId, WorkspaceCleanAfter: false, CoreExitReason.CancelRequested, ArrestReason.TokenBudget),
         new FlowEvent.StepRebound(StepId, ExecutionId, "agy", "gemini-3-pro", "claude", "sonnet", "Vendor failover"),
         new FlowEvent.ExecutionIndeterminate(ExecutionId, "reason", ".captured-response.md", ["advice.md"]),
         new FlowEvent.CaptureResolved(StepId, ExecutionId, Accepted: true, Reason: "capture honestly satisfies advice.md", ResolvedOutputNames: ["advice.md"]),

@@ -41,6 +41,7 @@ namespace Baton.Domain;
 [JsonDerivedType(typeof(DeliveryMerged), "deliveryMerged")]
 [JsonDerivedType(typeof(StreamLogLossDeclared), "streamLogLossDeclared")]
 [JsonDerivedType(typeof(EngineFilesPlaced), "engineFilesPlaced")]
+[JsonDerivedType(typeof(GraceTurnAttempted), "graceTurnAttempted")]
 public abstract record FlowEvent
 {
     private FlowEvent()
@@ -499,6 +500,27 @@ public abstract record FlowEvent
         string? Adapter = null,
         string? DominantCommandShape = null,
         int? DominantCommandSharePercent = null) : FlowEvent;
+
+    /// <summary>
+    /// #2134: the grace turn's own outcome (`spec/baton.md` §3, "The grace turn", is the canonical
+    /// account — not restated here). Always precedes the <see cref="ExecutionArrested"/> line for the
+    /// same <paramref name="ExecutionId"/>; this event carries no
+    /// <see cref="Status.WorkflowOutcome"/> consequence of its own.
+    /// </summary>
+    /// <param name="WorkspaceCleanAfter">
+    /// Whether <c>git status --porcelain</c> reported a clean workspace once the grace dispatch
+    /// returned — the best local evidence that it committed, not itself proof of a push.
+    /// </param>
+    /// <param name="ExitReason">The grace dispatch's own <see cref="CoreExitReason"/>.</param>
+    /// <param name="ArrestReason">
+    /// Set when, and only when, its own bounded <c>Mutation.TokenBudgetMonitor</c> cut this dispatch
+    /// short — the counterpart shape to <paramref name="WorkspaceCleanAfter"/> being false.
+    /// </param>
+    public sealed record GraceTurnAttempted(
+        ExecutionId ExecutionId,
+        bool WorkspaceCleanAfter,
+        CoreExitReason ExitReason,
+        ArrestReason? ArrestReason = null) : FlowEvent;
 
     /// <summary>
     /// S6 (spec/baton.md §3, #802 section 3.3, pulled forward by #1583): records that a step's execution was rebound to a different
