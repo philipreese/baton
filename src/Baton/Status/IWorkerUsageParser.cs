@@ -31,11 +31,21 @@ public interface IWorkerUsageParser
     /// (<c>ClaudeUsageParser.TryParseIncrementalUsage</c>'s own doc has why), so nothing ever exercised
     /// the claim. Measured on the two vendors that do populate it: agy's is additive
     /// (<c>docs/vendor-capabilities.md</c>, "agy's terminal <c>result.usage</c> IS the cumulative Σ of
-    /// its per-turn lines"; <c>AgyTerminalUsageIsCumulativeTests</c> pins it against real 70/157/190-turn
-    /// captures, where summing every turn's <c>TokensIn</c> reproduces the vendor's own terminal total to
-    /// the token, while reading only the last turn's figure — the LEVEL reading this doc used to
-    /// prescribe — undercounts by two-to-three orders of magnitude on those same captures) and codex's is
-    /// additive by construction (<c>CodexUsageParser</c> computes it as each round-trip's own non-cached
+    /// its per-turn lines" — measured on three real captures, 70/258/263 turns).
+    /// <c>AgyTerminalUsageIsCumulativeTests</c> pins it against one of those (70 turns), where summing
+    /// every turn's <c>TokensIn</c> reproduces the vendor's own terminal total to the token, while
+    /// reading only the last turn's figure — the LEVEL reading this doc used to prescribe — undercounts
+    /// by two orders of magnitude on that capture.
+    /// <c>AgyArrestedRoomUsageReplaysAdditiveTests</c> pins a second real shape: the 157-turn capture
+    /// from the <c>b982</c> room issue #2144 arrested, reproducing that room's own conductor-verified
+    /// billed total (<c>sum(input_tokens) + sum(output_tokens) = 1,203,855</c>, computed directly
+    /// against the raw <c>.stdout.log</c> independently of any parser in this repo). The sibling arrest,
+    /// <c>cmpa2-1951-agy-r2</c> (190 turns, total 1,203,170), is corroborated the same way but has no
+    /// fixture of its own — it is recorded in <c>benchmarks/comparator.md:110</c>. Both arrests are the
+    /// rooms the additive claim explains, not part of the measured population
+    /// <c>docs/vendor-capabilities.md</c> states (70/258/263 turns); citing them as additional captured
+    /// test fixtures is the mistake this correction removes. codex's <c>TokensIn</c> is additive by
+    /// construction (<c>CodexUsageParser</c> computes it as each round-trip's own non-cached
     /// remainder and its <c>Combine</c> sums it across round-trips deliberately). No shipped parser's
     /// <c>TokensIn</c> reading is ever a level; only <see cref="Baton.Mutation.TokenBudgetMonitor"/>'s own
     /// DERIVED context-size aggregate (<c>ContextLevelTokens</c>, folding <c>TokensIn</c> +
