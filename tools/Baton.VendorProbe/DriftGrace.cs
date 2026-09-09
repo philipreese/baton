@@ -42,82 +42,138 @@ public static class DriftGrace
         CorruptFail,
     }
 
-    public sealed record Bookkeeping(DateTimeOffset FirstDetectedAt);
+    /// <summary>
+    /// Vendors owns each clock. FirstDetectedAt is their oldest instant for existing file readers.
+    /// A legacy file without Vendors conservatively assigns its instant to every supported vendor
+    /// until that vendor is confirmed Current or re-pinned; a partial run cannot infer its owner.
+    /// </summary>
+    public sealed record Bookkeeping(
+        DateTimeOffset FirstDetectedAt,
+        IReadOnlyDictionary<string, DateTimeOffset>? Vendors = null);
 
     public sealed record Result(Verdict Verdict, string Message)
     {
         public bool Fatal => Verdict is Verdict.StaleFail or Verdict.CorruptFail;
     }
 
-    /// <summary>
-    /// One call, consumed by both the loud checker layer (<c>vendor-check</c>, which prints
-    /// <see cref="Result.Message"/> so it lands in <c>gates</c> output) and the xunit tripwire
-    /// (which only needs <see cref="Result.Fatal"/>) — so the two never disagree about what today's
-    /// verdict is.
-    /// </summary>
-    public static Result Evaluate(string bookkeepingPath, bool driftDetected, DateTimeOffset now)
+    /// <summary>Clears only the clocks covered by a successfully recorded probe run.</summary>
+    internal static void ClearRepinned(string path, IEnumerable<string> vendors)
     {
-        if (!driftDetected)
+        if (!File.Exists(path))
         {
-            if (File.Exists(bookkeepingPath))
+            return;
+        }
+
+        var clocks = ReadClocks(path);
+        var changed = false;
+        foreach (var vendor in vendors)
+        {
+            changed |= clocks.Remove(vendor);
+        }
+
+        if (changed)
+        {
+            WriteClocks(path, clocks);
+        }
+    }
+
+    private static Dictionary<string, DateTimeOffset> ReadClocks(string path)
+    {
+        var recorded = JsonSerializer.Deserialize<Bookkeeping>(File.ReadAllText(path), Json);
+        if (recorded is null || recorded.FirstDetectedAt == default
+            || recorded.Vendors is { Count: 0 }
+            || recorded.Vendors?.Any(v => string.IsNullOrWhiteSpace(v.Key) || v.Value == default) == true)
+        {
+            throw new JsonException("Missing or invalid drift instants.");
+        }
+
+        return recorded.Vendors is null
+            ? Program.SupportedVendors.ToDictionary(v => v, _ => recorded.FirstDetectedAt, StringComparer.Ordinal)
+            : new Dictionary<string, DateTimeOffset>(recorded.Vendors, StringComparer.Ordinal);
+    }
+
+    private static void WriteClocks(string path, Dictionary<string, DateTimeOffset> clocks)
+    {
+        if (clocks.Count == 0)
+        {
+            if (File.Exists(path))
             {
-                try
+                File.Delete(path);
+            }
+
+            return;
+        }
+
+        Directory.CreateDirectory(Path.GetDirectoryName(Path.GetFullPath(path))!);
+        File.WriteAllText(path, JsonSerializer.Serialize(new Bookkeeping(clocks.Values.Min(), clocks), Json));
+    }
+
+    /// <summary>
+    /// Shared verdict for vendor-check and its architecture tripwire. Only the supplied statuses
+    /// can clear or restart clocks; an omitted or Uninspectable vendor retains its recorded instant.
+    /// Without statuses, driftDetected describes all supported vendors (the legacy calling form).
+    /// </summary>
+    /// <remarks>
+    /// #2123: a newer RecordedAt clears only that vendor's older drift. This also recovers when
+    /// the probe wrote its lock but could not update bookkeeping, even if the same vendor has
+    /// already drifted again before the next check.
+    /// </remarks>
+    public static Result Evaluate(
+        string bookkeepingPath,
+        bool driftDetected,
+        DateTimeOffset now,
+        IReadOnlyList<Staleness.Status>? statuses = null)
+    {
+        statuses ??= Program.SupportedVendors.Select(v => new Staleness.Status(
+            v, driftDetected ? Staleness.Verdict.Drifted : Staleness.Verdict.Current,
+            null, null, null)).ToList();
+
+        var active = new List<DateTimeOffset>();
+        try
+        {
+            var clocks = File.Exists(bookkeepingPath)
+                ? ReadClocks(bookkeepingPath)
+                : new Dictionary<string, DateTimeOffset>(StringComparer.Ordinal);
+            var changed = false;
+            foreach (var status in statuses)
+            {
+                if (status.Verdict == Staleness.Verdict.Current)
                 {
-                    File.Delete(bookkeepingPath);
+                    changed |= clocks.Remove(status.Vendor);
                 }
-                catch (IOException ex)
+                else if (status.Verdict is Staleness.Verdict.Drifted or Staleness.Verdict.NeverProbed)
                 {
-                    // Fail closed, same as an unreadable file: a clock this run could not actually
-                    // clear must not be reported as cleared.
-                    return new Result(
-                        Verdict.CorruptFail,
-                        $"{bookkeepingPath} records cleared drift but could not be deleted ({ex.Message}). "
-                        + "Failing closed rather than reporting a clock as cleared when it was not.");
+                    if (!clocks.TryGetValue(status.Vendor, out var firstDetectedAt)
+                        || status.RecordedAt > firstDetectedAt)
+                    {
+                        firstDetectedAt = now;
+                        clocks[status.Vendor] = firstDetectedAt;
+                        changed = true;
+                    }
+
+                    active.Add(firstDetectedAt);
                 }
-
-                return new Result(
-                    Verdict.NoDrift,
-                    "no vendor CLI is drifted; a previously recorded drift instant was cleared");
             }
 
-            return new Result(Verdict.NoDrift, "no vendor CLI is drifted");
+            if (changed)
+            {
+                WriteClocks(bookkeepingPath, clocks);
+            }
         }
-
-        Bookkeeping recorded;
-        if (File.Exists(bookkeepingPath))
+        catch (Exception ex) when (ex is JsonException or IOException or UnauthorizedAccessException)
         {
-            Bookkeeping? parsed;
-            try
-            {
-                parsed = JsonSerializer.Deserialize<Bookkeeping>(File.ReadAllText(bookkeepingPath), Json);
-            }
-            catch (Exception ex) when (ex is JsonException or IOException)
-            {
-                return new Result(
-                    Verdict.CorruptFail,
-                    $"{bookkeepingPath} exists but cannot be read ({ex.Message}). Failing closed rather than "
-                    + "treating broken bookkeeping as if no drift had ever been recorded — that would quietly "
-                    + "reopen a fresh 7-day window every run. Delete the file (or restore it from a backup) "
-                    + "and re-run.");
-            }
-
-            if (parsed is null)
-            {
-                return new Result(
-                    Verdict.CorruptFail,
-                    $"{bookkeepingPath} exists but deserialized to nothing. Failing closed — delete the file "
-                    + "and re-run.");
-            }
-
-            recorded = parsed;
+            return new Result(
+                Verdict.CorruptFail,
+                $"{bookkeepingPath} could not be read or updated ({ex.Message}). Failing closed rather "
+                + "than reopening the grace window. Restore the bookkeeping or delete the file and re-run.");
         }
-        else
+
+        if (active.Count == 0)
         {
-            recorded = new Bookkeeping(now);
-            Directory.CreateDirectory(Path.GetDirectoryName(Path.GetFullPath(bookkeepingPath))!);
-            File.WriteAllText(bookkeepingPath, JsonSerializer.Serialize(recorded, Json));
+            return new Result(Verdict.NoDrift, "no checked vendor CLI is drifted; unchecked clocks are retained");
         }
 
+        var recorded = new Bookkeeping(active.Min());
         var age = now - recorded.FirstDetectedAt;
         if (age > Window)
         {

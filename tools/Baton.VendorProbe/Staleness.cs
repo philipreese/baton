@@ -89,7 +89,13 @@ public static class Staleness
     /// into "never probed" without anyone touching them. A partial run is partial evidence; it
     /// updates what it saw and leaves the rest alone.
     /// </remarks>
-    public static void Write(string path, IReadOnlyList<Finding> findings)
+    /// <param name="path">The lock file path.</param>
+    /// <param name="findings">The findings established in this probe run.</param>
+    /// <param name="driftPath">
+    /// Optional path to the drift bookkeeping file. Clears only the vendors re-pinned by these
+    /// findings (#2123), preserving every other vendor's grace clock.
+    /// </param>
+    public static void Write(string path, IReadOnlyList<Finding> findings, string? driftPath = null)
     {
         var probed = findings
             .Where(f => f.VendorVersion is not null)
@@ -104,6 +110,20 @@ public static class Staleness
 
         Directory.CreateDirectory(Path.GetDirectoryName(Path.GetFullPath(path))!);
         File.WriteAllText(path, JsonSerializer.Serialize(new LockFile(DateTimeOffset.Now, vendors), Json));
+
+        if (!string.IsNullOrEmpty(driftPath) && probed.Count > 0)
+        {
+            try
+            {
+                DriftGrace.ClearRepinned(driftPath, probed.Keys);
+            }
+            catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or JsonException)
+            {
+                // The lock is already durable; Evaluate can reconcile each surviving clock against
+                // its own vendor's RecordedAt. Broken bookkeeping still fails closed there.
+                Console.Error.WriteLine($"Could not clear re-pinned vendor drift in {driftPath}: {ex.Message}");
+            }
+        }
     }
 
     /// <summary>
