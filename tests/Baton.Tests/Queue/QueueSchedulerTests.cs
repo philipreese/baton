@@ -229,7 +229,7 @@ public sealed class QueueSchedulerTests
     }
 
     [Fact]
-    public void A_weighted_item_behind_a_slot_blocked_head_still_waits_even_when_it_would_fit()
+    public void A_non_review_item_never_passes_a_slot_blocked_head_regardless_of_what_is_behind_it()
     {
         // Live 3.5: the claude head (+1.0) is over the 4.0 cap. It waits anyway — order among
         // weighted items is untouched regardless of an item behind it (spec/baton.md §13); only
