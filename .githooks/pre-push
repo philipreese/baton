@@ -96,8 +96,9 @@ fi
 
 # NOT `exec`: the timing line above has to be written after the run, so the status is captured and
 # re-raised by hand. The fallback task's own exit code is still the only thing this hook exits
-# with -- tools/gates/gates.py's selftest runs this hook against a stub that exits 7 and asserts on
-# 7, on both the human (gates-fast) and lane (gates-lane-fast) branches.
+# with -- tools/gates/gates.py's selftest runs this hook against a stub that exits 7 on the human
+# (gates-fast) branch and a distinct 8 on the lane (gates-lane-fast) branch, proving the lane path
+# actually ran rather than falling back to the human one.
 pixi run "$fallback_task"
 status=$?
 record_push_timing
