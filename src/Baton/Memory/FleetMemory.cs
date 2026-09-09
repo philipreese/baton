@@ -50,6 +50,9 @@ public static class FleetMemory
     /// <summary>The fleet store's <c>links.jsonl</c> under the current <see cref="BatonPaths.Root"/>.</summary>
     public static string LinksFile => BatonPaths.MemoryLinksFile(Slug);
 
+    /// <summary>The fleet store's <c>retractions.jsonl</c> under the current <see cref="BatonPaths.Root"/>.</summary>
+    public static string RetractionsFile => BatonPaths.MemoryRetractionsFile(Slug);
+
     /// <summary>
     /// The refusal a parser prints when the reserved word arrives where a git identity is required.
     /// A message rather than a throw, because the parsers own their exception type

@@ -172,7 +172,8 @@ public static class MemorySyncCommand
         // for that slug this is empty and the entries below carry the origin instead.
         var fleet = isFleet || !File.Exists(FleetMemory.EntriesFile)
             ? []
-            : await MemoryStore.ReadResolvedAsync(FleetMemory.EntriesFile, FleetMemory.LinksFile, cancellationToken)
+            : await MemoryStore.ReadResolvedAsync(
+                    FleetMemory.EntriesFile, FleetMemory.LinksFile, FleetMemory.RetractionsFile, cancellationToken)
                 .ConfigureAwait(false);
         var fleetStorePath = !isFleet && File.Exists(FleetMemory.EntriesFile) ? FleetMemory.EntriesFile : null;
 
