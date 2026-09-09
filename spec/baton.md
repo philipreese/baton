@@ -6783,12 +6783,14 @@ gap silently, and neither is a setting anyone means.
 | `AdapterDefaultModels` | `agy` → `gemini-3.8-flash-high` | Model for an item whose tier names an adapter and no model. |
 | `WorktreeRoot` | parent of the invoking checkout | Where `--issue` puts `w<n>`. |
 
-**Lane weights: implement 1.0, an item on the `codex` adapter 0.5, `review` 0.** One function computes
-both the live tally over running rooms and the candidate's own weight; two copies would drift and the
-cap would still *look* enforced. Review is **two** behaviours, not one — weight zero *and* cap
-bypassing — because `live + candidate <= max` still fails at `live == max` when the candidate adds
-nothing. A review lane bypasses the memory floor for the same reason it bypasses the cap: it is not
-what consumes the memory the floor protects. It still honours `hold` and the gap.
+**Lane weights: implement 1.0 on every adapter, `review` 0.** One function computes both the live
+tally over running rooms and the candidate's own weight; two copies would drift and the cap would
+still *look* enforced. No adapter is discounted (#2163) — every mutating lane competes for the same
+memory/build-lock capacity the cap protects, regardless of vendor. Review is **two** behaviours, not
+one — weight zero *and* cap bypassing — because `live + candidate <= max` still fails at `live == max`
+when the candidate adds nothing. A review lane bypasses the memory floor for the same reason it
+bypasses the cap: it is not what consumes the memory the floor protects. It still honours `hold` and
+the gap.
 
 **Operator order is the launch order, with exactly one thing allowed past the head (#2136).** The
 head is the first queued, non-external, non-`ready` item; nothing reorders weighted items among
