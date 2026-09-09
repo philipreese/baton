@@ -97,18 +97,20 @@ public static class QueueScheduler
     }
 
     /// <summary>
-    /// The item that will actually launch once the hold and the gap clear: the head from
-    /// <see cref="Candidate(IReadOnlyList{QueueItem})"/>, or — when <b>only the slot gate</b> is shut
-    /// against that head — the earliest <see cref="IsEligible"/> item after it whose role
-    /// <see cref="QueueWeights.BypassesCap"/>, falling back to the head when there is none.
+    /// The item that will actually launch once the gap clears — or, while the queue is held, the head:
+    /// the head from <see cref="Candidate(IReadOnlyList{QueueItem})"/>, or — when <b>only the slot
+    /// gate</b> is shut against that head — the earliest <see cref="IsEligible"/> item after it whose
+    /// role <see cref="QueueWeights.BypassesCap"/>, falling back to the head when there is none.
     /// </summary>
     /// <remarks>
     /// <para>
     /// <b>The rule — what may pass a blocked head and what may not — is spec/baton.md §13's "Operator
     /// order is the launch order" paragraph (#2136), stated there and not here.</b> Two consequences
-    /// are worth reading off the code: a held queue picks the head, so the board goes on marking the
-    /// head rather than a passer that is not going anywhere either; and <see cref="Decide"/> has already
-    /// returned on the hold and the <see cref="QueueWaitReason.Gap"/> before it consults this.
+    /// are worth reading off the code, and they are deliberately asymmetric: a HELD queue returns the
+    /// head, so the board keeps marking the head — a hold is indefinite and operator-set, and naming a
+    /// passer that is not going anywhere either would be a promise; the GAP is seconds and is not an
+    /// input here (<see cref="Decide"/> returns on it before consulting this), so during a gap the board
+    /// already names the item that launches when the gap elapses.
     /// </para>
     /// <para>
     /// This is the same picker as the one-argument form, extended rather than a second predicate beside

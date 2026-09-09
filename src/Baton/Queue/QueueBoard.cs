@@ -226,6 +226,15 @@ public static class QueueBoard
             return reason;
         }
 
+        // A head that a passer has gone past is, by the picker's own rule (spec/baton.md §13), blocked
+        // on slots and nothing else — so when the ledger has no row about it (fresh daemon, or the newest
+        // row is the passer's launch) the panel says `slots`, not `next`: `next` is the passer's word,
+        // and two rows wearing it would make the token's own definition false (#2137 review).
+        if (ReferenceEquals(item, head) && next is not null && !ReferenceEquals(head, next))
+        {
+            return QueueWaitReasons.Token(QueueWaitReason.Slots);
+        }
+
         return QueueBoardWaitReasons.Next;
     }
 

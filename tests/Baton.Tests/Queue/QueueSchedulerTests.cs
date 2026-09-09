@@ -229,6 +229,20 @@ public sealed class QueueSchedulerTests
     }
 
     [Fact]
+    public void A_review_behind_two_slot_blocked_implements_still_passes_both()
+    {
+        // The pass-through walks the whole tail, not just the item behind the head: a refactor that
+        // looked only one row back (or stopped at the first weighted item) would re-open #2136's
+        // starvation while every other arm in this file stayed green.
+        var items = new[] { Item("head"), Item("second"), Item("rev", role: "review") };
+
+        var decision = QueueScheduler.Decide(LocalAt(12), items, liveWeight: 4.0, 8.0, Defaults, null, held: false);
+
+        Assert.Equal(QueueDecisionKind.Launch, decision.Kind);
+        Assert.Equal("rev", decision.Item!.Tag);
+    }
+
+    [Fact]
     public void A_weighted_item_behind_a_slot_blocked_head_still_waits_even_when_it_would_fit()
     {
         // Live 3.5: the claude head (+1.0) is over the 4.0 cap; the codex item behind it (+0.5) would
