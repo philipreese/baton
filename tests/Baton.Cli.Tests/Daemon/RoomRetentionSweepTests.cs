@@ -693,12 +693,24 @@ public class RoomRetentionSweepTests
     }
 
     // #1659: the retention hook -- RoomRetentionSweep may call `baton rooms prune --terminal` behind
-    // DaemonSettings.RoomsRetentionDays, default off.
+    // DaemonSettings.RoomsRetentionDays. #2111 changed the settings default to 30, but a
+    // RoomRetentionSweep constructed with no DaemonSettings at all (this constructor's own shape --
+    // every unit test above this one, and the real daemon before its first settings load) still
+    // resolves to off: there is no DaemonSettings instance here for a default to live on.
     [Fact]
     public void ResolveRoomsRetentionDays_NoSettingsAndNoOverride_IsNull()
     {
         var sweep = new RoomRetentionSweep();
         Assert.Null(sweep.ResolveRoomsRetentionDays());
+    }
+
+    // #2111: the settings default itself, read through the sweep the way the real daemon does once
+    // DaemonSettingsStore.LoadAsync has actually loaded a fresh (or absent) settings.json.
+    [Fact]
+    public void ResolveRoomsRetentionDays_DefaultDaemonSettings_ResolvesToTheDefault()
+    {
+        var sweep = new RoomRetentionSweep(new Baton.Vendors.DaemonSettings());
+        Assert.Equal(Baton.Vendors.DaemonSettings.DefaultRoomsRetentionDays, sweep.ResolveRoomsRetentionDays());
     }
 
     [Fact]
@@ -766,6 +778,91 @@ public class RoomRetentionSweepTests
 
             Assert.Equal(1, deletedCount);
             Assert.False(Directory.Exists(roomDir));
+        }
+        finally
+        {
+            if (Directory.Exists(tempRoot))
+            {
+                Directory.Delete(tempRoot, true);
+            }
+        }
+    }
+
+    /// <summary>
+    /// #2111: the issue's three-arm acceptance test, all through the exact path
+    /// <see cref="RoomRetentionSweep.ExecuteRoomsRetentionPruneAsync"/> now uses. The kept room's sibling
+    /// (an identically old, identically terminal, unkept room) is the discriminating control read
+    /// first per the v-and-v gate: without it, a broken fixture producing zero candidates at all would
+    /// also pass the kept assertion.
+    /// </summary>
+    [Fact]
+    public async Task ExecuteRoomsRetentionPruneAsync_KeptRoomSurvives_UnkeptTerminalRoomOlderThanWindowGoes_NonTerminalRoomNeverTouched()
+    {
+        var tempRoot = Path.Combine(Path.GetTempPath(), "baton_sweep_retention_arms_" + Guid.NewGuid().ToString("n"));
+        Directory.CreateDirectory(tempRoot);
+        try
+        {
+            var keptRoomDir = await CreateTerminalRoomWithArtifactsAsync(tempRoot, "kept-room", new ExecutionId("exec-kept"));
+            var keptSentinelPath = await WriteRoomTerminalSentinelAsync(keptRoomDir);
+            File.SetLastWriteTimeUtc(keptSentinelPath, DateTime.UtcNow.AddDays(-30));
+            await KeepMarker.MarkKeepAsync(keptRoomDir, TestContext.Current.CancellationToken);
+
+            var unkeptRoomDir = await CreateTerminalRoomWithArtifactsAsync(tempRoot, "unkept-room", new ExecutionId("exec-unkept"));
+            var unkeptSentinelPath = await WriteRoomTerminalSentinelAsync(unkeptRoomDir);
+            File.SetLastWriteTimeUtc(unkeptSentinelPath, DateTime.UtcNow.AddDays(-30));
+
+            var nonTerminalRoomDir = await CreateTerminalRoomWithArtifactsAsync(tempRoot, "non-terminal-room", new ExecutionId("exec-open"));
+            // No terminal sentinel written: RoomsPruneCommand's candidate discovery skips any room
+            // TerminalSentinelWriter.TryReadAsync reads back null for, terminal.json age or not.
+
+            var registryPath = Path.Combine(tempRoot, "room-registry.jsonl");
+            foreach (var roomDir in new[] { keptRoomDir, unkeptRoomDir, nonTerminalRoomDir })
+            {
+                await Baton.Vendors.RoomRegistryStore.AppendAsync(
+                    roomDir, tempRoot, registryPath, explicitRegister: true, cancellationToken: TestContext.Current.CancellationToken);
+            }
+
+            var sweep = new RoomRetentionSweep(new Baton.Vendors.DaemonSettings { RoomsRetentionDays = 1 });
+            var deletedCount = await sweep.ExecuteRoomsRetentionPruneAsync(
+                registryFilePathOverride: registryPath, cancellationToken: TestContext.Current.CancellationToken);
+
+            Assert.Equal(1, deletedCount);
+            Assert.True(Directory.Exists(keptRoomDir), "a room marked keep must survive rooms-retention prune.");
+            Assert.False(Directory.Exists(unkeptRoomDir), "the discriminating control: an unkept, old, terminal room must still go.");
+            Assert.True(Directory.Exists(nonTerminalRoomDir), "a non-terminal room must never be touched.");
+        }
+        finally
+        {
+            if (Directory.Exists(tempRoot))
+            {
+                Directory.Delete(tempRoot, true);
+            }
+        }
+    }
+
+    /// <summary>
+    /// #2111: see <see cref="RoomRetentionSweep.AutomaticPruneHoldReason"/> for why. This is the
+    /// discriminating pair to
+    /// <see cref="ExecuteRoomsRetentionPruneAsync_ConfiguredRetentionDays_DeletesAnOldTerminalRoom"/>:
+    /// same fixture, same retention setting, but reached through the automatic wrapper
+    /// <see cref="RoomRetentionSweep.ExecuteAsync"/> itself calls, and it must delete nothing.
+    /// </summary>
+    [Fact]
+    public async Task ExecuteAutomaticRoomsRetentionPruneAsync_ConfiguredRetentionDays_DeletesNothing()
+    {
+        var tempRoot = Path.Combine(Path.GetTempPath(), "baton_sweep_retention_hold_" + Guid.NewGuid().ToString("n"));
+        Directory.CreateDirectory(tempRoot);
+        try
+        {
+            var roomDir = await CreateTerminalRoomWithArtifactsAsync(tempRoot, "old-room", new ExecutionId("exec-1"));
+            var terminalSentinelPath = await WriteRoomTerminalSentinelAsync(roomDir);
+            File.SetLastWriteTimeUtc(terminalSentinelPath, DateTime.UtcNow.AddDays(-30));
+
+            var sweep = new RoomRetentionSweep(new Baton.Vendors.DaemonSettings { RoomsRetentionDays = 1 });
+            var deletedCount = await sweep.ExecuteAutomaticRoomsRetentionPruneAsync();
+
+            Assert.Equal(0, deletedCount);
+            Assert.True(Directory.Exists(roomDir));
         }
         finally
         {

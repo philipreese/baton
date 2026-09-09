@@ -1,3 +1,4 @@
+using Baton.Artifacts;
 using Baton.Status;
 using Baton.Vendors;
 
@@ -106,6 +107,15 @@ public static class RoomsPruneCommand
             }
 
             if (ConductorRoomDetector.IsConductorRoom(entry.RoomPath))
+            {
+                continue;
+            }
+
+            // #2111: baton keep must exempt a room from the batch delete this feeds (RoomRetentionSweep's
+            // automatic prune goes through this exact method), not only from ArtifactPruner's separate
+            // recoverable-move path. baton room delete <room-dir> still removes a kept room directly —
+            // this is candidate-discovery only, the escape hatch stays one target at a time.
+            if (KeepMarker.IsKept(entry.RoomPath))
             {
                 continue;
             }

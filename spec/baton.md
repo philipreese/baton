@@ -4893,10 +4893,36 @@ a removal, unbuilt as of this paragraph. Both verbs refuse a non-terminal room (
 unless `--force`, since a live engine may still hold the room's files open — the same holder-liveness
 read (`ConcurrencyGuard.ReadHolderInfo` + `EngineLivenessProbe`) `baton cancel` already uses, never a
 second mechanism. `RoomRetentionSweep` (§7) may call the batch form automatically, gated behind
-`DaemonSettings.RoomsRetentionDays` (default `null`, i.e. off — the ruling's "operator opts in"). A
-retention prune with no `--state` filter deletes `Indeterminate` rooms too — the operator who opts
-into `RoomsRetentionDays` accepts that, and `--state Indeterminate` selects them explicitly (or any
-other `--state` value excludes them) if that default is unwanted.
+`DaemonSettings.RoomsRetentionDays` (**default 30 days as of #2111** — a 2026-09-08 decision round
+ruled on 507 rooms / 846 MB accumulated unattended over two weeks; explicit `null`, `0`, or negative
+is still an operator opt-out, resolved the same way `RoomRetentionSweep.ResolveRoomsRetentionDays`
+always has). `baton rooms prune --terminal`'s candidate discovery skips any room `baton keep` has
+marked (`KeepMarker.IsKept`, checked in `RoomsPruneCommand.FindCandidatesAsync` beside the conductor-
+room skip) — the same exemption `ArtifactPruner`'s separate recoverable-move pruning already gave a
+kept room, now honored on this delete-the-whole-directory path too. `baton room delete <room-dir>`
+does **not** check the marker: it stays the single-target escape hatch for removing a kept room by
+name, deliberately not touched by this exemption. A retention prune with no `--state` filter deletes
+`Indeterminate` rooms too — the operator who opts into `RoomsRetentionDays` accepts that, and
+`--state Indeterminate` selects them explicitly (or any other `--state` value excludes them) if that
+default is unwanted.
+
+**The automatic prune is held until #2140 lands (#2111 operator ruling, 2026-09-08).** Pruning deletes
+prompts, stdout and diffs — a room's only evidence once it is gone — so before `RoomRetentionSweep`'s
+automatic path deletes a single room on an operator's machine unattended, the durable fleet event log
+(#2140, "glass cut, piece 3" of #2075: `~/.baton/fleet/events.jsonl`, append-only, monotonic ids) must
+carry that room's verdict text and terminal fact. #2140 is unbuilt as of this paragraph, so
+`RoomRetentionSweep.ExecuteAsync`'s automatic call goes through a wrapper,
+`ExecuteAutomaticRoomsRetentionPruneAsync`, that no-ops and logs the hold once per daemon process
+instead of reaching `ExecuteRoomsRetentionPruneAsync` (`RoomRetentionSweep.AutomaticPruneHoldReason`
+names the reason string). This hold is deliberately **not** a probe for the log file's existence — the
+shape isn't built, and "carries verdict text and terminal fact" isn't something a probe could verify —
+so it fails closed on a constant rather than silently opening the day an unrelated file first appears
+at that path. **The hold applies only to the unattended path.** `baton rooms prune --terminal`, typed
+by hand, is unaffected and deletes exactly as it always has — an operator watching the command run is
+the evidence the automatic path does not yet have another source for. The daemon logs each prune that
+actually deletes something, with the room count and the retention window, on stdout
+(`ExecuteRoomsRetentionPruneAsync`); a tick that finds nothing eligible stays silent, the same
+once-per-signal posture `RoomRetentionSweep`'s legacy-journal warning already takes.
 
 **Standing conductor room and `baton deliver` (#1669).** A standing orchestrator room under `{BATON_HOME}/rooms/conductor/` (`role: conductor` in its `bindings.json` stub) holds deliverables authored directly by an orchestrator rather than a worker subprocess. `baton deliver <file> [--title <text>] [--room <room-dir>]` (`--room-dir` also accepted as an alias for `--room`) copies the file to `<room>/artifacts/conductor/<hash-of-source-path>-<basename>` — the destination filename, hashed off the absolute source path rather than the basename alone so two sources sharing a basename never collide on one on-disk file — and appends/replaces an entry in `<room>/artifacts/conductor/manifest.jsonl` keyed on the absolute `source_path` (`title`, `source_path`, `delivered_at`, `sha256`, `artifact_file`). The manifest is encoded as UTF-8 without BOM; readers tolerate a BOM. Re-delivery replaces the entry and updates the file in place. `pusher.py` reads the destination filename from the manifest's `artifact_file` field, never re-deriving it from the basename. The conductor room is never terminal (has no `terminal.json`), is explicitly excluded from `rooms prune --terminal` candidate discovery, from `room delete` (including `--force`), and from the stall detector — one shared check (`ConductorRoomDetector`, `src/Baton.Cli/ConductorRoomDetector.cs`) decides role for all three call sites, the same resolution `fleet_status` already used, so the definition cannot drift between them. `fleet_status` carries the conductor room's `artifacts_path` so it is visible in the Fleet Glass fleet tab with copyable text, and `pusher.py` scans `manifest.jsonl` to push items to `/deliver` with `kind: conductor` and upsert identity on `source_path`, surfacing them in the Glass inbox with a `CONDUCTOR` chip (newest first). The Fleet Glass conductor card renders a `deliverables →` link filtered to the conductor room along with the count of conductor items in the inbox index (#1677).
 
