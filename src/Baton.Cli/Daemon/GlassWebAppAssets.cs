@@ -14,12 +14,15 @@ internal static class GlassWebAppAssets
     internal const string ManifestPath = "/fleet-glass.webmanifest";
     internal const string Icon192Path = "/icons/fleet-glass-192.png";
     internal const string Icon512Path = "/icons/fleet-glass-512.png";
+    internal const string ServiceWorkerPath = "/fleet-glass-service-worker.js";
 
     private const string ManifestResourceName = "Baton.Cli.Daemon.fleet-glass.webmanifest";
+    private const string ServiceWorkerResourceName = "Baton.Cli.Daemon.service-worker.js";
 
     private static readonly byte[] Icon192 = CreatePng(192);
     private static readonly byte[] Icon512 = CreatePng(512);
     private static string? _manifest;
+    private static string? _serviceWorker;
 
     internal static string Manifest()
     {
@@ -43,6 +46,22 @@ internal static class GlassWebAppAssets
         512 => Icon512,
         _ => throw new ArgumentOutOfRangeException(nameof(size)),
     };
+
+    internal static string ServiceWorker()
+    {
+        if (_serviceWorker is not null)
+        {
+            return _serviceWorker;
+        }
+
+        using var stream = typeof(GlassWebAppAssets).Assembly.GetManifestResourceStream(ServiceWorkerResourceName)
+            ?? throw new InvalidOperationException(
+                $"The Fleet Glass service worker resource '{ServiceWorkerResourceName}' is missing from " +
+                $"{Assembly.GetExecutingAssembly().GetName().Name}.");
+        using var reader = new StreamReader(stream, Encoding.UTF8);
+        _serviceWorker = reader.ReadToEnd();
+        return _serviceWorker;
+    }
 
     /// <summary>
     /// Produces a compact opaque RGBA PNG. Keeping these branded, dimension-specific raster bytes in

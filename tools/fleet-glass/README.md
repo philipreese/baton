@@ -46,11 +46,19 @@ timeline entries yet (#1902). `pusher.py --selftest` asserts it is the *only* di
 - `python tools/fleet-glass/pusher.py --compare-projection` — runs both sources once against the
   **live** fleet and diffs them room by room. Needs a running daemon and a built CLI; not a CI check.
 
-## Android standalone-install verification (#2166)
+## Android standalone-install and offline-failure verification (#2166, #2168)
 
 The daemon-hosted page links a same-origin manifest with standalone display and 192px/512px PNG
-icons. The listener remains opt-in and tailnet-only; this does not add public hosting, a service
-worker, or an offline cache.
+icons. The listener remains opt-in and tailnet-only; it also serves a navigation-only service worker
+from that private origin. After one successful online visit has activated it, a later launch that
+cannot reach the daemon (including an eight-second navigation timeout) shows a small static failure
+page with Retry. Retry navigates to the real page again. No dashboard HTML, projection, event stream,
+or other live response is cached or available offline; every normal launch and projection read goes
+to the network with `no-store`.
+
+Network freshness, install metadata, and the static failure page are separate facts. A reachable
+live response is not necessarily current: the projection's existing staleness handling remains the
+signal for that. The failure page has no fleet data at all.
 
 To verify on a phone after an operator has intentionally exposed the existing private HTTPS tailnet
 URL, first connect and authenticate the phone's Tailscale client to the same tailnet as the daemon.
@@ -63,8 +71,18 @@ before beginning installation:
    ordinary Chrome tabs.
 4. Change the fleet and confirm the installed view receives the fresh projection; then confirm the
    normal Chrome tab remains separate.
+5. With the app open online once and the worker activated, disconnect the phone from the tailnet and
+   relaunch it. Confirm the static failure page and Retry appear; reconnect, use Retry, and confirm
+   the real page returns.
 
-The automated listener test checks the served HTML, manifest fields, MIME types, PNG chunk CRCs,
-independently decompressed scanline pixels, and dimensions. It cannot verify phone tailnet
-authentication, certificate trust, Android installation, or launch behaviour; those remain
-unverified until these steps are performed on a physical phone.
+Chrome's [PWA update guidance](https://web.dev/learn/pwa/update) distinguishes installed-app assets
+from manifest metadata and notes that update timing depends on the browser lifecycle. Page changes
+can therefore arrive before launcher icon, name, or splash changes. If installation metadata remains
+stale, removing and reinstalling Fleet Glass is a recovery option; it is not a claim that every
+manifest change requires reinstallation.
+
+The automated listener and worker tests cover MIME types, no-store headers, private-only
+registration, successful navigation, network failure and timeout fallback, Retry/recovery, and
+bypass of projection/events/unrelated requests. They cannot verify phone tailnet authentication,
+certificate trust, Android installation, service-worker activation timing, or launch behaviour;
+those remain unverified until these steps are performed on a physical Android device.

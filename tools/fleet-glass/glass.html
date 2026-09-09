@@ -2148,7 +2148,11 @@ function startDaemonFeed(applySnapshot){
       if(snap && Array.isArray(snap.rooms)) applySnapshot(snap);
       else banner("<b>No fleet projection yet.</b> The daemon is serving this page but has not written <span class='mono'>fleet/projection.json</span> — check that <span class='mono'>baton daemon</span>'s projection writer is running.");
     })
-    .catch((e) => banner(`<b>Could not read the fleet projection.</b> ${esc(String(e && e.message || e))}`));
+    .catch((e) => {
+      banner(`<b>Connection to the daemon was lost.</b> ${esc(String(e && e.message || e))}` +
+        (lastGood ? " Data below is the last successful read, not a current fleet view." : ""));
+      if(lastGood) $("fresh").textContent = "connection lost — last successful read shown";
+    });
   load();
   const events = new EventSource("/events");
   events.addEventListener("projection", load);
@@ -2372,7 +2376,12 @@ function startDaemonFeed(applySnapshot){
   // #1946: the tailnet delivery stops here — no connector is reached, and `window.mcpHandle` stays
   // unset, which every mcpHandle call site already treats as "this affordance is unavailable".
   if(DAEMON_SERVED){
+    // #2168: the artifact has no private daemon origin, so only this delivery registers the
+    // navigation-only worker. It caches nothing; its one bounded-timeout fallback is a static
+    // failure page, never the dashboard or fleet data. A first successful online visit is needed
+    // before the browser has activated this worker for a later disconnected launch.
     startDaemonFeed(applySnapshot);
+    navigator.serviceWorker?.register("/fleet-glass-service-worker.js").catch(() => undefined);
     applyRoute();
     return;
   }

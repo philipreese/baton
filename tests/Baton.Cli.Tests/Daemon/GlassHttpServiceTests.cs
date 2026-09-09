@@ -231,6 +231,34 @@ public sealed class GlassHttpServiceTests : IDisposable
     }
 
     [Fact]
+    public async Task Serves_the_private_navigation_only_service_worker_without_a_cacheable_live_route()
+    {
+        using var cts = new CancellationTokenSource(TimeSpan.FromMinutes(1));
+        var harness = await StartAsync(cts.Token, projection: """{"rooms":[]}""");
+        try
+        {
+            using var client = new HttpClient { Timeout = TimeSpan.FromSeconds(30) };
+            var worker = await client.GetAsync($"{harness.BaseUrl}{GlassWebAppAssets.ServiceWorkerPath}", cts.Token);
+            var source = await worker.Content.ReadAsStringAsync(cts.Token);
+
+            Assert.Equal(HttpStatusCode.OK, worker.StatusCode);
+            Assert.Equal("application/javascript", worker.Content.Headers.ContentType?.MediaType);
+            Assert.Equal("no-store", worker.Headers.CacheControl?.ToString());
+            Assert.Contains("event.request.mode !== \"navigate\"", source, StringComparison.Ordinal);
+            Assert.Contains("cache: \"no-store\"", source, StringComparison.Ordinal);
+            Assert.DoesNotContain("caches.", source, StringComparison.Ordinal);
+
+            var projection = await client.GetAsync($"{harness.BaseUrl}/projection.json", cts.Token);
+            Assert.Equal("no-store", projection.Headers.CacheControl?.ToString());
+            Assert.Equal("application/json", projection.Content.Headers.ContentType?.MediaType);
+        }
+        finally
+        {
+            await harness.Service.StopAsync(CancellationToken.None);
+        }
+    }
+
+    [Fact]
     public async Task Serves_the_projection_file_byte_for_byte_and_404s_before_the_first_write()
     {
         using var cts = new CancellationTokenSource(TimeSpan.FromMinutes(1));

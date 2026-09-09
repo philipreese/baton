@@ -130,6 +130,14 @@ public sealed class GlassPageTests
         Assert.DoesNotContain("/stdout", feed.Value, StringComparison.Ordinal);
         Assert.DoesNotContain("/rooms", feed.Value, StringComparison.Ordinal);
 
+        // #2168: registration is private-daemon-only; the artifact has neither a private origin nor
+        // a worker registration. Its failure handler explicitly marks retained readings as old.
+        var daemonBranchWithRegistration = Regex.Match(
+            html, @"if\(DAEMON_SERVED\)\{.*?return;", RegexOptions.Singleline);
+        Assert.True(daemonBranchWithRegistration.Success);
+        Assert.Contains("navigator.serviceWorker?.register(\"/fleet-glass-service-worker.js\"", daemonBranchWithRegistration.Value, StringComparison.Ordinal);
+        Assert.Contains("connection lost — last successful read shown", feed.Value, StringComparison.Ordinal);
+
         // The artifact delivery is untouched: still the connector, still the same rendering entry
         // point, and there is exactly ONE of that entry point for both deliveries to share.
         Assert.Contains("""mcp.watchTool("baton", "fleet_status", {}, (ev) =>""", html, StringComparison.Ordinal);

@@ -26,6 +26,10 @@
          a filesystem dependency after the CLI is installed. -->
     <EmbeddedResource Include="..\..\tools\fleet-glass\fleet-glass.webmanifest"
                       LogicalName="Baton.Cli.Daemon.fleet-glass.webmanifest" />
+    <!-- #2168: served only by the private daemon so an installed page can explain a network
+         failure. The worker itself contains no cache and is never published with the artifact. -->
+    <EmbeddedResource Include="..\..\tools\fleet-glass\service-worker.js"
+                      LogicalName="Baton.Cli.Daemon.service-worker.js" />
   </ItemGroup>
 
   <PropertyGroup>

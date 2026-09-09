@@ -225,6 +225,13 @@ internal sealed class GlassHttpService : BackgroundService
                         .ConfigureAwait(false);
                     return;
 
+                case GlassWebAppAssets.ServiceWorkerPath:
+                    await WriteTextAsync(
+                            context, HttpStatusCode.OK, "application/javascript; charset=utf-8",
+                            GlassWebAppAssets.ServiceWorker())
+                        .ConfigureAwait(false);
+                    return;
+
                 case "/projection.json":
                     await WriteProjectionAsync(context).ConfigureAwait(false);
                     return;
