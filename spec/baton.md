@@ -6798,8 +6798,9 @@ themselves. When the head is blocked on **slots and nothing else**, the schedule
 later queued, non-external, non-`ready` item whose role bypasses the cap (`review`), because that item
 consumes none of what the head is waiting for and would otherwise starve behind it for the whole
 wait — measured 2026-09-08, two reviews sat behind one implement item at a full cap for the length of
-the wait. What may **not** pass: a weighted item of any size (a codex half-lane behind a full lane
-still waits, so the FIFO promise for implement lanes holds); anything behind a head blocked on
+the wait. What may **not** pass: a weighted item of any size (any implement lane behind a full-weight
+head still waits, so the FIFO promise for implement lanes holds regardless of vendor); anything behind
+a head blocked on
 **memory**, which is a host fact and applies to the whole queue even though a review *at the head*
 bypasses the floor; and anything while `hold` or the gap is in force, since those are evaluated
 before the pick. The head keeps its own wait reason on the board while a review goes ahead of it.
