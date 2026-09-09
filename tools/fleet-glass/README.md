@@ -60,10 +60,33 @@ Network freshness, install metadata, and the static failure page are separate fa
 live response is not necessarily current: the projection's existing staleness handling remains the
 signal for that. The failure page has no fleet data at all.
 
-To verify on a phone after an operator has intentionally exposed the existing private HTTPS tailnet
+### Known Android installation collision — not fixed
+
+Do not treat the current daemon URL as independently installable while another installed private
+web app uses the same Tailscale hostname with root scope. A physical Android Chrome check reached
+the Fleet Glass page and its correct manifest at the daemon's `:9443` URL, but the browser menu
+offered to open the already-installed app rather than install Fleet Glass. No phone package or
+WebAPK intent-filter inspection has yet confirmed the cause.
+
+The leading, source-backed hypothesis is a cross-port URL-handler collision: Chromium's current
+[WebAPK Android manifest template](https://github.com/chromium/chromium/blob/main/chrome/android/webapk/shell_apk/AndroidManifest.xml)
+matches scheme, host, and path, but has no port field. Both installed apps currently use `/` as
+their scope, so changing Fleet Glass to a path below that root would still be included by the
+existing app's root handler. Changing Fleet Glass's manifest name, id, or service worker does not
+separate that handler.
+
+Before installing Fleet Glass, give it a separately verified private HTTPS hostname (for example,
+a Tailscale Service only after the tailnet administrator has made that service available and
+authorized this node), then open that hostname in Android Chrome and confirm it is secure. The
+deployment plan and recovery procedure must preserve the other installed app and require a physical
+phone confirmation before this limitation is called resolved. Do not remove or reinstall either app
+as a substitute for hostname isolation; reinstalling Fleet Glass is only a later recovery option
+for stale metadata after coexistence has been proven.
+
+To verify on a phone after an operator has intentionally exposed the separately hosted private HTTPS
 URL, first connect and authenticate the phone's Tailscale client to the same tailnet as the daemon.
-Open the private URL in Android Chrome and confirm it loads securely with no certificate warning
-before beginning installation:
+Open the isolated private URL in Android Chrome and confirm it loads securely with no certificate
+warning before beginning installation:
 
 1. Use **Install app** from the Android Chrome browser menu.
 2. Confirm the install prompt identifies Fleet Glass and shows its icon, then complete installation.
@@ -83,6 +106,7 @@ manifest change requires reinstallation.
 
 The automated listener and worker tests cover MIME types, no-store headers, private-only
 registration, successful navigation, network failure and timeout fallback, Retry/recovery, and
-bypass of projection/events/unrelated requests. They cannot verify phone tailnet authentication,
-certificate trust, Android installation, service-worker activation timing, or launch behaviour;
-those remain unverified until these steps are performed on a physical Android device.
+bypass of projection/events/unrelated requests. They cannot verify Tailscale Service availability or
+authorization, phone tailnet authentication, certificate trust, Android installation,
+service-worker activation timing, or launch behaviour; those remain unverified until these steps are
+performed on a physical Android device.
