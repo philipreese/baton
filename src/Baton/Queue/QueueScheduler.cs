@@ -29,7 +29,9 @@ public static class QueueScheduler
     /// why that must not be UTC.
     /// </param>
     /// <param name="items">The queue, in operator order. The first <see cref="QueueItemState.Queued"/>,
-    /// non-<see cref="QueueItem.External"/> item is the candidate; nothing reorders or prioritizes.</param>
+    /// non-<see cref="QueueItem.External"/> item is the head; nothing reorders weighted items, and the one
+    /// thing that may pass the head is stated on the <see cref="Candidate(IReadOnlyList{QueueItem}, double, double?, double, QueueSettings, bool)"/>
+    /// overload (#2136).</param>
     /// <param name="liveWeight">The tally over rooms already running, built with <see cref="QueueWeights.For"/>.</param>
     /// <param name="freeGb">
     /// Free physical memory in GiB. <b>Null does not block</b> — the floor is skipped and the null is
@@ -59,35 +61,96 @@ public static class QueueScheduler
             return QueueDecision.Wait(QueueWaitReason.Hold, null, liveWeight, freeGb, floorGb);
         }
 
-        var candidate = Candidate(items);
-        if (candidate is null)
+        var head = Candidate(items);
+        if (head is null)
         {
             return QueueDecision.Wait(QueueWaitReason.NoItems, null, liveWeight, freeGb, floorGb);
         }
 
         if (lastLaunchAt is { } last && now - last < TimeSpan.FromSeconds(settings.EffectiveGapSeconds))
         {
-            return QueueDecision.Wait(QueueWaitReason.Gap, candidate, liveWeight, freeGb, floorGb);
+            return QueueDecision.Wait(QueueWaitReason.Gap, head, liveWeight, freeGb, floorGb);
         }
+
+        // The head, or the one item spec/baton.md §13 lets pass it (#2136). The overload's remarks cite
+        // where that rule lives; the gates below are then applied to whatever it picked, which for a
+        // passer means neither shuts (it bypasses both by construction) and for the head means exactly
+        // what they meant before.
+        var candidate = Candidate(items, liveWeight, freeGb, floorGb, settings, held)!;
 
         // One predicate for both bypasses (spec/baton.md §13), hoisted above the floor rather than
         // repeated in each condition, so the two can never diverge into a lane that skips one gate and
         // not the other.
         var bypasses = QueueWeights.BypassesCap(candidate.Role);
 
-        if (!bypasses && freeGb is { } free && free < floorGb)
+        if (!bypasses && BelowFloor(freeGb, floorGb))
         {
             return QueueDecision.Wait(QueueWaitReason.Memory, candidate, liveWeight, freeGb, floorGb);
         }
 
-        var candidateWeight = QueueWeights.For(candidate.Role, candidate.Adapter);
-        if (!bypasses && liveWeight + candidateWeight > settings.EffectiveMaxLiveWeight)
+        if (!bypasses && OverCap(candidate, liveWeight, settings))
         {
             return QueueDecision.Wait(QueueWaitReason.Slots, candidate, liveWeight, freeGb, floorGb);
         }
 
         return new QueueDecision(QueueDecisionKind.Launch, null, candidate, liveWeight, freeGb, floorGb);
     }
+
+    /// <summary>
+    /// The item that will actually launch once the hold and the gap clear: the head from
+    /// <see cref="Candidate(IReadOnlyList{QueueItem})"/>, or — when <b>only the slot gate</b> is shut
+    /// against that head — the earliest <see cref="IsEligible"/> item after it whose role
+    /// <see cref="QueueWeights.BypassesCap"/>, falling back to the head when there is none.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// <b>The rule — what may pass a blocked head and what may not — is spec/baton.md §13's "Operator
+    /// order is the launch order" paragraph (#2136), stated there and not here.</b> Two consequences
+    /// are worth reading off the code: a held queue picks the head, so the board goes on marking the
+    /// head rather than a passer that is not going anywhere either; and <see cref="Decide"/> has already
+    /// returned on the hold and the <see cref="QueueWaitReason.Gap"/> before it consults this.
+    /// </para>
+    /// <para>
+    /// This is the same picker as the one-argument form, extended rather than a second predicate beside
+    /// it, for the #1912 reason the one-argument form is <c>internal</c>: <c>QueueBoard.Project</c> marks
+    /// <c>isNext</c> by calling this, so the row a person sees marked is the row the scheduler launches,
+    /// by construction. The head stays the head — the board reads the head's own ledger reason off the
+    /// one-argument form — and this only says which item goes next.
+    /// </para>
+    /// </remarks>
+    internal static QueueItem? Candidate(
+        IReadOnlyList<QueueItem> items,
+        double liveWeight,
+        double? freeGb,
+        double floorGb,
+        QueueSettings settings,
+        bool held)
+    {
+        var head = Candidate(items);
+        if (head is null
+            || held
+            || QueueWeights.BypassesCap(head.Role)
+            || BelowFloor(freeGb, floorGb)
+            || !OverCap(head, liveWeight, settings))
+        {
+            return head;
+        }
+
+        return items
+            .SkipWhile(i => !ReferenceEquals(i, head))
+            .Skip(1)
+            .FirstOrDefault(i => IsEligible(i) && QueueWeights.BypassesCap(i.Role))
+            ?? head;
+    }
+
+    /// <summary>The floor gate, spelled once for <see cref="Decide"/> and the pass-through pick.</summary>
+    private static bool BelowFloor(double? freeGb, double floorGb) =>
+        freeGb is { } free && free < floorGb;
+
+    /// <summary>The slot gate, spelled once for <see cref="Decide"/> and the pass-through pick. The cap
+    /// is a ceiling, not a strict bound: landing exactly on it fits.</summary>
+    private static bool OverCap(QueueItem item, double liveWeight, QueueSettings settings) =>
+        liveWeight + QueueWeights.For(item.Role, item.Adapter) > settings.EffectiveMaxLiveWeight;
 
     /// <summary>
     /// The item the queue would launch next, or null when nothing is eligible: the first queued,
@@ -108,10 +171,19 @@ public static class QueueScheduler
     /// the gap, memory, slot and hold gates stay inside <see cref="Decide"/>, which is still the only
     /// thing that authorizes a launch.
     /// </para>
+    /// <para>
+    /// This is the <b>head</b>. The item that launches next is usually the head and is sometimes the
+    /// one item allowed past it — the five-argument overload is that answer, and it is the same picker
+    /// extended, not a second one.
+    /// </para>
     /// </remarks>
     internal static QueueItem? Candidate(IReadOnlyList<QueueItem> items) =>
-        items.FirstOrDefault(i =>
-            i.State == QueueItemState.Queued && !i.External && !IsReady(i));
+        items.FirstOrDefault(IsEligible);
+
+    /// <summary>The one candidacy predicate: queued, not external, not <c>ready</c>. Both
+    /// <see cref="Candidate(IReadOnlyList{QueueItem})"/> and the pass-through pick read it.</summary>
+    private static bool IsEligible(QueueItem item) =>
+        item.State == QueueItemState.Queued && !item.External && !IsReady(item);
 
     /// <summary>
     /// A work item the reviewer approved. <b>Never launched</b>: spec/baton.md §13's "the queue records
