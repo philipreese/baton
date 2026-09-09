@@ -39,6 +39,7 @@ internal sealed class DaemonTickLedger
     private readonly Action<string> _log;
     private readonly ConcurrentDictionary<string, ServiceTick> _ticks = new(StringComparer.Ordinal);
     private readonly DateTimeOffset _startedAt;
+    private IReadOnlyList<string>? _glassBoundPrefixes;
 
     internal DaemonTickLedger(Func<DateTimeOffset> clock, Action<string>? log = null)
     {
@@ -103,6 +104,13 @@ internal sealed class DaemonTickLedger
     /// service, the duration of its own last tick in milliseconds beside when it finished; and
     /// <paramref name="load"/> as <c>hostLoad</c>, the host as it looked when this body was rendered.
     /// </summary>
+
+    /// <summary>The prefixes <see cref="GlassHttpService"/> actually bound, last reported -- #2130,
+    /// spec/baton.md §7 states why a reverse proxy needs this. Null until that service has run at
+    /// least once (off, or not yet at its first tick); empty once it has run with every bind
+    /// refused, distinct from never having been configured at all.</summary>
+    internal void RecordGlassBoundPrefixes(IReadOnlyList<string> prefixes) => _glassBoundPrefixes = prefixes;
+
     internal string RenderHeartbeatJson(HostLoadSample load)
     {
         var services = new JsonObject();
@@ -118,7 +126,7 @@ internal sealed class DaemonTickLedger
             };
         }
 
-        return new JsonObject
+        var body = new JsonObject
         {
             // Never fabricated: before any service has completed a tick this is the process start
             // time, which is what "nothing has completed since" honestly means at that point.
@@ -126,7 +134,16 @@ internal sealed class DaemonTickLedger
             ["startedAt"] = _startedAt.ToString("O"),
             ["services"] = services,
             ["hostLoad"] = load.ToJson(),
-        }.ToJsonString();
+        };
+
+        // Omitted, not an empty array, when the glass listener has never run a tick -- "not
+        // configured" must not read the same as "configured and every prefix refused".
+        if (_glassBoundPrefixes is { } prefixes)
+        {
+            body["glassBoundPrefixes"] = new JsonArray([.. prefixes.Select(p => (JsonNode?)p)]);
+        }
+
+        return body.ToJsonString();
     }
 
     /// <summary>One service's most recent completed tick. <see cref="Service"/> is filled in by
