@@ -9,6 +9,13 @@ that carried them: `git show v0.35.0:src/Baton.Cli/CHANGELOG.md` (likewise `src/
 `release-please-config.json`. Everything below this line predates the split: the repo's single
 shared version through `0.14.0`.
 
+## [0.41.0](https://github.com/philipreese/baton/compare/v0.40.0...v0.41.0) (2026-09-09)
+
+
+### Features
+
+* **memory:** Add retract, which supersedes an entry with a reason and keeps history ([#2143](https://github.com/philipreese/baton/issues/2143)) ([508b269](https://github.com/philipreese/baton/commit/508b269f3525213a8650c7ba640328e58445d72d))
+
 ## [0.40.0](https://github.com/philipreese/baton/compare/v0.39.0...v0.40.0) (2026-09-09)
 
 
