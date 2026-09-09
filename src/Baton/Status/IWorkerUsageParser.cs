@@ -147,8 +147,8 @@ public interface IWorkerUsageParser
     /// <see cref="Baton.Domain.ShellCommandCeilings.ShippingCeilingMarker"/>.
     /// <see langword="false"/>: a completed run-command result that is not one. <see langword="null"/>:
     /// this line reports no run-command result at all, so it says nothing either way. A reader keeps the
-    /// LAST non-null answer over the stream, which is how a push that timed out and was then followed by
-    /// a successful command stops being read as the cause of anything.
+    /// LAST non-null answer over the stream, which is how a shipping-class command that timed out and
+    /// was then followed by a successful command stops being read as the cause of anything.
     /// </para>
     /// <para>
     /// Anchored inside the vendor's tool-result node, never a search of the raw line — the rule
@@ -157,8 +157,9 @@ public interface IWorkerUsageParser
     /// Baton's OWN repository runs a run-command that PRINTS the marker's defining file, which the tool
     /// anchor admits. So the item's own outcome is read as well — only a result the vendor reports as
     /// failed, whose text LEADS with the marker
-    /// (<see cref="Baton.Domain.ShellCommandCeilings.IsShippingCeilingTimeout"/>), is a timed-out push;
-    /// a successful command quoting it, or a failed one whose own exit line comes first, is
+    /// (<see cref="Baton.Domain.ShellCommandCeilings.IsShippingCeilingTimeout"/>), is a timed-out
+    /// shipping-class command (<c>git push</c>, <c>git commit</c>, or <c>gh pr create</c> alike); a
+    /// successful command quoting it, or a failed one whose own exit line comes first, is
     /// <see langword="false"/>.
     /// </para>
     /// Default null: a vendor Baton enforces no command ceiling on (claude and agy both run their shell

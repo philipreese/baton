@@ -18,9 +18,10 @@ public enum ShellCommandClass
     Gate,
 
     /// <summary>
-    /// A shipping command — the push or the PR that transfers a lane's finished work out of the
-    /// workspace. On this repository a push runs the pre-push hook, so a shipping command's wall clock
-    /// is a gate's plus the transfer.
+    /// A shipping command — the commit, push, or PR that transfers a lane's finished work out of the
+    /// workspace. A repository hook can legitimately run for minutes on any of the three (#2135: basis
+    /// splits its lint-at-commit / tests-at-push hook this way), so a shipping command's wall clock is a
+    /// gate's plus the transfer.
     /// </summary>
     Shipping,
 }
@@ -48,7 +49,9 @@ public enum ShellCommandClass
 public static class ShellCommandClassifier
 {
     /// <summary>
-    /// The table, and the whole of it: the command shapes #1998's ruling names, as leading-token
+    /// The table, and the whole of it: the command shapes #1998's ruling names, plus <c>git commit</c>
+    /// (#2135 — the shipping class covers every publication verb a repository hook can run against, not
+    /// only the two #1998 measured), as leading-token
     /// prefixes. A token ending in <c>*</c> matches any segment token starting with the part before it
     /// (<c>audit-*</c> covers <c>audit-recordonce</c>, <c>audit-completeness</c>, …); every other token
     /// must match whole, case-insensitively, with <c>\</c> read as <c>/</c> so a Windows spelling of a
@@ -80,6 +83,7 @@ public static class ShellCommandClassifier
     /// </summary>
     private static readonly (string[] Tokens, ShellCommandClass Class)[] Table =
     [
+        (["git", "commit"], ShellCommandClass.Shipping),
         (["git", "push"], ShellCommandClass.Shipping),
         (["gh", "pr", "create"], ShellCommandClass.Shipping),
         (["python", "tools/buildlock.py"], ShellCommandClass.Gate),

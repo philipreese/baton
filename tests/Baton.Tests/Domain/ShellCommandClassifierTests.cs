@@ -15,6 +15,8 @@ public sealed class ShellCommandClassifierTests
     [InlineData("git push")]
     [InlineData("git push origin 1998-lane")]
     [InlineData("gh pr create --fill")]
+    [InlineData("git commit -m \"ready to git push\"")]
+    [InlineData("git commit --amend --no-edit")]
     public void Shipping_shapes_classify_as_shipping(string commandLine) =>
         Assert.Equal(ShellCommandClass.Shipping, ShellCommandClassifier.Classify(commandLine));
 
@@ -44,7 +46,7 @@ public sealed class ShellCommandClassifierTests
     [Theory]
     [InlineData("echo \"git push\"")]
     [InlineData("echo 'gh pr create'")]
-    [InlineData("git commit -m \"ready to git push\"")]
+    [InlineData("echo \"git commit -m done\"")]
     [InlineData("git status")]
     [InlineData("git pushx")]
     [InlineData("pixi run fmt-check")]
@@ -59,6 +61,7 @@ public sealed class ShellCommandClassifierTests
     /// segment.
     /// </summary>
     [Theory]
+    [InlineData("git add -A && git commit -m wip")]
     [InlineData("git add -A && git push")]
     [InlineData("git push && gh pr create --fill")]
     [InlineData("git push | tee push.log")]

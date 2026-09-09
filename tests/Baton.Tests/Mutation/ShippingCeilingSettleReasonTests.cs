@@ -47,6 +47,45 @@ public sealed class ShippingCeilingSettleReasonTests
     }
 
     /// <summary>
+    /// #2135: the same kill, but the shipping-class command that timed out was a <c>git commit</c> a
+    /// slow pre-commit hook never let finish — not a push. <see cref="ShellCommandCeilings"/> tracks no
+    /// per-verb state (the marker and the reader both anchor on the CLASS, never the command line), so
+    /// the settle reason must not claim a push or a pre-push gate for this case either: the fixture
+    /// reuses the exact same timed-out run-command shape as the push arm above on purpose, to prove the
+    /// tail text names no single verb rather than happening to pass on a push-shaped fixture alone.
+    /// </summary>
+    [Fact]
+    public async Task A_final_commit_killed_at_the_shipping_ceiling_names_no_single_command()
+    {
+        var stream = TempPath("stream");
+        var origin = TempGitRepository.InitBareRepository(TempPath("origin"));
+        var workspace = TempPath("workspace");
+        try
+        {
+            Directory.CreateDirectory(stream);
+            WriteStream(
+                stream,
+                RunCommandSucceeded("Build succeeded."),
+                RunCommandTimedOut());
+
+            Assert.True(ShippingCeilingStreamReader.FinalRunCommandHitShippingCeiling(new CodexUsageParser(), stream));
+
+            var outcome = await CheckUnpushedWorkspaceAsync(origin, workspace, "2135-lane", shippingCeilingExceeded: true);
+
+            Assert.Equal(DeliveryCheckStatus.Failed, outcome.Status);
+            Assert.Equal(["branch-not-pushed"], outcome.FailingMembers);
+            Assert.Contains(ShellCommandCeilings.ShippingBreachReason(), outcome.Tail, StringComparison.Ordinal);
+            Assert.DoesNotContain("pre-push gate", outcome.Tail, StringComparison.OrdinalIgnoreCase);
+            Assert.DoesNotContain("the push exceeded", outcome.Tail, StringComparison.OrdinalIgnoreCase);
+        }
+        finally
+        {
+            DirectoryCleanup.DeleteRecursively(stream);
+            Cleanup(workspace, origin);
+        }
+    }
+
+    /// <summary>
     /// The polarity arm, and the one that makes the tri-state read of the stream load-bearing: the push
     /// timed out and then the lane ran something else that completed. The FINAL run-command is no longer
     /// the kill, so the room says what it always said — the ceiling is not offered as the cause of a
