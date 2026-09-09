@@ -50,7 +50,9 @@ public static class ShellCommandCeilings
     /// <summary>
     /// What a shipping command is allowed on top of the gate its hook runs: the transfer itself plus
     /// <c>gh</c>'s round trip. An ESTIMATE, not a measurement — a push of a few commits over a working
-    /// network is seconds, and this is slack for a slow one rather than a figure anything recorded.
+    /// network is seconds, and this is slack for a slow one rather than a figure anything recorded. Also
+    /// what a <c>git commit</c> is allowed on top of a commit-time hook (#2135) — the same allowance
+    /// rather than a second figure, since neither hook shape's transfer cost was separately measured.
     /// </summary>
     public static readonly TimeSpan PushTransferAllowance = TimeSpan.FromMinutes(2);
 
@@ -89,7 +91,7 @@ public static class ShellCommandCeilings
         var text = $"Command exceeded Baton's {Name(commandClass)} command ceiling "
             + $"({Seconds(effectiveCeiling)} s).";
         return commandClass == ShellCommandClass.Shipping
-            ? $"{ShippingCeilingMarker} {text} The push ran past it while the pre-push gate was still running."
+            ? $"{ShippingCeilingMarker} {text} The publication command ran past it while the repository hook was still running."
             : text;
     }
 

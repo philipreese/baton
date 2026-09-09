@@ -5727,14 +5727,29 @@ rather than runaway work: measured twice on 2026-09-06, a lane with all five com
 lost the whole run because its verified `git push` was killed while this repository's own pre-push
 hook was still running `gates-fast`, and the room settled `Verify failed (branch-not-pushed,
 pr-not-open)` for work that was complete. So `gate` is the measured pre-push gate wall clock plus
-50 % and `shipping` is that plus the push itself. That measurement is the one C-12's #1958 paragraph
-already records from the cost ledger's own `prePushGateMs`, not a second one — and it is a MEDIAN, so
-the margin is not a tail bound: C-12's median build-lock queue is most of what a contended run adds. **Every value, and the table that sorts a command line
+50 % and `shipping` is that plus the transfer itself. That measurement is the one C-12's #1958
+paragraph already records from the cost ledger's own `prePushGateMs`, not a second one — and it is a
+MEDIAN, so the margin is not a tail bound: C-12's median build-lock queue is most of what a contended
+run adds. **Every value, and the table that sorts a command line
 into a class, lives in `Baton.Domain.ShellCommandCeilings` / `ShellCommandClassifier`** — the timeout
 text and the delivery check's `branch-not-pushed` tail both read them rather than restating one, and
 that tail is where a push killed at the shipping ceiling is reported as the cause instead of leaving
 a conductor to reconstruct it. This bounds a command that is progressing; it bounds nothing about a
 contended build lock, which can make any of these arbitrarily longer.
+
+**`shipping` covers every publication verb, not only `git push` (#2135, operator ruling 2026-09-08
+23:10 ET).** `git commit` joined the table alongside `git push` and `gh pr create`: a repository's own
+hook can legitimately run for minutes at commit time exactly as it can at push time — measured the
+same night on `queue-b985-e52959a0` against a target repository (basis) whose pre-commit hook runs a
+4-minute backend suite (basis #988 then split that hook: lint at commit, tests at push, so the
+underlying repository also changed). Before this ruling `git commit` fell through to `other` and was
+killed at that class's flat 300 s (`ShellCommandCeilings.Other`), twice, on a room whose every change
+had already been made — the same failure shape #1998 fixed for `git push`, on the verb #1998 did not
+yet name. `git commit` shares `gh push`'s allowance (`ShellCommandCeilings.PushTransferAllowance`)
+rather than a separately measured one: neither hook shape's transfer cost was measured on its own, and
+inventing a fourth number a ruling never sized would be exactly the drift `record-once` forbids. This
+enforcement remains scoped to the one path that holds the stopwatch (`baton_run_command`, above) — a
+claude or agy lane's own CLI shell is unaffected because Baton is not the process bounding it.
 
 ### Canonical skill packages (#1151)
 

@@ -772,6 +772,38 @@ public sealed class CodexDynamicToolPolicyTests
     }
 
     /// <summary>
+    /// #2135: <c>git commit</c> is a publication verb too — a repository's pre-commit hook can run for
+    /// minutes exactly as its pre-push hook can (basis #988 splits its hook that way: lint at commit,
+    /// tests at push) — so it has to reach the shipping ceiling on this path the same way
+    /// <see cref="A_shipping_command_is_killed_at_the_shipping_ceiling_and_says_so"/> shows for
+    /// <c>git push</c>. The fixture's temp directory holds no repository, so the commit itself fails
+    /// immediately ("not a git repository") and <c>||</c> carries the line to the hang, exactly as the
+    /// push arm's own remark explains for that command.
+    /// </summary>
+    [Fact]
+    public async Task A_git_commit_is_killed_at_the_shipping_ceiling_and_says_so()
+    {
+        var hang = OperatingSystem.IsWindows() ? "ping -n 30 127.0.0.1" : "sleep 30";
+        var grant = new PermissionGrant(
+            RunShellCommands: true, ShellCommandPatterns: ["git commit*", "ping*", "sleep*"]);
+        using var fixture = new PolicyFixture(
+            grant,
+            ["report.md"],
+            commandCeiling: commandClass => commandClass == ShellCommandClass.Shipping
+                ? TimeSpan.FromMilliseconds(150)
+                : TimeSpan.FromMilliseconds(100));
+
+        var result = await fixture.ExecuteAsync(
+            CodexDynamicToolPolicy.RunCommandTool,
+            new { command = $"git commit -m wip || {hang}" });
+
+        Assert.False(result.Success);
+        Assert.Contains("shipping command ceiling (0.15 s)", result.Text, StringComparison.Ordinal);
+        Assert.True(ShellCommandCeilings.IsShippingCeilingTimeout(result.Text));
+        Assert.DoesNotContain(GrantRefusal.Marker, result.Text);
+    }
+
+    /// <summary>
     /// A read of a path the grant ALLOWS that simply is not there — unsuccessful, unmarked, uncounted.
     /// The polarity partner is <see cref="Contract_input_is_readable_even_when_general_workspace_reads_are_withheld"/>'s
     /// second arm, where the same tool is refused because the path is outside the readable roots.
