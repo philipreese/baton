@@ -9,6 +9,38 @@ that carried them: `git show v0.35.0:src/Baton.Cli/CHANGELOG.md` (likewise `src/
 `release-please-config.json`. Everything below this line predates the split: the repo's single
 shared version through `0.14.0`.
 
+## [0.40.0](https://github.com/philipreese/baton/compare/v0.39.0...v0.40.0) (2026-09-09)
+
+
+### Features
+
+* **skills:** Attach role default skill packages and author the three baton role skills ([#2118](https://github.com/philipreese/baton/issues/2118)) ([ccab1df](https://github.com/philipreese/baton/commit/ccab1df2860ded90a2e91cfc09999d9477acb473))
+
+
+### Bug Fixes
+
+* **budget:** Lower the implement ceiling to 600k and print the rule's proposal from the sweep ([#2122](https://github.com/philipreese/baton/issues/2122)) ([1549631](https://github.com/philipreese/baton/commit/1549631d9ba6bd3ff00e5f751bbfc9d0d591875e))
+* **daemon:** Fire the watchdog when no service ticks and sample host load in the heartbeat ([#2119](https://github.com/philipreese/baton/issues/2119)) ([3aa97cf](https://github.com/philipreese/baton/commit/3aa97cfaddfac1735fbe3b7e0a8154d4217ec880))
+* **queue:** Detach queue-launched lanes from the daemon and re-adopt them on restart ([#2117](https://github.com/philipreese/baton/issues/2117)) ([ce922fe](https://github.com/philipreese/baton/commit/ce922fef7626b6cc5bb1b78d3f51f81f35ffdc1a))
+* **queue:** Inherit a trusted repository's ceiling in its worktrees and clones ([#2093](https://github.com/philipreese/baton/issues/2093)) ([28823ee](https://github.com/philipreese/baton/commit/28823eed5d9cd66ec8821eac40524f1db9aa0692))
+* **queue:** Let a zero-weight review pass a slot-blocked head instead of starving behind it ([#2137](https://github.com/philipreese/baton/issues/2137)) ([931b6a9](https://github.com/philipreese/baton/commit/931b6a9668c5e7d113512249957527051a954136))
+* **trust:** Refuse to provision against a revoked repository instead of falling back to all ([#2127](https://github.com/philipreese/baton/issues/2127)) ([2fe982d](https://github.com/philipreese/baton/commit/2fe982dbdba222d485a3353dd6e05887e6aec6ad))
+
+
+### Documentation
+
+* **skills:** State the --skill bound per declared set and let the headroom constant own its number ([#2133](https://github.com/philipreese/baton/issues/2133)) ([d70690f](https://github.com/philipreese/baton/commit/d70690f105b5129bb82b4bde42d2288c64c56380))
+
+
+### Tests
+
+* **grants:** Fail when a lane role's allowlist reaches the daemon's write verbs ([#2128](https://github.com/philipreese/baton/issues/2128)) ([1ce937d](https://github.com/philipreese/baton/commit/1ce937d18e0e62489045eb0e51b31b6ef6250199))
+
+
+### Miscellaneous
+
+* **vendors:** Record vendor probe against claude 2.1.263 ([#2125](https://github.com/philipreese/baton/issues/2125)) ([ca643d5](https://github.com/philipreese/baton/commit/ca643d5ee5c2ad93480f40da2e82f361e5423c5a))
+
 ## [0.39.0](https://github.com/philipreese/baton/compare/v0.38.0...v0.39.0) (2026-09-08)
 
 
