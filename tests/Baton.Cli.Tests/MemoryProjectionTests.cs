@@ -182,7 +182,7 @@ public sealed class MemoryProjectionTests : IDisposable
                 MemorySupersessionLink.Derive(live.Id, archived.Id), live.Id, archived.Id, Repository, default),
         };
 
-        var resolved = MemoryStore.Resolve([live, archived], links);
+        var resolved = MemoryStore.Resolve([live, archived], links, []);
         var projection = MemoryProjection.Build(
             Repository, "store.jsonl", resolved.Select(Vendor).ToList(), ProjectionBudget.Default);
 
@@ -196,7 +196,7 @@ public sealed class MemoryProjectionTests : IDisposable
         var unlinked = MemoryProjection.Build(
             Repository,
             "store.jsonl",
-            MemoryStore.Resolve([live, archived], []).Select(Vendor).ToList(),
+            MemoryStore.Resolve([live, archived], [], []).Select(Vendor).ToList(),
             ProjectionBudget.Default);
         Assert.Equal(2, unlinked.ProjectedEntryIds.Count);
         Assert.Empty(unlinked.Superseded);

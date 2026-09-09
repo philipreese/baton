@@ -6461,6 +6461,23 @@ reads a directory the operator points it at and creates nothing. With the flag a
 empty population, which the report states in those words rather than printing a zero that reads as
 "no conflicts found".
 
+**`baton memory retract` — the removal path, and history is never deleted (#2113).** A retraction is
+its own append-only row (`MemoryRetraction`, `<repo-slug>/memory/retractions.jsonl`); `MemoryStore`'s
+own remarks carry why it is a third file rather than a field on the entry, and `MemoryRetraction`'s
+carry why there is no un-retract and what an operator does instead when one turns out to be wrong.
+`MemoryStore.Resolve`/`ReadResolvedAsync` drop a retracted entry from every
+resolved read before links are applied, so a link naming a retracted endpoint is dropped by the same
+dangling-link rule that already covers an entry removed by `import --undo`; a retraction naming an
+entry outside the store is inert until the entry is imported again, the same direction that rule takes.
+`baton memory sync` reports a retracted entry as its own omission kind (`retracted`, carrying the
+reason and `retractedBy`), distinct from `superseded`/`overridden`/`dropped` because the record it
+overrides was correct when written and only later ceased to hold. `baton memory audit` lists every
+retraction across the canonical store, oldest-first per repository, with its reason and author — the
+one report of what has been declared no longer true, since a retraction lives only in Baton's own
+store and never in a vendor root. `baton memory retract` itself refuses (exit 1, nothing written) an
+id that names no entry in that repository's store and one that is already retracted, printing the
+earlier retraction's reason and author in the latter case.
+
 **Targets are markdown, and they are discovered rather than constructed.** Q4 (operator, 2026-09-05)
 confined this phase to markdown, so the targets are the Claude roots that resolve to the repository
 being synced and the Codex **markdown** roots an operator has asserted a repository for; the

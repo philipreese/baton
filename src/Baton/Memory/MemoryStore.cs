@@ -17,12 +17,16 @@ namespace Baton.Memory;
 /// concurrency mechanism in this tree is precisely what those types' remarks exist to prevent.
 /// </para>
 /// <para>
-/// <b>Two files, because supersession is a fact about a PAIR of entries and entries are immutable.</b>
-/// <see cref="MemorySupersessionLink"/>'s own remarks carry why a link cannot live on the entry row;
-/// what this type adds is the reader that puts them back together, <see cref="ReadResolvedAsync"/>. A
-/// stored entry row therefore never carries <see cref="MemoryEntry.Supersedes"/> or
-/// <see cref="MemoryEntry.SupersededBy"/>: those two fields are populated on the way OUT, from the
-/// links file, and <see cref="ReadAllAsync"/> is the raw read that shows the rows as they sit on disk.
+/// <b>Three files, because supersession is a fact about a PAIR of entries, a retraction is a fact
+/// about an entry discovered after it was written, and entries are immutable.</b>
+/// <see cref="MemorySupersessionLink"/>'s own remarks carry why a link cannot live on the entry row,
+/// and <see cref="MemoryRetraction"/>'s why a retraction (#2113, <c>retractions.jsonl</c>) is a row
+/// rather than a deletion; what this type adds is the reader that puts them back together,
+/// <see cref="ReadResolvedAsync"/>. A stored entry row therefore never carries
+/// <see cref="MemoryEntry.Supersedes"/> or <see cref="MemoryEntry.SupersededBy"/>: those two fields
+/// are populated on the way OUT, from the links file, a retracted entry is dropped on the way out
+/// from the retractions file, and <see cref="ReadAllAsync"/> is the raw read that shows the rows as
+/// they sit on disk.
 /// </para>
 /// <para>
 /// <b>Append is idempotent because the id is derived</b> (<see cref="MemoryEntry.Derive"/>): the
@@ -57,6 +61,15 @@ public static class MemoryStore
         new("baton-memory-links", "memory supersession links", link => link.Id);
 
     /// <summary>
+    /// The retractions file's own ledger (#2113), under its own lock prefix for the same reason
+    /// <see cref="LinkLedger"/> has one. Its key is the retracted entry's id, so an entry is retracted
+    /// at most once — <see cref="MemoryRetraction"/> states why there is no second row and no
+    /// un-retract.
+    /// </summary>
+    internal static readonly JsonLinesLedger<MemoryRetraction> RetractionLedger =
+        new("baton-memory-retractions", "memory retractions", retraction => retraction.EntryId);
+
+    /// <summary>
     /// Appends the subset of <paramref name="entries"/> whose <see cref="MemoryEntry.Id"/> is not
     /// already in <paramref name="entriesFilePath"/>, in one read-check-then-append critical section.
     /// </summary>
@@ -89,10 +102,33 @@ public static class MemoryStore
         LinkLedger.ReadAllAsync(linksFilePath, cancellationToken);
 
     /// <summary>
-    /// One repository's entries with their supersession resolved from
+    /// Appends the subset of <paramref name="retractions"/> whose <see cref="MemoryRetraction.EntryId"/>
+    /// is not already in <paramref name="retractionsFilePath"/> (#2113). Idempotent on the entry id:
+    /// retracting an entry twice writes nothing the second time, and nothing here ever removes a row.
+    /// </summary>
+    public static Task AppendRetractionsAsync(
+        IReadOnlyList<MemoryRetraction> retractions, string retractionsFilePath, CancellationToken cancellationToken = default) =>
+        RetractionLedger.AppendAsync(retractions, retractionsFilePath, cancellationToken);
+
+    /// <summary>This file's retractions, oldest first.</summary>
+    public static Task<IReadOnlyList<MemoryRetraction>> ReadRetractionsAsync(
+        string retractionsFilePath, CancellationToken cancellationToken = default) =>
+        RetractionLedger.ReadAllAsync(retractionsFilePath, cancellationToken);
+
+    /// <summary>
+    /// One repository's entries with their retractions applied from
+    /// <paramref name="retractionsFilePath"/> and their supersession resolved from
     /// <paramref name="linksFilePath"/> — the read every consumer of a memory wants.
     /// </summary>
     /// <remarks>
+    /// <para>
+    /// <b>A retracted entry is absent from the result, and nothing else about it changes.</b> The row
+    /// is still in the entries file and the retraction beside it in its own (spec/baton.md §12: history
+    /// is never deleted); <see cref="ReadAllAsync"/> and <see cref="ReadRetractionsAsync"/> are the raw
+    /// reads that show both. Retraction is applied <i>before</i> links are resolved, so a link whose
+    /// endpoint was retracted is dropped by the rule below rather than surfacing an id the reader
+    /// cannot see.
+    /// </para>
     /// <para>
     /// <b>A link whose two entries are not BOTH present is dropped.</b> The store is append-only and
     /// the links file is its own file, so a dangling link is reachable in ordinary operation — an undo
@@ -100,33 +136,49 @@ public static class MemoryStore
     /// would put an id into <see cref="MemoryEntry.Supersedes"/> that names no entry in this store,
     /// which reads as "superseded by something you cannot see" rather than as the absence it is.
     /// Dropping it fails closed: the link reappears the moment the missing entry is imported again,
-    /// because the link row itself was never removed.
+    /// because the link row itself was never removed. A retraction naming an entry that is not in the
+    /// store is inert for the same reason and in the same direction — it takes effect the moment the
+    /// entry is imported again.
     /// </para>
     /// <para>
-    /// <b>Two sequential reads, never two nested locks.</b> Each ledger takes its own file's lock and
-    /// releases it before the next is acquired; holding one while acquiring the other is how two
+    /// <b>Three sequential reads, never nested locks.</b> Each ledger takes its own file's lock and
+    /// releases it before the next is acquired; holding one while acquiring another is how two
     /// callers taking them in opposite orders deadlock.
     /// </para>
     /// </remarks>
     public static async Task<IReadOnlyList<MemoryEntry>> ReadResolvedAsync(
-        string entriesFilePath, string linksFilePath, CancellationToken cancellationToken = default)
+        string entriesFilePath,
+        string linksFilePath,
+        string retractionsFilePath,
+        CancellationToken cancellationToken = default)
     {
         var entries = await ReadAllAsync(entriesFilePath, cancellationToken).ConfigureAwait(false);
         var links = await ReadLinksAsync(linksFilePath, cancellationToken).ConfigureAwait(false);
+        var retractions = await ReadRetractionsAsync(retractionsFilePath, cancellationToken).ConfigureAwait(false);
 
-        return Resolve(entries, links);
+        return Resolve(entries, links, retractions);
     }
 
     /// <summary>
-    /// <paramref name="entries"/> with <see cref="MemoryEntry.Supersedes"/> and
-    /// <see cref="MemoryEntry.SupersededBy"/> filled in from <paramref name="links"/>. Pure, so the
-    /// projection is testable without a filesystem and is the same computation wherever it is applied.
+    /// <paramref name="entries"/> minus every one <paramref name="retractions"/> names, with
+    /// <see cref="MemoryEntry.Supersedes"/> and <see cref="MemoryEntry.SupersededBy"/> filled in from
+    /// <paramref name="links"/> over what remains. Pure, so the projection is testable without a
+    /// filesystem and is the same computation wherever it is applied.
     /// </summary>
     public static IReadOnlyList<MemoryEntry> Resolve(
-        IReadOnlyList<MemoryEntry> entries, IReadOnlyList<MemorySupersessionLink> links)
+        IReadOnlyList<MemoryEntry> entries,
+        IReadOnlyList<MemorySupersessionLink> links,
+        IReadOnlyList<MemoryRetraction> retractions)
     {
         ArgumentNullException.ThrowIfNull(entries);
         ArgumentNullException.ThrowIfNull(links);
+        ArgumentNullException.ThrowIfNull(retractions);
+
+        if (retractions.Count > 0)
+        {
+            var retracted = retractions.Select(r => r.EntryId).ToHashSet(StringComparer.Ordinal);
+            entries = entries.Where(e => !retracted.Contains(e.Id)).ToList();
+        }
 
         if (links.Count == 0)
         {

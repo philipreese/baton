@@ -111,7 +111,7 @@ public static class MemoryAddOptionsParser
                     i += 2;
                     break;
                 case "--repository":
-                    repository = ParseRepository(RequireValue(args, i));
+                    repository = ParseRepository(RequireValue(args, i), Usage);
                     i += 2;
                     break;
                 default:
@@ -177,21 +177,23 @@ public static class MemoryAddOptionsParser
     /// (<see cref="MemoryImportOptionsParser.RequireAHostThatAProbeCouldAnswer"/>) — both are WRITE
     /// paths, and a store filed under an identity no git probe could ever answer for is one nothing
     /// will find again. <c>MemorySyncOptionsParser</c>'s own remarks are where the read path states why
-    /// it applies only the first half.
+    /// it applies only the first half. Shared with <c>MemoryRetractOptionsParser</c> (#2113), which
+    /// names the same store file the same way; <paramref name="usage"/> is whichever verb's grammar
+    /// the refusal should print.
     /// </summary>
-    private static string ParseRepository(string value)
+    internal static string ParseRepository(string value, string usage)
     {
         if (RepositoryIdentity.TryCanonicalize(value) is not { Length: > 0 } canonical)
         {
             throw new CliArgumentException(
                 $"'{value.Trim()}' is not a repository identity: it has no host-and-path to " +
-                $"canonicalize, so no store file could be named for it. {Usage}",
+                $"canonicalize, so no store file could be named for it. {usage}",
                 "pass a canonical identity, for example 'github.com/owner/repo' — a clone URL " +
                 "('https://github.com/owner/repo.git', 'git@github.com:owner/repo.git') is accepted " +
                 "and normalised to one.");
         }
 
-        MemoryImportOptionsParser.RequireAHostThatAProbeCouldAnswer(value, canonical, Usage);
+        MemoryImportOptionsParser.RequireAHostThatAProbeCouldAnswer(value, canonical, usage);
         return canonical;
     }
 

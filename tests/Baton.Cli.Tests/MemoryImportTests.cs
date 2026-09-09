@@ -84,6 +84,7 @@ public sealed class MemoryImportTests : IDisposable
         return MemoryStore.ReadResolvedAsync(
             BatonPaths.MemoryEntriesFile(slug),
             BatonPaths.MemoryLinksFile(slug),
+            BatonPaths.MemoryRetractionsFile(slug),
             TestContext.Current.CancellationToken);
     }
 

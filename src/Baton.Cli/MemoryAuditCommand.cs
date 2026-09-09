@@ -106,21 +106,69 @@ public static class MemoryAuditCommand
         // profile, and the Baton-managed Codex store hangs off BatonPaths.Root, which BATON_HOME can
         // point somewhere else entirely.
         var userHome = userHomeOverride ?? MemoryRootInventory.DefaultUserHome;
+        var batonRoot = batonRootOverride ?? BatonPaths.Root;
         var vendorRoots = MemoryRootInventory.ScanVendorRoots(
-            userHome, batonRootOverride ?? BatonPaths.Root, limits: null, cancellationToken);
+            userHome, batonRoot, limits: null, cancellationToken);
+        var retractions = await ReadRetractionsAsync(batonRoot, cancellationToken).ConfigureAwait(false);
 
         if (options.Format == MemoryAuditOutputFormat.Json)
         {
             output.WriteLine(JsonSerializer.Serialize(
                 new MemoryAuditJsonView(
-                    claudeHome, userHome, report.Roots, report.Findings, report.Counts, vendorRoots),
+                    claudeHome, userHome, report.Roots, report.Findings, report.Counts, vendorRoots, retractions),
                 ViewSerializerOptions));
             return 0;
         }
 
         WriteText(output, claudeHome, report);
         WriteVendorRoots(output, vendorRoots);
+        WriteRetractions(output, retractions);
         return 0;
+    }
+
+    /// <summary>
+    /// Every retraction in every canonical store under <paramref name="batonRoot"/> (#2113), oldest
+    /// first within a store and stores in slug order — so an operator can see what was declared no
+    /// longer true, by whom and why, without opening the files.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// <b>The third population this verb reports, and the first that is Baton's own store.</b> The
+    /// Claude roots and the non-Claude vendor roots are what <c>audit</c> was built to inventory; a
+    /// retraction is not in any vendor root — it exists only in the canonical store, and the verb an
+    /// operator has for "what does the store say" is this one. Still read-only by construction: the
+    /// ledger read creates nothing, and a repository directory with no <c>retractions.jsonl</c> simply
+    /// contributes no rows.
+    /// </para>
+    /// <para>
+    /// The enumeration is over <c>{batonRoot}/&lt;slug&gt;/memory/retractions.jsonl</c> — the
+    /// directories on disk ARE the list of repositories, for the reason <c>MemorySyncCommand</c>
+    /// gives for its own enumeration. Built from <paramref name="batonRoot"/> rather than from
+    /// <see cref="BatonPaths"/>' root-bound helpers so the test seam that keeps this verb off the
+    /// operator's real <c>~/.baton</c> covers this read too.
+    /// </para>
+    /// </remarks>
+    private static async Task<IReadOnlyList<MemoryRetraction>> ReadRetractionsAsync(
+        string batonRoot, CancellationToken cancellationToken)
+    {
+        if (!Directory.Exists(batonRoot))
+        {
+            return [];
+        }
+
+        var rows = new List<MemoryRetraction>();
+        foreach (var directory in Directory.EnumerateDirectories(batonRoot).OrderBy(d => d, StringComparer.OrdinalIgnoreCase))
+        {
+            var file = Path.Combine(directory, BatonPaths.MemoryDirectoryName, BatonPaths.MemoryRetractionsFileName);
+            if (!File.Exists(file))
+            {
+                continue;
+            }
+
+            rows.AddRange(await MemoryStore.ReadRetractionsAsync(file, cancellationToken).ConfigureAwait(false));
+        }
+
+        return rows;
     }
 
     /// <summary>
@@ -132,6 +180,9 @@ public static class MemoryAuditCommand
     /// <c>roots</c>, nor counted in <c>counts</c>: those describe repository-keyed Claude roots and
     /// every finding kind in them is a statement about a repository mapping that a per-machine vendor
     /// root has no basis for. <see cref="MemoryRootInventory.ScanVendorRoots"/>'s remarks carry why.
+    /// <c>retractions</c> (#2113) is a third additive array, over the canonical store rather than any
+    /// vendor root, and is likewise neither a finding nor counted — a retraction is an operator's
+    /// recorded decision, not something left open for the import to settle.
     /// </remarks>
     private sealed record MemoryAuditJsonView(
         string ClaudeHome,
@@ -139,7 +190,37 @@ public static class MemoryAuditCommand
         IReadOnlyList<MemoryRootRow> Roots,
         IReadOnlyList<MemoryFinding> Findings,
         MemoryAuditCounts Counts,
-        IReadOnlyList<VendorMemoryRoot> VendorRoots);
+        IReadOnlyList<VendorMemoryRoot> VendorRoots,
+        IReadOnlyList<MemoryRetraction> Retractions);
+
+    /// <summary>
+    /// The retractions, under their own heading, each with the reason and author verbatim — the
+    /// report the retract verb's help promises. Printed even when empty, so "none" is a statement
+    /// rather than a heading a reader has to notice is missing.
+    /// </summary>
+    private static void WriteRetractions(TextWriter output, IReadOnlyList<MemoryRetraction> retractions)
+    {
+        output.WriteLine();
+        output.WriteLine(
+            "Retractions in the canonical store (#2113) -- entries declared no longer true by 'baton " +
+            "memory retract'. Each entry's own row is still in its store; history is never deleted.");
+
+        if (retractions.Count == 0)
+        {
+            output.WriteLine("  none.");
+            return;
+        }
+
+        foreach (var retraction in retractions)
+        {
+            output.WriteLine();
+            output.WriteLine($"  {retraction.EntryId}  ({retraction.Repository})");
+            output.WriteLine(
+                $"    retracted by {retraction.RetractedBy} at " +
+                $"{retraction.RetractedAtUtc.ToString("O", CultureInfo.InvariantCulture)}");
+            output.WriteLine($"    reason: {retraction.Reason}");
+        }
+    }
 
     private static void WriteText(TextWriter output, string claudeHome, MemoryAuditReport report)
     {
