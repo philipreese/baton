@@ -3980,6 +3980,16 @@ code 2147942470 (exit 70), followed by ten minutes without a restart (#2083).
   (`src/Baton.Vendors/DaemonSettingsStore.cs`), and the allowed bind addresses have theirs on
   `GlassBindPolicy`. Off unless `settings.json` opts in. What slice 1 may and may not carry is
   C-11's ruling, not restated here.
+  **A reverse proxy in front of this listener must point at a prefix the daemon actually bound
+  (#2130).** Measured 2026-09-08: granting the tailnet urlacl reservations made the *loopback*
+  prefix start failing to bind too (`GlassHttpService`'s own remarks carry the measurement), and
+  `tailscale serve` stayed pointed at the now-unbound loopback address for four hours before
+  anyone noticed — a 502 with nothing in the daemon's own log to say the address it proxied to was
+  wrong. No prefix here is exempt from needing a urlacl reservation once other reservations exist on
+  the port, so the fix is the same for either: grant the reservation the daemon's per-prefix log
+  line states. `glassBoundPrefixes` on the heartbeat (above, `{Root}/fleet/heartbeat.json`) lists
+  what is actually bound, so a proxy misconfiguration is diagnosable from the glass's own heartbeat
+  rather than by re-deriving bind state from `netsh` or the daemon log.
 - **`DeliveryPoller`** (`Baton.Cli.Daemon`, a hosted service, #734) — a fifth kept responsibility, the
   same outbound-only ceiling as the fleet projection file above: a slow-cadence (default 5 min,
   `BATON_DELIVERY_POLL_INTERVAL_SECONDS`-configurable through `BatonEnvironmentSnapshot`, matching the
@@ -4064,10 +4074,13 @@ code 2147942470 (exit 70), followed by ten minutes without a restart (#2083).
   whichever is shorter, so a widened projection interval does not widen the fleet arm's reaction.
   **The heartbeat's schema, stated here once:** `tickCompletedAt` (newest completion across
   services), `startedAt` (process start), `services` (per service: `lastTickMs`, `completedAt`,
-  `intervalMs`), and `hostLoad` (#2082: `sampledAt`, `threadPoolPendingWorkItems`,
+  `intervalMs`), `hostLoad` (#2082: `sampledAt`, `threadPoolPendingWorkItems`,
   `threadPoolThreads`, `gcTotalMemoryBytes`, `workingSetBytes` — the process's own counters at the
-  sample's capture instant). These are process-counter reads; capture has been tested on a healthy
-  pool, not drilled against a wedged pool.
+  sample's capture instant), and `glassBoundPrefixes` (#2130: the prefixes `GlassHttpService`
+  actually bound, as reported to `DaemonTickLedger.RecordGlassBoundPrefixes`; omitted, not an empty
+  array, until that service has completed its first tick — the listener off reads differently from
+  the listener on with every prefix refused). These are process-counter reads; capture has been
+  tested on a healthy pool, not drilled against a wedged pool.
   A service's `lastTickMs` against its `intervalMs` is the host-load signal that predates the freeze:
   on 2026-09-08 `FleetProjectionWriter` had reached 10.97 s against 30 s in the last body written
   before every loop stopped. The watchdog's verdict line (`{Root}/fleet/watchdog.txt`) carries a

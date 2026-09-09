@@ -103,6 +103,29 @@ public sealed class GlassHttpServiceTests : IDisposable
         }
     }
 
+    /// <summary>#2130, spec/baton.md §7 — the diagnostic this exists for reads the heartbeat, not
+    /// <see cref="GlassHttpService.BoundPrefixes"/> directly, so the ledger write is what has to be
+    /// pinned rather than the property alone.</summary>
+    [Fact]
+    public async Task Reports_the_bound_prefixes_onto_the_shared_tick_ledger_for_the_heartbeat()
+    {
+        using var cts = new CancellationTokenSource(TimeSpan.FromMinutes(1));
+        var harness = await StartAsync(cts.Token);
+        try
+        {
+            var heartbeat = DaemonTickLedger.Instance.RenderHeartbeatJson(HostLoadSample.Capture(DateTimeOffset.UtcNow));
+            using var doc = System.Text.Json.JsonDocument.Parse(heartbeat);
+            var reported = doc.RootElement.GetProperty("glassBoundPrefixes")
+                .EnumerateArray().Select(e => e.GetString()!).ToList();
+
+            Assert.Equal(harness.Service.BoundPrefixes, reported);
+        }
+        finally
+        {
+            await harness.Service.StopAsync(CancellationToken.None);
+        }
+    }
+
     [Fact]
     public async Task Serves_nothing_at_all_when_the_operator_has_not_opted_in()
     {

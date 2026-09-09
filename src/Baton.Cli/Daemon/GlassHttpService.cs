@@ -35,11 +35,17 @@ namespace Baton.Cli.Daemon;
 /// reachability and nothing else.
 /// </para>
 /// <para>
-/// <b>On Windows a non-loopback prefix needs a URL reservation.</b> Measured 2026-09-07 on the
+/// <b>On Windows any prefix can end up needing a URL reservation.</b> Measured 2026-09-07 on the
 /// operator's machine: an unelevated process binds <c>http://127.0.0.1:PORT/</c> fine and gets
-/// "Access is denied" for <c>http://100.x.y.z:PORT/</c>. That is a one-time elevated
-/// <c>netsh http add urlacl</c>, which the per-prefix failure log prints verbatim; the loopback
-/// listener comes up regardless, so the daemon is never taken down by it.
+/// "Access is denied" for <c>http://100.x.y.z:PORT/</c> with no reservation at all. That looked like
+/// a loopback-is-always-free rule, and it is not one: measured again 2026-09-08, after the operator
+/// granted urlacl reservations for the two tailnet prefixes, the same unelevated process started
+/// getting "Access is denied" for <c>http://127.0.0.1:PORT/</c> too — a prefix that had bound cleanly
+/// for the prior day. Whatever changed on the reservation table, loopback is not exempt from needing
+/// one once other reservations exist on the port, so no prefix here is treated as needing no
+/// reservation. Each is a one-time elevated <c>netsh http add urlacl</c>, which the per-prefix
+/// failure log below prints verbatim for whichever prefix actually failed; a bind refusal on one
+/// prefix costs only that prefix's reachability, never the daemon.
 /// </para>
 /// </remarks>
 internal sealed class GlassHttpService : BackgroundService
@@ -113,15 +119,20 @@ internal sealed class GlassHttpService : BackgroundService
             {
                 listener.Close();
                 // Loud, once, with the exact remediation -- an operator who sees only "access is
-                // denied" has no way to know a URL reservation is what is missing.
+                // denied" has no way to know a URL reservation is what is missing. Stated for
+                // whichever prefix actually failed, loopback included: loopback is not exempt once
+                // other reservations exist on the port (see this class's own remarks).
                 _log.WriteLine(
-                    $"GlassHttpService: could not bind {prefix} ({ex.Message}). If this is the tailnet " +
-                    $"address, grant the reservation once from an elevated prompt: " +
+                    $"GlassHttpService: could not bind {prefix} ({ex.Message}). Grant the reservation " +
+                    $"once from an elevated prompt: " +
                     $"netsh http add urlacl url={prefix} user={Environment.UserDomainName}\\{Environment.UserName}");
             }
         }
 
         BoundPrefixes = bound;
+        // Surfaced on the heartbeat (spec/baton.md §7) so a reverse proxy pointed at the wrong
+        // address is diagnosable from the glass itself rather than only from this log line.
+        DaemonTickLedger.Instance.RecordGlassBoundPrefixes(bound);
         if (listeners.Count == 0)
         {
             _log.WriteLine("GlassHttpService: no address could be bound; the glass is not being served.");
