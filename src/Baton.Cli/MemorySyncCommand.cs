@@ -146,6 +146,7 @@ public static class MemorySyncCommand
         CancellationToken cancellationToken)
     {
         var entriesFile = BatonPaths.MemoryEntriesFile(slug);
+        var isFleet = FleetMemory.IsFleet(slug);
 
         // Checked BEFORE the lock. `--repository <id>` names a slug rather than selecting a directory
         // that exists, so an identity with no store reaches here -- a typo is enough. Measured, so the
@@ -165,6 +166,16 @@ public static class MemorySyncCommand
         var retractions = await MemoryStore
             .ReadRetractionsAsync(BatonPaths.MemoryRetractionsFile(slug), cancellationToken).ConfigureAwait(false);
 
+        // The fleet store is read BEFORE this repository's lock is taken and under its own, never
+        // nested -- MemoryStore.ReadResolvedAsync's rule. A repository's projection merges it in ahead
+        // of the repository's entries (#2112); the fleet's own projection is the fleet store alone, so
+        // for that slug this is empty and the entries below carry the origin instead.
+        var fleet = isFleet || !File.Exists(FleetMemory.EntriesFile)
+            ? []
+            : await MemoryStore.ReadResolvedAsync(FleetMemory.EntriesFile, FleetMemory.LinksFile, cancellationToken)
+                .ConfigureAwait(false);
+        var fleetStorePath = !isFleet && File.Exists(FleetMemory.EntriesFile) ? FleetMemory.EntriesFile : null;
+
         return await MemoryStore.RunUnderEntriesLockAsync(
             entriesFile,
             stored =>
@@ -181,14 +192,16 @@ public static class MemorySyncCommand
                 // (ProjectionOmission's remarks). The projector never sees a retracted entry, since
                 // Resolve drops it first, so the omission is accounted for here from the raw rows.
                 var retracted = RetractedOmissions(stored, retractions);
-                var candidates = resolved
-                    .Select(e => new MemoryProjectionCandidate(e, MemoryFactOrigin.Vendor))
+                var candidates = fleet
+                    .Select(e => new MemoryProjectionCandidate(e, MemoryFactOrigin.Fleet))
+                    .Concat(resolved.Select(e => new MemoryProjectionCandidate(
+                        e, isFleet ? MemoryFactOrigin.Fleet : MemoryFactOrigin.Vendor)))
                     .Concat(repositoryFacts.Where(f => string.Equals(
                         f.Entry.Repository, repository, StringComparison.OrdinalIgnoreCase)))
                     .ToList();
 
                 var projection = MemoryProjection.Build(
-                    repository, entriesFile, candidates, ProjectionBudget.Default);
+                    repository, entriesFile, candidates, ProjectionBudget.Default, fleetStorePath);
 
                 var targets = targetsByRepository.TryGetValue(repository, out var found)
                     ? found.OrderBy(t => t.FilePath, StringComparer.OrdinalIgnoreCase).ToList()
@@ -250,10 +263,16 @@ public static class MemorySyncCommand
     /// <see cref="MemoryImportCommand"/>'s unfiled reasons take the same shape.
     /// </summary>
     private static string NoTargetGuidance(string repository) =>
-        $"no vendor memory root on this machine resolves to '{repository}', so there is nothing to " +
-        "project into and nothing was created -- run 'baton memory audit' to see which roots exist, " +
-        "then assert a per-machine Codex root's repository with 'baton memory import --assert " +
-        $"<root>={repository}' (see spec/baton.md §12).";
+        FleetMemory.IsFleet(repository)
+            ? "no vendor memory root on this machine is asserted to the fleet store, so it has no file of " +
+              "its own and nothing was created. Its entries still reach EVERY repository's projection " +
+              "above, merged in ahead of that repository's own; assert a per-machine Codex root to it " +
+              $"with 'baton memory import --assert <root>={FleetMemory.Slug}' only if you want a fleet-only " +
+              "file too (see spec/baton.md §12)."
+            : $"no vendor memory root on this machine resolves to '{repository}', so there is nothing to " +
+              "project into and nothing was created -- run 'baton memory audit' to see which roots exist, " +
+              "then assert a per-machine Codex root's repository with 'baton memory import --assert " +
+              $"<root>={repository}' (see spec/baton.md §12).";
 
     /// <summary>
     /// The one place a projection reaches the disk, and the one place a dry run is proven not to.
@@ -290,38 +309,14 @@ public static class MemorySyncCommand
     }
 
     /// <summary>
-    /// Every repository slug that has a canonical store, or just the one <c>--repository</c> named.
+    /// Every slug that has a canonical store — the fleet store included, first — or just the one
+    /// <c>--repository</c> named. <see cref="CanonicalStoreInventory"/> is the enumeration and carries
+    /// why the directories on disk are the list.
     /// </summary>
-    /// <remarks>
-    /// The enumeration is over <c>{BATON_HOME}/&lt;slug&gt;/memory/entries.jsonl</c> rather than over a
-    /// registry, because there is no registry: Q3's layout makes the repository directory the unit, so
-    /// the directories on disk ARE the list. A directory with no store file is not a repository this
-    /// verb knows about — <c>rooms/</c>, <c>queue/</c> and the rest of <c>{BATON_HOME}</c> sit beside
-    /// them and are skipped by exactly that test, as is a repository directory holding only the cost
-    /// ledger #2041 moved in beside the store.
-    /// </remarks>
-    private static IEnumerable<string> StoredRepositorySlugs(string? repository)
-    {
-        if (repository is { Length: > 0 })
-        {
-            yield return RepositoryIdentity.FileSlugFor(repository);
-            yield break;
-        }
-
-        if (!Directory.Exists(BatonPaths.Root))
-        {
-            yield break;
-        }
-
-        foreach (var directory in Directory.EnumerateDirectories(BatonPaths.Root).OrderBy(d => d, StringComparer.OrdinalIgnoreCase))
-        {
-            var slug = Path.GetFileName(directory);
-            if (File.Exists(BatonPaths.MemoryEntriesFile(slug)))
-            {
-                yield return slug;
-            }
-        }
-    }
+    private static IEnumerable<string> StoredRepositorySlugs(string? repository) =>
+        repository is { Length: > 0 }
+            ? [FleetMemory.SlugFor(repository)]
+            : CanonicalStoreInventory.Scan(BatonPaths.Root).Select(s => s.Slug);
 
     /// <summary>
     /// Every vendor memory root this machine holds that a projection could be written into, grouped by

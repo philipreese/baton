@@ -11,7 +11,7 @@ namespace Baton.Cli;
 public static class MemoryAddOptionsParser
 {
     public const string Usage =
-        "Usage: baton memory add --text <text> --kind <kind> [--repository <id>] [--dry-run] [--help]";
+        "Usage: baton memory add --text <text> --kind <kind> [--repository <id>|fleet] [--dry-run] [--help]";
 
     /// <summary>
     /// The kinds this verb accepts, in the spelling the store writes — derived from
@@ -56,6 +56,11 @@ public static class MemoryAddOptionsParser
         "                      answers for in the current directory. If git answers for nothing and you",
         "                      passed no id, this refuses rather than guessing a subject -- the same",
         "                      refusal 'baton memory import' makes for a root it cannot place.",
+        "  --repository fleet  The reserved FLEET store (~/.baton/fleet/memory/), for a fact that belongs",
+        "                      to no repository: an operator preference, a device, a standing lane rule, a",
+        "                      machine fact. Every repository's projection merges the fleet store in ahead",
+        "                      of its own entries. Anything derivable from a repository is NOT fleet-scoped;",
+        "                      spec/baton.md §12 states the boundary once.",
         "  --dry-run           Write NOTHING: no store row, no manifest, no directory. It still refuses a",
         "                      duplicate, so a dry run previews the run it precedes rather than a",
         "                      different one.",
@@ -183,6 +188,14 @@ public static class MemoryAddOptionsParser
     /// </summary>
     internal static string ParseRepository(string value, string usage)
     {
+        // The reserved word is answered before canonicalization, which would otherwise refuse it as
+        // "no host-and-path" -- correct for a git identity and the wrong answer for the one subject that
+        // is not one (#2112).
+        if (FleetMemory.IsFleet(value))
+        {
+            return FleetMemory.Slug;
+        }
+
         if (RepositoryIdentity.TryCanonicalize(value) is not { Length: > 0 } canonical)
         {
             throw new CliArgumentException(

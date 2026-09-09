@@ -145,7 +145,7 @@ public static class MemoryImportCommand
         var linkRows = new List<ImportLinkRow>();
         foreach (var group in plan.Entries.GroupBy(e => e.Repository, StringComparer.OrdinalIgnoreCase))
         {
-            var slug = RepositoryIdentity.FileSlugFor(group.Key);
+            var slug = FleetMemory.SlugFor(group.Key);
             var entriesFile = BatonPaths.MemoryEntriesFile(slug);
             var linksFile = BatonPaths.MemoryLinksFile(slug);
             var entries = group.ToList();

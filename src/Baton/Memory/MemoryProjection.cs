@@ -21,6 +21,15 @@ public enum MemoryFactOrigin
 
     /// <summary>A fact that reached the canonical store from a vendor's memory root.</summary>
     [JsonStringEnumMemberName("vendor")] Vendor,
+
+    /// <summary>
+    /// A fact from the reserved fleet store (#2112) — an operator or machine fact that belongs to no
+    /// repository and is merged into every repository's projection ahead of that repository's own
+    /// entries. Never in conflict with either of the two above: its subject is <c>fleet</c>, so no
+    /// conflict key and no id can collide across the two stores. The merge rule is stated once in
+    /// spec/baton.md §12.
+    /// </summary>
+    [JsonStringEnumMemberName("fleet")] Fleet,
 }
 
 /// <summary>One entry offered to <see cref="MemoryProjection"/>, with where its authority comes from.</summary>
@@ -201,21 +210,35 @@ public static class MemoryProjection
     /// occurrence, so a caller that concatenated two reads of one store does not double the body.
     /// </param>
     /// <param name="budget">See <see cref="ProjectionBudget"/>.</param>
+    /// <param name="fleetStorePath">
+    /// The fleet store's <c>entries.jsonl</c> when the caller merged it in (#2112), named in the header
+    /// beside <paramref name="canonicalStorePath"/> so a reader of a fleet section knows which file to
+    /// change. <see langword="null"/> when no fleet store was read, and then the header says nothing
+    /// about one — which keeps a repository with no fleet store on this machine projecting the bytes it
+    /// projected before the slug existed.
+    /// </param>
     public static MemoryProjectionResult Build(
         string repository,
         string canonicalStorePath,
         IReadOnlyList<MemoryProjectionCandidate> candidates,
-        ProjectionBudget budget)
+        ProjectionBudget budget,
+        string? fleetStorePath = null)
     {
         ArgumentException.ThrowIfNullOrEmpty(repository);
         ArgumentException.ThrowIfNullOrEmpty(canonicalStorePath);
         ArgumentNullException.ThrowIfNull(candidates);
         ArgumentNullException.ThrowIfNull(budget);
 
+        // Fleet first, ahead of the (repository, kind, id) order, and this is the merge rule's
+        // mechanism rather than a preference: the budget truncates a suffix, so putting the
+        // machine-wide facts at the front is what makes a repository entry the one that drops before
+        // a fleet one does. Nothing here shadows anything -- the subjects are disjoint, so both stores'
+        // entries reach the body whatever their text or filename.
         var seen = new HashSet<string>(StringComparer.Ordinal);
         var ordered = candidates
             .Where(c => seen.Add(c.Entry.Id))
-            .OrderBy(c => c.Entry.Repository, StringComparer.Ordinal)
+            .OrderBy(c => c.Origin == MemoryFactOrigin.Fleet ? 0 : 1)
+            .ThenBy(c => c.Entry.Repository, StringComparer.Ordinal)
             .ThenBy(c => MemoryJsonNames.Of(c.Entry.Kind), StringComparer.Ordinal)
             .ThenBy(c => c.Entry.Id, StringComparer.Ordinal)
             .ToList();
@@ -269,7 +292,7 @@ public static class MemoryProjection
         var bodySha256 = Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(body))).ToLowerInvariant();
 
         var header = RenderHeader(
-            repository, canonicalStorePath, bodySha256, budget,
+            repository, canonicalStorePath, fleetStorePath, bodySha256, budget,
             sections.Count, superseded.Count, overridden.Count, dropped.Count);
 
         return new MemoryProjectionResult(
@@ -395,6 +418,13 @@ public static class MemoryProjection
                 $"Checked-in repository fact `{entry.Id}` ({MemoryJsonNames.Of(entry.Kind)}), read from " +
                 $"`{entry.SourcePath}` in the checkout. **Not a canonical store row** -- this id is derived " +
                 $"for reference and will not be found in the store file named above.\n\n")
+            : candidate.Origin == MemoryFactOrigin.Fleet
+            ? "Fleet entry `" + entry.Id + "` (" + MemoryJsonNames.Of(entry.Kind) + "), " +
+              (authored
+                  ? "authored through `baton memory add --repository " + FleetMemory.Slug + "` by `" + entry.AssertedBy + "`"
+                  : "projected from `" + entry.SourcePath + "`") +
+              ". **An operator or machine fact, not this repository's** -- it is a row in the fleet " +
+              "store named in the header, not in this repository's store.\n\n"
             : authored
             ? string.Create(
                 CultureInfo.InvariantCulture,
@@ -419,6 +449,7 @@ public static class MemoryProjection
     private static string RenderHeader(
         string repository,
         string canonicalStorePath,
+        string? fleetStorePath,
         string bodySha256,
         ProjectionBudget budget,
         int projected,
@@ -435,6 +466,15 @@ public static class MemoryProjection
             "overwritten in full on every run: an edit made here is lost on the next sync and is never read\n" +
             "back into Baton. To change what it says, change the canonical store it is projected from:\n\n");
         builder.Append(CultureInfo.InvariantCulture, $"    {canonicalStorePath}\n\n");
+        if (fleetStorePath is { Length: > 0 })
+        {
+            builder.Append(
+                "Sections marked `origin=fleet` come first and are operator or machine facts filed under the\n" +
+                "reserved `fleet` slug rather than under this repository. They are rows in the fleet store, which\n" +
+                "every repository's projection merges in ahead of its own entries:\n\n");
+            builder.Append(CultureInfo.InvariantCulture, $"    {fleetStorePath}\n\n");
+        }
+
         builder.Append(
             "Sections marked `origin=repository` are the exception: those are checked-in facts read straight\n" +
             "from a checkout at projection time, they are **not** rows in the store above, and each says so\n" +

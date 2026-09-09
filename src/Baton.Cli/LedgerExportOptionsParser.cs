@@ -73,6 +73,7 @@ public static class LedgerExportOptionsParser
                     break;
                 case "--repo-identity":
                     repositoryIdentityKey = RequireValue(args, i);
+                    LedgerViewOptionsParser.RefuseFleet(repositoryIdentityKey);
                     i += 2;
                     break;
                 default:

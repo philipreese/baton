@@ -110,12 +110,15 @@ public static class MemoryAuditCommand
         var vendorRoots = MemoryRootInventory.ScanVendorRoots(
             userHome, batonRoot, limits: null, cancellationToken);
         var retractions = await ReadRetractionsAsync(batonRoot, cancellationToken).ConfigureAwait(false);
+        var canonicalStores = await ScanCanonicalStoresAsync(batonRoot, options.Repository, cancellationToken)
+            .ConfigureAwait(false);
 
         if (options.Format == MemoryAuditOutputFormat.Json)
         {
             output.WriteLine(JsonSerializer.Serialize(
                 new MemoryAuditJsonView(
-                    claudeHome, userHome, report.Roots, report.Findings, report.Counts, vendorRoots, retractions),
+                    claudeHome, userHome, report.Roots, report.Findings, report.Counts, vendorRoots, retractions,
+                    canonicalStores),
                 ViewSerializerOptions));
             return 0;
         }
@@ -123,6 +126,7 @@ public static class MemoryAuditCommand
         WriteText(output, claudeHome, report);
         WriteVendorRoots(output, vendorRoots);
         WriteRetractions(output, retractions);
+        WriteCanonicalStores(output, batonRoot, options.Repository, canonicalStores);
         return 0;
     }
 
@@ -172,6 +176,67 @@ public static class MemoryAuditCommand
     }
 
     /// <summary>
+    /// Baton's own canonical stores under <paramref name="batonRoot"/> (#2112): the fleet store and
+    /// every repository's, each with its entry count — or just the one <paramref name="repository"/>
+    /// selects.
+    /// </summary>
+    /// <remarks>
+    /// <b>Rows are counted and never printed</b>, which keeps this half inside the verb's own
+    /// read-only-and-content-blind claim: an entry's text goes nowhere, and the one field read out of
+    /// a row is its subject, so the report can say whose store a slug is without decoding the slug.
+    /// A selected store that does not exist is reported as absent rather than dropped, because "no
+    /// fleet store yet" is an answer an operator acts on and an empty list is not.
+    /// </remarks>
+    private static async Task<IReadOnlyList<CanonicalStoreRow>> ScanCanonicalStoresAsync(
+        string batonRoot, string? repository, CancellationToken cancellationToken)
+    {
+        var selectedSlug = repository is { Length: > 0 } ? FleetMemory.SlugFor(repository) : null;
+        var rows = new List<CanonicalStoreRow>();
+        foreach (var store in CanonicalStoreInventory.Scan(batonRoot))
+        {
+            if (selectedSlug is not null && !string.Equals(store.Slug, selectedSlug, StringComparison.OrdinalIgnoreCase))
+            {
+                continue;
+            }
+
+            var entries = await MemoryStore.ReadAllAsync(store.EntriesFile, cancellationToken).ConfigureAwait(false);
+            rows.Add(new CanonicalStoreRow(
+                store.Slug,
+                store.IsFleet ? FleetMemory.Slug : entries.Count > 0 ? entries[0].Repository : null,
+                store.IsFleet,
+                store.EntriesFile,
+                Present: true,
+                entries.Count));
+        }
+
+        if (selectedSlug is not null && rows.Count == 0)
+        {
+            rows.Add(new CanonicalStoreRow(
+                selectedSlug,
+                repository,
+                FleetMemory.IsFleet(repository),
+                Path.Combine(batonRoot, selectedSlug, BatonPaths.MemoryDirectoryName, BatonPaths.MemoryEntriesFileName),
+                Present: false,
+                EntryCount: 0));
+        }
+
+        return rows;
+    }
+
+    /// <summary>
+    /// One canonical store in the report. <paramref name="Repository"/> is the subject its rows carry
+    /// (<c>fleet</c> for the fleet store); absent when the store holds no row yet, since a slug alone
+    /// cannot say whose it is.
+    /// </summary>
+    private sealed record CanonicalStoreRow(
+        string Slug,
+        string? Repository,
+        bool IsFleet,
+        string EntriesFile,
+        bool Present,
+        int EntryCount);
+
+    /// <summary>
     /// The JSON contract: the report plus the two roots it was taken over, so a stored report says
     /// which machine's homes produced it rather than leaving that to the reader's assumption.
     /// </summary>
@@ -191,7 +256,8 @@ public static class MemoryAuditCommand
         IReadOnlyList<MemoryFinding> Findings,
         MemoryAuditCounts Counts,
         IReadOnlyList<VendorMemoryRoot> VendorRoots,
-        IReadOnlyList<MemoryRetraction> Retractions);
+        IReadOnlyList<MemoryRetraction> Retractions,
+        IReadOnlyList<CanonicalStoreRow> CanonicalStores);
 
     /// <summary>
     /// The retractions, under their own heading, each with the reason and author verbatim — the
@@ -311,6 +377,42 @@ public static class MemoryAuditCommand
                 $"    files={fileCount} bytes={totalBytes.ToString("N0", CultureInfo.InvariantCulture)}" +
                 (root.NewestModifiedUtc is { } newest ? $" newest={newest:O}" : " newest=(none)") +
                 (root.Inventoried ? string.Empty : "  [counted only -- no file here was opened]"));
+        }
+    }
+
+    /// <summary>
+    /// Baton's own stores, under their own heading (#2112): the fleet store first, then one per
+    /// repository, counts only. A selected store that is absent says so on its own line.
+    /// </summary>
+    private static void WriteCanonicalStores(
+        TextWriter output, string batonRoot, string? repository, IReadOnlyList<CanonicalStoreRow> stores)
+    {
+        output.WriteLine();
+        output.WriteLine(
+            $"Canonical stores under {batonRoot} (#2112) -- Baton's own, COUNTS ONLY. The '{FleetMemory.Slug}' " +
+            "store holds operator and machine facts that belong to no repository and is merged into every " +
+            "repository's projection; each other store is one repository's. No row's text was read into this report.");
+
+        if (stores.Count == 0)
+        {
+            output.WriteLine();
+            output.WriteLine(
+                repository is { Length: > 0 }
+                    ? $"  (no canonical store for '{repository}')"
+                    : "  (no canonical store yet -- 'baton memory add' or 'baton memory import' creates one)");
+            return;
+        }
+
+        foreach (var store in stores)
+        {
+            output.WriteLine();
+            output.WriteLine($"  {store.EntriesFile}");
+            output.WriteLine(
+                store.Present
+                    ? $"    {(store.IsFleet ? "FLEET" : "repository=" + (store.Repository ?? "(no rows yet)"))} " +
+                      $"slug={store.Slug} entries={store.EntryCount.ToString("N0", CultureInfo.InvariantCulture)}"
+                    : $"    ABSENT -- no store has been created for '{store.Repository}' on this machine; " +
+                      "'baton memory add' or 'baton memory import' creates it.");
         }
     }
 

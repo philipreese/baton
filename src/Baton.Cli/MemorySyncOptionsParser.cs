@@ -16,7 +16,7 @@ namespace Baton.Cli;
 public static class MemorySyncOptionsParser
 {
     public const string Usage =
-        "Usage: baton memory sync [--repository <id>] [--apply | --check] [--format text|json] " +
+        "Usage: baton memory sync [--repository <id>|fleet] [--apply | --check] [--format text|json] " +
         "[--repository-facts <dir>] [--help]";
 
     /// <summary>
@@ -63,7 +63,12 @@ public static class MemorySyncOptionsParser
         "",
         "  --repository <id>   Sync only this repository, e.g. 'github.com/owner/repo'. Canonicalized the",
         "                      same way a git probe's answer is, so a clone URL is accepted. Default: every",
-        "                      repository that has a canonical store.",
+        "                      repository that has a canonical store, and the fleet store.",
+        "  --repository fleet  Sync only the reserved FLEET store's own targets: the roots an operator",
+        "                      asserted to 'fleet'. EVERY repository's projection already carries the fleet",
+        "                      store's entries -- merged in ahead of the repository's own, neither shadowing",
+        "                      the other (spec/baton.md §12 states the rule once) -- so this selects the",
+        "                      fleet's own file, not whether fleet facts reach a repository's.",
         "  --apply             Write the projections. Without it, nothing is written and the report says",
         "                      what would change. Writes happen under the canonical store's own lock, so a",
         "                      concurrent 'baton memory import' cannot land mid-projection.",
@@ -160,6 +165,19 @@ public static class MemorySyncOptionsParser
                 "add '--repository <id>' naming the repository those facts belong to.");
         }
 
+        // Refused rather than given an empty population that reads as "no conflicts found": the fleet
+        // store's boundary (FleetMemory's remarks; spec/baton.md §12) puts checked-in facts on the
+        // repository side of it.
+        if (repositoryFacts is { Length: > 0 } && FleetMemory.IsFleet(repository) && !help)
+        {
+            throw new CliArgumentException(
+                FleetMemory.GitIdentityRefusal(
+                    "--repository-facts with --repository",
+                    "checked-in facts are the repository's own, which the fleet store never holds.") +
+                $" {Usage}",
+                "name the repository the facts are checked into.");
+        }
+
         // Refused rather than ordered (#2040). '--check' asks whether the projections are already
         // current and '--apply' makes them current, so a run carrying both would rewrite the very
         // targets it was measuring and could never exit anything but 0 -- a gate that cannot fail. The
@@ -192,7 +210,9 @@ public static class MemorySyncOptionsParser
     /// honest answer for a store that does not exist.
     /// </remarks>
     private static string ParseRepository(string value) =>
-        RepositoryIdentity.TryCanonicalize(value) is { Length: > 0 } canonical
+        FleetMemory.IsFleet(value)
+            ? FleetMemory.Slug
+            : RepositoryIdentity.TryCanonicalize(value) is { Length: > 0 } canonical
             ? canonical
             : throw new CliArgumentException(
                 $"'{value.Trim()}' is not a repository identity: it has no host-and-path to " +
