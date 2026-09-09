@@ -22,15 +22,31 @@ public interface IWorkerUsageParser
     /// <c>"type":"assistant"</c> <c>message.usage</c>, agy's <c>"step_update"</c> DONE-state
     /// <c>usage</c>) — for a running token budget evaluated as usage arrives, never a replacement for
     /// <see cref="TryParseFinalUsage"/>'s own terminal-line read. Each matching line reports that one
-    /// turn's own usage, but the two output fields on <see cref="WorkerUsage"/> are NOT symmetric: the
-    /// output side (<c>TokensOut</c>) is additive — a caller sums across calls. The input side
-    /// (<c>TokensIn</c> + <c>CacheReadTokens</c> + <c>CacheCreationTokens</c>) is a LEVEL — a vendor's
-    /// own <c>input_tokens</c> for a turn already restates the whole context sent that turn, so a
-    /// caller replaces its running input total with each new reading rather than adding to it; summing
-    /// it the way output is summed double-counts a long conversation's context on every turn.
-    /// <see cref="Baton.Mutation.TokenBudgetMonitor"/> is the worked example of both halves together.
-    /// Default false/null: a parser that only supports the final-usage read (a test double, a future
-    /// vendor) opts out cleanly rather than being forced to implement this.
+    /// turn's own usage, and both <c>TokensIn</c> and <c>TokensOut</c> on <see cref="WorkerUsage"/> are
+    /// additive — a caller sums each across calls, the same as a real per-call bill would.
+    /// <para>
+    /// #2144 correction: an earlier revision of this doc claimed <c>TokensIn</c> was a LEVEL restating
+    /// the whole context each turn, by analogy from claude's shape rather than a measurement — claude
+    /// never actually populates it on an incremental reading
+    /// (<c>ClaudeUsageParser.TryParseIncrementalUsage</c>'s own doc has why), so nothing ever exercised
+    /// the claim. Measured on the two vendors that do populate it: agy's is additive
+    /// (<c>docs/vendor-capabilities.md</c>, "agy's terminal <c>result.usage</c> IS the cumulative Σ of
+    /// its per-turn lines"; <c>AgyTerminalUsageIsCumulativeTests</c> pins it against real 70/157/190-turn
+    /// captures, where summing every turn's <c>TokensIn</c> reproduces the vendor's own terminal total to
+    /// the token, while reading only the last turn's figure — the LEVEL reading this doc used to
+    /// prescribe — undercounts by two-to-three orders of magnitude on those same captures) and codex's is
+    /// additive by construction (<c>CodexUsageParser</c> computes it as each round-trip's own non-cached
+    /// remainder and its <c>Combine</c> sums it across round-trips deliberately). No shipped parser's
+    /// <c>TokensIn</c> reading is ever a level; only <see cref="Baton.Mutation.TokenBudgetMonitor"/>'s own
+    /// DERIVED context-size aggregate (<c>ContextLevelTokens</c>, folding <c>TokensIn</c> +
+    /// <c>CacheReadTokens</c> + <c>CacheCreationTokens</c>) is — that is a display figure the monitor
+    /// computes by replacing, not a property of this field. <c>CacheReadTokens</c> keeps the dual
+    /// treatment <see cref="WorkerUsage.CacheReadTokens"/> documents: additive on its own running Σ,
+    /// folded into that same derived level for display.
+    /// </para>
+    /// <see cref="Baton.Mutation.TokenBudgetMonitor"/> is the worked example. Default false/null: a
+    /// parser that only supports the final-usage read (a test double, a future vendor) opts out cleanly
+    /// rather than being forced to implement this.
     /// </summary>
     bool TryParseIncrementalUsage(string rawLine, out WorkerUsage? usage)
     {
