@@ -61,7 +61,7 @@ public class VendorProbeStalenessTests
             .Where(s => s.Verdict is Staleness.Verdict.Drifted or Staleness.Verdict.NeverProbed)
             .ToList();
 
-        var grace = DriftGrace.Evaluate(driftPath, stale.Count > 0, DateTimeOffset.Now);
+        var grace = DriftGrace.Evaluate(driftPath, stale.Count > 0, DateTimeOffset.Now, statuses);
 
         Assert.True(
             !grace.Fatal,

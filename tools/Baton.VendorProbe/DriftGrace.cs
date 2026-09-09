@@ -55,8 +55,33 @@ public static class DriftGrace
     /// (which only needs <see cref="Result.Fatal"/>) — so the two never disagree about what today's
     /// verdict is.
     /// </summary>
-    public static Result Evaluate(string bookkeepingPath, bool driftDetected, DateTimeOffset now)
+    /// <remarks>
+    /// #2123: If <paramref name="bookkeepingPath"/> carries a <see cref="Bookkeeping.FirstDetectedAt"/>
+    /// that predates the lock's newest <see cref="Staleness.Status.RecordedAt"/> for a vendor that is now
+    /// <see cref="Staleness.Verdict.Current"/> (<paramref name="newestOkRecordedAt"/> or derived from
+    /// <paramref name="statuses"/>), that previous drift cleared when the probe re-pinned (even if no
+    /// check ran in the interim to delete the file). It is treated as cleared and a fresh grace window
+    /// starts for the newly detected drift.
+    /// </remarks>
+    public static Result Evaluate(
+        string bookkeepingPath,
+        bool driftDetected,
+        DateTimeOffset now,
+        IReadOnlyList<Staleness.Status>? statuses = null,
+        DateTimeOffset? newestOkRecordedAt = null)
     {
+        if (newestOkRecordedAt is null && statuses is not null)
+        {
+            var okRecordedAts = statuses
+                .Where(s => s.Verdict == Staleness.Verdict.Current && s.RecordedAt.HasValue)
+                .Select(s => s.RecordedAt!.Value)
+                .ToList();
+            if (okRecordedAts.Count > 0)
+            {
+                newestOkRecordedAt = okRecordedAts.Max();
+            }
+        }
+
         if (!driftDetected)
         {
             if (File.Exists(bookkeepingPath))
@@ -109,7 +134,19 @@ public static class DriftGrace
                     + "and re-run.");
             }
 
-            recorded = parsed;
+            // #2123: an earlier drift was recorded before a vendor was re-pinned and confirmed ok.
+            // That drift cleared when the re-pin happened, even if vendor-check did not run in the interim.
+            // Treat it as cleared and start a fresh window for this newly detected drift.
+            if (newestOkRecordedAt.HasValue && parsed.FirstDetectedAt < newestOkRecordedAt.Value)
+            {
+                recorded = new Bookkeeping(now);
+                Directory.CreateDirectory(Path.GetDirectoryName(Path.GetFullPath(bookkeepingPath))!);
+                File.WriteAllText(bookkeepingPath, JsonSerializer.Serialize(recorded, Json));
+            }
+            else
+            {
+                recorded = parsed;
+            }
         }
         else
         {

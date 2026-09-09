@@ -116,7 +116,7 @@ public static class Program
 
         // Recorded whether or not --out was given: the versions these findings were established
         // against are what makes the free staleness check possible later.
-        Staleness.Write(lockPath, findings);
+        Staleness.Write(lockPath, findings, driftPath);
         Console.WriteLine($"recorded probed versions in {lockPath}");
 
         // Counts this run's own findings, never the published total — the published file may carry
@@ -168,7 +168,7 @@ public static class Program
         // a flaky --version into an unlimited grace window that never actually expires.
         if (inspectable.Count > 0)
         {
-            var grace = DriftGrace.Evaluate(driftPath, needsProbe.Count > 0, DateTimeOffset.Now);
+            var grace = DriftGrace.Evaluate(driftPath, needsProbe.Count > 0, DateTimeOffset.Now, statuses);
 
             if (grace.Verdict == DriftGrace.Verdict.FreshWarn)
             {

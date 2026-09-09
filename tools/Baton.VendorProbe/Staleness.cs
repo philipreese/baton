@@ -89,7 +89,13 @@ public static class Staleness
     /// into "never probed" without anyone touching them. A partial run is partial evidence; it
     /// updates what it saw and leaves the rest alone.
     /// </remarks>
-    public static void Write(string path, IReadOnlyList<Finding> findings)
+    /// <param name="path">The lock file path.</param>
+    /// <param name="findings">The findings established in this probe run.</param>
+    /// <param name="driftPath">
+    /// Optional path to the drift bookkeeping file. When provided and the file exists, it is deleted
+    /// (#2123) so the next drift starts a fresh grace window.
+    /// </param>
+    public static void Write(string path, IReadOnlyList<Finding> findings, string? driftPath = null)
     {
         var probed = findings
             .Where(f => f.VendorVersion is not null)
@@ -104,6 +110,19 @@ public static class Staleness
 
         Directory.CreateDirectory(Path.GetDirectoryName(Path.GetFullPath(path))!);
         File.WriteAllText(path, JsonSerializer.Serialize(new LockFile(DateTimeOffset.Now, vendors), Json));
+
+        // #2123: re-pinning clears any recorded drift bookkeeping file so the next drift starts a fresh window.
+        if (!string.IsNullOrEmpty(driftPath) && File.Exists(driftPath))
+        {
+            try
+            {
+                File.Delete(driftPath);
+            }
+            catch (IOException)
+            {
+                // Best-effort deletion on write; DriftGrace.Evaluate also treats a surviving stale file as cleared.
+            }
+        }
     }
 
     /// <summary>
