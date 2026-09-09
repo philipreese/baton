@@ -204,15 +204,12 @@ public sealed class MemoryProjectionTests : IDisposable
     }
 
     /// <summary>
-    /// A link naming a retracted endpoint is dropped by the existing dangling-link rule (#2113) --
-    /// <see cref="MemoryStore.Resolve"/> removes retracted entries from the present set BEFORE links are
-    /// applied, so the same "either endpoint absent" check that already handles a superseded/removed
-    /// entry handles a retracted one too, with no separate retraction-aware branch in the link logic.
-    /// Both directions are asserted, because the check is `!present.Contains(SupersedingId) ||
-    /// !present.Contains(SupersededId)` -- either side alone should trip it.
+    /// Pins spec/baton.md §12's retraction-ordering paragraph (#2113) against
+    /// <see cref="MemoryStore.Resolve"/> directly. Both link directions are asserted, since the
+    /// underlying check tests each endpoint independently.
     /// </summary>
     [Fact]
-    public void A_link_naming_a_retracted_endpoint_is_dropped_in_either_direction()
+    public void Resolve_omits_a_link_when_either_side_of_it_is_retracted()
     {
         var live = Entry("feedback_a.md", "current");
         var archived = Entry("archived/feedback_a.md", "older");
