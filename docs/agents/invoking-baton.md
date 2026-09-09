@@ -140,7 +140,8 @@ ReadFiles,WriteFiles` once per machine per project before dispatching against it
 must be a superset of whatever the binding's own `PermissionGrant` asks for, since the effective
 grant is the intersection of the two, never wider than either. `baton trust <path> --ceiling all`
 trusts a project without narrowing anything; `baton trust --list` shows every project this machine
-has a recorded ceiling for, and `baton trust <path> --revoke` undoes one. A binding with no
+has a recorded ceiling for, `baton trust <path> --revoke` withdraws one (leaving a revoked record),
+and `baton trust <path> --forget` deletes the record (spec/baton.md §9 has the difference). A binding with no
 `WorkingDirectory` at all is unaffected — there is no project scope to enforce.
 
 ### Why this is the read-lane profile

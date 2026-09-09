@@ -1,3 +1,4 @@
+using Baton.Accounting;
 using Baton.Cli.Tests.TestSupport;
 using Baton.Vendors;
 
@@ -93,6 +94,77 @@ public sealed class TrustCommandTests
         Assert.Null(ProjectCeilingStore.TryGet(derived, ProjectCeilingStore.DefaultPath));
     }
 
+    /// <summary>#2121: a revoked entry is listed as revoked, with when and its provenance — not as <c>none</c>, and not omitted.</summary>
+    [Fact]
+    public async Task ExecuteAsync_List_ShowsATombstoneAsRevoked()
+    {
+        using var home = new IsolatedBatonHome();
+        var source = Path.Combine(Path.GetTempPath(), $"trust-cmd-list-tomb-src-{Guid.NewGuid():N}");
+        var revoked = Path.Combine(Path.GetTempPath(), $"trust-cmd-list-tomb-{Guid.NewGuid():N}");
+        var at = new DateTimeOffset(2026, 9, 8, 12, 0, 0, TimeSpan.Zero);
+        ProjectCeilingStore.Set(revoked, ProjectCeiling.Unrestricted with { InheritedFrom = ProjectCeilingStore.CanonicalKey(source) }, ProjectCeilingStore.DefaultPath);
+        ProjectCeilingStore.Revoke(revoked, ProjectCeilingStore.DefaultPath, at);
+        var output = new StringWriter();
+
+        await TrustCommand.ExecuteAsync(
+            new TrustOptions(TrustMode.List, null, null), output, TestContext.Current.CancellationToken);
+
+        var line = Assert.Single(output.ToString().Split(Environment.NewLine, StringSplitOptions.RemoveEmptyEntries));
+        Assert.Equal(
+            $"{ProjectCeilingStore.CanonicalKey(revoked)}  revoked {at:u}  (inherited from {ProjectCeilingStore.CanonicalKey(source)})",
+            line);
+    }
+
+    /// <summary>
+    /// #2121: re-trusting one path of a revoked repository clears the tombstones on its other paths,
+    /// and only those — an unrelated repository's tombstone stays. The probe is injected: the temp
+    /// directories are not git checkouts.
+    /// </summary>
+    [Fact]
+    public async Task ExecuteAsync_Register_ClearsTheTombstonesOfTheSameRepositoryOnly()
+    {
+        using var home = new IsolatedBatonHome();
+        var root = Path.Combine(Path.GetTempPath(), $"trust-cmd-retrust-{Guid.NewGuid():N}");
+        var main = Path.Combine(root, "baton");
+        var worktree = Path.Combine(root, "w2121");
+        var unrelated = Path.Combine(root, "basis");
+        foreach (var directory in new[] { main, worktree, unrelated })
+        {
+            Directory.CreateDirectory(directory);
+        }
+
+        try
+        {
+            ProjectCeilingStore.Set(main, ProjectCeiling.Unrestricted, ProjectCeilingStore.DefaultPath);
+            ProjectCeilingStore.Set(worktree, ProjectCeiling.Unrestricted with { InheritedFrom = ProjectCeilingStore.CanonicalKey(main) }, ProjectCeilingStore.DefaultPath);
+            ProjectCeilingStore.Set(unrelated, ProjectCeiling.Unrestricted, ProjectCeilingStore.DefaultPath);
+            ProjectCeilingStore.Revoke(main, ProjectCeilingStore.DefaultPath);
+            ProjectCeilingStore.Revoke(unrelated, ProjectCeilingStore.DefaultPath);
+            var commonDir = Path.Combine(main, ".git");
+            Func<string, CancellationToken, Task<RepositoryIdentity?>> probe = (path, _) => Task.FromResult(
+                path.Equals(main, StringComparison.OrdinalIgnoreCase) || path.Equals(worktree, StringComparison.OrdinalIgnoreCase)
+                    ? RepositoryIdentity.From(null, commonDir)
+                    : path.Equals(unrelated, StringComparison.OrdinalIgnoreCase)
+                        ? RepositoryIdentity.From("https://github.com/philipreese/basis", null)
+                        : null);
+            var output = new StringWriter();
+
+            var exitCode = await TrustCommand.ExecuteAsync(
+                new TrustOptions(TrustMode.Register, main, ProjectCeiling.Unrestricted), output, probe, TestContext.Current.CancellationToken);
+
+            Assert.Equal(0, exitCode);
+            Assert.Equal(ProjectCeiling.Unrestricted, ProjectCeilingStore.TryGet(main, ProjectCeilingStore.DefaultPath));
+            Assert.Null(ProjectCeilingStore.TryGetRecord(worktree, ProjectCeilingStore.DefaultPath));
+            Assert.True(ProjectCeilingStore.TryGetRecord(unrelated, ProjectCeilingStore.DefaultPath)?.IsRevoked);
+            Assert.Contains($"Cleared the revocation of '{ProjectCeilingStore.CanonicalKey(worktree)}'", output.ToString(), StringComparison.Ordinal);
+            Assert.DoesNotContain(ProjectCeilingStore.CanonicalKey(unrelated), output.ToString(), StringComparison.OrdinalIgnoreCase);
+        }
+        finally
+        {
+            Baton.Tests.Shared.DirectoryCleanup.DeleteRecursively(root);
+        }
+    }
+
     [Fact]
     public async Task ExecuteAsync_Revoke_NeverTrusted_SaysNothingToRevoke()
     {
@@ -104,6 +176,87 @@ public sealed class TrustCommandTests
             new TrustOptions(TrustMode.Revoke, project, null), output, TestContext.Current.CancellationToken);
 
         Assert.Equal(0, exitCode);
+        Assert.Contains("No ceiling is recorded", output.ToString(), StringComparison.Ordinal);
         Assert.Contains("nothing to revoke", output.ToString(), StringComparison.Ordinal);
+    }
+
+    /// <summary>
+    /// #2121: a second <c>--revoke</c> says the state <c>--list</c> shows — already revoked, with the
+    /// first revoke's timestamp — rather than "no ceiling is recorded", and the tombstone's timestamp is
+    /// unchanged. The never-trusted arm above is the other polarity of the same "nothing to revoke".
+    /// </summary>
+    [Fact]
+    public async Task ExecuteAsync_Revoke_AlreadyRevoked_SaysSoWithTheOriginalTimestamp()
+    {
+        using var home = new IsolatedBatonHome();
+        var project = Path.Combine(Path.GetTempPath(), $"trust-cmd-revoke-twice-{Guid.NewGuid():N}");
+        var at = new DateTimeOffset(2026, 9, 8, 12, 0, 0, TimeSpan.Zero);
+        ProjectCeilingStore.Set(project, ProjectCeiling.Unrestricted, ProjectCeilingStore.DefaultPath);
+        ProjectCeilingStore.Revoke(project, ProjectCeilingStore.DefaultPath, at);
+        var output = new StringWriter();
+
+        var exitCode = await TrustCommand.ExecuteAsync(
+            new TrustOptions(TrustMode.Revoke, project, null), output, TestContext.Current.CancellationToken);
+
+        Assert.Equal(0, exitCode);
+        var line = Assert.Single(output.ToString().Split(Environment.NewLine, StringSplitOptions.RemoveEmptyEntries));
+        Assert.Equal($"'{project}' is already revoked ({at:u}) - nothing to revoke.", line);
+        Assert.Equal(at, ProjectCeilingStore.TryGetRecord(project, ProjectCeilingStore.DefaultPath)?.RevokedAt);
+    }
+
+    /// <summary>
+    /// #2121: <c>--forget</c> deletes the record — here a tombstone — and announces the path and what
+    /// the record was. Afterwards the store has no trace of it, which is the never-trusted state
+    /// (<c>IssueWorktreeProvisionerTrustTests</c> drives the provisioner through the same sequence).
+    /// </summary>
+    [Fact]
+    public async Task ExecuteAsync_Forget_DeletesATombstoneAndNamesWhatItWas()
+    {
+        using var home = new IsolatedBatonHome();
+        var project = Path.Combine(Path.GetTempPath(), $"trust-cmd-forget-{Guid.NewGuid():N}");
+        var at = new DateTimeOffset(2026, 9, 8, 12, 0, 0, TimeSpan.Zero);
+        ProjectCeilingStore.Set(project, ProjectCeiling.Unrestricted, ProjectCeilingStore.DefaultPath);
+        ProjectCeilingStore.Revoke(project, ProjectCeilingStore.DefaultPath, at);
+        var output = new StringWriter();
+
+        var exitCode = await TrustCommand.ExecuteAsync(
+            new TrustOptions(TrustMode.Forget, project, null), output, TestContext.Current.CancellationToken);
+
+        Assert.Equal(0, exitCode);
+        var line = Assert.Single(output.ToString().Split(Environment.NewLine, StringSplitOptions.RemoveEmptyEntries));
+        Assert.Equal($"Forgot '{ProjectCeilingStore.CanonicalKey(project)}' (was revoked {at:u}); it now reads as never trusted.", line);
+        Assert.Null(ProjectCeilingStore.TryGetRecord(project, ProjectCeilingStore.DefaultPath));
+    }
+
+    /// <summary>#2121: forgetting a live ceiling deletes it too, and the line says which ceiling left.</summary>
+    [Fact]
+    public async Task ExecuteAsync_Forget_DeletesALiveCeilingAndNamesIt()
+    {
+        using var home = new IsolatedBatonHome();
+        var project = Path.Combine(Path.GetTempPath(), $"trust-cmd-forget-live-{Guid.NewGuid():N}");
+        ProjectCeilingStore.Set(project, new ProjectCeiling(true, true, false, false), ProjectCeilingStore.DefaultPath);
+        var output = new StringWriter();
+
+        await TrustCommand.ExecuteAsync(
+            new TrustOptions(TrustMode.Forget, project, null), output, TestContext.Current.CancellationToken);
+
+        Assert.Contains($"Forgot '{ProjectCeilingStore.CanonicalKey(project)}' (was ceiling ReadFiles,WriteFiles)", output.ToString(), StringComparison.Ordinal);
+        Assert.Null(ProjectCeilingStore.TryGetRecord(project, ProjectCeilingStore.DefaultPath));
+    }
+
+    [Fact]
+    public async Task ExecuteAsync_Forget_NeverRecorded_SaysNothingToForget()
+    {
+        using var home = new IsolatedBatonHome();
+        var project = Path.Combine(Path.GetTempPath(), $"trust-cmd-forget-none-{Guid.NewGuid():N}");
+        var output = new StringWriter();
+
+        var exitCode = await TrustCommand.ExecuteAsync(
+            new TrustOptions(TrustMode.Forget, project, null), output, TestContext.Current.CancellationToken);
+
+        Assert.Equal(0, exitCode);
+        var line = Assert.Single(output.ToString().Split(Environment.NewLine, StringSplitOptions.RemoveEmptyEntries));
+        Assert.Equal($"No ceiling is recorded for '{ProjectCeilingStore.CanonicalKey(project)}' — nothing to forget.", line);
+        Assert.False(File.Exists(ProjectCeilingStore.DefaultPath));
     }
 }

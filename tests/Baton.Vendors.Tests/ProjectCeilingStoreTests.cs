@@ -133,6 +133,178 @@ public class ProjectCeilingStoreTests
         }
     }
 
+    /// <summary>
+    /// #2121: revoke leaves a tombstone, not an absence. <see cref="ProjectCeilingStore.TryGet"/> still
+    /// answers null (a tombstone is not a ceiling), but the raw record says revoked, when, and where the
+    /// entry had come from — and a tombstone permits nothing even to a reader that ignores the flag.
+    /// </summary>
+    [Fact]
+    public void Revoke_leaves_a_tombstone_that_TryGet_hides_and_TryGetRecord_shows()
+    {
+        var path = TempPath();
+        var source = Path.Combine(Path.GetTempPath(), $"baton-ceiling-tomb-src-{Guid.NewGuid():N}");
+        var projectPath = Path.Combine(Path.GetTempPath(), $"baton-ceiling-tomb-{Guid.NewGuid():N}");
+        var at = new DateTimeOffset(2026, 9, 8, 12, 0, 0, TimeSpan.Zero);
+        try
+        {
+            ProjectCeilingStore.Set(projectPath, ProjectCeiling.Unrestricted with { InheritedFrom = source }, path);
+
+            var revoked = ProjectCeilingStore.Revoke(projectPath, path, at);
+
+            Assert.True(revoked.Revoked);
+            Assert.Null(ProjectCeilingStore.TryGet(projectPath, path));
+            var record = ProjectCeilingStore.TryGetRecord(projectPath, path);
+            Assert.NotNull(record);
+            Assert.True(record.IsRevoked);
+            Assert.Equal(at, record.RevokedAt);
+            Assert.Equal(source, record.InheritedFrom);
+            Assert.False(record.ReadFiles || record.WriteFiles || record.RunShellCommands || record.NetworkAccess);
+        }
+        finally
+        {
+            FileCleanup.Delete(path);
+        }
+    }
+
+    [Fact]
+    public void Revoking_a_tombstone_again_reports_nothing_to_revoke_and_keeps_the_original_timestamp()
+    {
+        var path = TempPath();
+        var projectPath = Path.Combine(Path.GetTempPath(), $"baton-ceiling-tomb-twice-{Guid.NewGuid():N}");
+        var first = new DateTimeOffset(2026, 9, 8, 12, 0, 0, TimeSpan.Zero);
+        try
+        {
+            ProjectCeilingStore.Set(projectPath, ProjectCeiling.Unrestricted, path);
+            ProjectCeilingStore.Revoke(projectPath, path, first);
+
+            var again = ProjectCeilingStore.Revoke(projectPath, path, first.AddDays(1));
+
+            Assert.False(again.Revoked);
+            Assert.Equal(first, ProjectCeilingStore.TryGetRecord(projectPath, path)?.RevokedAt);
+        }
+        finally
+        {
+            FileCleanup.Delete(path);
+        }
+    }
+
+    /// <summary>The cascade tombstones the copies too — they are listed as revoked, not gone, and the copy's provenance survives on its tombstone.</summary>
+    [Fact]
+    public void Revoke_tombstones_the_inherited_copies_along_with_the_source()
+    {
+        var path = TempPath();
+        var source = Path.Combine(Path.GetTempPath(), $"baton-ceiling-cascade-src-{Guid.NewGuid():N}");
+        var copy = Path.Combine(Path.GetTempPath(), $"baton-ceiling-cascade-copy-{Guid.NewGuid():N}");
+        try
+        {
+            ProjectCeilingStore.Set(source, ProjectCeiling.Unrestricted, path);
+            ProjectCeilingStore.Set(copy, ProjectCeiling.Unrestricted with { InheritedFrom = ProjectCeilingStore.CanonicalKey(source) }, path);
+
+            var revoked = ProjectCeilingStore.Revoke(source, path);
+
+            Assert.Equal([ProjectCeilingStore.CanonicalKey(copy)], revoked.CascadedPaths);
+            var copyRecord = ProjectCeilingStore.TryGetRecord(copy, path);
+            Assert.NotNull(copyRecord);
+            Assert.True(copyRecord.IsRevoked);
+            Assert.Equal(ProjectCeilingStore.CanonicalKey(source), copyRecord.InheritedFrom);
+            Assert.Null(ProjectCeilingStore.TryGet(copy, path));
+        }
+        finally
+        {
+            FileCleanup.Delete(path);
+        }
+    }
+
+    [Fact]
+    public void Set_replaces_a_tombstone_with_a_live_ceiling()
+    {
+        var path = TempPath();
+        var projectPath = Path.Combine(Path.GetTempPath(), $"baton-ceiling-retrust-{Guid.NewGuid():N}");
+        try
+        {
+            ProjectCeilingStore.Set(projectPath, ProjectCeiling.Unrestricted, path);
+            ProjectCeilingStore.Revoke(projectPath, path);
+
+            ProjectCeilingStore.Set(projectPath, ProjectCeiling.Unrestricted, path);
+
+            var record = ProjectCeilingStore.TryGetRecord(projectPath, path);
+            Assert.NotNull(record);
+            Assert.False(record.IsRevoked);
+            Assert.Equal(ProjectCeiling.Unrestricted, ProjectCeilingStore.TryGet(projectPath, path));
+        }
+        finally
+        {
+            FileCleanup.Delete(path);
+        }
+    }
+
+    /// <summary>Both polarities: a tombstone is removed, a live ceiling given to the same call is left exactly as it was, and a never-recorded path is a no-op.</summary>
+    [Fact]
+    public void ClearRevocations_removes_tombstones_only()
+    {
+        var path = TempPath();
+        var tombstoned = Path.Combine(Path.GetTempPath(), $"baton-ceiling-clear-tomb-{Guid.NewGuid():N}");
+        var live = Path.Combine(Path.GetTempPath(), $"baton-ceiling-clear-live-{Guid.NewGuid():N}");
+        var never = Path.Combine(Path.GetTempPath(), $"baton-ceiling-clear-never-{Guid.NewGuid():N}");
+        try
+        {
+            ProjectCeilingStore.Set(tombstoned, ProjectCeiling.Unrestricted, path);
+            ProjectCeilingStore.Revoke(tombstoned, path);
+            var narrowed = new ProjectCeiling(ReadFiles: true, WriteFiles: false, RunShellCommands: false, NetworkAccess: false);
+            ProjectCeilingStore.Set(live, narrowed, path);
+
+            var cleared = ProjectCeilingStore.ClearRevocations([tombstoned, live, never], path);
+
+            Assert.Equal([ProjectCeilingStore.CanonicalKey(tombstoned)], cleared);
+            Assert.Null(ProjectCeilingStore.TryGetRecord(tombstoned, path));
+            Assert.Equal(narrowed, ProjectCeilingStore.TryGet(live, path));
+        }
+        finally
+        {
+            FileCleanup.Delete(path);
+        }
+    }
+
+    /// <summary>
+    /// #2121: <see cref="ProjectCeilingStore.Forget"/> is the one remover. All three polarities: a
+    /// tombstone is deleted and returned as the tombstone it was, a live ceiling is deleted and returned
+    /// live, and a never-recorded path returns null with the file untouched. A copy inherited from the
+    /// forgotten path is left exactly as it was — forget does not cascade.
+    /// </summary>
+    [Fact]
+    public void Forget_deletes_a_tombstone_or_a_live_ceiling_outright_and_nothing_else()
+    {
+        var path = TempPath();
+        var tombstoned = Path.Combine(Path.GetTempPath(), $"baton-ceiling-forget-tomb-{Guid.NewGuid():N}");
+        var live = Path.Combine(Path.GetTempPath(), $"baton-ceiling-forget-live-{Guid.NewGuid():N}");
+        var copy = Path.Combine(Path.GetTempPath(), $"baton-ceiling-forget-copy-{Guid.NewGuid():N}");
+        var never = Path.Combine(Path.GetTempPath(), $"baton-ceiling-forget-never-{Guid.NewGuid():N}");
+        var at = new DateTimeOffset(2026, 9, 8, 12, 0, 0, TimeSpan.Zero);
+        try
+        {
+            ProjectCeilingStore.Set(tombstoned, ProjectCeiling.Unrestricted, path);
+            ProjectCeilingStore.Revoke(tombstoned, path, at);
+            var narrowed = new ProjectCeiling(ReadFiles: true, WriteFiles: false, RunShellCommands: false, NetworkAccess: false);
+            ProjectCeilingStore.Set(live, narrowed, path);
+            ProjectCeilingStore.Set(copy, narrowed with { InheritedFrom = ProjectCeilingStore.CanonicalKey(live) }, path);
+
+            var forgottenTombstone = ProjectCeilingStore.Forget(tombstoned, path);
+            var forgottenLive = ProjectCeilingStore.Forget(live, path);
+            var forgottenNever = ProjectCeilingStore.Forget(never, path);
+
+            Assert.Equal(at, forgottenTombstone?.RevokedAt);
+            Assert.Equal(narrowed, forgottenLive);
+            Assert.Null(forgottenNever);
+            Assert.Null(ProjectCeilingStore.TryGetRecord(tombstoned, path));
+            Assert.Null(ProjectCeilingStore.TryGetRecord(live, path));
+            Assert.Equal(narrowed with { InheritedFrom = ProjectCeilingStore.CanonicalKey(live) }, ProjectCeilingStore.TryGet(copy, path));
+        }
+        finally
+        {
+            FileCleanup.Delete(path);
+        }
+    }
+
     [Fact]
     public void Revoke_returns_false_for_a_project_never_trusted()
     {

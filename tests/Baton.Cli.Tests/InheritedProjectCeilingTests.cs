@@ -156,7 +156,8 @@ public sealed class InheritedProjectCeilingTests : IDisposable
     /// which made the "nothing re-inherited" assertion pass whether or not the derived entry had
     /// survived — it could not discriminate. What is asserted now is what revoke actually does to the
     /// copy: it goes with its source (the cascade <see cref="ProjectCeilingStore.Revoke"/> states), a
-    /// copy of the copy goes too, an unrelated entry stays, and nothing is re-inherited afterwards.
+    /// copy of the copy goes too, an unrelated entry stays, and nothing is re-inherited afterwards —
+    /// the lookup reports the repository revoked (#2121).
     /// </summary>
     [Fact]
     public async Task Revoking_the_source_removes_its_inherited_entries_and_nothing_re_inherits()
@@ -195,11 +196,81 @@ public sealed class InheritedProjectCeilingTests : IDisposable
         Assert.Null(ProjectCeilingStore.TryGet(grandchild, Store));
         Assert.NotNull(ProjectCeilingStore.TryGet(unrelated, Store));
 
-        var afterRevoke = await InheritedProjectCeiling.TryRecordAsync(
+        var afterRevoke = await InheritedProjectCeiling.TryInheritAsync(
             worktree, Store, probe, TestContext.Current.CancellationToken);
 
-        Assert.Null(afterRevoke);
+        // #2121: not NoTrustedSource. The repository was revoked, and the outcome says so, naming the
+        // tombstone that made it revoked (the root, ordinal-first among the tombstones that match).
+        Assert.Equal(InheritanceOutcome.Revoked, afterRevoke.Outcome);
+        Assert.Null(afterRevoke.Fact);
+        Assert.Equal(ProjectCeilingStore.CanonicalKey(main), afterRevoke.RevokedPath);
+        Assert.Equal(ProjectCeilingStore.TryGetRecord(main, Store)?.RevokedAt, afterRevoke.RevokedAt);
         Assert.Null(ProjectCeilingStore.TryGet(worktree, Store));
+    }
+
+    /// <summary>
+    /// #2121, both polarities of "every recorded path revoked": with the root revoked but a hand-typed
+    /// sibling still live, the repository is not revoked and the worktree inherits the sibling's
+    /// ceiling; revoke that sibling too and the same call reports <see cref="InheritanceOutcome.Revoked"/>.
+    /// </summary>
+    [Fact]
+    public async Task A_repository_is_revoked_only_when_no_live_path_of_it_remains()
+    {
+        var main = MakeDirectory("baton");
+        var sibling = MakeDirectory("w1999");
+        var worktree = MakeDirectory("w2121");
+        var commonDir = Path.Combine(main, ".git");
+        var readOnly = new ProjectCeiling(ReadFiles: true, WriteFiles: false, RunShellCommands: false, NetworkAccess: false);
+        ProjectCeilingStore.Set(main, ProjectCeiling.Unrestricted, Store);
+        ProjectCeilingStore.Set(sibling, readOnly, Store);
+        ProjectCeilingStore.Revoke(main, Store);
+        var probe = ProbeOf(new() { [main] = (null, commonDir), [sibling] = (null, commonDir), [worktree] = (null, commonDir) });
+
+        var withLiveSibling = await InheritedProjectCeiling.TryInheritAsync(
+            worktree, Store, probe, TestContext.Current.CancellationToken);
+
+        Assert.Equal(InheritanceOutcome.Inherited, withLiveSibling.Outcome);
+        Assert.Equal(readOnly with { InheritedFrom = ProjectCeilingStore.CanonicalKey(sibling) }, ProjectCeilingStore.TryGet(worktree, Store));
+
+        ProjectCeilingStore.Revoke(sibling, Store);
+        var fresh = MakeDirectory("w2122");
+        var everyPathRevoked = await InheritedProjectCeiling.TryInheritAsync(
+            fresh, Store,
+            ProbeOf(new() { [main] = (null, commonDir), [sibling] = (null, commonDir), [worktree] = (null, commonDir), [fresh] = (null, commonDir) }),
+            TestContext.Current.CancellationToken);
+
+        Assert.Equal(InheritanceOutcome.Revoked, everyPathRevoked.Outcome);
+        Assert.Null(ProjectCeilingStore.TryGet(fresh, Store));
+    }
+
+    /// <summary>
+    /// #2121: a tombstone at the workspace's own key is not "already trusted". Revoke the root (the
+    /// worktree's copy goes with it), re-trust the root, and the worktree — still tombstoned — inherits
+    /// again and its tombstone is overwritten by the new copy.
+    /// </summary>
+    [Fact]
+    public async Task A_tombstoned_workspace_inherits_again_once_its_repository_is_re_trusted()
+    {
+        var main = MakeDirectory("baton");
+        var worktree = MakeDirectory("w2121");
+        var commonDir = Path.Combine(main, ".git");
+        var probe = ProbeOf(new() { [main] = (null, commonDir), [worktree] = (null, commonDir) });
+        ProjectCeilingStore.Set(main, ProjectCeiling.Unrestricted, Store);
+        Assert.NotNull(await InheritedProjectCeiling.TryRecordAsync(worktree, Store, probe, TestContext.Current.CancellationToken));
+        ProjectCeilingStore.Revoke(main, Store);
+        Assert.True(ProjectCeilingStore.TryGetRecord(worktree, Store)?.IsRevoked);
+
+        var narrowed = new ProjectCeiling(ReadFiles: true, WriteFiles: true, RunShellCommands: true, NetworkAccess: false);
+        ProjectCeilingStore.Set(main, narrowed, Store);
+        var afterReTrust = await InheritedProjectCeiling.TryInheritAsync(
+            worktree, Store, probe, TestContext.Current.CancellationToken);
+
+        Assert.Equal(InheritanceOutcome.Inherited, afterReTrust.Outcome);
+        var recorded = ProjectCeilingStore.TryGet(worktree, Store);
+        Assert.NotNull(recorded);
+        Assert.False(recorded.IsRevoked);
+        Assert.False(recorded.NetworkAccess);
+        Assert.Equal(ProjectCeilingStore.CanonicalKey(main), recorded.InheritedFrom);
     }
 
     /// <summary>
@@ -225,6 +296,111 @@ public sealed class InheritedProjectCeilingTests : IDisposable
         Assert.Null(noIdentity.Fact);
         Assert.Null(noSource.Fact);
         Assert.Null(ProjectCeilingStore.TryGet(stranger, Store));
+    }
+
+    /// <summary>
+    /// #2121: a recorded path whose directory exists but whose probe answers nothing, or throws, ends
+    /// the lookup as <see cref="InheritanceOutcome.CandidateUnknown"/> naming that path — never as
+    /// <see cref="InheritanceOutcome.NoTrustedSource"/>, which is the outcome a fallback-taking caller
+    /// would widen on. The control is the same store with the candidate identified: it inherits.
+    /// </summary>
+    [Fact]
+    public async Task A_recorded_path_the_probe_cannot_identify_is_reported_unknown_not_unmatched()
+    {
+        var main = MakeDirectory("baton");
+        var worktree = MakeDirectory("w2121");
+        var commonDir = Path.Combine(main, ".git");
+        ProjectCeilingStore.Set(main, ProjectCeiling.Unrestricted, Store);
+
+        var silent = await InheritedProjectCeiling.TryInheritAsync(
+            worktree, Store, ProbeOf(new() { [worktree] = (null, commonDir) }), TestContext.Current.CancellationToken);
+        var throwing = await InheritedProjectCeiling.TryInheritAsync(
+            worktree, Store,
+            (path, _) => path == worktree
+                ? Task.FromResult<RepositoryIdentity?>(RepositoryIdentity.From(null, commonDir))
+                : throw new InvalidOperationException("boom"),
+            TestContext.Current.CancellationToken);
+        var identified = await InheritedProjectCeiling.TryInheritAsync(
+            worktree, Store, ProbeOf(new() { [main] = (null, commonDir), [worktree] = (null, commonDir) }), TestContext.Current.CancellationToken);
+
+        Assert.Equal(InheritanceOutcome.CandidateUnknown, silent.Outcome);
+        Assert.Equal(ProjectCeilingStore.CanonicalKey(main), silent.CandidatePath);
+        Assert.Contains("answered nothing", silent.ProbeFailure, StringComparison.Ordinal);
+        Assert.Equal(InheritanceOutcome.CandidateUnknown, throwing.Outcome);
+        Assert.Equal(ProjectCeilingStore.CanonicalKey(main), throwing.CandidatePath);
+        Assert.Contains("boom", throwing.ProbeFailure, StringComparison.Ordinal);
+        Assert.Null(silent.Fact);
+        Assert.Null(throwing.Fact);
+        Assert.Equal(InheritanceOutcome.Inherited, identified.Outcome);
+    }
+
+    /// <summary>
+    /// #2121 re-review: an unidentifiable recorded path does not abort the scan. With a live matching
+    /// source also in the store the worktree inherits from it — one stale record anywhere on the machine
+    /// must not block every dispatch — and the scan runs PAST the unknown in ordinal order (the unknown
+    /// sorts first here). The control is the same store with the live source revoked: the same unknown
+    /// candidate is then what the lookup reports, so the arm above and this one are one condition apart.
+    /// </summary>
+    [Fact]
+    public async Task An_unidentifiable_candidate_does_not_block_inheritance_from_a_live_matching_source()
+    {
+        var archived = MakeDirectory("archived-w2100");
+        var main = MakeDirectory("baton");
+        var worktree = MakeDirectory("w2121");
+        var commonDir = Path.Combine(main, ".git");
+        ProjectCeilingStore.Set(archived, ProjectCeiling.Unrestricted, Store);
+        ProjectCeilingStore.Set(main, ProjectCeiling.Unrestricted, Store);
+        var probe = ProbeOf(new() { [main] = (null, commonDir), [worktree] = (null, commonDir) });
+
+        var withLiveSource = await InheritedProjectCeiling.TryInheritAsync(
+            worktree, Store, probe, TestContext.Current.CancellationToken);
+
+        Assert.Equal(InheritanceOutcome.Inherited, withLiveSource.Outcome);
+        Assert.Equal(ProjectCeilingStore.CanonicalKey(main), ProjectCeilingStore.TryGet(worktree, Store)?.InheritedFrom);
+
+        ProjectCeilingStore.Forget(worktree, Store);
+        ProjectCeilingStore.Revoke(main, Store);
+        var withoutLiveSource = await InheritedProjectCeiling.TryInheritAsync(
+            worktree, Store, probe, TestContext.Current.CancellationToken);
+
+        // A matching tombstone is known, so Revoked outranks the unknown; forget the tombstone too and
+        // the unknown is all that is left to report.
+        Assert.Equal(InheritanceOutcome.Revoked, withoutLiveSource.Outcome);
+        ProjectCeilingStore.Forget(main, Store);
+        var onlyTheUnknown = await InheritedProjectCeiling.TryInheritAsync(
+            worktree, Store, probe, TestContext.Current.CancellationToken);
+        Assert.Equal(InheritanceOutcome.CandidateUnknown, onlyTheUnknown.Outcome);
+        Assert.Equal(ProjectCeilingStore.CanonicalKey(archived), onlyTheUnknown.CandidatePath);
+        Assert.Null(ProjectCeilingStore.TryGet(worktree, Store));
+    }
+
+    /// <summary>
+    /// The residual spec/baton.md §9 accepts, pinned in its own polarity: an unknown that happens to be
+    /// the narrower sibling loses to the identifiable match (here `all`). The arm above records both entries as `all` and so
+    /// cannot tell "inherited the match" from "inherited the narrowest"; this one can, and a later
+    /// "hardening" that intersects the found source with an unknown's recorded ceiling goes red here
+    /// while <see cref="The_narrowest_matching_ceiling_wins"/> (both identifiable) stays green.
+    /// </summary>
+    [Fact]
+    public async Task The_residual_inherits_the_match_not_the_unidentifiable_narrower_sibling()
+    {
+        var archived = MakeDirectory("archived-w2100");
+        var main = MakeDirectory("baton");
+        var worktree = MakeDirectory("w2121");
+        var commonDir = Path.Combine(main, ".git");
+        var readOnly = new ProjectCeiling(ReadFiles: true, WriteFiles: false, RunShellCommands: false, NetworkAccess: false);
+        ProjectCeilingStore.Set(archived, readOnly, Store);
+        ProjectCeilingStore.Set(main, ProjectCeiling.Unrestricted, Store);
+        var probe = ProbeOf(new() { [main] = (null, commonDir), [worktree] = (null, commonDir) });
+
+        var outcome = await InheritedProjectCeiling.TryInheritAsync(
+            worktree, Store, probe, TestContext.Current.CancellationToken);
+
+        Assert.Equal(InheritanceOutcome.Inherited, outcome.Outcome);
+        var recorded = ProjectCeilingStore.TryGet(worktree, Store);
+        Assert.NotNull(recorded);
+        Assert.True(recorded.IsUnrestricted);
+        Assert.Equal(ProjectCeilingStore.CanonicalKey(main), recorded.InheritedFrom);
     }
 
     [Fact]

@@ -175,7 +175,9 @@ def make_workspace(root: Path, label: str, *, preflight: bool) -> Path:
 
     # Decision 0004's project ceiling: a headless dispatch against an unseen directory fails closed
     # rather than prompting, so the throwaway has to be trusted before it can be dispatched against.
-    # Revoked again in `main`'s finally, so a run leaves nothing in project-ceilings.json.
+    # Forgotten again in `main`'s finally (`baton trust <ws> --forget`, the only verb whose purpose is
+    # removal; `--revoke` would leave a tombstone, and `--ceiling` re-trust deletes tombstones only by
+    # replacing them with a live record), so a run leaves nothing in project-ceilings.json.
     if not preflight:
         baton_exe(["trust", str(ws), "--ceiling", "all"])
     return ws
@@ -360,8 +362,10 @@ def main() -> int:
             Path(args.out).write_text(json.dumps(results, indent=1), encoding="utf-8")
         for result in results:
             # The trust `make_workspace` recorded is scoped to a directory that is about to stop
-            # existing; leaving it behind would grow project-ceilings.json once per run forever.
-            baton_exe(["trust", result["workspace"], "--revoke"])
+            # existing; leaving it behind would grow project-ceilings.json once per run forever. This
+            # is the OPERATOR's real store (no BATON_HOME override), so the record has to go, not be
+            # revoked: `--revoke` leaves a tombstone that nothing but `--forget` removes (#2121).
+            baton_exe(["trust", result["workspace"], "--forget"])
         if not args.keep and not results:
             shutil.rmtree(root, ignore_errors=True)
 

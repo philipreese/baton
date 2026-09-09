@@ -4936,7 +4936,8 @@ a flat JSON map at `{BatonPaths.Root}/project-ceilings.json`, canonical project 
 closed set of ceiling levels, so this reuses the category vocabulary `ClaudeWorkerAdapter.TryTranslatePermissionGrant`
 already maps rather than inventing a second one). Decision 0004's "first presented as a trust prompt"
 has no interactive shape in a headless dispatch, so `baton trust <project-path> --ceiling
-all|none|<categories>` (list/revoke: `baton trust --list`, `baton trust <path> --revoke`) is the
+all|none|<categories>` (list/revoke/forget: `baton trust --list`, `baton trust <path> --revoke`,
+`baton trust <path> --forget`) is the
 explicit operator verb instead — the PR that built this states that reading as the assumption, not a
 correction to 0004's text. `ProjectCeilingGate` (`src/Baton.Vendors/`) is the one choke point both
 `ClaudeWorkerAdapter.Resolve` and `AgyWorkerAdapter.Resolve` call at the top of `Resolve`, before
@@ -4951,10 +4952,51 @@ and one whose repository is trusted nowhere still refuses exactly as above. An i
 **one-time persisted snapshot** of its source, taken at the first dispatch or `queue add --issue` for
 that workspace and never re-evaluated: re-trusting the source narrower later does not re-narrow its
 copies, and the operator narrows those by hand (`trust --list` marks each `(inherited from <path>)`).
-**Revoke cascades**: `baton trust <path> --revoke` removes every entry whose `InheritedFrom` names it,
-transitively, and names each one it removed — a copy that outlived the decision it was derived from
+**Revoke cascades**: `baton trust <path> --revoke` revokes every entry whose `InheritedFrom` names it,
+transitively, and names each one it revoked — a copy that outlived the decision it was derived from
 would keep granting what the operator just withdrew, which is the wrong default for a permission
-record. Otherwise the effective grant is `ceiling.Cap(roleGrant)` — each category survives only when both the
+record. **Revoked is a state, not an absence (#2121).** A revoked path stays in the store as a
+**tombstone** (`ProjectCeiling.RevokedAt` set, every category closed), so a repository every recorded
+path of which was revoked is distinguishable from one never trusted — the two used to collapse into
+"no entry", and the `queue add --issue` fallback for the never-trusted repository (§13) then stamped
+`all` straight back onto the one the operator had just withdrawn. This paragraph is the one statement
+of what each reader does with a tombstone; §13 and the code cite it. `ProjectCeilingStore.TryGet`
+hides tombstones, so nothing that asks "what ceiling applies" ever gets one as its answer; the gate
+reads the raw record and refuses a tombstoned path with the revocation named (still
+`ProjectNotTrustedException`, still fail-closed). `InheritedProjectCeiling` never takes a tombstone as
+a source, and when the only recorded paths sharing a workspace's repository identity are tombstones it
+reports `Revoked` rather than `NoTrustedSource` — a distinct outcome so a caller with a never-trusted
+fallback cannot take it. A tombstone matches the same way a live entry does, through its directory's
+own identity: one whose directory has been deleted matches nothing, so a repository whose every
+checkout was removed after the revoke reads as never trusted again, which is the boundary the
+path-keyed store has always had and not a new one. One whose directory exists but that git cannot
+identify (the probe answered nothing or threw) is not skipped as "no match", but it does not end the
+scan either: when **no live entry matched**, the lookup reports `CandidateUnknown` naming the first
+such path, and a caller with a never-trusted fallback refuses on it, because an unidentified record
+might be the tombstone — the same fail-closed rule the workspace's own probe already had. When a
+live entry does match, the workspace inherits from it and the unknown is not reported: once one
+matches the repository cannot be `Revoked` whatever the unknown was, and refusing there would let
+one stale record anywhere in the store block every dispatch on the machine. The residual is bounded:
+if the unknown was a narrower live entry of the same repository, what is inherited is wider than the
+operator's narrowest, but still a ceiling they recorded for that repository — which is `all` exactly when
+the entry that matched was recorded `all`; the bound is "recorded by the operator", not "narrower than
+`all`" (`InheritedProjectCeilingTests.The_residual_inherits_the_match_not_the_unidentifiable_narrower_sibling`
+pins that polarity). `baton
+trust <path> --ceiling …` on **any** path of
+the repository ends the revocation: the path itself is overwritten, and the register verb probes each
+remaining tombstone whose directory exists and clears the ones sharing the new path's identity, naming
+each. `trust --list` shows a tombstone as `revoked <timestamp>` with its provenance clause kept, and a
+second `--revoke` of the same path says it is already revoked, with that timestamp, and changes
+nothing. **Two verbs, two leftovers:** `baton trust <path> --revoke` withdraws the grant and leaves
+the tombstone; `baton trust <path> --forget` deletes the record outright, tombstone or live, announces
+the path and what the record was, and is the only verb whose purpose is removal — after it the path
+reads as never trusted, and it does not cascade (forgetting a live source leaves its inherited copies
+granting what they did; withdrawing is `--revoke`'s job). Re-trusting with `--ceiling` clears a
+tombstone only by replacing it with a live record of the same repository, as above, so it never
+removes one whose directory is gone. A tombstone for a deleted checkout is therefore permanent until
+forgotten, which is what a throwaway-workspace script (`tools/skill-probe/probe.py`) runs to leave
+the store as it found it.
+Otherwise the effective grant is `ceiling.Cap(roleGrant)` — each category survives only when both the
 role's own grant and the ceiling carry it, re-checked against
 `PermissionGrant.CategoriesDefeatedByTheShell` so a coherent role grant that becomes incoherent once
 narrowed (writes capped away while an unscoped shell stays granted) still refuses rather than shipping
@@ -6549,15 +6591,22 @@ posture the runway hold (§7) takes.
 `--issue <n>` provisions at **add** time, not launch time: `gh issue develop <n> --name <n>-lane`,
 `git worktree add <root>/w<n> <n>-lane`, then the workspace is trusted (§9) — **at the ceiling its
 repository already carries**, inherited through `InheritedProjectCeiling` exactly as `baton dispatch`
-inherits (#2076), and at `all` only as the fallback for a repository no path of which is trusted, which
-is the verb's pre-#2076 behaviour kept for the checkout an operator has never run `baton trust`
-against. Either way the add says which on its own output: the inheritance line names the source path,
-and the fallback prints `workspace <path>: no trusted repository to inherit from; recorded ceiling all`,
-because the fallback is a real widening and a silent one is the shape the announcement exists to rule
-out. The fallback is **not** taken when the identity probe answers nothing (git missing, timed out, or
-exited non-zero): that add is refused with `ProjectNotTrustedException` naming the probe failure, since
-"git said nothing" is not "no repository is trusted" and stamping `all` on it would let a transient
-failure widen a deliberately narrowed ceiling. Add time because an operator queueing eight items at
+inherits (#2076), and at `all` only as the fallback for a repository that was **never trusted** — no
+recorded path shares its identity, live or tombstoned — which is the verb's pre-#2076 behaviour kept
+for the checkout an operator has never run `baton trust` against. Either way the add says which on its
+own output: the inheritance line names the source path, and the fallback prints `workspace <path>: no
+trusted repository to inherit from; recorded ceiling all`, because the fallback is a real widening and
+a silent one is the shape the announcement exists to rule out. Two other populations refuse instead,
+with `ProjectNotTrustedException` naming the cause, before anything is queued: the identity probe
+answering nothing (git missing, timed out, or exited non-zero) — for the workspace, or for a
+recorded path whose directory exists when no live entry matched (§9's `CandidateUnknown`, named in
+the refusal's remedy) — since "git
+said nothing" is not "no repository is trusted" and stamping `all` on it would let a transient
+failure widen a deliberately narrowed ceiling or hide a tombstone; and a **revoked** repository
+(#2121) — every recorded path of it a tombstone — since
+that is the operator's own withdrawal and the fallback would undo it at the next add. §9's revoked
+state paragraph is the one statement of what a tombstone is and how it clears; this section only
+names which population it puts the add in. Add time because an operator queueing eight items at
 23:00 should learn immediately that the issue does not exist, and because it keeps `gh`/`git` spawning
 in the CLI rather than in the background host. `<root>` — which the issue left undefined — is
 `Queue.WorktreeRoot`, defaulting to **the parent directory of the checkout the verb was invoked from**,

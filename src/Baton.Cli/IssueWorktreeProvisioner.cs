@@ -31,18 +31,26 @@ namespace Baton.Cli;
 /// <c>all</c> unconditionally — what the runner did, and a real widening — which silently re-opened
 /// every category on a worktree of a repository whose ceiling the operator had deliberately narrowed.
 /// A worktree of a trusted repository now inherits that repository's own ceiling
-/// (<see cref="InheritedProjectCeiling"/>), and only a workspace whose repository is trusted nowhere
-/// falls back to unrestricted, which is the pre-#2076 behaviour kept for the repository an operator
-/// has never trusted at all: <c>queue add --issue n</c> provisions a worktree of the checkout the
-/// operator is standing in, so refusing there would break the verb rather than protect anything. The
-/// fallback is <b>announced on the verb's own output</b>, the same line the inheritance is, so the
-/// widening is never silent. <c>ProjectCeiling</c>'s own doc has what a ceiling does and does not bound.
+/// (<see cref="InheritedProjectCeiling"/>), and only a workspace whose repository was <b>never
+/// trusted</b> falls back to unrestricted, which is the pre-#2076 behaviour kept for exactly that
+/// repository: <c>queue add --issue n</c> provisions a worktree of the checkout the operator is
+/// standing in, so refusing there would break the verb rather than protect anything. The fallback is
+/// <b>announced on the verb's own output</b>, the same line the inheritance is, so the widening is
+/// never silent. <c>ProjectCeiling</c>'s own doc has what a ceiling does and does not bound.
 /// </para>
 /// <para>
-/// <b>The fallback is NOT taken on a probe failure.</b> "No trusted repository" is a fact git
-/// established; "git answered nothing" (missing, timed out, exited non-zero) is not. That path throws
-/// <see cref="ProjectNotTrustedException"/> naming the probe failure instead, and the add is refused
-/// before anything is queued — spec/baton.md §13 has why the alternative is a widening.
+/// <b>The fallback is NOT taken on a probe failure, and NOT on a revoked repository.</b> "Never
+/// trusted" is a fact git established against a store with no trace of the repository
+/// (<see cref="InheritanceOutcome.NoTrustedSource"/> says what the scan had to identify to reach it,
+/// once). "Git answered nothing" for
+/// the workspace (missing, timed out, exited non-zero) is not that fact; neither is a recorded path
+/// git could not identify (<see cref="InheritanceOutcome.CandidateUnknown"/>, #2121 — it might be the
+/// tombstone); and neither is "every path of this repository carries a tombstone"
+/// (<see cref="InheritanceOutcome.Revoked"/>): the first two are transients the operator did not
+/// decide, the third is a decision the operator did make. All three throw
+/// <see cref="ProjectNotTrustedException"/> — naming the probe failure (and the path it failed on) or
+/// the revocation — and the add is refused before anything is queued. spec/baton.md §13 states the
+/// populations; §9 has the revoked state itself.
 /// </para>
 /// </remarks>
 public static class IssueWorktreeProvisioner
@@ -131,7 +139,7 @@ public static class IssueWorktreeProvisioner
     /// line cannot be left to the later dispatch.
     /// </param>
     /// <exception cref="CliArgumentException">Any of the three steps failed, with the tool's own output in the message.</exception>
-    /// <exception cref="ProjectNotTrustedException">The trust step's identity probe answered nothing, so no ceiling was recorded — see the type remarks.</exception>
+    /// <exception cref="ProjectNotTrustedException">The trust step's identity probe answered nothing (for the workspace or for a recorded path), or the repository is revoked (#2121), so no ceiling was recorded — see the type remarks.</exception>
     public static async Task<string> ProvisionAsync(
         int issue,
         string repositoryDirectory,
@@ -188,9 +196,9 @@ public static class IssueWorktreeProvisioner
 
     /// <summary>
     /// Records <paramref name="workspace"/>'s ceiling: the source repository's own, when a path in that
-    /// repository is already trusted, and unrestricted when the repository is trusted nowhere — see the
+    /// repository is already trusted, and unrestricted when the repository was never trusted — see the
     /// type remarks for why that fallback is a widening rather than a refusal, and why a probe that
-    /// answers nothing is a refusal rather than the fallback. Writes nothing when the workspace already
+    /// answers nothing or a revoked repository is a refusal rather than the fallback. Writes nothing when the workspace already
     /// carries an entry (<see cref="InheritanceOutcome.AlreadyTrusted"/>), which is what makes a re-add
     /// of a live lane leave its ceiling as the operator last set it rather than resetting it to <c>all</c>.
     /// </summary>
@@ -224,6 +232,17 @@ public static class IssueWorktreeProvisioner
                 throw new ProjectNotTrustedException(
                     workspace,
                     "the repository-identity probe answered nothing (git missing, timed out, or exited non-zero).");
+            case InheritanceOutcome.CandidateUnknown:
+                // #2121: nothing live matched and a recorded path that cannot be identified might be the
+                // tombstone, so the never-trusted fallback below is not known to apply. The exception's
+                // own remedy names that path (not the workspace, which probed fine) so the operator can
+                // repair it or `baton trust <path> --forget` the record.
+                throw new ProjectNotTrustedException(workspace, result.CandidatePath!, result.ProbeFailure!);
+            case InheritanceOutcome.Revoked:
+                // #2121: the fallback below is for a repository the operator never trusted, and this one
+                // the operator revoked. The refusal names the tombstone so the operator knows which
+                // revocation `baton trust` would be undoing.
+                throw new ProjectNotTrustedException(workspace, result.RevokedPath!, result.RevokedAt!.Value);
             case InheritanceOutcome.NoTrustedSource:
                 ProjectCeilingStore.Set(workspace, ProjectCeiling.Unrestricted, storePath);
                 (output ?? Console.Out).WriteLine(
