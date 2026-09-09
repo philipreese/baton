@@ -191,6 +191,8 @@ public sealed class GlassHttpServiceTests : IDisposable
             Assert.Contains(
                 $"<link rel=\"manifest\" href=\"{GlassWebAppAssets.ManifestPath}\">", page,
                 StringComparison.Ordinal);
+            Assert.Contains("<title>Baton</title>", page, StringComparison.Ordinal);
+            Assert.Contains("<h1>Baton <span class=\"fresh\"", page, StringComparison.Ordinal);
 
             var manifestResponse = await client.GetAsync(
                 $"{harness.BaseUrl}{GlassWebAppAssets.ManifestPath}", cts.Token);
@@ -201,6 +203,8 @@ public sealed class GlassHttpServiceTests : IDisposable
             using var manifest = JsonDocument.Parse(await manifestResponse.Content.ReadAsStringAsync(cts.Token));
             var root = manifest.RootElement;
             Assert.Equal("/", root.GetProperty("id").GetString());
+            Assert.Equal("Baton", root.GetProperty("name").GetString());
+            Assert.Equal("Baton", root.GetProperty("short_name").GetString());
             Assert.Equal("/", root.GetProperty("start_url").GetString());
             Assert.Equal("/", root.GetProperty("scope").GetString());
             Assert.Equal("standalone", root.GetProperty("display").GetString());

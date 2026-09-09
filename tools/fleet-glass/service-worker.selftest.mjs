@@ -41,7 +41,7 @@ const failed = await worker.navigationResponse(
   { url: "https://private.example/", mode: "navigate" },
   async () => { throw new TypeError("network down"); });
 const failureHtml = await failed.text();
-check("a network failure returns the self-contained Retry page", failed.status === 503 && failureHtml.includes("Fleet Glass cannot be reached") && failureHtml.includes("Retry"));
+check("a network failure returns the self-contained Baton Retry page", failed.status === 503 && failureHtml.includes("Baton cannot be reached") && failureHtml.includes("Retry"));
 check("the static failure page makes no fleet-data claim", failureHtml.includes("contains no fleet data"));
 check("Retry returns to the real page", failureHtml.includes("location.replace(\"/\")"));
 

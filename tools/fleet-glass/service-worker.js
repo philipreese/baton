@@ -8,9 +8,9 @@ const DASHBOARD_PATHS = new Set(["/", "/index.html"]);
 const failurePage = `<!doctype html>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Fleet Glass unavailable</title>
+<title>Baton unavailable</title>
 <style>body{font:16px system-ui,sans-serif;max-width:32rem;margin:12vh auto;padding:0 1.5rem;color:#232830}button{font:inherit;padding:.6rem 1rem}</style>
-<h1>Fleet Glass cannot be reached</h1>
+<h1>Baton cannot be reached</h1>
 <p>The private daemon did not respond. This page contains no fleet data.</p>
 <button type="button" id="retry">Retry</button>
 <script>document.getElementById("retry").addEventListener("click",()=>location.replace("/"));</script>`;

@@ -1,7 +1,7 @@
 {
   "id": "/",
-  "name": "Fleet Glass",
-  "short_name": "Fleet Glass",
+  "name": "Baton",
+  "short_name": "Baton",
   "start_url": "/",
   "scope": "/",
   "display": "standalone",
