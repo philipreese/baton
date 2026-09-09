@@ -121,9 +121,8 @@ public sealed class DriftGraceTests : IDisposable
     public void Repin_with_stale_drift_file_clears_file_and_next_drift_starts_fresh_window()
     {
         var staleInstant = DateTimeOffset.Now - DriftGrace.Window - TimeSpan.FromDays(2);
-        File.WriteAllText(
-            BookkeepingPath,
-            JsonSerializer.Serialize(new DriftGrace.Bookkeeping(staleInstant)));
+        DriftGrace.Evaluate(BookkeepingPath, true, staleInstant,
+            [new("claude", Staleness.Verdict.Drifted, "old", "new", staleInstant.AddDays(-1))]);
 
         // Re-pin via Staleness.Write, passing the drift bookkeeping path
         var lockPath = Path.Combine(_dir, "lock.json");
@@ -148,33 +147,36 @@ public sealed class DriftGraceTests : IDisposable
         Assert.Equal(nextDriftTime, recorded!.FirstDetectedAt);
     }
 
-    [Fact]
-    public void Stale_drift_file_predating_ok_vendor_repin_is_treated_as_cleared_on_next_drift()
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public void Stale_drift_file_is_not_cleared_by_another_vendors_repin(bool legacy)
     {
         var staleSeen = DateTimeOffset.Now - DriftGrace.Window - TimeSpan.FromDays(2);
         File.WriteAllText(
             BookkeepingPath,
-            JsonSerializer.Serialize(new DriftGrace.Bookkeeping(staleSeen)));
+            JsonSerializer.Serialize(new DriftGrace.Bookkeeping(staleSeen,
+                legacy ? null : new Dictionary<string, DateTimeOffset> { ["claude"] = staleSeen })));
 
         // agy was re-pinned 2 days ago and is now Current (ok)
         var repinnedAt = DateTimeOffset.Now.AddDays(-2);
         var statuses = new List<Staleness.Status>
         {
-            new("claude", Staleness.Verdict.Drifted, "2.1.258", "2.1.263", DateTimeOffset.Now.AddDays(-5)),
+            new("claude", Staleness.Verdict.Drifted, "2.1.258", "2.1.263", staleSeen.AddDays(-1)),
             new("agy", Staleness.Verdict.Current, "1.1.27", "1.1.27", repinnedAt),
         };
 
         var now = DateTimeOffset.Now;
         var result = DriftGrace.Evaluate(BookkeepingPath, driftDetected: true, now, statuses);
 
-        Assert.Equal(DriftGrace.Verdict.FreshWarn, result.Verdict);
-        Assert.False(result.Fatal);
-        Assert.Contains("within the 7-day grace window", result.Message);
+        Assert.Equal(DriftGrace.Verdict.StaleFail, result.Verdict);
+        Assert.True(result.Fatal);
+        Assert.Contains("past the 7-day grace window", result.Message);
 
-        // The stale bookkeeping was cleared and replaced with a fresh record starting at now
+        // agy's re-pin says nothing about claude's unresolved drift.
         var recorded = JsonSerializer.Deserialize<DriftGrace.Bookkeeping>(File.ReadAllText(BookkeepingPath));
         Assert.NotNull(recorded);
-        Assert.Equal(now, recorded!.FirstDetectedAt);
+        Assert.Equal(staleSeen, recorded!.FirstDetectedAt);
     }
 
     [Fact]
@@ -200,7 +202,7 @@ public sealed class DriftGraceTests : IDisposable
     }
 
     [Fact]
-    public void Drift_with_no_ok_vendors_retains_drift_clock()
+    public void Drift_with_no_repinned_vendors_retains_drift_clock()
     {
         var firstSeen = DateTimeOffset.Now - DriftGrace.Window - TimeSpan.FromHours(1);
         File.WriteAllText(
@@ -209,13 +211,173 @@ public sealed class DriftGraceTests : IDisposable
 
         var statuses = new List<Staleness.Status>
         {
-            new("claude", Staleness.Verdict.Drifted, "2.1.258", "2.1.263", DateTimeOffset.Now.AddDays(-2)),
-            new("agy", Staleness.Verdict.Drifted, "1.1.25", "1.1.27", DateTimeOffset.Now.AddDays(-2)),
+            new("claude", Staleness.Verdict.Drifted, "2.1.258", "2.1.263", firstSeen.AddDays(-1)),
+            new("agy", Staleness.Verdict.Drifted, "1.1.25", "1.1.27", firstSeen.AddDays(-1)),
         };
 
         var result = DriftGrace.Evaluate(BookkeepingPath, driftDetected: true, DateTimeOffset.Now, statuses);
 
         Assert.Equal(DriftGrace.Verdict.StaleFail, result.Verdict);
         Assert.True(result.Fatal);
+    }
+
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public void Narrowed_probe_preserves_another_vendors_clock(bool legacy)
+    {
+        var day0 = DateTimeOffset.Now.AddDays(-10);
+        Staleness.Status[] statuses =
+        [
+            new("claude", Staleness.Verdict.Drifted, "old", "new", day0.AddDays(-1)),
+            new("agy", Staleness.Verdict.Current, "1", "1", day0.AddDays(-1)),
+        ];
+        if (legacy)
+        {
+            File.WriteAllText(BookkeepingPath, JsonSerializer.Serialize(new DriftGrace.Bookkeeping(day0)));
+        }
+        else
+        {
+            Assert.Equal(DriftGrace.Verdict.FreshWarn,
+                DriftGrace.Evaluate(BookkeepingPath, true, day0, statuses).Verdict);
+        }
+
+        var lockPath = Path.Combine(_dir, "lock.json");
+        for (var day = 5; day <= 8; day++)
+        {
+            Staleness.Write(lockPath,
+                [Finding.Seen("stream-json", "agy", "observed", ["--output-format"], "detail", "1")],
+                BookkeepingPath);
+            Assert.True(File.Exists(BookkeepingPath));
+            var result = DriftGrace.Evaluate(BookkeepingPath, true, day0.AddDays(day), statuses);
+            Assert.Equal(day <= 7 ? DriftGrace.Verdict.FreshWarn : DriftGrace.Verdict.StaleFail, result.Verdict);
+            var recorded = JsonSerializer.Deserialize<DriftGrace.Bookkeeping>(File.ReadAllText(BookkeepingPath));
+            Assert.Equal(day0, recorded!.FirstDetectedAt);
+        }
+    }
+
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public void Narrowed_clean_check_preserves_unchecked_drift(bool uninspectable)
+    {
+        var day0 = DateTimeOffset.Now.AddDays(-10);
+        Staleness.Status claude = new("claude", Staleness.Verdict.Drifted, "old", "new", day0.AddDays(-1));
+        DriftGrace.Evaluate(BookkeepingPath, true, day0, [claude]);
+
+        var result = DriftGrace.Evaluate(BookkeepingPath, false, day0.AddDays(5),
+            uninspectable
+                ? [new("claude", Staleness.Verdict.Uninspectable, "old", null, day0.AddDays(-1)),
+                    new("agy", Staleness.Verdict.Current, "1", "1", day0.AddDays(4))]
+                : [new("agy", Staleness.Verdict.Current, "1", "1", day0.AddDays(4))]);
+
+        Assert.Equal(DriftGrace.Verdict.NoDrift, result.Verdict);
+        Assert.True(File.Exists(BookkeepingPath));
+        Assert.Equal(DriftGrace.Verdict.StaleFail,
+            DriftGrace.Evaluate(BookkeepingPath, true, day0.AddDays(8), [claude]).Verdict);
+    }
+
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public void Own_repin_recovers_surviving_bookkeeping_even_after_another_update(bool legacy)
+    {
+        var day0 = DateTimeOffset.Now.AddDays(-10);
+        File.WriteAllText(BookkeepingPath, JsonSerializer.Serialize(new DriftGrace.Bookkeeping(day0,
+            legacy ? null : new Dictionary<string, DateTimeOffset> { ["claude"] = day0 })));
+        Staleness.Status[] statuses =
+        [
+            new("claude", Staleness.Verdict.Drifted, "repinned", "newer", day0.AddDays(5)),
+            new("agy", Staleness.Verdict.Current, "1", "1", day0.AddDays(-1)),
+            new("codex", Staleness.Verdict.Current, "1", "1", day0.AddDays(-1)),
+        ];
+        var now = day0.AddDays(8);
+
+        Assert.Equal(DriftGrace.Verdict.FreshWarn,
+            DriftGrace.Evaluate(BookkeepingPath, true, now, statuses).Verdict);
+        var recorded = JsonSerializer.Deserialize<DriftGrace.Bookkeeping>(File.ReadAllText(BookkeepingPath));
+        Assert.Equal(now, recorded!.Vendors!["claude"]);
+        Assert.Equal(DriftGrace.Verdict.StaleFail,
+            DriftGrace.Evaluate(BookkeepingPath, true, now.AddDays(8), statuses).Verdict);
+    }
+
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public void Clearing_one_of_two_drifted_vendors_preserves_the_others_independent_instant(bool probe)
+    {
+        var day0 = DateTimeOffset.Now.AddDays(-10);
+        Staleness.Status claude = new("claude", Staleness.Verdict.Drifted, "old", "new", day0.AddDays(-1));
+        Staleness.Status agy = new("agy", Staleness.Verdict.Drifted, "old", "new", day0.AddDays(-1));
+        DriftGrace.Evaluate(BookkeepingPath, true, day0, [claude]);
+        DriftGrace.Evaluate(BookkeepingPath, true, day0.AddDays(3), [claude, agy]);
+
+        if (probe)
+        {
+            Staleness.Write(Path.Combine(_dir, "lock.json"),
+                [Finding.Seen("stream-json", "claude", "observed", ["--output-format"], "detail", "new")],
+                BookkeepingPath);
+        }
+        else
+        {
+            DriftGrace.Evaluate(BookkeepingPath, true, day0.AddDays(5),
+                [claude with { Verdict = Staleness.Verdict.Current }, agy]);
+        }
+
+        var recorded = JsonSerializer.Deserialize<DriftGrace.Bookkeeping>(File.ReadAllText(BookkeepingPath));
+        Assert.Equal(day0.AddDays(3), recorded!.FirstDetectedAt);
+        Assert.Single(recorded.Vendors!);
+        Assert.Equal(day0.AddDays(3), recorded.Vendors!["agy"]);
+        Assert.Equal(DriftGrace.Verdict.FreshWarn,
+            DriftGrace.Evaluate(BookkeepingPath, true, day0.AddDays(8), [agy]).Verdict);
+        Assert.Equal(DriftGrace.Verdict.StaleFail,
+            DriftGrace.Evaluate(BookkeepingPath, true, day0.AddDays(11), [agy]).Verdict);
+    }
+
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public void Probe_without_a_recorded_version_preserves_drift(bool empty)
+    {
+        var day0 = DateTimeOffset.Now.AddDays(-10);
+        DriftGrace.Evaluate(BookkeepingPath, true, day0,
+            [new("claude", Staleness.Verdict.NeverProbed, null, "1", null)]);
+        var before = File.ReadAllText(BookkeepingPath);
+
+        Staleness.Write(Path.Combine(_dir, "lock.json"),
+            empty ? [] : [Finding.Seen("stream-json", "claude", "observed", [], "detail", null)],
+            BookkeepingPath);
+
+        Assert.Equal(before, File.ReadAllText(BookkeepingPath));
+    }
+
+    [Fact]
+    public void Full_repin_clears_legacy_bookkeeping()
+    {
+        File.WriteAllText(BookkeepingPath,
+            JsonSerializer.Serialize(new DriftGrace.Bookkeeping(DateTimeOffset.Now.AddDays(-10))));
+
+        Staleness.Write(Path.Combine(_dir, "lock.json"),
+            Program.SupportedVendors.Select(v => Finding.Seen("stream-json", v, "observed", [], "detail", "1")).ToList(),
+            BookkeepingPath);
+
+        Assert.False(File.Exists(BookkeepingPath));
+    }
+
+    [Theory]
+    [InlineData("{}")]
+    [InlineData("null")]
+    [InlineData("{ not valid json")]
+    public void Partial_repin_does_not_erase_corrupt_bookkeeping(string contents)
+    {
+        File.WriteAllText(BookkeepingPath, contents);
+        Staleness.Write(Path.Combine(_dir, "lock.json"),
+            [Finding.Seen("stream-json", "agy", "observed", [], "detail", "1")],
+            BookkeepingPath);
+
+        Assert.Equal(contents, File.ReadAllText(BookkeepingPath));
+        Assert.Equal(DriftGrace.Verdict.CorruptFail,
+            DriftGrace.Evaluate(BookkeepingPath, true, DateTimeOffset.Now,
+                [new("claude", Staleness.Verdict.Drifted, "old", "new", DateTimeOffset.Now.AddDays(-20))]).Verdict);
     }
 }

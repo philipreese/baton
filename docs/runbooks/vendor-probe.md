@@ -86,9 +86,9 @@ seen, in a machine-local, gitignored file beside the lock file
 (`docs/vendor-probe.drift.local.json` — gitignored because the clock is a property of *this machine's*
 installed CLI, not something to commit). WARN-and-pass within the grace window (see above),
 hard-fail past it, hard-fail if the bookkeeping file exists but cannot be read or cleared (fail closed
-on broken bookkeeping, never on fresh drift), and clear the bookkeeping the moment `vendor-probe`
-re-pins and drift is gone (directly on re-pin, and in `DriftGrace.Evaluate` when a recorded instant
-predates the lock's newest `RecordedAt` for a vendor that is now `ok` — #2123).
+on broken bookkeeping, never on fresh drift). Each vendor has its own clock: a narrowed probe or
+check preserves the others. Re-pinning clears the covered clocks immediately; `DriftGrace.Evaluate`
+also reconciles surviving bookkeeping against that same vendor's `RecordedAt` (#2123).
 
 ### The deliberate-update loop
 

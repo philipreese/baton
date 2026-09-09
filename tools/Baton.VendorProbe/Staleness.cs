@@ -92,8 +92,8 @@ public static class Staleness
     /// <param name="path">The lock file path.</param>
     /// <param name="findings">The findings established in this probe run.</param>
     /// <param name="driftPath">
-    /// Optional path to the drift bookkeeping file. When provided and the file exists, it is deleted
-    /// (#2123) so the next drift starts a fresh grace window.
+    /// Optional path to the drift bookkeeping file. Clears only the vendors re-pinned by these
+    /// findings (#2123), preserving every other vendor's grace clock.
     /// </param>
     public static void Write(string path, IReadOnlyList<Finding> findings, string? driftPath = null)
     {
@@ -111,16 +111,17 @@ public static class Staleness
         Directory.CreateDirectory(Path.GetDirectoryName(Path.GetFullPath(path))!);
         File.WriteAllText(path, JsonSerializer.Serialize(new LockFile(DateTimeOffset.Now, vendors), Json));
 
-        // #2123: re-pinning clears any recorded drift bookkeeping file so the next drift starts a fresh window.
-        if (!string.IsNullOrEmpty(driftPath) && File.Exists(driftPath))
+        if (!string.IsNullOrEmpty(driftPath) && probed.Count > 0)
         {
             try
             {
-                File.Delete(driftPath);
+                DriftGrace.ClearRepinned(driftPath, probed.Keys);
             }
-            catch (IOException)
+            catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or JsonException)
             {
-                // Best-effort deletion on write; DriftGrace.Evaluate also treats a surviving stale file as cleared.
+                // The lock is already durable; Evaluate can reconcile each surviving clock against
+                // its own vendor's RecordedAt. Broken bookkeeping still fails closed there.
+                Console.Error.WriteLine($"Could not clear re-pinned vendor drift in {driftPath}: {ex.Message}");
             }
         }
     }
