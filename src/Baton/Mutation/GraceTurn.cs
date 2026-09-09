@@ -1,9 +1,9 @@
 namespace Baton.Mutation;
 
 /// <summary>
-/// #2134: the caps and prompt for the one bounded extra turn a budget-arrested, workspace-verifying
-/// execution gets — <c>spec/baton.md</c> §3's "The grace turn" is the canonical account of why and
-/// what it does and does not change; not restated here. Wired at
+/// #2134: the caps and prompt for the one bounded extra turn a workspace-verifying execution gets on a
+/// budget arrest or a dirty wall-clock timeout — <c>spec/baton.md</c> §3's "The grace turn" is the
+/// canonical account of why and what it does and does not change; not restated here. Wired at
 /// <c>MutationInterface.RunGraceTurnAsync</c>. Fixed constants, not per-role configuration.
 /// </summary>
 public static class GraceTurn
