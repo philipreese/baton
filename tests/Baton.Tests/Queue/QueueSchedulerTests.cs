@@ -169,20 +169,6 @@ public sealed class QueueSchedulerTests
     }
 
     [Fact]
-    public void A_codex_lane_weighs_half_so_it_fits_where_an_implement_lane_does_not()
-    {
-        // Live weight 3.5: + 1.0 exceeds the 4.0 cap, + 0.5 lands exactly on it (and the cap is a
-        // ceiling, not a strict bound). The two arms differ only by the candidate's adapter, which is
-        // the weight rule under test.
-        var claudeLane = QueueScheduler.Decide(LocalAt(12), [Item()], 3.5, 8.0, Defaults, null, held: false);
-        var codexLane = QueueScheduler.Decide(
-            LocalAt(12), [Item(adapter: "codex")], 3.5, 8.0, Defaults, null, held: false);
-
-        Assert.Equal(QueueWaitReason.Slots, claudeLane.WaitReason);
-        Assert.Equal(QueueDecisionKind.Launch, codexLane.Kind);
-    }
-
-    [Fact]
     public void A_review_lane_bypasses_the_cap_and_the_floor_where_an_implement_lane_does_not()
     {
         // Both gates closed at once: the fleet is over the cap AND under the day floor.
@@ -243,11 +229,12 @@ public sealed class QueueSchedulerTests
     }
 
     [Fact]
-    public void A_weighted_item_behind_a_slot_blocked_head_still_waits_even_when_it_would_fit()
+    public void A_non_review_item_never_passes_a_slot_blocked_head_regardless_of_what_is_behind_it()
     {
-        // Live 3.5: the claude head (+1.0) is over the 4.0 cap; the codex item behind it (+0.5) would
-        // land exactly on it. It waits anyway — order among weighted items is untouched (spec/baton.md §13).
-        var items = new[] { Item("head"), Item("half", adapter: "codex"), Item("second") };
+        // Live 3.5: the claude head (+1.0) is over the 4.0 cap. It waits anyway — order among
+        // weighted items is untouched regardless of an item behind it (spec/baton.md §13); only
+        // review is allowed to pass a slot-blocked head.
+        var items = new[] { Item("head"), Item("behind", adapter: "codex"), Item("second") };
 
         var decision = QueueScheduler.Decide(LocalAt(12), items, liveWeight: 3.5, 8.0, Defaults, null, held: false);
 

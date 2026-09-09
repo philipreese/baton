@@ -117,14 +117,16 @@ check("a held queue says so on the slot line",
 check("(control) an unheld queue does not",
       !queueSlotsLineHtml({ held: false, slots: { cap: 4, live: 0, floorGb: 2, nightBand: false } }).includes("QUEUE HELD"));
 
-// -- live lanes, each with the weight the scheduler counted --
+// -- live lanes, rendered with whatever weight the caller passes -- the renderer displays any
+// number it's given; this is NOT an assertion about what QueueWeights.For actually returns today
+// (every mutating lane weighs 1.0 on any adapter, review weighs 0 -- see spec/baton.md) --
 {
   const out = queueLanesTableHtml({ slots: { lanes: [
     { room: "/r/a", label: "1912-lane", role: "implement", adapter: "claude", weight: 1 },
     { room: "/r/b", label: "1930-lane", role: "implement", adapter: "codex", weight: 0.5 },
     { room: "/r/c", label: "review-x", role: "review", adapter: "claude", weight: 0 },
   ] } });
-  check("every live lane renders its own weight (1 / 0.5 / 0)",
+  check("the renderer displays each lane's own weight verbatim, including a fractional one (1 / 0.5 / 0)",
         out.includes(">1</td>") && out.includes(">0.5</td>") && out.includes(">0</td>"));
   check("a lane whose bindings were unreadable says so rather than rendering blank",
         queueLanesTableHtml({ slots: { lanes: [{ room: "/r/x", weight: 1 }] } }).includes("role unknown"));

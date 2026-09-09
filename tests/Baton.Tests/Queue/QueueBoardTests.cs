@@ -67,7 +67,7 @@ public sealed class QueueBoardTests
             ]);
 
         Assert.Equal(QueueSettings.DefaultMaxLiveWeight, board.Slots.Cap);
-        Assert.Equal(1.5, board.Slots.Live);
+        Assert.Equal(2, board.Slots.Live);
         Assert.Equal(3, board.Slots.Lanes.Count);
 
         // Rounded, not raw: the projection file is compared byte-for-byte against the pusher's own
