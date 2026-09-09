@@ -208,6 +208,114 @@ public sealed class QueueSchedulerTests
             QueueScheduler.Decide(now, items, 0, 8.0, Defaults, now - TimeSpan.FromSeconds(1), held: false).WaitReason);
     }
 
+    /// <summary>
+    /// #2136: the shape measured on 2026-09-08 — an implement head at a full cap with two reviews
+    /// behind it, neither of which launched for the whole wait.
+    /// </summary>
+    [Fact]
+    public void A_review_behind_a_slot_blocked_implement_head_launches_instead_of_starving()
+    {
+        var items = new[] { Item("head"), Item("rev-1", role: "review"), Item("rev-2", role: "review") };
+
+        var atCap = QueueScheduler.Decide(LocalAt(12), items, liveWeight: 4.0, 8.0, Defaults, null, held: false);
+
+        Assert.Equal(QueueDecisionKind.Launch, atCap.Kind);
+        Assert.Equal("rev-1", atCap.Item!.Tag);
+
+        // Control: the same queue with room for the head launches the head, so the arm above is about
+        // the pass-through and not about review always winning.
+        var belowCap = QueueScheduler.Decide(LocalAt(12), items, liveWeight: 3.0, 8.0, Defaults, null, held: false);
+        Assert.Equal("head", belowCap.Item!.Tag);
+    }
+
+    [Fact]
+    public void A_review_behind_two_slot_blocked_implements_still_passes_both()
+    {
+        // The pass-through walks the whole tail, not just the item behind the head: a refactor that
+        // looked only one row back (or stopped at the first weighted item) would re-open #2136's
+        // starvation while every other arm in this file stayed green.
+        var items = new[] { Item("head"), Item("second"), Item("rev", role: "review") };
+
+        var decision = QueueScheduler.Decide(LocalAt(12), items, liveWeight: 4.0, 8.0, Defaults, null, held: false);
+
+        Assert.Equal(QueueDecisionKind.Launch, decision.Kind);
+        Assert.Equal("rev", decision.Item!.Tag);
+    }
+
+    [Fact]
+    public void A_weighted_item_behind_a_slot_blocked_head_still_waits_even_when_it_would_fit()
+    {
+        // Live 3.5: the claude head (+1.0) is over the 4.0 cap; the codex item behind it (+0.5) would
+        // land exactly on it. It waits anyway — order among weighted items is untouched (spec/baton.md §13).
+        var items = new[] { Item("head"), Item("half", adapter: "codex"), Item("second") };
+
+        var decision = QueueScheduler.Decide(LocalAt(12), items, liveWeight: 3.5, 8.0, Defaults, null, held: false);
+
+        Assert.Equal(QueueWaitReason.Slots, decision.WaitReason);
+        Assert.Equal("head", decision.Item!.Tag);
+    }
+
+    [Fact]
+    public void A_review_behind_a_memory_blocked_head_does_not_pass_it()
+    {
+        // Under the day floor AND at the cap. Memory is a host fact: the review would bypass it as
+        // the head (the control), but not as a passer behind a head the floor is holding.
+        var items = new[] { Item("head"), Item("rev", role: "review") };
+
+        var decision = QueueScheduler.Decide(LocalAt(12), items, liveWeight: 4.0, freeGb: 0.1, Defaults, null, held: false);
+
+        Assert.Equal(QueueWaitReason.Memory, decision.WaitReason);
+        Assert.Equal("head", decision.Item!.Tag);
+
+        var reviewAtHead = QueueScheduler.Decide(
+            LocalAt(12), [Item("rev", role: "review")], liveWeight: 4.0, freeGb: 0.1, Defaults, null, held: false);
+        Assert.Equal(QueueDecisionKind.Launch, reviewAtHead.Kind);
+    }
+
+    [Fact]
+    public void A_review_behind_a_slot_blocked_head_still_honours_the_hold_and_the_gap()
+    {
+        var now = LocalAt(12);
+        var items = new[] { Item("head"), Item("rev", role: "review") };
+
+        var heldDecision = QueueScheduler.Decide(now, items, liveWeight: 4.0, 8.0, Defaults, null, held: true);
+        var inGap = QueueScheduler.Decide(now, items, liveWeight: 4.0, 8.0, Defaults, now - TimeSpan.FromSeconds(1), held: false);
+
+        Assert.Equal(QueueWaitReason.Hold, heldDecision.WaitReason);
+        Assert.Equal(QueueWaitReason.Gap, inGap.WaitReason);
+        Assert.Equal("head", inGap.Item!.Tag);
+
+        // Control: the identical inputs with the gap elapsed DO launch the review.
+        var afterGap = QueueScheduler.Decide(
+            now, items, liveWeight: 4.0, 8.0, Defaults, now - TimeSpan.FromSeconds(Defaults.EffectiveGapSeconds), held: false);
+        Assert.Equal("rev", afterGap.Item!.Tag);
+    }
+
+    [Fact]
+    public void Only_an_eligible_review_passes_a_slot_blocked_head()
+    {
+        // The same candidacy predicate the head is chosen by: an external, a launched and a `ready`
+        // review are all skipped, and the first eligible one after them is the passer.
+        var items = new[]
+        {
+            Item("head"),
+            Item("outside", role: "review", external: true),
+            Item("running", role: "review", state: QueueItemState.Launched),
+            Item("approved", role: "review") with { Stage = WorkStage.Ready },
+            Item("rev", role: "review"),
+        };
+
+        var decision = QueueScheduler.Decide(LocalAt(12), items, liveWeight: 4.0, 8.0, Defaults, null, held: false);
+
+        Assert.Equal(QueueDecisionKind.Launch, decision.Kind);
+        Assert.Equal("rev", decision.Item!.Tag);
+
+        // Control: with no eligible review behind it the head's own slots wait is what is recorded.
+        var nonePass = QueueScheduler.Decide(LocalAt(12), items[..4], liveWeight: 4.0, 8.0, Defaults, null, held: false);
+        Assert.Equal(QueueWaitReason.Slots, nonePass.WaitReason);
+        Assert.Equal("head", nonePass.Item!.Tag);
+    }
+
     [Fact]
     public void The_hold_is_reported_ahead_of_every_other_closed_gate()
     {

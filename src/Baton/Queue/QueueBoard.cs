@@ -76,7 +76,12 @@ public static class QueueBoard
         // The scheduler's OWN pick, called rather than re-spelled -- QueueScheduler.Candidate's remarks
         // are why it is exposed at all. The row the panel marks `next` is therefore the row the
         // scheduler would launch by construction, not by two copies of a predicate agreeing today.
-        var candidate = QueueScheduler.Candidate(items);
+        // Two answers off the one picker (#2136): the head, whose own ledger reason is what a person
+        // wants explained, and the item that will actually go next -- the head, or the one review
+        // spec/baton.md §13 lets pass a head blocked on slots alone. The live tally handed in is the
+        // unrounded sum, the same arithmetic the scheduler's gate sees; `slots.Live` is the display copy.
+        var head = QueueScheduler.Candidate(items);
+        var next = QueueScheduler.Candidate(items, liveLanes.Sum(l => l.Weight), freeGb, slots.FloorGb, settings, held);
 
         var pending = new List<QueuePendingView>();
         foreach (var item in OrderTwinsAdjacent(items))
@@ -106,8 +111,8 @@ public static class QueueBoard
                 Role: item.Role,
                 Adapter: item.Adapter,
                 Model: item.Model,
-                Reason: WaitReasonFor(item, candidate, held, lastDecision, briefExists),
-                IsNext: ReferenceEquals(item, candidate),
+                Reason: WaitReasonFor(item, head, next, held, lastDecision, briefExists),
+                IsNext: ReferenceEquals(item, next),
                 External: item.External,
                 Halted: item.Halted,
                 Arm: ArmLabel(item),
@@ -165,10 +170,12 @@ public static class QueueBoard
     /// </summary>
     /// <remarks>
     /// <para>
-    /// <b>Only the candidate gets the scheduler's own verdict.</b> Every other queued item is behind it
-    /// by construction — the scheduler launches at most one item per evaluation and always the first
-    /// eligible one — so reporting a gate token on a row the scheduler never evaluated would be a
-    /// verdict nothing produced. <see cref="QueueBoardWaitReasons.Behind"/> is the honest word.
+    /// <b>Only the head and the item going next get the scheduler's own verdict.</b> Those are the only
+    /// rows the scheduler evaluates — the head always, and the one review spec/baton.md §13 lets pass a
+    /// slot-blocked head (#2136), which is usually the head itself — so reporting a gate token on any other row
+    /// would be a verdict nothing produced. <see cref="QueueBoardWaitReasons.Behind"/> is the honest
+    /// word. The head keeps its own reason while a passer goes ahead of it: the ledger row about the
+    /// head is still about the head.
     /// </para>
     /// <para>
     /// The three answers ahead of the ledger's are ones the ledger cannot carry: <c>halted</c> and
@@ -178,7 +185,8 @@ public static class QueueBoard
     /// </remarks>
     internal static string WaitReasonFor(
         QueueItem item,
-        QueueItem? candidate,
+        QueueItem? head,
+        QueueItem? next,
         bool held,
         QueueDecisionEntry? lastDecision,
         Func<QueueItem, bool> briefExists)
@@ -203,7 +211,7 @@ public static class QueueBoard
             return QueueWaitReasons.Token(QueueWaitReason.Hold);
         }
 
-        if (!ReferenceEquals(item, candidate))
+        if (!ReferenceEquals(item, head) && !ReferenceEquals(item, next))
         {
             return QueueBoardWaitReasons.Behind;
         }
@@ -216,6 +224,15 @@ public static class QueueBoard
             && string.Equals(lastDecision.Tag, item.Tag, StringComparison.Ordinal))
         {
             return reason;
+        }
+
+        // A head that a passer has gone past is, by the picker's own rule (spec/baton.md §13), blocked
+        // on slots and nothing else — so when the ledger has no row about it (fresh daemon, or the newest
+        // row is the passer's launch) the panel says `slots`, not `next`: `next` is the passer's word,
+        // and two rows wearing it would make the token's own definition false (#2137 review).
+        if (ReferenceEquals(item, head) && next is not null && !ReferenceEquals(head, next))
+        {
+            return QueueWaitReasons.Token(QueueWaitReason.Slots);
         }
 
         return QueueBoardWaitReasons.Next;
@@ -295,10 +312,10 @@ public static class QueueBoard
 /// </summary>
 public static class QueueBoardWaitReasons
 {
-    /// <summary>The candidate, with no gate shut against it as of the last recorded evaluation.</summary>
+    /// <summary>The head or the item going next, with no gate shut against it as of the last recorded evaluation.</summary>
     public const string Next = "next";
 
-    /// <summary>Queued behind the candidate — see <c>QueueBoard.WaitReasonFor</c>'s remarks.</summary>
+    /// <summary>Queued behind the head and not the item going next — see <c>QueueBoard.WaitReasonFor</c>'s remarks.</summary>
     public const string Behind = "behind";
 
     /// <summary>The lifecycle gave up on this item and a person has to act (<see cref="QueueItem.Halted"/>).</summary>

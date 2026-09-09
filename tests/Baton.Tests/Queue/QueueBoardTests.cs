@@ -161,6 +161,68 @@ public sealed class QueueBoardTests
         Assert.False(board.Pending[1].IsNext);
     }
 
+    /// <summary>
+    /// #2136: at a full cap the review behind an implement head is what launches next, and the board
+    /// says so — while the head keeps the `slots` reason the ledger recorded against it.
+    /// </summary>
+    [Fact]
+    public void The_next_mark_moves_to_the_review_a_slot_blocked_head_lets_pass_and_the_head_keeps_its_reason()
+    {
+        var head = Item("head", stage: WorkStage.Implement, issue: 1);
+        var review = Item("rev", stage: WorkStage.Review, issue: 2);
+        var ledger = new QueueDecisionEntry(
+            DateTimeOffset.UtcNow, "head", QueueDecisionEntry.Waited,
+            QueueWaitReasons.Token(QueueWaitReason.Slots), LiveWeight: 4, FreeGb: 8, FloorGb: 2);
+
+        var board = Project([head, review], lanes: AtCap(), lastDecision: ledger);
+
+        Assert.Equal("slots", board.Pending[0].Reason);
+        Assert.False(board.Pending[0].IsNext);
+        Assert.True(board.Pending[1].IsNext);
+        Assert.Equal(QueueBoardWaitReasons.Next, board.Pending[1].Reason);
+
+        // Control: below the cap the head is next and the review is merely behind it.
+        var roomy = Project([head, review], lastDecision: ledger);
+        Assert.True(roomy.Pending[0].IsNext);
+        Assert.False(roomy.Pending[1].IsNext);
+        Assert.Equal(QueueBoardWaitReasons.Behind, roomy.Pending[1].Reason);
+
+        // With nothing in the ledger about the head, its reason is still `slots` — the token `next`
+        // belongs to the passer alone (the rule and its reason live at QueueBoard.WaitReasonFor).
+        var unlogged = Project([head, review], lanes: AtCap(), lastDecision: null);
+        Assert.Equal("slots", unlogged.Pending[0].Reason);
+        Assert.False(unlogged.Pending[0].IsNext);
+        Assert.Equal(QueueBoardWaitReasons.Next, unlogged.Pending[1].Reason);
+        Assert.True(unlogged.Pending[1].IsNext);
+    }
+
+    [Theory]
+    [InlineData("implement-behind")]
+    [InlineData("memory-blocked")]
+    [InlineData("held")]
+    public void The_next_mark_stays_on_the_head_when_nothing_may_pass_it(string shape)
+    {
+        var head = Item("head", stage: WorkStage.Implement, issue: 1);
+        var behind = shape == "implement-behind"
+            ? Item("second", stage: WorkStage.Implement, issue: 2)
+            : Item("rev", stage: WorkStage.Review, issue: 2);
+
+        var board = Project(
+            [head, behind],
+            lanes: AtCap(),
+            freeGb: shape == "memory-blocked" ? 0.1 : 8.0,
+            held: shape == "held");
+
+        Assert.True(board.Pending[0].IsNext);
+        Assert.False(board.Pending[1].IsNext);
+    }
+
+    /// <summary>Live lanes summing exactly to the shipped cap, so a full implement lane is over it.</summary>
+    private static QueueLiveLane[] AtCap() =>
+        Enumerable.Range(0, (int)QueueSettings.DefaultMaxLiveWeight)
+            .Select(i => new QueueLiveLane($"/r/{i}", $"impl-{i}", "implement", "claude", QueueWeights.For("implement", "claude")))
+            .ToArray();
+
     [Fact]
     public void A_ledger_row_about_another_item_or_another_kind_never_becomes_this_items_reason()
     {
@@ -284,11 +346,20 @@ public sealed class QueueBoardTests
     [InlineData("ready-head")]
     [InlineData("external-head")]
     [InlineData("failed-head")]
+    [InlineData("slot-blocked-head")]
     [InlineData("nothing-eligible")]
     public void The_row_marked_next_is_the_item_the_scheduler_itself_would_pick(string shape)
     {
+        // #2136: the one shape where next is not the head. The live tally is handed to both sides
+        // the same way the daemon and the projection writer would hand it.
+        var lanes = shape == "slot-blocked-head" ? AtCap() : [];
         QueueItem[] items = shape switch
         {
+            "slot-blocked-head" =>
+            [
+                Item("head", stage: WorkStage.Implement, issue: 1),
+                Item("rev", stage: WorkStage.Review, issue: 2),
+            ],
             "plain" =>
             [
                 Item("a", stage: WorkStage.Implement, issue: 1),
@@ -317,12 +388,16 @@ public sealed class QueueBoardTests
         };
 
         var decision = QueueScheduler.Decide(
-            DateTimeOffset.UtcNow, items, liveWeight: 0, freeGb: 64, new QueueSettings(),
+            DateTimeOffset.UtcNow, items, liveWeight: lanes.Sum(l => l.Weight), freeGb: 64, new QueueSettings(),
             lastLaunchAt: null, held: false);
 
-        var marked = Project(items).Pending.SingleOrDefault(p => p.IsNext);
+        var marked = Project(items, lanes: lanes).Pending.SingleOrDefault(p => p.IsNext);
 
         Assert.Equal(decision.Item?.Tag, marked?.Tag);
+        if (shape == "slot-blocked-head")
+        {
+            Assert.Equal("rev", marked?.Tag);
+        }
 
         // Control: the fixture set actually exercises both outcomes, so the equality above is not
         // trivially satisfied by every shape having (or lacking) a candidate.
