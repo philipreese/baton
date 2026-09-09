@@ -750,6 +750,30 @@ public class AgyWorkerAdapterTests
             env => env.Name == AgyWorkerAdapter.DeniedShellOptionTokensVariable && env.Value == "agy:");
     }
 
+    [Theory]
+    [InlineData(true, "agy:baton status*")]
+    [InlineData(false, "agy:")]
+    public void The_denied_shell_exceptions_channel_is_always_emitted_tagged(bool withExceptions, string expected)
+    {
+        // #2114: the fourth channel, same always-emitted contract as the three beside it — "agy:" at
+        // minimum, so the hook can tell "no exceptions" from "the channel broke". On this vendor the
+        // hook is the only place the exception is honoured, so a field threaded to the grant but not
+        // to this variable would be a read allowlist that denies every read.
+        var adapter = new AgyWorkerAdapter();
+        var grant = new PermissionGrant(
+            ReadFiles: true, RunShellCommands: true, NetworkAccess: true,
+            DeniedShellCommandPatterns: ["baton *"],
+            DeniedShellCommandExceptions: withExceptions ? ["baton status*"] : null);
+
+        var target = adapter.Resolve(
+            new WorkerInvocation("Draft a plan.", PermissionGrant: grant, StreamJson: true),
+            ArchitectContract);
+
+        Assert.Contains(
+            target.Environment!,
+            env => env.Name == AgyWorkerAdapter.DeniedShellExceptionsVariable && env.Value == expected);
+    }
+
     [Fact]
     public void A_grant_with_no_denies_still_emits_the_denied_shell_patterns_variable_present_but_empty()
     {

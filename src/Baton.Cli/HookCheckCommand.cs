@@ -77,6 +77,13 @@ public static class HookCheckCommand
         "BATON_HOOK_DENIED_SHELL_OPTION_TOKENS";
 
     /// <summary>
+    /// #2114's read-allowlist channel — same literal as
+    /// <c>ClaudeWorkerAdapter.DeniedShellExceptionsVariable</c> (record-once). Like the option-token
+    /// channel above, NOT belt-and-braces: the deny it carves into is off the vendor flag.
+    /// </summary>
+    public const string DeniedShellExceptionsEnvironmentVariable = "BATON_HOOK_DENIED_SHELL_EXCEPTIONS";
+
+    /// <summary>
     /// Exit code 2, fed back to Claude Code as a blocking <c>PreToolUse</c> error (stderr becomes
     /// the reason shown to the model) — the only exit code that mechanism treats as a denial.
     /// </summary>
@@ -104,7 +111,8 @@ public static class HookCheckCommand
     public static int Execute(
         TextReader stdin, TextWriter stderr, string? deniedToolsRaw, string? outboxDirectory = null,
         string? workspaceDirectory = null, string? shellPatternsRaw = null,
-        string? deniedShellPatternsRaw = null, string? deniedShellOptionTokensRaw = null)
+        string? deniedShellPatternsRaw = null, string? deniedShellOptionTokensRaw = null,
+        string? deniedShellExceptionsRaw = null)
     {
         ArgumentNullException.ThrowIfNull(stdin);
         ArgumentNullException.ThrowIfNull(stderr);
@@ -119,7 +127,7 @@ public static class HookCheckCommand
         {
             return Decide(
                 scribe, stdin, stderr, deniedToolsRaw, outboxDirectory, workspaceDirectory,
-                shellPatternsRaw, deniedShellPatternsRaw, deniedShellOptionTokensRaw);
+                shellPatternsRaw, deniedShellPatternsRaw, deniedShellOptionTokensRaw, deniedShellExceptionsRaw);
         }
         catch (Exception ex)
         {
@@ -157,7 +165,7 @@ public static class HookCheckCommand
     private static int Decide(
         GrantDecisionScribe scribe, TextReader stdin, TextWriter stderr, string? deniedToolsRaw,
         string? outboxDirectory, string? workspaceDirectory, string? shellPatternsRaw,
-        string? deniedShellPatternsRaw, string? deniedShellOptionTokensRaw)
+        string? deniedShellPatternsRaw, string? deniedShellOptionTokensRaw, string? deniedShellExceptionsRaw)
     {
         // Always drain stdin before deciding anything, even when there is nothing to check
         // against below: Claude Code is the writer on the other end of this pipe, and exiting
@@ -359,8 +367,14 @@ public static class HookCheckCommand
             // own --disallowedTools flag is not a sufficient backstop on its own for this rung.
             if (deniedShellPatterns.Count > 0 || shellPatternList.Patterns.Count > 0)
             {
+                // #2114: the exception channel. Absent collapses to none here, the same way the deny
+                // channel above collapses, and with no exceptions every deny simply stands.
+                var deniedShellExceptionList = ShellPatternList.Parse(deniedShellExceptionsRaw, VendorTag);
+                var deniedShellExceptions = deniedShellExceptionList.Status == ShellPatternListStatus.Present
+                    ? deniedShellExceptionList.Patterns
+                    : Array.Empty<string>();
                 var result = Baton.Vendors.ShellCommandPatternMatcher.EvaluateChainedCommand(
-                    shellCommandLine, shellPatternList.Patterns, deniedShellPatterns);
+                    shellCommandLine, shellPatternList.Patterns, deniedShellPatterns, deniedShellExceptions);
 
                 if (!result.IsAllowed)
                 {

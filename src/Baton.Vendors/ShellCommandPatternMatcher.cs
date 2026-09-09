@@ -491,7 +491,8 @@ public static class ShellCommandPatternMatcher
     /// already has. On an UNSCOPED grant with a standing deny list, this unconditional fail-closed
     /// behaviour does not hold — see the whole-line fold in <see cref="TrySegmentChainedCommand"/>
     /// (its <c>permissiveMetacharacters</c> parameter) and the ruling recorded once at
-    /// spec/baton.md §9.
+    /// spec/baton.md §9. On either scope, a segment whose head is a shell wrapper has its body
+    /// re-matched against the deny list too (#2114, <see cref="IsSegmentDenied"/>).
     /// </remarks>
     /// <param name="commandLine">The full shell command line as claude's <c>Bash</c> tool received it.</param>
     /// <param name="allowedPatterns">
@@ -503,8 +504,18 @@ public static class ShellCommandPatternMatcher
     /// get the original narrowing — every segment must match one of these patterns.
     /// </param>
     /// <param name="deniedPatterns">The grant's standing-deny patterns, or empty/null when none apply.</param>
+    /// <param name="deniedExceptions">
+    /// #2114: <see cref="PermissionGrant.DeniedShellCommandExceptions"/> selects verbs exempt from
+    /// the baton head in <paramref name="deniedPatterns"/> (currently reads; #2100 extends the selection).
+    /// A segment matching both is decided by the
+    /// LONGER tokenized match, deny winning a tie; the whole rule, and why exception heads compare
+    /// ordinally where deny heads do not, is on <see cref="IsDeniedByTokenizedHead"/>. Meaningless
+    /// without a deny list, and null/empty leaves every deny standing exactly as before this field
+    /// existed.
+    /// </param>
     public static ScopedShellResult EvaluateChainedCommand(
-        string? commandLine, IReadOnlyList<string>? allowedPatterns, IReadOnlyList<string>? deniedPatterns)
+        string? commandLine, IReadOnlyList<string>? allowedPatterns, IReadOnlyList<string>? deniedPatterns,
+        IReadOnlyList<string>? deniedExceptions = null)
     {
         if (string.IsNullOrWhiteSpace(commandLine))
         {
@@ -539,9 +550,8 @@ public static class ShellCommandPatternMatcher
         {
             if (deniedPatterns is { Count: > 0 })
             {
-                bool segmentDenied = unscopedWithDeny
-                    ? IsDeniedByTokenizedHead(segment, deniedPatterns, anyOffset: folded)
-                    : IsAllowed(segment, deniedPatterns);
+                bool segmentDenied = IsSegmentDenied(
+                    segment, deniedPatterns, deniedExceptions, unscopedWithDeny, folded);
 
                 if (segmentDenied)
                 {
@@ -604,9 +614,112 @@ public static class ShellCommandPatternMatcher
     private const int MaxRenderedGrantedPatterns = 24;
 
     /// <summary>
+    /// The deny half of one segment's verdict: the segment itself against the deny list under the
+    /// scope's own grammar, and then (#2114) the segment read as a SHELL WRAPPER — <c>pwsh -c "…"</c>,
+    /// <c>powershell -Command …</c>, <c>cmd /c …</c>, <c>bash -c "…"</c>, <c>sh -c "…"</c> — whose body
+    /// is re-matched at every token offset, because a well-formed wrapper segments cleanly and so never
+    /// reached the whole-line fold's every-offset scan: <c>pwsh -c "baton cancel x"</c> had head
+    /// <c>pwsh</c>, and no deny pattern names a shell. A wrapper whose body this matcher cannot read
+    /// (<see cref="TryReadShellWrapperBody"/>: an encoded PowerShell command, or no body at all) is
+    /// denied outright rather than let past on the strength of what could not be seen. The wrapper
+    /// rung runs on both scopes — on a scoped grant the wrapper still has to match an allow pattern
+    /// first, so this only ever narrows.
+    /// </summary>
+    private static bool IsSegmentDenied(
+        string segment, IReadOnlyList<string> deniedPatterns, IReadOnlyList<string>? deniedExceptions,
+        bool unscopedWithDeny, bool folded)
+    {
+        bool direct = unscopedWithDeny
+            ? IsDeniedByTokenizedHead(segment, deniedPatterns, deniedExceptions, anyOffset: folded)
+            : IsAllowed(segment, deniedPatterns) && !IsAllowed(segment, deniedExceptions);
+        if (direct)
+        {
+            return true;
+        }
+
+        if (!TryReadShellWrapperBody(segment, out var body))
+        {
+            return false;
+        }
+
+        return body is null || IsDeniedByTokenizedHead(body, deniedPatterns, deniedExceptions, anyOffset: true);
+    }
+
+    /// <summary>
+    /// The shell wrappers <see cref="IsSegmentDenied"/> folds (#2114), compared against a segment's head
+    /// token case-insensitively, with any directory and a <c>.exe</c> suffix removed first. A wrapper
+    /// not on this list is not folded; adding one here is the whole of adding it.
+    /// </summary>
+    private static readonly string[] ShellWrapperHeads = ["pwsh", "powershell", "cmd", "bash", "sh", "zsh"];
+
+    /// <summary>
+    /// Reads the command a shell wrapper will run (#2114). Returns <see langword="false"/> when
+    /// <paramref name="segment"/>'s head is not one of <see cref="ShellWrapperHeads"/>. Returns
+    /// <see langword="true"/> with <paramref name="body"/> set to everything after the head — options
+    /// included, since the body is scanned at every token offset and an option token matches nothing —
+    /// or with <paramref name="body"/> <see langword="null"/> when there is nothing readable to scan:
+    /// a bare wrapper, or a PowerShell <c>-EncodedCommand</c> (<c>-e</c>, <c>-ec</c>, and every
+    /// unambiguous prefix from <c>-en</c> up) whose command is base64 the matcher cannot read. A
+    /// <c>-File x.ps1</c> body reads as readable and matches nothing: a script file is the
+    /// compiled-code exposure spec/baton.md §9's #2114 paragraph accepts, not a spelling this closes.
+    /// </summary>
+    private static bool TryReadShellWrapperBody(string segment, out string? body)
+    {
+        body = null;
+        var trimmed = segment.TrimStart();
+        int end = 0;
+        while (end < trimmed.Length && !char.IsWhiteSpace(trimmed[end]))
+        {
+            end++;
+        }
+
+        var head = StripWrapperCharacters(trimmed[..end]);
+        head = head[(head.LastIndexOfAny(['/', '\\']) + 1)..];
+        if (head.EndsWith(".exe", StringComparison.OrdinalIgnoreCase))
+        {
+            head = head[..^4];
+        }
+
+        if (!ShellWrapperHeads.Contains(head, StringComparer.OrdinalIgnoreCase))
+        {
+            return false;
+        }
+
+        var rest = trimmed[end..].Trim();
+        if (rest.Length == 0)
+        {
+            return true;
+        }
+
+        bool powerShell = head.Equals("pwsh", StringComparison.OrdinalIgnoreCase)
+            || head.Equals("powershell", StringComparison.OrdinalIgnoreCase);
+        if (powerShell)
+        {
+            foreach (var token in rest.Split((char[]?)null, StringSplitOptions.RemoveEmptyEntries))
+            {
+                if (!token.StartsWith('-'))
+                {
+                    continue;
+                }
+
+                var name = token[1..].ToLowerInvariant();
+                if (name is "e" or "ec"
+                    || (name.StartsWith("en", StringComparison.Ordinal)
+                        && "encodedcommand".StartsWith(name, StringComparison.Ordinal)))
+                {
+                    return true;
+                }
+            }
+        }
+
+        body = rest;
+        return true;
+    }
+
+    /// <summary>
     /// The unscoped-grant deny match (#1731): compares a deny pattern's whitespace-tokenized head
     /// (<c>"gh label*"</c> → <c>["gh", "label"]</c>) against <paramref name="anyOffset"/>-controlled
-    /// tokens of <paramref name="segment"/>, exact and ordinal. Deliberately not a substring/prefix
+    /// tokens of <paramref name="segment"/>, exact per token. Deliberately not a substring/prefix
     /// scan like <see cref="IsAllowed"/> — the accepted cost of that choice is recorded once at
     /// spec/baton.md §9, not restated here. This grammar also diverges from <see cref="IsAllowed"/>'s
     /// on the two points that matter for writing a new deny entry: a pattern with no trailing
@@ -614,17 +727,38 @@ public static class ShellCommandPatternMatcher
     /// whole-line equality, and a trailing <c>*</c> never reaches inside a token (narrowing —
     /// <c>"gh label*"</c> does not deny <c>gh labelfoo</c>) rather than word-boundary matching a
     /// continuation.
+    /// <para>
+    /// <b>Deny heads compare case-insensitively; exception heads compare ordinally (#2114).</b> The two
+    /// vendors' shells resolve <c>IWR</c>, <c>Invoke-Webrequest</c> and <c>CURL</c> to the same program
+    /// the lowercase spelling names, and every Windows executable name is case-insensitive, so an
+    /// ordinal deny was walked past by a shift key; over-denying <c>Curl</c> on a POSIX host, where no
+    /// such program exists, costs nothing. An exception is the opposite sign, and it names a CLI whose
+    /// own dispatch IS ordinal: <c>baton Status</c> is not <c>baton status</c> to <c>Program.cs</c>, it
+    /// is the default arm, which is <c>baton supply</c> — a write. So an exception admits only the
+    /// exact spelling the CLI reads as the read it names. Exceptions without a trailing <c>*</c>
+    /// require the remaining tokens to match exactly, so <c>baton trust --list</c> cannot admit
+    /// additional options; deny patterns retain their fail-closed prefix semantics.
+    /// </para>
+    /// <para>
+    /// <b>The longer match decides, deny winning a tie.</b> At each offset the longest deny match and
+    /// the longest exception match are measured in tokens; the segment is denied there unless the
+    /// exception is strictly longer. That is what lets <c>baton *</c> stand while <c>baton ledger*</c> is excepted
+    /// and <c>baton ledger --rebuild*</c> is denied again beneath it, without any list order mattering.
+    /// With no exceptions this is exactly the pre-#2114 predicate.
+    /// </para>
     /// </summary>
     /// <param name="anyOffset">
     /// #1748 F2: when <see langword="true"/> (the whole-line fold path, where
-    /// <see cref="TrySegmentChainedCommand"/> could not find a trustworthy boundary), the pattern's
+    /// <see cref="TrySegmentChainedCommand"/> could not find a trustworthy boundary, and since #2114 a
+    /// shell wrapper's body), the pattern's
     /// token sequence is matched starting at EVERY token offset in <paramref name="segment"/>, not
     /// only offset 0 — a denied command need not be in head position once the line's own
     /// segmentation is already untrustworthy. This over-denies (e.g. <c>echo gh label</c>), which is
     /// the accepted fail-closed direction on this path; see spec/baton.md §9.
     /// </param>
     private static bool IsDeniedByTokenizedHead(
-        string segment, IReadOnlyList<string> deniedPatterns, bool anyOffset = false)
+        string segment, IReadOnlyList<string> deniedPatterns, IReadOnlyList<string>? deniedExceptions,
+        bool anyOffset = false)
     {
         var tokens = segment.Split((char[]?)null, StringSplitOptions.RemoveEmptyEntries);
         for (int t = 0; t < tokens.Length; t++)
@@ -637,7 +771,41 @@ public static class ShellCommandPatternMatcher
             return false;
         }
 
-        foreach (var pattern in deniedPatterns)
+        int maxStart = anyOffset ? tokens.Length - 1 : 0;
+        for (int start = 0; start <= maxStart; start++)
+        {
+            int denyLength = LongestTokenizedMatch(tokens, start, deniedPatterns, StringComparison.OrdinalIgnoreCase);
+            if (denyLength == 0)
+            {
+                continue;
+            }
+
+            int exceptionLength = LongestTokenizedMatch(tokens, start, deniedExceptions, StringComparison.Ordinal, exactUnlessWildcard: true);
+            if (denyLength >= exceptionLength)
+            {
+                return true;
+            }
+        }
+
+        return false;
+    }
+
+    /// <summary>
+    /// The token count of the longest pattern in <paramref name="patterns"/> whose tokenized body
+    /// matches <paramref name="tokens"/> starting at <paramref name="start"/>, or 0 when none does.
+    /// The grammar is <see cref="IsDeniedByTokenizedHead"/>'s; this only measures it.
+    /// </summary>
+    private static int LongestTokenizedMatch(
+        string[] tokens, int start, IReadOnlyList<string>? patterns, StringComparison comparison,
+        bool exactUnlessWildcard = false)
+    {
+        if (patterns is null)
+        {
+            return 0;
+        }
+
+        int longest = 0;
+        foreach (var pattern in patterns)
         {
             if (string.IsNullOrWhiteSpace(pattern))
             {
@@ -646,40 +814,44 @@ public static class ShellCommandPatternMatcher
 
             var patternBody = pattern.EndsWith('*') ? pattern[..^1] : pattern;
             var patternTokens = patternBody.Split((char[]?)null, StringSplitOptions.RemoveEmptyEntries);
-            if (patternTokens.Length == 0 || patternTokens.Length > tokens.Length)
+            if (exactUnlessWildcard && !pattern.EndsWith('*') && patternTokens.Length != tokens.Length - start)
             {
                 continue;
             }
 
-            int maxStart = anyOffset ? tokens.Length - patternTokens.Length : 0;
-            for (int start = 0; start <= maxStart; start++)
+            if (patternTokens.Length == 0 || patternTokens.Length <= longest
+                || patternTokens.Length > tokens.Length - start)
             {
-                bool matches = true;
-                for (int i = 0; i < patternTokens.Length; i++)
-                {
-                    if (!tokens[start + i].Equals(patternTokens[i], StringComparison.Ordinal))
-                    {
-                        matches = false;
-                        break;
-                    }
-                }
+                continue;
+            }
 
-                if (matches)
+            bool matches = true;
+            for (int i = 0; i < patternTokens.Length; i++)
+            {
+                if (!tokens[start + i].Equals(patternTokens[i], comparison))
                 {
-                    return true;
+                    matches = false;
+                    break;
                 }
+            }
+
+            if (matches)
+            {
+                longest = patternTokens.Length;
             }
         }
 
-        return false;
+        return longest;
     }
 
     /// <summary>
-    /// Strips a leading backtick, <c>$(</c>, bare <c>(</c>, or quote character off a token (#1748 F2)
-    /// — the wrapper characters a fold-path token can carry when the line's own segmentation already
-    /// failed to find a boundary (<c>` `gh</c> from `` `gh label create x` ``, <c>$(gh</c> from
-    /// <c>$(gh label create x)</c>). Only strips from the front: the token's own text past that point
-    /// is compared unchanged.
+    /// Strips a leading backtick, <c>$(</c>, bare <c>(</c>, or quote character off the front of a
+    /// token (#1748 F2) — the wrapper characters a fold-path token can carry when the line's own
+    /// segmentation already failed to find a boundary (<c>` `gh</c> from `` `gh label create x` ``,
+    /// <c>$(gh</c> from <c>$(gh label create x)</c>) — and (#2114) a trailing quote, <c>)</c> or
+    /// backtick off its end, which is where the closing character of a wrapper's quoted body lands
+    /// (<c>cancel"</c> from <c>pwsh -c "baton cancel"</c>). The token's own text between is compared
+    /// unchanged.
     /// </summary>
     private static string StripWrapperCharacters(string token)
     {
@@ -701,7 +873,13 @@ public static class ShellCommandPatternMatcher
             break;
         }
 
-        return start == 0 ? token : token[start..];
+        int end = token.Length;
+        while (end > start && token[end - 1] is '`' or ')' or '\'' or '"')
+        {
+            end--;
+        }
+
+        return start == 0 && end == token.Length ? token : token[start..end];
     }
 
     /// <summary>

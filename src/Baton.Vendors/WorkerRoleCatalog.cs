@@ -326,7 +326,8 @@ public static class WorkerRoleCatalog
                     NetworkAccess: raw.NetworkAccess,
                     DeniedShellCommandPatterns: raw.DeniedShellCommandPatterns,
                     ShellCommandsAreReadOnly: raw.ShellCommandsAreReadOnly,
-                    DeniedShellOptionTokens: raw.DeniedShellOptionTokens),
+                    DeniedShellOptionTokens: raw.DeniedShellOptionTokens,
+                    DeniedShellCommandExceptions: raw.DeniedShellCommandExceptions),
                 Timeout: TimeSpan.FromMinutes(raw.TimeoutMinutes),
                 ProducesVerdict: raw.VerdictSchema,
                 Purpose: raw.Purpose,
@@ -489,6 +490,9 @@ public static class WorkerRoleCatalog
         // #1683 F2: optional for the same reason as the three above -- only `review` scopes a shell at
         // all, and omitting this key is exactly PermissionGrant's own "no option tokens denied".
         IReadOnlyList<string>? DeniedShellOptionTokens = null,
+        // #2114: optional like the four above -- the read allowlist carved out of a deny, which only
+        // the two unscoped write roles carry; omitting it is PermissionGrant's own "no exceptions".
+        IReadOnlyList<string>? DeniedShellCommandExceptions = null,
         // #1623: optional like the three above, for the same reason -- most roles declare neither and
         // omitting them is exactly "no engine-run verify, no token budget", the WorkerRole defaults.
         string? VerifyPixiTask = null,

@@ -31,7 +31,10 @@ public sealed record RoleTemplateExport(
     // silently absent from every lane dispatched through that tool. `baton templates --json`
     // (this export's own surface) is still exercised today by tool-refresh/refresh.py's install
     // smoke check.
-    [property: JsonPropertyName("denied_shell_option_tokens")] IReadOnlyList<string>? DeniedShellOptionTokens = null);
+    [property: JsonPropertyName("denied_shell_option_tokens")] IReadOnlyList<string>? DeniedShellOptionTokens = null,
+    // #2114: exported for the same reason as the three lists above -- a reader of this export that
+    // saw the `baton *` deny without the reads carved out of it would under-report the grant.
+    [property: JsonPropertyName("denied_shell_command_exceptions")] IReadOnlyList<string>? DeniedShellCommandExceptions = null);
 
 /// <summary>
 /// Information describing a built-in workflow template (M22 Phase 1).
@@ -109,7 +112,8 @@ public static class BuiltInWorkflowTemplates
                 ShellCommandPatterns: role.Grant.ShellCommandPatterns,
                 DeniedShellCommandPatterns: role.Grant.DeniedShellCommandPatterns,
                 ShellCommandsAreReadOnly: role.Grant.ShellCommandsAreReadOnly,
-                DeniedShellOptionTokens: role.Grant.DeniedShellOptionTokens);
+                DeniedShellOptionTokens: role.Grant.DeniedShellOptionTokens,
+                DeniedShellCommandExceptions: role.Grant.DeniedShellCommandExceptions);
         }
         return dict;
     }

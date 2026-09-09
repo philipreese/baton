@@ -104,6 +104,28 @@ public class AgyHookCheckCommandTests
         Assert.DoesNotContain("view_file", reason, StringComparison.Ordinal);
     }
 
+    // #2114: agy's copy of HookCheckCommandTests' exception-channel theory (that one states the
+    // shape). It matters more on this vendor: no flag stands behind the hook here, so if this channel
+    // were never threaded to the gate, every read the role names would be refused anyway.
+    [Theory]
+    [InlineData("baton status room-1", "agy:baton status*", "allow")]
+    [InlineData("baton status room-1", "agy:", "deny")]
+    [InlineData("baton cancel room-1", "agy:baton status*", "deny")]
+    [InlineData("pwsh -c \"baton cancel room-1\"", "agy:baton status*", "deny")]
+    public void The_denied_shell_exceptions_channel_carves_a_read_out_of_a_head_deny(
+        string command, string exceptionsRaw, string expectedDecision)
+    {
+        using var stdin = new StringReader(RunPayload(command));
+        using var stdout = new StringWriter();
+
+        AgyHookCheckCommand.Execute(
+            stdin, stdout, "agy:", shellPatternsRaw: "agy:", deniedShellPatternsRaw: "agy:baton *",
+            deniedShellOptionTokensRaw: "agy:", deniedShellExceptionsRaw: exceptionsRaw);
+
+        using var doc = JsonDocument.Parse(stdout.ToString());
+        Assert.Equal(expectedDecision, doc.RootElement.GetProperty("decision").GetString());
+    }
+
     private static string DenyReason(
         string stdinText, string? denied, string? shellPatterns, string deniedShellPatterns = "agy:")
     {
