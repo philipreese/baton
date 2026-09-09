@@ -178,9 +178,9 @@ set the two do share is identical, `gpt-6-astra`'s `ultra` included.
 **2026-09-08 vendor probe (#2125, #2126).** The 2026-09-08 vendor probe re-established the live
 `model/list` catalog and observed that `gpt-5.4-mini` was dropped from the visible and
 account-sensitive catalogs on the operator's account (the 2026-09-04 recording having noted it as
-scheduled for deprecation in favor of `gpt-5.6-luna`). The embedded recording was re-pinned to
-`src/Baton.Vendors/codex-model-list-2026-09-08.jsonl` (#2126), carrying six visible models and no
-`gpt-5.4-mini`.
+scheduled for deprecation in favor of `gpt-5.6-luna`). The embedded recording was re-pinned to that
+day's dated file under `src/Baton.Vendors/` (#2126; `docs/vendor-capabilities.md` names the exact
+filename and format), carrying six visible models and no `gpt-5.4-mini`.
 
 ## Sandbox and approval behavior
 

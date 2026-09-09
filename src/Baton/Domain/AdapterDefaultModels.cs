@@ -34,10 +34,10 @@ public static class AdapterDefaultModels
     /// </description></item>
     /// <item><description>
     /// <c>codex</c> — <c>gpt-6-astra</c>, the single entry marked <c>"isDefault": true</c> in the
-    /// captured <c>model/list</c> answer shipped at
-    /// <c>src/Baton.Vendors/codex-model-list-2026-09-08.jsonl</c>. That recording is the record
-    /// (<c>docs/vendor-codex-probe-2026-09-04.md</c>), and it can go stale — a codex release that moves
-    /// the default makes this entry wrong, and re-running that probe is what corrects it.
+    /// captured <c>model/list</c> answer <c>docs/vendor-codex-probe-2026-09-04.md</c> shipped and
+    /// documents the exact recording for — that doc is the record, and it can go stale: a codex
+    /// release that moves the default makes this entry wrong, and re-running that probe is what
+    /// corrects it.
     /// </description></item>
     /// </list>
     /// </summary>
