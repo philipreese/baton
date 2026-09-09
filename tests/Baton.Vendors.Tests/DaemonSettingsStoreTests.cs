@@ -59,15 +59,37 @@ public class DaemonSettingsStoreTests
         }
     }
 
-    // #1659: RoomsRetentionDays defaults to null (off) -- the ruling's "default off, operator opts in".
+    // #2111: RoomsRetentionDays defaults to 30 now -- see DaemonSettings.DefaultRoomsRetentionDays for
+    // the decision-round measurement that moved this off #1659's original "operator opts in" default.
     [Fact]
-    public async Task Loading_a_missing_file_resolves_RoomsRetentionDays_to_null()
+    public async Task Loading_a_missing_file_resolves_RoomsRetentionDays_to_the_default()
     {
         var path = TempPath();
 
         var settings = await DaemonSettingsStore.LoadAsync(path, TestContext.Current.CancellationToken);
 
-        Assert.Null(settings.RoomsRetentionDays);
+        Assert.Equal(DaemonSettings.DefaultRoomsRetentionDays, settings.RoomsRetentionDays);
+    }
+
+    // #2111: an operator can still turn it off explicitly -- unlike an absent file (which reads the
+    // default above), an explicit null in settings.json is an opt-out System.Text.Json still honors,
+    // since RoomsRetentionDays carries no non-null coalescing on deserialize the way _runwayHold does.
+    [Fact]
+    public async Task Explicit_null_RoomsRetentionDays_in_settings_json_is_honored_as_off()
+    {
+        var path = TempPath();
+        try
+        {
+            await File.WriteAllTextAsync(path, "{\"RoomsRetentionDays\":null}", TestContext.Current.CancellationToken);
+
+            var settings = await DaemonSettingsStore.LoadAsync(path, TestContext.Current.CancellationToken);
+
+            Assert.Null(settings.RoomsRetentionDays);
+        }
+        finally
+        {
+            FileCleanup.Delete(path);
+        }
     }
 
     [Fact]

@@ -13,13 +13,24 @@ public sealed record DaemonSettings
     public int PerVendorConcurrencyCap { get; init; } = DefaultPerVendorConcurrencyCap;
 
     /// <summary>
-    /// #1659: gates <see cref="Baton.Cli.Daemon.RoomRetentionSweep"/>'s automatic
-    /// <c>baton rooms prune --terminal</c> call — <c>null</c> (the default) means off, matching the
-    /// issue's "default off, so the operator opts in" ruling. A room's <c>terminal.json</c> at least
-    /// this many days old is eligible; see <c>RoomsPruneOptions.OlderThanDays</c> for the exact
-    /// predicate this value feeds.
+    /// #1659, default changed to 30 by #2111: gates <see cref="Baton.Cli.Daemon.RoomRetentionSweep"/>'s
+    /// automatic <c>baton rooms prune --terminal</c> call. Absent from <c>settings.json</c> reads as
+    /// <see cref="DefaultRoomsRetentionDays"/>; an explicit <c>null</c>, <c>0</c>, or negative value
+    /// still turns the automatic prune off (an operator's opt-out, not merely "unset") — see
+    /// <see cref="Baton.Cli.Daemon.RoomRetentionSweep.ResolveRoomsRetentionDays"/> for the exact
+    /// resolution. A room's <c>terminal.json</c> at least this many days old is eligible; see
+    /// <c>RoomsPruneOptions.OlderThanDays</c> for the exact predicate this value feeds. The automatic
+    /// prune this gates does not actually run yet regardless of this value — see
+    /// <see cref="Baton.Cli.Daemon.RoomRetentionSweep.AutomaticPruneHoldReason"/> — spec/baton.md §8
+    /// records why.
     /// </summary>
-    public int? RoomsRetentionDays { get; init; }
+    public int? RoomsRetentionDays { get; init; } = DefaultRoomsRetentionDays;
+
+    /// <summary>
+    /// #2111 decision round (2026-09-08): 507 rooms / 846 MB after two weeks unattended is the
+    /// measurement that moved this from off to on.
+    /// </summary>
+    public const int DefaultRoomsRetentionDays = 30;
 
     /// <summary>
     /// #2072: how long a room's journal must have been quiet before

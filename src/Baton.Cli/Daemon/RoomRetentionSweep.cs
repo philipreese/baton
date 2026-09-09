@@ -345,11 +345,11 @@ public sealed class RoomRetentionSweep : BackgroundService
     }
 
     /// <summary>
-    /// #1659: <see cref="DaemonSettings.RoomsRetentionDays"/>, or <c>null</c> when unset/non-positive —
-    /// the daemon's own "off unless the operator opts in" default. Never reads an environment
-    /// variable, unlike every sibling <c>Get*</c>/<c>Is*</c> resolver above: this setting arrives
-    /// through <c>settings.json</c> (<see cref="DaemonSettingsStore"/>), the config surface the issue
-    /// asked for, not a new env var.
+    /// #1659, default changed to <see cref="DaemonSettings.DefaultRoomsRetentionDays"/> by #2111:
+    /// <see cref="DaemonSettings.RoomsRetentionDays"/>, or <c>null</c> when explicitly unset (or set
+    /// non-positive) — an operator's opt-out. Never reads an environment variable, unlike every sibling
+    /// <c>Get*</c>/<c>Is*</c> resolver above: this setting arrives through <c>settings.json</c>
+    /// (<see cref="DaemonSettingsStore"/>), the config surface the issue asked for, not a new env var.
     /// </summary>
     internal int? ResolveRoomsRetentionDays(int? roomsRetentionDaysOverride = null)
     {
@@ -385,6 +385,18 @@ public sealed class RoomRetentionSweep : BackgroundService
             var result = await RoomsPruneCommand
                 .ExecuteAsync(options, TextWriter.Null, registryFilePath, cancellationToken)
                 .ConfigureAwait(false);
+
+            // #2111: "the daemon logs each prune with counts" -- only when a prune actually deleted
+            // something, so a tick that found nothing eligible stays silent rather than repeating this
+            // line at the sweep's cadence (LegacyTerminalInstantWarnedRooms above is the same call: a
+            // signal nobody reads once it fires on every tick).
+            if (result.Deleted.Count > 0)
+            {
+                Console.Out.WriteLine(
+                    $"RoomRetentionSweep: rooms-retention prune deleted {result.Deleted.Count} room(s) " +
+                    $"older than {roomsRetentionDays} day(s).");
+            }
+
             return result.Deleted.Count;
         }
         catch (OperationCanceledException)
@@ -396,6 +408,42 @@ public sealed class RoomRetentionSweep : BackgroundService
             Console.Error.WriteLine($"RoomRetentionSweep: Error running rooms-retention prune: {ex.Message}");
             return 0;
         }
+    }
+
+    /// <summary>
+    /// #2111 operator ruling — full reasoning recorded once, in spec/baton.md §8 ("The automatic prune
+    /// is held until #2140 lands"), not restated here. In short: the automatic path holds until the
+    /// durable fleet event log (#2140) can record what it is about to delete; flip
+    /// <see cref="ExecuteAutomaticRoomsRetentionPruneAsync"/> to call
+    /// <see cref="ExecuteRoomsRetentionPruneAsync"/> once a writer there does.
+    /// </summary>
+    public const string AutomaticPruneHoldReason =
+        "waiting on the durable fleet event log (#2140) to carry each pruned room's verdict text and terminal fact";
+
+    private bool _automaticPruneHoldWarned;
+
+    /// <summary>
+    /// What <see cref="ExecuteAsync"/> calls every tick, as opposed to <see cref="ExecuteRoomsRetentionPruneAsync"/>
+    /// itself, which stays directly callable — by <c>baton rooms prune --terminal</c> typed by hand, and
+    /// by every test exercising the prune mechanics — so <see cref="AutomaticPruneHoldReason"/>'s hold
+    /// closes only the unattended path, never the operator-typed one. Returns 0 without touching
+    /// anything, whether held or whether <see cref="ResolveRoomsRetentionDays"/> resolves to <c>null</c>.
+    /// </summary>
+    internal Task<int> ExecuteAutomaticRoomsRetentionPruneAsync(
+        int? roomsRetentionDaysOverride = null)
+    {
+        if (ResolveRoomsRetentionDays(roomsRetentionDaysOverride) is null)
+        {
+            return Task.FromResult(0);
+        }
+
+        if (!_automaticPruneHoldWarned)
+        {
+            _automaticPruneHoldWarned = true;
+            Console.Error.WriteLine($"RoomRetentionSweep: automatic rooms-retention prune is held: {AutomaticPruneHoldReason}.");
+        }
+
+        return Task.FromResult(0);
     }
 
     protected override async Task ExecuteAsync(CancellationToken stoppingToken)
@@ -423,7 +471,10 @@ public sealed class RoomRetentionSweep : BackgroundService
             {
                 try
                 {
-                    await ExecuteRoomsRetentionPruneAsync(cancellationToken: stoppingToken).ConfigureAwait(false);
+                    // #2111: not a direct call to ExecuteRoomsRetentionPruneAsync -- see
+                    // AutomaticPruneHoldReason for why the automatic path holds while the direct one
+                    // (baton rooms prune --terminal, typed by hand) still runs today.
+                    await ExecuteAutomaticRoomsRetentionPruneAsync().ConfigureAwait(false);
                 }
                 catch (OperationCanceledException) when (stoppingToken.IsCancellationRequested)
                 {
