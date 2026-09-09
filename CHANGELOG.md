@@ -9,6 +9,18 @@ that carried them: `git show v0.35.0:src/Baton.Cli/CHANGELOG.md` (likewise `src/
 `release-please-config.json`. Everything below this line predates the split: the repo's single
 shared version through `0.14.0`.
 
+## [0.42.0](https://github.com/philipreese/baton/compare/v0.41.0...v0.42.0) (2026-09-09)
+
+
+### Features
+
+* **memory:** Add the fleet slug for operator and machine facts and merge it into every projection ([#2141](https://github.com/philipreese/baton/issues/2141)) ([0c8ca70](https://github.com/philipreese/baton/commit/0c8ca70ca385e9c0d0e80ba19906f9117e9acc69))
+
+
+### Bug Fixes
+
+* **docs:** Correct IWorkerUsageParser's TokensIn level claim to measured additive ([#2145](https://github.com/philipreese/baton/issues/2145)) ([5f2e17b](https://github.com/philipreese/baton/commit/5f2e17bb3fd0cbcb8f7ef2b09f4449c8c23edd71))
+
 ## [0.41.0](https://github.com/philipreese/baton/compare/v0.40.0...v0.41.0) (2026-09-09)
 
 
