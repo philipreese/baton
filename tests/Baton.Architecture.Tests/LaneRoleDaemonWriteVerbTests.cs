@@ -1,5 +1,6 @@
 using System.Text.RegularExpressions;
 using Baton.Cli;
+using Baton.Cli.Tests.TestSupport;
 using Baton.Status;
 using Baton.Vendors;
 
@@ -48,7 +49,8 @@ namespace Baton.Architecture.Tests;
 /// binds a spelling: <c>baton.exe</c>, <c>curl.exe</c>, <c>python3 -c</c>, <c>py -c</c>,
 /// <c>node --eval</c>, a script file run through a wrapper (<c>pwsh -File x.ps1</c>, pinned admitted
 /// below), <c>eval</c>, <c>iex</c>/<c>Invoke-Expression</c> (arbitrary code, deliberately
-/// unfolded under #2114\'s accepted exposure; containment concerns the CLI path), or an HTTP call from inside a test the lane compiles and runs are all past it. An
+/// unfolded under #2114's accepted exposure; containment concerns the CLI path), or an HTTP call from
+/// inside a test the lane compiles and runs are all past it. An
 /// <c>implement</c> lane running arbitrary test code can open a socket to the daemon port regardless;
 /// that exposure is the same one it has through the CLI on its own machine, and spec/baton.md §9
 /// records it as accepted rather than closed. This test is a tripwire on the casual path, not a wall.
@@ -300,6 +302,94 @@ public sealed class LaneRoleDaemonWriteVerbTests
                 $"Read control '{read}' has no CLI read-only handler declaration.");
         }
     }
+
+    /// <summary>
+    /// Exercises each declared read against the CLI suites' isolated home and real parked room.
+    /// File membership and bytes are compared after EACH invocation, including the room journal.
+    /// </summary>
+    /// <remarks>
+    /// Sabotage: make TemplatesCommand's "install" argument write under BatonPaths.Root while
+    /// retaining the baton templates* declaration. The install invocation below then fails the
+    /// snapshot comparison. This probes that concrete sub-verb growth, not all possible arguments.
+    /// </remarks>
+    [Fact]
+    public async Task Every_excepted_read_leaves_the_store_and_room_ledger_byte_identical()
+    {
+        using var home = new IsolatedBatonHome();
+        var room = Path.Combine(home.Path, "rooms", "read-probe");
+        var fixture = await ParkedStepFixture.WriteParkedStepFixtureAsync(home.Path, room);
+        ProjectCeilingStore.Set(home.Path, ProjectCeiling.Unrestricted, ProjectCeilingStore.DefaultPath);
+        var ledger = BatonPaths.CostLedgerFile("read-probe");
+        Directory.CreateDirectory(Path.GetDirectoryName(ledger)!);
+        File.WriteAllText(ledger, "");
+        var before = SnapshotFiles(home.Path);
+        Assert.NotEmpty(before);
+        Assert.NotEmpty(File.ReadAllBytes(fixture.LogPath));
+        var token = TestContext.Current.CancellationToken;
+
+        foreach (var read in ReadOnlyVerbs)
+        {
+            using var output = new StringWriter();
+            switch (read.Pattern)
+            {
+                case "baton status*":
+                    await StatusCommand.ExecuteAsync(
+                        StatusOptionsParser.Parse([room, "--json"]), output, token);
+                    break;
+                case "baton templates*":
+                    Assert.Equal(0, await TemplatesCommand.ExecuteAsync(["--json"], output, token));
+                    AssertUnchanged();
+                    Assert.Equal(0, await TemplatesCommand.ExecuteAsync(["install"], output, token));
+                    break;
+                case "baton trust --list":
+                    Assert.Equal(0, await TrustCommand.ExecuteAsync(
+                        TrustOptionsParser.Parse(["--list"]), output, token));
+                    Assert.Contains(ProjectCeilingStore.CanonicalKey(home.Path), output.ToString());
+                    break;
+                case "baton ledger*":
+                    Assert.Equal(0, await LedgerViewCommand.ExecuteAsync(
+                        LedgerViewOptionsParser.Parse(["--repo-identity", "read-probe"]),
+                        output, cancellationToken: token));
+                    break;
+                case "baton memory audit*":
+                    Assert.Equal(0, await MemoryAuditCommand.ExecuteAsync(
+                        MemoryAuditOptionsParser.Parse([]), output,
+                        Path.Combine(home.Path, "claude"), token,
+                        Path.Combine(home.Path, "user"), home.Path));
+                    break;
+                case "baton audit lanes*":
+                    Assert.Equal(0, await AuditLanesCommand.ExecuteAsync(
+                        new AuditLanesOptions(RoomsRoot: Path.GetDirectoryName(room)),
+                        output, cancellationToken: token));
+                    break;
+                case "baton --version*":
+                    output.WriteLine(VersionInfo.GetVersion(typeof(VersionInfo).Assembly));
+                    break;
+                default:
+                    Assert.Fail($"Add a behavioral invocation for CLI read '{read.Pattern}'.");
+                    break;
+            }
+
+            Assert.False(string.IsNullOrWhiteSpace(output.ToString()), read.Pattern);
+            AssertUnchanged();
+
+            void AssertUnchanged()
+            {
+                var after = SnapshotFiles(home.Path);
+                Assert.True(before.Keys.Order().SequenceEqual(after.Keys.Order()),
+                    $"{read.Pattern} changed the store's file membership.");
+                foreach (var (path, bytes) in before)
+                {
+                    Assert.True(bytes.AsSpan().SequenceEqual(after[path]),
+                        $"{read.Pattern} changed store or room ledger bytes at {path}.");
+                }
+            }
+        }
+    }
+
+    private static Dictionary<string, byte[]> SnapshotFiles(string root) =>
+        Directory.EnumerateFiles(root, "*", SearchOption.AllDirectories)
+            .ToDictionary(path => Path.GetRelativePath(root, path), File.ReadAllBytes);
 
     [Fact]
     public void Trust_sub_verbs_are_coupled_to_the_write_probes()

@@ -47,6 +47,8 @@
 
   <ItemGroup>
     <Using Include="Xunit" />
+    <Compile Include="..\Baton.Cli.Tests\TestSupport\IsolatedBatonHome.cs" Link="TestSupport\IsolatedBatonHome.cs" />
+    <Compile Include="..\Baton.Cli.Tests\TestSupport\ParkedStepFixture.cs" Link="TestSupport\ParkedStepFixture.cs" />
   </ItemGroup>
 
 </Project>

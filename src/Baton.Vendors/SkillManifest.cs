@@ -167,7 +167,8 @@ public sealed record SkillRequirements(
                 && (granted.Count == 0 || granted.Contains(pattern, StringComparer.Ordinal));
             // Exact membership OR the gate's own predicate on the shortest line the pattern admits --
             // the remark above states why both, and why neither alone is enough. #2114: a pattern the
-            // grant's read allowlist lists or covers is carved back out of the deny, by the same pair.
+            // grant excepts from the baton head deny is recognized by the same pair; see
+            // PermissionGrant.DeniedShellCommandExceptions (reads today, widening intended in #2100).
             var deniedByGrant = denied.Contains(pattern, StringComparer.Ordinal)
                 || ShellCommandPatternMatcher.IsDenied(pattern.TrimEnd('*'), denied);
             var exceptedByGrant = excepted.Contains(pattern, StringComparer.Ordinal)

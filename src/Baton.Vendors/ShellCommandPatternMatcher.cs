@@ -505,8 +505,9 @@ public static class ShellCommandPatternMatcher
     /// </param>
     /// <param name="deniedPatterns">The grant's standing-deny patterns, or empty/null when none apply.</param>
     /// <param name="deniedExceptions">
-    /// #2114: <see cref="PermissionGrant.DeniedShellCommandExceptions"/> — the explicit read allowlist
-    /// carved out of <paramref name="deniedPatterns"/>. A segment matching both is decided by the
+    /// #2114: <see cref="PermissionGrant.DeniedShellCommandExceptions"/> selects verbs exempt from
+    /// the baton head in <paramref name="deniedPatterns"/> (currently reads; #2100 extends the selection).
+    /// A segment matching both is decided by the
     /// LONGER tokenized match, deny winning a tie; the whole rule, and why exception heads compare
     /// ordinally where deny heads do not, is on <see cref="IsDeniedByTokenizedHead"/>. Meaningless
     /// without a deny list, and null/empty leaves every deny standing exactly as before this field
