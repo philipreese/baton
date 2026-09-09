@@ -8,19 +8,20 @@ using Microsoft.Extensions.Hosting;
 namespace Baton.Cli.Daemon;
 
 /// <summary>
-/// #1946 slice 1 — the tailnet plane's listener (spec/baton.md §11 C-11): three GET routes serving
-/// <see cref="GlassPage"/>, the fleet projection the daemon already writes, and a stream of that
-/// file's changes. Off unless <see cref="GlassListenerSettings.Listen"/> is set.
+/// #1946 slice 1 — the tailnet plane's listener (spec/baton.md §11 C-11): GET routes serving
+/// <see cref="GlassPage"/>, its static install metadata, the fleet projection the daemon already
+/// writes, and a stream of that file's changes. Off unless <see cref="GlassListenerSettings.Listen"/>
+/// is set.
 /// </summary>
 /// <remarks>
 /// <para>
-/// <b>THE SLICE BOUNDARY, and it is the whole reason this plane exists.</b> The route table below
-/// serves the FLEET ROW ONLY — the same payload the mailbox already carries. No stdout tail beyond
-/// what the projection file itself contains, no room artifacts, no per-room timeline endpoint, no
-/// arrest verb. Drill-down (live stdout tail, full timeline, room artifacts) is slice 2, and C-11
-/// rules that it may live ONLY on this plane: it must never be added to the worker-served or
-/// artifact copies, whose secret gate and KV write cap are the two walls that forced a second plane
-/// in the first place.
+/// <b>THE SLICE BOUNDARY, and it is the whole reason this plane exists.</b> Apart from the page's
+/// static install metadata, the route table below serves the FLEET ROW ONLY — the same payload the
+/// mailbox already carries. No stdout tail beyond what the projection file itself contains, no room
+/// artifacts, no per-room timeline endpoint, no arrest verb. Drill-down (live stdout tail, full
+/// timeline, room artifacts) is slice 2, and C-11 rules that it may live ONLY on this plane: it must
+/// never be added to the worker-served or artifact copies, whose secret gate and KV write cap are
+/// the two walls that forced a second plane in the first place.
 /// </para>
 /// <para>
 /// <b>Read-only, and structurally so.</b> Every route is a GET; a request with any other method is
@@ -207,6 +208,23 @@ internal sealed class GlassHttpService : BackgroundService
                         .ConfigureAwait(false);
                     return;
 
+                case GlassWebAppAssets.ManifestPath:
+                    await WriteTextAsync(
+                            context, HttpStatusCode.OK, "application/manifest+json; charset=utf-8",
+                            GlassWebAppAssets.Manifest())
+                        .ConfigureAwait(false);
+                    return;
+
+                case GlassWebAppAssets.Icon192Path:
+                    await WriteBytesAsync(context, HttpStatusCode.OK, "image/png", GlassWebAppAssets.Icon(192))
+                        .ConfigureAwait(false);
+                    return;
+
+                case GlassWebAppAssets.Icon512Path:
+                    await WriteBytesAsync(context, HttpStatusCode.OK, "image/png", GlassWebAppAssets.Icon(512))
+                        .ConfigureAwait(false);
+                    return;
+
                 case "/projection.json":
                     await WriteProjectionAsync(context).ConfigureAwait(false);
                     return;
@@ -376,6 +394,16 @@ internal sealed class GlassHttpService : BackgroundService
         context.Response.ContentType = contentType;
         context.Response.ContentLength64 = payload.Length;
         await context.Response.OutputStream.WriteAsync(payload).ConfigureAwait(false);
+    }
+
+    private static async Task WriteBytesAsync(
+        HttpListenerContext context, HttpStatusCode status, string contentType, ReadOnlyMemory<byte> body)
+    {
+        NoStore(context.Response);
+        context.Response.StatusCode = (int)status;
+        context.Response.ContentType = contentType;
+        context.Response.ContentLength64 = body.Length;
+        await context.Response.OutputStream.WriteAsync(body).ConfigureAwait(false);
     }
 
     /// <summary>The projection is a live reading; a cached copy on a phone is a lie about the fleet
