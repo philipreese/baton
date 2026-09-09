@@ -17,6 +17,11 @@ Only explicit grants in the brief override these constraints.
 ## What the lane never does
 
 - No gates (`pixi run gates`, `gates-fast`, receipt recording). The engine verifies after you exit.
+  This does not cover `.githooks/pre-push` running on your own `git push` — that hook fires whether
+  you invoke it or not, and (#2129) on your push it runs only the seconds-scale `gates-lane-fast`,
+  not the full `gates-fast`. Seeing it run is expected, not a brief violation: if it reports a real
+  failure, fix it and retry the push in the same turn rather than treating the retry itself as the
+  forbidden thing.
 - No sub-agents. The second reader is the conductor's own review lane.
 - No live vendor CLIs (`claude`, `codex`, `agy`, anything spending subscription budget) unless the
   brief grants them by name, with a run count.

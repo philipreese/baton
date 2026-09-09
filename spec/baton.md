@@ -6120,6 +6120,56 @@ temp dir -- `.githooks/pre-push` now `unset`s the `GIT_*` keys before invoking a
 `gates.py` scrubs them from its own process environment and passes an explicit scrubbed `env=` to
 every git subprocess its fixtures spawn.
 
+**Ruled 2026-09-08 23:45 ET (operator, #2129): a lane's own push pays gates-fast's cost a second
+time, and cannot tell the hook apart from the brief that forbids it.** Two lanes that day
+(`2125fix`, `2110fix2`) reported `.githooks/pre-push` running the full `gates-fast` (~4.5 minutes,
+`prePushGateMs` 269543 in `2110fix2`'s own `push-timing.jsonl`) despite a brief that says "no
+gates" — the brief means *don't invoke `pixi run gates`/`gates-fast` yourself*, but a lane reading
+the hook's own gate run has no way to tell that from the thing it was told not to do. One lane
+finished its commit and then declined to *retry* a failed push, since retrying would re-run gates
+against its own brief; the room settled `branch-not-pushed` for work that was otherwise complete.
+The condition the ruling attaches: this must not turn `audit-recordonce` (and the other cheap
+audits) into CI-only failures that cost an expensive lane's context to chase after the fact — the
+push-time check has to stay, just narrowed to what it actually needs to run locally.
+
+The fix is a THIRD path, not a widened skip on the existing two. `Baton.Artifacts.
+ArtifactManager.BuildEnvironment` now sets `BATON_LANE` unconditionally on every dispatched
+worker's environment — present-or-absent, no value carries meaning, since every caller of that
+method already is a lane by construction. It survives into a lane's own `git push` because a
+lane's shell inherits its process environment; a human push at a keyboard never carries it, so the
+hook's existing human-path behaviour (receipt check, then a full `gates-fast` fallback) is
+unchanged for every push that isn't dispatched. `.githooks/pre-push` branches on it: with
+`BATON_LANE` set and no still-valid receipt, the hook's fallback is `pixi run gates-lane-fast`
+(`gates.py --lane-fast`) rather than `gates-fast`. That mode runs `tools/gates/gates.py`'s
+`LANE_FAST_AUDITS` — ten substantive, pure-Python audits against committed content
+(`audit-completeness`, `audit-recordonce`, `audit-waitceiling`, `audit-retiredphrases`,
+`audit-docsbudget`, `audit-speccitations`, `audit-commentspecrefs`, `audit-clitripwire`, both
+`*-derived-check`s) plus `fmt-check`, the one member the ruling names explicitly despite not being
+pure-Python — and nothing else: no `lint`, no `test-no-build`, no AFTER_BUILD_FAST member (each of
+those reads the CLI binary `lint` produces), and none of the OVERLAP members literally named
+`*-selftest` or `gate-sabotage`, since each of those is a self-test of a gate TOOL's own
+discrimination rather than a check of this tree — `gates-selftest` alone spawns dozens of
+subprocesses and a real `sh`/temp-git-repo fixture, and `vendor-verify-selftest` can go RED for a
+reason with nothing to do with this tree (its own `pixi.toml` entry names the scratch-directory
+case) — exactly the host-dependent, minutes-scale cost this narrowing exists to keep off a lane's
+push. `fmt-check` is fast, not free:
+it still takes the build lock (`tools/buildlock.py --replay`), so a tree with no cached verdict to
+replay can queue behind it.
+
+`--lane-fast` never writes the whole-run receipt: it ran a strict subset of `fast_member_set()`, and
+that receipt's own meaning is "the whole fast set passed here" — the same reason a `--skip-covered`
+partial run withholds it. Every member it DID run still earns (or loses) its own per-member receipt
+through the ordinary `record_run_members` path, so a lane's `gates-lane-fast` push and the engine's
+own `gates-fast-cover` verify (this section's own `#1958` paragraph) are not wasted effort against
+each other — a later `gates-fast-cover` completing the fast set has that many fewer members left to
+run for real. CI is unaffected on both branches: `gates-ci-quiet` runs every member regardless of
+what any push-time hook decided, exactly as ruling C already established for the human path.
+
+**When CI later fails on something the lane-fast set didn't check** (`lint`, `test-no-build`, an
+AFTER_BUILD_FAST self-check), the follow-up is a cheap `patch`-role lane, not a re-brief of the
+original lane — the same trade C-12's `#1958` paragraph already takes for the engine's own verify,
+now applied to a lane's local push as well.
+
 ### C-13 — Build fan-out is bounded; gates records what it costs (#1671)
 
 Measured 2026-09-01/02 on the 15.7 GB fleet box: lane concurrency is memory-bound, not CPU-bound.

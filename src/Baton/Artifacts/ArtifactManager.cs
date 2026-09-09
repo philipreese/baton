@@ -163,8 +163,9 @@ public static class ArtifactManager
     /// <c>BATON_INPUT_0</c>.. for each resolved input path, in order, <c>BATON_OUTPUT_DIR</c> for
     /// the pre-allocated output directory, <c>BATON_ARTIFACTS_ROOT</c> for <paramref name="artifactsRootPath"/>
     /// itself, <see cref="Dispatch.BuildLockWaitCredit.LogEnvironmentVariable"/> for this execution's
-    /// build-lock wait log, and — only when this dispatch is a <see cref="Domain.DecisionType.RetryWithRevision"/>
-    /// or <see cref="Domain.DecisionType.Supersede"/> consequence carrying a supplement
+    /// build-lock wait log, <c>BATON_LANE</c> (see remarks) unconditionally, and — only when this
+    /// dispatch is a <see cref="Domain.DecisionType.RetryWithRevision"/> or
+    /// <see cref="Domain.DecisionType.Supersede"/> consequence carrying a supplement
     /// — <c>BATON_SUPPLEMENTARY_INPUT</c> for <paramref name="supplementaryInputPath"/>. A dedicated
     /// variable, not a declared input name, so it can never collide with a step's own declared
     /// <c>Inputs</c>. Pass-through variables (secrets, vendor settings) are not this method's concern
@@ -181,6 +182,14 @@ public static class ArtifactManager
     /// its own answer on Windows for no benefit. Emitted unconditionally, exactly like
     /// <c>BATON_OUTPUT_DIR</c>, since it carries no vendor-specific meaning; an adapter with no use for
     /// it (Claude) simply never references it.
+    ///
+    /// <c>BATON_LANE</c> (#2129, spec/baton.md C-12) is the marker every dispatched worker is a
+    /// "baton lane" rather than a human at a keyboard — every caller of this method is a dispatch,
+    /// so it is set unconditionally, present-or-absent rather than carrying a value.
+    /// <c>.githooks/pre-push</c> is the sole reader, since a lane's shell inherits its process
+    /// environment into its own <c>git push</c>: it swaps the fallback gate task the hook falls
+    /// back to when a human pushes for a narrower one (spec/baton.md C-12). A human push never
+    /// carries this variable, so the hook's default path is unchanged.
     /// </remarks>
     public static IReadOnlyList<EnvironmentVariable.BatonComputed> BuildEnvironment(
         IReadOnlyList<string> inputPaths,
@@ -208,7 +217,7 @@ public static class ArtifactManager
             RefuseRelative(supplementaryInputPath, nameof(supplementaryInputPath));
         }
 
-        var variables = new List<EnvironmentVariable.BatonComputed>(inputPaths.Count + 4);
+        var variables = new List<EnvironmentVariable.BatonComputed>(inputPaths.Count + 5);
         for (var i = 0; i < inputPaths.Count; i++)
         {
             variables.Add(new EnvironmentVariable.BatonComputed($"BATON_INPUT_{i}", inputPaths[i]));
@@ -225,6 +234,10 @@ public static class ArtifactManager
         variables.Add(new EnvironmentVariable.BatonComputed(
             Dispatch.BuildLockWaitCredit.LogEnvironmentVariable,
             Path.Combine(outputDirectory, Dispatch.BuildLockWaitCredit.LogFileName)));
+
+        // #2129: present-or-absent, no value carries meaning — see the remarks above for the sole
+        // reader (.githooks/pre-push) and what it does with it.
+        variables.Add(new EnvironmentVariable.BatonComputed("BATON_LANE", "1"));
 
         if (supplementaryInputPath is not null)
         {

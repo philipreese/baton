@@ -130,6 +130,23 @@ BUILD_PHASE = [
     "lint",
 ]
 
+# What a BATON_LANE push runs instead of the full `gates-fast` (#2129) -- the incident, the ruling,
+# and the reasoning for every exclusion below are spec/baton.md C-12, not restated here. In one
+# line: every entry is a substantive audit of committed content, never a `*-selftest`/`gate-sabotage`
+# self-check of a gate TOOL, and never a member that needs `lint`'s build first.
+LANE_FAST_AUDITS = [
+    "audit-completeness",
+    "audit-recordonce",
+    "audit-waitceiling",
+    "audit-retiredphrases",
+    "audit-docsbudget",
+    "audit-speccitations",
+    "audit-commentspecrefs",
+    "audit-clitripwire",
+    "deepswe-derived-check",
+    "ledger-derived-check",
+]
+
 # `vendor-check` is sequential because it reads the CLI binary `lint` writes -- it runs after the
 # build phase, once the overlapped audits have been joined. `audit-selfcheck`/`audit-controls` sat
 # here for the matching reason before #1759: `tools/baton-agy-loop/dispatch.py` loaded the worker
@@ -360,17 +377,26 @@ def pixi_spawner(name):
     return subprocess.Popen(["pixi", "run", name], stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
 
 
-def run_all(after_build, spawner=pixi_spawner, runner=pixi_runner, quiet=False, skip=frozenset()):
+def run_all(after_build, spawner=pixi_spawner, runner=pixi_runner, quiet=False, skip=frozenset(),
+            overlap_names=None, build_phase_names=None):
     """Overlapped audits start first, the build phase runs while they work, then everything joins.
 
     `skip` (#1676) drops CI_SKIP-marked names from every phase before anything runs -- `--ci`'s way
     of excluding them, rather than running and discarding their result.
 
+    `overlap_names`/`build_phase_names` (#2129) default to the module globals `OVERLAP`/
+    `BUILD_PHASE` when `None` -- resolved here, at call time, rather than bound as the parameter's
+    own default, so the selftest's `skip=` control arm (which mutates `OVERLAP`/`BUILD_PHASE` in
+    place) still reaches the values it just set. `--lane-fast` is the only caller that passes a
+    narrower list.
+
     Returns `(names, failed, blocked)` (#1796) -- `blocked` names a buildlock-timeout member
     distinctly from a real failure, same precedence `summarise` applies to the headline.
     """
-    overlap = [n for n in OVERLAP if n not in skip]
-    build_phase = [n for n in BUILD_PHASE if n not in skip]
+    overlap_names = OVERLAP if overlap_names is None else overlap_names
+    build_phase_names = BUILD_PHASE if build_phase_names is None else build_phase_names
+    overlap = [n for n in overlap_names if n not in skip]
+    build_phase = [n for n in build_phase_names if n not in skip]
     after_build = [n for n in after_build if n not in skip]
     procs = [(name, spawner(name)) for name in overlap]
     failed, blocked = run_gates(build_phase, runner)
@@ -384,7 +410,7 @@ def run_all(after_build, spawner=pixi_spawner, runner=pixi_runner, quiet=False, 
 
 
 def run_gates_and_shutdown(after_build, runner, quiet, shutdown=shutdown_build_servers, run_all_fn=run_all,
-                            skip=frozenset()):
+                            skip=frozenset(), overlap_names=None, build_phase_names=None):
     """`run_all`, plus a build-server shutdown that fires even if `run_all_fn` raises (#1671).
 
     `run_gates` above already shuts down after each test* gate; this is the outer net -- e.g. for
@@ -393,7 +419,8 @@ def run_gates_and_shutdown(after_build, runner, quiet, shutdown=shutdown_build_s
     under a real exception without spawning a real `dotnet` process or a real gate run.
     """
     try:
-        return run_all_fn(after_build, runner=runner, quiet=quiet, skip=skip)
+        return run_all_fn(after_build, runner=runner, quiet=quiet, skip=skip,
+                           overlap_names=overlap_names, build_phase_names=build_phase_names)
     finally:
         shutdown()
 
@@ -491,6 +518,14 @@ def delete_receipt(cwd=None):
 def fast_member_set():
     """The members `gates --fast` runs -- the population a member-receipt union has to cover."""
     return _dedupe(OVERLAP + BUILD_PHASE + AFTER_BUILD_FAST)
+
+
+def lane_fast_member_set():
+    """The seconds-scale subset `--lane-fast` runs (#2129) -- see LANE_FAST_AUDITS' own comment for
+    why this is not `fast_member_set()` narrowed by a filter. Every member here is also a member of
+    `fast_member_set()`, so a lane's own per-member receipts still shrink whatever `gates-fast-cover`
+    has left to do (spec/baton.md C-12)."""
+    return _dedupe(LANE_FAST_AUDITS + ["fmt-check"])
 
 
 def tree_identity(cwd=None):
@@ -775,7 +810,7 @@ def _init_temp_repo(path):
     subprocess.run(["git", "-C", path, "commit", "-q", "-m", "initial"], check=True, env=env)
 
 
-def _write_stub_pixi(bin_dir, real_gates_py, call_log, fast_exit=0):
+def _write_stub_pixi(bin_dir, real_gates_py, call_log, fast_exit=0, lane_call_log=None, lane_exit=0):
     """A fake `pixi` on PATH: forwards `run gates-check-receipt` to the REAL gates.py (so the
     forged-receipt case exercises the real check-receipt logic end to end), and records any
     `run gates-fast` call to call_log instead of actually running gates -- exiting `fast_exit`,
@@ -785,8 +820,23 @@ def _write_stub_pixi(bin_dir, real_gates_py, call_log, fast_exit=0):
     Also appends the stub's own GIT_DIR/GIT_INDEX_FILE (or `unset` for either) to call_log,
     alongside `called` -- this is what lets the caller prove the HOOK's `unset` line, not just
     scrubbed_env(), scrubbed them before this subprocess ever ran (#1651 F1).
+
+    `lane_call_log` (#2129), when given, adds a THIRD case: `run gates-lane-fast` records to its
+    OWN log rather than `call_log` -- a separate file rather than a third line appended to
+    `call_log`, because the existing `unset/unset` check above is index-addressed
+    (`call_log_lines[1]`) and a shared log would make which branch ran ambiguous to a caller that
+    only checked file existence. `None` (the default) leaves that case absent, falling through to
+    `exit 1` -- the miss-everything default every other unhandled invocation already gets.
     """
     stub = os.path.join(bin_dir, "pixi")
+    lane_case = ""
+    if lane_call_log is not None:
+        lane_case = (
+            'if [ "$1" = "run" ] && [ "$2" = "gates-lane-fast" ]; then\n'
+            f'    printf \'called\\n\' >> "{lane_call_log}"\n'
+            f'    exit {lane_exit}\n'
+            "fi\n"
+        )
     with open(stub, "w", encoding="utf-8", newline="\n") as f:
         f.write(
             "#!/bin/sh\n"
@@ -798,6 +848,7 @@ def _write_stub_pixi(bin_dir, real_gates_py, call_log, fast_exit=0):
             f'    printf \'%s\\n\' "${{GIT_DIR-unset}}/${{GIT_INDEX_FILE-unset}}" >> "{call_log}"\n'
             f'    exit {fast_exit}\n'
             "fi\n"
+            f"{lane_case}"
             'exit 1\n'
         )
     os.chmod(stub, 0o755)
@@ -896,7 +947,8 @@ def selftest():
     # no test* gate at all, or a crash before one is reached.
     shutdown_calls_outer = []
 
-    def _raising_run_all(after_build, runner, quiet, skip=frozenset()):
+    def _raising_run_all(after_build, runner, quiet, skip=frozenset(), overlap_names=None,
+                          build_phase_names=None):
         raise RuntimeError("boom")
 
     try:
@@ -1244,12 +1296,21 @@ def selftest():
             bin_dir = os.path.join(td, "bin")
             os.makedirs(bin_dir)
             call_log = os.path.join(td, "calls.log")
+            lane_call_log = os.path.join(td, "lane-calls.log")
             # fast_exit=7, not 0: the miss arm below must prove the hook PROPAGATES a real gates
             # failure, not merely that it attempted one -- a hook that swallowed gates-fast's exit
-            # (e.g. `pixi run gates-fast || true`) would pass a hardcoded-0 stub undetected.
-            _write_stub_pixi(bin_dir, real_gates_py, call_log, fast_exit=7)
+            # (e.g. `pixi run gates-fast || true`) would pass a hardcoded-0 stub undetected. Same
+            # reasoning gives the lane branch its own distinct lane_exit=8 below (#2129).
+            _write_stub_pixi(bin_dir, real_gates_py, call_log, fast_exit=7,
+                             lane_call_log=lane_call_log, lane_exit=8)
             env = dict(os.environ)
             env["PATH"] = bin_dir + os.pathsep + env.get("PATH", "")
+            # #2129: this process may itself be running inside a dispatched lane, which sets
+            # BATON_LANE on ITS OWN environment -- `env = dict(os.environ)` above would otherwise
+            # inherit it, sending every human-path arm below down the lane branch the stub has no
+            # case for (exit 1, unhandled) instead of the gates-fast branch they mean to exercise.
+            # Popped here, unconditionally, so every arm below is a human push unless it opts in.
+            env.pop("BATON_LANE", None)
             # #1651 F1: main()'s GIT_ENV_KEYS pop (its first statement) already popped these keys
             # from THIS process's os.environ before selftest() ran, so `env = dict(os.environ)`
             # above starts clean regardless of what .githooks/pre-push's own `unset` line does --
@@ -1347,6 +1408,40 @@ def selftest():
                 print(f"  control FAILED: hook skipped with {fast_member_set()[0]!r} unreceipted -- "
                       f"exit={union_miss.returncode} stdout={union_miss.stdout!r}")
                 ok = False
+
+            # #2129: BATON_LANE set, no receipt -- the hook must call gates-lane-fast, propagate
+            # ITS exit code, and never touch gates-fast at all. Both directions matter: without the
+            # env branch this would still call gates-fast (call_log, not lane_call_log, would
+            # exist) and exit 7, not 8.
+            member_receipt.delete(_git_dir(repo), fast_member_set()[0])
+            for f in (call_log, lane_call_log):
+                if os.path.exists(f):
+                    os.remove(f)
+            lane_env = dict(env)
+            lane_env["BATON_LANE"] = "1"
+            lane_miss = subprocess.run([sh, hook], cwd=repo, env=lane_env,
+                                       capture_output=True, text=True, check=False)
+            if not os.path.exists(lane_call_log) or os.path.exists(call_log) or lane_miss.returncode != 8:
+                print(f"  control FAILED: a BATON_LANE push with no receipt did not call "
+                      f"gates-lane-fast alone -- exit={lane_miss.returncode} "
+                      f"lane_call_log exists={os.path.exists(lane_call_log)} "
+                      f"call_log exists={os.path.exists(call_log)}")
+                ok = False
+
+            # A still-valid whole-run receipt skips BOTH branches identically -- the receipt check
+            # above the branch is unchanged by #2129, human or lane.
+            for f in (call_log, lane_call_log):
+                if os.path.exists(f):
+                    os.remove(f)
+            write_receipt("fast", cwd=repo)
+            lane_hit = subprocess.run([sh, hook], cwd=repo, env=lane_env,
+                                      capture_output=True, text=True, check=False)
+            if (lane_hit.returncode != 0 or "-- skipping" not in lane_hit.stdout
+                    or os.path.exists(call_log) or os.path.exists(lane_call_log)):
+                print(f"  control FAILED: a BATON_LANE push with a valid receipt did not skip -- "
+                      f"exit={lane_hit.returncode} stdout={lane_hit.stdout!r}")
+                ok = False
+            delete_receipt(cwd=repo)
 
             # #1936 review: a millisecond clock that returns a non-number reaches the hook's
             # `$((...))` as an arithmetic error -- fatal under a POSIX sh, aborting an otherwise-good
@@ -1521,9 +1616,11 @@ def selftest():
             bogus_ran.append(name)
             return fake_spawner(0)
 
-        def _recording_run_gates_and_shutdown(after_build, runner, quiet, skip=frozenset()):
+        def _recording_run_gates_and_shutdown(after_build, runner, quiet, skip=frozenset(),
+                                               overlap_names=None, build_phase_names=None):
             return run_all(after_build, spawner=_recording_spawner, runner=runner,
-                           quiet=quiet, skip=skip)
+                           quiet=quiet, skip=skip, overlap_names=overlap_names,
+                           build_phase_names=build_phase_names)
 
         prior_cwd = os.getcwd()
         prior_argv = list(sys.argv)
@@ -1598,9 +1695,11 @@ def selftest():
             ran.append(name)
             return fake_spawner(0)
 
-        def _fake_run_gates_and_shutdown(after_build, runner, quiet, skip=frozenset()):
+        def _fake_run_gates_and_shutdown(after_build, runner, quiet, skip=frozenset(),
+                                          overlap_names=None, build_phase_names=None):
             return run_all(after_build, spawner=_fake_cover_spawner, runner=runner,
-                           quiet=quiet, skip=skip)
+                           quiet=quiet, skip=skip, overlap_names=overlap_names,
+                           build_phase_names=build_phase_names)
 
         prior_cwd = os.getcwd()
         prior_argv = list(sys.argv)
@@ -1653,6 +1752,24 @@ def selftest():
             front_door_rc = main()
             front_door_ran, ran[:] = list(ran), []
             front_door_covered = fast[1] in covered_members(cwd=repo)
+
+            # #2129: --lane-fast runs exactly lane_fast_member_set(), never lint/test-no-build/a
+            # *-selftest member, and mints no whole-run receipt -- distinct from every arm above,
+            # every one of which either runs the whole fast set or writes nothing at all.
+            lane = lane_fast_member_set()
+            delete_receipt(cwd=repo)
+            sys.argv = ["gates.py", "--lane-fast"]
+            lane_rc = main()
+            lane_ran, ran[:] = list(ran), []
+            lane_receipt = os.path.exists(receipt_path(repo))
+
+            # Refused together with --fast/--ci, before anything runs.
+            sys.argv = ["gates.py", "--lane-fast", "--fast"]
+            lane_fast_combo_rc = main()
+            lane_fast_combo_ran, ran[:] = list(ran), []
+            sys.argv = ["gates.py", "--lane-fast", "--ci"]
+            lane_ci_combo_rc = main()
+            lane_ci_combo_ran, ran[:] = list(ran), []
         finally:
             os.chdir(prior_cwd)
             sys.argv = prior_argv
@@ -1680,6 +1797,23 @@ def selftest():
             print(f"  control FAILED: `--record-member {fast[1]}` through main() exited "
                   f"{front_door_rc}, ran {front_door_ran}, and left it covered: "
                   f"{front_door_covered}")
+            ok = False
+        if lane_rc != 0 or lane_ran != lane or lane_receipt:
+            print(f"  control FAILED: --lane-fast exited {lane_rc}, ran {lane_ran} (want {lane}), "
+                  f"and left a whole-run receipt: {lane_receipt}")
+            ok = False
+        excluded = {"lint", "test-no-build", "gate-sabotage"} | {n for n in fast if n.endswith("-selftest")}
+        if excluded & set(lane_ran):
+            print(f"  control FAILED: --lane-fast ran a build/test/self-test member -- "
+                  f"{sorted(excluded & set(lane_ran))}")
+            ok = False
+        if lane_fast_combo_rc != 2 or lane_fast_combo_ran:
+            print(f"  control FAILED: --lane-fast --fast was not refused before running anything -- "
+                  f"exit {lane_fast_combo_rc}, ran {lane_fast_combo_ran}")
+            ok = False
+        if lane_ci_combo_rc != 2 or lane_ci_combo_ran:
+            print(f"  control FAILED: --lane-fast --ci was not refused before running anything -- "
+                  f"exit {lane_ci_combo_rc}, ran {lane_ci_combo_ran}")
             ok = False
 
     # The CI_SKIP ratchet (#1676): an orphan name (not a real member) and a blank reason must both
@@ -1782,7 +1916,36 @@ def build_parser():
     parser.add_argument("--ci", action="store_true",
                         help="exclude CI_SKIP members, validate the ratchet, and assert the run "
                              "matches the tracked member list (#1676; what CI's own job passes)")
+    parser.add_argument("--lane-fast", action="store_true",
+                        help="run only lane_fast_member_set() -- the seconds-scale audits plus "
+                             "fmt-check, no build, no tests, no self-tests (#2129; what "
+                             "`.githooks/pre-push` runs for a BATON_LANE push). Never writes a "
+                             "whole-run receipt; refused together with --fast/--ci/--skip-covered")
     return parser
+
+
+def lane_fast(quiet=False):
+    """`--lane-fast` entry point (#2129): run `lane_fast_member_set()` alone, report, receipt.
+
+    Deliberately not a `mode` value `main()`'s ordinary path can reach: this never calls
+    `write_receipt` -- a whole-run receipt asserts the WHOLE fast set passed, and this run is a
+    strict subset of it (LANE_FAST_AUDITS' own comment says which members it never touches). Every
+    member it DID run still gets (or loses) its own per-member receipt through
+    `record_run_members`, same as any other run -- those are correct regardless of scope, and are
+    what let a later `gates-fast-cover` skip the legs this push already paid for.
+    """
+    names, failed, blocked = run_gates_and_shutdown(
+        [], quiet_pixi_runner if quiet else pixi_runner, quiet,
+        overlap_names=LANE_FAST_AUDITS, build_phase_names=["fmt-check"])
+    print()
+    print(f"{RAN_REPORT}{len(names)} member(s): {', '.join(names)}")
+    print(summarise(names, failed, blocked))
+    record_run_members(names, failed, blocked)
+    if failed:
+        return 1
+    if blocked:
+        return BLOCKED_EXIT_CODE
+    return 0
 
 
 def main():
@@ -1810,6 +1973,12 @@ def main():
         return selftest()
     if args.check_receipt:
         return check_receipt()
+    if args.lane_fast:
+        if args.fast or args.ci or args.skip_covered:
+            print("gates: --lane-fast is not usable with --fast/--ci/--skip-covered -- it is its "
+                  "own, narrower mode", flush=True)
+            return 2
+        return lane_fast(quiet=args.quiet)
     if args.skip_covered and args.ci:
         # CI is the independent run (C-12): it never skips a member on the strength of a receipt
         # written by the machine it is checking, and --ci's own member-list assertion would fail
