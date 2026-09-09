@@ -21,6 +21,11 @@
          src/ would be the drift the record-once gate exists to stop, and the link name below is what
          GlassPage.cs resolves. -->
     <EmbeddedResource Include="..\..\tools\fleet-glass\glass.html" LogicalName="Baton.Cli.Daemon.glass.html" />
+    <!-- #2166: the private daemon, not an artifact host, serves this same-origin install metadata.
+         The raster icon bytes live in GlassWebAppAssets so they are generated as valid PNGs without
+         a filesystem dependency after the CLI is installed. -->
+    <EmbeddedResource Include="..\..\tools\fleet-glass\fleet-glass.webmanifest"
+                      LogicalName="Baton.Cli.Daemon.fleet-glass.webmanifest" />
   </ItemGroup>
 
   <PropertyGroup>

@@ -1,6 +1,7 @@
 using System.Net;
 using System.Net.Sockets;
 using System.Text;
+using System.Text.Json;
 using System.Text.RegularExpressions;
 using Baton.Cli.Daemon;
 using Baton.Tests.Shared;
@@ -170,6 +171,57 @@ public sealed class GlassHttpServiceTests : IDisposable
             // start discriminating; GlassMarkup owns the reason.
             Assert.Single(
                 Regex.Matches(GlassMarkup.Of(body), Regex.Escape(GlassPage.SourceMetaTag)));
+        }
+        finally
+        {
+            await harness.Service.StopAsync(CancellationToken.None);
+        }
+    }
+
+    [Fact]
+    public async Task Serves_the_same_origin_standalone_manifest_and_its_raster_icons()
+    {
+        using var cts = new CancellationTokenSource(TimeSpan.FromMinutes(1));
+        var harness = await StartAsync(cts.Token);
+        try
+        {
+            using var client = new HttpClient { Timeout = TimeSpan.FromSeconds(30) };
+            var page = await client.GetStringAsync($"{harness.BaseUrl}/", cts.Token);
+            Assert.Contains(
+                $"<link rel=\"manifest\" href=\"{GlassWebAppAssets.ManifestPath}\">", page,
+                StringComparison.Ordinal);
+
+            var manifestResponse = await client.GetAsync(
+                $"{harness.BaseUrl}{GlassWebAppAssets.ManifestPath}", cts.Token);
+            Assert.Equal(HttpStatusCode.OK, manifestResponse.StatusCode);
+            Assert.Equal("application/manifest+json", manifestResponse.Content.Headers.ContentType?.MediaType);
+            Assert.Equal("no-store", manifestResponse.Headers.CacheControl?.ToString());
+
+            using var manifest = JsonDocument.Parse(await manifestResponse.Content.ReadAsStringAsync(cts.Token));
+            var root = manifest.RootElement;
+            Assert.Equal("/", root.GetProperty("id").GetString());
+            Assert.Equal("/", root.GetProperty("start_url").GetString());
+            Assert.Equal("/", root.GetProperty("scope").GetString());
+            Assert.Equal("standalone", root.GetProperty("display").GetString());
+
+            var icons = root.GetProperty("icons").EnumerateArray().ToArray();
+            Assert.Collection(
+                icons,
+                icon => AssertIcon(icon, GlassWebAppAssets.Icon192Path, "192x192", 192),
+                icon => AssertIcon(icon, GlassWebAppAssets.Icon512Path, "512x512", 512));
+
+            foreach (var icon in icons)
+            {
+                var response = await client.GetAsync(
+                    $"{harness.BaseUrl}{icon.GetProperty("src").GetString()}", cts.Token);
+                Assert.Equal(HttpStatusCode.OK, response.StatusCode);
+                Assert.Equal("image/png", response.Content.Headers.ContentType?.MediaType);
+                Assert.Equal("no-store", response.Headers.CacheControl?.ToString());
+                AssertPngDimensions(
+                    await response.Content.ReadAsByteArrayAsync(cts.Token),
+                    int.Parse(icon.GetProperty("sizes").GetString()![..3],
+                        System.Globalization.CultureInfo.InvariantCulture));
+            }
         }
         finally
         {
@@ -377,6 +429,21 @@ public sealed class GlassHttpServiceTests : IDisposable
         }
 
         Assert.Fail($"The expected stream content did not arrive within {budget}.");
+    }
+
+    private static void AssertIcon(JsonElement icon, string path, string size, int dimension)
+    {
+        Assert.Equal(path, icon.GetProperty("src").GetString());
+        Assert.Equal(size, icon.GetProperty("sizes").GetString());
+        Assert.Equal("image/png", icon.GetProperty("type").GetString());
+        Assert.Equal(dimension, int.Parse(size[..3], System.Globalization.CultureInfo.InvariantCulture));
+    }
+
+    private static void AssertPngDimensions(byte[] png, int dimension)
+    {
+        Assert.True(png.AsSpan().StartsWith(new byte[] { 137, 80, 78, 71, 13, 10, 26, 10 }));
+        Assert.Equal(dimension, System.Buffers.Binary.BinaryPrimitives.ReadInt32BigEndian(png.AsSpan(16, 4)));
+        Assert.Equal(dimension, System.Buffers.Binary.BinaryPrimitives.ReadInt32BigEndian(png.AsSpan(20, 4)));
     }
 
     private static string RepoGlassHtmlPath()

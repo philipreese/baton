@@ -45,3 +45,23 @@ timeline entries yet (#1902). `pusher.py --selftest` asserts it is the *only* di
 - `pixi run fleet-glass-worker-selftest` — `node tools/fleet-glass/worker.selftest.mjs`.
 - `python tools/fleet-glass/pusher.py --compare-projection` — runs both sources once against the
   **live** fleet and diffs them room by room. Needs a running daemon and a built CLI; not a CI check.
+
+## Android standalone-install verification (#2166)
+
+The daemon-hosted page links a same-origin manifest with standalone display and 192px/512px PNG
+icons. The listener remains opt-in and tailnet-only; this does not add public hosting, a service
+worker, or an offline cache.
+
+To verify on a phone after an operator has intentionally exposed the existing private HTTPS tailnet
+URL:
+
+1. Open the Fleet Glass URL in Android Chrome and use **Install app** from the browser menu.
+2. Confirm the install prompt identifies Fleet Glass and shows its icon, then complete installation.
+3. Launch it from the Android launcher and confirm it opens in a standalone window, independent of
+   ordinary Chrome tabs.
+4. Change the fleet and confirm the installed view receives the fresh projection; then confirm the
+   normal Chrome tab remains separate.
+
+The automated listener test checks the served HTML, manifest fields, MIME types, PNG signatures, and
+PNG dimensions. It cannot verify Android installation or launch behaviour; that remains unverified
+until these steps are performed on a physical phone.
