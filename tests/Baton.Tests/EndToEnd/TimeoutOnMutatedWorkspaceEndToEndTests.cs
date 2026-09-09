@@ -96,7 +96,14 @@ public sealed class TimeoutOnMutatedWorkspaceEndToEndTests
             Assert.Contains("2 changed/untracked path(s)", step.LatestFailureReason!, StringComparison.Ordinal);
 
             Assert.Empty(run.Events.OfType<FlowEvent.StepRetryScheduled>());
-            Assert.Single(run.DispatchedTargets);
+            // #2134: a dirty, workspace-verifying lane whose primary dispatch hits its wall-clock
+            // timeout gets the same one bounded grace dispatch as a budget arrest. The grace target
+            // returns TimedOut in this fixture too, but its result never replaces the primary timeout
+            // classification above.
+            Assert.Equal(2, run.DispatchedTargets.Count);
+            var grace = Assert.Single(run.Events.OfType<FlowEvent.GraceTurnAttempted>());
+            Assert.False(grace.WorkspaceCleanAfter);
+            Assert.Equal(CoreExitReason.TimedOut, grace.ExitReason);
         }
         finally
         {

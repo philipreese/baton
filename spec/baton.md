@@ -2349,14 +2349,14 @@ push: confirming the branch actually reached the remote is left to whoever resol
 way #1373's own commit/push accounting already separates "committed" from "pushed" for a timed-out
 attempt.
 
-**Scope: the token/tool-step/billed-rate arrest, not a wall-clock timeout.** All three motivating
-incidents were budget arrests, so the grace turn is wired at the one `budgetMonitor is { Arrested: true
-}` block those three trigger and nowhere else. A role's ordinary wall-clock `Timeout` expiring returns
-`CoreExitReason.TimedOut` and falls through to the unchanged `OutcomeClassifier.Classify` path a few
-lines below (already covered by #1373's own timeout/retry accounting, `TimeoutOnMutatedWorkspaceEndToEndTests`)
-— a deliberate scope limit, not an oversight, and #1373's existing machinery already gives a timed-out
-attempt's dirty tree the same "never silently retried, never silently discarded" treatment a grace turn
-gives an arrest's.
+**Scope: token/tool-step/billed-rate arrests and wall-clock timeouts.** The three budget-monitor
+producers enter through `budgetMonitor is { Arrested: true }`; a role's ordinary wall-clock `Timeout`
+instead returns `CoreExitReason.TimedOut`. Both shapes receive the same one bounded grace dispatch when
+the role verifies its workspace and `Workspaces.WorktreeProvisioner.Audit` finds it genuinely dirty.
+After a timeout's grace dispatch, the primary timeout still falls through to
+`OutcomeClassifier.Classify` and #1373's timeout/retry accounting — the courtesy turn never replaces its
+classification. `TimeoutOnMutatedWorkspaceEndToEndTests` covers that dirty-timeout shape; clean and
+read-shaped workspaces receive no grace dispatch.
 
 ### Exit codes
 
