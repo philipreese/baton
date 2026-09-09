@@ -447,8 +447,8 @@ by any canonical level; it remains available only as a raw, unvalidated escape h
 `#566` already threads through `WorkerInvocation.Effort`), not through the canonical picker.
 Codex likewise keeps `xhigh` and `ultra` on the raw path. Availability is model-specific, and Baton
 rejects unknown models and unsupported pairs before a process starts. Note which `model/list` that
-check reads (#1875): a **dated recording** of one, `src/Baton.Vendors/codex-model-list-2026-09-04.jsonl`
-(codex-cli 0.153.2, 2026-09-04, `includeHidden:false`), kept as the raw app-server JSONL the CLI
+check reads (#1875, #2126): a **dated recording** of one, `src/Baton.Vendors/codex-model-list-2026-09-08.jsonl`
+(codex-cli 0.153.2, 2026-09-08, `includeHidden:false`), kept as the raw app-server JSONL the CLI
 wrote — initialize line included, which is where that CLI version comes from — embedded in
 `Baton.Vendors`, and parsed into `CodexWorkerAdapter`'s validation table by the same parser live
 discovery uses. Live `model/list` is asked separately — `DiscoverCapabilitiesAsync`, from the

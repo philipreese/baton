@@ -32,21 +32,33 @@ public sealed class CodexWorkerAdapter : IWorkerAdapter, IPermissionGrantTransla
     /// is what selects the catalog line out of it. Its provenance and what it settles are recorded
     /// once, in <c>docs/vendor-capabilities.md</c>'s effort table section (#1875); before that the
     /// table was hand-written while <see cref="ValidateModel"/> called it a probed snapshot.
+    /// Re-pinned to 2026-09-08 in #2126 after `gpt-5.4-mini` dropped from the live catalog.
     /// </summary>
-    internal const string ModelCatalogResourceName = "Baton.Vendors.codex-model-list-2026-09-04.jsonl";
+    internal const string ModelCatalogResourceName = "Baton.Vendors.codex-model-list-2026-09-08.jsonl";
 
     private static readonly Lazy<RecordedCatalog> RecordedEffortsByModel = new(LoadRecordedEffortTable);
 
     /// <summary>
     /// Which reasoning efforts each model advertised in <see cref="ModelCatalogResourceName"/>.
     /// A model absent from the recording is unknown, and <see cref="ValidateModel"/> refuses it —
-    /// that is how <c>gpt-5.4</c> left the table in #1875: the 2026-09-04 visible catalog no longer
-    /// carries it. This is a recorded snapshot, not live discovery: it is what dispatch validates
+    /// that is how <c>gpt-5.4</c> left the table in #1875 (the 2026-09-04 visible catalog no longer
+    /// carried it) and <c>gpt-5.4-mini</c> left in #2126 (the 2026-09-08 visible catalog dropped it).
+    /// This is a recorded snapshot, not live discovery: it is what dispatch validates
     /// against before a process is ever started, while <see cref="DiscoverCapabilitiesAsync"/> asks
     /// the installed CLI what it offers right now.
     /// </summary>
     private static IReadOnlyDictionary<string, IReadOnlyList<string>> KnownEffortsByModel =>
         RecordedEffortsByModel.Value.EffortsByModel;
+
+    /// <summary>
+    /// Which reasoning efforts each model advertised in <see cref="ModelCatalogResourceName"/>.
+    /// </summary>
+    public static IReadOnlyDictionary<string, IReadOnlyList<string>> RecordedEfforts => KnownEffortsByModel;
+
+    /// <summary>
+    /// The name of the embedded snapshot resource currently used for validation.
+    /// </summary>
+    public static string RecordedSnapshotResourceName => ModelCatalogResourceName;
 
     /// <summary>Whether the recorded capability snapshot described above contains <paramref name="model"/>.</summary>
     public static bool KnowsRecordedModel(string model) => KnownEffortsByModel.ContainsKey(model);

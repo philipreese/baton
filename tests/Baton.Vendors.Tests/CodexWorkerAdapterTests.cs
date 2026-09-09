@@ -448,7 +448,7 @@ public sealed class CodexWorkerAdapterTests
                 NoOutputContract));
 
         Assert.Contains("absent from the recorded Codex capability snapshot", exception.Message);
-        Assert.Contains("codex-model-list-2026-09-04.jsonl", exception.Message);
+        Assert.Contains("codex-model-list-2026-09-08.jsonl", exception.Message);
 
         // #1880: the refusal names which CLI's catalog said so, read from the recording's own
         // initialize line rather than restated here — the file's name already carries the date.
@@ -483,24 +483,23 @@ public sealed class CodexWorkerAdapterTests
     }
 
     /// <summary>
-    /// The polarity partner of the two tests above and the behaviour change #1875 shipped: `gpt-5.4`
-    /// was in the hand-written table but is not in the 2026-09-04 visible catalog, so deriving the
-    /// table from the recording refuses it locally instead of sending it to fail at the vendor.
-    /// `gpt-5.4-mini`, which the recording does carry, still resolves.
+    /// The polarity partner of the two tests above and the behaviour changes #1875/#2126 shipped:
+    /// `gpt-5.4` was in the hand-written table but was not in the 2026-09-04 visible catalog (#1875),
+    /// and `gpt-5.4-mini` dropped in the 2026-09-08 catalog (#2126), so deriving the table from the
+    /// recording refuses both locally instead of sending them to fail at the vendor.
     /// </summary>
     [Fact]
-    public void A_model_the_recording_does_not_carry_is_refused_while_its_mini_sibling_resolves()
+    public void Models_the_recording_does_not_carry_are_refused()
     {
         Assert.Throws<IncoherentVendorEffortException>(
             () => new CodexWorkerAdapter().Resolve(
                 new WorkerInvocation("Inspect.", Model: "gpt-5.4", Effort: "high"),
                 NoOutputContract));
 
-        var target = new CodexWorkerAdapter().Resolve(
-            new WorkerInvocation("Inspect.", Model: "gpt-5.4-mini", Effort: "high"),
-            NoOutputContract);
-
-        Assert.Equal("gpt-5.4-mini", ArgValue(target, "--model"));
+        Assert.Throws<IncoherentVendorEffortException>(
+            () => new CodexWorkerAdapter().Resolve(
+                new WorkerInvocation("Inspect.", Model: "gpt-5.4-mini", Effort: "high"),
+                NoOutputContract));
     }
 
     [Fact]
@@ -876,16 +875,17 @@ public sealed class CodexWorkerAdapterTests
         Assert.Equal(
             [
                 "gpt-6-astra", "gpt-5.6-sol", "gpt-5.6-terra", "gpt-5.6-luna",
-                "gpt-5.5", "gpt-5.4-mini", "gpt-5.3-codex-spark",
+                "gpt-5.5", "gpt-5.3-codex-spark",
             ],
             capabilities.Models);
-        Assert.Equal(35, capabilities.Items.Count);
+        Assert.Equal(31, capabilities.Items.Count);
         Assert.Contains(capabilities.Items, item => item.Name == "gpt-6-astra[ultra]" && item.Kind == "mode");
         Assert.Contains(capabilities.Items, item => item.Name == "gpt-5.6-sol[high]" && item.Kind == "mode");
         Assert.Contains(capabilities.Items, item => item.Name == "gpt-5.6-terra[max]" && item.Kind == "mode");
         Assert.Contains(capabilities.Items, item => item.Name == "gpt-5.6-luna[max]" && item.Kind == "mode");
         Assert.DoesNotContain(capabilities.Items, item => item.Name == "gpt-5.6-luna[ultra]");
         Assert.DoesNotContain(capabilities.Models, model => model == "gpt-5.4");
+        Assert.DoesNotContain(capabilities.Models, model => model == "gpt-5.4-mini");
     }
 
     [Theory]

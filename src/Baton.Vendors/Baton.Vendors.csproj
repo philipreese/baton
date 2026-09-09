@@ -44,6 +44,7 @@
          it is what stops a deployment from silently editing or losing the evidence CodexWorkerAdapter's
          validation table rests on. -->
     <EmbeddedResource Include="codex-model-list-2026-09-04.jsonl" />
+    <EmbeddedResource Include="codex-model-list-2026-09-08.jsonl" />
   </ItemGroup>
 
   <PropertyGroup>

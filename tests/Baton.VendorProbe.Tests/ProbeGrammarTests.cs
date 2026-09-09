@@ -210,4 +210,74 @@ public sealed class ProbeGrammarTests
         // A line merely containing the word "type" in prose must not masquerade as a stream (structural, not substring).
         Assert.False(Probes.LooksLikeStreamJson("The response type is JSON, apparently."));
     }
+
+    [Fact]
+    public void Codex_try_parse_live_catalog_extracts_visible_models_and_efforts()
+    {
+        Assert.True(CodexProbe.TryParseLiveCatalog(CodexModels, out var liveCatalog));
+        Assert.Single(liveCatalog);
+        Assert.True(liveCatalog.ContainsKey("gpt-example"));
+        Assert.Equal(["low", "high"], liveCatalog["gpt-example"]);
+        Assert.False(liveCatalog.ContainsKey("hidden-reserve"));
+    }
+
+    [Fact]
+    public void Codex_compare_catalog_reports_current_when_catalogs_match()
+    {
+        var catalog = new Dictionary<string, IReadOnlyList<string>>
+        {
+            ["gpt-6-astra"] = ["low", "medium", "high"],
+        };
+
+        var drift = CodexProbe.CompareCatalog(catalog, catalog, "recording.jsonl");
+
+        Assert.False(drift.HasDrift);
+        Assert.Equal(CodexProbe.CatalogDriftVerdict.Current, drift.Verdict);
+        Assert.Contains("matches embedded recording", drift.Explain());
+    }
+
+    [Fact]
+    public void Codex_compare_catalog_detects_dropped_and_gained_models()
+    {
+        var recorded = new Dictionary<string, IReadOnlyList<string>>
+        {
+            ["gpt-6-astra"] = ["low", "high"],
+            ["gpt-5.4-mini"] = ["low", "medium", "high"],
+        };
+        var live = new Dictionary<string, IReadOnlyList<string>>
+        {
+            ["gpt-6-astra"] = ["low", "high"],
+            ["gpt-6.5-nova"] = ["medium"],
+        };
+
+        var drift = CodexProbe.CompareCatalog(live, recorded, "codex-model-list-2026-09-04.jsonl");
+
+        Assert.True(drift.HasDrift);
+        Assert.Equal(CodexProbe.CatalogDriftVerdict.Drifted, drift.Verdict);
+        Assert.Equal(["gpt-5.4-mini"], drift.DroppedModels);
+        Assert.Equal(["gpt-6.5-nova"], drift.GainedModels);
+        Assert.Empty(drift.ChangedEfforts);
+        var explanation = drift.Explain();
+        Assert.Contains("dropped: gpt-5.4-mini", explanation);
+        Assert.Contains("gained: gpt-6.5-nova", explanation);
+    }
+
+    [Fact]
+    public void Codex_compare_catalog_detects_changed_efforts()
+    {
+        var recorded = new Dictionary<string, IReadOnlyList<string>>
+        {
+            ["gpt-6-astra"] = ["low", "high"],
+        };
+        var live = new Dictionary<string, IReadOnlyList<string>>
+        {
+            ["gpt-6-astra"] = ["low", "high", "ultra"],
+        };
+
+        var drift = CodexProbe.CompareCatalog(live, recorded, "recording.jsonl");
+
+        Assert.True(drift.HasDrift);
+        Assert.Equal(["gpt-6-astra (live: [low/high/ultra], recorded: [low/high])"], drift.ChangedEfforts);
+        Assert.Contains("effort changed", drift.Explain());
+    }
 }

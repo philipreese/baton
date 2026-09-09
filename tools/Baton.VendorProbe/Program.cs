@@ -80,6 +80,12 @@ public static class Program
                 {
                     Console.WriteLine($"              looked at: {string.Join(", ", f.SurfacesConsulted)}");
                 }
+
+                if (f.Detail.Contains("WARN RECORDING-DRIFT:"))
+                {
+                    var msg = f.Detail[(f.Detail.IndexOf("WARN RECORDING-DRIFT:") + "WARN RECORDING-DRIFT:".Length)..].Trim();
+                    Console.WriteLine($"              STALE: {msg}");
+                }
             }
         }
 
@@ -127,6 +133,17 @@ public static class Program
         Console.WriteLine(
             $"\n{findings.Count} findings established this run · {negatives} negative, each carrying "
             + $"the surfaces it was established on{scope}.");
+        var recordingDrifts = findings.Where(f => f.Detail.Contains("WARN RECORDING-DRIFT:")).ToList();
+        if (recordingDrifts.Count > 0)
+        {
+            Console.WriteLine();
+            foreach (var rd in recordingDrifts)
+            {
+                var msg = rd.Detail[(rd.Detail.IndexOf("WARN RECORDING-DRIFT:") + "WARN RECORDING-DRIFT:".Length)..].Trim();
+                Console.WriteLine($"WARN RECORDING-DRIFT: {msg}");
+            }
+        }
+
         return 0;
     }
 

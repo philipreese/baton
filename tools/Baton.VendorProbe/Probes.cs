@@ -351,20 +351,32 @@ public static class Probes
     {
         const string cap = "models";
         string[] surfaces = [Surfaces.AppServer];
-        return CodexProbe.TryDescribeModels(appServer.StdOut, out var summary)
-            ? Finding.Seen(
-                cap,
-                vendor,
-                "visible models from `model/list`",
-                surfaces,
-                $"The account-sensitive app-server catalog reported: {summary}.",
-                version)
-            : Finding.Absent(
+        if (!CodexProbe.TryDescribeModels(appServer.StdOut, out var summary))
+        {
+            return Finding.Absent(
                 cap,
                 vendor,
                 surfaces,
                 "No visible model catalog was parsed from the initialized app-server `model/list` response.",
                 version);
+        }
+
+        var detail = $"The account-sensitive app-server catalog reported: {summary}.";
+
+        if (CodexProbe.TryParseLiveCatalog(appServer.StdOut, out var liveCatalog))
+        {
+            var drift = CodexProbe.CompareCatalog(
+                liveCatalog,
+                CodexWorkerAdapter.RecordedEfforts,
+                CodexWorkerAdapter.RecordedSnapshotResourceName);
+
+            if (drift.HasDrift)
+            {
+                detail += $" WARN RECORDING-DRIFT: {drift.Explain()}";
+            }
+        }
+
+        return Finding.Seen(cap, vendor, "visible models from `model/list`", surfaces, detail, version);
     }
 
     /// <summary>API-equivalent cost per turn — the "what would this have cost on a key" number.</summary>
