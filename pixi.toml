@@ -404,6 +404,12 @@ fleet-glass-worker-selftest = { cmd = "node tools/fleet-glass/worker.selftest.mj
 # which of the three run and why.
 fleet-glass-selftest = { cmd = "node tools/fleet-glass/glass.selftest.mjs" }
 
+# #2168 review: executable production-byte tests for the daemon feed's EventSource loss/recovery
+# behavior and the service worker's navigation boundary and activation callbacks. Both use only
+# synthetic browser seams, never a daemon, tailnet, or phone.
+fleet-glass-daemon-feed-selftest = { cmd = "node tools/fleet-glass/daemon-feed.selftest.mjs" }
+fleet-glass-service-worker-selftest = { cmd = "node tools/fleet-glass/service-worker.selftest.mjs" }
+
 # M13 Phase 4 (#110), the milestone's completion gate: unlike smoke-claude/smoke-mixed-vendor
 # above, this needs no live vendor auth, so it runs unattended in default CI rather than a gated
 # runbook. Packs `baton`, installs it as a real global tool from that local nupkg, runs it against a

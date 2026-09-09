@@ -43,6 +43,10 @@ timeline entries yet (#1902). `pusher.py --selftest` asserts it is the *only* di
 - `pixi run fleet-glass-pusher-selftest` — `python tools/fleet-glass/pusher.py --selftest`. Pure
   Python, no network, no vendor, no `~/.baton` read.
 - `pixi run fleet-glass-worker-selftest` — `node tools/fleet-glass/worker.selftest.mjs`.
+- `pixi run fleet-glass-daemon-feed-selftest` — EventSource disconnect/reconnect behavior over the
+  shipped `glass.html` function, including the retained-data noncurrent marker.
+- `pixi run fleet-glass-service-worker-selftest` — the worker's first install/activate callbacks,
+  dashboard-only navigation fallback, Retry/recovery, timeout, and live-route bypasses.
 - `python tools/fleet-glass/pusher.py --compare-projection` — runs both sources once against the
   **live** fleet and diffs them room by room. Needs a running daemon and a built CLI; not a CI check.
 
@@ -104,9 +108,10 @@ can therefore arrive before launcher icon, name, or splash changes. If installat
 stale, removing and reinstalling Fleet Glass is a recovery option; it is not a claim that every
 manifest change requires reinstallation.
 
-The automated listener and worker tests cover MIME types, no-store headers, private-only
-registration, successful navigation, network failure and timeout fallback, Retry/recovery, and
-bypass of projection/events/unrelated requests. They cannot verify Tailscale Service availability or
+The automated listener, daemon-feed, and worker tests cover MIME types, no-store headers,
+private-only registration, successful navigation, network failure and timeout fallback,
+Retry/recovery, EventSource disconnect/recovery, and bypass of projection/events/unrelated
+requests. They cannot verify Tailscale Service availability or
 authorization, phone tailnet authentication, certificate trust, Android installation,
 service-worker activation timing, or launch behaviour; those remain unverified until these steps are
 performed on a physical Android device.

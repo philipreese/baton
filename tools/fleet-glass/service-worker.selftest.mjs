@@ -8,15 +8,26 @@ const failures = [];
 const check = (name, condition) => { if (!condition) failures.push(name); };
 
 const listeners = new Map();
+const lifecycleCalls = [];
 const serviceWorker = {
   addEventListener(type, listener) { listeners.set(type, listener); },
-  skipWaiting() { return Promise.resolve(); },
-  clients: { claim() { return Promise.resolve(); } },
+  location: { origin: "https://private.example" },
+  skipWaiting() { lifecycleCalls.push("skipWaiting"); return Promise.resolve(); },
+  clients: { claim() { lifecycleCalls.push("claim"); return Promise.resolve(); } },
 };
 const worker = new Function(
   "self", "Response", "AbortController", "setTimeout", "clearTimeout", "fetch",
-  `${workerSource}\nreturn { navigationResponse };`)(
-    serviceWorker, Response, AbortController, setTimeout, clearTimeout, fetch);
+  `${workerSource}\nreturn { navigationResponse, isDashboardNavigation };`)(
+    serviceWorker, Response, AbortController, setTimeout, clearTimeout,
+    async () => { throw new TypeError("network unavailable in fetch-listener test"); });
+
+for (const [eventName, expectedCall] of [["install", "skipWaiting"], ["activate", "claim"]]) {
+  let lifecyclePromise;
+  listeners.get(eventName)({ waitUntil(promise) { lifecyclePromise = promise; } });
+  check(`${eventName} waits for its lifecycle operation`, lifecyclePromise instanceof Promise);
+  await lifecyclePromise;
+  check(`${eventName} performs ${expectedCall}`, lifecycleCalls.includes(expectedCall));
+}
 
 const success = await worker.navigationResponse(
   { url: "https://private.example/", mode: "navigate" },
@@ -45,11 +56,22 @@ const recovered = await worker.navigationResponse(
   async () => new Response("recovered", { status: 200 }));
 check("Retry recovers by fetching the real page again", recovered.status === 200 && await recovered.text() === "recovered");
 
-let bypassed = false;
-listeners.get("fetch")({ request: { mode: "cors", url: "https://private.example/projection.json" }, respondWith() { bypassed = true; } });
-listeners.get("fetch")({ request: { mode: "same-origin", url: "https://private.example/events" }, respondWith() { bypassed = true; } });
-listeners.get("fetch")({ request: { mode: "same-origin", url: "https://private.example/unrelated" }, respondWith() { bypassed = true; } });
-check("projection, events, and unrelated requests bypass the worker", !bypassed);
+const intercepted = (request) => {
+  let response;
+  listeners.get("fetch")({ request, respondWith(value) { response = value; } });
+  return response;
+};
+check("the root dashboard navigation is intercepted", intercepted({ mode: "navigate", url: "https://private.example/" }) instanceof Promise);
+check("the index dashboard navigation is intercepted", intercepted({ mode: "navigate", url: "https://private.example/index.html" }) instanceof Promise);
+for (const [name, request] of [
+  ["projection", { mode: "navigate", url: "https://private.example/projection.json" }],
+  ["events", { mode: "navigate", url: "https://private.example/events" }],
+  ["unrelated path", { mode: "navigate", url: "https://private.example/unrelated" }],
+  ["cross-origin dashboard", { mode: "navigate", url: "https://other.example/" }],
+  ["non-navigation projection", { mode: "cors", url: "https://private.example/projection.json" }],
+]) {
+  check(`${name} bypasses the worker`, intercepted(request) === undefined);
+}
 check("the worker names no Cache API, preserving the no-live-data-cache invariant", !workerSource.includes("caches."));
 
 if (failures.length) {

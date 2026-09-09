@@ -3,6 +3,7 @@
 // live response would make old fleet state look current. The sole offline response is this worker's
 // self-contained navigation failure page.
 const NAVIGATION_TIMEOUT_MS = 8000;
+const DASHBOARD_PATHS = new Set(["/", "/index.html"]);
 
 const failurePage = `<!doctype html>
 <meta charset="utf-8">
@@ -39,9 +40,19 @@ async function navigationResponse(request, fetchImpl = fetch, timeoutMs = NAVIGA
   }
 }
 
+function isDashboardNavigation(request){
+  const url = new URL(request.url);
+  return request.mode === "navigate"
+    && url.origin === self.location.origin
+    && DASHBOARD_PATHS.has(url.pathname);
+}
+
 self.addEventListener("install", (event) => event.waitUntil(self.skipWaiting()));
 self.addEventListener("activate", (event) => event.waitUntil(self.clients.claim()));
 self.addEventListener("fetch", (event) => {
-  if(event.request.mode !== "navigate") return;
+  // Fleet Glass is a live reading: only its same-origin dashboard routes receive the static
+  // failure response. Projection data, the event stream, and every other route always bypass this
+  // worker, even if a browser reports their request as a navigation.
+  if(!isDashboardNavigation(event.request)) return;
   event.respondWith(navigationResponse(event.request));
 });

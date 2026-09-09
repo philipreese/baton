@@ -244,7 +244,9 @@ public sealed class GlassHttpServiceTests : IDisposable
             Assert.Equal(HttpStatusCode.OK, worker.StatusCode);
             Assert.Equal("application/javascript", worker.Content.Headers.ContentType?.MediaType);
             Assert.Equal("no-store", worker.Headers.CacheControl?.ToString());
-            Assert.Contains("event.request.mode !== \"navigate\"", source, StringComparison.Ordinal);
+            Assert.Contains("isDashboardNavigation(event.request)", source, StringComparison.Ordinal);
+            Assert.Contains("url.origin === self.location.origin", source, StringComparison.Ordinal);
+            Assert.Contains("DASHBOARD_PATHS.has(url.pathname)", source, StringComparison.Ordinal);
             Assert.Contains("cache: \"no-store\"", source, StringComparison.Ordinal);
             Assert.DoesNotContain("caches.", source, StringComparison.Ordinal);
 
