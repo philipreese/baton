@@ -1,3 +1,4 @@
+using System.Globalization;
 using System.Security.Cryptography;
 using System.Text;
 using System.Text.Json;
@@ -132,10 +133,10 @@ public static class MemorySyncCommand
     /// entries read inside its own lock.
     /// </summary>
     /// <remarks>
-    /// The links file is read <b>before</b> the entries lock is taken, never inside it:
-    /// <see cref="MemoryStore.ReadResolvedAsync"/>'s remarks carry the rule (the two locks are never
-    /// nested), and a link appended in the gap is picked up by the next run rather than deadlocking
-    /// this one.
+    /// The links and retractions files are read <b>before</b> the entries lock is taken, never inside
+    /// it: <see cref="MemoryStore.ReadResolvedAsync"/>'s remarks carry the rule (the locks are never
+    /// nested), and a link or retraction appended in the gap is picked up by the next run rather than
+    /// deadlocking this one.
     /// </remarks>
     private static async Task<SyncRepositoryReport?> SyncOneAsync(
         string slug,
@@ -161,6 +162,8 @@ public static class MemorySyncCommand
 
         var links = await MemoryStore
             .ReadLinksAsync(BatonPaths.MemoryLinksFile(slug), cancellationToken).ConfigureAwait(false);
+        var retractions = await MemoryStore
+            .ReadRetractionsAsync(BatonPaths.MemoryRetractionsFile(slug), cancellationToken).ConfigureAwait(false);
 
         return await MemoryStore.RunUnderEntriesLockAsync(
             entriesFile,
@@ -171,8 +174,13 @@ public static class MemorySyncCommand
                     return null;
                 }
 
-                var resolved = MemoryStore.Resolve(stored, links);
-                var repository = resolved[0].Repository;
+                var resolved = MemoryStore.Resolve(stored, links, retractions);
+                var repository = stored[0].Repository;
+
+                // Named, never counted — the posture every other omission on this surface takes
+                // (ProjectionOmission's remarks). The projector never sees a retracted entry, since
+                // Resolve drops it first, so the omission is accounted for here from the raw rows.
+                var retracted = RetractedOmissions(stored, retractions);
                 var candidates = resolved
                     .Select(e => new MemoryProjectionCandidate(e, MemoryFactOrigin.Vendor))
                     .Concat(repositoryFacts.Where(f => string.Equals(
@@ -199,11 +207,41 @@ public static class MemorySyncCommand
                     projection.ProjectedEntryIds.Count,
                     writes,
                     targets.Count == 0 ? NoTargetGuidance(repository) : null,
+                    retracted,
                     projection.Superseded,
                     projection.Overridden,
                     projection.Dropped);
             },
             cancellationToken).ConfigureAwait(false);
+    }
+
+    /// <summary>
+    /// Every stored entry a retraction names, as an omission carrying the retraction's own reason and
+    /// author (#2113). A retraction naming no stored entry produces nothing here, the same way
+    /// <see cref="MemoryStore.Resolve"/> treats it: inert until the entry exists.
+    /// </summary>
+    private static List<ProjectionOmission> RetractedOmissions(
+        IReadOnlyList<MemoryEntry> stored, IReadOnlyList<MemoryRetraction> retractions)
+    {
+        var byId = retractions
+            .GroupBy(r => r.EntryId, StringComparer.Ordinal)
+            .ToDictionary(g => g.Key, g => g.First(), StringComparer.Ordinal);
+
+        return stored
+            .Where(e => byId.ContainsKey(e.Id))
+            .OrderBy(e => e.Id, StringComparer.Ordinal)
+            .Select(e =>
+            {
+                var retraction = byId[e.Id];
+                return new ProjectionOmission(
+                    e.Id,
+                    Path.GetFileName(e.SourcePath),
+                    e.SourcePath,
+                    $"retracted by {retraction.RetractedBy} at " +
+                    $"{retraction.RetractedAtUtc.ToString("O", CultureInfo.InvariantCulture)}: " +
+                    $"{retraction.Reason} -- the store still holds this row; history is never deleted.");
+            })
+            .ToList();
     }
 
     /// <summary>
@@ -510,6 +548,7 @@ public static class MemorySyncCommand
                 output.WriteLine($"    [{target.Disposition}] {target.Vendor}: {target.FilePath} ({target.Bytes} bytes)");
             }
 
+            WriteOmissions(output, "omitted as RETRACTED", repository.Retracted);
             WriteOmissions(output, "omitted as superseded", repository.Superseded);
             WriteOmissions(output, "OVERRIDDEN by checked-in repository truth", repository.Overridden);
             WriteOmissions(output, "dropped by the projection budget", repository.Dropped);
@@ -638,6 +677,7 @@ public static class MemorySyncCommand
         [property: JsonPropertyName("projectedEntries")] int ProjectedEntries,
         [property: JsonPropertyName("targets")] IReadOnlyList<SyncTargetReport> Targets,
         [property: JsonPropertyName("noTargetReason")] string? NoTargetReason,
+        [property: JsonPropertyName("retracted")] IReadOnlyList<ProjectionOmission> Retracted,
         [property: JsonPropertyName("superseded")] IReadOnlyList<ProjectionOmission> Superseded,
         [property: JsonPropertyName("overridden")] IReadOnlyList<ProjectionOmission> Overridden,
         [property: JsonPropertyName("dropped")] IReadOnlyList<ProjectionOmission> Dropped);

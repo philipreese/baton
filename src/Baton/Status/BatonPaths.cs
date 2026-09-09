@@ -298,6 +298,18 @@ public static class BatonPaths
     public const string MemoryLinksFileName = "links.jsonl";
 
     /// <summary>
+    /// <c>{Root}/&lt;repository-slug&gt;/memory/retractions.jsonl</c> — one repository's append-only
+    /// retractions (#2113), a third file beside <see cref="MemoryLinksFile"/> for the reason
+    /// <c>Baton.Memory.MemoryStore</c>'s own remarks give. See <c>Baton.Memory.MemoryRetraction</c> for
+    /// the row and <c>Baton.Memory.MemoryStore</c> for how a reader applies it.
+    /// </summary>
+    public static string MemoryRetractionsFile(string repositorySlug) =>
+        Path.Combine(MemoryDirectory(repositorySlug), MemoryRetractionsFileName);
+
+    /// <summary>Filename of <see cref="MemoryRetractionsFile"/> relative to <see cref="MemoryDirectory"/>.</summary>
+    public const string MemoryRetractionsFileName = "retractions.jsonl";
+
+    /// <summary>
     /// <c>{Root}/memory-aliases.jsonl</c> — see <c>Baton.Memory.MemoryAliasStore</c> for what it holds
     /// and when it is consulted. <b>Machine-wide, so deliberately not inside a repository directory</b>:
     /// it maps a checkout path to the repository it belongs to, and filing it under that answer would
