@@ -20,10 +20,13 @@ namespace Baton.Cli.Daemon;
 /// testable without any of that.
 /// </para>
 /// <para>
-/// <b>A dispatched lane outlives the tick that started it, and outlives this service too</b>
-/// (spec/baton.md §13 states the shutdown ruling and what it costs). Here that means one thing to
-/// hold on to: <see cref="ResolveFinishedItemsAsync"/> is what closes an item out, it reads the room
-/// off disk, and it therefore also closes out items some earlier daemon process started.
+/// <b>A dispatched lane outlives the tick that started it, and outlives this daemon too</b>
+/// (spec/baton.md §13's launch/adopt contract, #2082). Here that means two things to hold on to:
+/// <see cref="ResolveFinishedItemsAsync"/> is what closes an item out, it reads the room off disk,
+/// and it therefore also closes out items some earlier daemon process started; and the first thing
+/// <see cref="ExecuteAsync"/> does is hand every still-launched row to
+/// <see cref="QueueLauncher.AdoptLaunchedLanesAsync"/>, so a lane the previous daemon left running
+/// is supervised again rather than merely read.
 /// </para>
 /// <para>
 /// <b>The runway hold is discovered, not predicted (Q5)</b> — <see cref="QueueLauncher"/> owns that
@@ -35,6 +38,7 @@ namespace Baton.Cli.Daemon;
 public sealed class QueueSchedulerService : BackgroundService
 {
     private readonly Func<QueueLaunchRequest, CancellationToken, Task<QueueLaunchOutcome>> _launch;
+    private readonly Func<CancellationToken, Task<IReadOnlyList<QueueLaneAdoption>>> _adopt;
     private readonly Func<CancellationToken, Task<double>> _liveWeight;
     private readonly Func<double?> _freeGb;
     private readonly Func<DateTimeOffset> _now;
@@ -58,9 +62,11 @@ public sealed class QueueSchedulerService : BackgroundService
         Func<CancellationToken, Task<double>>? liveWeight,
         Func<double?>? freeGb,
         Func<DateTimeOffset>? now,
-        WorkItemAdvancer? advancer = null)
+        WorkItemAdvancer? advancer = null,
+        Func<CancellationToken, Task<IReadOnlyList<QueueLaneAdoption>>>? adopt = null)
     {
         _launch = launch ?? QueueLauncher.LaunchAsync;
+        _adopt = adopt ?? QueueLauncher.AdoptLaunchedLanesAsync;
         _liveWeight = liveWeight ?? CountLiveWeightAsync;
         _freeGb = freeGb ?? FreePhysicalMemory.TryReadGiB;
         _now = now ?? (() => DateTimeOffset.UtcNow);
@@ -69,6 +75,25 @@ public sealed class QueueSchedulerService : BackgroundService
 
     protected override async Task ExecuteAsync(CancellationToken stoppingToken)
     {
+        // #2082: re-adopt before the first tick, so a lane the previous daemon left running has a
+        // supervisor again before anything else reads the queue. A failure here is logged and the
+        // loop still starts: the rows stay `launched`, done detection still reads their rooms, and
+        // refusing to schedule anything because one journal was unreadable would be the wrong trade.
+        try
+        {
+            await _adopt(stoppingToken).ConfigureAwait(false);
+        }
+        catch (OperationCanceledException) when (stoppingToken.IsCancellationRequested)
+        {
+            return;
+        }
+        catch (Exception ex)
+        {
+            Console.Error.WriteLine(
+                $"QueueSchedulerService: re-adopting launched lanes failed, so this daemon supervises none of them "
+                + $"until they settle on their own: {ex.Message}");
+        }
+
         while (!stoppingToken.IsCancellationRequested)
         {
             var started = Stopwatch.GetTimestamp();

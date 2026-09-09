@@ -153,6 +153,44 @@ public sealed class WatchNotifierTests
     }
 
     /// <summary>
+    /// #2117 re-review, finding 1: the command's stdout/stderr are redirected and drained rather than
+    /// inherited, because inside the daemon the inherit flag is gone after the first detached queue
+    /// launch and an inherited stream's writes then vanish. The drain is the half that matters: a
+    /// redirect with no reader blocks the command once it has written the pipe buffer (~4 KB), so
+    /// this command writes several times that on stdout and one line on stderr, and both the
+    /// completion (well inside the command timeout) and the captured text are asserted. The last
+    /// stdout line is the discriminating one — a stalled or absent drain never sees it. Sabotage
+    /// check made while writing this: with the two <c>Begin*ReadLine</c> calls removed, the command
+    /// stalls at the buffer, the OS-exit wait times out, and the assertion on the last line fails.
+    /// </summary>
+    [Fact]
+    public async Task NotifyAsync_CommandTarget_WritesPastThePipeBufferOnStdout_CompletesAndItsOutputIsCaptured()
+    {
+        var output = new StringWriter();
+        var error = new StringWriter();
+        var commandTimeout = TimeSpan.FromSeconds(10);
+        var notifier = new WatchNotifier(commandTimeout: commandTimeout, commandOutput: output, commandError: error);
+
+        // 400 lines of ~50 bytes: ~20 KB on stdout, five times the pipe buffer; then one stderr line.
+        const string command =
+            "(for /L %i in (1,1,400) do @echo stdout-line-%i-0123456789abcdef0123456789abcdef) & echo stderr-marker 1>&2";
+
+        var stopwatch = Stopwatch.StartNew();
+        await notifier.NotifyAsync(command, SamplePayload(), TestContext.Current.CancellationToken);
+        stopwatch.Stop();
+
+        var captured = output.ToString();
+        Assert.True(
+            stopwatch.Elapsed < commandTimeout,
+            $"NotifyAsync took {stopwatch.Elapsed} — the command stalled on an undrained pipe until the timeout.");
+        Assert.True(
+            captured.Length > 4096,
+            $"only {captured.Length} chars of stdout were captured; the drain stopped at the pipe buffer.");
+        Assert.Contains("stdout-line-400-", captured, StringComparison.Ordinal);
+        Assert.Contains("stderr-marker", error.ToString(), StringComparison.Ordinal);
+    }
+
+    /// <summary>
     /// L1: the property that payload content never reaches the spawned command's argv already holds
     /// (verified by reading — <c>command</c>'s argv is built from the <c>--notify</c> target alone,
     /// never from any <see cref="WatchNotifyPayload"/> field), but nothing previously went red if a

@@ -2,8 +2,10 @@ using System.Text.Json;
 using Baton.Cli.Daemon;
 using Baton.Cli.Mcp;
 using Baton.Cli.Tests.TestSupport;
+using Baton.Core;
 using Baton.Domain;
 using Baton.Queue;
+using Baton.Runway;
 using Baton.Status;
 using Baton.Tests.Shared;
 using Baton.Store;
@@ -566,21 +568,20 @@ public sealed class QueueLauncherTests : IDisposable
     /// <see cref="QueueItemState.Launched"/>.
     /// </summary>
     [Fact]
-    public async Task A_cancelled_pump_settles_the_room_rather_than_wedging_the_item_in_launched()
+    public async Task A_lane_process_that_exits_without_a_sentinel_settles_the_room_rather_than_wedging_the_item_in_launched()
     {
         var root = CreateTempRoot();
         try
         {
-            var room = Path.Combine(root, "queue-t4-cancelled");
+            var room = Path.Combine(root, "queue-t4-killed");
             Directory.CreateDirectory(room);
 
-            await QueueLauncher.SettleFinishedPumpAsync(
-                Task.FromCanceled<CommandResult>(new CancellationToken(canceled: true)), "t4", room);
+            await QueueLauncher.SettleExitedLaneAsync(exitCode: -1, "t4", room);
 
             var sentinel = await TerminalSentinelWriter.TryReadAsync(room, Ct);
             Assert.NotNull(sentinel);
             Assert.Equal(WorkflowOutcome.Failed, sentinel.State);
-            Assert.Contains("cancelled after launch", sentinel.Error!, StringComparison.Ordinal);
+            Assert.Contains("exited with -1 without settling the room", sentinel.Error!, StringComparison.Ordinal);
             Assert.Equal(QueueItemState.Failed, QueueSchedulerService.ClassifyTerminal(sentinel, room).State);
         }
         finally
@@ -590,34 +591,152 @@ public sealed class QueueLauncherTests : IDisposable
     }
 
     /// <summary>
-    /// The polarity arm of the two above: a pump that completed is settled by
-    /// <see cref="TerminalSettleRecorder"/> on its own terms, and this path fabricates nothing over it.
-    /// A non-terminal result records nothing at all, so the absence here is that recorder's own contract
-    /// rather than a fault sentinel that failed to write.
+    /// The polarity arm of the one above: a lane process that settled its own room — the ordinary
+    /// ending, <see cref="TerminalSettleRecorder"/> inside <c>baton dispatch</c> — is left exactly as
+    /// it recorded itself, whatever its exit code.
     /// </summary>
     [Fact]
-    public async Task A_pump_that_completed_gets_no_fault_sentinel()
+    public async Task A_lane_process_that_settled_its_own_room_gets_no_fault_sentinel_over_it()
     {
         var root = CreateTempRoot();
         try
         {
             var room = Path.Combine(root, "queue-t5-completed");
             Directory.CreateDirectory(room);
+            await File.WriteAllTextAsync(
+                Path.Combine(room, TerminalSentinelWriter.TerminalSentinelFileName),
+                """{"state":"Succeeded","steps":[],"outputs":[],"error":null}""",
+                Ct);
 
-            var snapshotId = new WorkflowDefinitionSnapshotId("done");
-            var result = new CommandResult(
-                new FlowState(snapshotId, [], WorkflowStatus.Running),
-                new WorkflowDefinitionSnapshot(snapshotId, new WorkflowTemplateId("done"), 1, []),
-                RoomDirectoryPath: room);
+            await QueueLauncher.SettleExitedLaneAsync(exitCode: 1, "t5", room);
 
-            await QueueLauncher.SettleFinishedPumpAsync(Task.FromResult(result), "t5", room);
-
-            Assert.Null(await TerminalSentinelWriter.TryReadAsync(room, Ct));
+            var sentinel = await TerminalSentinelWriter.TryReadAsync(room, Ct);
+            Assert.NotNull(sentinel);
+            Assert.Equal(WorkflowOutcome.Succeeded, sentinel.State);
         }
         finally
         {
             DirectoryCleanup.DeleteRecursively(root);
         }
+    }
+
+    /// <summary>
+    /// #2082: a hold and a bad spec both exit <c>ValidationRefused</c>, so the exit code cannot tell
+    /// them apart — the admission ledger's own row against this room can. Both polarities, and the
+    /// two rows that must NOT count (an overridden hold, and a hold recorded against another room).
+    /// </summary>
+    [Fact]
+    public void A_pre_provision_exit_is_a_hold_only_when_the_admission_ledger_holds_this_room()
+    {
+        var room = Path.Combine(Path.GetTempPath(), "baton-rooms", "queue-t6-abcd1234");
+        var otherRoom = Path.Combine(Path.GetTempPath(), "baton-rooms", "queue-t6-ffff0000");
+        RunwayAdmissionEntry Row(string decision, string forRoom) =>
+            new(DateTimeOffset.UtcNow, "claude", decision, RunwayAdmissionDecidedBy.Counters, Room: BatonPaths.RecordKey(forRoom));
+
+        var held = QueueLauncher.ClassifyPreProvisionExit(
+            2, room, [Row(RunwayAdmissionDecisions.Held, room)], ["Error: Runway hold — not dispatching new work on claude."]);
+        Assert.True(held.RunwayHeld);
+        Assert.Null(held.Error);
+        Assert.Null(held.RoomDirectory);
+
+        // Same exit code, same words on stderr, no held row for THIS room: a refusal, with the
+        // child's own last words carried onto the item.
+        var refused = QueueLauncher.ClassifyPreProvisionExit(
+            2, room,
+            [Row(RunwayAdmissionDecisions.HeldOverridden, room), Row(RunwayAdmissionDecisions.Held, otherRoom)],
+            ["Error: Unknown role 'implementer'.", "try: baton templates"]);
+        Assert.False(refused.RunwayHeld);
+        Assert.Contains("exited 2 before provisioning the room", refused.Error!, StringComparison.Ordinal);
+        Assert.Contains("Unknown role 'implementer'", refused.Error, StringComparison.Ordinal);
+        Assert.Contains("try: baton templates", refused.Error, StringComparison.Ordinal);
+
+        var silent = QueueLauncher.ClassifyPreProvisionExit(null, room, [], []);
+        Assert.Contains("exited an unreadable code", silent.Error!, StringComparison.Ordinal);
+        Assert.Contains("wrote nothing to stderr", silent.Error, StringComparison.Ordinal);
+    }
+
+    /// <summary>
+    /// #2082: the argv the daemon hands the lane process parses back to the options the queue meant
+    /// to forward — every field <see cref="QueueLauncher.BuildOptions"/> sets, through the CLI's own
+    /// parser, so a flag added to one side and not the other fails here rather than silently
+    /// dropping out of every queue lane.
+    /// </summary>
+    [Fact]
+    public void The_lane_process_argv_round_trips_through_the_dispatch_parser()
+    {
+        var item = new QueueItem
+        {
+            Tag = "t7",
+            Role = "implement",
+            Workspace = @"C:\repos\w7",
+            SpecFile = @"C:\Users\x\.baton\queue\specs\t7.md",
+            TimeoutMinutes = 90,
+            TokenBudget = 250_000,
+            MaxToolSteps = 400,
+            OverrideRunwayReason = "conductor lane, week resets in 2h",
+        };
+        var tier = new QueueTierResolution("engine", "claude", "opus", "high", IsOverride: true, OverrideReason: "spec says opus");
+        var room = Path.Combine(BatonPaths.Rooms, "queue-t7-0badf00d");
+        var expected = QueueLauncher.BuildOptions(new QueueLaunchRequest(item, tier, room));
+
+        var argv = QueueLauncher.BuildArguments(expected);
+
+        Assert.Equal("dispatch", argv[0]);
+        var parsed = DispatchOptionsParser.Parse(argv.Skip(1).ToList());
+        Assert.Equal(expected.Name, parsed.Name);
+        Assert.Equal(expected.SpecFilePath, parsed.SpecFilePath);
+        Assert.Equal(expected.RoomDirectoryPath, parsed.RoomDirectoryPath);
+        Assert.Equal(expected.Adapter, parsed.Adapter);
+        Assert.Equal(expected.WorkspaceDirectory, parsed.WorkspaceDirectory);
+        Assert.Equal(expected.Model, parsed.Model);
+        Assert.Equal(expected.Effort, parsed.Effort);
+        Assert.Equal(expected.Timeout, parsed.Timeout);
+        Assert.Equal(expected.Label, parsed.Label);
+        Assert.Equal(expected.TokenBudget, parsed.TokenBudget);
+        Assert.Equal(expected.MaxToolSteps, parsed.MaxToolSteps);
+        Assert.Equal(expected.OverrideRunwayReason, parsed.OverrideRunwayReason);
+
+        // Optional fields the queue never sets stay absent rather than being sent as empty flags.
+        var minimal = QueueLauncher.BuildArguments(QueueLauncher.BuildOptions(new QueueLaunchRequest(
+            item with { TimeoutMinutes = null, TokenBudget = null, MaxToolSteps = null, OverrideRunwayReason = null },
+            new QueueTierResolution("engine", "claude", "opus", "high", false, null),
+            room)));
+        Assert.DoesNotContain("--timeout", minimal);
+        Assert.DoesNotContain("--token-budget", minimal);
+        Assert.DoesNotContain("--max-tool-steps", minimal);
+        Assert.DoesNotContain("--override-runway", minimal);
+    }
+
+    /// <summary>
+    /// #2117 review, finding 2: the lane's redirected streams decode as UTF-8 on the daemon's side,
+    /// set on the start info, which is what hands <c>BeginOutputReadLine</c> its decoder.
+    /// <c>RedirectedProcessEncodingTests</c> catches a revert of this as a text count; here the
+    /// claim is read off the object instead, including that both streams are
+    /// redirected (the shape <c>DetachedProcess.Start(ProcessStartInfo)</c> requires) and that the argv
+    /// lands in order behind the muxer's leading arguments.
+    /// </summary>
+    [Fact]
+    public void The_lane_start_info_redirects_both_streams_and_pins_their_decode_to_UTF8()
+    {
+        var startInfo = ChildProcessStartInfo.Create(
+            "baton.exe",
+            psi => QueueLauncher.ConfigureLaneStartInfo(psi, ["Baton.Cli.dll"], ["dispatch", "implement", "--room-dir", @"C:\r"]));
+
+        Assert.True(startInfo.RedirectStandardOutput);
+        Assert.True(startInfo.RedirectStandardError);
+        Assert.Same(System.Text.Encoding.UTF8, startInfo.StandardOutputEncoding);
+        Assert.Same(System.Text.Encoding.UTF8, startInfo.StandardErrorEncoding);
+        Assert.Equal(["Baton.Cli.dll", "dispatch", "implement", "--room-dir", @"C:\r"], startInfo.ArgumentList);
+
+        // The polarity control: the factory alone pins nothing, so the assertions above are about
+        // ConfigureLaneStartInfo and not about a default .NET happens to apply.
+        var bare = ChildProcessStartInfo.Create("baton.exe");
+        Assert.False(bare.RedirectStandardOutput);
+        Assert.Null(bare.StandardOutputEncoding);
+        Assert.Null(bare.StandardErrorEncoding);
+
+        // And the shape is the one the detached seam accepts.
+        Assert.Null(DetachedProcess.Refusal(startInfo));
     }
 
     /// <summary>

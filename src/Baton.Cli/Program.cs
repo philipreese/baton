@@ -155,10 +155,11 @@ if (args.Length == 0 || !knownSubcommands.Contains(args[0]))
 // proceeds once the redirected stream reaches EOF. Every child .NET spawns inherits a duplicate of
 // this process's stdout/stderr whether or not its own streams are redirected, so one straggler
 // outliving the lane held the wrapper open for an hour. Cleared here, before the first spawn, for
-// the verbs that run a lane; `watch` is excluded on purpose -- WatchNotifier's operator command
-// redirects only stdin and reads its stdout by inheritance. Why redirects alone cannot fix this is
-// StandardHandleInheritance's own remarks; which verbs run a lane is IsLaneVerb at the foot of this
-// file, the same symbol the exit-code table below reads.
+// the verbs that run a lane; `watch` is not one (nothing wraps it waiting for EOF), and since #2117
+// its notify command redirects both output streams anyway, so the flag's state is nothing it reads.
+// The daemon clears the same flags itself, at its first queue launch (DetachedProcess). Why
+// redirects alone cannot fix this is StandardHandleInheritance's own remarks; which verbs run a lane
+// is IsLaneVerb at the foot of this file, the same symbol the exit-code table below reads.
 if (IsLaneVerb(args[0]))
 {
     Baton.Core.Internal.StandardHandleInheritance.Disable();

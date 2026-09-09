@@ -485,7 +485,11 @@ command that never reads stdin — the documented `curl -X POST …` shape above
 wedge the sweep once the payload exceeds the OS pipe buffer (~4 KB on Windows). A write that has not
 drained by the deadline gets the process tree killed and the failure logged, since a command that never
 consumed the first byte was never going to finish reading the rest; a command that exits after its own
-work is left to keep running past the timeout unkilled, as before. This is a deliberate decision *not*
+work is left to keep running past the timeout unkilled, as before — with one change the #2082 redirect
+brought: its stdout and stderr are now pipes the daemon owns, closed the moment the wait returns, so a
+command that treats a failed write as fatal (curl exits 23; a `set -e` script dies on the statement)
+ends at its next print rather than finishing silently. A command that must outlive the budget writes to
+its own file or redirects its output away. This is a deliberate decision *not*
 to gate the stdin write on payload size or fall back to a temp file: `BATON_WATCH_EVENT` already
 carries the identical payload with no blocking risk (set at spawn time, not written to a stream), so a
 command that only wants the common case can read from there and skip stdin entirely — the timeout is
@@ -4105,6 +4109,12 @@ execution and stops. The distinction is the whole ruling: #1513's danger was a b
 *acting* on a room it does not own, while #1530 Residual 1's defect was an arrest no observer could
 see. A room whose pump was killed is no longer a room that quietly reads Running forever.
 
+**Supervising is not reaping either (#2082).** Queue-launched lanes are now separate processes that
+outlive the daemon, and a restarted daemon re-adopts the ones whose engine is still alive — it waits
+on that process and records the post-launch fault if it exits unsettled, nothing more (§13's
+launch/adopt contract). For one whose engine is dead it does nothing but log: the probe above is what
+records that arrest, and the pump is still never re-driven.
+
 ### The quota ledger — what is new build, stated correctly
 
 Polls vendor CLIs' print-mode `/usage`; accumulation from lane logs is attribution only, never the
@@ -6828,14 +6838,28 @@ reading would invent a comparison nothing made.
 
 ### Launching, done detection, and shutdown
 
-The scheduler dispatches **in-process, through `DispatchCommand.ExecuteAsync`** — the same code path
-`baton dispatch` uses, not a shell-out. A spawned CLI would be a new process-spawn site whose exit
-code cannot distinguish a runway hold from a bad spec.
+**The lane is its own process (#2082, superseding slice 1's in-process pump).** The scheduler starts
+`baton dispatch` as a separate process through `DetachedProcess` — the argv is
+`QueueLauncher.BuildArguments`, the inverse of the CLI's own parser for exactly the fields the queue
+forwards, pinned by a round-trip test — and returns as soon as the outcome is known. Slice 1 ran the
+dispatch in-process, on a `Task` inside the daemon, for one stated reason: a spawned CLI's exit code
+cannot distinguish a runway hold from a bad spec. What that bought was measured on 2026-09-08, when
+the daemon exited 70 with two lanes live: a pump that is a task inside the daemon cannot outlive it,
+and its workers sat in a job the daemon owned, so both lanes died with it, both rooms kept
+`flow.lock` with no pump, and one worktree kept five uncommitted files. The exit-code objection is
+answered without an exit code: every pre-provision refusal happens before the room directory exists
+(`DispatchPreProvisionOrderingTests`), so a child that exits with no room refused, and whether it
+refused for a **hold** is read off the **runway admission ledger** — the `held` row the child wrote
+against that very room before refusing (§7's runway hold; `QueueLauncher.ClassifyPreProvisionExit`).
+A row against another room or a `held-overridden` row does not count, and an unreadable ledger
+degrades to a failed item carrying the child's own last stderr lines rather than a hold nothing
+recorded.
 
-Because it runs in-process, the terminal sentinel and both ledgers — the block that used to live only
-in `Program.cs`'s top-level code — are now `TerminalSettleRecorder`, shared rather than copied. Without
-that, a queue-launched room would carry no `terminal.json` (invisible to `fleet_status`'s
-sentinel-first path) and no cost-ledger row, which is indistinguishable from a lane that spent nothing.
+`TerminalSettleRecorder` is still the one settle block — the terminal sentinel and both ledgers,
+shared rather than copied — and it now runs where it always did for `baton dispatch`: inside the lane
+process, at its end. A queue-launched room therefore carries the same `terminal.json` and cost-ledger
+row a hand-dispatched one does; without that it would be invisible to `fleet_status`'s sentinel-first
+path and indistinguishable from a lane that spent nothing.
 
 An item is **done** when its room reaches a terminal state, read from the room itself — no `.done`
 sentinel files, so a restarted daemon resolves an item it never launched. **The fate comes from the
@@ -6851,13 +6875,14 @@ records decisions, and reading a room that finished is not one.
 **No item stays launched with nothing to read.** Two paths would otherwise leave one there forever,
 and each is closed where the fact exists:
 
-- A lane that **faults or is cancelled after launch** never reaches Terminal, so nothing writes its
-  `terminal.json`. The launcher's own continuation writes the room a `Failed` sentinel instead, and
-  done detection resolves it like any other settled room. Both non-success shapes are covered, not
-  only the throw: a pump whose `OperationCanceledException` escapes ends its task *cancelled* rather
-  than *faulted*, and a fault-only gate left that one settling nothing at all. It never creates a room
-  the dispatch never provisioned — that would put a lane in `fleet_status` that never ran — and never
-  overwrites a refusal the dispatch already recorded, which carries the `try` line a person acts on.
+- A lane process that **exits without settling its room** — a crash, a kill, an unhandled throw
+  twenty minutes in — never reaches Terminal, so nothing writes its `terminal.json`. The daemon
+  supervising it (`QueueLauncher.SuperviseAsync`, whether that daemon launched the process or adopted
+  it under the contract below) writes the room a `Failed` sentinel naming the exit code instead, and
+  done detection resolves it like any other settled room. A lane that settled itself is left exactly
+  as it recorded, whatever its exit code. It never creates a room the dispatch never provisioned —
+  that would put a lane in `fleet_status` that never ran — and never overwrites a refusal the dispatch
+  already recorded, which carries the `try` line a person acts on.
 
   **That sentinel is projected from the room's own ledger, never fabricated.** The path is reached
   only by a lane that got past provisioning, so the room normally has a real `flow.jsonl`; a
@@ -6908,12 +6933,43 @@ and each is closed where the fact exists:
   slack for a slow pre-provision `git` spawn). Items carrying no room *at all* — the imported ones,
   which the runner never recorded one for — are excluded, not swept.
 
-**Shutdown does not arrest a launched lane.** The dispatch runs on a detached task with
-`CancellationToken.None`, deliberately not the host's stopping token — stopping the daemon must not
-kill lanes it started. The cost, stated rather than left emergent: a daemon that exits mid-lane
-orphans that lane's *supervision*. The room's own record and the worker keep going, and nothing marks
-the item done until a daemon comes back and re-reads the room, which is precisely why done detection
-reads from disk.
+**The launch/adopt contract (#2082).** Stated once, here. `DetachedProcess`'s own remarks carry the
+measurement it rests on, and §7's reaper paragraph the line it must not cross.
+
+- *Launch.* The lane process is started with **no job of the daemon's and no breakaway flag**, with
+  the daemon's own stdout/stderr made non-inheritable first (§7's wrapper shell relaunches the daemon
+  only once its redirected output reaches EOF, so a surviving lane holding that handle would have
+  wedged the very restart this exists to survive). That clear is process-wide and lasts for the rest
+  of the daemon's life, so every daemon spawn redirects both output streams or neither —
+  `SpawnOutputRedirectionTests` enforces it, and `DetachedProcess`'s remarks say why per-spawn was
+  rejected (#2117). Why neither a job nor a breakaway is needed is
+  the 2026-09-08 Task Scheduler measurement `DetachedProcess`'s remarks record, pinned in both arms
+  by `DetachedProcessTests`. While the launching daemon lives, the lane's stdout/stderr are relayed
+  into `daemon.log` with `[lane <tag>]` in front, decoded as UTF-8 on the daemon's side; once that
+  daemon dies those lines are lost and the room is the record. So a daemon exit — orderly, watchdog, or crash — orphans the lane's *supervision*
+  and nothing else: the worker keeps running and the room keeps journaling.
+- *Adopt.* On start, before its first tick, the scheduler walks every `launched` row that names a
+  room, reads the engine pid and start time the room's journal already stamps on
+  `ExecutionRequestAccepted`, and asks the ONE liveness probe (`EngineLivenessProbe`, the same one
+  `baton status` and `baton resume` ask). **Alive**: the daemon attaches to that process, re-confirms
+  the start time on the handle it actually holds (a pid alone is a number, and the OS can reuse one
+  in the gap after the probe), and supervises it exactly as if it had launched it. **Dead**: the row
+  is left as found — the dead-pump probe (§7) records the arrest, and `baton resolve`/`baton
+  redispatch` are the operator's verbs from there. **Unknown** (no ledger yet, no pid stamped, an
+  unreadable journal): left as found, and what closes it depends on what the room goes on to write.
+  A lane that was mid-provision and then runs writes its ledger and snapshot, so the dead-pump probe
+  sees it on a later tick and it degrades onto the Dead path above. **A room that exists but never
+  gets a ledger — the lane died before its first journal write — has no closer at all**: the
+  roomless sweep needs the room to be absent, the probe needs a ledger and a snapshot, and adoption
+  runs once per daemon start. That row reads `launched` until the operator resolves it by hand; the
+  adoption line in `daemon.log` naming a room with no ledger is the only signal, and it says so.
+  Adoption changes no row and writes no sentinel; one line per row lands in `daemon.log` saying which
+  of the three it found. The queue-row vocabulary gains nothing: `launched` already means "not
+  terminal yet, read the room", which is what each of these rows still is.
+- *What stays true.* Stopping the daemon still does not arrest a launched lane, and the daemon still
+  never re-drives a room (§7). The cost that remains, stated: a lane whose engine died between two
+  daemons is closed out by the dead-pump probe's fact plus an operator verb, not by the queue on its
+  own — its row reads `launched` until the room carries a sentinel.
 
 **The launch is recorded before it is started, under the same token it runs on.** The item is marked
 launched — with the room the scheduler picks and hands to the dispatch — *before* the dispatch
