@@ -15,11 +15,9 @@ namespace Baton.Queue;
 /// nothing.
 /// </remarks>
 /// <remarks>
-/// No adapter gets a lighter weight than any other mutating lane (operator ruling, #2163): every
-/// vendor competes for the same memory/build-lock capacity the cap protects, and none had measured
-/// grounds for a discount — a prior 0.5 weight for the codex adapter was removed here, since it also
-/// had the effect of biasing the scheduler toward admitting MORE of whichever vendor is under a
-/// spend-conservation instruction, exactly backwards from what such an instruction wants.
+/// No adapter gets a lighter weight than any other mutating lane (operator ruling, #2163) — see
+/// spec/baton.md's "Lane weights" section for why. A prior 0.5 weight for the codex adapter was
+/// removed here.
 /// </remarks>
 public static class QueueWeights
 {
