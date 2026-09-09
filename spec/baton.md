@@ -2310,6 +2310,54 @@ stays display-only, never itself a gate. `StateProjector.DescribeArrest` is the 
 `TokenBudget`/`ToolStepCap`/`BilledRate`/`null`, and since #1691 that totality is a test over
 `Enum.GetValues<ArrestReason>()` rather than a claim.
 
+**The grace turn (#2134, operator ruling 2026-09-08 23:10 ET, "build it").** Three `agy` budget
+arrests the same night each landed after real work was done and before it was ever committed, leaving
+a dirty tree a follow-up lane had to rescue at several hundred thousand tokens — a grace turn costs one
+bounded reply on an already-cached context instead. When `TokenBudgetMonitor` arrests an execution
+whose role is workspace-verifying (`WorkerBinding.Process.VerifiesWorkspace` — the same `implement`/
+`janitor` set §"Arms 2 and 3 grade the roles that CHANGE the workspace" already draws, on the same
+reasoning: a read-shaped role writes nothing, so there is nothing for a grace turn to rescue) and whose
+workspace is genuinely dirty (`Workspaces.WorktreeProvisioner.Audit`, the same probe #1373's own
+mutation check already uses — no second, freshly-written `git status --porcelain`), the engine spawns
+ONE further, bounded dispatch into the SAME workspace and under the SAME grant as the arrested
+execution (`WorkerBinding.Process.Target` verbatim — program, args, working directory, permission
+flags; only the prompt and the caps change, never a fresh, more permissive dispatch) before the arrest
+itself is appended. That dispatch carries a fixed, self-contained prompt (`Mutation.GraceTurn.PromptText`
+— "Budget reached. Commit everything staged and unstaged on the current branch with a conventional
+subject that says the work is incomplete, push the branch, write `changes.md` naming what is done and
+what is not, then stop. No other action.") under its own fixed, far smaller caps
+(`Mutation.GraceTurn.TokenBudget`/`MaxToolSteps`/`WallClockTimeout`) — one bounded reply, never a second
+attempt at the original task, and never per-role configurable: there is no role-specific reason for a
+grace turn to run longer than the commit-and-push it exists for.
+
+The prompt is self-contained on purpose — it names no prior turn — so no vendor session resume is
+needed to make it actionable: the workspace on disk already carries whatever the arrested execution
+left behind. `MutationInterface.RunGraceTurnAsync` journals exactly one `FlowEvent.GraceTurnAttempted`
+(`WorkspaceCleanAfter`, `ExitReason`, and — non-null only when the grace dispatch's OWN bounded monitor
+arrested IT in turn, the "exceeded its own cap" shape — `ArrestReason`) before the `ExecutionArrested`
+line for the same execution, and never throws a grace-turn spawn failure out of the arrest path: a
+courtesy turn that could not even start is recorded `WorkspaceCleanAfter: false` rather than orphaning
+the arrest append that follows it.
+
+**A grace turn never turns an arrest into a `Succeeded` room.** It runs entirely inside the same
+`budgetMonitor is { Arrested: true }` block that already returns without ever reaching
+`OutcomeClassifier.Classify` — a grace-committed, even grace-pushed, branch still settles the room
+`Indeterminate` via the unchanged `ExecutionArrested` → `ApplyIndeterminate` path, exactly as it would
+with no grace turn at all. `WorkspaceCleanAfter` is the best LOCAL evidence that the grace dispatch
+committed — real `git status --porcelain` after it returns — and is deliberately not itself proof of a
+push: confirming the branch actually reached the remote is left to whoever resolves the room, the same
+way #1373's own commit/push accounting already separates "committed" from "pushed" for a timed-out
+attempt.
+
+**Scope: the token/tool-step/billed-rate arrest, not a wall-clock timeout.** All three motivating
+incidents were budget arrests, so the grace turn is wired at the one `budgetMonitor is { Arrested: true
+}` block those three trigger and nowhere else. A role's ordinary wall-clock `Timeout` expiring returns
+`CoreExitReason.TimedOut` and falls through to the unchanged `OutcomeClassifier.Classify` path a few
+lines below (already covered by #1373's own timeout/retry accounting, `TimeoutOnMutatedWorkspaceEndToEndTests`)
+— a deliberate scope limit, not an oversight, and #1373's existing machinery already gives a timed-out
+attempt's dirty tree the same "never silently retried, never silently discarded" treatment a grace turn
+gives an arrest's.
+
 ### Exit codes
 
 `RunExitCode` (`src/Baton.Cli/RunExitCodeResolver.cs`), returned by `run`, `dispatch`, and

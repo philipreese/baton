@@ -2138,7 +2138,19 @@ public static class MutationInterface
                 // asked). No OutcomeClassifier.Classify call at all: classifying a cancelled-out-from-
                 // under-it process would only produce a Cancelled/Failed verdict that this replaces
                 // wholesale, never Succeeded.
-                //
+
+                // #2134 (`spec/baton.md` §3, "The grace turn"): reuses #2029's VerifiesWorkspace set
+                // and #1373's own dirty-tree probe (Workspaces.WorktreeProvisioner.Audit) rather than a
+                // fresh one.
+                if (binding.VerifiesWorkspace
+                    && mutationProbePath is not null
+                    && !Workspaces.WorktreeProvisioner.Audit(mutationProbePath).IsClean)
+                {
+                    await RunGraceTurnAsync(
+                            prepared, binding, mutationProbePath, dispatcher, eventLogWriter, dispatchCancellationToken)
+                        .ConfigureAwait(false);
+                }
+
                 // #2002: read once and destructured, never twice inline -- the two halves of this
                 // reading must describe the same snapshot.
                 var dominantCommand = budgetMonitor.SnapshotDominantCommandShape();
@@ -2433,6 +2445,103 @@ public static class MutationInterface
         {
             inFlightExecutions.Unregister(prepared.Request.ExecutionId);
         }
+    }
+
+    /// <summary>
+    /// #2134: the grace turn itself, dispatched off <paramref name="binding"/>'s own untouched
+    /// <c>Target</c> rather than the primary dispatch's <c>ContinuationBrief</c>/<c>budgetMonitor</c>
+    /// composition above. Journals <see cref="FlowEvent.GraceTurnAttempted"/> and returns; a spawn
+    /// failure here is caught and mapped rather than left to escape and orphan the arrest append that
+    /// follows it.
+    /// </summary>
+    private static async Task RunGraceTurnAsync(
+        PreparedExecution prepared,
+        WorkerBinding.Process binding,
+        string workspacePath,
+        ICoreDispatcher dispatcher,
+        IEventLogWriter eventLogWriter,
+        CancellationToken cancellationToken)
+    {
+        if (binding.Target.PromptText is null)
+        {
+            // No prose prompt this adapter carries at all (CommandWorkerAdapter) -- nothing to hand the
+            // grace instruction to, and re-running the original argv verbatim would not run it either.
+            // Nothing to journal: the grace turn never started.
+            return;
+        }
+
+        // A distinct BATON_OUTPUT_DIR, under the arrested execution's own artifacts directory, so this
+        // dispatch's prompt.txt/stdout capture (CoreDispatcher.DispatchAsync writes both there) never
+        // overwrites the arrested execution's own -- that archival copy is the only durable record of
+        // what actually ran before the arrest, and this dispatch must not clobber it.
+        var graceOutputDirectory = Path.Combine(prepared.OutputDirectory, "grace-turn");
+        Directory.CreateDirectory(graceOutputDirectory);
+        var graceEnvironment = prepared.Request.Environment
+            .Select(variable => variable is EnvironmentVariable.BatonComputed { Name: "BATON_OUTPUT_DIR" } computed
+                ? (EnvironmentVariable)(computed with { Value = graceOutputDirectory })
+                : variable)
+            .ToList();
+
+        // Its own, far smaller budget -- never the arrested execution's, which this stream has already
+        // crossed. GraceTurn.TokenBudget/MaxToolSteps state why these are fixed constants, not
+        // per-role configuration.
+        var graceUsageParser = prepared.Request.Adapter is { } graceAdapter
+            ? StandardWorkerUsageParsers.Default.GetValueOrDefault(graceAdapter)
+            : null;
+        var graceMonitor = graceUsageParser is not null
+            ? new TokenBudgetMonitor(GraceTurn.TokenBudget, GraceTurn.MaxToolSteps, billedRateLimit: null, graceUsageParser)
+            : null;
+
+        var graceTarget = binding.Target.WithReplacedPrompt(GraceTurn.PromptText) with
+        {
+            OnStdoutLine = graceMonitor is null ? null : graceMonitor.OnStdoutLine,
+            // Nothing new to seed or journal on this dispatch -- both are the primary dispatch's own
+            // pre-spawn concerns (FlowEvent.EngineFilesPlaced), already durable from that spawn.
+            OnEngineFilesPlaced = null,
+        };
+
+        var graceRequest = prepared.Request with
+        {
+            Timeout = GraceTurn.WallClockTimeout,
+            Environment = graceEnvironment,
+        };
+
+        using var graceLinkedCancellation = graceMonitor is not null
+            ? CancellationTokenSource.CreateLinkedTokenSource(cancellationToken, graceMonitor.ArrestRequested)
+            : null;
+        var graceCancellationToken = graceLinkedCancellation?.Token ?? cancellationToken;
+
+        CoreDispatchResult graceResult;
+        try
+        {
+            graceResult = await dispatcher.DispatchAsync(graceRequest, graceTarget, graceCancellationToken)
+                .ConfigureAwait(false);
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException || !cancellationToken.IsCancellationRequested)
+        {
+            // The same spawn-failure shapes the primary dispatch's own contract admits (#747:
+            // CommandLineTooLongException, Core.BatonException) -- mapped to a structured result rather
+            // than swallowed (CLAUDE.md's error-handling rule): a grace turn that could not even start
+            // leaves the workspace exactly as dirty as the arrest found it.
+            Console.Error.WriteLine(
+                $"Grace turn (#2134) for execution '{prepared.Request.ExecutionId.Value}' failed to spawn: {ex.Message}");
+            await eventLogWriter.AppendAsync(
+                    new FlowEvent.GraceTurnAttempted(
+                        prepared.Request.ExecutionId, WorkspaceCleanAfter: false, CoreExitReason.CancelRequested),
+                    CancellationToken.None)
+                .ConfigureAwait(false);
+            return;
+        }
+
+        var workspaceCleanAfter = Workspaces.WorktreeProvisioner.Audit(workspacePath).IsClean;
+        await eventLogWriter.AppendAsync(
+                new FlowEvent.GraceTurnAttempted(
+                    prepared.Request.ExecutionId,
+                    workspaceCleanAfter,
+                    graceResult.Reason,
+                    graceMonitor is { Arrested: true } ? graceMonitor.ArrestReasonValue : null),
+                CancellationToken.None)
+            .ConfigureAwait(false);
     }
 
     /// <summary>
