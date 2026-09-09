@@ -1802,7 +1802,7 @@ def selftest():
             print(f"  control FAILED: --lane-fast exited {lane_rc}, ran {lane_ran} (want {lane}), "
                   f"and left a whole-run receipt: {lane_receipt}")
             ok = False
-        excluded = {"lint", "test-no-build", "gate-sabotage"} | {n for n in fast if n.endswith("-selftest")}
+        excluded = set(AFTER_BUILD_FAST) | {"lint", "test-no-build", "gate-sabotage"} | {n for n in fast if n.endswith("-selftest")}
         if excluded & set(lane_ran):
             print(f"  control FAILED: --lane-fast ran a build/test/self-test member -- "
                   f"{sorted(excluded & set(lane_ran))}")

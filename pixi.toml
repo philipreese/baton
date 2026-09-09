@@ -343,7 +343,6 @@ gates-fast = { cmd = "python -u tools/gates/gates.py --fast" }
 # What .githooks/pre-push runs on a BATON_LANE push instead of gates-fast -- membership and the
 # ruling behind it are gates.py's LANE_FAST_AUDITS comment and spec/baton.md C-12 (#2129).
 gates-lane-fast = { cmd = "python -u tools/gates/gates.py --lane-fast" }
-gates-lane-fast-quiet = { cmd = "python -u tools/gates/gates.py --lane-fast --quiet" }
 # The quiet pair (#1560) is what DISPATCHED WORKERS run: same gates, same exit-code contract, but a
 # passing gate's log is dropped and a failing gate's is tail-bounded -- inherited full-suite output
 # was measured re-entering a lane's model context on every call (43.8M cache-read tokens in one lane).
