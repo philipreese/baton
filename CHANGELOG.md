@@ -9,6 +9,18 @@ that carried them: `git show v0.35.0:src/Baton.Cli/CHANGELOG.md` (likewise `src/
 `release-please-config.json`. Everything below this line predates the split: the repo's single
 shared version through `0.14.0`.
 
+## [0.43.0](https://github.com/philipreese/baton/compare/v0.42.2...v0.43.0) (2026-09-09)
+
+
+### Features
+
+* **glass:** Make Fleet Glass installable ([#2167](https://github.com/philipreese/baton/issues/2167)) ([1839d9f](https://github.com/philipreese/baton/commit/1839d9f1716be14ca333cd5c078ded60af2820dd))
+
+
+### Bug Fixes
+
+* **dispatch:** Narrow a lane's own pre-push hook to the seconds-scale audits ([#2161](https://github.com/philipreese/baton/issues/2161)) ([16f3bf3](https://github.com/philipreese/baton/commit/16f3bf3387c713c453f410423ba4df48bd614392))
+
 ## [0.42.2](https://github.com/philipreese/baton/compare/v0.42.1...v0.42.2) (2026-09-09)
 
 
