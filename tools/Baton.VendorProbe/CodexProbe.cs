@@ -195,6 +195,130 @@ internal static class CodexProbe
         return false;
     }
 
+    internal enum CatalogDriftVerdict
+    {
+        Current,
+        Drifted,
+    }
+
+    internal sealed record CatalogDrift(
+        CatalogDriftVerdict Verdict,
+        IReadOnlyList<string> DroppedModels,
+        IReadOnlyList<string> GainedModels,
+        IReadOnlyList<string> ChangedEfforts,
+        string RecordingName)
+    {
+        public bool HasDrift => Verdict == CatalogDriftVerdict.Drifted;
+
+        public string Explain()
+        {
+            if (!HasDrift)
+            {
+                return $"catalog matches embedded recording ({RecordingName}).";
+            }
+
+            var parts = new List<string>();
+            if (DroppedModels.Count > 0)
+            {
+                parts.Add($"dropped: {string.Join(", ", DroppedModels)}");
+            }
+            if (GainedModels.Count > 0)
+            {
+                parts.Add($"gained: {string.Join(", ", GainedModels)}");
+            }
+            if (ChangedEfforts.Count > 0)
+            {
+                parts.Add($"effort changed: {string.Join(", ", ChangedEfforts)}");
+            }
+
+            return $"catalog has drifted from embedded recording ({RecordingName}): {string.Join("; ", parts)}. Re-record snapshot to restore alignment.";
+        }
+    }
+
+    internal static bool TryParseLiveCatalog(
+        string stdout,
+        out Dictionary<string, IReadOnlyList<string>> liveCatalog)
+    {
+        liveCatalog = new Dictionary<string, IReadOnlyList<string>>(StringComparer.Ordinal);
+        foreach (var line in Lines(stdout))
+        {
+            try
+            {
+                using var document = JsonDocument.Parse(line);
+                var root = document.RootElement;
+                if (!IsId(root, ModelListRequestId)
+                    || !root.TryGetProperty("result", out var result)
+                    || !result.TryGetProperty("data", out var data)
+                    || data.ValueKind != JsonValueKind.Array)
+                {
+                    continue;
+                }
+
+                foreach (var item in data.EnumerateArray())
+                {
+                    if (item.TryGetProperty("hidden", out var hidden)
+                        && hidden.ValueKind is JsonValueKind.True)
+                    {
+                        continue;
+                    }
+
+                    if (!item.TryGetProperty("model", out var model)
+                        || model.GetString() is not { Length: > 0 } name)
+                    {
+                        continue;
+                    }
+
+                    var efforts = item.TryGetProperty("supportedReasoningEfforts", out var supported)
+                                  && supported.ValueKind == JsonValueKind.Array
+                        ? supported.EnumerateArray()
+                            .Select(e => e.TryGetProperty("reasoningEffort", out var effort)
+                                ? effort.GetString()
+                                : null)
+                            .Where(e => !string.IsNullOrWhiteSpace(e))
+                            .Select(e => e!)
+                            .ToList()
+                        : [];
+
+                    liveCatalog[name] = efforts;
+                }
+
+                return liveCatalog.Count > 0;
+            }
+            catch (JsonException)
+            {
+                // Keep scanning notifications and unrelated responses.
+            }
+        }
+
+        return false;
+    }
+
+    internal static CatalogDrift CompareCatalog(
+        IReadOnlyDictionary<string, IReadOnlyList<string>> live,
+        IReadOnlyDictionary<string, IReadOnlyList<string>> recorded,
+        string recordingName)
+    {
+        var dropped = recorded.Keys.Where(k => !live.ContainsKey(k)).OrderBy(x => x, StringComparer.Ordinal).ToList();
+        var gained = live.Keys.Where(k => !recorded.ContainsKey(k)).OrderBy(x => x, StringComparer.Ordinal).ToList();
+        var changed = new List<string>();
+
+        foreach (var key in live.Keys.Where(recorded.ContainsKey))
+        {
+            var liveEfforts = live[key];
+            var recordedEfforts = recorded[key];
+            if (!liveEfforts.SequenceEqual(recordedEfforts, StringComparer.Ordinal))
+            {
+                changed.Add($"{key} (live: [{string.Join('/', liveEfforts)}], recorded: [{string.Join('/', recordedEfforts)}])");
+            }
+        }
+
+        var verdict = dropped.Count > 0 || gained.Count > 0 || changed.Count > 0
+            ? CatalogDriftVerdict.Drifted
+            : CatalogDriftVerdict.Current;
+
+        return new CatalogDrift(verdict, dropped, gained, changed, recordingName);
+    }
+
     internal static bool TryDescribeRateLimits(string stdout, out string summary)
     {
         summary = string.Empty;
