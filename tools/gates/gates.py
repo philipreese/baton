@@ -91,6 +91,10 @@ OVERLAP = [
     # the SHIPPED glass.html bytes rather than a copy, so it also fails when the markers it slices on
     # are renamed away.
     "fleet-glass-selftest",
+    # #2168 review: these production-byte browser seams keep EventSource recovery and the private
+    # worker's navigation/lifecycle contract in normal CI without a daemon or physical device.
+    "fleet-glass-daemon-feed-selftest",
+    "fleet-glass-service-worker-selftest",
     # #1670 F2: exercises baton.cmd/baton.ps1 against a mock exe fixture built with the legacy
     # Framework csc.exe (ships with Windows, no MSBuild involved) -- entirely under a temp
     # BATON_HOME, never the live tools root, same overlap-safety shape as tool-refresh-selftest

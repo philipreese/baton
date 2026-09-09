@@ -40,6 +40,8 @@ PROTECTED_TOOLING_PATHS: tuple[tuple[str, str, str], ...] = (
     # lines from the assertion list leaves the member green and quiet, which is the exposure this
     # entry closes.
     ("file", "tools/fleet-glass/glass.selftest.mjs", "the conductor panel's assertion set -- the only thing between glass.html's row kinds and a silent break (gates.py OVERLAP)"),
+    ("file", "tools/fleet-glass/daemon-feed.selftest.mjs", "the daemon-feed gate member's production-byte assertions (gates.py OVERLAP)"),
+    ("file", "tools/fleet-glass/service-worker.selftest.mjs", "the service-worker gate member's production-byte assertions (gates.py OVERLAP)"),
     ("file", "tools/tool-refresh/refresh.py", "tool-refresh-selftest's body (gates.py OVERLAP)"),
     ("file", "tests/Launcher.Tests.ps1", "launcher-selftest's body -- exercises baton.cmd/baton.ps1 against a mock exe fixture (gates.py OVERLAP)"),
     ("dir", "tools/Baton.VendorProbe/", "vendor-check's actual body, the loud half of the drift grace window (gates.py AFTER_BUILD_FAST); a directory because it is a compiled project"),
@@ -762,9 +764,11 @@ def selftest() -> int:
             ("n", "tools/buildlock.py"),
             ("o", "tools/flake-watch/summarize.py"),
             ("p", "tests/Baton.Architecture.Tests/SpawnGateTests.cs"),
-            # (s)-(w): the #1754 widening -- the wired selftest bodies #1744's ruling had wrongly
-            # excluded as "not enforcement", plus vendor-check's actual body.
+            # The wired selftest bodies #1744's ruling had wrongly excluded as "not enforcement",
+            # plus vendor-check's actual body.
             ("s", "tools/fleet-glass/worker.selftest.mjs"),
+            ("al", "tools/fleet-glass/daemon-feed.selftest.mjs"),
+            ("am", "tools/fleet-glass/service-worker.selftest.mjs"),
             ("t", "tools/tool-refresh/refresh.py"),
             ("u", "benchmarks/deepswe/derive_scores.py"),
             ("v", "tests/Launcher.Tests.ps1"),
@@ -1334,7 +1338,7 @@ def selftest() -> int:
         print(f"diff-shape: selftest FAIL -- {'; '.join(failures)}", file=sys.stderr)
         return 1
 
-    print("diff-shape: selftest OK (all 42 discrimination arms passed)")
+    print("diff-shape: selftest OK (all 44 discrimination arms passed)")
     return 0
 
 

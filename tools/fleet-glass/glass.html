@@ -66,7 +66,7 @@
   `projectionStaleness` itself; this file only renders the verdict, and where it renders it in the
   banner chain is the precedence table beside that chain.
 -->
-<title>Fleet Glass</title>
+<title>Baton</title>
 <link rel="manifest" href="/fleet-glass.webmanifest">
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link href="https://fonts.googleapis.com/css2?family=Sora:wght@600;700&family=Public+Sans:wght@400;500;600&family=IBM+Plex+Mono:wght@400;500&display=swap" rel="stylesheet">
@@ -283,7 +283,7 @@ footer{margin-top:2rem; font-size:.7rem; color:var(--ink-soft); border-top:1px s
       <circle cx="19.9" cy="6.4" r="1.2" fill="var(--accent)"/>
     </svg>
     <div class="titleblock">
-      <h1>Fleet Glass <span class="fresh" id="fresh">connecting…</span></h1>
+      <h1>Baton <span class="fresh" id="fresh">connecting…</span></h1>
       <p class="kicker">the conductor's view</p>
     </div>
   </div>
@@ -2138,6 +2138,13 @@ function startDaemonFeed(applySnapshot){
   // this instant (a transient lock). Mapping both to null would tell an operator the daemon "has not
   // written" a file that is sitting right there -- the plausible-and-wrong shape the banner
   // precedence table below exists to keep out.
+  let disconnected = false;
+  const markDisconnected = (detail) => {
+    disconnected = true;
+    banner(`<b>Connection to the daemon was lost.</b> ${esc(detail)}` +
+      (lastGood ? " Data below is the last successful read, not a current fleet view." : ""));
+    if(lastGood) $("fresh").textContent = "connection lost — last successful read shown";
+  };
   const load = () => fetch("/projection.json", { cache: "no-store" })
     .then((r) => {
       if(r.ok) return r.json();
@@ -2145,13 +2152,24 @@ function startDaemonFeed(applySnapshot){
       throw new Error(`HTTP ${r.status}`);
     })
     .then((snap) => {
-      if(snap && Array.isArray(snap.rooms)) applySnapshot(snap);
+      if(snap && Array.isArray(snap.rooms)) {
+        disconnected = false;
+        applySnapshot(snap);
+      }
       else banner("<b>No fleet projection yet.</b> The daemon is serving this page but has not written <span class='mono'>fleet/projection.json</span> — check that <span class='mono'>baton daemon</span>'s projection writer is running.");
     })
-    .catch((e) => banner(`<b>Could not read the fleet projection.</b> ${esc(String(e && e.message || e))}`));
+    .catch((e) => {
+      markDisconnected(String(e && e.message || e));
+    });
   load();
   const events = new EventSource("/events");
   events.addEventListener("projection", load);
+  events.addEventListener("error", () => markDisconnected("The event stream disconnected."));
+  events.addEventListener("open", () => {
+    // Reconnection only proves the event stream opened. A fresh projection read is what makes the
+    // retained board current again, so keep the noncurrent marker until this succeeds.
+    if(disconnected) load();
+  });
   // The inbox tab is a MAILBOX-plane surface (deliverables_list/deliverable_read are MCP tools, and
   // this delivery has no connector): say so rather than showing a permanently empty list. Every
   // `window.mcpHandle` call site already early-returns when it is unset, so nothing throws here —
@@ -2372,7 +2390,12 @@ function startDaemonFeed(applySnapshot){
   // #1946: the tailnet delivery stops here — no connector is reached, and `window.mcpHandle` stays
   // unset, which every mcpHandle call site already treats as "this affordance is unavailable".
   if(DAEMON_SERVED){
+    // #2168: the artifact has no private daemon origin, so only this delivery registers the
+    // navigation-only worker. It caches nothing; its one bounded-timeout fallback is a static
+    // failure page, never the dashboard or fleet data. A first successful online visit is needed
+    // before the browser has activated this worker for a later disconnected launch.
     startDaemonFeed(applySnapshot);
+    navigator.serviceWorker?.register("/fleet-glass-service-worker.js").catch(() => undefined);
     applyRoute();
     return;
   }

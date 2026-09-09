@@ -191,6 +191,8 @@ public sealed class GlassHttpServiceTests : IDisposable
             Assert.Contains(
                 $"<link rel=\"manifest\" href=\"{GlassWebAppAssets.ManifestPath}\">", page,
                 StringComparison.Ordinal);
+            Assert.Contains("<title>Baton</title>", page, StringComparison.Ordinal);
+            Assert.Contains("<h1>Baton <span class=\"fresh\"", page, StringComparison.Ordinal);
 
             var manifestResponse = await client.GetAsync(
                 $"{harness.BaseUrl}{GlassWebAppAssets.ManifestPath}", cts.Token);
@@ -201,6 +203,8 @@ public sealed class GlassHttpServiceTests : IDisposable
             using var manifest = JsonDocument.Parse(await manifestResponse.Content.ReadAsStringAsync(cts.Token));
             var root = manifest.RootElement;
             Assert.Equal("/", root.GetProperty("id").GetString());
+            Assert.Equal("Baton", root.GetProperty("name").GetString());
+            Assert.Equal("Baton", root.GetProperty("short_name").GetString());
             Assert.Equal("/", root.GetProperty("start_url").GetString());
             Assert.Equal("/", root.GetProperty("scope").GetString());
             Assert.Equal("standalone", root.GetProperty("display").GetString());
@@ -223,6 +227,36 @@ public sealed class GlassHttpServiceTests : IDisposable
                     int.Parse(icon.GetProperty("sizes").GetString()![..3],
                         System.Globalization.CultureInfo.InvariantCulture));
             }
+        }
+        finally
+        {
+            await harness.Service.StopAsync(CancellationToken.None);
+        }
+    }
+
+    [Fact]
+    public async Task Serves_the_private_navigation_only_service_worker_without_a_cacheable_live_route()
+    {
+        using var cts = new CancellationTokenSource(TimeSpan.FromMinutes(1));
+        var harness = await StartAsync(cts.Token, projection: """{"rooms":[]}""");
+        try
+        {
+            using var client = new HttpClient { Timeout = TimeSpan.FromSeconds(30) };
+            var worker = await client.GetAsync($"{harness.BaseUrl}{GlassWebAppAssets.ServiceWorkerPath}", cts.Token);
+            var source = await worker.Content.ReadAsStringAsync(cts.Token);
+
+            Assert.Equal(HttpStatusCode.OK, worker.StatusCode);
+            Assert.Equal("application/javascript", worker.Content.Headers.ContentType?.MediaType);
+            Assert.Equal("no-store", worker.Headers.CacheControl?.ToString());
+            Assert.Contains("isDashboardNavigation(event.request)", source, StringComparison.Ordinal);
+            Assert.Contains("url.origin === self.location.origin", source, StringComparison.Ordinal);
+            Assert.Contains("DASHBOARD_PATHS.has(url.pathname)", source, StringComparison.Ordinal);
+            Assert.Contains("cache: \"no-store\"", source, StringComparison.Ordinal);
+            Assert.DoesNotContain("caches.", source, StringComparison.Ordinal);
+
+            var projection = await client.GetAsync($"{harness.BaseUrl}/projection.json", cts.Token);
+            Assert.Equal("no-store", projection.Headers.CacheControl?.ToString());
+            Assert.Equal("application/json", projection.Content.Headers.ContentType?.MediaType);
         }
         finally
         {

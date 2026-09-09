@@ -157,6 +157,13 @@ The routes are `/` (the page), `/projection.json` (the fleet projection, as-is) 
 Server-Sent Events stream of its changes). All GET, all read-only. **You get the fleet board and
 nothing beneath it** — stdout tails, room artifacts and timelines are C-11's next slice.
 
+Validation evidence: the conductor tested the actual final-a1908337 JavaScript in in-app Chromium on
+isolated localhost. The first online visit activated the service worker; a hanging navigation showed
+the static fallback; restoring the server and selecting Retry returned the online page; and stopping
+the server also showed the static fallback. This did not cover HTTP 5xx, real-daemon retained-snapshot
+recovery, or a physical Android offline launch. A physical install on a distinct private hostname was
+user-confirmed. The new HTTP-error fallback behavior has not been browser-tested yet.
+
 ## Vendor authentication
 
 Baton does not authenticate to any model provider. It spawns the vendor's own first-party CLI
