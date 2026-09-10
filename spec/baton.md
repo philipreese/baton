@@ -5764,14 +5764,13 @@ overreached (#2002 review).** Rule 1 closes **model-authored** backgrounding sha
 vendors. It does not close agy's **vendor-side** backgrounding: `docs/vendor-capabilities.md` records
 a `run_command` that backgrounds a long command with the model then polling `manage_task`, and that
 path carries no `Start-Process`, no `&` and no `nohup` for a detector reading a command string to
-see. It carries **parameters** instead: two captured agy 1.2.0 `PreToolUse` payloads for `run_command`
-carry `WaitMsBeforeAsync` plus two descriptive strings, supplied by agy rather than chosen by the model
-(`docs/vendor-capabilities.md`, widened 2026-09-10 — that register owns the finding, its n = 2
-scope, and what about it stays unmeasured). **A gate cannot refuse a parameter the vendor supplies
-itself**, so this is scoped rather than closed: `AgyHookCheckCommand.MeasuredRunCommandArgs` refuses
-only a `run_command` argument beyond those five, which closes the *next* backgrounding switch and
-not this one — and would refuse a legitimate command if agy's real argument set is wider than those
-two captures. Rule 1 is therefore **prospective on agy, not a fix for the
+see. It carries **vendor-supplied parameters** rather than a command-line backgrounding shape; the
+measured hook payload and its scope are recorded in `docs/vendor-capabilities.md`. **A gate cannot
+refuse a parameter the vendor supplies itself**, so this is scoped rather than closed:
+`AgyHookCheckCommand.MeasuredRunCommandArgs` refuses only a `run_command` argument beyond that
+registered set, which closes the *next* backgrounding switch and not this one — and would refuse a
+legitimate command if agy's real argument set is wider than the captured set. Rule 1 is therefore
+**prospective on agy, not a fix for the
 measured lane**. Nor was it one for the measured
 room: `dispatch-implement-12f930d9` contains no backgrounding shape at all (see
 `BackgroundingShapeDetector`'s own remark, which quotes the room), and its `Get-Process -Id <pid>`

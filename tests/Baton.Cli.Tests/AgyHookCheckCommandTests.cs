@@ -977,8 +977,8 @@ public class AgyHookCheckCommandTests
     /// <summary>
     /// #2002 review MEDIUM and #2152, both directions. An argument no measurement accounts for is
     /// refused because it could be the backgrounding switch this gate cannot read. The control is
-    /// the first arm: it carries the complete five-field shape observed twice on agy 1.2.0. The next
-    /// two arms prove each descriptive field stays independently optional, and the old three-field
+    /// the first arm: it carries measured descriptive metadata alongside the command. The next two
+    /// arms prove each descriptive field stays independently optional, and the old three-field
     /// payload remains compatible. The final arms prove neither an unknown argument nor a malformed
     /// descriptive value can pass unread. Scope and provenance live in
     /// <c>docs/vendor-capabilities.md</c>; <c>AgyHookCheckCommand.MeasuredRunCommandArgs</c> points at
