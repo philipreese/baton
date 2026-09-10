@@ -51,7 +51,7 @@ public static class QueueCommand
         }
 
         var settings = await DaemonSettingsStore.LoadAsync(BatonPaths.SettingsFile, cancellationToken).ConfigureAwait(false);
-        var (adapter, tier, adapterFromModel) = ResolveTierForAdd(options, settings.Queue);
+        var (adapter, tier, adapterFromModel, stageSelections) = ResolveTierForAdd(options, settings.Queue);
 
         // The launched-tag refusal is raised HERE, before the spec copy and before any worktree is
         // provisioned — not only inside the mutate below (#1939 review). File.Copy(overwrite: true)
@@ -99,7 +99,7 @@ public static class QueueCommand
             Adapter = adapter,
             Model = options.Model,
             Effort = options.Effort,
-            StageSelections = options.StageSelections,
+            StageSelections = stageSelections,
             LifecyclePin = options.LifecyclePin,
             TimeoutMinutes = options.TimeoutMinutes,
             MaxToolSteps = options.MaxToolSteps,
@@ -329,7 +329,8 @@ public static class QueueCommand
         return 0;
     }
 
-    private static (string? Adapter, QueueTierResolution Tier, bool AdapterFromModel) ResolveTierForAdd(
+    private static (string? Adapter, QueueTierResolution Tier, bool AdapterFromModel,
+        IReadOnlyList<QueueStageSelection>? StageSelections) ResolveTierForAdd(
         QueueOptions options, QueueSettings settings)
     {
         try
@@ -341,27 +342,11 @@ public static class QueueCommand
             throw new CliArgumentException(ex.Message);
         }
 
-        if (options.Adapter is not null && options.Model is not null)
-        {
-            ValidateAdapterModel(options.Adapter, options.Model);
-        }
-
-        var adapters = options.Model is null
-            ? Array.Empty<string>() : WorkerModelCatalog.AdaptersFor(options.Model);
-        if (options.Model is not null && options.Adapter is null && adapters.Count == 0)
-        {
-            throw new CliArgumentException(
-                $"--model '{options.Model}' has no recorded adapter candidate; specify --adapter to use its model validation.");
-        }
-
-        if (options.Adapter is null && adapters.Count > 1)
-        {
-            throw new CliArgumentException(
-                $"--model '{options.Model}' has multiple candidate adapters: {string.Join(", ", adapters)}; specify --adapter.");
-        }
-
-        var adapterFromModel = options.ScopeClass is null && options.Adapter is null && adapters.Count == 1;
-        var adapter = adapterFromModel ? adapters[0] : options.Adapter;
+        var (adapter, adapters, adapterFromModel) = InferAdapterForModel(
+            options.ScopeClass, options.Adapter, options.Model);
+        var stageSelections = options.Lifecycle
+            ? NormalizeLifecycleStageSelections(options.StageSelections, options.ScopeClass)
+            : options.StageSelections;
         var tier = QueueTierTable.Resolve(
             new QueueItem
             {
@@ -373,7 +358,7 @@ public static class QueueCommand
                 Adapter = adapter,
                 Model = options.Model,
                 Effort = options.Effort,
-                StageSelections = options.StageSelections,
+                StageSelections = stageSelections,
                 LifecyclePin = options.LifecyclePin,
             },
             settings,
@@ -393,7 +378,7 @@ public static class QueueCommand
                 Model = options.Model,
                 Effort = options.Effort,
                 Reason = options.Reason,
-                StageSelections = options.StageSelections,
+                StageSelections = stageSelections,
                 LifecyclePin = options.LifecyclePin,
                 Stage = WorkStage.Implement,
             };
@@ -417,7 +402,53 @@ public static class QueueCommand
             ValidateAdapterModel(tier.Adapter, options.Model);
         }
 
-        return (adapter, tier, adapterFromModel);
+        return (adapter, tier, adapterFromModel, stageSelections);
+    }
+
+    /// <summary>
+    /// Applies ordinary add-time model routing to each explicit stage selection. A model-only
+    /// selection must retain the adapter inferred from its unique model candidate, because the
+    /// stage resolver otherwise has no item-level adapter to launch with after a later advance.
+    /// </summary>
+    internal static IReadOnlyList<QueueStageSelection>? NormalizeLifecycleStageSelections(
+        IReadOnlyList<QueueStageSelection>? selections, string? scopeClass)
+    {
+        if (selections is null)
+        {
+            return null;
+        }
+
+        return selections.Select(selection =>
+        {
+            var (adapter, _, _) = InferAdapterForModel(scopeClass, selection.Adapter, selection.Model);
+            return selection with { Adapter = adapter };
+        }).ToList();
+    }
+
+    private static (string? Adapter, IReadOnlyList<string> Candidates, bool AdapterFromModel) InferAdapterForModel(
+        string? scopeClass, string? adapter, string? model)
+    {
+        if (adapter is not null && model is not null)
+        {
+            ValidateAdapterModel(adapter, model);
+        }
+
+        var candidates = model is null
+            ? Array.Empty<string>() : WorkerModelCatalog.AdaptersFor(model);
+        if (model is not null && adapter is null && candidates.Count == 0)
+        {
+            throw new CliArgumentException(
+                $"--model '{model}' has no recorded adapter candidate; specify --adapter to use its model validation.");
+        }
+
+        if (adapter is null && candidates.Count > 1)
+        {
+            throw new CliArgumentException(
+                $"--model '{model}' has multiple candidate adapters: {string.Join(", ", candidates)}; specify --adapter.");
+        }
+
+        var adapterFromModel = scopeClass is null && adapter is null && candidates.Count == 1;
+        return (adapterFromModel ? candidates[0] : adapter, candidates, adapterFromModel);
     }
 
     /// <summary>
@@ -432,42 +463,34 @@ public static class QueueCommand
                      WorkStage.Implement, WorkStage.Review, WorkStage.Fix, WorkStage.ReReview, WorkStage.Continue,
                  })
         {
-            var (selection, source) = QueueTierTable.SelectionForStage(item, stage);
-            if (selection?.Model is not { } model || source == QueueSelectionSource.StageDefault)
+            var (_, source) = QueueTierTable.SelectionForStage(item, stage);
+            if (source == QueueSelectionSource.StageDefault)
             {
                 continue;
             }
 
-            var candidates = WorkerModelCatalog.AdaptersFor(model);
-            if (selection.Adapter is not null)
-            {
-                ValidateAdapterModel(selection.Adapter, model);
-                // Match ordinary queue-add semantics: a named adapter's own offline rules are the
-                // authority when the shared model catalog has no candidate for this model.
-                if (candidates.Count == 0)
-                {
-                    continue;
-                }
-            }
-            else if (candidates.Count == 0)
-            {
-                throw new CliArgumentException(
-                    $"--model '{model}' has no recorded adapter candidate; specify --adapter to use its model validation.");
-            }
-
             var tier = QueueTierTable.ResolveForStage(
                 item, stage, settings, WorkerRoleCatalog.QueueTierFor, WorkerRoleCatalog.QueueTierForRole);
-            if (tier.Adapter is null || !candidates.Contains(tier.Adapter, StringComparer.OrdinalIgnoreCase))
+            if (tier.Adapter is { } adapter && tier.Model is { } model)
             {
-                var actualAdapter = tier.Adapter ?? "unconfigured";
-                throw new CliArgumentException(
-                    $"The {WorkStages.Token(stage)} selection's model '{model}' is known by "
-                    + $"{string.Join(", ", candidates)}, but the resolved {actualAdapter} adapter cannot use it.");
-            }
+                var candidates = WorkerModelCatalog.AdaptersFor(model);
+                if (candidates.Count > 0 && !candidates.Contains(adapter, StringComparer.OrdinalIgnoreCase))
+                {
+                    throw new CliArgumentException(
+                        $"The {WorkStages.Token(stage)} selection's resolved model '{model}' is known by "
+                        + $"{string.Join(", ", candidates)}, but the resolved {adapter} adapter cannot use it.");
+                }
 
-            // A model inferred through a role/scope tier still receives that adapter's offline
-            // validation; selecting a later stage is no exemption from add-time refusal.
-            ValidateAdapterModel(tier.Adapter, model);
+                try
+                {
+                    ValidateAdapterModel(adapter, model);
+                }
+                catch (CliArgumentException ex)
+                {
+                    throw new CliArgumentException(
+                        $"The {WorkStages.Token(stage)} selection's resolved {adapter}/{model} tuple is invalid: {ex.Message}");
+                }
+            }
         }
     }
 

@@ -208,6 +208,38 @@ public sealed class QueueCommandTests
     }
 
     [Fact]
+    public void A_model_only_stage_selection_keeps_its_unique_models_adapter()
+    {
+        var selections = QueueCommand.NormalizeLifecycleStageSelections(
+            [new QueueStageSelection { Stage = WorkStage.Review, Model = "gpt-5.6-sol" }], scopeClass: null);
+
+        Assert.Equal("codex", Assert.Single(selections!).Adapter);
+    }
+
+    [Fact]
+    public async Task Add_refuses_an_adapter_only_lifecycle_pin_with_an_inherited_incompatible_model_before_provisioning()
+    {
+        var home = CreateTempHome();
+        using var scope = BatonEnvironmentSnapshot.BeginScope(BatonEnvironmentSnapshot.Blank with { HomeOverride = home });
+        try
+        {
+            var refusal = await Assert.ThrowsAsync<CliArgumentException>(() => QueueCommand.ExecuteAsync(
+                new QueueOptions(
+                    QueueVerb.Add, Tag: "2181-pin", Role: "implement", Issue: 2181, Lifecycle: true,
+                    ScopeClass: "tooling", Adapter: "agy", LifecyclePin: true),
+                TextWriter.Null, Ct));
+
+            Assert.Contains("cannot use", refusal.Message, StringComparison.Ordinal);
+            Assert.False(File.Exists(BatonPaths.QueueFile));
+            Assert.False(Directory.Exists(BatonPaths.QueueSpecsDirectory));
+        }
+        finally
+        {
+            DirectoryCleanup.DeleteRecursively(home);
+        }
+    }
+
+    [Fact]
     public async Task Add_prints_an_unscoped_roles_resolved_adapter_without_a_model()
     {
         var home = CreateTempHome();
