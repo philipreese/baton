@@ -20,6 +20,7 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import time
 from pathlib import Path
 from typing import Callable
 
@@ -85,23 +86,19 @@ def _sabotage_ci_selftest() -> None:
         for name in ["aggregate.py", "selftest.py", "test_shards.py"]:
             shutil.copy2(ROOT / "tools" / "ci" / name, tools_dir / name)
 
-        # Keep the production selftest and its synthetic fixtures intact while pointing the two
-        # checks that inspect/evaluate the live tree back at this checkout. Only aggregate.py below
-        # is sabotaged, in the isolated copy imported by this driver.
+        # Exercise the production aggregate assertions without selftest.main()'s unrelated live
+        # project identity evaluations and workflow checks. Only aggregate.py below is sabotaged,
+        # in the isolated copy imported by this driver.
         driver = tools_dir / "sabotage_driver.py"
         driver.write_text(
-            "from pathlib import Path\n"
             "import selftest\n"
-            "import test_shards\n"
-            f"root = Path({str(ROOT)!r})\n"
-            "selftest.ROOT = root\n"
-            "test_shards.ROOT = root\n"
-            "selftest.main()\n",
+            "selftest.check_aggregate_table()\n",
             encoding="utf-8",
         )
 
-        def run() -> subprocess.CompletedProcess:
-            return subprocess.run(
+        def run() -> tuple[subprocess.CompletedProcess, float]:
+            started = time.perf_counter()
+            result = subprocess.run(
                 [sys.executable, "-B", str(driver)],
                 cwd=dest,
                 capture_output=True,
@@ -109,9 +106,10 @@ def _sabotage_ci_selftest() -> None:
                 env=_clean_git_env(),
                 timeout=60,
             )
+            return result, time.perf_counter() - started
 
-        baseline = run()
-        assert baseline.returncode == 0, baseline.stdout + baseline.stderr
+        baseline, baseline_seconds = run()
+        assert baseline.returncode == 0, "control failed before sabotage:\n" + baseline.stdout + baseline.stderr
 
         aggregate = tools_dir / "aggregate.py"
         original = aggregate.read_text(encoding="utf-8")
@@ -123,9 +121,13 @@ def _sabotage_ci_selftest() -> None:
         assert mutated != original, "gates-result mutation target not found in aggregate.py"
         aggregate.write_text(mutated, encoding="utf-8")
 
-        sabotaged = run()
+        sabotaged, sabotaged_seconds = run()
         assert sabotaged.returncode != 0 and "AssertionError" in sabotaged.stderr, (
             sabotaged.stdout + sabotaged.stderr
+        )
+        print(
+            f"  ci-selftest aggregate timing: control={baseline_seconds:.3f}s, "
+            f"mutant={sabotaged_seconds:.3f}s"
         )
 
 @fixture("audit-completeness")
