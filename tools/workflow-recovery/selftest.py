@@ -84,7 +84,7 @@ def check_workflow(text):
     assert field(jobs['ci'],'needs')=='[changes, test, gates]'
     assert field(jobs['test'],'needs')=='[changes, recovery_target]'
     assert field(jobs['pack'],'needs')=='[test, recovery_target]'
-    assert field(jobs['gates'],'needs')=='recovery_target'
+    assert field(jobs['gates'],'needs')=='[changes, recovery_target]'
     assert field(jobs['recovery_ci'],'needs')=='[recovery_target, test, gates, pack]'
     for event in ('push','pull_request','workflow_dispatch'):
         assert condition(field(jobs['recovery_target'],'if'),event)==(event=='workflow_dispatch')
@@ -116,11 +116,12 @@ def check_workflow(text):
     assert 'uses:' not in aggregate and 'continue-on-error' not in aggregate
     for key,job in [('TARGET','recovery_target'),('TEST','test'),('GATES','gates'),('PACK','pack')]:
         assert key+'_RESULT: ${{ needs.'+job+'.result }}' in aggregate
-    results={key+'_RESULT':'success' for key in ('TARGET','TEST','GATES','PACK')}
+    assert 'GATES_MODE: ${{ needs.gates.outputs.coverage-mode }}' in aggregate
+    results={key+'_RESULT':'success' for key in ('TARGET','TEST','GATES','PACK')} | {'GATES_MODE':'test-shard-complement'}
     aggregate_script=script_from(aggregate)
     assert run_script(aggregate_script,results)==0
     for key in results:
-        for status in ('failure','cancelled','skipped',''):
+        for status in ('failure','cancelled','skipped','') if key != 'GATES_MODE' else ('full',''):
             assert run_script(aggregate_script,results|{key:status})!=0
 
 
@@ -131,6 +132,7 @@ def main():
                          ('[ "$live_sha" != "$EXPECTED_SHA" ]','[ "$live_sha" = "$EXPECTED_SHA" ]'),
                          ('needs: [recovery_target, test, gates, pack]','needs: [test, gates]'),
                          ('PACK_RESULT: ${{ needs.pack.result }}','PACK_RESULT: success'),
+                         ('GATES_MODE: ${{ needs.gates.outputs.coverage-mode }}','GATES_MODE: full'),
                          ('        shell: bash\n','        with:\n          fetch-depth: 0\n        shell: bash\n')):
         assert before in text
         refused(lambda before=before,after=after:check_workflow(text.replace(before,after)))

@@ -15,6 +15,7 @@ Run every gate even after one fails -- fail-fast hides the others, and a session
 re-run the whole set to discover the next problem starts filtering output again.
 """
 import argparse
+import contextlib
 import csv
 import hashlib
 import io
@@ -162,12 +163,17 @@ AFTER_BUILD_FAST = [
     # not -- dotnet test only prints a test's output when it fails, so this is the layer that can
     # actually make a fresh, still-within-grace drift visible without turning the run red.
     "vendor-check",
+    # #2182: independently exercises evaluated solution-project identity, shard ownership,
+    # workflow bindings/sentinels, and the aggregate truth table. It queries MSBuild through the
+    # build lock, so it stays sequential after lint rather than joining the pure-file overlap.
+    "ci-selftest",
 ]
 
 # The full run's test leg. `test-no-build` reuses the assemblies `lint` just built; if `lint`
 # failed, the aggregate is already red, so a stale-assembly test result cannot turn a broken run
 # green. Outside `gates`, use `pixi run test` (which force-rebuilds -- #688).
-AFTER_BUILD_FULL = AFTER_BUILD_FAST + ["test-no-build"]
+SOLUTION_TEST_MEMBER = "test-no-build"
+AFTER_BUILD_FULL = AFTER_BUILD_FAST + [SOLUTION_TEST_MEMBER]
 
 # #1676: CI runs `--ci`, which excludes every name here from the run and requires each to carry a
 # non-empty reason -- the same shape sabotage.py's ALLOWLIST enforces for its own ratchet, so an
@@ -1739,6 +1745,23 @@ def selftest():
             ci_rc = main()
             ci_ran, ran[:] = list(ran), []
 
+            # #2182: ordinary full CI owns every canonical member, while complement CI omits
+            # exactly the solution test member that the same-revision shards own.
+            delete_receipt(cwd=repo)
+            sys.argv = ["gates.py"]
+            local_full_rc = main()
+            local_full_ran, ran[:] = list(ran), []
+            local_full_receipt = os.path.exists(receipt_path(repo))
+            delete_receipt(cwd=repo)
+            sys.argv = ["gates.py", "--ci"]
+            full_ci_rc = main()
+            full_ci_ran, ran[:] = list(ran), []
+            full_ci_receipt = os.path.exists(receipt_path(repo))
+            sys.argv = ["gates.py", "--ci", "--ci-test-shards-cover"]
+            complement_rc = main()
+            complement_ran, ran[:] = list(ran), []
+            complement_receipt = os.path.exists(receipt_path(repo))
+
             # `--record-member`'s name-only path END TO END through main(): parse, dispatch,
             # resolve, run, receipt. The arms in the fixture above call record_member directly, and
             # the CLI arm dies in parse_args before the dispatch is reached -- so without this the
@@ -1767,6 +1790,21 @@ def selftest():
             sys.argv = ["gates.py", "--lane-fast", "--ci"]
             lane_ci_combo_rc = main()
             lane_ci_combo_ran, ran[:] = list(ran), []
+
+            complement_invalid = []
+            for argv in (
+                ["gates.py", "--ci-test-shards-cover"],
+                ["gates.py", "--ci", "--fast", "--ci-test-shards-cover"],
+                ["gates.py", "--ci", "--skip-covered", "--ci-test-shards-cover"],
+                ["gates.py", "--ci", "--check-receipt", "--ci-test-shards-cover"],
+                ["gates.py", "--ci", "--record-member", "lint", "--ci-test-shards-cover"],
+            ):
+                output = io.StringIO()
+                with contextlib.redirect_stdout(output):
+                    sys.argv = argv
+                    rc = main()
+                complement_invalid.append((argv, rc, list(ran), output.getvalue()))
+                ran.clear()
         finally:
             os.chdir(prior_cwd)
             sys.argv = prior_argv
@@ -1790,6 +1828,25 @@ def selftest():
             print(f"  control FAILED: --skip-covered with --ci was not refused -- exit {ci_rc}, "
                   f"ran {ci_ran}")
             ok = False
+        if (local_full_rc != 0 or local_full_ran != _all_members()
+                or SOLUTION_TEST_MEMBER not in local_full_ran or not local_full_receipt):
+            print(f"  control FAILED: local full population/receipt contract -- exit {local_full_rc}, "
+                  f"ran {local_full_ran}, receipt={local_full_receipt}")
+            ok = False
+        if full_ci_rc != 0 or full_ci_ran != ci_member_set() or SOLUTION_TEST_MEMBER not in full_ci_ran or full_ci_receipt:
+            print(f"  control FAILED: full CI population/receipt contract -- exit {full_ci_rc}, "
+                  f"ran {full_ci_ran}, receipt={full_ci_receipt}")
+            ok = False
+        if (complement_rc != 0 or complement_ran != ci_member_set(True)
+                or SOLUTION_TEST_MEMBER in complement_ran or complement_receipt):
+            print(f"  control FAILED: complement CI population/receipt contract -- exit "
+                  f"{complement_rc}, ran {complement_ran}, receipt={complement_receipt}")
+            ok = False
+        for argv, rc, invalid_ran, output in complement_invalid:
+            if rc != 2 or invalid_ran or "--ci-test-shards-cover is full-CI-only" not in output:
+                print(f"  control FAILED: complement invalid combination {argv} -- exit {rc}, "
+                      f"ran {invalid_ran}, output={output!r}")
+                ok = False
         if front_door_rc != 0 or front_door_ran != [fast[1]] or not front_door_covered:
             print(f"  control FAILED: `--record-member {fast[1]}` through main() exited "
                   f"{front_door_rc}, ran {front_door_ran}, and left it covered: "
@@ -1842,6 +1899,17 @@ def selftest():
         CI_SKIP.clear()
         CI_SKIP.update(orig_ci_skip)
 
+    # A future canonical member is automatically included in both CI populations; only the one
+    # semantic external-coverage constant is subtracted from complement mode.
+    OVERLAP.append("newly-injected-canonical-member")
+    try:
+        if ("newly-injected-canonical-member" not in ci_member_set()
+                or "newly-injected-canonical-member" not in ci_member_set(True)):
+            print("  control FAILED: complement CI dropped a newly injected canonical member")
+            ok = False
+    finally:
+        OVERLAP.pop()
+
     # `skip=` (#1676) must drop a name from every phase before spawning/running it -- proven by a
     # fake spawner/runner that would raise if ever called for the skipped name, so a filter that
     # ran-and-discarded it (rather than never starting it) still fails this arm.
@@ -1885,6 +1953,12 @@ def _all_members():
     return seen
 
 
+def ci_member_set(test_shards_cover=False):
+    """The canonical ordered CI member set, optionally complemented by external test shards."""
+    externally_covered = {SOLUTION_TEST_MEMBER} if test_shards_cover else set()
+    return [name for name in _all_members() if name not in CI_SKIP and name not in externally_covered]
+
+
 def build_parser():
     """#1684: argparse, not `"--x" in sys.argv` -- an unrecognised flag must be refused (usage on
     stderr, exit 2) rather than silently falling through to a full gate run, which is what
@@ -1913,6 +1987,9 @@ def build_parser():
     parser.add_argument("--ci", action="store_true",
                         help="exclude CI_SKIP members, validate the ratchet, and assert the run "
                              "matches the tracked member list (#1676; what CI's own job passes)")
+    parser.add_argument("--ci-test-shards-cover", action="store_true",
+                        help="with --ci only, omit exactly the solution-test member covered by "
+                             "same-revision CI shards")
     parser.add_argument("--lane-fast", action="store_true",
                         help="run only lane_fast_member_set() -- the seconds-scale audits plus "
                              "fmt-check, no build, no tests, no self-tests (#2129; what "
@@ -1956,6 +2033,21 @@ def main():
 
     args = build_parser().parse_args()
 
+    if args.ci_test_shards_cover:
+        incompatible = []
+        if not args.ci:
+            incompatible.append("without --ci")
+        if args.fast:
+            incompatible.append("with --fast")
+        if args.skip_covered or args.check_receipt or args.record_member is not None:
+            incompatible.append("with receipt coverage")
+        if args.selftest or args.lane_fast:
+            incompatible.append("with another execution selector")
+        if incompatible:
+            print("gates: --ci-test-shards-cover is full-CI-only; not usable "
+                  + ", ".join(incompatible), flush=True)
+            return 2
+
     # #1936 review: argparse owns this now. `--record-member` takes a member NAME and nothing else,
     # so trailing argv (`--record-member lint -- dotnet build`) is refused for free as unrecognised
     # arguments, exit 2 -- the hand-rolled pre-argparse dispatch this replaces existed only to pass
@@ -1995,6 +2087,8 @@ def main():
     after_build = AFTER_BUILD_FAST if mode == "fast" else AFTER_BUILD_FULL
     quiet = args.quiet
     skip = frozenset(CI_SKIP) if args.ci else frozenset()
+    if args.ci_test_shards_cover:
+        skip = frozenset(skip | {SOLUTION_TEST_MEMBER})
     if args.skip_covered:
         # #1910: the completion pass. Skipping a member here is the same decision --check-receipt
         # makes about the whole set, taken one member at a time and against the same identity, so
@@ -2014,10 +2108,10 @@ def main():
     print(f"{RAN_REPORT}{len(names)} member(s): {', '.join(names)}")
 
     # #1676: the assertion that CI cannot silently drift from the tracked member list. Under --ci
-    # this must equal every gates.py member (build order) minus CI_SKIP -- any other result means
-    # run_all's own filtering diverged from _all_members(), not that a member merely failed.
+    # this must equal the canonical CI member set -- ordinary CI is the whole register minus
+    # CI_SKIP; complement CI additionally subtracts exactly the solution member owned by shards.
     if args.ci:
-        expected = [n for n in _dedupe(OVERLAP + BUILD_PHASE + after_build) if n not in CI_SKIP]
+        expected = ci_member_set(args.ci_test_shards_cover)
         if names != expected:
             print("gates: CI member list does not match the tracked list -- ")
             print(f"  ran:      {names}")
@@ -2032,11 +2126,16 @@ def main():
     # (1): the room-level engine caller (Baton.Mutation.VerifyRunner) discriminates on gates.py's
     # printed marker line, not this process's own exit code, but a human or CI script reading only
     # the exit code must still see three distinct outcomes.
-    # #1910: every member this run actually ran gets (or loses) its own receipt, whatever the
+    # #1910: every member a local run actually ran gets (or loses) its own receipt, whatever the
     # aggregate verdict was -- that is what lets a later `--skip-covered` pass stand on the legs
     # this run already paid for, and what stops a member that just went red from staying covered.
-    record_run_members(names, failed, blocked)
+    # CI is cold evidence and neither consumes nor produces local receipts. Its same-revision
+    # coverage claim belongs to the workflow aggregate, not to this job in isolation.
+    if not args.ci:
+        record_run_members(names, failed, blocked)
     if failed or blocked:
+        delete_receipt()
+    elif args.ci:
         delete_receipt()
     elif args.skip_covered:
         # A partial run must never mint a WHOLE-run receipt: it did not run every fast member, and

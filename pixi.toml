@@ -98,11 +98,11 @@ test = { cmd = "python tools/buildlock.py dotnet build --no-incremental && pytho
 # exactly the "zero-match assembly fails the leg" breakage #984's findings comment named). Each
 # shard instead invokes its member projects directly by `--project` -- there is no filter for a
 # zero-match assembly to hit, because every project actually named here has tests of its own.
-# `Baton.Tests` is the flow suite; the other four in-solution test projects (everything except
-# `Baton.Tests`) are `test-other`'s split, unchanged from the pre-#1833 grouping. `Baton.Cli.
-# SmokeTests` stays out of both, same as always (outside `Baton.slnx`, live-only).
-test-flow = { cmd = "python tools/buildlock.py dotnet build --no-incremental && python tools/buildlock.py dotnet test --project tests/Baton.Tests/Baton.Tests.csproj --no-build --minimum-expected-tests 1" }
-test-other = { cmd = "python tools/buildlock.py dotnet build --no-incremental && python tools/buildlock.py dotnet test --project tests/Baton.Vendors.Tests/Baton.Vendors.Tests.csproj --no-build --minimum-expected-tests 1 && python tools/buildlock.py dotnet test --project tests/Baton.Architecture.Tests/Baton.Architecture.Tests.csproj --no-build --minimum-expected-tests 1 && python tools/buildlock.py dotnet test --project tests/Baton.Cli.Tests/Baton.Cli.Tests.csproj --no-build --minimum-expected-tests 1 && python tools/buildlock.py dotnet test --project tests/Baton.VendorProbe.Tests/Baton.VendorProbe.Tests.csproj --no-build --minimum-expected-tests 1" }
+# tools/ci/test_shards.py evaluates every Baton.slnx project's MSBuild test identity once per
+# invocation, keeps Baton.Tests as the stable flow anchor, and assigns every other test to other.
+# Missing/ambiguous identity, a missing anchor, or an empty shard fails before any test starts.
+test-flow = { cmd = "python tools/buildlock.py dotnet build --no-incremental && python tools/ci/test_shards.py flow" }
+test-other = { cmd = "python tools/buildlock.py dotnet build --no-incremental && python tools/ci/test_shards.py other" }
 # The gates-only test leg (#986): `gates` sequences this after `lint`, whose forced
 # `--no-incremental` build is the same protection `test`'s own build step buys (the "partial
 # cover" note under `lint` below) -- so building again inside the same run was pure duplication.
@@ -349,6 +349,7 @@ gates-lane-fast = { cmd = "python -u tools/gates/gates.py --lane-fast" }
 gates-quiet = { cmd = "python -u tools/gates/gates.py --quiet" }
 gates-fast-quiet = { cmd = "python -u tools/gates/gates.py --fast --quiet" }
 workflow-recovery-selftest = { cmd = "python tools/workflow-recovery/selftest.py" }
+ci-selftest = { cmd = "python tools/ci/selftest.py" }
 gates-selftest = { cmd = "python -u tools/gates/gates.py --selftest" }
 # #1910: the completion pass a lane runs before pushing -- what it skips, and why it writes no
 # whole-run receipt, are stated at tools/gates/gates.py's covering rule (spec/baton.md C-12 ruling C).
@@ -356,6 +357,8 @@ gates-fast-cover = { cmd = "python -u tools/gates/gates.py --fast --skip-covered
 gates-fast-cover-quiet = { cmd = "python -u tools/gates/gates.py --fast --skip-covered --quiet" }
 # #1676: what .github/workflows/ci.yml's own required job runs (see that job's own comment for why).
 gates-ci-quiet = { cmd = "python -u tools/gates/gates.py --ci --quiet" }
+# #2182: complementary cold-CI gates; the final ci job owns the union with same-SHA test shards.
+gates-ci-test-complement-quiet = { cmd = "python -u tools/gates/gates.py --ci --ci-test-shards-cover --quiet" }
 gate-sabotage = { cmd = "python -u tools/gates/sabotage.py" }
 # #1636 (spec/baton.md C-12): what .githooks/pre-push runs before deciding whether to skip.
 # #1910: through buildlock.py's read-only priority class, not unwrapped -- it is pure git and file
