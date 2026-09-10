@@ -362,7 +362,9 @@ public sealed class RunwayReservationDispatchTests : IDisposable
 
     private static async Task<DispatchOptions> BuildDispatchAsync(
         string testRoot, string room, string? adapter = null) =>
-        new("advise", await WriteSpecAsync(testRoot), Path.Combine(testRoot, room), Adapter: adapter ?? "fake");
+        new(
+            "advise", await WriteSpecAsync(testRoot), Path.Combine(testRoot, room), Adapter: adapter ?? "fake",
+            Model: string.Equals(adapter, "claude", StringComparison.OrdinalIgnoreCase) ? "sonnet" : null);
 
     private static async Task<string> WriteSpecAsync(string testRoot)
     {

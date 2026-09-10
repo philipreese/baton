@@ -149,6 +149,20 @@ public static class DispatchCommand
             bindings = new Dictionary<string, WorkerBindingConfigEntry> { [continuedWorkerName] = resumedEntry };
         }
 
+        // #2142: the display-only ModelResolved stamp must never answer this policy. The final binding
+        // tuple's Model is what reaches the vendor argv, so reject only an effective Claude invocation
+        // that still lacks it. This is after role/template resolution and continuation inheritance, but
+        // before runway admission, room provisioning, or any other dispatch write.
+        foreach (var (workerName, binding) in bindings)
+        {
+            if (ClaudeInvocationModelPolicy.RefusalMessage(binding.Adapter, binding.Model) is { } refusal)
+            {
+                throw new CliArgumentException(
+                    $"Worker '{workerName}' {refusal}",
+                    ClaudeInvocationModelPolicy.ExplicitModelRemedy + ".");
+            }
+        }
+
         // R1 (#1354/#1380): disclose the consequence up front, before the run starts, whenever
         // RoleDispatch.ToBinding declared a fresh worktree for an audited role — the worker runs in
         // that tree, so it sees `workspace` at HEAD, not the uncommitted or staged changes in it

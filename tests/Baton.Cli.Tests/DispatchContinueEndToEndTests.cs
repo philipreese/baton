@@ -54,7 +54,7 @@ public sealed class DispatchContinueEndToEndTests : IDisposable
             var followUpSpecPath = await WriteSpecAsync(testRoot, "Now weigh Y instead.");
             var childRoom = Path.Combine(testRoot, "child");
             var options = new DispatchOptions(
-                "advise", followUpSpecPath, childRoom, Adapter: "claude", ContinueFromRoomDirectoryPath: parentRoom);
+                "advise", followUpSpecPath, childRoom, Adapter: "claude", Model: "sonnet", ContinueFromRoomDirectoryPath: parentRoom);
 
             var result = await DispatchCommand.ExecuteAsync(options, Adapters, TestContext.Current.CancellationToken, evaluateRunway: RunwayTestGate.Admit);
 
@@ -117,7 +117,7 @@ public sealed class DispatchContinueEndToEndTests : IDisposable
             var parentSpecPath = await WriteSpecAsync(testRoot, "Now weigh Y instead.");
             var parentRoom = Path.Combine(testRoot, "parent");
             var parentOptions = new DispatchOptions(
-                "advise", parentSpecPath, parentRoom, Adapter: "claude", ContinueFromRoomDirectoryPath: grandparentRoom);
+                "advise", parentSpecPath, parentRoom, Adapter: "claude", Model: "sonnet", ContinueFromRoomDirectoryPath: grandparentRoom);
             var parentResult = await DispatchCommand.ExecuteAsync(parentOptions, Adapters, TestContext.Current.CancellationToken, evaluateRunway: RunwayTestGate.Admit);
             var parentView = WorkflowStatusProjector.Project(parentResult.State, parentResult.Snapshot, parentRoom);
             await TerminalSentinelWriter.WriteAsync(parentRoom, parentView, TestContext.Current.CancellationToken);
@@ -125,7 +125,7 @@ public sealed class DispatchContinueEndToEndTests : IDisposable
             var childSpecPath = await WriteSpecAsync(testRoot, "Now weigh Z instead.");
             var childRoom = Path.Combine(testRoot, "child");
             var childOptions = new DispatchOptions(
-                "advise", childSpecPath, childRoom, Adapter: "claude", ContinueFromRoomDirectoryPath: parentRoom);
+                "advise", childSpecPath, childRoom, Adapter: "claude", Model: "sonnet", ContinueFromRoomDirectoryPath: parentRoom);
             var childResult = await DispatchCommand.ExecuteAsync(childOptions, Adapters, TestContext.Current.CancellationToken, evaluateRunway: RunwayTestGate.Admit);
 
             Assert.Equal(WorkflowStatus.Terminal, childResult.State.Status);
@@ -150,7 +150,7 @@ public sealed class DispatchContinueEndToEndTests : IDisposable
             var followUpSpecPath = await WriteSpecAsync(testRoot, "Now weigh Y instead.");
             var childRoom = Path.Combine(testRoot, "child");
             var options = new DispatchOptions(
-                "advise", followUpSpecPath, childRoom, Adapter: "claude", ContinueFromRoomDirectoryPath: parentRoom);
+                "advise", followUpSpecPath, childRoom, Adapter: "claude", Model: "sonnet", ContinueFromRoomDirectoryPath: parentRoom);
 
             await DispatchCommand.ExecuteAsync(options, Adapters, TestContext.Current.CancellationToken, evaluateRunway: RunwayTestGate.Admit);
 
@@ -179,7 +179,7 @@ public sealed class DispatchContinueEndToEndTests : IDisposable
             var followUpSpecPath = await WriteSpecAsync(testRoot, "Now weigh Y instead.");
             var childRoom = Path.Combine(testRoot, "child");
             var options = new DispatchOptions(
-                "advise", followUpSpecPath, childRoom, Adapter: "claude", ContinueFromRoomDirectoryPath: parentRoom);
+                "advise", followUpSpecPath, childRoom, Adapter: "claude", Model: "sonnet", ContinueFromRoomDirectoryPath: parentRoom);
 
             var ex = await Assert.ThrowsAsync<CliArgumentException>(
                 () => DispatchCommand.ExecuteAsync(options, Adapters, TestContext.Current.CancellationToken, evaluateRunway: RunwayTestGate.Admit));
@@ -231,13 +231,13 @@ public sealed class DispatchContinueEndToEndTests : IDisposable
             var specPath = await WriteSpecAsync(testRoot, "Weigh the options for X.");
             var parentRoom = Path.Combine(testRoot, "parent");
             var parentResult = await DispatchCommand.ExecuteAsync(
-                new DispatchOptions("advise", specPath, parentRoom, Adapter: "claude"), Adapters, TestContext.Current.CancellationToken, evaluateRunway: RunwayTestGate.Admit);
+                new DispatchOptions("advise", specPath, parentRoom, Adapter: "claude", Model: "sonnet"), Adapters, TestContext.Current.CancellationToken, evaluateRunway: RunwayTestGate.Admit);
             await SetSessionIdAsync(parentRoom, "advise", "sess-abc-123");
 
             var followUpSpecPath = await WriteSpecAsync(testRoot, "Now weigh Y instead.");
             var childRoom = Path.Combine(testRoot, "child");
             var options = new DispatchOptions(
-                "advise", followUpSpecPath, childRoom, Adapter: "claude", ContinueFromRoomDirectoryPath: parentRoom);
+                "advise", followUpSpecPath, childRoom, Adapter: "claude", Model: "sonnet", ContinueFromRoomDirectoryPath: parentRoom);
 
             var ex = await Assert.ThrowsAsync<CliArgumentException>(
                 () => DispatchCommand.ExecuteAsync(options, Adapters, TestContext.Current.CancellationToken, evaluateRunway: RunwayTestGate.Admit));
@@ -269,7 +269,7 @@ public sealed class DispatchContinueEndToEndTests : IDisposable
             var followUpSpecPath = await WriteSpecAsync(testRoot, "Now weigh Y instead.");
             var childRoom = Path.Combine(testRoot, "child");
             var options = new DispatchOptions(
-                "advise", followUpSpecPath, childRoom, Adapter: "claude", ContinueFromRoomDirectoryPath: parentRoom);
+                "advise", followUpSpecPath, childRoom, Adapter: "claude", Model: "sonnet", ContinueFromRoomDirectoryPath: parentRoom);
 
             var ex = await Assert.ThrowsAsync<CliArgumentException>(
                 () => DispatchCommand.ExecuteAsync(options, Adapters, TestContext.Current.CancellationToken, evaluateRunway: RunwayTestGate.Admit));
@@ -292,7 +292,7 @@ public sealed class DispatchContinueEndToEndTests : IDisposable
             var specPath = await WriteSpecAsync(testRoot, "Weigh the options for X.");
             var childRoom = Path.Combine(testRoot, "child");
             var options = new DispatchOptions(
-                "advise", specPath, childRoom, Adapter: "claude", ContinueFromRoomDirectoryPath: missingParent);
+                "advise", specPath, childRoom, Adapter: "claude", Model: "sonnet", ContinueFromRoomDirectoryPath: missingParent);
 
             var ex = await Assert.ThrowsAsync<CliArgumentException>(
                 () => DispatchCommand.ExecuteAsync(options, Adapters, TestContext.Current.CancellationToken, evaluateRunway: RunwayTestGate.Admit));
@@ -347,7 +347,7 @@ public sealed class DispatchContinueEndToEndTests : IDisposable
             var followUpSpecPath = await WriteSpecAsync(testRoot, "Now weigh Y instead.");
             var childRoom = Path.Combine(testRoot, "child");
             var options = new DispatchOptions(
-                "advise", followUpSpecPath, childRoom, Adapter: "claude", ContinueFromRoomDirectoryPath: parentRoom);
+                "advise", followUpSpecPath, childRoom, Adapter: "claude", Model: "sonnet", ContinueFromRoomDirectoryPath: parentRoom);
 
             await DispatchCommand.ExecuteAsync(options, Adapters, TestContext.Current.CancellationToken, evaluateRunway: RunwayTestGate.Admit);
 
@@ -367,7 +367,9 @@ public sealed class DispatchContinueEndToEndTests : IDisposable
     {
         var specPath = await WriteSpecAsync(testRoot, spec);
         var roomDirectory = Path.Combine(testRoot, "parent");
-        var options = new DispatchOptions("advise", specPath, roomDirectory, Adapter: adapter);
+        var options = new DispatchOptions(
+            "advise", specPath, roomDirectory, Adapter: adapter,
+            Model: string.Equals(adapter, "claude", StringComparison.OrdinalIgnoreCase) ? "sonnet" : null);
 
         var result = await DispatchCommand.ExecuteAsync(options, Adapters, TestContext.Current.CancellationToken, evaluateRunway: RunwayTestGate.Admit);
         var view = WorkflowStatusProjector.Project(result.State, result.Snapshot, roomDirectory);
@@ -381,7 +383,7 @@ public sealed class DispatchContinueEndToEndTests : IDisposable
     {
         var specPath = await WriteSpecAsync(testRoot, spec);
         var roomDirectory = Path.Combine(testRoot, "parent");
-        var options = new DispatchOptions("advise", specPath, roomDirectory, Adapter: "claude");
+        var options = new DispatchOptions("advise", specPath, roomDirectory, Adapter: "claude", Model: "sonnet");
 
         var result = await DispatchCommand.ExecuteAsync(options, Adapters, TestContext.Current.CancellationToken, evaluateRunway: RunwayTestGate.Admit);
         var view = WorkflowStatusProjector.Project(result.State, result.Snapshot, roomDirectory);

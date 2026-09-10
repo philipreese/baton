@@ -232,6 +232,17 @@ public sealed class QueueSchedulerService : BackgroundService
                 return interval;
             }
 
+            // #2142: imported and hand-edited legacy rows bypass queue add, so apply the same
+            // final-tuple policy before claiming a room or spawning a lane. This is a refusal, not a
+            // fallback: the item records the actionable repair and no vendor process is started.
+            if (ClaudeInvocationModelPolicy.RefusalMessage(tier.Adapter, tier.Model) is { } refusal)
+            {
+                await FailAsync(
+                    item, $"{refusal} Re-add the item with {ClaudeInvocationModelPolicy.ExplicitModelRemedy}.",
+                    room: null, now, decision, tier, cancellationToken).ConfigureAwait(false);
+                return interval;
+            }
+
             // The launch is RECORDED BEFORE IT IS STARTED, and started under the same token it was recorded
             // under -- spec/baton.md §13 states that ruling and the duplicate-worker failure it closes.
             // What belongs here rather than there: the two writes are deliberately asymmetric. The ITEM is
