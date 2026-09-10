@@ -15,15 +15,16 @@ namespace Baton.Cli.Mcp;
 /// </para>
 /// <para>
 /// It answers a question about the DAEMON, not about the rooms: <c>fleet_status</c> itself scans the
-/// rooms directory live on every call, so its own <c>rooms[]</c> are always fresh. What can be stale
-/// is the projection file every other consumer (the pusher, and through it the glass) reads instead.
+/// rooms directory live on every call, so its own <c>rooms[]</c> are always fresh. The daemon-served
+/// Fleet Glass page reads the same projection file, so its freshness is a property of the daemon
+/// writer rather than of the room scan.
 /// </para>
 /// <para>
 /// <b>Absent, unreadable, or unparseable reads STALE, with no age.</b> Same fail-closed posture as
-/// <c>pusher.py</c>'s own <c>read_projection_file</c> (spec/baton.md §6): "no evidence the daemon
-/// wrote anything" is the same operational fact as "it last wrote an hour ago", and the alternative —
-/// reporting a clean <c>stale: false</c> because the file is missing — is exactly the silence #1981
-/// is about. The age is omitted rather than fabricated when it cannot be computed.
+/// the daemon-served page's projection read: "no evidence the daemon wrote anything" is the same
+/// operational fact as "it last wrote an hour ago", and the alternative — reporting a clean
+/// <c>stale: false</c> because the file is missing — is exactly the silence #1981 is about. The age is
+/// omitted rather than fabricated when it cannot be computed.
 /// </para>
 /// </summary>
 internal static class FleetProjectionStaleness

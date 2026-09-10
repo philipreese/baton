@@ -340,8 +340,8 @@ public static class BatonPaths
     /// <c>{Root}/fleet/projection.json</c> — the daemon-written fleet projection file (#1557,
     /// spec/baton.md §7's fourth kept responsibility): the same <c>fleet_status</c> room array
     /// (spec/baton.md §6) plus per-room <c>live</c>/<c>pruned</c> and the top-level <c>derived_at</c>,
-    /// rewritten atomically roughly every 30s so a local reader (a janitor sweep, the pusher once
-    /// #1557 PR-B lands) never has to re-derive it by scanning every room itself.
+    /// rewritten atomically roughly every 30s so a local reader never has to re-derive it by scanning
+    /// every room itself.
     /// </summary>
     public static string FleetProjectionFile => Path.Combine(Root, FleetDirectoryName, FleetProjectionFileName);
 
@@ -482,17 +482,11 @@ public static class BatonPaths
     }
 
     /// <summary>
-    /// <c>{Root}/fleet-glass/secretpatterns.local.txt</c> — the fail-closed secret-gate denylist
-    /// <c>tools/fleet-glass/pusher.py</c>'s <c>load_secret_patterns</c>/<c>secret_hit_index</c> already
-    /// define (spec/baton.md §6): one regex per line, '#' starts a comment, blank lines ignored. The
-    /// SAME path the pusher's own <c>DEFAULT_SECRET_PATTERNS_FILE</c> resolves (beside <c>pusher.py</c>,
-    /// i.e. <c>&lt;.baton root&gt;\fleet-glass\</c> on a machine where the pusher runs from an installed
-    /// copy under the storage root) — #1816: the daemon previously kept its own copy directly under
-    /// <see cref="Root"/>, a path the pusher never wrote to, so every <c>stdoutTail</c> silently read as
-    /// withheld. Machine-local like the pusher's own (never checked in — outside the repo entirely, so
-    /// no <c>.gitignore</c> entry is needed either). Missing or unreadable fails CLOSED (every
-    /// <c>stdoutTail</c> line withheld), matching the pusher's own ruling — <c>FleetProjectionWriter</c>
-    /// logs once when that fallback triggers rather than staying silent about it.
+    /// <c>{Root}/fleet-glass/secretpatterns.local.txt</c> — the fail-closed secret-gate denylist:
+    /// one regex per line, '#' starts a comment, and blank lines are ignored (spec/baton.md §6).
+    /// This machine-local file is not checked in. Missing or unreadable input fails CLOSED, withholding
+    /// every <c>stdoutTail</c> line; <c>FleetProjectionWriter</c> logs once when that fallback triggers
+    /// rather than staying silent about it.
     /// </summary>
     public static string SecretPatternsFile => Path.Combine(Root, SecretPatternsDirectoryName, SecretPatternsFileName);
 

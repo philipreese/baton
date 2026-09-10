@@ -344,8 +344,8 @@ as `baton dispatch`'s own.)
 
 Once a room is genuinely done with, `baton room delete <room-dir>` (or its batch form,
 `baton rooms prune --terminal --yes`) actually removes it — the directory, its `room-registry.jsonl`
-line(s), and (best-effort) a deliverables tombstone — refusing a non-terminal room unless `--force`;
-`spec/baton.md` §8 has the full contract, including what it cannot reach.
+line(s) — refusing a non-terminal room unless `--force`. This is a local CLI operation; server-side
+artifact state is outside its reach. `spec/baton.md` §8 has the full contract, including what it cannot reach.
 
 **Delivering orchestrator deliverables (`baton deliver`).** A conductor or orchestrator delivering artifacts (such as its decision queue at the end of an unattended window) delivers them directly to the standing conductor room so they reach the Fleet Glass inbox:
 
