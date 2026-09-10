@@ -9,6 +9,32 @@ that carried them: `git show v0.35.0:src/Baton.Cli/CHANGELOG.md` (likewise `src/
 `release-please-config.json`. Everything below this line predates the split: the repo's single
 shared version through `0.14.0`.
 
+## [0.45.0](https://github.com/philipreese/baton/compare/v0.44.4...v0.45.0) (2026-09-10)
+
+
+### Features
+
+* **docs:** Establish shared agent entry point and role authority ([05ce750](https://github.com/philipreese/baton/commit/05ce750358b30a964c3a57d8a36fee083384c372))
+* **usage:** Read real Codex subscription counters ([567842a](https://github.com/philipreese/baton/commit/567842acc8db7245875d793707a615cb6f3c99dd))
+
+
+### Bug Fixes
+
+* **tools:** Bound source discovery and key reads on served windows ([3fe51ba](https://github.com/philipreese/baton/commit/3fe51ba752f178331a89463673046ac34d7502af))
+* **tools:** Retain bounded command output for safe recovery ([2097a6e](https://github.com/philipreese/baton/commit/2097a6ec24e80d829d1f6e98c53db35c86b475cc))
+* **vendors:** Accept and validate measured agy command metadata ([51bb188](https://github.com/philipreese/baton/commit/51bb1882d58d7ccb0734b8167b97bf2151342575))
+* **vendors:** Show agy tool names in progress ([feda8e0](https://github.com/philipreese/baton/commit/feda8e0e9a978c605b90b9b63f84350f1afa77f8))
+
+
+### Performance Improvements
+
+* **ci:** Partition solution tests across CI jobs ([#2203](https://github.com/philipreese/baton/issues/2203)) ([d1035ed](https://github.com/philipreese/baton/commit/d1035ed64ebcd83028d64b039d929c68492cb4f1))
+
+
+### Documentation
+
+* **vendors:** Centralize agy capture evidence ([c616bed](https://github.com/philipreese/baton/commit/c616bed1e11df7596b409229850b1afca974c5a3))
+
 ## [0.44.4](https://github.com/philipreese/baton/compare/v0.44.3...v0.44.4) (2026-09-10)
 
 
