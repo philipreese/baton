@@ -198,7 +198,9 @@ public sealed class RepeatedToolCallTests
     [Fact]
     public async Task Three_identical_git_status_calls_are_three_executions()
     {
-        using var fixture = new RepeatFixture(commandCeiling: null, "git status*");
+        using var fixture = new RepeatFixture(commandCeiling: null, "git init*", "git status*");
+        var initialized = await fixture.RunAsync("git init --quiet --template=");
+        Assert.True(initialized.Success, initialized.Text);
 
         var results = new List<CodexDynamicToolResult>();
         for (var i = 0; i < 3; i++)
@@ -208,6 +210,7 @@ public sealed class RepeatedToolCallTests
 
         Assert.All(results, result =>
         {
+            Assert.True(result.Success, result.Text);
             Assert.DoesNotContain("replayed:", result.Text, StringComparison.Ordinal);
             Assert.DoesNotContain(GrantRefusal.Marker, result.Text);
         });

@@ -151,18 +151,27 @@ public sealed class RepeatedToolCallLedger
     public RepeatDecision ClassifyCommand(string commandLine)
     {
         ArgumentNullException.ThrowIfNull(commandLine);
-        if (IsVolatile(commandLine))
+        var now = _timeProvider.GetUtcNow();
+        var key = CommandKey(commandLine);
+        var hasEntry = TryTouch(key, out var entry);
+
+        // A volatile command is exempt only after a successful observation. Once Baton has started
+        // one and then timed out, been cancelled, or lost its capture, retrying is no longer a poll:
+        // an external diff driver or other helper may already have performed side effects. Consult
+        // that terminal failure before applying the normal volatile re-read exemption.
+        if (IsVolatile(commandLine)
+            && (!hasEntry
+                || entry.Output is null
+                || entry.OutputSucceeded is not false
+                || now - entry.ExecutedAt > Window))
         {
             return RepeatDecision.Execute;
         }
 
-        var now = _timeProvider.GetUtcNow();
-        var key = CommandKey(commandLine);
-
         // No entry, a stale one, or one whose output we never recorded (the command failed to start,
         // or was itself refused) all read the same way: there is no previous answer to stand in for
         // this one, so it runs.
-        if (!TryTouch(key, out var entry)
+        if (!hasEntry
             || entry.Output is null
             || now - entry.ExecutedAt > Window)
         {
@@ -230,21 +239,38 @@ public sealed class RepeatedToolCallLedger
     /// <summary>
     /// Stores what a <see cref="RepeatVerdict.Execute"/> command actually printed, so the next ask
     /// inside <see cref="Window"/> can be answered with it. A command whose output is never recorded
-    /// simply executes again — the ledger never refuses on an answer it does not hold.
+    /// simply executes again — the ledger never refuses on an answer it does not hold. Successful
+    /// volatile observations remain unrecorded so they can be re-read, but a terminal volatile
+    /// failure is force-recorded because its helpers may already have performed side effects.
     /// </summary>
     public void RecordCommandOutput(string commandLine, string output, bool succeeded = true)
     {
         ArgumentNullException.ThrowIfNull(commandLine);
         ArgumentNullException.ThrowIfNull(output);
-        if (IsVolatile(commandLine))
+        if (IsVolatile(commandLine) && succeeded)
         {
             return;
         }
 
-        if (TryTouch(CommandKey(commandLine), out var entry))
+        var key = CommandKey(commandLine);
+        if (TryTouch(key, out var entry))
         {
             entry.Output = output;
             entry.OutputSucceeded = succeeded;
+            return;
+        }
+
+        // ClassifyCommand deliberately creates no entry for a volatile observation, so its failed
+        // outcome establishes the entry here. Non-volatile commands already established theirs
+        // before execution and keep the prior no-entry behavior.
+        if (IsVolatile(commandLine))
+        {
+            Put(key, new Entry
+            {
+                ExecutedAt = _timeProvider.GetUtcNow(),
+                Output = output,
+                OutputSucceeded = succeeded,
+            });
         }
     }
 

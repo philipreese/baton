@@ -939,7 +939,7 @@ public sealed class CodexDynamicToolPolicyTests
             new PermissionGrant(RunShellCommands: true),
             ["report.md"],
             // wait-ok: injected ceiling reaches the timeout branch quickly; the child is killed there.
-            commandCeiling: _ => TimeSpan.FromMilliseconds(150));
+            commandCeiling: _ => TimeSpan.FromMilliseconds(500));
         var command = HangingSideEffectCommand(fixture.Workspace, "timeout");
 
         var timedOut = await fixture.ExecuteAsync(
@@ -951,13 +951,35 @@ public sealed class CodexDynamicToolPolicyTests
         var replay = await fixture.ExecuteAsync(
             CodexDynamicToolPolicy.RunCommandTool, new { command = command.CommandLine });
 
-        Assert.False(timedOut.Success);
+        Assert.False(timedOut.Success, timedOut.Text);
         Assert.Contains("default command ceiling", timedOut.Text, StringComparison.Ordinal);
         Assert.True(retained.Success, retained.Text);
         Assert.Contains("BEFORE-HANG", retained.Text, StringComparison.Ordinal);
         Assert.False(replay.Success);
         Assert.Contains("replayed: identical command", replay.Text, StringComparison.Ordinal);
         Assert.Contains(reference, replay.Text, StringComparison.Ordinal);
+        Assert.Single(File.ReadAllLines(command.CounterPath));
+    }
+
+    [Fact]
+    public async Task Timed_out_volatile_diff_is_replayed_without_rerunning_its_external_driver()
+    {
+        using var fixture = new PolicyFixture(
+            new PermissionGrant(RunShellCommands: true),
+            ["report.md"],
+            // wait-ok: injected ceiling reaches the timeout branch quickly; the child is killed there.
+            commandCeiling: _ => TimeSpan.FromMilliseconds(500));
+        var command = HangingExternalDiffCommand(fixture.Workspace, "volatile-timeout");
+
+        var timedOut = await fixture.ExecuteAsync(
+            CodexDynamicToolPolicy.RunCommandTool, new { command = command.CommandLine });
+        var replay = await fixture.ExecuteAsync(
+            CodexDynamicToolPolicy.RunCommandTool, new { command = command.CommandLine });
+
+        Assert.False(timedOut.Success, timedOut.Text);
+        Assert.Contains("default command ceiling", timedOut.Text, StringComparison.Ordinal);
+        Assert.False(replay.Success, replay.Text);
+        Assert.Contains("replayed: identical command", replay.Text, StringComparison.Ordinal);
         Assert.Single(File.ReadAllLines(command.CounterPath));
     }
 
@@ -1797,6 +1819,71 @@ public sealed class CodexDynamicToolPolicyTests
         return ($"./{name}", counterPath);
     }
 
+    private static (string CommandLine, string CounterPath) HangingExternalDiffCommand(
+        string directory, string name)
+    {
+        var counterPath = Path.Combine(directory, $"{name}-runs.txt");
+        var helperName = $"{name}-diff.sh";
+        var helperPath = Path.Combine(directory, helperName);
+        var hang = OperatingSystem.IsWindows()
+            ? "exec ping -n 30 127.0.0.1 >/dev/null"
+            : "exec sleep 30";
+        File.WriteAllText(
+            helperPath,
+            $"#!/bin/sh\nprintf 'ran\\n' >> {name}-runs.txt\nprintf 'BEFORE-HANG\\n'\n{hang}\n");
+        if (!OperatingSystem.IsWindows())
+        {
+            File.SetUnixFileMode(
+                helperPath,
+                UnixFileMode.UserRead | UnixFileMode.UserWrite | UnixFileMode.UserExecute
+                | UnixFileMode.GroupRead | UnixFileMode.GroupExecute
+                | UnixFileMode.OtherRead | UnixFileMode.OtherExecute);
+        }
+        var helperCommand = OperatingSystem.IsWindows()
+            ? $"sh ./{helperName}"
+            : $"./{helperName}";
+
+        // No commit is needed: the index supplies the old side and the worktree supplies the new.
+        // An empty template and hooks path keep this synthetic repository isolated from operator git
+        // setup; PolicyFixture removes the repository and helper during teardown.
+        RunGitSetup(directory, "init", "--quiet", "--template=");
+        RunGitSetup(directory, "config", "core.hooksPath", "");
+        RunGitSetup(directory, "config", "diff.counter.command", helperCommand);
+        File.WriteAllText(Path.Combine(directory, ".gitattributes"), "tracked.txt diff=counter\n");
+        var trackedPath = Path.Combine(directory, "tracked.txt");
+        File.WriteAllText(trackedPath, "before\n");
+        RunGitSetup(directory, "add", ".gitattributes", "tracked.txt");
+        File.WriteAllText(trackedPath, "after changed\n");
+
+        return ("git diff --ext-diff", counterPath);
+    }
+
+    private static void RunGitSetup(string directory, params string[] arguments)
+    {
+        var startInfo = new System.Diagnostics.ProcessStartInfo("git")
+        {
+            WorkingDirectory = directory,
+            RedirectStandardOutput = true,
+            RedirectStandardError = true,
+            UseShellExecute = false,
+        };
+        foreach (var argument in arguments)
+        {
+            startInfo.ArgumentList.Add(argument);
+        }
+
+        using var process = System.Diagnostics.Process.Start(startInfo)
+            ?? throw new IOException("Could not start git while preparing the synthetic diff fixture.");
+        var stdout = process.StandardOutput.ReadToEnd();
+        var stderr = process.StandardError.ReadToEnd();
+        process.WaitForExit();
+        if (process.ExitCode != 0)
+        {
+            throw new IOException(
+                $"Git fixture setup failed with exit {process.ExitCode}: {stdout}{stderr}");
+        }
+    }
+
     private static string CommandOutputReference(string text)
     {
         const string marker = "Command output reference: ";
@@ -1909,6 +1996,17 @@ public sealed class CodexDynamicToolPolicyTests
         {
             if (Directory.Exists(Root))
             {
+                // Git object files are read-only on Windows. The external-diff regression creates
+                // them with `git add`, so normalize fixture-owned files before recursive cleanup.
+                var gitObjects = Path.Combine(Workspace, ".git", "objects");
+                if (Directory.Exists(gitObjects))
+                {
+                    foreach (var path in Directory.EnumerateFiles(
+                                 gitObjects, "*", SearchOption.AllDirectories))
+                    {
+                        File.SetAttributes(path, FileAttributes.Normal);
+                    }
+                }
                 DirectoryCleanup.DeleteRecursively(Root);
             }
         }
