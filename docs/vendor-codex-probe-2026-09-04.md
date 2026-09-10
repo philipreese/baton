@@ -10,6 +10,12 @@ credentials were scrubbed before launch and no API-key-billed request was permit
 A later Baton role-mediation acceptance used Luna/low again. It is recorded separately below because
 it exercised Baton's app-server broker and grant-generated dynamic tools rather than bare `codex exec`.
 
+On 2026-09-10 the conductor made the follow-up capture required by #1904 against the same installed
+`codex-cli 0.153.2`: initialize/initialized followed by `account/rateLimits/read`, with no thread,
+model turn, logout, credential read, or quota reset. The checked-in rate-limit fixture is a scoped,
+shape-preserving subtree of that response, not the complete response; unrelated account, upsell,
+reset-credit, and private fields were omitted and the raw capture remains local.
+
 ## Evidence boundary
 
 The evidence has three distinct sources:
@@ -238,16 +244,14 @@ The included error fixture is schema-derived rather than a live quota-wall captu
 
 - No live Codex quota exhaustion was induced, so the exact `codex exec --json` quota-wall payload,
   reset-time availability, retry behavior, and process exit code remain unmeasured.
-- The reusable probe observed three app-server rate-limit windows with used percentages and reset
-  instants. It did not establish human-facing names or how each window maps to ChatGPT product limits,
-  so they must not be relabelled or presented as an inferred token allowance. It also did not record
-  the response's own **payload shape** — `CodexProbe.CollectRateLimitWindows` walks the result
-  recursively and discards the property path, and no response fixture is in the index below. A parser
-  written against it today would be a guess, which is why `#1904` ships a **derived** codex usage
-  source (`CodexUsageSource`, aggregating Baton's own burn ledger and labelled `source: derived`)
-  rather than a reader of this surface. **One authenticated `account/rateLimits/read` capture is what
-  unblocks the real thing** — a `CodexRateLimitsSource` through `CodexAppServerBroker`, which already
-  speaks app-server JSON-RPC and is already an approved spawn site — and retires the derivation.
+- The 2026-09-10 capture established the rate-limit property paths. The result carries a legacy
+  `rateLimits` object and a multi-bucket `rateLimitsByLimitId` map. Its account-wide `codex`
+  primary is the 10,080-minute weekly window at 48% used; account secondary is null. The separate
+  named model bucket carries 300-minute and 10,080-minute windows. This proves that `primary` does
+  not mean five hours and that the legacy object aliases a map entry; it does not establish that every
+  account exposes both account windows or that bucket names are stable. `CodexUsageSource` therefore
+  maps by limit identity and duration, prefers the map without adding the alias, preserves null as
+  unavailable, and makes no token-allowance inference.
 - App-server dynamic tools have enforced a read-only/outbox-only Baton grant on this host. A live
   workspace-write role, extra writable roots, network access, and subprocess cancellation during an
   active tool call remain unmeasured.
@@ -276,3 +280,5 @@ The included error fixture is schema-derived rather than a live quota-wall captu
 - `codex-app-server-errors.jsonl` — schema-derived structured limit notifications.
 - `codex-app-server-broker-readonly-success.jsonl` — live-shaped grant-tool success with exact per-turn usage.
 - `codex-app-server-broker-resume-cache-miss.jsonl` — same thread resumed across a broker process with zero cached input.
+- `codex-app-server-rate-limits-0.153.2.jsonl` — observed, scoped rate-limit subtree captured without
+  a model turn; structure and relevant values are preserved, while unrelated response fields are omitted.

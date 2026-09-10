@@ -2965,7 +2965,7 @@ anticipated this shape):
           "percentUsed"?: number,    // ALWAYS percent USED (agy's own "percent remaining" is converted before this field is populated) -- absent, never a guessed number, when unparsed
           "resetsAt"?: string,       // ISO-8601 UTC instant -- absent when the vendor's own line carried no reset clause, or claude's non-ISO "Jul 25, 12:09am (America/New_York)" format (minutes optional) failed to resolve; "rawLine" still carries the vendor's own text either way
           "rawLine": string,         // the vendor's own line, verbatim, for a reader that wants to show what parsing dropped
-          "ratePctPerHour"?: number, // #1746: advisory burn, percentage points of this window consumed per hour, derived over the persisted sample ring (oldest to newest). ABSENT under two samples -- never 0, which would read as "idle" when the truth is "not yet known" -- and absent when the ring spans no time at all. Present as 0 when two or more samples show no movement the two-decimal rounding can see; the ring keeps at most twelve samples and none older than three hours before the newest, so a rate is never averaged across an idle gap the harvester's backoff created. **Always absent on a `source: derived` entry (#1904)**, and so is `minutesToExhaustion` beneath it: no ring is kept for such an entry at all, because a derived percentage is not the monotonic counter every rule above assumes — `CodexUsageSource`'s own doc comment owns why, and `VendorUsageBurn.Advance` is where the skip happens
+          "ratePctPerHour"?: number, // #1746: advisory burn, percentage points of this window consumed per hour, derived over the persisted sample ring (oldest to newest). ABSENT under two samples -- never 0, which would read as "idle" when the truth is "not yet known" -- and absent when the ring spans no time at all. Present as 0 when two or more samples show no movement the two-decimal rounding can see; the ring keeps at most twelve samples and none older than three hours before the newest, so a rate is never averaged across an idle gap the harvester's backoff created. **Always absent on a `source: derived` entry (#1904)**, and so is `minutesToExhaustion` beneath it: no ring is kept for such an entry at all, because a derived percentage has no vendor-declared rollover boundary. No current source writes this provenance; `VendorUsageBurn.Advance` retains the rule for persisted interim snapshots
           "minutesToExhaustion"?: number // #1746: (100 - percentUsed) / ratePctPerHour, in minutes, at that rate. Absent whenever the rate is absent or not positive (nothing is being consumed to run out) and whenever percentUsed itself is absent
         }
       ],
@@ -3000,22 +3000,26 @@ from that call's own room scan — `vendors[]` is never itself a live vendor spa
 nothing in this slice reads `vendors[]` to hold, warn, or reject a dispatch.
 
 **`source: vendor|derived` (#1904).** Every entry declares whether its windows are the vendor's own
-counter or Baton's own derivation, and no reader may infer it from the adapter tag. #1391 settled that
-a source reads the vendor CLI's own report and is *"never a `QuotaLedgerStore`-derived estimate, never
-an operator-declared ceiling"*; #1904 **narrows** that clause rather than deleting it — a derivation is
-admitted only for a vendor with no plan counter Baton has measured, and only while it carries
-`source: derived` all the way out to the glass. For a vendor whose own counter is readable, #1391
-stands unchanged. `codex` is the one derived entry today (`CodexUsageSource`, aggregating the
-`quota-ledger.jsonl` burn rows over a **rolling** 5h and 7d lookback — that type's own doc comment owns
-the window rule, what the total misses, and why `percentUsed` is absent unless
-`DaemonSettings.CodexPlanCeiling` declares one). It is interim: codex-cli *does* expose an app-server
-`account/rateLimits/read` surface, whose payload shape is unrecorded —
-`docs/vendor-codex-probe-2026-09-04.md`'s known-unknowns is the register for that, and for what
-retires the derivation. Being on `RunwayGate.MeasuredVendors` is what gives codex a snapshot file and
-a glass block; it is **not** what gates it, and codex is deliberately absent from
-`RunwayGate`'s window-name table (that list's own doc comment states why). A derived entry also never
-carries the two burn fields — the `windows[]` table above says so on `ratePctPerHour`, and that is the
-fourth thing `derived` costs, alongside the rolling boundary, the lower bound, and the absent percentage.
+counter or Baton's own derivation, and no reader may infer it from the adapter tag. Current sources all
+report vendor counters. `codex` reads the subscription-authenticated app-server
+`account/rateLimits/read` result through `CodexAppServerBroker`, without starting a thread or model
+turn. `rateLimitsByLimitId` is authoritative when present; the legacy `rateLimits` object is a
+compatibility fallback and is never counted beside the map. Each window preserves the vendor's
+`usedPercent`, Unix-second `resetsAt`, `limitId`, primary/secondary identity, and
+`windowDurationMins`. Duration identifies product semantics: 300 minutes is the account session
+window and 10,080 minutes is the account weekly window; the measured 0.153.2 response has the weekly
+window in `primary` and a null `secondary`, so property position is not a duration and null is
+unavailable, never zero. Per-model buckets remain visible but cannot satisfy the account runway
+selectors. Percentages never imply a token allowance, and per-thread token usage is a separate
+execution-accounting value.
+
+`source: derived` remains a wire and persisted-file compatibility value for interim Codex snapshots
+written before the real source shipped. Those snapshots remain readable but cannot satisfy Codex's new
+identity/duration runway selectors and therefore fail closed until reharvested. The retired
+`DaemonSettings.CodexPlanCeiling` shape remains loadable and saveable during the rollback window so
+an ordinary settings save does not silently discard operator data, but no current reader consults it;
+operators may remove it after all installations use the real source. Derived snapshots keep their
+existing no-burn-ring rule.
 
 **Burn rate and minutes-to-exhaustion (#1746).** A single harvest carries no rate, so the persisted
 snapshot file keeps a bounded ring of the last `VendorUsageBurn.RingCapacity` readings per window

@@ -41,6 +41,32 @@ public class DaemonSettingsStoreTests
     }
 
     [Fact]
+    public async Task Retired_codex_ceiling_setting_round_trips_for_rollback_compatibility()
+    {
+        var path = TempPath();
+        try
+        {
+            var original = new DaemonSettings
+            {
+                CodexPlanCeiling = new CodexPlanCeilingSettings
+                {
+                    FiveHourTokens = 5_000_000,
+                    WeeklyTokens = 120_000_000,
+                },
+            };
+
+            await DaemonSettingsStore.SaveAsync(original, path, TestContext.Current.CancellationToken);
+            var loaded = await DaemonSettingsStore.LoadAsync(path, TestContext.Current.CancellationToken);
+
+            Assert.Equal(original.CodexPlanCeiling, loaded.CodexPlanCeiling);
+        }
+        finally
+        {
+            FileCleanup.Delete(path);
+        }
+    }
+
+    [Fact]
     public async Task Loading_a_malformed_file_resolves_to_defaults_rather_than_throwing()
     {
         var path = TempPath();

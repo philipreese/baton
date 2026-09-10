@@ -76,6 +76,15 @@ public sealed record DaemonSettings
     }
 
     /// <summary>
+    /// Compatibility-only #1904 setting from the retired ledger-derived Codex source. The real source
+    /// reads vendor percentages from app-server and never consults these token counts or infers an
+    /// allowance from them. The property remains loadable and saveable for a downgrade/rollback
+    /// window, so upgrading does not silently erase an operator's settings. Operators may remove the
+    /// block after all installations have moved to the real source.
+    /// </summary>
+    public CodexPlanCeilingSettings? CodexPlanCeiling { get; init; }
+
+    /// <summary>
     /// #1934 slice 1 — see <see cref="QueueSettings"/> for what it holds. Never null, and by exactly
     /// the mechanism <see cref="RunwayHold"/> uses above: read-through nullable backing field,
     /// coalesced on the way in as well as out. That property's remarks carry the whole argument,
@@ -179,6 +188,26 @@ public sealed record RunwayHoldSettings
     private static int Percent(int value, int fallback) => value is > 0 and <= 100 ? value : fallback;
 
     private static int Hours(int value) => value > 0 ? value : RunwayThresholds.DefaultMaxSnapshotAgeHours;
+}
+
+/// <summary>
+/// Compatibility shape for the retired <see cref="DaemonSettings.CodexPlanCeiling"/> setting. No
+/// current usage source reads either value; retaining the exact serialized shape prevents a normal
+/// settings save from discarding rollback data during the migration away from derived counters.
+/// </summary>
+public sealed record CodexPlanCeilingSettings
+{
+    public long? FiveHourTokens { get; init; }
+
+    public long? WeeklyTokens { get; init; }
+
+    /// <summary>Compatibility accessor retained with the serialized setting shape.</summary>
+    [JsonIgnore]
+    public long? EffectiveFiveHourTokens => FiveHourTokens is > 0 ? FiveHourTokens : null;
+
+    /// <summary>Compatibility accessor retained with the serialized setting shape.</summary>
+    [JsonIgnore]
+    public long? EffectiveWeeklyTokens => WeeklyTokens is > 0 ? WeeklyTokens : null;
 }
 
 /// <summary>

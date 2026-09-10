@@ -12,6 +12,72 @@ public sealed class CodexAppServerBrokerTests
     }
 
     [Fact]
+    public async Task Rate_limit_protocol_initializes_then_reads_the_account_without_starting_a_thread()
+    {
+        var transcript = string.Join('\n',
+        [
+            "{\"id\":1,\"result\":{\"userAgent\":\"fixture\"}}",
+            "{\"id\":2,\"result\":{\"rateLimits\":{\"limitId\":\"codex\",\"primary\":null,\"secondary\":null}}}",
+        ]) + "\n";
+        using var serverOutput = new StringReader(transcript);
+        using var serverInput = new StringWriter();
+        using var error = new StringWriter();
+
+        var result = await CodexAppServerBroker.ReadRateLimitsProtocolAsync(
+            serverInput, serverOutput, error, TestContext.Current.CancellationToken);
+
+        Assert.Equal("codex", result["rateLimits"]!["limitId"]!.GetValue<string>());
+        var requests = Lines(serverInput).Select(line => JsonNode.Parse(line)!).ToArray();
+        Assert.Equal(3, requests.Length);
+        Assert.Equal("initialize", requests[0]["method"]!.GetValue<string>());
+        Assert.Equal("initialized", requests[1]["method"]!.GetValue<string>());
+        Assert.Equal("account/rateLimits/read", requests[2]["method"]!.GetValue<string>());
+        Assert.Empty(requests[2]["params"]!.AsObject());
+        Assert.DoesNotContain(requests, request =>
+            request["method"]?.GetValue<string>().StartsWith("thread/", StringComparison.Ordinal) == true
+            || request["method"]?.GetValue<string>().StartsWith("turn/", StringComparison.Ordinal) == true);
+        Assert.Equal(string.Empty, error.ToString());
+    }
+
+    [Fact]
+    public async Task Rate_limit_protocol_surfaces_the_vendor_error_response()
+    {
+        var transcript = string.Join('\n',
+        [
+            "{\"id\":1,\"result\":{\"userAgent\":\"fixture\"}}",
+            "{\"id\":2,\"error\":{\"code\":-32000,\"message\":\"subscription login required\"}}",
+        ]) + "\n";
+        using var serverOutput = new StringReader(transcript);
+        using var serverInput = new StringWriter();
+        using var error = new StringWriter();
+
+        var exception = await Assert.ThrowsAsync<InvalidOperationException>(() =>
+            CodexAppServerBroker.ReadRateLimitsProtocolAsync(
+                serverInput, serverOutput, error, TestContext.Current.CancellationToken));
+
+        Assert.Equal("subscription login required", exception.Message);
+    }
+
+    [Fact]
+    public async Task Rate_limit_protocol_rejects_a_success_response_without_a_result_object()
+    {
+        var transcript = string.Join('\n',
+        [
+            "{\"id\":1,\"result\":{\"userAgent\":\"fixture\"}}",
+            "{\"id\":2,\"result\":null}",
+        ]) + "\n";
+        using var serverOutput = new StringReader(transcript);
+        using var serverInput = new StringWriter();
+        using var error = new StringWriter();
+
+        var exception = await Assert.ThrowsAsync<InvalidOperationException>(() =>
+            CodexAppServerBroker.ReadRateLimitsProtocolAsync(
+                serverInput, serverOutput, error, TestContext.Current.CancellationToken));
+
+        Assert.Equal("Codex app-server returned no rate-limit result.", exception.Message);
+    }
+
+    [Fact]
     public async Task Protocol_translates_thread_tools_response_usage_and_terminal_success_to_exec_jsonl()
     {
         var root = Path.Combine(Path.GetTempPath(), $"baton-codex-broker-{Guid.NewGuid():N}");

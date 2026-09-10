@@ -1,3 +1,5 @@
+using System.Text.Json.Nodes;
+
 namespace Baton.Vendors.Tests;
 
 /// <summary>
@@ -26,6 +28,37 @@ public class RunwayGateTests
             $"Gemini Models\tWeekly Limit Remaining\t{weeklyRemaining}\t2026-09-09T19:34:12Z\n"
             + $"Gemini Models\tFive Hour Limit Remaining\t{fiveHourRemaining}\t2026-09-05T19:34:12Z\n",
             Now);
+
+    /// <summary>
+    /// Synthetic app-server arm: unlike the measured fixture, it supplies both account windows so
+    /// both runway thresholds can be exercised. Primary is deliberately weekly, matching the
+    /// measured 0.153.2 identity and proving the gate maps by duration rather than property name.
+    /// </summary>
+    private static VendorUsageSnapshot Codex(int weeklyPct, int sessionPct, DateTimeOffset? harvestedAt = null) =>
+        CodexUsageSource.Parse(
+            new JsonObject
+            {
+                ["rateLimitsByLimitId"] = new JsonObject
+                {
+                    ["codex"] = new JsonObject
+                    {
+                        ["limitId"] = "codex",
+                        ["primary"] = new JsonObject
+                        {
+                            ["usedPercent"] = weeklyPct,
+                            ["windowDurationMins"] = CodexUsageSource.WeeklyDurationMins,
+                            ["resetsAt"] = 1_800_000_000,
+                        },
+                        ["secondary"] = new JsonObject
+                        {
+                            ["usedPercent"] = sessionPct,
+                            ["windowDurationMins"] = CodexUsageSource.FiveHourDurationMins,
+                            ["resetsAt"] = 1_800_010_000,
+                        },
+                    },
+                },
+            },
+            harvestedAt ?? Now);
 
     private static RunwayDecision Evaluate(string vendor, VendorUsageSnapshot? snapshot, RunwayThresholds? thresholds = null) =>
         RunwayGate.Evaluate(vendor, snapshot, thresholds ?? new RunwayThresholds(), Now);
@@ -200,15 +233,13 @@ public class RunwayGateTests
     }
 
     /// <summary>
-    /// #1923's population guard: the on-demand harvest must only spend a <c>/usage</c> call where the
-    /// counters can actually decide. <c>codex</c> has a source and a snapshot file and is deliberately
-    /// NOT gated (#1904), so it must read false here — a check keyed on
-    /// <see cref="RunwayGate.MeasuredVendors"/> instead would say true and harvest it for nothing.
+    /// #1923's population guard: the on-demand harvest must only spend a usage read where counters can
+    /// decide. Codex joined this table when #1904 replaced its interim estimate with account counters.
     /// </summary>
     [Theory]
     [InlineData("claude", true)]
     [InlineData("agy", true)]
-    [InlineData("codex", false)]
+    [InlineData("codex", true)]
     [InlineData("fake", false)]
     public void Only_the_window_table_vendors_are_gated(string vendor, bool gated) =>
         Assert.Equal(gated, RunwayGate.IsGated(vendor));
@@ -311,111 +342,115 @@ public class RunwayGateTests
     }
 
     /// <summary>
-    /// #1904's whole gate-side claim in one arm: codex gained an <see cref="IVendorUsageSource"/> and is
-    /// on <see cref="RunwayGate.MeasuredVendors"/> (which is what gives it a snapshot file and a glass
-    /// block), and it is STILL admitted as unmeasured — because <see cref="RunwayGate.Evaluate"/> keys on
-    /// the window-name table, which codex is deliberately not in. Both halves are asserted together on
-    /// purpose: separately, either one passes while the pair that matters is broken. Adding codex to the
-    /// window table would fail this test, which is the point — that is a decision to take, not a side
-    /// effect of the list growing.
+    /// #1904's gate-side wiring: codex has a source, a snapshot file, and duration-based selectors.
+    /// With no snapshot it therefore fails closed like the other measured vendors.
     /// </summary>
     [Fact]
-    public void Codex_is_on_the_measured_list_and_still_admitted_as_unmeasured()
+    public void Codex_is_on_the_measured_list_and_holds_without_a_snapshot()
     {
         Assert.Contains("codex", RunwayGate.MeasuredVendors);
 
         var decision = Evaluate("codex", snapshot: null);
 
-        Assert.Equal(RunwayDisposition.Admit, decision.Disposition);
-        Assert.Equal(RunwayGate.UnmeasuredReason, decision.Reason);
+        Assert.Equal(RunwayDisposition.Hold, decision.Disposition);
+        Assert.Contains("no readable usage snapshot", decision.Reason, StringComparison.Ordinal);
     }
 
     /// <summary>
-    /// The polarity of the arm above. A codex snapshot that HAS been harvested — the ordinary state on a
-    /// fleet running codex lanes, and one whose derived windows carry no percentage without a declared
-    /// ceiling — is admitted too. Without this, "codex admits" could be resting on the snapshot being
-    /// null rather than on codex being outside the window table.
+    /// Synthetic measured-shape arm: a per-model bucket has both durations, while the account bucket
+    /// has the observed weekly primary and null secondary. The per-model 5h window must not satisfy
+    /// the account selector, and null must not become zero.
     /// </summary>
     [Fact]
-    public void A_harvested_codex_snapshot_with_no_percentage_still_admits()
+    public void Codex_per_model_windows_do_not_fill_a_missing_account_window()
     {
-        var snapshot = CodexUsageSource.Aggregate(
-            [new Baton.Status.QuotaLedgerEntry(At: Now.AddHours(-1).UtcDateTime, Execution: "e1", Adapter: "codex", TokensIn: 500)],
-            ceiling: null,
+        var snapshot = CodexUsageSource.Parse(
+            new JsonObject
+            {
+                ["rateLimitsByLimitId"] = new JsonObject
+                {
+                    ["codex_model"] = new JsonObject
+                    {
+                        ["limitId"] = "codex_model",
+                        ["primary"] = new JsonObject
+                        {
+                            ["usedPercent"] = 0,
+                            ["windowDurationMins"] = CodexUsageSource.FiveHourDurationMins,
+                        },
+                        ["secondary"] = new JsonObject
+                        {
+                            ["usedPercent"] = 0,
+                            ["windowDurationMins"] = CodexUsageSource.WeeklyDurationMins,
+                        },
+                    },
+                    ["codex"] = new JsonObject
+                    {
+                        ["limitId"] = "codex",
+                        ["primary"] = new JsonObject
+                        {
+                            ["usedPercent"] = 48,
+                            ["windowDurationMins"] = CodexUsageSource.WeeklyDurationMins,
+                        },
+                        ["secondary"] = null,
+                    },
+                },
+            },
             Now);
-        Assert.All(snapshot!.Windows, w => Assert.Null(w.PercentUsed));
 
         var decision = RunwayGate.Evaluate("codex", snapshot, new RunwayThresholds(), Now);
 
-        Assert.Equal(RunwayDisposition.Admit, decision.Disposition);
-        Assert.Equal(RunwayGate.UnmeasuredReason, decision.Reason);
+        Assert.Equal(RunwayDisposition.Hold, decision.Disposition);
+        Assert.Contains("codex 300-minute", decision.Reason, StringComparison.Ordinal);
+        Assert.DoesNotContain(
+            decision.Counters,
+            counter => counter.Window.Contains("codex_model", StringComparison.Ordinal));
+    }
+
+    [Fact]
+    public void Codex_account_windows_are_gated_by_duration_when_primary_is_weekly()
+    {
+        Assert.Equal(
+            RunwayDisposition.Admit,
+            Evaluate("codex", Codex(weeklyPct: 84, sessionPct: 89)).Disposition);
+
+        var weekHold = Evaluate("codex", Codex(weeklyPct: 85, sessionPct: 0));
+        var sessionHold = Evaluate("codex", Codex(weeklyPct: 0, sessionPct: 90));
+
+        Assert.Equal(RunwayDisposition.Hold, weekHold.Disposition);
+        Assert.Contains("7d (primary)", weekHold.Reason, StringComparison.Ordinal);
+        Assert.Equal(RunwayDisposition.Hold, sessionHold.Disposition);
+        Assert.Contains("5h (secondary)", sessionHold.Reason, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void A_stale_codex_snapshot_holds_however_low_the_vendor_counters_are()
+    {
+        var stale = Codex(weeklyPct: 0, sessionPct: 0, harvestedAt: Now.AddHours(-48));
+
+        var decision = RunwayGate.Evaluate("codex", stale, new RunwayThresholds(), Now);
+
+        Assert.Equal(RunwayDisposition.Hold, decision.Disposition);
+        Assert.Contains("stale counter", decision.Reason, StringComparison.Ordinal);
     }
 
     /// <summary>
-    /// #1926 review. Adding codex to <see cref="RunwayGate.MeasuredVendors"/> must not have put it
-    /// behind the staleness arm either: a codex snapshot far older than <c>maxSnapshotAgeHours</c> still
-    /// admits as unmeasured, because the window-table check runs first. The control is the arm directly
-    /// below: the same age on <c>claude</c>, which IS in the table, Holds — so this test is measuring
-    /// codex's exemption and not a broken staleness check.
+    /// Persisted interim snapshots remain deserializable, but provenance grants no admission
+    /// exemption. Their old windows have no measured limit identity or duration and therefore hold
+    /// unreadable until the real source replaces them.
     /// </summary>
     [Fact]
-    public void A_stale_derived_codex_snapshot_still_admits_while_the_same_age_holds_claude()
+    public void An_interim_derived_codex_snapshot_fails_closed_until_reharvested()
     {
-        var stale = Now.AddHours(-48);
-        var codex = CodexUsageSource.Aggregate(
-            [new Baton.Status.QuotaLedgerEntry(At: stale.UtcDateTime, Execution: "e1", Adapter: "codex", TokensIn: 500)],
-            ceiling: null,
-            stale);
-
-        var codexDecision = RunwayGate.Evaluate("codex", codex, new RunwayThresholds(), Now);
-        Assert.Equal(RunwayDisposition.Admit, codexDecision.Disposition);
-        Assert.Equal(RunwayGate.UnmeasuredReason, codexDecision.Reason);
-
-        var claudeDecision = RunwayGate.Evaluate(
-            "claude",
-            new VendorUsageSnapshot("claude", stale, null, [new VendorUsageWindow("session", 1, null, "session: 1%")]),
-            new RunwayThresholds(),
-            Now);
-        Assert.Equal(RunwayDisposition.Hold, claudeDecision.Disposition);
-    }
-
-    /// <summary>
-    /// #1926 re-review. The arm above changes adapter and provenance together, so it cannot tell an
-    /// adapter-keyed exemption from a provenance-keyed one. This arm separates them: a stale snapshot
-    /// MARKED derived but tagged with a gated vendor still Holds (the mark buys no staleness exemption —
-    /// a derivation is a lower bound and goes stale like any counter), and a codex snapshot marked as a
-    /// vendor counter still admits unmeasured (the exemption is codex's absence from the window table,
-    /// not its provenance). Either assertion flipping means the gate started reading the mark.
-    /// </summary>
-    [Fact]
-    public void The_derived_mark_neither_exempts_a_gated_vendor_from_staleness_nor_gates_codex()
-    {
-        var stale = Now.AddHours(-48);
-
-        var derivedClaude = RunwayGate.Evaluate(
-            "claude",
-            new VendorUsageSnapshot(
-                "claude",
-                stale,
-                null,
-                [new VendorUsageWindow("session", 1, null, "session: 1%")],
-                VendorUsageProvenance.Derived),
-            new RunwayThresholds(),
-            Now);
-        Assert.Equal(RunwayDisposition.Hold, derivedClaude.Disposition);
-        Assert.Contains("old", derivedClaude.Reason, StringComparison.Ordinal);
-
-        var vendorMarkedCodex = RunwayGate.Evaluate(
+        var snapshot = new VendorUsageSnapshot(
             "codex",
-            new VendorUsageSnapshot(
-                "codex",
-                stale,
-                null,
-                [new VendorUsageWindow("5-hour", null, null, "5-hour: derived")],
-                VendorUsageProvenance.Vendor),
-            new RunwayThresholds(),
-            Now);
-        Assert.Equal(RunwayDisposition.Admit, vendorMarkedCodex.Disposition);
-        Assert.Equal(RunwayGate.UnmeasuredReason, vendorMarkedCodex.Reason);
+            Now,
+            null,
+            [new VendorUsageWindow("rolling 5h (derived)", 1, null, "derived")],
+            VendorUsageProvenance.Derived);
+
+        var decision = RunwayGate.Evaluate("codex", snapshot, new RunwayThresholds(), Now);
+
+        Assert.Equal(RunwayDisposition.Hold, decision.Disposition);
+        Assert.Contains("not readable", decision.Reason, StringComparison.Ordinal);
     }
 }

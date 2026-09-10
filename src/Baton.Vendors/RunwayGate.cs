@@ -101,7 +101,7 @@ public sealed record RunwayThresholds(
 /// <c>Baton.Cli.OnDemandRunwayHarvest</c>, before this method is called, and reaches it only as a
 /// <see cref="RunwayHarvestAttempt"/> value. What is no longer true of the gate as a whole is that a
 /// check costs no subscription usage: the first check for a vendor with no snapshot spends one
-/// <c>/usage</c> call. That bound is stated in spec/baton.md §7.
+/// vendor usage read. That bound is stated in spec/baton.md §7.
 /// </summary>
 /// <remarks>
 /// <para>
@@ -167,10 +167,9 @@ public static class RunwayGate
         int? SessionDurationMins = null);
 
     /// <summary>
-    /// Whether this vendor's counters are what decide its admission — membership in the window-name
-    /// table above, which is a narrower thing than <see cref="MeasuredVendors"/> (that list's own doc
-    /// comment has why codex is on it and not here). Exposed for #1923's on-demand harvest, which must
-    /// not spend a <c>/usage</c> call on a vendor whose decision cannot turn on the result.
+    /// Whether this vendor's counters are what decide its admission — membership in the selector
+    /// table above. Exposed for #1923's on-demand harvest, which must not spend a vendor usage read on
+    /// an adapter whose decision cannot turn on the result.
     /// </summary>
     public static bool IsGated(string vendor) =>
         !string.IsNullOrEmpty(vendor) && WindowSelectors.ContainsKey(vendor);
@@ -192,7 +191,7 @@ public static class RunwayGate
     /// <summary>
     /// Decides admission for one vendor. <paramref name="snapshot"/> is that vendor's latest
     /// PERSISTED snapshot (null when none exists or it could not be read) — this method itself never
-    /// makes a live <c>/usage</c> call.
+    /// makes a live vendor usage read.
     /// </summary>
     /// <param name="vendor">The adapter tag being dispatched to, e.g. <c>"claude"</c>.</param>
     /// <param name="now">The clock, passed in so the staleness arm is testable without waiting.</param>

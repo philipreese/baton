@@ -29,9 +29,10 @@ public sealed record VendorUsageWindow(
 /// </summary>
 /// <param name="Source">
 /// #1904: this snapshot's provenance — see <see cref="VendorUsageProvenance"/> for the two values and
-/// what each asserts. Trailing with a <see cref="VendorUsageProvenance.Vendor"/> default so the two #1391 sources keep
-/// their existing shape; <see cref="CodexUsageSource"/> is the only thing that sets
-/// <see cref="VendorUsageProvenance.Derived"/>. Carried all the way onto the fleet projection's
+/// what each asserts. Trailing with a <see cref="VendorUsageProvenance.Vendor"/> default so older
+/// persisted snapshots keep their existing shape. Current sources all write vendor counters;
+/// <see cref="VendorUsageProvenance.Derived"/> remains readable for interim Codex snapshots written
+/// before #1904's app-server replacement. Carried all the way onto the fleet projection's
 /// <c>vendors[].source</c> field so no reader can mistake one for the other.
 /// </param>
 public sealed record VendorUsageSnapshot(
@@ -66,11 +67,9 @@ public enum VendorUsageProvenance
 /// </summary>
 /// <remarks>
 /// <para>
-/// <b>Two kinds of source, distinguished on the wire (#1904).</b> This interface used to rule out a
-/// derived source outright (#1391). #1904 narrowed that ruling rather than deleting it — its exact
-/// terms, the clause it quotes, and what still stands unchanged are spec/baton.md §6's
-/// <c>source: vendor|derived</c> paragraph, which is the register and is not restated here.
-/// <see cref="CodexUsageSource"/> is the one implementation the narrowing admits.
+/// <b>Two persisted provenance values, distinguished on the wire (#1904).</b> Current implementations
+/// read vendor counters. The derived value is retained only so snapshots from the retired interim
+/// Codex ledger estimate remain readable during migration; spec/baton.md §6 is the register.
 /// </para>
 /// </remarks>
 public interface IVendorUsageSource
