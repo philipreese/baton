@@ -1,4 +1,5 @@
 using System.Text.Json;
+using System.Text.Json.Nodes;
 using Baton.Domain;
 using Baton.Status;
 using Baton.Tests.Shared;
