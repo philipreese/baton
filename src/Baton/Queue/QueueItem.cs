@@ -101,6 +101,18 @@ public sealed record QueueItem
     public int? PullRequest { get; init; }
 
     /// <summary>
+    /// Opaque ownership token for a readiness reconciliation that has crossed its local linearization
+    /// point. While present, cancellation and same-tag replacement must not supersede the row: the
+    /// already-authorized GitHub mutation is allowed to finish and commit its observation first.
+    /// </summary>
+    /// <remarks>
+    /// The token is durable so a daemon restart can atomically replace an orphaned claim and recover
+    /// after re-observing GitHub. It is not a lease and no network call runs while the queue lock is
+    /// held. <c>WorkItemAdvancer</c> is the sole writer; <c>QueueCommand</c> is the command-side reader.
+    /// </remarks>
+    public string? ReadinessMutationClaim { get; init; }
+
+    /// <summary>
     /// The verdict the last review produced, as an absolute path to that room's <c>verdict.json</c>.
     /// <b>Recorded, never inlined into the next brief from here</b> — the brief carries the findings'
     /// text, and spec/baton.md §13 says why a room path must not travel into one.

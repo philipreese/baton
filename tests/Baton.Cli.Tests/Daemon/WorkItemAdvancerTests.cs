@@ -30,7 +30,8 @@ public sealed class WorkItemAdvancerTests
     private static readonly RepositoryIdentity ExpectedRepositoryIdentity =
         RepositoryIdentity.From("https://github.com/aer-works/baton.git", null)!;
 
-    private sealed class FakeGh(string stdout, int exitCode = 0, string requiredBucket = "pass") : IGhCliRunner
+    private sealed class FakeGh(
+        string stdout, int exitCode = 0, string requiredBucket = "pass", int readyExitCode = 0) : IGhCliRunner
     {
         private bool _isDraft = !stdout.Contains("\"isDraft\":false", StringComparison.Ordinal);
 
@@ -57,6 +58,12 @@ public sealed class WorkItemAdvancerTests
 
             if (args is ["pr", "ready", ..])
             {
+                if (readyExitCode != 0)
+                {
+                    return Task.FromResult(new GhCliResult(
+                        Started: true, readyExitCode, string.Empty, "readiness mutation failed"));
+                }
+
                 _isDraft = args.Contains("--undo", StringComparer.Ordinal);
                 return Task.FromResult(new GhCliResult(Started: true, 0, "ok", string.Empty));
             }
@@ -685,6 +692,179 @@ public sealed class WorkItemAdvancerTests
             Assert.Equal(WorkStage.Ready, restored.Stage);
             Assert.Null(restored.Error);
             Assert.Contains(passingGh.Calls, args => args is ["pr", "ready", "77", "--repo", Repository]);
+        }
+        finally
+        {
+            DirectoryCleanup.DeleteRecursively(home);
+        }
+    }
+
+    [Fact]
+    public async Task Cancellation_that_changes_the_row_before_readiness_authorization_prevents_the_GitHub_mutation()
+    {
+        var home = CreateTempHome();
+        using var scope = BatonEnvironmentSnapshot.BeginScope(BatonEnvironmentSnapshot.Blank with { HomeOverride = home });
+        try
+        {
+            var room = await WriteSettledRoomAsync(home, WorkflowOutcome.Succeeded, ApprovingVerdict);
+            var seeded = await SeedAsync(home, WorkStage.Review, room, QueueItemState.Queued);
+            await QueueStore.MutateAsync(
+                BatonPaths.QueueFile,
+                state => state with
+                {
+                    Items =
+                    [
+                        seeded with
+                        {
+                            Stage = WorkStage.Ready,
+                            PullRequest = 77,
+                            LastVerdict = Path.Combine(room, "verdict.json"),
+                            RoomDirectory = null,
+                        },
+                    ],
+                },
+                Ct);
+            var gh = new FakeGh(PrJson(77, PushedSha, isDraft: true));
+
+            async Task<string?> CancelBeforeClaim(string _, CancellationToken cancellationToken)
+            {
+                await QueueCommand.ExecuteAsync(
+                    new QueueOptions(QueueVerb.Cancel, Tag: "1934-lane"), TextWriter.Null, cancellationToken);
+                return PushedSha;
+            }
+
+            var facts = await Advancer(gh, CancelBeforeClaim).AdvanceAsync(Now, Ct);
+
+            var item = await ReadBackAsync();
+            Assert.Empty(facts);
+            Assert.Equal(QueueItemState.Cancelled, item.State);
+            Assert.Null(item.ReadinessMutationClaim);
+            Assert.DoesNotContain(gh.Calls, args => args is ["pr", "ready", ..]);
+        }
+        finally
+        {
+            DirectoryCleanup.DeleteRecursively(home);
+        }
+    }
+
+    [Fact]
+    public async Task Allowed_replacement_that_changes_the_row_before_draft_authorization_prevents_the_undo()
+    {
+        var home = CreateTempHome();
+        using var scope = BatonEnvironmentSnapshot.BeginScope(BatonEnvironmentSnapshot.Blank with { HomeOverride = home });
+        try
+        {
+            var room = await WriteSettledRoomAsync(home, WorkflowOutcome.Succeeded, verdictJson: null);
+            var seeded = await SeedAsync(home, WorkStage.Implement, room);
+            var replacementSource = Path.Combine(home, "replacement.md");
+            await File.WriteAllTextAsync(replacementSource, "replacement brief", Ct);
+            var gh = new FakeGh(PrJson(77, PushedSha, isDraft: false));
+
+            async Task<string?> ReplaceBeforeClaim(string _, CancellationToken cancellationToken)
+            {
+                await QueueCommand.ExecuteAsync(
+                    new QueueOptions(
+                        QueueVerb.Add, Tag: "1934-lane", Role: "implement", SpecFilePath: replacementSource,
+                        WorkspaceDirectory: seeded.Workspace),
+                    TextWriter.Null,
+                    cancellationToken);
+                return PushedSha;
+            }
+
+            var facts = await Advancer(gh, ReplaceBeforeClaim).AdvanceAsync(Now, Ct);
+
+            var item = await ReadBackAsync();
+            Assert.Empty(facts);
+            Assert.Null(item.Stage);
+            Assert.Equal(QueueItemState.Queued, item.State);
+            Assert.Null(item.ReadinessMutationClaim);
+            Assert.Equal("replacement brief", await File.ReadAllTextAsync(item.SpecFile, Ct));
+            Assert.DoesNotContain(gh.Calls, args => args is ["pr", "ready", ..]);
+        }
+        finally
+        {
+            DirectoryCleanup.DeleteRecursively(home);
+        }
+    }
+
+    [Fact]
+    public async Task A_restart_reclaims_an_orphaned_readiness_claim_and_clears_it_after_one_mutation()
+    {
+        var home = CreateTempHome();
+        using var scope = BatonEnvironmentSnapshot.BeginScope(BatonEnvironmentSnapshot.Blank with { HomeOverride = home });
+        try
+        {
+            var room = await WriteSettledRoomAsync(home, WorkflowOutcome.Succeeded, ApprovingVerdict);
+            var seeded = await SeedAsync(home, WorkStage.Review, room, QueueItemState.Queued);
+            await QueueStore.MutateAsync(
+                BatonPaths.QueueFile,
+                state => state with
+                {
+                    Items =
+                    [
+                        seeded with
+                        {
+                            Stage = WorkStage.Ready,
+                            PullRequest = 77,
+                            LastVerdict = Path.Combine(room, "verdict.json"),
+                            RoomDirectory = null,
+                            ReadinessMutationClaim = "orphaned-daemon-claim",
+                        },
+                    ],
+                },
+                Ct);
+            var gh = new FakeGh(PrJson(77, PushedSha, isDraft: true));
+
+            Assert.Empty(await Advancer(gh, (_, _) => Task.FromResult<string?>(PushedSha)).AdvanceAsync(Now, Ct));
+
+            var item = await ReadBackAsync();
+            Assert.Equal(WorkStage.Ready, item.Stage);
+            Assert.Null(item.ReadinessMutationClaim);
+            Assert.Single(gh.Calls, args => args is ["pr", "ready", "77", "--repo", Repository]);
+        }
+        finally
+        {
+            DirectoryCleanup.DeleteRecursively(home);
+        }
+    }
+
+    [Fact]
+    public async Task A_failed_readiness_mutation_releases_the_claim_for_operator_cancellation()
+    {
+        var home = CreateTempHome();
+        using var scope = BatonEnvironmentSnapshot.BeginScope(BatonEnvironmentSnapshot.Blank with { HomeOverride = home });
+        try
+        {
+            var room = await WriteSettledRoomAsync(home, WorkflowOutcome.Succeeded, ApprovingVerdict);
+            var seeded = await SeedAsync(home, WorkStage.Review, room, QueueItemState.Queued);
+            await QueueStore.MutateAsync(
+                BatonPaths.QueueFile,
+                state => state with
+                {
+                    Items =
+                    [
+                        seeded with
+                        {
+                            Stage = WorkStage.Ready,
+                            PullRequest = 77,
+                            LastVerdict = Path.Combine(room, "verdict.json"),
+                            RoomDirectory = null,
+                        },
+                    ],
+                },
+                Ct);
+            var gh = new FakeGh(PrJson(77, PushedSha, isDraft: true), readyExitCode: 1);
+
+            var fact = Assert.Single(
+                await Advancer(gh, (_, _) => Task.FromResult<string?>(PushedSha)).AdvanceAsync(Now, Ct));
+
+            var retained = await ReadBackAsync();
+            Assert.Equal(QueueDecisionEntry.Failed, fact.Decision);
+            Assert.Null(retained.ReadinessMutationClaim);
+            Assert.Contains("readiness obligation remains", retained.Error!, StringComparison.Ordinal);
+            Assert.Equal(0, await QueueCommand.ExecuteAsync(
+                new QueueOptions(QueueVerb.Cancel, Tag: "1934-lane"), TextWriter.Null, Ct));
+            Assert.Equal(QueueItemState.Cancelled, (await ReadBackAsync()).State);
         }
         finally
         {

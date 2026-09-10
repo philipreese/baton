@@ -134,6 +134,23 @@ public sealed class WorkItemAdvancer
 
         var transition = WorkItemLifecycle.Decide(Observation(pr));
         var readinessMutated = false;
+        var readinessClaimed = false;
+
+        // A crash can leave a durable claim after GitHub reached the requested state but before the
+        // queue observation committed. Re-own it with the same complete-row CAS used below before
+        // clearing or advancing the row, so two recovery ticks cannot both act on the orphan.
+        if (item.ReadinessMutationClaim is not null
+            && transition.PullRequestAction == PullRequestReadinessAction.None)
+        {
+            var recovered = await TryClaimReadinessAsync(item).ConfigureAwait(false);
+            if (recovered is null)
+            {
+                return null;
+            }
+
+            item = recovered;
+            readinessClaimed = true;
+        }
 
         // A readiness mutation is never trusted from the command receipt. Re-observe the PR after
         // every attempt, then ask the pure lifecycle again. The bounded loop covers the one real
@@ -146,6 +163,22 @@ public sealed class WorkItemAdvancer
                 return await RetainReconciliationAsync(
                     item, transition.Reason + " (no exact PR number was available for the mutation)",
                     pr, now, room, recordFailure: true).ConfigureAwait(false);
+            }
+
+            if (!readinessClaimed)
+            {
+                // This durable compare-and-swap is the readiness operation's local linearization
+                // point. Cancellation or an allowed same-tag replacement that committed first makes
+                // the claim lose and therefore prevents the external mutation. Once the claim wins,
+                // those commands refuse until this bounded reconciliation commits or releases it.
+                var claimed = await TryClaimReadinessAsync(item).ConfigureAwait(false);
+                if (claimed is null)
+                {
+                    return null;
+                }
+
+                item = claimed;
+                readinessClaimed = true;
             }
 
             var args = transition.PullRequestAction == PullRequestReadinessAction.MarkDraft
@@ -205,6 +238,7 @@ public sealed class WorkItemAdvancer
                     Checks = pr.Checks ?? existing.Checks,
                     ChecksObservedAt = pr.Checks is null ? existing.ChecksObservedAt : now,
                     Error = null,
+                    ReadinessMutationClaim = null,
                 }).ConfigureAwait(false);
             }
 
@@ -247,6 +281,7 @@ public sealed class WorkItemAdvancer
             Checks = pr.Checks ?? existing.Checks,
             ChecksObservedAt = pr.Checks is null ? existing.ChecksObservedAt : now,
             Error = reason,
+            ReadinessMutationClaim = null,
         }).ConfigureAwait(false);
 
         return retained && recordFailure
@@ -317,6 +352,7 @@ public sealed class WorkItemAdvancer
             RoomDirectory = null,
             LaunchedAt = null,
             Error = null,
+            ReadinessMutationClaim = null,
         }, () =>
         {
             Directory.CreateDirectory(BatonPaths.QueueSpecsDirectory);
@@ -346,6 +382,7 @@ public sealed class WorkItemAdvancer
             RoomDirectory = null,
             LaunchedAt = null,
             Error = null,
+            ReadinessMutationClaim = null,
         }).ConfigureAwait(false);
 
         return stopped ? Fact(item, from, WorkStage.Ready, transition, now, room) : null;
@@ -372,6 +409,7 @@ public sealed class WorkItemAdvancer
             Error = transition.Reason,
             LastVerdict = verdictPath ?? existing.LastVerdict,
             Halted = true,
+            ReadinessMutationClaim = null,
         }).ConfigureAwait(false);
 
         return failed ? new QueueDecisionEntry(
@@ -407,6 +445,7 @@ public sealed class WorkItemAdvancer
             State = stage == WorkStage.Ready ? QueueItemState.Queued : QueueItemState.Failed,
             Error = reason,
             Halted = true,
+            ReadinessMutationClaim = null,
         }).ConfigureAwait(false);
 
         return halted ? new QueueDecisionEntry(
@@ -450,6 +489,42 @@ public sealed class WorkItemAdvancer
             },
             CancellationToken.None).ConfigureAwait(false);
         return changed;
+    }
+
+    /// <summary>
+    /// Claims the complete observed row under the queue mutex and returns the exact claimed value.
+    /// Replacing an existing token is restart recovery: only the caller whose replacement wins may
+    /// continue. The mutex is released before any GitHub call.
+    /// </summary>
+    private static async Task<QueueItem?> TryClaimReadinessAsync(QueueItem expected)
+    {
+        var expectedJson = JsonSerializer.Serialize(expected);
+        QueueItem? claimed = null;
+        await QueueStore.MutateAsync(
+            BatonPaths.QueueFile,
+            snapshot =>
+            {
+                var current = snapshot.Items.FirstOrDefault(i =>
+                    string.Equals(i.Tag, expected.Tag, StringComparison.Ordinal));
+                if (current is null
+                    || !string.Equals(
+                        JsonSerializer.Serialize(current),
+                        expectedJson,
+                        StringComparison.Ordinal))
+                {
+                    return snapshot;
+                }
+
+                claimed = current with { ReadinessMutationClaim = Guid.NewGuid().ToString("N") };
+                return snapshot with
+                {
+                    Items = snapshot.Items
+                        .Select(i => ReferenceEquals(i, current) ? claimed : i)
+                        .ToList(),
+                };
+            },
+            CancellationToken.None).ConfigureAwait(false);
+        return claimed;
     }
 
     /// <summary>

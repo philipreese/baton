@@ -222,6 +222,14 @@ public static class QueueCommand
     /// </remarks>
     private static void RefuseIfNotReplaceable(QueueItem? existing, string tag)
     {
+        if (existing?.ReadinessMutationClaim is { Length: > 0 })
+        {
+            throw new CliArgumentException(
+                $"Item '{tag}' has an in-flight pull-request readiness update. Re-adding it would supersede "
+                + "an operation that is already authorized.",
+                "wait for the daemon to finish reconciliation, then retry.");
+        }
+
         if (existing is { State: QueueItemState.Launched })
         {
             throw new CliArgumentException(
@@ -355,7 +363,8 @@ public static class QueueCommand
         await QueueStore.MutateAsync(BatonPaths.QueueFile, snapshot =>
         {
             observed = snapshot.Items.FirstOrDefault(item => string.Equals(item.Tag, tag, StringComparison.Ordinal));
-            if (observed?.State != QueueItemState.Queued)
+            if (observed?.State != QueueItemState.Queued
+                || observed.ReadinessMutationClaim is { Length: > 0 })
             {
                 return snapshot;
             }
@@ -372,6 +381,10 @@ public static class QueueCommand
         {
             case null:
                 throw new CliArgumentException($"Queue item '{tag}' does not exist.", "run 'baton queue list' to see recorded tags.");
+            case { ReadinessMutationClaim: { Length: > 0 } }:
+                throw new CliArgumentException(
+                    $"Queue item '{tag}' has an in-flight pull-request readiness update and cannot be cancelled yet.",
+                    "the operation was already claimed; wait for reconciliation to finish, then retry cancellation.");
             case { State: QueueItemState.Queued }:
                 await QueueDecisionLedgerStore.AppendCancellationAsync(
                     cancelledAt, tag, BatonPaths.QueueDecisionLedgerFile, cancellationToken).ConfigureAwait(false);
@@ -422,6 +435,16 @@ public static class QueueCommand
         await QueueStore.MutateAsync(BatonPaths.QueueFile, snapshot =>
         {
             var importedTags = imported.Select(i => i.Tag).ToHashSet(StringComparer.Ordinal);
+            var claimed = snapshot.Items.FirstOrDefault(
+                item => item.ReadinessMutationClaim is { Length: > 0 } && importedTags.Contains(item.Tag));
+            if (claimed is not null)
+            {
+                throw new CliArgumentException(
+                    $"Item '{claimed.Tag}' has an in-flight pull-request readiness update. Importing it would "
+                    + "supersede an operation that is already authorized.",
+                    "remove that tag from the import, or wait for reconciliation to finish and retry.");
+            }
+
             var cancelled = snapshot.Items.FirstOrDefault(
                 item => item.State == QueueItemState.Cancelled && importedTags.Contains(item.Tag));
             if (cancelled is not null)
