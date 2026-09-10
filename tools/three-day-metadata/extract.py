@@ -113,6 +113,13 @@ ROLE_DISPLAY_ORDER = {
     "fact-check": 3,
     "unknown": 4,
 }
+CONDUCTOR_ATTRIBUTION_STATES = (
+    "attributed_unique",
+    "ambiguous_overlapping_intervals",
+    "unattributed_interval_gap",
+    "unavailable_lifecycle_time",
+    "unavailable_no_handoff_intervals",
+)
 
 
 @dataclass(frozen=True)
@@ -399,16 +406,53 @@ def load_optional_rows(path: Path | None, key: str) -> list[dict[str, Any]]:
     return rows
 
 
-def assign_conductor(started: datetime | None, handoffs: list[dict[str, Any]]) -> str | None:
-    if started is None:
-        return None
-    matches = []
-    for handoff in handoffs:
+def validate_handoffs(handoffs: list[dict[str, Any]]) -> None:
+    for index, handoff in enumerate(handoffs):
+        conductor = handoff.get("conductor")
         begin = parse_time(handoff.get("start"))
-        end = parse_time(handoff.get("end"))
-        if begin is not None and begin <= started and (end is None or started <= end):
-            matches.append(str(handoff.get("conductor") or "unknown"))
-    return matches[0] if len(matches) == 1 else None
+        raw_end = handoff.get("end")
+        end = parse_time(raw_end) if raw_end is not None else None
+        if not isinstance(conductor, str) or not conductor.strip():
+            raise ValueError(f"handoff {index}: conductor must be a non-empty string")
+        if begin is None:
+            raise ValueError(f"handoff {index}: start must be an offset-aware timestamp")
+        if raw_end is not None and end is None:
+            raise ValueError(f"handoff {index}: end must be null or an offset-aware timestamp")
+        if end is not None and end < begin:
+            raise ValueError(f"handoff {index}: end precedes start")
+
+
+def attribute_conductor(
+    attribution_time: datetime | None, handoffs: list[dict[str, Any]]
+) -> dict[str, Any]:
+    if not handoffs:
+        return {
+            "conductor": None,
+            "state": "unavailable_no_handoff_intervals",
+            "candidates": [],
+        }
+    if attribution_time is None:
+        return {
+            "conductor": None,
+            "state": "unavailable_lifecycle_time",
+            "candidates": [],
+        }
+    candidates = sorted({
+        str(handoff["conductor"]).strip()
+        for handoff in handoffs
+        if (begin := parse_time(handoff.get("start"))) is not None
+        and begin <= attribution_time
+        and ((end := parse_time(handoff.get("end"))) is None or attribution_time <= end)
+    })
+    if len(candidates) == 1:
+        return {"conductor": candidates[0], "state": "attributed_unique", "candidates": candidates}
+    if candidates:
+        return {
+            "conductor": None,
+            "state": "ambiguous_overlapping_intervals",
+            "candidates": candidates,
+        }
+    return {"conductor": None, "state": "unattributed_interval_gap", "candidates": []}
 
 
 def select_lifecycle_evidence(
@@ -416,40 +460,98 @@ def select_lifecycle_evidence(
     quota_rows: list[dict[str, Any]],
     window: Window,
 ) -> tuple[list[dict[str, Any]], list[dict[str, Any]], dict[str, Any]]:
-    """Keep available pre-window events for executions observed in the frozen window.
+    """Select overlapping execution intervals, then retain their evidence through cutoff.
 
-    Post-window rows are never admitted. This reconstructs joins only from rows the
-    supplied snapshot retained; it cannot recover events already truncated upstream.
+    Rows after the frozen cutoff may establish that a pre-window start spans the
+    window, but are not admitted to lifecycle calculations. This reconstructs only
+    joins present in the supplied snapshot; it cannot recover upstream truncation.
     """
-    window_events = [row for row in event_rows if in_window(row, "room_events", window)]
-    window_quotas = [row for row in quota_rows if in_window(row, "quota_ledger", window)]
-    execution_ids = {
-        value
-        for row in window_events
-        if isinstance((value := row.get("ExecutionId")), str) and value
-    }
-    execution_ids.update(
-        value
-        for row in window_quotas
-        if isinstance((value := row.get("execution")), str) and value
-    )
-    joined_events = []
+    events_by_execution: dict[str, list[dict[str, Any]]] = defaultdict(list)
+    quotas_by_execution: dict[str, list[dict[str, Any]]] = defaultdict(list)
     for row in event_rows:
         execution = row.get("ExecutionId")
-        stamp = parse_time(row.get("at"))
-        if execution in execution_ids and stamp is not None and stamp <= window.end:
-            joined_events.append(row)
-    return joined_events, window_quotas, {
-        "intersecting_execution_ids": len(execution_ids),
-        "in_window_event_rows": len(window_events),
-        "in_window_quota_rows": len(window_quotas),
+        if isinstance(execution, str) and execution:
+            events_by_execution[execution].append(row)
+    for row in quota_rows:
+        execution = row.get("execution")
+        if isinstance(execution, str) and execution:
+            quotas_by_execution[execution].append(row)
+
+    observed_in_window_ids: set[str] = set()
+    intersecting_ids: set[str] = set()
+    for execution in set(events_by_execution) | set(quotas_by_execution):
+        execution_events = events_by_execution.get(execution, [])
+        execution_quotas = quotas_by_execution.get(execution, [])
+        observed_times = [
+            stamp
+            for row in (*execution_events, *execution_quotas)
+            if (stamp := parse_time(row.get("at"))) is not None
+        ]
+        if any(window.contains(stamp) for stamp in observed_times):
+            observed_in_window_ids.add(execution)
+            intersecting_ids.add(execution)
+            continue
+        starts = [
+            stamp
+            for row in execution_events
+            if row.get("type") in {"executionAttemptStarted", "executionStarted"}
+            and (stamp := parse_time(row.get("at"))) is not None
+        ]
+        if not starts or min(starts) > window.end:
+            continue
+        ends = [
+            stamp
+            for row in execution_events
+            if (row.get("type") in TERMINAL_EVENT_OUTCOMES or row.get("type") == "executionExited")
+            and (stamp := parse_time(row.get("at"))) is not None
+        ]
+        ends.extend(
+            stamp
+            for row in execution_quotas
+            if (stamp := parse_time(row.get("at"))) is not None
+        )
+        if not ends or max(ends) >= window.start:
+            intersecting_ids.add(execution)
+
+    joined_events = [
+        row
+        for row in event_rows
+        if row.get("ExecutionId") in intersecting_ids
+        and (stamp := parse_time(row.get("at"))) is not None
+        and stamp <= window.end
+    ]
+    joined_quotas = [
+        row
+        for row in quota_rows
+        if row.get("execution") in intersecting_ids
+        and (stamp := parse_time(row.get("at"))) is not None
+        and stamp <= window.end
+    ]
+    return joined_events, joined_quotas, {
+        "intersecting_execution_ids": len(intersecting_ids),
+        "observed_in_window_execution_ids": len(observed_in_window_ids),
+        "interval_only_execution_ids": len(intersecting_ids - observed_in_window_ids),
+        "in_window_event_rows": sum(in_window(row, "room_events", window) for row in event_rows),
+        "in_window_quota_rows": sum(in_window(row, "quota_ledger", window) for row in quota_rows),
         "retained_pre_window_event_rows": sum(
             parse_time(row.get("at")) < window.start for row in joined_events
         ),
+        "retained_pre_window_quota_rows": sum(
+            parse_time(row.get("at")) < window.start for row in joined_quotas
+        ),
         "joined_event_rows_through_cutoff": len(joined_events),
+        "joined_quota_rows_through_cutoff": len(joined_quotas),
         "post_window_event_rows_excluded": sum(
-            (stamp := parse_time(row.get("at"))) is not None and stamp > window.end
+            row.get("ExecutionId") in intersecting_ids
+            and (stamp := parse_time(row.get("at"))) is not None
+            and stamp > window.end
             for row in event_rows
+        ),
+        "post_window_quota_rows_excluded": sum(
+            row.get("execution") in intersecting_ids
+            and (stamp := parse_time(row.get("at"))) is not None
+            and stamp > window.end
+            for row in quota_rows
         ),
         "upstream_truncation_recoverable": False,
     }
@@ -538,23 +640,31 @@ def build_lifecycles(
         origin_item = origin_matches[-1] if origin_matches else item
         added = parse_time(origin_item.get("AddedAt"))
         launched = parse_time((launch_fact or {}).get("at")) or parse_time(item.get("LaunchedAt"))
+        tag_launches = sorted(
+            (
+                (stamp, row)
+                for row in launches_by_tag.get(tag, [])
+                if (stamp := parse_time(row.get("at"))) is not None
+            ),
+            key=lambda pair: pair[0],
+        ) if isinstance(tag, str) else []
+        previous_launch = max(
+            (stamp for stamp, _row in tag_launches if launched is not None and stamp < launched),
+            default=None,
+        )
         advances = [
             row
             for row in advances_by_tag.get(tag, [])
             if launched is not None
             and (stamp := parse_time(row.get("at"))) is not None
+            and (previous_launch is None or previous_launch < stamp)
             and stamp <= launched
         ] if isinstance(tag, str) else []
         round_queued = parse_time(max(advances, key=lambda row: parse_time(row.get("at"))).get("at")) if advances else None
-        prior_launch_exists = any(
-            (stamp := parse_time(row.get("at"))) is not None and launched is not None and stamp < launched
-            for row in launches_by_tag.get(tag, [])
-        ) if isinstance(tag, str) else False
-        declared_later_round = bool(origin_item.get("Round", 0))
         if round_queued is not None:
             queue_wait_start = round_queued
             queue_wait_basis = "round_transition_to_launch"
-        elif launched is not None and not prior_launch_exists and not declared_later_round:
+        elif launched is not None and previous_launch is None:
             queue_wait_start = added
             queue_wait_basis = "item_added_to_initial_launch" if added is not None else "unavailable"
         else:
@@ -569,6 +679,8 @@ def build_lifecycles(
             usage_status = "complete_fields"
         else:
             usage_status = "partial_fields"
+        attribution_time = started or attempted or launched or quota_recorded
+        attribution = attribute_conductor(attribution_time, handoffs)
         lifecycles.append(
             {
                 "room": room,
@@ -579,10 +691,17 @@ def build_lifecycles(
                 "work_mix_proxy": classify_work(item) if item else "other",
                 "queue_state_at_snapshot": item.get("State") or None,
                 "queue_round": item.get("Round") if item else None,
+                "observed_launch_sequence": (
+                    1 + sum(stamp < launched for stamp, _row in tag_launches)
+                    if launched is not None else None
+                ),
                 "inherited": None if added is None else added < window.start,
                 "in_flight": outcome == "in_flight",
                 "outcome": outcome,
-                "conductor": assign_conductor(started, handoffs),
+                "conductor": attribution["conductor"],
+                "conductor_attribution_state": attribution["state"],
+                "conductor_candidates": attribution["candidates"],
+                "conductor_attribution_at": iso(attribution_time),
                 "added_at": iso(added),
                 "launched_at": iso(launched),
                 "launch_time_source": "queue_decision" if launch_fact is not None else ("queue_snapshot" if launched is not None else "unavailable"),
@@ -661,6 +780,23 @@ def match_exclusions(
     return rows, sorted(exclusion_ids - lifecycle_ids)
 
 
+def apply_exclusions(
+    exclusion_ids: set[str], lifecycles: list[dict[str, Any]]
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]], list[str], set[str], str]:
+    exclusion_rows, unmatched_ids = match_exclusions(exclusion_ids, lifecycles)
+    matched_ids = exclusion_ids - set(unmatched_ids)
+    primary = [row for row in lifecycles if row["execution"] not in matched_ids]
+    if matched_ids and unmatched_ids:
+        status = "applied_matched_exact_ids_with_unmatched_requests"
+    elif matched_ids:
+        status = "applied_exact_ids"
+    elif exclusion_ids:
+        status = "requested_ids_unmatched_no_exclusion_applied"
+    else:
+        status = "unresolved_no_exclusion_applied"
+    return primary, exclusion_rows, unmatched_ids, matched_ids, status
+
+
 def count_by(rows: Iterable[dict[str, Any]], fields: tuple[str, ...]) -> list[dict[str, Any]]:
     counts = Counter(tuple(row.get(field) for field in fields) for row in rows)
     result = []
@@ -684,11 +820,26 @@ def numeric_summary(values: Iterable[Any]) -> dict[str, Any]:
     }
 
 
-def phase_summaries(lifecycles: list[dict[str, Any]]) -> list[dict[str, Any]]:
+def phase_summaries(
+    lifecycles: list[dict[str, Any]], *, by_conductor: bool = False
+) -> list[dict[str, Any]]:
     result = []
-    roles = {str(row.get("worker_role") or "unknown") for row in lifecycles}
-    for role in sorted(roles, key=lambda value: (ROLE_DISPLAY_ORDER.get(value, 99), value)):
-        selected = [row for row in lifecycles if str(row.get("worker_role") or "unknown") == role]
+    group_fields = (
+        ("conductor", "conductor_attribution_state", "worker_role")
+        if by_conductor else ("worker_role",)
+    )
+    groups: dict[tuple[Any, ...], list[dict[str, Any]]] = defaultdict(list)
+    for row in lifecycles:
+        groups[tuple(row.get(field) for field in group_fields)].append(row)
+    for values, selected in sorted(
+        groups.items(),
+        key=lambda pair: (
+            *(str(value or "unknown") for value in pair[0][:-1]),
+            ROLE_DISPLAY_ORDER.get(str(pair[0][-1] or "unknown"), 99),
+            str(pair[0][-1] or "unknown"),
+        ),
+    ):
+        group = dict(zip(group_fields, values))
         for field in (
             "queue_wait_seconds",
             "launch_to_start_seconds",
@@ -696,33 +847,68 @@ def phase_summaries(lifecycles: list[dict[str, Any]]) -> list[dict[str, Any]]:
             "verification_seconds",
             "execution_to_terminal_seconds",
         ):
-            result.append({"worker_role": role, "phase": field, **numeric_summary(row.get(field) for row in selected)})
+            result.append({**group, "phase": field, **numeric_summary(row.get(field) for row in selected)})
     return result
 
 
-def usage_summaries(lifecycles: list[dict[str, Any]]) -> list[dict[str, Any]]:
-    groups: dict[tuple[str, str, str], list[dict[str, Any]]] = defaultdict(list)
+def usage_summaries(
+    lifecycles: list[dict[str, Any]], *, by_conductor: bool = False
+) -> list[dict[str, Any]]:
+    groups: dict[tuple[Any, ...], list[dict[str, Any]]] = defaultdict(list)
     for row in lifecycles:
-        key = (
+        key: tuple[Any, ...] = (
             str(row.get("adapter") or "unknown"),
             str(row.get("model") or "unknown"),
             str(row.get("worker_role") or "unknown"),
         )
+        if by_conductor:
+            key = (
+                row.get("conductor"),
+                row.get("conductor_attribution_state"),
+                *key,
+            )
         groups[key].append(row)
     result = []
-    for (adapter, model, role), rows in sorted(groups.items()):
+    for key, rows in sorted(
+        groups.items(), key=lambda pair: tuple(str(value or "unknown") for value in pair[0])
+    ):
+        if by_conductor:
+            conductor, attribution_state, adapter, model, role = key
+        else:
+            adapter, model, role = key
         item: dict[str, Any] = {
             "adapter": adapter,
             "model": model,
             "worker_role": role,
             "execution_rows": len(rows),
         }
+        if by_conductor:
+            item = {
+                "conductor": conductor,
+                "conductor_attribution_state": attribution_state,
+                **item,
+            }
         for field in USAGE_FIELDS:
             values = [row["usage"].get(field) for row in rows if row["usage"].get(field) is not None]
             item[f"{field}_observed_n"] = len(values)
             item[f"{field}_sum"] = sum(values) if values else None
         result.append(item)
     return result
+
+
+def analytical_view(lifecycles: list[dict[str, Any]]) -> dict[str, Any]:
+    return {
+        "lifecycle_row_count": len(lifecycles),
+        "outcomes": count_by(lifecycles, ("worker_role", "outcome")),
+        "phase_summaries": phase_summaries(lifecycles),
+        "usage_summaries": usage_summaries(lifecycles),
+        "conductor_outcomes": count_by(
+            lifecycles,
+            ("conductor", "conductor_attribution_state", "worker_role", "outcome"),
+        ),
+        "conductor_phase_summaries": phase_summaries(lifecycles, by_conductor=True),
+        "conductor_usage_summaries": usage_summaries(lifecycles, by_conductor=True),
+    }
 
 
 def build_dataset(input_dir: Path, handoff_path: Path | None, exclusion_path: Path | None) -> dict[str, Any]:
@@ -745,6 +931,7 @@ def build_dataset(input_dir: Path, handoff_path: Path | None, exclusion_path: Pa
         tables[source] = rows
 
     handoffs = load_optional_rows(handoff_path, "handoffs")
+    validate_handoffs(handoffs)
     exclusions = load_optional_rows(exclusion_path, "exclusions")
     joined_events, quotas, lifecycle_evidence = select_lifecycle_evidence(
         tables["room_events"], tables["quota_ledger"], window
@@ -761,10 +948,29 @@ def build_dataset(input_dir: Path, handoff_path: Path | None, exclusion_path: Pa
     room_event_manifest = next(item for item in manifests if item["source"] == "room_events")
     room_event_manifest["rows_retained_for_lifecycle_join"] = len(joined_events)
     room_event_manifest["retained_pre_window_rows"] = lifecycle_evidence["retained_pre_window_event_rows"]
+    quota_manifest = next(item for item in manifests if item["source"] == "quota_ledger")
+    quota_manifest["rows_retained_for_lifecycle_join"] = len(quotas)
+    quota_manifest["retained_pre_window_rows"] = lifecycle_evidence["retained_pre_window_quota_rows"]
     exclusion_ids = load_exclusion_ids(exclusions)
-    primary = [row for row in lifecycles if row["execution"] not in exclusion_ids]
-    exclusion_rows, unmatched_exclusion_ids = match_exclusions(exclusion_ids, lifecycles)
+    (
+        primary,
+        exclusion_rows,
+        unmatched_exclusion_ids,
+        matched_exclusion_ids,
+        exclusion_status,
+    ) = apply_exclusions(exclusion_ids, lifecycles)
     candidates = fable_candidates(tables["queue"], lifecycles)
+
+    attribution_state_counts = count_by(lifecycles, ("conductor_attribution_state",))
+    uncertain_attribution_rows = sum(
+        row.get("conductor_attribution_state") != "attributed_unique" for row in lifecycles
+    )
+    if not handoffs:
+        attribution_status = "unavailable_no_authoritative_intervals"
+    elif uncertain_attribution_rows:
+        attribution_status = "provided_with_attribution_uncertainty"
+    else:
+        attribution_status = "provided_all_lifecycle_rows_uniquely_attributed"
 
     decisions = [row for row in tables["queue_decisions"] if in_window(row, "queue_decisions", window)]
     decision_categories = [
@@ -785,7 +991,7 @@ def build_dataset(input_dir: Path, handoff_path: Path | None, exclusion_path: Pa
             })
 
     return {
-        "schema_version": 2,
+        "schema_version": 3,
         "generated_by": "tools/three-day-metadata/extract.py",
         "window": {
             "start_utc": iso(window.start),
@@ -805,8 +1011,9 @@ def build_dataset(input_dir: Path, handoff_path: Path | None, exclusion_path: Pa
         },
         "exclusion_manifest": {
             "requested_episode": "Fable runaway",
-            "status": "applied_exact_ids" if exclusion_ids else "unresolved_no_exclusion_applied",
-            "primary_excluded_execution_ids": sorted(exclusion_ids),
+            "status": exclusion_status,
+            "requested_execution_ids": sorted(exclusion_ids),
+            "primary_excluded_execution_ids": sorted(matched_exclusion_ids),
             "exact_exclusions": exclusion_rows,
             "unmatched_exclusion_ids": unmatched_exclusion_ids,
             "candidate_ambiguity": candidates,
@@ -814,23 +1021,25 @@ def build_dataset(input_dir: Path, handoff_path: Path | None, exclusion_path: Pa
             "primary_lifecycle_rows": len(primary),
         },
         "conductor_attribution": {
-            "status": "provided" if handoffs else "unavailable_no_authoritative_intervals",
+            "status": attribution_status,
             "interval_count": len(handoffs),
-            "attributed_lifecycle_rows": sum(row.get("conductor") is not None for row in lifecycles),
+            "uniquely_attributed_lifecycle_rows": sum(
+                row.get("conductor_attribution_state") == "attributed_unique" for row in lifecycles
+            ),
+            "uncertain_lifecycle_rows": uncertain_attribution_rows,
+            "state_counts": attribution_state_counts,
+            "attribution_time_precedence": [
+                "executionStarted", "executionAttemptStarted", "queueLaunch", "quotaRecorded"
+            ],
         },
         "join_manifest": joins,
         "inclusive": {
             "lifecycle_rows": lifecycles,
-            "outcomes": count_by(lifecycles, ("worker_role", "outcome")),
-            "phase_summaries": phase_summaries(lifecycles),
-            "usage_summaries": usage_summaries(lifecycles),
+            **analytical_view(lifecycles),
         },
         "primary": {
-            "same_as_inclusive": not exclusion_ids,
-            "lifecycle_row_count": len(primary),
-            "outcomes": count_by(primary, ("worker_role", "outcome")),
-            "phase_summaries": phase_summaries(primary),
-            "usage_summaries": usage_summaries(primary),
+            "same_as_inclusive": not matched_exclusion_ids,
+            **analytical_view(primary),
         },
         "available_axes": {
             "event_types": event_type_counts,
@@ -846,8 +1055,11 @@ def build_dataset(input_dir: Path, handoff_path: Path | None, exclusion_path: Pa
             "inherited_unknown_rows": sum(row.get("inherited") is None for row in lifecycles),
             "in_flight_rows": sum(bool(row.get("in_flight")) for row in lifecycles),
         },
-        "limitations": [
-            "No authoritative conductor handoff intervals or personal conductor usage were supplied.",
+        "limitations": ([
+            "No authoritative conductor handoff intervals or personal conductor usage were supplied."
+        ] if not handoffs else [
+            "Supplied handoff intervals attribute worker lifecycles only; personal conductor usage remains unavailable, and interval gaps or overlaps stay explicit rather than being allocated."
+        ]) + [
             "The exact Fable runaway execution IDs were not supplied; no statistical outlier was substituted.",
             "Queue decision rows are observed decisions, not a duration measure; suppressed repeats are unknown.",
             "Queue events do not represent full attempt cost, and missing usage fields remain null rather than zero.",
@@ -856,8 +1068,11 @@ def build_dataset(input_dir: Path, handoff_path: Path | None, exclusion_path: Pa
             "Parallel and overlapping durations are reported separately and are never summed.",
             "Pre-window lifecycle events are joined only when present in the supplied snapshot; upstream truncation can leave starts and durations unknown and cannot be repaired by this extractor.",
         ],
-        "minimum_missing_extraction": [
-            "Authoritative UTC conductor ownership intervals, including temporary/shared ownership, plus measured personal conductor usage by interval.",
+        "minimum_missing_extraction": ([
+            "Authoritative UTC conductor ownership intervals, including temporary/shared ownership, plus measured personal conductor usage by interval."
+        ] if not handoffs else [
+            "Measured personal conductor usage by supplied ownership interval."
+        ]) + [
             "Exact room and execution IDs, with UTC boundaries, for the operator-identified Fable runaway episode.",
             "Window-scoped issue/PR/review/check/merge/deploy timestamps joined by issue, PR, exact head, and deployed revision.",
             "Upstream inventory for rows skipped while the snapshot was created, plus confirmation that the named locked post-cutoff room has no event at or before the cutoff.",
@@ -894,12 +1109,68 @@ def render_report(dataset: dict[str, Any], max_rows: int) -> str:
     window = dataset["window"]
     coverage = dataset["coverage_manifest"]
     exclusions = dataset["exclusion_manifest"]
+    attribution = dataset["conductor_attribution"]
     usage_columns = [
         "adapter", "model", "worker_role", "execution_rows",
         "tokensIn_observed_n", "tokensIn_sum", "tokensOut_observed_n", "tokensOut_sum",
         "cacheRead_observed_n", "cacheRead_sum", "cacheCreation_observed_n", "cacheCreation_sum",
         "thinking_observed_n", "thinking_sum", "turns_observed_n", "turns_sum",
     ]
+    conductor_usage_columns = [
+        "conductor", "conductor_attribution_state", *usage_columns
+    ]
+
+    def conductor_view_lines(view: dict[str, Any]) -> list[str]:
+        if not attribution["interval_count"]:
+            return [
+                "",
+                "### Conductor-stratified summaries",
+                "",
+                "_Not produced because no authoritative handoff intervals were supplied._",
+            ]
+        return [
+            "",
+            "### Conductor-stratified worker outcomes",
+            "",
+            md_table(
+                view["conductor_outcomes"],
+                ["conductor", "conductor_attribution_state", "worker_role", "outcome", "observed_rows"],
+                max_rows,
+            ),
+            "",
+            "### Conductor-stratified phase summaries",
+            "",
+            md_table(
+                view["conductor_phase_summaries"],
+                ["conductor", "conductor_attribution_state", "worker_role", "phase", "n", "median", "p90_nearest_rank", "max"],
+                max_rows,
+            ),
+            "",
+            "### Conductor-stratified worker usage-field coverage",
+            "",
+            md_table(view["conductor_usage_summaries"], conductor_usage_columns, max_rows),
+        ]
+    if attribution["interval_count"]:
+        comparison_boundary = (
+            f"The {attribution['interval_count']} supplied conductor interval(s) enable "
+            "conductor-stratified worker outcomes, phases, and usage coverage below. "
+            "Overlaps, gaps, and missing lifecycle times remain explicit uncertainty; personal "
+            "conductor usage and delivery-system metadata remain unavailable."
+        )
+        conclusion_scope = (
+            "The available snapshot establishes conductor-stratified worker-metadata counts and "
+            "phase distributions under the supplied intervals. "
+        )
+    else:
+        comparison_boundary = (
+            "A conductor before/after comparison is unavailable: no authoritative conductor "
+            "ownership intervals or personal conductor usage were supplied. The views below are "
+            "worker-metadata baselines."
+        )
+        conclusion_scope = (
+            "The available snapshot establishes counts and phase distributions for joined worker "
+            "metadata only. "
+        )
     lines = [
         "# Three-day metadata comparison",
         "",
@@ -927,9 +1198,12 @@ def render_report(dataset: dict[str, Any], max_rows: int) -> str:
         f"the parsed delta is `{coverage['declared_vs_parsed_room_event_delta']}`. Other upstream parse failures remain unknown. ",
         "The named locked room began after cutoff according to the supplied declaration, but its pre-cutoff absence was not independently verified.",
         "",
-        f"For {coverage['lifecycle_evidence']['intersecting_execution_ids']} intersecting execution IDs, the extractor retained "
-        f"{coverage['lifecycle_evidence']['retained_pre_window_event_rows']} available pre-window event rows and excluded "
-        f"{coverage['lifecycle_evidence']['post_window_event_rows_excluded']} post-window rows. This joins retained evidence only; "
+        f"For {coverage['lifecycle_evidence']['intersecting_execution_ids']} interval-overlapping execution IDs "
+        f"({coverage['lifecycle_evidence']['interval_only_execution_ids']} established only by lifecycle overlap), "
+        f"the extractor retained {coverage['lifecycle_evidence']['retained_pre_window_event_rows']} available pre-window event rows "
+        f"and {coverage['lifecycle_evidence']['retained_pre_window_quota_rows']} available pre-window quota rows. It excluded "
+        f"{coverage['lifecycle_evidence']['post_window_event_rows_excluded']} post-window event rows and "
+        f"{coverage['lifecycle_evidence']['post_window_quota_rows_excluded']} post-window quota rows from calculations. This joins retained evidence only; "
         "events truncated before snapshot creation remain absent and their durations remain unknown.",
         "",
         "GitHub window queries were unavailable under this lane's command grant, so merge, closure, review/check, and deployment coverage is absent.",
@@ -941,7 +1215,7 @@ def render_report(dataset: dict[str, Any], max_rows: int) -> str:
         "",
         md_table(exclusions["candidate_ambiguity"], ["room", "tag", "executions"], max_rows),
         "",
-        "Exact requested exclusions and whether each matched an intersecting lifecycle:",
+        "Exact requested exclusions and whether each matched an interval-overlapping lifecycle:",
         "",
         md_table(exclusions["exact_exclusions"], ["execution", "matched_lifecycle"], max_rows),
         "",
@@ -949,8 +1223,20 @@ def render_report(dataset: dict[str, Any], max_rows: int) -> str:
         "",
         "## Comparison boundary",
         "",
-        "A conductor before/after comparison is unavailable: the snapshot has no authoritative conductor ownership intervals and no personal conductor usage. ",
-        "The primary exact-exclusion view and inclusive sensitivity view below are worker-metadata baselines, not a claim that all three-day metadata or a causal comparison is complete.",
+        comparison_boundary,
+        "The primary exact-exclusion view and inclusive sensitivity view are not a claim that all three-day metadata or a causal comparison is complete.",
+        "",
+        "## Conductor attribution",
+        "",
+        f"Status: **{attribution['status']}**. Uniquely attributed lifecycle rows: "
+        f"{attribution['uniquely_attributed_lifecycle_rows']}; uncertain rows: {attribution['uncertain_lifecycle_rows']}.",
+        "Lifecycle attribution uses the first available timestamp in this order: execution start, attempt start, queue launch, quota record.",
+        "",
+        md_table(
+            attribution["state_counts"],
+            ["conductor_attribution_state", "observed_rows"],
+            max_rows,
+        ),
         "",
         "## Phase joins",
         "",
@@ -971,7 +1257,7 @@ def render_report(dataset: dict[str, Any], max_rows: int) -> str:
         "",
         "### Phase summaries",
         "",
-        "Queue wait uses the latest retained lifecycle-transition decision for later rounds. If that transition is absent, the value is censored; item age is retained separately in lifecycle rows and is not presented as queue wait.",
+        "Queue wait pairs each retained lifecycle-transition decision with its next launch. If a later launch has no transition after the preceding launch, the value is censored; item age is retained separately in lifecycle rows and is not presented as queue wait.",
         "",
         md_table(
             dataset["primary"]["phase_summaries"],
@@ -982,6 +1268,7 @@ def render_report(dataset: dict[str, Any], max_rows: int) -> str:
         "### Worker usage-field coverage",
         "",
         md_table(dataset["primary"]["usage_summaries"], usage_columns, max_rows),
+        *conductor_view_lines(dataset["primary"]),
         "",
         "## Inclusive sensitivity view",
         "",
@@ -1019,6 +1306,7 @@ def render_report(dataset: dict[str, Any], max_rows: int) -> str:
             usage_columns,
             max_rows,
         ),
+        *conductor_view_lines(dataset["inclusive"]),
         "",
         "## Scheduling context",
         "",
@@ -1061,7 +1349,7 @@ def render_report(dataset: dict[str, Any], max_rows: int) -> str:
         "",
         "## What can and cannot be concluded",
         "",
-        "The available snapshot establishes counts and phase distributions for joined worker metadata only. ",
+        conclusion_scope,
         "It does not establish whether delivery slowed after a conductor handoff, accepted-delivery throughput, first-pass acceptance, reopen/regression rates, ",
         "complete retry cost, conductor action delay, CI critical path, or merge-to-deploy delay. Small, dependent cohorts and missing attribution do not support a fitted causal model.",
         "",
@@ -1195,41 +1483,59 @@ def selftest() -> None:
     assert quota_unknown[0]["outcome"] == "unknown"
     assert quota_unknown[0]["inherited"] is None
 
-    # A later round waits from its transition, never from the item's original add time.
+    # Each advance pairs only with its next launch. The current queue Round cannot
+    # leak backward and censor a supported initial wait, and a missing later
+    # transition cannot reuse the preceding round's transition.
     round_queue = [{
         "Tag": "synthetic-rounds",
         "Role": "review",
-        "RoomDirectory": "C:/fixture/room-round-2",
-        "AddedAt": "2026-09-07T21:00:00Z",
-        "LaunchedAt": "2026-09-09T01:05:00Z",
-        "Round": 2,
+        "RoomDirectory": "C:/fixture/room-round-3",
+        "AddedAt": "2026-09-09T00:59:46.067Z",
+        "LaunchedAt": "2026-09-09T03:00:00Z",
+        "Round": 3,
     }]
     round_decisions = [
         {
             "at": "2026-09-09T01:00:00Z", "tag": "synthetic-rounds",
+            "decision": "launched", "room": "room-round-1",
+        },
+        {
+            "at": "2026-09-09T01:30:00Z", "tag": "synthetic-rounds",
             "decision": "advanced", "room": "room-round-1",
         },
         {
-            "at": "2026-09-09T01:05:00Z", "tag": "synthetic-rounds",
+            "at": "2026-09-09T01:35:00Z", "tag": "synthetic-rounds",
             "decision": "launched", "room": "room-round-2",
         },
+        {
+            "at": "2026-09-09T03:00:00Z", "tag": "synthetic-rounds",
+            "decision": "launched", "room": "room-round-3",
+        },
     ]
-    round_events = [{
-        "room": "room-round-2", "ExecutionId": "round-2", "type": "executionStarted",
-        "at": "2026-09-09T01:05:01Z",
-    }]
+    round_events = [
+        {
+            "room": f"room-round-{index}", "ExecutionId": f"round-{index}",
+            "type": "executionStarted", "at": stamp,
+        }
+        for index, stamp in (
+            (1, "2026-09-09T01:00:01Z"),
+            (2, "2026-09-09T01:35:01Z"),
+            (3, "2026-09-09T03:00:01Z"),
+        )
+    ]
     rounds, _joins = build_lifecycles(round_queue, round_decisions, round_events, [], window, [])
-    assert rounds[0]["queue_wait_seconds"] == 300
-    assert rounds[0]["item_age_at_launch_seconds"] == 101100
-    assert rounds[0]["queue_wait_basis"] == "round_transition_to_launch"
-    censored_rounds, _joins = build_lifecycles(
-        round_queue, round_decisions[1:], round_events, [], window, []
-    )
-    assert censored_rounds[0]["queue_wait_seconds"] is None
-    assert censored_rounds[0]["queue_wait_basis"] == "unavailable_missing_round_transition"
+    rounds_by_execution = {row["execution"]: row for row in rounds}
+    assert rounds_by_execution["round-1"]["queue_wait_seconds"] == 13.933
+    assert rounds_by_execution["round-1"]["queue_wait_basis"] == "item_added_to_initial_launch"
+    assert rounds_by_execution["round-1"]["observed_launch_sequence"] == 1
+    assert rounds_by_execution["round-2"]["queue_wait_seconds"] == 300
+    assert rounds_by_execution["round-2"]["queue_wait_basis"] == "round_transition_to_launch"
+    assert rounds_by_execution["round-3"]["queue_wait_seconds"] is None
+    assert rounds_by_execution["round-3"]["queue_wait_basis"] == "unavailable_missing_round_transition"
 
-    # An execution observed inside the window retains an available pre-window start,
-    # while evidence after the frozen cutoff is excluded.
+    # Selection is by interval overlap, not by requiring a row inside the window.
+    # Available pre-window event/quota evidence is retained through cutoff, while
+    # post-window evidence is used only to establish overlap.
     crossing_events = [
         {
             "room": "crossing", "ExecutionId": "crossing-1", "type": "executionStarted",
@@ -1247,14 +1553,87 @@ def selftest() -> None:
             "room": "crossing", "ExecutionId": "crossing-1", "type": "executionProgress",
             "at": "2026-09-10T20:37:14Z",
         },
+        {
+            "room": "spanning", "ExecutionId": "spanning-1", "type": "executionStarted",
+            "at": "2026-09-07T20:30:00Z",
+        },
+        {
+            "room": "spanning", "ExecutionId": "spanning-1", "type": "executionExited",
+            "at": "2026-09-10T20:40:00Z",
+        },
+        {
+            "room": "before", "ExecutionId": "before-1", "type": "executionStarted",
+            "at": "2026-09-07T20:00:00Z",
+        },
+        {
+            "room": "before", "ExecutionId": "before-1", "type": "executionExited",
+            "at": "2026-09-07T20:10:00Z",
+        },
     ]
-    joined, joined_quotas, evidence = select_lifecycle_evidence(crossing_events, [], window)
-    assert joined_quotas == [] and len(joined) == 3
-    assert evidence["retained_pre_window_event_rows"] == 1
-    assert evidence["post_window_event_rows_excluded"] == 1
-    crossing, _joins = build_lifecycles([], [], joined, [], window, [])
-    assert crossing[0]["outcome"] == "succeeded"
-    assert crossing[0]["lane_service_seconds"] == 600
+    crossing_quotas = [{
+        "room": "crossing", "execution": "crossing-1", "at": "2026-09-07T20:35:00Z",
+        "outcome": "Succeeded", "tokensIn": 7,
+    }]
+    joined, joined_quotas, evidence = select_lifecycle_evidence(
+        crossing_events, crossing_quotas, window
+    )
+    assert {row["ExecutionId"] for row in joined} == {"crossing-1", "spanning-1"}
+    assert len(joined_quotas) == 1 and joined_quotas[0]["tokensIn"] == 7
+    assert evidence["interval_only_execution_ids"] == 1
+    assert evidence["retained_pre_window_event_rows"] == 2
+    assert evidence["retained_pre_window_quota_rows"] == 1
+    assert evidence["post_window_event_rows_excluded"] == 2
+    crossing, _joins = build_lifecycles([], [], joined, joined_quotas, window, [])
+    crossing_by_execution = {row["execution"]: row for row in crossing}
+    assert crossing_by_execution["crossing-1"]["outcome"] == "succeeded"
+    assert crossing_by_execution["crossing-1"]["lane_service_seconds"] == 600
+    assert crossing_by_execution["crossing-1"]["usage"]["tokensIn"] == 7
+    assert crossing_by_execution["spanning-1"]["in_flight"] is True
+
+    # Supplied intervals produce conductor-stratified summaries. Every
+    # attribution state is explicit, including overlaps, gaps, and missing time.
+    handoffs = [
+        {"conductor": "before", "start": "2026-09-07T20:00:00Z", "end": "2026-09-09T02:00:00Z"},
+        {"conductor": "after", "start": "2026-09-09T00:00:00Z", "end": None},
+    ]
+    validate_handoffs(handoffs)
+    attribution_controls = {
+        attribute_conductor(parse_time("2026-09-08T01:00:00Z"), handoffs)["state"],
+        attribute_conductor(parse_time("2026-09-09T01:00:00Z"), handoffs)["state"],
+        attribute_conductor(parse_time("2026-09-07T19:00:00Z"), handoffs)["state"],
+        attribute_conductor(None, handoffs)["state"],
+        attribute_conductor(parse_time("2026-09-08T01:00:00Z"), [])["state"],
+    }
+    assert attribution_controls == set(CONDUCTOR_ATTRIBUTION_STATES)
+    attributed, _joins = build_lifecycles(
+        [], [], [],
+        [
+            {
+                "room": "before-room", "execution": "before-execution",
+                "at": "2026-09-08T01:00:00Z", "outcome": "Succeeded", "tokensIn": 3,
+            },
+            {
+                "room": "shared-room", "execution": "shared-execution",
+                "at": "2026-09-09T01:00:00Z", "outcome": "Failed", "tokensIn": 5,
+            },
+            {
+                "room": "after-room", "execution": "after-execution",
+                "at": "2026-09-09T03:00:00Z", "outcome": "Succeeded", "tokensIn": 7,
+            },
+        ],
+        window, handoffs,
+    )
+    attributed_view = analytical_view(attributed)
+    assert {row["conductor"] for row in attributed_view["conductor_outcomes"]} == {
+        "before", "after", None,
+    }
+    assert any(
+        row["conductor_attribution_state"] == "ambiguous_overlapping_intervals"
+        for row in attributed_view["conductor_phase_summaries"]
+    )
+    assert {row["conductor"] for row in attributed_view["conductor_usage_summaries"]} == {
+        "before", "after", None,
+    }
 
     # The declared first-match work-mix rule applies even when Role is not review.
     assert classify_work({"Role": "advise", "Reason": "rereview the evidence"}) == "review"
@@ -1274,17 +1653,31 @@ def selftest() -> None:
             "lifecycle_evidence": evidence,
         },
         "exclusion_manifest": {
-            "status": "applied_exact_ids", "inclusive_lifecycle_rows": 1,
+            "status": "requested_ids_unmatched_no_exclusion_applied", "inclusive_lifecycle_rows": 1,
             "primary_lifecycle_rows": 1, "candidate_ambiguity": [],
             "exact_exclusions": [{"execution": "missing-id", "matched_lifecycle": False}],
             "unmatched_exclusion_ids": ["missing-id"],
         },
+        "conductor_attribution": {
+            "status": "provided_with_attribution_uncertainty", "interval_count": 2,
+            "uniquely_attributed_lifecycle_rows": 2, "uncertain_lifecycle_rows": 1,
+            "state_counts": [
+                {"conductor_attribution_state": "attributed_unique", "observed_rows": 2},
+                {"conductor_attribution_state": "ambiguous_overlapping_intervals", "observed_rows": 1},
+            ],
+        },
         "join_manifest": {},
         "primary": {
-            "lifecycle_row_count": 1, "same_as_inclusive": False,
+            "lifecycle_row_count": 1, "same_as_inclusive": True,
             "outcomes": [], "phase_summaries": [], "usage_summaries": [],
+            "conductor_outcomes": [], "conductor_phase_summaries": [],
+            "conductor_usage_summaries": [],
         },
-        "inclusive": {"outcomes": [], "phase_summaries": [], "usage_summaries": []},
+        "inclusive": {
+            "outcomes": [], "phase_summaries": [], "usage_summaries": [],
+            "conductor_outcomes": [], "conductor_phase_summaries": [],
+            "conductor_usage_summaries": [],
+        },
         "available_axes": {
             "inherited_rows": 0, "inherited_unknown_rows": 1, "in_flight_rows": 0,
             "worker_activity_by_utc_day": [], "queue_decisions": [], "runway_admissions": [],
@@ -1297,12 +1690,26 @@ def selftest() -> None:
     report = render_report(report_fixture, 20)
     assert report.index("## Primary exact-exclusion view") < report.index("## Inclusive sensitivity view")
     assert "missing-id" in report and "Unmatched exclusion IDs" in report
-    matched, unmatched = match_exclusions({"crossing-1", "missing-id"}, crossing)
+    assert "enable conductor-stratified worker outcomes" in report
+    assert "Same as inclusive: `True`" in report
+    primary_missing, matched, unmatched, matched_ids, status = apply_exclusions(
+        {"missing-id"}, crossing
+    )
+    assert primary_missing == crossing and matched_ids == set()
+    assert status == "requested_ids_unmatched_no_exclusion_applied"
+    assert matched == [
+        {"execution": "missing-id", "matched_lifecycle": False},
+    ]
+    assert unmatched == ["missing-id"]
+    _primary_matched, matched, unmatched, matched_ids, status = apply_exclusions(
+        {"crossing-1", "missing-id"}, crossing
+    )
     assert matched == [
         {"execution": "crossing-1", "matched_lifecycle": True},
         {"execution": "missing-id", "matched_lifecycle": False},
     ]
-    assert unmatched == ["missing-id"]
+    assert unmatched == ["missing-id"] and matched_ids == {"crossing-1"}
+    assert status == "applied_matched_exact_ids_with_unmatched_requests"
 
     print("three-day-metadata selftest: PASS (measurement-integrity controls)")
 
