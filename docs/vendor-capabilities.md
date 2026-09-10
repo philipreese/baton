@@ -751,7 +751,8 @@ language-server process rather than the CLI binary. This is a partial, not an ab
 **Superseded, #508 → #525.** The Python SDK (`pip install google-antigravity`) was read and answers
 what this RPC surface would have: structured events, per-turn usage, and a `deny()`/`allow()` gate.
 But the SDK path — for both vendors — is foreclosed by auth policy, not capability: neither SDK
-supports a subscription login, only API keys, which CLAUDE.md's premise rules out. **The integration
+supports a subscription login, only API keys, which conflicts with the subscription-only premise in
+the [development guide](agents/developing-baton.md). **The integration
 choice is CLI, both vendors, and the SDK question is closed** — see
 [`vendor-doc-audit.md`](vendor-doc-audit.md#should-aer-drive-sdks-instead-of-clis-no-and-the-reason-is-contractual)
 for the full reasoning. The RPC surface itself remains genuinely unenumerated, but no design decision

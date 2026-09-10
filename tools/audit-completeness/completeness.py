@@ -3,8 +3,8 @@
 WHY THIS EXISTS
 ---------------
 A claim of completeness ships with the artifact that lets someone check it -- prose alone enforces
-nothing (CLAUDE.md, "PROSE THAT NOBODY READS IS USELESS"). This is that artifact for the #527 audit
-chain.
+nothing (the development guide, "PROSE THAT NOBODY READS IS USELESS"). This is that artifact for
+the #527 audit chain.
 
 Each step takes a population that can be ENUMERATED and asserts every member carries a disposition.
 `main()` is the list of them; do not restate it here -- a restated count is one `selfcheck.py`
@@ -42,6 +42,7 @@ import subprocess
 import sys
 
 ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+DEVELOPMENT_GUIDE = "docs/agents/developing-baton.md"
 
 
 def read(path):
@@ -224,11 +225,11 @@ def step8_cited_checks_exist():
 
     A fabricated citation is worse than an uncited claim: it reads as evidence, it survives review by
     looking exactly like the real names around it, and the next person to trust it inherits a
-    conclusion that was never measured. Note the ordering that makes this non-optional -- CLAUDE.md
-    gate `common-sense` had ALREADY been extended that same day with "run `verify.py --list` before claiming a
-    vendor fact is unmeasured", by the same author who then fabricated the name hours later. Prose
-    did not hold. This is the population gate `record-once` describes as earning a checker: enumerable, and
-    invisible when omitted.
+    conclusion that was never measured. Note the ordering that makes this non-optional -- the
+    development guide's gate `common-sense` had ALREADY been extended that same day with "run
+    `verify.py --list` before claiming a vendor fact is unmeasured", by the same author who then
+    fabricated the name hours later. Prose did not hold. This is the population gate `record-once`
+    describes as earning a checker: enumerable, and invisible when omitted.
     """
     rule("STEP 8 -- every cited vendor-verify check name actually exists")
     verify = read("tools/vendor-verify/verify.py")
@@ -383,7 +384,7 @@ def step9_pinned_models_exist():
     Prose could not have caught it: `gemini-3.1-pro` reads exactly like a real model name, appears as
     a substring of two real ones, and is used correctly in surrounding prose about the grid's holes.
     Only a join against the enumerated set separates it from the valid names -- which is precisely the
-    population CLAUDE.md gate `record-once` describes as earning a checker.
+    population the development guide's gate `record-once` describes as earning a checker.
 
     THIS IS NOT THE FIRST CHECK OF ITS KIND, AND SAYING SO IS THE POINT
     `tools/smoke-preflight/preflight.py` already validates model pins against agy's catalogue, was
@@ -727,9 +728,9 @@ def generated_changelog(filename: str) -> bool:
     return filename == "CHANGELOG.md"
 
 
-def gate_slugs(claude_md: str) -> set[str]:
-    """The gate slugs CLAUDE.md actually defines, from its own headings."""
-    return set(GATE_HEADING.findall(claude_md))
+def gate_slugs(development_guide: str) -> set[str]:
+    """The gate slugs the canonical development guide defines, from its own headings."""
+    return set(GATE_HEADING.findall(development_guide))
 
 
 # GitHub closes an issue whenever a closing keyword sits beside a reference. It does not care about
@@ -860,10 +861,10 @@ def gate_citation_faults(files: dict, slugs: set[str]) -> list:
     `files` maps a display path to its text. Pure, so a checker can drive it with planted input --
     a lint that can only be run against the real tree cannot be shown to discriminate.
 
-    Two faults, one cause. CLAUDE.md's own gate list says to cite a gate by its slug and never its
-    number, because numbers are positional and merging two gates once already invalidated every
-    citation in the repo. That instruction had been prose for months, and prose does not renumber
-    citations: `pixi.toml` cited a gate ordinal past the end of the list.
+    Two faults, one cause. The development guide's own gate list says to cite a gate by its slug and
+    never its number, because numbers are positional and merging two gates once already invalidated
+    every citation in the repo. That instruction had been prose for months, and prose does not
+    renumber citations: `pixi.toml` cited a gate ordinal past the end of the list.
     """
     faults = []
     for path, text in sorted(files.items()):
@@ -878,11 +879,11 @@ def gate_citation_faults(files: dict, slugs: set[str]) -> list:
 
 
 def step10_gate_citations():
-    """No file cites a shipping gate by a number, or by a slug CLAUDE.md does not define."""
+    """No file cites a gate by number or by a slug the development guide does not define."""
     rule("STEP 10 -- every gate citation survives the list being renumbered")
-    slugs = gate_slugs(read("CLAUDE.md"))
+    slugs = gate_slugs(read(DEVELOPMENT_GUIDE))
     if not slugs:
-        print("    !! no gate headings found in CLAUDE.md -- the expected set is empty, so this"
+        print(f"    !! no gate headings found in {DEVELOPMENT_GUIDE} -- the expected set is empty, so this"
               " step cannot judge any citation")
         return False
 
@@ -902,7 +903,7 @@ def step10_gate_citations():
                     continue
                 files[rel] = read(rel)
 
-    line("gate slugs defined by CLAUDE.md", len(slugs))
+    line(f"gate slugs defined by {DEVELOPMENT_GUIDE}", len(slugs))
     line("files scanned for gate citations", len(files))
     faults = gate_citation_faults(files, slugs)
     ok = line("citations that cannot survive a renumbering", len(faults), 0,
@@ -924,7 +925,8 @@ def step13_structural_claims():
     """#314: the checkable slice of "the spec is the source of truth" -- structural claims.
 
     Three asserts, each a prose claim the tree can falsify the day it drifts:
-    - CLAUDE.md's repo-structure map names exactly the src/* projects on disk, both directions.
+    - The development guide's repo-structure map names exactly the src/* projects on disk, both
+      directions.
       First live catch, before this step even ran in CI: Baton.Mcp and Baton.Mcp.Host had shipped
       without the map noticing.
     - Every src/... path cited by spec/*.md resolves in the tree.
@@ -939,7 +941,7 @@ def step13_structural_claims():
 
     src = os.path.join(ROOT, "src")
     on_disk = {d for d in os.listdir(src) if os.path.isdir(os.path.join(src, d))} if os.path.isdir(src) else set()
-    block = re.search(r"## Repo structure.*?```(.*?)```", read("CLAUDE.md"), re.S)
+    block = re.search(r"## Repo structure.*?```(.*?)```", read(DEVELOPMENT_GUIDE), re.S)
     # #1458: the regex used to require a literal "." after "Baton" (every src/ project was
     # "Baton.X"), which cannot match a bare "Baton/" entry -- the 3b consolidation introduced
     # exactly one (src/Baton, the engine, ex-Baton.Flow). The trailing "?" is what widens the
@@ -948,10 +950,11 @@ def step13_structural_claims():
     # A check over an empty population passes vacuously — assert the anchors held before
     # trusting the comparison (found by #314's second reader).
     ok &= line("src/ directories found (a 0 here means the scan itself broke)", 1 if on_disk else 0, 1)
-    ok &= line("repo-map entries parsed from CLAUDE.md (0 = anchor regex broke)", 1 if mapped else 0, 1)
+    ok &= line(f"repo-map entries parsed from {DEVELOPMENT_GUIDE} (0 = anchor regex broke)",
+               1 if mapped else 0, 1)
     missing = sorted(on_disk - mapped)
     ghosts = sorted(m for m in mapped - on_disk if os.path.isdir(os.path.join(ROOT, "src")))
-    ok &= line("src/ projects missing from CLAUDE.md's repo map", len(missing), 0,
+    ok &= line(f"src/ projects missing from {DEVELOPMENT_GUIDE}'s repo map", len(missing), 0,
                "Baton.Mcp shipped invisibly once already")
     for name in missing:
         print(f"      NOT IN MAP: src/{name}")

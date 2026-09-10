@@ -35,9 +35,9 @@ SEARCH_ROOTS = ["docs", "spec", "src", "tests", "tools"]
 
 SEARCH_SUFFIXES = {".md", ".html", ".cs", ".dart", ".axaml", ".py", ".json"}
 
-# docs/archive holds superseded documents on purpose: a doc in the live tree is current, a doc that is
-# not gets moved there (CLAUDE.md's repo map). Rewriting history there would defeat the point of
-# keeping it. CHANGELOG is generated from commit subjects that were true when written.
+# docs/archive holds superseded documents on purpose: a doc in the live tree is current, a doc that
+# is not gets moved there (the development guide's repo map). Rewriting history there would defeat
+# the point of keeping it. CHANGELOG is generated from commit subjects that were true when written.
 EXCLUDED = (
     ROOT / "docs" / "archive",
     ROOT / "CHANGELOG.md",

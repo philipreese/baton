@@ -35,7 +35,8 @@ negative: `/usage`, which is absent from `--help` and works perfectly as a slash
 | `pixi run vendor-probe` | **real subscription usage**, a few minutes | you, deliberately |
 | `pixi run vendor-check` | **nothing** | every `pixi run test`; also `gates`/`gates-fast` since #1487 |
 
-The probe drives live authenticated CLIs, so it is permanently a human action item (CLAUDE.md) — the
+The probe drives live authenticated CLIs, so it is permanently a human action item
+([development guide](../agents/developing-baton.md#live-vendor-smoke-tests)) — the
 same rule as the `smoke-*` tasks, for the same reason. But asking *"has the CLI moved since we last
 looked?"* costs nothing: `--version` is a local string that starts no session.
 
@@ -78,7 +79,8 @@ per `docs/vendor-capabilities.md`'s dated entry for this measurement:
   evidence class the probes use for exactly this reason.
 
 Neither was flipped by this change — see the dated row for why (spend/environment-mutation policy,
-CLAUDE.md) — this is the measured setting for the operator's own runbook step.
+[development guide](../agents/developing-baton.md)) — this is the measured setting for the operator's
+own runbook step.
 
 **2. The staleness tripwire grew a grace window** instead of hard-failing the instant a CLI moves.
 `DriftGrace` (`tools/Baton.VendorProbe/DriftGrace.cs`) records the drift instant the first time it is

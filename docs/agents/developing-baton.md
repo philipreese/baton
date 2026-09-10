@@ -143,6 +143,13 @@ citation elsewhere in the repo, and the slug is what survives the next restructu
 **1. Common sense first — `common-sense`.** Ask the obvious question before building anything. Does the thing you are
 about to verify or depend on actually exist? Does a helper for this already exist? Is the failure you
 are theorising the one that was actually measured?
+
+Existing practice is evidence, not authority. Before carrying a convention forward, identify the
+problem it solves, verify that the problem still exists, and consider a simpler alternative. Preserve
+active safety and authority constraints until an authorised change replaces them; surface a proposed
+change with its evidence and a recommendation instead of quietly weakening a rule. Revisit the
+decision when the evidence changes.
+
 *#534's fix was one condition away from a parser already in the file — the shape was there, and
 finding that first is what the gate buys, whether or not you end up sharing the code. #532 was scoped
 to self-check a `PreToolUse` hook AER does not ship; the issue is real, its stated mechanism was not.*

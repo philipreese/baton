@@ -81,7 +81,9 @@ def _sabotage_audit_completeness() -> None:
         tools_dir = dest / "tools" / "audit-completeness"
         tools_dir.mkdir(parents=True)
         shutil.copy2(ROOT / "tools" / "audit-completeness" / "completeness.py", tools_dir / "completeness.py")
-        (dest / "CLAUDE.md").write_text("# Baton\n", encoding="utf-8")
+        guide = dest / "docs" / "agents" / "developing-baton.md"
+        guide.parent.mkdir(parents=True)
+        guide.write_text("# Developing Baton\n", encoding="utf-8")
 
         proc = subprocess.run(
             [sys.executable, "-u", str(tools_dir / "completeness.py")],

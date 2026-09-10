@@ -6,7 +6,8 @@ aer-flow dispatches to a live LLM instead of `StubCoreDispatcher` or a shell-stu
 runs from this runbook and a dedicated `pixi run` task, never from default CI (no API key or
 network access is available there, and a real call shouldn't gate every PR anyway).
 
-**This is a human-run step in general** — see CLAUDE.md's "Live-vendor smoke tests" section. The
+**This is a human-run step in general** — see the
+[shared policy for live vendor runs](../agents/developing-baton.md#live-vendor-smoke-tests). The
 recorded green run below happened to be closed from inside an agent session because that session's
 own host coincidentally carried an authenticated `claude` CLI; that's a coincidence of the host, not
 a capability to rely on for future re-runs or for gates on other vendors (see

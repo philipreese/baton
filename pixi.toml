@@ -26,8 +26,8 @@ UseSharedCompilation = "false"
 
 [tasks]
 # Every toolchain below (Go, .NET) is installed separately and is NOT
-# pixi-managed. CLAUDE.md's "Running tasks" section owns that fact and the install instructions;
-# stated here once rather than re-explained per task.
+# pixi-managed. docs/agents/developing-baton.md's "Running tasks" section owns that fact and the
+# install instructions; stated here once rather than re-explained per task.
 #
 # Every `dotnet` invocation that starts MSBuild goes through tools/buildlock.py (#1402): a
 # host-global lock serializing builds across worktrees, so concurrent lanes queue at the build
@@ -171,9 +171,9 @@ smoke-preflight = { cmd = "python -u tools/smoke-preflight/preflight.py" }
 
 # LIVE AND PAID -- smoke-claude, smoke-mixed-vendor, vendor-probe and
 # vendor-verify drive real authenticated vendor CLIs and spend real subscription usage. They never
-# run in CI and are permanently a human action item; an agent session cannot close one. CLAUDE.md's
-# "Live-vendor smoke tests" section owns that rule and the reasoning; each task below adds only what
-# is specific to IT, and names the runbook to read first. `Baton.Cli.SmokeTests` sits outside
+# run in CI and are permanently a human action item; an agent session cannot close one.
+# docs/agents/developing-baton.md owns the shared live-run policy and reasoning; each task below adds
+# only what is specific to IT, and names the runbook to read first. `Baton.Cli.SmokeTests` sits outside
 # Baton.slnx so none of it runs as a side effect of `build`/`test`/`lint`.
 #
 # Not in that set, despite the neighbouring names: smoke-preflight, vendor-survey and vendor-check
@@ -257,9 +257,9 @@ vendor-verify-selftest = { cmd = "python -u tools/vendor-verify/verify.py --self
 #
 # STANDING CHECK (re-scoped 2026-07-26 -- see the SCOPE note in the script; it was run cold nine
 # days after #527 and caught 11 undispositioned decisions and 2 orphaned vendor-verify checks).
-# Run it before the PRs CLAUDE.md gate `record-once` names. Free except step 4 (closed-issue
-# citation check), which needs `gh` and the network and skips loudly rather than failing when
-# neither is available.
+# Run it before the PRs the development guide's gate `record-once` names. Free except step 4
+# (closed-issue citation check), which needs `gh` and the network and skips loudly rather than
+# failing when neither is available.
 audit-completeness = { cmd = "python -u tools/audit-completeness/completeness.py" }
 
 # #1759: `build-cli` used to exist so the CI audit leg had a built Baton.Cli before

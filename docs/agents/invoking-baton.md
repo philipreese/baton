@@ -8,6 +8,18 @@ It is **not** for developing Baton — that is [`docs/agents/developing-baton.md
 reference for `baton dispatch`, which is [`docs/dispatch.md`](../dispatch.md). Where those own a fact,
 this links rather than restates.
 
+**When conducting repository-changing work**, read the selected worker package through
+[`AGENTS.md`](../../AGENTS.md) before writing the brief; the role package owns standing lane rules and
+the brief owns task-specific work. Reconcile the task, role tools, grants, outputs, and verification
+owner before dispatch, and surface a conflict instead of copying both instructions into the brief.
+The shared development guide owns [record-once](developing-baton.md#before-you-ship--the-gates-every-change-runs-through),
+[bounded delegation](developing-baton.md#delegating-to-subagents), and
+[spend disclosure](developing-baton.md#cost-and-reversibility-are-the-operators-call). After a lane,
+use the [completion and verification signals](#3-where-the-output-lands-and-how-you-find-it), not the
+worker's success claim alone. For a queued lifecycle, §7 below points to `spec/baton.md` §13; a
+`ready` item remains the conductor's responsibility for final PR metadata, CI and review, and the
+merge decision.
+
 This assumes `baton` is already installed on PATH. If `baton dispatch`/`baton status` print a
 `WARN: installed baton ... is behind this checkout's ...` line, the installed tool has drifted from
 the repo it is dispatching against (#1645) — refresh it with `pixi run tool-refresh` (README's

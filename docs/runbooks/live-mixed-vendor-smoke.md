@@ -8,7 +8,8 @@ dispatches two different vendors in the same run, and the first time a live smok
 exercises the mutation surface (`baton decide`), not just `baton run`.
 
 **This is always a human-run step, not something an agent session can close on its own** — see
-CLAUDE.md's "Live-vendor smoke tests" section. Both adapters shell out to whatever's already
+[why these runs stay human-owned](../agents/developing-baton.md#live-vendor-smoke-tests). Both
+adapters shell out to whatever's already
 authenticated on the host rather than owning key-handling code of their own, which is what lets
 this work against real subscriptions; nothing about that can be provisioned headlessly from inside
 an agent session, and it shouldn't be worked around (e.g. by dropping in an API key) just to make
