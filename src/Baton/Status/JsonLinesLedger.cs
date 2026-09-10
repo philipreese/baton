@@ -77,14 +77,23 @@ internal sealed class JsonLinesLedger<TEntry>(
     /// bytes. Each store's own <c>AppendAsync</c> documents why its ledger needs the skip and against
     /// which repeated-settle shapes.
     /// </summary>
-    public Task AppendAsync(IReadOnlyList<TEntry> entries, string ledgerFilePath, CancellationToken cancellationToken = default)
+    public async Task AppendAsync(IReadOnlyList<TEntry> entries, string ledgerFilePath, CancellationToken cancellationToken = default) =>
+        _ = await AppendAndGetAppendedAsync(entries, ledgerFilePath, cancellationToken).ConfigureAwait(false);
+
+    /// <summary>
+    /// Appends the same subset <see cref="AppendAsync"/> does and returns the rows this call actually
+    /// wrote, in input order. The result is decided inside the same ledger lock as the dedupe check,
+    /// so a caller recording ownership can never claim a row a concurrent append won first.
+    /// </summary>
+    internal Task<IReadOnlyList<TEntry>> AppendAndGetAppendedAsync(
+        IReadOnlyList<TEntry> entries, string ledgerFilePath, CancellationToken cancellationToken = default)
     {
         ArgumentNullException.ThrowIfNull(entries);
         ArgumentException.ThrowIfNullOrEmpty(ledgerFilePath);
 
         if (entries.Count == 0)
         {
-            return Task.CompletedTask;
+            return Task.FromResult((IReadOnlyList<TEntry>)[]);
         }
 
         AppendOperationObserver?.Invoke(entries.Count);
@@ -109,7 +118,7 @@ internal sealed class JsonLinesLedger<TEntry>(
             }
             if (toAppend.Count == 0)
             {
-                return;
+                return (IReadOnlyList<TEntry>)toAppend;
             }
 
             var builder = new StringBuilder();
@@ -123,6 +132,8 @@ internal sealed class JsonLinesLedger<TEntry>(
                 ledgerFilePath, FileMode.Append, FileAccess.Write, FileShare.Read, bufferSize: 4096, useAsync: false);
             stream.Write(bytes);
             stream.Flush();
+
+            return (IReadOnlyList<TEntry>)toAppend;
         }, cancellationToken);
     }
 

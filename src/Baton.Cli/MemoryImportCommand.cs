@@ -166,20 +166,32 @@ public static class MemoryImportCommand
                 .Select(l => l.Id)
                 .ToHashSet(StringComparer.Ordinal);
 
-            if (!options.DryRun)
-            {
-                await MemoryStore.AppendAsync(entries, entriesFile, cancellationToken).ConfigureAwait(false);
-                await MemoryStore.AppendLinksAsync(links, linksFile, cancellationToken).ConfigureAwait(false);
-            }
+            // A dry run has no lock-held append to observe, so it remains an advisory preview based on
+            // the earlier reads. An applied manifest instead records the result decided under each
+            // owning ledger lock: a concurrent import may have won between those reads and this call.
+            var appendedEntryIds = options.DryRun
+                ? entries.Where(e => !existing.Contains(e.Id)).Select(e => e.Id).ToHashSet(StringComparer.Ordinal)
+                : (await MemoryStore.AppendAndGetAppendedAsync(entries, entriesFile, cancellationToken)
+                    .ConfigureAwait(false)).Select(e => e.Id).ToHashSet(StringComparer.Ordinal);
+            var appendedLinkIds = options.DryRun
+                ? links.Where(l => !existingLinks.Contains(l.Id)).Select(l => l.Id).ToHashSet(StringComparer.Ordinal)
+                : (await MemoryStore.AppendLinksAndGetAppendedAsync(links, linksFile, cancellationToken)
+                    .ConfigureAwait(false)).Select(l => l.Id).ToHashSet(StringComparer.Ordinal);
 
+            // An input batch can itself repeat an id. The ledger writes only its first occurrence;
+            // consume each returned id once so undo expects one removal rather than claiming both
+            // source rows own the same stored record.
+            var ownedEntryIds = new HashSet<string>(StringComparer.Ordinal);
             rows.AddRange(entries.Select(e => new ImportManifestRow(
                 e.SourcePath, e.Sha256, e.SourceMtimeUtc,
                 sizeByPath.TryGetValue(e.SourcePath, out var size) ? size : 0,
                 e.SourceVendor, e.SourceScope, e.Id, e.Repository, entriesFile,
-                AlreadyPresent: existing.Contains(e.Id))));
+                AlreadyPresent: !appendedEntryIds.Contains(e.Id) || !ownedEntryIds.Add(e.Id))));
 
+            var ownedLinkIds = new HashSet<string>(StringComparer.Ordinal);
             linkRows.AddRange(links.Select(l => new ImportLinkRow(
-                l.Id, l.Repository, linksFile, AlreadyPresent: existingLinks.Contains(l.Id))));
+                l.Id, l.Repository, linksFile,
+                AlreadyPresent: !appendedLinkIds.Contains(l.Id) || !ownedLinkIds.Add(l.Id))));
         }
 
         var manifest = new ImportManifest(
