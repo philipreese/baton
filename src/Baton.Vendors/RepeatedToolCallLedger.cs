@@ -271,7 +271,7 @@ public sealed class RepeatedToolCallLedger
         return entry.Served == 1
             ? new RepeatDecision(
                 RepeatVerdict.Replay,
-                Preamble: "replayed: identical read — this file has not changed since you last read it")
+                Preamble: ReadReplayPreamble)
             : new RepeatDecision(RepeatVerdict.Refuse, Reason: ReadRepeatRefusal);
     }
 
@@ -370,6 +370,10 @@ public sealed class RepeatedToolCallLedger
     /// <summary>The third-and-later refusal for a repeated read, same reason as its command sibling.</summary>
     public const string ReadRepeatRefusal =
         "the previous read is still the answer; this file has not changed since";
+
+    /// <summary>The metadata carried by a broker replay of an unchanged read.</summary>
+    internal const string ReadReplayPreamble =
+        "replayed: identical read — this file has not changed since you last read it";
 
     /// <summary>
     /// The second-ask denial a hook emits for a repeated command. <paramref name="cachedOutput"/> is

@@ -481,15 +481,11 @@ public sealed class CodexDynamicToolPolicy
             take++;
         }
 
-        var repeat = _repeats.ClassifyRead(
-            path, info.LastWriteTimeUtc, info.Length, $"offset={offset};end={offset + take}");
-        if (repeat.Verdict == RepeatVerdict.Refuse)
-        {
-            return CodexDynamicToolResult.Refused(repeat.Reason!, GrantRules.Repeat);
-        }
-
-        var preamble = repeat.Verdict == RepeatVerdict.Replay ? $"[{repeat.Preamble}]\n" : string.Empty;
-        var responseBudget = MaxDiscoveryResponseCharacters - preamble.Length;
+        var replayPreamble = $"[{RepeatedToolCallLedger.ReadReplayPreamble}]\n";
+        // Repeat identity is the window actually served, not the wider request that arrived. Reserve
+        // replay metadata even on the first answer so adding it on a replay cannot move that window;
+        // requests that converge to the same bounded, scalar-safe content are then one question.
+        var responseBudget = MaxDiscoveryResponseCharacters - replayPreamble.Length;
         string? footer = null;
         if (offset + take < text.Length || take > responseBudget)
         {
@@ -514,6 +510,16 @@ public sealed class CodexDynamicToolPolicy
             }
         }
 
+        var repeat = _repeats.ClassifyRead(
+            path, info.LastWriteTimeUtc, info.Length, $"offset={offset};end={offset + take}");
+        if (repeat.Verdict == RepeatVerdict.Refuse)
+        {
+            return CodexDynamicToolResult.Refused(repeat.Reason!, GrantRules.Repeat);
+        }
+
+        Debug.Assert(repeat.Verdict != RepeatVerdict.Replay
+                     || repeat.Preamble == RepeatedToolCallLedger.ReadReplayPreamble);
+        var preamble = repeat.Verdict == RepeatVerdict.Replay ? replayPreamble : string.Empty;
         var range = text.Substring(offset, take);
         var displayed = preamble + (footer is null ? range : range + '\n' + footer);
         Debug.Assert(displayed.Length <= MaxDiscoveryResponseCharacters);

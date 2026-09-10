@@ -1300,6 +1300,31 @@ public sealed class CodexDynamicToolPolicyTests
     }
 
     [Fact]
+    public async Task Read_repeat_identity_uses_the_equivalent_post_budget_window()
+    {
+        using var fixture = new PolicyFixture(new PermissionGrant(ReadFiles: true), ["report.md"]);
+        var path = Path.Combine(fixture.Workspace, "budgeted.txt");
+        File.WriteAllText(path, new string('a', 25_000));
+
+        var fresh = await fixture.ExecuteAsync(
+            CodexDynamicToolPolicy.ReadTextTool, new { path, offset = 0, length = 12_000 });
+        var replay = await fixture.ExecuteAsync(
+            CodexDynamicToolPolicy.ReadTextTool, new { path, offset = 0, length = 11_999 });
+        var refused = await fixture.ExecuteAsync(
+            CodexDynamicToolPolicy.ReadTextTool, new { path, offset = 0, length = 12_000 });
+
+        Assert.True(fresh.Success, fresh.Text);
+        Assert.DoesNotContain("replayed:", fresh.Text, StringComparison.Ordinal);
+        Assert.True(fresh.Text.Length <= 12_000, $"fresh read returned {fresh.Text.Length} characters");
+        Assert.True(replay.Success, replay.Text);
+        Assert.StartsWith("[replayed: identical read", replay.Text, StringComparison.Ordinal);
+        Assert.True(replay.Text.Length <= 12_000, $"replay returned {replay.Text.Length} characters");
+        Assert.Equal(fresh.Text, replay.Text[(replay.Text.IndexOf('\n', StringComparison.Ordinal) + 1)..]);
+        Assert.False(refused.Success);
+        Assert.Contains("previous read is still the answer", refused.Text, StringComparison.Ordinal);
+    }
+
+    [Fact]
     public async Task Recursive_listing_excludes_git_object_database_content()
     {
         using var fixture = new PolicyFixture(new PermissionGrant(ReadFiles: true), ["report.md"]);
