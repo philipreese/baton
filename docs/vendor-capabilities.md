@@ -1161,10 +1161,12 @@ are absent from the stream.
 
 The consequence for #2002 is in `spec/baton.md` §9: a gate cannot refuse a parameter agy supplies
 itself, so rule 1 is scoped on this vendor rather than claimed complete, and
-`AgyHookCheckCommand.MeasuredRunCommandArgs` refuses only an argument beyond these five and validates
-the two descriptive fields as strings when present — a rung whose own failure mode, against an
-argument set wider than these two captures, is refusing a
-legitimate command.
+`AgyHookCheckCommand.MeasuredRunCommandArgs` refuses only an argument beyond these five. The gate
+requires a non-empty string `CommandLine`; the other four fields remain optional for compatibility,
+but when present must retain the measured JSON types above. It deliberately accepts any numeric
+`WaitMsBeforeAsync` rather than treating the one captured value as a supported-value set. The rung's
+own failure mode, against an argument set wider than these two captures, is refusing a legitimate
+command.
 
 The rest of this paragraph, unchanged: the `stream-json` `init` event's `tools` array lists tool
 *names* only —

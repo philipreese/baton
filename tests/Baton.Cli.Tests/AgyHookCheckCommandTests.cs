@@ -990,8 +990,8 @@ public class AgyHookCheckCommandTests
     [InlineData("\"toolSummary\":\"Check Node.js version\"", "allow", null)]
     [InlineData(null, "allow", null)]
     [InlineData("\"Async\":true", "deny", "in the background instead of to completion")]
-    [InlineData("\"toolAction\":12", "deny", "descriptive metadata that was not a string")]
-    [InlineData("\"toolSummary\":false", "deny", "descriptive metadata that was not a string")]
+    [InlineData("\"toolAction\":12", "deny", "measured arguments with malformed values")]
+    [InlineData("\"toolSummary\":false", "deny", "measured arguments with malformed values")]
     public void Run_command_accepts_only_the_measured_argument_names_and_metadata_types(
         string? additionalArgs, string expected, string? denialReason)
     {
@@ -1011,6 +1011,38 @@ public class AgyHookCheckCommandTests
                 denialReason, doc.RootElement.GetProperty("reason").GetString()!,
                 StringComparison.Ordinal);
         }
+    }
+
+    /// <summary>
+    /// Review of #2152: a run command cannot be judged without an object-shaped argument bag and a
+    /// non-empty string command. The other measured fields remain optional, but when present their
+    /// measured types are part of the payload shape rather than values this gate may ignore.
+    /// </summary>
+    [Theory]
+    [InlineData("null")]
+    [InlineData("[]")]
+    [InlineData("{}")]
+    [InlineData("{\"CommandLine\":12}")]
+    [InlineData("{\"CommandLine\":\"\"}")]
+    [InlineData("{\"CommandLine\":\"   \"}")]
+    [InlineData("{\"CommandLine\":\"node --version\",\"Cwd\":12}")]
+    [InlineData("{\"CommandLine\":\"node --version\",\"WaitMsBeforeAsync\":\"5000\"}")]
+    public void An_unjudgeable_or_malformed_run_command_payload_is_denied(string argsJson)
+    {
+        var payload = ToolPayload("run_command", argsJson);
+
+        Assert.Equal("deny", Decide(payload, "agy:", shellPatterns: "agy:"));
+    }
+
+    [Theory]
+    [InlineData("{\"CommandLine\":\"node --version\"}")]
+    [InlineData("{\"CommandLine\":\"node --version\",\"Cwd\":\"C:\\\\x\"}")]
+    [InlineData("{\"CommandLine\":\"node --version\",\"WaitMsBeforeAsync\":1}")]
+    public void Optional_measured_run_command_fields_may_be_absent(string argsJson)
+    {
+        var payload = ToolPayload("run_command", argsJson);
+
+        Assert.Equal("allow", Decide(payload, "agy:", shellPatterns: "agy:"));
     }
 
     [Fact]

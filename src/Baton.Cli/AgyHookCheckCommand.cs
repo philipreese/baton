@@ -303,8 +303,9 @@ public static class AgyHookCheckCommand
         string? commandLine = null;
         string? writeTarget = null;
         string? readTarget = null;
+        var runCommandArgsAreObject = false;
         IReadOnlyList<string> extraRunCommandArgs = Array.Empty<string>();
-        IReadOnlyList<string> malformedRunCommandMetadataArgs = Array.Empty<string>();
+        IReadOnlyList<string> malformedRunCommandArgs = Array.Empty<string>();
         // Captured here because the JsonDocument is disposed before the denial below is built, and
         // a denial that cannot name what the payload carried is the misdirection #708 was made of.
         var argKeys = "no args object at all";
@@ -326,6 +327,7 @@ public static class AgyHookCheckCommand
             if (toolName == "run_command" && toolCall.TryGetProperty("args", out var args) &&
                 args.ValueKind == JsonValueKind.Object)
             {
+                runCommandArgsAreObject = true;
                 if (args.TryGetProperty("CommandLine", out var cmdProp) &&
                     cmdProp.ValueKind == JsonValueKind.String)
                 {
@@ -339,11 +341,12 @@ public static class AgyHookCheckCommand
                     .Where(name => !MeasuredRunCommandArgs.Contains(name))
                     .ToArray();
 
-                // #2152: these values describe the call for display only. Account for their
-                // measured string shape without ever reading them as the command or as grant input.
-                malformedRunCommandMetadataArgs = args.EnumerateObject()
-                    .Where(property => MeasuredRunCommandStringMetadataArgs.Contains(property.Name) &&
-                        property.Value.ValueKind != JsonValueKind.String)
+                // #2152 review: every measured value is optional except CommandLine, but a value
+                // that is present must retain its measured type. None of the descriptive metadata
+                // is read as the command or as grant input.
+                malformedRunCommandArgs = args.EnumerateObject()
+                    .Where(property => MeasuredRunCommandArgs.Contains(property.Name) &&
+                        !HasMeasuredRunCommandArgShape(property))
                     .Select(property => property.Name)
                     .ToArray();
             }
@@ -379,6 +382,30 @@ public static class AgyHookCheckCommand
 
         if (toolName == "run_command")
         {
+            if (!runCommandArgsAreObject)
+            {
+                return DenyJson(scribe, GrantRules.UnjudgeableCall,
+                    "AER: the permission gate could not read toolCall.args as an object in the hook " +
+                    "payload and denied this run_command call rather than allowing it unchecked.");
+            }
+
+            if (string.IsNullOrWhiteSpace(commandLine))
+            {
+                return DenyJson(scribe, GrantRules.UnjudgeableCall,
+                    "AER: the permission gate could not read a non-empty string from " +
+                    "toolCall.args.CommandLine in the hook payload and denied this run_command " +
+                    "call rather than allowing it unchecked.");
+            }
+
+            if (malformedRunCommandArgs.Count > 0)
+            {
+                return DenyJson(scribe, GrantRules.UnjudgeableCall,
+                    $"AER: the 'run_command' tool carried measured arguments with malformed values: " +
+                    $"{string.Join(", ", malformedRunCommandArgs)}. Baton's gate refuses a present " +
+                    "field whose type does not match the measured payload shape rather than allowing " +
+                    "it unread.");
+            }
+
             // #2002 rule 1, the same rung the claude hook carries at its own `Bash` branch, from the
             // same vendor-neutral detector; spec/baton.md §9 states the rule and the measurement.
             // Unconditional and ahead of the pattern rungs because `implement` is an unscoped grant,
@@ -408,15 +435,6 @@ public static class AgyHookCheckCommand
                     "gate cannot tell whether an argument it has never measured makes this command run " +
                     "in the background instead of to completion, so it refuses rather than allowing it " +
                     "unread. Re-issue with the arguments agy normally sends.");
-            }
-
-            if (malformedRunCommandMetadataArgs.Count > 0)
-            {
-                return DenyJson(scribe, GrantRules.UnjudgeableCall,
-                    $"AER: the 'run_command' tool carried descriptive metadata that was not a string: " +
-                    $"{string.Join(", ", malformedRunCommandMetadataArgs)}. Baton's gate only accepts " +
-                    "the measured string shape for these fields and refuses malformed values rather " +
-                    "than allowing them unread.");
             }
 
             // The shell channel gates this tool. A non-Present list means the gate cannot judge the
@@ -689,8 +707,8 @@ public static class AgyHookCheckCommand
     /// <remarks>
     /// <para>
     /// <b>Scope: two captured agy 1.2.0 <c>run_command</c> hook payloads.</b> Both carry these five,
-    /// including <c>WaitMsBeforeAsync</c> at 5000 and the two string-valued descriptive fields —
-    /// names, values, and types that were observed;
+    /// including numeric <c>WaitMsBeforeAsync</c> and the two string-valued descriptive fields —
+    /// names and types that were observed;
     /// <em>that it is the backgrounding mechanism</em> is inference from the name, which is how
     /// <c>docs/vendor-capabilities.md</c> frames it too. That register owns the finding and its
     /// provenance (widened there 2026-09-10); do not restate them here.
@@ -716,11 +734,19 @@ public static class AgyHookCheckCommand
         };
 
     /// <summary>
-    /// The optional descriptive <c>run_command</c> arguments observed as strings in both captures.
-    /// They are validated but never consumed: <c>CommandLine</c> remains the only command source.
+    /// Whether a measured argument has the captured JSON shape. The exact numeric wait value is not
+    /// constrained here: <c>docs/vendor-capabilities.md</c> owns that measurement, and no captured
+    /// evidence establishes a supported-value set. Descriptive metadata is never consumed;
+    /// <c>CommandLine</c> remains the only command source.
     /// </summary>
-    private static readonly IReadOnlySet<string> MeasuredRunCommandStringMetadataArgs =
-        new HashSet<string>(StringComparer.Ordinal) { "toolAction", "toolSummary" };
+    private static bool HasMeasuredRunCommandArgShape(JsonProperty property) => property.Name switch
+    {
+        "CommandLine" => property.Value.ValueKind == JsonValueKind.String &&
+            !string.IsNullOrWhiteSpace(property.Value.GetString()),
+        "Cwd" or "toolAction" or "toolSummary" => property.Value.ValueKind == JsonValueKind.String,
+        "WaitMsBeforeAsync" => property.Value.ValueKind == JsonValueKind.Number,
+        _ => true,
+    };
 
     /// <summary>
     /// agy's file-read tool (#2002 rule 2b), the counterpart of the tool name
