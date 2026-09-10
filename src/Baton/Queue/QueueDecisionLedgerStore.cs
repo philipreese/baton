@@ -110,15 +110,18 @@ public sealed record QueueDecisionEntry(
 /// </summary>
 /// <remarks>
 /// <para>
-/// <b>No dedupe key.</b> The shared ledger deduplicates on an execution id; a scheduling decision has
-/// none — it is an observation at an instant, and two identical observations minutes apart are two
-/// facts. The selector therefore returns null, which
-/// <see cref="JsonLinesLedger{TEntry}.AppendAsync"/> already documents as "always appended".
+/// <b>Cancellation-only durable dedupe.</b> Ordinary scheduling decisions have no durable dedupe key:
+/// they are observations at instants, and two identical observations minutes apart are two facts. The
+/// scheduler carries its own in-memory verdict key to collapse repeated ticks. Cancellation is the
+/// exception because a persisted <see cref="QueueItemState.Cancelled"/> plus its timestamp promises one
+/// matching fact even if the process dies between the queue write and the append. Its key is the tag
+/// and retained timestamp, so the daemon may replay it without duplicating the fact.
 /// </para>
 /// <para>
-/// <b>Fails open, never gates</b>, exactly as <c>QuotaLedgerStore</c> does, and with the same split:
-/// this store throws, and the caller — the daemon's queue service — is where the log-and-swallow
-/// happens.
+/// <b>CLI and daemon have different failure handling.</b> This store throws. The CLI lets an immediate
+/// cancellation append failure reach the operator after the queue mutation committed; the daemon
+/// retries retained cancellations on later ticks and logs-and-continues if that replay cannot append.
+/// Neither path lets ledger availability gate a launch.
 /// </para>
 /// </remarks>
 public static class QueueDecisionLedgerStore
@@ -161,9 +164,9 @@ public static class QueueDecisionLedgerStore
 
     /// <summary>
     /// Records the cancellation fact for one retained item, once. The queue write precedes this
-    /// accounting append, so a failed append is retried when the operator repeats queue cancel
-    /// against the persisted cancellation. Its key includes the retained timestamp: a tag is not
-    /// enough, because the ledger's ordinary decisions deliberately do not deduplicate.
+    /// accounting append, so the CLI can report a failed immediate append while the daemon's later
+    /// reconciliation repairs the persisted fact. Its key includes the retained timestamp: a tag is
+    /// not enough, because the ledger's ordinary decisions deliberately do not deduplicate.
     /// </summary>
     public static Task AppendCancellationAsync(
         DateTimeOffset cancelledAt,
@@ -180,6 +183,32 @@ public static class QueueDecisionLedgerStore
                 LiveWeight: 0, FreeGb: null, FloorGb: 0)],
             ledgerFilePath,
             cancellationToken);
+    }
+
+    /// <summary>
+    /// Replays each persisted cancellation that carries the timestamp required for its durable key.
+    /// This is deliberately narrow reconciliation, not a general event delivery mechanism: only the
+    /// retained <see cref="QueueItemState.Cancelled"/> state promises a ledger fact, and the ledger's
+    /// cancellation key makes every replay idempotent.
+    /// </summary>
+    public static async Task ReconcileCancellationsAsync(
+        IReadOnlyList<QueueItem> items,
+        string ledgerFilePath,
+        CancellationToken cancellationToken = default)
+    {
+        ArgumentNullException.ThrowIfNull(items);
+        ArgumentException.ThrowIfNullOrEmpty(ledgerFilePath);
+
+        foreach (var item in items)
+        {
+            if (item is not { State: QueueItemState.Cancelled, CancelledAt: { } cancelledAt })
+            {
+                continue;
+            }
+
+            await AppendCancellationAsync(cancelledAt, item.Tag, ledgerFilePath, cancellationToken)
+                .ConfigureAwait(false);
+        }
     }
 
     /// <summary>Every parseable line, in write order — read tolerance and the never-throws posture are

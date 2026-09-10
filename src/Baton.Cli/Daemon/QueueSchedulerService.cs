@@ -168,6 +168,8 @@ public sealed class QueueSchedulerService : BackgroundService
             .ConfigureAwait(false)).Queue;
         var interval = TimeSpan.FromSeconds(settings.EffectiveTickSeconds);
 
+    retry:
+        await ReconcileCancelledItemsAsync(cancellationToken).ConfigureAwait(false);
         await ResolveFinishedItemsAsync(cancellationToken).ConfigureAwait(false);
 
         // The lifecycle advance runs BETWEEN done detection and the launch decision, and both
@@ -261,11 +263,11 @@ public sealed class QueueSchedulerService : BackgroundService
 
         if (!launchClaimed)
         {
-            await RecordAsync(
-                new QueueDecisionEntry(now, null, QueueDecisionEntry.Waited,
-                    QueueWaitReasons.Token(QueueWaitReason.NoItems), decision.LiveWeight, decision.FreeGb, decision.FloorGb),
-                CancellationToken.None).ConfigureAwait(false);
-            return interval;
+            // The snapshot chose a candidate that cancellation has now removed. Re-evaluate instead
+            // of recording no-items from that stale snapshot: another queued item may be launchable.
+            // This reuses the whole current-state decision path, including its honest wait reason.
+            // A label rather than recursion keeps a run of cancelled claims from growing the stack.
+            goto retry;
         }
 
         _lastLaunchAt = now;
@@ -581,6 +583,27 @@ public sealed class QueueSchedulerService : BackgroundService
             // that already launched is treated as not having launched. Logged, never swallowed silently.
             Console.Error.WriteLine(
                 $"Could not append to the queue decision ledger at '{BatonPaths.QueueDecisionLedgerFile}': {ex.Message}.");
+        }
+    }
+
+    /// <summary>
+    /// Repairs the one ledger fact promised by persisted cancellation state. The CLI attempts the
+    /// append immediately and reports a failure; the daemon is the automatic recovery path, so an
+    /// unavailable ledger is logged but cannot stop later queue work from being considered.
+    /// </summary>
+    private static async Task ReconcileCancelledItemsAsync(CancellationToken cancellationToken)
+    {
+        var snapshot = await QueueStore.LoadAsync(BatonPaths.QueueFile, cancellationToken).ConfigureAwait(false);
+        try
+        {
+            await QueueDecisionLedgerStore.ReconcileCancellationsAsync(
+                snapshot.Items, BatonPaths.QueueDecisionLedgerFile, cancellationToken).ConfigureAwait(false);
+        }
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or WaitHandleCannotBeOpenedException)
+        {
+            Console.Error.WriteLine(
+                $"Could not reconcile cancelled queue items into the decision ledger at "
+                + $"'{BatonPaths.QueueDecisionLedgerFile}': {ex.Message}.");
         }
     }
 
