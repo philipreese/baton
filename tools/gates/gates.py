@@ -78,6 +78,7 @@ OVERLAP = [
     # anywhere; wired in now because it is what proves the gate-receipt logic below still
     # discriminates, not merely that it ran once at review time.
     "gates-selftest",
+    "workflow-recovery-selftest",
     # #1912: same shape, and wired in for the same reason -- plain `node`, no network, no MSBuild.
     # It is the only thing between the conductor panel's row kinds and a silent break, and it reads
     # the SHIPPED glass.html bytes rather than a copy, so it also fails when the markers it slices on

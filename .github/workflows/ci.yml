@@ -4,8 +4,38 @@ on:
   pull_request:
   push:
     branches: [main]
+  workflow_dispatch:
+    inputs:
+      expected_sha:
+        description: "Exact main SHA selected for this CI recovery"
+        required: true
+        type: string
 
 jobs:
+  recovery_target:
+    if: github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: read
+    steps:
+      - name: Admit selected main revision without checkout
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          EXPECTED_SHA: ${{ inputs.expected_sha }}
+        run: |
+          set -euo pipefail
+          if [ "$GITHUB_REF" != "refs/heads/main" ] || [[ ! "$EXPECTED_SHA" =~ ^[0-9a-f]{40}$ ]] || [ "$GITHUB_SHA" != "$EXPECTED_SHA" ]; then
+            echo "::error::Select main and provide its exact SHA."
+            exit 1
+          fi
+          live_sha=$(gh api "repos/$GITHUB_REPOSITORY/git/ref/heads/main" --jq .object.sha)
+          if [ "$live_sha" != "$EXPECTED_SHA" ]; then
+            echo "::error::Main moved before recovery admission."
+            exit 1
+          fi
+
   # Detects which areas a PR touched, so the heavy jobs below can skip when irrelevant.
   # pull_request ONLY: paths-filter uses the API there (no checkout needed), but on push it shells
   # out to `git` and dies without a checkout (#410). On push the heavy jobs ignore this job entirely
@@ -38,11 +68,11 @@ jobs:
               - '.github/workflows/**'
 
   test:
-    needs: changes
+    needs: [changes, recovery_target]
     # PR: run only when .NET-relevant files changed. Push to main: always run (main stays green).
     # !cancelled() makes this a status-check expression, so a skipped `changes` (PR-only, #410)
     # does not skip this job on push.
-    if: ${{ !cancelled() && (github.event_name != 'pull_request' || needs.changes.outputs.dotnet == 'true') }}
+    if: ${{ !cancelled() && (github.event_name != 'workflow_dispatch' || needs.recovery_target.result == 'success') && (github.event_name != 'pull_request' || needs.changes.outputs.dotnet == 'true') }}
     name: test (${{ matrix.name }})
     timeout-minutes: 17
     strategy:
@@ -62,6 +92,8 @@ jobs:
 
     steps:
       - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.sha }}
 
       # run-install/cache are off: the pixi env is deliberately empty (the .NET SDK is a system
       # install, not a conda package — GitHub's standard runner images ship it already), and
@@ -175,8 +207,8 @@ jobs:
     # PR-only per #410, and its skip otherwise cascades through `test` to here). The explicit
     # needs.test.result check restores the "only pack a green build" guarantee that the implicit
     # needs-success gate provided before !cancelled() removed it.
-    if: ${{ !cancelled() && github.event_name == 'push' && needs.test.result == 'success' }}
-    needs: test
+    if: ${{ !cancelled() && (github.event_name == 'push' || github.event_name == 'workflow_dispatch') && needs.test.result == 'success' }}
+    needs: [test, recovery_target]
     runs-on: windows-latest
     timeout-minutes: 5
     env:
@@ -185,6 +217,8 @@ jobs:
 
     steps:
       - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.sha }}
 
       # #1117: the pixi binary download itself flaked ("socket hang up") four times on
       # 2026-08-12, failing runs before any repo code executed. One bounded retry; a second
@@ -264,6 +298,8 @@ jobs:
   # local `pixi run gates` run has always done, so this makes CI match local behaviour rather than
   # regressing it, but it is a real loss of precision worth naming rather than leaving silent.
   gates:
+    needs: recovery_target
+    if: ${{ !cancelled() && (github.event_name != 'workflow_dispatch' || needs.recovery_target.result == 'success') }}
     runs-on: windows-latest
     timeout-minutes: 15
     env:
@@ -272,6 +308,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
         with:
+          ref: ${{ github.sha }}
           # audit-recordonce diffs against origin/main. A shallow clone cannot see it, and the check
           # fails closed rather than passing on an unreadable diff -- so the depth is what makes it
           # run at all.
@@ -318,7 +355,7 @@ jobs:
 
   ci:
     needs: [changes, test, gates]
-    if: always()
+    if: ${{ always() && github.event_name != 'workflow_dispatch' }}
     runs-on: ubuntu-latest
     timeout-minutes: 5
     steps:
@@ -336,3 +373,26 @@ jobs:
             fi
           done
           echo "CI gate passed (skipped or successful jobs are OK)."
+
+  recovery_ci:
+    name: CI recovery
+    needs: [recovery_target, test, gates, pack]
+    if: ${{ always() && github.event_name == 'workflow_dispatch' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Require complete recovery coverage
+        shell: bash
+        env:
+          TARGET_RESULT: ${{ needs.recovery_target.result }}
+          TEST_RESULT: ${{ needs.test.result }}
+          GATES_RESULT: ${{ needs.gates.result }}
+          PACK_RESULT: ${{ needs.pack.result }}
+        run: |
+          set -euo pipefail
+          for result in "$TARGET_RESULT" "$TEST_RESULT" "$GATES_RESULT" "$PACK_RESULT"; do
+            if [ "$result" != "success" ]; then
+              echo "::error::Recovery requires successful admission, tests, gates and packaging."
+              exit 1
+            fi
+          done

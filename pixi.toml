@@ -348,6 +348,7 @@ gates-lane-fast = { cmd = "python -u tools/gates/gates.py --lane-fast" }
 # was measured re-entering a lane's model context on every call (43.8M cache-read tokens in one lane).
 gates-quiet = { cmd = "python -u tools/gates/gates.py --quiet" }
 gates-fast-quiet = { cmd = "python -u tools/gates/gates.py --fast --quiet" }
+workflow-recovery-selftest = { cmd = "python tools/workflow-recovery/selftest.py" }
 gates-selftest = { cmd = "python -u tools/gates/gates.py --selftest" }
 # #1910: the completion pass a lane runs before pushing -- what it skips, and why it writes no
 # whole-run receipt, are stated at tools/gates/gates.py's covering rule (spec/baton.md C-12 ruling C).

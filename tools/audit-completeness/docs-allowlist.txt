@@ -50,6 +50,7 @@ docs/runbooks/live-claude-smoke.md
 docs/runbooks/live-mixed-vendor-smoke.md
 docs/runbooks/sep-1036-url-elicitation.md
 docs/runbooks/vendor-probe.md
+docs/runbooks/workflow-recovery.md
 docs/vendor-capabilities.md
 docs/vendor-capabilities.probe.md
 docs/vendor-codex-probe-2026-09-04.md
