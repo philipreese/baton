@@ -130,6 +130,167 @@ public sealed class QueueSchedulerServiceTests
     }
 
     [Fact]
+    public async Task A_cancel_that_wins_the_queue_mutation_lock_re_evaluates_and_launches_the_next_item()
+    {
+        var home = CreateTempHome();
+        using var scope = BatonEnvironmentSnapshot.BeginScope(BatonEnvironmentSnapshot.Blank with { HomeOverride = home });
+        try
+        {
+            await QueueStore.MutateAsync(BatonPaths.QueueFile, s => s with { Items = [Item("2159-lane"), Item("next")] }, Ct);
+            var claimReached = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
+            var allowClaim = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
+            var launched = new List<string>();
+            var claimCount = 0;
+            var service = new QueueSchedulerService(
+                (request, _) =>
+                {
+                    launched.Add(request.Item.Tag);
+                    return Task.FromResult(new QueueLaunchOutcome(null));
+                },
+                _ => Task.FromResult(0d),
+                () => 16d,
+                () => DateTimeOffset.UtcNow,
+                beforeLaunchClaim: _ =>
+                {
+                    if (Interlocked.Increment(ref claimCount) == 1)
+                    {
+                        claimReached.TrySetResult(true);
+                        return allowClaim.Task;
+                    }
+
+                    return Task.CompletedTask;
+                });
+
+            var tick = service.TickOnceAsync(Ct);
+            await claimReached.Task.WaitAsync(Ct);
+
+            await QueueCommand.ExecuteAsync(new QueueOptions(QueueVerb.Cancel, Tag: "2159-lane"), TextWriter.Null, Ct);
+            allowClaim.TrySetResult(true);
+            await tick;
+
+            Assert.Equal(["next"], launched);
+            var items = (await QueueStore.LoadAsync(BatonPaths.QueueFile, Ct)).Items;
+            Assert.Equal(QueueItemState.Cancelled, items[0].State);
+            Assert.Equal(QueueItemState.Launched, items[1].State);
+            var facts = await QueueDecisionLedgerStore.ReadAllAsync(BatonPaths.QueueDecisionLedgerFile, Ct);
+            Assert.Contains(facts, fact => fact.Decision == QueueDecisionEntry.Cancelled && fact.Tag == "2159-lane");
+            Assert.Contains(facts, fact => fact.Decision == QueueDecisionEntry.Launched && fact.Tag == "next");
+            Assert.DoesNotContain(facts, fact => fact.Decision == QueueDecisionEntry.Waited && fact.Reason == "no-items");
+        }
+        finally
+        {
+            Cleanup(home);
+        }
+    }
+
+    [Fact]
+    public async Task A_cancelled_follower_makes_the_heads_unchanged_slots_wait_current_again()
+    {
+        var home = CreateTempHome();
+        using var scope = BatonEnvironmentSnapshot.BeginScope(BatonEnvironmentSnapshot.Blank with { HomeOverride = home });
+        try
+        {
+            await QueueStore.MutateAsync(BatonPaths.QueueFile, s => s with { Items = [Item("head"), Item("follower")] }, Ct);
+            var service = Service(
+                (_, _) => throw new InvalidOperationException("a full queue must not launch"),
+                liveWeight: QueueSettings.DefaultMaxLiveWeight);
+
+            await service.TickOnceAsync(Ct);
+            await QueueCommand.ExecuteAsync(new QueueOptions(QueueVerb.Cancel, Tag: "follower"), TextWriter.Null, Ct);
+            await service.TickOnceAsync(Ct);
+
+            var facts = await QueueDecisionLedgerStore.ReadAllAsync(BatonPaths.QueueDecisionLedgerFile, Ct);
+            var current = facts[^1];
+            Assert.Equal(QueueDecisionEntry.Waited, current.Decision);
+            Assert.Equal("head", current.Tag);
+            Assert.Equal(QueueWaitReasons.Token(QueueWaitReason.Slots), current.Reason);
+        }
+        finally
+        {
+            Cleanup(home);
+        }
+    }
+
+    [Fact]
+    public async Task Sustained_lost_claims_take_only_one_fresh_scheduling_pass_per_tick()
+    {
+        var home = CreateTempHome();
+        using var scope = BatonEnvironmentSnapshot.BeginScope(BatonEnvironmentSnapshot.Blank with { HomeOverride = home });
+        try
+        {
+            await QueueStore.MutateAsync(
+                BatonPaths.QueueFile, s => s with { Items = [Item("first"), Item("second"), Item("third")] }, Ct);
+            var claims = 0;
+            var launches = new List<string>();
+            var service = new QueueSchedulerService(
+                (request, _) =>
+                {
+                    launches.Add(request.Item.Tag);
+                    return Task.FromResult(new QueueLaunchOutcome(request.RoomDirectory));
+                },
+                _ => Task.FromResult(0d),
+                () => 16d,
+                () => DateTimeOffset.UtcNow,
+                beforeLaunchClaim: async _ =>
+                {
+                    var tag = Interlocked.Increment(ref claims) switch
+                    {
+                        1 => "first",
+                        2 => "second",
+                        _ => "third",
+                    };
+                    await QueueCommand.ExecuteAsync(new QueueOptions(QueueVerb.Cancel, Tag: tag), TextWriter.Null, Ct);
+                });
+
+            await service.TickOnceAsync(Ct);
+
+            Assert.Equal(2, claims);
+            Assert.Empty(launches);
+            var items = (await QueueStore.LoadAsync(BatonPaths.QueueFile, Ct)).Items;
+            Assert.Equal(QueueItemState.Cancelled, items[0].State);
+            Assert.Equal(QueueItemState.Cancelled, items[1].State);
+            Assert.Equal(QueueItemState.Queued, items[2].State);
+        }
+        finally
+        {
+            Cleanup(home);
+        }
+    }
+
+    [Fact]
+    public async Task A_restart_tick_backfills_a_committed_cancellation_once_when_its_ledger_fact_is_missing()
+    {
+        var home = CreateTempHome();
+        using var scope = BatonEnvironmentSnapshot.BeginScope(BatonEnvironmentSnapshot.Blank with { HomeOverride = home });
+        try
+        {
+            var cancelledAt = new DateTimeOffset(2026, 9, 9, 20, 0, 0, TimeSpan.Zero);
+            await QueueStore.MutateAsync(BatonPaths.QueueFile, s => s with
+            {
+                Items = [Item("2159-lane") with { State = QueueItemState.Cancelled, CancelledAt = cancelledAt }],
+            }, Ct);
+
+            // This is the committed-queue/missing-ledger crash window. A fresh service models the
+            // daemon after restart; no operator repeats the cancel command.
+            await Service((_, _) => throw new InvalidOperationException("a cancelled item must not launch"))
+                .TickOnceAsync(Ct);
+
+            // A later tick is a duplicate replay. The cancellation key must retain exactly one fact.
+            await Service((_, _) => throw new InvalidOperationException("a cancelled item must not launch"))
+                .TickOnceAsync(Ct);
+
+            var facts = await QueueDecisionLedgerStore.ReadAllAsync(BatonPaths.QueueDecisionLedgerFile, Ct);
+            var fact = Assert.Single(facts, entry => entry.Decision == QueueDecisionEntry.Cancelled);
+            Assert.Equal("2159-lane", fact.Tag);
+            Assert.Equal(cancelledAt, fact.At);
+        }
+        finally
+        {
+            Cleanup(home);
+        }
+    }
+
+    [Fact]
     public async Task The_item_is_marked_launched_before_the_launch_starts_so_a_shutdown_mid_launch_cannot_relaunch_it()
     {
         var home = CreateTempHome();

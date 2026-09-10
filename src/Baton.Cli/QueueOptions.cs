@@ -7,6 +7,7 @@ public enum QueueVerb
     List,
     Hold,
     Resume,
+    Cancel,
     Import,
 }
 
@@ -16,7 +17,7 @@ public enum QueueVerb
 /// validation that can be done without touching the filesystem.
 /// </summary>
 /// <param name="Verb">The sub-verb.</param>
-/// <param name="Tag">The item tag, for <see cref="QueueVerb.Add"/>. Already
+/// <param name="Tag">The item tag, for <see cref="QueueVerb.Add"/> and <see cref="QueueVerb.Cancel"/>. Already
 /// <c>Baton.Queue.QueueTag</c>-validated by the parser.</param>
 /// <param name="Role">The worker role, for <see cref="QueueVerb.Add"/>.</param>
 /// <param name="SpecFilePath">The operator's spec file, copied into baton's own specs directory at add time.</param>

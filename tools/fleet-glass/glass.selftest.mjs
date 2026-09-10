@@ -189,6 +189,7 @@ check("(control) an unheld queue does not",
     { tag: "a", pr: 2028, stage: "review", round: 1, verdict: "block", checks: "failing", checksObservedAt: "2026-09-07T11:00:00Z", halted: false },
     { tag: "b", pr: 2035, stage: "ready", round: 3, verdict: "approve", checks: "passing", checksObservedAt: "2026-09-07T11:59:30Z", halted: false },
     { tag: "c", pr: 2040, stage: "fix", round: 2, halted: true },
+    { tag: "cancelled", pr: 2173, stage: "review", round: 2, state: "Cancelled", halted: false },
   ] });
   check("the PR number is rendered", out.includes("#2028") && out.includes("#2035"));
   check("every stage this table can carry renders", out.includes(">review</td>") && out.includes(">ready</td>"));
@@ -198,6 +199,7 @@ check("(control) an unheld queue does not",
         out.includes("failing (1h ago)") && out.includes("passing (just now)"));
   check("(control) checks never observed says so, not 'passing'", out.includes("not observed"));
   check("a halted work item is marked on its PR row", out.includes("halted"));
+  check("a cancelled work item is marked on its PR row", out.includes("review · cancelled"));
   check("(control) no PR renders an explicit empty line",
         queuePrTableHtml({ pullRequests: [] }).includes("No work item has a pull request open."));
 }

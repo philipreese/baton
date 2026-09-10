@@ -146,6 +146,7 @@ public static class QueueBoard
                 Tag: item.Tag,
                 PullRequest: pr,
                 Stage: WorkStages.Token(stage),
+                State: item.State,
                 Round: item.Round,
                 Issue: item.Issue,
                 Branch: item.Branch,
@@ -403,6 +404,7 @@ public sealed record QueuePullRequestView(
     [property: JsonPropertyName("tag")] string Tag,
     [property: JsonPropertyName("pr")] int PullRequest,
     [property: JsonPropertyName("stage")] string Stage,
+    [property: JsonPropertyName("state")] QueueItemState State,
     [property: JsonPropertyName("round")] int Round,
     [property: JsonPropertyName("issue")]
     [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]

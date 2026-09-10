@@ -65,6 +65,9 @@ internal sealed class JsonLinesLedger<TEntry>(
     /// </summary>
     internal JsonSerializerOptions SerializerOptions { get; } = serializerOptions ?? new JsonSerializerOptions { WriteIndented = false };
 
+    /// <summary>Test-only observation of each shared read-check-then-append operation.</summary>
+    internal Action<int>? AppendOperationObserver { get; set; }
+
     /// <summary>
     /// Appends the subset of <paramref name="entries"/> whose execution id is not already present in
     /// <paramref name="ledgerFilePath"/>, in ONE read-check-then-append critical section — two lock
@@ -84,6 +87,7 @@ internal sealed class JsonLinesLedger<TEntry>(
             return Task.CompletedTask;
         }
 
+        AppendOperationObserver?.Invoke(entries.Count);
         EnsureParentDirectory(ledgerFilePath);
 
         return RunUnderLockAsync(ledgerFilePath, () =>
@@ -94,9 +98,15 @@ internal sealed class JsonLinesLedger<TEntry>(
                 .Select(id => id!)
                 .ToHashSet(StringComparer.Ordinal);
 
-            var toAppend = entries
-                .Where(e => executionIdSelector(e) is not { Length: > 0 } id || !alreadyRecorded.Contains(id))
-                .ToList();
+            var toAppend = new List<TEntry>(entries.Count);
+            foreach (var entry in entries)
+            {
+                var id = executionIdSelector(entry);
+                if (id is not { Length: > 0 } || alreadyRecorded.Add(id))
+                {
+                    toAppend.Add(entry);
+                }
+            }
             if (toAppend.Count == 0)
             {
                 return;
