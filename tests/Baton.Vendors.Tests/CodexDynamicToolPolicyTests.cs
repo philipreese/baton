@@ -628,6 +628,22 @@ public sealed class CodexDynamicToolPolicyTests
     }
 
     [Fact]
+    public async Task Workspace_writer_cannot_target_a_declared_output_artifact_path()
+    {
+        using var fixture = new PolicyFixture(
+            new PermissionGrant(ReadFiles: true, WriteFiles: true), ["changes.md"]);
+        var artifactPath = Path.Combine(fixture.Output, "changes.md");
+
+        var result = await fixture.ExecuteAsync(
+            CodexDynamicToolPolicy.WriteTextTool, new { path = artifactPath, content = "escape" });
+
+        Assert.False(result.Success);
+        Assert.Contains(GrantRefusal.Marker, result.Text);
+        Assert.Contains("outside", result.Text, StringComparison.OrdinalIgnoreCase);
+        Assert.False(File.Exists(artifactPath));
+    }
+
+    [Fact]
     public async Task Contract_input_is_readable_even_when_general_workspace_reads_are_withheld()
     {
         using var fixture = new PolicyFixture(new PermissionGrant(), ["answer.md"], createInput: true);
