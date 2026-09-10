@@ -6,9 +6,8 @@ namespace Baton.Cli.Tests;
 /// <summary>
 /// #554: <see cref="AgyHookCheckCommand"/> is the executable target <c>agy</c> spawns for every
 /// matched <c>PreToolUse</c> event. These drive <see cref="AgyHookCheckCommand.Execute"/> against
-/// the exact stdin shape the live CLI produces — captured by
-/// <c>agy.hook-env-inherited</c> in <c>tools/vendor-verify/verify.py</c>, which logs the real
-/// payload — rather than a hand-shaped fixture, so a regression in field handling surfaces here.
+/// sanitized stdin shapes derived from captured hook payloads, including old-format compatibility
+/// variants, so a regression in field handling surfaces here without retaining raw capture paths.
 /// </summary>
 /// <remarks>
 /// <b>Every assertion below checks the parsed <c>decision</c> field, never the exit code.</b> On agy
@@ -25,7 +24,7 @@ namespace Baton.Cli.Tests;
 public class AgyHookCheckCommandTests
 {
     /// <summary>
-    /// The real payload agy sends, from the live capture in <c>agy.hook-env-inherited</c>'s log.
+    /// The earlier measured three-argument payload, retained as an old-format compatibility fixture.
     /// Note <c>toolCall.name</c> nested and camelCase — claude's is a root-level <c>tool_name</c> —
     /// and the undocumented <c>modelName</c> field (recorded in <c>docs/vendor-doc-audit.md</c>),
     /// present here so a parser that trips over unexpected fields fails in this suite.
@@ -976,30 +975,27 @@ public class AgyHookCheckCommandTests
     }
 
     /// <summary>
-    /// #2002 review MEDIUM, both directions. An argument no measurement accounts for is refused,
-    /// because it could be the backgrounding switch this gate cannot read. The control is the first
-    /// arm, and it is the one that matters: <c>CommandLine</c>, <c>Cwd</c> and
-    /// <c>WaitMsBeforeAsync</c> were observed once, on room <c>dispatch-implement-12f930d9</c>, so a
-    /// rule that refused "anything but CommandLine" would deny the shape that capture shows agy
-    /// sending. What that observation does and does not establish — including whether
-    /// <c>WaitMsBeforeAsync</c> is the backgrounding switch its name suggests — is scoped in
-    /// <c>docs/vendor-capabilities.md</c>; <c>AgyHookCheckCommand.MeasuredRunCommandArgs</c> points
-    /// at it.
+    /// #2002 review MEDIUM and #2152, both directions. An argument no measurement accounts for is
+    /// refused because it could be the backgrounding switch this gate cannot read. The control is
+    /// the first arm: it carries the complete five-field shape observed twice on agy 1.2.0. The next
+    /// two arms prove each descriptive field stays independently optional, and the old three-field
+    /// payload remains compatible. The final arms prove neither an unknown argument nor a malformed
+    /// descriptive value can pass unread. Scope and provenance live in
+    /// <c>docs/vendor-capabilities.md</c>; <c>AgyHookCheckCommand.MeasuredRunCommandArgs</c> points at
+    /// that canonical finding.
     /// </summary>
     [Theory]
-    [InlineData("""{"CommandLine":"dotnet build","Cwd":"C:\\x","WaitMsBeforeAsync":5000}""", "allow")]
-    [InlineData("""{"CommandLine":"dotnet build"}""", "allow")]
-    [InlineData("""{"CommandLine":"dotnet build","Async":true}""", "deny")]
-    [InlineData("""{"CommandLine":"dotnet build","Cwd":"C:\\x","Detach":true}""", "deny")]
-    public void An_unmeasured_run_command_argument_is_refused_and_the_measured_three_are_not(
-        string argsJson, string expected)
+    [InlineData("\"toolAction\":\"Running node --version\",\"toolSummary\":\"Check Node.js version\"", "allow", null)]
+    [InlineData("\"toolAction\":\"Running node --version\"", "allow", null)]
+    [InlineData("\"toolSummary\":\"Check Node.js version\"", "allow", null)]
+    [InlineData(null, "allow", null)]
+    [InlineData("\"Async\":true", "deny", "in the background instead of to completion")]
+    [InlineData("\"toolAction\":12", "deny", "measured arguments with malformed values")]
+    [InlineData("\"toolSummary\":false", "deny", "measured arguments with malformed values")]
+    public void Run_command_accepts_only_the_measured_argument_names_and_metadata_types(
+        string? additionalArgs, string expected, string? denialReason)
     {
-        var payload = $$"""
-            {"artifactDirectoryPath":"C:/x/brain/abc","conversationId":"abc",
-             "modelName":"gemini-3.6-flash-medium","stepIdx":3,
-             "toolCall":{"args":{{argsJson}},"name":"run_command"},
-             "transcriptPath":"C:/x/transcript_full.jsonl","workspacePaths":["C:/x"]}
-            """;
+        var payload = RunPayload("node --version", additionalArgs);
         using var stdin = new StringReader(payload);
         using var stdout = new StringWriter();
 
@@ -1009,13 +1005,58 @@ public class AgyHookCheckCommandTests
 
         using var doc = JsonDocument.Parse(stdout.ToString());
         Assert.Equal(expected, doc.RootElement.GetProperty("decision").GetString());
-        if (expected == "deny")
+        if (denialReason is not null)
         {
             Assert.Contains(
-                "in the background instead of to completion",
-                doc.RootElement.GetProperty("reason").GetString()!,
+                denialReason, doc.RootElement.GetProperty("reason").GetString()!,
                 StringComparison.Ordinal);
         }
+    }
+
+    /// <summary>
+    /// Review of #2152: a run command cannot be judged without an object-shaped argument bag and a
+    /// non-empty string command. The other measured fields remain optional, but when present their
+    /// measured types are part of the payload shape rather than values this gate may ignore.
+    /// </summary>
+    [Theory]
+    [InlineData("null")]
+    [InlineData("[]")]
+    [InlineData("{}")]
+    [InlineData("{\"CommandLine\":12}")]
+    [InlineData("{\"CommandLine\":\"\"}")]
+    [InlineData("{\"CommandLine\":\"   \"}")]
+    [InlineData("{\"CommandLine\":\"node --version\",\"Cwd\":12}")]
+    [InlineData("{\"CommandLine\":\"node --version\",\"WaitMsBeforeAsync\":\"5000\"}")]
+    public void An_unjudgeable_or_malformed_run_command_payload_is_denied(string argsJson)
+    {
+        var payload = ToolPayload("run_command", argsJson);
+
+        Assert.Equal("deny", Decide(payload, "agy:", shellPatterns: "agy:"));
+    }
+
+    [Theory]
+    [InlineData("{\"CommandLine\":\"node --version\"}")]
+    [InlineData("{\"CommandLine\":\"node --version\",\"Cwd\":\"C:\\\\x\"}")]
+    [InlineData("{\"CommandLine\":\"node --version\",\"WaitMsBeforeAsync\":1}")]
+    public void Optional_measured_run_command_fields_may_be_absent(string argsJson)
+    {
+        var payload = ToolPayload("run_command", argsJson);
+
+        Assert.Equal("allow", Decide(payload, "agy:", shellPatterns: "agy:"));
+    }
+
+    [Fact]
+    public void Descriptive_metadata_cannot_make_a_prohibited_command_safe()
+    {
+        var payload = RunPayload(
+            "git push --force",
+            "\"toolAction\":\"Running node --version\",\"toolSummary\":\"Check Node.js version\"");
+
+        var reason = DenyReason(
+            payload, "agy:", shellPatterns: "agy:", deniedShellPatterns: "agy:git push*");
+
+        Assert.Contains("command line 'git push --force' is denied", reason, StringComparison.Ordinal);
+        Assert.DoesNotContain("node --version", reason, StringComparison.Ordinal);
     }
 
     /// <summary>
@@ -1178,11 +1219,13 @@ public class AgyHookCheckCommandTests
         "{\"toolCall\":{\"args\":" + argsJson + ",\"name\":" +
         JsonSerializer.Serialize(toolName) + "}}";
 
-    private static string RunPayload(string command) =>
+    private static string RunPayload(string command, string? additionalArgs = null) =>
         ToolPayload(
             "run_command",
             "{\"CommandLine\":" + JsonSerializer.Serialize(command) +
-            ",\"Cwd\":\"C:\\\\x\",\"WaitMsBeforeAsync\":5000}");
+            ",\"Cwd\":" + JsonSerializer.Serialize(Path.GetTempPath()) +
+            ",\"WaitMsBeforeAsync\":5000" +
+            (additionalArgs is null ? string.Empty : "," + additionalArgs) + "}");
 
     private static string ViewPayload(string path, string? extraArgs = null) =>
         ToolPayload(
