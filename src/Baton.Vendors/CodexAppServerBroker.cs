@@ -232,7 +232,7 @@ public static class CodexAppServerBroker
                 return ReadRateLimitsProtocolAsync(
                     process.StandardInput, process.StandardOutput, error, token);
             },
-            token => StopRateLimitsProcessAsync(process, stderrDrain, token),
+            token => StopRateLimitsProcessAsync(process, stderrDrain, error, token),
             error,
             responseTimeout,
             responseBound,
@@ -366,17 +366,38 @@ public static class CodexAppServerBroker
     }
 
     internal static async Task StopRateLimitsProcessAsync(
-        Process process, Task stderrDrain, CancellationToken cancellationToken)
+        Process process, Task stderrDrain, TextWriter error, CancellationToken cancellationToken)
     {
         try
         {
-            if (!process.HasExited)
+            try
             {
-                process.Kill(entireProcessTree: true);
+                if (!process.HasExited)
+                {
+                    process.Kill(entireProcessTree: true);
+                }
+
+                await process.WaitForExitAsync(cancellationToken).ConfigureAwait(false);
+            }
+            catch (Exception)
+            {
+                // Process cleanup abandoned its independently running diagnostic drain before it
+                // could await it. Keep ownership of that nested task after this cleanup task ends.
+                _ = ObserveLatePhaseAsync(stderrDrain, error, "stderr drain");
+                throw;
             }
 
-            await process.WaitForExitAsync(cancellationToken).ConfigureAwait(false);
-            await stderrDrain.WaitAsync(cancellationToken).ConfigureAwait(false);
+            try
+            {
+                await stderrDrain.WaitAsync(cancellationToken).ConfigureAwait(false);
+            }
+            catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+            {
+                // WaitAsync observes only its own cancellation. The drain still runs without that
+                // token and must retain a late observer before the process streams are disposed.
+                _ = ObserveLatePhaseAsync(stderrDrain, error, "stderr drain");
+                throw;
+            }
         }
         finally
         {
@@ -396,7 +417,8 @@ public static class CodexAppServerBroker
         {
             if (await startTask.ConfigureAwait(false) is { } process)
             {
-                await StopRateLimitsProcessAsync(process, Task.CompletedTask, CancellationToken.None)
+                await StopRateLimitsProcessAsync(
+                    process, Task.CompletedTask, TextWriter.Null, CancellationToken.None)
                     .ConfigureAwait(false);
             }
         }

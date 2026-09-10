@@ -332,7 +332,7 @@ public sealed class CodexAppServerBrokerTests
         var result = await CodexAppServerBroker.ReadRateLimitsWithinBoundsAsync(
             _ => Task.FromResult(new JsonObject { ["ok"] = true }),
             token => CodexAppServerBroker.StopRateLimitsProcessAsync(
-                process, Task.CompletedTask, token),
+                process, Task.CompletedTask, error, token),
             error,
             TimeSpan.FromSeconds(1),
             TimeSpan.FromSeconds(5),
@@ -342,6 +342,38 @@ public sealed class CodexAppServerBrokerTests
             TimeSpan.FromSeconds(5), TestContext.Current.CancellationToken);
         Assert.True(result!["ok"]!.GetValue<bool>());
         Assert.Equal(string.Empty, error.ToString());
+    }
+
+    [Fact]
+    public async Task Production_cleanup_observes_a_stderr_drain_that_faults_after_its_deadline()
+    {
+        var processExited = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var process = StartSleepingProcess();
+        process.EnableRaisingEvents = true;
+        process.Exited += (_, _) => processExited.TrySetResult();
+        var stderrDrain = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        using var error = new SignalingStringWriter("stderr drain failed after its deadline");
+        var stopwatch = Stopwatch.StartNew();
+
+        var result = await CodexAppServerBroker.ReadRateLimitsWithinBoundsAsync(
+            _ => Task.FromResult(new JsonObject { ["ok"] = true }),
+            token => CodexAppServerBroker.StopRateLimitsProcessAsync(
+                process, stderrDrain.Task, error, token),
+            error,
+            TimeSpan.FromSeconds(1),
+            TimeSpan.FromMilliseconds(50),
+            TestContext.Current.CancellationToken);
+
+        stopwatch.Stop();
+        Assert.True(result!["ok"]!.GetValue<bool>());
+        Assert.True(stopwatch.Elapsed < TimeSpan.FromSeconds(5), $"elapsed {stopwatch.Elapsed}");
+        Assert.Contains("cleanup did not finish within", error.ToString(), StringComparison.Ordinal);
+        await processExited.Task.WaitAsync(
+            TimeSpan.FromSeconds(5), TestContext.Current.CancellationToken);
+
+        stderrDrain.SetException(new IOException("late stderr fault"));
+        await error.Signal.WaitAsync(TimeSpan.FromSeconds(60), TestContext.Current.CancellationToken);
+        Assert.Contains("late stderr fault", error.ToString(), StringComparison.Ordinal);
     }
 
     [Fact]
