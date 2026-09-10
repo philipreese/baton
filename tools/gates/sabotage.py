@@ -74,6 +74,60 @@ def _sabotage_workflow_recovery() -> None:
             mutated = run()
             assert mutated.returncode != 0 and "AssertionError" in mutated.stderr, mutated.stderr
 
+
+@fixture("ci-selftest")
+def _sabotage_ci_selftest() -> None:
+    """Prove the CI selftest rejects a fail-open same-revision coverage aggregate."""
+    with tempfile.TemporaryDirectory() as td:
+        dest = Path(td)
+        tools_dir = dest / "tools" / "ci"
+        tools_dir.mkdir(parents=True)
+        for name in ["aggregate.py", "selftest.py", "test_shards.py"]:
+            shutil.copy2(ROOT / "tools" / "ci" / name, tools_dir / name)
+
+        # Keep the production selftest and its synthetic fixtures intact while pointing the two
+        # checks that inspect/evaluate the live tree back at this checkout. Only aggregate.py below
+        # is sabotaged, in the isolated copy imported by this driver.
+        driver = tools_dir / "sabotage_driver.py"
+        driver.write_text(
+            "from pathlib import Path\n"
+            "import selftest\n"
+            "import test_shards\n"
+            f"root = Path({str(ROOT)!r})\n"
+            "selftest.ROOT = root\n"
+            "test_shards.ROOT = root\n"
+            "selftest.main()\n",
+            encoding="utf-8",
+        )
+
+        def run() -> subprocess.CompletedProcess:
+            return subprocess.run(
+                [sys.executable, "-B", str(driver)],
+                cwd=dest,
+                capture_output=True,
+                text=True,
+                env=_clean_git_env(),
+                timeout=60,
+            )
+
+        baseline = run()
+        assert baseline.returncode == 0, baseline.stdout + baseline.stderr
+
+        aggregate = tools_dir / "aggregate.py"
+        original = aggregate.read_text(encoding="utf-8")
+        mutated = original.replace(
+            '    if gates != "success":\n',
+            '    if False:  # sabotage: accept a non-success gates result\n',
+            1,
+        )
+        assert mutated != original, "gates-result mutation target not found in aggregate.py"
+        aggregate.write_text(mutated, encoding="utf-8")
+
+        sabotaged = run()
+        assert sabotaged.returncode != 0 and "AssertionError" in sabotaged.stderr, (
+            sabotaged.stdout + sabotaged.stderr
+        )
+
 @fixture("audit-completeness")
 def _sabotage_audit_completeness() -> None:
     with tempfile.TemporaryDirectory() as td:
