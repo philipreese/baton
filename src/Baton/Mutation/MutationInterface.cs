@@ -3130,37 +3130,56 @@ public static class MutationInterface
 
     /// <summary>
     /// #2131 slice 2's settle-time write-tool measurement. Null means the stream could not answer
-    /// (no parser or no captured stdout segment); zero means at least one captured segment was read
-    /// and no vendor write-family call appeared. Uses the same rollover order as the canary count
-    /// above so a long execution cannot lose its early writes at settle.
+    /// (no parser support, no captured stdout segment, an unreadable segment, or either loss marker);
+    /// zero means a complete captured stream was read and no vendor write-family call appeared. Uses
+    /// the same rollover order as the canary count above so a once-rolled execution includes its early
+    /// writes. A twice-rolled or write-failed stream cannot prove zero because events were lost.
     /// </summary>
-    private static int? CountWriteToolCallsFromStdoutLog(
+    internal static int? CountWriteToolCallsFromStdoutLog(
         IWorkerUsageParser? usageParser, string outputDirectory)
     {
-        if (usageParser is null)
+        if (usageParser is null || !usageParser.SupportsWriteToolStepCounting)
+        {
+            return null;
+        }
+
+        if (File.Exists(Path.Combine(outputDirectory, ExecutionStreamLogger.StdoutTruncationMarkerFileName))
+            || File.Exists(Path.Combine(outputDirectory, ExecutionStreamLogger.StdoutWriteFailureMarkerFileName)))
         {
             return null;
         }
 
         var count = 0;
         var readAnySegment = false;
-        foreach (var fileName in new[]
-                 {
-                     ExecutionStreamLogger.StdoutRolloverFileName,
-                     ExecutionStreamLogger.StdoutLogFileName,
-                 })
+        try
         {
-            var path = Path.Combine(outputDirectory, fileName);
-            if (!File.Exists(path))
+            foreach (var fileName in new[]
+                     {
+                         ExecutionStreamLogger.StdoutRolloverFileName,
+                         ExecutionStreamLogger.StdoutLogFileName,
+                     })
             {
-                continue;
-            }
+                var path = Path.Combine(outputDirectory, fileName);
+                if (!File.Exists(path))
+                {
+                    continue;
+                }
 
-            readAnySegment = true;
-            foreach (var line in File.ReadLines(path))
-            {
-                count += usageParser.CountWriteToolSteps(line);
+                readAnySegment = true;
+                foreach (var line in File.ReadLines(path))
+                {
+                    if (usageParser.CountWriteToolSteps(line) is not { } lineCount)
+                    {
+                        return null;
+                    }
+
+                    count += lineCount;
+                }
             }
+        }
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
+        {
+            return null;
         }
 
         return readAnySegment ? count : null;

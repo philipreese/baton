@@ -33,6 +33,9 @@ namespace Baton.Cli.Daemon;
 /// </remarks>
 public sealed class WorkItemAdvancer
 {
+    private const string PullRequestJsonFields =
+        "number,state,isDraft,headRefOid,statusCheckRollup,headRefName,baseRefName,isCrossRepository";
+
     private readonly IGhCliRunner _gh;
     private readonly Func<string, CancellationToken, Task<string?>> _workspaceHead;
 
@@ -140,7 +143,8 @@ public sealed class WorkItemAdvancer
                 : ["pr", "ready", pullRequest.ToString(CultureInfo.InvariantCulture)];
             var mutation = await _gh.RunAsync(item.Workspace, args, cancellationToken).ConfigureAwait(false);
 
-            var after = await ReadPullRequestAsync(item, cancellationToken).ConfigureAwait(false);
+            var after = await ReadPullRequestAsync(
+                item with { PullRequest = pullRequest }, cancellationToken).ConfigureAwait(false);
             var desiredDraft = transition.PullRequestAction == PullRequestReadinessAction.MarkDraft;
             var reachedDesiredState = after.Succeeded
                 && after.Number == pullRequest
@@ -407,7 +411,7 @@ public sealed class WorkItemAdvancer
             return PullRequestObservation.Failed($"workspace '{item.Workspace}' is unavailable");
         }
 
-        var before = await ReadPullRequestSnapshotAsync(item.Workspace, branch, cancellationToken).ConfigureAwait(false);
+        var before = await ReadPullRequestSnapshotAsync(item, cancellationToken).ConfigureAwait(false);
         if (!before.Succeeded || before.Number is null || before.IsOpen != true)
         {
             return before;
@@ -429,7 +433,10 @@ public sealed class WorkItemAdvancer
                 before);
         }
 
-        var after = await ReadPullRequestSnapshotAsync(item.Workspace, branch, cancellationToken).ConfigureAwait(false);
+        // Even on the discovery tick, the stability read is exact by number. A second same-branch PR
+        // appearing between the two reads therefore cannot replace the candidate about to be stored.
+        var after = await ReadPullRequestSnapshotAsync(
+            item with { PullRequest = before.Number }, cancellationToken).ConfigureAwait(false);
         if (!after.Succeeded)
         {
             return after;
@@ -446,21 +453,48 @@ public sealed class WorkItemAdvancer
     }
 
     private async Task<PullRequestObservation> ReadPullRequestSnapshotAsync(
-        string workspace, string branch, CancellationToken cancellationToken)
+        QueueItem item, CancellationToken cancellationToken)
     {
+        var branch = item.Branch!;
+        var persistedNumber = item.PullRequest;
+        var args = persistedNumber is { } exact
+            ? new[]
+            {
+                "pr", "view", exact.ToString(CultureInfo.InvariantCulture),
+                "--json", PullRequestJsonFields,
+            }
+            :
+            [
+                "pr", "list", "--head", branch, "--state", "open", "--limit", "100",
+                "--json", PullRequestJsonFields,
+            ];
         var result = await _gh.RunAsync(
-            workspace,
-            ["pr", "list", "--head", branch, "--state", "all", "--limit", "100", "--json", "number,state,isDraft,headRefOid,statusCheckRollup"],
+            item.Workspace,
+            args,
             cancellationToken).ConfigureAwait(false);
         if (!result.Started || result.ExitCode != 0)
         {
+            var operation = persistedNumber is null ? "gh pr list" : $"gh pr view {persistedNumber}";
             return PullRequestObservation.Failed(
-                !result.Started ? "gh pr list did not start" : $"gh pr list exited {result.ExitCode}");
+                !result.Started ? $"{operation} did not start" : $"{operation} exited {result.ExitCode}");
         }
 
         try
         {
             using var document = JsonDocument.Parse(result.Stdout);
+            if (persistedNumber is { } expected)
+            {
+                if (document.RootElement.ValueKind != JsonValueKind.Object)
+                {
+                    return PullRequestObservation.Failed(
+                        $"gh pr view returned a non-object JSON value for persisted PR #{expected}");
+                }
+
+                return TryReadPullRequest(document.RootElement, item, expected, out var exactObservation, out var exactError)
+                    ? exactObservation
+                    : PullRequestObservation.Failed(exactError!);
+            }
+
             if (document.RootElement.ValueKind != JsonValueKind.Array)
             {
                 return PullRequestObservation.Failed("gh pr list returned a non-array JSON value");
@@ -472,54 +506,109 @@ public sealed class WorkItemAdvancer
                 return PullRequestObservation.NoPullRequest;
             }
 
-            if (candidates.Any(e => e.ValueKind != JsonValueKind.Object))
+            var matches = new List<PullRequestObservation>();
+            foreach (var candidate in candidates)
             {
-                return PullRequestObservation.Failed("gh pr list returned a non-object pull-request entry");
+                if (!TryReadPullRequest(candidate, item, expectedNumber: null, out var observation, out var error))
+                {
+                    return PullRequestObservation.Failed(error!);
+                }
+
+                matches.Add(observation);
             }
 
-            var root = candidates.FirstOrDefault(e => string.Equals(Text(e, "state"), "OPEN", StringComparison.OrdinalIgnoreCase));
-            if (root.ValueKind == JsonValueKind.Undefined)
-            {
-                root = candidates[0];
-            }
-
-            var number = root.TryGetProperty("number", out var n) && n.ValueKind == JsonValueKind.Number
-                ? n.GetInt32()
-                : (int?)null;
-            var state = Text(root, "state");
-            var isOpen = state?.ToUpperInvariant() switch
-            {
-                "OPEN" => true,
-                "CLOSED" or "MERGED" => false,
-                _ => (bool?)null,
-            };
-            var isDraft = root.TryGetProperty("isDraft", out var d)
-                && d.ValueKind is JsonValueKind.True or JsonValueKind.False
-                    ? d.GetBoolean()
-                    : (bool?)null;
-            var headSha = Text(root, "headRefOid");
-            var checks = PullRequestChecks.Summarize(
-                root.TryGetProperty("statusCheckRollup", out var rollup) ? rollup : null);
-
-            if (number is null)
-            {
-                return PullRequestObservation.Failed("gh pr list returned a PR without a number");
-            }
-
-            if (isOpen is null || isDraft is null || headSha is not { Length: > 0 })
+            if (matches.Count != 1)
             {
                 return PullRequestObservation.Failed(
-                    $"gh pr list returned incomplete state for PR #{number}");
+                    $"gh pr list found {matches.Count} identity-valid open PRs for branch '{branch}'; "
+                    + "refusing to choose one before persistence");
             }
 
-            return new PullRequestObservation(true, number, headSha, isOpen, isDraft, checks, null, null);
+            return matches[0];
         }
         catch (JsonException ex)
         {
             Console.Error.WriteLine(
-                $"WorkItemAdvancer: could not read 'gh pr list --head {branch}' output as JSON: {ex.Message}");
-            return PullRequestObservation.Failed($"gh pr list returned malformed JSON: {ex.Message}");
+                $"WorkItemAdvancer: could not read GitHub PR output for branch '{branch}' as JSON: {ex.Message}");
+            return PullRequestObservation.Failed($"GitHub PR lookup returned malformed JSON: {ex.Message}");
         }
+    }
+
+    /// <summary>
+    /// Validates the PR identity before any number can reach queue persistence or a readiness mutation.
+    /// The command runs in <see cref="QueueItem.Workspace"/>, so its repository context is the base
+    /// repository; the remaining identity is the exact number (once persisted), same-repository head,
+    /// recorded branch, and the lifecycle's <c>main</c> base.
+    /// </summary>
+    private static bool TryReadPullRequest(
+        JsonElement root,
+        QueueItem item,
+        int? expectedNumber,
+        out PullRequestObservation observation,
+        out string? error)
+    {
+        observation = PullRequestObservation.NoPullRequest;
+        error = null;
+        if (root.ValueKind != JsonValueKind.Object)
+        {
+            error = "GitHub PR lookup returned a non-object pull-request entry";
+            return false;
+        }
+
+        var number = root.TryGetProperty("number", out var n) && n.ValueKind == JsonValueKind.Number
+            && n.TryGetInt32(out var parsedNumber) && parsedNumber > 0
+                ? parsedNumber
+                : (int?)null;
+        if (number is null)
+        {
+            error = "GitHub PR lookup returned a PR without a valid number";
+            return false;
+        }
+
+        if (expectedNumber is { } expected && number != expected)
+        {
+            error = $"GitHub returned PR #{number} while the queue tracks exact PR #{expected}";
+            return false;
+        }
+
+        var state = Text(root, "state");
+        var isOpen = state?.ToUpperInvariant() switch
+        {
+            "OPEN" => true,
+            "CLOSED" or "MERGED" => false,
+            _ => (bool?)null,
+        };
+        var isDraft = root.TryGetProperty("isDraft", out var d)
+            && d.ValueKind is JsonValueKind.True or JsonValueKind.False
+                ? d.GetBoolean()
+                : (bool?)null;
+        var headSha = Text(root, "headRefOid");
+        var headBranch = Text(root, "headRefName");
+        var baseBranch = Text(root, "baseRefName");
+        var sameRepository = root.TryGetProperty("isCrossRepository", out var cross)
+            && cross.ValueKind is JsonValueKind.True or JsonValueKind.False
+                ? !cross.GetBoolean()
+                : (bool?)null;
+
+        if (isOpen is null || isDraft is null || headSha is not { Length: > 0 })
+        {
+            error = $"GitHub PR lookup returned incomplete state for PR #{number}";
+            return false;
+        }
+
+        if (!string.Equals(headBranch, item.Branch, StringComparison.Ordinal)
+            || !string.Equals(baseBranch, "main", StringComparison.Ordinal)
+            || sameRepository != true)
+        {
+            error = $"PR #{number} does not match the queue item's repository/base/head identity";
+            return false;
+        }
+
+        var checks = PullRequestChecks.Summarize(
+            root.TryGetProperty("statusCheckRollup", out var rollup) ? rollup : null);
+        observation = new PullRequestObservation(
+            true, number, headSha, isOpen, isDraft, checks, null, null);
+        return true;
     }
 
     private static string? Text(JsonElement element, string property) =>

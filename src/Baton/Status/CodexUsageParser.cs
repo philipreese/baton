@@ -202,7 +202,9 @@ public sealed class CodexUsageParser : IWorkerUsageParser
     /// on <c>Baton.Vendors.CodexDynamicToolPolicy</c>; that policy's constants are pinned to these
     /// literals by its parser-facing tests.
     /// </summary>
-    public int CountWriteToolSteps(string rawLine) => TryParseToolName(rawLine) switch
+    public bool SupportsWriteToolStepCounting => true;
+
+    public int? CountWriteToolSteps(string rawLine) => TryParseToolName(rawLine) switch
     {
         "apply_patch" or "baton_write_text" or "baton_write_output" => 1,
         _ => 0,

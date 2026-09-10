@@ -394,8 +394,10 @@ public sealed class ClaudeUsageParser : IWorkerUsageParser
         }
     }
 
+    public bool SupportsWriteToolStepCounting => true;
+
     /// <summary>#2131 slice 2: every claude write-family <c>tool_use</c> block in this turn.</summary>
-    public int CountWriteToolSteps(string rawLine)
+    public int? CountWriteToolSteps(string rawLine)
     {
         if (string.IsNullOrWhiteSpace(rawLine))
         {
@@ -911,12 +913,14 @@ public sealed class AgyUsageParser : IWorkerUsageParser
         }
     }
 
+    public bool SupportsWriteToolStepCounting => true;
+
     /// <summary>
     /// #2131 slice 2: agy's terminal write-family steps. The names mirror the adapter grant's
     /// write-tool family; the terminal anchor is shared with <see cref="CountToolSteps"/> so ACTIVE
     /// and DONE lines for one call cannot double-count it.
     /// </summary>
-    public int CountWriteToolSteps(string rawLine)
+    public int? CountWriteToolSteps(string rawLine)
     {
         if (!TryReadTerminalToolInfo(rawLine, out var toolInfo)
             || !toolInfo.TryGetProperty("name", out var name))
