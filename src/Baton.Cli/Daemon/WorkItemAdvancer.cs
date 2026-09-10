@@ -20,8 +20,9 @@ namespace Baton.Cli.Daemon;
 /// </para>
 /// <para>
 /// <b>No new process-spawn site.</b> <c>gh</c> goes through <see cref="IGhCliRunner"/>, the seam
-/// <see cref="DeliveryPoller"/> already owns, and the workspace head through
-/// <see cref="WorkspaceHead.CaptureAsync"/>, the <c>git</c> spawn the CLI already has.
+/// <see cref="DeliveryPoller"/> already owns, the workspace head through
+/// <see cref="WorkspaceHead.CaptureAsync"/>, and repository context through
+/// <see cref="RepositoryIdentityResolver"/> — existing <c>git</c> spawns the CLI already has.
 /// <c>VendorSpawnGateTests</c>'s population is unchanged by design, not by luck.
 /// </para>
 /// <para>
@@ -38,19 +39,23 @@ public sealed class WorkItemAdvancer
 
     private readonly IGhCliRunner _gh;
     private readonly Func<string, CancellationToken, Task<string?>> _workspaceHead;
+    private readonly Func<string, CancellationToken, Task<RepositoryIdentity?>>? _repositoryIdentity;
 
     public WorkItemAdvancer()
-        : this(null, null)
+        : this(null, null, RepositoryIdentityResolver.TryResolveAsync)
     {
     }
 
-    /// <summary>Test seam (Baton.Cli.Tests): both spawns are delegates, so every transition runs
+    /// <summary>Test seam (Baton.Cli.Tests): all three probes are delegates, so every transition runs
     /// against a fixture room with no <c>gh</c>, no <c>git</c> and no network.</summary>
     internal WorkItemAdvancer(
-        IGhCliRunner? gh, Func<string, CancellationToken, Task<string?>>? workspaceHead)
+        IGhCliRunner? gh,
+        Func<string, CancellationToken, Task<string?>>? workspaceHead,
+        Func<string, CancellationToken, Task<RepositoryIdentity?>>? repositoryIdentity = null)
     {
         _gh = gh ?? new GhCliRunner();
         _workspaceHead = workspaceHead ?? ReadWorkspaceHeadAsync;
+        _repositoryIdentity = repositoryIdentity;
     }
 
     /// <summary>
@@ -139,8 +144,8 @@ public sealed class WorkItemAdvancer
             }
 
             var args = transition.PullRequestAction == PullRequestReadinessAction.MarkDraft
-                ? new[] { "pr", "ready", pullRequest.ToString(CultureInfo.InvariantCulture), "--undo" }
-                : ["pr", "ready", pullRequest.ToString(CultureInfo.InvariantCulture)];
+                ? RepositoryArgs(item, "pr", "ready", pullRequest.ToString(CultureInfo.InvariantCulture), "--undo")
+                : RepositoryArgs(item, "pr", "ready", pullRequest.ToString(CultureInfo.InvariantCulture));
             var mutation = await _gh.RunAsync(item.Workspace, args, cancellationToken).ConfigureAwait(false);
 
             var after = await ReadPullRequestAsync(
@@ -205,7 +210,11 @@ public sealed class WorkItemAdvancer
         {
             WorkItemTransitionKind.None =>
                 await RetainReconciliationAsync(
-                    item, transition.Reason, pr, now, room,
+                    item,
+                    pr.Error is { Length: > 0 } observationError
+                        ? $"{transition.Reason}: {observationError}"
+                        : transition.Reason,
+                    pr, now, room,
                     recordFailure: !pr.Succeeded).ConfigureAwait(false),
             WorkItemTransitionKind.NeedsOperator =>
                 await FailAsync(item, stage, transition, verdictPath, now, room).ConfigureAwait(false),
@@ -389,8 +398,8 @@ public sealed class WorkItemAdvancer
             CancellationToken.None);
 
     /// <summary>
-    /// Reads the branch's PR from an all-state, head-scoped list, then reads required checks for the
-    /// exact open PR and repeats the list read. The second snapshot is the stability fence: check
+    /// Discovers the branch's PR from an open-only, head-scoped list, then reads required checks and
+    /// re-reads the exact PR by number. That exact-number snapshot is the stability fence: check
     /// evidence is accepted only when number, head and draft state still describe the same open PR.
     /// Command failure and malformed output are explicit failed observations, never "no PR".
     /// </summary>
@@ -411,6 +420,37 @@ public sealed class WorkItemAdvancer
             return PullRequestObservation.Failed($"workspace '{item.Workspace}' is unavailable");
         }
 
+        if (item.Repository is not { Length: > 0 } repository)
+        {
+            return PullRequestObservation.Failed(
+                "the lifecycle item has no trusted repository identity (legacy queue entry); "
+                + "re-add it from the owning repository before GitHub reconciliation can continue");
+        }
+
+        var persistedIdentity = RepositoryIdentity.From("https://" + repository, gitCommonDirectoryPath: null);
+        if (!string.Equals(persistedIdentity?.RemoteValue, repository, StringComparison.Ordinal))
+        {
+            return PullRequestObservation.Failed(
+                $"the lifecycle item carries an invalid remote repository identity '{repository}'; "
+                + "re-add it from the owning repository");
+        }
+
+        var currentIdentity = _repositoryIdentity is null
+            ? persistedIdentity
+            : await _repositoryIdentity(item.Workspace, cancellationToken).ConfigureAwait(false);
+        if (currentIdentity?.RemoteValue is not { Length: > 0 } currentRepository)
+        {
+            return PullRequestObservation.Failed(
+                $"the repository identity for workspace '{item.Workspace}' is unavailable; expected '{repository}'");
+        }
+
+        if (!string.Equals(currentRepository, repository, StringComparison.Ordinal))
+        {
+            return PullRequestObservation.Failed(
+                $"repository context drifted from persisted '{repository}' to '{currentRepository}'; "
+                + "refusing all GitHub PR reads and mutations");
+        }
+
         var before = await ReadPullRequestSnapshotAsync(item, cancellationToken).ConfigureAwait(false);
         if (!before.Succeeded || before.Number is null || before.IsOpen != true)
         {
@@ -419,7 +459,9 @@ public sealed class WorkItemAdvancer
 
         var requiredResult = await _gh.RunAsync(
             item.Workspace,
-            ["pr", "checks", before.Number.Value.ToString(CultureInfo.InvariantCulture), "--required", "--json", "bucket,name,state,workflow"],
+            RepositoryArgs(
+                item, "pr", "checks", before.Number.Value.ToString(CultureInfo.InvariantCulture),
+                "--required", "--json", "bucket,name,state,workflow"),
             cancellationToken).ConfigureAwait(false);
         var required = requiredResult.Started
             ? PullRequestChecks.TrySummarizeRequired(requiredResult.Stdout)
@@ -458,16 +500,14 @@ public sealed class WorkItemAdvancer
         var branch = item.Branch!;
         var persistedNumber = item.PullRequest;
         var args = persistedNumber is { } exact
-            ? new[]
-            {
+            ? RepositoryArgs(
+                item,
                 "pr", "view", exact.ToString(CultureInfo.InvariantCulture),
-                "--json", PullRequestJsonFields,
-            }
-            :
-            [
+                "--json", PullRequestJsonFields)
+            : RepositoryArgs(
+                item,
                 "pr", "list", "--head", branch, "--state", "open", "--limit", "100",
-                "--json", PullRequestJsonFields,
-            ];
+                "--json", PullRequestJsonFields);
         var result = await _gh.RunAsync(
             item.Workspace,
             args,
@@ -536,9 +576,9 @@ public sealed class WorkItemAdvancer
 
     /// <summary>
     /// Validates the PR identity before any number can reach queue persistence or a readiness mutation.
-    /// The command runs in <see cref="QueueItem.Workspace"/>, so its repository context is the base
-    /// repository; the remaining identity is the exact number (once persisted), same-repository head,
-    /// recorded branch, and the lifecycle's <c>main</c> base.
+    /// Every command is explicitly scoped to <see cref="QueueItem.Repository"/> after a live workspace
+    /// identity comparison; the remaining identity is the exact number (once persisted),
+    /// same-repository head, recorded branch, and the lifecycle's <c>main</c> base.
     /// </summary>
     private static bool TryReadPullRequest(
         JsonElement root,
@@ -615,6 +655,9 @@ public sealed class WorkItemAdvancer
         element.TryGetProperty(property, out var value) && value.ValueKind == JsonValueKind.String
             ? value.GetString()
             : null;
+
+    private static string[] RepositoryArgs(QueueItem item, params string[] args) =>
+        [.. args, "--repo", item.Repository!];
 
     private sealed record PullRequestObservation(
         bool Succeeded,

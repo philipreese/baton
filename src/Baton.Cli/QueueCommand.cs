@@ -72,13 +72,18 @@ public static class QueueCommand
                 .Items.FirstOrDefault(i => string.Equals(i.Tag, tag, StringComparison.Ordinal)),
             tag);
 
+        var sourceRepository = repositoryDirectory ?? Directory.GetCurrentDirectory();
+        var lifecycleRepository = options.Lifecycle
+            ? await ResolveLifecycleRepositoryAsync(sourceRepository, cancellationToken).ConfigureAwait(false)
+            : null;
+
         // Provisioning first, before anything is written to the queue: a `gh issue develop` that fails
         // must leave no half-added item behind, the same pre-provision-refusal placement
         // DispatchCommand's own drain/continue checks use.
         var workspace = options.Issue is { } issue
             ? await IssueWorktreeProvisioner.ProvisionAsync(
                 issue,
-                repositoryDirectory ?? Directory.GetCurrentDirectory(),
+                sourceRepository,
                 (await DaemonSettingsStore.LoadAsync(BatonPaths.SettingsFile, cancellationToken).ConfigureAwait(false))
                     .Queue.WorktreeRoot,
                 output: output,
@@ -118,6 +123,7 @@ public static class QueueCommand
             Issue = options.Issue,
             Stage = options.Lifecycle ? WorkStage.Implement : null,
             Branch = options.Lifecycle ? IssueWorktreeProvisioner.BranchNameFor(options.Issue!.Value) : null,
+            Repository = lifecycleRepository,
             // Explicit false distinguishes a newly-created lifecycle item from a pre-#2131 item
             // whose persisted history has no trustworthy automatic-fix budget.
             AutomaticFixUsed = options.Lifecycle ? false : null,
@@ -133,7 +139,7 @@ public static class QueueCommand
             // instructions keeps them, and gets the standing rules and the ship block for free.
             var (title, body) = specSource is null
                 ? await IssueWorktreeProvisioner.FetchIssueAsync(
-                    options.Issue!.Value, repositoryDirectory ?? Directory.GetCurrentDirectory(),
+                    options.Issue!.Value, sourceRepository,
                     cancellationToken: cancellationToken).ConfigureAwait(false)
                 : ($"Implement #{options.Issue}", await File.ReadAllTextAsync(specSource, cancellationToken).ConfigureAwait(false));
 
@@ -179,6 +185,26 @@ public static class QueueCommand
         }
 
         return 0;
+    }
+
+    /// <summary>
+    /// Captures the existing canonical remote identity before provisioning can mutate anything. The
+    /// common-directory fallback is deliberately insufficient: it identifies local worktrees for
+    /// accounting, but cannot be passed to <c>gh --repo</c> as lifecycle ownership.
+    /// </summary>
+    private static async Task<string> ResolveLifecycleRepositoryAsync(
+        string sourceRepository, CancellationToken cancellationToken)
+    {
+        var identity = await RepositoryIdentityResolver
+            .TryResolveAsync(sourceRepository, cancellationToken).ConfigureAwait(false);
+        if (identity?.RemoteValue is not { Length: > 0 } repository)
+        {
+            throw new CliArgumentException(
+                $"Cannot establish a canonical remote repository identity for lifecycle work from '{sourceRepository}'.",
+                "configure that checkout's origin remote, then re-run 'baton queue add --lifecycle'.");
+        }
+
+        return repository;
     }
 
     /// <summary>

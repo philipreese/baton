@@ -89,6 +89,14 @@ public sealed record QueueItem
     /// </summary>
     public string? Branch { get; init; }
 
+    /// <summary>
+    /// The immutable canonical <c>host/owner/repo</c> identity that owns this lifecycle, captured from
+    /// the source repository when the item is added. Null on non-lifecycle requests and on historical
+    /// lifecycle rows; the latter is uncertainty, never permission to infer an owner from mutable
+    /// workspace or CLI context.
+    /// </summary>
+    public string? Repository { get; init; }
+
     /// <summary>The pull request the lifecycle is tracking, once one is open on <see cref="Branch"/>.</summary>
     public int? PullRequest { get; init; }
 
