@@ -198,6 +198,8 @@ public sealed class WorkItemAdvancerTests
         {
             var room = await WriteSettledRoomAsync(home, WorkflowOutcome.Succeeded, BlockingVerdict);
             await SeedAsync(home, WorkStage.ReReview, room, round: 2, automaticFixUsed: true);
+            await QueueStore.MutateAsync(BatonPaths.QueueFile,
+                state => state with { Items = state.Items.Select(i => i with { LastVerdict = "previous-verdict.json" }).ToList() }, Ct);
 
             var fact = Assert.Single(await new WorkItemAdvancer(
                 new FakeGh(PrJson(77, PushedSha)), (_, _) => Task.FromResult<string?>(PushedSha)).AdvanceAsync(Now, Ct));
@@ -208,6 +210,7 @@ public sealed class WorkItemAdvancerTests
             Assert.True(item.Halted);
             Assert.Equal(WorkStage.ReReview, item.Stage);
             Assert.Equal(room, item.RoomDirectory);
+            Assert.Equal(Path.Combine(room, "verdict.json"), item.LastVerdict);
             Assert.Contains("one automatic fix was already dispatched", item.Error!, StringComparison.Ordinal);
         }
         finally
@@ -232,6 +235,7 @@ public sealed class WorkItemAdvancerTests
             var item = await ReadBackAsync();
             Assert.True(item.Halted);
             Assert.Equal(room, item.RoomDirectory);
+            Assert.Equal(Path.Combine(room, "verdict.json"), item.LastVerdict);
             Assert.Contains("no trustworthy automatic-fix history", item.Error!, StringComparison.Ordinal);
         }
         finally

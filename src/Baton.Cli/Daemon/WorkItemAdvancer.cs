@@ -114,7 +114,7 @@ public sealed class WorkItemAdvancer
         {
             WorkItemTransitionKind.None => null,
             WorkItemTransitionKind.NeedsOperator =>
-                await FailAsync(item, stage, transition, now, room).ConfigureAwait(false),
+                await FailAsync(item, stage, transition, verdictPath, now, room).ConfigureAwait(false),
             WorkItemTransitionKind.Stop =>
                 await StopAsync(item, stage, transition, pr, verdictPath, now, room).ConfigureAwait(false),
             WorkItemTransitionKind.Dispatch =>
@@ -223,6 +223,7 @@ public sealed class WorkItemAdvancer
         QueueItem item,
         WorkStage from,
         WorkItemTransition transition,
+        string? verdictPath,
         DateTimeOffset now,
         string room)
     {
@@ -237,6 +238,7 @@ public sealed class WorkItemAdvancer
             Stage = from,
             State = QueueItemState.Failed,
             Error = transition.Reason,
+            LastVerdict = verdictPath ?? existing.LastVerdict,
             Halted = true,
         }).ConfigureAwait(false);
 
