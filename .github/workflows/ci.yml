@@ -4,8 +4,38 @@ on:
   pull_request:
   push:
     branches: [main]
+  workflow_dispatch:
+    inputs:
+      expected_sha:
+        description: "Exact main SHA selected for this CI recovery"
+        required: true
+        type: string
 
 jobs:
+  recovery_target:
+    if: github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: read
+    steps:
+      - name: Admit selected main revision without checkout
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          EXPECTED_SHA: ${{ inputs.expected_sha }}
+        run: |
+          set -euo pipefail
+          if [ "$GITHUB_REF" != "refs/heads/main" ] || [[ ! "$EXPECTED_SHA" =~ ^[0-9a-f]{40}$ ]] || [ "$GITHUB_SHA" != "$EXPECTED_SHA" ]; then
+            echo "::error::Select main and provide its exact SHA."
+            exit 1
+          fi
+          live_sha=$(gh api "repos/$GITHUB_REPOSITORY/git/ref/heads/main" --jq .object.sha)
+          if [ "$live_sha" != "$EXPECTED_SHA" ]; then
+            echo "::error::Main moved before recovery admission."
+            exit 1
+          fi
+
   # Detects which areas a PR touched, so the heavy jobs below can skip when irrelevant.
   # pull_request ONLY: paths-filter uses the API there (no checkout needed), but on push it shells
   # out to `git` and dies without a checkout (#410). On push the heavy jobs ignore this job entirely
@@ -38,11 +68,11 @@ jobs:
               - '.github/workflows/**'
 
   test:
-    needs: changes
+    needs: [changes, recovery_target]
     # PR: run only when .NET-relevant files changed. Push to main: always run (main stays green).
     # !cancelled() makes this a status-check expression, so a skipped `changes` (PR-only, #410)
     # does not skip this job on push.
-    if: ${{ !cancelled() && (github.event_name != 'pull_request' || needs.changes.outputs.dotnet == 'true') }}
+    if: ${{ !cancelled() && (github.event_name != 'workflow_dispatch' || needs.recovery_target.result == 'success') && (github.event_name != 'pull_request' || needs.changes.outputs.dotnet == 'true') }}
     name: test (${{ matrix.name }})
     timeout-minutes: 17
     strategy:
@@ -62,6 +92,8 @@ jobs:
 
     steps:
       - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.sha }}
 
       # run-install/cache are off: the pixi env is deliberately empty (the .NET SDK is a system
       # install, not a conda package — GitHub's standard runner images ship it already), and
@@ -175,8 +207,8 @@ jobs:
     # PR-only per #410, and its skip otherwise cascades through `test` to here). The explicit
     # needs.test.result check restores the "only pack a green build" guarantee that the implicit
     # needs-success gate provided before !cancelled() removed it.
-    if: ${{ !cancelled() && github.event_name == 'push' && needs.test.result == 'success' }}
-    needs: test
+    if: ${{ !cancelled() && (github.event_name == 'push' || github.event_name == 'workflow_dispatch') && needs.test.result == 'success' }}
+    needs: [test, recovery_target]
     runs-on: windows-latest
     timeout-minutes: 5
     env:
@@ -185,6 +217,8 @@ jobs:
 
     steps:
       - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.sha }}
 
       # #1117: the pixi binary download itself flaked ("socket hang up") four times on
       # 2026-08-12, failing runs before any repo code executed. One bounded retry; a second
@@ -232,11 +266,10 @@ jobs:
       - name: Verify installed-tool round trip
         run: pixi run verify-pack
 
-  # The single branch-protection required status check. Aggregates the path-filtered heavy jobs into
-  # one always-reporting context, so filtering can skip a leg on a PR without leaving a required
-  # check stuck at "Expected" forever. Passes when nothing that ran FAILED -- a path-skipped job
-  # counts as fine; only a real failure or cancellation fails the gate. `pack` is deliberately not
-  # aggregated here: it is a main-only, post-merge packaging check, not part of PR mergeability.
+  # record-once-ok: #2182 spec/baton.md
+  # The sole gates/test aggregate. `diff-shape` and `pr-body-lint` remain separate required checks.
+  # This job contributes either full local-gate coverage or the complement of same-SHA test shards;
+  # only `ci` below may claim their union. `pack` remains outside PR mergeability.
   # The register meta-check (#589, #620). Deliberately its own job rather than a step in `test`:
   # it is OS-independent, so running it on all three matrix legs would triple the cost for one
   # answer, and it must run even when a PR touches no .NET file at all -- a decisions-only or
@@ -247,15 +280,13 @@ jobs:
   # a session filtered the output for `OK`/`FAIL`, and the red run was reported as passing 16/16
   # in a merged PR body. Adding a red check to CI would have blocked every unrelated PR on
   # pre-existing debt, which is why #589 landed first.
-  # The single source of truth for "every local gate passed" (#1676) -- one step, the same tracked
-  # pixi task a human or the pre-push hook runs, never a hand-picked list of individual
+  # The single source of truth for gate membership (#1676) -- one step, a tracked pixi task backed
+  # by tools/gates/gates.py, never a hand-picked list of individual
   # `pixi run <member>` steps mirroring tools/gates/gates.py's own membership (what let a member
   # added there, or in pixi.toml, go unrun in CI until someone remembered to add a step). What
-  # `--ci` enforces: spec/baton.md §11 C-12. Unconditional -- no `changes` filter: several members
-  # (audit-completeness et al.) must catch a docs-only or decisions-only PR too, same reason the
-  # former `audit` job ran unconditionally; the cost is that this job now also runs the full
-  # build+test+lint on every PR regardless of what changed, which `test`'s own path-filtered shards
-  # above deliberately do not.
+  # `--ci` enforces: spec/baton.md §11 C-12. Several members must catch docs-only changes too, so
+  # gates always runs; only its coverage mode changes. Relevant PRs/pushes/recovery run the test
+  # complement beside shards, while a non-.NET PR runs ordinary full gates and skips shards.
   #
   # Cost, stated once: the former `audit` job passed `audit-recordonce` an explicit
   # `origin/${{ github.base_ref || 'main' }}` argument; the tracked `pixi run audit-recordonce`
@@ -264,14 +295,34 @@ jobs:
   # local `pixi run gates` run has always done, so this makes CI match local behaviour rather than
   # regressing it, but it is a real loss of precision worth naming rather than leaving silent.
   gates:
+    needs: [changes, recovery_target]
+    if: ${{ !cancelled() && (github.event_name != 'workflow_dispatch' || needs.recovery_target.result == 'success') }}
     runs-on: windows-latest
     timeout-minutes: 15
+    outputs:
+      coverage-mode: ${{ steps.coverage.outputs.mode }}
     env:
       DOTNET_CLI_TELEMETRY_OPTOUT: 1
       DOTNET_SKIP_FIRST_TIME_EXPERIENCE: 1
     steps:
+      - name: Select authoritative coverage mode
+        id: coverage
+        shell: bash
+        env:
+          EVENT: ${{ github.event_name }}
+          DOTNET: ${{ needs.changes.outputs.dotnet }}
+        run: |
+          if [ "$EVENT" = "pull_request" ] && [ "$DOTNET" != "true" ]; then
+            echo "mode=full" >> "$GITHUB_OUTPUT"
+            echo "task=gates-ci-quiet" >> "$GITHUB_OUTPUT"
+          else
+            echo "mode=test-shard-complement" >> "$GITHUB_OUTPUT"
+            echo "task=gates-ci-test-complement-quiet" >> "$GITHUB_OUTPUT"
+          fi
+
       - uses: actions/checkout@v4
         with:
+          ref: ${{ github.sha }}
           # audit-recordonce diffs against origin/main. A shallow clone cannot see it, and the check
           # fails closed rather than passing on an unreadable diff -- so the depth is what makes it
           # run at all.
@@ -309,8 +360,8 @@ jobs:
           cache: true
           cache-dependency-path: "**/packages.lock.json"
 
-      - name: Run every local gate (tools/gates/gates.py's tracked member list)
-        run: pixi run gates-ci-quiet
+      - name: Run authoritative gate coverage
+        run: pixi run ${{ steps.coverage.outputs.task }}
 
       - name: Shutdown dotnet build server
         run: pixi run dotnet build-server shutdown
@@ -318,21 +369,49 @@ jobs:
 
   ci:
     needs: [changes, test, gates]
-    if: always()
+    if: ${{ always() && github.event_name != 'workflow_dispatch' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.sha }}
+      - name: Verify complete same-revision coverage
+        env:
+          EVENT: ${{ github.event_name }}
+          CHANGES: ${{ needs.changes.result }}
+          DOTNET: ${{ needs.changes.outputs.dotnet }}
+          TEST: ${{ needs.test.result }}
+          GATES: ${{ needs.gates.result }}
+          MODE: ${{ needs.gates.outputs.coverage-mode }}
+        run: python tools/ci/aggregate.py
+
+  recovery_ci:
+    name: CI recovery
+    needs: [recovery_target, test, gates, pack]
+    if: ${{ always() && github.event_name == 'workflow_dispatch' }}
     runs-on: ubuntu-latest
     timeout-minutes: 5
     steps:
-      - name: Verify no required job failed
+      - name: Require complete recovery coverage
+        shell: bash
         env:
-          CHANGES: ${{ needs.changes.result }}
-          TEST: ${{ needs.test.result }}
-          GATES: ${{ needs.gates.result }}
+          TARGET_RESULT: ${{ needs.recovery_target.result }}
+          TEST_RESULT: ${{ needs.test.result }}
+          GATES_RESULT: ${{ needs.gates.result }}
+          GATES_MODE: ${{ needs.gates.outputs.coverage-mode }}
+          PACK_RESULT: ${{ needs.pack.result }}
         run: |
-          echo "results: changes=$CHANGES test=$TEST gates=$GATES"
-          for r in "$CHANGES" "$TEST" "$GATES"; do
-            if [ "$r" = "failure" ] || [ "$r" = "cancelled" ]; then
-              echo "::error::A required CI job reported '$r'."
+          set -euo pipefail
+          for result in "$TARGET_RESULT" "$TEST_RESULT" "$GATES_RESULT" "$PACK_RESULT"; do
+            if [ "$result" != "success" ]; then
+              echo "::error::Recovery requires successful admission, tests, gates and packaging."
               exit 1
             fi
           done
-          echo "CI gate passed (skipped or successful jobs are OK)."
+          if [ "$GATES_MODE" != "test-shard-complement" ]; then
+            echo "::error::Recovery requires the gates complement beside successful shards."
+            exit 1
+          fi

@@ -54,6 +54,14 @@ public static class QueueCommand
         var settings = await DaemonSettingsStore.LoadAsync(BatonPaths.SettingsFile, cancellationToken).ConfigureAwait(false);
         var (adapter, tier, adapterFromModel, stageSelections) = ResolveTierForAdd(options, settings.Queue);
 
+        // #2142: queue admission uses the already-resolved tuple the launcher will forward, not the
+        // raw item fields and not RoleDispatch's display-only stamp. Refuse before the early tag read,
+        // spec copy, worktree provision, or queue mutation so a bad request leaves no queue side effect.
+        if (ClaudeInvocationModelPolicy.RefusalMessage(tier.Adapter, tier.Model) is { } refusal)
+        {
+            throw new CliArgumentException(refusal, ClaudeInvocationModelPolicy.ExplicitModelRemedy + ".");
+        }
+
         // The launched-tag refusal is raised HERE, before the spec copy and before any worktree is
         // provisioned — not only inside the mutate below (#1939 review). File.Copy(overwrite: true)
         // would otherwise already have replaced the running lane's brief by the time the refusal was
@@ -555,6 +563,13 @@ public static class QueueCommand
 
             var tier = QueueTierTable.ResolveForStage(
                 item, stage, settings, WorkerRoleCatalog.QueueTierFor, WorkerRoleCatalog.QueueTierForRole);
+            if (ClaudeInvocationModelPolicy.RefusalMessage(tier.Adapter, tier.Model) is { } refusal)
+            {
+                throw new CliArgumentException(
+                    $"The {WorkStages.Token(stage)} selection is invalid: {refusal}",
+                    ClaudeInvocationModelPolicy.ExplicitModelRemedy + ".");
+            }
+
             if (tier.Adapter is { } adapter && tier.Model is { } model)
             {
                 var candidates = WorkerModelCatalog.AdaptersFor(model);

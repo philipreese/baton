@@ -31,7 +31,11 @@ namespace Baton.Cli.Tests;
 public sealed class DispatchPreProvisionOrderingTests : IDisposable
 {
     private static readonly IReadOnlyDictionary<string, IWorkerAdapter> Adapters =
-        new Dictionary<string, IWorkerAdapter> { ["fake"] = new ContractOutputWorkerAdapter(satisfyOutputs: true) };
+        new Dictionary<string, IWorkerAdapter>
+        {
+            ["fake"] = new ContractOutputWorkerAdapter(satisfyOutputs: true),
+            ["claude"] = new ContractOutputWorkerAdapter(satisfyOutputs: true),
+        };
 
     private static readonly IReadOnlyList<RunwayCounter> Counters =
         [new("week (all models)", 87), new("session", 12)];
@@ -116,6 +120,52 @@ public sealed class DispatchPreProvisionOrderingTests : IDisposable
                 options, Adapters, TestContext.Current.CancellationToken, evaluateRunway: Admit);
 
             Assert.True(Directory.Exists(options.RoomDirectoryPath));
+        }
+        finally
+        {
+            DirectoryCleanup.DeleteRecursively(testRoot);
+        }
+    }
+
+    [Fact]
+    public async Task An_unpinned_claude_dispatch_refuses_before_creating_a_room()
+    {
+        var testRoot = Path.Combine(Path.GetTempPath(), $"dispatch-order-claude-model-{Guid.NewGuid():N}");
+        try
+        {
+            var options = (await BuildDispatchAsync(testRoot)) with { Name = "janitor", Adapter = "claude" };
+
+            var refusal = await Assert.ThrowsAsync<CliArgumentException>(() => DispatchCommand.ExecuteAsync(
+                options, Adapters, TestContext.Current.CancellationToken, evaluateRunway: Admit));
+
+            Assert.Contains("standing model policy", refusal.Message, StringComparison.Ordinal);
+            Assert.Equal("pass --model sonnet, --model opus, or --model haiku.", refusal.TryInvocation);
+            Assert.False(Directory.Exists(options.RoomDirectoryPath));
+        }
+        finally
+        {
+            DirectoryCleanup.DeleteRecursively(testRoot);
+        }
+    }
+
+    [Fact]
+    public async Task An_explicit_claude_model_reaches_the_dispatch_binding()
+    {
+        var testRoot = Path.Combine(Path.GetTempPath(), $"dispatch-order-claude-explicit-{Guid.NewGuid():N}");
+        try
+        {
+            var options = (await BuildDispatchAsync(testRoot)) with
+            {
+                Name = "janitor",
+                Adapter = "claude",
+                Model = "sonnet",
+            };
+
+            await DispatchCommand.ExecuteAsync(options, Adapters, TestContext.Current.CancellationToken, evaluateRunway: Admit);
+
+            var bindings = await WorkerBindingConfigParser.LoadFromFileAsync(
+                BatonPaths.RoomBindingsFile(options.RoomDirectoryPath), TestContext.Current.CancellationToken);
+            Assert.Equal("sonnet", Assert.Single(bindings).Value.Model);
         }
         finally
         {

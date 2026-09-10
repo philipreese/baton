@@ -106,4 +106,44 @@ public class CancelCommandDeadHolderTests
             DirectoryCleanup.DeleteRecursively(testRoot);
         }
     }
+
+    [Fact]
+    public async Task Explicit_cancel_forecloses_an_unknown_reset_park_makes_it_terminal_and_is_idempotent()
+    {
+        var testRoot = Path.Combine(Path.GetTempPath(), $"cli-e2e-{Guid.NewGuid():N}");
+        var roomDirectory = Path.Combine(testRoot, "task");
+        try
+        {
+            var (_, logPath, executionId) = await WriteUnknownResetParkedStepFixtureAsync(testRoot, roomDirectory);
+
+            var first = await CancelCommand.ExecuteAsync(
+                new CancelOptions(roomDirectory, executionId.Value, BindingsFilePath: "ignored"),
+                Adapters,
+                TestContext.Current.CancellationToken,
+                pumpAnswerWindow: TimeSpan.FromMilliseconds(200));
+
+            Assert.Equal(WorkflowStatus.Terminal, first.State.Status);
+            var step = Assert.Single(first.State.Steps);
+            Assert.True(step.RetryForeclosed);
+            Assert.Null(step.RetryNotBefore);
+            Assert.Equal(FailureClassification.ExhaustedUntil, step.LatestFailureClassification);
+            var eventsAfterFirstCancel = await new FlowEventLogReader(logPath).ReadAllAsync(TestContext.Current.CancellationToken);
+            Assert.Single(eventsAfterFirstCancel.OfType<FlowEvent.StepRetryForeclosed>());
+
+            var repeat = await CancelCommand.ExecuteAsync(
+                new CancelOptions(roomDirectory, executionId.Value, BindingsFilePath: "ignored"),
+                Adapters,
+                TestContext.Current.CancellationToken,
+                pumpAnswerWindow: TimeSpan.FromMilliseconds(200));
+
+            Assert.True(repeat.CancelWasNoOp);
+            Assert.Equal(WorkflowStatus.Terminal, repeat.State.Status);
+            Assert.Single((await new FlowEventLogReader(logPath).ReadAllAsync(TestContext.Current.CancellationToken))
+                .OfType<FlowEvent.StepRetryForeclosed>());
+        }
+        finally
+        {
+            DirectoryCleanup.DeleteRecursively(testRoot);
+        }
+    }
 }

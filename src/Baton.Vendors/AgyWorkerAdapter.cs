@@ -1391,7 +1391,13 @@ public sealed partial class AgyWorkerAdapter : IWorkerAdapter, IPermissionGrantT
                     // the user's own echoed `user_input`, internal `checkpoint`, and opaque `unknown`.
                     // (Which edge/types to surface is a UX policy provisional on a live end-to-end drive,
                     // which is blocked on the agy weekly-quota reset; the parse itself is fixture-pinned.)
-                    progressEvent = new WorkerProgressEvent("status", stepType);
+                    // A tool step's category is only a fallback: the same envelope carries the
+                    // measured tool name that AgyUsageParser already reads for usage accounting.
+                    // Keep the category when that field is absent so progress never invents a name.
+                    var toolName = stepType == "tool" ? UsageParser.TryParseToolName(rawLine) : null;
+                    progressEvent = toolName is { Length: > 0 } actualToolName
+                        ? new WorkerProgressEvent("tool", actualToolName)
+                        : new WorkerProgressEvent("status", stepType);
                     return true;
 
                 case "result"

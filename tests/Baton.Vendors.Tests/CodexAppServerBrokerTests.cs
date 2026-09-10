@@ -353,16 +353,29 @@ public sealed class CodexAppServerBrokerTests
         var declared = parameters["dynamicTools"]!.AsArray()
             .Select(tool => tool!["name"]!.GetValue<string>()).ToArray();
         Assert.DoesNotContain("baton_*", instructions, StringComparison.Ordinal);
+        Assert.Contains(
+            "The read-only native sandbox applies to disabled native tools; declared Baton tools "
+            + "operate under this role's actual grant.",
+            instructions,
+            StringComparison.Ordinal);
         Assert.Equal(writeGranted, declared.Contains(CodexDynamicToolPolicy.ApplyPatchTool));
         foreach (var name in declared.Where(name => !name.StartsWith("baton_", StringComparison.Ordinal)))
         {
             Assert.Contains(name, instructions, StringComparison.Ordinal);
         }
-        if (!writeGranted)
+        if (writeGranted)
+        {
+            Assert.Contains(
+                $"{CodexDynamicToolPolicy.ApplyPatchTool} is this thread's edit tool.",
+                instructions,
+                StringComparison.Ordinal);
+        }
+        else
         {
             // The polarity partner: a read-only thread is not told about an edit tool it will not be
             // offered, so the sentence tracks the manifest in both directions.
             Assert.DoesNotContain(CodexDynamicToolPolicy.ApplyPatchTool, instructions, StringComparison.Ordinal);
+            Assert.DoesNotContain("is this thread's edit tool.", instructions, StringComparison.Ordinal);
         }
     }
 

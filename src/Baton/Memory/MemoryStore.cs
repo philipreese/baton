@@ -78,6 +78,15 @@ public static class MemoryStore
         Ledger.AppendAsync(entries, entriesFilePath, cancellationToken);
 
     /// <summary>
+    /// Appends entries and returns exactly the rows this call inserted, as decided under this store's
+    /// existing ledger lock. Import manifests use this result for reversal ownership; callers that
+    /// only need idempotent append keep using <see cref="AppendAsync"/>.
+    /// </summary>
+    public static Task<IReadOnlyList<MemoryEntry>> AppendAndGetAppendedAsync(
+        IReadOnlyList<MemoryEntry> entries, string entriesFilePath, CancellationToken cancellationToken = default) =>
+        Ledger.AppendAndGetAppendedAsync(entries, entriesFilePath, cancellationToken);
+
+    /// <summary>
     /// This file's entries as they sit on disk, oldest first — <b>with no supersession resolved</b>.
     /// The read for a caller that is about to compute links or rewrite rows;
     /// <see cref="ReadResolvedAsync"/> is the one for a caller that wants to read a memory.
@@ -95,6 +104,13 @@ public static class MemoryStore
     public static Task AppendLinksAsync(
         IReadOnlyList<MemorySupersessionLink> links, string linksFilePath, CancellationToken cancellationToken = default) =>
         LinkLedger.AppendAsync(links, linksFilePath, cancellationToken);
+
+    /// <summary>
+    /// Appends links and returns exactly the rows this call inserted, under the links ledger lock.
+    /// </summary>
+    public static Task<IReadOnlyList<MemorySupersessionLink>> AppendLinksAndGetAppendedAsync(
+        IReadOnlyList<MemorySupersessionLink> links, string linksFilePath, CancellationToken cancellationToken = default) =>
+        LinkLedger.AppendAndGetAppendedAsync(links, linksFilePath, cancellationToken);
 
     /// <summary>This file's supersession links, oldest first.</summary>
     public static Task<IReadOnlyList<MemorySupersessionLink>> ReadLinksAsync(

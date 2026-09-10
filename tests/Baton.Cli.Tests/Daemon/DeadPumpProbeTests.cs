@@ -122,6 +122,27 @@ public sealed class DeadPumpProbeTests : IDisposable
         return (roomDir, executionId);
     }
 
+    [Fact]
+    public async Task An_unknown_reset_quota_park_without_a_pump_is_left_parked()
+    {
+        var (roomDir, executionId, lastEventUtc) = await WriteOpenRoomAsync(TimeSpan.FromHours(3));
+        var logPath = Path.Combine(roomDir, BatonPaths.FlowLogFileName);
+        var entry = new LogEntry.FlowLogEntry(
+            new FlowEvent.ExecutionFailed(executionId, FailureClassification.ExhaustedUntil, "quota reset unknown"),
+            lastEventUtc);
+        await File.AppendAllTextAsync(logPath,
+            JsonSerializer.Serialize(entry, typeof(LogEntry), FlowEventLogJson.Options) + "\n",
+            TestContext.Current.CancellationToken);
+        File.SetLastWriteTimeUtc(logPath, lastEventUtc);
+        var before = await File.ReadAllTextAsync(logPath, TestContext.Current.CancellationToken);
+        var probe = Probe();
+
+        Assert.Equal(0, await probe.ProbeRoomAsync(roomDir, TestContext.Current.CancellationToken, TextWriter.Null));
+        Assert.Equal(0, await probe.ProbeRoomAsync(roomDir, TestContext.Current.CancellationToken, TextWriter.Null));
+        Assert.Equal(before, await File.ReadAllTextAsync(logPath, TestContext.Current.CancellationToken));
+        Assert.Equal(WorkflowOutcome.Running, await DescribeOutcomeAsync(roomDir));
+        Assert.Empty((await ReadEventsAsync(roomDir)).OfType<FlowEvent.StepRetryForeclosed>());
+    }
     private static async Task<IReadOnlyList<FlowEvent>> ReadEventsAsync(string roomDir) =>
         await new FlowEventLogReader(Path.Combine(roomDir, BatonPaths.FlowLogFileName))
             .ReadAllAsync(TestContext.Current.CancellationToken);

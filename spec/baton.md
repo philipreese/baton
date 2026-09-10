@@ -5764,14 +5764,14 @@ overreached (#2002 review).** Rule 1 closes **model-authored** backgrounding sha
 vendors. It does not close agy's **vendor-side** backgrounding: `docs/vendor-capabilities.md` records
 a `run_command` that backgrounds a long command with the model then polling `manage_task`, and that
 path carries no `Start-Process`, no `&` and no `nohup` for a detector reading a command string to
-see. It carries a **parameter** instead: the one captured agy `PreToolUse` payload for `run_command`
-carries `WaitMsBeforeAsync: 5000`, supplied by agy rather than chosen by the model
-(`docs/vendor-capabilities.md`, corrected 2026-09-06 — that register owns the finding, its n = 1
+see. It carries **parameters** instead: two captured agy 1.2.0 `PreToolUse` payloads for `run_command`
+carry `WaitMsBeforeAsync` plus two descriptive strings, supplied by agy rather than chosen by the model
+(`docs/vendor-capabilities.md`, widened 2026-09-10 — that register owns the finding, its n = 2
 scope, and what about it stays unmeasured). **A gate cannot refuse a parameter the vendor supplies
 itself**, so this is scoped rather than closed: `AgyHookCheckCommand.MeasuredRunCommandArgs` refuses
-only a `run_command` argument beyond those three, which closes the *next* backgrounding switch and
-not this one — and would refuse a legitimate command if agy's real argument set is wider than that
-single capture. Rule 1 is therefore **prospective on agy, not a fix for the
+only a `run_command` argument beyond those five, which closes the *next* backgrounding switch and
+not this one — and would refuse a legitimate command if agy's real argument set is wider than those
+two captures. Rule 1 is therefore **prospective on agy, not a fix for the
 measured lane**. Nor was it one for the measured
 room: `dispatch-implement-12f930d9` contains no backgrounding shape at all (see
 `BackgroundingShapeDetector`'s own remark, which quotes the room), and its `Get-Process -Id <pid>`
@@ -6120,7 +6120,7 @@ no non-GET request and reads no origin but the one that served it. That test's n
 narrowed by #1946 from "no network requests at all" to "no *mutating* network requests", which is the
 predicate its own summary always stated; the read-only decision above is unchanged by it.
 
-### C-12 — Gate receipts: one passing run per tree, CI is the independent one
+### C-12 — Gate receipts: one passing run per tree, CI coverage is an independent same-revision union
 
 Measured 2026-09-01: `.githooks/pre-push` ran `gates-fast` under the shared build lock
 (`tools/buildlock.py`) on every push, even seconds after a dispatched lane had already run
@@ -6131,16 +6131,21 @@ one per worktree) on every PASS, recording the tree hash, a hash of the uncommit
 passed, and a timestamp; a FAIL deletes it. The pre-push hook (`pixi run gates-check-receipt`) skips
 its own run only when the receipt's tree hash and dirty-hash still match `HEAD^{tree}` and it is
 under six hours old — any mismatch falls through to a real `gates-fast` run. This narrows what the
-hook re-verifies, not what CI verifies: CI remains the one platform-independent run and is never
-skipped by a local receipt.
+hook re-verifies, not what CI verifies: CI remains cold, same-revision evidence and never consumes
+or produces a local receipt.
 
-**The pre-push hook is a fast local mirror; CI is the authority (#1676).** `.github/workflows/ci.yml`
-runs `pixi run gates-ci-quiet` (`gates.py --ci`) as its own required job — the same tracked member
-list the hook and a dispatched lane run, never a hand-picked subset of individual `pixi run <member>`
-steps that could drift from it. `--ci` excludes any `CI_SKIP`-marked member (each entry needs a
-reason, ratcheted the way `sabotage.py`'s `ALLOWLIST` is) and asserts the executed member list
-matches the tracked one, so a member silently dropped from either side fails loudly instead of
-passing quiet.
+**The pre-push hook is a fast local mirror; the `ci` aggregate owns CI coverage (#1676, #2182).**
+On a push or .NET-relevant PR, `.github/workflows/ci.yml` runs the two solution-test shards and
+`gates.py --ci --ci-test-shards-cover` in parallel at `github.sha`; the latter subtracts exactly
+`SOLUTION_TEST_MEMBER` from `_all_members()`. On a non-.NET PR the shards skip and ordinary
+`gates.py --ci` runs the full member register instead. The always-reporting `ci` job accepts only
+those two complementary shapes: successful complement plus successful shards, or successful full
+gates plus skipped shards. Path-filter failure, a missing/contradictory mode, and every failed,
+cancelled, or unexpectedly skipped coverage job are red. This is the sole gates/test aggregate;
+`diff-shape` and `pr-body-lint` remain separate checks. A green complement job alone makes no full
+coverage claim. Both CI gate modes derive from the same tracked register, exclude any reasoned and
+ratcheted `CI_SKIP` member, and assert their executed population; neither accepts or writes a gate
+receipt. Standalone/local gates remain full and unchanged.
 
 **Scope, stated plainly: tracked content only.** The dirty-hash is `git diff HEAD`, which does not
 see untracked files. A tree that was already dirty when its receipt was written, and then gains an
@@ -6164,8 +6169,9 @@ makes the skip honest rather than a widening of the hook. `pixi run gates-fast-c
 it reachable: it runs only the fast members this tree has no receipt for, so the expensive MSBuild
 legs a lane already paid for are not paid twice, and it writes per-member receipts only — a partial
 run never mints a whole-run receipt. The hook, the exit-code contract above, and the ban on
-`--no-verify`, environment-variable and per-worktree-`hooksPath` bypasses are all unchanged; CI still
-runs everything and is never skipped by any receipt. Two supporting changes ship with it:
+`--no-verify`, environment-variable and per-worktree-`hooksPath` bypasses are all unchanged; CI's
+authoritative union still covers everything and is never skipped by any receipt. Two supporting
+changes ship with it:
 `tools/buildlock.py` gains a **read-only priority class** (`--class readonly`, refused for any argv
 that directly invokes `dotnet`/`msbuild` on a build verb — a tripwire on the single task line that
 declares the class rather than a sandbox, its exact reach and its documented blind spots stated in
@@ -6268,8 +6274,8 @@ partial run withholds it. Every member it DID run still earns (or loses) its own
 through the ordinary `record_run_members` path, so a lane's `gates-lane-fast` push and the engine's
 own `gates-fast-cover` verify (this section's own `#1958` paragraph) are not wasted effort against
 each other — a later `gates-fast-cover` completing the fast set has that many fewer members left to
-run for real. CI is unaffected on both branches: `gates-ci-quiet` runs every member regardless of
-what any push-time hook decided, exactly as ruling C already established for the human path.
+run for real. CI is unaffected on both branches: its full or complementary cold run ignores every
+push-time receipt, exactly as ruling C already established for the human path.
 
 **When CI later fails on something the lane-fast set didn't check** (`lint`, `test-no-build`, an
 AFTER_BUILD_FAST self-check), the follow-up is a cheap `patch`-role lane, not a re-brief of the
@@ -6972,6 +6978,14 @@ Whenever model hints identify any candidates, the resolved adapter must belong t
 when `--adapter` is named. With zero candidates, a named adapter's own validation alone decides.
 The resolved adapter's offline rules also check models when no adapter was named. These refusals
 precede row writes, spec copies, and worktree provisioning. Import does not perform this add-time validation.
+
+**Claude invocation models fail closed (#2142).** Queue admission, including every explicitly selected
+lifecycle stage, refuses a resolved Claude adapter with no nonblank invocation model before provisioning,
+spec copies or queue writes. The scheduler applies the same check to persisted/imported items before
+launch, and dispatch checks its final binding after template and continuation resolution but before
+provisioning or runway reservation. A display-only model stamp is not an invocation model. The refusal
+names the standing model policy and requires an explicit model; a resolved configured or role model
+remains valid. This rule neither supplies a shipped Claude default nor changes exhaustion handling.
 
 **`sonnet` is not promoted.** An item that asks for it gets it, and the launch fact says the tier was
 departed from. Nothing in the queue substitutes a model.

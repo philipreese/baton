@@ -9,6 +9,36 @@ that carried them: `git show v0.35.0:src/Baton.Cli/CHANGELOG.md` (likewise `src/
 `release-please-config.json`. Everything below this line predates the split: the repo's single
 shared version through `0.14.0`.
 
+## [0.44.4](https://github.com/philipreese/baton/compare/v0.44.3...v0.44.4) (2026-09-10)
+
+
+### Bug Fixes
+
+* **ci:** Add validated manual CI recovery ([#2198](https://github.com/philipreese/baton/issues/2198)) ([e7e0140](https://github.com/philipreese/baton/commit/e7e01407162eb9b3fa3bb17b85157dc9fe3feae5))
+
+## [0.44.3](https://github.com/philipreese/baton/compare/v0.44.2...v0.44.3) (2026-09-10)
+
+
+### Bug Fixes
+
+* **cancel:** Allow cancellation of quota parks with unknown reset time ([#2195](https://github.com/philipreese/baton/issues/2195)) ([cb3b8f1](https://github.com/philipreese/baton/commit/cb3b8f196661d1a66ea8267269bbe69e4fe57775))
+
+## [0.44.2](https://github.com/philipreese/baton/compare/v0.44.1...v0.44.2) (2026-09-10)
+
+
+### Bug Fixes
+
+* **memory:** Record-import-ownership-from-append-result ([#2192](https://github.com/philipreese/baton/issues/2192)) ([9b1e6d2](https://github.com/philipreese/baton/commit/9b1e6d26d726513863707dd61e6967f90f0f5597))
+
+## [0.44.1](https://github.com/philipreese/baton/compare/v0.44.0...v0.44.1) (2026-09-10)
+
+
+### Bug Fixes
+
+* **codex:** Clarify-dynamic-tool-grants ([#2189](https://github.com/philipreese/baton/issues/2189)) ([5cb5419](https://github.com/philipreese/baton/commit/5cb5419b5fe16eb1ee1d33a67523e9a622055040))
+* **dispatch:** refuse implicit Claude invocation models ([#2187](https://github.com/philipreese/baton/issues/2187)) ([1d495d1](https://github.com/philipreese/baton/commit/1d495d1729dcffdbff4ca6c87c7a7e38c43deb80))
+* **queue:** Stop-after-one-automatic-fix ([#2186](https://github.com/philipreese/baton/issues/2186)) ([c5f454e](https://github.com/philipreese/baton/commit/c5f454e75483bad3f662a19f05de7c7aa4e61d2f))
+
 ## [0.44.0](https://github.com/philipreese/baton/compare/v0.43.0...v0.44.0) (2026-09-10)
 
 

@@ -20,6 +20,7 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import time
 from pathlib import Path
 from typing import Callable
 
@@ -49,6 +50,85 @@ def fixture(name: str):
         return fn
     return decorator
 
+
+@fixture("workflow-recovery-selftest")
+def _sabotage_workflow_recovery() -> None:
+    with tempfile.TemporaryDirectory() as td:
+        dest = Path(td)
+        for relative in ["tools/workflow-recovery/selftest.py", ".github/workflows/ci.yml",
+                         "pixi.toml", "tools/gates/gates.py"]:
+            target = dest / relative
+            target.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copy2(ROOT / relative, target)
+        def run() -> subprocess.CompletedProcess:
+            return subprocess.run(
+                [sys.executable, "-B", str(dest / "tools/workflow-recovery/selftest.py")],
+                cwd=dest, capture_output=True, text=True, timeout=30)
+        baseline = run()
+        assert baseline.returncode == 0, baseline.stdout + baseline.stderr
+        workflow = dest / ".github/workflows/ci.yml"
+        original = workflow.read_text(encoding="utf-8")
+        for before, after in [('[ "$live_sha" != "$EXPECTED_SHA" ]', '[ "$live_sha" = "$EXPECTED_SHA" ]'),
+                              ("needs.test.result == 'success'", "needs.test.result != 'success'")]:
+            assert before in original
+            workflow.write_text(original.replace(before, after), encoding="utf-8")
+            mutated = run()
+            assert mutated.returncode != 0 and "AssertionError" in mutated.stderr, mutated.stderr
+
+
+@fixture("ci-selftest")
+def _sabotage_ci_selftest() -> None:
+    """Prove the CI selftest rejects a fail-open same-revision coverage aggregate."""
+    with tempfile.TemporaryDirectory() as td:
+        dest = Path(td)
+        tools_dir = dest / "tools" / "ci"
+        tools_dir.mkdir(parents=True)
+        for name in ["aggregate.py", "selftest.py", "test_shards.py"]:
+            shutil.copy2(ROOT / "tools" / "ci" / name, tools_dir / name)
+
+        # Exercise the production aggregate assertions without selftest.main()'s unrelated live
+        # project identity evaluations and workflow checks. Only aggregate.py below is sabotaged,
+        # in the isolated copy imported by this driver.
+        driver = tools_dir / "sabotage_driver.py"
+        driver.write_text(
+            "import selftest\n"
+            "selftest.check_aggregate_table()\n",
+            encoding="utf-8",
+        )
+
+        def run() -> tuple[subprocess.CompletedProcess, float]:
+            started = time.perf_counter()
+            result = subprocess.run(
+                [sys.executable, "-B", str(driver)],
+                cwd=dest,
+                capture_output=True,
+                text=True,
+                env=_clean_git_env(),
+                timeout=60,
+            )
+            return result, time.perf_counter() - started
+
+        baseline, baseline_seconds = run()
+        assert baseline.returncode == 0, "control failed before sabotage:\n" + baseline.stdout + baseline.stderr
+
+        aggregate = tools_dir / "aggregate.py"
+        original = aggregate.read_text(encoding="utf-8")
+        mutated = original.replace(
+            '    if gates != "success":\n',
+            '    if False:  # sabotage: accept a non-success gates result\n',
+            1,
+        )
+        assert mutated != original, "gates-result mutation target not found in aggregate.py"
+        aggregate.write_text(mutated, encoding="utf-8")
+
+        sabotaged, sabotaged_seconds = run()
+        assert sabotaged.returncode != 0 and "AssertionError" in sabotaged.stderr, (
+            sabotaged.stdout + sabotaged.stderr
+        )
+        print(
+            f"  ci-selftest aggregate timing: control={baseline_seconds:.3f}s, "
+            f"mutant={sabotaged_seconds:.3f}s"
+        )
 
 @fixture("audit-completeness")
 def _sabotage_audit_completeness() -> None:

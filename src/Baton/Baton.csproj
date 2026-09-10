@@ -5,6 +5,8 @@
     <ImplicitUsings>enable</ImplicitUsings>
     <Nullable>enable</Nullable>
     <IsPackable>false</IsPackable>
+    <IsTestProject>false</IsTestProject>
+    <IsTestingPlatformApplication>false</IsTestingPlatformApplication>
     <!-- #1458 3b: NuGet's restore graph keys each project by PackageSpec.Name, which defaults to
          PackageId when one is set. Baton.Cli packs as a dotnet tool with PackageId "baton"
          (PackAsTool, the shipped `baton` binary) and references this project by ProjectReference.

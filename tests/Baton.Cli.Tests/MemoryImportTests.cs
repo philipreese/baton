@@ -289,6 +289,103 @@ public sealed class MemoryImportTests : IDisposable
     }
 
     /// <summary>
+    /// #2191: an import records ownership from the append result under the ledger lock, rather than
+    /// from its earlier advisory read. The first import reads an empty store then waits immediately
+    /// before its append; the second appends the same entries and link; the first resumes and must
+    /// record every row as already present. Undoing that losing manifest must preserve the winner.
+    /// </summary>
+    [Fact]
+    public async Task A_losing_concurrent_import_does_not_claim_or_undo_the_winners_entries_or_links()
+    {
+        const string repository = "github.com/philipreese/baton";
+        await BuildStandardFixtureAsync();
+        var archive = WriteArchivedRoot("c--baton-memory", ("user_who.md", "the older who"));
+        var firstAppendEntered = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var releaseFirstAppend = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var appendCalls = 0;
+
+        MemoryStore.Ledger.AppendOperationObserver = _ =>
+        {
+            if (Interlocked.Increment(ref appendCalls) == 1)
+            {
+                firstAppendEntered.TrySetResult();
+                releaseFirstAppend.Task.GetAwaiter().GetResult();
+            }
+        };
+
+        try
+        {
+            var losingImport = RunRawAsync("--assert", $"{archive}={repository}", "--asserted-by", "the-test");
+            await firstAppendEntered.Task.WaitAsync(TestContext.Current.CancellationToken);
+
+            var (winnerCode, winnerOutput) = await RunRawAsync(
+                "--assert", $"{archive}={repository}", "--asserted-by", "the-test");
+            Assert.Equal(0, winnerCode);
+            var winnerEntries = await StoreAsync(repository);
+            var winnerLinks = await LinksAsync(repository);
+            Assert.NotEmpty(winnerEntries);
+            Assert.Single(winnerLinks);
+
+            releaseFirstAppend.TrySetResult();
+            var (loserCode, loserOutput) = await losingImport;
+            Assert.Equal(0, loserCode);
+
+            var losingManifest = ImportManifest.Read(ManifestPathFrom(loserOutput));
+            Assert.All(losingManifest.Entries, entry => Assert.True(entry.AlreadyPresent));
+            Assert.All(losingManifest.Links!, link => Assert.True(link.AlreadyPresent));
+            Assert.Empty(losingManifest.Appended);
+            Assert.Empty(losingManifest.AppendedLinks);
+
+            var (undoCode, undoOutput) = await RunRawAsync("--undo", ManifestPathFrom(loserOutput));
+            Assert.Equal(0, undoCode);
+            Assert.DoesNotContain("INCOMPLETE", undoOutput, StringComparison.Ordinal);
+            Assert.Equal(winnerEntries.Select(e => e.Id), (await StoreAsync(repository)).Select(e => e.Id));
+            Assert.Equal(winnerLinks.Select(link => link.Id), (await LinksAsync(repository)).Select(link => link.Id));
+            Assert.Contains("Manifest:", winnerOutput, StringComparison.Ordinal);
+        }
+        finally
+        {
+            releaseFirstAppend.TrySetResult();
+            MemoryStore.Ledger.AppendOperationObserver = null;
+        }
+    }
+
+    /// <summary>
+    /// The returned append ownership is one row per id: duplicate input ids never claim a second row,
+    /// and a pre-existing entry or link returns no ownership at all.
+    /// </summary>
+    [Fact]
+    public async Task Locked_append_results_deduplicate_input_ids_and_exclude_pre_existing_entries_and_links()
+    {
+        const string repository = "github.com/philipreese/baton";
+        const string digest = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+        var entriesFile = BatonPaths.MemoryEntriesFile(RepositoryIdentity.FileSlugFor(repository));
+        var linksFile = BatonPaths.MemoryLinksFile(RepositoryIdentity.FileSlugFor(repository));
+        var entry = new MemoryEntry(
+            MemoryEntry.Derive(repository, Path.Combine(_root, "source.md"), digest), repository,
+            MemoryKind.Unknown, MemoryKindSource.Unknown, "memory", digest, Path.Combine(_root, "source.md"),
+            "claude", VendorMemoryScope.Vendor, DateTime.UnixEpoch, DateTime.UnixEpoch);
+        var other = entry with
+        {
+            Id = MemoryEntry.Derive(repository, Path.Combine(_root, "other.md"), digest),
+            SourcePath = Path.Combine(_root, "other.md"),
+        };
+        var link = MemorySupersessionLink.Create(entry.Id, other.Id, repository, DateTime.UnixEpoch);
+
+        var appendedEntries = await MemoryStore.AppendAndGetAppendedAsync(
+            [entry, entry, other, other], entriesFile, TestContext.Current.CancellationToken);
+        Assert.Equal([entry.Id, other.Id], appendedEntries.Select(e => e.Id));
+        Assert.Empty(await MemoryStore.AppendAndGetAppendedAsync(
+            [entry, entry, other], entriesFile, TestContext.Current.CancellationToken));
+
+        var appendedLinks = await MemoryStore.AppendLinksAndGetAppendedAsync(
+            [link, link], linksFile, TestContext.Current.CancellationToken);
+        Assert.Equal([link.Id], appendedLinks.Select(l => l.Id));
+        Assert.Empty(await MemoryStore.AppendLinksAndGetAppendedAsync(
+            [link, link], linksFile, TestContext.Current.CancellationToken));
+    }
+
+    /// <summary>
     /// #1852: "emits a reversible import manifest". The discriminating shape is two imports and one
     /// undo — an undo that merely emptied the store file would pass a single-import test and destroy
     /// the earlier import's entries here.
