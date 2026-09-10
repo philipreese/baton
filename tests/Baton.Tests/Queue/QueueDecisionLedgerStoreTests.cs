@@ -91,6 +91,8 @@ public sealed class QueueDecisionLedgerStoreTests
     public async Task Reconciliation_appends_a_retained_cancellation_batch_once_and_collapses_duplicate_keys_within_it()
     {
         var path = TempLedgerPath();
+        var appendOperationSizes = new List<int>();
+        QueueDecisionLedgerStore.Ledger.AppendOperationObserver = appendOperationSizes.Add;
         try
         {
             var cancelledAt = At.AddMinutes(1);
@@ -100,7 +102,10 @@ public sealed class QueueDecisionLedgerStoreTests
             retained.Add(Cancelled("cancelled-0", cancelledAt));
 
             await QueueDecisionLedgerStore.ReconcileCancellationsAsync(retained, path, Ct);
+            Assert.Equal([retained.Count], appendOperationSizes);
+
             await QueueDecisionLedgerStore.ReconcileCancellationsAsync(retained, path, Ct);
+            Assert.Equal([retained.Count, retained.Count], appendOperationSizes);
 
             var recorded = await QueueDecisionLedgerStore.ReadAllAsync(path, Ct);
             Assert.Equal(128, recorded.Count);
@@ -108,6 +113,7 @@ public sealed class QueueDecisionLedgerStoreTests
         }
         finally
         {
+            QueueDecisionLedgerStore.Ledger.AppendOperationObserver = null;
             Delete(path);
         }
     }
