@@ -86,6 +86,7 @@ public static class QueueCommand
                 sourceRepository,
                 (await DaemonSettingsStore.LoadAsync(BatonPaths.SettingsFile, cancellationToken).ConfigureAwait(false))
                     .Queue.WorktreeRoot,
+                lifecycleRepository!,
                 output: output,
                 cancellationToken: cancellationToken).ConfigureAwait(false)
             : Path.GetFullPath(options.WorkspaceDirectory!);
@@ -139,7 +140,7 @@ public static class QueueCommand
             // instructions keeps them, and gets the standing rules and the ship block for free.
             var (title, body) = specSource is null
                 ? await IssueWorktreeProvisioner.FetchIssueAsync(
-                    options.Issue!.Value, sourceRepository,
+                    options.Issue!.Value, sourceRepository, lifecycleRepository!,
                     cancellationToken: cancellationToken).ConfigureAwait(false)
                 : ($"Implement #{options.Issue}", await File.ReadAllTextAsync(specSource, cancellationToken).ConfigureAwait(false));
 

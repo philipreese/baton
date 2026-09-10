@@ -109,7 +109,8 @@ internal sealed class DaemonTickLedger
     /// spec/baton.md §7 states why a reverse proxy needs this. Null until that service has run at
     /// least once (off, or not yet at its first tick); empty once it has run with every bind
     /// refused, distinct from never having been configured at all.</summary>
-    internal void RecordGlassBoundPrefixes(IReadOnlyList<string> prefixes) => _glassBoundPrefixes = prefixes;
+    internal void RecordGlassBoundPrefixes(IReadOnlyList<string> prefixes) =>
+        Volatile.Write(ref _glassBoundPrefixes, prefixes);
 
     internal string RenderHeartbeatJson(HostLoadSample load)
     {
@@ -138,7 +139,7 @@ internal sealed class DaemonTickLedger
 
         // Omitted, not an empty array, when the glass listener has never run a tick -- "not
         // configured" must not read the same as "configured and every prefix refused".
-        if (_glassBoundPrefixes is { } prefixes)
+        if (Volatile.Read(ref _glassBoundPrefixes) is { } prefixes)
         {
             body["glassBoundPrefixes"] = new JsonArray([.. prefixes.Select(p => (JsonNode?)p)]);
         }

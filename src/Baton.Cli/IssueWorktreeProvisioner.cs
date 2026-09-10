@@ -72,21 +72,26 @@ public static class IssueWorktreeProvisioner
     /// when no <c>--spec</c> is given. Through the SAME runner every other spawn here uses, so this adds
     /// no process-spawn site of its own.
     /// </summary>
+    /// <param name="repository">The canonical repository captured before provisioning; passed to
+    /// <c>gh --repo</c> so ambient CLI context cannot redirect the issue read.</param>
     /// <returns>Title and body; the body is empty when the issue has none.</returns>
     /// <exception cref="CliArgumentException"><c>gh</c> refused — the issue does not exist, or <c>gh</c> is not authenticated.</exception>
     public static async Task<(string Title, string Body)> FetchIssueAsync(
         int issue,
         string repositoryDirectory,
+        string repository,
         Func<string, IReadOnlyList<string>, string, CancellationToken, Task<(int ExitCode, string Output)>>? runner = null,
         CancellationToken cancellationToken = default)
     {
         ArgumentOutOfRangeException.ThrowIfNegativeOrZero(issue);
         ArgumentException.ThrowIfNullOrEmpty(repositoryDirectory);
+        ArgumentException.ThrowIfNullOrEmpty(repository);
 
         runner ??= RunAsync;
         var (exit, output) = await runner(
             "gh",
-            ["issue", "view", issue.ToString(System.Globalization.CultureInfo.InvariantCulture), "--json", "title,body"],
+            ["issue", "view", issue.ToString(System.Globalization.CultureInfo.InvariantCulture),
+                "--json", "title,body", "--repo", repository],
             repositoryDirectory, cancellationToken).ConfigureAwait(false);
         if (exit != 0)
         {
@@ -128,6 +133,8 @@ public static class IssueWorktreeProvisioner
     /// <c>&lt;repos&gt;</c> never defined. <c>QueueSettings.WorktreeRoot</c> is what an operator with
     /// a different layout sets.
     /// </param>
+    /// <param name="repository">The canonical repository captured before provisioning; passed to
+    /// <c>gh --repo</c> so ambient CLI context cannot redirect branch creation.</param>
     /// <param name="runner">Test seam: runs one command and returns (exit code, stdout+stderr).</param>
     /// <param name="probe">
     /// Test seam for the trust step's repository-identity lookup (#2076) — the same injected-probe shape
@@ -144,6 +151,7 @@ public static class IssueWorktreeProvisioner
         int issue,
         string repositoryDirectory,
         string? worktreeRoot,
+        string repository,
         Func<string, IReadOnlyList<string>, string, CancellationToken, Task<(int ExitCode, string Output)>>? runner = null,
         Func<string, CancellationToken, Task<RepositoryIdentity?>>? probe = null,
         TextWriter? output = null,
@@ -151,6 +159,7 @@ public static class IssueWorktreeProvisioner
     {
         ArgumentOutOfRangeException.ThrowIfNegativeOrZero(issue);
         ArgumentException.ThrowIfNullOrEmpty(repositoryDirectory);
+        ArgumentException.ThrowIfNullOrEmpty(repository);
 
         runner ??= RunAsync;
 
@@ -172,7 +181,8 @@ public static class IssueWorktreeProvisioner
         }
 
         var (developExit, developOutput) = await runner(
-            "gh", ["issue", "develop", issue.ToString(System.Globalization.CultureInfo.InvariantCulture), "--name", branch],
+            "gh", ["issue", "develop", issue.ToString(System.Globalization.CultureInfo.InvariantCulture),
+                "--name", branch, "--repo", repository],
             repositoryDirectory, cancellationToken).ConfigureAwait(false);
         if (developExit != 0)
         {

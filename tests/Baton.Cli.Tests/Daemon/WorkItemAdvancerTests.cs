@@ -259,6 +259,97 @@ public sealed class WorkItemAdvancerTests
     }
 
     [Fact]
+    public async Task A_later_stage_legacy_item_halts_with_history_preserving_recovery_instructions()
+    {
+        var home = CreateTempHome();
+        using var scope = BatonEnvironmentSnapshot.BeginScope(BatonEnvironmentSnapshot.Blank with { HomeOverride = home });
+        try
+        {
+            var room = await WriteSettledRoomAsync(home, WorkflowOutcome.Succeeded, BlockingVerdict);
+            var seeded = await SeedAsync(home, WorkStage.Review, room, round: 3, automaticFixUsed: true);
+            var verdictPath = Path.Combine(room, "verdict.json");
+            await QueueStore.MutateAsync(
+                BatonPaths.QueueFile,
+                state => state with
+                {
+                    Items = [seeded with { Repository = null, LastVerdict = verdictPath }],
+                },
+                Ct);
+            var gh = new FakeGh(PrJson(77, PushedSha));
+
+            var fact = Assert.Single(await Advancer(gh, (_, _) => Task.FromResult<string?>(PushedSha))
+                .AdvanceAsync(Now, Ct));
+
+            var item = await ReadBackAsync();
+            Assert.Equal(QueueDecisionEntry.Failed, fact.Decision);
+            Assert.Equal(WorkStage.Review, item.Stage);
+            Assert.Equal(3, item.Round);
+            Assert.True(item.AutomaticFixUsed);
+            Assert.Equal(room, item.RoomDirectory);
+            Assert.Equal(verdictPath, item.LastVerdict);
+            Assert.True(item.Halted);
+            Assert.Contains("no 'baton queue' verb repairs this field in place", item.Error!, StringComparison.Ordinal);
+            Assert.Contains("preserve Stage, State, Round, RoomDirectory, LastVerdict and AutomaticFixUsed", item.Error!,
+                StringComparison.Ordinal);
+            Assert.Empty(gh.Calls);
+        }
+        finally
+        {
+            DirectoryCleanup.DeleteRecursively(home);
+        }
+    }
+
+    [Fact]
+    public async Task A_same_tag_replacement_between_observation_and_commit_keeps_its_row_and_brief()
+    {
+        var home = CreateTempHome();
+        using var scope = BatonEnvironmentSnapshot.BeginScope(BatonEnvironmentSnapshot.Blank with { HomeOverride = home });
+        try
+        {
+            var room = await WriteSettledRoomAsync(home, WorkflowOutcome.Succeeded, verdictJson: null);
+            await SeedAsync(home, WorkStage.Implement, room);
+            const string replacementBrief = "replacement brief that belongs to the new row";
+            var gh = new FakeGh(PrJson(77, PushedSha));
+            async Task<string?> ReplaceBeforeCommit(string _, CancellationToken cancellationToken)
+            {
+                await QueueStore.MutateAsync(
+                    BatonPaths.QueueFile,
+                    snapshot =>
+                    {
+                        File.WriteAllText(BatonPaths.QueueSpecFile("1934-lane"), replacementBrief);
+                        return snapshot with
+                        {
+                            Items = snapshot.Items.Select(item => item with
+                            {
+                                State = QueueItemState.Queued,
+                                RoomDirectory = null,
+                                AddedAt = Now.AddMinutes(1),
+                                Instructions = "replacement instructions",
+                            }).ToList(),
+                        };
+                    },
+                    cancellationToken);
+                return PushedSha;
+            }
+
+            var facts = await Advancer(gh, ReplaceBeforeCommit).AdvanceAsync(Now, Ct);
+
+            var item = await ReadBackAsync();
+            Assert.Empty(facts);
+            Assert.Equal(WorkStage.Implement, item.Stage);
+            Assert.Equal(QueueItemState.Queued, item.State);
+            Assert.Null(item.PullRequest);
+            Assert.Null(item.RoomDirectory);
+            Assert.Equal("replacement instructions", item.Instructions);
+            Assert.Equal(replacementBrief, await File.ReadAllTextAsync(item.SpecFile, Ct));
+        }
+        finally
+        {
+            DirectoryCleanup.DeleteRecursively(home);
+        }
+    }
+
+    [Fact]
     public async Task Repository_drift_blocks_a_same_number_branch_base_and_head_collision_before_any_PR_call()
     {
         var home = CreateTempHome();

@@ -105,6 +105,11 @@ public sealed class WorkItemAdvancer
         QueueItem item, DateTimeOffset now, CancellationToken cancellationToken)
     {
         var stage = item.Stage!.Value;
+        if (item.Repository is null && stage != WorkStage.Implement)
+        {
+            return await HaltLegacyRepositoryAsync(item, stage, now).ConfigureAwait(false);
+        }
+
         var room = item.RoomDirectory;
         var sentinel = room is null
             ? null
@@ -194,7 +199,7 @@ public sealed class WorkItemAdvancer
         {
             if (readinessMutated || item.Error is not null)
             {
-                await MarkAsync(item.Tag, existing => existing with
+                await TryMarkAsync(item, existing => existing with
                 {
                     PullRequest = pr.Number ?? existing.PullRequest,
                     Checks = pr.Checks ?? existing.Checks,
@@ -221,7 +226,7 @@ public sealed class WorkItemAdvancer
             WorkItemTransitionKind.Stop =>
                 await StopAsync(item, stage, transition, pr, verdictPath, now, room).ConfigureAwait(false),
             WorkItemTransitionKind.Dispatch =>
-                await QueueNextRoundAsync(item, stage, transition, pr, verdict, verdictPath, now, room, cancellationToken)
+                await QueueNextRoundAsync(item, stage, transition, pr, verdict, verdictPath, now, room)
                     .ConfigureAwait(false),
             _ => null,
         };
@@ -236,7 +241,7 @@ public sealed class WorkItemAdvancer
         QueueItem item, string reason, PullRequestObservation pr, DateTimeOffset now, string? room,
         bool recordFailure)
     {
-        await MarkAsync(item.Tag, existing => existing with
+        var retained = await TryMarkAsync(item, existing => existing with
         {
             PullRequest = pr.Number ?? existing.PullRequest,
             Checks = pr.Checks ?? existing.Checks,
@@ -244,7 +249,7 @@ public sealed class WorkItemAdvancer
             Error = reason,
         }).ConfigureAwait(false);
 
-        return recordFailure
+        return retained && recordFailure
             ? new QueueDecisionEntry(
                 now, item.Tag, QueueDecisionEntry.Failed, reason,
                 LiveWeight: 0, FreeGb: null, FloorGb: 0, Room: room)
@@ -256,7 +261,7 @@ public sealed class WorkItemAdvancer
     /// not leave an item queued against the previous round's brief, which is the failure mode of writing
     /// the state first.
     /// </summary>
-    private static async Task<QueueDecisionEntry> QueueNextRoundAsync(
+    private static async Task<QueueDecisionEntry?> QueueNextRoundAsync(
         QueueItem item,
         WorkStage from,
         WorkItemTransition transition,
@@ -264,8 +269,7 @@ public sealed class WorkItemAdvancer
         ReviewVerdict? verdict,
         string? verdictPath,
         DateTimeOffset now,
-        string? room,
-        CancellationToken cancellationToken)
+        string? room)
     {
         var next = transition.NextStage!.Value;
 
@@ -291,10 +295,7 @@ public sealed class WorkItemAdvancer
             Round: transition.Round,
             Findings: findings));
 
-        Directory.CreateDirectory(BatonPaths.QueueSpecsDirectory);
-        await File.WriteAllTextAsync(item.SpecFile, brief, cancellationToken).ConfigureAwait(false);
-
-        await MarkAsync(item.Tag, existing => existing with
+        var advanced = await TryMarkAsync(item, existing => existing with
         {
             Stage = next,
             Role = WorkStages.RoleFor(next),
@@ -316,12 +317,16 @@ public sealed class WorkItemAdvancer
             RoomDirectory = null,
             LaunchedAt = null,
             Error = null,
+        }, () =>
+        {
+            Directory.CreateDirectory(BatonPaths.QueueSpecsDirectory);
+            File.WriteAllText(item.SpecFile, brief);
         }).ConfigureAwait(false);
 
-        return Fact(item, from, next, transition, now, room);
+        return advanced ? Fact(item, from, next, transition, now, room) : null;
     }
 
-    private static async Task<QueueDecisionEntry> StopAsync(
+    private static async Task<QueueDecisionEntry?> StopAsync(
         QueueItem item,
         WorkStage from,
         WorkItemTransition transition,
@@ -330,7 +335,7 @@ public sealed class WorkItemAdvancer
         DateTimeOffset now,
         string? room)
     {
-        await MarkAsync(item.Tag, existing => existing with
+        var stopped = await TryMarkAsync(item, existing => existing with
         {
             Stage = WorkStage.Ready,
             PullRequest = pr.Number ?? existing.PullRequest,
@@ -343,10 +348,10 @@ public sealed class WorkItemAdvancer
             Error = null,
         }).ConfigureAwait(false);
 
-        return Fact(item, from, WorkStage.Ready, transition, now, room);
+        return stopped ? Fact(item, from, WorkStage.Ready, transition, now, room) : null;
     }
 
-    private static async Task<QueueDecisionEntry> FailAsync(
+    private static async Task<QueueDecisionEntry?> FailAsync(
         QueueItem item,
         WorkStage from,
         WorkItemTransition transition,
@@ -360,7 +365,7 @@ public sealed class WorkItemAdvancer
         // the LAST tick that reads this item, rather than the first of an unbounded run of identical
         // ones (QueueItem.Halted's own remarks). The room and the stage are left on the item, for the
         // reason spec/baton.md §13 gives.
-        await MarkAsync(item.Tag, existing => existing with
+        var failed = await TryMarkAsync(item, existing => existing with
         {
             Stage = from,
             State = QueueItemState.Failed,
@@ -369,9 +374,9 @@ public sealed class WorkItemAdvancer
             Halted = true,
         }).ConfigureAwait(false);
 
-        return new QueueDecisionEntry(
+        return failed ? new QueueDecisionEntry(
             now, item.Tag, QueueDecisionEntry.Failed, transition.Reason,
-            LiveWeight: 0, FreeGb: null, FloorGb: 0, Room: room);
+            LiveWeight: 0, FreeGb: null, FloorGb: 0, Room: room) : null;
     }
 
     /// <summary>
@@ -386,16 +391,66 @@ public sealed class WorkItemAdvancer
             $"{WorkStages.Token(from)} → {WorkStages.Token(to)}: {transition.Reason}",
             LiveWeight: 0, FreeGb: null, FloorGb: 0, Room: room);
 
-    private static Task MarkAsync(string tag, Func<QueueItem, QueueItem> update) =>
-        QueueStore.MutateAsync(
+    private static async Task<QueueDecisionEntry?> HaltLegacyRepositoryAsync(
+        QueueItem item, WorkStage stage, DateTimeOffset now)
+    {
+        var reason = $"the {WorkStages.Token(stage)} lifecycle item has no trusted repository identity "
+            + "(legacy queue entry), and re-adding this tag past implement would erase its lifecycle history. "
+            + $"The item is halted: no 'baton queue' verb repairs this field in place. Stop the daemon, back up "
+            + $"{BatonPaths.QueueFileName}, set only this row's Repository to its canonical host/owner/repo and "
+            + "Halted to false, preserve Stage, State, Round, RoomDirectory, LastVerdict and AutomaticFixUsed, "
+            + "then restart the daemon.";
+        var halted = await TryMarkAsync(item, existing => existing with
+        {
+            // Ready is parked as Queued by definition; preserving that state is what lets clearing
+            // Halted after the documented identity repair make it a reconciliation candidate again.
+            State = stage == WorkStage.Ready ? QueueItemState.Queued : QueueItemState.Failed,
+            Error = reason,
+            Halted = true,
+        }).ConfigureAwait(false);
+
+        return halted ? new QueueDecisionEntry(
+            now, item.Tag, QueueDecisionEntry.Failed, reason,
+            LiveWeight: 0, FreeGb: null, FloorGb: 0, Room: item.RoomDirectory) : null;
+    }
+
+    /// <summary>
+    /// Commits only when the complete row observed before external I/O is still current. The optional
+    /// spec write runs under the same queue mutex and only after that comparison succeeds, matching
+    /// <c>QueueCommand</c>'s established queue/spec lock order.
+    /// </summary>
+    private static async Task<bool> TryMarkAsync(
+        QueueItem expected, Func<QueueItem, QueueItem> update, Action? coupledWrite = null)
+    {
+        var expectedJson = JsonSerializer.Serialize(expected);
+        var changed = false;
+        await QueueStore.MutateAsync(
             BatonPaths.QueueFile,
-            s => s with
+            snapshot =>
             {
-                Items = s.Items
-                    .Select(i => string.Equals(i.Tag, tag, StringComparison.Ordinal) ? update(i) : i)
-                    .ToList(),
+                var current = snapshot.Items.FirstOrDefault(i =>
+                    string.Equals(i.Tag, expected.Tag, StringComparison.Ordinal));
+                if (current is null
+                    || !string.Equals(
+                        JsonSerializer.Serialize(current),
+                        expectedJson,
+                        StringComparison.Ordinal))
+                {
+                    return snapshot;
+                }
+
+                coupledWrite?.Invoke();
+                changed = true;
+                return snapshot with
+                {
+                    Items = snapshot.Items
+                        .Select(i => ReferenceEquals(i, current) ? update(i) : i)
+                        .ToList(),
+                };
             },
-            CancellationToken.None);
+            CancellationToken.None).ConfigureAwait(false);
+        return changed;
+    }
 
     /// <summary>
     /// Discovers the branch's PR from an open-only, head-scoped list, then reads required checks and
