@@ -253,11 +253,9 @@ public static class DispatchCommand
 
         // #1500/#1576: Copy attached context files into the room before the worker starts, via the
         // seam RedispatchCommand's own --attach path now shares. Attachment content is operator-supplied
-        // and inbound: it is never scanned and never published, because the pusher's gather_deliverables
-        // reads only terminal.json's declared step outputs (not a directory walk), and an attachment is
-        // never a declared output of any step (#1500 second-reader LOW-6 — "never passes the gate" read
-        // as either "never scanned" or "the gate withholds it"; state the mechanism instead of the
-        // ambiguous phrase).
+        // and inbound: it is not part of the daemon's fleet projection or its declared step outputs,
+        // so it is never published as a deliverable (#1500 second-reader LOW-6 — state the mechanism
+        // instead of the ambiguous phrase "never passes the gate").
         RoleSpecMaterializer.CopyAttachmentsIntoRoom(options.Attachments, options.RoomDirectoryPath);
 
         var primaryOutputName = definition.Steps.FirstOrDefault()?.Outputs.FirstOrDefault() ?? "output";

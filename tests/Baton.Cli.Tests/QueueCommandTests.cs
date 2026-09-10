@@ -323,6 +323,57 @@ public sealed class QueueCommandTests
     }
 
     [Fact]
+    public async Task Re_adding_a_cancelled_tag_leaves_its_retained_brief_unchanged()
+    {
+        var home = CreateTempHome();
+        using var scope = BatonEnvironmentSnapshot.BeginScope(BatonEnvironmentSnapshot.Blank with { HomeOverride = home });
+        try
+        {
+            var workspace = Path.Combine(home, "w2159");
+            Directory.CreateDirectory(workspace);
+            Directory.CreateDirectory(BatonPaths.QueueSpecsDirectory);
+            var spec = BatonPaths.QueueSpecFile("2159-lane");
+            await File.WriteAllTextAsync(spec, "the brief the operator cancelled", Ct);
+            await QueueStore.MutateAsync(
+                BatonPaths.QueueFile,
+                s => s with
+                {
+                    Items =
+                    [
+                        new QueueItem
+                        {
+                            Tag = "2159-lane",
+                            Role = "implement",
+                            Workspace = workspace,
+                            SpecFile = spec,
+                            State = QueueItemState.Cancelled,
+                            CancelledAt = DateTimeOffset.UtcNow,
+                        },
+                    ],
+                },
+                Ct);
+
+            var replacement = Path.Combine(home, "replacement.md");
+            await File.WriteAllTextAsync(replacement, "a replacement brief", Ct);
+
+            await Assert.ThrowsAsync<CliArgumentException>(() => QueueCommand.ExecuteAsync(
+                new QueueOptions(
+                    QueueVerb.Add, Tag: "2159-lane", Role: "implement", SpecFilePath: replacement,
+                    WorkspaceDirectory: workspace),
+                TextWriter.Null,
+                Ct));
+
+            // The locked add check protects the same canonical file cancellation retained. This is the
+            // cancellation-wins half of the add/cancel race; the old early read alone could not prove it.
+            Assert.Equal("the brief the operator cancelled", await File.ReadAllTextAsync(spec, Ct));
+        }
+        finally
+        {
+            DirectoryCleanup.DeleteRecursively(home);
+        }
+    }
+
+    [Fact]
     public async Task Re_adding_a_work_item_past_implement_is_refused_before_its_brief_is_overwritten()
     {
         var home = CreateTempHome();
@@ -644,6 +695,210 @@ public sealed class QueueCommandTests
             await QueueCommand.ExecuteAsync(new QueueOptions(QueueVerb.List), output, Ct);
 
             Assert.DoesNotContain("Waiting on", output.ToString(), StringComparison.Ordinal);
+        }
+        finally
+        {
+            DirectoryCleanup.DeleteRecursively(home);
+        }
+    }
+
+    [Fact]
+    public async Task Cancel_retains_a_queued_items_history_and_records_the_cancellation()
+    {
+        var home = CreateTempHome();
+        using var scope = BatonEnvironmentSnapshot.BeginScope(BatonEnvironmentSnapshot.Blank with { HomeOverride = home });
+        try
+        {
+            var workspace = Path.Combine(home, "w2159");
+            Directory.CreateDirectory(workspace);
+            Directory.CreateDirectory(BatonPaths.QueueSpecsDirectory);
+            var spec = BatonPaths.QueueSpecFile("2159-lane");
+            await File.WriteAllTextAsync(spec, "the queued brief", Ct);
+            await QueueStore.MutateAsync(BatonPaths.QueueFile, s => s with
+            {
+                Items = [new QueueItem
+                {
+                    Tag = "2159-lane",
+                    Role = "implement",
+                    Workspace = workspace,
+                    SpecFile = spec,
+                }],
+            }, Ct);
+
+            var output = new StringWriter();
+            Assert.Equal(0, await QueueCommand.ExecuteAsync(new QueueOptions(QueueVerb.Cancel, Tag: "2159-lane"), output, Ct));
+
+            var item = Assert.Single((await QueueStore.LoadAsync(BatonPaths.QueueFile, Ct)).Items);
+            Assert.Equal(QueueItemState.Cancelled, item.State);
+            Assert.NotNull(item.CancelledAt);
+            Assert.True(Directory.Exists(workspace));
+            Assert.Equal("the queued brief", await File.ReadAllTextAsync(spec, Ct));
+            Assert.Contains("retained", output.ToString(), StringComparison.Ordinal);
+            var fact = Assert.Single(await QueueDecisionLedgerStore.ReadAllAsync(BatonPaths.QueueDecisionLedgerFile, Ct));
+            Assert.Equal(QueueDecisionEntry.Cancelled, fact.Decision);
+            Assert.Equal("2159-lane", fact.Tag);
+
+            var repeat = await Assert.ThrowsAsync<CliArgumentException>(() => QueueCommand.ExecuteAsync(
+                new QueueOptions(QueueVerb.Cancel, Tag: "2159-lane"), TextWriter.Null, Ct));
+            Assert.Contains("already cancelled", repeat.Message, StringComparison.Ordinal);
+        }
+        finally
+        {
+            DirectoryCleanup.DeleteRecursively(home);
+        }
+    }
+
+    [Fact]
+    public async Task Cancel_retry_backfills_a_ledger_fact_that_failed_after_the_queue_write()
+    {
+        var home = CreateTempHome();
+        using var scope = BatonEnvironmentSnapshot.BeginScope(BatonEnvironmentSnapshot.Blank with { HomeOverride = home });
+        try
+        {
+            var workspace = Path.Combine(home, "w2159");
+            Directory.CreateDirectory(workspace);
+            Directory.CreateDirectory(BatonPaths.QueueSpecsDirectory);
+            await QueueStore.MutateAsync(BatonPaths.QueueFile, s => s with
+            {
+                Items =
+                [
+                    new QueueItem
+                    {
+                        Tag = "2159-lane",
+                        Role = "implement",
+                        Workspace = workspace,
+                        SpecFile = BatonPaths.QueueSpecFile("2159-lane"),
+                    },
+                ],
+            }, Ct);
+
+            // A directory at the ledger's filename makes its append fail after the queue mutation,
+            // without depending on the machine's permissions.
+            Directory.CreateDirectory(BatonPaths.QueueDecisionLedgerFile);
+            var failure = await Record.ExceptionAsync(() => QueueCommand.ExecuteAsync(
+                new QueueOptions(QueueVerb.Cancel, Tag: "2159-lane"), TextWriter.Null, Ct));
+            Assert.True(failure is IOException or UnauthorizedAccessException);
+
+            var cancelled = (await QueueStore.LoadAsync(BatonPaths.QueueFile, Ct)).Items.Single();
+            Assert.Equal(QueueItemState.Cancelled, cancelled.State);
+            Assert.NotNull(cancelled.CancelledAt);
+
+            Directory.Delete(BatonPaths.QueueDecisionLedgerFile);
+            var repeat = await Assert.ThrowsAsync<CliArgumentException>(() => QueueCommand.ExecuteAsync(
+                new QueueOptions(QueueVerb.Cancel, Tag: "2159-lane"), TextWriter.Null, Ct));
+            Assert.Contains("already cancelled", repeat.Message, StringComparison.Ordinal);
+
+            var fact = Assert.Single(await QueueDecisionLedgerStore.ReadAllAsync(BatonPaths.QueueDecisionLedgerFile, Ct));
+            Assert.Equal(QueueDecisionEntry.Cancelled, fact.Decision);
+            Assert.Equal("2159-lane", fact.Tag);
+            Assert.Equal(cancelled.CancelledAt, fact.At);
+        }
+        finally
+        {
+            DirectoryCleanup.DeleteRecursively(home);
+        }
+    }
+
+    [Fact]
+    public async Task Import_refuses_a_collision_with_a_retained_cancelled_item()
+    {
+        var home = CreateTempHome();
+        using var scope = BatonEnvironmentSnapshot.BeginScope(BatonEnvironmentSnapshot.Blank with { HomeOverride = home });
+        try
+        {
+            var workspace = Path.Combine(home, "w2159");
+            Directory.CreateDirectory(workspace);
+            Directory.CreateDirectory(BatonPaths.QueueSpecsDirectory);
+            var spec = BatonPaths.QueueSpecFile("2159-lane");
+            var cancelledAt = new DateTimeOffset(2026, 9, 9, 20, 0, 0, TimeSpan.Zero);
+            await File.WriteAllTextAsync(spec, "the cancelled brief", Ct);
+            await QueueStore.MutateAsync(BatonPaths.QueueFile, s => s with
+            {
+                Items =
+                [
+                    new QueueItem
+                    {
+                        Tag = "2159-lane",
+                        Role = "implement",
+                        Workspace = workspace,
+                        SpecFile = spec,
+                        State = QueueItemState.Cancelled,
+                        CancelledAt = cancelledAt,
+                    },
+                ],
+            }, Ct);
+            await QueueDecisionLedgerStore.AppendCancellationAsync(
+                cancelledAt, "2159-lane", BatonPaths.QueueDecisionLedgerFile, Ct);
+
+            var import = Path.Combine(home, "scratchpad.json");
+            await File.WriteAllTextAsync(
+                import,
+                """[{ "tag": "2159-lane", "role": "implement", "workspace": "C:\\scratch\\w2159", "launched": false }]""",
+                Ct);
+
+            var refusal = await Assert.ThrowsAsync<CliArgumentException>(() => QueueCommand.ExecuteAsync(
+                new QueueOptions(QueueVerb.Import, ImportFilePath: import), TextWriter.Null, Ct));
+            Assert.Contains("cancelled before launch", refusal.Message, StringComparison.Ordinal);
+
+            var item = Assert.Single((await QueueStore.LoadAsync(BatonPaths.QueueFile, Ct)).Items);
+            Assert.Equal(QueueItemState.Cancelled, item.State);
+            Assert.Equal(cancelledAt, item.CancelledAt);
+            Assert.Equal("the cancelled brief", await File.ReadAllTextAsync(spec, Ct));
+            var fact = Assert.Single(await QueueDecisionLedgerStore.ReadAllAsync(BatonPaths.QueueDecisionLedgerFile, Ct));
+            Assert.Equal(QueueDecisionEntry.Cancelled, fact.Decision);
+            Assert.Equal(cancelledAt, fact.At);
+        }
+        finally
+        {
+            DirectoryCleanup.DeleteRecursively(home);
+        }
+    }
+
+    [Fact]
+    public async Task Cancel_reports_a_missing_tag_without_recording_a_false_cancellation()
+    {
+        var home = CreateTempHome();
+        using var scope = BatonEnvironmentSnapshot.BeginScope(BatonEnvironmentSnapshot.Blank with { HomeOverride = home });
+        try
+        {
+            var refusal = await Assert.ThrowsAsync<CliArgumentException>(() => QueueCommand.ExecuteAsync(
+                new QueueOptions(QueueVerb.Cancel, Tag: "missing"), TextWriter.Null, Ct));
+
+            Assert.Contains("does not exist", refusal.Message, StringComparison.Ordinal);
+            Assert.False(File.Exists(BatonPaths.QueueDecisionLedgerFile));
+        }
+        finally
+        {
+            DirectoryCleanup.DeleteRecursively(home);
+        }
+    }
+
+    [Fact]
+    public async Task Cancel_refuses_a_launched_item_with_the_room_cancel_remedy()
+    {
+        var home = CreateTempHome();
+        using var scope = BatonEnvironmentSnapshot.BeginScope(BatonEnvironmentSnapshot.Blank with { HomeOverride = home });
+        try
+        {
+            var room = Path.Combine(home, "rooms", "queue-2159-lane-abcd1234");
+            await QueueStore.MutateAsync(BatonPaths.QueueFile, s => s with
+            {
+                Items = [new QueueItem
+                {
+                    Tag = "2159-lane",
+                    Role = "implement",
+                    Workspace = Path.Combine(home, "w2159"),
+                    SpecFile = BatonPaths.QueueSpecFile("2159-lane"),
+                    State = QueueItemState.Launched,
+                    RoomDirectory = room,
+                }],
+            }, Ct);
+
+            var refusal = await Assert.ThrowsAsync<CliArgumentException>(() => QueueCommand.ExecuteAsync(
+                new QueueOptions(QueueVerb.Cancel, Tag: "2159-lane"), TextWriter.Null, Ct));
+
+            Assert.Equal("cancel the launched lane with 'baton cancel " + room + "'.", refusal.TryInvocation);
+            Assert.Equal(QueueItemState.Launched, (await QueueStore.LoadAsync(BatonPaths.QueueFile, Ct)).Items.Single().State);
         }
         finally
         {

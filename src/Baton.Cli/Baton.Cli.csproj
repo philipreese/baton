@@ -15,11 +15,10 @@
   </ItemGroup>
 
   <ItemGroup>
-    <!-- #1946: the SAME glass.html the Claude.ai artifact is published from, embedded so
-         `baton daemon` can serve it from an installed tool directory with no path configuration and
-         no second copy of the page. One page, two deliveries (spec/baton.md §11 C-11) — a copy under
-         src/ would be the drift the record-once gate exists to stop, and the link name below is what
-         GlassPage.cs resolves. -->
+    <!-- #1946: the shared glass.html source is embedded so `baton daemon` can serve it from an
+         installed tool directory with no path configuration or second copy of the page. One page,
+         one delivery (spec/baton.md §11 C-11) — a copy under src/ would be the drift the record-once
+         gate exists to stop, and the link name below is what GlassPage.cs resolves. -->
     <EmbeddedResource Include="..\..\tools\fleet-glass\glass.html" LogicalName="Baton.Cli.Daemon.glass.html" />
     <!-- #2166: the private daemon, not an artifact host, serves this same-origin install metadata.
          The raster icon bytes live in GlassWebAppAssets so they are generated as valid PNGs without

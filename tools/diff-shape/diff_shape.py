@@ -32,9 +32,7 @@ PROTECTED_TOOLING_PATHS: tuple[tuple[str, str, str], ...] = (
     ("dir", "tests/Baton.Architecture.Tests/", "compiled enforcement: spawn gate, state vocabularies, citation pins"),
     # #1754: gates.py's own OVERLAP/AFTER_BUILD_FAST comments say each of these is a wired member
     # (not merely a pixi.toml line), contradicting #1744's "not enforcement" exclusion of their
-    # directories -- protecting the specific file, not the whole directory, so a genuinely unwired
-    # sibling (tools/fleet-glass/pusher.py) stays unprotected.
-    ("file", "tools/fleet-glass/worker.selftest.mjs", "the only thing standing between worker.js's paging/heartbeat-merge logic and a silent revert (gates.py OVERLAP)"),
+    # directories -- protecting the specific wired files, not the whole directory.
     # #1912 fix round: same shape and same reason one line up -- a wired member's own body. The
     # sabotage fixture guards the EXTRACTION (a gutted panel, a renamed marker); dropping check(...)
     # lines from the assertion list leaves the member green and quiet, which is the exposure this
@@ -209,7 +207,7 @@ _ASSERTION_PATTERNS: tuple[tuple[str, re.Pattern[str]], ...] = (
     ("[InlineData", re.compile(r"\[InlineData")),
 )
 
-# Only checked against .mjs files (the selftest-in-JS shape, e.g. worker.selftest.mjs).
+# Only checked against .mjs files (the selftest-in-JS shape).
 _MJS_ASSERTION_PATTERNS: tuple[tuple[str, re.Pattern[str]], ...] = (
     ("it(", re.compile(r"\bit\(")),
     ("test(", re.compile(r"\btest\(")),
@@ -766,7 +764,6 @@ def selftest() -> int:
             ("p", "tests/Baton.Architecture.Tests/SpawnGateTests.cs"),
             # The wired selftest bodies #1744's ruling had wrongly excluded as "not enforcement",
             # plus vendor-check's actual body.
-            ("s", "tools/fleet-glass/worker.selftest.mjs"),
             ("al", "tools/fleet-glass/daemon-feed.selftest.mjs"),
             ("am", "tools/fleet-glass/service-worker.selftest.mjs"),
             ("t", "tools/tool-refresh/refresh.py"),
@@ -791,7 +788,7 @@ def selftest() -> int:
 
         # (q) Control: a genuinely unprotected sibling in a partly-protected directory, plus
         # .githooks/, stay unprotected -> PASS. tools/fleet-glass/glass.html (not
-        # worker.selftest.mjs, protected by name since #1754) proves the widening protects the
+        # a protected selftest, protected by name since #1754) proves the widening protects the
         # specific wired file rather than the whole tools/fleet-glass/ directory.
         subprocess.run(["git", "checkout", "-q", "-b", "branch-q", base_sha], cwd=repo, check=True, env=env)
         (repo / "tools" / "fleet-glass").mkdir(parents=True, exist_ok=True)

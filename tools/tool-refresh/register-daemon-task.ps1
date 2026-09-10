@@ -2,9 +2,8 @@
 # (#1557 side item). `RoomRetentionSweep` and the fleet-wide concurrency-cap apply (spec/baton.md
 # §7) are both hosted services inside `baton daemon` -- they only do anything while some process
 # is actually running that verb, and nothing before this script registered one. This is the
-# `baton-daemon` sibling of the `fleet-glass-pusher` task `tools/fleet-glass/deploy.ps1` (step 5)
-# registers -- same convention (idempotent `Register-ScheduledTask -Force`, repeating relaunch,
-# `IgnoreNew` against overlap), different action.
+# `baton-daemon` task registers here with an idempotent `Register-ScheduledTask -Force`, repeating
+# relaunch, and `IgnoreNew` against overlap.
 #
 # One-time, run manually by the operator (or by the deploy conductor after a PR that touches this
 # script merges) -- not invoked by CI or by any lane. Re-running is safe: `-Force` overwrites the

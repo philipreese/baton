@@ -82,7 +82,7 @@ public static class RoomsPruneCommand
             // the shared delete, not through RoomDeleteCommand.ExecuteAsync's refusal gate, which would
             // just re-read the same file this loop already read.
             var deleteResult = await RoomDeleteCommand
-                .DeleteAsync(candidate.RoomDirectoryPath, keepDeliverables: false, cancellationToken)
+                .DeleteAsync(candidate.RoomDirectoryPath, cancellationToken)
                 .ConfigureAwait(false);
             RoomDeleteCommand.Print(deleteResult, output);
             deleted.Add(deleteResult);

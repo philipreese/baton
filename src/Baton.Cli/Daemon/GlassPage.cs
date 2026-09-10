@@ -14,10 +14,9 @@ internal static class GlassPage
     internal const string ResourceName = "Baton.Cli.Daemon.glass.html";
 
     /// <summary>
-    /// The <c>&lt;meta&gt;</c> name the page reads. Its mere presence means "served by the daemon"
-    /// — an artifact never carries it, so the artifact copy needs no change to keep behaving exactly
-    /// as it does today, and a stale artifact cannot accidentally opt itself into a same-origin fetch
-    /// that has no origin to fetch from.
+    /// The <c>&lt;meta&gt;</c> name the page reads. Its mere presence means "served by the daemon".
+    /// The artifact delivery was retired with #2170; the marker still ensures an older artifact copy
+    /// cannot accidentally opt itself into a same-origin fetch that has no origin to fetch from.
     /// </summary>
     internal const string SourceMetaName = "baton-glass-source";
 

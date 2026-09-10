@@ -43,6 +43,7 @@ public sealed class QueueSchedulerService : BackgroundService
     private readonly Func<double?> _freeGb;
     private readonly Func<DateTimeOffset> _now;
     private readonly WorkItemAdvancer _advancer;
+    private readonly Func<CancellationToken, Task>? _beforeLaunchClaim;
 
     private DateTimeOffset? _lastLaunchAt;
     private string? _lastVerdictKey;
@@ -63,7 +64,8 @@ public sealed class QueueSchedulerService : BackgroundService
         Func<double?>? freeGb,
         Func<DateTimeOffset>? now,
         WorkItemAdvancer? advancer = null,
-        Func<CancellationToken, Task<IReadOnlyList<QueueLaneAdoption>>>? adopt = null)
+        Func<CancellationToken, Task<IReadOnlyList<QueueLaneAdoption>>>? adopt = null,
+        Func<CancellationToken, Task>? beforeLaunchClaim = null)
     {
         _launch = launch ?? QueueLauncher.LaunchAsync;
         _adopt = adopt ?? QueueLauncher.AdoptLaunchedLanesAsync;
@@ -71,6 +73,7 @@ public sealed class QueueSchedulerService : BackgroundService
         _freeGb = freeGb ?? FreePhysicalMemory.TryReadGiB;
         _now = now ?? (() => DateTimeOffset.UtcNow);
         _advancer = advancer ?? new WorkItemAdvancer();
+        _beforeLaunchClaim = beforeLaunchClaim;
     }
 
     protected override async Task ExecuteAsync(CancellationToken stoppingToken)
@@ -165,149 +168,190 @@ public sealed class QueueSchedulerService : BackgroundService
             .ConfigureAwait(false)).Queue;
         var interval = TimeSpan.FromSeconds(settings.EffectiveTickSeconds);
 
-        await ResolveFinishedItemsAsync(cancellationToken).ConfigureAwait(false);
-
-        // The lifecycle advance runs BETWEEN done detection and the launch decision, and both
-        // orderings matter (#1934 slice 2). After resolve, because it acts on items resolve has just
-        // moved out of `launched`; before Decide, because an item it queues for its next round is a
-        // candidate this same tick rather than one tick later.
-        await AdvanceWorkItemsAsync(cancellationToken).ConfigureAwait(false);
-
-        var snapshot = await QueueStore.LoadAsync(BatonPaths.QueueFile, cancellationToken).ConfigureAwait(false);
-        var now = _now();
-        var liveWeight = await _liveWeight(cancellationToken).ConfigureAwait(false);
-        var freeGb = _freeGb();
-
-        var decision = QueueScheduler.Decide(now, snapshot.Items, liveWeight, freeGb, settings, _lastLaunchAt, snapshot.Held);
-
-        if (decision.Kind == QueueDecisionKind.Wait)
+        // A claim can be lost to an operator cancellation after a candidate is chosen. One fresh pass
+        // keeps the next static candidate launchable in this tick; further churn returns to the daemon
+        // loop so its heartbeat and configured delay cannot be starved by an endless race.
+        for (var schedulingPass = 0; schedulingPass < 2; schedulingPass++)
         {
-            await RecordAsync(
-                new QueueDecisionEntry(
-                    now, decision.Item?.Tag, QueueDecisionEntry.Waited,
-                    QueueWaitReasons.Token(decision.WaitReason!.Value),
-                    decision.LiveWeight, decision.FreeGb, decision.FloorGb),
-                cancellationToken).ConfigureAwait(false);
-            return interval;
-        }
+            await ReconcileCancelledItemsAsync(cancellationToken).ConfigureAwait(false);
+            await ResolveFinishedItemsAsync(cancellationToken).ConfigureAwait(false);
 
-        var item = decision.Item!;
-        QueueTierResolution tier;
-        try
-        {
-            _ = WorkerRoleCatalog.For(item.Role);
-            tier = item.Stage is { } stage
-                ? QueueTierTable.ResolveForStage(
-                    item, stage, settings, WorkerRoleCatalog.QueueTierFor, WorkerRoleCatalog.QueueTierForRole)
-                : QueueTierTable.Resolve(
-                    item, settings, WorkerRoleCatalog.QueueTierFor, WorkerRoleCatalog.QueueTierForRole);
-        }
-        catch (KeyNotFoundException ex)
-        {
-            await FailAsync(
-                item, ex.Message, room: null, now, decision,
-                new QueueTierResolution(null, item.Adapter, item.Model, item.Effort, false, null),
-                cancellationToken).ConfigureAwait(false);
-            return interval;
-        }
+            // The lifecycle advance runs BETWEEN done detection and the launch decision, and both
+            // orderings matter (#1934 slice 2). After resolve, because it acts on items resolve has just
+            // moved out of `launched`; before Decide, because an item it queues for its next round is a
+            // candidate this same tick rather than one tick later.
+            await AdvanceWorkItemsAsync(cancellationToken).ConfigureAwait(false);
 
-        // Fail closed, per spec/baton.md §13's tier-resolution ruling. Reachable only through a
-        // hand-edited queue file, since QueueOptionsParser already refuses the scope class -- which is
-        // why the daemon checks anyway rather than trusting the verb that wrote the item.
-        if (item.ScopeClass is { Length: > 0 } scopeClass && tier.TierKey is not null
-            && QueueTierTable.LookupTier(tier.TierKey, settings, WorkerRoleCatalog.QueueTierFor) is null)
-        {
-            await FailAsync(
-                item, $"no tier is configured for '{tier.TierKey}' (scope class '{scopeClass}', role '{item.Role}')",
-                room: null, now, decision, tier, cancellationToken).ConfigureAwait(false);
-            return interval;
-        }
+            var snapshot = await QueueStore.LoadAsync(BatonPaths.QueueFile, cancellationToken).ConfigureAwait(false);
+            var now = _now();
+            var liveWeight = await _liveWeight(cancellationToken).ConfigureAwait(false);
+            var freeGb = _freeGb();
 
-        // The launch is RECORDED BEFORE IT IS STARTED, and started under the same token it was recorded
-        // under -- spec/baton.md §13 states that ruling and the duplicate-worker failure it closes.
-        // What belongs here rather than there: the two writes are deliberately asymmetric. The ITEM is
-        // written first, because it is what the next daemon reads to pick candidates; the LEDGER row
-        // waits for the outcome, below.
-        var roomDirectory = QueueLauncher.RoomDirectoryFor(item);
-        _lastLaunchAt = now;
-        await MarkAsync(item.Tag, existing => existing with
-        {
-            State = QueueItemState.Launched,
-            RoomDirectory = roomDirectory,
-            LaunchedAt = now,
-            Error = null,
-        }).ConfigureAwait(false);
+            var decision = QueueScheduler.Decide(now, snapshot.Items, liveWeight, freeGb, settings, _lastLaunchAt, snapshot.Held);
 
-        QueueLaunchOutcome outcome;
-        try
-        {
-            outcome = await _launch(new QueueLaunchRequest(item, tier, roomDirectory), CancellationToken.None)
-                .ConfigureAwait(false);
-        }
-        catch (OperationCanceledException)
-        {
-            // Nothing in the launch takes a cancellable token any more, so this is the belt to that
-            // braces. `failed`, not left launched: the queue has lost track of whether a lane started,
-            // and the room id on the item is how an operator finds out.
-            await FailAsync(
-                item, $"the daemon shut down while launching into room '{roomDirectory}'; check that room before "
-                + "re-adding this item, because the lane may have started", roomDirectory, now, decision, tier,
-                CancellationToken.None).ConfigureAwait(false);
-            return interval;
-        }
-        catch (Exception ex) when (ex is not OutOfMemoryException and not StackOverflowException)
-        {
-            // A throw the launcher does not model as a QueueLaunchOutcome -- an IO failure inside
-            // TerminalSettleRecorder, say. Mapped to the item's own Failed state and one recorded fact
-            // rather than unwound into the loop's catch-all, which would leave the item launched with
-            // nothing said about why (#1939 review).
-            await FailAsync(
-                item, $"the launch into room '{roomDirectory}' threw {ex.GetType().Name}: {ex.Message}",
-                Directory.Exists(roomDirectory) ? roomDirectory : null, now, decision, tier,
-                CancellationToken.None).ConfigureAwait(false);
-            return interval;
-        }
-
-        if (outcome.RunwayHeld)
-        {
-            // The item goes back to QUEUED, undoing the pre-launch mark above: nothing was dispatched,
-            // so it must be the candidate again next tick (Q5's arm). _lastLaunchAt stays advanced, so
-            // the gap paces the retry -- a held vendor must not be re-asked every TickSeconds.
-            await MarkAsync(item.Tag, existing => existing with
+            if (decision.Kind == QueueDecisionKind.Wait)
             {
-                State = QueueItemState.Queued,
-                RoomDirectory = null,
-                LaunchedAt = null,
-            }).ConfigureAwait(false);
+                await RecordAsync(
+                    new QueueDecisionEntry(
+                        now, decision.Item?.Tag, QueueDecisionEntry.Waited,
+                        QueueWaitReasons.Token(decision.WaitReason!.Value),
+                        decision.LiveWeight, decision.FreeGb, decision.FloorGb),
+                    cancellationToken).ConfigureAwait(false);
+                return interval;
+            }
+
+            var item = decision.Item!;
+            QueueTierResolution tier;
+            try
+            {
+                _ = WorkerRoleCatalog.For(item.Role);
+                tier = item.Stage is { } stage
+                    ? QueueTierTable.ResolveForStage(
+                        item, stage, settings, WorkerRoleCatalog.QueueTierFor, WorkerRoleCatalog.QueueTierForRole)
+                    : QueueTierTable.Resolve(
+                        item, settings, WorkerRoleCatalog.QueueTierFor, WorkerRoleCatalog.QueueTierForRole);
+            }
+            catch (KeyNotFoundException ex)
+            {
+                await FailAsync(
+                    item, ex.Message, room: null, now, decision,
+                    new QueueTierResolution(null, item.Adapter, item.Model, item.Effort, false, null),
+                    cancellationToken).ConfigureAwait(false);
+                return interval;
+            }
+
+            // Fail closed, per spec/baton.md §13's tier-resolution ruling. Reachable only through a
+            // hand-edited queue file, since QueueOptionsParser already refuses the scope class -- which is
+            // why the daemon checks anyway rather than trusting the verb that wrote the item.
+            if (item.ScopeClass is { Length: > 0 } scopeClass && tier.TierKey is not null
+                && QueueTierTable.LookupTier(tier.TierKey, settings, WorkerRoleCatalog.QueueTierFor) is null)
+            {
+                await FailAsync(
+                    item, $"no tier is configured for '{tier.TierKey}' (scope class '{scopeClass}', role '{item.Role}')",
+                    room: null, now, decision, tier, cancellationToken).ConfigureAwait(false);
+                return interval;
+            }
+
+            // The launch is RECORDED BEFORE IT IS STARTED, and started under the same token it was recorded
+            // under -- spec/baton.md §13 states that ruling and the duplicate-worker failure it closes.
+            // What belongs here rather than there: the two writes are deliberately asymmetric. The ITEM is
+            // written first, because it is what the next daemon reads to pick candidates; the LEDGER row
+            // waits for the outcome, below.
+            var roomDirectory = QueueLauncher.RoomDirectoryFor(item);
+            if (_beforeLaunchClaim is not null)
+            {
+                await _beforeLaunchClaim(cancellationToken).ConfigureAwait(false);
+            }
+
+            // Re-check Queued under QueueStore's mutation lock, rather than trusting the snapshot this
+            // tick read above: `baton queue cancel` owns the same seam. A cancellation that gets there
+            // first wins and this scheduler never starts a lane from its stale candidate.
+            var launchClaimed = false;
+            await QueueStore.MutateAsync(BatonPaths.QueueFile, snapshot =>
+            {
+                var current = snapshot.Items.FirstOrDefault(i => string.Equals(i.Tag, item.Tag, StringComparison.Ordinal));
+                if (current?.State != QueueItemState.Queued)
+                {
+                    return snapshot;
+                }
+
+                launchClaimed = true;
+                return snapshot with
+                {
+                    Items = Replace(snapshot.Items, item.Tag, existing => existing with
+                    {
+                        State = QueueItemState.Launched,
+                        RoomDirectory = roomDirectory,
+                        LaunchedAt = now,
+                        Error = null,
+                    }),
+                };
+            }, CancellationToken.None).ConfigureAwait(false);
+
+            if (!launchClaimed)
+            {
+                // The snapshot chose a candidate that cancellation has now removed. Re-evaluate instead
+                // of recording no-items from that stale snapshot: another queued item may be launchable.
+                // This reuses the whole current-state decision path, including its honest wait reason,
+                // once. Continuing cancellation churn is reconsidered by the next daemon tick.
+                continue;
+            }
+
+            _lastLaunchAt = now;
+
+            QueueLaunchOutcome outcome;
+            try
+            {
+                outcome = await _launch(new QueueLaunchRequest(item, tier, roomDirectory), CancellationToken.None)
+                    .ConfigureAwait(false);
+            }
+            catch (OperationCanceledException)
+            {
+                // Nothing in the launch takes a cancellable token any more, so this is the belt to that
+                // braces. `failed`, not left launched: the queue has lost track of whether a lane started,
+                // and the room id on the item is how an operator finds out.
+                await FailAsync(
+                    item, $"the daemon shut down while launching into room '{roomDirectory}'; check that room before "
+                    + "re-adding this item, because the lane may have started", roomDirectory, now, decision, tier,
+                    CancellationToken.None).ConfigureAwait(false);
+                return interval;
+            }
+            catch (Exception ex) when (ex is not OutOfMemoryException and not StackOverflowException)
+            {
+                // A throw the launcher does not model as a QueueLaunchOutcome -- an IO failure inside
+                // TerminalSettleRecorder, say. Mapped to the item's own Failed state and one recorded fact
+                // rather than unwound into the loop's catch-all, which would leave the item launched with
+                // nothing said about why (#1939 review).
+                await FailAsync(
+                    item, $"the launch into room '{roomDirectory}' threw {ex.GetType().Name}: {ex.Message}",
+                    Directory.Exists(roomDirectory) ? roomDirectory : null, now, decision, tier,
+                    CancellationToken.None).ConfigureAwait(false);
+                return interval;
+            }
+
+            if (outcome.RunwayHeld)
+            {
+                // The item goes back to QUEUED, undoing the pre-launch mark above: nothing was dispatched,
+                // so it must be the candidate again next tick (Q5's arm). _lastLaunchAt stays advanced, so
+                // the gap paces the retry -- a held vendor must not be re-asked every TickSeconds.
+                await MarkAsync(item.Tag, existing => existing with
+                {
+                    State = QueueItemState.Queued,
+                    RoomDirectory = null,
+                    LaunchedAt = null,
+                }).ConfigureAwait(false);
+                await RecordAsync(
+                    new QueueDecisionEntry(
+                        now, item.Tag, QueueDecisionEntry.Waited,
+                        QueueWaitReasons.Token(QueueWaitReason.RunwayHeld),
+                        decision.LiveWeight, decision.FreeGb, decision.FloorGb,
+                        tier.TierKey, tier.Adapter, tier.Model, tier.Effort, tier.IsOverride, tier.OverrideReason,
+                        SelectionSource: tier.SelectionSource),
+                    cancellationToken).ConfigureAwait(false);
+                return interval;
+            }
+
+            if (outcome.Error is { Length: > 0 } error)
+            {
+                // outcome.RoomDirectory, not the path above: the launcher reports it only when the dispatch
+                // actually provisioned the room, and a refusal that never got that far must leave the item
+                // pointing at nothing rather than at a directory that does not exist.
+                await FailAsync(item, error, outcome.RoomDirectory, now, decision, tier, CancellationToken.None)
+                    .ConfigureAwait(false);
+                return interval;
+            }
+
+            // The item is already marked launched, above. All that is left is the fact.
             await RecordAsync(
                 new QueueDecisionEntry(
-                    now, item.Tag, QueueDecisionEntry.Waited,
-                    QueueWaitReasons.Token(QueueWaitReason.RunwayHeld),
+                    now, item.Tag, QueueDecisionEntry.Launched, null,
                     decision.LiveWeight, decision.FreeGb, decision.FloorGb,
                     tier.TierKey, tier.Adapter, tier.Model, tier.Effort, tier.IsOverride, tier.OverrideReason,
-                    SelectionSource: tier.SelectionSource),
-                cancellationToken).ConfigureAwait(false);
+                    outcome.RoomDirectory ?? roomDirectory, tier.SelectionSource),
+                CancellationToken.None).ConfigureAwait(false);
+
             return interval;
         }
-
-        if (outcome.Error is { Length: > 0 } error)
-        {
-            // outcome.RoomDirectory, not the path above: the launcher reports it only when the dispatch
-            // actually provisioned the room, and a refusal that never got that far must leave the item
-            // pointing at nothing rather than at a directory that does not exist.
-            await FailAsync(item, error, outcome.RoomDirectory, now, decision, tier, CancellationToken.None)
-                .ConfigureAwait(false);
-            return interval;
-        }
-
-        // The item is already marked launched, above. All that is left is the fact.
-        await RecordAsync(
-            new QueueDecisionEntry(
-                now, item.Tag, QueueDecisionEntry.Launched, null,
-                decision.LiveWeight, decision.FreeGb, decision.FloorGb,
-                tier.TierKey, tier.Adapter, tier.Model, tier.Effort, tier.IsOverride, tier.OverrideReason,
-                outcome.RoomDirectory ?? roomDirectory, tier.SelectionSource),
-            CancellationToken.None).ConfigureAwait(false);
 
         return interval;
     }
@@ -551,6 +595,27 @@ public sealed class QueueSchedulerService : BackgroundService
             // that already launched is treated as not having launched. Logged, never swallowed silently.
             Console.Error.WriteLine(
                 $"Could not append to the queue decision ledger at '{BatonPaths.QueueDecisionLedgerFile}': {ex.Message}.");
+        }
+    }
+
+    /// <summary>
+    /// Repairs the one ledger fact promised by persisted cancellation state. The CLI attempts the
+    /// append immediately and reports a failure; the daemon is the automatic recovery path, so an
+    /// unavailable ledger is logged but cannot stop later queue work from being considered.
+    /// </summary>
+    private static async Task ReconcileCancelledItemsAsync(CancellationToken cancellationToken)
+    {
+        var snapshot = await QueueStore.LoadAsync(BatonPaths.QueueFile, cancellationToken).ConfigureAwait(false);
+        try
+        {
+            await QueueDecisionLedgerStore.ReconcileCancellationsAsync(
+                snapshot.Items, BatonPaths.QueueDecisionLedgerFile, cancellationToken).ConfigureAwait(false);
+        }
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or WaitHandleCannotBeOpenedException)
+        {
+            Console.Error.WriteLine(
+                $"Could not reconcile cancelled queue items into the decision ledger at "
+                + $"'{BatonPaths.QueueDecisionLedgerFile}': {ex.Message}.");
         }
     }
 

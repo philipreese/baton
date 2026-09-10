@@ -30,8 +30,8 @@ namespace Baton.Cli.Daemon;
 /// Reuses <see cref="FleetStatusTool.DiscoverRoomsAsync"/>/<see cref="FleetStatusTool.ProcessRoomAsync"/>
 /// in-process (same assembly) rather than going through the MCP tool's JSON-in/JSON-out wrapper — the
 /// exact room list and per-room projection <c>fleet_status</c> itself would return, serialized with the
-/// SAME <see cref="FleetStatusTool.SerializerOptions"/>. This PR (PR-A) adds no pusher.py change: both
-/// paths run side by side until #1557's own PR-B.
+/// SAME <see cref="FleetStatusTool.SerializerOptions"/>. This daemon path is the sole Fleet Glass
+/// delivery; no second delivery is maintained.
 /// </para>
 /// <para>
 /// <b>PR-A2 (#1557)</b> added <c>rooms[].live.stdoutTail</c> — <see cref="StdoutTailRenderer"/>'s own
@@ -47,9 +47,8 @@ namespace Baton.Cli.Daemon;
 /// <para>
 /// <b>#1912 slice 1</b> added the top-level <c>queue</c> section — the conductor's own rows
 /// (<see cref="QueueBoard"/> is the projection and the register of what each field means).
-/// <b>This plane only:</b> <c>pusher.py</c> composes the mailbox payload key by key, so <c>queue</c>
-/// does not travel to it, and <c>glass.html</c> renders the section absent-safe for exactly that
-/// reason. That is the split C-11 rules, not an omission.
+/// The daemon-served Fleet Glass consumes <c>queue</c> directly from this projection. The page renders
+/// the section absent-safe when no queue file exists; that is the split C-11 rules, not an omission.
 /// </para>
 /// </remarks>
 public sealed class FleetProjectionWriter : BackgroundService
@@ -91,14 +90,13 @@ public sealed class FleetProjectionWriter : BackgroundService
     public static readonly TimeSpan DefaultInterval = TimeSpan.FromSeconds(30);
 
     /// <summary>
-    /// #1981: how many missed ticks make the projection "stale" — the one place that multiple is
-    /// stated. Three, not one: a single tick that runs long (a room walk under IO contention) is
-    /// ordinary, and a reader that shouted on every one of those would be the false-firing banner
-    /// #1613 already had to pull out of <c>glass.html</c> once. Every consumer derives its own
-    /// threshold from <see cref="StaleAfter"/> rather than transcribing 90 seconds:
-    /// <c>FleetStatusTool</c>'s <c>stale</c> flag, and — across the language boundary, where a
-    /// literal is unavoidable — <c>PROJECTION_STALE_AFTER_MS</c> in
-    /// <c>tools/fleet-glass/worker.core.mjs</c>, which names this symbol as its source.
+    /// #1981: how many missed ticks make the projection "stale" for the MCP reader. Three, not one:
+    /// a single tick that runs long (a room walk under IO contention) is ordinary, and a reader that
+    /// shouted on every one of those would be the false-firing banner #1613 already had to pull out
+    /// of <c>glass.html</c> once. <c>FleetStatusTool</c>'s <c>stale</c> flag derives this threshold
+    /// from <see cref="StaleAfter"/>. The daemon-served page has a distinct ten-minute
+    /// <c>RUNNING_SUSPICION_MS</c> check for Running rooms; it is not a second copy of this
+    /// three-tick projection threshold.
     /// </summary>
     public const int StaleAfterTicks = 3;
 
@@ -107,7 +105,7 @@ public sealed class FleetProjectionWriter : BackgroundService
     public static readonly TimeSpan MinInterval = TimeSpan.FromSeconds(1);
     public static readonly TimeSpan MaxInterval = TimeSpan.FromDays(1);
 
-    // spec/baton.md §6: `LAST_ACTIVITY_BUCKET_SECONDS` in pusher.py -- floors a Running room's stdout
+    // Historical pusher behavior: `LAST_ACTIVITY_BUCKET_SECONDS` floored a Running room's stdout
     // mtime to this bucket before it enters the payload, so a continuously-streaming lane's every-chunk
     // mtime advance does not itself change the file every cycle.
     private const int LastActivityBucketSeconds = 90;
@@ -115,15 +113,14 @@ public sealed class FleetProjectionWriter : BackgroundService
     // spec/baton.md §6 (#1155): newest N pruned execution dirs surfaced per room.
     private const int PrunedItemsCap = 20;
 
-    // #1902: `TIMELINE_CAP` in pusher.py -- the newest N timeline entries kept per room. Named here
-    // rather than repeated as a literal for the same reason LastActivityBucketSeconds is: the two
-    // implementations project the same field and a silent divergence is invisible in the pushed body.
+    // #1902: the legacy `TIMELINE_CAP` -- the newest N timeline entries kept per room. Named here
+    // rather than repeated as a literal so the daemon's projection boundary has one visible cap.
     private const int TimelineCap = 30;
 
     private readonly Dictionary<string, ExecutionLiveState> _liveCache = new(StringComparer.Ordinal);
     private readonly Dictionary<string, PrunedCacheEntry> _prunedCache = new(StringComparer.Ordinal);
 
-    // #1902: the terminal-room cache ResolveTimelineAsync's own remarks describe -- pusher.py's
+    // #1902: the terminal-room cache ResolveTimelineAsync's own remarks describe -- the legacy
     // `terminal_timeline_cache` is its counterpart. In-memory only: a restart self-heals. Plain CLR
     // entries, not JsonNode: a JsonNode has a single parent, so a cached node re-attached on the next
     // tick would throw (ComputePrunedInfo's DeepClone is the other way out of the same trap).
@@ -236,15 +233,13 @@ public sealed class FleetProjectionWriter : BackgroundService
         var liveLanesByVendor = new Dictionary<string, int>(StringComparer.Ordinal);
         var liveLanes = new List<QueueLiveLane>();
 
-        // pusher.py's main() loop reloads its secret-gate denylist every cycle (not once at startup),
-        // so an operator's edit to the patterns file takes effect on the NEXT tick rather than needing
-        // a daemon restart -- matched here rather than caching across ticks.
+        // Reload the secret-gate denylist every cycle (not once at startup), so an operator's edit to
+        // the patterns file takes effect on the NEXT tick rather than needing a daemon restart.
         var secretPatterns = StdoutTailRenderer.LoadSecretPatterns(BatonPaths.SecretPatternsFile);
         if (secretPatterns is null && !_loggedMissingSecretPatterns)
         {
-            // #1816: LoadSecretPatterns' fail-closed null withholds every stdoutTail line -- that stays
-            // fail-closed, but silently was how the daemon and the pusher drifted onto two different
-            // paths in the first place. Logged once per process (not every ~30s tick) since a missing
+            // #1816: LoadSecretPatterns' fail-closed null withholds every stdoutTail line. Log it once
+            // per process (not every ~30s tick) since a missing
             // denylist is an operator setup gap, not a per-tick event worth repeating.
             _loggedMissingSecretPatterns = true;
             diagnostics.WriteLine(
@@ -277,9 +272,9 @@ public sealed class FleetProjectionWriter : BackgroundService
             // "Stalled" (FleetStatusTool's own display-only override) -- the step's own State stays
             // "Running" regardless. processAlive/stdout_last_write_ago_sec/elapsed exist precisely to
             // diagnose that case, so they gate on the step, never on the room's display state. `live`
-            // (spec/baton.md §6, pre-existing pusher.py contract) stays narrower -- gated inside
-            // AttachLiveFieldsAsync on the room's displayed State being exactly "Running", matching
-            // pusher's own "never a live section a dead process cannot honestly back" rule.
+            // (spec/baton.md §6) stays narrower -- gated inside AttachLiveFieldsAsync on the room's
+            // displayed State being exactly "Running": never a live section a dead process cannot
+            // honestly back.
             if (view.Steps?.Any(s => s.State == "Running" && s.Execution is not null) == true)
             {
                 await AttachLiveFieldsAsync(node, view, secretPatterns, liveKeysThisTick, cancellationToken).ConfigureAwait(false);
@@ -325,10 +320,9 @@ public sealed class FleetProjectionWriter : BackgroundService
             ["derived_at"] = DateTimeOffset.UtcNow.ToString("O"),
             ["rooms"] = roomsArray,
 
-            // #1902: room path -> timeline entries, the field pusher.py's `file` path reads straight
-            // through (`projection_data["timelines"]`) instead of spending a `room_detail` MCP call per
-            // room per cycle. Always present, `{}` when no room has a readable timeline -- the absent
-            // key is what the pre-#1902 file looked like, and the pusher treats the two the same.
+            // #1902: room path -> timeline entries, so the daemon-served page can read timelines from
+            // this projection instead of spending a `room_detail` MCP call per room per cycle. Always
+            // present, `{}` when no room has a readable timeline.
             ["timelines"] = timelines,
         };
 
@@ -379,10 +373,8 @@ public sealed class FleetProjectionWriter : BackgroundService
     /// <item><b>The section threw</b> — the exception's own message, which the panel renders as a
     /// visible line. This is the state that was previously indistinguishable from the one above, and
     /// it is the one an operator has to act on.</item>
-    /// <item><b>Neither key is present at all</b> — nothing the daemon wrote, because this delivery did
-    /// not come from the daemon. <c>pusher.py</c> composes the mailbox payload key by key
-    /// (<c>wrapped_snapshot</c>) and copies no unknown top-level key, so the tailnet plane carries
-    /// neither of the two above. <c>glass.html</c> says so rather than rendering blank.</item>
+    /// <item><b>Neither key is present at all</b> — the daemon could not write either queue marker for
+    /// this tick. <c>glass.html</c> says so rather than rendering blank.</item>
     /// </list>
     /// <para>
     /// <b>A failure here costs the section, never the tick.</b> The whole projection is what the glass
@@ -562,9 +554,8 @@ public sealed class FleetProjectionWriter : BackgroundService
 
                 // #1812: the LATEST line's reading (WorkerUsage.CacheReadLevelTokens), not the running
                 // Σ TokenBudgetMonitor also tracks (WorkerUsage.CacheReadTokens, display-only per that
-                // field's own doc) -- pusher.py's derive path replaces this value per turn rather than
-                // summing it, so the projection has to report the same level or the compare's identity
-                // check reads a structural sum-vs-level mismatch as an ~8x drift.
+                // field's own doc) -- the source derivation replaces this value per turn rather than
+                // summing it, so the projection reports the latest level rather than a running sum.
                 if (usage.CacheReadLevelTokens is { } cacheReadTokens)
                 {
                     liveNode["cacheReadTokens"] = cacheReadTokens;
@@ -585,8 +576,7 @@ public sealed class FleetProjectionWriter : BackgroundService
 
             // #1557 PR-A2: same stdoutPath FindStdoutPaths already resolved above -- never a second
             // way of finding it. A snapshot read from EOF every tick (not fed by the incremental
-            // offset ReadIncrementalInto tracks), matching pusher.py's own "the tail is a snapshot of
-            // now, not an accumulator" design.
+            // offset ReadIncrementalInto tracks): the tail is a snapshot of now, not an accumulator.
             var stdoutTail = StdoutTailRenderer.ComputeTail(stdoutPath, secretPatterns);
             if (stdoutTail is not null)
             {
@@ -601,11 +591,10 @@ public sealed class FleetProjectionWriter : BackgroundService
                 liveNode["doingNow"] = doingNow;
             }
 
-            // spec/baton.md §6 (pre-existing pusher.py contract): `live` itself stays gated on the
-            // room's DISPLAYED state being exactly "Running" -- never a live section for a room #1513
-            // already downgraded to "Stalled" once its engine is confirmed dead, matching pusher's own
-            // "never a live section a dead process cannot honestly back" rule. processAlive below is
-            // deliberately NOT behind this gate -- it is the diagnostic that explains a Stalled room.
+            // spec/baton.md §6: `live` itself stays gated on the room's DISPLAYED state being exactly
+            // "Running" -- never a live section for a room #1513 already downgraded to "Stalled" once
+            // its engine is confirmed dead. processAlive below is deliberately NOT behind this gate --
+            // it is the diagnostic that explains a Stalled room.
             if (view.State == "Running")
             {
                 node["live"] = liveNode;
@@ -680,9 +669,9 @@ public sealed class FleetProjectionWriter : BackgroundService
     }
 
     /// <summary>
-    /// #1902 — one room's timeline entries for this tick, the daemon-side counterpart of pusher.py's
+    /// #1902 — one room's timeline entries for this tick, projected by the daemon from the room's
     /// <c>resolve_room_timeline</c>. A room is terminal once its <c>terminal.json</c> exists (the same
-    /// sentinel pusher's <c>is_terminal_room</c> keys on, not the displayed state): a terminal room's
+    /// sentinel (the legacy reader keyed on <c>is_terminal_room</c>, not the displayed state): a terminal room's
     /// ledger is frozen, so it is read once and served from <see cref="_terminalTimelineCache"/>
     /// afterwards, while a non-terminal room's still-growing timeline is re-read every tick.
     /// <para>
@@ -697,10 +686,8 @@ public sealed class FleetProjectionWriter : BackgroundService
     /// starts AND finishes between two ticks — the daemon never observing the non-terminal window —
     /// still misses the cache and re-reads.</description></item>
     /// </list>
-    /// Without both, a re-run room served the FIRST run's entries until the daemon process restarted,
-    /// and the daemon is a long-lived scheduled task (spec/baton.md §7). <c>pusher.py</c>'s
-    /// <c>resolve_room_timeline</c> still has the hole; parity with it is not a correctness argument,
-    /// and <c>file</c> is the default source now.
+    /// Without both, a re-run room served the FIRST run's entries until the daemon process restarted.
+    /// The cache invalidation above is the correctness rule; <c>file</c> is the default source.
     /// </para>
     /// <para>
     /// <para>
@@ -774,7 +761,7 @@ public sealed class FleetProjectionWriter : BackgroundService
     }
 
     /// <summary>
-    /// pusher.py's <c>extract_timeline</c> content projection, in C#: KEEP ONLY <c>type</c>,
+    /// The legacy Fleet Glass content projection, in C#: KEEP ONLY <c>type</c>,
     /// <c>timestamp</c>, <c>stepId</c> and <c>exitCode</c> off each entry, capped at the newest
     /// <see cref="TimelineCap"/>. Like that function it enumerates what it KEEPS rather than what it
     /// drops, so a future <see cref="RoomTimelineEntryView"/> field cannot leak into the projection by
@@ -782,12 +769,9 @@ public sealed class FleetProjectionWriter : BackgroundService
     /// serialized, since serializing it would carry <c>detail</c> (an exception message) straight out.
     /// No event type is filtered, deliberately (#1537): the vocabulary is whatever the engine journals.
     /// <para>
-    /// <b>Two implementations of one projection, kept in lock-step by a shared fixture</b>
-    /// (<c>tests/fixtures/timeline-projection-sample.json</c>) rather than by a literal shared
-    /// implementation across the C#/Python boundary — the same pattern <c>doingNow</c> uses
-    /// (spec/baton.md §6). This method and <c>pusher.py</c>'s <c>extract_timeline</c> both project that
-    /// fixture's <c>roomDetail</c> to its <c>expected</c> array byte-for-byte, so a drift in either —
-    /// a moved cap, a field added or dropped, a reordered key — reds one side. <c>internal</c>, not
+    /// The shared fixture (<c>tests/fixtures/timeline-projection-sample.json</c>) pins this method's
+    /// <c>roomDetail</c> projection to its <c>expected</c> array byte-for-byte, so a drift — a moved
+    /// cap, a field added or dropped, or a reordered key — reds the daemon projection. <c>internal</c>, not
     /// private, so the xunit half can assert the projection itself rather than only its effect on a
     /// whole tick's JSON.
     /// </para>
@@ -851,7 +835,7 @@ public sealed class FleetProjectionWriter : BackgroundService
     /// <c>ExecutionUsageProjector</c>'s terminal-usage read already uses
     /// (<see cref="ArtifactManager.ResolveOutputDirectory"/>, falling back to
     /// <see cref="ArtifactManager.ResolvePrunedOutputDirectory"/> for a retention-swept execution), not
-    /// a reimplementation of pusher.py's own path logic.
+    /// a reimplementation of the deleted legacy pusher's path logic.
     /// </summary>
     private static (string? StdoutPath, string? RolloverPath) FindStdoutPaths(string roomPath, string executionId)
     {
@@ -876,8 +860,8 @@ public sealed class FleetProjectionWriter : BackgroundService
     }
 
     /// <summary>
-    /// Byte-offset incremental read plus rollover detection — the daemon's own port of pusher.py's
-    /// <c>_read_new_lines</c>/rollover heuristic (no C# precedent existed; <c>ExecutionStreamLogger</c>
+    /// Byte-offset incremental read plus rollover detection — historically shared with the deleted
+    /// legacy pusher's <c>_read_new_lines</c>/rollover heuristic (no C# precedent existed; <c>ExecutionStreamLogger</c>
     /// writes the rollover, nothing before this read it back incrementally). A size DECREASE since the
     /// offset last read is the rollover signal: <c>.stdout.log</c> rolls to <c>.stdout.log.1</c> at 8
     /// MiB and resets to empty.
@@ -922,7 +906,7 @@ public sealed class FleetProjectionWriter : BackgroundService
     /// Complete lines appended to <paramref name="path"/> since byte <paramref name="offset"/>, and the
     /// new offset positioned right after the last complete line consumed. A trailing partial line (the
     /// vendor CLI mid-flush, no newline yet) is left unconsumed so it is read whole next cycle instead
-    /// of split across two parses — mirrors pusher.py's <c>_read_new_lines</c>.
+    /// of split across two parses — preserves the legacy reader's historical behavior.
     /// </summary>
     private static (List<string> Lines, long NewOffset) ReadNewLines(string path, long offset)
     {
@@ -1018,11 +1002,11 @@ public sealed class FleetProjectionWriter : BackgroundService
     }
 
     /// <summary>
-    /// spec/baton.md §6 (#1155) — port of pusher.py's <c>pruned_info_for_room</c>: present only for a
+    /// spec/baton.md §6 (#1155) — the legacy pusher's <c>pruned_info_for_room</c> behavior: present only for a
     /// room whose <c>artifacts/pruned/</c> directory is non-empty, capped at the
     /// <see cref="PrunedItemsCap"/> newest entries by <c>prunedAt</c>. Cached per room path, keyed on
     /// the pruned directory's own (mtime, child count) — a room with an unchanged pruned/ directory
-    /// skips the walk entirely, mirroring pusher's own cache.
+    /// skips the walk entirely, preserving the legacy cache behavior.
     /// </summary>
     private JsonObject? ComputePrunedInfo(string roomPath)
     {
@@ -1059,7 +1043,7 @@ public sealed class FleetProjectionWriter : BackgroundService
                 DateTime prunedAt;
                 if (Directory.Exists(child))
                 {
-                    // Unfiltered, matching pusher.py's pruned_info_for_room: this field answers "how
+                    // Unfiltered, matching the legacy projection behavior: this field answers "how
                     // much did pruning reclaim", and stream logs were reclaimed too, so their bytes
                     // count. #1351's filter is about hiding stream logs from artifact LISTINGS; it does
                     // not apply to this reclaimed-bytes total.
@@ -1079,7 +1063,7 @@ public sealed class FleetProjectionWriter : BackgroundService
             }
             catch (IOException)
             {
-                // Best-effort, same as pusher.py's own try/except OSError per child.
+                // Best-effort, as required by the legacy projection behavior, per child.
             }
         }
 
@@ -1130,10 +1114,9 @@ public sealed class FleetProjectionWriter : BackgroundService
     /// or lock violation, or the access-denied Windows raises for a delete-pending name) is an
     /// ordinary transient RETRY that carries no information about content. Every shipped reader
     /// already treats it as one, and this is the single place that rule is stated:
-    /// <c>tools/fleet-glass/pusher.py</c>'s <c>read_projection_file</c> (<c>except OSError</c> -> fall
-    /// back to derive this cycle, re-read next), <see cref="Mcp.FleetProjectionStaleness"/>'s
-    /// <c>Read</c> and <see cref="GlassHttpService"/>'s <c>WriteProjectionAsync</c> (both catch, report
-    /// unavailable, and re-read on the next call). A reader that reported a failed open as corruption
+    /// <see cref="Mcp.FleetProjectionStaleness"/>'s <c>Read</c> and <see cref="GlassHttpService"/>'s
+    /// <c>WriteProjectionAsync</c> (both catch, report unavailable, and re-read on the next call).
+    /// A reader that reported a failed open as corruption
     /// would be wrong about this contract -- which is what <c>FleetProjectionWriterTests</c>' own race
     /// arm was doing when #2012 was filed.
     /// </para></summary>

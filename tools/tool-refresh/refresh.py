@@ -6,10 +6,8 @@ Replaces the single-global-tool drain cycle (#1645) with isolated side-by-side i
 - Run sanity invocations against the newly installed executable.
 - Atomically flip `~/.baton/tools/current` pointer file (temp file + rename).
 - Ensure launcher scripts (`baton.cmd`, `baton.ps1`, `baton`) are installed in `~/.dotnet/tools` on PATH,
-- Build Debug CLI for the pusher task.
-- Restart the `fleet-glass-pusher` and `baton-daemon` scheduled tasks (#1557), so both a daemon
-  restart via `dotnet tool install` and a plain re-refresh at the same head cycle the daemon onto
-  the launcher's `current` pointer the same way the pusher already does.
+- Restart the `baton-daemon` scheduled task so a re-refresh cycles the daemon onto the launcher's
+  `current` pointer.
 - Prune unreferenced versions older than the top 3 installs.
 - No drain wait; no `draining.json` write. Keep `draining.json` honoured by dispatch as an operator-invoked stop only.
 
@@ -518,7 +516,7 @@ def prune_tools(deps: Deps, dry_run: bool, print_fn: Callable[[str], None], keep
 
 
 def refresh(deps: Deps, dry_run: bool, print_fn: Callable[[str], None]) -> int:
-    """Executes the side-by-side refresh: pack -> install -> verify -> flip pointer -> launcher -> pusher -> prune."""
+    """Executes the side-by-side refresh: pack -> install -> verify -> flip pointer -> launcher -> daemon -> prune."""
     version = read_repo_version(deps.repo_root)
     if version is None:
         print_fn(
@@ -624,29 +622,10 @@ def refresh(deps: Deps, dry_run: bool, print_fn: Callable[[str], None]) -> int:
     if not install_launcher(deps, dry_run, print_fn):
         return 1
 
-    # Rebuild Baton.Cli Debug for the pusher
-    rebuild_result = run_step(deps, ["dotnet", "build", "src/Baton.Cli"], dry_run, print_fn)
-    if rebuild_result.returncode != 0:
-        print_fn(
-            f"tool-refresh: warning: rebuilding Baton.Cli Debug failed (exit {rebuild_result.returncode}): "
-            f"{rebuild_result.stderr.strip()}"
-        )
-    else:
-        print_fn("tool-refresh: rebuilt Baton.Cli Debug for fleet-glass pusher")
-
-    # Restart scheduled tasks -- both are long-running processes that only pick up a newly
-    # flipped `current` pointer by being restarted; neither re-resolves it on its own mid-run.
+    # Restart the daemon task -- it is a long-running process that only picks up a newly flipped
+    # `current` pointer by being restarted; it does not re-resolve it on its own mid-run.
     if sys.platform == "win32" or os.name == "nt":
-        restart_cmd = [
-            "powershell", "-NoProfile", "-Command",
-            "Stop-ScheduledTask -TaskName fleet-glass-pusher -ErrorAction SilentlyContinue; "
-            "Start-ScheduledTask -TaskName fleet-glass-pusher -ErrorAction SilentlyContinue",
-        ]
-        run_step(deps, restart_cmd, dry_run, print_fn)
-        print_fn("tool-refresh: restarted fleet-glass-pusher scheduled task")
-
-        # #1557: the daemon has no HTTP listener or other external signal to poll for a new tool
-        # head, so it needs the same restart-on-refresh treatment the pusher already gets.
+        # The daemon has no HTTP listener or other external signal to poll for a new tool head.
         # #1773: kill any orphaned baton.exe daemon process first (see kill_orphaned_daemon_processes),
         # then confirm after restart that a fresh instance actually came up under the new tool_dir.
         kill_orphaned_daemon_processes(deps, dry_run, print_fn)
@@ -1052,14 +1031,34 @@ def _selftest_refresh_end_to_end_mocked() -> bool:
             print("  FAILED: dotnet tool uninstall --global baton was not executed")
             ok = False
 
-        # Both scheduled tasks are restarted on every refresh (#1557: baton-daemon mirrors the
-        # pusher's own restart so it also cycles onto the newly flipped tool head).
+        # The daemon task is restarted after every refresh so it cycles onto the newly flipped tool
+        # head.
         powershell_cmds = [" ".join(c) for c in commands_run if c and c[0] == "powershell"]
-        if not any("fleet-glass-pusher" in c for c in powershell_cmds):
-            print(f"  FAILED: fleet-glass-pusher scheduled task was not restarted. powershell commands: {powershell_cmds}")
-            ok = False
         if not any("baton-daemon" in c for c in powershell_cmds):
             print(f"  FAILED: baton-daemon scheduled task was not restarted. powershell commands: {powershell_cmds}")
+            ok = False
+
+        # The retired mailbox task must not be mentioned by any refresh action. Keep this negative
+        # assertion on the complete command trace so a future build/log/restart step cannot quietly
+        # resurrect its task or state writes.
+        refresh_commands = [" ".join(c) for c in commands_run]
+
+        def no_retired_pusher_command(commands: Sequence[str]) -> bool:
+            return not any("fleet-glass-pusher" in c.lower() for c in commands)
+
+        if not no_retired_pusher_command(refresh_commands):
+            print(f"  FAILED: refresh mentioned the retired fleet-glass-pusher task. commands: {refresh_commands}")
+            ok = False
+
+        # Synthetic pre-change arm: the assertion must reject the old restart shape, or this test
+        # would still pass against a refresh that had reintroduced the retired task.
+        reintroduced_commands = refresh_commands + [
+            "Stop-ScheduledTask -TaskName fleet-glass-pusher",
+            "Start-ScheduledTask -TaskName fleet-glass-pusher",
+            "Add-Content fleet-glass-pusher.log refresh",
+        ]
+        if no_retired_pusher_command(reintroduced_commands):
+            print("  FAILED: retired-task negative assertion did not detect a synthetic reintroduction")
             ok = False
 
         # #1773: the orphan-kill query must run BEFORE the task is restarted -- killing after would

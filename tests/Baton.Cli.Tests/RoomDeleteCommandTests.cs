@@ -5,7 +5,7 @@ namespace Baton.Cli.Tests;
 
 /// <summary>
 /// <c>baton room delete</c> (#1659, ruling in full at spec/baton.md §8) — see
-/// <see cref="RoomDeleteCommand"/>'s own remarks for exactly what it removes and what it cannot reach.
+/// <see cref="RoomDeleteCommand"/>'s own remarks for exactly what it removes.
 /// </summary>
 [Collection(SerializedEnvironmentCollection.Name)]
 public sealed class RoomDeleteCommandTests
@@ -34,7 +34,7 @@ public sealed class RoomDeleteCommandTests
             var roomDir = Path.Combine(tempHome, "room-not-terminal");
             Directory.CreateDirectory(roomDir); // no terminal.json -> not terminal
 
-            var options = new RoomDeleteOptions(roomDir, KeepDeliverables: false, Force: false);
+            var options = new RoomDeleteOptions(roomDir, Force: false);
 
             var ex = await Assert.ThrowsAsync<CliArgumentException>(
                 () => RoomDeleteCommand.ExecuteAsync(options, TextWriter.Null, TestContext.Current.CancellationToken));
@@ -58,7 +58,7 @@ public sealed class RoomDeleteCommandTests
             var roomDir = Path.Combine(tempHome, "room-not-terminal-forced");
             Directory.CreateDirectory(roomDir);
 
-            var options = new RoomDeleteOptions(roomDir, KeepDeliverables: false, Force: true);
+            var options = new RoomDeleteOptions(roomDir, Force: true);
             var result = await RoomDeleteCommand.ExecuteAsync(options, TextWriter.Null, TestContext.Current.CancellationToken);
 
             Assert.True(result.DirectoryExisted);
@@ -71,7 +71,7 @@ public sealed class RoomDeleteCommandTests
     }
 
     [Fact]
-    public async Task ExecuteAsync_TerminalRoom_RemovesDirectory_RegistryLine_AndWritesATombstone()
+    public async Task ExecuteAsync_TerminalRoom_RemovesDirectory_AndRegistryLine()
     {
         var tempHome = CreateTempHome();
         using var scope = BatonEnvironmentSnapshot.BeginScope(BatonEnvironmentSnapshot.Blank with { HomeOverride = tempHome });
@@ -83,45 +83,16 @@ public sealed class RoomDeleteCommandTests
                 roomDir, tempHome, BatonPaths.RoomRegistryFile, explicitRegister: true,
                 cancellationToken: TestContext.Current.CancellationToken);
 
-            var options = new RoomDeleteOptions(roomDir, KeepDeliverables: false, Force: false);
+            var options = new RoomDeleteOptions(roomDir, Force: false);
             var result = await RoomDeleteCommand.ExecuteAsync(options, TextWriter.Null, TestContext.Current.CancellationToken);
 
             Assert.True(result.DirectoryExisted);
             Assert.Equal(1, result.RegistryLinesRemoved);
-            Assert.True(result.DeliverablesTombstoneWritten);
-
             Assert.False(Directory.Exists(roomDir));
             var remainingRegistryEntries = await RoomRegistryStore.ReadDistinctByRoomAsync(
                 BatonPaths.RoomRegistryFile, TestContext.Current.CancellationToken);
             Assert.Empty(remainingRegistryEntries);
 
-            var tombstoneLine = (await File.ReadAllLinesAsync(BatonPaths.DeletedRoomsFile, TestContext.Current.CancellationToken))
-                .Single(line => !string.IsNullOrWhiteSpace(line));
-            var tombstone = System.Text.Json.JsonSerializer.Deserialize<DeletedRoomTombstone>(tombstoneLine)!;
-            Assert.Equal(BatonPaths.RecordKey(roomDir), tombstone.RoomPath);
-        }
-        finally
-        {
-            DirectoryCleanup.DeleteRecursively(tempHome);
-        }
-    }
-
-    [Fact]
-    public async Task ExecuteAsync_KeepDeliverables_SkipsTheTombstoneButStillRemovesTheRoom()
-    {
-        var tempHome = CreateTempHome();
-        using var scope = BatonEnvironmentSnapshot.BeginScope(BatonEnvironmentSnapshot.Blank with { HomeOverride = tempHome });
-        try
-        {
-            var roomDir = Path.Combine(tempHome, "room-terminal-keep-deliverables");
-            await WriteTerminalSentinelAsync(roomDir, WorkflowOutcome.Succeeded, TestContext.Current.CancellationToken);
-
-            var options = new RoomDeleteOptions(roomDir, KeepDeliverables: true, Force: false);
-            var result = await RoomDeleteCommand.ExecuteAsync(options, TextWriter.Null, TestContext.Current.CancellationToken);
-
-            Assert.False(result.DeliverablesTombstoneWritten);
-            Assert.False(Directory.Exists(roomDir));
-            Assert.False(File.Exists(BatonPaths.DeletedRoomsFile));
         }
         finally
         {
@@ -141,7 +112,7 @@ public sealed class RoomDeleteCommandTests
             var conductorRoom = Path.Combine(tempHome, "conductor");
             Directory.CreateDirectory(conductorRoom);
 
-            var options = new RoomDeleteOptions(conductorRoom, KeepDeliverables: false, Force: false);
+            var options = new RoomDeleteOptions(conductorRoom, Force: false);
 
             var ex = await Assert.ThrowsAsync<CliArgumentException>(
                 () => RoomDeleteCommand.ExecuteAsync(options, TextWriter.Null, TestContext.Current.CancellationToken));
@@ -167,7 +138,7 @@ public sealed class RoomDeleteCommandTests
             var conductorRoom = Path.Combine(tempHome, "conductor");
             Directory.CreateDirectory(conductorRoom);
 
-            var options = new RoomDeleteOptions(conductorRoom, KeepDeliverables: false, Force: true);
+            var options = new RoomDeleteOptions(conductorRoom, Force: true);
 
             var ex = await Assert.ThrowsAsync<CliArgumentException>(
                 () => RoomDeleteCommand.ExecuteAsync(options, TextWriter.Null, TestContext.Current.CancellationToken));
@@ -195,7 +166,7 @@ public sealed class RoomDeleteCommandTests
             // Directory never created -> RefuseUnlessTerminalOrForced's absent-directory carve-out
             // (see its own remarks) applies, so this must not refuse.
 
-            var options = new RoomDeleteOptions(roomDir, KeepDeliverables: false, Force: false);
+            var options = new RoomDeleteOptions(roomDir, Force: false);
             var result = await RoomDeleteCommand.ExecuteAsync(options, TextWriter.Null, TestContext.Current.CancellationToken);
 
             Assert.False(result.DirectoryExisted);

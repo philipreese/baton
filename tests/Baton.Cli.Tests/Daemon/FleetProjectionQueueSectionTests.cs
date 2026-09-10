@@ -187,4 +187,17 @@ public sealed class FleetProjectionQueueSectionTests : IDisposable
         Assert.Equal("memory", queue.GetProperty("pending")[0].GetProperty("reason").GetString());
         Assert.True(queue.TryGetProperty("lastDecisionAt", out _));
     }
+
+    [Fact]
+    public async Task A_cancelled_pr_bearing_item_projects_its_state_for_the_fleet_page()
+    {
+        await WriteQueueAsync(Item("2159-lane", WorkStage.Review, 2159, pr: 2173) with
+        {
+            State = QueueItemState.Cancelled,
+            CancelledAt = new DateTimeOffset(2026, 9, 9, 20, 0, 0, TimeSpan.Zero),
+        });
+
+        var row = Assert.Single((await BuildAsync()).GetProperty("queue").GetProperty("pullRequests").EnumerateArray());
+        Assert.Equal("Cancelled", row.GetProperty("state").GetString());
+    }
 }
