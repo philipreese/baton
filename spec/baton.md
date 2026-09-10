@@ -7128,7 +7128,7 @@ and cost ledgers share. Fields: `at`, `tag`, `decision` (`launched` | `waited` |
 `CancelledAt`, its `tag` names that retained item, and its reason is `operator cancelled before
 launch`; it carries no live-memory reading and zero counters because no scheduling evaluation launched
 it. A persisted cancelled item that lacks this line is reconciled idempotently by that tag and timestamp
-when the operator repeats the cancel command after an append failure.
+on a daemon tick after an append failure; repeating the cancel command remains the immediate/manual path.
 
 **`advanced` is one line per work-item stage change** (slice 2), naming the evidence it was derived
 from: the stage pair, the outcome word, the PR head, the verdict's counts. That is not decoration —

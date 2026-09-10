@@ -94,9 +94,15 @@ internal sealed class JsonLinesLedger<TEntry>(
                 .Select(id => id!)
                 .ToHashSet(StringComparer.Ordinal);
 
-            var toAppend = entries
-                .Where(e => executionIdSelector(e) is not { Length: > 0 } id || !alreadyRecorded.Contains(id))
-                .ToList();
+            var toAppend = new List<TEntry>(entries.Count);
+            foreach (var entry in entries)
+            {
+                var id = executionIdSelector(entry);
+                if (id is not { Length: > 0 } || alreadyRecorded.Add(id))
+                {
+                    toAppend.Add(entry);
+                }
+            }
             if (toAppend.Count == 0)
             {
                 return;

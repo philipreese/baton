@@ -184,6 +184,80 @@ public sealed class QueueSchedulerServiceTests
     }
 
     [Fact]
+    public async Task A_cancelled_follower_makes_the_heads_unchanged_slots_wait_current_again()
+    {
+        var home = CreateTempHome();
+        using var scope = BatonEnvironmentSnapshot.BeginScope(BatonEnvironmentSnapshot.Blank with { HomeOverride = home });
+        try
+        {
+            await QueueStore.MutateAsync(BatonPaths.QueueFile, s => s with { Items = [Item("head"), Item("follower")] }, Ct);
+            var service = Service(
+                (_, _) => throw new InvalidOperationException("a full queue must not launch"),
+                liveWeight: QueueSettings.DefaultMaxLiveWeight);
+
+            await service.TickOnceAsync(Ct);
+            await QueueCommand.ExecuteAsync(new QueueOptions(QueueVerb.Cancel, Tag: "follower"), TextWriter.Null, Ct);
+            await service.TickOnceAsync(Ct);
+
+            var facts = await QueueDecisionLedgerStore.ReadAllAsync(BatonPaths.QueueDecisionLedgerFile, Ct);
+            var current = facts[^1];
+            Assert.Equal(QueueDecisionEntry.Waited, current.Decision);
+            Assert.Equal("head", current.Tag);
+            Assert.Equal(QueueWaitReasons.Token(QueueWaitReason.Slots), current.Reason);
+        }
+        finally
+        {
+            Cleanup(home);
+        }
+    }
+
+    [Fact]
+    public async Task Sustained_lost_claims_take_only_one_fresh_scheduling_pass_per_tick()
+    {
+        var home = CreateTempHome();
+        using var scope = BatonEnvironmentSnapshot.BeginScope(BatonEnvironmentSnapshot.Blank with { HomeOverride = home });
+        try
+        {
+            await QueueStore.MutateAsync(
+                BatonPaths.QueueFile, s => s with { Items = [Item("first"), Item("second"), Item("third")] }, Ct);
+            var claims = 0;
+            var launches = new List<string>();
+            var service = new QueueSchedulerService(
+                (request, _) =>
+                {
+                    launches.Add(request.Item.Tag);
+                    return Task.FromResult(new QueueLaunchOutcome(request.RoomDirectory));
+                },
+                _ => Task.FromResult(0d),
+                () => 16d,
+                () => DateTimeOffset.UtcNow,
+                beforeLaunchClaim: async _ =>
+                {
+                    var tag = Interlocked.Increment(ref claims) switch
+                    {
+                        1 => "first",
+                        2 => "second",
+                        _ => "third",
+                    };
+                    await QueueCommand.ExecuteAsync(new QueueOptions(QueueVerb.Cancel, Tag: tag), TextWriter.Null, Ct);
+                });
+
+            await service.TickOnceAsync(Ct);
+
+            Assert.Equal(2, claims);
+            Assert.Empty(launches);
+            var items = (await QueueStore.LoadAsync(BatonPaths.QueueFile, Ct)).Items;
+            Assert.Equal(QueueItemState.Cancelled, items[0].State);
+            Assert.Equal(QueueItemState.Cancelled, items[1].State);
+            Assert.Equal(QueueItemState.Queued, items[2].State);
+        }
+        finally
+        {
+            Cleanup(home);
+        }
+    }
+
+    [Fact]
     public async Task A_restart_tick_backfills_a_committed_cancellation_once_when_its_ledger_fact_is_missing()
     {
         var home = CreateTempHome();

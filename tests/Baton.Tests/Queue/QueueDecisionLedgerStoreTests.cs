@@ -88,6 +88,31 @@ public sealed class QueueDecisionLedgerStoreTests
     }
 
     [Fact]
+    public async Task Reconciliation_appends_a_retained_cancellation_batch_once_and_collapses_duplicate_keys_within_it()
+    {
+        var path = TempLedgerPath();
+        try
+        {
+            var cancelledAt = At.AddMinutes(1);
+            var retained = Enumerable.Range(0, 128)
+                .Select(index => Cancelled($"cancelled-{index}", cancelledAt))
+                .ToList();
+            retained.Add(Cancelled("cancelled-0", cancelledAt));
+
+            await QueueDecisionLedgerStore.ReconcileCancellationsAsync(retained, path, Ct);
+            await QueueDecisionLedgerStore.ReconcileCancellationsAsync(retained, path, Ct);
+
+            var recorded = await QueueDecisionLedgerStore.ReadAllAsync(path, Ct);
+            Assert.Equal(128, recorded.Count);
+            Assert.Equal(128, recorded.Select(entry => entry.CancellationKey).Distinct().Count());
+        }
+        finally
+        {
+            Delete(path);
+        }
+    }
+
+    [Fact]
     public async Task An_absent_reading_is_written_absent_rather_than_as_zero()
     {
         var path = TempLedgerPath();
@@ -117,6 +142,16 @@ public sealed class QueueDecisionLedgerStoreTests
     [InlineData(QueueWaitReason.RunwayHeld, "runway-held")]
     public void Every_wait_reason_has_the_ledger_token_the_issue_fixed(QueueWaitReason reason, string token) =>
         Assert.Equal(token, QueueWaitReasons.Token(reason));
+
+    private static QueueItem Cancelled(string tag, DateTimeOffset at) => new()
+    {
+        Tag = tag,
+        Role = "implement",
+        Workspace = @"C:\repos\w1",
+        SpecFile = @"C:\spec.md",
+        State = QueueItemState.Cancelled,
+        CancelledAt = at,
+    };
 
     private static void Delete(string path) => FileCleanup.Delete(path);
 }

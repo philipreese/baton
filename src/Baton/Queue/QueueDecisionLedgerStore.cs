@@ -155,7 +155,17 @@ public static class QueueDecisionLedgerStore
         var key = entry.VerdictKey;
         if (string.Equals(previousVerdictKey, key, StringComparison.Ordinal))
         {
-            return key;
+            // The cache only proves what this scheduler last wrote. Another writer may have appended
+            // (notably a retained cancellation) since then, in which case repeating this wait makes
+            // it the current verdict again. The generic ledger's read lock keeps this comparison
+            // coherent with its own parse tolerance; a writer landing after this read is likewise a
+            // newer fact, so suppressing this tick is safe and the next bounded evaluation revisits it.
+            var latest = (await Ledger.ReadAllAsync(ledgerFilePath, cancellationToken).ConfigureAwait(false))
+                .LastOrDefault();
+            if (latest is not null && string.Equals(latest.VerdictKey, key, StringComparison.Ordinal))
+            {
+                return key;
+            }
         }
 
         await Ledger.AppendAsync([entry], ledgerFilePath, cancellationToken).ConfigureAwait(false);
@@ -186,7 +196,8 @@ public static class QueueDecisionLedgerStore
     }
 
     /// <summary>
-    /// Replays each persisted cancellation that carries the timestamp required for its durable key.
+    /// Replays persisted cancellations that carry the timestamp required for their durable keys in one
+    /// ledger read-check-append critical section.
     /// This is deliberately narrow reconciliation, not a general event delivery mechanism: only the
     /// retained <see cref="QueueItemState.Cancelled"/> state promises a ledger fact, and the ledger's
     /// cancellation key makes every replay idempotent.
@@ -199,16 +210,14 @@ public static class QueueDecisionLedgerStore
         ArgumentNullException.ThrowIfNull(items);
         ArgumentException.ThrowIfNullOrEmpty(ledgerFilePath);
 
-        foreach (var item in items)
-        {
-            if (item is not { State: QueueItemState.Cancelled, CancelledAt: { } cancelledAt })
-            {
-                continue;
-            }
+        var cancellations = items
+            .Where(item => item is { State: QueueItemState.Cancelled, CancelledAt: not null })
+            .Select(item => new QueueDecisionEntry(
+                item.CancelledAt!.Value, item.Tag, QueueDecisionEntry.Cancelled,
+                "operator cancelled before launch", LiveWeight: 0, FreeGb: null, FloorGb: 0))
+            .ToList();
 
-            await AppendCancellationAsync(cancelledAt, item.Tag, ledgerFilePath, cancellationToken)
-                .ConfigureAwait(false);
-        }
+        await Ledger.AppendAsync(cancellations, ledgerFilePath, cancellationToken).ConfigureAwait(false);
     }
 
     /// <summary>Every parseable line, in write order — read tolerance and the never-throws posture are
