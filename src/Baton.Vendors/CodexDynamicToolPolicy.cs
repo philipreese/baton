@@ -170,8 +170,10 @@ public sealed class CodexDynamicToolPolicy
                 StringSchema("path", "Absolute or workspace-relative directory path.")));
             tools.Add(Function(SearchTextTool,
                 "Search allowed UTF-8 source files for a literal string with bounded results; recursive "
-                + "searches skip .git/bin/obj and binary files.",
-                TwoStringSchema("path", "Directory or file to search.", "query", "Literal text to find.")));
+                + "searches skip .git/bin/obj and binary files. Incomplete results name the next "
+                + "zero-based matching-line position; positions are deterministic for the current "
+                + "path-ordered contents and may shift when files change.",
+                SearchTextSchema()));
         }
 
         if (_declaredOutputs.Count > 0)
@@ -308,7 +310,9 @@ public sealed class CodexDynamicToolPolicy
                     OptionalInteger(arguments, "length")),
                 ListFilesTool => ListFiles(RequiredString(arguments, "path")),
                 SearchTextTool => SearchText(
-                    RequiredString(arguments, "path"), RequiredString(arguments, "query")),
+                    RequiredString(arguments, "path"),
+                    RequiredString(arguments, "query"),
+                    OptionalInteger(arguments, "start")),
                 WriteOutputTool => WriteOutput(
                     RequiredString(arguments, "name"), RequiredString(arguments, "content")),
                 WriteTextTool => WriteText(
@@ -463,9 +467,22 @@ public sealed class CodexDynamicToolPolicy
             return CodexDynamicToolResult.Failed(
                 $"Read range offset {offset} is past the file's {text.Length} characters.");
         }
+        if (IsBetweenSurrogates(text, offset))
+        {
+            return CodexDynamicToolResult.Failed(
+                $"Read range offset {offset} is not a Unicode scalar boundary.");
+        }
+
+        var take = (int)Math.Min((long)length, text.Length - (long)offset);
+        if (IsBetweenSurrogates(text, offset + take))
+        {
+            // A requested UTF-16 character count can land between a surrogate pair. Include the
+            // scalar's low surrogate and report that actual end in the continuation footer.
+            take++;
+        }
 
         var repeat = _repeats.ClassifyRead(
-            path, info.LastWriteTimeUtc, info.Length, $"offset={offset};length={length}");
+            path, info.LastWriteTimeUtc, info.Length, $"offset={offset};end={offset + take}");
         if (repeat.Verdict == RepeatVerdict.Refuse)
         {
             return CodexDynamicToolResult.Refused(repeat.Reason!, GrantRules.Repeat);
@@ -473,7 +490,6 @@ public sealed class CodexDynamicToolPolicy
 
         var preamble = repeat.Verdict == RepeatVerdict.Replay ? $"[{repeat.Preamble}]\n" : string.Empty;
         var responseBudget = MaxDiscoveryResponseCharacters - preamble.Length;
-        var take = (int)Math.Min((long)length, text.Length - (long)offset);
         string? footer = null;
         if (offset + take < text.Length || take > responseBudget)
         {
@@ -486,6 +502,10 @@ public sealed class CodexDynamicToolPolicy
                          + $"next range: offset={end}, length={nextLength}]";
                 var boundedTake = Math.Min(
                     take, Math.Max(0, responseBudget - footer.Length - 1));
+                if (IsBetweenSurrogates(text, offset + boundedTake))
+                {
+                    boundedTake--;
+                }
                 if (boundedTake == take)
                 {
                     break;
@@ -527,7 +547,7 @@ public sealed class CodexDynamicToolPolicy
             string.Join('\n', rendered) + (truncated ? $"\n[truncated by Baton at {MaxListedFiles} files]" : string.Empty));
     }
 
-    private CodexDynamicToolResult SearchText(string requestedPath, string query)
+    private CodexDynamicToolResult SearchText(string requestedPath, string query, int? requestedStart)
     {
         if (!_grant.ReadFiles)
         {
@@ -538,6 +558,11 @@ public sealed class CodexDynamicToolPolicy
         {
             return CodexDynamicToolResult.Failed("Search query must not be empty.");
         }
+        var start = requestedStart ?? 0;
+        if (start < 0)
+        {
+            return CodexDynamicToolResult.Failed("Search start must be zero or greater.");
+        }
 
         var path = ResolveWithinWorkspace(requestedPath);
         EnsureNoReparsePoint(path);
@@ -546,11 +571,14 @@ public sealed class CodexDynamicToolPolicy
             : Directory.Exists(path)
                 ? EnumerateContentFiles(path, SafeEnumerationOptions())
                 : throw new ArgumentException($"Search path '{requestedPath}' does not exist.");
+        files = files.OrderBy(file => file, PathComparer);
 
         var matches = new StringBuilder(MaxDiscoveryResponseCharacters);
         var shown = 0;
+        var matchIndex = 0;
         var truncatedSnippets = 0;
         string? incompleteReason = null;
+        int? nextStart = null;
         foreach (var file in files)
         {
             try
@@ -564,9 +592,15 @@ public sealed class CodexDynamicToolPolicy
                     {
                         continue;
                     }
+                    if (matchIndex < start)
+                    {
+                        matchIndex++;
+                        continue;
+                    }
                     if (shown >= MaxSearchMatches)
                     {
                         incompleteReason = $"match limit of {MaxSearchMatches} reached";
+                        nextStart = matchIndex;
                         break;
                     }
 
@@ -577,6 +611,7 @@ public sealed class CodexDynamicToolPolicy
                     {
                         incompleteReason =
                             $"response capped at {MaxDiscoveryResponseCharacters} characters after {shown} matches";
+                        nextStart = matchIndex;
                         break;
                     }
 
@@ -586,6 +621,7 @@ public sealed class CodexDynamicToolPolicy
                     }
                     matches.Append(rendered);
                     shown++;
+                    matchIndex++;
                     truncatedSnippets += line.Length > MaxSearchLineSnippetCharacters ? 1 : 0;
                 }
             }
@@ -601,8 +637,8 @@ public sealed class CodexDynamicToolPolicy
         }
 
         var footer = incompleteReason is not null
-            ? $"[incomplete: {incompleteReason}; more matches may exist. Narrow the path or query; "
-              + "use the baton_read_text ranges shown for truncated lines.]"
+            ? $"[incomplete: {incompleteReason}; next search: start={nextStart}. "
+              + "The position applies to the current path-ordered contents; changed files may shift it.]"
             : truncatedSnippets > 0
                 ? $"[complete search: {shown} matches; {truncatedSnippets} line snippets truncated. "
                   + "Use the baton_read_text ranges shown to retrieve omitted text.]"
@@ -629,11 +665,25 @@ public sealed class CodexDynamicToolPolicy
         var snippetStart = Math.Max(0, matchOffset - MaxSearchLineSnippetCharacters / 4);
         snippetStart = Math.Min(snippetStart, line.Length - MaxSearchLineSnippetCharacters);
         var fileOffset = line.Start + snippetStart;
-        var snippet = text.Substring(fileOffset, MaxSearchLineSnippetCharacters);
+        if (IsBetweenSurrogates(text, fileOffset))
+        {
+            fileOffset++;
+            snippetStart++;
+        }
+        var snippetEnd = Math.Min(line.Start + line.Length, fileOffset + MaxSearchLineSnippetCharacters);
+        if (IsBetweenSurrogates(text, snippetEnd))
+        {
+            snippetEnd--;
+        }
+        var snippet = text.Substring(fileOffset, snippetEnd - fileOffset);
         return $"{relative}:{line.Number}:[snippet truncated: zero-based line characters "
                + $"{snippetStart}..{snippetStart + snippet.Length - 1} of {line.Length}; "
                + $"read range: offset={fileOffset}, length={snippet.Length}] {snippet}";
     }
+
+    private static bool IsBetweenSurrogates(string text, int offset) =>
+        offset > 0 && offset < text.Length
+        && char.IsHighSurrogate(text[offset - 1]) && char.IsLowSurrogate(text[offset]);
 
     private CodexDynamicToolResult WriteOutput(string outputName, string content)
     {
@@ -1223,6 +1273,32 @@ public sealed class CodexDynamicToolPolicy
             },
         },
         ["required"] = new JsonArray("path"),
+        ["additionalProperties"] = false,
+    };
+
+    private static JsonObject SearchTextSchema() => new()
+    {
+        ["type"] = "object",
+        ["properties"] = new JsonObject
+        {
+            ["path"] = new JsonObject
+            {
+                ["type"] = "string",
+                ["description"] = "Directory or file to search.",
+            },
+            ["query"] = new JsonObject
+            {
+                ["type"] = "string",
+                ["description"] = "Literal text to find.",
+            },
+            ["start"] = new JsonObject
+            {
+                ["type"] = "integer",
+                ["minimum"] = 0,
+                ["description"] = "Optional zero-based matching-line position; defaults to 0.",
+            },
+        },
+        ["required"] = new JsonArray("path", "query"),
         ["additionalProperties"] = false,
     };
 

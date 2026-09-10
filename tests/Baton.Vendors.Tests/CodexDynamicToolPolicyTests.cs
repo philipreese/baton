@@ -56,6 +56,23 @@ public sealed class CodexDynamicToolPolicyTests
         Assert.False(schema["additionalProperties"]!.GetValue<bool>());
     }
 
+    [Fact]
+    public void Search_tool_schema_exposes_an_optional_bounded_continuation_position()
+    {
+        using var fixture = new PolicyFixture(new PermissionGrant(ReadFiles: true), ["report.md"]);
+        var tool = fixture.Policy.BuildToolDefinitions()
+            .Single(node => node!["name"]!.GetValue<string>() == CodexDynamicToolPolicy.SearchTextTool)!;
+        var schema = (JsonObject)tool["inputSchema"]!;
+        var properties = (JsonObject)schema["properties"]!;
+
+        Assert.Equal(
+            ["path", "query"],
+            schema["required"]!.AsArray().Select(node => node!.GetValue<string>()));
+        Assert.Equal("integer", properties["start"]!["type"]!.GetValue<string>());
+        Assert.Equal(0, properties["start"]!["minimum"]!.GetValue<int>());
+        Assert.False(schema["additionalProperties"]!.GetValue<bool>());
+    }
+
     /// <summary>
     /// #1996's first arm: the tool codex reaches for natively changes files on disk, and does it
     /// through the same write path <c>baton_write_text</c> takes. All three operations in one envelope
@@ -1106,6 +1123,22 @@ public sealed class CodexDynamicToolPolicyTests
     }
 
     [Fact]
+    public async Task Truncated_search_snippets_preserve_non_bmp_scalars_when_serialized()
+    {
+        using var fixture = new PolicyFixture(new PermissionGrant(ReadFiles: true), ["report.md"]);
+        var path = Path.Combine(fixture.Workspace, "unicode-search.txt");
+        File.WriteAllText(path, "😀" + new string('a', 124) + "NEEDLE" + new string('b', 500));
+
+        var result = await fixture.ExecuteAsync(
+            CodexDynamicToolPolicy.SearchTextTool, new { path, query = "NEEDLE" });
+
+        Assert.True(result.Success, result.Text);
+        Assert.Contains("NEEDLE", result.Text, StringComparison.Ordinal);
+        var serialized = JsonSerializer.Serialize(result.Text);
+        Assert.Equal(result.Text, JsonSerializer.Deserialize<string>(serialized));
+    }
+
+    [Fact]
     public async Task Search_caps_the_aggregate_response_when_many_lines_match()
     {
         using var fixture = new PolicyFixture(new PermissionGrant(ReadFiles: true), ["report.md"]);
@@ -1120,7 +1153,36 @@ public sealed class CodexDynamicToolPolicyTests
         Assert.True(result.Text.Length <= 12_000, $"search returned {result.Text.Length} characters");
         Assert.Contains("[incomplete:", result.Text, StringComparison.Ordinal);
         Assert.Contains("response capped at 12000 characters", result.Text, StringComparison.Ordinal);
-        Assert.Contains("Narrow the path or query", result.Text, StringComparison.Ordinal);
+        var nextStart = NextSearchStart(result.Text);
+
+        var continuation = await fixture.ExecuteAsync(
+            CodexDynamicToolPolicy.SearchTextTool, new { path, query = "NEEDLE", start = nextStart });
+
+        Assert.True(continuation.Success, continuation.Text);
+        Assert.Contains($"NEEDLE {nextStart:D3}", continuation.Text, StringComparison.Ordinal);
+        Assert.DoesNotContain("NEEDLE 000", continuation.Text, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task Search_continues_past_the_match_count_limit_in_one_specific_file()
+    {
+        using var fixture = new PolicyFixture(new PermissionGrant(ReadFiles: true), ["report.md"]);
+        var path = Path.Combine(fixture.Workspace, "a");
+        File.WriteAllLines(path, Enumerable.Repeat("x", 600));
+
+        var first = await fixture.ExecuteAsync(
+            CodexDynamicToolPolicy.SearchTextTool, new { path, query = "x" });
+        var continuation = await fixture.ExecuteAsync(
+            CodexDynamicToolPolicy.SearchTextTool,
+            new { path, query = "x", start = NextSearchStart(first.Text) });
+
+        Assert.True(first.Success, first.Text);
+        Assert.True(continuation.Success, continuation.Text);
+        Assert.Contains("match limit of 500 reached", first.Text, StringComparison.Ordinal);
+        Assert.Contains("next search: start=500", first.Text, StringComparison.Ordinal);
+        Assert.StartsWith("a:501:x", continuation.Text, StringComparison.Ordinal);
+        Assert.Contains("a:600:x", continuation.Text, StringComparison.Ordinal);
+        Assert.DoesNotContain("a:1:x", continuation.Text, StringComparison.Ordinal);
     }
 
     [Fact]
@@ -1211,6 +1273,33 @@ public sealed class CodexDynamicToolPolicyTests
     }
 
     [Fact]
+    public async Task Read_ranges_preserve_non_bmp_scalars_and_serialize_without_replacement()
+    {
+        using var fixture = new PolicyFixture(new PermissionGrant(ReadFiles: true), ["report.md"]);
+        var path = Path.Combine(fixture.Workspace, "unicode.txt");
+        File.WriteAllText(path, "😀X");
+
+        var result = await fixture.ExecuteAsync(
+            CodexDynamicToolPolicy.ReadTextTool, new { path, offset = 0, length = 1 });
+
+        Assert.True(result.Success, result.Text);
+        Assert.StartsWith("😀", result.Text, StringComparison.Ordinal);
+        Assert.Contains("returned file characters 0..1 of 3", result.Text, StringComparison.Ordinal);
+        Assert.Contains("next range: offset=2, length=1", result.Text, StringComparison.Ordinal);
+        var serialized = JsonSerializer.Serialize(result.Text);
+        Assert.Equal(result.Text, JsonSerializer.Deserialize<string>(serialized));
+
+        var equivalentRange = await fixture.ExecuteAsync(
+            CodexDynamicToolPolicy.ReadTextTool, new { path, offset = 0, length = 2 });
+        Assert.Contains("replayed: identical read", equivalentRange.Text, StringComparison.Ordinal);
+
+        var splitStart = await fixture.ExecuteAsync(
+            CodexDynamicToolPolicy.ReadTextTool, new { path, offset = 1, length = 1 });
+        Assert.False(splitStart.Success);
+        Assert.Contains("Unicode scalar boundary", splitStart.Text, StringComparison.Ordinal);
+    }
+
+    [Fact]
     public async Task Recursive_listing_excludes_git_object_database_content()
     {
         using var fixture = new PolicyFixture(new PermissionGrant(ReadFiles: true), ["report.md"]);
@@ -1228,6 +1317,14 @@ public sealed class CodexDynamicToolPolicyTests
 
     private static IReadOnlyList<string> ToolNames(CodexDynamicToolPolicy policy) =>
         policy.BuildToolDefinitions().Select(node => node!["name"]!.GetValue<string>()).ToArray();
+
+    private static int NextSearchStart(string text)
+    {
+        const string marker = "next search: start=";
+        var start = text.IndexOf(marker, StringComparison.Ordinal) + marker.Length;
+        var end = text.IndexOfAny([';', '.', ']'], start);
+        return int.Parse(text[start..end], System.Globalization.CultureInfo.InvariantCulture);
+    }
 
     private sealed class PolicyFixture : IDisposable
     {

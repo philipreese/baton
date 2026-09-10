@@ -252,8 +252,8 @@ public sealed class RepeatedToolCallLedger
     /// spellings of one file are one key.
     /// </param>
     /// <param name="request">
-    /// The normalized spelling of range arguments, or null/empty for a whole-file read. Different
-    /// windows are different questions about the same file, matching the hook-side read predicate.
+    /// The normalized actual scalar-safe range served, or null/empty for a whole-file read. Different
+    /// windows are different questions about the same file.
     /// </param>
     public RepeatDecision ClassifyRead(
         string path, DateTimeOffset lastWriteUtc, long length, string? request = null)
@@ -284,7 +284,7 @@ public sealed class RepeatedToolCallLedger
     /// <param name="request">
     /// The normalised spelling of the read's range arguments, or <see langword="null"/>/empty for a
     /// whole-file read. <see cref="ReadKey"/> states why a read is keyed on this rather than on the
-    /// path alone; the broker passes the same normalized range identity when one is requested.
+    /// path alone.
     /// </param>
     public string? ClassifyHookRead(
         string path, DateTimeOffset lastWriteUtc, long length, string? request = null)
