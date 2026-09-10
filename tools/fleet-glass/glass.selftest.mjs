@@ -67,6 +67,56 @@ const ageSource = ageSourceRaw.replace("Date.now()", "NOW");
 
 const { esc, age } = new Function("NOW", `${escSource}\n${ageSource}\nreturn { esc, age };`)(NOW);
 
+const vendorUsageRowSource = sliceOne(/^function vendorUsageRowHtml\(vendor, w, derived\)\{[\s\S]*?\n\}$/gm, "definition of `vendorUsageRowHtml`");
+const vendorUsageSource = sliceOne(/^function vendorUsageHtml\(vendors\)\{[\s\S]*?\n\}$/gm, "definition of `vendorUsageHtml`");
+const { vendorUsageRowHtml, vendorUsageHtml } = new Function("esc", "age", "$", `${vendorUsageRowSource}\n${vendorUsageSource}\nreturn { vendorUsageRowHtml, vendorUsageHtml };`)(
+  esc,
+  age,
+  (id) => id === "vendorusage" ? vendorUsageSink : null);
+
+const vendorUsageSink = { innerHTML: "" };
+const explicitNullRow = vendorUsageRowHtml("codex", {
+  name: "codex · unavailable (secondary)",
+  rawLine: "null",
+  windowKind: "secondary",
+  windowDurationMins: null,
+  percentUsed: null,
+  resetsAt: null,
+}, false);
+check("an explicitly null vendor window renders unavailable with no invented usage or boundary",
+      explicitNullRow.includes("usage unavailable") && explicitNullRow.includes("duration/reset unavailable"));
+
+const malformedObjectRow = vendorUsageRowHtml("codex", {
+  name: "codex · unavailable (secondary)",
+  rawLine: '{"usedPercent":"not-a-number","windowDurationMins":"not-a-number"}',
+  windowKind: "secondary",
+  windowDurationMins: null,
+  percentUsed: null,
+  resetsAt: null,
+}, false);
+check("a malformed exposed object renders unknown/unreadable rather than explicit unavailable",
+      malformedObjectRow.includes("unknown") && !malformedObjectRow.includes("usage unavailable"));
+
+vendorUsageHtml([{
+  adapter: "codex",
+  harvestedAt: "2026-09-07T12:00:00Z",
+  windows: [{
+    name: "codex · 7d (primary)",
+    rawLine: '{"usedPercent":17,"windowDurationMins":10080,"resetsAt":1778198400}',
+    windowKind: "primary",
+    windowDurationMins: 10080,
+    percentUsed: 17,
+    resetsAt: "2026-05-07T00:00:00Z",
+  }],
+  liveLanes: 0,
+  source: "vendor",
+}]);
+check("a valid weekly-only account renders its vendor window without manufacturing a five-hour row",
+      vendorUsageSink.innerHTML.includes("codex · 7d (primary)")
+      && vendorUsageSink.innerHTML.includes("17% used")
+      && (vendorUsageSink.innerHTML.match(/vendorusage-row/g) || []).length === 1
+      && !vendorUsageSink.innerHTML.includes("5h"));
+
 const panel = new Function("esc", "age", `${source}\nreturn { ${REQUIRED.join(", ")} };`)(esc, age);
 const { queueSlotsLineHtml, queuePendingTableHtml, queuePrTableHtml, queueLanesTableHtml, queueBoardHtml } = panel;
 

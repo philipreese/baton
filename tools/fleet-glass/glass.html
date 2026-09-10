@@ -1404,15 +1404,16 @@ function banner(html){ $("banner").innerHTML = html ? `<div class="banner">${htm
 // harvest, not this instant, so an old `harvestedAt` qualifies them just as it qualifies the percent.
 // #1904: `derived` remains readable for an interim persisted block. Current Codex blocks are vendor
 // counters and carry limitId/windowKind/windowDurationMins. An explicitly null app-server window has
-// a kind but no duration: render it as unavailable, never as 0% or as an ordinary reset parse miss.
+// rawLine === "null": render it as unavailable, never as 0% or as an ordinary reset parse miss.
+// A raw JSON object with missing numeric fields is malformed evidence, not an explicit null, so keep
+// its individual values unknown/unreadable rather than collapsing it into the unavailable state.
 // `derived` is the block's own `source === "derived"`, passed down because it changes what an
 // ABSENT field means on the row. On a vendor block, a missing `resetsAt` means the vendor's reset
 // clause did not parse -- "reset unknown" is the honest word. On a derived block the windows are a
 // rolling lookback with no reset instant BY CONSTRUCTION (CodexUsageSource's own doc comment), so
 // "unknown" would report a parse failure that did not happen and imply a boundary that does not exist.
 function vendorUsageRowHtml(vendor, w, derived){
-  const unavailable = typeof w.windowKind === "string" && w.windowDurationMins == null
-    && w.percentUsed == null && !w.resetsAt;
+  const unavailable = w.rawLine === "null";
   const pct = typeof w.percentUsed === "number" ? `${w.percentUsed}% used`
     : unavailable ? "usage unavailable" : "unknown";
   const resets = unavailable ? "duration/reset unavailable"
