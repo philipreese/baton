@@ -23,6 +23,7 @@ from pathlib import Path
 # rather than restating it. `kind` is "dir" (prefix match) or "file" (exact match).
 PROTECTED_TOOLING_PATHS: tuple[tuple[str, str, str], ...] = (
     ("dir", "tools/gates/", "the gates orchestrator itself"),
+    ("dir", "tools/ci/", "the CI shard driver, aggregate verifier, and their independently gated selftest"),
     ("dir", ".github/workflows/", "the CI workflow definitions gates run under"),
     ("dir", "tools/diff-shape/", "this gate's own implementation"),
     ("dir", "tools/audit-completeness/", "the audit-* checker bodies gates.py's OVERLAP/AFTER_BUILD phases run"),
@@ -53,7 +54,7 @@ PROTECTED_TOOLING_PATHS: tuple[tuple[str, str, str], ...] = (
 # definition lines protected; everything else in the file (an ordinary task addition/edit) passes.
 PIXI_PROTECTED_TASK_RULE = (
     "pixi.toml task definitions matching gates*, gate-sabotage, diff-shape*, audit-*, "
-    "*-selftest, vendor-check, vendor-verify, lint, fmt-check, or test-no-build "
+    "*-selftest, vendor-check, vendor-verify, lint, fmt-check, test-no-build, test-flow, or test-other "
     "(line-level, not the whole file)"
 )
 
@@ -70,7 +71,7 @@ def _is_protected_pixi_task(name: str) -> bool:
         return True
     if name.endswith("-selftest"):
         return True
-    if name in ("vendor-check", "vendor-verify", "lint", "fmt-check", "test-no-build"):
+    if name in ("vendor-check", "vendor-verify", "lint", "fmt-check", "test-no-build", "test-flow", "test-other"):
         return True
     return False
 
@@ -573,7 +574,9 @@ def selftest() -> int:
             'build = { cmd = "dotnet build" }\n'
             'gates = { cmd = "python tools/gates/gates.py" }\n'
             'audit-recordonce = { cmd = "python tools/audit-completeness/recordonce.py" }\n'
-            'test-no-build = { cmd = "python tools/buildlock.py dotnet test --no-build -m:1" }\n',
+            'test-no-build = { cmd = "python tools/buildlock.py dotnet test --no-build -m:1" }\n'
+            'test-flow = { cmd = "python tools/ci/test_shards.py flow" }\n'
+            'test-other = { cmd = "python tools/ci/test_shards.py other" }\n',
             encoding="utf-8",
         )
 
@@ -755,6 +758,22 @@ def selftest() -> int:
         else:
             print("  OK (r) pixi.toml test-no-build task edit -> FAIL")
 
+        # (s1/s2) The CI shard aliases are protected even if weakened to a successful no-op.
+        for label, task in (("s1", "test-flow"), ("s2", "test-other")):
+            subprocess.run(["git", "checkout", "-q", "-b", f"branch-{label}", base_sha], cwd=repo, check=True, env=env)
+            original = f'{task} = {{ cmd = "python tools/ci/test_shards.py {task.removeprefix("test-")}" }}'
+            pixi_file.write_text(
+                pixi_file.read_text(encoding="utf-8").replace(original, f'{task} = {{ cmd = "python -c pass" }}'),
+                encoding="utf-8",
+            )
+            subprocess.run(["git", "commit", "-q", "-a", "-m", f"weaken {task}"], cwd=repo, check=True, env=env)
+            head_s = subprocess.run(["git", "rev-parse", "HEAD"], cwd=repo, capture_output=True, text=True, check=True, env=env).stdout.strip()
+            passed_s, _ = check_diff_shape(base_sha, head_s, labels=[], cwd=repo)
+            if passed_s:
+                failures.append(f"({label}) weakening {task} to a successful no-op did not fail")
+            else:
+                print(f"  OK ({label}) pixi.toml {task} successful no-op -> FAIL")
+
         # (l)-(p): the widened protected-tooling directories/files (#1744) -- one arm each, FAIL.
         widened_targets = [
             ("l", "tools/audit-completeness/completeness.py"),
@@ -770,6 +789,7 @@ def selftest() -> int:
             ("u", "benchmarks/deepswe/derive_scores.py"),
             ("v", "tests/Launcher.Tests.ps1"),
             ("w", "tools/Baton.VendorProbe/Program.cs"),
+            ("an", "tools/ci/test_shards.py"),
         ]
         for label, rel_path in widened_targets:
             subprocess.run(["git", "checkout", "-q", "-b", f"branch-{label}", base_sha], cwd=repo, check=True, env=env)
