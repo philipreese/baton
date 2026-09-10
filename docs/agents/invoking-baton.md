@@ -353,7 +353,7 @@ line(s), and (best-effort) a deliverables tombstone — refusing a non-terminal 
 baton deliver <file> [--title <text>] [--room <room-dir>]
 ```
 
-`--room-dir` is also accepted as an alias for `--room`. This copies the file into `<room>/artifacts/conductor/` under a filename unique to the source path (recorded as `artifact_file` in the manifest, defaulting the room to `~/.baton/rooms/conductor/`) and records it in `manifest.jsonl`, which `pusher.py` forwards to the inbox with a `CONDUCTOR` chip. Re-delivering the same source path updates the file and replaces the existing inbox item in place.
+`--room-dir` is also accepted as an alias for `--room`. This copies the file into `<room>/artifacts/conductor/` under a filename unique to the source path (recorded as `artifact_file` in the manifest, defaulting the room to `~/.baton/rooms/conductor/`) and records it in `manifest.jsonl`, where the daemon-served Glass can show the local deliverable path. Re-delivering the same source path updates the file and replaces the existing manifest entry.
 
 **What a room cost (`baton ledger`).** After a room settles, its per-attempt accounting rows are
 readable without opening any file:

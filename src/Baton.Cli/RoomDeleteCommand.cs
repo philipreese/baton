@@ -8,9 +8,8 @@ namespace Baton.Cli;
 /// <summary>
 /// <c>baton room delete</c> — the 2026-09-02 operator ruling spec/baton.md §8 records in full: Fleet
 /// Glass's "dismiss" only ever hid a room from one browser's own localStorage, while the room
-/// directory, its <c>room-registry.jsonl</c> lines, and its pushed deliverables all persisted
-/// regardless. This verb removes what it can reach locally and records what it cannot (see
-/// <see cref="DeletedRoomsTombstoneStore"/>).
+/// directory and its <c>room-registry.jsonl</c> lines persisted regardless. This verb removes both
+/// local records.
 /// </summary>
 /// <remarks>
 /// Not a <see cref="CommandResult"/>/<see cref="FlowStateReporter"/> command — deletion produces no
@@ -25,8 +24,7 @@ public static class RoomDeleteCommand
     public sealed record Result(
         string RoomDirectoryPath,
         bool DirectoryExisted,
-        int RegistryLinesRemoved,
-        bool DeliverablesTombstoneWritten);
+        int RegistryLinesRemoved);
 
     /// <exception cref="CliArgumentException">
     /// The room has not reached a terminal state (no <c>terminal.json</c>) and <c>--force</c> was not
@@ -40,7 +38,7 @@ public static class RoomDeleteCommand
         ArgumentNullException.ThrowIfNull(output);
 
         RefuseUnlessTerminalOrForced(options.RoomDirectoryPath, options.Force);
-        var result = await DeleteAsync(options.RoomDirectoryPath, options.KeepDeliverables, cancellationToken).ConfigureAwait(false);
+        var result = await DeleteAsync(options.RoomDirectoryPath, cancellationToken).ConfigureAwait(false);
         Print(result, output);
         return result;
     }
@@ -56,27 +54,24 @@ public static class RoomDeleteCommand
         output.WriteLine(result.RegistryLinesRemoved > 0
             ? $"Removed {result.RegistryLinesRemoved} room-registry line(s)."
             : "No room-registry lines matched.");
-        output.WriteLine(result.DeliverablesTombstoneWritten
-            ? "Recorded a deleted-rooms tombstone for the deliverables inbox to catch up on."
-            : "Deliverables tombstone not written (--keep-deliverables, or the write failed — see stderr).");
     }
 
     /// <summary>
     /// The delete itself, shared with <c>baton rooms prune</c>'s batch path — both remove the same
-    /// three things (the directory, its registry lines, and a deliverables tombstone) once a caller has
-    /// already established the room is safe to remove. Order matters only for the directory: it is
-    /// deleted *first*, before the registry line and tombstone, so a delete that dies mid-way (killed
+    /// two things (the directory and its registry lines) once a caller has already established the
+    /// room is safe to remove. Order matters only for the directory: it is deleted *first*, before
+    /// the registry line, so a delete that dies mid-way (killed
     /// process, disk full) leaves a registry line pointing at a now-missing directory — a shape every
     /// reader already tolerates (<c>FleetStatusTool</c> drops it rather than surfacing a phantom room,
     /// and <c>RoomRegistryStore.CompactAsync</c>/<c>PreviewCompactionAsync</c> cleans it up on the very
     /// next <c>rooms prune</c>, including the automatic retention sweep, no human involved). The
-    /// opposite order — registry/tombstone first — trades that for a silent, disk-leaking failure mode:
+    /// opposite order — registry first — trades that for a silent, disk-leaking failure mode:
     /// an orphaned directory with no registry line is invisible to <c>RoomsPruneCommand.FindCandidatesAsync</c>
     /// (registry-only, never a filesystem scan), so it can never become a delete candidate again and
     /// only a human manually re-running <c>baton room delete</c> against the exact path recovers it.
     /// </summary>
     internal static async Task<Result> DeleteAsync(
-        string roomDirectoryPath, bool keepDeliverables, CancellationToken cancellationToken)
+        string roomDirectoryPath, CancellationToken cancellationToken)
     {
         var directoryExisted = Directory.Exists(roomDirectoryPath);
         if (directoryExisted)
@@ -88,19 +83,14 @@ public static class RoomDeleteCommand
             .RemoveByRoomPathAsync(BatonPaths.RoomRegistryFile, roomDirectoryPath, cancellationToken)
             .ConfigureAwait(false);
 
-        var tombstoneWritten = !keepDeliverables
-            && await DeletedRoomsTombstoneStore
-                .AppendAsync(roomDirectoryPath, BatonPaths.DeletedRoomsFile, cancellationToken)
-                .ConfigureAwait(false);
-
-        return new Result(roomDirectoryPath, directoryExisted, registryLinesRemoved, tombstoneWritten);
+        return new Result(roomDirectoryPath, directoryExisted, registryLinesRemoved);
     }
 
     /// <summary>
     /// A room directory that no longer exists (already deleted by hand, or by a previous interrupted
     /// delete — see <see cref="DeleteAsync"/>'s own remarks) has nothing left for a live engine to hold,
     /// so it is always terminal for this check's purposes; it still reaches
-    /// <see cref="DeleteAsync"/> to clean up any leftover registry line or tombstone.
+    /// <see cref="DeleteAsync"/> to clean up any leftover registry line.
     /// </summary>
     internal static void RefuseUnlessTerminalOrForced(string roomDirectoryPath, bool force)
     {

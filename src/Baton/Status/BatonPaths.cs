@@ -496,7 +496,7 @@ public static class BatonPaths
     /// </summary>
     public static string SecretPatternsFile => Path.Combine(Root, SecretPatternsDirectoryName, SecretPatternsFileName);
 
-    /// <summary>Directory name <see cref="SecretPatternsFile"/> lives under, relative to a root — the pusher's own <c>tools/fleet-glass</c> convention.</summary>
+    /// <summary>Directory name <see cref="SecretPatternsFile"/> lives under, relative to a root.</summary>
     public const string SecretPatternsDirectoryName = "fleet-glass";
 
     /// <summary>
@@ -515,15 +515,6 @@ public static class BatonPaths
     public const string SecretPatternsFileName = "secretpatterns.local.txt";
 
     /// <summary>
-    /// <c>{Root}/deleted-rooms.jsonl</c> — the local record <c>baton room delete</c>/<c>baton rooms
-    /// prune</c> leave behind so a deleted room's pushed deliverables can eventually be caught up on
-    /// elsewhere. See <see cref="DeletedRoomsTombstoneStore"/> (#1659) for what writes it and why.
-    /// </summary>
-    public static string DeletedRoomsFile => Path.Combine(Root, DeletedRoomsFileName);
-
-    /// <summary>Filename of <see cref="DeletedRoomsFile"/> relative to a root.</summary>
-    public const string DeletedRoomsFileName = "deleted-rooms.jsonl";
-
     /// <summary>
     /// <c>{Root}/watches</c> — one JSON file per <c>baton watch</c> registration (#1488), named
     /// <c>&lt;watch-id&gt;.json</c>. <c>Baton.Cli</c>'s <c>WatchStore</c> (not referenced from here —

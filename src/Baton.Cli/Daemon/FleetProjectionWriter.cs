@@ -98,7 +98,7 @@ public sealed class FleetProjectionWriter : BackgroundService
     /// threshold from <see cref="StaleAfter"/> rather than transcribing 90 seconds:
     /// <c>FleetStatusTool</c>'s <c>stale</c> flag, and — across the language boundary, where a
     /// literal is unavoidable — <c>PROJECTION_STALE_AFTER_MS</c> in
-    /// <c>tools/fleet-glass/worker.core.mjs</c>, which names this symbol as its source.
+    /// The daemon-served Fleet Glass consumes this threshold from the projection file.
     /// </summary>
     public const int StaleAfterTicks = 3;
 

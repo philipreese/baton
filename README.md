@@ -32,8 +32,8 @@ The [arm comparator](benchmarks/comparator.md) records the matched-brief routing
 | `baton cancel` / `baton decide` / `baton resolve` / `baton resume` / `baton supply` | Mutate an already-started room — cancel a lane, record a pause decision, resolve a captured response, resume a stalled pump, supply a supplementary output. |
 | `baton status` | Read-only projection of a room's current state. |
 | `baton keep` / `baton unkeep` | Mark/unmark a room exempt from `RoomRetentionSweep`'s pruning — both the recoverable artifact move and the `rooms prune --terminal` delete the daemon now runs automatically by default (`spec/baton.md` §8). |
-| `baton deliver <file> [--title <text>] [--room <room-dir>]` (`--room-dir` also accepted) | Deliver an orchestrator artifact into a room (defaults to standing conductor room) so it reaches the Fleet Glass inbox. |
-| `baton room delete <room-dir> [--keep-deliverables] [--force]` | Remove one room for good: its directory, its `room-registry.jsonl` lines, and (best-effort) a deliverables tombstone. Refuses a non-terminal room unless `--force` — see `spec/baton.md` §8. |
+| `baton deliver <file> [--title <text>] [--room <room-dir>]` (`--room-dir` also accepted) | Deliver an orchestrator artifact into a room (defaults to standing conductor room) so the daemon-served Fleet Glass can show its local path. |
+| `baton room delete <room-dir> [--force]` | Remove one room for good: its directory and `room-registry.jsonl` lines. Refuses a non-terminal room unless `--force` — see `spec/baton.md` §8. |
 | `baton rooms prune --terminal [--older-than <days>] [--state <state>] [--dry-run] [--yes]` | Batch form of `room delete`, plus unconditional registry hygiene (dedupe, drop lines whose directory is gone). Lists candidates by default; `--yes` actually deletes. |
 | `baton templates` | List the built-in workflow template catalog. |
 | `baton ledger [<room-dir>] [filters] [--format text\|json\|csv] [--drill]` | Read the repository's cost ledger: per-vendor token and estimate subtotals, then a labelled all-vendor estimate, for a room or the whole fleet. `baton ledger --rebuild` is the separate burn-ledger rebuild (`spec/baton.md` §7). |
@@ -72,22 +72,7 @@ stops for the operator rather than being guessed at. An approved item stops at `
 `spec/baton.md` §13 is the contract — the shipped defaults, the recorded fact's shape, what happens
 when free memory cannot be read, and the lifecycle's own transition table.
 
-## Fleet Glass push notifications
-
-`tools/fleet-glass/pusher.py` can push terminal/attention-worthy fleet events (a failed lane, a
-stalled room, a pusher-level anomaly) to a phone via [ntfy](https://ntfy.sh) — see
-[`spec/baton.md`](spec/baton.md) §6 for the full behavior (tier table, quiet hours, dedup). To
-enable it, copy `tools/fleet-glass/pusher.config.example.json` to `pusher.config.json` and set:
-
-| Key | Purpose |
-|---|---|
-| `ntfy_topic` | The ntfy topic to push to. **Unset or blank disables the feature entirely** (one startup log line, no error). |
-| `ntfy_server` | ntfy server base URL; defaults to `https://ntfy.sh`. A self-hosted instance requiring auth also needs `ntfy_token` in `secrets.local.json` (see `secrets.local.example.json`) — never in `pusher.config.json`. |
-| `ntfy_quiet_hours` | Optional `{"start", "end", "timezone"}` (24h `HH:MM`, wrapping past midnight allowed; timezone defaults to `America/New_York`). Suppresses every tier below `urgent`; omit for no quiet hours at all. |
-| `ntfy_state_file` | Where the dedup ledger is persisted; defaults to `ntfy-state.local.json` beside `pusher.py`. |
-
-Event type → ntfy priority (`NTFY_EVENT_TIERS`, spec/baton.md §6): `lane_failed` → urgent,
-`zombie_detected` / `pusher_anomaly` → high, `lane_succeeded_with_warnings` → default.
+## Fleet Glass
 
 Fleet Glass (`tools/fleet-glass/glass.html`) and `fleet_status` also show each authenticated vendor's
 own headless `/usage` report — session/weekly percent used, reset instant, and the vendor's own
@@ -162,7 +147,10 @@ isolated localhost. The first online visit activated the service worker; a hangi
 the static fallback; restoring the server and selecting Retry returned the online page; and stopping
 the server also showed the static fallback. This did not cover HTTP 5xx, real-daemon retained-snapshot
 recovery, or a physical Android offline launch. A physical install on a distinct private hostname was
-user-confirmed. The new HTTP-error fallback behavior has not been browser-tested yet.
+user-confirmed. The operator also confirmed the phone proof and live tailnet service URLs today:
+`baton.tail552f69.ts.net:8420`, `basis.tail552f69.ts.net:5173`, and
+`wdw-planner.tail552f69.ts.net:5174`. Tailnet-only access remains intact. The new HTTP-error fallback
+behavior has not been browser-tested yet.
 
 ## Vendor authentication
 

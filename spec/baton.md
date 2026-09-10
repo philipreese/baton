@@ -2858,6 +2858,11 @@ have. That gap is now moot rather than fixed, because the mechanism it was a gap
 
 ## §6 Fleet Glass — observability
 
+**Repository retirement status (#2170, 2026-09-09).** The committed Fleet Glass delivery is now the
+daemon-served tailnet page. The legacy pusher, Worker/KV mailbox, and published artifact deployment
+machinery are no longer repository-supported; the remaining live stop/decommission steps are owned
+by the conductor and are tracked in the implementation handoff for #2170.
+
 This is the entire user-facing surface, unconditionally. `fleet_status`
 (`src/Baton.Cli/Mcp/FleetStatusTool.cs`) is a read-only MCP tool that scans rooms across the fleet: it
 leverages the terminal-sentinel fast path for terminal rooms and projects active rooms from bound

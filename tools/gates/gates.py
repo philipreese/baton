@@ -78,14 +78,6 @@ OVERLAP = [
     # anywhere; wired in now because it is what proves the gate-receipt logic below still
     # discriminates, not merely that it ran once at review time.
     "gates-selftest",
-    # #1656 F2 (2026-09-02 review): plain `node` against in-memory synthetic fixtures -- no
-    # network, no MSBuild, no built CLI, same overlap-safety shape as tool-refresh-selftest above.
-    # Its sibling `fleet-glass-pusher-selftest` deliberately stays UNWIRED (fleet-glass is an
-    # unbuilt-by-CI operator tool, per that task's own pixi.toml comment); this one is wired in
-    # anyway because it is the ONLY thing standing between worker.js's paging/heartbeat-merge logic
-    # and a silent revert going undetected (the F2 finding this fixes: reverting the merge broke
-    # nothing in CI before this).
-    "fleet-glass-worker-selftest",
     # #1912: same shape, and wired in for the same reason -- plain `node`, no network, no MSBuild.
     # It is the only thing between the conductor panel's row kinds and a silent break, and it reads
     # the SHIPPED glass.html bytes rather than a copy, so it also fails when the markers it slices on

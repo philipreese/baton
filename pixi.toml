@@ -387,24 +387,10 @@ setup-hooks = { cmd = "git config core.hooksPath .githooks" }
 # tree, would replay as a pass and this gate would never fire.
 vendor-check = { cmd = "python tools/buildlock.py dotnet run --project tools/Baton.VendorProbe -- --check" }
 
-# #1413: pure-Python red/green check that the fleet-glass pusher's secret gate fails CLOSED (a
-# missing/unreadable secretpatterns.local.txt withholds every deliverable) and that its dedupe and
-# artifact-selection rules discriminate, over synthetic temp fixtures -- no network, no real
-# ~/.baton. Not wired into gates/gates-fast: fleet-glass is an unbuilt-by-CI operator tool (like
-# vendor-verify above), run by whoever touches pusher.py rather than on every PR.
-fleet-glass-pusher-selftest = { cmd = "python tools/fleet-glass/pusher.py --selftest" }
-
-# #1656 F2 (2026-09-02 review): the JS-side twin of the selftest above -- worker.core.mjs's
-# deliverables_list/fleet_status paging and the heartbeat-merge (maxIsoOrNull), over synthetic
-# in-memory fixtures via plain `node`, no live Cloudflare Worker/KV. Same "operator tool, not
-# CI-wired" posture as fleet-glass-pusher-selftest.
-fleet-glass-worker-selftest = { cmd = "node tools/fleet-glass/worker.selftest.mjs" }
-
 # #1912: the conductor panel's own row kinds, over glass.html's SHIPPED bytes -- that file's marked
 # block is extracted and evaluated rather than reimplemented, and the harness exits 1 if the markers
-# are gone, so it cannot go quietly vacuous. WIRED INTO THE GATES, like fleet-glass-worker-selftest
-# immediately above and unlike fleet-glass-pusher-selftest: gates.py's membership is the register for
-# which of the three run and why.
+# are gone, so it cannot go quietly vacuous. WIRED INTO THE GATES: gates.py's membership is the
+# register for which of the three retained Fleet Glass selftests run and why.
 fleet-glass-selftest = { cmd = "node tools/fleet-glass/glass.selftest.mjs" }
 
 # #2168 review: executable production-byte tests for the daemon feed's EventSource loss/recovery
@@ -422,8 +408,8 @@ verify-pack = { cmd = "bash scripts/verify-pack-roundtrip.sh", depends-on = ["pa
 
 # #1645 / #1668: the one-command refresh of the installed tool -- side-by-side per-commit install into
 # ~/.baton/tools/<sha> (no drain wait needed), verify directly, flip ~/.baton/tools/current atomically,
-# install launcher into ~/.dotnet/tools, rebuild Debug CLI for pusher, restart fleet-glass-pusher,
-# and prune old unreferenced versions. Not wrapped in buildlock.py itself: the script's own `pixi run pack`
+# install launcher into ~/.dotnet/tools, restart baton-daemon, and prune old unreferenced versions.
+# Not wrapped in buildlock.py itself: the script's own `pixi run pack`
 # call is (see pack above), and wrapping twice would self-deadlock. Not built/tested by default CI --
 # like pack/verify-pack, this needs the checkout to pack from, and mutates this machine's real installed tool,
 # so it stays operator-run rather than gated.
