@@ -1,3 +1,4 @@
+using System.ComponentModel;
 using System.Diagnostics;
 using System.Text;
 using System.Text.Json;
@@ -48,6 +49,8 @@ public static class CodexAppServerBroker
     private const int ThreadRequestId = 2;
     private const int TurnRequestId = 3;
     private const int RateLimitsRequestId = 2;
+    internal static readonly TimeSpan RateLimitsSourceBound = TimeSpan.FromSeconds(45);
+    internal static readonly TimeSpan RateLimitsCleanupReserve = TimeSpan.FromSeconds(5);
     internal static readonly Encoding JsonLineEncoding = new UTF8Encoding(encoderShouldEmitUTF8Identifier: false);
 
     public static async Task<int> RunAsync(
@@ -142,60 +145,150 @@ public static class CodexAppServerBroker
 
     /// <summary>
     /// Reads authenticated account limits through the broker's isolated home and app-server
-    /// lifecycle, stopping before any thread or model turn is started.
+    /// lifecycle, stopping before any thread or model turn is started. The whole source owns a
+    /// 45-second bound: forty seconds for initialize/read and five reserved for kill, exit, and stderr
+    /// drain so a server that starts but never answers cannot stop the serial daemon harvest loop.
     /// </summary>
-    internal static async Task<JsonObject?> ReadRateLimitsAsync(CancellationToken cancellationToken)
+    internal static Task<JsonObject?> ReadRateLimitsAsync(CancellationToken cancellationToken) =>
+        ReadRateLimitsAsync(
+            () =>
+            {
+                var isolatedHome = CodexIsolatedHome.Prepare(BatonPaths.Root);
+                return StartAppServer(Environment.CurrentDirectory, allowsSubagents: false, isolatedHome);
+            },
+            Console.Error,
+            RateLimitsSourceBound,
+            RateLimitsCleanupReserve,
+            cancellationToken);
+
+    /// <summary>
+    /// Process-creation seam for the source contract. Creation belongs inside the same ordinary-failure
+    /// boundary as protocol errors: an absent or unstartable executable is a logged null harvest, not an
+    /// exception escaping <see cref="IVendorUsageSource.ReadAsync"/>.
+    /// </summary>
+    internal static async Task<JsonObject?> ReadRateLimitsAsync(
+        Func<Process?> startAppServer,
+        TextWriter error,
+        TimeSpan sourceBound,
+        TimeSpan cleanupReserve,
+        CancellationToken cancellationToken)
     {
-        string isolatedHome;
+        ArgumentNullException.ThrowIfNull(startAppServer);
+        ArgumentNullException.ThrowIfNull(error);
+        if (sourceBound <= cleanupReserve || cleanupReserve <= TimeSpan.Zero)
+        {
+            throw new ArgumentOutOfRangeException(nameof(sourceBound));
+        }
+
+        Process? started;
         try
         {
-            isolatedHome = CodexIsolatedHome.Prepare(BatonPaths.Root);
+            started = startAppServer();
         }
-        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or ArgumentException)
+        catch (Exception ex) when (ex is Win32Exception or IOException or UnauthorizedAccessException
+            or ArgumentException or InvalidOperationException)
         {
-            Console.Error.WriteLine($"Codex rate-limit harvest failed: {ex.Message}");
+            await error.WriteLineAsync($"Codex rate-limit harvest failed: {ex.Message}").ConfigureAwait(false);
             return null;
         }
 
-        using var process = StartAppServer(Environment.CurrentDirectory, allowsSubagents: false, isolatedHome);
-        if (process is null)
+        if (started is null)
         {
-            Console.Error.WriteLine("Codex rate-limit harvest could not start codex app-server.");
-            return null;
-        }
-
-        var stderrDrain = DrainStderrAsync(process.StandardError, Console.Error, cancellationToken);
-        try
-        {
-            return await ReadRateLimitsProtocolAsync(
-                process.StandardInput, process.StandardOutput, Console.Error, cancellationToken)
+            await error.WriteLineAsync("Codex rate-limit harvest could not start codex app-server.")
                 .ConfigureAwait(false);
+            return null;
+        }
+
+        using var process = started;
+        Task stderrDrain = Task.CompletedTask;
+        return await ReadRateLimitsWithinBoundsAsync(
+            token =>
+            {
+                // Drain until process exit. The cleanup's own WaitAsync supplies the bound; coupling the
+                // drain to the response token would make a normal response timeout look like failed cleanup.
+                stderrDrain = DrainStderrAsync(process.StandardError, error, CancellationToken.None);
+                return ReadRateLimitsProtocolAsync(
+                    process.StandardInput, process.StandardOutput, error, token);
+            },
+            token => StopRateLimitsProcessAsync(process, stderrDrain, token),
+            error,
+            sourceBound - cleanupReserve,
+            cleanupReserve,
+            cancellationToken).ConfigureAwait(false);
+    }
+
+    /// <summary>
+    /// One bounded lifecycle around response and cleanup. <see cref="Task.WaitAsync(CancellationToken)"/>
+    /// enforces both bounds even when an underlying stream or cleanup operation ignores its token.
+    /// </summary>
+    internal static async Task<JsonObject?> ReadRateLimitsWithinBoundsAsync(
+        Func<CancellationToken, Task<JsonObject>> read,
+        Func<CancellationToken, Task> cleanup,
+        TextWriter error,
+        TimeSpan responseBound,
+        TimeSpan cleanupBound,
+        CancellationToken cancellationToken)
+    {
+        using var responseTimeout = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
+        responseTimeout.CancelAfter(responseBound);
+        try
+        {
+            return await read(responseTimeout.Token).WaitAsync(responseTimeout.Token).ConfigureAwait(false);
         }
         catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
         {
             throw;
         }
-        catch (Exception ex) when (ex is IOException or JsonException or InvalidOperationException)
+        catch (OperationCanceledException) when (responseTimeout.IsCancellationRequested)
         {
-            Console.Error.WriteLine($"Codex rate-limit harvest failed: {ex.Message}");
+            await error.WriteLineAsync(
+                $"Codex rate-limit harvest did not answer within {responseBound.TotalSeconds:0}s.")
+                .ConfigureAwait(false);
+            return null;
+        }
+        catch (Exception ex) when (ex is IOException or JsonException or InvalidOperationException
+            or UnauthorizedAccessException)
+        {
+            await error.WriteLineAsync($"Codex rate-limit harvest failed: {ex.Message}").ConfigureAwait(false);
             return null;
         }
         finally
         {
-            process.StandardInput.Close();
-            if (!process.HasExited)
+            using var cleanupTimeout = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
+            cleanupTimeout.CancelAfter(cleanupBound);
+            try
             {
-                try
-                {
-                    process.Kill(entireProcessTree: true);
-                }
-                catch (InvalidOperationException)
-                {
-                    // The process raced the reader to a normal exit.
-                }
+                await cleanup(cleanupTimeout.Token).WaitAsync(cleanupTimeout.Token).ConfigureAwait(false);
             }
-            await stderrDrain.ConfigureAwait(false);
+            catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+            {
+                // The caller's own bound wins. The cleanup delegate is invoked before WaitAsync sees
+                // cancellation, so the production delegate has already issued the process-tree kill.
+            }
+            catch (OperationCanceledException) when (cleanupTimeout.IsCancellationRequested)
+            {
+                await error.WriteLineAsync(
+                    $"Codex rate-limit harvest cleanup did not finish within {cleanupBound.TotalSeconds:0}s.")
+                    .ConfigureAwait(false);
+            }
+            catch (Exception ex) when (ex is Win32Exception or IOException or InvalidOperationException)
+            {
+                await error.WriteLineAsync($"Codex rate-limit harvest cleanup failed: {ex.Message}")
+                    .ConfigureAwait(false);
+            }
         }
+    }
+
+    private static async Task StopRateLimitsProcessAsync(
+        Process process, Task stderrDrain, CancellationToken cancellationToken)
+    {
+        if (!process.HasExited)
+        {
+            process.Kill(entireProcessTree: true);
+        }
+
+        await process.WaitForExitAsync(cancellationToken).ConfigureAwait(false);
+        await stderrDrain.WaitAsync(cancellationToken).ConfigureAwait(false);
     }
 
     internal static async Task<int> RunProtocolAsync(

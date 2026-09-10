@@ -78,11 +78,12 @@ public interface IVendorUsageSource
     string Vendor { get; }
 
     /// <summary>
-    /// Runs the vendor's own headless usage command once and parses its output. Returns null when the
-    /// CLI could not be spawned, exited non-zero, or exited zero having written nothing at all —
+    /// Runs the vendor's own headless usage read once and parses its output. Returns null when the
+    /// CLI/app-server could not be spawned, failed, or produced no result at all —
     /// never a snapshot with fabricated content, and a null tells the harvester to leave the last
-    /// persisted snapshot alone rather than blank it (<see cref="VendorUsageCommandRun"/> is where
-    /// all three cases are decided, and its doc comment has the #1869 defect they close). Output that
+    /// persisted snapshot alone rather than blank it (for slash-command sources,
+    /// <see cref="VendorUsageCommandRun"/> is where those cases are decided, and its doc comment has
+    /// the #1869 defect they close). Output that
     /// was written but is unrecognizable still returns a snapshot, with
     /// <see cref="VendorUsageSnapshot.Windows"/> empty, so a caller can tell "harvested, nothing
     /// parsed" apart from "did not harvest at all".

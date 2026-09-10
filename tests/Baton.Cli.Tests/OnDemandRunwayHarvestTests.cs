@@ -1,3 +1,4 @@
+using System.Text.Json.Nodes;
 using Baton.Cli.Daemon;
 using Baton.Cli.Tests.TestSupport;
 using Baton.Vendors;
@@ -51,6 +52,19 @@ public sealed class OnDemandRunwayHarvestTests : IDisposable
     private static RunwayDecision Decide(string vendor, RunwayHarvestAttempt? attempt) =>
         RunwayGate.Evaluate(
             vendor, RunwaySnapshotReader.Read(vendor), new RunwayThresholds(), Now, attempt);
+
+    private static VendorUsageSnapshot MeasuredCodexSnapshot(DateTimeOffset harvestedAt)
+    {
+        var fixture = Path.Combine(
+            RepoRoot(),
+            "tests",
+            "Baton.Vendors.Tests",
+            "Fixtures",
+            "codex",
+            "codex-app-server-rate-limits-0.153.2.jsonl");
+        var root = JsonNode.Parse(File.ReadAllText(fixture))!.AsObject();
+        return CodexUsageSource.Parse(root["result"]!.AsObject(), harvestedAt);
+    }
 
     [Fact]
     public async Task A_gated_vendor_with_a_source_and_no_snapshot_is_harvested_and_then_admitted()
@@ -121,16 +135,13 @@ public sealed class OnDemandRunwayHarvestTests : IDisposable
     }
 
     /// <summary>
-    /// A vendor with no <see cref="IVendorUsageSource"/> is untouched: nothing is harvested, and the
-    /// decision is the unmeasured Admit #1848 already shipped. Two arms in one, because the gate's own
-    /// two populations differ — <c>codex</c> HAS a source and is still not gated, so it must not be
-    /// harvested either, and a list check keyed on the wrong population would pass the first arm alone.
+    /// A vendor whose counters do not gate is untouched: nothing is harvested, and the decision is the
+    /// unmeasured Admit #1848 already shipped.
     /// </summary>
-    [Theory]
-    [InlineData("fake")]
-    [InlineData("codex")]
-    public async Task A_vendor_the_counters_do_not_gate_is_not_harvested_at_all(string vendor)
+    [Fact]
+    public async Task A_vendor_the_counters_do_not_gate_is_not_harvested_at_all()
     {
+        const string vendor = "fake";
         var source = new StubUsageSource(vendor, () => AgySnapshot(95, 90));
 
         var attempt = await OnDemandRunwayHarvest.TryHarvestAsync(
@@ -139,6 +150,27 @@ public sealed class OnDemandRunwayHarvestTests : IDisposable
         Assert.Null(attempt);
         Assert.Equal(0, source.Reads);
         Assert.Equal(RunwayGate.UnmeasuredReason, Decide(vendor, attempt).Reason);
+    }
+
+    /// <summary>
+    /// Codex moved to the gated population with the authenticated account source. This pins the
+    /// opposite polarity from the unmeasured arm above and replays the measured weekly-only fixture
+    /// through the inline writer and the real gate.
+    /// </summary>
+    [Fact]
+    public async Task Codex_is_gated_harvested_and_admitted_on_the_measured_account_shape()
+    {
+        var source = new StubUsageSource("codex", () => MeasuredCodexSnapshot(Now));
+
+        var attempt = await OnDemandRunwayHarvest.TryHarvestAsync(
+            "codex", snapshotUsable: false, [source], TestContext.Current.CancellationToken);
+
+        Assert.NotNull(attempt);
+        Assert.Null(attempt.FailureReason);
+        Assert.Equal(1, source.Reads);
+        var decision = Decide("codex", attempt);
+        Assert.Equal(RunwayDisposition.Admit, decision.Disposition);
+        Assert.Single(decision.Counters);
     }
 
     /// <summary>A vendor that already has a USABLE snapshot pays nothing — the harvest is the path for
@@ -221,6 +253,40 @@ public sealed class OnDemandRunwayHarvestTests : IDisposable
     }
 
     /// <summary>
+    /// A fresh interim snapshot is readable from disk but cannot decide the authenticated account
+    /// gate. The production evaluator must classify it as unusable, run the migration refresh, re-read
+    /// the persisted measured fixture, and admit on that fixture's weekly-only account counter.
+    /// </summary>
+    [Fact]
+    public void A_fresh_derived_codex_snapshot_is_refreshed_and_decided_on_the_measured_fixture()
+    {
+        var now = DateTimeOffset.UtcNow;
+        VendorUsageHarvester.Persist(
+            "codex",
+            new VendorUsageSnapshot(
+                "codex",
+                now,
+                null,
+                [new VendorUsageWindow("rolling 5h (derived)", 1, null, "derived")],
+                VendorUsageProvenance.Derived));
+        var calls = new List<(string Vendor, bool SnapshotUsable)>();
+
+        Task<RunwayHarvestAttempt?> Harvest(string vendor, bool snapshotUsable)
+        {
+            calls.Add((vendor, snapshotUsable));
+            VendorUsageHarvester.Persist(vendor, MeasuredCodexSnapshot(DateTimeOffset.UtcNow));
+            return Task.FromResult<RunwayHarvestAttempt?>(
+                new RunwayHarvestAttempt(DateTimeOffset.Now, FailureReason: null));
+        }
+
+        var decision = DispatchCommand.CreateDiskRunwayEvaluator(new DaemonSettings(), Harvest)("codex");
+
+        Assert.Equal(("codex", false), Assert.Single(calls));
+        Assert.Equal(RunwayDisposition.Admit, decision.Disposition);
+        Assert.Equal(48, Assert.Single(decision.Counters).PercentUsed);
+    }
+
+    /// <summary>
     /// <b>#1966's measured incident, end to end</b> — the morning hold on a 12.2 h-old agy snapshot that
     /// the conductor had to <c>--override-runway</c> past; spec/baton.md §7 carries the measurement, and
     /// the age below is its. The stale snapshot's counters are DELIBERATELY under both thresholds and
@@ -285,7 +351,7 @@ public sealed class OnDemandRunwayHarvestTests : IDisposable
     }
 
     /// <summary>
-    /// The bound's own arm, on the path both gated vendors actually take: their sources kill the CLI and
+    /// The bound's null-return arm, on the path the slash-command sources actually take: they kill the CLI and
     /// report the killed run as a null (<c>VendorUsageCommandRun</c> folds <c>BatonCancelException</c>
     /// into one), so "did not finish within Ns" has to be recognised there and not only in the
     /// cancellation catch — which no shipped source can reach. Driven over the internal bound seam, so
@@ -333,11 +399,14 @@ public sealed class OnDemandRunwayHarvestTests : IDisposable
             Path.Combine(root, "tests", "Baton.Architecture.Tests", "VendorSpawnGateTests.cs"));
         Assert.DoesNotContain("OnDemandRunwayHarvest.cs", allowlist, StringComparison.Ordinal);
 
-        // The spawn the inline harvest DOES cause is each source's own, and those files are on the
-        // reviewed list already. Asserted on the sources the production evaluator actually passes.
+        // The spawn the inline harvest DOES cause is each source's existing reviewed spawn. Codex's
+        // source delegates process ownership to the pre-existing broker; the other sources own theirs.
         foreach (var vendorSource in VendorUsageSources.Default.Where(s => RunwayGate.IsGated(s.Vendor)))
         {
-            Assert.Contains($"{vendorSource.GetType().Name}.cs", allowlist, StringComparison.Ordinal);
+            var spawnOwner = vendorSource is CodexUsageSource
+                ? $"{nameof(CodexAppServerBroker)}.cs"
+                : $"{vendorSource.GetType().Name}.cs";
+            Assert.Contains(spawnOwner, allowlist, StringComparison.Ordinal);
         }
     }
 

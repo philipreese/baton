@@ -2956,7 +2956,8 @@ anticipated this shape):
   "vendors"?: [ /* #1391: advisory per-vendor usage runway -- absent entirely (never an empty array)
                    until at least one vendor has ever been harvested */
     {
-      "adapter": string,             // "claude" | "agy" -- Codex is explicitly out of scope (#1391's own "Decisions already made")
+      "adapter": string,             // "claude" | "agy" | "codex"
+      "source": "vendor" | "derived", // always present; current harvesters write vendor, while derived remains readable for interim Codex snapshots
       "harvestedAt": string,         // ISO-8601 UTC instant of the harvest this entry reflects
       "caveat"?: string,             // the vendor's own machine-local disclaimer, verbatim -- absent when the harvest carried none (agy: never documented, so always absent)
       "windows": [
@@ -2964,7 +2965,10 @@ anticipated this shape):
           "name": string,            // vendor's own wording, e.g. "session", "week (Fable)", "Gemini Models · Weekly Limit" -- agy's own "Remaining" is stripped so the label cannot contradict the percent-USED number rendered beside it (#1869 review); "rawLine" keeps the vendor's wording verbatim
           "percentUsed"?: number,    // ALWAYS percent USED (agy's own "percent remaining" is converted before this field is populated) -- absent, never a guessed number, when unparsed
           "resetsAt"?: string,       // ISO-8601 UTC instant -- absent when the vendor's own line carried no reset clause, or claude's non-ISO "Jul 25, 12:09am (America/New_York)" format (minutes optional) failed to resolve; "rawLine" still carries the vendor's own text either way
-          "rawLine": string,         // the vendor's own line, verbatim, for a reader that wants to show what parsing dropped
+          "rawLine": string,         // the vendor source record: a slash-command line verbatim, or Codex's shape-preserving window JSON / "null"
+          "limitId"?: string,        // Codex bucket identity; absent for textual slash-command sources
+          "windowKind"?: string,     // Codex property identity (primary|secondary); absent for textual slash-command sources
+          "windowDurationMins"?: number, // Codex product semantics; absent when the vendor omitted/null-ed it or it did not parse
           "ratePctPerHour"?: number, // #1746: advisory burn, percentage points of this window consumed per hour, derived over the persisted sample ring (oldest to newest). ABSENT under two samples -- never 0, which would read as "idle" when the truth is "not yet known" -- and absent when the ring spans no time at all. Present as 0 when two or more samples show no movement the two-decimal rounding can see; the ring keeps at most twelve samples and none older than three hours before the newest, so a rate is never averaged across an idle gap the harvester's backoff created. **Always absent on a `source: derived` entry (#1904)**, and so is `minutesToExhaustion` beneath it: no ring is kept for such an entry at all, because a derived percentage has no vendor-declared rollover boundary. No current source writes this provenance; `VendorUsageBurn.Advance` retains the rule for persisted interim snapshots
           "minutesToExhaustion"?: number // #1746: (100 - percentUsed) / ratePctPerHour, in minutes, at that rate. Absent whenever the rate is absent or not positive (nothing is being consumed to run out) and whenever percentUsed itself is absent
         }
@@ -4213,20 +4217,21 @@ code path. Both vendors participate in the ledger.
 ### Runway hold (#1848) — shipped
 
 The **enforcement** half of the runway work, and the only place in the tree that gates on a vendor's
-own `/usage` counters. It consumes the per-vendor projection #1391/#1869 already persists: the daemon
+own usage counters. It consumes the per-vendor projection #1391/#1869/#1904 already persists: the daemon
 harvests, `baton dispatch` reads the persisted snapshot (`BatonPaths.VendorUsageSnapshotFile`). The
-harvester's own `/usage` call is exempt from everything below — it is how the counters are measured.
+harvester's own usage read is exempt from everything below — it is how the counters are measured.
 
-**On demand, once, when what is there cannot decide (#1923, widened by #1966).** When a gated vendor
+**On demand, once, when what is there cannot decide (#1923, widened by #1966/#1904).** When a gated vendor
 has a usage source and no snapshot this gate can decide on, the hold runs that source once inline —
 bounded at 10 s, written through the harvester's own writer, no second snapshot format and no second
 source list (`VendorUsageSources.Default`) — and then decides on what was actually persisted. **Cannot
-decide** means the two cases this section already holds for: no snapshot at all (#1923), and, since
-#1966, one older than `maxSnapshotAgeHours` — `RunwayGate.IsUsable` is where that test is written, and
+decide** includes no snapshot at all (#1923), one older than `maxSnapshotAgeHours` (#1966), and a fresh
+interim derived (or otherwise structurally non-decision-capable) Codex snapshot that needs migration
+refresh (#1904) — `RunwayGate.IsUsable` is where that test is written, and
 a stale counter is not evidence of headroom, so leaving it unharvested refused a vendor on a number
-nothing was going to replace. A **fresh** snapshot is never harvested here, so the common path still
+nothing was going to replace. A **fresh decision-capable vendor** snapshot is never harvested here, so the common path still
 spends nothing and the gate still cannot be what exhausts the runway it protects. This is the one case
-in which a gate check spends subscription usage, bounded to one `/usage` call per such vendor per
+in which a gate check spends subscription usage, bounded to one usage read per such vendor per
 dispatch. **A failed harvest still holds**, and says so, in both cases: the refusal reads `harvest
 attempted at HH:MM and failed: <reason>` — alone when there was no snapshot, appended to the staleness
 sentence when there was one — because "never harvested" is a bootstrap state and "harvested and it
@@ -4246,11 +4251,13 @@ running at once. That is the whole of the guarantee: the on-demand inline harves
 coordinated with the tick, and both live in the daemon process, so a hold evaluated while a tick is
 harvesting can spawn a second vendor CLI beside it. The bound is **one CLI from the tick plus one per
 concurrent gated dispatch evaluation** in that process, each bounded by its own timeout (10 s inline,
-45 s for a tick's source). What this replaced was the idle backoff (#1391: no harvesting at all without
+45 s for a tick's source). Codex reserves the last 5 s of that 45 s source bound for process-tree kill,
+exit, and stderr drain, leaving 40 s for initialize and `account/rateLimits/read`; a non-answer cannot
+strand the serial tick. What this replaced was the idle backoff (#1391: no harvesting at all without
 a live lane), which is what made the on-demand path above the only thing that
 ever refreshed an idle vendor: measured 2026-09-06 07:22 ET, an agy analysis lane held on a 12.2 h-old
 snapshot after no agy lane had run overnight, and the conductor had to override. What it costs is the
-extra `/usage` calls: at most one per vendor per 30 min while the fleet is idle, **plus one per window
+extra usage reads: at most one per vendor per 30 min while the fleet is idle, **plus one per window
 boundary** that vendor's last snapshot named — claude's session window resets every five hours, so the
 boundary trigger is the smaller half of the bill, not a rounding error inside the 30 min one.
 
@@ -4273,32 +4280,35 @@ nothing in flight.
 | A composed template's later phases | no | Admitted once, at the dispatch that materialised the whole DAG — a phase boundary is not a new admission. |
 | Retry / retry-with-continuation (#1373) | no | Same execution's own recovery inside an admitted lane, not new work. |
 | Fallback-on-exhaustion rebind (#802) | no | Rebinding an admitted step onto a declared fallback vendor; the lane is already running. |
-| Daemon `/usage` harvest | **exempt** | It is the measurement this gate reads. |
+| Daemon usage harvest | **exempt** | It is the measurement this gate reads. |
 
 **The decision.** `RunwayGate.Evaluate(vendor, snapshot, thresholds, now)` → Admit or Hold, per vendor
 and independently: a claude hold never holds an agy or codex dispatch (operator ruling, 2026-09-05).
-It holds when the vendor's **week (all models)** window is at or above `weekHoldPct` (default 85), when
-its **session / five-hour** window is at or above `sessionHoldPct` (default 90), or when the counters
+It holds when the vendor's account **weekly** window is at or above `weekHoldPct` (default 85), when
+an exposed account **session / five-hour** window is at or above `sessionHoldPct` (default 90), or when the counters
 are not readable at all — a missing or corrupt snapshot file, a snapshot carrying no window this
 gate's table recognises, a recognised window whose percentage did not parse, or a snapshot older than
 `maxSnapshotAgeHours` (default 6). Stale holds for the same reason unreadable does, stated once on
 `RunwayThresholds.EffectiveMaxSnapshotAge`'s own doc comment: a stale counter is not evidence of
-headroom. claude's **`week (Fable)`** counter is deliberately not a gate while no worker runs on Fable,
+headroom. Codex's measured authenticated account exposes only its 10,080-minute weekly primary and a
+null secondary; that weekly-only account is complete and admissible below threshold, because an
+unexposed 300-minute account window is not malformed reported data. If a 300-minute account window is
+exposed, its percentage is applicable and malformed/unknown values hold. An exposed account window
+whose duration is unknown or unexpected also holds rather than being assumed irrelevant. Buckets with
+a non-account `limitId` are per-model and can neither admit nor hold the account. claude's
+**`week (Fable)`** counter is deliberately not a gate while no worker runs on Fable,
 which is why the window table matches vendor window names exactly rather than by prefix. A vendor
 outside that window table is admitted, recorded as `runway: unmeasured` — unmeasured is a different
 claim from unreadable, and holding on a vendor Baton has never been able to read would block work the
-counters say nothing about. **`codex` is still that vendor after #1904**, and deliberately: it now has
-an `IVendorUsageSource` and a snapshot file, but a *derived* one whose `percentUsed` is absent unless
-the operator declared a plan ceiling (§6, `source: vendor|derived`). Putting its window names in the
-table would route every ceiling-less codex dispatch down the "recognised window, no percentage" Hold
-arm — holding the newest vendor on the fleet for the same absence this paragraph chose to admit.
-Gating on the derived counters is a separate decision, not a consequence of the source existing.
+counters say nothing about. `codex` is inside the selector table after #1904: its authenticated account
+bucket is selected by `limitId=codex` and the vendor-reported durations above, never by primary/secondary
+position and never from an interim derived snapshot.
 
 **The harvest is a prerequisite, and its absence is a Hold.** On a machine where nothing has harvested
-within `maxSnapshotAgeHours`, every `claude` and `agy` dispatch is refused until something does or the
+within `maxSnapshotAgeHours`, every `claude`, `agy`, and `codex` dispatch is refused until something does or the
 operator passes `--override-runway`. That is the ruling's own consequence, not an oversight: unreadable
-holds, and a stale snapshot is unreadable for this purpose. Both of the cases that reach it — no
-snapshot, and one past the limit — are what the on-demand harvest above tries to resolve before
+holds, and a stale snapshot is unreadable for this purpose. All cases that reach it — no snapshot,
+one past the limit, or a fresh non-decision-capable Codex migration snapshot — are what the on-demand harvest above tries to resolve before
 deciding, and both are still a Hold when that harvest fails. A vendor with no usage source at all is
 unaffected — it is admitted as unmeasured.
 

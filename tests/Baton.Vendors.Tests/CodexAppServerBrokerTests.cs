@@ -1,3 +1,5 @@
+using System.ComponentModel;
+using System.Diagnostics;
 using System.Text.Json.Nodes;
 using Baton.Tests.Shared;
 
@@ -75,6 +77,56 @@ public sealed class CodexAppServerBrokerTests
                 serverInput, serverOutput, error, TestContext.Current.CancellationToken));
 
         Assert.Equal("Codex app-server returned no rate-limit result.", exception.Message);
+    }
+
+    /// <summary>
+    /// The daemon awaits sources serially. A server that starts and then answers neither initialize nor
+    /// rateLimits must therefore consume a bounded response interval and a bounded cleanup interval,
+    /// even when both underlying operations ignore cancellation.
+    /// </summary>
+    [Fact]
+    public async Task Hung_rate_limit_response_and_cleanup_are_both_bounded()
+    {
+        var response = new TaskCompletionSource<JsonObject>(TaskCreationOptions.RunContinuationsAsynchronously);
+        var cleanup = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
+        var cleanupStarted = false;
+        using var error = new StringWriter();
+        var stopwatch = Stopwatch.StartNew();
+
+        var result = await CodexAppServerBroker.ReadRateLimitsWithinBoundsAsync(
+            _ => response.Task,
+            _ =>
+            {
+                cleanupStarted = true;
+                return cleanup.Task;
+            },
+            error,
+            TimeSpan.FromMilliseconds(25),
+            TimeSpan.FromMilliseconds(25),
+            TestContext.Current.CancellationToken);
+
+        stopwatch.Stop();
+        Assert.Null(result);
+        Assert.True(cleanupStarted);
+        Assert.True(stopwatch.Elapsed < TimeSpan.FromSeconds(5), $"elapsed {stopwatch.Elapsed}");
+        Assert.Contains("did not answer within", error.ToString(), StringComparison.Ordinal);
+        Assert.Contains("cleanup did not finish within", error.ToString(), StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task Ordinary_app_server_spawn_failure_returns_the_source_null_contract()
+    {
+        using var error = new StringWriter();
+
+        var result = await CodexAppServerBroker.ReadRateLimitsAsync(
+            () => throw new Win32Exception("codex executable was not found"),
+            error,
+            TimeSpan.FromMilliseconds(100),
+            TimeSpan.FromMilliseconds(25),
+            TestContext.Current.CancellationToken);
+
+        Assert.Null(result);
+        Assert.Contains("codex executable was not found", error.ToString(), StringComparison.Ordinal);
     }
 
     [Fact]

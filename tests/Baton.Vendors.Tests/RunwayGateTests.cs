@@ -357,12 +357,12 @@ public class RunwayGateTests
     }
 
     /// <summary>
-    /// Synthetic measured-shape arm: a per-model bucket has both durations, while the account bucket
-    /// has the observed weekly primary and null secondary. The per-model 5h window must not satisfy
-    /// the account selector, and null must not become zero.
+    /// Synthetic measured-shape arm: a per-model bucket is exhausted in both durations, while the
+    /// account bucket has the observed weekly primary and null secondary. The absent account session
+    /// is not malformed data, and the per-model windows must neither fill it nor hold the account.
     /// </summary>
     [Fact]
-    public void Codex_per_model_windows_do_not_fill_a_missing_account_window()
+    public void Codex_per_model_windows_do_not_fill_an_unexposed_account_window()
     {
         var snapshot = CodexUsageSource.Parse(
             new JsonObject
@@ -374,12 +374,12 @@ public class RunwayGateTests
                         ["limitId"] = "codex_model",
                         ["primary"] = new JsonObject
                         {
-                            ["usedPercent"] = 0,
+                            ["usedPercent"] = 99,
                             ["windowDurationMins"] = CodexUsageSource.FiveHourDurationMins,
                         },
                         ["secondary"] = new JsonObject
                         {
-                            ["usedPercent"] = 0,
+                            ["usedPercent"] = 99,
                             ["windowDurationMins"] = CodexUsageSource.WeeklyDurationMins,
                         },
                     },
@@ -399,11 +399,67 @@ public class RunwayGateTests
 
         var decision = RunwayGate.Evaluate("codex", snapshot, new RunwayThresholds(), Now);
 
-        Assert.Equal(RunwayDisposition.Hold, decision.Disposition);
-        Assert.Contains("codex 300-minute", decision.Reason, StringComparison.Ordinal);
+        Assert.Equal(RunwayDisposition.Admit, decision.Disposition);
+        Assert.Null(decision.Reason);
+        Assert.Equal(37, decision.HeadroomPoints);
+        Assert.Single(decision.Counters);
         Assert.DoesNotContain(
             decision.Counters,
             counter => counter.Window.Contains("codex_model", StringComparison.Ordinal));
+    }
+
+    /// <summary>
+    /// The conductor's sanitized 0.153.2 response, replayed through the parser and the actual gate.
+    /// Its account has only the 48%-used weekly primary; this is the supported production shape, not
+    /// merely parser evidence.
+    /// </summary>
+    [Fact]
+    public void Measured_weekly_only_codex_account_is_admitted_by_the_actual_gate()
+    {
+        var root = JsonNode.Parse(File.ReadAllText(Path.Combine(
+            AppContext.BaseDirectory,
+            "Fixtures",
+            "codex",
+            "codex-app-server-rate-limits-0.153.2.jsonl")))!.AsObject();
+        var snapshot = CodexUsageSource.Parse(root["result"]!.AsObject(), Now);
+
+        var decision = RunwayGate.Evaluate("codex", snapshot, new RunwayThresholds(), Now);
+
+        Assert.Equal(RunwayDisposition.Admit, decision.Disposition);
+        Assert.Null(decision.Reason);
+        Assert.Equal(37, decision.HeadroomPoints);
+        var counter = Assert.Single(decision.Counters);
+        Assert.Equal(48, counter.PercentUsed);
+        Assert.Contains("7d", counter.Window, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void Codex_exposed_session_with_a_malformed_percentage_still_holds()
+    {
+        var snapshot = Codex(weeklyPct: 48, sessionPct: 101);
+
+        var decision = RunwayGate.Evaluate("codex", snapshot, new RunwayThresholds(), Now);
+
+        Assert.Equal(RunwayDisposition.Hold, decision.Disposition);
+        Assert.Contains("no percentage", decision.Reason, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void Codex_exposed_account_window_with_an_unknown_duration_still_holds()
+    {
+        var parsed = Codex(weeklyPct: 48, sessionPct: 1);
+        var snapshot = parsed with
+        {
+            Windows = parsed.Windows.Select(window =>
+                window.WindowDurationMins == CodexUsageSource.FiveHourDurationMins
+                    ? window with { WindowDurationMins = null }
+                    : window).ToArray(),
+        };
+
+        var decision = RunwayGate.Evaluate("codex", snapshot, new RunwayThresholds(), Now);
+
+        Assert.Equal(RunwayDisposition.Hold, decision.Disposition);
+        Assert.Contains("codex 300-minute", decision.Reason, StringComparison.Ordinal);
     }
 
     [Fact]
