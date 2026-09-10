@@ -829,6 +829,47 @@ public sealed class WorkItemAdvancerTests
     }
 
     [Fact]
+    public async Task A_restart_clears_an_orphaned_claim_when_the_PR_already_reached_the_desired_state()
+    {
+        var home = CreateTempHome();
+        using var scope = BatonEnvironmentSnapshot.BeginScope(BatonEnvironmentSnapshot.Blank with { HomeOverride = home });
+        try
+        {
+            var room = await WriteSettledRoomAsync(home, WorkflowOutcome.Succeeded, ApprovingVerdict);
+            var seeded = await SeedAsync(home, WorkStage.Review, room, QueueItemState.Queued);
+            await QueueStore.MutateAsync(
+                BatonPaths.QueueFile,
+                state => state with
+                {
+                    Items =
+                    [
+                        seeded with
+                        {
+                            Stage = WorkStage.Ready,
+                            PullRequest = 77,
+                            LastVerdict = Path.Combine(room, "verdict.json"),
+                            RoomDirectory = null,
+                            ReadinessMutationClaim = "orphaned-after-github-converged",
+                        },
+                    ],
+                },
+                Ct);
+            var gh = new FakeGh(PrJson(77, PushedSha, isDraft: false));
+
+            Assert.Empty(await Advancer(gh, (_, _) => Task.FromResult<string?>(PushedSha)).AdvanceAsync(Now, Ct));
+
+            var item = await ReadBackAsync();
+            Assert.Equal(WorkStage.Ready, item.Stage);
+            Assert.Null(item.ReadinessMutationClaim);
+            Assert.DoesNotContain(gh.Calls, args => args is ["pr", "ready", ..]);
+        }
+        finally
+        {
+            DirectoryCleanup.DeleteRecursively(home);
+        }
+    }
+
+    [Fact]
     public async Task A_failed_readiness_mutation_releases_the_claim_for_operator_cancellation()
     {
         var home = CreateTempHome();

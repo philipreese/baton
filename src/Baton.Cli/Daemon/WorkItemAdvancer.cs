@@ -133,7 +133,6 @@ public sealed class WorkItemAdvancer
             reading.IsDraft, reading.RequiredChecks);
 
         var transition = WorkItemLifecycle.Decide(Observation(pr));
-        var readinessMutated = false;
         var readinessClaimed = false;
 
         // A crash can leave a durable claim after GitHub reached the requested state but before the
@@ -209,7 +208,6 @@ public sealed class WorkItemAdvancer
                     recordFailure: true).ConfigureAwait(false);
             }
 
-            readinessMutated = true;
             pr = after;
             transition = WorkItemLifecycle.Decide(Observation(pr));
         }
@@ -230,7 +228,10 @@ public sealed class WorkItemAdvancer
                 || pr.IsOpen == true && pr.IsDraft == false
                     && pr.RequiredChecks == PullRequestChecks.Passing))
         {
-            if (readinessMutated || item.Error is not null)
+            // `readinessClaimed` also covers restart recovery where the previous daemon completed
+            // the GitHub mutation but stopped before clearing its durable claim. The live observation
+            // is already stable, so the replacement claim itself is the remaining state to commit.
+            if (readinessClaimed || item.Error is not null)
             {
                 await TryMarkAsync(item, existing => existing with
                 {
