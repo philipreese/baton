@@ -91,7 +91,7 @@ public sealed class WriteToolUsageContractTests
         }
         finally
         {
-            Directory.Delete(root, recursive: true);
+            Baton.Tests.Shared.DirectoryCleanup.DeleteRecursively(root);
         }
     }
 }
