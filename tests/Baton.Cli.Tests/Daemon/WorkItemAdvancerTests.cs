@@ -80,7 +80,7 @@ public sealed class WorkItemAdvancerTests
 
     private static async Task<QueueItem> SeedAsync(
         string home, WorkStage stage, string room, QueueItemState state = QueueItemState.Done, int round = 0,
-        IReadOnlyList<QueueStageSelection>? stageSelections = null)
+        bool? automaticFixUsed = false, IReadOnlyList<QueueStageSelection>? stageSelections = null)
     {
         var workspace = Path.Combine(home, "w1934");
         Directory.CreateDirectory(workspace);
@@ -99,6 +99,7 @@ public sealed class WorkItemAdvancerTests
             Branch = "1934-lane",
             Stage = stage,
             Round = round,
+            AutomaticFixUsed = automaticFixUsed,
             State = state,
             RoomDirectory = room,
             Instructions = "Build the lifecycle.",
@@ -167,6 +168,7 @@ public sealed class WorkItemAdvancerTests
             Assert.Equal(WorkStage.Fix, item.Stage);
             Assert.Equal("implement", item.Role);
             Assert.Equal(1, item.Round);
+            Assert.True(item.AutomaticFixUsed);
             Assert.Equal(Path.Combine(room, "verdict.json"), item.LastVerdict);
 
             var brief = await File.ReadAllTextAsync(item.SpecFile, Ct);
@@ -180,6 +182,61 @@ public sealed class WorkItemAdvancerTests
             Assert.DoesNotContain(room, brief, StringComparison.OrdinalIgnoreCase);
 
             Assert.Contains("review → fix", Assert.Single(facts).Reason!, StringComparison.Ordinal);
+        }
+        finally
+        {
+            DirectoryCleanup.DeleteRecursively(home);
+        }
+    }
+
+    [Fact]
+    public async Task A_second_block_halts_the_item_with_its_room_and_actionable_reason()
+    {
+        var home = CreateTempHome();
+        using var scope = BatonEnvironmentSnapshot.BeginScope(BatonEnvironmentSnapshot.Blank with { HomeOverride = home });
+        try
+        {
+            var room = await WriteSettledRoomAsync(home, WorkflowOutcome.Succeeded, BlockingVerdict);
+            await SeedAsync(home, WorkStage.ReReview, room, round: 2, automaticFixUsed: true);
+            await QueueStore.MutateAsync(BatonPaths.QueueFile,
+                state => state with { Items = state.Items.Select(i => i with { LastVerdict = "previous-verdict.json" }).ToList() }, Ct);
+
+            var fact = Assert.Single(await new WorkItemAdvancer(
+                new FakeGh(PrJson(77, PushedSha)), (_, _) => Task.FromResult<string?>(PushedSha)).AdvanceAsync(Now, Ct));
+
+            var item = await ReadBackAsync();
+            Assert.Equal(QueueDecisionEntry.Failed, fact.Decision);
+            Assert.Equal(QueueItemState.Failed, item.State);
+            Assert.True(item.Halted);
+            Assert.Equal(WorkStage.ReReview, item.Stage);
+            Assert.Equal(room, item.RoomDirectory);
+            Assert.Equal(Path.Combine(room, "verdict.json"), item.LastVerdict);
+            Assert.Contains("one automatic fix was already dispatched", item.Error!, StringComparison.Ordinal);
+        }
+        finally
+        {
+            DirectoryCleanup.DeleteRecursively(home);
+        }
+    }
+
+    [Fact]
+    public async Task A_legacy_block_halts_instead_of_inventing_an_automatic_fix_budget()
+    {
+        var home = CreateTempHome();
+        using var scope = BatonEnvironmentSnapshot.BeginScope(BatonEnvironmentSnapshot.Blank with { HomeOverride = home });
+        try
+        {
+            var room = await WriteSettledRoomAsync(home, WorkflowOutcome.Succeeded, BlockingVerdict);
+            await SeedAsync(home, WorkStage.Review, room, automaticFixUsed: null);
+
+            await new WorkItemAdvancer(new FakeGh(PrJson(77, PushedSha)), (_, _) => Task.FromResult<string?>(PushedSha))
+                .AdvanceAsync(Now, Ct);
+
+            var item = await ReadBackAsync();
+            Assert.True(item.Halted);
+            Assert.Equal(room, item.RoomDirectory);
+            Assert.Equal(Path.Combine(room, "verdict.json"), item.LastVerdict);
+            Assert.Contains("no trustworthy automatic-fix history", item.Error!, StringComparison.Ordinal);
         }
         finally
         {

@@ -108,6 +108,20 @@ public sealed record QueueItem
     public int Round { get; init; }
 
     /// <summary>
+    /// Whether this item has used the one automatic fix the conductor queue may dispatch after a
+    /// blocking review. <see langword="false"/> is recorded for every newly-added lifecycle item;
+    /// <see langword="true"/> is written atomically with that first fix dispatch. A null value is a
+    /// pre-#2131 item with no trustworthy fix-budget history and must fail closed if a review blocks.
+    /// </summary>
+    /// <remarks>
+    /// This is intentionally separate from <see cref="Round"/>. Continuations and re-review retries
+    /// consume rounds too, so their count cannot prove whether the automatic fix was already used.
+    /// <see cref="WorkItemLifecycle"/> is the sole policy reader and <c>WorkItemAdvancer</c> is the
+    /// sole lifecycle writer.
+    /// </remarks>
+    public bool? AutomaticFixUsed { get; init; }
+
+    /// <summary>
     /// The issue's own instructions — the text that became the implement brief's "## Do" section,
     /// captured once at add time.
     /// </summary>

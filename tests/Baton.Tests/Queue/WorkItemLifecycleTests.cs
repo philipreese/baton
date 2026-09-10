@@ -18,8 +18,9 @@ public sealed class WorkItemLifecycleTests
         int? pr = 42,
         string? prHead = "aaaaaaaabbbbbbbb",
         string? workspaceHead = "aaaaaaaabbbbbbbb",
-        int round = 0) =>
-        new(stage, round, "1934-lane", outcome, verdict, pr, prHead, workspaceHead);
+        int round = 0,
+        bool? automaticFixUsed = false) =>
+        new(stage, round, automaticFixUsed, "1934-lane", outcome, verdict, pr, prHead, workspaceHead);
 
     /// <summary>
     /// A verdict whose DECISION and whose FINDINGS are set independently — which is the whole point of
@@ -63,6 +64,31 @@ public sealed class WorkItemLifecycleTests
         Assert.Equal(WorkItemTransitionKind.Dispatch, transition.Kind);
         Assert.Equal(WorkStage.Fix, transition.NextStage);
         Assert.Equal(2, transition.Round);
+        Assert.True(transition.UsesAutomaticFix);
+    }
+
+    [Fact]
+    public void A_second_block_after_the_one_automatic_fix_stops_for_the_conductor()
+    {
+        // The marker, not the aggregate round, is the evidence: a retry or continuation can reach
+        // the same round without ever consuming a fix. Once this persisted history says the fix was
+        // dispatched, another BLOCK never starts one automatically.
+        var transition = WorkItemLifecycle.Decide(At(
+            WorkStage.ReReview, verdict: Verdict(ReviewDecision.Block), round: 2, automaticFixUsed: true));
+
+        Assert.Equal(WorkItemTransitionKind.NeedsOperator, transition.Kind);
+        Assert.Contains("one automatic fix was already dispatched", transition.Reason, StringComparison.Ordinal);
+        Assert.Contains("report.md", transition.Reason, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void A_block_with_legacy_fix_history_fails_closed()
+    {
+        var transition = WorkItemLifecycle.Decide(At(
+            WorkStage.Review, verdict: Verdict(ReviewDecision.Block), automaticFixUsed: null));
+
+        Assert.Equal(WorkItemTransitionKind.NeedsOperator, transition.Kind);
+        Assert.Contains("no trustworthy automatic-fix history", transition.Reason, StringComparison.Ordinal);
     }
 
     [Fact]
@@ -123,6 +149,16 @@ public sealed class WorkItemLifecycleTests
     }
 
     [Fact]
+    public void A_re_review_approval_reaches_ready_even_after_the_automatic_fix()
+    {
+        var transition = WorkItemLifecycle.Decide(At(
+            WorkStage.ReReview, verdict: Verdict(ReviewDecision.Approve), automaticFixUsed: true));
+
+        Assert.Equal(WorkItemTransitionKind.Stop, transition.Kind);
+        Assert.Equal(WorkStage.Ready, transition.NextStage);
+    }
+
+    [Fact]
     public void A_review_that_wrote_no_verdict_is_not_read_as_an_approval()
     {
         var transition = WorkItemLifecycle.Decide(At(WorkStage.Review, verdict: null));
@@ -161,6 +197,7 @@ public sealed class WorkItemLifecycleTests
         var transition = WorkItemLifecycle.Decide(At(WorkStage.Review, outcome: WorkflowOutcome.Cancelled));
 
         Assert.Equal(WorkStage.ReReview, transition.NextStage);
+        Assert.False(transition.UsesAutomaticFix);
     }
 
     [Fact]
