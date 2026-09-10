@@ -304,6 +304,7 @@ public static class AgyHookCheckCommand
         string? writeTarget = null;
         string? readTarget = null;
         IReadOnlyList<string> extraRunCommandArgs = Array.Empty<string>();
+        IReadOnlyList<string> malformedRunCommandMetadataArgs = Array.Empty<string>();
         // Captured here because the JsonDocument is disposed before the denial below is built, and
         // a denial that cannot name what the payload carried is the misdirection #708 was made of.
         var argKeys = "no args object at all";
@@ -336,6 +337,14 @@ public static class AgyHookCheckCommand
                 extraRunCommandArgs = args.EnumerateObject()
                     .Select(property => property.Name)
                     .Where(name => !MeasuredRunCommandArgs.Contains(name))
+                    .ToArray();
+
+                // #2152: these values describe the call for display only. Account for their
+                // measured string shape without ever reading them as the command or as grant input.
+                malformedRunCommandMetadataArgs = args.EnumerateObject()
+                    .Where(property => MeasuredRunCommandStringMetadataArgs.Contains(property.Name) &&
+                        property.Value.ValueKind != JsonValueKind.String)
+                    .Select(property => property.Name)
                     .ToArray();
             }
 
@@ -399,6 +408,15 @@ public static class AgyHookCheckCommand
                     "gate cannot tell whether an argument it has never measured makes this command run " +
                     "in the background instead of to completion, so it refuses rather than allowing it " +
                     "unread. Re-issue with the arguments agy normally sends.");
+            }
+
+            if (malformedRunCommandMetadataArgs.Count > 0)
+            {
+                return DenyJson(scribe, GrantRules.UnjudgeableCall,
+                    $"AER: the 'run_command' tool carried descriptive metadata that was not a string: " +
+                    $"{string.Join(", ", malformedRunCommandMetadataArgs)}. Baton's gate only accepts " +
+                    "the measured string shape for these fields and refuses malformed values rather " +
+                    "than allowing them unread.");
             }
 
             // The shell channel gates this tool. A non-Present list means the gate cannot judge the
@@ -670,11 +688,12 @@ public static class AgyHookCheckCommand
     /// </summary>
     /// <remarks>
     /// <para>
-    /// <b>Scope: ONE captured <c>run_command</c> hook payload.</b> That payload carries these three,
-    /// including <c>WaitMsBeforeAsync</c> at 5000 — a name and a value that were observed;
+    /// <b>Scope: two captured agy 1.2.0 <c>run_command</c> hook payloads.</b> Both carry these five,
+    /// including <c>WaitMsBeforeAsync</c> at 5000 and the two string-valued descriptive fields —
+    /// names, values, and types that were observed;
     /// <em>that it is the backgrounding mechanism</em> is inference from the name, which is how
     /// <c>docs/vendor-capabilities.md</c> frames it too. That register owns the finding and its
-    /// provenance (corrected there 2026-09-06); do not restate them here.
+    /// provenance (widened there 2026-09-10); do not restate them here.
     /// </para>
     /// <para>
     /// The consequence for this gate: a parameter agy puts on its own calls cannot be refused, because
@@ -683,15 +702,25 @@ public static class AgyHookCheckCommand
     /// parameter — an <c>Async</c>, a <c>Background</c>, a <c>Detach</c> — arriving unread.
     /// </para>
     /// <para>
-    /// <b>Its failure mode is a refused legitimate command, and n=1 is the exposure.</b> If agy sends
-    /// a fourth argument on some prompt shape nobody has captured, this rung denies a <c>run_command</c>
+    /// <b>Its failure mode is a refused legitimate command, and n=2 is the exposure.</b> If agy sends
+    /// a sixth argument on some prompt shape nobody has captured, this rung denies a <c>run_command</c>
     /// that should have run. Stated rather than hidden: it is the fail-closed direction and the only
-    /// one available against an unread backgrounding switch, but a second captured payload carrying a
+    /// one available against an unread backgrounding switch, but another captured payload carrying a
     /// name not on this list is a reason to widen the list, not evidence that the rung worked.
     /// </para>
     /// </remarks>
     private static readonly IReadOnlySet<string> MeasuredRunCommandArgs =
-        new HashSet<string>(StringComparer.Ordinal) { "CommandLine", "Cwd", "WaitMsBeforeAsync" };
+        new HashSet<string>(StringComparer.Ordinal)
+        {
+            "CommandLine", "Cwd", "WaitMsBeforeAsync", "toolAction", "toolSummary",
+        };
+
+    /// <summary>
+    /// The optional descriptive <c>run_command</c> arguments observed as strings in both captures.
+    /// They are validated but never consumed: <c>CommandLine</c> remains the only command source.
+    /// </summary>
+    private static readonly IReadOnlySet<string> MeasuredRunCommandStringMetadataArgs =
+        new HashSet<string>(StringComparer.Ordinal) { "toolAction", "toolSummary" };
 
     /// <summary>
     /// agy's file-read tool (#2002 rule 2b), the counterpart of the tool name

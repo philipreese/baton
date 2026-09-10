@@ -1139,28 +1139,31 @@ gates-quiet` calls, measured at 260.9s and 460.7s respectively — multi-minute,
 minutes each" figure. Every `run_command` call actually observed in that lane
 passed only a `CommandLine` parameter — no other field was ever used.
 
-**Corrected 2026-09-06 (#2002): a parameter by that name has been seen — the STREAM is the wrong
-surface to look for it on.** The paragraph below still describes what the stream can and cannot
+**Corrected 2026-09-06 (#2002), widened 2026-09-10 (#2152): parameters beyond the command have been
+seen — the STREAM is the wrong surface to look for it on.** The paragraph below still describes what
+the stream can and cannot
 answer, and that part stands: a `step_update`'s `tool_info.parameters` carries `CommandLine` alone
 (414 of 414 `run_command` calls in `dispatch-implement-12f930d9`, re-counted 2026-09-06). The
-**`PreToolUse` hook payload** is a different surface, and **one captured payload** carries three
-arguments — `CommandLine`, `Cwd`, and **`WaitMsBeforeAsync`, at 5000**, a value agy supplies rather
-than the model choosing it.
+**`PreToolUse` hook payload** is a different surface. Two locally captured payloads from agy 1.2.0
+carry five arguments: string `CommandLine`, string `Cwd`, numeric **`WaitMsBeforeAsync`**, string
+`toolAction`, and string `toolSummary`. In the sanitized regression fixture the last two read
+`Running node --version` and `Check Node.js version`; they describe the call rather than supplying
+its command.
 
-Scope and provenance, stated so none of this is overread: **n = 1.** The fixture in
-`AgyHookCheckCommandTests.Payload` records it as "the real payload agy sends, from the live capture
-in `agy.hook-env-inherited`'s log"; that check *reports* payload shape rather than asserting it, so
-this is a second-hand reading of one real capture, not a gated measurement. Two things remain
-**unmeasured**: whether agy sends these same three on every `run_command`, and whether
+Scope and provenance, stated so none of this is overread: **n = 2.** Both payloads were read from
+local captures; repository fixtures retain only sanitized values and temporary directories. This is
+not a gated population measurement. Two things remain **unmeasured**: whether agy sends these same
+five on every `run_command`, and whether
 `WaitMsBeforeAsync` is in fact the wait-then-background switch its name suggests — the name and the
-value are what was observed, the mechanism is inference. What this does settle is the earlier
-sentence's premise: a blocking/wait-shaped field is not absent from the tool, it is absent from the
-stream.
+type are what were observed, the mechanism is inference. What this does settle is the earlier
+sentence's premise: blocking/wait-shaped and descriptive fields are not absent from the tool, they
+are absent from the stream.
 
 The consequence for #2002 is in `spec/baton.md` §9: a gate cannot refuse a parameter agy supplies
 itself, so rule 1 is scoped on this vendor rather than claimed complete, and
-`AgyHookCheckCommand.MeasuredRunCommandArgs` refuses only an argument beyond these three — a rung
-whose own failure mode, against an argument set wider than this single capture, is refusing a
+`AgyHookCheckCommand.MeasuredRunCommandArgs` refuses only an argument beyond these five and validates
+the two descriptive fields as strings when present — a rung whose own failure mode, against an
+argument set wider than these two captures, is refusing a
 legitimate command.
 
 The rest of this paragraph, unchanged: the `stream-json` `init` event's `tools` array lists tool
