@@ -16,7 +16,7 @@ namespace Baton.VendorProbe;
 /// </para>
 /// <para>
 /// Never runs in CI. It drives live authenticated CLIs, which is permanently a human action item
-/// (CLAUDE.md). The goal is that one command produces a trustworthy matrix, not that a robot does it
+/// (docs/agents/developing-baton.md). The goal is that one command produces a trustworthy matrix, not that a robot does it
 /// nightly.
 /// </para>
 /// </remarks>

@@ -13,8 +13,8 @@ public static class MemoryAuditOptionsParser
     public const string Usage = "Usage: baton memory audit [--repository <id>|fleet] [--format text|json] [--help]";
 
     /// <summary>
-    /// What <c>--help</c> prints under <see cref="Usage"/>. Every line is a place a reader's prior
-    /// fills the gap wrongly if the negative is not stated (CLAUDE.md, "Writing documentation"):
+    /// What <c>--help</c> prints under <see cref="Usage"/>. Its negatives prevent unstated behavior
+    /// from being inferred (<see href="../../../docs/agents/developing-baton.md"/>):
     /// whether this writes anything, whether it reads what a memory file SAYS, which roots it looks
     /// at, and — for each finding kind — what it does NOT claim.
     /// </summary>

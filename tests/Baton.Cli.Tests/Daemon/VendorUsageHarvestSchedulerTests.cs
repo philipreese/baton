@@ -6,7 +6,7 @@ namespace Baton.Cli.Tests.Daemon;
 /// <summary>
 /// Cadence coverage for <see cref="VendorUsageHarvestScheduler"/> (issue #1391), driven entirely by
 /// caller-supplied <c>DateTimeOffset</c> ticks — no real clock, no process, no fake-clock package
-/// (CLAUDE.md: <c>Baton.Cli</c>'s project graph carries no extra NuGet dependency for this).
+/// (docs/agents/developing-baton.md: <c>Baton.Cli</c>'s project graph carries no extra NuGet dependency for this).
 /// </summary>
 public sealed class VendorUsageHarvestSchedulerTests
 {

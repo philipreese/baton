@@ -7,21 +7,19 @@ terminal success, with real artifacts from both vendors on disk. This is the fir
 dispatches two different vendors in the same run, and the first time a live smoke test also
 exercises the mutation surface (`baton decide`), not just `baton run`.
 
-**This is always a human-run step, not something an agent session can close on its own** — see
-[why these runs stay human-owned](../agents/developing-baton.md#live-vendor-smoke-tests). Both
-adapters shell out to whatever's already
-authenticated on the host rather than owning key-handling code of their own, which is what lets
-this work against real subscriptions; nothing about that can be provisioned headlessly from inside
-an agent session, and it shouldn't be worked around (e.g. by dropping in an API key) just to make
-the gate pass.
+This mixed gate is agent-runnable only when both subscription CLI logins are already present;
+disclose expected cost before starting. Missing authentication returns the task to a human; see the
+[shared live-run policy](../agents/developing-baton.md#live-vendor-smoke-tests). Both adapters shell
+out to the existing subscription-authenticated CLIs rather than owning key-handling code, and a
+missing login must not be worked around by switching to API-key authentication.
 
 ## Prerequisites
 
 - An authenticated `claude` CLI on `PATH` — see
   [`live-claude-smoke.md`](./live-claude-smoke.md)'s prerequisites; unchanged here.
-- An authenticated `agy` (antigravity, Google Gemini's CLI) on `PATH` — either a logged-in session
-  or an API key configured for it. `AgyWorkerAdapter` has no key-handling code of its own; it
-  shells out to whatever `agy` invocation is already authenticated on this machine.
+- A subscription-authenticated `agy` (antigravity, Google Gemini's CLI) on `PATH`. `AgyWorkerAdapter`
+  delegates authentication by launching that already-signed-in executable; it does not accept
+  credentials itself.
 - Outbound network access to both Anthropic's and Google's APIs.
 - Standard repo prerequisites, same as the claude smoke runbook (.NET 10 SDK).
 

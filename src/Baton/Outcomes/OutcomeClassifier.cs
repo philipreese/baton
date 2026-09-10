@@ -493,7 +493,7 @@ public static class OutcomeClassifier
             // grant audit clean, and no ToolDenied/ExhaustedUntil signal -- so it can only ever
             // downgrade a run that would otherwise return Succeeded next, exactly what this comment and
             // spec/baton.md §9 say it does. Vendor-neutral by construction: this class never parses a
-            // vendor's own stream (Architecture Rule 1, CLAUDE.md), so both counts arrive pre-computed
+            // vendor's own stream (Architecture Rule 1, docs/agents/developing-baton.md), so both counts arrive pre-computed
             // -- today only an agy dispatch whose hook is the sole narrowing supplies them
             // (AgyWorkerAdapter.Resolve's CountHookVerdicts, IWorkerUsageParser.CountToolSteps summed
             // over the stream), which is why both default to null and every other caller's

@@ -137,7 +137,8 @@ public sealed class LedgerCsvRedactionTests
 
     /// <summary>
     /// A refusal names the offending column, and a refusal is a <see cref="BatonFlowException"/> rather
-    /// than a bare <see cref="InvalidOperationException"/> — CLAUDE.md's error-handling rule, and the
+    /// than a bare <see cref="InvalidOperationException"/> — the shared error-handling rule
+    /// (<see href="../../../docs/agents/developing-baton.md"/>) — and the
     /// difference between an operator who can fix the row and one who reads a stack trace.
     /// </summary>
     [Fact]

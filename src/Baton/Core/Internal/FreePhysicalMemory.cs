@@ -7,7 +7,8 @@ namespace Baton.Core.Internal;
 /// Thin P/Invoke wrapper over <c>GlobalMemoryStatusEx</c> — the free-physical-memory reading the
 /// conductor queue's floor gate is compared against (#1934 slice 1). Like
 /// <see cref="SafeJobObjectHandle"/> beside it this is Win32 surface, not the deleted aer-core Rust
-/// FFI that CLAUDE.md's Architecture Rule 3 scopes; the rule enumerates the exceptions it allows and
+/// FFI scoped by Architecture Rule 3 (<see href="../../../../docs/agents/developing-baton.md"/>);
+/// that rule enumerates the exceptions it allows and
 /// this is one of them (counting them here is what went stale when #2030 added a third).
 /// </summary>
 /// <remarks>

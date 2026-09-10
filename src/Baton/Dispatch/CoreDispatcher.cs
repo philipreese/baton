@@ -8,8 +8,9 @@ namespace Baton.Dispatch;
 /// <summary>
 /// The concrete binary and arguments to spawn for an <see cref="ExecutionRequest"/>. Resolving a
 /// <see cref="ExecutionRequest.Worker"/> role name (e.g. <c>"architect"</c>) to this is a vendor
-/// binding concern — <c>CLAUDE.md</c>'s Adapter Isolation rule keeps that resolution out of
-/// <c>Baton</c> entirely, so the caller supplies it explicitly rather than the dispatcher
+/// binding concern. Adapter Isolation keeps that resolution out of <c>Baton</c>
+/// (<see href="../../../docs/agents/developing-baton.md"/>),
+/// so the caller supplies it explicitly rather than the dispatcher
 /// interpreting <see cref="ExecutionRequest.Worker"/> itself.
 /// </summary>
 /// <param name="WorkingDirectory">
@@ -29,7 +30,7 @@ namespace Baton.Dispatch;
 /// resolved path, matching every other field here. <see langword="null"/> means this adapter has
 /// nothing worth capturing this way — <c>CommandWorkerAdapter</c> leaves this null since its
 /// declared argv carries no prose prompt to capture. Archival
-/// capture only, for UI/audit display (CLAUDE.md Architecture Rule 1) — never read back by Flow to
+/// capture only, for UI/audit display (docs/agents/developing-baton.md Architecture Rule 1) — never read back by Flow to
 /// make a routing decision.
 /// </param>
 /// <param name="Environment">
@@ -97,7 +98,7 @@ public sealed record CoreDispatchTarget(
     /// element that carries it, which must stay byte-identical.
     /// <para>
     /// Why both: <see cref="PromptText"/> is archival (<see cref="CoreDispatcher.DispatchAsync"/> writes
-    /// it to <c>prompt.txt</c> for display, and CLAUDE.md Architecture Rule 1 forbids reading it back to
+    /// it to <c>prompt.txt</c> for display, and docs/agents/developing-baton.md Architecture Rule 1 forbids reading it back to
     /// route). The string the vendor CLI is actually invoked with is the <see cref="Args"/> element —
     /// every shipped adapter passes the same object as both (<c>["-p", prompt]</c> plus
     /// <c>PromptText: prompt</c>). Prepending to <see cref="PromptText"/> alone would put the preamble
@@ -789,7 +790,7 @@ public sealed class CoreDispatcher(ICoreEventLogWriter coreEventLogWriter, IStre
         var childEnvironment = AssembleChildEnvironment(request, target);
 
         // Issue #292: durably capture the resolved prompt a step's worker was actually invoked with
-        // (CLAUDE.md Architecture Rule 1: archival capture for UI display, never read back to make a
+        // (docs/agents/developing-baton.md Architecture Rule 1: archival capture for UI display, never read back to make a
         // routing decision). Written before BatonTask ever spawns (below), so it is present even if
         // the execution later fails or times out. Null PromptText (an adapter with nothing to
         // capture) is a deliberate no-op, not a missing-data condition.
@@ -1171,7 +1172,7 @@ public sealed class CoreDispatcher(ICoreEventLogWriter coreEventLogWriter, IStre
                     }
                     catch (Exception ex)
                     {
-                        // CLAUDE.md: no silent catch. MarkTerminal drains the retry queue and retries a
+                        // docs/agents/developing-baton.md: no silent catch. MarkTerminal drains the retry queue and retries a
                         // pending loss marker (#1879), both of which swallow their own IO failures, so
                         // this is not expected to fire -- best-effort terminal marking means the
                         // dispatch must not fail over it, not that a genuine exception here disappears

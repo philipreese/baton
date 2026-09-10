@@ -8,7 +8,7 @@ namespace Baton.Vendors;
 /// downstream phase reads, by running <c>git diff --output=&lt;artifact&gt; &lt;base&gt;</c> in the
 /// workspace. Registered under the capability name <see cref="WorkflowTemplateComposer.CaptureAdapter"/>
 /// (<c>"capture"</c>); to <c>Baton</c> it is an ordinary worker dispatched through an adapter, so the
-/// engine never learns git exists — the git-ness is quarantined here (Adapter Isolation, CLAUDE.md
+/// engine never learns git exists — the git-ness is quarantined here (Adapter Isolation, docs/agents/developing-baton.md
 /// rule 2).
 /// </summary>
 /// <remarks>

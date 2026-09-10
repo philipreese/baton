@@ -64,7 +64,8 @@ public sealed record WorkerProgressEvent(string Kind, string Text, bool IsPartia
 
 /// <summary>
 /// Maps a <see cref="WorkerInvocation"/> and its paired <see cref="WorkerContract"/> to a
-/// <see cref="CoreDispatchTarget"/> — the seam CLAUDE.md's Adapter Isolation rule requires. Every
+/// <see cref="CoreDispatchTarget"/> — the Adapter Isolation seam
+/// (<see href="../../../docs/agents/developing-baton.md"/>). Every
 /// vendor quirk (flag vocabulary, cwd handling, stdin redirection, shell-wrapping to reference
 /// <c>BATON_INPUT_&lt;n&gt;</c>/<c>BATON_OUTPUT_DIR</c>) lives behind an implementation of this
 /// interface; <c>Baton</c> never learns a vendor exists.

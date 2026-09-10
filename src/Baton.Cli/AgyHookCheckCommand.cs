@@ -67,7 +67,7 @@ public static class AgyHookCheckCommand
     /// environment agy was spawned with. agy's own documentation
     /// (<c>.vendor-survey/corpus/agy__hooks.md</c>) is silent on inheritance — claude's states it
     /// explicitly — so carrying claude's answer across would have been exactly the population-scope
-    /// mistake CLAUDE.md gate `claim-scope` names.
+    /// mistake docs/agents/developing-baton.md gate `claim-scope` names.
     /// </remarks>
     public const string DeniedToolsEnvironmentVariable =
         HookCheckCommand.DeniedToolsEnvironmentVariable;

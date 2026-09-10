@@ -658,7 +658,7 @@ def _recordonce_discriminates():
     # had to be assembled from fragments to avoid disabling the checker it is a fixture for.
     # The canonical path has to be a file that EXISTS -- a marker naming one that does not is
     # refused, which the last arm below asserts. So the fixture names a real one.
-    marker = "// record-once-ok: #901 canonical is CLAUDE.md"
+    marker = "// record-once-ok: #901 canonical is docs/agents/developing-baton.md"
 
     # Genuinely different sentences, as real files citing one issue have -- a fixture that repeated
     # one sentence ten times would be restatement, and the checker would be right to say so.
@@ -785,7 +785,7 @@ def _recordonce_discriminates():
 
     # And it must be reported, or a silenced run reads exactly like a clean one.
     notes = rec.groups(added, at)[1]
-    assert notes and "#901" in notes[0] and "CLAUDE.md" in notes[0], (
+    assert notes and "#901" in notes[0] and "docs/agents/developing-baton.md" in notes[0], (
         f"record-once: the exemption was not reported with its issue and canonical path -- {notes}")
 
     # PASSAGE-level, not file-level: a second, unmarked restatement in the SAME file is still found.
@@ -821,7 +821,7 @@ def _recordonce_discriminates():
     # A marker whose canonical location does not exist, and one that does not parse at all, each
     # exempt nothing AND fail the run. Both are unambiguous typos, and both previously landed as a
     # printed note saying the passage had been exempted while it was being compared.
-    typo = marker.replace("CLAUDE.md", "docs/no-such-file.md")
+    typo = marker.replace("docs/agents/developing-baton.md", "docs/no-such-file.md")
     absent = {"src/A.cs": [f"// {sentence}", typo], "docs/B.md": [sentence]}
     at_typo = lambda path: absent.get(path)  # noqa: E731
     assert rec.violations(added, at_typo), (
@@ -841,7 +841,7 @@ def _recordonce_discriminates():
     # HTML comment is the only comment form it has; before this, the comment form exempted nothing
     # AND reported nothing, which is the same silent no-op class as `broken` above, scoped to
     # exactly the files most likely to need a marker.
-    md_marker = "<!-- record-once-ok: #901 canonical is CLAUDE.md -->"
+    md_marker = "<!-- record-once-ok: #901 canonical is docs/agents/developing-baton.md -->"
     # No marker on the src side, deliberately: one side's marker exempts the pair (the #676 arm
     # above pins that), so a fixture carrying the C# marker too would pass with the markdown one
     # still dead -- which is exactly how the first draft of this arm failed to discriminate.
@@ -851,7 +851,7 @@ def _recordonce_discriminates():
 
     # Its malformed sibling must be REPORTED, not silent -- SUPPRESS_LOOSE has to see the same
     # comment shape SUPPRESS does, or the mistyped-marker class reopens for markdown specifically.
-    md_typo = {"docs/B.md": [sentence, "<!-- record-once-ok #901 CLAUDE.md -->"],
+    md_typo = {"docs/B.md": [sentence, "<!-- record-once-ok #901 docs/agents/developing-baton.md -->"],
                "src/A.cs": [f"// {sentence}", marker]}
     assert any("does not parse" in b for b in rec.groups(added, lambda path: md_typo.get(path))[2]), (
         "record-once: a malformed HTML-comment marker in markdown failed silently")

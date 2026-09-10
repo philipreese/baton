@@ -21,15 +21,13 @@ baton/
 │                                workers connect to (fleet_status, baton yield, memory proposals).
 │                                PermissionGateTool/PermissionReturnShape (the mid-lane ask
 │                                machinery) were deleted earlier (#1417, spec/baton.md §5)
-│                              - `baton daemon` (ex-Baton.Daemon) — the background runner NARROWED
-│                                to the 7-kept surface (#1420): mutex, settings load, fleet-wide
-│                                concurrency-cap apply, and RoomRetentionSweep as a hosted service.
-│                                No HTTP listener remains — every REST/WS route, pairing, WebSocket
-│                                broadcast, and sidecar supervision are deleted, along with
-│                                Baton.RoomSession and Baton.Sidecar in full. The room-watcher
-│                                (serving fleet_status/the registry), the snapshot push loop, and
-│                                the quota-runway ledger (spec/baton.md §7) are unbuilt new work for
-│                                a later PR, not something #1420's narrowing preserved
+│                              - `baton daemon` (ex-Baton.Daemon) — the background host. Its current
+│                                services include fleet projection, vendor-usage harvest, queue
+│                                scheduling and launch, retention, watchdog, and Fleet Glass HTTP.
+│                                `src/Baton.Cli/Daemon/DaemonHost.cs` is the current registration map;
+│                                README's daemon sections and `spec/baton.md` describe the shipped
+│                                operator surface. Consult those sources instead of treating this
+│                                overview as a stable hosted-service inventory
 ├── tests/                     Unit/integration tests; live-smoke test projects (Baton.Cli.SmokeTests)
 │                              live outside Baton.slnx (default CI skips them) — see docs/runbooks/
 ├── spec/
@@ -403,4 +401,3 @@ There is no `CONTEXT.md`, and four skills look for one by name (the two above, p
 `/diagnosing-bugs`). The vocabulary they want is one vocabulary, code and UI alike, no translation
 map — stated inline here rather than in a dedicated doc. Don't create a `CONTEXT.md` that would
 become a second place the same nouns are defined.
-

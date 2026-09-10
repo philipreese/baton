@@ -63,7 +63,7 @@ public static class ShellCommandClassifier
     /// wrong and then need exclusions.
     /// </para>
     /// <para>
-    /// <b>The <c>pixi run</c> spellings are the ones a lane here is REQUIRED to use</b> (CLAUDE.md,
+    /// <b>The <c>pixi run</c> spellings are the ones a lane here is REQUIRED to use</b> (docs/agents/developing-baton.md,
     /// "Running tasks": always <c>pixi run &lt;task&gt;</c>, never <c>dotnet</c> directly), so they are
     /// the first thing the table has to name — without them the forbidden spelling got the gate ceiling
     /// and the mandated one did not. The keys are read off <c>pixi.toml</c> rather than guessed at:

@@ -279,7 +279,7 @@ AppContainer sandbox on Windows · the daemon↔credential coupling ·
 | Channels | research preview; needs a plugin install and org enablement |
 | Workflows | plan-gated; needs `/config` opt-in on Pro |
 | Agent teams | needs `CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS=1` (env-only, safe — but untested) |
-| Live smoke gates | permanently a human action item ([development guide](agents/developing-baton.md#live-vendor-smoke-tests)) |
+| Live smoke gates | agent-runnable after spend disclosure when the required subscription login already exists; authentication provisioning is human-only ([development guide](agents/developing-baton.md#live-vendor-smoke-tests)) |
 
 ---
 

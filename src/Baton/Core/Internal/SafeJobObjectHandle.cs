@@ -6,8 +6,8 @@ namespace Baton.Core.Internal;
 /// <summary>
 /// Thin P/Invoke wrapper over the Windows Job Object API, used by <see cref="BatonTask"/> to hold the
 /// spawned process's entire descendant tree (the "no orphans" guarantee aer-core's M3 milestone
-/// established) — this is Win32 surface, not the aer-core Rust FFI that CLAUDE.md's Architecture
-/// Rule 3 (P/Invoke Layer) scopes to the deleted ABI; CreateJobObject/AssignProcessToJobObject/
+/// established) — this is Win32 surface, not the deleted Rust FFI scoped by Architecture Rule 3
+/// (<see href="../../../../docs/agents/developing-baton.md"/>); CreateJobObject/AssignProcessToJobObject/
 /// TerminateJobObject calling Windows directly is one of the exceptions it enumerates.
 /// </summary>
 /// <remarks>

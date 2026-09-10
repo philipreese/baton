@@ -855,7 +855,7 @@ public sealed partial class AgyWorkerAdapter : IWorkerAdapter, IPermissionGrantT
     /// <para>
     /// <b>Never the operator's own <c>~/.gemini/config/</c></b>, which is agy's other documented
     /// hooks location. Writing there would put AER's configuration inside the user's own vendor
-    /// config — the boundary CLAUDE.md's Credential Isolation rule draws, and the same reason
+    /// config — the boundary docs/agents/developing-baton.md's Credential Isolation rule draws, and the same reason
     /// <c>agy.permissions-are-global-only</c> is recorded as a limitation rather than used as a
     /// mechanism.
     /// </para>

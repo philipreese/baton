@@ -255,7 +255,7 @@ def step8_cited_checks_exist():
             "the #554 fabrication itself, named in the prose that records it",
     }
 
-    roots = ["src", "tools", "docs", "tests", "spec", "CLAUDE.md"]
+    roots = ["src", "tools", "docs", "tests", "spec", "AGENTS.md", "CLAUDE.md"]
     exts = {".cs", ".py", ".md", ".json", ".ps1", ".sh"}
     bad = {}
     for root in roots:
@@ -709,7 +709,7 @@ NUMERIC_GATE = re.compile(r"\bgates?\s+\d+", re.I)
 # shipping gate at all -- was reported as citing a gate that does not exist.
 CITED_SLUG = re.compile(r"(?i:\bgates?)\s+`([a-z][a-z-]+)`")
 GATE_SCAN_DIRS = ("docs", "spec", "src", "tools", "tests", ".github")
-GATE_SCAN_FILES = ("CLAUDE.md", "README.md", "pixi.toml")
+GATE_SCAN_FILES = ("AGENTS.md", "CLAUDE.md", "README.md", "pixi.toml")
 GATE_SCAN_EXCLUDE = ()
 GATE_SCAN_SUFFIXES = (".md", ".py", ".cs", ".toml", ".yml", ".yaml", ".rs", ".go")
 

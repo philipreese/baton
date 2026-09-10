@@ -697,7 +697,7 @@ public sealed class ExecutionStreamLogger
     /// #1885: hands one declared loss to the dispatcher's callback, if there is one. Never throws into
     /// the append path — a handler that fails must not turn a stream-log gap into a dispatch failure,
     /// the same posture <see cref="TryWriteMarker"/> already takes toward the marker file — but the
-    /// failure is stated rather than swallowed (CLAUDE.md), because a handler that throws means the loss
+    /// failure is stated rather than swallowed (docs/agents/developing-baton.md), because a handler that throws means the loss
     /// reached NEITHER durable channel.
     /// </summary>
     private void ReportLoss(StreamState stream, long? bytesSurrendered, bool terminalReannouncement)

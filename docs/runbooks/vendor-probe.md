@@ -35,10 +35,11 @@ negative: `/usage`, which is absent from `--help` and works perfectly as a slash
 | `pixi run vendor-probe` | **real subscription usage**, a few minutes | you, deliberately |
 | `pixi run vendor-check` | **nothing** | every `pixi run test`; also `gates`/`gates-fast` since #1487 |
 
-The probe drives live authenticated CLIs, so it is permanently a human action item
+Existing subscription logins make the live probe eligible for an agent after expected-cost
+disclosure. A human must provision any missing login
 ([development guide](../agents/developing-baton.md#live-vendor-smoke-tests)) — the
-same rule as the `smoke-*` tasks, for the same reason. But asking *"has the CLI moved since we last
-looked?"* costs nothing: `--version` is a local string that starts no session.
+same rule as the `smoke-*` tasks. But asking *"has the CLI moved since we last looked?"* costs
+nothing: `--version` is a local string that starts no session.
 
 So the free check is the trigger for the paid one. The probe records the versions it ran against in
 `docs/vendor-probe.lock.json`; `VendorProbeStalenessTests` (in `Baton.Architecture.Tests`, which *is*

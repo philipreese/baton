@@ -634,8 +634,8 @@ catch (Baton.Status.StaleSentinelDeletionException ex)
 }
 catch (BatonFlowException ex)
 {
-    // The typed-exception boundary CLAUDE.md's error-handling rules require: every malformed
-    // workflow/bindings/argument failure surfaces as one of these further up the call stack, so
+    // The typed-exception boundary requires every malformed workflow/bindings/argument failure to
+    // surface here ([development guide](../../docs/agents/developing-baton.md)), so
     // this is the one place that turns it into a clean CLI failure instead of a raw stack trace.
     WriteErrorWithTry(ex);
 

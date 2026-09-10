@@ -6,7 +6,8 @@ namespace Baton.Core.Internal;
 /// <summary>
 /// Clears <c>HANDLE_FLAG_INHERIT</c> on this process's own stdout and stderr handles, so nothing
 /// Baton spawns can keep them open after Baton exits (#2030). One of the narrow Win32 P/Invokes
-/// CLAUDE.md's Architecture Rule 3 enumerates, alongside <see cref="SafeJobObjectHandle"/> and
+/// enumerated by Architecture Rule 3 (<see href="../../../../docs/agents/developing-baton.md"/>),
+/// alongside <see cref="SafeJobObjectHandle"/> and
 /// <see cref="FreePhysicalMemory"/> beside it — read the rule there for what it still forbids.
 /// </summary>
 /// <remarks>

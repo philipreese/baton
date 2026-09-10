@@ -15,7 +15,7 @@ public static class AuditLanesOptionsParser
 
     /// <summary>
     /// What <c>--help</c> prints under <see cref="Usage"/>. Every line states a negative a reader's
-    /// prior would otherwise fill in wrongly (CLAUDE.md, "Writing documentation"): which zeros are
+    /// prior would otherwise fill in wrongly (<see href="../../../docs/agents/developing-baton.md"/>): which zeros are
     /// measurements and which are not, which clock <c>--since</c> reads, and the one population this
     /// report cannot see.
     /// </summary>

@@ -133,7 +133,7 @@ public sealed class TemplateDispatchabilityTests : IDisposable
     }
 
     /// <summary>
-    /// The discriminating control the loop above needs to mean anything (CLAUDE.md gate <c>v-and-v</c>):
+    /// The discriminating control the loop above needs to mean anything (docs/agents/developing-baton.md gate <c>v-and-v</c>):
     /// without it, a <see cref="WorkerBindingResolver.Resolve"/> call whose result nobody checked, or a
     /// refusal rule that had stopped firing entirely, would leave the assertion above green for the
     /// wrong reason. #1386's own "read-shaped grant on agy" shape (<c>write_files: false</c>) is NOT

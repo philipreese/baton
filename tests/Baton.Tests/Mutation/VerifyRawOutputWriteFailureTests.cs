@@ -69,7 +69,7 @@ public sealed class VerifyRawOutputWriteFailureTests
             Assert.DoesNotContain(VerifyRunner.RawOutputFileName, outcome.Tail, StringComparison.Ordinal);
             Assert.False(File.Exists(Path.Combine(blockedPath, VerifyRunner.RawOutputFileName)));
 
-            // Logged, never silently swallowed (CLAUDE.md's error-handling rule).
+            // Logged, never silently swallowed ([development guide](../../../../docs/agents/developing-baton.md)).
             Assert.Contains(VerifyRunner.RawOutputFileName, captured.ToString(), StringComparison.Ordinal);
             Assert.Contains("The filtered tail is still recorded.", captured.ToString(), StringComparison.Ordinal);
         }

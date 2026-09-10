@@ -29,8 +29,8 @@ Only explicit grants in the brief override these constraints.
 
 ## Two checks on every code change
 
-Where `AGENTS.md` exists, it owns these checks. Apply the lane-side form below and list each
-check's findings in `changes.md`.
+This package owns these checks. Apply them and list each finding in `changes.md`; `AGENTS.md` routes
+workers here instead of restating them.
 
 - **State enumeration.** Adding or renaming a word in a state vocabulary means listing every
   predicate that switches over it and fixing each in the same change.

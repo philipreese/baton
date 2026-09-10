@@ -3,7 +3,7 @@ namespace Baton.Cli;
 /// <summary>
 /// Parses <c>baton room delete</c>'s arguments: <c>baton room delete &lt;room-dir&gt;
 /// [--force]</c>. Mirrors <see cref="KeepOptionsParser"/>'s shape — every failure
-/// is a <see cref="CliArgumentException"/>, never a bare framework exception (CLAUDE.md's
+/// is a <see cref="CliArgumentException"/>, never a bare framework exception (docs/agents/developing-baton.md's
 /// error-handling rules).
 /// </summary>
 public static class RoomDeleteOptionsParser

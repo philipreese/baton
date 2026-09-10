@@ -9,9 +9,21 @@ reference for `baton dispatch`, which is [`docs/dispatch.md`](../dispatch.md). W
 this links rather than restates.
 
 **When conducting repository-changing work**, read the selected worker package through
-[`AGENTS.md`](../../AGENTS.md) before writing the brief; the role package owns standing lane rules and
-the brief owns task-specific work. Reconcile the task, role tools, grants, outputs, and verification
-owner before dispatch, and surface a conflict instead of copying both instructions into the brief.
+[`baton-implement`](../../src/Baton.Vendors/Skills/baton-implement/SKILL.md),
+[`baton-review`](../../src/Baton.Vendors/Skills/baton-review/SKILL.md), or
+[`baton-advise`](../../src/Baton.Vendors/Skills/baton-advise/SKILL.md) before writing the brief; the
+role package owns standing lane rules and the brief owns task-specific work. Reconcile the task,
+role tools, grants, outputs, verification owner, prerequisites, and allowance before dispatch, and
+surface a conflict instead of copying both instructions into the brief.
+
+**Treat caps as emergency brakes, not calibrated efficiency targets.** Role defaults are starting
+points, not validated optima; do not replace a normal allowance with an arbitrary small limit.
+High turn count alone is not evidence of runaway work. Inspect useful progress and disclosed spend
+before extending or arresting a lane: repeated blocked actions, loops, or escalating spend without
+useful progress justify intervention, while legitimate work gets room to finish. Tighten defaults
+only from comparable completed-task evidence that includes recovery cost. [#2175](https://github.com/philipreese/baton/issues/2175)
+owns allowance calibration and telemetry measurement; this ruling neither removes safeguards nor
+authorizes unbounded spend.
 The shared development guide owns [record-once](developing-baton.md#before-you-ship--the-gates-every-change-runs-through),
 [bounded delegation](developing-baton.md#delegating-to-subagents), and
 [spend disclosure](developing-baton.md#cost-and-reversibility-are-the-operators-call). After a lane,

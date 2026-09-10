@@ -98,7 +98,7 @@ public sealed record ArrestLedgerEntry(
 /// <see cref="FlowEvent.CancellationRejected"/>), and <c>room.jsonl</c> for the two shapes that never
 /// did (<see cref="RoomEvent.ArrestRequestUnresolvable"/>/<see cref="RoomEvent.ArrestRequestExpired"/>
 /// — see that type's own remarks for why the second log is the only durable home available). Reading
-/// both existing logs rather than inventing a third, parallel ledger store is exactly what CLAUDE.md's
+/// both existing logs rather than inventing a third, parallel ledger store is exactly what docs/agents/developing-baton.md's
 /// <c>record-once</c> gate asks for.
 /// </summary>
 public static class ArrestLedgerProjector
