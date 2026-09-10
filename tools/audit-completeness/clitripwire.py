@@ -23,9 +23,9 @@ TWO DIRECTIONS OF DRIFT
    doc's example gets a `CliArgumentException`. Reported at the parser's own Usage line, since there
    is no single doc line the omission belongs to.
    Deliberately scoped to REQUIRED flags only: invoking-baton.md is the quickstart, not the
-   reference (`docs/dispatch.md` and `spec/baton.md` own that job, and CLAUDE.md's record-once gate
-   forbids restating one in the other) -- demanding every optional flag appear here would turn the
-   quickstart into the reference it explicitly defers to.
+   reference (`docs/dispatch.md` and `spec/baton.md` own that job, and the development guide's
+   record-once gate forbids restating one in the other) -- demanding every optional flag appear here
+   would turn the quickstart into the reference it explicitly defers to.
 A verb the doc never demonstrates with a flag-bearing invocation (`baton cancel`, `baton supply` are
 never shown at all) is out of scope for direction 2 -- there is nothing there to be missing FROM.
 

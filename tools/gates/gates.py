@@ -1765,8 +1765,8 @@ def selftest():
             # `--record-member`'s name-only path END TO END through main(): parse, dispatch,
             # resolve, run, receipt. The arms in the fixture above call record_member directly, and
             # the CLI arm dies in parse_args before the dispatch is reached -- so without this the
-            # one line main() dispatches on has no execution anywhere, and it is the line CLAUDE.md
-            # tells every lane to use.
+            # one line main() dispatches on has no execution anywhere, and it is the line the
+            # development guide tells every lane to use.
             member_receipt.delete(_git_dir(repo), fast[1])
             sys.argv = ["gates.py", "--record-member", fast[1]]
             front_door_rc = main()

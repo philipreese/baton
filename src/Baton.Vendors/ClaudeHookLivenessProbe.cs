@@ -18,7 +18,8 @@ namespace Baton.Vendors;
 /// </summary>
 /// <remarks>
 /// Injectable so <see cref="ClaudeWorkerAdapter"/>'s unit tests drive it without spawning a real
-/// <c>dotnet</c> process (CLAUDE.md's <c>right-instrument</c> gate).
+/// <c>dotnet</c> process, as required by the <c>right-instrument</c> gate
+/// (<see href="../../../docs/agents/developing-baton.md"/>).
 /// </remarks>
 public interface IClaudeHookLivenessProbe
 {

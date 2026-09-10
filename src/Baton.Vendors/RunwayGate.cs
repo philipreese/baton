@@ -18,8 +18,9 @@ public enum RunwayDisposition
 /// <see cref="RunwayGate.UnmeasuredReason"/>, a vendor with no usage source at all.
 /// </summary>
 /// <param name="HeadroomPoints">
-/// #1896: percentage points left before the NEARER of the two thresholds bites — the minimum of
-/// (weekHoldPct − week%) and (sessionHoldPct − session%). Computed here rather than by the caller
+/// #1896: percentage points left before the NEARER exposed threshold bites — the weekly margin for
+/// a weekly-only account, otherwise the minimum of the weekly and session margins. Computed here
+/// rather than by the caller
 /// because only this type's window-name table knows which counter is which. <b>Present only on an Admit
 /// taken against readable counters</b>: a Hold has no headroom to report, and an unmeasured vendor has no
 /// counters at all. That absence is what confines the reservation arm to the one case it is safe in.
@@ -101,7 +102,7 @@ public sealed record RunwayThresholds(
 /// <c>Baton.Cli.OnDemandRunwayHarvest</c>, before this method is called, and reaches it only as a
 /// <see cref="RunwayHarvestAttempt"/> value. What is no longer true of the gate as a whole is that a
 /// check costs no subscription usage: the first check for a vendor with no snapshot spends one
-/// <c>/usage</c> call. That bound is stated in spec/baton.md §7.
+/// vendor usage read. That bound is stated in spec/baton.md §7.
 /// </summary>
 /// <remarks>
 /// <para>
@@ -125,16 +126,9 @@ public static class RunwayGate
     /// reads its snapshot-file population from here rather than keeping a second copy. A vendor
     /// outside it is admitted with <see cref="UnmeasuredReason"/>. The register for why that differs
     /// from an unreadable snapshot's Hold: spec/baton.md §7, "Runway hold (#1848)".
-    /// <para>
-    /// <b>Membership here is not the same as being gated (#1904).</b> <see cref="Evaluate"/> keys on
-    /// <see cref="WindowNames"/>, not on this list, and codex is on this list without being in that
-    /// table: <see cref="CodexUsageSource"/> harvests a snapshot (so the glass gets a codex block) whose
-    /// windows are DERIVED and carry no percentage unless the operator declared a plan ceiling. Putting
-    /// those names in the table would send every ceiling-less codex dispatch down the "recognized
-    /// window, no percentage" Hold arm — holding a vendor for the same absence #1848 chose to admit as
-    /// unmeasured. So codex is still admitted with <see cref="UnmeasuredReason"/>, and gating on the
-    /// derived counters is a follow-up decision, not a side effect of this list growing.
-    /// </para>
+    /// Codex joined the gated population when #1904 replaced its interim ledger estimate with the
+    /// vendor's authenticated account counters. <see cref="WindowSelectors"/> identifies its account
+    /// bucket and measured durations without assuming that <c>primary</c> means a particular window.
     /// </summary>
     public static readonly IReadOnlyList<string> MeasuredVendors = ["claude", "agy", "codex"];
 
@@ -142,7 +136,7 @@ public static class RunwayGate
     public const string UnmeasuredReason = "runway: unmeasured";
 
     /// <summary>
-    /// The ONE window-name table (#1848). Each vendor's own parser decides these strings, and they
+    /// The ONE window selector table (#1848/#1904). Claude and agy select their textual names, which
     /// differ per vendor: claude's are the words between "Current " and the colon in its
     /// <c>/usage</c> report (<see cref="ClaudeUsageSlashCommandSource.Parse"/>), agy's are the
     /// composed <c>"&lt;family&gt; · &lt;window&gt;"</c> name with "Remaining" stripped
@@ -150,45 +144,74 @@ public static class RunwayGate
     /// also reports a <c>"week (Fable)"</c> window the operator ruling of 2026-09-05 excludes
     /// (spec/baton.md §7, "Runway hold (#1848)") — a prefix or contains match on "week" would silently
     /// gate on it.
-    /// <para>
-    /// <b>This table, not <see cref="MeasuredVendors"/>, is what makes a vendor gated</b>, and codex is
-    /// deliberately absent from it even though it now has a source — that list's own doc comment states
-    /// why (#1904).
-    /// </para>
+    /// Codex instead selects <c>limitId=codex</c> and exact measured durations. This keeps a separate
+    /// per-model bucket from satisfying the account runway. A null account secondary is unexposed and
+    /// therefore inapplicable, never zero; an exposed malformed account window remains unreadable.
     /// </summary>
-    private static readonly Dictionary<string, (string Week, string Session)> WindowNames = new(StringComparer.Ordinal)
+    private static readonly Dictionary<string, WindowSelector> WindowSelectors = new(StringComparer.Ordinal)
     {
-        ["claude"] = ("week (all models)", "session"),
-        ["agy"] = ("Gemini Models · Weekly Limit", "Gemini Models · Five Hour Limit"),
+        ["claude"] = new("week (all models)", "session"),
+        ["agy"] = new("Gemini Models · Weekly Limit", "Gemini Models · Five Hour Limit"),
+        ["codex"] = new(
+            WeekName: null,
+            SessionName: null,
+            LimitId: CodexUsageSource.AccountLimitId,
+            WeekDurationMins: CodexUsageSource.WeeklyDurationMins,
+            SessionDurationMins: CodexUsageSource.FiveHourDurationMins,
+            SessionMayBeUnexposed: true),
     };
 
-    /// <summary>
-    /// Whether this vendor's counters are what decide its admission — membership in the window-name
-    /// table above, which is a narrower thing than <see cref="MeasuredVendors"/> (that list's own doc
-    /// comment has why codex is on it and not here). Exposed for #1923's on-demand harvest, which must
-    /// not spend a <c>/usage</c> call on a vendor whose decision cannot turn on the result.
-    /// </summary>
-    public static bool IsGated(string vendor) =>
-        !string.IsNullOrEmpty(vendor) && WindowNames.ContainsKey(vendor);
+    private sealed record WindowSelector(
+        string? WeekName,
+        string? SessionName,
+        string? LimitId = null,
+        int? WeekDurationMins = null,
+        int? SessionDurationMins = null,
+        bool SessionMayBeUnexposed = false);
 
     /// <summary>
-    /// Whether <paramref name="snapshot"/> is evidence this gate can decide on at <paramref name="now"/>:
-    /// present, and no older than <see cref="RunwayThresholds.EffectiveMaxSnapshotAge"/>. <b>The one place
-    /// that comparison is written</b> — <see cref="Evaluate"/>'s staleness arm and #1966's caller
-    /// (<c>DispatchCommand.CreateDiskRunwayEvaluator</c>, deciding whether to harvest inline) both read it
-    /// here rather than each spelling out an age test that could drift apart into a hold the harvest never
-    /// tries to clear.
+    /// Whether this vendor's counters are what decide its admission — membership in the selector
+    /// table above. Exposed for #1923's on-demand harvest, which must not spend a vendor usage read on
+    /// an adapter whose decision cannot turn on the result.
+    /// </summary>
+    public static bool IsGated(string vendor) =>
+        !string.IsNullOrEmpty(vendor) && WindowSelectors.ContainsKey(vendor);
+
+    /// <summary>
+    /// Whether <paramref name="snapshot"/> is evidence this gate can decide on at <paramref name="now"/>.
+    /// Besides freshness, a Codex snapshot must carry the authenticated vendor provenance and the account
+    /// window identity the gate consumes. That second condition makes a fresh interim derived snapshot
+    /// trigger the same inline migration refresh as an absent one instead of suppressing the only reader
+    /// that can replace it. Other vendors retain their existing freshness-only rule.
     /// </summary>
     public static bool IsUsable(VendorUsageSnapshot? snapshot, RunwayThresholds thresholds, DateTimeOffset now)
     {
         ArgumentNullException.ThrowIfNull(thresholds);
-        return snapshot is not null && now - snapshot.HarvestedAt <= thresholds.EffectiveMaxSnapshotAge;
+        if (snapshot is null || !IsFresh(snapshot, thresholds, now))
+        {
+            return false;
+        }
+
+        if (!string.Equals(snapshot.Vendor, CodexUsageSource.AccountLimitId, StringComparison.Ordinal))
+        {
+            return true;
+        }
+
+        var selector = WindowSelectors[CodexUsageSource.AccountLimitId];
+        if (!TrySelectWindows(snapshot, selector, out var week, out var session, out var sessionIsUnexposed))
+        {
+            return false;
+        }
+
+        return snapshot.Source == VendorUsageProvenance.Vendor
+            && week?.PercentUsed is not null
+            && (session?.PercentUsed is not null || sessionIsUnexposed);
     }
 
     /// <summary>
     /// Decides admission for one vendor. <paramref name="snapshot"/> is that vendor's latest
     /// PERSISTED snapshot (null when none exists or it could not be read) — this method itself never
-    /// makes a live <c>/usage</c> call.
+    /// makes a live vendor usage read.
     /// </summary>
     /// <param name="vendor">The adapter tag being dispatched to, e.g. <c>"claude"</c>.</param>
     /// <param name="now">The clock, passed in so the staleness arm is testable without waiting.</param>
@@ -214,7 +237,7 @@ public static class RunwayGate
         // is a lower bound on usage and goes stale exactly like a vendor counter, so exempting it would
         // fail open. The mark's one consumer is the burn ring (VendorUsageBurn), which skips derived
         // blocks because their rolling window is not monotonic (#1926 review).
-        if (!WindowNames.TryGetValue(vendor, out var names))
+        if (!WindowSelectors.TryGetValue(vendor, out var selector))
         {
             return new RunwayDecision(vendor, RunwayDisposition.Admit, UnmeasuredReason, []);
         }
@@ -228,7 +251,7 @@ public static class RunwayGate
                 []);
         }
 
-        if (!IsUsable(snapshot, thresholds, now))
+        if (!IsFresh(snapshot, thresholds, now))
         {
             return new RunwayDecision(
                 vendor,
@@ -240,17 +263,26 @@ public static class RunwayGate
                 + $"(limit {Hours(thresholds.EffectiveMaxSnapshotAge)}h) — "
                 + "a stale counter is a lower bound on today's usage, not evidence of headroom"
                 + DescribeFailedHarvest(harvest),
-                Counters(snapshot, names),
+                Counters(snapshot, selector),
                 SnapshotHarvestedAt: snapshot.HarvestedAt);
         }
 
-        var week = Find(snapshot, names.Week);
-        var session = Find(snapshot, names.Session);
-        var counters = Counters(snapshot, names);
-
-        if (week is null || session is null)
+        if (!TrySelectWindows(snapshot, selector, out var week, out var session, out var sessionIsUnexposed))
         {
-            var missing = week is null ? names.Week : names.Session;
+            return new RunwayDecision(
+                vendor,
+                RunwayDisposition.Hold,
+                "the harvested snapshot carries conflicting or malformed account window evidence — "
+                    + "the vendor's report was not readable",
+                [],
+                SnapshotHarvestedAt: snapshot.HarvestedAt);
+        }
+
+        var counters = Counters(week, session);
+
+        if (week is null || (session is null && !sessionIsUnexposed))
+        {
+            var missing = Expected(selector, weekly: week is null);
             return new RunwayDecision(
                 vendor,
                 RunwayDisposition.Hold,
@@ -259,7 +291,7 @@ public static class RunwayGate
                 SnapshotHarvestedAt: snapshot.HarvestedAt);
         }
 
-        if (week.PercentUsed is not { } weekPct || session.PercentUsed is not { } sessionPct)
+        if (week.PercentUsed is not { } weekPct || (session is not null && session.PercentUsed is null))
         {
             return new RunwayDecision(
                 vendor,
@@ -274,17 +306,17 @@ public static class RunwayGate
             return new RunwayDecision(
                 vendor,
                 RunwayDisposition.Hold,
-                $"'{names.Week}' is at {weekPct}% (holds at {thresholds.WeekHoldPct}%)",
+                $"'{week.Name}' is at {weekPct}% (holds at {thresholds.WeekHoldPct}%)",
                 counters,
                 SnapshotHarvestedAt: snapshot.HarvestedAt);
         }
 
-        if (sessionPct >= thresholds.SessionHoldPct)
+        if (session?.PercentUsed is { } sessionPct && sessionPct >= thresholds.SessionHoldPct)
         {
             return new RunwayDecision(
                 vendor,
                 RunwayDisposition.Hold,
-                $"'{names.Session}' is at {sessionPct}% (holds at {thresholds.SessionHoldPct}%)",
+                $"'{session.Name}' is at {sessionPct}% (holds at {thresholds.SessionHoldPct}%)",
                 counters,
                 SnapshotHarvestedAt: snapshot.HarvestedAt);
         }
@@ -294,8 +326,77 @@ public static class RunwayGate
             RunwayDisposition.Admit,
             Reason: null,
             counters,
-            HeadroomPoints: Math.Min(thresholds.WeekHoldPct - weekPct, thresholds.SessionHoldPct - sessionPct),
+            HeadroomPoints: session?.PercentUsed is { } admittedSessionPct
+                ? Math.Min(thresholds.WeekHoldPct - weekPct, thresholds.SessionHoldPct - admittedSessionPct)
+                : thresholds.WeekHoldPct - weekPct,
             SnapshotHarvestedAt: snapshot.HarvestedAt);
+    }
+
+    private static bool IsFresh(
+        VendorUsageSnapshot snapshot, RunwayThresholds thresholds, DateTimeOffset now) =>
+        now - snapshot.HarvestedAt <= thresholds.EffectiveMaxSnapshotAge;
+
+    /// <summary>
+    /// Selects the complete evidence set the decision rests on. Text-named vendors retain their exact
+    /// name lookup. Codex additionally validates the account identity/exposure/duration matrix before
+    /// selecting either duration: primary and secondary source identities are unique; omitted and raw
+    /// null are the only unexposed forms; every exposed row has a supported duration; and each duration
+    /// occurs at most once. Thus a valid weekly sibling cannot hide a malformed or conflicting duplicate.
+    /// Per-model buckets never enter the matrix because their <c>limitId</c> is not the account.
+    /// </summary>
+    private static bool TrySelectWindows(
+        VendorUsageSnapshot snapshot,
+        WindowSelector selector,
+        out VendorUsageWindow? week,
+        out VendorUsageWindow? session,
+        out bool sessionIsUnexposed)
+    {
+        week = null;
+        session = null;
+        sessionIsUnexposed = false;
+
+        if (selector.LimitId is null)
+        {
+            week = FindByName(snapshot, selector.WeekName);
+            session = FindByName(snapshot, selector.SessionName);
+            return true;
+        }
+
+        var accountWindows = snapshot.Windows
+            .Where(window => string.Equals(window.LimitId, selector.LimitId, StringComparison.Ordinal))
+            .ToArray();
+        var knownKinds = new[] { "primary", "secondary" };
+        if (accountWindows.Any(window => !knownKinds.Contains(window.WindowKind, StringComparer.Ordinal))
+            || knownKinds.Any(kind => accountWindows.Count(
+                window => string.Equals(window.WindowKind, kind, StringComparison.Ordinal)) > 1))
+        {
+            return false;
+        }
+
+        static bool IsUnexposed(VendorUsageWindow window) =>
+            string.Equals(window.RawLine, "null", StringComparison.Ordinal)
+            && window.PercentUsed is null
+            && window.ResetsAt is null
+            && window.WindowDurationMins is null;
+
+        var exposed = accountWindows.Where(window => !IsUnexposed(window)).ToArray();
+        if (exposed.Any(window => window.WindowDurationMins != selector.WeekDurationMins
+                && window.WindowDurationMins != selector.SessionDurationMins))
+        {
+            return false;
+        }
+
+        var weekly = exposed.Where(window => window.WindowDurationMins == selector.WeekDurationMins).ToArray();
+        var sessions = exposed.Where(window => window.WindowDurationMins == selector.SessionDurationMins).ToArray();
+        if (weekly.Length > 1 || sessions.Length > 1)
+        {
+            return false;
+        }
+
+        week = weekly.SingleOrDefault();
+        session = sessions.SingleOrDefault();
+        sessionIsUnexposed = selector.SessionMayBeUnexposed && session is null;
+        return true;
     }
 
     /// <summary>
@@ -339,18 +440,40 @@ public static class RunwayGate
     private static string Hours(TimeSpan span) =>
         span.TotalHours.ToString("0.#", System.Globalization.CultureInfo.InvariantCulture);
 
-    private static VendorUsageWindow? Find(VendorUsageSnapshot snapshot, string name) =>
-        snapshot.Windows.FirstOrDefault(w => string.Equals(w.Name, name, StringComparison.Ordinal));
+    private static VendorUsageWindow? FindByName(VendorUsageSnapshot snapshot, string? name) =>
+        name is null
+            ? null
+            : snapshot.Windows.FirstOrDefault(w => string.Equals(w.Name, name, StringComparison.Ordinal));
 
-    /// <summary>The two gated windows only — the counters a decision actually rests on. claude's
+    private static string Expected(WindowSelector selector, bool weekly)
+    {
+        var name = weekly ? selector.WeekName : selector.SessionName;
+        if (name is not null)
+        {
+            return name;
+        }
+
+        var duration = weekly ? selector.WeekDurationMins : selector.SessionDurationMins;
+        return $"{selector.LimitId} {duration}-minute";
+    }
+
+    /// <summary>The exposed gated windows only — the counters a decision actually rests on. claude's
     /// <c>week (Fable)</c> and agy's other families are deliberately absent rather than reported
     /// beside numbers that did not decide anything.</summary>
-    private static IReadOnlyList<RunwayCounter> Counters(VendorUsageSnapshot snapshot, (string Week, string Session) names)
+    private static IReadOnlyList<RunwayCounter> Counters(VendorUsageSnapshot snapshot, WindowSelector selector)
+    {
+        return TrySelectWindows(snapshot, selector, out var week, out var session, out _)
+            ? Counters(week, session)
+            : [];
+    }
+
+    private static IReadOnlyList<RunwayCounter> Counters(
+        VendorUsageWindow? week, VendorUsageWindow? session)
     {
         List<RunwayCounter> counters = [];
-        foreach (var name in new[] { names.Week, names.Session })
+        foreach (var window in new[] { week, session })
         {
-            if (Find(snapshot, name) is { } window)
+            if (window is not null)
             {
                 counters.Add(new RunwayCounter(window.Name, window.PercentUsed));
             }

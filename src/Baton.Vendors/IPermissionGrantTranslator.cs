@@ -25,7 +25,7 @@ public interface IPermissionGrantTranslator
     /// <para>
     /// Must refuse (return <see langword="false"/>) rather than approximate whenever the requested
     /// grant cannot be expressed exactly — granting more than requested is as much a bug here as
-    /// granting less (Adapter Isolation, CLAUDE.md rule #2, cuts both ways).
+    /// granting less (Adapter Isolation cuts both ways; <see href="../../../docs/agents/developing-baton.md"/>).
     /// </para>
     /// </summary>
     bool TryTranslatePermissionGrant(PermissionGrant grant, out string? resolvedValue, out string? gapReason);

@@ -5,29 +5,30 @@ description: Rules for Baton implementation lanes.
 
 # baton implement lane
 
-The brief says what to build; this governs lane behavior. Only its explicit grants override these rules.
+The brief defines the work; this governs lane conduct. Only explicit grants override it.
 
 ## Before anything
 
-- Run `git status` and `git log --oneline -3`; create the named branch from `origin/main` only
-  in a fresh detached clone, otherwise verify the existing branch.
+- Run `git status` and `git log --oneline -3`; in a fresh detached clone, create the named branch
+  from `origin/main`; otherwise verify it.
 - Read the cited issue (`gh issue view <n>`) and verify its claims against the tree; the body may be stale.
 
 ## What the lane never does
 
-- No gates (`pixi run gates`, `gates-fast`, receipts). The engine verifies after exit; the normal
-  pre-push `gates-lane-fast` still runs, and a real failure must be fixed.
+- No aggregate gates or receipts; the engine verifies after exit. The normal pre-push
+  `gates-lane-fast` still runs; fix real failures.
 - No sub-agents. The second reader is the conductor's own review lane.
 - No live vendor CLIs (`claude`, `codex`, `agy`, anything spending subscription budget) unless the
   brief grants them by name, with a run count.
 - No `--no-verify`, no force-push.
-- Write only in the workspace or `$BATON_OUTPUT_DIR`; memory work uses fixtures, never real vendor
-  memory or the operator's Baton home.
+- Write only in the workspace or `$BATON_OUTPUT_DIR`; use fixtures, never real vendor memory or the
+  operator's Baton home.
 - Never restart or reinstall the real daemon, its scheduled task, or the installed tool.
 
 ## Two checks on every code change
 
-Where `AGENTS.md` exists it owns these checks. Record each finding in `changes.md`.
+This package owns these checks. Apply them and list each finding in `changes.md`; `AGENTS.md` routes
+workers here instead of restating them.
 
 - **State enumeration.** For an added/renamed state word, list and fix every switching predicate.
 - **Value provenance.** For a changed value source, list every reader and confirm each remains correct.

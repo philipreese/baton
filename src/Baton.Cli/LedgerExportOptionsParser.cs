@@ -15,7 +15,7 @@ public static class LedgerExportOptionsParser
 
     /// <summary>
     /// What <c>--help</c> prints under <see cref="Usage"/>. Each line states a negative a reader's prior
-    /// fills in wrongly otherwise (CLAUDE.md, "Writing documentation"): that the date does not window
+    /// fills in wrongly otherwise (docs/agents/developing-baton.md, "Writing documentation"): that the date does not window
     /// the rows, that this format alone is redacted, and that the store is never written.
     /// </summary>
     public static IReadOnlyList<string> HelpLines { get; } =

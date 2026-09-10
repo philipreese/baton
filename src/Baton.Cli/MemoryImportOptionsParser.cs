@@ -16,8 +16,8 @@ public static class MemoryImportOptionsParser
         "[--asserted-by <who>] | baton memory import --undo <manifest> [--help]";
 
     /// <summary>
-    /// What <c>--help</c> prints under <see cref="Usage"/>. Every line is a place a reader's prior
-    /// fills the gap wrongly if the negative is not stated (CLAUDE.md, "Writing documentation"): what
+    /// What <c>--help</c> prints under <see cref="Usage"/>. The explicit negatives follow the shared
+    /// documentation rule (<see href="../../../docs/agents/developing-baton.md"/>): what
     /// this writes and what it provably does not, which roots it reads, how an entry's kind is decided
     /// and what it is never decided from, and which population it cannot file without help.
     /// </summary>
@@ -271,7 +271,7 @@ public static class MemoryImportOptionsParser
     /// The calling verb's own usage line, appended to the refusal. <b>Internal and parameterised rather
     /// than copied</b> (#2071): <c>baton memory add --repository</c> is the second operator write path
     /// onto a store file and needs this same refusal, and a second copy is a second place for the rule
-    /// to drift (CLAUDE.md, <c>record-once</c>).
+    /// to drift (docs/agents/developing-baton.md, <c>record-once</c>).
     /// </param>
     internal static void RequireAHostThatAProbeCouldAnswer(string repository, string canonical, string usage)
     {

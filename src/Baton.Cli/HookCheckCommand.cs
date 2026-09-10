@@ -610,7 +610,7 @@ public static class HookCheckCommand
     /// a key that ignored it.
     /// <para>
     /// <b>What claude's <c>Read</c> payload actually carries is unmeasured here, and both registers
-    /// were checked rather than assumed silent</b> (CLAUDE.md `common-sense`):
+    /// were checked rather than assumed silent</b> (docs/agents/developing-baton.md `common-sense`):
     /// <c>tools/vendor-verify/verify.py --list</c> has no check on any claude <c>tool_input</c>
     /// shape, and <c>docs/vendor-doc-audit.md</c> records one captured claude <c>PreToolUse</c>
     /// payload — for <c>Write</c> — in which <c>tool_input</c> holds the tool's own arguments

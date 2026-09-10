@@ -11,7 +11,7 @@ namespace Baton.Cli;
 /// <remarks>
 /// The format enum is <see cref="MemoryAuditOutputFormat"/>, shared with <c>audit</c> rather than
 /// duplicated: it is the same two-valued choice with the same meaning, and a second enum spelling
-/// <c>text|json</c> would be a second definition of one thing (CLAUDE.md, <c>record-once</c>).
+/// <c>text|json</c> would be a second definition of one thing (docs/agents/developing-baton.md, <c>record-once</c>).
 /// </remarks>
 public static class MemorySyncOptionsParser
 {

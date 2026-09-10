@@ -3,7 +3,7 @@ namespace Baton.Cli;
 /// <summary>
 /// Parses <c>baton status</c>'s arguments: <c>baton status &lt;room-dir&gt; [--follow]</c>. Never
 /// throws a bare <see cref="InvalidOperationException"/> for a malformed invocation — every
-/// failure here is a <see cref="CliArgumentException"/> (CLAUDE.md's error-handling rules),
+/// failure here is a <see cref="CliArgumentException"/> (<see href="../../../docs/agents/developing-baton.md"/>),
 /// mirroring <see cref="RunOptionsParser"/>/<see cref="CancelOptionsParser"/>.
 /// </summary>
 public static class StatusOptionsParser

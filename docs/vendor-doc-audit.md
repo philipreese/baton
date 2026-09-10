@@ -724,7 +724,7 @@ rather than capability**, and the constraint is one sentence in the setup steps:
 > the API key authentication methods described in this document instead.**"
 
 The Agent SDK authenticates with `ANTHROPIC_API_KEY`, Bedrock, Vertex, or Foundry. **AER Flow's stated
-premise is subscriptions, not API keys** (CLAUDE.md: *"the project's whole point is working against
+premise is subscriptions, not API keys** ([development guide](agents/developing-baton.md): *"the project's whole point is working against
 **subscriptions**, not API keys"*, and *"dropping in an API key to make a gate pass would test a
 different auth path than the one the project exists to support"*).
 

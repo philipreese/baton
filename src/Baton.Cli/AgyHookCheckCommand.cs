@@ -67,7 +67,7 @@ public static class AgyHookCheckCommand
     /// environment agy was spawned with. agy's own documentation
     /// (<c>.vendor-survey/corpus/agy__hooks.md</c>) is silent on inheritance — claude's states it
     /// explicitly — so carrying claude's answer across would have been exactly the population-scope
-    /// mistake CLAUDE.md gate `claim-scope` names.
+    /// mistake docs/agents/developing-baton.md gate `claim-scope` names.
     /// </remarks>
     public const string DeniedToolsEnvironmentVariable =
         HookCheckCommand.DeniedToolsEnvironmentVariable;
@@ -706,12 +706,8 @@ public static class AgyHookCheckCommand
     /// </summary>
     /// <remarks>
     /// <para>
-    /// <b>Scope: two captured agy 1.2.0 <c>run_command</c> hook payloads.</b> Both carry these five,
-    /// including numeric <c>WaitMsBeforeAsync</c> and the two string-valued descriptive fields —
-    /// names and types that were observed;
-    /// <em>that it is the backgrounding mechanism</em> is inference from the name, which is how
-    /// <c>docs/vendor-capabilities.md</c> frames it too. That register owns the finding and its
-    /// provenance (widened there 2026-09-10); do not restate them here.
+    /// <c>docs/vendor-capabilities.md</c> is the canonical vendor register for this finding and its
+    /// provenance; do not restate that measured history here.
     /// </para>
     /// <para>
     /// The consequence for this gate: a parameter agy puts on its own calls cannot be refused, because
@@ -720,8 +716,8 @@ public static class AgyHookCheckCommand
     /// parameter — an <c>Async</c>, a <c>Background</c>, a <c>Detach</c> — arriving unread.
     /// </para>
     /// <para>
-    /// <b>Its failure mode is a refused legitimate command, and n=2 is the exposure.</b> If agy sends
-    /// a sixth argument on some prompt shape nobody has captured, this rung denies a <c>run_command</c>
+    /// <b>Its failure mode is a refused legitimate command.</b> If agy sends an argument on some
+    /// prompt shape nobody has captured, this rung denies a <c>run_command</c>
     /// that should have run. Stated rather than hidden: it is the fail-closed direction and the only
     /// one available against an unread backgrounding switch, but another captured payload carrying a
     /// name not on this list is a reason to widen the list, not evidence that the rung worked.

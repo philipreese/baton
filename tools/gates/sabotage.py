@@ -15,6 +15,7 @@ lacks a sabotage fixture unless explicitly allowlisted with a one-line justifica
 """
 from __future__ import annotations
 
+import importlib.util
 import os
 import shutil
 import subprocess
@@ -137,8 +138,59 @@ def _sabotage_audit_completeness() -> None:
         tools_dir = dest / "tools" / "audit-completeness"
         tools_dir.mkdir(parents=True)
         shutil.copy2(ROOT / "tools" / "audit-completeness" / "completeness.py", tools_dir / "completeness.py")
-        (dest / "CLAUDE.md").write_text("# Baton\n", encoding="utf-8")
+        guide = dest / "docs" / "agents" / "developing-baton.md"
+        guide.parent.mkdir(parents=True)
+        guide_text = (
+            "# Developing Baton\n\n"
+            "**1. Known gate — `known-gate`.**\n"
+            "**2. Common sense — `common-sense`.**\n"
+            "**3. Record once — `record-once`.**\n")
+        guide.write_text(guide_text, encoding="utf-8")
 
+        verify = dest / "tools" / "vendor-verify" / "verify.py"
+        verify.parent.mkdir(parents=True)
+        verify.write_text('@check("known.real-check")\n', encoding="utf-8")
+        agents = dest / "AGENTS.md"
+        known_slug = "known-" + "gate"
+        clean_agents = f"Use gate `{known_slug}`; evidence is known.real-check.\n"
+        agents.write_text(clean_agents, encoding="utf-8")
+
+        module_spec = importlib.util.spec_from_file_location(
+            "sabotage_completeness", tools_dir / "completeness.py")
+        assert module_spec is not None and module_spec.loader is not None
+        completeness = importlib.util.module_from_spec(module_spec)
+        module_spec.loader.exec_module(completeness)
+
+        previous_cwd = Path.cwd()
+        os.chdir(dest)
+        try:
+            assert completeness.step8_cited_checks_exist(), (
+                "STEP 8 baseline failed before AGENTS.md vendor-check sabotage")
+            assert completeness.step10_gate_citations(), (
+                "STEP 10 baseline failed before AGENTS.md gate-citation sabotage")
+
+            agents.write_text("Evidence is known.not-a-check.\n", encoding="utf-8")
+            assert not completeness.step8_cited_checks_exist(), (
+                "STEP 8 ignored a fabricated vendor-check citation in AGENTS.md")
+
+            numeric_citation = "See " + "gate " + "1.\n"
+            agents.write_text(numeric_citation, encoding="utf-8")
+            assert not completeness.step10_gate_citations(), (
+                "STEP 10 ignored a numeric gate citation in AGENTS.md")
+
+            agents.write_text(clean_agents, encoding="utf-8")
+            (dest / "CLAUDE.md").write_text(
+                "# Bridge\n\n**1. Bridge-only gate — `bridge-gate`.**\n", encoding="utf-8")
+            guide.unlink()
+            assert not completeness.step10_gate_citations(), (
+                "STEP 10 accepted CLAUDE.md when the canonical development guide was absent")
+        finally:
+            os.chdir(previous_cwd)
+
+        agents.write_text(clean_agents, encoding="utf-8")
+        guide.write_text(guide_text, encoding="utf-8")
+
+        # Retain the member-level shell-out check after the targeted, otherwise-green controls above.
         proc = subprocess.run(
             [sys.executable, "-u", str(tools_dir / "completeness.py")],
             cwd=dest,
@@ -227,10 +279,9 @@ def _sabotage_audit_retiredphrases() -> None:
         tools_dir.mkdir(parents=True)
         shutil.copy2(ROOT / "tools" / "audit-completeness" / "retiredphrases.py", tools_dir / "retiredphrases.py")
 
-        docs_dir = dest / "docs"
-        docs_dir.mkdir(parents=True)
         phrase = "standing " + "grant"
-        (docs_dir / "violating.md").write_text(f"This mentions {phrase} without marker.\n", encoding="utf-8")
+        (dest / "AGENTS.md").write_text(
+            f"This mentions {phrase} without marker.\n", encoding="utf-8")
 
         proc = subprocess.run(
             [sys.executable, "-u", str(tools_dir / "retiredphrases.py")],

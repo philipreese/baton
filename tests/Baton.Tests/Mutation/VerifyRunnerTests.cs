@@ -241,7 +241,7 @@ public sealed class VerifyRunnerTests
     [Fact]
     public async Task Cancellation_during_verify_reports_Cancelled_kind()
     {
-        // Found while fixing #1706 (its own issue, fixed here per CLAUDE.md's found-while-fixing rule):
+        // Found while fixing #1706 (its own issue, fixed here per docs/agents/developing-baton.md's found-while-fixing rule):
         // this raced `cmd /c exit 0` against an already-cancelled token and asserted the token won.
         // On an idle machine it does; inside `pixi run gates-quiet`, with five test assemblies and a
         // build competing for cores, the child sometimes exited 0 first and the run reported Passed --

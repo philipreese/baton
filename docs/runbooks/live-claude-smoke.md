@@ -3,20 +3,18 @@
 M11's completion gate (#87): a real two-step `draft` → `review` workflow, run through `baton run`
 against the real headless `claude` CLI, producing real artifacts on disk. This is the first time
 aer-flow dispatches to a live LLM instead of `StubCoreDispatcher` or a shell-stub worker — so it
-runs from this runbook and a dedicated `pixi run` task, never from default CI (no API key or
-network access is available there, and a real call shouldn't gate every PR anyway).
+runs from this runbook and a dedicated `pixi run` task, never from default CI (no authenticated
+subscription session or network access is available there, and a real call shouldn't gate every PR
+anyway).
 
-**This is a human-run step in general** — see CLAUDE.md's "Live-vendor smoke tests" section. The
-recorded green run below happened to be closed from inside an agent session because that session's
-own host coincidentally carried an authenticated `claude` CLI; that's a coincidence of the host, not
-a capability to rely on for future re-runs or for gates on other vendors (see
-`live-mixed-vendor-smoke.md`, where the same coincidence didn't hold for `agy`).
+Before running, follow the
+[shared policy for live vendor runs](../agents/developing-baton.md#live-vendor-smoke-tests). This
+smoke run's local prerequisites are listed below.
 
 ## Prerequisites
 
-- An authenticated `claude` CLI on `PATH` — either a logged-in session or an API key configured
-  for it. `ClaudeWorkerAdapter` has no key-handling code of its own; it shells out to whatever
-  `claude` invocation is already authenticated on this machine.
+- A subscription-authenticated `claude` CLI on `PATH`. `ClaudeWorkerAdapter` has no
+  authentication-handling code of its own; it shells out to the authenticated CLI on this machine.
 - Outbound network access to Anthropic's API.
 - The usual repo prerequisites (`.NET 10` SDK — see the root `README.md`).
 

@@ -2554,8 +2554,8 @@ public static class MutationInterface
         {
             // The same spawn-failure shapes the primary dispatch's own contract admits (#747:
             // CommandLineTooLongException, Core.BatonException) -- mapped to a structured result rather
-            // than swallowed (CLAUDE.md's error-handling rule): a grace turn that could not even start
-            // leaves the workspace exactly as dirty as the arrest found it.
+            // than swallowed: a grace turn that could not even start leaves the workspace exactly as
+            // dirty as the arrest found it ([development guide](../../../docs/agents/developing-baton.md)).
             Console.Error.WriteLine(
                 $"Grace turn (#2134) for execution '{prepared.Request.ExecutionId.Value}' failed to spawn: {ex.Message}");
             await eventLogWriter.AppendAsync(

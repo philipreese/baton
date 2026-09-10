@@ -4,7 +4,7 @@ namespace Baton.Vendors;
 /// 0023's canonical effort vocabulary (quick/standard/careful/exhaustive) translated to each
 /// vendor's raw <c>--effort</c> value at dispatch (decision 0058's #1318 scope ruling 4). See
 /// <see cref="WorkerInvocation.Effort"/> for what this field now carries and why; this is the only
-/// place that resolves it to a vendor flag value (0023 constraint 1, CLAUDE.md Architecture Rule 2).
+/// place that resolves it to a vendor flag value (0023 constraint 1, docs/agents/developing-baton.md Architecture Rule 2).
 /// Nothing outside this assembly sees a raw vendor effort string; the
 /// mapping itself lives only here and is stated once, in <c>docs/vendor-capabilities.md</c>'s "The
 /// canonical effort mapping" table — restated in this file's data, never in prose elsewhere.

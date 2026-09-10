@@ -84,7 +84,7 @@ namespace Baton.Domain;
 /// output directory, recorded alongside <paramref name="HookCanaryArmed"/> so the replay can count
 /// verdicts directly from disk without resolving today's binding to obtain the same delegate. Non-null
 /// only when <paramref name="HookCanaryArmed"/> is <see langword="true"/>. Adapter Isolation
-/// (CLAUDE.md Architecture Rule 2): this is an opaque string Flow never interprets or defaults, only
+/// (docs/agents/developing-baton.md Architecture Rule 2): this is an opaque string Flow never interprets or defaults, only
 /// carries — the vendor adapter is what names it.
 /// </param>
 public sealed record ExecutionRequest(

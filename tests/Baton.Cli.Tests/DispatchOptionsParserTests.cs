@@ -483,7 +483,7 @@ public class DispatchOptionsParserTests
 
     /// <summary>
     /// #1691: the flag appears in the usage line every parse error prints. A flag that exists and is
-    /// undiscoverable is the documentation defect CLAUDE.md's writing rule names, and the usage string
+    /// undiscoverable is the documentation defect docs/agents/developing-baton.md's writing rule names, and the usage string
     /// is the only place a CLI reader looks.
     /// </summary>
     [Fact]

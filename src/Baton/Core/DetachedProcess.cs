@@ -51,7 +51,8 @@ namespace Baton.Core;
 /// redirects and drains both. Two per-spawn alternatives were weighed and rejected there. A
 /// <c>PROC_THREAD_ATTRIBUTE_HANDLE_LIST</c> on the spawn is not reachable through
 /// <see cref="Process"/> and would need a <c>CreateProcess</c> P/Invoke of Baton's own, which
-/// CLAUDE.md's Architecture Rule 3 forbids. Clearing and restoring the flag around this one spawn
+/// Architecture Rule 3 forbids (<see href="../../../docs/agents/developing-baton.md"/>). Clearing
+/// and restoring the flag around this one spawn
 /// would reopen, for the width of that window, exactly the leak this clear exists to close: any
 /// other spawn racing it (a <c>git</c> or <c>gh</c> child, a notify command) would duplicate the
 /// daemon's stdout into a child that may outlive the daemon, and the wrapper shell's restart would

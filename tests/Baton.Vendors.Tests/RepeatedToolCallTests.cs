@@ -198,7 +198,9 @@ public sealed class RepeatedToolCallTests
     [Fact]
     public async Task Three_identical_git_status_calls_are_three_executions()
     {
-        using var fixture = new RepeatFixture(commandCeiling: null, "git status*");
+        using var fixture = new RepeatFixture(commandCeiling: null, "git init*", "git status*");
+        var initialized = await fixture.RunAsync("git init --quiet --template=");
+        Assert.True(initialized.Success, initialized.Text);
 
         var results = new List<CodexDynamicToolResult>();
         for (var i = 0; i < 3; i++)
@@ -208,9 +210,33 @@ public sealed class RepeatedToolCallTests
 
         Assert.All(results, result =>
         {
+            Assert.True(result.Success, result.Text);
             Assert.DoesNotContain("replayed:", result.Text, StringComparison.Ordinal);
             Assert.DoesNotContain(GrantRefusal.Marker, result.Text);
         });
+    }
+
+    /// <summary>
+    /// The hook cannot observe a command's eventual exit, so it invalidates before admitting every
+    /// volatile command. The repeated status calls prove freshness is unchanged; the unrelated
+    /// command and read prove that freshness is no longer mistaken for read-only behavior.
+    /// </summary>
+    [Fact]
+    public void A_volatile_hook_command_stays_fresh_and_invalidates_unrelated_entries()
+    {
+        var ledger = new RepeatedToolCallLedger();
+        const string cachedCommand = "dotnet test";
+        const string cachedPath = "C:/synthetic/source.cs";
+        var stamp = new DateTimeOffset(2026, 9, 10, 12, 0, 0, TimeSpan.Zero);
+
+        Assert.Null(ledger.ClassifyHookCommand(cachedCommand));
+        Assert.Null(ledger.ClassifyHookRead(cachedPath, stamp, length: 10));
+
+        Assert.Null(ledger.ClassifyHookCommand("git status --short"));
+        Assert.Null(ledger.ClassifyHookCommand("git status --short"));
+
+        Assert.Null(ledger.ClassifyHookRead(cachedPath, stamp, length: 10));
+        Assert.Null(ledger.ClassifyHookCommand(cachedCommand));
     }
 
     /// <summary>

@@ -266,7 +266,7 @@ public sealed record ImportManifest(
 /// <summary>
 /// A domain-level failure in the memory subsystem — a manifest that cannot be trusted, an import that
 /// cannot proceed. Typed rather than an <see cref="InvalidOperationException"/> so a caller can tell
-/// this subsystem's refusals from a bug (CLAUDE.md, "Error handling rules").
+/// this subsystem's refusals from a bug (docs/agents/developing-baton.md, "Error handling rules").
 /// </summary>
 /// <remarks>
 /// <b>A <see cref="BatonFlowException"/>, so it surfaces as a message rather than a stack trace.</b>

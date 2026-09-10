@@ -1,7 +1,7 @@
 <Project Sdk="Microsoft.NET.Sdk">
 
   <!--
-    #370: the code sibling of the doc/spec guards (#367/#314/#315). Enforces CLAUDE.md's
+    #370: the code sibling of the doc/spec guards (#367/#314/#315). Enforces docs/agents/developing-baton.md's
     reference-direction architecture invariants against the actual project graph, so the room-model
     churn (#333/#335) can't silently introduce a layering violation. IN Baton.slnx on purpose —
     it must run in default CI (`pixi run test`) so a forbidden dependency fails the build the moment

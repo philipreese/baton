@@ -1,10 +1,12 @@
 #!/usr/bin/env bash
 # M13 Phase 4 (#110), the milestone's completion gate: proves the packed nupkg is actually
 # installable and runnable, unattended, with no live vendor auth. Unlike M11/M12's gated
-# smoke-claude/smoke-mixed-vendor runbooks (real subscription auth, permanently human-run per
-# CLAUDE.md's "Live-vendor smoke tests"), nothing here needs a live vendor: the `claude` binary the
-# installed `baton` shells out to is a local stub that just satisfies the declared output contract,
-# so this can run unattended in default CI. Invoked as `pixi run verify-pack` (depends on `pack`).
+# record-once-ok: #2204 docs/agents/developing-baton.md
+# smoke-claude/smoke-mixed-vendor runbooks (live-vendor policy:
+# docs/agents/developing-baton.md#live-vendor-smoke-tests), nothing here needs a live vendor: the
+# `claude` binary the installed `baton` shells out to is a local stub that just satisfies the
+# declared output contract, so this can run unattended in default CI. Invoked as
+# `pixi run verify-pack` (depends on `pack`).
 set -euo pipefail
 
 PACK_DIR="$(cd bin/pack && pwd)"

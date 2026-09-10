@@ -21,10 +21,16 @@ public enum RepeatVerdict
 /// <paramref name="Reason"/> on <see cref="RepeatVerdict.Refuse"/>; both are null on
 /// <see cref="RepeatVerdict.Execute"/>. <paramref name="ReplayedOutput"/> is the previous command
 /// output, and is null for reads — see the ledger's remarks for why a read is re-read from disk
-/// rather than served from memory.
+/// rather than served from memory. <paramref name="ReplayedSuccess"/> preserves the recorded tool
+/// disposition so a non-zero exit, timeout, cancellation, or capture failure cannot come back as a
+/// successful replay. It is not a statement about capture completion or mutation safety.
 /// </summary>
 public sealed record RepeatDecision(
-    RepeatVerdict Verdict, string? Preamble = null, string? Reason = null, string? ReplayedOutput = null)
+    RepeatVerdict Verdict,
+    string? Preamble = null,
+    string? Reason = null,
+    string? ReplayedOutput = null,
+    bool ReplayedSuccess = true)
 {
     public static readonly RepeatDecision Execute = new(RepeatVerdict.Execute);
 }
@@ -104,9 +110,10 @@ public sealed class RepeatedToolCallLedger
     /// instrument. #2002's measured offender was polling LOCAL processes it had backgrounded itself,
     /// which rule 1 removes at the source.
     /// <para>
-    /// <b>This list is also the ledger's only proof that a command did not touch the tree.</b> Every
-    /// one of these five reads and never writes, which is what lets an executing command on this list
-    /// leave the other command entries alone — see <see cref="ForgetAllCommands"/>.
+    /// <b>A command with a successful tool result on this list remains fresh.</b> That controls only
+    /// whether its own output is recorded. It does not claim the command was read-only: the broker
+    /// invalidates unrelated cached observations after every actual execution because a helper such
+    /// as an external diff driver may have mutated the tree on any exit path.
     /// </para>
     /// </summary>
     public static readonly IReadOnlyList<string> VolatileCommandPrefixes =
@@ -146,18 +153,35 @@ public sealed class RepeatedToolCallLedger
     public RepeatDecision ClassifyCommand(string commandLine)
     {
         ArgumentNullException.ThrowIfNull(commandLine);
-        if (IsVolatile(commandLine))
-        {
-            return RepeatDecision.Execute;
-        }
-
         var now = _timeProvider.GetUtcNow();
         var key = CommandKey(commandLine);
+        var hasEntry = TryTouch(key, out var entry);
+
+        // A volatile command is exempt only after a successful tool result. Once Baton has started
+        // one and it exited non-zero, timed out, was cancelled, or lost its capture, retrying is no
+        // longer a poll: an external diff driver or other helper may already have performed side
+        // effects. Consult that failed result before applying the normal volatile re-read exemption.
+        if (IsVolatile(commandLine)
+            && (!hasEntry
+                || entry.Output is null
+                || entry.OutputSucceeded is not false
+                || now - entry.ExecutedAt > Window))
+        {
+            // An admitted retry of an existing attempt starts a new window. Replacing the entry also
+            // resets Served and removes an expired failure, so if this attempt fails its immediate
+            // re-ask is a replay rather than a refusal. A first failure is established when its
+            // outcome is recorded, and successful observations leave no entry at all.
+            if (hasEntry)
+            {
+                Put(key, new Entry { ExecutedAt = now });
+            }
+            return RepeatDecision.Execute;
+        }
 
         // No entry, a stale one, or one whose output we never recorded (the command failed to start,
         // or was itself refused) all read the same way: there is no previous answer to stand in for
         // this one, so it runs.
-        if (!TryTouch(key, out var entry)
+        if (!hasEntry
             || entry.Output is null
             || now - entry.ExecutedAt > Window)
         {
@@ -171,7 +195,8 @@ public sealed class RepeatedToolCallLedger
             ? new RepeatDecision(
                 RepeatVerdict.Replay,
                 Preamble: $"replayed: identical command {ago} s ago",
-                ReplayedOutput: entry.Output)
+                ReplayedOutput: entry.Output,
+                ReplayedSuccess: entry.OutputSucceeded ?? true)
             : new RepeatDecision(RepeatVerdict.Refuse, Reason: CommandRepeatRefusal);
     }
 
@@ -195,6 +220,8 @@ public sealed class RepeatedToolCallLedger
     /// half would give this path the very defect the command half was added to fix: read a file, run
     /// <c>dotnet format</c>, re-read it — same byte count inside one filesystem tick — and be told it
     /// has not changed.
+    /// Volatile commands take the same eviction path before returning: their freshness exemption says
+    /// only that they may run again, not that a helper cannot mutate the tree while they run.
     /// </para>
     /// </summary>
     public string? ClassifyHookCommand(string commandLine)
@@ -202,6 +229,8 @@ public sealed class RepeatedToolCallLedger
         ArgumentNullException.ThrowIfNull(commandLine);
         if (IsVolatile(commandLine))
         {
+            ForgetAllCommands();
+            ForgetAllReads();
             return null;
         }
 
@@ -223,21 +252,45 @@ public sealed class RepeatedToolCallLedger
 
     /// <summary>
     /// Stores what a <see cref="RepeatVerdict.Execute"/> command actually printed, so the next ask
-    /// inside <see cref="Window"/> can be answered with it. A command whose output is never recorded
-    /// simply executes again — the ledger never refuses on an answer it does not hold.
+    /// inside <see cref="Window"/> can be answered with it. <paramref name="toolSucceeded"/> is the
+    /// result disposition consumed by <see cref="RepeatDecision.ReplayedSuccess"/>: true means exit
+    /// code zero with trustworthy capture; false includes a non-zero exit, timeout, cancellation, or
+    /// capture failure. It is not capture-completion or mutation-safety state. A command whose output
+    /// is never recorded simply executes again — the ledger never refuses on an answer it does not
+    /// hold. Successful volatile observations remain unrecorded so they can be re-read, but a failed
+    /// volatile result is force-recorded so its side effects cannot be repeated immediately.
     /// </summary>
-    public void RecordCommandOutput(string commandLine, string output)
+    public void RecordCommandOutput(string commandLine, string output, bool toolSucceeded = true)
     {
         ArgumentNullException.ThrowIfNull(commandLine);
         ArgumentNullException.ThrowIfNull(output);
-        if (IsVolatile(commandLine))
+        var key = CommandKey(commandLine);
+        if (IsVolatile(commandLine) && toolSucceeded)
         {
+            // A successful retry after a prior failure is a fresh observation, not a cached result.
+            // Remove the admission placeholder so subsequent successful asks remain entry-free too.
+            Forget(key);
             return;
         }
 
-        if (TryTouch(CommandKey(commandLine), out var entry))
+        if (TryTouch(key, out var entry))
         {
             entry.Output = output;
+            entry.OutputSucceeded = toolSucceeded;
+            return;
+        }
+
+        // A first volatile attempt has no entry until its terminal failure is recorded here. This is
+        // also the fallback for a caller that records without classifying first; non-volatile
+        // commands retain the prior no-entry behavior.
+        if (IsVolatile(commandLine))
+        {
+            Put(key, new Entry
+            {
+                ExecutedAt = _timeProvider.GetUtcNow(),
+                Output = output,
+                OutputSucceeded = toolSucceeded,
+            });
         }
     }
 
@@ -341,10 +394,11 @@ public sealed class RepeatedToolCallLedger
     /// other entry was recorded against a tree that no longer exists.
     /// </para>
     /// <para>
-    /// A command on <see cref="VolatileCommandPrefixes"/> never calls this: those five are the only
-    /// commands this ledger can prove read-only. Everything else is assumed to have written, which is
-    /// the fail-closed direction — it costs a re-run, where the other direction cost a wrong answer
-    /// reported as a fresh one.
+    /// The broker calls this for every command that actually ran, including successful commands on
+    /// <see cref="VolatileCommandPrefixes"/>. The hook calls it before every admitted command because
+    /// it cannot observe completion. Freshness preference does not prove read-only behavior. This
+    /// fail-closed direction costs a re-run of an unrelated command after every execution; the other
+    /// direction can report a stale answer as fresh after a mutating helper.
     /// </para>
     /// </summary>
     public void ForgetAllCommands(string? exceptCommandLine = null)
@@ -438,6 +492,7 @@ public sealed class RepeatedToolCallLedger
                 Length = row.Length,
                 Served = row.Served,
                 Output = row.Output,
+                OutputSucceeded = row.OutputSucceeded,
             });
         }
 
@@ -455,7 +510,7 @@ public sealed class RepeatedToolCallLedger
         var state = new PersistedLedger(
             _order.Select(key => new PersistedEntry(
                     key, _entries[key].ExecutedAt, _entries[key].LastWriteUtc, _entries[key].Length,
-                    _entries[key].Served, _entries[key].Output))
+                    _entries[key].Served, _entries[key].Output, _entries[key].OutputSucceeded))
                 .ToArray());
 
         // Beside the target, because an atomic replace needs the same volume. Deleted in `finally`
@@ -484,19 +539,20 @@ public sealed class RepeatedToolCallLedger
 
     private sealed record PersistedEntry(
         string Key, DateTimeOffset ExecutedAt, DateTimeOffset LastWriteUtc, long Length, int Served,
-        string? Output);
+        string? Output, bool? OutputSucceeded);
 
     private static string CommandKey(string commandLine) => "cmd " + commandLine;
 
     /// <summary>
-    /// <b>A read is keyed on the whole request, not on the path alone (#2002 re-review HIGH).</b> A
-    /// read tool that takes a range returns a WINDOW, so a second call naming a different one is a new
-    /// question about the same unchanged file — and denying it with
+    /// <b>A read is keyed on the returned window, not on the path alone (#2002 re-review HIGH).</b> A
+    /// read tool that takes a range returns a WINDOW, so a second call naming a different one can be a
+    /// new question about the same unchanged file — and denying it with
     /// <see cref="HookReadDenial"/> ("its content is above in your transcript") asserts something
-    /// false: the room holds the first window and asked for a second. <paramref name="request"/> is
-    /// the caller's normalised spelling of every argument beyond the path that narrows what comes
-    /// back, empty when there is none; a caller that cannot account for an argument passes no request
-    /// at all and skips this rung instead (see <see cref="RepeatedToolCallHook.JudgeRead"/>).
+    /// false when the room holds the first window and asked for a second. The broker can see its
+    /// budget and Unicode adjustment, so it passes the semantic served-window bounds. A hook runs
+    /// before its vendor's read and cannot know that served window; it instead passes the normalised
+    /// raw range arguments as the conservative identity, and skips this rung when it cannot account
+    /// for every narrowing argument (see <see cref="RepeatedToolCallHook.JudgeRead"/>).
     /// <para>
     /// The separator is a NUL so <see cref="ForgetRead"/> can forget every window of one path with a
     /// single prefix pass without <c>C:\foo</c> also matching <c>C:\foobar</c>. An absent request and
@@ -516,8 +572,8 @@ public sealed class RepeatedToolCallLedger
     /// between the two characters is dropped). Quote-aware so a separator inside
     /// <c>git log -S "a;b"</c> is not a boundary. Deliberately not
     /// <see cref="ShellCommandPatternMatcher"/>'s segmenter: that one refuses outright on a backslash
-    /// or a <c>$</c> under a scoped grant, and this question — "is every part of this line one of five
-    /// read-only commands" — has to be answerable for every line, including a Windows path.
+    /// or a <c>$</c> under a scoped grant, and this question — "is every part of this line one of the
+    /// five volatile command shapes" — has to be answerable for every line, including a Windows path.
     /// </summary>
     private static List<string> SplitTopLevelSegments(string commandLine)
     {
@@ -643,5 +699,8 @@ public sealed class RepeatedToolCallLedger
 
         /// <summary>The command output held for replay. Always null on a read entry — a read is re-read.</summary>
         public string? Output;
+
+        /// <summary>The tool disposition paired with <see cref="Output"/>; null reads old ledgers as success.</summary>
+        public bool? OutputSucceeded;
     }
 }

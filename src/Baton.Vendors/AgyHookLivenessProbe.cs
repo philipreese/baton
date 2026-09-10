@@ -17,7 +17,8 @@ namespace Baton.Vendors;
 /// </summary>
 /// <remarks>
 /// Injectable so <see cref="AgyWorkerAdapter"/>'s unit tests drive it without spawning a real
-/// process (CLAUDE.md's <c>right-instrument</c> gate, and this task's own "no live agy" constraint).
+/// process (the <c>right-instrument</c> gate and this task's own "no live agy" constraint;
+/// <see href="../../../docs/agents/developing-baton.md"/>).
 /// </remarks>
 public interface IAgyHookLivenessProbe
 {

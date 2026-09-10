@@ -4,7 +4,7 @@ namespace Baton.Cli;
 /// Parses <c>baton run</c>'s arguments: <c>baton run &lt;workflow-file&gt; --bindings &lt;bindings-file&gt;
 /// [--room-dir &lt;dir&gt;] [--workflow-id &lt;id&gt;] [--echo-worker] [--register]</c>. Never throws a bare
 /// <see cref="InvalidOperationException"/> for a malformed invocation — every failure here is a
-/// <see cref="CliArgumentException"/> (CLAUDE.md's error-handling rules).
+/// <see cref="CliArgumentException"/> (<see href="../../../docs/agents/developing-baton.md"/>).
 /// </summary>
 public static class RunOptionsParser
 {

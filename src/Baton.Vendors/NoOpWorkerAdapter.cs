@@ -10,7 +10,7 @@ namespace Baton.Vendors;
 /// -- <c>Supersede</c>'s target must be a distinct transitive ancestor, and a single "chat"
 /// step has none. This adapter ignores <see cref="WorkerInvocation.PromptTemplate"/> entirely and
 /// writes its declared output instantly via a trivial shell invocation -- no vendor CLI, no network,
-/// no meaningful cost or latency (Adapter Isolation, CLAUDE.md: this is not a vendor, so it carries
+/// no meaningful cost or latency (Adapter Isolation, docs/agents/developing-baton.md: this is not a vendor, so it carries
 /// none of a vendor's quirks) -- including no grant machinery (#1166): it does not implement
 /// <see cref="IPermissionGrantTranslator"/>, so <see cref="ProjectCeilingGate"/> never runs against it.
 /// </summary>

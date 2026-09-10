@@ -1,3 +1,4 @@
+AGENTS.md
 CHANGELOG.md
 CLAUDE.md
 README.md
@@ -9,6 +10,7 @@ benchmarks/ledger/README.md
 benchmarks/ledger/medians.md
 benchmarks/subscription-usage/2026-09-04/README.md
 benchmarks/vendor-model-trials.md
+docs/agents/developing-baton.md
 docs/agents/invoking-baton.md
 docs/agents/issue-tracker.md
 docs/agents/triage-labels.md

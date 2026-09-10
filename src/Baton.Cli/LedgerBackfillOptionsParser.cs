@@ -13,7 +13,7 @@ public static class LedgerBackfillOptionsParser
 
     /// <summary>
     /// What <c>--help</c> prints under <see cref="Usage"/>. Every line states a negative a reader's
-    /// prior would otherwise fill in wrongly (CLAUDE.md, "Writing documentation"): which rows a run
+    /// prior would otherwise fill in wrongly (<see href="../../../docs/agents/developing-baton.md"/>): which rows a run
     /// adds, which it can never add, what the two halves do when they cannot attribute something, and
     /// that a second run is a no-op rather than a duplicate.
     /// </summary>

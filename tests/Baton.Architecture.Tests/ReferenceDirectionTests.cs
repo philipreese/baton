@@ -3,7 +3,7 @@ using System.Xml.Linq;
 namespace Baton.Architecture.Tests;
 
 /// <summary>
-/// #370: CLAUDE.md's reference-direction invariant is prose the compiler can't check on its own, and
+/// #370: docs/agents/developing-baton.md's reference-direction invariant is prose the compiler can't check on its own, and
 /// the room-model churn (#333/#335) is exactly when it could silently erode — a stray
 /// <c>ProjectReference</c> added mid-refactor, and nothing fails. These tests read the project graph
 /// and fail the build the moment a forbidden dependency appears, a seam gate in decision 0005's
@@ -11,7 +11,7 @@ namespace Baton.Architecture.Tests;
 /// this lands first.
 ///
 /// <para>Scope: the <em>structurally checkable</em> invariants — who may reference whom. "Flow never
-/// parses worker content to make routing decisions" (CLAUDE.md rule 1) is a property of logic, not
+/// parses worker content to make routing decisions" (docs/agents/developing-baton.md rule 1) is a property of logic, not
 /// of the reference graph, so it stays a review-time invariant no static test can honestly assert.</para>
 ///
 /// <para>Pure file reading over the repo — no project references, no network — so it runs identically
@@ -19,7 +19,7 @@ namespace Baton.Architecture.Tests;
 /// </summary>
 public class ReferenceDirectionTests
 {
-    // Baton is the pure engine (CLAUDE.md rule 2: the core layer understands only the single,
+    // Baton is the pure engine (docs/agents/developing-baton.md rule 2: the core layer understands only the single,
     // unified canonical protocol). It may depend on the managed BatonTask engine and the framework —
     // never on a vendor adapter or a client. This is the load-bearing invariant #335 rides: the
     // engine needs no changes for multi-task precisely because nothing above it reaches back in.
@@ -32,8 +32,8 @@ public class ReferenceDirectionTests
             forbiddenProjects: ["Baton.Vendors", "Baton.Cli"],
             forbiddenPackagePrefixes: ["Avalonia", "Microsoft.AspNetCore"]);
 
-    // Adapter isolation (CLAUDE.md rule 2): vendor quirks live in Baton.Vendors, which depends only
-    // downward on the engine — never up into a client.
+    // Adapter isolation: vendor quirks live in Baton.Vendors, which depends only
+    // downward on the engine (<see href="../../../docs/agents/developing-baton.md"/>) — never up into a client.
     [Fact]
     public void Baton_Vendors_does_not_depend_on_clients()
         => AssertNoForbiddenReferences(
@@ -58,7 +58,7 @@ public class ReferenceDirectionTests
         Assert.True(
             projectHits.Count == 0,
             $"{project} must not reference project(s) [{string.Join(", ", projectHits)}] — " +
-            "reference-direction invariant (CLAUDE.md architecture rules, #370).");
+            "reference-direction invariant (docs/agents/developing-baton.md architecture rules, #370).");
 
         var packageHits = packageRefs
             .Where(pkg => forbiddenPackagePrefixes.Any(prefix => pkg.StartsWith(prefix, StringComparison.OrdinalIgnoreCase)))
@@ -66,7 +66,7 @@ public class ReferenceDirectionTests
         Assert.True(
             packageHits.Count == 0,
             $"{project} must not reference package(s) [{string.Join(", ", packageHits)}] — " +
-            "reference-direction invariant (CLAUDE.md architecture rules, #370).");
+            "reference-direction invariant (docs/agents/developing-baton.md architecture rules, #370).");
     }
 
     private static (IReadOnlyCollection<string> ProjectRefs, IReadOnlyCollection<string> PackageRefs) ReadReferences(string project)

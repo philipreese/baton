@@ -323,8 +323,9 @@ public sealed class CodexUsageParser : IWorkerUsageParser
     /// <summary>
     /// #2008: the sibling field carrying the call's INPUT IDENTITY, as the worker wrote it (selected
     /// and length-capped, not normalised: whitespace and path spelling are the worker's own) — the command line of a
-    /// <see cref="RunCommandToolName"/> call, the path of a read/list/search/write, the declared output
-    /// name of a write-output, the patched paths of an <c>apply_patch</c>.
+    /// <see cref="RunCommandToolName"/> call, the opaque reference of a retained-command-output read,
+    /// the path of a read/list/search/write, the declared output name of a write-output, and the
+    /// patched paths of an <c>apply_patch</c>.
     /// <c>Baton.Vendors.CodexDynamicToolPolicy.InputIdentity</c> is the one place that mapping lives and
     /// states what it excludes (file contents, patch bodies) and its length cap; named here for the same
     /// cross-project reason as <see cref="ArgumentsDigestField"/> above.

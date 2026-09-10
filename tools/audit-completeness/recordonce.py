@@ -22,8 +22,8 @@ cites no issue at all, which the reference design could not see by construction.
 
 WHAT IT CANNOT CHECK:
   * A copy of text that ALREADY EXISTS in the tree. The population is added lines, so both copies
-    have to be written in the same change. Pasting a paragraph out of CLAUDE.md into a new doc is
-    invisible -- which is the dominant real shape of the violation. #674.
+    have to be written in the same change. Pasting a paragraph out of the development guide into a
+    new doc is invisible -- which is the dominant real shape of the violation. #674.
   * Which change introduced a duplication. `git diff` emits a modified line as `+`, so touching two
     files that already shared a passage reads the same as writing it twice. #674.
   * A comment the change FALSIFIED without touching -- absent from the diff by definition. #636's.

@@ -138,7 +138,7 @@ public sealed class InteractiveSessionTests
     public async Task AgyWorkerAdapter_DiscoverCapabilities_DoesNotFabricateDataWhenAgyUnavailable()
     {
         // agy is a real vendor CLI coincidentally present on some hosts (never assumed present in
-        // CI — see CLAUDE.md's live-vendor-smoke-test rule). This only asserts the parts that don't
+        // CI — see docs/agents/developing-baton.md's live-vendor-smoke-test rule). This only asserts the parts that don't
         // depend on the CLI being installed: it must never throw, and it must never report a
         // model/agent/plugin list it didn't actually observe from `agy models`/`agy agent`/
         // `agy plugin list`.

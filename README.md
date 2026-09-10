@@ -1,7 +1,7 @@
 # Baton
 
 Baton is a vendor-neutral worker-room engine an agent harness drives: it dispatches vendor CLI
-agents (`claude`, `agy`) as workers inside durable, auditable rooms, and reports completion through
+agents (`claude`, `agy`, `codex`) as workers inside durable, auditable rooms, and reports completion through
 a machine contract.
 
 Built in .NET, it parses a declared workflow, hands each step's work to a Worker, and folds the result back into the run.
@@ -12,7 +12,7 @@ Built in .NET, it parses a declared workflow, hands each step's work to a Worker
 system is: the dispatch unit, the completion contract, gates, Fleet Glass observability, the
 narrowed daemon, and bindings/permissions. If this README and the spec disagree, the spec wins.
 
-- [Agent Instructions](CLAUDE.md) - Architectural rules and development workflows for AI agents.
+- [Agent instructions](AGENTS.md) - Short task router for agents using or developing Baton.
 - [Invoking Baton](docs/agents/invoking-baton.md) - For an agent whose job is to *run* a Baton lane
   against some other repo rather than develop Baton: the invocation that works today, a complete
   workflow+bindings pair, and the edges it will hit.
@@ -157,7 +157,7 @@ HTTP-error fallback behavior has not been browser-tested yet.
 ## Vendor authentication
 
 Baton does not authenticate to any model provider. It spawns the vendor's own first-party CLI
-(`claude`, `agy`) as a subprocess, and that CLI uses whatever login the operator already established
+(`claude`, `agy`, `codex`) as a subprocess, and that CLI uses whatever login the operator already established
 on their own machine.
 
 **Baton never reads, copies, forwards, or stores a vendor credential** — no API keys, no OAuth tokens,

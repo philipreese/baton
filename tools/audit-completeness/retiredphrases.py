@@ -32,12 +32,13 @@ RETIRED = {
 }
 
 SEARCH_ROOTS = ["docs", "spec", "src", "tests", "tools"]
+SEARCH_FILES = ["AGENTS.md"]
 
 SEARCH_SUFFIXES = {".md", ".html", ".cs", ".dart", ".axaml", ".py", ".json"}
 
-# docs/archive holds superseded documents on purpose: a doc in the live tree is current, a doc that is
-# not gets moved there (CLAUDE.md's repo map). Rewriting history there would defeat the point of
-# keeping it. CHANGELOG is generated from commit subjects that were true when written.
+# docs/archive holds superseded documents on purpose: a doc in the live tree is current, a doc that
+# is not gets moved there (the development guide's repo map). Rewriting history there would defeat
+# the point of keeping it. CHANGELOG is generated from commit subjects that were true when written.
 EXCLUDED = (
     ROOT / "docs" / "archive",
     ROOT / "CHANGELOG.md",
@@ -57,43 +58,45 @@ def main(argv: list[str]) -> int:
     problems: list[str] = []
     scanned = 0
 
+    search_paths = [ROOT / name for name in SEARCH_FILES]
     for root_name in SEARCH_ROOTS:
         root = ROOT / root_name
-        if not root.is_dir():
+        if root.is_dir():
+            search_paths.extend(root.rglob("*"))
+
+    for path in search_paths:
+        if not path.is_file() or path.suffix.lower() not in SEARCH_SUFFIXES:
             continue
-        for path in root.rglob("*"):
-            if not path.is_file() or path.suffix.lower() not in SEARCH_SUFFIXES:
-                continue
-            if _is_excluded(path):
-                continue
-            if any(part in {"bin", "obj", "node_modules", ".dart_tool", "__pycache__"}
-                   for part in path.parts):
-                continue
-            # This file names the phrases it bans, so it would fail itself.
-            if path.resolve() == Path(__file__).resolve():
-                continue
+        if _is_excluded(path):
+            continue
+        if any(part in {"bin", "obj", "node_modules", ".dart_tool", "__pycache__"}
+               for part in path.parts):
+            continue
+        # This file names the phrases it bans, so it would fail itself.
+        if path.resolve() == Path(__file__).resolve():
+            continue
 
-            try:
-                text = path.read_text(encoding="utf-8")
-            except (UnicodeDecodeError, OSError):
-                continue
+        try:
+            text = path.read_text(encoding="utf-8")
+        except (UnicodeDecodeError, OSError):
+            continue
 
-            scanned += 1
-            for lineno, line in enumerate(text.splitlines(), start=1):
-                lowered = line.lower()
-                for phrase, guidance in RETIRED.items():
-                    if phrase not in lowered:
-                        continue
-                    marker = MARKER_RE.search(line)
-                    if marker:
-                        if not marker.group(1).strip():
-                            problems.append(
-                                f"{path.relative_to(ROOT)}:{lineno}: 'retired-ok:' with an empty "
-                                f"reason — say why this occurrence stays")
-                        continue
-                    problems.append(
-                        f"{path.relative_to(ROOT)}:{lineno}: retired phrase '{phrase}' — {guidance}. "
-                        f"Mark 'retired-ok: <reason>' on the line if this occurrence must stay.")
+        scanned += 1
+        for lineno, line in enumerate(text.splitlines(), start=1):
+            lowered = line.lower()
+            for phrase, guidance in RETIRED.items():
+                if phrase not in lowered:
+                    continue
+                marker = MARKER_RE.search(line)
+                if marker:
+                    if not marker.group(1).strip():
+                        problems.append(
+                            f"{path.relative_to(ROOT)}:{lineno}: 'retired-ok:' with an empty "
+                            f"reason — say why this occurrence stays")
+                    continue
+                problems.append(
+                    f"{path.relative_to(ROOT)}:{lineno}: retired phrase '{phrase}' — {guidance}. "
+                    f"Mark 'retired-ok: <reason>' on the line if this occurrence must stay.")
 
     print(f"retiredphrases: {scanned} file(s) scanned for {len(RETIRED)} retired phrase(s)")
     if problems:

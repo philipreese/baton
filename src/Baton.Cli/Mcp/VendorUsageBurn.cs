@@ -77,11 +77,10 @@ public static class VendorUsageBurn
     /// it already had. Keyed on PROVENANCE rather than on any one window's shape, deliberately: the
     /// rollover rule below detects a reset by the reading falling, which is only sound when the vendor
     /// declares the boundary it fell across. A derived figure has no such boundary to be checked
-    /// against, so no derived reading can be told apart from a rolled-over one — whatever shape a
-    /// future derived source's windows take. What makes today's one fall without a reset:
-    /// <see cref="CodexUsageSource"/>'s "rolling total is NOT monotonic" paragraph, which also has why
-    /// the monotonic alternative is unavailable. spec/baton.md §6's <c>windows[]</c> table states the
-    /// resulting wire absence.</item>
+    /// against, so no derived reading can be told apart from a rolled-over one. No current source
+    /// writes derived snapshots; this arm preserves the safe behavior for interim Codex snapshots
+    /// persisted before #1904's vendor-counter replacement. spec/baton.md §6's <c>windows[]</c> table
+    /// states the resulting wire absence.</item>
     /// <item>A window whose <see cref="VendorUsageWindow.Name"/> appears more than once in this one
     /// snapshot keeps NO ring — two rows under one key would merge into one nonsense rate, and no
     /// rate is the conservative reading. (Neither vendor's parser produces duplicates today; agy

@@ -1,7 +1,7 @@
 namespace Baton.Vendors;
 
 /// <summary>
-/// The vendor-neutral description of what a worker adapter must invoke a worker to do (CLAUDE.md
+/// The vendor-neutral description of what a worker adapter must invoke a worker to do (docs/agents/developing-baton.md
 /// rule #2's canonical protocol, M11 Phase 1). Paired with the <see cref="Baton.Domain.WorkerContract"/>
 /// a <see cref="IWorkerAdapter"/> resolves alongside it, which already carries the ordered input
 /// role names and declared outputs — this record adds only what the contract doesn't: the
