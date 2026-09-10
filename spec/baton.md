@@ -7118,10 +7118,17 @@ on the operator.
 
 One line per evaluation in `~/.baton/fleet/queue.jsonl`, through the same `JsonLinesLedger` the burn
 and cost ledgers share. Fields: `at`, `tag`, `decision` (`launched` | `waited` | `failed` |
-`advanced`), `reason`
-(`slots` | `memory` | `gap` | `hold` | `runway-held` | `no-items`, or the error), `liveWeight`,
+`advanced` | `cancelled`), `reason`
+(`slots` | `memory` | `gap` | `hold` | `runway-held` | `no-items`, the error, or `operator cancelled before launch`),
+`liveWeight`,
 `freeGb` (absent when unmeasured), `floorGb`, `tier`, `adapter`, `model`, `effort`, `tierOverride`,
 `overrideReason`, `room`.
+
+**`cancelled` is the retained pre-launch cancellation fact.** Its `at` is the item's
+`CancelledAt`, its `tag` names that retained item, and its reason is `operator cancelled before
+launch`; it carries no live-memory reading and zero counters because no scheduling evaluation launched
+it. A persisted cancelled item that lacks this line is reconciled idempotently by that tag and timestamp
+when the operator repeats the cancel command after an append failure.
 
 **`advanced` is one line per work-item stage change** (slice 2), naming the evidence it was derived
 from: the stage pair, the outcome word, the PR head, the verdict's counts. That is not decoration —

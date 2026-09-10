@@ -90,6 +90,17 @@ public sealed record QueueDecisionEntry(
     /// </summary>
     [JsonIgnore]
     public string VerdictKey => $"{Decision}|{Reason}|{Tag}";
+
+    /// <summary>
+    /// The one decision kind whose persisted queue state promises a matching ledger fact. Other
+    /// decisions remain append-only observations; cancellation is keyed by its retained timestamp so
+    /// a retry after an append failure repairs that one missing fact without duplicating it.
+    /// </summary>
+    [JsonIgnore]
+    internal string? CancellationKey =>
+        Decision == Cancelled && Tag is { Length: > 0 } tag
+            ? $"{tag}|{At.ToUniversalTime():O}"
+            : null;
 }
 
 /// <summary>
@@ -113,7 +124,7 @@ public sealed record QueueDecisionEntry(
 public static class QueueDecisionLedgerStore
 {
     internal static readonly JsonLinesLedger<QueueDecisionEntry> Ledger =
-        new("baton-queue-ledger", "queue decision ledger", _ => null);
+        new("baton-queue-ledger", "queue decision ledger", entry => entry.CancellationKey);
 
     /// <summary>
     /// Appends <paramref name="entry"/> unless <paramref name="previousVerdictKey"/> already equals
@@ -146,6 +157,29 @@ public static class QueueDecisionLedgerStore
 
         await Ledger.AppendAsync([entry], ledgerFilePath, cancellationToken).ConfigureAwait(false);
         return key;
+    }
+
+    /// <summary>
+    /// Records the cancellation fact for one retained item, once. The queue write precedes this
+    /// accounting append, so a failed append is retried when the operator repeats queue cancel
+    /// against the persisted cancellation. Its key includes the retained timestamp: a tag is not
+    /// enough, because the ledger's ordinary decisions deliberately do not deduplicate.
+    /// </summary>
+    public static Task AppendCancellationAsync(
+        DateTimeOffset cancelledAt,
+        string tag,
+        string ledgerFilePath,
+        CancellationToken cancellationToken = default)
+    {
+        ArgumentException.ThrowIfNullOrEmpty(tag);
+        ArgumentException.ThrowIfNullOrEmpty(ledgerFilePath);
+
+        return Ledger.AppendAsync(
+            [new QueueDecisionEntry(
+                cancelledAt, tag, QueueDecisionEntry.Cancelled, "operator cancelled before launch",
+                LiveWeight: 0, FreeGb: null, FloorGb: 0)],
+            ledgerFilePath,
+            cancellationToken);
     }
 
     /// <summary>Every parseable line, in write order — read tolerance and the never-throws posture are

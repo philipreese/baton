@@ -1532,7 +1532,8 @@ function queuePrTableHtml(q){
     const checks = p.checks
       ? `${p.checks} (${observed === null ? "age unknown" : observed === "just now" ? "just now" : observed + " ago"})`
       : "not observed";
-    const stage = p.halted ? `<span class="q-halt">${esc(p.stage)} · halted</span>` : esc(p.stage);
+    const stage = p.state === "Cancelled" ? `<span class="q-halt">${esc(p.stage)} · cancelled</span>`
+      : p.halted ? `<span class="q-halt">${esc(p.stage)} · halted</span>` : esc(p.stage);
     return `<tr${cls}><td>${esc("#" + p.pr)}</td>`
       + `<td class="q-tag">${esc(p.tag)}</td>`
       + `<td>${stage}</td>`

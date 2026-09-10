@@ -111,6 +111,7 @@ public static class QueueCommand
             AddedAt = DateTimeOffset.UtcNow,
         };
 
+        string specContents;
         if (options.Lifecycle)
         {
             // The templates are the product (operator ruling 2026-09-06): a work item's brief is
@@ -127,15 +128,12 @@ public static class QueueCommand
             // remarks say why the brief cannot be the register for this.
             item = item with { Instructions = body.Trim() };
 
-            await File.WriteAllTextAsync(
-                specDestination,
-                QueueBriefTemplates.Compose(
-                    WorkStage.Implement, item, new QueueBriefTemplates.BriefContext(Title: title, Do: body.Trim())),
-                cancellationToken).ConfigureAwait(false);
+            specContents = QueueBriefTemplates.Compose(
+                WorkStage.Implement, item, new QueueBriefTemplates.BriefContext(Title: title, Do: body.Trim()));
         }
         else
         {
-            File.Copy(specSource!, specDestination, overwrite: true);
+            specContents = await File.ReadAllTextAsync(specSource!, cancellationToken).ConfigureAwait(false);
         }
 
         var replaced = false;
@@ -147,6 +145,11 @@ public static class QueueCommand
             // running lane's own record would be overwritten.
             var existing = snapshot.Items.FirstOrDefault(i => string.Equals(i.Tag, tag, StringComparison.Ordinal));
             RefuseIfNotReplaceable(existing, tag);
+
+            // The copied brief is part of replacing this tag, not a preliminary side effect. Keep it
+            // inside the queue's authoritative mutation so a cancellation that wins the same lock is
+            // refused before it can overwrite the retained brief.
+            File.WriteAllText(specDestination, specContents);
 
             replaced = existing is not null;
             var items = snapshot.Items.Where(i => !string.Equals(i.Tag, tag, StringComparison.Ordinal)).ToList();
@@ -292,13 +295,18 @@ public static class QueueCommand
             case null:
                 throw new CliArgumentException($"Queue item '{tag}' does not exist.", "run 'baton queue list' to see recorded tags.");
             case { State: QueueItemState.Queued }:
-                await QueueDecisionLedgerStore.AppendAsync(
-                    new QueueDecisionEntry(cancelledAt, tag, QueueDecisionEntry.Cancelled,
-                        "operator cancelled before launch", LiveWeight: 0, FreeGb: null, FloorGb: 0),
-                    previousVerdictKey: null, BatonPaths.QueueDecisionLedgerFile, cancellationToken).ConfigureAwait(false);
+                await QueueDecisionLedgerStore.AppendCancellationAsync(
+                    cancelledAt, tag, BatonPaths.QueueDecisionLedgerFile, cancellationToken).ConfigureAwait(false);
                 output.WriteLine($"Cancelled queued item '{tag}'. Its spec, worktree, and branch were retained.");
                 return 0;
             case { State: QueueItemState.Cancelled }:
+                // A failed append after the queue write must not make the promised fact unrecoverable.
+                // Re-running cancel remains a refusal, but it first backfills the retained item's
+                // uniquely keyed cancellation fact.
+                await QueueDecisionLedgerStore.AppendCancellationAsync(
+                    observed.CancelledAt ?? throw new QueueStoreException(
+                        $"Cancelled queue item '{tag}' has no cancellation timestamp."),
+                    tag, BatonPaths.QueueDecisionLedgerFile, cancellationToken).ConfigureAwait(false);
                 throw new CliArgumentException($"Queue item '{tag}' was already cancelled at {observed.CancelledAt:O}.");
             case { State: QueueItemState.Launched, RoomDirectory: { Length: > 0 } room }:
                 throw new CliArgumentException(
@@ -336,6 +344,15 @@ public static class QueueCommand
         await QueueStore.MutateAsync(BatonPaths.QueueFile, snapshot =>
         {
             var importedTags = imported.Select(i => i.Tag).ToHashSet(StringComparer.Ordinal);
+            var cancelled = snapshot.Items.FirstOrDefault(
+                item => item.State == QueueItemState.Cancelled && importedTags.Contains(item.Tag));
+            if (cancelled is not null)
+            {
+                throw new CliArgumentException(
+                    $"Item '{cancelled.Tag}' was cancelled before launch. Importing it would overwrite its retained cancellation record.",
+                    "remove that tag from the import, or use a different tag for new work.");
+            }
+
             var kept = snapshot.Items.Where(i => !importedTags.Contains(i.Tag)).ToList();
             kept.AddRange(imported);
             return snapshot with { Items = kept };

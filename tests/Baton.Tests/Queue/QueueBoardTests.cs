@@ -448,6 +448,25 @@ public sealed class QueueBoardTests
     }
 
     [Fact]
+    public void A_cancelled_work_item_with_an_open_pr_carries_its_cancelled_state_to_the_pr_projection()
+    {
+        var board = Project(
+        [
+            Item("2159-lane", stage: WorkStage.Review, issue: 2159, pr: 2173, state: QueueItemState.Cancelled),
+        ]);
+
+        var row = Assert.Single(board.PullRequests);
+        Assert.Equal(QueueItemState.Cancelled, row.State);
+        Assert.Empty(board.Pending);
+
+        // Control: active PR rows retain their actual queue state, rather than every PR row acquiring
+        // the cancellation marker because it has a pull request.
+        Assert.Equal(
+            QueueItemState.Queued,
+            Assert.Single(Project([Item("active", stage: WorkStage.Review, issue: 1, pr: 2)]).PullRequests).State);
+    }
+
+    [Fact]
     public void A_launched_item_is_not_a_pending_row()
     {
         var board = Project(
