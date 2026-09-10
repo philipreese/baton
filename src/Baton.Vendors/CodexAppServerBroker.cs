@@ -329,9 +329,10 @@ public static class CodexAppServerBroker
         // #1996 re-review MEDIUM: the instruction used to say "only the provided baton_* dynamic
         // tools", a glob that by its own wording excluded the edit tool sitting in the very manifest
         // it constrains — the model obeying it lands back on "I cannot edit this workspace", which is
-        // what #1996 measured. It names the edit tool from the policy's own constant, and only when
-        // this thread actually declares it, so it stays a constraint on the list rather than a second
-        // copy of it.
+        // what #1996 measured. The read-only native sandbox applies to the disabled native tools;
+        // Baton's declared dynamic tools instead operate under this role's actual grant. It names the
+        // edit tool from the policy's own constant, and only when this thread actually declares it, so
+        // it stays a constraint on the list rather than a second copy of it.
         var declaresEditTool = tools.Any(
             tool => tool?["name"]?.GetValue<string>() == CodexDynamicToolPolicy.ApplyPatchTool);
         var result = new JsonObject
@@ -346,6 +347,8 @@ public static class CodexAppServerBroker
             ["developerInstructions"] =
                 "You are a Baton worker. Use only the dynamic tools declared on this thread, whatever "
                 + "their names."
+                + " The read-only native sandbox applies to disabled native tools; declared Baton tools "
+                + "operate under this role's actual grant."
                 + (declaresEditTool
                     ? $" {CodexDynamicToolPolicy.ApplyPatchTool} is this thread's edit tool."
                     : string.Empty)
