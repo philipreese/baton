@@ -4951,11 +4951,10 @@ need a way to actually delete stuff, not just hide it from the glass." Fleet Gla
 per-browser `localStorage` hide — the room directory, its registry lines here, and its pushed
 deliverables all persist regardless, reappearing in any other browser and in every `fleet_status`
 payload. `baton room delete <room-dir>` and its batch form `baton rooms prune --terminal` are the only
-verbs that actually remove a room: the directory, every matching registry line (`RemoveByRoomPathAsync`),
-and — best-effort, since the CLI has no reach into the Cloudflare Worker's KV deliverables index
-(`tools/fleet-glass/worker.js`'s `/deliver` route accepts no removal verb today) — a
-`deleted-rooms.jsonl` tombstone (`DeletedRoomsTombstoneStore`) for the pusher to eventually forward as
-a removal, unbuilt as of this paragraph. Both verbs refuse a non-terminal room (no `terminal.json`)
+verbs that actually remove a room: the directory and every matching registry line
+(`RemoveByRoomPathAsync`). Deletion is daemon-only: it does not preserve, remove, or record remote
+deliverables, and there is no `--keep-deliverables` option. Both
+verbs refuse a non-terminal room (no `terminal.json`)
 unless `--force`, since a live engine may still hold the room's files open — the same holder-liveness
 read (`ConcurrencyGuard.ReadHolderInfo` + `EngineLivenessProbe`) `baton cancel` already uses, never a
 second mechanism. `RoomRetentionSweep` (§7) may call the batch form automatically, gated behind

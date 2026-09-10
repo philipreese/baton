@@ -1038,6 +1038,29 @@ def _selftest_refresh_end_to_end_mocked() -> bool:
             print(f"  FAILED: baton-daemon scheduled task was not restarted. powershell commands: {powershell_cmds}")
             ok = False
 
+        # The retired mailbox task must not be mentioned by any refresh action. Keep this negative
+        # assertion on the complete command trace so a future build/log/restart step cannot quietly
+        # resurrect its task or state writes.
+        refresh_commands = [" ".join(c) for c in commands_run]
+
+        def no_retired_pusher_command(commands: Sequence[str]) -> bool:
+            return not any("fleet-glass-pusher" in c.lower() for c in commands)
+
+        if not no_retired_pusher_command(refresh_commands):
+            print(f"  FAILED: refresh mentioned the retired fleet-glass-pusher task. commands: {refresh_commands}")
+            ok = False
+
+        # Synthetic pre-change arm: the assertion must reject the old restart shape, or this test
+        # would still pass against a refresh that had reintroduced the retired task.
+        reintroduced_commands = refresh_commands + [
+            "Stop-ScheduledTask -TaskName fleet-glass-pusher",
+            "Start-ScheduledTask -TaskName fleet-glass-pusher",
+            "Add-Content fleet-glass-pusher.log refresh",
+        ]
+        if no_retired_pusher_command(reintroduced_commands):
+            print("  FAILED: retired-task negative assertion did not detect a synthetic reintroduction")
+            ok = False
+
         # #1773: the orphan-kill query must run BEFORE the task is restarted -- killing after would
         # let a fresh instance race the still-live orphan for the mutex. There are two Win32_Process
         # queries in the trace (kill_orphaned_daemon_processes, then verify_daemon_started_under);

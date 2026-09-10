@@ -148,9 +148,11 @@ the static fallback; restoring the server and selecting Retry returned the onlin
 the server also showed the static fallback. This did not cover HTTP 5xx, real-daemon retained-snapshot
 recovery, or a physical Android offline launch. A physical install on a distinct private hostname was
 user-confirmed. The operator also confirmed the phone proof and live tailnet service URLs today:
-`baton.tail552f69.ts.net:8420`, `basis.tail552f69.ts.net:5173`, and
-`wdw-planner.tail552f69.ts.net:5174`. Tailnet-only access remains intact. The new HTTP-error fallback
-behavior has not been browser-tested yet.
+`https://baton.tail552f69.ts.net/`, `https://basis.tail552f69.ts.net/`, and
+`https://wdw-planner.tail552f69.ts.net/`. These are HTTPS service endpoints on the default port 443.
+Only the Baton service is expected to serve Fleet Glass; the other two are separate applications and
+should be verified only as their own applications. Tailnet-only access remains intact. The new
+HTTP-error fallback behavior has not been browser-tested yet.
 
 ## Vendor authentication
 

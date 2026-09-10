@@ -30,8 +30,8 @@ namespace Baton.Cli.Daemon;
 /// Reuses <see cref="FleetStatusTool.DiscoverRoomsAsync"/>/<see cref="FleetStatusTool.ProcessRoomAsync"/>
 /// in-process (same assembly) rather than going through the MCP tool's JSON-in/JSON-out wrapper — the
 /// exact room list and per-room projection <c>fleet_status</c> itself would return, serialized with the
-/// SAME <see cref="FleetStatusTool.SerializerOptions"/>. This PR (PR-A) adds no pusher.py change: both
-/// paths run side by side until #1557's own PR-B.
+/// SAME <see cref="FleetStatusTool.SerializerOptions"/>. This daemon path is the sole Fleet Glass
+/// delivery; no second delivery is maintained.
 /// </para>
 /// <para>
 /// <b>PR-A2 (#1557)</b> added <c>rooms[].live.stdoutTail</c> — <see cref="StdoutTailRenderer"/>'s own

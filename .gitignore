@@ -77,3 +77,15 @@ __pycache__/
 gates-run.txt
 gates-output.txt
 gates-exit.txt
+
+# Retired Fleet Glass mailbox-plane credentials and state remain machine-local and ignored until an
+# operator explicitly verifies their local purge or migration. Keep these narrow entries so a broad
+# add cannot stage surviving secrets or Wrangler state after the retired delivery is removed.
+tools/fleet-glass/secrets.local.json
+tools/fleet-glass/pusher.config.json
+tools/fleet-glass/secretpatterns.local.txt
+tools/fleet-glass/push-state.local.json
+tools/fleet-glass/ntfy-state.local.json
+tools/fleet-glass/pusher.log
+tools/fleet-glass/login.log
+tools/fleet-glass/.wrangler/
