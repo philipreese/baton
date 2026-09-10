@@ -7,9 +7,9 @@ there" half -- not a human, but a session that behaves like one has attached.
 
 WHAT THIS WAS THOUGHT TO NEED, AND WHY THAT WAS WRONG
 -----------------------------------------------------
-#531 was filed as "permanently a human action item". That was pattern-matching to the live-vendor
-smoke gates, which genuinely cannot be closed from a session because *authentication* cannot be
-provisioned. This is not that. Its three open questions split cleanly:
+#531 was filed as "permanently a human action item". That incorrectly generalized from the separate
+live-vendor policy (docs/agents/developing-baton.md#live-vendor-smoke-tests). This probe's three
+open questions split cleanly:
 
     does interactive agy SURFACE the url?    a pty and a string assertion -- no human
     does the completion notification RESUME? pure protocol -- no human, no browser

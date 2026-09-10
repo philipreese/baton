@@ -7,11 +7,9 @@ terminal success, with real artifacts from both vendors on disk. This is the fir
 dispatches two different vendors in the same run, and the first time a live smoke test also
 exercises the mutation surface (`baton decide`), not just `baton run`.
 
-This mixed gate is agent-runnable only when both subscription CLI logins are already present;
-disclose expected cost before starting. Missing authentication returns the task to a human; see the
-[shared live-run policy](../agents/developing-baton.md#live-vendor-smoke-tests). Both adapters shell
-out to the existing subscription-authenticated CLIs rather than owning key-handling code, and a
-missing login must not be worked around by switching to API-key authentication.
+Before running, follow the
+[shared live-run policy](../agents/developing-baton.md#live-vendor-smoke-tests). This smoke run's
+local prerequisite is both subscription CLIs; details are listed below.
 
 ## Prerequisites
 

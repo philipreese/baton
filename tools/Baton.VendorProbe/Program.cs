@@ -15,9 +15,10 @@ namespace Baton.VendorProbe;
 /// carry the list of surfaces it was established on.
 /// </para>
 /// <para>
-/// Never runs in CI. It drives live authenticated CLIs, which is permanently a human action item
-/// (docs/agents/developing-baton.md). The goal is that one command produces a trustworthy matrix, not that a robot does it
-/// nightly.
+/// Never runs in CI. It drives live authenticated CLIs; the shared execution policy lives at
+/// record-once-ok: #2204 docs/agents/developing-baton.md
+/// <c>docs/agents/developing-baton.md#live-vendor-smoke-tests</c>. The goal is that one command
+/// produces a trustworthy matrix, not that it runs nightly.
 /// </para>
 /// </remarks>
 public static class Program

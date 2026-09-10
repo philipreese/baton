@@ -417,10 +417,10 @@ and the test derives the cap from the threshold. `--skill` additions must togeth
 than the remaining space to the threshold, since reaching the threshold refuses the declared set as a whole.
 **Each package is the sole register, for a
 dispatched lane, of the lane constraints it states** (what a lane never does, the delivery and review
-shapes, the two `AGENTS.md`-derived checks, the public-repository rules): a brief carries only what is
+shapes, the two package-owned common checks, the public-repository rules): a brief carries only what is
 task-specific, and no other lane-facing document restates the package. The workspace's own contributor
-file (`AGENTS.md`) is a separate register, read by people and interactive sessions rather
-than by a lane; where a rule is both, the contributor file cites the package. What the defaults do NOT
+entry point (`AGENTS.md`) is read by people and interactive sessions rather than by a lane, and
+routes workers to the package instead of owning those checks. What the defaults do NOT
 carry is the conductor's own merging rules, which are the conductor's and never a lane's.
 
 ### §2 schema — the CLI argument table

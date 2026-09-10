@@ -13,7 +13,8 @@ some other repo and collect its output — read `docs/agents/invoking-baton.md` 
 baton/
 ├── src/                        ONE shipped binary, three projects (#1458 3b — down from six):
 │   ├── Baton/                  The core execution engine and routing state machine (ex-Baton.Flow)
-│   ├── Baton.Vendors/          Vendor adapters (Claude/Gemini) + the built-in template catalog
+│   ├── Baton.Vendors/          Vendor adapters (Claude, Gemini/agy, Codex) + built-in templates;
+│   │                          shipped membership lives in WorkerAdapterRegistry.cs
 │   └── Baton.Cli/               Command-line interface (baton run/dispatch/decide/cancel/supply/
 │                              resume/status/templates/keep/unkeep), plus two folded-in verbs that
 │                              used to be their own shipped binaries:

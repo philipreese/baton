@@ -7,11 +7,9 @@ runs from this runbook and a dedicated `pixi run` task, never from default CI (n
 subscription session or network access is available there, and a real call shouldn't gate every PR
 anyway).
 
-An existing subscription-authenticated `claude` CLI makes this gate eligible for an agent run;
-disclose its likely cost before starting. Login setup remains a human action. See the
-[shared policy for live vendor runs](../agents/developing-baton.md#live-vendor-smoke-tests). A login
-present on one session's host is not a capability to assume for future re-runs or for another vendor
-(see `live-mixed-vendor-smoke.md`, where the same coincidence did not hold for `agy`).
+Before running, follow the
+[shared policy for live vendor runs](../agents/developing-baton.md#live-vendor-smoke-tests). This
+smoke run's local prerequisites are listed below.
 
 ## Prerequisites
 

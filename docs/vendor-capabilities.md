@@ -1272,7 +1272,7 @@ Both CLIs self-update, so every row here has a shelf life. The suite splits alon
 
 | | what it does | cost | where it runs |
 |---|---|---|---|
-| `pixi run vendor-probe` | drives the live CLIs, regenerates the findings | **real subscription usage**, a few minutes | a human, on a machine with both vendors authenticated |
+| `pixi run vendor-probe` | drives the live CLIs, regenerates the findings | **real subscription usage**, a few minutes | follow the [shared live-run policy](agents/developing-baton.md#live-vendor-smoke-tests) |
 | `pixi run vendor-check` | compares installed `--version` against the recorded one | **nothing** — no session, no tokens | the ordinary dev loop, and `pixi run test` |
 
 The free check is the trigger for the paid one. `pixi run vendor-probe` writes

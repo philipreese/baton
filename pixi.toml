@@ -171,11 +171,11 @@ smoke-preflight = { cmd = "python -u tools/smoke-preflight/preflight.py" }
 
 # LIVE AND PAID -- smoke-claude, smoke-mixed-vendor, vendor-probe and
 # vendor-verify drive real authenticated vendor CLIs and spend real subscription usage. They never
-# run in CI. An agent may run one after disclosing spend when the required subscription login already
-# exists on its host; authentication provisioning remains a human action item.
-# docs/agents/developing-baton.md owns the shared live-run policy and reasoning; each task below adds
-# only what is specific to IT, and names the runbook to read first. `Baton.Cli.SmokeTests` sits outside
-# Baton.slnx so none of it runs as a side effect of `build`/`test`/`lint`.
+# record-once-ok: #2204 docs/agents/developing-baton.md
+# run in CI. docs/agents/developing-baton.md#live-vendor-smoke-tests owns the shared execution and
+# authentication policy; each task below adds only what is specific to IT, and names the runbook to
+# read first. `Baton.Cli.SmokeTests` sits outside Baton.slnx so none of it runs as a side effect of
+# `build`/`test`/`lint`.
 #
 # Not in that set, despite the neighbouring names: smoke-preflight, vendor-survey and vendor-check
 # are all free and start no billable session -- each says so where it is defined.
