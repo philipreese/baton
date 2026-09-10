@@ -21,10 +21,15 @@ public enum RepeatVerdict
 /// <paramref name="Reason"/> on <see cref="RepeatVerdict.Refuse"/>; both are null on
 /// <see cref="RepeatVerdict.Execute"/>. <paramref name="ReplayedOutput"/> is the previous command
 /// output, and is null for reads — see the ledger's remarks for why a read is re-read from disk
-/// rather than served from memory.
+/// rather than served from memory. <paramref name="ReplayedSuccess"/> preserves the recorded tool
+/// disposition so a timeout or capture failure cannot come back as a successful replay.
 /// </summary>
 public sealed record RepeatDecision(
-    RepeatVerdict Verdict, string? Preamble = null, string? Reason = null, string? ReplayedOutput = null)
+    RepeatVerdict Verdict,
+    string? Preamble = null,
+    string? Reason = null,
+    string? ReplayedOutput = null,
+    bool ReplayedSuccess = true)
 {
     public static readonly RepeatDecision Execute = new(RepeatVerdict.Execute);
 }
@@ -171,7 +176,8 @@ public sealed class RepeatedToolCallLedger
             ? new RepeatDecision(
                 RepeatVerdict.Replay,
                 Preamble: $"replayed: identical command {ago} s ago",
-                ReplayedOutput: entry.Output)
+                ReplayedOutput: entry.Output,
+                ReplayedSuccess: entry.OutputSucceeded ?? true)
             : new RepeatDecision(RepeatVerdict.Refuse, Reason: CommandRepeatRefusal);
     }
 
@@ -226,7 +232,7 @@ public sealed class RepeatedToolCallLedger
     /// inside <see cref="Window"/> can be answered with it. A command whose output is never recorded
     /// simply executes again — the ledger never refuses on an answer it does not hold.
     /// </summary>
-    public void RecordCommandOutput(string commandLine, string output)
+    public void RecordCommandOutput(string commandLine, string output, bool succeeded = true)
     {
         ArgumentNullException.ThrowIfNull(commandLine);
         ArgumentNullException.ThrowIfNull(output);
@@ -238,6 +244,7 @@ public sealed class RepeatedToolCallLedger
         if (TryTouch(CommandKey(commandLine), out var entry))
         {
             entry.Output = output;
+            entry.OutputSucceeded = succeeded;
         }
     }
 
@@ -438,6 +445,7 @@ public sealed class RepeatedToolCallLedger
                 Length = row.Length,
                 Served = row.Served,
                 Output = row.Output,
+                OutputSucceeded = row.OutputSucceeded,
             });
         }
 
@@ -455,7 +463,7 @@ public sealed class RepeatedToolCallLedger
         var state = new PersistedLedger(
             _order.Select(key => new PersistedEntry(
                     key, _entries[key].ExecutedAt, _entries[key].LastWriteUtc, _entries[key].Length,
-                    _entries[key].Served, _entries[key].Output))
+                    _entries[key].Served, _entries[key].Output, _entries[key].OutputSucceeded))
                 .ToArray());
 
         // Beside the target, because an atomic replace needs the same volume. Deleted in `finally`
@@ -484,7 +492,7 @@ public sealed class RepeatedToolCallLedger
 
     private sealed record PersistedEntry(
         string Key, DateTimeOffset ExecutedAt, DateTimeOffset LastWriteUtc, long Length, int Served,
-        string? Output);
+        string? Output, bool? OutputSucceeded);
 
     private static string CommandKey(string commandLine) => "cmd " + commandLine;
 
@@ -644,5 +652,8 @@ public sealed class RepeatedToolCallLedger
 
         /// <summary>The command output held for replay. Always null on a read entry — a read is re-read.</summary>
         public string? Output;
+
+        /// <summary>The tool disposition paired with <see cref="Output"/>; null reads old ledgers as success.</summary>
+        public bool? OutputSucceeded;
     }
 }

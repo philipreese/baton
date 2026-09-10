@@ -1,4 +1,5 @@
 using System.Diagnostics;
+using System.Security.Cryptography;
 using System.Text;
 using System.Text.Json;
 using System.Text.Json.Nodes;
@@ -87,6 +88,7 @@ public sealed class CodexDynamicToolPolicy
     private readonly IReadOnlyList<string> _inputRoots;
     private readonly HashSet<string> _declaredOutputs;
     private readonly Func<ShellCommandClass, TimeSpan> _commandCeiling;
+    private readonly Func<string, Stream> _commandCaptureStreamFactory;
     private readonly Dictionary<string, RetainedCommandOutput> _commandOutputs =
         new(StringComparer.Ordinal);
 
@@ -139,8 +141,30 @@ public sealed class CodexDynamicToolPolicy
         _declaredOutputs = producedOutputNames.Where(name => !string.IsNullOrWhiteSpace(name))
             .Select(NormalizeRelativeOutput).ToHashSet(PathComparer);
         _commandCeiling = commandCeiling ?? ShellCommandCeilings.For;
+        _commandCaptureStreamFactory = CreateCommandCaptureStream;
         _repeats = new RepeatedToolCallLedger(timeProvider);
         _ownPullRequestOnly = OwnPullRequestOnlyRule.AppliesTo(grant) ? new OwnPullRequestOnlyRule() : null;
+    }
+
+    /// <summary>
+    /// Test-only seam for a capture destination that opens successfully and then fails while the
+    /// child is running. Production always uses <see cref="CreateCommandCaptureStream"/>.
+    /// </summary>
+    internal CodexDynamicToolPolicy(
+        PermissionGrant grant,
+        string? workingDirectory,
+        string outputDirectory,
+        IEnumerable<string> inputPaths,
+        IEnumerable<string> producedOutputNames,
+        Func<ShellCommandClass, TimeSpan>? commandCeiling,
+        TimeProvider? timeProvider,
+        Func<string, Stream> commandCaptureStreamFactory)
+        : this(
+            grant, workingDirectory, outputDirectory, inputPaths, producedOutputNames,
+            commandCeiling, timeProvider)
+    {
+        _commandCaptureStreamFactory = commandCaptureStreamFactory
+            ?? throw new ArgumentNullException(nameof(commandCaptureStreamFactory));
     }
 
     /// <summary>
@@ -923,37 +947,41 @@ public sealed class CodexDynamicToolPolicy
                 $"Command output range length must be between 1 and {MaxReadRangeCharacters} characters.");
         }
 
-        EnsureNoReparsePoint(channel.Path);
-        var text = File.ReadAllText(channel.Path, StrictUtf8);
-        if (offset > text.Length)
+        if (offset > channel.RetainedCharacters)
         {
             return CodexDynamicToolResult.Failed(
                 $"Command output range offset {offset} is past the retained {channelName} length "
-                + $"of {text.Length} characters.");
+                + $"of {channel.RetainedCharacters} characters.");
         }
-        if (IsBetweenSurrogates(text, offset))
+
+        var take = (int)Math.Min((long)length, channel.RetainedCharacters - (long)offset);
+        var windowStart = Math.Max(0, offset - 1);
+        var windowEnd = Math.Min(channel.RetainedCharacters, offset + take + 1);
+        var window = ReadVerifiedCommandWindow(channel, windowStart, windowEnd - windowStart);
+        var localOffset = offset - windowStart;
+        if (IsBetweenSurrogates(window, localOffset))
         {
             return CodexDynamicToolResult.Failed(
                 $"Command output range offset {offset} is not a Unicode scalar boundary.");
         }
-
-        var take = (int)Math.Min((long)length, text.Length - (long)offset);
-        if (IsBetweenSurrogates(text, offset + take))
+        if (IsBetweenSurrogates(window, localOffset + take))
         {
             take++;
         }
 
         var header = $"[command output {reference}; channel={channelName}; "
                      + $"retained={channel.RetainedCharacters} of produced={channel.TotalCharacters} characters]";
+        var replayPreamble = $"[{RepeatedToolCallLedger.ReadReplayPreamble}]\n";
+        var responseBudget = MaxCommandResponseCharacters - replayPreamble.Length;
         string? footer = null;
         while (true)
         {
             var end = offset + take;
-            if (end < text.Length)
+            if (end < channel.RetainedCharacters)
             {
-                var nextLength = Math.Min(MaxReadRangeCharacters, text.Length - end);
+                var nextLength = Math.Min(MaxReadRangeCharacters, channel.RetainedCharacters - end);
                 footer = $"[incomplete: returned retained {channelName} characters {offset}..{end - 1} "
-                         + $"of {text.Length}; next range: reference={reference}, channel={channelName}, "
+                         + $"of {channel.RetainedCharacters}; next range: reference={reference}, channel={channelName}, "
                          + $"offset={end}, length={nextLength}]";
             }
             else if (channel.TotalCharacters > channel.RetainedCharacters)
@@ -969,8 +997,8 @@ public sealed class CodexDynamicToolPolicy
             }
 
             var metadataLength = header.Length + 1 + (footer is null ? 0 : footer.Length + 1);
-            var boundedTake = Math.Min(take, Math.Max(0, MaxCommandResponseCharacters - metadataLength));
-            if (IsBetweenSurrogates(text, offset + boundedTake))
+            var boundedTake = Math.Min(take, Math.Max(0, responseBudget - metadataLength));
+            if (IsBetweenSurrogates(window, localOffset + boundedTake))
             {
                 boundedTake--;
             }
@@ -981,8 +1009,19 @@ public sealed class CodexDynamicToolPolicy
             take = boundedTake;
         }
 
-        var range = text.Substring(offset, take);
-        var rendered = header + '\n' + range + (footer is null ? string.Empty : "\n" + footer);
+        var repeat = _repeats.ClassifyRead(
+            channel.Path,
+            DateTimeOffset.UnixEpoch,
+            channel.ByteLength,
+            $"reference={reference};channel={channelName};offset={offset};end={offset + take}");
+        if (repeat.Verdict == RepeatVerdict.Refuse)
+        {
+            return CodexDynamicToolResult.Refused(repeat.Reason!, GrantRules.Repeat);
+        }
+
+        var range = window.Substring(localOffset, take);
+        var body = header + '\n' + range + (footer is null ? string.Empty : "\n" + footer);
+        var rendered = repeat.Verdict == RepeatVerdict.Replay ? replayPreamble + body : body;
         Debug.Assert(rendered.Length <= MaxCommandResponseCharacters);
         return CodexDynamicToolResult.Allowed(rendered);
     }
@@ -1060,6 +1099,8 @@ public sealed class CodexDynamicToolPolicy
                 GrantRules.Backgrounding);
         }
 
+        cancellationToken.ThrowIfCancellationRequested();
+
         // #2002 rule 2. Refused rather than Failed on the third ask: this step bought no information
         // because Baton declined it, which is the population the refusal marker counts, and a lane
         // that spends five of six steps re-asking is exactly what that count exists to make visible.
@@ -1067,7 +1108,10 @@ public sealed class CodexDynamicToolPolicy
         switch (repeat.Verdict)
         {
             case RepeatVerdict.Replay:
-                return CodexDynamicToolResult.Allowed($"[{repeat.Preamble}]\n{repeat.ReplayedOutput}");
+                var replayed = $"[{repeat.Preamble}]\n{repeat.ReplayedOutput}";
+                return repeat.ReplayedSuccess
+                    ? CodexDynamicToolResult.Allowed(replayed)
+                    : CodexDynamicToolResult.Failed(replayed);
             case RepeatVerdict.Refuse:
                 return CodexDynamicToolResult.Refused(repeat.Reason!, GrantRules.Repeat);
             case RepeatVerdict.Execute:
@@ -1098,22 +1142,57 @@ public sealed class CodexDynamicToolPolicy
             startInfo.ArgumentList.Add(commandLine);
         }
 
-        using var process = Process.Start(startInfo)
-            ?? throw new IOException("Baton could not start the granted command.");
-        using var timeout = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
-        timeout.CancelAfter(ceiling);
         var reference = "command-" + Guid.NewGuid().ToString("N");
-        var stdout = CaptureCommandChannelAsync(process.StandardOutput, reference, "stdout");
-        var stderr = CaptureCommandChannelAsync(process.StandardError, reference, "stderr");
-        string? timeoutFailure = null;
+        var stdoutPath = ResolveWithinRoot(_outputRoot, $".{reference}.stdout.log");
+        var stderrPath = ResolveWithinRoot(_outputRoot, $".{reference}.stderr.log");
+        EnsureNoReparsePoint(stdoutPath, includeLeaf: false);
+        EnsureNoReparsePoint(stderrPath, includeLeaf: false);
+
+        // Both durable sinks exist before spawn. If opening either fails, the command has not run and
+        // an identical retry is safe. Faults after spawn take the recorded-failure path below.
+        var stdoutDestination = _commandCaptureStreamFactory(stdoutPath);
+        Stream stderrDestination;
         try
         {
-            await process.WaitForExitAsync(timeout.Token).ConfigureAwait(false);
+            stderrDestination = _commandCaptureStreamFactory(stderrPath);
+        }
+        catch
+        {
+            await stdoutDestination.DisposeAsync().ConfigureAwait(false);
+            throw;
+        }
+
+        Process process;
+        try
+        {
+            process = Process.Start(startInfo)
+                ?? throw new IOException("Baton could not start the granted command.");
+        }
+        catch
+        {
+            await stdoutDestination.DisposeAsync().ConfigureAwait(false);
+            await stderrDestination.DisposeAsync().ConfigureAwait(false);
+            throw;
+        }
+
+        using var processLifetime = process;
+        using var timeout = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
+        timeout.CancelAfter(ceiling);
+        var stdout = CaptureCommandChannelAsync(
+            process.StandardOutput, stdoutPath, "stdout", stdoutDestination);
+        var stderr = CaptureCommandChannelAsync(
+            process.StandardError, stderrPath, "stderr", stderrDestination);
+        string? timeoutFailure = null;
+        var callerCancelled = false;
+        Exception? captureFailure = null;
+        try
+        {
+            await WaitForExitOrCaptureFailureAsync(process, timeout.Token, stdout, stderr)
+                .ConfigureAwait(false);
         }
         catch (OperationCanceledException) when (!cancellationToken.IsCancellationRequested)
         {
             KillProcessTree(process);
-            await DrainAfterKillAsync(stdout, stderr).ConfigureAwait(false);
             // A timeout is a failure of a command the grant ALLOWED and Baton RAN. It costs the step
             // and carries its retained diagnostics, but nothing here declined it, so it carries no
             // refusal marker.
@@ -1122,19 +1201,52 @@ public sealed class CodexDynamicToolPolicy
         catch (OperationCanceledException)
         {
             KillProcessTree(process);
-            await DrainAfterKillAsync(stdout, stderr).ConfigureAwait(false);
-            throw;
+            callerCancelled = true;
+        }
+        catch (Exception ex) when (IsCommandCaptureFailure(ex))
+        {
+            KillProcessTree(process);
+            captureFailure = ex;
         }
 
-        var retained = new RetainedCommandOutput(
-            reference,
-            await stdout.ConfigureAwait(false),
-            await stderr.ConfigureAwait(false));
-        _commandOutputs.Add(reference, retained);
-        var stdoutText = File.ReadAllText(retained.Stdout.Path, StrictUtf8);
-        var stderrText = File.ReadAllText(retained.Stderr.Path, StrictUtf8);
+        RetainedCommandOutput? retained = null;
+        string? stdoutText = null;
+        string? stderrText = null;
+        if (captureFailure is null)
+        {
+            try
+            {
+                retained = new RetainedCommandOutput(
+                    reference,
+                    await stdout.ConfigureAwait(false),
+                    await stderr.ConfigureAwait(false));
+                stdoutText = ReadVerifiedCommandWindow(
+                    retained.Stdout, 0, retained.Stdout.RetainedCharacters);
+                stderrText = ReadVerifiedCommandWindow(
+                    retained.Stderr, 0, retained.Stderr.RetainedCharacters);
+            }
+            catch (Exception ex) when (IsCommandCaptureFailure(ex))
+            {
+                KillProcessTree(process);
+                captureFailure = ex;
+            }
+        }
 
-        if (timeoutFailure is null && process.ExitCode == 0)
+        if (captureFailure is not null)
+        {
+            await ObserveCaptureCompletionAsync(stdout, stderr).ConfigureAwait(false);
+            var failedCapture = RenderCommandCaptureFailure(captureFailure);
+            RecordExecutedCommandOutcome(commandLine, failedCapture, succeeded: false);
+            if (callerCancelled)
+            {
+                throw new OperationCanceledException(cancellationToken);
+            }
+            return CodexDynamicToolResult.Failed(failedCapture);
+        }
+
+        _commandOutputs.Add(reference, retained!);
+
+        if (!callerCancelled && timeoutFailure is null && process.ExitCode == 0)
         {
             // #2001: the one place a room can learn its own PR number while it is still running —
             // `gh pr create` prints the new PR's URL, and only a create that SUCCEEDED opened one.
@@ -1144,10 +1256,18 @@ public sealed class CodexDynamicToolPolicy
             _ownPullRequestOnly?.ObserveCommandOutput(commandLine, stdoutText + stderrText);
         }
 
-        var status = timeoutFailure ?? $"Command exited {process.ExitCode}.";
-        var displayed = RenderCommandResult(status, retained, stdoutText, stderrText);
+        var status = callerCancelled
+            ? "Command was cancelled after it started."
+            : timeoutFailure ?? $"Command exited {process.ExitCode}.";
+        var displayed = RenderCommandResult(status, retained!, stdoutText!, stderrText!);
+        if (callerCancelled)
+        {
+            RecordExecutedCommandOutcome(commandLine, displayed, succeeded: false);
+            throw new OperationCanceledException(cancellationToken);
+        }
         if (timeoutFailure is not null)
         {
+            RecordExecutedCommandOutcome(commandLine, displayed, succeeded: false);
             return CodexDynamicToolResult.Failed(displayed);
         }
         // #2002: a command is the broker's other write path, and the loud one -- see ForgetAllReads
@@ -1156,16 +1276,10 @@ public sealed class CodexDynamicToolPolicy
         // command's own entry is kept, because it observed the tree AFTER its own change and an
         // immediate re-ask of it is the population rule 2 exists for. Eviction runs BEFORE the record
         // below for exactly that reason -- reversing the two would drop the entry just recorded.
-        if (!RepeatedToolCallLedger.IsVolatile(commandLine))
-        {
-            _repeats.ForgetAllCommands(exceptCommandLine: commandLine);
-            _repeats.ForgetAllReads();
-        }
-
         // #2002: recorded whatever the exit code was, because a re-ask of a command that just failed
         // is the same wasted step as a re-ask of one that succeeded — the #1951 lane re-issued the
         // same failing `dotnet test` four times.
-        _repeats.RecordCommandOutput(commandLine, displayed);
+        RecordExecutedCommandOutcome(commandLine, displayed, succeeded: true);
 
         // A non-zero exit is the command's own answer, with bounded channel previews and a recovery
         // reference — `pixi run test` with three failing tests is the case that matters, and its
@@ -1178,49 +1292,194 @@ public sealed class CodexDynamicToolPolicy
     }
 
     private async Task<RetainedCommandChannel> CaptureCommandChannelAsync(
-        StreamReader reader, string reference, string channel)
+        StreamReader reader, string path, string channel, Stream destination)
     {
-        var path = ResolveWithinRoot(_outputRoot, $".{reference}.{channel}.log");
-        EnsureNoReparsePoint(path, includeLeaf: false);
-        await using var stream = new FileStream(
-            path, FileMode.CreateNew, FileAccess.Write, FileShare.Read, bufferSize: 4096,
-            FileOptions.Asynchronous | FileOptions.SequentialScan);
-        await using var writer = new StreamWriter(
-            stream, new UTF8Encoding(encoderShouldEmitUTF8Identifier: false), bufferSize: 4096);
         var buffer = new char[4096];
         long total = 0;
         var retained = 0;
         var retentionClosed = false;
-        while (true)
+        await using (var writer = new StreamWriter(
+                         destination,
+                         new UTF8Encoding(encoderShouldEmitUTF8Identifier: false),
+                         bufferSize: 4096))
         {
-            var read = await reader.ReadAsync(buffer).ConfigureAwait(false);
-            if (read == 0)
+            while (true)
             {
-                break;
-            }
-            total += read;
-            if (retentionClosed)
-            {
-                continue;
+                var read = await reader.ReadAsync(buffer).ConfigureAwait(false);
+                if (read == 0)
+                {
+                    break;
+                }
+                total += read;
+                if (retentionClosed)
+                {
+                    continue;
+                }
+
+                var available = MaxRetainedCommandChannelCharacters - retained;
+                var take = Math.Min(available, read);
+                if (take == available && take > 0 && char.IsHighSurrogate(buffer[take - 1]))
+                {
+                    // Stop before the scalar rather than persist half of it at the retention boundary.
+                    take--;
+                }
+                if (take > 0)
+                {
+                    await writer.WriteAsync(buffer.AsMemory(0, take)).ConfigureAwait(false);
+                    retained += take;
+                }
+                retentionClosed = take < read || retained >= MaxRetainedCommandChannelCharacters;
             }
 
-            var available = MaxRetainedCommandChannelCharacters - retained;
-            var take = Math.Min(available, read);
-            if (take == available && take > 0 && char.IsHighSurrogate(buffer[take - 1]))
-            {
-                // Stop before the scalar rather than persist half of it at the retention boundary.
-                take--;
-            }
-            if (take > 0)
-            {
-                await writer.WriteAsync(buffer.AsMemory(0, take)).ConfigureAwait(false);
-                retained += take;
-            }
-            retentionClosed = take < read || retained >= MaxRetainedCommandChannelCharacters;
+            await writer.FlushAsync().ConfigureAwait(false);
         }
 
-        await writer.FlushAsync().ConfigureAwait(false);
-        return new RetainedCommandChannel(channel, path, retained, total);
+        var info = new FileInfo(path);
+        if (info.Length > MaxRetainedCommandChannelCharacters * 3L)
+        {
+            throw new IOException("Retained command output exceeded its bounded UTF-8 storage size.");
+        }
+        using var stored = new FileStream(
+            path, FileMode.Open, FileAccess.Read, FileShare.Read, bufferSize: 4096,
+            FileOptions.SequentialScan);
+        var digest = SHA256.HashData(stored);
+        return new RetainedCommandChannel(channel, path, retained, total, info.Length, digest);
+    }
+
+    private static Stream CreateCommandCaptureStream(string path) => new FileStream(
+        path, FileMode.CreateNew, FileAccess.Write, FileShare.Read, bufferSize: 4096,
+        FileOptions.Asynchronous | FileOptions.SequentialScan);
+
+    private static async Task WaitForExitOrCaptureFailureAsync(
+        Process process,
+        CancellationToken cancellationToken,
+        Task stdout,
+        Task stderr)
+    {
+        var exit = process.WaitForExitAsync(cancellationToken);
+        var pendingCaptures = new List<Task> { stdout, stderr };
+        while (pendingCaptures.Count > 0)
+        {
+            var completed = await Task.WhenAny(pendingCaptures.Append(exit)).ConfigureAwait(false);
+            if (completed == exit)
+            {
+                await exit.ConfigureAwait(false);
+                return;
+            }
+
+            await completed.ConfigureAwait(false);
+            pendingCaptures.Remove(completed);
+        }
+
+        await exit.ConfigureAwait(false);
+    }
+
+    private static async Task ObserveCaptureCompletionAsync(params Task[] captures)
+    {
+        foreach (var capture in captures)
+        {
+            try
+            {
+                await capture.ConfigureAwait(false);
+            }
+            catch (Exception ex) when (IsCommandCaptureFailure(ex))
+            {
+                // The first capture fault is already the recorded failure. This only observes its
+                // sibling after the process tree has been killed so no task is left unobserved.
+            }
+        }
+    }
+
+    private static bool IsCommandCaptureFailure(Exception ex) =>
+        ex is IOException or UnauthorizedAccessException or ObjectDisposedException
+            or NotSupportedException or EncoderFallbackException
+            or System.Security.SecurityException;
+
+    private static string RenderCommandCaptureFailure(Exception failure)
+    {
+        var detail = $"{failure.GetType().Name}: {failure.Message}";
+        const int maxDetailCharacters = 1_000;
+        if (detail.Length > maxDetailCharacters)
+        {
+            var end = maxDetailCharacters - 1;
+            if (char.IsHighSurrogate(detail[end - 1]))
+            {
+                end--;
+            }
+            detail = detail[..end] + "…";
+        }
+
+        return "Baton ran the command, but retaining its output failed. The command's outcome cannot "
+               + "be recovered, and Baton will not run an identical retry because its side effects "
+               + $"may already have happened. Capture failure: {detail}";
+    }
+
+    private void RecordExecutedCommandOutcome(string commandLine, string output, bool succeeded)
+    {
+        if (!RepeatedToolCallLedger.IsVolatile(commandLine))
+        {
+            _repeats.ForgetAllCommands(exceptCommandLine: commandLine);
+            _repeats.ForgetAllReads();
+        }
+        _repeats.RecordCommandOutput(commandLine, output, succeeded);
+    }
+
+    private static string ReadVerifiedCommandWindow(
+        RetainedCommandChannel channel, int windowStart, int windowLength)
+    {
+        EnsureNoReparsePoint(channel.Path);
+        if (windowStart < 0 || windowLength < 0
+            || (long)windowStart + windowLength > channel.RetainedCharacters)
+        {
+            throw new IOException("Retained command output metadata is invalid.");
+        }
+
+        using var stream = new FileStream(
+            channel.Path, FileMode.Open, FileAccess.Read, FileShare.Read, bufferSize: 4096,
+            FileOptions.SequentialScan);
+        if (stream.Length != channel.ByteLength
+            || stream.Length > MaxRetainedCommandChannelCharacters * 3L)
+        {
+            throw new IOException("Retained command output changed after capture and is unavailable.");
+        }
+
+        using var hasher = IncrementalHash.CreateHash(HashAlgorithmName.SHA256);
+        var decoder = StrictUtf8.GetDecoder();
+        var bytes = new byte[4096];
+        var characters = new char[4098];
+        var captured = new StringBuilder(windowLength);
+        var charactersSeen = 0;
+        var windowEnd = windowStart + windowLength;
+
+        void Consume(ReadOnlySpan<char> decoded)
+        {
+            foreach (var character in decoded)
+            {
+                if (charactersSeen >= windowStart && charactersSeen < windowEnd)
+                {
+                    captured.Append(character);
+                }
+                charactersSeen++;
+            }
+        }
+
+        int read;
+        while ((read = stream.Read(bytes, 0, bytes.Length)) > 0)
+        {
+            hasher.AppendData(bytes, 0, read);
+            var decoded = decoder.GetChars(bytes.AsSpan(0, read), characters, flush: false);
+            Consume(characters.AsSpan(0, decoded));
+        }
+        var flushed = decoder.GetChars(ReadOnlySpan<byte>.Empty, characters, flush: true);
+        Consume(characters.AsSpan(0, flushed));
+
+        var actualDigest = hasher.GetHashAndReset();
+        if (charactersSeen != channel.RetainedCharacters
+            || !CryptographicOperations.FixedTimeEquals(actualDigest, channel.Sha256Digest))
+        {
+            throw new IOException("Retained command output changed after capture and is unavailable.");
+        }
+        return captured.ToString();
     }
 
     private static string RenderCommandResult(
@@ -1291,7 +1550,12 @@ public sealed class CodexDynamicToolPolicy
         string Reference, RetainedCommandChannel Stdout, RetainedCommandChannel Stderr);
 
     private sealed record RetainedCommandChannel(
-        string Name, string Path, int RetainedCharacters, long TotalCharacters);
+        string Name,
+        string Path,
+        int RetainedCharacters,
+        long TotalCharacters,
+        long ByteLength,
+        byte[] Sha256Digest);
 
     private string ResolveAllowedRead(string requestedPath)
     {
@@ -1391,18 +1655,6 @@ public sealed class CodexDynamicToolPolicy
         catch (InvalidOperationException)
         {
             // The subprocess raced cancellation to a natural exit.
-        }
-    }
-
-    private static async Task DrainAfterKillAsync(Task stdout, Task stderr)
-    {
-        try
-        {
-            await Task.WhenAll(stdout, stderr).ConfigureAwait(false);
-        }
-        catch (OperationCanceledException)
-        {
-            // The read tasks share the cancelled timeout token; the process tree is already gone.
         }
     }
 
