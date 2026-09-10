@@ -2655,8 +2655,7 @@ public static class MutationInterface
     /// mistaken for one (the exact race
     /// <c>False_but_still_running_execution_is_left_pending_then_delivered_on_later_tick_after_registration</c>
     /// pins): that target is left unrecorded here, and the poller's own re-mark on its next tick
-    /// re-offers it once the race resolves either way. A parked (<see cref="StepStatus.Failed"/> with
-    /// a scheduled <see cref="StepState.RetryNotBefore"/>) or step-less target needs no binding check
+    /// re-offers it once the race resolves either way. A quota-parked or step-less target needs no binding check
     /// — both are non-process by construction (a live process step cannot reach that shape without
     /// unregistering first; a step-less execution is only ever minted against a non-process binding,
     /// <see cref="RecordSupplementaryExecutionAsync"/>).

@@ -63,4 +63,47 @@ public static class ParkedStepFixture
 
         return (snapshotPath, logPath, executionId, retryNotBefore);
     }
+
+    /// <summary>
+    /// An <see cref="FailureClassification.ExhaustedUntil"/> park with no retry obligation: the
+    /// offline shape <c>MutationInterface</c> records when neither a vendor reset instant nor a
+    /// fallback is available. It deliberately appends no <see cref="FlowEvent.StepRetryScheduled"/>
+    /// and never fabricates a reset time.
+    /// </summary>
+    public static async Task<(string SnapshotPath, string LogPath, ExecutionId ExecutionId)>
+        WriteUnknownResetParkedStepFixtureAsync(string testRoot, string roomDirectory)
+    {
+        Directory.CreateDirectory(roomDirectory);
+        var stepId = new StepId("implement");
+        var definition = new WorkflowDefinition(
+            new WorkflowTemplateId("unknown-reset-parked-probe"),
+            1,
+            [new WorkflowStepDefinition(stepId, "implement", [], ["out"], [], new RetryPolicy(3))]);
+        var snapshot = SnapshotBinder.Bind(definition);
+        var snapshotPath = Path.Combine(roomDirectory, "snapshot.json");
+        await SnapshotBinder.PersistAsync(snapshot, snapshotPath, TestContext.Current.CancellationToken);
+
+        var logPath = Path.Combine(roomDirectory, "flow.jsonl");
+        var executionId = new ExecutionId("exec-unknown-reset-parked-1");
+        var request = new ExecutionRequest(
+            executionId,
+            new WorkflowId("wf-unknown-reset-parked"),
+            stepId,
+            "implement",
+            Inputs: [],
+            Outputs: [],
+            Timeout: TimeSpan.FromSeconds(30),
+            Environment: [],
+            UpstreamExecutionIds: new Dictionary<StepId, ExecutionId>());
+
+        await using var writer = new FlowEventLogWriter(logPath);
+        await writer.AppendAsync(
+            new FlowEvent.ExecutionRequestAccepted(request),
+            TestContext.Current.CancellationToken);
+        await writer.AppendAsync(
+            new FlowEvent.ExecutionFailed(executionId, FailureClassification.ExhaustedUntil, "quota reset unknown"),
+            TestContext.Current.CancellationToken);
+
+        return (snapshotPath, logPath, executionId);
+    }
 }

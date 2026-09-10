@@ -9,7 +9,7 @@ namespace Baton.Cli;
 /// <see cref="CancelCommand"/>'s room-level <c>--execution</c>-omitted path,
 /// <see cref="CancelRequestPoller"/>'s <c>latest</c> literal, and <see cref="ExecutionProgressHeartbeat"/>'s
 /// own tick. A candidate is either a currently <see cref="StepStatus.Running"/> step, or a
-/// quota-parked one — <see cref="StepStatus.Failed"/> with a scheduled <see cref="StepState.RetryNotBefore"/>.
+/// quota-parked one as <see cref="ArrestableExecutions"/> defines.
 /// Fail closed: zero or more than one candidate is refused rather than guessed.
 /// <para>
 /// #1556 PR 1: a two-line shim over <see cref="ArrestableExecutions.ResolveSingleStepLane"/>, the one

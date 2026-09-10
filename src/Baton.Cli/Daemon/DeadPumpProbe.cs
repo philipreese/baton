@@ -247,17 +247,15 @@ public sealed class DeadPumpProbe : BackgroundService
                 // Two shapes, one fact each — because ArrestableExecutions.All admits two shapes and a
                 // single event settles only one of them.
                 //
-                // A quota-parked target (#1607: StepStatus.Failed with a scheduled StepState.RetryNotBefore)
-                // has ALREADY settled its latest execution — that is what the park IS, an
-                // ExecutionFailed(ExhaustedUntil) plus a StepRetryScheduled nothing will now drive. What is
-                // still open there is the step's retry obligation, not the execution, so the fact that
+                // A quota-parked target (#1607: an un-foreclosed ExhaustedUntil failure, whether its
+                // reset is scheduled or unknown) has ALREADY settled its latest execution. What is
+                // still open there is the step's retry eligibility, not the execution, so the fact that
                 // records the arrest is FlowEvent.StepRetryForeclosed (#1586 S1's retry-foreclosure
-                // primitive, whose whole purpose is this) rather than a second ExecutionFailed. A second
-                // ExecutionFailed would be wrong twice over: StateProjector never clears
-                // RetryNotBeforeByStepId on that arm, so DeriveWorkflowStatus would keep ORing
-                // `step.RetryNotBefore is not null` into deliverability and the room would still read
-                // Running — the arrest invisible, which is the defect this probe exists to fix — and the
-                // target would stay arrestable, so the next tick would append it again, forever.
+                // primitive, whose whole purpose is this) rather than a second ExecutionFailed. On a
+                // recorded-reset park, a second ExecutionFailed would leave RetryNotBefore set, so the
+                // room would still read Running and the probe would repeat forever. On an unknown-reset
+                // park, it would overwrite the quota classification instead of recording the same
+                // foreclosure fact every other reader recognizes.
                 if (target is { StepId: { } parkedStepId, Status: StepStatus.Failed })
                 {
                     await writer.AppendAsync(
