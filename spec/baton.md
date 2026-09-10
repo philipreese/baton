@@ -2858,6 +2858,11 @@ have. That gap is now moot rather than fixed, because the mechanism it was a gap
 
 ## §6 Fleet Glass — observability
 
+**Repository retirement status (#2170, 2026-09-09).** The committed Fleet Glass delivery is now the
+daemon-served tailnet page. The legacy pusher, Worker/KV mailbox, and published artifact deployment
+machinery are no longer repository-supported; the remaining live stop/decommission steps are owned
+by the conductor and are tracked in the implementation handoff for #2170.
+
 This is the entire user-facing surface, unconditionally. `fleet_status`
 (`src/Baton.Cli/Mcp/FleetStatusTool.cs`) is a read-only MCP tool that scans rooms across the fleet: it
 leverages the terminal-sentinel fast path for terminal rooms and projects active rooms from bound
@@ -2885,20 +2890,19 @@ daemon-served, tailnet-bound, read-only drill-down page for the payloads this ru
 carry — the reasoning lives in that entry, and this ruling continues to govern everything reachable
 from a conversation.
 
-The outbound push mailbox — the mechanism that would notify a harness of a state-change event without
-polling — is **(new build)**. There is no `push`, `mailbox`, or outbound-webhook-shaped
+Historically, the outbound push mailbox — the mechanism that would notify a harness of a state-change event without
+polling — was **(new build)**. There is no supported `push`, `mailbox`, or outbound-webhook-shaped
 component anywhere under `src/Baton.Cli/Mcp` or `src/Baton.Cli/Daemon` at HEAD — nothing broadcast-shaped
 survives the daemon narrowing (`DaemonBroadcast` and `DoorbellMonitor` both died with it, #1417/#1420),
 so the "unbuilt" ruling stands with no surviving near-miss to distinguish it from. Quota data (§7)
-and gate-pending visibility both ride this mailbox once it exists; its transport (webhook,
+and gate-pending visibility were intended to ride this mailbox; its transport (webhook,
 log-append, something else) is unspecified here — that is design work for the build.
 
-**Current reality, stated so this section cannot overclaim:** a transitional status page exists
-today *outside this repo* — a pushed snapshot rendered remotely for the operator. #1413 tracks
-folding its pipeline into `tools/`; it is the mailbox's display end and a prototype of the push
-loop, not a product surface this spec endorses. "Never a second application" constrains what Baton
-*builds and ships* — the MCP tool is the surface — and stays honest only while that page remains a
-disposable prototype rather than a maintained app.
+**Historical reality, retired with #2170:** a transitional status page once existed outside this
+repo — a pushed snapshot rendered remotely for the operator. It was the mailbox's display end and a
+prototype of the push loop, not a product surface this spec endorsed. The retired delivery is
+recorded here only to explain this section's former terminology; Baton now has no supported
+artifact or mailbox delivery.
 
 ### §6 schema — `fleet_status`
 
@@ -2910,7 +2914,7 @@ Input:
 }
 ```
 Output (#1391: wraps the previously-bare room array in an object, per the `vendors[]` schema below —
-`FleetStatusResponse`'s own doc comment (`Baton.Cli.Mcp`) records which pusher.py functions already
+`FleetStatusResponse`'s own doc comment (`Baton.Cli.Mcp`) records which legacy pusher.py functions already
 anticipated this shape):
 ```
 {
@@ -3252,7 +3256,7 @@ exactly the fields it enumerates as KEPT (now `type`/`timestamp`/`stepId`/`exitC
 `room_detail` entry and nothing else — a future `room_detail` field still never leaks through by
 accident of that function failing to name it.
 
-**The pushed mailbox payload carries three fields `fleet_status`/`room_detail` do not (#1613 items 1
+**Historical pushed-mailbox payload (#1613).** It carried three fields `fleet_status`/`room_detail` do not (items 1
 and 2, plus #1155's `rooms[].pruned` below) — pusher-computed, not part of either MCP tool's own C#
 output above.** The first two are read
 directly off the room's already-captured `.stdout.log` or wall-clock, python-side
@@ -3262,7 +3266,7 @@ ever populates an execution that has recorded BOTH a `CoreEvent.ExecutionStarted
 the last non-blank line of the captured stream — neither fits a still-running execution, which by
 definition has no exit event yet and needs every line scanned, not just the last:
 - **`rooms[].live` (item 1, extended by a 2026-09-01 review of #1613's PR, and by #1682)**, present
-  only for a room whose pusher-displayed `state` is exactly `"Running"`:
+  only for a room whose displayed `state` was exactly `"Running"` in the legacy pusher:
   `{ "toolCalls"?: number, "billedTokens"?: number, "billedIsFloor"?: true, "turns"?: number,
     "contextTokens"?: number, "cacheReadTokens"?: number, "lastActivityAt"?: string }`.
 
@@ -3272,7 +3276,7 @@ definition has no exit event yet and needs every line scanned, not just the last
   `tests/Baton.Cli.Tests/RunCommandEchoTests.cs`, `AgyWorkerAdapter.TryParseProgressEvent`'s own doc
   comment). **Scope of the codex measurement, stated because the set is wider than the evidence:**
   `Baton.Status.CodexUsageParser.TryParseToolName` is the canonical home of WHICH item types count;
-  the default `file` source reads it directly, while `pusher.py`'s stale-fallback derivation
+  the default `file` source reads it directly; the legacy pusher's stale-fallback derivation
   deliberately RESTATES the set (and the `turn.completed` usage arithmetic) in Python, because that
   reader cannot call into the engine and the fallback still runs whenever the daemon's file is stale
   or absent (#1557 PR-B2's `derive_snapshot_and_timelines` removal condition) — so dropping the copy
@@ -3521,7 +3525,7 @@ and its scheduled task reporting Running; every consumer kept serving the frozen
 and the `staleness` field above never fired because 900s had not elapsed. Two fields; **three ticks of
 `FleetProjectionWriter.GetInterval()`** is the threshold, stated once as
 `FleetProjectionWriter.StaleAfterTicks`. Its C# consumers derive from that symbol; the JS side cannot
-reach it and transcribes it as `PROJECTION_STALE_AFTER_MS` (`worker.core.mjs`), which says at its own
+Historically, the Worker reached it and transcribed it as `PROJECTION_STALE_AFTER_MS` (`worker.core.mjs`), which said at its own
 declaration that it is a transcription and what widening `BATON_FLEET_PROJECTION_INTERVAL_SECONDS`
 therefore costs. **A second, unrelated threshold lives on the JS side only** and has its own home: the
 "nothing fresh has reached the mailbox at all" arm is measured against the cadence `pusher.py` reports
@@ -3648,7 +3652,7 @@ Needs-You rooms.
 **Paging and the terminal hot-set cap (#1656).** Measured 2026-09-02: `deliverables_list` returned
 292 items / 160,539 bytes in one body, big enough that the operator's MCP connector reported
 "Inbox feed unavailable (upstream_error)"; `fleet_status` was 265,193 bytes / 234 rooms per push.
-Both mailbox tools (`tools/fleet-glass/worker.js`'s `handleMcp`) now page:
+Historically, both mailbox tools (`tools/fleet-glass/worker.js`'s `handleMcp`) paged:
 - **`deliverables_list`** takes `limit` (default 50, max 200) and an opaque `cursor` — base64 of the
   next item's own `(pushed_at, id)` identity, so a caller round-trips it verbatim with no
   server-side per-cursor state. Response carries `items`, `count` (the total after any `room`
@@ -3887,7 +3891,7 @@ instead of asserting non-existence for something the same request's own index sa
 SAME flat `DELIVER_BATCH_KV_WRITE_COST` regardless of item count K, so the old fixed
 `DEFAULT_DELIVER_BATCH_CAP` (10 items, sized when cost scaled with K) bought nothing once the fold
 landed and cost a lot: a 210-item backlog that could ship as 1 batch instead cost 21
-write-amplifying ones. `gather_deliverables`/`gather_conductor_deliverables` now cap by cumulative
+write-amplifying ones. Historically, `gather_deliverables`/`gather_conductor_deliverables` capped by cumulative
 content bytes (`DEFAULT_DELIVER_BATCH_BYTES`, ~4MB, safely under `worker.js`'s 5,000,000-char
 `/deliver` body cap) with a generous item-count ceiling (`DEFAULT_DELIVER_BATCH_COUNT_CEILING`, 2000)
 as a backstop only — at least one item is always admitted even if it alone exceeds the byte budget
@@ -3976,12 +3980,11 @@ reassignment/pairing/broadcast REST surface went with the daemon narrowing below
 
 What the daemon narrows **to**: a **room-watcher serving the §8 registry** (`fleet_status` itself
 needs no daemon, §6 — the watcher serves the registry the tool will consult, never the tool's own
-file reads), the **snapshot push loop** feeding the mailbox (§6),
-and the **quota-runway ledger** (below). Two more live responsibilities need a stated home rather
+file reads), and the **quota-runway ledger** (below). Two more live responsibilities need a stated home rather
 than silently dropping out with the rest of the deleted daemon surface. All of the above assumes
 `baton daemon` is actually running persistently; it is kept running by the `baton-daemon` scheduled
 task (`tools/tool-refresh/register-daemon-task.ps1`, #1557), cycled onto each newly refreshed tool
-head the same way `tools/tool-refresh/refresh.py` already cycles `fleet-glass-pusher`. That script
+head the same way `tools/tool-refresh/refresh.py` already restarts `baton-daemon`. That script
 registers unelevated with two triggers: a logon trigger scoped to the registering user for first
 launch at each logon, and a one-time trigger starting at registration that repeats every five minutes
 indefinitely (#2083). Omitting RepetitionDuration gives indefinite repetition; the operator measured
@@ -4014,7 +4017,7 @@ code 2147942470 (exit 70), followed by ten minutes without a restart (#2083).
   "under the same outbound-only ceiling the rest of this section states: the daemon only ever writes
   this file, never serves it over a listener" — the tailnet listener below now serves exactly this
   file. The writing half is unchanged, and there is still exactly one derivation of the fleet row.
-  No pusher.py change rides with PR-A — both paths run side by side until a later PR retires the pusher's
+  No pusher.py change rode with PR-A — both paths ran side by side until #2170 retired the legacy pusher's
   own derivation. A reader of this file opens it with `FileShare.ReadWrite | FileShare.Delete` in C#,
   or copies then parses in Python (#1782 — `open()` cannot express `FILE_SHARE_DELETE`), so an
   in-flight atomic rewrite never surfaces a torn read to it. The open itself is not promised —
@@ -4179,7 +4182,7 @@ records that arrest, and the pump is still never re-driven.
 ### The quota ledger — what is new build, stated correctly
 
 Polls vendor CLIs' print-mode `/usage`; accumulation from lane logs is attribution only, never the
-reset-time source of truth. Quota data rides the push mailbox (§6). I could not find a `/usage`-polling
+reset-time source of truth. Historically, quota data rode the push mailbox (§6). I could not find a `/usage`-polling
 implementation, a runway projection, or push delivery for quota anywhere in `src/` at HEAD — that part
 is genuinely **(new build)**.
 
@@ -4946,11 +4949,10 @@ need a way to actually delete stuff, not just hide it from the glass." Fleet Gla
 per-browser `localStorage` hide — the room directory, its registry lines here, and its pushed
 deliverables all persist regardless, reappearing in any other browser and in every `fleet_status`
 payload. `baton room delete <room-dir>` and its batch form `baton rooms prune --terminal` are the only
-verbs that actually remove a room: the directory, every matching registry line (`RemoveByRoomPathAsync`),
-and — best-effort, since the CLI has no reach into the Cloudflare Worker's KV deliverables index
-(`tools/fleet-glass/worker.js`'s `/deliver` route accepts no removal verb today) — a
-`deleted-rooms.jsonl` tombstone (`DeletedRoomsTombstoneStore`) for the pusher to eventually forward as
-a removal, unbuilt as of this paragraph. Both verbs refuse a non-terminal room (no `terminal.json`)
+verbs that actually remove a room: the directory and every matching registry line
+(`RemoveByRoomPathAsync`). Deletion is performed locally by the CLI: it does not preserve, remove, or
+record remotely served deliverables, and there is no `--keep-deliverables` option. Both
+verbs refuse a non-terminal room (no `terminal.json`)
 unless `--force`, since a live engine may still hold the room's files open — the same holder-liveness
 read (`ConcurrencyGuard.ReadHolderInfo` + `EngineLivenessProbe`) `baton cancel` already uses, never a
 second mechanism. `RoomRetentionSweep` (§7) may call the batch form automatically, gated behind
@@ -6035,7 +6037,7 @@ against pruning the directory it actually runs from.
 **Tool refresh.** Refreshing is `pixi run tool-refresh` (`tools/tool-refresh/refresh.py`): packs the checkout, installs into the
 new `{BATON_HOME}/tools/<sha>`, verifies `--version` and `templates --json` directly from that directory's binary, flips `current`
 atomically, installs/updates the launcher (uninstalling any legacy global tool in `~/.dotnet/tools` to prevent executable
-collision), rebuilds `src/Baton.Cli` Debug for the Fleet Glass pusher, restarts the `fleet-glass-pusher` scheduled task, and prunes
+collision), rebuilds `src/Baton.Cli` Debug for the daemon-served Fleet Glass, restarts the `baton-daemon` scheduled task, and prunes
 old unreferenced tool directories. It requires no drain wait and writes no drain marker.
 
 **Manual drain marker.** Draining is retained solely as an operator-invoked stop: an explicit `{BATON_HOME}/draining.json`
@@ -6050,14 +6052,16 @@ record §6's own tripwire demanded before any page could be built — written fi
 requires, and written honestly: the thing being ruled in **is** a maintained page, and this entry
 amends the ruling's reach rather than pretending the page slips under it.
 
-**The decision.** Observability splits into two planes by what the bytes are, not by preference. The
-**mailbox plane** (pusher → Worker KV/MCP → artifact, §6) owns the fleet row: small, curated,
+**Current decision (#2170).** Fleet Glass has one supported delivery path: the daemon-served tailnet
+page described above. The following mailbox-plane rationale is retained as explicitly historical
+provenance only.
+**Historical mailbox plane** (pusher → Worker KV/MCP → artifact, §6) formerly owned the fleet row: small, curated,
 change-gated, secret-gated, reachable from a Claude conversation, working while the machine sleeps.
-The **tailnet plane** — a page served by the existing daemon (§7), bound to the tailnet/loopback
+The **daemon-served tailnet page** — bound to the tailnet/loopback
 interface only, never `0.0.0.0` — owns drill-down: live stdout tail, full timeline, room artifacts.
-Neither is a fallback for the other.
+The retired mailbox was not a fallback for this page.
 
-**Why the mailbox cannot carry drill-down — the constraint that forced a second plane.** Two hard
+**Historical mailbox constraint.** The former reason the mailbox could not carry drill-down was two hard
 walls, not taste. The secret gate: the deliverables path exists to guarantee the mailbox never
 carries `prompt.txt` or `.stdout.log` — only declared outputs through a fail-closed denylist — and a
 live stdout tail is precisely the uncurated stream that design refuses, on a public repo. (#1351: the
@@ -6071,8 +6075,8 @@ operator's own tailnet both walls vanish: the bytes never leave the network, and
 quota is in the path.
 
 **What §6's "never a second application" still governs, and what it no longer does.** That ruling
-stands, un-softened, for the mailbox plane: drill-down reachable from a conversation is `room_detail`
-in the same MCP host, and no page grows there. This entry rules in exactly one additional surface —
+That historical distinction stood, un-softened, for the mailbox plane: drill-down reachable from a conversation is `room_detail`
+in the same MCP host, and no page grew there under the retired design. This historical entry ruled in exactly one additional surface —
 a read-only diagnostic page on the private plane — because the mailbox physically cannot carry its
 payload. The tripwire this entry inherits from §6 is restated for the new plane: the page is a
 **diagnostic**, not an application. It renders what the room record already says; v2.5 ships it

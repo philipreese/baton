@@ -344,8 +344,8 @@ as `baton dispatch`'s own.)
 
 Once a room is genuinely done with, `baton room delete <room-dir>` (or its batch form,
 `baton rooms prune --terminal --yes`) actually removes it — the directory, its `room-registry.jsonl`
-line(s), and (best-effort) a deliverables tombstone — refusing a non-terminal room unless `--force`;
-`spec/baton.md` §8 has the full contract, including what it cannot reach.
+line(s) — refusing a non-terminal room unless `--force`. This is a local CLI operation; server-side
+artifact state is outside its reach. `spec/baton.md` §8 has the full contract, including what it cannot reach.
 
 **Delivering orchestrator deliverables (`baton deliver`).** A conductor or orchestrator delivering artifacts (such as its decision queue at the end of an unattended window) delivers them directly to the standing conductor room so they reach the Fleet Glass inbox:
 
@@ -353,7 +353,7 @@ line(s), and (best-effort) a deliverables tombstone — refusing a non-terminal 
 baton deliver <file> [--title <text>] [--room <room-dir>]
 ```
 
-`--room-dir` is also accepted as an alias for `--room`. This copies the file into `<room>/artifacts/conductor/` under a filename unique to the source path (recorded as `artifact_file` in the manifest, defaulting the room to `~/.baton/rooms/conductor/`) and records it in `manifest.jsonl`, which `pusher.py` forwards to the inbox with a `CONDUCTOR` chip. Re-delivering the same source path updates the file and replaces the existing inbox item in place.
+`--room-dir` is also accepted as an alias for `--room`. This copies the file into `<room>/artifacts/conductor/` under a filename unique to the source path (recorded as `artifact_file` in the manifest, defaulting the room to `~/.baton/rooms/conductor/`) and records it in `manifest.jsonl`, where the daemon-served Glass can show the local deliverable path. Re-delivering the same source path updates the file and replaces the existing manifest entry.
 
 **What a room cost (`baton ledger`).** After a room settles, its per-attempt accounting rows are
 readable without opening any file:

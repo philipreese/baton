@@ -7,8 +7,8 @@ namespace Baton.Cli.Daemon;
 /// <summary>
 /// #1981 — the daemon's self-watchdog: dying loudly beats hanging quietly.
 /// <para>
-/// On 2026-09-06 at 14:51 the daemon stopped writing anything — the log, the projection, the pusher's
-/// upstream — and stayed that way for thirteen minutes with its process alive, a 6.6 MB working set,
+/// On 2026-09-06 at 14:51 the daemon stopped writing anything — the log and the projection — and
+/// stayed that way for thirteen minutes with its process alive, a 6.6 MB working set,
 /// and its scheduled task reporting Running. Nothing recovered it; a person did. This service exits
 /// the process non-zero once the whole daemon has been silent past the bound spec/baton.md §7 ("The
 /// daemon watches itself") states — two arms, either trips: <see cref="FleetSilenceMultiplier"/>

@@ -468,7 +468,6 @@ ALLOWLIST: dict[str, str] = {
     "vendor-check": "dotnet CLI probe runner that queries host CLI versions under grace-window semantics",
     "test-no-build": "full xUnit test suite runner where sabotage is covered by individual test assertions",
     "gate-sabotage": "the sabotage suite and ratchet runner itself; self-tested by executing all sabotage fixtures",
-    "fleet-glass-worker-selftest": "pure synthetic selftest already proving red/green discrimination for the heartbeat merge (#1656 F2) and cursor/limit/count polarity, over in-memory fixtures with no live Worker",
     "fleet-glass-daemon-feed-selftest": "production-byte synthetic EventSource harness covering its disconnect marker and recovery read without a daemon or browser",
     "fleet-glass-service-worker-selftest": "production-byte synthetic worker harness covering lifecycle callbacks, network fallback/recovery, and dashboard-only interception without a browser",
     "launcher-selftest": "pure synthetic selftest exercising fail-closed pointer arms plus real argv-forwarding/exit-code/pointer-flip discrimination (#1670 F2) against a compiled mock exe fixture under a temp BATON_HOME",

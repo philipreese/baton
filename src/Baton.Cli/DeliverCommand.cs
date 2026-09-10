@@ -24,7 +24,7 @@ public sealed record ConductorManifestEntry(
 
 /// <summary>
 /// <c>baton deliver</c> (#1669): copies a conductor deliverable into a room's artifacts directory
-/// with a manifest entry so pusher.py forwards it to the glass inbox.
+/// with a manifest entry so the daemon-served Glass can show its local path.
 /// </summary>
 public static class DeliverCommand
 {

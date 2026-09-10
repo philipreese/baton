@@ -236,15 +236,14 @@ try {
     $allStreamsThreeContents = Get-Content -LiteralPath $allStreamsThree -Raw
     Assert-Contains $allStreamsThreeContents $stderrThreeLine "baton.ps1 redirects native stderr for a nonzero exit"
 
-    # 7. Neither task-registering script calls New-ScheduledTaskSettingsSet with a parameter name
+    # 7. The daemon task-registering script does not call New-ScheduledTaskSettingsSet with a parameter name
     # that cmdlet doesn't actually have (#1770: -DisallowStartIfOnBatteries/-StopIfGoingOnBatteries
     # don't exist on it and blew up the register call with NamedParameterNotFound before either
-    # script reached Register-ScheduledTask). Both scripts carried the same bug, so both are checked.
+    # script reached Register-ScheduledTask).
     Write-Host "Test 7: task-registering scripts only pass real New-ScheduledTaskSettingsSet parameters..."
     $realParams = (Get-Command New-ScheduledTaskSettingsSet).Parameters.Keys
     $taskScripts = @(
-        [System.IO.Path]::Combine($repoRoot, "tools", "tool-refresh", "register-daemon-task.ps1"),
-        [System.IO.Path]::Combine($repoRoot, "tools", "fleet-glass", "deploy.ps1")
+        [System.IO.Path]::Combine($repoRoot, "tools", "tool-refresh", "register-daemon-task.ps1")
     )
     foreach ($registerScript in $taskScripts) {
         $ast = [System.Management.Automation.Language.Parser]::ParseFile($registerScript, [ref]$null, [ref]$null)

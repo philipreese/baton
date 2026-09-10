@@ -78,11 +78,9 @@ gates-run.txt
 gates-output.txt
 gates-exit.txt
 
-# tools/fleet-glass (#1413): machine-local secrets and state, never committed. secrets.local.json
-# and pusher.config.json carry the mailbox's push token / read segment; secretpatterns.local.txt is
-# the secret-gate's denylist, sensitive in its own right (it is close to a map of what to grep for);
-# push-state.local.json and pusher.log are per-machine run state/log. Each ships a *.example.* or
-# *-allowlist-style sibling with placeholders -- see tools/fleet-glass/pusher.py's docstring.
+# Retired Fleet Glass mailbox-plane credentials and state remain machine-local and ignored until an
+# operator explicitly verifies their local purge or migration. Keep these narrow entries so a broad
+# add cannot stage surviving secrets or Wrangler state after the retired delivery is removed.
 tools/fleet-glass/secrets.local.json
 tools/fleet-glass/pusher.config.json
 tools/fleet-glass/secretpatterns.local.txt
