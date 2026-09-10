@@ -3008,7 +3008,9 @@ counter or Baton's own derivation, and no reader may infer it from the adapter t
 report vendor counters. `codex` reads the subscription-authenticated app-server
 `account/rateLimits/read` result through `CodexAppServerBroker`, without starting a thread or model
 turn. `rateLimitsByLimitId` is authoritative when present; the legacy `rateLimits` object is a
-compatibility fallback and is never counted beside the map. Each window preserves the vendor's
+compatibility fallback only when the map property is absent and is never counted beside the map.
+A present null or non-object map remains unreadable evidence rather than admitting on the alias.
+Each window preserves the vendor's
 `usedPercent`, Unix-second `resetsAt`, `limitId`, primary/secondary identity, and
 `windowDurationMins`. Duration identifies product semantics: 300 minutes is the account session
 window and 10,080 minutes is the account weekly window; the measured 0.153.2 response has the weekly

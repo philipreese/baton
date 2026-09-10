@@ -14,7 +14,8 @@ namespace Baton.Vendors;
 /// <b>The multi-bucket map is authoritative when present.</b>
 /// <c>rateLimitsByLimitId</c> is parsed instead of the legacy <c>rateLimits</c> alias, never in
 /// addition to it, so the account-wide <c>codex</c> bucket is not counted twice. The legacy object is
-/// retained as a compatibility arm for installed versions that do not expose the map.
+/// retained as a compatibility arm only when installed versions do not expose the map property; a
+/// present null or non-object map is unreadable evidence and never falls through to the alias.
 /// </para>
 /// <para>
 /// <b>Window identity comes from the response, not property position.</b> <c>primary</c> and
@@ -72,14 +73,16 @@ public sealed class CodexUsageSource : IVendorUsageSource
         ArgumentNullException.ThrowIfNull(result);
 
         List<VendorUsageWindow> windows = [];
-        if (result.TryGetPropertyValue("rateLimitsByLimitId", out var byIdNode)
-            && byIdNode is JsonObject byId)
+        if (result.TryGetPropertyValue("rateLimitsByLimitId", out var byIdNode))
         {
-            foreach (var (mapKey, bucketNode) in byId)
+            if (byIdNode is JsonObject byId)
             {
-                if (bucketNode is JsonObject bucket)
+                foreach (var (mapKey, bucketNode) in byId)
                 {
-                    ParseBucket(bucket, mapKey, windows);
+                    if (bucketNode is JsonObject bucket)
+                    {
+                        ParseBucket(bucket, mapKey, windows);
+                    }
                 }
             }
         }

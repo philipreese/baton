@@ -84,6 +84,55 @@ public class CodexUsageSourceTests
     }
 
     /// <summary>
+    /// Synthetic authoritative-map state matrix. The legacy alias is compatibility evidence only
+    /// when the map property is absent. Once the authoritative property is present, null or a wrong
+    /// type must remain an unreadable harvest and drive the real runway gate to Hold rather than
+    /// admitting on a valid-looking alias.
+    /// </summary>
+    [Theory]
+    [InlineData("absent", RunwayDisposition.Admit)]
+    [InlineData("null", RunwayDisposition.Hold)]
+    [InlineData("wrong-type", RunwayDisposition.Hold)]
+    public void Authoritative_map_presence_controls_legacy_fallback(
+        string mapShape,
+        RunwayDisposition expected)
+    {
+        var result = new JsonObject
+        {
+            ["rateLimits"] = Bucket(
+                CodexUsageSource.AccountLimitId,
+                Window(48, CodexUsageSource.WeeklyDurationMins, 1_800_000_000),
+                secondary: null),
+        };
+        if (mapShape != "absent")
+        {
+            result["rateLimitsByLimitId"] = mapShape switch
+            {
+                "null" => null,
+                "wrong-type" => "unreadable",
+                _ => throw new ArgumentOutOfRangeException(nameof(mapShape)),
+            };
+        }
+
+        var snapshot = CodexUsageSource.Parse(result, Now);
+        var decision = RunwayGate.Evaluate(
+            CodexUsageSource.AccountLimitId, snapshot, new RunwayThresholds(), Now);
+
+        Assert.Equal(expected, decision.Disposition);
+        if (mapShape == "absent")
+        {
+            Assert.Equal(48, Assert.Single(snapshot.Windows,
+                window => window.WindowDurationMins == CodexUsageSource.WeeklyDurationMins).PercentUsed);
+            Assert.Null(decision.Reason);
+        }
+        else
+        {
+            Assert.Empty(snapshot.Windows);
+            Assert.Contains("not readable", decision.Reason!, StringComparison.Ordinal);
+        }
+    }
+
+    /// <summary>
     /// Synthetic precedence arm: the legacy object aliases an entry in the map. When the map is
     /// present it is authoritative even if the alias carries different values.
     /// </summary>
