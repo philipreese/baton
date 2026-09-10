@@ -275,4 +275,55 @@ public sealed class QueueTierTableTests
         // Case is the operator's business, not the key's.
         Assert.Equal("review-tooling", QueueTierTable.KeyFor("Review", "Tooling"));
     }
+
+    /// <summary>
+    /// #2181: a lifecycle item's initial choice no longer becomes a hidden review pin. The four
+    /// sources are crossed here because the JSON shape has to distinguish no selection, a one-stage
+    /// selection, an intentional pin and an older persisted item's historic whole-item axes.
+    /// </summary>
+    [Fact]
+    public void Lifecycle_stage_resolution_keeps_stage_overrides_local_and_makes_their_source_auditable()
+    {
+        var defaults = Item(scope: "tooling") with { Stage = WorkStage.Implement, StageSelections = [] };
+        var implement = QueueTierTable.ResolveForStage(
+            defaults, WorkStage.Implement, new QueueSettings(), NamedTiers(), NoNamedTiers);
+        var review = QueueTierTable.ResolveForStage(
+            defaults, WorkStage.Review, new QueueSettings(), NamedTiers(), NoNamedTiers);
+
+        Assert.Equal(QueueSelectionSource.StageDefault, implement.SelectionSource);
+        Assert.Equal(("codex", "gpt-6-astra", "medium"), (implement.Adapter, implement.Model, implement.Effort));
+        Assert.Equal(QueueSelectionSource.StageDefault, review.SelectionSource);
+        Assert.Equal(("codex", "gpt-5.6-sol", "high"), (review.Adapter, review.Model, review.Effort));
+
+        var staged = defaults with
+        {
+            StageSelections =
+            [
+                new QueueStageSelection
+                {
+                    Stage = WorkStage.Implement,
+                    Model = "sonnet",
+                    Reason = "implement experiment",
+                },
+            ],
+        };
+        Assert.Equal("sonnet", QueueTierTable.ResolveForStage(
+            staged, WorkStage.Implement, new QueueSettings(), NamedTiers(), NoNamedTiers).Model);
+        Assert.Equal(QueueSelectionSource.StageOverride, QueueTierTable.ResolveForStage(
+            staged, WorkStage.Implement, new QueueSettings(), NamedTiers(), NoNamedTiers).SelectionSource);
+        Assert.Equal("gpt-5.6-sol", QueueTierTable.ResolveForStage(
+            staged, WorkStage.Review, new QueueSettings(), NamedTiers(), NoNamedTiers).Model);
+
+        var pin = defaults with { Model = "sonnet", LifecyclePin = true };
+        Assert.Equal(QueueSelectionSource.LifecyclePin, QueueTierTable.ResolveForStage(
+            pin, WorkStage.Review, new QueueSettings(), NamedTiers(), NoNamedTiers).SelectionSource);
+        Assert.Equal("sonnet", QueueTierTable.ResolveForStage(
+            pin, WorkStage.Review, new QueueSettings(), NamedTiers(), NoNamedTiers).Model);
+
+        var persisted = defaults with { Model = "sonnet", StageSelections = null };
+        var legacyReview = QueueTierTable.ResolveForStage(
+            persisted, WorkStage.Review, new QueueSettings(), NamedTiers(), NoNamedTiers);
+        Assert.Equal(QueueSelectionSource.PersistedLifecycleCompatibility, legacyReview.SelectionSource);
+        Assert.Equal("sonnet", legacyReview.Model);
+    }
 }

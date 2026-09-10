@@ -25,6 +25,8 @@ namespace Baton.Queue;
 /// <param name="TierOverride">True when the item's axes differed from its tier's.</param>
 /// <param name="OverrideReason">The item's <c>--reason</c>, present only alongside <paramref name="TierOverride"/>.</param>
 /// <param name="Room">The room the item launched into; absent for a wait, present for a failure that had already provisioned one.</param>
+/// <param name="SelectionSource">Whether the effective axes came from a stage default, stage override,
+/// explicit lifecycle pin or persisted-item compatibility rule.</param>
 public sealed record QueueDecisionEntry(
     [property: JsonPropertyName("at")] DateTimeOffset At,
     [property: JsonPropertyName("tag")]
@@ -59,7 +61,9 @@ public sealed record QueueDecisionEntry(
     string? OverrideReason = null,
     [property: JsonPropertyName("room")]
     [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
-    string? Room = null)
+    string? Room = null,
+    [property: JsonPropertyName("selectionSource")]
+    QueueSelectionSource SelectionSource = QueueSelectionSource.StageDefault)
 {
     public const string Launched = "launched";
     public const string Waited = "waited";
