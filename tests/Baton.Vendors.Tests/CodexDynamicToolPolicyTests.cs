@@ -962,25 +962,77 @@ public sealed class CodexDynamicToolPolicyTests
     }
 
     [Fact]
-    public async Task Timed_out_volatile_diff_is_replayed_without_rerunning_its_external_driver()
+    public async Task Timed_out_volatile_diff_gets_one_retry_after_expiry_then_replays_that_failure()
     {
+        var clock = new StepClock(new DateTimeOffset(2026, 9, 10, 12, 0, 0, TimeSpan.Zero));
         using var fixture = new PolicyFixture(
             new PermissionGrant(RunShellCommands: true),
             ["report.md"],
             // wait-ok: injected ceiling reaches the timeout branch quickly; the child is killed there.
-            commandCeiling: _ => TimeSpan.FromMilliseconds(500));
+            commandCeiling: _ => TimeSpan.FromMilliseconds(500),
+            timeProvider: clock);
         var command = HangingExternalDiffCommand(fixture.Workspace, "volatile-timeout");
 
-        var timedOut = await fixture.ExecuteAsync(
+        var firstFailure = await fixture.ExecuteAsync(
             CodexDynamicToolPolicy.RunCommandTool, new { command = command.CommandLine });
-        var replay = await fixture.ExecuteAsync(
+        var immediateReplay = await fixture.ExecuteAsync(
+            CodexDynamicToolPolicy.RunCommandTool, new { command = command.CommandLine });
+        clock.Advance(RepeatedToolCallLedger.Window + TimeSpan.FromSeconds(1));
+        var failureAfterExpiry = await fixture.ExecuteAsync(
+            CodexDynamicToolPolicy.RunCommandTool, new { command = command.CommandLine });
+        var replayAfterExpiry = await fixture.ExecuteAsync(
             CodexDynamicToolPolicy.RunCommandTool, new { command = command.CommandLine });
 
-        Assert.False(timedOut.Success, timedOut.Text);
-        Assert.Contains("default command ceiling", timedOut.Text, StringComparison.Ordinal);
-        Assert.False(replay.Success, replay.Text);
-        Assert.Contains("replayed: identical command", replay.Text, StringComparison.Ordinal);
-        Assert.Single(File.ReadAllLines(command.CounterPath));
+        Assert.False(firstFailure.Success, firstFailure.Text);
+        Assert.Contains("default command ceiling", firstFailure.Text, StringComparison.Ordinal);
+        Assert.False(immediateReplay.Success, immediateReplay.Text);
+        Assert.Contains("replayed: identical command", immediateReplay.Text, StringComparison.Ordinal);
+        Assert.False(failureAfterExpiry.Success, failureAfterExpiry.Text);
+        Assert.DoesNotContain("replayed: identical command", failureAfterExpiry.Text, StringComparison.Ordinal);
+        Assert.False(replayAfterExpiry.Success, replayAfterExpiry.Text);
+        Assert.Contains("replayed: identical command", replayAfterExpiry.Text, StringComparison.Ordinal);
+        Assert.Equal(2, File.ReadAllLines(command.CounterPath).Length);
+    }
+
+    [Fact]
+    public async Task Failed_volatile_diff_invalidates_cached_command_and_read_but_keeps_its_failure()
+    {
+        using var fixture = new PolicyFixture(
+            new PermissionGrant(ReadFiles: true, RunShellCommands: true),
+            ["report.md"],
+            // wait-ok: injected ceiling reaches the timeout branch quickly; the child is killed there.
+            commandCeiling: _ => TimeSpan.FromMilliseconds(500));
+        var volatileCommand = HangingExternalDiffCommand(fixture.Workspace, "volatile-cache");
+        var originalStamp = File.GetLastWriteTimeUtc(volatileCommand.MutatedPath);
+        var cachedCommand = OperatingSystem.IsWindows()
+            ? $"type {Path.GetFileName(volatileCommand.MutatedPath)}"
+            : $"cat ./{Path.GetFileName(volatileCommand.MutatedPath)}";
+
+        var commandBefore = await fixture.ExecuteAsync(
+            CodexDynamicToolPolicy.RunCommandTool, new { command = cachedCommand });
+        var readBefore = await fixture.ExecuteAsync(
+            CodexDynamicToolPolicy.ReadTextTool, new { path = volatileCommand.MutatedPath });
+        var failed = await fixture.ExecuteAsync(
+            CodexDynamicToolPolicy.RunCommandTool, new { command = volatileCommand.CommandLine });
+        // Make the stat pair identical so only explicit invalidation can expose the helper's mutation.
+        File.SetLastWriteTimeUtc(volatileCommand.MutatedPath, originalStamp);
+        var failureReplay = await fixture.ExecuteAsync(
+            CodexDynamicToolPolicy.RunCommandTool, new { command = volatileCommand.CommandLine });
+        var readAfter = await fixture.ExecuteAsync(
+            CodexDynamicToolPolicy.ReadTextTool, new { path = volatileCommand.MutatedPath });
+        var commandAfter = await fixture.ExecuteAsync(
+            CodexDynamicToolPolicy.RunCommandTool, new { command = cachedCommand });
+
+        Assert.Contains("before", commandBefore.Text, StringComparison.Ordinal);
+        Assert.Equal("before", readBefore.Text);
+        Assert.False(failed.Success, failed.Text);
+        Assert.Equal("AFTER!", readAfter.Text);
+        Assert.DoesNotContain("replayed: identical read", readAfter.Text, StringComparison.Ordinal);
+        Assert.Contains("AFTER!", commandAfter.Text, StringComparison.Ordinal);
+        Assert.DoesNotContain("replayed: identical command", commandAfter.Text, StringComparison.Ordinal);
+        Assert.False(failureReplay.Success, failureReplay.Text);
+        Assert.Contains("replayed: identical command", failureReplay.Text, StringComparison.Ordinal);
+        Assert.Single(File.ReadAllLines(volatileCommand.CounterPath));
     }
 
     [Fact]
@@ -1819,10 +1871,13 @@ public sealed class CodexDynamicToolPolicyTests
         return ($"./{name}", counterPath);
     }
 
-    private static (string CommandLine, string CounterPath) HangingExternalDiffCommand(
+    private static (string CommandLine, string CounterPath, string MutatedPath) HangingExternalDiffCommand(
         string directory, string name)
     {
         var counterPath = Path.Combine(directory, $"{name}-runs.txt");
+        var mutatedName = $"{name}-mutated.txt";
+        var mutatedPath = Path.Combine(directory, mutatedName);
+        File.WriteAllText(mutatedPath, "before");
         var helperName = $"{name}-diff.sh";
         var helperPath = Path.Combine(directory, helperName);
         var hang = OperatingSystem.IsWindows()
@@ -1830,7 +1885,8 @@ public sealed class CodexDynamicToolPolicyTests
             : "exec sleep 30";
         File.WriteAllText(
             helperPath,
-            $"#!/bin/sh\nprintf 'ran\\n' >> {name}-runs.txt\nprintf 'BEFORE-HANG\\n'\n{hang}\n");
+            $"#!/bin/sh\nprintf 'ran\\n' >> {name}-runs.txt\nprintf 'AFTER!' > {mutatedName}\n"
+            + $"printf 'BEFORE-HANG\\n'\n{hang}\n");
         if (!OperatingSystem.IsWindows())
         {
             File.SetUnixFileMode(
@@ -1855,7 +1911,7 @@ public sealed class CodexDynamicToolPolicyTests
         RunGitSetup(directory, "add", ".gitattributes", "tracked.txt");
         File.WriteAllText(trackedPath, "after changed\n");
 
-        return ("git diff --ext-diff", counterPath);
+        return ("git diff --ext-diff", counterPath, mutatedPath);
     }
 
     private static void RunGitSetup(string directory, params string[] arguments)
@@ -1939,6 +1995,15 @@ public sealed class CodexDynamicToolPolicyTests
             ValueTask.FromException(new IOException("synthetic capture write failure"));
     }
 
+    private sealed class StepClock(DateTimeOffset start) : TimeProvider
+    {
+        private DateTimeOffset _now = start;
+
+        public override DateTimeOffset GetUtcNow() => _now;
+
+        public void Advance(TimeSpan by) => _now += by;
+    }
+
     private sealed class PolicyFixture : IDisposable
     {
         public PolicyFixture(
@@ -1946,7 +2011,8 @@ public sealed class CodexDynamicToolPolicyTests
             IReadOnlyList<string> outputs,
             bool createInput = false,
             Func<ShellCommandClass, TimeSpan>? commandCeiling = null,
-            Func<string, Stream>? commandCaptureStreamFactory = null)
+            Func<string, Stream>? commandCaptureStreamFactory = null,
+            TimeProvider? timeProvider = null)
         {
             Root = Path.Combine(Path.GetTempPath(), $"baton-codex-policy-{Guid.NewGuid():N}");
             Workspace = Path.Combine(Root, "workspace");
@@ -1961,7 +2027,8 @@ public sealed class CodexDynamicToolPolicyTests
             }
             Policy = commandCaptureStreamFactory is null
                 ? new CodexDynamicToolPolicy(
-                    grant, Workspace, Output, createInput ? [Input] : [], outputs, commandCeiling)
+                    grant, Workspace, Output, createInput ? [Input] : [], outputs, commandCeiling,
+                    timeProvider)
                 : new CodexDynamicToolPolicy(
                     grant,
                     Workspace,
@@ -1969,7 +2036,7 @@ public sealed class CodexDynamicToolPolicyTests
                     createInput ? [Input] : [],
                     outputs,
                     commandCeiling,
-                    timeProvider: null,
+                    timeProvider,
                     commandCaptureStreamFactory);
         }
 

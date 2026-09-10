@@ -1416,7 +1416,7 @@ public sealed class CodexDynamicToolPolicy
 
     private void RecordExecutedCommandOutcome(string commandLine, string output, bool succeeded)
     {
-        if (!RepeatedToolCallLedger.IsVolatile(commandLine))
+        if (!RepeatedToolCallLedger.IsVolatile(commandLine) || !succeeded)
         {
             _repeats.ForgetAllCommands(exceptCommandLine: commandLine);
             _repeats.ForgetAllReads();

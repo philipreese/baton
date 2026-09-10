@@ -109,9 +109,10 @@ public sealed class RepeatedToolCallLedger
     /// instrument. #2002's measured offender was polling LOCAL processes it had backgrounded itself,
     /// which rule 1 removes at the source.
     /// <para>
-    /// <b>This list is also the ledger's only proof that a command did not touch the tree.</b> Every
-    /// one of these five reads and never writes, which is what lets an executing command on this list
-    /// leave the other command entries alone — see <see cref="ForgetAllCommands"/>.
+    /// <b>A successful command on this list is treated as an observation.</b> Its own answer stays
+    /// fresh and the other cached observations remain available. A failed attempt is different: a
+    /// helper such as an external diff driver may already have mutated the tree before the failure,
+    /// so that outcome invalidates the other entries — see <see cref="ForgetAllCommands"/>.
     /// </para>
     /// </summary>
     public static readonly IReadOnlyList<string> VolatileCommandPrefixes =
@@ -165,6 +166,14 @@ public sealed class RepeatedToolCallLedger
                 || entry.OutputSucceeded is not false
                 || now - entry.ExecutedAt > Window))
         {
+            // An admitted retry of an existing attempt starts a new window. Replacing the entry also
+            // resets Served and removes an expired failure, so if this attempt fails its immediate
+            // re-ask is a replay rather than a refusal. A first failure is established when its
+            // outcome is recorded, and successful observations leave no entry at all.
+            if (hasEntry)
+            {
+                Put(key, new Entry { ExecutedAt = now });
+            }
             return RepeatDecision.Execute;
         }
 
@@ -247,12 +256,15 @@ public sealed class RepeatedToolCallLedger
     {
         ArgumentNullException.ThrowIfNull(commandLine);
         ArgumentNullException.ThrowIfNull(output);
+        var key = CommandKey(commandLine);
         if (IsVolatile(commandLine) && succeeded)
         {
+            // A successful retry after a prior failure is a fresh observation, not a cached result.
+            // Remove the admission placeholder so subsequent successful asks remain entry-free too.
+            Forget(key);
             return;
         }
 
-        var key = CommandKey(commandLine);
         if (TryTouch(key, out var entry))
         {
             entry.Output = output;
@@ -260,9 +272,9 @@ public sealed class RepeatedToolCallLedger
             return;
         }
 
-        // ClassifyCommand deliberately creates no entry for a volatile observation, so its failed
-        // outcome establishes the entry here. Non-volatile commands already established theirs
-        // before execution and keep the prior no-entry behavior.
+        // A first volatile attempt has no entry until its terminal failure is recorded here. This is
+        // also the fallback for a caller that records without classifying first; non-volatile
+        // commands retain the prior no-entry behavior.
         if (IsVolatile(commandLine))
         {
             Put(key, new Entry
@@ -374,10 +386,10 @@ public sealed class RepeatedToolCallLedger
     /// other entry was recorded against a tree that no longer exists.
     /// </para>
     /// <para>
-    /// A command on <see cref="VolatileCommandPrefixes"/> never calls this: those five are the only
-    /// commands this ledger can prove read-only. Everything else is assumed to have written, which is
-    /// the fail-closed direction — it costs a re-run, where the other direction cost a wrong answer
-    /// reported as a fresh one.
+    /// A successful command on <see cref="VolatileCommandPrefixes"/> does not call this. A failed one
+    /// does, because a helper may have mutated before failing. Everything else is assumed to have
+    /// written, which is the fail-closed direction — it costs a re-run, where the other direction
+    /// cost a wrong answer reported as a fresh one.
     /// </para>
     /// </summary>
     public void ForgetAllCommands(string? exceptCommandLine = null)
@@ -551,8 +563,8 @@ public sealed class RepeatedToolCallLedger
     /// between the two characters is dropped). Quote-aware so a separator inside
     /// <c>git log -S "a;b"</c> is not a boundary. Deliberately not
     /// <see cref="ShellCommandPatternMatcher"/>'s segmenter: that one refuses outright on a backslash
-    /// or a <c>$</c> under a scoped grant, and this question — "is every part of this line one of five
-    /// read-only commands" — has to be answerable for every line, including a Windows path.
+    /// or a <c>$</c> under a scoped grant, and this question — "is every part of this line one of the
+    /// five volatile command shapes" — has to be answerable for every line, including a Windows path.
     /// </summary>
     private static List<string> SplitTopLevelSegments(string commandLine)
     {
