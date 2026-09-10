@@ -90,13 +90,13 @@ public sealed class FleetProjectionWriter : BackgroundService
     public static readonly TimeSpan DefaultInterval = TimeSpan.FromSeconds(30);
 
     /// <summary>
-    /// #1981: how many missed ticks make the projection "stale" — the one place that multiple is
-    /// stated. Three, not one: a single tick that runs long (a room walk under IO contention) is
-    /// ordinary, and a reader that shouted on every one of those would be the false-firing banner
-    /// #1613 already had to pull out of <c>glass.html</c> once. Every consumer derives its own
-    /// threshold from <see cref="StaleAfter"/> rather than transcribing 90 seconds. The current reader
-    /// is <c>FleetStatusTool</c>'s <c>stale</c> flag; the daemon-served page consumes the projection
-    /// itself and does not define a second copy of this threshold.
+    /// #1981: how many missed ticks make the projection "stale" for the MCP reader. Three, not one:
+    /// a single tick that runs long (a room walk under IO contention) is ordinary, and a reader that
+    /// shouted on every one of those would be the false-firing banner #1613 already had to pull out
+    /// of <c>glass.html</c> once. <c>FleetStatusTool</c>'s <c>stale</c> flag derives this threshold
+    /// from <see cref="StaleAfter"/>. The daemon-served page has a distinct ten-minute
+    /// <c>RUNNING_SUSPICION_MS</c> check for Running rooms; it is not a second copy of this
+    /// three-tick projection threshold.
     /// </summary>
     public const int StaleAfterTicks = 3;
 

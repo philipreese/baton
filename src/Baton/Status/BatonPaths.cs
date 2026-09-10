@@ -509,7 +509,6 @@ public static class BatonPaths
     public const string SecretPatternsFileName = "secretpatterns.local.txt";
 
     /// <summary>
-    /// <summary>
     /// <c>{Root}/watches</c> — one JSON file per <c>baton watch</c> registration (#1488), named
     /// <c>&lt;watch-id&gt;.json</c>. <c>Baton.Cli</c>'s <c>WatchStore</c> (not referenced from here —
     /// this project has no <c>Baton.Cli</c> reference) owns what each file holds and how exactly-once

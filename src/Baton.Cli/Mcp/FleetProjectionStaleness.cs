@@ -11,20 +11,22 @@ namespace Baton.Cli.Mcp;
 /// <see cref="BatonPaths.FleetProjectionFile"/> for thirteen minutes while the scheduled task still
 /// reported Running, and every consumer kept serving the frozen picture as if it were current. This
 /// type is the programmatic half of the fix — <c>fleet_status</c> carries the projection's age and a
-/// <c>stale</c> flag, so a conductor reading the tool sees the same fact the operator's banner shows.
+/// <c>stale</c> flag after the writer's three-tick threshold. The daemon-served page independently
+/// uses its ten-minute <c>RUNNING_SUSPICION_MS</c> check when rooms are Running; these related
+/// diagnostics intentionally do not claim threshold parity.
 /// </para>
 /// <para>
 /// It answers a question about the DAEMON, not about the rooms: <c>fleet_status</c> itself scans the
 /// rooms directory live on every call, so its own <c>rooms[]</c> are always fresh. The daemon-served
-/// Fleet Glass page reads the same projection file, so its freshness is a property of the daemon
-/// writer rather than of the room scan.
+/// Fleet Glass page also reads the projection file, but its Running-room suspicion uses the page's
+/// independent threshold rather than this MCP reading.
 /// </para>
 /// <para>
-/// <b>Absent, unreadable, or unparseable reads STALE, with no age.</b> Same fail-closed posture as
-/// the daemon-served page's projection read: "no evidence the daemon wrote anything" is the same
-/// operational fact as "it last wrote an hour ago", and the alternative — reporting a clean
-/// <c>stale: false</c> because the file is missing — is exactly the silence #1981 is about. The age is
-/// omitted rather than fabricated when it cannot be computed.
+/// <b>Absent, unreadable, or unparseable reads STALE, with no age.</b> For this MCP reading, "no
+/// evidence the daemon wrote anything" is the same operational fact as "it last wrote an hour ago",
+/// and the alternative — reporting a clean <c>stale: false</c> because the file is missing — is
+/// exactly the silence #1981 is about. The age is omitted rather than fabricated when it cannot be
+/// computed.
 /// </para>
 /// </summary>
 internal static class FleetProjectionStaleness

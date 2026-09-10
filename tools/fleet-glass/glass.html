@@ -2114,15 +2114,15 @@ document.addEventListener("click", (ev) => {
 });
 window.addEventListener("hashchange", applyRoute);
 
-// #1946 (spec/baton.md §11 C-11): ONE page, TWO deliveries. The Claude.ai artifact reaches the
-// fleet through the `baton` MCP connector, exactly as it always has; the daemon-served copy on the
-// operator's tailnet reaches the SAME fleet row same-origin. The daemon injects the meta below into
-// the bytes it serves, so an artifact — which never carries it — takes the mailbox path unchanged,
-// and there is no probe that could mistake a mailbox delivery for a tailnet one. Read once, at
-// parse time, because the delivery cannot change under a loaded page.
+// #1946 (spec/baton.md §11 C-11) originally supported two deliveries. #2170 retired the artifact
+// and mailbox delivery; the daemon-served page is the current delivery. The non-daemon branch below
+// remains intentionally dormant compatibility code for older copies. The daemon injects the meta
+// below into its bytes, so a retired artifact cannot accidentally opt itself into a same-origin
+// fetch. Read once, at parse time, because the delivery cannot change under a loaded page.
 const DAEMON_SERVED = !!document.querySelector('meta[name="baton-glass-source"][content="daemon"]');
 
-// #1946: the daemon's own delivery of the same snapshot `applySnapshot` renders for the mailbox.
+// #1946: the daemon's own delivery of the snapshot `applySnapshot` renders. The retired mailbox
+// path above remains only as dormant compatibility behavior.
 // GET-only and same-origin by construction: `/projection.json` is the file the daemon's
 // FleetProjectionWriter already writes, served as-is, and `/events` is an EventSource (which cannot
 // be anything but a GET). Nothing here originates or arrests anything — C-11's read-only tripwire,

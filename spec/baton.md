@@ -2898,12 +2898,11 @@ so the "unbuilt" ruling stands with no surviving near-miss to distinguish it fro
 and gate-pending visibility were intended to ride this mailbox; its transport (webhook,
 log-append, something else) is unspecified here — that is design work for the build.
 
-**Current reality, stated so this section cannot overclaim:** a transitional status page exists
-today *outside this repo* — a pushed snapshot rendered remotely for the operator. #1413 tracks
-folding its pipeline into `tools/`; it was the mailbox's display end and a prototype of the push
-loop, not a product surface this spec endorses. "Never a second application" constrains what Baton
-*builds and ships* — the MCP tool is the surface — and stays honest only while that page remains a
-disposable prototype rather than a maintained app.
+**Historical reality, retired with #2170:** a transitional status page once existed outside this
+repo — a pushed snapshot rendered remotely for the operator. It was the mailbox's display end and a
+prototype of the push loop, not a product surface this spec endorsed. The retired delivery is
+recorded here only to explain this section's former terminology; Baton now has no supported
+artifact or mailbox delivery.
 
 ### §6 schema — `fleet_status`
 
