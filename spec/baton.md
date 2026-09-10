@@ -6816,7 +6816,7 @@ satisfied rather than avoided: `WorkItemLifecycle` is the code that advances the
 
 `baton queue add <tag> --role <role> --spec <file> (--issue <n> | --workspace <dir>) [--scope
 engine|tooling|docs] [--adapter] [--model] [--effort] [--timeout <minutes>] [--max-tool-steps]
-[--token-budget] [--override-runway <reason>] [--reason <why>]`, plus `list`, `hold`, `resume`, and
+[--token-budget] [--override-runway <reason>] [--reason <why>]`, plus `list`, `hold`, `resume`, `cancel <tag>`, and
 `import <file>`.
 
 **No verb launches anything.** Adding an item is a durable request; the running daemon is the only
@@ -6824,6 +6824,13 @@ thing that dispatches, which is what keeps one auditable path into a room. `hold
 launches without stopping the daemon — the usage harvester, the projection writer and the delivery
 poller keep running and live lanes are untouched, the same "work already running is unaffected"
 posture the runway hold (§7) takes.
+
+**`cancel <tag>` cancels only a request that has not launched (#2159).** It changes the retained queue
+item from `queued` to `cancelled` and appends a `cancelled` decision-ledger fact; it deletes neither the
+item, its copied brief, its worktree, nor its branch. The cancellation mutation and the scheduler's
+`queued`→`launched` claim take the same queue lock, so exactly one wins. A command that finds an already
+launched item refuses with `baton cancel <room-dir>`, the existing room-level remedy; missing and already
+cancelled tags report that fact rather than pretending a new cancellation occurred.
 
 `--issue <n>` provisions at **add** time, not launch time: `gh issue develop <n> --name <n>-lane`,
 `git worktree add <root>/w<n> <n>-lane`, then the workspace is trusted (§9) — **at the ceiling its

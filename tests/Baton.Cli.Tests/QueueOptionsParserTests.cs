@@ -164,6 +164,18 @@ public sealed class QueueOptionsParserTests
     }
 
     [Fact]
+    public void Cancel_takes_one_valid_queue_tag()
+    {
+        var options = QueueOptionsParser.Parse(["cancel", "2159-lane"]);
+
+        Assert.Equal(QueueVerb.Cancel, options.Verb);
+        Assert.Equal("2159-lane", options.Tag);
+        Assert.Throws<CliArgumentException>(() => QueueOptionsParser.Parse(["cancel"]));
+        Assert.Throws<CliArgumentException>(() => QueueOptionsParser.Parse(["cancel", "has spaces"]));
+        Assert.Throws<CliArgumentException>(() => QueueOptionsParser.Parse(["cancel", "a", "b"]));
+    }
+
+    [Fact]
     public void Import_takes_exactly_one_path()
     {
         Assert.Equal("q.json", QueueOptionsParser.Parse(["import", "q.json"]).ImportFilePath);

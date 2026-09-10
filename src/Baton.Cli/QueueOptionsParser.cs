@@ -16,7 +16,7 @@ public static class QueueOptionsParser
         "[--lifecycle] [--scope engine|tooling|docs] [--adapter <a>] [--model <m>] [--effort <e>] " +
         "[--timeout <minutes>] " +
         "[--max-tool-steps <n>] [--token-budget <n>] [--override-runway <reason>] [--reason <why>] | " +
-        "baton queue list | baton queue hold | baton queue resume | baton queue import <file>. " +
+        "baton queue list | baton queue hold | baton queue resume | baton queue cancel <tag> | baton queue import <file>. " +
         "A worktree provisioned by --issue inherits its repository's recorded ceiling; " +
         "when no path in that repository is trusted it is recorded at 'all', and the add says which.";
 
@@ -35,6 +35,7 @@ public static class QueueOptionsParser
             "list" => ParseBare(QueueVerb.List, args),
             "hold" => ParseBare(QueueVerb.Hold, args),
             "resume" => ParseBare(QueueVerb.Resume, args),
+            "cancel" => ParseCancel(args),
             "import" => ParseImport(args),
             _ => throw new CliArgumentException($"Unknown 'baton queue' sub-verb '{args[0]}'. {Usage}"),
         };
@@ -58,6 +59,23 @@ public static class QueueOptionsParser
         }
 
         return new QueueOptions(QueueVerb.Import, ImportFilePath: args[1]);
+    }
+
+    private static QueueOptions ParseCancel(IReadOnlyList<string> args)
+    {
+        if (args.Count != 2)
+        {
+            throw new CliArgumentException($"'baton queue cancel' takes exactly one queue tag. {Usage}");
+        }
+
+        if (!QueueTag.IsValid(args[1]))
+        {
+            throw new CliArgumentException(
+                $"'{args[1]}' is not a usable queue tag ({QueueTag.Rule}).",
+                "pass the tag shown by 'baton queue list'.");
+        }
+
+        return new QueueOptions(QueueVerb.Cancel, Tag: args[1]);
     }
 
     private static QueueOptions ParseAdd(IReadOnlyList<string> args)

@@ -10,7 +10,7 @@ namespace Baton.Queue;
 /// </summary>
 /// <param name="At">When the evaluation happened, UTC.</param>
 /// <param name="Tag">The candidate item's tag, or null for a decision about no item at all (<c>no-items</c>, <c>hold</c>).</param>
-/// <param name="Decision"><c>launched</c> | <c>waited</c> | <c>failed</c>.</param>
+/// <param name="Decision"><c>launched</c> | <c>waited</c> | <c>failed</c> | <c>cancelled</c>.</param>
 /// <param name="Reason">
 /// For <c>waited</c>, a <see cref="QueueWaitReasons.Token"/> value. For <c>failed</c>, the error. Null
 /// for <c>launched</c> — a launch has no reason beyond the counters beside it.
@@ -64,6 +64,9 @@ public sealed record QueueDecisionEntry(
     public const string Launched = "launched";
     public const string Waited = "waited";
     public const string Failed = "failed";
+
+    /// <summary>An operator cancelled a queued request before the scheduler claimed its launch.</summary>
+    public const string Cancelled = "cancelled";
 
     /// <summary>
     /// A work item moved from one <see cref="WorkStage"/> to the next (#1934 slice 2). A fourth

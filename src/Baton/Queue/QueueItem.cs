@@ -142,6 +142,10 @@ public sealed record QueueItem
 
     public DateTimeOffset? LaunchedAt { get; init; }
 
+    /// <summary>When an operator cancelled this request before launch. Its item and spec remain in the
+    /// queue history; cancellation is a fact, not deletion.</summary>
+    public DateTimeOffset? CancelledAt { get; init; }
+
     /// <summary>Why this item is <see cref="QueueItemState.Failed"/>; null otherwise.</summary>
     public string? Error { get; init; }
 
@@ -179,7 +183,7 @@ public sealed record QueueItem
 }
 
 /// <summary>
-/// Where an item is with respect to <em>launching</em>. Four states, and deliberately still four: the
+/// Where an item is with respect to <em>launching</em>. Five states: cancellation is terminal, while the
 /// lifecycle a work item moves through is <see cref="WorkStage"/>, a separate axis, because "queued"
 /// and "fix round 2" are answers to different questions and folding them into one enum would make
 /// every state check ask both.
@@ -201,4 +205,7 @@ public enum QueueItemState
     /// code path moves an item out of it, so clearing one is an operator action.
     /// </summary>
     Failed,
+
+    /// <summary>The operator cancelled this request before the scheduler claimed its launch.</summary>
+    Cancelled,
 }

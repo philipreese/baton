@@ -130,6 +130,52 @@ public sealed class QueueSchedulerServiceTests
     }
 
     [Fact]
+    public async Task A_cancel_that_wins_the_queue_mutation_lock_prevents_the_schedulers_stale_candidate_from_launching()
+    {
+        var home = CreateTempHome();
+        using var scope = BatonEnvironmentSnapshot.BeginScope(BatonEnvironmentSnapshot.Blank with { HomeOverride = home });
+        try
+        {
+            await QueueStore.MutateAsync(BatonPaths.QueueFile, s => s with { Items = [Item("2159-lane")] }, Ct);
+            var claimReached = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
+            var allowClaim = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
+            var launched = false;
+            var service = new QueueSchedulerService(
+                (_, _) =>
+                {
+                    launched = true;
+                    return Task.FromResult(new QueueLaunchOutcome(null));
+                },
+                _ => Task.FromResult(0d),
+                () => 16d,
+                () => DateTimeOffset.UtcNow,
+                beforeLaunchClaim: _ =>
+                {
+                    claimReached.TrySetResult(true);
+                    return allowClaim.Task;
+                });
+
+            var tick = service.TickOnceAsync(Ct);
+            await claimReached.Task.WaitAsync(Ct);
+
+            await QueueCommand.ExecuteAsync(new QueueOptions(QueueVerb.Cancel, Tag: "2159-lane"), TextWriter.Null, Ct);
+            allowClaim.TrySetResult(true);
+            await tick;
+
+            Assert.False(launched);
+            var item = Assert.Single((await QueueStore.LoadAsync(BatonPaths.QueueFile, Ct)).Items);
+            Assert.Equal(QueueItemState.Cancelled, item.State);
+            Assert.Contains(
+                await QueueDecisionLedgerStore.ReadAllAsync(BatonPaths.QueueDecisionLedgerFile, Ct),
+                fact => fact.Decision == QueueDecisionEntry.Cancelled && fact.Tag == "2159-lane");
+        }
+        finally
+        {
+            Cleanup(home);
+        }
+    }
+
+    [Fact]
     public async Task The_item_is_marked_launched_before_the_launch_starts_so_a_shutdown_mid_launch_cannot_relaunch_it()
     {
         var home = CreateTempHome();

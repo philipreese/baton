@@ -6,7 +6,7 @@ using Baton.Vendors;
 namespace Baton.Cli;
 
 /// <summary>
-/// <c>baton queue add|list|hold|resume|import</c> (#1934 slice 1): the operator's control surface over
+/// <c>baton queue add|list|hold|resume|cancel|import</c> (#1934 slice 1): the operator's control surface over
 /// the dispatch queue the daemon's scheduler drains. Produces no <see cref="CommandResult"/> — there
 /// is no workflow to pump — so it joins <c>trust</c>/<c>keep</c>/<c>watch</c> in <c>Program.cs</c>'s
 /// carve-out rather than the CommandResult/FlowStateReporter switch.
@@ -33,6 +33,7 @@ public static class QueueCommand
             QueueVerb.List => ListAsync(output, cancellationToken),
             QueueVerb.Hold => SetHoldAsync(true, output, cancellationToken),
             QueueVerb.Resume => SetHoldAsync(false, output, cancellationToken),
+            QueueVerb.Cancel => CancelAsync(options.Tag!, output, cancellationToken),
             QueueVerb.Import => ImportAsync(options, output, cancellationToken),
             _ => throw new ArgumentOutOfRangeException(nameof(options)),
         };
@@ -186,6 +187,13 @@ public static class QueueCommand
                 "pick a different tag, or wait for the lane to settle.");
         }
 
+        if (existing is { State: QueueItemState.Cancelled })
+        {
+            throw new CliArgumentException(
+                $"Item '{tag}' was cancelled before launch. Re-adding it would overwrite that cancellation record.",
+                "pick a different tag for new work.");
+        }
+
         if (existing?.Stage is { } stage && stage != WorkStage.Implement)
         {
             throw new CliArgumentException(
@@ -248,6 +256,62 @@ public static class QueueCommand
             ? "Queue held. The daemon keeps running and live lanes are untouched; no new item will launch."
             : "Queue resumed. The next scheduler tick may launch an item.");
         return 0;
+    }
+
+    /// <summary>Cancels one request that has not been launched.</summary>
+    /// <remarks>
+    /// The state transition is inside <see cref="QueueStore.MutateAsync"/>, the same mutex-protected
+    /// read-modify-write seam the scheduler uses to claim a launch. Thus either this mutation changes
+    /// <c>Queued</c> to <c>Cancelled</c>, or the scheduler has already changed it to <c>Launched</c> and
+    /// the operator is directed to the room-level cancellation verb. The item, its copied brief, and
+    /// its provisioned worktree are deliberately retained; the item state and the decision ledger are
+    /// the durable cancellation record.
+    /// </remarks>
+    private static async Task<int> CancelAsync(string tag, TextWriter output, CancellationToken cancellationToken)
+    {
+        QueueItem? observed = null;
+        var cancelledAt = DateTimeOffset.UtcNow;
+        await QueueStore.MutateAsync(BatonPaths.QueueFile, snapshot =>
+        {
+            observed = snapshot.Items.FirstOrDefault(item => string.Equals(item.Tag, tag, StringComparison.Ordinal));
+            if (observed?.State != QueueItemState.Queued)
+            {
+                return snapshot;
+            }
+
+            return snapshot with
+            {
+                Items = snapshot.Items.Select(item => string.Equals(item.Tag, tag, StringComparison.Ordinal)
+                    ? item with { State = QueueItemState.Cancelled, CancelledAt = cancelledAt }
+                    : item).ToList(),
+            };
+        }, cancellationToken).ConfigureAwait(false);
+
+        switch (observed)
+        {
+            case null:
+                throw new CliArgumentException($"Queue item '{tag}' does not exist.", "run 'baton queue list' to see recorded tags.");
+            case { State: QueueItemState.Queued }:
+                await QueueDecisionLedgerStore.AppendAsync(
+                    new QueueDecisionEntry(cancelledAt, tag, QueueDecisionEntry.Cancelled,
+                        "operator cancelled before launch", LiveWeight: 0, FreeGb: null, FloorGb: 0),
+                    previousVerdictKey: null, BatonPaths.QueueDecisionLedgerFile, cancellationToken).ConfigureAwait(false);
+                output.WriteLine($"Cancelled queued item '{tag}'. Its spec, worktree, and branch were retained.");
+                return 0;
+            case { State: QueueItemState.Cancelled }:
+                throw new CliArgumentException($"Queue item '{tag}' was already cancelled at {observed.CancelledAt:O}.");
+            case { State: QueueItemState.Launched, RoomDirectory: { Length: > 0 } room }:
+                throw new CliArgumentException(
+                    $"Queue item '{tag}' is already launched into room '{room}'.",
+                    $"cancel the launched lane with 'baton cancel {room}'.");
+            case { State: QueueItemState.Launched }:
+                throw new CliArgumentException(
+                    $"Queue item '{tag}' is already launched.",
+                    "run 'baton queue list' to find its room, then use 'baton cancel <room-dir>'.");
+            default:
+                throw new CliArgumentException(
+                    $"Queue item '{tag}' is already {observed.State.ToString().ToLowerInvariant()} and cannot be cancelled as a queued request.");
+        }
     }
 
     private static async Task<int> ImportAsync(QueueOptions options, TextWriter output, CancellationToken cancellationToken)

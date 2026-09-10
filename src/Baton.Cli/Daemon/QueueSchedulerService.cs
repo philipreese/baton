@@ -43,6 +43,7 @@ public sealed class QueueSchedulerService : BackgroundService
     private readonly Func<double?> _freeGb;
     private readonly Func<DateTimeOffset> _now;
     private readonly WorkItemAdvancer _advancer;
+    private readonly Func<CancellationToken, Task>? _beforeLaunchClaim;
 
     private DateTimeOffset? _lastLaunchAt;
     private string? _lastVerdictKey;
@@ -63,7 +64,8 @@ public sealed class QueueSchedulerService : BackgroundService
         Func<double?>? freeGb,
         Func<DateTimeOffset>? now,
         WorkItemAdvancer? advancer = null,
-        Func<CancellationToken, Task<IReadOnlyList<QueueLaneAdoption>>>? adopt = null)
+        Func<CancellationToken, Task<IReadOnlyList<QueueLaneAdoption>>>? adopt = null,
+        Func<CancellationToken, Task>? beforeLaunchClaim = null)
     {
         _launch = launch ?? QueueLauncher.LaunchAsync;
         _adopt = adopt ?? QueueLauncher.AdoptLaunchedLanesAsync;
@@ -71,6 +73,7 @@ public sealed class QueueSchedulerService : BackgroundService
         _freeGb = freeGb ?? FreePhysicalMemory.TryReadGiB;
         _now = now ?? (() => DateTimeOffset.UtcNow);
         _advancer = advancer ?? new WorkItemAdvancer();
+        _beforeLaunchClaim = beforeLaunchClaim;
     }
 
     protected override async Task ExecuteAsync(CancellationToken stoppingToken)
@@ -226,14 +229,46 @@ public sealed class QueueSchedulerService : BackgroundService
         // written first, because it is what the next daemon reads to pick candidates; the LEDGER row
         // waits for the outcome, below.
         var roomDirectory = QueueLauncher.RoomDirectoryFor(item);
-        _lastLaunchAt = now;
-        await MarkAsync(item.Tag, existing => existing with
+        if (_beforeLaunchClaim is not null)
         {
-            State = QueueItemState.Launched,
-            RoomDirectory = roomDirectory,
-            LaunchedAt = now,
-            Error = null,
-        }).ConfigureAwait(false);
+            await _beforeLaunchClaim(cancellationToken).ConfigureAwait(false);
+        }
+
+        // Re-check Queued under QueueStore's mutation lock, rather than trusting the snapshot this
+        // tick read above: `baton queue cancel` owns the same seam. A cancellation that gets there
+        // first wins and this scheduler never starts a lane from its stale candidate.
+        var launchClaimed = false;
+        await QueueStore.MutateAsync(BatonPaths.QueueFile, snapshot =>
+        {
+            var current = snapshot.Items.FirstOrDefault(i => string.Equals(i.Tag, item.Tag, StringComparison.Ordinal));
+            if (current?.State != QueueItemState.Queued)
+            {
+                return snapshot;
+            }
+
+            launchClaimed = true;
+            return snapshot with
+            {
+                Items = Replace(snapshot.Items, item.Tag, existing => existing with
+                {
+                    State = QueueItemState.Launched,
+                    RoomDirectory = roomDirectory,
+                    LaunchedAt = now,
+                    Error = null,
+                }),
+            };
+        }, CancellationToken.None).ConfigureAwait(false);
+
+        if (!launchClaimed)
+        {
+            await RecordAsync(
+                new QueueDecisionEntry(now, null, QueueDecisionEntry.Waited,
+                    QueueWaitReasons.Token(QueueWaitReason.NoItems), decision.LiveWeight, decision.FreeGb, decision.FloorGb),
+                CancellationToken.None).ConfigureAwait(false);
+            return interval;
+        }
+
+        _lastLaunchAt = now;
 
         QueueLaunchOutcome outcome;
         try
