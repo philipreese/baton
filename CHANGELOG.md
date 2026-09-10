@@ -9,6 +9,26 @@ that carried them: `git show v0.35.0:src/Baton.Cli/CHANGELOG.md` (likewise `src/
 `release-please-config.json`. Everything below this line predates the split: the repo's single
 shared version through `0.14.0`.
 
+## [0.44.0](https://github.com/philipreese/baton/compare/v0.43.0...v0.44.0) (2026-09-10)
+
+
+### Features
+
+* **glass:** Add installed failure fallback ([#2171](https://github.com/philipreese/baton/issues/2171)) ([6778062](https://github.com/philipreese/baton/commit/67780624e3d3061c506e982462cafb255bc9052a))
+* **mutation:** Grace turn — one bounded final commit before a budget arrest is recorded ([#2162](https://github.com/philipreese/baton/issues/2162)) ([a03af1d](https://github.com/philipreese/baton/commit/a03af1da7a2b5ac521cef5e8af5467c3ee8aa729))
+* **queue:** Add queued-request cancellation ([#2173](https://github.com/philipreese/baton/issues/2173)) ([d056c70](https://github.com/philipreese/baton/commit/d056c70d5f26f9d12ed0530d2ab3629b8fea1514))
+* **queue:** Add stage-specific lifecycle selections ([#2184](https://github.com/philipreese/baton/issues/2184)) ([2912ee5](https://github.com/philipreese/baton/commit/2912ee509ec72133a43dea5b1e8b8d9b5a6b2975))
+
+
+### Bug Fixes
+
+* **codex:** Correct declared-output prompt guidance ([#2185](https://github.com/philipreese/baton/issues/2185)) ([17c9664](https://github.com/philipreese/baton/commit/17c9664f3d00ce7805614e11f3805a6cdbced330))
+
+
+### Miscellaneous
+
+* **glass:** Retire mailbox plane ([#2174](https://github.com/philipreese/baton/issues/2174)) ([5751c7e](https://github.com/philipreese/baton/commit/5751c7e1121c175e9dced32f2643b92dd311f816))
+
 ## [0.43.0](https://github.com/philipreese/baton/compare/v0.42.2...v0.43.0) (2026-09-09)
 
 
