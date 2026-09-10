@@ -238,6 +238,33 @@ public sealed class QueueCommandTests
     }
 
     [Fact]
+    public async Task Add_refuses_a_later_claude_stage_without_a_model_before_provisioning()
+    {
+        var home = CreateTempHome();
+        using var scope = BatonEnvironmentSnapshot.BeginScope(BatonEnvironmentSnapshot.Blank with { HomeOverride = home });
+        try
+        {
+            var refusal = await Assert.ThrowsAsync<CliArgumentException>(() => QueueCommand.ExecuteAsync(
+                new QueueOptions(
+                    QueueVerb.Add, Tag: "2142-lifecycle", Role: "implement", Issue: 2142, Lifecycle: true,
+                    StageSelections:
+                    [
+                        new QueueStageSelection { Stage = WorkStage.Review, Adapter = "claude" },
+                    ]),
+                TextWriter.Null, Ct));
+
+            Assert.Contains("review selection", refusal.Message, StringComparison.Ordinal);
+            Assert.Contains("standing model policy", refusal.Message, StringComparison.Ordinal);
+            Assert.False(File.Exists(BatonPaths.QueueFile));
+            Assert.False(Directory.Exists(BatonPaths.QueueSpecsDirectory));
+        }
+        finally
+        {
+            DirectoryCleanup.DeleteRecursively(home);
+        }
+    }
+
+    [Fact]
     public void A_model_only_stage_selection_keeps_its_unique_models_adapter()
     {
         var selections = QueueCommand.NormalizeLifecycleStageSelections(

@@ -6973,6 +6973,14 @@ when `--adapter` is named. With zero candidates, a named adapter's own validatio
 The resolved adapter's offline rules also check models when no adapter was named. These refusals
 precede row writes, spec copies, and worktree provisioning. Import does not perform this add-time validation.
 
+**Claude invocation models fail closed (#2142).** Queue admission, including every explicitly selected
+lifecycle stage, refuses a resolved Claude adapter with no nonblank invocation model before provisioning,
+spec copies or queue writes. The scheduler applies the same check to persisted/imported items before
+launch, and dispatch checks its final binding after template and continuation resolution but before
+provisioning or runway reservation. A display-only model stamp is not an invocation model. The refusal
+names the standing model policy and requires an explicit model; a resolved configured or role model
+remains valid. This rule neither supplies a shipped Claude default nor changes exhaustion handling.
+
 **`sonnet` is not promoted.** An item that asks for it gets it, and the launch fact says the tier was
 departed from. Nothing in the queue substitutes a model.
 

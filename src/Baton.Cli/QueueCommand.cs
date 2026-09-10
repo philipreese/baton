@@ -560,6 +560,13 @@ public static class QueueCommand
 
             var tier = QueueTierTable.ResolveForStage(
                 item, stage, settings, WorkerRoleCatalog.QueueTierFor, WorkerRoleCatalog.QueueTierForRole);
+            if (ClaudeInvocationModelPolicy.RefusalMessage(tier.Adapter, tier.Model) is { } refusal)
+            {
+                throw new CliArgumentException(
+                    $"The {WorkStages.Token(stage)} selection is invalid: {refusal}",
+                    ClaudeInvocationModelPolicy.ExplicitModelRemedy + ".");
+            }
+
             if (tier.Adapter is { } adapter && tier.Model is { } model)
             {
                 var candidates = WorkerModelCatalog.AdaptersFor(model);
