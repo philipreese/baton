@@ -46,6 +46,20 @@ public sealed class AgyStreamJsonProgressParsingTests
         Assert.Equal(stepType, progressEvent.Text);
     }
 
+    [Fact]
+    public void Step_update_DONE_tool_step_uses_the_actual_tool_name()
+    {
+        const string line = """
+            {"event":"step_update","step_update":{"conversation_id":"5ec0d582","step_index":2,"state":"DONE","step_type":"tool","tool_name":"view_file"}}
+            """;
+
+        var parsed = _adapter.TryParseProgressEvent(line, out var progressEvent);
+
+        Assert.True(parsed);
+        Assert.Equal("tool", progressEvent!.Kind);
+        Assert.Equal("view_file", progressEvent.Text);
+    }
+
     [Theory]
     [InlineData("user_input")]  // the user's own echoed input, not worker progress
     [InlineData("checkpoint")]  // internal bookkeeping
