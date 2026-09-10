@@ -9,6 +9,13 @@ that carried them: `git show v0.35.0:src/Baton.Cli/CHANGELOG.md` (likewise `src/
 `release-please-config.json`. Everything below this line predates the split: the repo's single
 shared version through `0.14.0`.
 
+## [0.44.3](https://github.com/philipreese/baton/compare/v0.44.2...v0.44.3) (2026-09-10)
+
+
+### Bug Fixes
+
+* **cancel:** Allow cancellation of quota parks with unknown reset time ([#2195](https://github.com/philipreese/baton/issues/2195)) ([cb3b8f1](https://github.com/philipreese/baton/commit/cb3b8f196661d1a66ea8267269bbe69e4fe57775))
+
 ## [0.44.2](https://github.com/philipreese/baton/compare/v0.44.1...v0.44.2) (2026-09-10)
 
 
