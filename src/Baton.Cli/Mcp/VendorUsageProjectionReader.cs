@@ -17,8 +17,7 @@ namespace Baton.Cli.Mcp;
 public static class VendorUsageProjectionReader
 {
     /// <summary>Every adapter tag a snapshot file can exist for — claude/agy since #1391, plus codex
-    /// since #1904 (whose snapshot is <see cref="VendorUsageProvenance.Derived"/>, not a vendor
-    /// counter). One list, owned by
+    /// since #1904 (whose current snapshot is an authenticated app-server vendor counter). One list, owned by
     /// <see cref="RunwayGate.MeasuredVendors"/> since #1848: the population that has an
     /// <see cref="Baton.Vendors.IVendorUsageSource"/> and the population whose snapshot files exist are
     /// the same population, and a second copy here is how one of them would go stale.</summary>
@@ -79,7 +78,8 @@ public static class VendorUsageProjectionReader
                     rings?.TryGetValue(w.Name, out ring);
                     var (ratePctPerHour, minutesToExhaustion) = VendorUsageBurn.Derive(ring, w.PercentUsed);
                     return new VendorUsageWindowView(
-                        w.Name, w.PercentUsed, w.ResetsAt, w.RawLine, ratePctPerHour, minutesToExhaustion);
+                        w.Name, w.PercentUsed, w.ResetsAt, w.RawLine, ratePctPerHour,
+                        minutesToExhaustion, w.LimitId, w.WindowKind, w.WindowDurationMins);
                 })
                 .ToList();
             entries.Add(new VendorUsageProjectionView(
@@ -113,10 +113,10 @@ public static class VendorUsageProjectionReader
 
 /// <summary>One vendor's projected usage windows plus its current live-lane count (issue #1391).</summary>
 /// <param name="Source">#1904: <c>"vendor"</c> when these windows are the vendor CLI's own counter,
-/// <c>"derived"</c> when Baton computed them itself because the vendor exposes no counter Baton has
-/// measured — see <see cref="VendorUsageProvenance"/>. Always emitted, never omitted: a reader that has
-/// to infer provenance from a missing key is exactly what this field exists to prevent, and
-/// <c>glass.html</c> renders the word beside the adapter tag on a derived block.</param>
+/// <c>"derived"</c> only for a persisted interim snapshot written by the retired Codex ledger
+/// estimate — see <see cref="VendorUsageProvenance"/>. Always emitted, never omitted: a reader that
+/// has to infer provenance from a missing key is exactly what this field exists to prevent, and
+/// <c>glass.html</c> renders the word beside the adapter tag on a derived compatibility block.</param>
 public sealed record VendorUsageProjectionView(
     [property: JsonPropertyName("adapter")] string Adapter,
     [property: JsonPropertyName("harvestedAt")] DateTimeOffset HarvestedAt,
@@ -146,7 +146,16 @@ public sealed record VendorUsageWindowView(
     double? RatePctPerHour = null,
     [property: JsonPropertyName("minutesToExhaustion")]
     [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
-    double? MinutesToExhaustion = null);
+    double? MinutesToExhaustion = null,
+    [property: JsonPropertyName("limitId")]
+    [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    string? LimitId = null,
+    [property: JsonPropertyName("windowKind")]
+    [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    string? WindowKind = null,
+    [property: JsonPropertyName("windowDurationMins")]
+    [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    int? WindowDurationMins = null);
 
 /// <summary>
 /// <c>fleet_status</c>'s top-level response shape since issue #1391 — was a bare JSON array of

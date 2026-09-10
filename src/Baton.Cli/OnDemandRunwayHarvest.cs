@@ -5,7 +5,8 @@ namespace Baton.Cli;
 
 /// <summary>
 /// #1923: the runway hold's own harvest, run once inline for a vendor whose counters decide its
-/// admission and whose snapshot cannot decide it — absent, or (since #1966) stale. <b>The bootstrap
+/// admission and whose snapshot cannot decide it — absent, stale, or an interim Codex shape that
+/// needs migration refresh. <b>The bootstrap
 /// this closes:</b> the daemon's <see cref="VendorUsageHarvester"/> used to harvest a vendor only while
 /// one of its lanes was live (or just after one exited), so a vendor with no lane running never got a
 /// snapshot, and the hold read "no snapshot" as halted — the first agy lane of a window could not start
@@ -23,9 +24,10 @@ namespace Baton.Cli;
 /// "harvested and it failed" stop being one message.
 /// </para>
 /// <para>
-/// <b>Spends at most one <c>/usage</c> call per gated vendor per dispatch</b>, and only when that
-/// vendor's snapshot cannot decide the admission — absent, or (since #1966) older than
-/// <see cref="RunwayThresholds.EffectiveMaxSnapshotAge"/> — spec/baton.md §7 states that bound and what
+/// <b>Spends at most one vendor usage read per gated vendor per dispatch</b>, and only when that
+/// vendor's snapshot cannot decide the admission — absent, older than
+/// <see cref="RunwayThresholds.EffectiveMaxSnapshotAge"/>, or a non-decision-capable Codex migration
+/// snapshot — spec/baton.md §7 states that bound and what
 /// the common path therefore costs. #1961 confined this to absent on the
 /// reasoning that the daemon's cadence already refreshed a stale one; #1966 measured that it did not —
 /// that cadence only fired while a lane of the same vendor was live, so an idle vendor's snapshot aged
@@ -55,9 +57,9 @@ public static class OnDemandRunwayHarvest
     /// <c>BatonProcessRunner</c> throws <c>BatonCancelException</c>, which is a <c>BatonException</c>
     /// and not an <see cref="OperationCanceledException"/>, and
     /// <c>VendorUsageCommandRun.CaptureStdoutOrNullAsync</c> catches it and returns null — so the null
-    /// path below, not the cancellation catch, is the arm both gated vendors actually take. A source
-    /// that instead honours the token by throwing, which <see cref="IVendorUsageSource.ReadAsync"/>'s
-    /// contract equally permits, lands in the catch. Neither arm may be dropped: without the catch a
+    /// path below, not the cancellation catch, is the arm the slash-command sources take. A source
+    /// that instead honours the token by throwing (including Codex's bounded app-server source), which
+    /// <see cref="IVendorUsageSource.ReadAsync"/>'s contract equally permits, lands in the catch. Neither arm may be dropped: without the catch a
     /// bound-fired cancellation would escape into the caller's blocking wait and crash the dispatch
     /// rather than holding it.
     /// </remarks>
@@ -71,7 +73,8 @@ public static class OnDemandRunwayHarvest
     /// </summary>
     /// <param name="snapshotUsable">
     /// Whether the vendor already has a persisted snapshot this gate can decide on —
-    /// <see cref="RunwayGate.IsUsable"/>, which is present AND within the staleness limit. Passed in
+    /// <see cref="RunwayGate.IsUsable"/>, which is present, fresh, and (for Codex) carries authenticated
+    /// account windows that can decide. Passed in
     /// rather than re-read here so the caller reads the file exactly once per decision, and expressed as
     /// "usable" rather than "exists" since #1966: a stale snapshot is not evidence, so it buys the same
     /// harvest an absent one does.

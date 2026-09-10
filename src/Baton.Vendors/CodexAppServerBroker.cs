@@ -1,3 +1,4 @@
+using System.ComponentModel;
 using System.Diagnostics;
 using System.Text;
 using System.Text.Json;
@@ -47,6 +48,9 @@ public static class CodexAppServerBroker
     private const int InitializeRequestId = 1;
     private const int ThreadRequestId = 2;
     private const int TurnRequestId = 3;
+    private const int RateLimitsRequestId = 2;
+    internal static readonly TimeSpan RateLimitsSourceBound = TimeSpan.FromSeconds(45);
+    internal static readonly TimeSpan RateLimitsCleanupReserve = TimeSpan.FromSeconds(5);
     internal static readonly Encoding JsonLineEncoding = new UTF8Encoding(encoderShouldEmitUTF8Identifier: false);
 
     public static async Task<int> RunAsync(
@@ -139,6 +143,293 @@ public static class CodexAppServerBroker
         }
     }
 
+    /// <summary>
+    /// Reads authenticated account limits through the broker's isolated home and app-server
+    /// lifecycle, stopping before any thread or model turn is started. The whole source owns a
+    /// 45-second managed bound: forty seconds shared by isolated-home preparation, process start,
+    /// initialize, and read, with five reserved for kill, exit, and stderr drain. A synchronous OS
+    /// call is run off the harvester thread so the managed deadline can return; .NET cannot forcibly
+    /// stop an arbitrary blocked OS call, so late process creation is observed and cleaned up when it
+    /// eventually returns.
+    /// </summary>
+    internal static Task<JsonObject?> ReadRateLimitsAsync(CancellationToken cancellationToken) =>
+        ReadRateLimitsAsync(
+            () =>
+            {
+                var isolatedHome = CodexIsolatedHome.Prepare(BatonPaths.Root);
+                return StartAppServer(Environment.CurrentDirectory, allowsSubagents: false, isolatedHome);
+            },
+            Console.Error,
+            RateLimitsSourceBound,
+            RateLimitsCleanupReserve,
+            cancellationToken);
+
+    /// <summary>
+    /// Process-creation seam for the source contract. Creation belongs inside the same ordinary-failure
+    /// boundary as protocol errors: an absent or unstartable executable is a logged null harvest, not an
+    /// exception escaping <see cref="IVendorUsageSource.ReadAsync"/>.
+    /// </summary>
+    internal static async Task<JsonObject?> ReadRateLimitsAsync(
+        Func<Process?> startAppServer,
+        TextWriter error,
+        TimeSpan sourceBound,
+        TimeSpan cleanupReserve,
+        CancellationToken cancellationToken)
+    {
+        ArgumentNullException.ThrowIfNull(startAppServer);
+        ArgumentNullException.ThrowIfNull(error);
+        if (sourceBound <= cleanupReserve || cleanupReserve <= TimeSpan.Zero)
+        {
+            throw new ArgumentOutOfRangeException(nameof(sourceBound));
+        }
+        cancellationToken.ThrowIfCancellationRequested();
+
+        var responseBound = sourceBound - cleanupReserve;
+        using var responseTimeout = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
+        responseTimeout.CancelAfter(responseBound);
+
+        var startTask = Task.Run(startAppServer, CancellationToken.None);
+        Process? started;
+        try
+        {
+            started = await startTask.WaitAsync(responseTimeout.Token).ConfigureAwait(false);
+        }
+        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+        {
+            _ = StopLateRateLimitsProcessAsync(startTask);
+            throw;
+        }
+        catch (OperationCanceledException) when (responseTimeout.IsCancellationRequested)
+        {
+            _ = StopLateRateLimitsProcessAsync(startTask);
+            await error.WriteLineAsync(
+                $"Codex rate-limit harvest did not start within {responseBound.TotalSeconds:0}s.")
+                .ConfigureAwait(false);
+            return null;
+        }
+        catch (Exception ex) when (ex is Win32Exception or IOException or UnauthorizedAccessException
+            or ArgumentException or InvalidOperationException)
+        {
+            await error.WriteLineAsync($"Codex rate-limit harvest failed: {ex.Message}").ConfigureAwait(false);
+            return null;
+        }
+
+        if (started is null)
+        {
+            await error.WriteLineAsync("Codex rate-limit harvest could not start codex app-server.")
+                .ConfigureAwait(false);
+            return null;
+        }
+
+        var process = started;
+        Task stderrDrain = Task.CompletedTask;
+        return await ReadRateLimitsWithinBoundsAsync(
+            token =>
+            {
+                // Drain until process exit. The cleanup's own WaitAsync supplies the bound; coupling the
+                // drain to the response token would make a normal response timeout look like failed cleanup.
+                stderrDrain = DrainStderrAsync(process.StandardError, error, CancellationToken.None);
+                return ReadRateLimitsProtocolAsync(
+                    process.StandardInput, process.StandardOutput, error, token);
+            },
+            token => StopRateLimitsProcessAsync(process, stderrDrain, error, token),
+            error,
+            responseTimeout,
+            responseBound,
+            cleanupReserve,
+            cancellationToken).ConfigureAwait(false);
+    }
+
+    /// <summary>
+    /// One bounded lifecycle around response and cleanup. <see cref="Task.WaitAsync(CancellationToken)"/>
+    /// enforces both bounds even when an underlying stream or cleanup operation ignores its token.
+    /// A phase that outlives its wait is observed asynchronously: its late exception is diagnostic and
+    /// cannot become an unobserved task or extend the foreground deadline.
+    /// </summary>
+    internal static async Task<JsonObject?> ReadRateLimitsWithinBoundsAsync(
+        Func<CancellationToken, Task<JsonObject>> read,
+        Func<CancellationToken, Task> cleanup,
+        TextWriter error,
+        TimeSpan responseBound,
+        TimeSpan cleanupBound,
+        CancellationToken cancellationToken)
+    {
+        using var responseTimeout = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
+        responseTimeout.CancelAfter(responseBound);
+        return await ReadRateLimitsWithinBoundsAsync(
+            read, cleanup, error, responseTimeout, responseBound, cleanupBound, cancellationToken)
+            .ConfigureAwait(false);
+    }
+
+    private static async Task<JsonObject?> ReadRateLimitsWithinBoundsAsync(
+        Func<CancellationToken, Task<JsonObject>> read,
+        Func<CancellationToken, Task> cleanup,
+        TextWriter error,
+        CancellationTokenSource responseTimeout,
+        TimeSpan responseBound,
+        TimeSpan cleanupBound,
+        CancellationToken cancellationToken)
+    {
+        var responseToken = responseTimeout.Token;
+        Task<JsonObject>? readTask = null;
+        try
+        {
+            readTask = Task.Run(() =>
+            {
+                responseToken.ThrowIfCancellationRequested();
+                return read(responseToken);
+            }, CancellationToken.None);
+            return await readTask.WaitAsync(responseToken).ConfigureAwait(false);
+        }
+        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+        {
+            _ = ObserveLatePhaseAsync(readTask, error, "read");
+            throw;
+        }
+        catch (OperationCanceledException) when (responseTimeout.IsCancellationRequested)
+        {
+            _ = ObserveLatePhaseAsync(readTask, error, "read");
+            await error.WriteLineAsync(
+                $"Codex rate-limit harvest did not answer within {responseBound.TotalSeconds:0}s.")
+                .ConfigureAwait(false);
+            return null;
+        }
+        catch (Exception ex) when (ex is IOException or JsonException or InvalidOperationException
+            or UnauthorizedAccessException)
+        {
+            await error.WriteLineAsync($"Codex rate-limit harvest failed: {ex.Message}").ConfigureAwait(false);
+            return null;
+        }
+        finally
+        {
+            using var cleanupTimeout = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
+            cleanupTimeout.CancelAfter(cleanupBound);
+            var cleanupToken = cleanupTimeout.Token;
+            Task? cleanupTask = null;
+            try
+            {
+                cleanupTask = Task.Run(() => cleanup(cleanupToken), CancellationToken.None);
+                await cleanupTask.WaitAsync(cleanupToken).ConfigureAwait(false);
+            }
+            catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+            {
+                _ = ObserveLatePhaseAsync(cleanupTask, error, "cleanup");
+                // Cleanup was dispatched before cancellation is propagated. The production delegate
+                // owns the process until its kill/exit/drain attempt finishes, even if the caller no
+                // longer waits for it.
+                throw;
+            }
+            catch (OperationCanceledException) when (cleanupTimeout.IsCancellationRequested)
+            {
+                _ = ObserveLatePhaseAsync(cleanupTask, error, "cleanup");
+                await error.WriteLineAsync(
+                    $"Codex rate-limit harvest cleanup did not finish within {cleanupBound.TotalSeconds:0}s.")
+                    .ConfigureAwait(false);
+            }
+            catch (Exception ex) when (ex is Win32Exception or IOException or InvalidOperationException)
+            {
+                await error.WriteLineAsync($"Codex rate-limit harvest cleanup failed: {ex.Message}")
+                    .ConfigureAwait(false);
+            }
+        }
+    }
+
+    private static async Task ObserveLatePhaseAsync(Task? task, TextWriter error, string phase)
+    {
+        if (task is null)
+        {
+            return;
+        }
+
+        try
+        {
+            await task.ConfigureAwait(false);
+        }
+        catch (OperationCanceledException)
+        {
+            // Cancellation is the expected late outcome after the phase's token was cancelled.
+        }
+        catch (Exception ex)
+        {
+            try
+            {
+                await error.WriteLineAsync(
+                    $"Codex rate-limit harvest {phase} failed after its deadline: {ex.Message}")
+                    .ConfigureAwait(false);
+            }
+            catch (Exception)
+            {
+                // The caller may have disposed its diagnostic writer after the foreground returned.
+                // The phase exception has still been observed, and this observer must never fault too.
+            }
+        }
+    }
+
+    internal static async Task StopRateLimitsProcessAsync(
+        Process process, Task stderrDrain, TextWriter error, CancellationToken cancellationToken)
+    {
+        try
+        {
+            try
+            {
+                if (!process.HasExited)
+                {
+                    process.Kill(entireProcessTree: true);
+                }
+
+                await process.WaitForExitAsync(cancellationToken).ConfigureAwait(false);
+            }
+            catch (Exception)
+            {
+                // Process cleanup abandoned its independently running diagnostic drain before it
+                // could await it. Keep ownership of that nested task after this cleanup task ends.
+                _ = ObserveLatePhaseAsync(stderrDrain, error, "stderr drain");
+                throw;
+            }
+
+            try
+            {
+                await stderrDrain.WaitAsync(cancellationToken).ConfigureAwait(false);
+            }
+            catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+            {
+                // WaitAsync observes only its own cancellation. The drain still runs without that
+                // token and must retain a late observer before the process streams are disposed.
+                _ = ObserveLatePhaseAsync(stderrDrain, error, "stderr drain");
+                throw;
+            }
+        }
+        finally
+        {
+            process.Dispose();
+        }
+    }
+
+    /// <summary>
+    /// Observes a preparation/start call that outlived its caller. If it eventually creates a
+    /// process, that process still enters the production process-tree cleanup path rather than
+    /// becoming an orphan. The wait itself is intentionally detached: the caller's managed deadline
+    /// has already elapsed, and managed cancellation cannot stop arbitrary synchronous OS startup.
+    /// </summary>
+    private static async Task StopLateRateLimitsProcessAsync(Task<Process?> startTask)
+    {
+        try
+        {
+            if (await startTask.ConfigureAwait(false) is { } process)
+            {
+                await StopRateLimitsProcessAsync(
+                    process, Task.CompletedTask, TextWriter.Null, CancellationToken.None)
+                    .ConfigureAwait(false);
+            }
+        }
+        catch (Exception)
+        {
+            // The foreground path has already reported timeout or cancellation. This continuation
+            // exists only to observe every late startup/cleanup outcome and make a best-effort
+            // process-tree cleanup. It must never become a second unobserved task.
+        }
+    }
+
     internal static async Task<int> RunProtocolAsync(
         CodexBrokerConfiguration configuration,
         string prompt,
@@ -149,27 +440,7 @@ public static class CodexAppServerBroker
         TextWriter error,
         CancellationToken cancellationToken)
     {
-        await SendAsync(serverInput, new JsonObject
-        {
-            ["method"] = "initialize",
-            ["id"] = InitializeRequestId,
-            ["params"] = new JsonObject
-            {
-                ["clientInfo"] = new JsonObject
-                {
-                    ["name"] = "baton",
-                    ["title"] = "Baton Codex broker",
-                    ["version"] = "1",
-                },
-                ["capabilities"] = new JsonObject { ["experimentalApi"] = true },
-            },
-        }, cancellationToken).ConfigureAwait(false);
-        await ReadResponseAsync(serverOutput, InitializeRequestId, error, cancellationToken).ConfigureAwait(false);
-        await SendAsync(serverInput, new JsonObject
-        {
-            ["method"] = "initialized",
-            ["params"] = new JsonObject(),
-        }, cancellationToken).ConfigureAwait(false);
+        await InitializeAsync(serverInput, serverOutput, error, cancellationToken).ConfigureAwait(false);
 
         var threadParams = BuildThreadParams(configuration, policy);
         await SendAsync(serverInput, new JsonObject
@@ -268,7 +539,58 @@ public static class CodexAppServerBroker
         throw new IOException("Codex app-server closed stdout before a terminal turn event.");
     }
 
-    private static Process? StartAppServer(CodexBrokerConfiguration configuration, string isolatedHome)
+    internal static async Task<JsonObject> ReadRateLimitsProtocolAsync(
+        TextWriter serverInput,
+        TextReader serverOutput,
+        TextWriter error,
+        CancellationToken cancellationToken)
+    {
+        await InitializeAsync(serverInput, serverOutput, error, cancellationToken).ConfigureAwait(false);
+        await SendAsync(serverInput, new JsonObject
+        {
+            ["method"] = "account/rateLimits/read",
+            ["id"] = RateLimitsRequestId,
+            ["params"] = new JsonObject(),
+        }, cancellationToken).ConfigureAwait(false);
+        var response = await ReadResponseAsync(
+            serverOutput, RateLimitsRequestId, error, cancellationToken).ConfigureAwait(false);
+        return response["result"] as JsonObject
+            ?? throw new InvalidOperationException("Codex app-server returned no rate-limit result.");
+    }
+
+    private static async Task InitializeAsync(
+        TextWriter serverInput,
+        TextReader serverOutput,
+        TextWriter error,
+        CancellationToken cancellationToken)
+    {
+        await SendAsync(serverInput, new JsonObject
+        {
+            ["method"] = "initialize",
+            ["id"] = InitializeRequestId,
+            ["params"] = new JsonObject
+            {
+                ["clientInfo"] = new JsonObject
+                {
+                    ["name"] = "baton",
+                    ["title"] = "Baton Codex broker",
+                    ["version"] = "1",
+                },
+                ["capabilities"] = new JsonObject { ["experimentalApi"] = true },
+            },
+        }, cancellationToken).ConfigureAwait(false);
+        await ReadResponseAsync(serverOutput, InitializeRequestId, error, cancellationToken).ConfigureAwait(false);
+        await SendAsync(serverInput, new JsonObject
+        {
+            ["method"] = "initialized",
+            ["params"] = new JsonObject(),
+        }, cancellationToken).ConfigureAwait(false);
+    }
+
+    private static Process? StartAppServer(CodexBrokerConfiguration configuration, string isolatedHome) =>
+        StartAppServer(configuration.WorkingDirectory, configuration.AllowsSubagents, isolatedHome);
+
+    private static Process? StartAppServer(string? workingDirectory, bool allowsSubagents, string isolatedHome)
     {
         var startInfo = ChildProcessStartInfo.Create(CodexExecutableResolver.Resolve(), startInfo =>
         {
@@ -282,11 +604,11 @@ public static class CodexAppServerBroker
             startInfo.StandardInputEncoding = JsonLineEncoding;
             startInfo.StandardOutputEncoding = JsonLineEncoding;
             startInfo.StandardErrorEncoding = JsonLineEncoding;
-            startInfo.WorkingDirectory = configuration.WorkingDirectory ?? Environment.CurrentDirectory;
+            startInfo.WorkingDirectory = workingDirectory ?? Environment.CurrentDirectory;
         });
         startInfo.ArgumentList.Add("app-server");
         startInfo.ArgumentList.Add("--stdio");
-        foreach (var feature in DisabledFeatures(configuration.AllowsSubagents))
+        foreach (var feature in DisabledFeatures(allowsSubagents))
         {
             startInfo.ArgumentList.Add("--disable");
             startInfo.ArgumentList.Add(feature);

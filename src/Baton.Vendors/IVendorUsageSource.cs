@@ -14,7 +14,10 @@ public sealed record VendorUsageWindow(
     string Name,
     int? PercentUsed,
     DateTimeOffset? ResetsAt,
-    string RawLine);
+    string RawLine,
+    string? LimitId = null,
+    string? WindowKind = null,
+    int? WindowDurationMins = null);
 
 /// <summary>
 /// One harvest of a single vendor's headless <c>/usage</c> report (issue #1391, reporting slice only
@@ -26,9 +29,10 @@ public sealed record VendorUsageWindow(
 /// </summary>
 /// <param name="Source">
 /// #1904: this snapshot's provenance — see <see cref="VendorUsageProvenance"/> for the two values and
-/// what each asserts. Trailing with a <see cref="VendorUsageProvenance.Vendor"/> default so the two #1391 sources keep
-/// their existing shape; <see cref="CodexUsageSource"/> is the only thing that sets
-/// <see cref="VendorUsageProvenance.Derived"/>. Carried all the way onto the fleet projection's
+/// what each asserts. Trailing with a <see cref="VendorUsageProvenance.Vendor"/> default so older
+/// persisted snapshots keep their existing shape. Current sources all write vendor counters;
+/// <see cref="VendorUsageProvenance.Derived"/> remains readable for interim Codex snapshots written
+/// before #1904's app-server replacement. Carried all the way onto the fleet projection's
 /// <c>vendors[].source</c> field so no reader can mistake one for the other.
 /// </param>
 public sealed record VendorUsageSnapshot(
@@ -39,9 +43,9 @@ public sealed record VendorUsageSnapshot(
     VendorUsageProvenance Source = VendorUsageProvenance.Vendor);
 
 /// <summary>
-/// Where a <see cref="VendorUsageSnapshot"/>'s numbers came from (#1904). A closed set of two, so
-/// "is this the vendor's own counter?" is a field read rather than an inference from which adapter
-/// tag happens to be on the snapshot.
+/// Where a <see cref="VendorUsageSnapshot"/>'s numbers came from (#1904). Kept backward-compatible
+/// with persisted interim snapshots: current sources report vendor counters, while
+/// <see cref="Derived"/> identifies snapshots written by the retired ledger estimate.
 /// </summary>
 [JsonConverter(typeof(JsonStringEnumConverter<VendorUsageProvenance>))]
 public enum VendorUsageProvenance
@@ -50,9 +54,8 @@ public enum VendorUsageProvenance
     [JsonStringEnumMemberName("vendor")] Vendor,
 
     /// <summary>
-    /// Baton derived these numbers from its own records because the vendor exposes no plan counter
-    /// Baton has measured. Never presentable as the vendor's own reading — see
-    /// <see cref="CodexUsageSource"/> for the one implementation and exactly what it derives from.
+    /// Baton derived these numbers from its own records. No current source writes this value; it is
+    /// retained so pre-#1904 persisted snapshots remain readable and honestly labelled.
     /// </summary>
     [JsonStringEnumMemberName("derived")] Derived,
 }
@@ -64,11 +67,9 @@ public enum VendorUsageProvenance
 /// </summary>
 /// <remarks>
 /// <para>
-/// <b>Two kinds of source, distinguished on the wire (#1904).</b> This interface used to rule out a
-/// derived source outright (#1391). #1904 narrowed that ruling rather than deleting it — its exact
-/// terms, the clause it quotes, and what still stands unchanged are spec/baton.md §6's
-/// <c>source: vendor|derived</c> paragraph, which is the register and is not restated here.
-/// <see cref="CodexUsageSource"/> is the one implementation the narrowing admits.
+/// <b>Two persisted provenance values, distinguished on the wire (#1904).</b> Current implementations
+/// read vendor counters. The derived value is retained only so snapshots from the retired interim
+/// Codex ledger estimate remain readable during migration; spec/baton.md §6 is the register.
 /// </para>
 /// </remarks>
 public interface IVendorUsageSource
@@ -77,11 +78,12 @@ public interface IVendorUsageSource
     string Vendor { get; }
 
     /// <summary>
-    /// Runs the vendor's own headless usage command once and parses its output. Returns null when the
-    /// CLI could not be spawned, exited non-zero, or exited zero having written nothing at all —
+    /// Runs the vendor's own headless usage read once and parses its output. Returns null when the
+    /// CLI/app-server could not be spawned, failed, or produced no result at all —
     /// never a snapshot with fabricated content, and a null tells the harvester to leave the last
-    /// persisted snapshot alone rather than blank it (<see cref="VendorUsageCommandRun"/> is where
-    /// all three cases are decided, and its doc comment has the #1869 defect they close). Output that
+    /// persisted snapshot alone rather than blank it (for slash-command sources,
+    /// <see cref="VendorUsageCommandRun"/> is where those cases are decided, and its doc comment has
+    /// the #1869 defect they close). Output that
     /// was written but is unrecognizable still returns a snapshot, with
     /// <see cref="VendorUsageSnapshot.Windows"/> empty, so a caller can tell "harvested, nothing
     /// parsed" apart from "did not harvest at all".

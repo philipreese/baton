@@ -290,27 +290,31 @@ public sealed class VendorUsageHarvesterTests : IDisposable
     }
 
     /// <summary>
-    /// #1904. Every arm above drives a snapshot whose windows carry a percentage, which is what EVERY
-    /// #1391 source produces — so nothing here had ever pushed a null-percent window through
-    /// <see cref="VendorUsageHarvester.Persist"/> and its <c>VendorUsageBurn.Advance</c> call.
-    /// <see cref="CodexUsageSource"/> produces exactly that on any machine where the operator has
-    /// declared no plan ceiling, which is every machine on day one: if <c>Advance</c> threw on the
-    /// null, <c>Persist</c>'s catch (IOException/UnauthorizedAccessException only) would not hold it,
-    /// the whole tick would fail, and codex would silently never be persisted at all while every unit
-    /// test stayed green. This is the arm that makes that failure visible.
+    /// #1904. The measured Codex response has a null account secondary window. Push that exact unknown
+    /// shape through persistence and projection: null remains absent, source remains vendor, and the
+    /// app-server identity fields survive for runway and glass readers.
     /// </summary>
     [Fact]
-    public async Task TickOnce_DerivedSnapshotWithNoPercentage_PersistsWithItsDerivedLabelAndNoFabricatedRing()
+    public async Task TickOnce_VendorSnapshotWithUnavailableWindow_PreservesUnknownAndIdentity()
     {
-        var derived = new VendorUsageSnapshot(
+        var measured = new VendorUsageSnapshot(
             "codex",
             new DateTimeOffset(2026, 9, 5, 12, 0, 0, TimeSpan.Zero),
-            CodexUsageSource.DerivedCaveat,
-            [new VendorUsageWindow(CodexUsageSource.FiveHourWindowName, PercentUsed: null, ResetsAt: null, "derived: 0 billed tokens")],
-            VendorUsageProvenance.Derived);
+            Caveat: null,
+            [
+                new VendorUsageWindow(
+                    "codex · unavailable (secondary)",
+                    PercentUsed: null,
+                    ResetsAt: null,
+                    RawLine: "null",
+                    LimitId: "codex",
+                    WindowKind: "secondary",
+                    WindowDurationMins: null),
+            ],
+            VendorUsageProvenance.Vendor);
 
         var harvester = new VendorUsageHarvester(
-            [new FakeSource("codex", derived)],
+            [new FakeSource("codex", measured)],
             AlwaysDueScheduler(),
             countLiveLanes: _ => Task.FromResult(new Dictionary<string, int>(StringComparer.Ordinal) { ["codex"] = 1 }));
 
@@ -321,23 +325,23 @@ public sealed class VendorUsageHarvesterTests : IDisposable
         var persisted = JsonSerializer.Deserialize<PersistedVendorUsage>(
             await File.ReadAllTextAsync(path, TestContext.Current.CancellationToken))!;
 
-        Assert.Equal(VendorUsageProvenance.Derived, persisted.Source);
-        Assert.Null(Assert.Single(persisted.Windows).PercentUsed);
-        // A derived snapshot keeps NO ring at all (VendorUsageBurn.Advance's first rule) -- and a null
-        // percentage would contribute no sample either way. The alternative, a fabricated 0, would let
-        // VendorUsageBurn.Derive publish a burn rate and an ETA built out of invented zeros, in the one
-        // place this whole change says "never a number".
+        Assert.Equal(VendorUsageProvenance.Vendor, persisted.Source);
+        var window = Assert.Single(persisted.Windows);
+        Assert.Null(window.PercentUsed);
+        Assert.Equal("codex", window.LimitId);
+        Assert.Equal("secondary", window.WindowKind);
+        Assert.Null(window.WindowDurationMins);
+        // A null percentage contributes no sample. A fabricated 0 would publish a burn reading from
+        // data the account response explicitly said was unavailable.
         Assert.True(persisted.Rings is null || persisted.Rings.Count == 0);
 
-        // The STRING, on the path glass.html actually compares against. Everything above asserts the
-        // enum survived the persisted file's round trip; glass.html tests `v.source === "derived"`
-        // against the projection's JSON, so an enum serialized as a number (0/1) or as PascalCase
-        // "Derived" would leave every arm above green while the glass silently labelled a derived
-        // block as a vendor counter. Spacing included: FleetStatusTool.SerializerOptions is
-        // WriteIndented, which is the same options the daemon's projection writer uses.
         var wire = JsonSerializer.Serialize(
             VendorUsageProjectionReader.ReadAll(new Dictionary<string, int>(StringComparer.Ordinal)),
             FleetStatusTool.SerializerOptions);
-        Assert.Contains("\"source\": \"derived\"", wire, StringComparison.Ordinal);
+        Assert.Contains("\"source\": \"vendor\"", wire, StringComparison.Ordinal);
+        Assert.Contains("\"limitId\": \"codex\"", wire, StringComparison.Ordinal);
+        Assert.Contains("\"windowKind\": \"secondary\"", wire, StringComparison.Ordinal);
+        Assert.DoesNotContain("\"percentUsed\"", wire, StringComparison.Ordinal);
+        Assert.DoesNotContain("\"windowDurationMins\"", wire, StringComparison.Ordinal);
     }
 }
