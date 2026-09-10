@@ -64,10 +64,18 @@ TERMINAL_EVENT_OUTCOMES = {
 }
 QUOTA_OUTCOMES = {
     "succeeded": "succeeded",
+    "finishedduringteardown": "succeeded",
     "failed": "failed",
+    "retryable": "failed",
+    "permanent": "failed",
+    "exhausteduntil": "failed",
+    "tooldenied": "failed",
     "cancelled": "cancelled",
     "indeterminate": "indeterminate",
+    "arrested": "arrested",
 }
+
+EXACT_WINDOW_DURATION = timedelta(hours=72)
 
 # Ordered, complete work-mix proxy vocabulary. The first matching predicate wins.
 WORK_MIX_RULES = (
@@ -193,42 +201,44 @@ def file_fingerprint(path: Path) -> dict[str, Any]:
     }
 
 
-def load_jsonl(path: Path) -> tuple[list[dict[str, Any]], dict[str, Any]]:
+def parse_jsonl_payloads(payloads: Iterable[bytes]) -> tuple[list[dict[str, Any]], dict[str, int]]:
     records: list[dict[str, Any]] = []
     parse_failures = 0
     non_object_rows = 0
     line_count = 0
-    with path.open(encoding="utf-8", errors="replace") as handle:
-        for line in handle:
-            line_count += 1
-            try:
-                value = json.loads(line)
-            except (json.JSONDecodeError, UnicodeError):
-                parse_failures += 1
-                continue
-            if not isinstance(value, dict):
-                non_object_rows += 1
-                continue
-            records.append(value)
+    for payload in payloads:
+        line_count += 1
+        try:
+            line = payload.decode("utf-8")
+            value = json.loads(line)
+        except (json.JSONDecodeError, UnicodeError):
+            parse_failures += 1
+            continue
+        if not isinstance(value, dict):
+            non_object_rows += 1
+            continue
+        records.append(value)
     records, exact_duplicates = exact_dedupe(records)
-    audit = file_fingerprint(path)
-    audit.update(
-        {
-            "rows_seen": line_count,
-            "rows_parsed": len(records),
-            "parse_failures": parse_failures,
-            "non_object_rows": non_object_rows,
-            "exact_duplicates_removed": exact_duplicates,
-        }
-    )
-    return records, audit
+    return records, {
+        "rows_seen": line_count,
+        "rows_parsed": len(records),
+        "parse_failures": parse_failures,
+        "non_object_rows": non_object_rows,
+        "exact_duplicates_removed": exact_duplicates,
+    }
+
+
+def load_jsonl(path: Path) -> tuple[list[dict[str, Any]], dict[str, Any]]:
+    with path.open("rb") as handle:
+        records, counts = parse_jsonl_payloads(handle)
+    return records, {**file_fingerprint(path), **counts}
 
 
 def load_queue(path: Path) -> tuple[list[dict[str, Any]], dict[str, Any]]:
     parse_failures = 0
     non_object_rows = 0
     try:
-        value = json.loads(path.read_text(encoding="utf-8", errors="replace"))
+        value = json.loads(path.read_text(encoding="utf-8"))
     except (json.JSONDecodeError, UnicodeError):
         value = {}
         parse_failures = 1
@@ -257,8 +267,13 @@ def load_queue(path: Path) -> tuple[list[dict[str, Any]], dict[str, Any]]:
     return records, audit
 
 
+def validate_window_duration(start: datetime, end: datetime, source: Any) -> None:
+    if end - start != EXACT_WINDOW_DURATION:
+        raise ValueError(f"{source}: snapshot window must be exactly 72 hours")
+
+
 def load_coverage(path: Path) -> tuple[Window, dict[str, Any]]:
-    text = path.read_text(encoding="utf-8", errors="replace")
+    text = path.read_text(encoding="utf-8")
     match = re.search(r"Snapshot window:\s*(\S+)\s+through\s*(\S+)\.", text)
     if match is None:
         raise ValueError(f"{path}: missing exact snapshot window")
@@ -266,6 +281,7 @@ def load_coverage(path: Path) -> tuple[Window, dict[str, Any]]:
     end = parse_time(match.group(2))
     if start is None or end is None or start > end:
         raise ValueError(f"{path}: invalid snapshot window")
+    validate_window_duration(start, end, path)
     retained = re.search(r"(\d+) retained events", text)
     locked = re.search(r"running ([A-Za-z0-9_-]+) was skipped", text)
     manifest = file_fingerprint(path)
@@ -312,11 +328,8 @@ def identity_conflicts(source: str, rows: list[dict[str, Any]]) -> int:
 
 
 def classify_work(item: dict[str, Any]) -> str:
-    role = str(item.get("Role") or "").lower()
     text = " ".join(str(item.get(field) or "") for field in ("Tag", "Reason", "Role")).lower()
-    if role == "review":
-        return "review"
-    for label, needles in WORK_MIX_RULES[1:]:
+    for label, needles in WORK_MIX_RULES:
         if any(needle in text for needle in needles):
             return label
     return "other"
@@ -398,17 +411,79 @@ def assign_conductor(started: datetime | None, handoffs: list[dict[str, Any]]) -
     return matches[0] if len(matches) == 1 else None
 
 
+def select_lifecycle_evidence(
+    event_rows: list[dict[str, Any]],
+    quota_rows: list[dict[str, Any]],
+    window: Window,
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]], dict[str, Any]]:
+    """Keep available pre-window events for executions observed in the frozen window.
+
+    Post-window rows are never admitted. This reconstructs joins only from rows the
+    supplied snapshot retained; it cannot recover events already truncated upstream.
+    """
+    window_events = [row for row in event_rows if in_window(row, "room_events", window)]
+    window_quotas = [row for row in quota_rows if in_window(row, "quota_ledger", window)]
+    execution_ids = {
+        value
+        for row in window_events
+        if isinstance((value := row.get("ExecutionId")), str) and value
+    }
+    execution_ids.update(
+        value
+        for row in window_quotas
+        if isinstance((value := row.get("execution")), str) and value
+    )
+    joined_events = []
+    for row in event_rows:
+        execution = row.get("ExecutionId")
+        stamp = parse_time(row.get("at"))
+        if execution in execution_ids and stamp is not None and stamp <= window.end:
+            joined_events.append(row)
+    return joined_events, window_quotas, {
+        "intersecting_execution_ids": len(execution_ids),
+        "in_window_event_rows": len(window_events),
+        "in_window_quota_rows": len(window_quotas),
+        "retained_pre_window_event_rows": sum(
+            parse_time(row.get("at")) < window.start for row in joined_events
+        ),
+        "joined_event_rows_through_cutoff": len(joined_events),
+        "post_window_event_rows_excluded": sum(
+            (stamp := parse_time(row.get("at"))) is not None and stamp > window.end
+            for row in event_rows
+        ),
+        "upstream_truncation_recoverable": False,
+    }
+
+
 def build_lifecycles(
     queue_rows: list[dict[str, Any]],
+    decision_rows: list[dict[str, Any]],
     event_rows: list[dict[str, Any]],
     quota_rows: list[dict[str, Any]],
     window: Window,
     handoffs: list[dict[str, Any]],
 ) -> tuple[list[dict[str, Any]], dict[str, Any]]:
     queue_by_room: dict[str, list[dict[str, Any]]] = defaultdict(list)
+    queue_by_tag: dict[str, list[dict[str, Any]]] = defaultdict(list)
     for item in queue_rows:
         if key := room_key(item.get("RoomDirectory")):
             queue_by_room[key].append(item)
+        if isinstance(item.get("Tag"), str) and item["Tag"]:
+            queue_by_tag[item["Tag"]].append(item)
+
+    launches_by_room: dict[str, list[dict[str, Any]]] = defaultdict(list)
+    advances_by_tag: dict[str, list[dict[str, Any]]] = defaultdict(list)
+    launches_by_tag: dict[str, list[dict[str, Any]]] = defaultdict(list)
+    for decision in decision_rows:
+        kind = str(decision.get("decision") or "").lower()
+        tag = decision.get("tag")
+        if kind == "launched":
+            if key := room_key(decision.get("room")):
+                launches_by_room[key].append(decision)
+            if isinstance(tag, str) and tag:
+                launches_by_tag[tag].append(decision)
+        elif kind == "advanced" and isinstance(tag, str) and tag:
+            advances_by_tag[tag].append(decision)
 
     events_by_execution: dict[tuple[str, str], list[dict[str, Any]]] = defaultdict(list)
     event_rooms: set[str] = set()
@@ -450,8 +525,41 @@ def build_lifecycles(
         verify_ended = last_event_time(events, {"verifyPassed", "verifyFailed"})
         terminal = last_event_time(events, set(TERMINAL_EVENT_OUTCOMES))
         quota_recorded = parse_time((quota or {}).get("at"))
-        added = parse_time(item.get("AddedAt"))
-        launched = parse_time(item.get("LaunchedAt"))
+        lifecycle_bound = started or attempted or terminal or quota_recorded
+        launch_candidates = [
+            row
+            for row in launches_by_room.get(room, [])
+            if (stamp := parse_time(row.get("at"))) is not None
+            and (lifecycle_bound is None or stamp <= lifecycle_bound)
+        ]
+        launch_fact = max(launch_candidates, key=lambda row: parse_time(row.get("at"))) if launch_candidates else None
+        tag = (launch_fact or {}).get("tag") or item.get("Tag")
+        origin_matches = queue_by_tag.get(tag, []) if isinstance(tag, str) else []
+        origin_item = origin_matches[-1] if origin_matches else item
+        added = parse_time(origin_item.get("AddedAt"))
+        launched = parse_time((launch_fact or {}).get("at")) or parse_time(item.get("LaunchedAt"))
+        advances = [
+            row
+            for row in advances_by_tag.get(tag, [])
+            if launched is not None
+            and (stamp := parse_time(row.get("at"))) is not None
+            and stamp <= launched
+        ] if isinstance(tag, str) else []
+        round_queued = parse_time(max(advances, key=lambda row: parse_time(row.get("at"))).get("at")) if advances else None
+        prior_launch_exists = any(
+            (stamp := parse_time(row.get("at"))) is not None and launched is not None and stamp < launched
+            for row in launches_by_tag.get(tag, [])
+        ) if isinstance(tag, str) else False
+        declared_later_round = bool(origin_item.get("Round", 0))
+        if round_queued is not None:
+            queue_wait_start = round_queued
+            queue_wait_basis = "round_transition_to_launch"
+        elif launched is not None and not prior_launch_exists and not declared_later_round:
+            queue_wait_start = added
+            queue_wait_basis = "item_added_to_initial_launch" if added is not None else "unavailable"
+        else:
+            queue_wait_start = None
+            queue_wait_basis = "unavailable_missing_round_transition"
         outcome = event_outcome(events, quota)
         usage = {field: (quota or {}).get(field) for field in USAGE_FIELDS}
         present_usage = sum(value is not None for value in usage.values())
@@ -477,6 +585,8 @@ def build_lifecycles(
                 "conductor": assign_conductor(started, handoffs),
                 "added_at": iso(added),
                 "launched_at": iso(launched),
+                "launch_time_source": "queue_decision" if launch_fact is not None else ("queue_snapshot" if launched is not None else "unavailable"),
+                "round_queued_at": iso(round_queued),
                 "attempt_started_at": iso(attempted),
                 "execution_started_at": iso(started),
                 "execution_exited_at": iso(exited),
@@ -485,7 +595,9 @@ def build_lifecycles(
                 "observed_day_utc": iso(terminal or quota_recorded or exited or started)[:10]
                 if (terminal or quota_recorded or exited or started)
                 else None,
-                "queue_wait_seconds": seconds_between(added, launched),
+                "queue_wait_seconds": seconds_between(queue_wait_start, launched),
+                "queue_wait_basis": queue_wait_basis,
+                "item_age_at_launch_seconds": seconds_between(added, launched),
                 "launch_to_start_seconds": seconds_between(launched, started),
                 "lane_service_seconds": seconds_between(started, exited),
                 "verification_seconds": seconds_between(verify_started, verify_ended),
@@ -536,6 +648,17 @@ def load_exclusion_ids(rows: list[dict[str, Any]]) -> set[str]:
         if isinstance(value, str) and value:
             ids.add(value)
     return ids
+
+
+def match_exclusions(
+    exclusion_ids: set[str], lifecycles: list[dict[str, Any]]
+) -> tuple[list[dict[str, Any]], list[str]]:
+    lifecycle_ids = {row["execution"] for row in lifecycles}
+    rows = [
+        {"execution": execution, "matched_lifecycle": execution in lifecycle_ids}
+        for execution in sorted(exclusion_ids)
+    ]
+    return rows, sorted(exclusion_ids - lifecycle_ids)
 
 
 def count_by(rows: Iterable[dict[str, Any]], fields: tuple[str, ...]) -> list[dict[str, Any]]:
@@ -614,17 +737,33 @@ def build_dataset(input_dir: Path, handoff_path: Path | None, exclusion_path: Pa
         audit["timestamp_field"] = "AddedAt|LaunchedAt" if source == "queue" else timestamp_field
         audit["rows_with_valid_timestamp"] = sum(bool(record_times(row, source)) for row in rows)
         audit["rows_intersecting_window"] = sum(in_window(row, source, window) for row in rows)
+        stamps = [stamp for row in rows for stamp in record_times(row, source)]
+        audit["earliest_available_timestamp"] = iso(min(stamps)) if stamps else None
+        audit["latest_available_timestamp"] = iso(max(stamps)) if stamps else None
         audit["identity_conflicts"] = identity_conflicts(source, rows)
         manifests.append(audit)
         tables[source] = rows
 
     handoffs = load_optional_rows(handoff_path, "handoffs")
     exclusions = load_optional_rows(exclusion_path, "exclusions")
+    joined_events, quotas, lifecycle_evidence = select_lifecycle_evidence(
+        tables["room_events"], tables["quota_ledger"], window
+    )
     events = [row for row in tables["room_events"] if in_window(row, "room_events", window)]
-    quotas = [row for row in tables["quota_ledger"] if in_window(row, "quota_ledger", window)]
-    lifecycles, joins = build_lifecycles(tables["queue"], events, quotas, window, handoffs)
+    decisions_through_cutoff = [
+        row
+        for row in tables["queue_decisions"]
+        if (stamp := parse_time(row.get("at"))) is not None and stamp <= window.end
+    ]
+    lifecycles, joins = build_lifecycles(
+        tables["queue"], decisions_through_cutoff, joined_events, quotas, window, handoffs
+    )
+    room_event_manifest = next(item for item in manifests if item["source"] == "room_events")
+    room_event_manifest["rows_retained_for_lifecycle_join"] = len(joined_events)
+    room_event_manifest["retained_pre_window_rows"] = lifecycle_evidence["retained_pre_window_event_rows"]
     exclusion_ids = load_exclusion_ids(exclusions)
     primary = [row for row in lifecycles if row["execution"] not in exclusion_ids]
+    exclusion_rows, unmatched_exclusion_ids = match_exclusions(exclusion_ids, lifecycles)
     candidates = fable_candidates(tables["queue"], lifecycles)
 
     decisions = [row for row in tables["queue_decisions"] if in_window(row, "queue_decisions", window)]
@@ -646,7 +785,7 @@ def build_dataset(input_dir: Path, handoff_path: Path | None, exclusion_path: Pa
             })
 
     return {
-        "schema_version": 1,
+        "schema_version": 2,
         "generated_by": "tools/three-day-metadata/extract.py",
         "window": {
             "start_utc": iso(window.start),
@@ -660,6 +799,7 @@ def build_dataset(input_dir: Path, handoff_path: Path | None, exclusion_path: Pa
             "sources": manifests,
             "context_sources": context_sources,
             "declared_vs_parsed_room_event_delta": None if declared is None else declared - parsed_events,
+            "lifecycle_evidence": lifecycle_evidence,
             "locked_room_after_cutoff_verified": False,
             "github_window_queries": "unavailable",
         },
@@ -667,6 +807,8 @@ def build_dataset(input_dir: Path, handoff_path: Path | None, exclusion_path: Pa
             "requested_episode": "Fable runaway",
             "status": "applied_exact_ids" if exclusion_ids else "unresolved_no_exclusion_applied",
             "primary_excluded_execution_ids": sorted(exclusion_ids),
+            "exact_exclusions": exclusion_rows,
+            "unmatched_exclusion_ids": unmatched_exclusion_ids,
             "candidate_ambiguity": candidates,
             "inclusive_lifecycle_rows": len(lifecycles),
             "primary_lifecycle_rows": len(primary),
@@ -686,9 +828,9 @@ def build_dataset(input_dir: Path, handoff_path: Path | None, exclusion_path: Pa
         "primary": {
             "same_as_inclusive": not exclusion_ids,
             "lifecycle_row_count": len(primary),
-            "outcomes": None if not exclusion_ids else count_by(primary, ("worker_role", "outcome")),
-            "phase_summaries": None if not exclusion_ids else phase_summaries(primary),
-            "usage_summaries": None if not exclusion_ids else usage_summaries(primary),
+            "outcomes": count_by(primary, ("worker_role", "outcome")),
+            "phase_summaries": phase_summaries(primary),
+            "usage_summaries": usage_summaries(primary),
         },
         "available_axes": {
             "event_types": event_type_counts,
@@ -712,12 +854,13 @@ def build_dataset(input_dir: Path, handoff_path: Path | None, exclusion_path: Pa
             "Issue, pull-request, review, check, merge, and deployment timestamps are absent from the local snapshot.",
             "Work mix is a tag/role text proxy and is not a complexity or outcome target.",
             "Parallel and overlapping durations are reported separately and are never summed.",
+            "Pre-window lifecycle events are joined only when present in the supplied snapshot; upstream truncation can leave starts and durations unknown and cannot be repaired by this extractor.",
         ],
         "minimum_missing_extraction": [
             "Authoritative UTC conductor ownership intervals, including temporary/shared ownership, plus measured personal conductor usage by interval.",
             "Exact room and execution IDs, with UTC boundaries, for the operator-identified Fable runaway episode.",
             "Window-scoped issue/PR/review/check/merge/deploy timestamps joined by issue, PR, exact head, and deployed revision.",
-            "Extractor inventory for the skipped parse failures and confirmation that the named locked post-cutoff room has no event at or before the cutoff.",
+            "Upstream inventory for rows skipped while the snapshot was created, plus confirmation that the named locked post-cutoff room has no event at or before the cutoff.",
             "Complete per-attempt usage availability/completeness markers and lineage across initial work, repair, and re-review.",
         ],
     }
@@ -751,6 +894,12 @@ def render_report(dataset: dict[str, Any], max_rows: int) -> str:
     window = dataset["window"]
     coverage = dataset["coverage_manifest"]
     exclusions = dataset["exclusion_manifest"]
+    usage_columns = [
+        "adapter", "model", "worker_role", "execution_rows",
+        "tokensIn_observed_n", "tokensIn_sum", "tokensOut_observed_n", "tokensOut_sum",
+        "cacheRead_observed_n", "cacheRead_sum", "cacheCreation_observed_n", "cacheCreation_sum",
+        "thinking_observed_n", "thinking_sum", "turns_observed_n", "turns_sum",
+    ]
     lines = [
         "# Three-day metadata comparison",
         "",
@@ -764,7 +913,8 @@ def render_report(dataset: dict[str, Any], max_rows: int) -> str:
             [
                 "file", "bytes", "sha256", "rows_seen", "rows_parsed", "parse_failures",
                 "exact_duplicates_removed", "identity_conflicts", "rows_with_valid_timestamp",
-                "rows_intersecting_window",
+                "rows_intersecting_window", "earliest_available_timestamp", "latest_available_timestamp",
+                "rows_retained_for_lifecycle_join", "retained_pre_window_rows",
             ],
             max_rows,
         ),
@@ -777,6 +927,11 @@ def render_report(dataset: dict[str, Any], max_rows: int) -> str:
         f"the parsed delta is `{coverage['declared_vs_parsed_room_event_delta']}`. Other upstream parse failures remain unknown. ",
         "The named locked room began after cutoff according to the supplied declaration, but its pre-cutoff absence was not independently verified.",
         "",
+        f"For {coverage['lifecycle_evidence']['intersecting_execution_ids']} intersecting execution IDs, the extractor retained "
+        f"{coverage['lifecycle_evidence']['retained_pre_window_event_rows']} available pre-window event rows and excluded "
+        f"{coverage['lifecycle_evidence']['post_window_event_rows_excluded']} post-window rows. This joins retained evidence only; "
+        "events truncated before snapshot creation remain absent and their durations remain unknown.",
+        "",
         "GitHub window queries were unavailable under this lane's command grant, so merge, closure, review/check, and deployment coverage is absent.",
         "",
         "## Exclusions manifest",
@@ -786,10 +941,16 @@ def render_report(dataset: dict[str, Any], max_rows: int) -> str:
         "",
         md_table(exclusions["candidate_ambiguity"], ["room", "tag", "executions"], max_rows),
         "",
+        "Exact requested exclusions and whether each matched an intersecting lifecycle:",
+        "",
+        md_table(exclusions["exact_exclusions"], ["execution", "matched_lifecycle"], max_rows),
+        "",
+        f"Unmatched exclusion IDs: `{exclusions['unmatched_exclusion_ids']}`.",
+        "",
         "## Comparison boundary",
         "",
         "A conductor before/after comparison is unavailable: the snapshot has no authoritative conductor ownership intervals and no personal conductor usage. ",
-        "The tables below are an inclusive worker-metadata baseline, not a claim that all three-day metadata or a causal comparison is complete.",
+        "The primary exact-exclusion view and inclusive sensitivity view below are worker-metadata baselines, not a claim that all three-day metadata or a causal comparison is complete.",
         "",
         "## Phase joins",
         "",
@@ -799,11 +960,36 @@ def render_report(dataset: dict[str, Any], max_rows: int) -> str:
         f"inheritance is unknown for {dataset['available_axes']['inherited_unknown_rows']} queue-unjoined rows. ",
         f"In-flight/censored lifecycle rows: {dataset['available_axes']['in_flight_rows']}; their unfinished durations remain `unknown`, never zero.",
         "",
-        "## Worker outcomes (inclusive sensitivity view)",
+        "## Primary exact-exclusion view",
+        "",
+        f"This view contains {dataset['primary']['lifecycle_row_count']} lifecycle rows after applying only the exact IDs above. "
+        f"Same as inclusive: `{dataset['primary']['same_as_inclusive']}`.",
+        "",
+        "### Worker outcomes",
+        "",
+        md_table(dataset["primary"]["outcomes"], ["worker_role", "outcome", "observed_rows"], max_rows),
+        "",
+        "### Phase summaries",
+        "",
+        "Queue wait uses the latest retained lifecycle-transition decision for later rounds. If that transition is absent, the value is censored; item age is retained separately in lifecycle rows and is not presented as queue wait.",
+        "",
+        md_table(
+            dataset["primary"]["phase_summaries"],
+            ["worker_role", "phase", "n", "median", "p90_nearest_rank", "max"],
+            max_rows,
+        ),
+        "",
+        "### Worker usage-field coverage",
+        "",
+        md_table(dataset["primary"]["usage_summaries"], usage_columns, max_rows),
+        "",
+        "## Inclusive sensitivity view",
+        "",
+        "### Worker outcomes",
         "",
         md_table(dataset["inclusive"]["outcomes"], ["worker_role", "outcome", "observed_rows"], max_rows),
         "",
-        "## Worker activity by UTC day",
+        "### Worker activity by UTC day",
         "",
         "These are terminal or quota-record observations, not accepted deliveries or complete attempts.",
         "",
@@ -813,9 +999,9 @@ def render_report(dataset: dict[str, Any], max_rows: int) -> str:
             max_rows,
         ),
         "",
-        "## Non-overlapping phase summaries by worker role",
+        "### Phase summaries by worker role",
         "",
-        "Each duration is summarized independently. Rows must not be added across phases or parallel executions.",
+        "Each duration is summarized independently. Some phases overlap; rows must not be added across phases or parallel executions.",
         "",
         md_table(
             dataset["inclusive"]["phase_summaries"],
@@ -823,19 +1009,14 @@ def render_report(dataset: dict[str, Any], max_rows: int) -> str:
             max_rows,
         ),
         "",
-        "## Worker usage-field coverage",
+        "### Worker usage-field coverage",
         "",
         "Values are grouped by vendor/model/worker role and retain each source field's observed row count. ",
         "They are not conductor costs, subscription quota, cross-vendor currency, or full lifecycle-attempt costs.",
         "",
         md_table(
             dataset["inclusive"]["usage_summaries"],
-            [
-                "adapter", "model", "worker_role", "execution_rows",
-                "tokensIn_observed_n", "tokensIn_sum", "tokensOut_observed_n", "tokensOut_sum",
-                "cacheRead_observed_n", "cacheRead_sum", "cacheCreation_observed_n", "cacheCreation_sum",
-                "thinking_observed_n", "thinking_sum", "turns_observed_n", "turns_sum",
-            ],
+            usage_columns,
             max_rows,
         ),
         "",
@@ -901,8 +1082,16 @@ def selftest() -> None:
     assert start is not None and end is not None
     window = Window(start, end)
 
-    # Polarity and inclusive-boundary check.
+    # Polarity, exact-duration, and inclusive-boundary controls.
     assert window.contains(start) and window.contains(end)
+    validate_window_duration(start, end, "synthetic")
+    for invalid_end in (end - timedelta(hours=1), end + timedelta(hours=1)):
+        try:
+            validate_window_duration(start, invalid_end, "synthetic")
+        except ValueError:
+            pass
+        else:
+            raise AssertionError("a non-72-hour window was accepted")
     assert america_new_york(start).utcoffset() == timedelta(hours=-4)
     january = parse_time("2026-01-10T12:00:00Z")
     assert january is not None and america_new_york(january).utcoffset() == timedelta(hours=-5)
@@ -910,7 +1099,28 @@ def selftest() -> None:
     assert event_outcome(failed_events, None) == "failed"
     arrested_events = [{"type": "executionArrested", "at": "2026-09-08T00:00:04Z"}]
     assert event_outcome(arrested_events, None) == "arrested"
-    assert event_outcome([], {"outcome": "Succeeded"}) == "succeeded"
+    quota_polarities = {
+        "Succeeded": "succeeded",
+        "FinishedDuringTeardown": "succeeded",
+        "Failed": "failed",
+        "Retryable": "failed",
+        "Permanent": "failed",
+        "ExhaustedUntil": "failed",
+        "ToolDenied": "failed",
+        "Cancelled": "cancelled",
+        "Indeterminate": "indeterminate",
+        "Arrested": "arrested",
+    }
+    for producer_value, expected in quota_polarities.items():
+        assert event_outcome([], {"outcome": producer_value}) == expected
+
+    # Invalid UTF-8 is a counted parse failure, never a replacement-character identity.
+    parsed, parse_counts = parse_jsonl_payloads([
+        b'{"execution":"good"}\n',
+        b'{"execution":"bad-\xff"}\n',
+    ])
+    assert parsed == [{"execution": "good"}]
+    assert parse_counts["rows_seen"] == 2 and parse_counts["parse_failures"] == 1
 
     # Exact duplicates collapse, but a same-identity conflicting observation remains visible.
     first = {"execution": "e1", "at": "2026-09-08T00:00:00Z", "tokensIn": 1}
@@ -934,7 +1144,7 @@ def selftest() -> None:
         "type": "executionStarted",
         "at": "2026-09-07T20:37:13Z",
     }]
-    lifecycles, _joins = build_lifecycles(queue, events, [], window, [])
+    lifecycles, _joins = build_lifecycles(queue, [], events, [], window, [])
     assert len(lifecycles) == 1
     assert lifecycles[0]["inherited"] is True
     assert lifecycles[0]["in_flight"] is True
@@ -942,6 +1152,7 @@ def selftest() -> None:
     assert lifecycles[0]["usage"]["tokensIn"] is None
 
     quota_only, _joins = build_lifecycles(
+        [],
         [],
         [],
         [{
@@ -956,7 +1167,25 @@ def selftest() -> None:
     )
     assert len(quota_only) == 1 and quota_only[0]["outcome"] == "succeeded"
     assert quota_only[0]["usage"]["tokensIn"] == 3
+    quota_controls, _joins = build_lifecycles(
+        [],
+        [],
+        [],
+        [
+            {
+                "room": f"quota-{index}", "execution": f"quota-{index}",
+                "at": "2026-09-08T01:00:00Z", "outcome": producer_value,
+            }
+            for index, producer_value in enumerate(quota_polarities)
+        ],
+        window,
+        [],
+    )
+    quota_control_outcomes = {row["execution"]: row["outcome"] for row in quota_controls}
+    for index, expected in enumerate(quota_polarities.values()):
+        assert quota_control_outcomes[f"quota-{index}"] == expected
     quota_unknown, _joins = build_lifecycles(
+        [],
         [],
         [],
         [{"room": "room-c", "execution": "e3", "at": "2026-09-08T01:00:00Z"}],
@@ -965,9 +1194,117 @@ def selftest() -> None:
     )
     assert quota_unknown[0]["outcome"] == "unknown"
     assert quota_unknown[0]["inherited"] is None
+
+    # A later round waits from its transition, never from the item's original add time.
+    round_queue = [{
+        "Tag": "synthetic-rounds",
+        "Role": "review",
+        "RoomDirectory": "C:/fixture/room-round-2",
+        "AddedAt": "2026-09-07T21:00:00Z",
+        "LaunchedAt": "2026-09-09T01:05:00Z",
+        "Round": 2,
+    }]
+    round_decisions = [
+        {
+            "at": "2026-09-09T01:00:00Z", "tag": "synthetic-rounds",
+            "decision": "advanced", "room": "room-round-1",
+        },
+        {
+            "at": "2026-09-09T01:05:00Z", "tag": "synthetic-rounds",
+            "decision": "launched", "room": "room-round-2",
+        },
+    ]
+    round_events = [{
+        "room": "room-round-2", "ExecutionId": "round-2", "type": "executionStarted",
+        "at": "2026-09-09T01:05:01Z",
+    }]
+    rounds, _joins = build_lifecycles(round_queue, round_decisions, round_events, [], window, [])
+    assert rounds[0]["queue_wait_seconds"] == 300
+    assert rounds[0]["item_age_at_launch_seconds"] == 101100
+    assert rounds[0]["queue_wait_basis"] == "round_transition_to_launch"
+    censored_rounds, _joins = build_lifecycles(
+        round_queue, round_decisions[1:], round_events, [], window, []
+    )
+    assert censored_rounds[0]["queue_wait_seconds"] is None
+    assert censored_rounds[0]["queue_wait_basis"] == "unavailable_missing_round_transition"
+
+    # An execution observed inside the window retains an available pre-window start,
+    # while evidence after the frozen cutoff is excluded.
+    crossing_events = [
+        {
+            "room": "crossing", "ExecutionId": "crossing-1", "type": "executionStarted",
+            "at": "2026-09-07T20:30:00Z",
+        },
+        {
+            "room": "crossing", "ExecutionId": "crossing-1", "type": "executionExited",
+            "at": "2026-09-07T20:40:00Z",
+        },
+        {
+            "room": "crossing", "ExecutionId": "crossing-1", "type": "executionSucceeded",
+            "at": "2026-09-07T20:40:01Z",
+        },
+        {
+            "room": "crossing", "ExecutionId": "crossing-1", "type": "executionProgress",
+            "at": "2026-09-10T20:37:14Z",
+        },
+    ]
+    joined, joined_quotas, evidence = select_lifecycle_evidence(crossing_events, [], window)
+    assert joined_quotas == [] and len(joined) == 3
+    assert evidence["retained_pre_window_event_rows"] == 1
+    assert evidence["post_window_event_rows_excluded"] == 1
+    crossing, _joins = build_lifecycles([], [], joined, [], window, [])
+    assert crossing[0]["outcome"] == "succeeded"
+    assert crossing[0]["lane_service_seconds"] == 600
+
+    # The declared first-match work-mix rule applies even when Role is not review.
+    assert classify_work({"Role": "advise", "Reason": "rereview the evidence"}) == "review"
     assert queue_reason_category({"decision": "waited", "reason": "private novel text"}) == "other"
 
-    print("three-day-metadata selftest: PASS (polarity, dedup/conflict, inclusive boundary, censoring)")
+    # The report exposes primary and inclusive summaries as separate views, plus
+    # the exact unmatched exclusion evidence.
+    report_fixture = {
+        "window": {
+            "start_utc": iso(start), "end_utc": iso(end),
+            "start_america_new_york": america_new_york(start).isoformat(),
+            "end_america_new_york": america_new_york(end).isoformat(),
+        },
+        "coverage_manifest": {
+            "sources": [], "context_sources": [], "declared_vs_parsed_room_event_delta": 0,
+            "coverage_declaration": {"declared_retained_room_events": 0},
+            "lifecycle_evidence": evidence,
+        },
+        "exclusion_manifest": {
+            "status": "applied_exact_ids", "inclusive_lifecycle_rows": 1,
+            "primary_lifecycle_rows": 1, "candidate_ambiguity": [],
+            "exact_exclusions": [{"execution": "missing-id", "matched_lifecycle": False}],
+            "unmatched_exclusion_ids": ["missing-id"],
+        },
+        "join_manifest": {},
+        "primary": {
+            "lifecycle_row_count": 1, "same_as_inclusive": False,
+            "outcomes": [], "phase_summaries": [], "usage_summaries": [],
+        },
+        "inclusive": {"outcomes": [], "phase_summaries": [], "usage_summaries": []},
+        "available_axes": {
+            "inherited_rows": 0, "inherited_unknown_rows": 1, "in_flight_rows": 0,
+            "worker_activity_by_utc_day": [], "queue_decisions": [], "runway_admissions": [],
+            "queue_live_weight": numeric_summary([]), "queue_free_gb": numeric_summary([]),
+            "work_mix_proxy": [],
+        },
+        "minimum_missing_extraction": [],
+        "limitations": [],
+    }
+    report = render_report(report_fixture, 20)
+    assert report.index("## Primary exact-exclusion view") < report.index("## Inclusive sensitivity view")
+    assert "missing-id" in report and "Unmatched exclusion IDs" in report
+    matched, unmatched = match_exclusions({"crossing-1", "missing-id"}, crossing)
+    assert matched == [
+        {"execution": "crossing-1", "matched_lifecycle": True},
+        {"execution": "missing-id", "matched_lifecycle": False},
+    ]
+    assert unmatched == ["missing-id"]
+
+    print("three-day-metadata selftest: PASS (measurement-integrity controls)")
 
 
 def parse_args(argv: list[str]) -> argparse.Namespace:
