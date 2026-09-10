@@ -38,6 +38,23 @@ public sealed class CodexDynamicToolPolicyTests
         Assert.Contains(CodexDynamicToolPolicy.RunCommandTool, names);
     }
 
+    [Fact]
+    public void Read_tool_schema_keeps_path_only_compatibility_and_bounds_optional_ranges()
+    {
+        using var fixture = new PolicyFixture(new PermissionGrant(ReadFiles: true), ["report.md"]);
+        var tool = fixture.Policy.BuildToolDefinitions()
+            .Single(node => node!["name"]!.GetValue<string>() == CodexDynamicToolPolicy.ReadTextTool)!;
+        var schema = (JsonObject)tool["inputSchema"]!;
+        var properties = (JsonObject)schema["properties"]!;
+
+        Assert.Equal(["path"], schema["required"]!.AsArray().Select(node => node!.GetValue<string>()));
+        Assert.Equal("integer", properties["offset"]!["type"]!.GetValue<string>());
+        Assert.Equal(0, properties["offset"]!["minimum"]!.GetValue<int>());
+        Assert.Equal("integer", properties["length"]!["type"]!.GetValue<string>());
+        Assert.Equal(12_000, properties["length"]!["maximum"]!.GetValue<int>());
+        Assert.False(schema["additionalProperties"]!.GetValue<bool>());
+    }
+
     /// <summary>
     /// #1996's first arm: the tool codex reaches for natively changes files on disk, and does it
     /// through the same write path <c>baton_write_text</c> takes. All three operations in one envelope
@@ -1062,6 +1079,134 @@ public sealed class CodexDynamicToolPolicyTests
         Assert.False(result.Success);
         Assert.Contains("reparse", result.Text, StringComparison.OrdinalIgnoreCase);
         Assert.Equal("original", File.ReadAllText(outside));
+    }
+
+    [Fact]
+    public async Task Search_bounds_huge_line_snippets_and_points_to_a_retrievable_file_range()
+    {
+        using var fixture = new PolicyFixture(new PermissionGrant(ReadFiles: true), ["report.md"]);
+        var path = Path.Combine(fixture.Workspace, "huge.txt");
+        File.WriteAllText(path, new string('a', 20_000) + "NEEDLE" + new string('b', 20_000));
+
+        var result = await fixture.ExecuteAsync(
+            CodexDynamicToolPolicy.SearchTextTool, new { path, query = "NEEDLE" });
+
+        Assert.True(result.Success, result.Text);
+        Assert.True(result.Text.Length <= 12_000, $"search returned {result.Text.Length} characters");
+        Assert.Contains("huge.txt:1:", result.Text, StringComparison.Ordinal);
+        Assert.Contains("snippet truncated", result.Text, StringComparison.Ordinal);
+        Assert.Contains("read range: offset=", result.Text, StringComparison.Ordinal);
+        Assert.Contains("NEEDLE", result.Text, StringComparison.Ordinal);
+
+        var omittedPrefix = await fixture.ExecuteAsync(
+            CodexDynamicToolPolicy.ReadTextTool, new { path, offset = 19_500, length = 1_000 });
+        Assert.True(omittedPrefix.Success, omittedPrefix.Text);
+        Assert.Contains("NEEDLE", omittedPrefix.Text, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task Search_caps_the_aggregate_response_when_many_lines_match()
+    {
+        using var fixture = new PolicyFixture(new PermissionGrant(ReadFiles: true), ["report.md"]);
+        var path = Path.Combine(fixture.Workspace, "many.txt");
+        File.WriteAllLines(path, Enumerable.Range(0, 500)
+            .Select(index => $"NEEDLE {index:D3} {new string('x', 500)}"));
+
+        var result = await fixture.ExecuteAsync(
+            CodexDynamicToolPolicy.SearchTextTool, new { path, query = "NEEDLE" });
+
+        Assert.True(result.Success, result.Text);
+        Assert.True(result.Text.Length <= 12_000, $"search returned {result.Text.Length} characters");
+        Assert.Contains("[incomplete:", result.Text, StringComparison.Ordinal);
+        Assert.Contains("response capped at 12000 characters", result.Text, StringComparison.Ordinal);
+        Assert.Contains("Narrow the path or query", result.Text, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task Recursive_discovery_skips_build_directories_and_binary_files_but_direct_reads_remain_available()
+    {
+        using var fixture = new PolicyFixture(new PermissionGrant(ReadFiles: true), ["report.md"]);
+        var bin = Path.Combine(fixture.Workspace, "bin");
+        var obj = Path.Combine(fixture.Workspace, "obj");
+        Directory.CreateDirectory(bin);
+        Directory.CreateDirectory(obj);
+        File.WriteAllText(Path.Combine(bin, "generated.txt"), "NEEDLE generated bin");
+        File.WriteAllText(Path.Combine(obj, "generated.txt"), "NEEDLE generated obj");
+        var binary = Path.Combine(fixture.Workspace, "binary.dat");
+        File.WriteAllBytes(binary, [0xff, 0xfe, 0x00, 0x4e, 0x45, 0x45, 0x44, 0x4c, 0x45]);
+        File.WriteAllText(Path.Combine(fixture.Workspace, "source.cs"), "// NEEDLE source");
+
+        var listing = await fixture.ExecuteAsync(
+            CodexDynamicToolPolicy.ListFilesTool, new { path = fixture.Workspace });
+        var search = await fixture.ExecuteAsync(
+            CodexDynamicToolPolicy.SearchTextTool, new { path = fixture.Workspace, query = "NEEDLE" });
+        var generatedRead = await fixture.ExecuteAsync(
+            CodexDynamicToolPolicy.ReadTextTool, new { path = Path.Combine(bin, "generated.txt") });
+        var binaryRead = await fixture.ExecuteAsync(
+            CodexDynamicToolPolicy.ReadTextTool, new { path = binary });
+
+        Assert.True(listing.Success, listing.Text);
+        Assert.Contains("source.cs", listing.Text, StringComparison.Ordinal);
+        Assert.DoesNotContain("bin/", listing.Text, StringComparison.OrdinalIgnoreCase);
+        Assert.DoesNotContain("obj/", listing.Text, StringComparison.OrdinalIgnoreCase);
+        Assert.DoesNotContain("binary.dat", listing.Text, StringComparison.Ordinal);
+        Assert.True(search.Success, search.Text);
+        Assert.Contains("source.cs:1:", search.Text, StringComparison.Ordinal);
+        Assert.DoesNotContain("generated", search.Text, StringComparison.OrdinalIgnoreCase);
+        Assert.DoesNotContain("binary.dat", search.Text, StringComparison.Ordinal);
+        Assert.True(generatedRead.Success, generatedRead.Text);
+        Assert.Contains("NEEDLE generated bin", generatedRead.Text, StringComparison.Ordinal);
+        Assert.True(binaryRead.Success, binaryRead.Text);
+    }
+
+    [Fact]
+    public async Task Read_ranges_are_recoverable_range_aware_repeats_with_clear_validation_and_denials()
+    {
+        using var fixture = new PolicyFixture(new PermissionGrant(ReadFiles: true), ["report.md"]);
+        var path = Path.Combine(fixture.Workspace, "long.txt");
+        File.WriteAllText(path, new string('a', 12_000) + new string('b', 12_000) + new string('c', 1_000));
+
+        var first = await fixture.ExecuteAsync(CodexDynamicToolPolicy.ReadTextTool, new { path });
+        Assert.True(first.Success, first.Text);
+        Assert.True(first.Text.Length <= 12_000, $"read returned {first.Text.Length} characters");
+        Assert.Contains("[incomplete:", first.Text, StringComparison.Ordinal);
+        Assert.Contains("next range: offset=", first.Text, StringComparison.Ordinal);
+
+        var secondRange = new { path, offset = 12_000, length = 12_000 };
+        var second = await fixture.ExecuteAsync(CodexDynamicToolPolicy.ReadTextTool, secondRange);
+        var replay = await fixture.ExecuteAsync(CodexDynamicToolPolicy.ReadTextTool, secondRange);
+        var refused = await fixture.ExecuteAsync(CodexDynamicToolPolicy.ReadTextTool, secondRange);
+
+        Assert.True(second.Success, second.Text);
+        Assert.DoesNotContain("replayed:", second.Text, StringComparison.Ordinal);
+        Assert.Contains('b', second.Text);
+        Assert.Contains("replayed: identical read", replay.Text, StringComparison.Ordinal);
+        Assert.False(refused.Success);
+        Assert.Contains("previous read is still the answer", refused.Text, StringComparison.Ordinal);
+
+        foreach (var invalid in new object[]
+                 {
+                     new { path, offset = -1, length = 10 },
+                     new { path, offset = 0, length = 0 },
+                     new { path, offset = 0, length = 12_001 },
+                     new { path, offset = 25_001, length = 1 },
+                 })
+        {
+            var failed = await fixture.ExecuteAsync(CodexDynamicToolPolicy.ReadTextTool, invalid);
+            Assert.False(failed.Success);
+            Assert.Contains("range", failed.Text, StringComparison.OrdinalIgnoreCase);
+        }
+
+        var denied = await fixture.ExecuteAsync(
+            CodexDynamicToolPolicy.ReadTextTool,
+            new
+            {
+                path = Path.Combine(Path.GetDirectoryName(fixture.Workspace)!, "outside.txt"),
+                offset = 1,
+                length = 10,
+            });
+        Assert.False(denied.Success);
+        Assert.Contains(GrantRefusal.Marker, denied.Text);
     }
 
     [Fact]

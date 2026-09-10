@@ -245,16 +245,21 @@ public sealed class RepeatedToolCallLedger
     /// Judges a file read and records the occurrence. <paramref name="lastWriteUtc"/> and
     /// <paramref name="length"/> are the caller's own stat of the file it is about to read, taken
     /// BEFORE serving — the whole predicate is that pair being unchanged since this room last read
-    /// the same path.
+    /// the same path and requested window.
     /// </summary>
     /// <param name="path">
     /// An already-resolved absolute path. Normalised here for case and trailing separator only, so two
     /// spellings of one file are one key.
     /// </param>
-    public RepeatDecision ClassifyRead(string path, DateTimeOffset lastWriteUtc, long length)
+    /// <param name="request">
+    /// The normalized spelling of range arguments, or null/empty for a whole-file read. Different
+    /// windows are different questions about the same file, matching the hook-side read predicate.
+    /// </param>
+    public RepeatDecision ClassifyRead(
+        string path, DateTimeOffset lastWriteUtc, long length, string? request = null)
     {
         ArgumentNullException.ThrowIfNull(path);
-        var key = ReadKey(path);
+        var key = ReadKey(path, request);
 
         if (!TryTouch(key, out var entry) || entry.LastWriteUtc != lastWriteUtc || entry.Length != length)
         {
@@ -279,8 +284,7 @@ public sealed class RepeatedToolCallLedger
     /// <param name="request">
     /// The normalised spelling of the read's range arguments, or <see langword="null"/>/empty for a
     /// whole-file read. <see cref="ReadKey"/> states why a read is keyed on this rather than on the
-    /// path alone; the broker's <see cref="ClassifyRead"/> takes no such parameter because
-    /// <c>baton_read_text</c> takes a path and no range at all.
+    /// path alone; the broker passes the same normalized range identity when one is requested.
     /// </param>
     public string? ClassifyHookRead(
         string path, DateTimeOffset lastWriteUtc, long length, string? request = null)

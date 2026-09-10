@@ -53,10 +53,18 @@ public sealed class CodexDynamicToolPolicy
     /// </summary>
     private const string WithheldWorkspaceWrite = "This Baton role does not grant workspace writes.";
 
-    private const int MaxReadCharacters = 200_000;
+    // #2206: provisional engineering policy, intentionally conservative rather than presented as a
+    // measured optimum. Metadata shares this budget so a recovery pointer cannot push the response
+    // back over the ceiling it describes.
+    private const int MaxDiscoveryResponseCharacters = 12_000;
+    private const int MaxReadRangeCharacters = 12_000;
     private const int MaxListedFiles = 1_000;
     private const int MaxSearchMatches = 500;
+    private const int MaxSearchLineSnippetCharacters = 500;
+    private const int MaxSearchFooterCharacters = 320;
     private const int MaxCommandOutputCharacters = 200_000;
+
+    private static readonly Encoding StrictUtf8 = new UTF8Encoding(false, true);
 
     private readonly PermissionGrant _grant;
     private readonly string? _workspaceRoot;
@@ -148,15 +156,21 @@ public sealed class CodexDynamicToolPolicy
         var tools = new JsonArray();
         if (_grant.ReadFiles || _inputRoots.Count > 0)
         {
-            tools.Add(Function(ReadTextTool, "Read UTF-8 text from a path allowed by Baton's role grant.",
-                StringSchema("path", "Absolute or workspace-relative file path.")));
+            tools.Add(Function(
+                ReadTextTool,
+                "Read an allowed file by bounded character range. Path-only calls remain valid; "
+                + "incomplete results name the next range.",
+                ReadTextSchema()));
         }
 
         if (_grant.ReadFiles)
         {
-            tools.Add(Function(ListFilesTool, "List files below a directory allowed by Baton's role grant.",
+            tools.Add(Function(ListFilesTool,
+                "List UTF-8 source files below an allowed directory, skipping .git/bin/obj and binary files.",
                 StringSchema("path", "Absolute or workspace-relative directory path.")));
-            tools.Add(Function(SearchTextTool, "Search allowed UTF-8 text files for a literal string.",
+            tools.Add(Function(SearchTextTool,
+                "Search allowed UTF-8 source files for a literal string with bounded results; recursive "
+                + "searches skip .git/bin/obj and binary files.",
                 TwoStringSchema("path", "Directory or file to search.", "query", "Literal text to find.")));
         }
 
@@ -288,7 +302,10 @@ public sealed class CodexDynamicToolPolicy
         {
             return toolName switch
             {
-                ReadTextTool => ReadText(RequiredString(arguments, "path")),
+                ReadTextTool => ReadText(
+                    RequiredString(arguments, "path"),
+                    OptionalInteger(arguments, "offset"),
+                    OptionalInteger(arguments, "length")),
                 ListFilesTool => ListFiles(RequiredString(arguments, "path")),
                 SearchTextTool => SearchText(
                     RequiredString(arguments, "path"), RequiredString(arguments, "query")),
@@ -406,7 +423,7 @@ public sealed class CodexDynamicToolPolicy
         return "This role has no write tool at all: it cannot create or edit any file.";
     }
 
-    private CodexDynamicToolResult ReadText(string requestedPath)
+    private CodexDynamicToolResult ReadText(string requestedPath, int? requestedOffset, int? requestedLength)
     {
         if (!_grant.ReadFiles && _inputRoots.Count == 0)
         {
@@ -424,26 +441,66 @@ public sealed class CodexDynamicToolPolicy
 
         EnsureNoReparsePoint(path);
 
+        var offset = requestedOffset ?? 0;
+        var length = requestedLength ?? MaxReadRangeCharacters;
+        if (offset < 0)
+        {
+            return CodexDynamicToolResult.Failed("Read range offset must be zero or greater.");
+        }
+        if (length is < 1 or > MaxReadRangeCharacters)
+        {
+            return CodexDynamicToolResult.Failed(
+                $"Read range length must be between 1 and {MaxReadRangeCharacters} characters.");
+        }
+
         // #2002 rule 2b. Stat BEFORE serving, which is the whole predicate — see
         // RepeatedToolCallLedger for why a read is judged on the stat pair and a command on a clock.
         // The population: the measured agy rooms re-opened their own `task-N.log` 22-25 times.
         var info = new FileInfo(path);
-        var repeat = _repeats.ClassifyRead(path, info.LastWriteTimeUtc, info.Length);
+        var text = File.ReadAllText(path, Encoding.UTF8);
+        if (offset > text.Length)
+        {
+            return CodexDynamicToolResult.Failed(
+                $"Read range offset {offset} is past the file's {text.Length} characters.");
+        }
+
+        var repeat = _repeats.ClassifyRead(
+            path, info.LastWriteTimeUtc, info.Length, $"offset={offset};length={length}");
         if (repeat.Verdict == RepeatVerdict.Refuse)
         {
             return CodexDynamicToolResult.Refused(repeat.Reason!, GrantRules.Repeat);
         }
 
-        var text = File.ReadAllText(path, Encoding.UTF8);
-        if (text.Length > MaxReadCharacters)
+        var preamble = repeat.Verdict == RepeatVerdict.Replay ? $"[{repeat.Preamble}]\n" : string.Empty;
+        var responseBudget = MaxDiscoveryResponseCharacters - preamble.Length;
+        var take = (int)Math.Min((long)length, text.Length - (long)offset);
+        string? footer = null;
+        if (offset + take < text.Length || take > responseBudget)
         {
-            text = text[..MaxReadCharacters] + $"\n[truncated by Baton at {MaxReadCharacters} characters]";
+            // The footer's digits can change when `take` is reduced, so converge once more if needed.
+            while (true)
+            {
+                var end = offset + take;
+                var nextLength = Math.Min(MaxReadRangeCharacters, text.Length - end);
+                footer = $"[incomplete: returned file characters {offset}..{end - 1} of {text.Length}; "
+                         + $"next range: offset={end}, length={nextLength}]";
+                var boundedTake = Math.Min(
+                    take, Math.Max(0, responseBudget - footer.Length - 1));
+                if (boundedTake == take)
+                {
+                    break;
+                }
+                take = boundedTake;
+            }
         }
+
+        var range = text.Substring(offset, take);
+        var displayed = preamble + (footer is null ? range : range + '\n' + footer);
+        Debug.Assert(displayed.Length <= MaxDiscoveryResponseCharacters);
 
         // The replay preamble rides bytes this call has just taken off disk; RepeatedToolCallLedger's
         // remarks say why a read entry deliberately holds no copy of them.
-        return CodexDynamicToolResult.Allowed(
-            repeat.Verdict == RepeatVerdict.Replay ? $"[{repeat.Preamble}]\n{text}" : text);
+        return CodexDynamicToolResult.Allowed(displayed);
     }
 
     private CodexDynamicToolResult ListFiles(string requestedPath)
@@ -485,43 +542,97 @@ public sealed class CodexDynamicToolPolicy
         var path = ResolveWithinWorkspace(requestedPath);
         EnsureNoReparsePoint(path);
         IEnumerable<string> files = File.Exists(path)
-            ? [path]
+            ? IsUtf8TextFile(path) ? [path] : []
             : Directory.Exists(path)
                 ? EnumerateContentFiles(path, SafeEnumerationOptions())
                 : throw new ArgumentException($"Search path '{requestedPath}' does not exist.");
 
-        List<string> matches = [];
+        var matches = new StringBuilder(MaxDiscoveryResponseCharacters);
+        var shown = 0;
+        var truncatedSnippets = 0;
+        string? incompleteReason = null;
         foreach (var file in files)
         {
-            if (matches.Count >= MaxSearchMatches)
-            {
-                break;
-            }
             try
             {
-                int lineNumber = 0;
-                foreach (var line in File.ReadLines(file, Encoding.UTF8))
+                var text = File.ReadAllText(file, StrictUtf8);
+                foreach (var line in EnumerateLines(text))
                 {
-                    lineNumber++;
-                    if (line.Contains(query, StringComparison.Ordinal))
+                    var lineText = text.AsSpan(line.Start, line.Length);
+                    var matchOffset = lineText.IndexOf(query.AsSpan(), StringComparison.Ordinal);
+                    if (matchOffset < 0)
                     {
-                        matches.Add($"{Path.GetRelativePath(_workspaceRoot!, file).Replace('\\', '/')}:{lineNumber}:{line}");
-                        if (matches.Count >= MaxSearchMatches)
-                        {
-                            break;
-                        }
+                        continue;
                     }
+                    if (shown >= MaxSearchMatches)
+                    {
+                        incompleteReason = $"match limit of {MaxSearchMatches} reached";
+                        break;
+                    }
+
+                    var rendered = RenderSearchMatch(file, text, line, matchOffset);
+                    var separatorLength = matches.Length == 0 ? 0 : 1;
+                    if (matches.Length + separatorLength + rendered.Length + MaxSearchFooterCharacters
+                        > MaxDiscoveryResponseCharacters)
+                    {
+                        incompleteReason =
+                            $"response capped at {MaxDiscoveryResponseCharacters} characters after {shown} matches";
+                        break;
+                    }
+
+                    if (matches.Length > 0)
+                    {
+                        matches.Append('\n');
+                    }
+                    matches.Append(rendered);
+                    shown++;
+                    truncatedSnippets += line.Length > MaxSearchLineSnippetCharacters ? 1 : 0;
                 }
             }
             catch (DecoderFallbackException)
             {
                 // A binary or non-UTF-8 file is not a match, not a reason to abort the whole search.
             }
+
+            if (incompleteReason is not null)
+            {
+                break;
+            }
         }
 
-        return CodexDynamicToolResult.Allowed(
-            string.Join('\n', matches) + (matches.Count >= MaxSearchMatches
-                ? $"\n[truncated by Baton at {MaxSearchMatches} matches]" : string.Empty));
+        var footer = incompleteReason is not null
+            ? $"[incomplete: {incompleteReason}; more matches may exist. Narrow the path or query; "
+              + "use the baton_read_text ranges shown for truncated lines.]"
+            : truncatedSnippets > 0
+                ? $"[complete search: {shown} matches; {truncatedSnippets} line snippets truncated. "
+                  + "Use the baton_read_text ranges shown to retrieve omitted text.]"
+                : $"[complete search: {shown} matches]";
+        Debug.Assert(footer.Length <= MaxSearchFooterCharacters);
+        if (matches.Length > 0)
+        {
+            matches.Append('\n');
+        }
+        matches.Append(footer);
+        Debug.Assert(matches.Length <= MaxDiscoveryResponseCharacters);
+        return CodexDynamicToolResult.Allowed(matches.ToString());
+    }
+
+    private string RenderSearchMatch(
+        string file, string text, (int Number, int Start, int Length) line, int matchOffset)
+    {
+        var relative = Path.GetRelativePath(_workspaceRoot!, file).Replace('\\', '/');
+        if (line.Length <= MaxSearchLineSnippetCharacters)
+        {
+            return $"{relative}:{line.Number}:{text.Substring(line.Start, line.Length)}";
+        }
+
+        var snippetStart = Math.Max(0, matchOffset - MaxSearchLineSnippetCharacters / 4);
+        snippetStart = Math.Min(snippetStart, line.Length - MaxSearchLineSnippetCharacters);
+        var fileOffset = line.Start + snippetStart;
+        var snippet = text.Substring(fileOffset, MaxSearchLineSnippetCharacters);
+        return $"{relative}:{line.Number}:[snippet truncated: zero-based line characters "
+               + $"{snippetStart}..{snippetStart + snippet.Length - 1} of {line.Length}; "
+               + $"read range: offset={fileOffset}, length={snippet.Length}] {snippet}";
     }
 
     private CodexDynamicToolResult WriteOutput(string outputName, string content)
@@ -1002,11 +1113,71 @@ public sealed class CodexDynamicToolPolicy
         ReturnSpecialDirectories = false,
     };
 
-    private static IEnumerable<string> EnumerateContentFiles(string path, EnumerationOptions options) =>
-        Directory.EnumerateFiles(path, "*", options)
+    private static IEnumerable<string> EnumerateContentFiles(string path, EnumerationOptions options)
+    {
+        if (IsGeneratedDirectory(Path.GetFileName(Path.TrimEndingDirectorySeparator(path))))
+        {
+            return [];
+        }
+
+        return Directory.EnumerateFiles(path, "*", options)
             .Where(file => !Path.GetRelativePath(path, file)
                 .Split(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar)
-                .Any(segment => segment.Equals(".git", StringComparison.OrdinalIgnoreCase)));
+                .Any(IsGeneratedDirectory))
+            .Where(IsUtf8TextFile);
+    }
+
+    private static bool IsGeneratedDirectory(string segment) =>
+        segment.Equals(".git", StringComparison.OrdinalIgnoreCase)
+        || segment.Equals("bin", StringComparison.OrdinalIgnoreCase)
+        || segment.Equals("obj", StringComparison.OrdinalIgnoreCase);
+
+    private static bool IsUtf8TextFile(string path)
+    {
+        try
+        {
+            using var reader = new StreamReader(path, StrictUtf8, detectEncodingFromByteOrderMarks: false);
+            Span<char> buffer = stackalloc char[4_096];
+            int read;
+            while ((read = reader.Read(buffer)) > 0)
+            {
+                foreach (var character in buffer[..read])
+                {
+                    if (character == '\0'
+                        || (char.IsControl(character) && character is not ('\t' or '\r' or '\n' or '\f')))
+                    {
+                        return false;
+                    }
+                }
+            }
+            return true;
+        }
+        catch (DecoderFallbackException)
+        {
+            // Invalid UTF-8 is binary/non-source content for recursive discovery. Direct reads still
+            // use the grant-checked ReadText path and deliberately retain its replacement decoding.
+            return false;
+        }
+    }
+
+    private static IEnumerable<(int Number, int Start, int Length)> EnumerateLines(string text)
+    {
+        var number = 1;
+        var start = 0;
+        while (start < text.Length)
+        {
+            var relativeEnd = text.AsSpan(start).IndexOfAny('\r', '\n');
+            if (relativeEnd < 0)
+            {
+                yield return (number, start, text.Length - start);
+                yield break;
+            }
+
+            var end = start + relativeEnd;
+            yield return (number++, start, end - start);
+            start = end + (text[end] == '\r' && end + 1 < text.Length && text[end + 1] == '\n' ? 2 : 1);
+        }
+    }
 
     private static JsonObject Function(string name, string description, JsonObject inputSchema) => new()
     {
@@ -1024,6 +1195,34 @@ public sealed class CodexDynamicToolPolicy
             [name] = new JsonObject { ["type"] = "string", ["description"] = description },
         },
         ["required"] = new JsonArray(name),
+        ["additionalProperties"] = false,
+    };
+
+    private static JsonObject ReadTextSchema() => new()
+    {
+        ["type"] = "object",
+        ["properties"] = new JsonObject
+        {
+            ["path"] = new JsonObject
+            {
+                ["type"] = "string",
+                ["description"] = "Absolute or workspace-relative file path.",
+            },
+            ["offset"] = new JsonObject
+            {
+                ["type"] = "integer",
+                ["minimum"] = 0,
+                ["description"] = "Optional zero-based character offset; defaults to 0.",
+            },
+            ["length"] = new JsonObject
+            {
+                ["type"] = "integer",
+                ["minimum"] = 1,
+                ["maximum"] = MaxReadRangeCharacters,
+                ["description"] = $"Optional character count, 1..{MaxReadRangeCharacters}; defaults to the maximum.",
+            },
+        },
+        ["required"] = new JsonArray("path"),
         ["additionalProperties"] = false,
     };
 
@@ -1050,6 +1249,19 @@ public sealed class CodexDynamicToolPolicy
             throw new ArgumentException($"Dynamic tool argument '{name}' must be a non-empty string.");
         }
         return value.GetString()!;
+    }
+
+    private static int? OptionalInteger(JsonElement arguments, string name)
+    {
+        if (!arguments.TryGetProperty(name, out var value))
+        {
+            return null;
+        }
+        if (value.ValueKind != JsonValueKind.Number || !value.TryGetInt32(out var result))
+        {
+            throw new ArgumentException($"Dynamic tool argument '{name}' must be an integer when provided.");
+        }
+        return result;
     }
 
     private static string NormalizeRoot(string path) => Path.TrimEndingDirectorySeparator(Path.GetFullPath(path));
