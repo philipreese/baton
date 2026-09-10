@@ -63,6 +63,42 @@ public sealed class QueueSchedulerServiceTests
         }
     }
 
+    [Fact]
+    public async Task A_legacy_unpinned_claude_item_fails_without_claiming_a_room_or_launching()
+    {
+        var home = CreateTempHome();
+        using var scope = BatonEnvironmentSnapshot.BeginScope(BatonEnvironmentSnapshot.Blank with { HomeOverride = home });
+        try
+        {
+            await QueueStore.MutateAsync(BatonPaths.QueueFile, s => s with
+            {
+                Items = [Item("legacy", scope: null) with { Adapter = "claude", Model = null }],
+            }, Ct);
+            var launched = false;
+            var service = Service((_, _) =>
+            {
+                launched = true;
+                return Task.FromResult(new QueueLaunchOutcome(null));
+            });
+
+            await service.TickOnceAsync(Ct);
+
+            Assert.False(launched);
+            var item = Assert.Single((await QueueStore.LoadAsync(BatonPaths.QueueFile, Ct)).Items);
+            Assert.Equal(QueueItemState.Failed, item.State);
+            Assert.Null(item.RoomDirectory);
+            Assert.Null(item.LaunchedAt);
+            Assert.Contains("--model sonnet", item.Error!, StringComparison.Ordinal);
+            var fact = Assert.Single(await QueueDecisionLedgerStore.ReadAllAsync(BatonPaths.QueueDecisionLedgerFile, Ct));
+            Assert.Equal(QueueDecisionEntry.Failed, fact.Decision);
+            Assert.Equal("legacy", fact.Tag);
+        }
+        finally
+        {
+            Cleanup(home);
+        }
+    }
+
 
     private static string CreateTempHome()
     {

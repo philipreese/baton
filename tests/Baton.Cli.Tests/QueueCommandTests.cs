@@ -18,7 +18,7 @@ public sealed class QueueCommandTests
 
     [Theory]
     [InlineData("agy", null, "gemini-3.8-flash-high")]
-    [InlineData("claude", null, "role default model")]
+    [InlineData("claude", "sonnet", "sonnet")]
     [InlineData("codex", null, "role default model")]
     [InlineData("claude", "claude-opus-4-8", "claude-opus-4-8")]
     [InlineData("claude", "sonnet[1m]", "sonnet[1m]")]
@@ -48,6 +48,36 @@ public sealed class QueueCommandTests
             Assert.Equal(adapter, item.Adapter);
             Assert.Equal(model, item.Model);
             Assert.Null(item.Effort);
+        }
+        finally
+        {
+            DirectoryCleanup.DeleteRecursively(home);
+        }
+    }
+
+    [Fact]
+    public async Task Add_refuses_an_unpinned_claude_before_any_queue_side_effect()
+    {
+        var home = CreateTempHome();
+        using var scope = BatonEnvironmentSnapshot.BeginScope(BatonEnvironmentSnapshot.Blank with { HomeOverride = home });
+        try
+        {
+            var workspace = Path.Combine(home, "workspace");
+            var brief = Path.Combine(home, "brief.md");
+            Directory.CreateDirectory(workspace);
+            await File.WriteAllTextAsync(brief, "implement this", Ct);
+
+            var refusal = await Assert.ThrowsAsync<CliArgumentException>(() => QueueCommand.ExecuteAsync(
+                new QueueOptions(
+                    QueueVerb.Add, Tag: "unpinned-claude", Role: "implement", SpecFilePath: brief,
+                    WorkspaceDirectory: workspace, Adapter: "claude"),
+                TextWriter.Null,
+                Ct));
+
+            Assert.Contains("standing model policy", refusal.Message, StringComparison.Ordinal);
+            Assert.Equal("pass --model sonnet, --model opus, or --model haiku.", refusal.TryInvocation);
+            Assert.False(File.Exists(BatonPaths.QueueFile));
+            Assert.False(Directory.Exists(BatonPaths.QueueSpecsDirectory));
         }
         finally
         {
