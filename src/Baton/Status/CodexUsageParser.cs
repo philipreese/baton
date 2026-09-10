@@ -196,6 +196,19 @@ public sealed class CodexUsageParser : IWorkerUsageParser
     public int CountToolSteps(string rawLine) => TryParseToolName(rawLine) is null ? 0 : 1;
 
     /// <summary>
+    /// #2131 slice 2: codex's Baton-owned write family. These are the exact dynamic-tool names the
+    /// broker emits on <c>item.started</c>; native <c>file_change</c> is excluded because Baton grants
+    /// codex no native file tool. Kept here, in the stream reader, because <c>Baton</c> cannot depend
+    /// on <c>Baton.Vendors.CodexDynamicToolPolicy</c>; that policy's constants are pinned to these
+    /// literals by its parser-facing tests.
+    /// </summary>
+    public int CountWriteToolSteps(string rawLine) => TryParseToolName(rawLine) switch
+    {
+        "apply_patch" or "baton_write_text" or "baton_write_output" => 1,
+        _ => 0,
+    };
+
+    /// <summary>
     /// #1921. Codex announces a call on <c>item.started</c> and reports its result on
     /// <c>item.completed</c>, so a refusal is counted on a DIFFERENT line from the one
     /// <see cref="CountToolSteps"/> counts — that asymmetry is

@@ -19,8 +19,13 @@ public sealed class WorkItemLifecycleTests
         string? prHead = "aaaaaaaabbbbbbbb",
         string? workspaceHead = "aaaaaaaabbbbbbbb",
         int round = 0,
-        bool? automaticFixUsed = false) =>
-        new(stage, round, automaticFixUsed, "1934-lane", outcome, verdict, pr, prHead, workspaceHead);
+        bool? automaticFixUsed = false,
+        bool prObserved = true,
+        bool? prOpen = true,
+        bool? prDraft = true,
+        string? requiredChecks = PullRequestChecks.Passing) =>
+        new(stage, round, automaticFixUsed, "1934-lane", outcome, verdict, pr, prHead, workspaceHead,
+            prObserved, prOpen, prDraft, requiredChecks);
 
     /// <summary>
     /// A verdict whose DECISION and whose FINDINGS are set independently — which is the whole point of
@@ -28,7 +33,7 @@ public sealed class WorkItemLifecycleTests
     /// cannot pass.
     /// </summary>
     private static ReviewVerdict Verdict(ReviewDecision? decision, params ReviewFinding[] findings) =>
-        new("PR #42", findings, "the summary, which nothing routes on", Decision: decision);
+        new("aaaaaaaabbbbbbbb", findings, "the summary, which nothing routes on", Decision: decision);
 
     private static ReviewFinding Finding(
         ReviewFindingSeverity severity, ReviewFindingStatus status, string claim = "the claim") =>
@@ -156,6 +161,68 @@ public sealed class WorkItemLifecycleTests
 
         Assert.Equal(WorkItemTransitionKind.Stop, transition.Kind);
         Assert.Equal(WorkStage.Ready, transition.NextStage);
+    }
+
+    [Fact]
+    public void An_approval_for_a_previous_head_re_drafts_and_re_reviews_the_new_head()
+    {
+        var stale = new ReviewVerdict("1111111122222222", [], Decision: ReviewDecision.Approve);
+
+        var transition = WorkItemLifecycle.Decide(At(
+            WorkStage.Review, verdict: stale, prDraft: false));
+
+        Assert.Equal(WorkItemTransitionKind.Dispatch, transition.Kind);
+        Assert.Equal(WorkStage.ReReview, transition.NextStage);
+        Assert.Equal(PullRequestReadinessAction.MarkDraft, transition.PullRequestAction);
+        Assert.Contains("approval is stale", transition.Reason, StringComparison.Ordinal);
+    }
+
+    [Theory]
+    [InlineData(PullRequestChecks.Pending)]
+    [InlineData(PullRequestChecks.Failing)]
+    [InlineData(PullRequestChecks.None)]
+    [InlineData(null)]
+    public void Current_head_approval_waits_in_draft_until_required_checks_pass(string? checks)
+    {
+        var transition = WorkItemLifecycle.Decide(At(
+            WorkStage.Review, verdict: Verdict(ReviewDecision.Approve), requiredChecks: checks));
+
+        Assert.Equal(WorkItemTransitionKind.None, transition.Kind);
+        Assert.Null(transition.NextStage);
+        Assert.Equal(PullRequestReadinessAction.None, transition.PullRequestAction);
+        Assert.Contains("required checks", transition.Reason, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void Current_head_approval_with_green_required_checks_marks_a_draft_ready()
+    {
+        var transition = WorkItemLifecycle.Decide(At(
+            WorkStage.Review, verdict: Verdict(ReviewDecision.Approve), prDraft: true));
+
+        Assert.Equal(WorkStage.Ready, transition.NextStage);
+        Assert.Equal(PullRequestReadinessAction.MarkReady, transition.PullRequestAction);
+    }
+
+    [Fact]
+    public void Uncertain_GitHub_state_retains_the_round_without_claiming_no_PR()
+    {
+        var transition = WorkItemLifecycle.Decide(At(
+            WorkStage.Implement, prObserved: false, pr: null, prHead: null,
+            prOpen: null, prDraft: null, requiredChecks: null));
+
+        Assert.Equal(WorkItemTransitionKind.None, transition.Kind);
+        Assert.Contains("observation failed", transition.Reason, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void A_closed_or_merged_PR_is_never_reopened_or_advanced()
+    {
+        var transition = WorkItemLifecycle.Decide(At(
+            WorkStage.Review, verdict: Verdict(ReviewDecision.Approve), prOpen: false, prDraft: false));
+
+        Assert.Equal(WorkItemTransitionKind.NeedsOperator, transition.Kind);
+        Assert.Equal(PullRequestReadinessAction.None, transition.PullRequestAction);
+        Assert.Contains("will not reopen", transition.Reason, StringComparison.Ordinal);
     }
 
     [Fact]

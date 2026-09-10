@@ -1189,6 +1189,9 @@ public static class MutationInterface
                         // #1741: arms from the RECORDED request fact, never from today's binding --
                         // see ExecutionRequest.HookCanaryArmed's own doc for why (spec/baton.md §9).
                         int? toolCallCount = null;
+                        var writeToolCallCount = changesTree
+                            ? CountWriteToolCallsFromStdoutLog(usageParser, outputDirectory)
+                            : null;
                         int? hookVerdictCount = null;
                         if (request.HookCanaryArmed is { } armed)
                         {
@@ -1230,7 +1233,8 @@ public static class MutationInterface
                             grantAuditMode: grantAuditMode, worktreePath: worktreePath, responseParser: responseParser,
                             usageParser: usageParser, worktreeBaseRef: worktreeBaseRef, changesTree: changesTree,
                             changesTreeWorkingDirectory: changesTreeWorkingDirectory, toolCallCount: toolCallCount,
-                            hookVerdictCount: hookVerdictCount, workspaceHeadShaAtStart: workspaceHeadShaAtStart);
+                            writeToolCallCount: writeToolCallCount, hookVerdictCount: hookVerdictCount,
+                            workspaceHeadShaAtStart: workspaceHeadShaAtStart);
 
                         // #1709: no TokenBudgetMonitor in scope on this path -- this classifies a
                         // RECORDED exit from a possibly-defunct workspace, never a live process, so
@@ -2203,6 +2207,9 @@ public static class MutationInterface
             // Isolation: this file never names "agy" -- the vendor decided applicability at resolve
             // time, this file only asks the target it was handed).
             int? toolCallCount = null;
+            var writeToolCallCount = binding.ChangesTree
+                ? CountWriteToolCallsFromStdoutLog(usageParser, prepared.OutputDirectory)
+                : null;
             int? hookVerdictCount = null;
             if (target.CountHookVerdicts is { } countHookVerdicts)
             {
@@ -2232,7 +2239,8 @@ public static class MutationInterface
             var classification = OutcomeClassifier.Classify(
                 dispatchResult, binding.Contract, prepared.OutputDirectory, binding.FailureClassifier, timeProvider,
                 grantAuditMode, worktreePath, binding.ResponseParser, usageParser, binding.WorktreeBaseSha, binding.ChangesTree,
-                changesTreeWorkingDirectory, toolCallCount, hookVerdictCount, workspaceHeadShaAtStart, openPullRequest: openPullRequest);
+                changesTreeWorkingDirectory, toolCallCount, writeToolCallCount, hookVerdictCount,
+                workspaceHeadShaAtStart, openPullRequest: openPullRequest);
 
             // #1623 (contract: spec/baton.md §3): the engine's own verify
             // step, spawned here -- between Classify returning Succeeded and the outcome event append
@@ -3118,6 +3126,44 @@ public static class MutationInterface
         }
 
         return toolCallCount;
+    }
+
+    /// <summary>
+    /// #2131 slice 2's settle-time write-tool measurement. Null means the stream could not answer
+    /// (no parser or no captured stdout segment); zero means at least one captured segment was read
+    /// and no vendor write-family call appeared. Uses the same rollover order as the canary count
+    /// above so a long execution cannot lose its early writes at settle.
+    /// </summary>
+    private static int? CountWriteToolCallsFromStdoutLog(
+        IWorkerUsageParser? usageParser, string outputDirectory)
+    {
+        if (usageParser is null)
+        {
+            return null;
+        }
+
+        var count = 0;
+        var readAnySegment = false;
+        foreach (var fileName in new[]
+                 {
+                     ExecutionStreamLogger.StdoutRolloverFileName,
+                     ExecutionStreamLogger.StdoutLogFileName,
+                 })
+        {
+            var path = Path.Combine(outputDirectory, fileName);
+            if (!File.Exists(path))
+            {
+                continue;
+            }
+
+            readAnySegment = true;
+            foreach (var line in File.ReadLines(path))
+            {
+                count += usageParser.CountWriteToolSteps(line);
+            }
+        }
+
+        return readAnySegment ? count : null;
     }
 
 }

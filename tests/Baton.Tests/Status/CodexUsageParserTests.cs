@@ -110,6 +110,19 @@ public sealed class CodexUsageParserTests
             "{\"type\":\"item.completed\",\"item\":{\"type\":\"mcp_tool_call\"}}"));
     }
 
+    [Theory]
+    [InlineData("apply_patch", 1)]
+    [InlineData("baton_write_text", 1)]
+    [InlineData("baton_write_output", 1)]
+    [InlineData("baton_read_text", 0)]
+    [InlineData("baton_run_command", 0)]
+    public void CountWriteToolSteps_uses_the_broker_write_family(string tool, int expected)
+    {
+        var line = $$$"""{"type":"item.started","item":{"type":"mcp_tool_call","tool":"{{{tool}}}"}}""";
+
+        Assert.Equal(expected, new CodexUsageParser().CountWriteToolSteps(line));
+    }
+
     [Fact]
     public void Completed_turn_separates_uncached_input_from_cache_and_preserves_other_usage_fields()
     {

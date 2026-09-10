@@ -84,6 +84,55 @@ public static class PullRequestChecks
     }
 
     /// <summary>
+    /// Reduces the JSON emitted by <c>gh pr checks --required --json bucket,...</c>. The command's
+    /// exit code describes the check result, so callers deliberately parse its output even when that
+    /// receipt is non-zero. Null means no trustworthy JSON evidence; an empty array means
+    /// <see cref="None"/>, not passing.
+    /// </summary>
+    public static string? TrySummarizeRequired(string json)
+    {
+        try
+        {
+            using var document = JsonDocument.Parse(json);
+            if (document.RootElement.ValueKind != JsonValueKind.Array)
+            {
+                return null;
+            }
+
+            var verdicts = new List<string>();
+            foreach (var element in document.RootElement.EnumerateArray())
+            {
+                if (element.ValueKind != JsonValueKind.Object)
+                {
+                    return null;
+                }
+
+                var bucket = Text(element, "bucket");
+                if (bucket is null)
+                {
+                    return null;
+                }
+
+                verdicts.Add(bucket.ToUpperInvariant() switch
+                {
+                    "PASS" or "SKIPPING" => Passing,
+                    "PENDING" => Pending,
+                    _ => Failing,
+                });
+            }
+
+            return verdicts.Count == 0 ? None
+                : verdicts.Contains(Failing) ? Failing
+                : verdicts.Contains(Pending) ? Pending
+                : Passing;
+        }
+        catch (JsonException)
+        {
+            return null;
+        }
+    }
+
+    /// <summary>
     /// One element's verdict. <c>conclusion</c> is the settled answer and is null while a check run is
     /// still going, so its absence means <see cref="Pending"/> rather than success; a
     /// <c>StatusContext</c>'s <c>state</c> carries both meanings in one field.

@@ -220,6 +220,7 @@ public static class OutcomeClassifier
         bool changesTree = false,
         string? changesTreeWorkingDirectory = null,
         int? toolCallCount = null,
+        int? writeToolCallCount = null,
         int? hookVerdictCount = null,
         string? workspaceHeadShaAtStart = null,
         Func<string?, string?, Workspaces.WorkspaceMutationReading?>? workspaceMutationProbe = null,
@@ -249,7 +250,8 @@ public static class OutcomeClassifier
             if (result.TerminalSuccessObserved && ContractValidator.IsSatisfied(contract, outputDirectory))
             {
                 return BuildSucceededClassification(
-                    contract, changesTreeWorkingDirectory, worktreeBaseRef, changesTree, result.EnginePlacedFiles);
+                    contract, changesTreeWorkingDirectory, worktreeBaseRef, changesTree, result.EnginePlacedFiles,
+                    writeToolCallCount);
             }
 
             // #1373: a timeout kill stays retryable only over an empty workspace. The ruling, the
@@ -314,10 +316,12 @@ public static class OutcomeClassifier
 
                 if (reading is { Mutated: true, FinishedAndPushed: true } && contractSatisfied)
                 {
-                    return BuildSucceededClassification(
-                        contract, changesTreeWorkingDirectory, worktreeBaseRef, changesTree, result.EnginePlacedFiles)
-                        with
-                    { FinishedDuringTeardown = true };
+                    var completion = BuildSucceededClassification(
+                        contract, changesTreeWorkingDirectory, worktreeBaseRef, changesTree,
+                        result.EnginePlacedFiles, writeToolCallCount);
+                    return completion.Verdict == OutcomeVerdict.Succeeded
+                        ? completion with { FinishedDuringTeardown = true }
+                        : completion;
                 }
 
                 if (reading is { Mutated: true })
@@ -520,7 +524,8 @@ public static class OutcomeClassifier
             }
 
             return BuildSucceededClassification(
-                contract, changesTreeWorkingDirectory, worktreeBaseRef, changesTree, result.EnginePlacedFiles);
+                contract, changesTreeWorkingDirectory, worktreeBaseRef, changesTree, result.EnginePlacedFiles,
+                writeToolCallCount);
         }
 
         // #1593: Natural exit 0 with unsatisfied contract settles Indeterminate (spec/baton.md §3 Producers).
@@ -857,7 +862,7 @@ public static class OutcomeClassifier
     /// </summary>
     private static OutcomeClassification BuildSucceededClassification(
         WorkerContract contract, string? changesTreeWorkingDirectory, string? worktreeBaseRef, bool changesTree,
-        IReadOnlyList<Domain.EnginePlacedFile>? enginePlacedFiles)
+        IReadOnlyList<Domain.EnginePlacedFile>? enginePlacedFiles, int? writeToolCallCount)
     {
         if (!changesTree)
         {
@@ -876,6 +881,24 @@ public static class OutcomeClassifier
                 changesTreeWorkingDirectory, worktreeBaseRef, out var workspaceChanged, enginePlacedFiles))
         {
             return new OutcomeClassification(OutcomeVerdict.Succeeded);
+        }
+
+        // #2131 slice 2: this is the measured no-op signature, and both halves are required. An
+        // unchanged tree alone remains the pre-existing hollow signal (a write may legitimately have
+        // targeted only a declared output), while a zero call count alone says nothing about shell
+        // writes or a clean commit. Null is unmeasured and cannot be promoted into zero. The binding's
+        // ChangesTree bit is derived from the write+shell grant at dispatch, so read-shaped roles never
+        // reach this branch.
+        if (!workspaceChanged && writeToolCallCount == 0)
+        {
+            return new OutcomeClassification(
+                OutcomeVerdict.Failed,
+                FailureClassification.Permanent,
+                "Implementation self-check failed: the write-granted lane made zero write-tool calls "
+                + "and left the worktree unchanged.",
+                WorkspaceChanged: false,
+                Hollow: true,
+                HollowReason: "zero write-tool calls and an unchanged worktree");
         }
 
         var hollow = !workspaceChanged && contract.ProducedOutputs.Count == 0;

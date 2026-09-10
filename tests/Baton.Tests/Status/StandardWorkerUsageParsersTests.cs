@@ -242,6 +242,25 @@ public sealed class StandardWorkerUsageParsersTests
     }
 
     [Fact]
+    public void Agy_CountWriteToolSteps_counts_only_terminal_write_family_calls()
+    {
+        var parser = new AgyUsageParser();
+        const string activeWrite = """
+            {"event":"step_update","step_update":{"state":"ACTIVE","step_type":"tool","tool_name":"write_to_file","tool_info":{"name":"write_to_file"}}}
+            """;
+        const string doneWrite = """
+            {"event":"step_update","step_update":{"state":"DONE","step_type":"tool","tool_name":"write_to_file","tool_info":{"name":"write_to_file"}}}
+            """;
+        const string doneRead = """
+            {"event":"step_update","step_update":{"state":"DONE","step_type":"tool","tool_name":"view_file","tool_info":{"name":"view_file"}}}
+            """;
+
+        Assert.Equal(0, parser.CountWriteToolSteps(activeWrite));
+        Assert.Equal(1, parser.CountWriteToolSteps(doneWrite));
+        Assert.Equal(0, parser.CountWriteToolSteps(doneRead));
+    }
+
+    [Fact]
     public void Agy_parser_TryParseIncrementalUsage_ReturnsFalse_for_a_DONE_tool_step_even_if_it_carried_usage()
     {
         // #1686 review F4 (AgyUsageParser.TryParseIncrementalUsage's own doc has the full predicate
@@ -269,6 +288,17 @@ public sealed class StandardWorkerUsageParsersTests
 
         // Distinct from TryParseToolName, which deliberately reports only the FIRST block's name.
         Assert.Equal("Bash", parser.TryParseToolName(multiToolLine));
+    }
+
+    [Fact]
+    public void Claude_CountWriteToolSteps_counts_every_write_family_block_and_no_read_blocks()
+    {
+        var parser = new ClaudeUsageParser();
+        const string line = """
+            {"type":"assistant","message":{"content":[{"type":"tool_use","name":"Edit"},{"type":"tool_use","name":"Read"},{"type":"tool_use","name":"NotebookEdit"}]}}
+            """;
+
+        Assert.Equal(2, parser.CountWriteToolSteps(line));
     }
 
     [Fact]

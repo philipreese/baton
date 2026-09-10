@@ -61,6 +61,30 @@ public static class WorkItemLifecycle
             return WorkItemTransition.None("the room has not settled yet");
         }
 
+        // #2131 readiness policy: an unavailable forge answer is an obligation to retry, never
+        // evidence that no PR exists. Likewise, a closed/merged PR is terminal forge state: this
+        // lifecycle may observe it but must never reopen it or dispatch work as though it were open.
+        if (!observation.PullRequestObservationSucceeded)
+        {
+            return WorkItemTransition.None(
+                "GitHub pull-request observation failed; retaining this settled round for reconciliation");
+        }
+
+        if (observation.PullRequest is not null && observation.PullRequestIsOpen is false)
+        {
+            return WorkItemTransition.NeedsOperator(
+                $"PR #{observation.PullRequest} is closed or merged — the queue will not reopen it or "
+                + $"advance the {WorkStages.Token(observation.Stage)} round");
+        }
+
+        if (observation.PullRequest is not null
+            && (observation.PullRequestIsOpen is null || observation.PullRequestIsDraft is null))
+        {
+            return WorkItemTransition.None(
+                $"PR #{observation.PullRequest} open/draft state was not readable; retaining this settled "
+                + "round for reconciliation");
+        }
+
         // The SUCCEEDED-shaped SET, never one word: #1945's FinishedDuringTeardown is a room that
         // finished and pushed, and reading it as a failure here re-reviewed a PR whose verdict was
         // already on disk. WorkflowOutcome owns the membership test (spec/baton.md §3).
@@ -92,10 +116,10 @@ public static class WorkItemLifecycle
         // A completed fix is reviewed against the prior verdict, not treated as the first review of
         // the item again. The distinct stage is what lets its effective tier selection be explicit.
         var nextReview = observation.Stage == WorkStage.Fix ? WorkStage.ReReview : WorkStage.Review;
-        return Dispatch(
+        return EnsureDraft(observation, Dispatch(
             observation, nextReview,
             $"the {WorkStages.Token(observation.Stage)} lane succeeded and PR #{pr} is open at "
-            + $"{Short(observation.PullRequestHeadSha)}");
+            + $"{Short(observation.PullRequestHeadSha)}"));
     }
 
     /// <summary>
@@ -108,9 +132,9 @@ public static class WorkItemLifecycle
         {
             // Not treated as an approval. A review that produced no readable verdict has said nothing,
             // and reading silence as APPROVE would merge on the strength of a missing file.
-            return WorkItemTransition.NeedsOperator(
+            return EnsureDraft(observation, WorkItemTransition.NeedsOperator(
                 $"the {WorkStages.Token(observation.Stage)} lane settled succeeded but wrote no readable "
-                + $"verdict.json — read the room's report.md and decide the round by hand; {Recovery(observation.Stage)}");
+                + $"verdict.json — read the room's report.md and decide the round by hand; {Recovery(observation.Stage)}"));
         }
 
         // Never a guess from the findings. A decision-less verdict reaches a person with the findings
@@ -120,20 +144,37 @@ public static class WorkItemLifecycle
         // normally and stops here rather than failing its lane.
         if (verdict.Decision is not { } decision)
         {
-            return WorkItemTransition.NeedsOperator(
+            return EnsureDraft(observation, WorkItemTransition.NeedsOperator(
                 $"the {WorkStages.Token(observation.Stage)} lane's verdict carries no decision — "
                 + $"read its {verdict.Findings.Count} finding(s) and the room's report.md, then carry the round by "
-                + $"hand; {Recovery(observation.Stage)}");
+                + $"hand; {Recovery(observation.Stage)}"));
         }
 
         if (decision == ReviewDecision.Approve)
         {
+            if (!ReviewCoversCurrentHead(verdict, observation.PullRequestHeadSha))
+            {
+                return EnsureDraft(observation, Dispatch(
+                    observation,
+                    WorkStage.ReReview,
+                    $"the review approved {verdict.ReviewedRef}, but PR #{observation.PullRequest} is now at "
+                    + $"{Short(observation.PullRequestHeadSha)} — the approval is stale"));
+            }
+
+            if (observation.RequiredChecks != PullRequestChecks.Passing)
+            {
+                return EnsureDraft(observation, WorkItemTransition.None(
+                    $"the review approved current head {Short(observation.PullRequestHeadSha)}, but required "
+                    + $"checks are {observation.RequiredChecks ?? "unknown"}; retaining the draft until they pass"));
+            }
+
             return WorkItemTransition.Stop(
                 WorkStage.Ready,
-                $"the review approved: decision 'approve' over {verdict.Findings.Count} finding(s)");
+                $"the review approved current head {Short(observation.PullRequestHeadSha)} and required checks passed",
+                observation.PullRequestIsDraft == true ? PullRequestReadinessAction.MarkReady : PullRequestReadinessAction.None);
         }
 
-        return observation.AutomaticFixUsed switch
+        return EnsureDraft(observation, observation.AutomaticFixUsed switch
         {
             false => Dispatch(
                 observation, WorkStage.Fix,
@@ -148,7 +189,7 @@ public static class WorkItemLifecycle
                 $"the review blocked but this legacy item has no trustworthy automatic-fix history — read its "
                 + $"{verdict.Findings.Count} finding(s) and the room's report.md, then decide the next round by hand; "
                 + Recovery(observation.Stage)),
-        };
+        });
     }
 
     /// <summary>
@@ -163,30 +204,51 @@ public static class WorkItemLifecycle
         // carries now.
         if (observation.Stage is WorkStage.Review or WorkStage.ReReview)
         {
-            return observation.PullRequest is { } reviewPr
+            return EnsureDraft(observation, observation.PullRequest is { } reviewPr
                 ? Dispatch(
                     observation, WorkStage.ReReview,
                     $"the review lane settled {observation.TerminalOutcome} without a verdict; PR #{reviewPr} is "
                     + $"still open at {Short(observation.PullRequestHeadSha)}")
                 : WorkItemTransition.NeedsOperator(
                     $"the review lane settled {observation.TerminalOutcome} and no pull request is open on "
-                    + $"'{observation.Branch}' — there is nothing left to review; {Recovery(observation.Stage)}");
+                    + $"'{observation.Branch}' — there is nothing left to review; {Recovery(observation.Stage)}"));
         }
 
         if (IsPushed(observation))
         {
-            return Dispatch(
+            return EnsureDraft(observation, Dispatch(
                 observation, WorkStage.ReReview,
                 $"the {WorkStages.Token(observation.Stage)} lane settled {observation.TerminalOutcome} with its work "
                 + $"pushed — PR #{observation.PullRequest} head {Short(observation.PullRequestHeadSha)} is the "
-                + "workspace head, so the round is re-review rather than fix");
+                + "workspace head, so the round is re-review rather than fix"));
         }
 
-        return Dispatch(
+        return EnsureDraft(observation, Dispatch(
             observation, WorkStage.Continue,
             $"the {WorkStages.Token(observation.Stage)} lane settled {observation.TerminalOutcome} with work that "
-            + $"never reached the PR ({DescribeUnpushed(observation)}) — finish and push it");
+            + $"never reached the PR ({DescribeUnpushed(observation)}) — finish and push it"));
     }
+
+    /// <summary>
+    /// A review/fix/continue obligation always leaves an open PR in draft. This is also the recovery
+    /// path for a pre-policy PR that was already ready: the action is idempotent, and the I/O owner
+    /// re-observes GitHub before applying the transition.
+    /// </summary>
+    private static WorkItemTransition EnsureDraft(
+        WorkItemObservation observation, WorkItemTransition transition) =>
+        observation.PullRequest is not null && observation.PullRequestIsOpen == true
+        && observation.PullRequestIsDraft == false
+            ? transition with { PullRequestAction = PullRequestReadinessAction.MarkDraft }
+            : transition;
+
+    /// <summary>
+    /// Current-head coverage is deliberately exact. A branch or PR reference can identify what the
+    /// reviewer meant to inspect, but cannot prove which commit it actually covered; a short SHA can
+    /// collide. The generated review brief asks for this exact full head.
+    /// </summary>
+    private static bool ReviewCoversCurrentHead(ReviewVerdict verdict, string? headSha) =>
+        headSha is { Length: > 0 }
+        && string.Equals(verdict.ReviewedRef.Trim(), headSha, StringComparison.OrdinalIgnoreCase);
 
     /// <summary>
     /// <b>Every dispatch this type issues goes through here</b> — the round is incremented in one place
@@ -298,7 +360,11 @@ public sealed record WorkItemObservation(
     ReviewVerdict? Verdict,
     int? PullRequest,
     string? PullRequestHeadSha,
-    string? WorkspaceHeadSha);
+    string? WorkspaceHeadSha,
+    bool PullRequestObservationSucceeded,
+    bool? PullRequestIsOpen,
+    bool? PullRequestIsDraft,
+    string? RequiredChecks);
 
 /// <summary>What the queue does with a work item next.</summary>
 /// <param name="Kind">Which of the three shapes below.</param>
@@ -311,7 +377,8 @@ public sealed record WorkItemTransition(
     WorkStage? NextStage,
     int Round,
     string Reason,
-    bool UsesAutomaticFix = false)
+    bool UsesAutomaticFix = false,
+    PullRequestReadinessAction PullRequestAction = PullRequestReadinessAction.None)
 {
     internal static WorkItemTransition None(string reason) =>
         new(WorkItemTransitionKind.None, null, 0, reason);
@@ -319,11 +386,24 @@ public sealed record WorkItemTransition(
     internal static WorkItemTransition Dispatch(WorkStage stage, int round, string reason, bool usesAutomaticFix) =>
         new(WorkItemTransitionKind.Dispatch, stage, round, reason, UsesAutomaticFix: usesAutomaticFix);
 
-    internal static WorkItemTransition Stop(WorkStage stage, string reason) =>
-        new(WorkItemTransitionKind.Stop, stage, 0, reason);
+    internal static WorkItemTransition Stop(
+        WorkStage stage, string reason,
+        PullRequestReadinessAction pullRequestAction = PullRequestReadinessAction.None) =>
+        new(WorkItemTransitionKind.Stop, stage, 0, reason, PullRequestAction: pullRequestAction);
 
     internal static WorkItemTransition NeedsOperator(string reason) =>
         new(WorkItemTransitionKind.NeedsOperator, null, 0, reason);
+}
+
+/// <summary>
+/// The only GitHub mutations the lifecycle may request. Neither is merge authority: one changes the
+/// visible readiness signal, and <see cref="WorkStage.Ready"/> still parks for the conductor.
+/// </summary>
+public enum PullRequestReadinessAction
+{
+    None,
+    MarkDraft,
+    MarkReady,
 }
 
 /// <summary>The three shapes of <see cref="WorkItemTransition"/>, plus the do-nothing one.</summary>

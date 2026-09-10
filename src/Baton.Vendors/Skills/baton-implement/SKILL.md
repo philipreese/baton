@@ -52,11 +52,26 @@ A red result is reported, never worked around. A check that cannot run is named,
 
 - One commit on the named branch unless the brief says otherwise, subject
   `<type>(<scope>): Capitalised description`; a subject the brief gives is used verbatim.
-- Push to `origin <branch>`; open the PR with `gh pr create`. The body ends with `Closes #<n>` (or
+- Push to `origin <branch>`; open the PR as a draft with `gh pr create --draft`. The body ends with
+  `Closes #<n>` (or
   `Part of #<n>`, as the brief says) alone on the last line.
 - No AI attribution anywhere: no `Co-Authored-By`, no "Generated with", no session links. After
   creating the PR, read the stored body back (`gh pr view --json body`) and fix anything appended.
 - `gh pr view` with no selector reaches your own PR; naming another PR's number is refused.
+
+## End-of-implementation self-check
+
+Immediately before reporting completion, in this same lane and context:
+
+- Re-read the final `origin/main..HEAD` diff against the brief and name any acceptance item it does
+  not satisfy.
+- Confirm the branch's final head is pushed and the draft PR exists at that head.
+- Re-read the stored PR body and `changes.md`; every sentence must be true of the final commit.
+- Confirm every check the brief required was actually run and that the recorded exit code is true.
+
+This is result validation, not an independent review and must never be described as one. A failed or
+uncertain push, PR lookup, or PR-body update leaves an explicit unfinished obligation; a command being
+issued is not evidence that its intended state took effect.
 
 ## changes.md
 

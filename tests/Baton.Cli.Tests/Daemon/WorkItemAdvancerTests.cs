@@ -25,13 +25,40 @@ public sealed class WorkItemAdvancerTests
 
     private sealed class FakeGh(string stdout, int exitCode = 0) : IGhCliRunner
     {
+        private bool _isDraft = true;
+
+        public List<string[]> Calls { get; } = [];
+
         public Task<GhCliResult> RunAsync(
-            string workingDirectory, IReadOnlyList<string> args, CancellationToken cancellationToken) =>
-            Task.FromResult(new GhCliResult(Started: true, exitCode, stdout, string.Empty));
+            string workingDirectory, IReadOnlyList<string> args, CancellationToken cancellationToken)
+        {
+            Calls.Add(args.ToArray());
+            if (exitCode != 0)
+            {
+                return Task.FromResult(new GhCliResult(Started: true, exitCode, stdout, string.Empty));
+            }
+
+            if (args is ["pr", "checks", ..])
+            {
+                return Task.FromResult(new GhCliResult(
+                    Started: true, 0, "[{\"name\":\"ci\",\"bucket\":\"pass\",\"state\":\"SUCCESS\"}]", string.Empty));
+            }
+
+            if (args is ["pr", "ready", ..])
+            {
+                _isDraft = args.Contains("--undo", StringComparer.Ordinal);
+                return Task.FromResult(new GhCliResult(Started: true, 0, "ok", string.Empty));
+            }
+
+            var observed = stdout.Replace(
+                "\"isDraft\":true", $"\"isDraft\":{_isDraft.ToString().ToLowerInvariant()}",
+                StringComparison.Ordinal);
+            return Task.FromResult(new GhCliResult(Started: true, 0, observed, string.Empty));
+        }
     }
 
     private static string PrJson(int number, string headSha) =>
-        $$"""{"number":{{number}},"headRefOid":"{{headSha}}","mergeStateStatus":"CLEAN"}""";
+        $$$"""{"number":{{{number}}},"state":"OPEN","isDraft":true,"headRefOid":"{{{headSha}}}","statusCheckRollup":[]}""";
 
     /// <summary>
     /// A blocking verdict whose blocking-ness is its <c>decision</c> and nothing else. The finding is
@@ -47,7 +74,7 @@ public sealed class WorkItemAdvancerTests
     /// <summary>The polarity partner, and crossed the other way: two CONFIRMED HIGHS the reviewer
     /// nonetheless approved.</summary>
     private const string ApprovingVerdict = """
-        {"reviewedRef":"PR #77","decision":"approve","summary":"nothing blocking","findings":[
+        {"reviewedRef":"aaaaaaaabbbbbbbbccccccccdddddddd","decision":"approve","summary":"nothing blocking","findings":[
           {"claim":"a real one, already fixed on the branch","severity":"high","status":"confirmed"},
           {"claim":"another","severity":"high","status":"confirmed"}]}
         """;
@@ -530,7 +557,7 @@ public sealed class WorkItemAdvancerTests
             await SeedAsync(home, WorkStage.Implement, room);
 
             const string prWithChecks = $$"""
-                {"number":77,"headRefOid":"{{PushedSha}}",
+                {"number":77,"state":"OPEN","isDraft":true,"headRefOid":"{{PushedSha}}",
                  "statusCheckRollup":[{"name":"gates","conclusion":"FAILURE"}]}
                 """;
             await new WorkItemAdvancer(new FakeGh(prWithChecks), (_, _) => Task.FromResult<string?>(PushedSha))

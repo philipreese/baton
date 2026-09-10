@@ -107,12 +107,70 @@ public sealed class WorkItemAdvancer
         var pr = await ReadPullRequestAsync(item, cancellationToken).ConfigureAwait(false);
         var head = await _workspaceHead(item.Workspace, cancellationToken).ConfigureAwait(false);
 
-        var transition = WorkItemLifecycle.Decide(new WorkItemObservation(
-            stage, item.Round, item.AutomaticFixUsed, item.Branch, outcome, verdict, pr.Number, pr.HeadSha, head));
+        WorkItemObservation Observation(PullRequestObservation reading) => new(
+            stage, item.Round, item.AutomaticFixUsed, item.Branch, outcome, verdict,
+            reading.Number, reading.HeadSha, head, reading.Succeeded, reading.IsOpen,
+            reading.IsDraft, reading.RequiredChecks);
+
+        var transition = WorkItemLifecycle.Decide(Observation(pr));
+
+        // A readiness mutation is never trusted from the command receipt. Re-observe the PR after
+        // every attempt, then ask the pure lifecycle again. The bounded loop covers the one real
+        // race: a head changes while a mark-ready is in flight, so the post-read requests mark-draft.
+        // A third requested action means GitHub never converged; retain the obligation for next tick.
+        for (var attempt = 0; transition.PullRequestAction != PullRequestReadinessAction.None && attempt < 3; attempt++)
+        {
+            if (pr.Number is not { } pullRequest)
+            {
+                return await RetainReconciliationAsync(
+                    item, transition.Reason + " (no exact PR number was available for the mutation)",
+                    pr, now, room, recordFailure: true).ConfigureAwait(false);
+            }
+
+            var args = transition.PullRequestAction == PullRequestReadinessAction.MarkDraft
+                ? new[] { "pr", "ready", pullRequest.ToString(CultureInfo.InvariantCulture), "--undo" }
+                : ["pr", "ready", pullRequest.ToString(CultureInfo.InvariantCulture)];
+            var mutation = await _gh.RunAsync(item.Workspace, args, cancellationToken).ConfigureAwait(false);
+
+            var after = await ReadPullRequestAsync(item, cancellationToken).ConfigureAwait(false);
+            var desiredDraft = transition.PullRequestAction == PullRequestReadinessAction.MarkDraft;
+            var reachedDesiredState = after.Succeeded
+                && after.Number == pullRequest
+                && after.IsOpen == true
+                && after.IsDraft == desiredDraft;
+            if (!reachedDesiredState)
+            {
+                var receipt = !mutation.Started
+                    ? "gh did not start"
+                    : $"gh exited {mutation.ExitCode}";
+                var observationError = after.Error is { Length: > 0 } error ? $"; {error}" : string.Empty;
+                return await RetainReconciliationAsync(
+                    item,
+                    $"{transition.PullRequestAction} for PR #{pullRequest} was not confirmed ({receipt}{observationError}); "
+                    + "the readiness obligation remains",
+                    after,
+                    now,
+                    room,
+                    recordFailure: true).ConfigureAwait(false);
+            }
+
+            pr = after;
+            transition = WorkItemLifecycle.Decide(Observation(pr));
+        }
+
+        if (transition.PullRequestAction != PullRequestReadinessAction.None)
+        {
+            return await RetainReconciliationAsync(
+                item, "GitHub readiness did not converge after three confirmed observations; the obligation remains",
+                pr, now, room, recordFailure: true).ConfigureAwait(false);
+        }
 
         return transition.Kind switch
         {
-            WorkItemTransitionKind.None => null,
+            WorkItemTransitionKind.None =>
+                await RetainReconciliationAsync(
+                    item, transition.Reason, pr, now, room,
+                    recordFailure: !pr.Succeeded).ConfigureAwait(false),
             WorkItemTransitionKind.NeedsOperator =>
                 await FailAsync(item, stage, transition, verdictPath, now, room).ConfigureAwait(false),
             WorkItemTransitionKind.Stop =>
@@ -125,6 +183,30 @@ public sealed class WorkItemAdvancer
     }
 
     /// <summary>
+    /// Keeps a settled lane eligible for the next reconciliation tick while recording the current
+    /// PR/check observation and an actionable reason on the item. A failed GitHub attempt also emits
+    /// a ledger fact; an ordinary pending-check wait does not pretend to be a failure.
+    /// </summary>
+    private static async Task<QueueDecisionEntry?> RetainReconciliationAsync(
+        QueueItem item, string reason, PullRequestObservation pr, DateTimeOffset now, string room,
+        bool recordFailure)
+    {
+        await MarkAsync(item.Tag, existing => existing with
+        {
+            PullRequest = pr.Number ?? existing.PullRequest,
+            Checks = pr.Checks ?? existing.Checks,
+            ChecksObservedAt = pr.Checks is null ? existing.ChecksObservedAt : now,
+            Error = reason,
+        }).ConfigureAwait(false);
+
+        return recordFailure
+            ? new QueueDecisionEntry(
+                now, item.Tag, QueueDecisionEntry.Failed, reason,
+                LiveWeight: 0, FreeGb: null, FloorGb: 0, Room: room)
+            : null;
+    }
+
+    /// <summary>
     /// The next round: the brief is rendered FIRST, then the item is written. A render that throws must
     /// not leave an item queued against the previous round's brief, which is the failure mode of writing
     /// the state first.
@@ -133,7 +215,7 @@ public sealed class WorkItemAdvancer
         QueueItem item,
         WorkStage from,
         WorkItemTransition transition,
-        (int? Number, string? HeadSha, string? Checks) pr,
+        PullRequestObservation pr,
         ReviewVerdict? verdict,
         string? verdictPath,
         DateTimeOffset now,
@@ -198,7 +280,7 @@ public sealed class WorkItemAdvancer
         QueueItem item,
         WorkStage from,
         WorkItemTransition transition,
-        (int? Number, string? HeadSha, string? Checks) pr,
+        PullRequestObservation pr,
         string? verdictPath,
         DateTimeOffset now,
         string room)
@@ -271,57 +353,149 @@ public sealed class WorkItemAdvancer
             CancellationToken.None);
 
     /// <summary>
-    /// <c>gh pr view &lt;branch&gt; --json number,headRefOid,statusCheckRollup</c>, run in the item's own
-    /// worktree. Every failure — no <c>gh</c>, not authenticated, no PR on the branch, output that does
-    /// not parse — is <c>(null, null, null)</c>, which the lifecycle reads as "no PR": that routes a
-    /// stalled lane to <see cref="WorkStage.Continue"/> rather than to a review of a PR that may not
-    /// exist. The third field goes the same way rather than to <see cref="PullRequestChecks.None"/> —
-    /// "the call failed" is not "no checks are configured".
+    /// Reads the branch's PR from an all-state, head-scoped list, then reads required checks for the
+    /// exact open PR and repeats the list read. The second snapshot is the stability fence: check
+    /// evidence is accepted only when number, head and draft state still describe the same open PR.
+    /// Command failure and malformed output are explicit failed observations, never "no PR".
     /// </summary>
     /// <remarks>
-    /// <b>Exactly the three fields something reads.</b> <c>mergeStateStatus</c> was requested and never
-    /// parsed (#2004 review); the queue never merges (spec/baton.md §13), so nothing here has a question
-    /// mergeability answers, and a requested-but-unread field reads to the next person as one that is
-    /// load-bearing somewhere. <c>statusCheckRollup</c> earned its place under that same rule in #1912:
-    /// the lifecycle still does not read it, but the conductor board's PR row does, and it is written
-    /// onto the item here (<see cref="QueueItem.Checks"/>) because this is the only place that already
-    /// spawns <c>gh</c> for this PR.
+    /// Closed and merged matches are returned as such and never passed to a readiness command. An empty
+    /// successful list is distinct from a failed list. The queue never merges and never reopens a PR.
     /// </remarks>
-    private async Task<(int? Number, string? HeadSha, string? Checks)> ReadPullRequestAsync(
+    private async Task<PullRequestObservation> ReadPullRequestAsync(
         QueueItem item, CancellationToken cancellationToken)
     {
-        if (item.Branch is not { Length: > 0 } branch || !Directory.Exists(item.Workspace))
+        if (item.Branch is not { Length: > 0 } branch)
         {
-            return (null, null, null);
+            return PullRequestObservation.NoPullRequest;
         }
 
-        var result = await _gh.RunAsync(
+        if (!Directory.Exists(item.Workspace))
+        {
+            return PullRequestObservation.Failed($"workspace '{item.Workspace}' is unavailable");
+        }
+
+        var before = await ReadPullRequestSnapshotAsync(item.Workspace, branch, cancellationToken).ConfigureAwait(false);
+        if (!before.Succeeded || before.Number is null || before.IsOpen != true)
+        {
+            return before;
+        }
+
+        var requiredResult = await _gh.RunAsync(
             item.Workspace,
-            ["pr", "view", branch, "--json", "number,headRefOid,statusCheckRollup"],
+            ["pr", "checks", before.Number.Value.ToString(CultureInfo.InvariantCulture), "--required", "--json", "bucket,name,state,workflow"],
+            cancellationToken).ConfigureAwait(false);
+        var required = requiredResult.Started
+            ? PullRequestChecks.TrySummarizeRequired(requiredResult.Stdout)
+            : null;
+        if (required is null)
+        {
+            return PullRequestObservation.Failed(
+                !requiredResult.Started
+                    ? $"gh pr checks did not start for PR #{before.Number}"
+                    : $"gh pr checks returned unreadable required-check evidence for PR #{before.Number}",
+                before);
+        }
+
+        var after = await ReadPullRequestSnapshotAsync(item.Workspace, branch, cancellationToken).ConfigureAwait(false);
+        if (!after.Succeeded)
+        {
+            return after;
+        }
+
+        if (after.Number != before.Number || after.IsOpen != true || after.HeadSha != before.HeadSha
+            || after.IsDraft != before.IsDraft)
+        {
+            return PullRequestObservation.Failed(
+                $"PR #{before.Number} changed while its required checks were being observed", after);
+        }
+
+        return after with { RequiredChecks = required };
+    }
+
+    private async Task<PullRequestObservation> ReadPullRequestSnapshotAsync(
+        string workspace, string branch, CancellationToken cancellationToken)
+    {
+        var result = await _gh.RunAsync(
+            workspace,
+            ["pr", "list", "--head", branch, "--state", "all", "--limit", "100", "--json", "number,state,isDraft,headRefOid,statusCheckRollup"],
             cancellationToken).ConfigureAwait(false);
         if (!result.Started || result.ExitCode != 0)
         {
-            return (null, null, null);
+            return PullRequestObservation.Failed(
+                !result.Started ? "gh pr list did not start" : $"gh pr list exited {result.ExitCode}");
         }
 
         try
         {
             using var document = JsonDocument.Parse(result.Stdout);
-            var root = document.RootElement;
+            var candidates = document.RootElement.ValueKind == JsonValueKind.Array
+                ? document.RootElement.EnumerateArray().Where(e => e.ValueKind == JsonValueKind.Object).ToList()
+                : document.RootElement.ValueKind == JsonValueKind.Object
+                    ? [document.RootElement]
+                    : [];
+            if (candidates.Count == 0)
+            {
+                return PullRequestObservation.NoPullRequest;
+            }
+
+            var root = candidates.FirstOrDefault(e => string.Equals(Text(e, "state"), "OPEN", StringComparison.OrdinalIgnoreCase));
+            if (root.ValueKind == JsonValueKind.Undefined)
+            {
+                root = candidates[0];
+            }
+
             var number = root.TryGetProperty("number", out var n) && n.ValueKind == JsonValueKind.Number
                 ? n.GetInt32()
                 : (int?)null;
-            var headSha = root.TryGetProperty("headRefOid", out var h) ? h.GetString() : null;
+            var state = Text(root, "state");
+            var isOpen = state is null || string.Equals(state, "OPEN", StringComparison.OrdinalIgnoreCase)
+                ? true
+                : state is "CLOSED" or "MERGED"
+                    ? false
+                    : (bool?)null;
+            var isDraft = root.TryGetProperty("isDraft", out var d)
+                && d.ValueKind is JsonValueKind.True or JsonValueKind.False
+                    ? d.GetBoolean()
+                    : (bool?)null;
+            var headSha = Text(root, "headRefOid");
             var checks = PullRequestChecks.Summarize(
                 root.TryGetProperty("statusCheckRollup", out var rollup) ? rollup : null);
-            return (number, headSha, checks);
+
+            return number is null
+                ? PullRequestObservation.Failed("gh pr list returned a PR without a number")
+                : new PullRequestObservation(true, number, headSha, isOpen, isDraft, checks, null, null);
         }
         catch (JsonException ex)
         {
             Console.Error.WriteLine(
-                $"WorkItemAdvancer: could not read 'gh pr view {branch}' output as JSON for '{item.Tag}': {ex.Message}");
-            return (null, null, null);
+                $"WorkItemAdvancer: could not read 'gh pr list --head {branch}' output as JSON: {ex.Message}");
+            return PullRequestObservation.Failed($"gh pr list returned malformed JSON: {ex.Message}");
         }
+    }
+
+    private static string? Text(JsonElement element, string property) =>
+        element.TryGetProperty(property, out var value) && value.ValueKind == JsonValueKind.String
+            ? value.GetString()
+            : null;
+
+    private sealed record PullRequestObservation(
+        bool Succeeded,
+        int? Number,
+        string? HeadSha,
+        bool? IsOpen,
+        bool? IsDraft,
+        string? Checks,
+        string? RequiredChecks,
+        string? Error)
+    {
+        internal static PullRequestObservation NoPullRequest { get; } =
+            new(true, null, null, false, null, null, null, null);
+
+        internal static PullRequestObservation Failed(
+            string error, PullRequestObservation? last = null) =>
+            new(false, last?.Number, last?.HeadSha, last?.IsOpen, last?.IsDraft,
+                last?.Checks, null, error);
     }
 
     /// <summary>
