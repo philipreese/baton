@@ -12,7 +12,7 @@ Built in .NET, it parses a declared workflow, hands each step's work to a Worker
 system is: the dispatch unit, the completion contract, gates, Fleet Glass observability, the
 narrowed daemon, and bindings/permissions. If this README and the spec disagree, the spec wins.
 
-- [Agent Instructions](CLAUDE.md) - Architectural rules and development workflows for AI agents.
+- [Agent instructions](AGENTS.md) - Short task router for agents using or developing Baton.
 - [Invoking Baton](docs/agents/invoking-baton.md) - For an agent whose job is to *run* a Baton lane
   against some other repo rather than develop Baton: the invocation that works today, a complete
   workflow+bindings pair, and the edges it will hit.
