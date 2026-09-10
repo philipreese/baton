@@ -5,7 +5,7 @@ namespace Baton.Outcomes;
 /// answer from its terminal stream envelope. Exists for exactly one consumer,
 /// <see cref="OutputMaterializer"/>: a worker that did the work but never wrote its declared output
 /// file still said something on its way out, and that response is the only recovery an engine that
-/// never reads conversation content (CLAUDE.md's Architecture Rule 1) is allowed to reach for.
+/// never reads conversation content (docs/agents/developing-baton.md's Architecture Rule 1) is allowed to reach for.
 /// </summary>
 public interface IWorkerResponseParser
 {

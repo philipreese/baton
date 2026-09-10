@@ -8,8 +8,10 @@ namespace Baton.VendorProbe;
 /// </summary>
 /// <remarks>
 /// <para>
-/// The probe spends real subscription usage, so it can never run unattended — but the question
-/// "are these findings still about the CLI that is installed?" costs nothing to ask, because
+/// The probe spends real subscription usage; its execution policy lives at
+/// record-once-ok: #2204 docs/agents/developing-baton.md
+/// <c>docs/agents/developing-baton.md#live-vendor-smoke-tests</c>. The question "are these findings
+/// still about the CLI that is installed?" costs nothing to ask, because
 /// <c>--version</c> is a local string that starts no session and burns no quota. So the free check
 /// gates the expensive one: the probe records the versions it ran against, and this compares them
 /// against what is installed now.

@@ -6,7 +6,7 @@ namespace Baton.Cli;
 /// [--output &lt;path&gt;] [--timeout &lt;minutes&gt;]</c>. No <c>--room-dir</c> flag: the new room's
 /// directory is always freshly generated (see <see cref="Parse"/>), the same never-reused rule
 /// <see cref="DispatchOptionsParser"/> documents for <c>baton dispatch</c>. Every malformed invocation is
-/// a <see cref="CliArgumentException"/> (CLAUDE.md's error-handling rules).
+/// a <see cref="CliArgumentException"/> (<see href="../../../docs/agents/developing-baton.md"/>).
 /// </summary>
 public static class RedispatchOptionsParser
 {

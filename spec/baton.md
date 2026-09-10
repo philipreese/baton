@@ -417,10 +417,10 @@ and the test derives the cap from the threshold. `--skill` additions must togeth
 than the remaining space to the threshold, since reaching the threshold refuses the declared set as a whole.
 **Each package is the sole register, for a
 dispatched lane, of the lane constraints it states** (what a lane never does, the delivery and review
-shapes, the two `AGENTS.md`-derived checks, the public-repository rules): a brief carries only what is
+shapes, the two package-owned common checks, the public-repository rules): a brief carries only what is
 task-specific, and no other lane-facing document restates the package. The workspace's own contributor
-file (`CLAUDE.md`/`AGENTS.md`) is a separate register, read by people and interactive sessions rather
-than by a lane; where a rule is both, the contributor file cites the package. What the defaults do NOT
+entry point (`AGENTS.md`) is read by people and interactive sessions rather than by a lane, and
+routes workers to the package instead of owning those checks. What the defaults do NOT
 carry is the conductor's own merging rules, which are the conductor's and never a lane's.
 
 ### §2 schema — the CLI argument table
@@ -3155,7 +3155,7 @@ giving up. Two things this still does **not** settle: exactly where `quotaLimits
 question and why both are checked), and whether any of this matches a real capture at all — every
 fixture this adapter is tested against remains bundle-derived (`claude-rate-limit.bundle-derived.jsonl`),
 and #1115's own record still calls a real cap hit "unprovokable without a real cap" (an operator spend
-decision, `CLAUDE.md` "Cost and reversibility are the operator's call", not a default action). What
+decision, `docs/agents/developing-baton.md` "Cost and reversibility are the operator's call", not a default action). What
 #1631 got right and #1609 leaves unchanged: `claude -p "/usage"`/`/cost` still reliably report real,
 headless reset instants for the session and weekly windows (decision 0026,
 `docs/vendor-capabilities.md`) — but neither the typed `credits_required` shape nor the CLI's own
@@ -5808,7 +5808,7 @@ exactly one implementation of this rule rather than two kept in step by hand.
 granted shell command Baton itself runs — the codex broker's `baton_run_command`, the only path where
 Baton holds the stopwatch, since claude and agy run their shell inside the vendor CLI — is bounded by
 one of three classes. `shipping` is the commands that transfer finished work out of the workspace;
-`gate` is the named gate tasks, in the `pixi run` spellings `CLAUDE.md` mandates and in the wrapped
+`gate` is the named gate tasks, in the `pixi run` spellings `docs/agents/developing-baton.md` mandates and in the wrapped
 spellings those tasks run as; `other` is everything else and keeps the ceiling every command
 had before. The two named classes are commands
 *known to be progressing while they run*, so a ceiling sized to a quick command kills finished work
@@ -6315,7 +6315,8 @@ target argument) is scoped to the current user session, not to the invoking repo
 run also kills any build server a concurrent *non*-pixi build on this box is using -- an interactive
 IDE/hand `dotnet build`, which deliberately keeps node reuse and the shared compiler on (the "the
 interactive developer build is unchanged" scope stated above). Accepted rather than narrowed: every
-tool path this repo tells its own tooling to use goes through pixi (CLAUDE.md, "never invoke `dotnet`
+tool path this repo tells its own tooling to use goes through pixi (`docs/agents/developing-baton.md`,
+"never invoke `dotnet`
 directly"), where both are already off, so a concurrent lane's own in-flight `pixi run` build has no
 server process to lose to another lane's shutdown call; `--vbcscompiler`/`--msbuild` targets narrow
 *which* servers die, not the session-wide scope, so there is no narrower target that fixes this.

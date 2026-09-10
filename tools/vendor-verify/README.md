@@ -86,9 +86,10 @@ moved*.
 
 ## Cost and safety
 
-Every check starts a real CLI session and spends real subscription usage, so this never runs in CI
-— the same permanent-human-action-item rule as `smoke-*` and `vendor-probe`. This is not a rounding
-error: one verification session took the operator's plan from **33% used to 78%**.
+Every check starts a real CLI session and spends real subscription usage, so this never runs in CI.
+Follow the [shared live-run policy](../../docs/agents/developing-baton.md#live-vendor-smoke-tests)
+before running it. This is not a rounding error: one verification session took the operator's plan
+from **33% used to 78%**.
 
 ### The model tier, and why it is not a blanket downgrade
 

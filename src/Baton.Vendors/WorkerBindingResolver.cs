@@ -6,7 +6,8 @@ namespace Baton.Vendors;
 /// <summary>
 /// Turns a parsed worker-binding config into the <c>Baton.Mutation.WorkerBinding</c> dictionary
 /// <c>MutationInterface.StartWorkflowAsync</c> needs — the "adapter resolution into WorkerBinding"
-/// M11 Phase 1 names, kept out of <c>Baton</c> entirely per CLAUDE.md's Adapter Isolation rule.
+/// M11 Phase 1 names, kept out of <c>Baton</c> by Adapter Isolation
+/// (<see href="../../../docs/agents/developing-baton.md"/>).
 /// Every entry resolves to <see cref="WorkerBinding.Process"/>: a worker-binding config describes
 /// a real vendor invocation, never a non-process party (<c>Baton.Mutation.WorkerBinding.NonProcess</c>)
 /// — those are constructed directly by whatever caller needs one, same as before this

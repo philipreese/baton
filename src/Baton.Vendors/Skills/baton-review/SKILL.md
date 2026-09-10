@@ -34,9 +34,10 @@ assert things, and the job is to try to falsify each one against the diff and th
   after the fix that cannot fail is not evidence.
 - **Comments and docs are claims.** A comment the change falsified without touching, a sentence
   that now overclaims, a spec paragraph that still describes the old behaviour.
-- **State enumeration and value provenance.** The workspace's `AGENTS.md`, when present, is the
-  register. A new vocabulary word with a predicate left unfixed; a value whose source moved with a
-  reader still reading the old one. Enumerate the readers yourself; the lane's list is a claim.
+- **State enumeration and value provenance.** The review package owns these checks. A new vocabulary
+  word with a predicate left unfixed; a value whose source moved with a reader still reading the old
+  one. Enumerate readers; the lane's list is a claim. AGENTS.md directs review workers here; the
+  implement package holds the shared lane-side form.
 - **Record-once.** A fact now stated in two places is a finding, whichever copy is right.
 - **Scope.** Anything in the diff the issue did not ask for, and anything the issue asked for that
   the diff does not do.

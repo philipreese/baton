@@ -11,7 +11,7 @@ namespace Baton.Cli;
 /// <see cref="CancelOptions"/>); <c>--bindings</c> still defaults to <c>&lt;room-dir&gt;/bindings.json</c>
 /// (#1607) so the record's field stays non-null. Never throws a bare
 /// <see cref="InvalidOperationException"/> for a malformed invocation — every failure here is a
-/// <see cref="CliArgumentException"/> (CLAUDE.md's error-handling rules), mirroring
+/// <see cref="CliArgumentException"/> (<see href="../../../docs/agents/developing-baton.md"/>), mirroring
 /// <see cref="RunOptionsParser"/>.
 /// </summary>
 public static class CancelOptionsParser

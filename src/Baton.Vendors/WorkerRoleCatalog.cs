@@ -74,7 +74,7 @@ public sealed record WorkerTier([property: JsonRequired] string Adapter, string?
 /// its own in-lane <c>Agent</c> "second reader" is a duplicate review — eight such lanes carried ~80% of
 /// one night's cache-read tokens across all implement rooms (#1802). False (the default -- every role
 /// but <c>advise</c> leaves this key omitted in <c>WorkerRoles.json</c>) withholds the tool; <c>advise</c>
-/// sets it true because weighing options via fan-out is that role's whole point. CLAUDE.md rule 7 names
+/// sets it true because weighing options via fan-out is that role's whole point. docs/agents/developing-baton.md names
 /// the replacement: under baton dispatch the second reader is the conductor's own review lane, never an
 /// in-lane subagent.
 /// </param>

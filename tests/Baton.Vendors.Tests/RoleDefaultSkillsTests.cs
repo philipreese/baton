@@ -250,18 +250,30 @@ public sealed class RoleDefaultSkillsTests : IDisposable
     }
 
     /// <summary>
-    /// The two code-facing packages cite <c>AGENTS.md</c> rather than restating it: the check names
-    /// the file and states the lane-side form. <c>baton-advise</c> runs no code change and so carries
+    /// The two code-facing packages own the common checks and state their lane-side form, while
+    /// <c>AGENTS.md</c> routes workers to them. <c>baton-advise</c> runs no code change and so carries
     /// neither check — asserted as the negative so a paste of the implement block into it is loud.
     /// </summary>
     [Fact]
-    public void The_two_code_facing_packages_cite_AGENTS_md_and_the_advise_package_does_not()
+    public void The_two_code_facing_packages_own_the_common_checks_and_the_advise_package_does_not()
     {
         string Content(string name) => SkillPackageReader.LoadPackage(Path.Combine(ShippedSkillsDirectory, name)).Content;
 
-        Assert.Contains("AGENTS.md", Content("baton-implement"), StringComparison.Ordinal);
-        Assert.Contains("AGENTS.md", Content("baton-review"), StringComparison.Ordinal);
-        Assert.DoesNotContain("AGENTS.md", Content("baton-advise"), StringComparison.Ordinal);
+        var implement = Content("baton-implement");
+        var implementNormalized = Regex.Replace(implement, @"\s+", " ").Replace("`", "", StringComparison.Ordinal);
+        Assert.Contains("This package owns these checks.", implement, StringComparison.Ordinal);
+        Assert.Contains("State enumeration", implement, StringComparison.Ordinal);
+        Assert.Contains("value provenance", implement, StringComparison.OrdinalIgnoreCase);
+        Assert.Contains("AGENTS.md routes workers here instead of restating them.", implementNormalized, StringComparison.Ordinal);
+
+        var review = Content("baton-review");
+        var reviewNormalized = Regex.Replace(review, @"\s+", " ");
+        Assert.Contains("The review package owns these checks.", review, StringComparison.Ordinal);
+        Assert.Contains("State enumeration and value provenance", review, StringComparison.Ordinal);
+        Assert.Contains("AGENTS.md directs review workers here", reviewNormalized, StringComparison.Ordinal);
+
+        Assert.DoesNotContain("State enumeration", Content("baton-advise"), StringComparison.Ordinal);
+        Assert.DoesNotContain("Value provenance", Content("baton-advise"), StringComparison.Ordinal);
     }
 
     [Theory]

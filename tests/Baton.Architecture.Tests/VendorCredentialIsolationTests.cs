@@ -3,7 +3,7 @@ using System.Text.RegularExpressions;
 namespace Baton.Architecture.Tests;
 
 /// <summary>
-/// CLAUDE.md architecture rule 4: AER must never read, copy, forward, or store a vendor credential.
+/// docs/agents/developing-baton.md architecture rule 4: AER must never read, copy, forward, or store a vendor credential.
 /// It spawns the vendor's own first-party CLI, which authenticates itself; AER is a keyboard, not a
 /// client.
 /// </summary>
@@ -14,7 +14,7 @@ namespace Baton.Architecture.Tests;
 /// <c>ANTHROPIC_API_KEY</c> to a child process's environment to make a test pass.
 /// </para>
 /// <para>
-/// It is the product premise made structural. CLAUDE.md: the project works against
+/// It is the product premise made structural. docs/agents/developing-baton.md: the project works against
 /// <em>subscriptions</em>, not API keys, and the adapters "deliberately own no key-handling code".
 /// Both vendors' SDKs were evaluated and rejected precisely because they are API-key transports
 /// (<c>docs/vendor-doc-audit.md</c>). A key read anywhere in <c>src/</c> would mean the thing the
@@ -87,7 +87,7 @@ public class VendorCredentialIsolationTests
         Assert.True(
             offenders.Count == 0,
             "AER must never read or forward a vendor credential — it spawns the vendor CLI, which "
-            + "authenticates itself (CLAUDE.md rule 4 — subscriptions, not API keys). Found:\n  "
+            + "authenticates itself (docs/agents/developing-baton.md rule 4 — subscriptions, not API keys). Found:\n  "
             + string.Join("\n  ", offenders));
     }
 
@@ -110,7 +110,7 @@ public class VendorCredentialIsolationTests
         Assert.True(
             offenders.Count == 0,
             "AER must not read the OS credential store — the vendor CLIs own their own logins "
-            + "(CLAUDE.md rule 4). Found:\n  " + string.Join("\n  ", offenders));
+            + "(docs/agents/developing-baton.md rule 4). Found:\n  " + string.Join("\n  ", offenders));
     }
 
     // A scanner that reads nothing passes both assertions above vacuously — the same stale-and-

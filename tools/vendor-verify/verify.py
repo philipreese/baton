@@ -2953,7 +2953,7 @@ def _agy_hook_env():
     per-invocation data (the denied-tool list) through `BATON_HOOK_DENIED_TOOLS`.
     `.vendor-survey/corpus/agy__hooks.md` documents the stdin payload in detail and says **nothing**
     about environment inheritance, so carrying claude's answer across would be exactly the
-    population-scope mistake CLAUDE.md gate `claim-scope` names.
+    population-scope mistake the development guide's gate `claim-scope` names.
 
     Sentinel because the failure is silent and total: if a future agy stops inheriting, the hook
     reads an empty denied list, treats it as "nothing withheld", allows every tool -- and looks

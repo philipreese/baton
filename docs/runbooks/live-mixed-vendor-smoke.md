@@ -7,20 +7,17 @@ terminal success, with real artifacts from both vendors on disk. This is the fir
 dispatches two different vendors in the same run, and the first time a live smoke test also
 exercises the mutation surface (`baton decide`), not just `baton run`.
 
-**This is always a human-run step, not something an agent session can close on its own** — see
-CLAUDE.md's "Live-vendor smoke tests" section. Both adapters shell out to whatever's already
-authenticated on the host rather than owning key-handling code of their own, which is what lets
-this work against real subscriptions; nothing about that can be provisioned headlessly from inside
-an agent session, and it shouldn't be worked around (e.g. by dropping in an API key) just to make
-the gate pass.
+Before running, follow the
+[shared live-run policy](../agents/developing-baton.md#live-vendor-smoke-tests). This smoke run's
+local prerequisite is both subscription CLIs; details are listed below.
 
 ## Prerequisites
 
 - An authenticated `claude` CLI on `PATH` — see
   [`live-claude-smoke.md`](./live-claude-smoke.md)'s prerequisites; unchanged here.
-- An authenticated `agy` (antigravity, Google Gemini's CLI) on `PATH` — either a logged-in session
-  or an API key configured for it. `AgyWorkerAdapter` has no key-handling code of its own; it
-  shells out to whatever `agy` invocation is already authenticated on this machine.
+- A subscription-authenticated `agy` (antigravity, Google Gemini's CLI) on `PATH`. `AgyWorkerAdapter`
+  delegates authentication by launching that already-signed-in executable; it does not accept
+  credentials itself.
 - Outbound network access to both Anthropic's and Google's APIs.
 - Standard repo prerequisites, same as the claude smoke runbook (.NET 10 SDK).
 

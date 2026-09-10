@@ -655,7 +655,7 @@ public static class MemorySyncCommand
     /// <param name="Check">
     /// Which run this was, mirroring <paramref name="Apply"/> — NOT the verdict. The verdict is the
     /// process exit code, and each target's <c>disposition</c> below is what it was computed from; a
-    /// second JSON field restating it would be the same fact in two places (CLAUDE.md,
+    /// second JSON field restating it would be the same fact in two places (docs/agents/developing-baton.md,
     /// <c>record-once</c>).
     /// </param>
     private sealed record SyncReport(

@@ -5,7 +5,7 @@ namespace Baton.Cli;
 /// [--execution &lt;execution-id&gt;] --accept-capture | --reject --reason &lt;text&gt; | --close --reason
 /// &lt;text&gt;</c>. Never throws a
 /// bare <see cref="InvalidOperationException"/> for a malformed invocation — every failure here is a
-/// <see cref="CliArgumentException"/> (CLAUDE.md's error-handling rules), mirroring
+/// <see cref="CliArgumentException"/> (<see href="../../../docs/agents/developing-baton.md"/>), mirroring
 /// <see cref="DecideOptionsParser"/>. Every validity rule beyond "is this a recognized flag" stays
 /// <c>Mutation.MutationInterface.RecordCaptureResolutionAsync</c>'s (e.g. whether the named execution
 /// actually has an unresolved capture) — this parser adds no vocabulary of its own beyond the

@@ -4,9 +4,33 @@ For the **cold invoking agent**: you have been told to run a Baton lane over som
 have no prior session context, and your job is to get one worker to produce one file. This page is
 the working invocation and the edges around it, as they actually are today.
 
-It is **not** for developing Baton — that is [`CLAUDE.md`](../../CLAUDE.md) — and it is not the
+It is **not** for developing Baton — that is [`docs/agents/developing-baton.md`](developing-baton.md) — and it is not the
 reference for `baton dispatch`, which is [`docs/dispatch.md`](../dispatch.md). Where those own a fact,
 this links rather than restates.
+
+**When conducting repository-changing work**, read the selected worker package through
+[`baton-implement`](../../src/Baton.Vendors/Skills/baton-implement/SKILL.md),
+[`baton-review`](../../src/Baton.Vendors/Skills/baton-review/SKILL.md), or
+[`baton-advise`](../../src/Baton.Vendors/Skills/baton-advise/SKILL.md) before writing the brief; the
+role package owns standing lane rules and the brief owns task-specific work. Reconcile the task,
+role tools, grants, outputs, verification owner, prerequisites, and allowance before dispatch, and
+surface a conflict instead of copying both instructions into the brief.
+
+**Treat caps as emergency brakes, not calibrated efficiency targets.** Role defaults are starting
+points, not validated optima; do not replace a normal allowance with an arbitrary small limit.
+High turn count alone is not evidence of runaway work. Inspect useful progress and disclosed spend
+before extending or arresting a lane: repeated blocked actions, loops, or escalating spend without
+useful progress justify intervention, while legitimate work gets room to finish. Tighten defaults
+only from comparable completed-task evidence that includes recovery cost. [#2175](https://github.com/philipreese/baton/issues/2175)
+owns allowance calibration and telemetry measurement; this ruling neither removes safeguards nor
+authorizes unbounded spend.
+The shared development guide owns [record-once](developing-baton.md#before-you-ship--the-gates-every-change-runs-through),
+[bounded delegation](developing-baton.md#delegating-to-subagents), and
+[spend disclosure](developing-baton.md#cost-and-reversibility-are-the-operators-call). After a lane,
+use the [completion and verification signals](#3-where-the-output-lands-and-how-you-find-it), not the
+worker's success claim alone. For a queued lifecycle, §7 below points to `spec/baton.md` §13; a
+`ready` item remains the conductor's responsibility for final PR metadata, CI and review, and the
+merge decision.
 
 This assumes `baton` is already installed on PATH. If `baton dispatch`/`baton status` print a
 `WARN: installed baton ... is behind this checkout's ...` line, the installed tool has drifted from
@@ -21,9 +45,9 @@ room untouched. An operator can clear a manual marker with `pixi run tool-refres
 specification for tool installation, launcher resolution, and drain markers is in [`spec/baton.md`](../../spec/baton.md) §8.
 
 Everything below is the state of the tree on the day it was written. Dispatch ergonomics
-([#1354](https://github.com/aer-works/baton/issues/1354)), the machine completion contract
-([#1356](https://github.com/aer-works/baton/issues/1356)), and validation errors carrying a
-corrected-invocation `Try:` line ([#1357](https://github.com/aer-works/baton/issues/1357)) have all
+([#1354](https://github.com/philipreese/baton/issues/1354)), the machine completion contract
+([#1356](https://github.com/philipreese/baton/issues/1356)), and validation errors carrying a
+corrected-invocation `Try:` line ([#1357](https://github.com/philipreese/baton/issues/1357)) have all
 landed — §3, §5, and §6 below describe what they actually do rather than what they were tracked to
 add.
 
@@ -49,7 +73,7 @@ still refuses at bind time.
 resolve them — it opens the argument as a file and fails with `Template file '<name>' does not
 exist.` That the two are different namespaces now shows up in the error itself, as a `Try:` line:
 `'baton run' takes a workflow FILE; built-in templates are used via 'baton dispatch <role>'`
-([#1357](https://github.com/aer-works/baton/issues/1357)).
+([#1357](https://github.com/philipreese/baton/issues/1357)).
 
 ---
 
@@ -567,7 +591,7 @@ itself is untouched (still Paused, no sentinel written), so a later `baton decid
 room still works normally; only this particular `--wait` call gave up on it.
 
 **Budget the wall clock in minutes, not seconds.** A repo-scale agy review ran roughly 3–5 minutes in
-the 2026-08-26 session that prompted [#1358](https://github.com/aer-works/baton/issues/1358) — one
+the 2026-08-26 session that prompted [#1358](https://github.com/philipreese/baton/issues/1358) — one
 observation, an order of magnitude rather than a measurement. What is exact is the ceiling: the
 binding's `Timeout` field, which the example above sets to 25 minutes to match what the `review` role
 declares in [`src/Baton.Vendors/WorkerRoles.json`](../../src/Baton.Vendors/WorkerRoles.json). A timeout
@@ -575,7 +599,7 @@ shorter than the work kills a run you have already paid for.
 
 **Most validation/refusal errors now carry a `Try:` line naming a corrected invocation**, printed
 directly under the error and echoed on the pre-ledger `terminal.json`/`status --json` sentinel's
-`try` field (§3) — [#1357](https://github.com/aer-works/baton/issues/1357). Two you are most likely
+`try` field (§3) — [#1357](https://github.com/philipreese/baton/issues/1357). Two you are most likely
 to meet are the template-file error in §1 and the worktree error in §6. Not every refusal gets one:
 an unknown option or an extra positional argument has no way to infer what you meant, so those are
 left without a suggestion rather than a guessed one.

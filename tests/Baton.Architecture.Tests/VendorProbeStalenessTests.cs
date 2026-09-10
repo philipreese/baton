@@ -8,9 +8,10 @@ namespace Baton.Architecture.Tests;
 /// </summary>
 /// <remarks>
 /// <para>
-/// The probe itself drives live authenticated CLIs and spends real subscription usage, so it is
-/// permanently a human action item (CLAUDE.md) and must never run unattended. But the trigger for
-/// running it does not have to be expensive. <c>--version</c> starts no session and burns no quota,
+/// The probe itself drives live authenticated CLIs and spends real subscription usage; follow
+/// record-once-ok: #2204 docs/agents/developing-baton.md
+/// <c>docs/agents/developing-baton.md#live-vendor-smoke-tests</c> before running it. The trigger does
+/// not have to be expensive: <c>--version</c> starts no session and burns no quota,
 /// so this test asks the only cheap question that matters: <em>is what is installed still the thing
 /// the findings were established against?</em>
 /// </para>

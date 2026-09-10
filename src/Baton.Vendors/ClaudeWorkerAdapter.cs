@@ -569,7 +569,7 @@ public sealed partial class ClaudeWorkerAdapter : IWorkerAdapter, IPermissionGra
     /// <see cref="AppContext.BaseDirectory"/> either way (a raw build's own output directory, or a
     /// global tool's own store directory -- it is, after all, the same dll this process is currently
     /// running from), and `dotnet` itself is a hard prerequisite for this whole product already
-    /// (`CLAUDE.md`: ".NET 10 SDK is required"). The explicit <see cref="File.Exists"/> guard below
+    /// (`docs/agents/developing-baton.md`: ".NET 10 SDK is required"). The explicit <see cref="File.Exists"/> guard below
     /// turns any future deployment shape this reasoning missed into a loud failure at dispatch time
     /// rather than a silent one at hook-invocation time.
     /// </remarks>
@@ -624,7 +624,7 @@ public sealed partial class ClaudeWorkerAdapter : IWorkerAdapter, IPermissionGra
     /// claimed. The content this writes is fixed and identical regardless of who wins, so the correct
     /// response to that specific exception is "someone else just created it" -- verified by re-checking
     /// existence, not assumed. Any other failure (permissions, disk full, a genuinely corrupt partial
-    /// write) still throws, per CLAUDE.md's rule against silently swallowing exceptions.
+    /// write) still throws, per docs/agents/developing-baton.md's rule against silently swallowing exceptions.
     /// </remarks>
     private static void EnsureFileExists(string path, string content)
     {

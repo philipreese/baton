@@ -70,7 +70,8 @@ public class LiveMixedVendorPausedRunSmokeTest
     /// <summary>
     /// Only checks the output exists and is non-blank — a live worker's exact text is never
     /// asserted verbatim (the contract is "the file exists", not "the file says X"; the
-    /// CLAUDE.md rule against parsing worker output applies here too).
+    /// engine does not parse that text for routing). See
+    /// <see href="../../../docs/agents/developing-baton.md"/>.
     /// </summary>
     private static async Task AssertRealOutputAsync(string artifactsRoot, StepState stepState, string outputName)
     {

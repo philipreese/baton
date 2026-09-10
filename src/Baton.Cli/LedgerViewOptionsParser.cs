@@ -21,8 +21,8 @@ public static class LedgerViewOptionsParser
         "[--repo-identity <key>] [--format text|json|csv] [--drill] [--help]";
 
     /// <summary>
-    /// What <c>--help</c> prints under <see cref="Usage"/>. Every line here is a place a reader's prior
-    /// fills the gap wrongly if the negative is not stated (CLAUDE.md, "Writing documentation"): which
+    /// What <c>--help</c> prints under <see cref="Usage"/>. Every line here closes a gap a reader could
+    /// otherwise fill incorrectly (<see href="../../../docs/agents/developing-baton.md"/>): which
     /// of the two ledgers this reads, which instant the window is on and which end is open, what a
     /// local-date shorthand means, and which facet does nothing useful yet.
     /// </summary>

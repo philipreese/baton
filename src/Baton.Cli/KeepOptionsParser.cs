@@ -3,7 +3,7 @@ namespace Baton.Cli;
 /// <summary>
 /// Parses <c>baton keep</c>'s arguments: <c>baton keep &lt;room-dir&gt;</c>. Never throws a bare
 /// <see cref="InvalidOperationException"/> for a malformed invocation — every failure here is a
-/// <see cref="CliArgumentException"/> (CLAUDE.md's error-handling rules), mirroring
+/// <see cref="CliArgumentException"/> (<see href="../../../docs/agents/developing-baton.md"/>), mirroring
 /// <see cref="StatusOptionsParser"/>. Its inverse, <see cref="UnkeepOptionsParser"/>, is a separate
 /// class (not a shared flag) so <c>tools/audit-completeness/clitripwire.py</c> — which globs
 /// <c>*OptionsParser.cs</c> and reads one verb per file's own <c>Usage</c> constant — can validate
