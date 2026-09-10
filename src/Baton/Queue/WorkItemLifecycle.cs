@@ -130,9 +130,22 @@ public static class WorkItemLifecycle
                 $"the review approved: decision 'approve' over {verdict.Findings.Count} finding(s)");
         }
 
-        return Dispatch(
-            observation, WorkStage.Fix,
-            $"the review blocked: decision 'block' over {verdict.Findings.Count} finding(s)");
+        return observation.AutomaticFixUsed switch
+        {
+            false => Dispatch(
+                observation, WorkStage.Fix,
+                $"the review blocked: decision 'block' over {verdict.Findings.Count} finding(s); "
+                + "dispatching the one automatic fix",
+                usesAutomaticFix: true),
+            true => WorkItemTransition.NeedsOperator(
+                $"the review blocked after the item's one automatic fix was already dispatched — read its "
+                + $"{verdict.Findings.Count} finding(s) and the room's report.md, then decide the next round by hand; "
+                + Recovery(observation.Stage)),
+            null => WorkItemTransition.NeedsOperator(
+                $"the review blocked but this legacy item has no trustworthy automatic-fix history — read its "
+                + $"{verdict.Findings.Count} finding(s) and the room's report.md, then decide the next round by hand; "
+                + Recovery(observation.Stage)),
+        };
     }
 
     /// <summary>
@@ -184,7 +197,8 @@ public static class WorkItemLifecycle
     /// wait: the reason names the count and the stage pair it stopped at, and lands on the item where
     /// <c>baton queue list</c> shows it.
     /// </remarks>
-    private static WorkItemTransition Dispatch(WorkItemObservation observation, WorkStage next, string reason)
+    private static WorkItemTransition Dispatch(
+        WorkItemObservation observation, WorkStage next, string reason, bool usesAutomaticFix = false)
     {
         var round = observation.Round + 1;
         if (round > WorkStages.MaxRounds)
@@ -195,7 +209,7 @@ public static class WorkItemLifecycle
                 + $"{WorkStages.Token(next)} round again ({reason}); {Recovery(observation.Stage)}");
         }
 
-        return WorkItemTransition.Dispatch(next, round, reason);
+        return WorkItemTransition.Dispatch(next, round, reason, usesAutomaticFix);
     }
 
     /// <summary>
@@ -255,6 +269,11 @@ public static class WorkItemLifecycle
 /// How many rounds the queue has already dispatched for it — 0 before the first, and one per dispatch
 /// of any stage after that. <see cref="WorkStages.MaxRounds"/> is the ceiling.
 /// </param>
+/// <param name="AutomaticFixUsed">
+/// The persisted one-automatic-fix history: false before the first blocking review, true after its
+/// fix dispatch, and null for legacy data whose history cannot be trusted. This is deliberately not
+/// derived from <paramref name="Round"/>, because retries and continuations also consume rounds.
+/// </param>
 /// <param name="Branch">The lane's branch, for the reasons this produces. Never used to decide.</param>
 /// <param name="TerminalOutcome">
 /// The settled room's own outcome word (<c>WorkflowOutcome</c>'s vocabulary), or null when the room
@@ -270,6 +289,7 @@ public static class WorkItemLifecycle
 public sealed record WorkItemObservation(
     WorkStage Stage,
     int Round,
+    bool? AutomaticFixUsed,
     string? Branch,
     string? TerminalOutcome,
     ReviewVerdict? Verdict,
@@ -287,13 +307,14 @@ public sealed record WorkItemTransition(
     WorkItemTransitionKind Kind,
     WorkStage? NextStage,
     int Round,
-    string Reason)
+    string Reason,
+    bool UsesAutomaticFix = false)
 {
     internal static WorkItemTransition None(string reason) =>
         new(WorkItemTransitionKind.None, null, 0, reason);
 
-    internal static WorkItemTransition Dispatch(WorkStage stage, int round, string reason) =>
-        new(WorkItemTransitionKind.Dispatch, stage, round, reason);
+    internal static WorkItemTransition Dispatch(WorkStage stage, int round, string reason, bool usesAutomaticFix) =>
+        new(WorkItemTransitionKind.Dispatch, stage, round, reason, UsesAutomaticFix: usesAutomaticFix);
 
     internal static WorkItemTransition Stop(WorkStage stage, string reason) =>
         new(WorkItemTransitionKind.Stop, stage, 0, reason);

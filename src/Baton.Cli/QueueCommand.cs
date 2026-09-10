@@ -108,6 +108,9 @@ public static class QueueCommand
             Issue = options.Issue,
             Stage = options.Lifecycle ? WorkStage.Implement : null,
             Branch = options.Lifecycle ? IssueWorktreeProvisioner.BranchNameFor(options.Issue!.Value) : null,
+            // Explicit false distinguishes a newly-created lifecycle item from a pre-#2131 item
+            // whose persisted history has no trustworthy automatic-fix budget.
+            AutomaticFixUsed = options.Lifecycle ? false : null,
             AddedAt = DateTimeOffset.UtcNow,
         };
 

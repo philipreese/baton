@@ -108,7 +108,7 @@ public sealed class WorkItemAdvancer
         var head = await _workspaceHead(item.Workspace, cancellationToken).ConfigureAwait(false);
 
         var transition = WorkItemLifecycle.Decide(new WorkItemObservation(
-            stage, item.Round, item.Branch, outcome, verdict, pr.Number, pr.HeadSha, head));
+            stage, item.Round, item.AutomaticFixUsed, item.Branch, outcome, verdict, pr.Number, pr.HeadSha, head));
 
         return transition.Kind switch
         {
@@ -181,6 +181,10 @@ public sealed class WorkItemAdvancer
             Checks = pr.Checks ?? existing.Checks,
             ChecksObservedAt = pr.Checks is null ? existing.ChecksObservedAt : now,
             LastVerdict = verdictPath ?? existing.LastVerdict,
+            // The lifecycle is the one authority that says a BLOCK may spend this budget. Preserve
+            // false, true, and legacy-null through every other transition so retries and
+            // continuations cannot manufacture a fix history from their shared round count.
+            AutomaticFixUsed = transition.UsesAutomaticFix ? true : existing.AutomaticFixUsed,
             State = QueueItemState.Queued,
             RoomDirectory = null,
             LaunchedAt = null,

@@ -6982,7 +6982,7 @@ departed from. Nothing in the queue substitutes a model.
 one spelling of that choice — no `--kind work` alias. It needs `--issue` (the issue is what its
 briefs are rendered from and what its PR is looked for on), refuses `--role` (the stage picks it), and
 defaults its tag to `<n>-lane`. The item carries `issue`, its worktree, `branch`, `stage`, `pr`,
-`lastVerdict` and `round` alongside every slice-1 field, plus the `checks`/`checksObservedAt` pair
+`lastVerdict`, `round`, and `automaticFixUsed` alongside every slice-1 field, plus the `checks`/`checksObservedAt` pair
 (#1912; `Baton.Queue.QueueItem.Checks` is the register for both). **What is ruled here rather than
 there: those two are display surface, not policy** — no arm of the table below reads either, so a
 change to how they are derived can never move an item to a different stage.
@@ -6995,7 +6995,8 @@ written:
 | implement / fix / continue | succeeded-shaped, PR open | **review** | there is something to review |
 | implement / fix / continue | succeeded-shaped, no PR | **operator** | the queue never opens a PR |
 | review / re-review | succeeded-shaped, `decision: approve` | **ready** | the conductor merges; the queue never does |
-| review / re-review | succeeded-shaped, `decision: block` | **fix** | the brief is the findings |
+| review / re-review | succeeded-shaped, `decision: block`, `automaticFixUsed: false` | **fix** | the one automatic fix has not been used |
+| review / re-review | succeeded-shaped, `decision: block`, `automaticFixUsed: true` or absent | **operator** | a second fix or untrustworthy legacy history needs conductor judgment |
 | review / re-review | succeeded-shaped, verdict with no decision | **operator** | never guessed from the findings |
 | review / re-review | succeeded-shaped, no readable verdict | **operator** | silence is not an approval |
 | implement / fix / continue | anything else, work pushed | **re-review** | the PR head is the workspace head |
@@ -7010,14 +7011,19 @@ succeeded-shaped — `Succeeded` and `FinishedDuringTeardown` — take every row
 the consumers §3 obliges, and an ordinal `== "Succeeded"` here discarded a readable `verdict.json` and
 re-dispatched a full review lane against the same head.
 
-**Every dispatch is counted, and the count is bounded** (`WorkStages.MaxRounds`, 4). `round` is one per
+**The one automatic fix is separately recorded and every dispatch is bounded** (`WorkStages.MaxRounds`, 4).
+`automaticFixUsed` is explicitly false on a newly-created work item and becomes true atomically with
+the first BLOCK → fix transition. It is the authoritative fix-budget history: a retry or continuation
+can consume `round` without dispatching a fix, so a count cannot prove that another BLOCK is safe to
+automate. An absent marker on a legacy item fails closed on BLOCK, preserving its room and findings for
+the conductor rather than granting a fix from ambiguous history. APPROVE still reaches ready regardless
+of the marker. `round` remains one per
 dispatch the lifecycle issues — review, fix, re-review, continue alike — not one per BLOCK, because the
 two arms that can repeat forever are `re-review → re-review` (a review lane that keeps hitting its wall
 clock) and `continue → continue` (a lane whose work never reaches the PR), and neither passes through a
-verdict. The default permits the conductor's own practice — round 1 the first review, then
-fix → re-review → fix — and stops at the dispatch after that, naming the count and the stage in the
-reason. Unattended overnight running is the whole point of the daemon, so an unbounded cycle is a
-frontier lane per tick with nothing putting it in front of a person.
+verdict. The ceiling still arrests those cycles; it is not the fix budget. Unattended overnight running
+is the whole point of the daemon, so an unbounded cycle is a frontier lane per tick with nothing putting
+it in front of a person.
 
 **APPROVE and BLOCK are READ from the verdict's `decision`, never derived** (operator ruling,
 2026-09-06 evening). `verdict.json` carries `"decision": "approve" | "block"` — the reviewer's own

@@ -59,13 +59,11 @@ public static class WorkStages
     /// </summary>
     /// <remarks>
     /// <para>
-    /// The arithmetic, so a later reader changes it against visible reasoning rather than re-deriving
-    /// it: round 1 is the first review, and the conductor's practice is two fix rounds before a person
-    /// looks — rounds 2, 3 and 4 are <c>fix → re-review → fix</c>, and the dispatch after that (the
-    /// second re-review) is where the queue stops and asks. Four, not "as many as it takes": a
+    /// This is a general dispatch ceiling, not the automatic-fix budget. The one automatic fix is
+    /// governed by <see cref="QueueItem.AutomaticFixUsed"/> in <see cref="WorkItemLifecycle"/>, because
+    /// continuations and re-review retries also consume rounds. Four, not "as many as it takes": a
     /// <c>re-review → re-review</c> or <c>continue → continue</c> cycle has no arm that ends it, and
-    /// each iteration is a full frontier lane on a daemon whose purpose is running unattended (#2004
-    /// review).
+    /// each iteration is a full frontier lane on a daemon whose purpose is running unattended.
     /// </para>
     /// <para>
     /// One home, deliberately: a second copy on <c>QueueItem</c> or in the scheduler would be the number
