@@ -6976,12 +6976,34 @@ defaults its tag to `<n>-lane`. The item carries `issue`, its worktree, `branch`
 there: those two are display surface, not policy** — no arm of the table below reads either, so a
 change to how they are derived can never move an item to a different stage.
 
+**Lifecycle selection is stage-specific by default (#2181).** On a newly added work item, bare
+`--adapter`, `--model` and `--effort` select the initial `implement` stage only; after every advance,
+the next stage resolves its own role/scope tier through the existing queue tier resolver. An operator
+may name a future stage with `--stage implement|review|fix|re-review|continue` before its axes, and
+may name more than one stage in one add. `--lifecycle-pin` is the distinct, explicit experiment
+surface: paired with at least one axis, it applies those axes to every lifecycle stage. It cannot be
+combined with `--stage`, so unset, stage override and whole-lifecycle pin are three inspectable
+states rather than inferred intent. `baton queue list` prints the effective plan and its source for
+every dispatchable stage; launch facts record the selected adapter/model/effort and `selectionSource`.
+Stage choices never alter timeout, tool-step or token budgets, and no stage advance escalates a
+vendor or model.
+
+**Persisted-item compatibility is explicit.** A lifecycle row written before this rule has no
+`stageSelections` field. If it also carries an adapter, model or effort, those stored axes retain
+their historic whole-item effect and each launch records `selectionSource:
+persisted-lifecycle-compatibility`; a row with no stored axes remains tier-default. New rows write an
+empty `stageSelections` list when they intentionally have no selections, so they cannot be mistaken
+for that compatibility population. This preserves queued and running work across restart instead of
+silently changing its reviewer. Every explicit stage/pin model combination is validated at add time
+for every stage it can reach, before a spec copy, worktree provision or worker spend.
+
 The lifecycle is the one the conductor ran by hand roughly forty times in the week before it was
 written:
 
 | At stage | The lane settled | Then | Because |
 |---|---|---|---|
-| implement / fix / continue | succeeded-shaped, PR open | **review** | there is something to review |
+| implement / continue | succeeded-shaped, PR open | **review** | there is something to review |
+| fix | succeeded-shaped, PR open | **re-review** | the prior verdict's findings are being checked |
 | implement / fix / continue | succeeded-shaped, no PR | **operator** | the queue never opens a PR |
 | review / re-review | succeeded-shaped, `decision: approve` | **ready** | the conductor merges; the queue never does |
 | review / re-review | succeeded-shaped, `decision: block` | **fix** | the brief is the findings |
@@ -7114,7 +7136,8 @@ and cost ledgers share. Fields: `at`, `tag`, `decision` (`launched` | `waited` |
 `advanced`), `reason`
 (`slots` | `memory` | `gap` | `hold` | `runway-held` | `no-items`, or the error), `liveWeight`,
 `freeGb` (absent when unmeasured), `floorGb`, `tier`, `adapter`, `model`, `effort`, `tierOverride`,
-`overrideReason`, `room`.
+`overrideReason`, `room`, `selectionSource` (`StageDefault` | `StageOverride` | `LifecyclePin` |
+`PersistedLifecycleCompatibility`).
 
 **`advanced` is one line per work-item stage change** (slice 2), naming the evidence it was derived
 from: the stage pair, the outcome word, the PR head, the verdict's counts. That is not decoration —

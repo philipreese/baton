@@ -13,7 +13,8 @@ public static class QueueOptionsParser
 {
     public const string Usage =
         "Usage: baton queue add <tag> --role <role> --spec <file> (--issue <n> | --workspace <dir>) " +
-        "[--lifecycle] [--scope engine|tooling|docs] [--adapter <a>] [--model <m>] [--effort <e>] " +
+        "[--lifecycle [--stage implement|review|fix|re-review|continue] | --lifecycle-pin] " +
+        "[--scope engine|tooling|docs] [--adapter <a>] [--model <m>] [--effort <e>] " +
         "[--timeout <minutes>] " +
         "[--max-tool-steps <n>] [--token-budget <n>] [--override-runway <reason>] [--reason <why>] | " +
         "baton queue list | baton queue hold | baton queue resume | baton queue import <file>. " +
@@ -68,6 +69,9 @@ public static class QueueOptionsParser
         int? issue = null, timeout = null, maxToolSteps = null;
         long? tokenBudget = null;
         var lifecycle = false;
+        var lifecyclePin = false;
+        WorkStage? selectedStage = null;
+        var stageSelections = new Dictionary<WorkStage, QueueStageSelection>();
 
         var i = 1;
         while (i < args.Count)
@@ -88,16 +92,20 @@ public static class QueueOptionsParser
                     scope = TakeValue(args, ref i, "--scope");
                     continue;
                 case "--adapter":
-                    adapter = TakeValue(args, ref i, "--adapter");
+                    SetAdapter(selectedStage, stageSelections, TakeValue(args, ref i, "--adapter"), ref adapter);
                     continue;
                 case "--model":
-                    model = TakeValue(args, ref i, "--model");
+                    SetModel(selectedStage, stageSelections, TakeValue(args, ref i, "--model"), ref model);
                     continue;
                 case "--effort":
-                    effort = TakeValue(args, ref i, "--effort");
+                    SetEffort(selectedStage, stageSelections, TakeValue(args, ref i, "--effort"), ref effort);
                     continue;
                 case "--reason":
-                    reason = TakeValue(args, ref i, "--reason");
+                    SetReason(selectedStage, stageSelections, TakeValue(args, ref i, "--reason"), ref reason);
+                    continue;
+                case "--stage":
+                    selectedStage = ParseStage(TakeValue(args, ref i, "--stage"));
+                    stageSelections.TryAdd(selectedStage.Value, new QueueStageSelection { Stage = selectedStage.Value });
                     continue;
                 case "--override-runway":
                     overrideRunway = TakeValue(args, ref i, "--override-runway");
@@ -116,6 +124,10 @@ public static class QueueOptionsParser
                     continue;
                 case "--lifecycle":
                     lifecycle = true;
+                    i++;
+                    continue;
+                case "--lifecycle-pin":
+                    lifecyclePin = true;
                     i++;
                     continue;
                 default:
@@ -161,6 +173,59 @@ public static class QueueOptionsParser
 
             tag ??= $"{issue}-lane";
             role = WorkStages.RoleFor(WorkStage.Implement);
+        }
+
+        if (selectedStage is not null && !lifecycle)
+        {
+            throw new CliArgumentException("'--stage' selects lifecycle-stage axes, so it requires '--lifecycle'.");
+        }
+
+        if (lifecyclePin && !lifecycle)
+        {
+            throw new CliArgumentException("'--lifecycle-pin' applies only to a '--lifecycle' work item.");
+        }
+
+        if (lifecyclePin && selectedStage is not null)
+        {
+            throw new CliArgumentException(
+                "'--lifecycle-pin' and '--stage' are different selection scopes; choose one so the effective choice is unambiguous.");
+        }
+
+        if (lifecyclePin && adapter is null && model is null && effort is null)
+        {
+            throw new CliArgumentException(
+                "'--lifecycle-pin' needs at least one of '--adapter', '--model' or '--effort' to pin.");
+        }
+
+        if (lifecycle && !lifecyclePin)
+        {
+            // Bare axes on a new work item deliberately mean the initial implement stage only. The
+            // list is written even when empty, which keeps an old persisted row distinguishable from
+            // a new item that intentionally leaves every stage to its tier.
+            if (adapter is not null || model is not null || effort is not null || reason is not null)
+            {
+                if (stageSelections.TryGetValue(WorkStage.Implement, out var existing)
+                    && (existing.Adapter is not null || existing.Model is not null || existing.Effort is not null
+                        || existing.Reason is not null))
+                {
+                    throw new CliArgumentException(
+                        "Implement-stage axes were supplied both before and after '--stage implement'; state each axis once.");
+                }
+
+                stageSelections[WorkStage.Implement] = new QueueStageSelection
+                {
+                    Stage = WorkStage.Implement,
+                    Adapter = adapter,
+                    Model = model,
+                    Effort = effort,
+                    Reason = reason,
+                };
+            }
+
+            adapter = null;
+            model = null;
+            effort = null;
+            reason = null;
         }
 
         if (tag is null)
@@ -225,6 +290,21 @@ public static class QueueOptionsParser
                 + "which is the whole point of having a tier table to depart from.");
         }
 
+        foreach (var selection in stageSelections.Values)
+        {
+            if (selection.Adapter is null && selection.Model is null && selection.Effort is null)
+            {
+                throw new CliArgumentException(
+                    $"'--stage {WorkStages.Token(selection.Stage)}' needs at least one of '--adapter', '--model' or '--effort'.");
+            }
+
+            if (scope is not null && string.IsNullOrWhiteSpace(selection.Reason))
+            {
+                throw new CliArgumentException(
+                    $"A '{WorkStages.Token(selection.Stage)}' stage selection that overrides its tier needs '--reason <why>'.");
+            }
+        }
+
         if (overrideRunway is not null && string.IsNullOrWhiteSpace(overrideRunway))
         {
             throw new CliArgumentException(
@@ -254,8 +334,73 @@ public static class QueueOptionsParser
 
         return new QueueOptions(
             QueueVerb.Add, tag, role, spec, issue, workspace, scope, adapter, model, effort,
-            timeout, maxToolSteps, tokenBudget, overrideRunway, reason, ImportFilePath: null, Lifecycle: lifecycle);
+            timeout, maxToolSteps, tokenBudget, overrideRunway, reason, ImportFilePath: null, Lifecycle: lifecycle,
+            StageSelections: lifecycle ? stageSelections.Values.ToList() : null, LifecyclePin: lifecyclePin);
     }
+
+    private static void SetAdapter(
+        WorkStage? stage, IDictionary<WorkStage, QueueStageSelection> selections, string value, ref string? ordinaryValue)
+    {
+        if (stage is not { } selected)
+        {
+            ordinaryValue = value;
+            return;
+        }
+
+        selections.TryGetValue(selected, out var existing);
+        selections[selected] = (existing ?? new QueueStageSelection { Stage = selected }) with { Adapter = value };
+    }
+
+    private static void SetModel(
+        WorkStage? stage, IDictionary<WorkStage, QueueStageSelection> selections, string value, ref string? ordinaryValue)
+    {
+        if (stage is not { } selected)
+        {
+            ordinaryValue = value;
+            return;
+        }
+
+        selections.TryGetValue(selected, out var existing);
+        selections[selected] = (existing ?? new QueueStageSelection { Stage = selected }) with { Model = value };
+    }
+
+    private static void SetEffort(
+        WorkStage? stage, IDictionary<WorkStage, QueueStageSelection> selections, string value, ref string? ordinaryValue)
+    {
+        if (stage is not { } selected)
+        {
+            ordinaryValue = value;
+            return;
+        }
+
+        selections.TryGetValue(selected, out var existing);
+        selections[selected] = (existing ?? new QueueStageSelection { Stage = selected }) with { Effort = value };
+    }
+
+    private static void SetReason(
+        WorkStage? stage, IDictionary<WorkStage, QueueStageSelection> selections, string value, ref string? ordinaryValue)
+    {
+        if (stage is not { } selected)
+        {
+            ordinaryValue = value;
+            return;
+        }
+
+        selections.TryGetValue(selected, out var existing);
+        selections[selected] = (existing ?? new QueueStageSelection { Stage = selected }) with { Reason = value };
+    }
+
+    private static WorkStage ParseStage(string value) => value switch
+    {
+        "implement" => WorkStage.Implement,
+        "review" => WorkStage.Review,
+        "fix" => WorkStage.Fix,
+        "re-review" => WorkStage.ReReview,
+        "continue" => WorkStage.Continue,
+        "ready" => throw new CliArgumentException("'--stage ready' is invalid because ready never dispatches."),
+        _ => throw new CliArgumentException(
+            $"Unknown lifecycle stage '{value}'. Pass implement, review, fix, re-review or continue."),
+    };
 
     private static string TakeValue(IReadOnlyList<string> args, ref int i, string option)
     {

@@ -79,7 +79,8 @@ public sealed class WorkItemAdvancerTests
     }
 
     private static async Task<QueueItem> SeedAsync(
-        string home, WorkStage stage, string room, QueueItemState state = QueueItemState.Done, int round = 0)
+        string home, WorkStage stage, string room, QueueItemState state = QueueItemState.Done, int round = 0,
+        IReadOnlyList<QueueStageSelection>? stageSelections = null)
     {
         var workspace = Path.Combine(home, "w1934");
         Directory.CreateDirectory(workspace);
@@ -101,6 +102,7 @@ public sealed class WorkItemAdvancerTests
             State = state,
             RoomDirectory = room,
             Instructions = "Build the lifecycle.",
+            StageSelections = stageSelections,
         };
 
         await QueueStore.MutateAsync(BatonPaths.QueueFile, s => s with { Items = [item] }, Ct);
@@ -256,7 +258,12 @@ public sealed class WorkItemAdvancerTests
             // rendered from the room that just settled says "(no findings were recorded)" and then asks
             // the reviewer whether the new head closes findings it was never shown.
             var reviewRoom = await WriteSettledRoomAsync(home, WorkflowOutcome.Succeeded, BlockingVerdict);
-            await SeedAsync(home, WorkStage.Review, reviewRoom, round: 1);
+            var selections = new[]
+            {
+                new QueueStageSelection { Stage = WorkStage.Fix, Model = "gpt-6-astra", Reason = "fix experiment" },
+                new QueueStageSelection { Stage = WorkStage.ReReview, Model = "gpt-5.6-sol", Reason = "independent review" },
+            };
+            await SeedAsync(home, WorkStage.Review, reviewRoom, round: 1, stageSelections: selections);
 
             var advancer = new WorkItemAdvancer(
                 new FakeGh(PrJson(77, PushedSha)), (_, _) => Task.FromResult<string?>(PushedSha));
@@ -265,6 +272,7 @@ public sealed class WorkItemAdvancerTests
             var afterBlock = await ReadBackAsync();
             Assert.Equal(WorkStage.Fix, afterBlock.Stage);
             Assert.Equal(Path.Combine(reviewRoom, "verdict.json"), afterBlock.LastVerdict);
+            Assert.Equal("gpt-6-astra", afterBlock.StageSelections!.Single(s => s.Stage == WorkStage.Fix).Model);
 
             // That fix lane settles cleanly with its work pushed, and produces no verdict of its own.
             var fixRoom = await WriteSettledRoomAsync(home, WorkflowOutcome.Succeeded, verdictJson: null);
@@ -276,7 +284,8 @@ public sealed class WorkItemAdvancerTests
             await advancer.AdvanceAsync(Now.AddMinutes(5), Ct);
 
             var item = await ReadBackAsync();
-            Assert.Equal(WorkStage.Review, item.Stage);
+            Assert.Equal(WorkStage.ReReview, item.Stage);
+            Assert.Equal("gpt-5.6-sol", item.StageSelections!.Single(s => s.Stage == WorkStage.ReReview).Model);
 
             var brief = await File.ReadAllTextAsync(item.SpecFile, Ct);
             Assert.Contains("Re-review PR #77", brief, StringComparison.Ordinal);

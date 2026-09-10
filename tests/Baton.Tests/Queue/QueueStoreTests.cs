@@ -54,6 +54,43 @@ public sealed class QueueStoreTests
     }
 
     [Fact]
+    public async Task Lifecycle_selection_intent_and_the_legacy_compatibility_shape_survive_a_restart()
+    {
+        var path = TempQueuePath();
+        try
+        {
+            var staged = Item("staged") with
+            {
+                Stage = WorkStage.Review,
+                StageSelections =
+                [
+                    new QueueStageSelection
+                    {
+                        Stage = WorkStage.Review,
+                        Model = "gpt-5.6-sol",
+                        Reason = "independent review",
+                    },
+                ],
+                TokenBudget = 600_000,
+            };
+            // Null is the on-disk shape an item written before #2181 has: its stored axis retains
+            // the old all-stage interpretation rather than being reclassified on load.
+            var legacy = Item("legacy") with { Stage = WorkStage.Review, Model = "sonnet", StageSelections = null };
+            await QueueStore.MutateAsync(path, s => s with { Items = [staged, legacy] }, Ct);
+
+            var read = await QueueStore.LoadAsync(path, Ct);
+            Assert.Equal("gpt-5.6-sol", read.Items[0].StageSelections!.Single().Model);
+            Assert.Equal(600_000, read.Items[0].TokenBudget);
+            var (_, source) = QueueTierTable.SelectionForStage(read.Items[1], WorkStage.ReReview);
+            Assert.Equal(QueueSelectionSource.PersistedLifecycleCompatibility, source);
+        }
+        finally
+        {
+            Cleanup(path);
+        }
+    }
+
+    [Fact]
     public async Task A_mutation_sees_what_the_previous_one_wrote()
     {
         var path = TempQueuePath();

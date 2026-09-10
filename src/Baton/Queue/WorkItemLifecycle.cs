@@ -89,8 +89,11 @@ public static class WorkItemLifecycle
                 + $"'{observation.Branch}' — the queue will not open a PR; {Recovery(observation.Stage)}");
         }
 
+        // A completed fix is reviewed against the prior verdict, not treated as the first review of
+        // the item again. The distinct stage is what lets its effective tier selection be explicit.
+        var nextReview = observation.Stage == WorkStage.Fix ? WorkStage.ReReview : WorkStage.Review;
         return Dispatch(
-            observation, WorkStage.Review,
+            observation, nextReview,
             $"the {WorkStages.Token(observation.Stage)} lane succeeded and PR #{pr} is open at "
             + $"{Short(observation.PullRequestHeadSha)}");
     }

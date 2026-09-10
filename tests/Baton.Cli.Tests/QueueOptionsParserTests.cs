@@ -125,6 +125,40 @@ public sealed class QueueOptionsParserTests
         Assert.Null(options.ScopeClass);
     }
 
+    [Fact]
+    public void Lifecycle_axes_default_to_implement_while_named_stage_axes_stay_on_that_stage()
+    {
+        var options = QueueOptionsParser.Parse([
+            "add", "2181-lane", "--issue", "2181", "--lifecycle",
+            "--model", "gpt-6-astra",
+            "--stage", "review", "--model", "gpt-5.6-sol",
+        ]);
+
+        Assert.Null(options.Model);
+        Assert.False(options.LifecyclePin);
+        Assert.Equal(2, options.StageSelections!.Count);
+        Assert.Equal("gpt-6-astra", options.StageSelections.Single(s => s.Stage == Baton.Queue.WorkStage.Implement).Model);
+        Assert.Equal("gpt-5.6-sol", options.StageSelections.Single(s => s.Stage == Baton.Queue.WorkStage.Review).Model);
+    }
+
+    [Fact]
+    public void Lifecycle_pin_is_explicit_and_cannot_be_combined_with_a_stage_selection()
+    {
+        var pin = QueueOptionsParser.Parse([
+            "add", "2181-lane", "--issue", "2181", "--lifecycle", "--lifecycle-pin", "--model", "gpt-6-astra",
+        ]);
+        Assert.True(pin.LifecyclePin);
+        Assert.Equal("gpt-6-astra", pin.Model);
+        Assert.Null(pin.StageSelections!.SingleOrDefault());
+
+        Assert.Throws<CliArgumentException>(() => QueueOptionsParser.Parse([
+            "add", "2181-lane", "--issue", "2181", "--lifecycle", "--lifecycle-pin", "--stage", "review", "--model", "gpt-5.6-sol",
+        ]));
+        Assert.Throws<CliArgumentException>(() => QueueOptionsParser.Parse([
+            "add", "2181-lane", "--issue", "2181", "--lifecycle", "--stage", "review",
+        ]));
+    }
+
     [Theory]
     [InlineData("--timeout", "0")]
     [InlineData("--max-tool-steps", "-1")]

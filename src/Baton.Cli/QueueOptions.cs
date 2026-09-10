@@ -1,3 +1,5 @@
+using Baton.Queue;
+
 namespace Baton.Cli;
 
 /// <summary>Which <c>baton queue</c> sub-verb was typed.</summary>
@@ -44,6 +46,10 @@ public enum QueueVerb
 /// <c>--kind work</c> alias, because two ways to say one thing is one of them going stale. Requires
 /// <c>--issue</c>, refuses <c>--role</c> (the stage picks it), and makes <c>--spec</c> optional.
 /// </param>
+/// <param name="StageSelections">Explicit lifecycle-stage axes. Null distinguishes an older persisted
+/// item from a newly added lifecycle item that intentionally leaves every stage at its tier.</param>
+/// <param name="LifecyclePin">Makes the ordinary axes an explicit whole-lifecycle pin rather than an
+/// implement-stage selection. Valid only with <paramref name="Lifecycle"/>.</param>
 public sealed record QueueOptions(
     QueueVerb Verb,
     string? Tag = null,
@@ -61,4 +67,6 @@ public sealed record QueueOptions(
     string? OverrideRunwayReason = null,
     string? Reason = null,
     string? ImportFilePath = null,
-    bool Lifecycle = false);
+    bool Lifecycle = false,
+    IReadOnlyList<QueueStageSelection>? StageSelections = null,
+    bool LifecyclePin = false);

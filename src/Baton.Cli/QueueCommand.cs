@@ -99,6 +99,8 @@ public static class QueueCommand
             Adapter = adapter,
             Model = options.Model,
             Effort = options.Effort,
+            StageSelections = options.StageSelections,
+            LifecyclePin = options.LifecyclePin,
             TimeoutMinutes = options.TimeoutMinutes,
             MaxToolSteps = options.MaxToolSteps,
             TokenBudget = options.TokenBudget,
@@ -199,6 +201,9 @@ public static class QueueCommand
     private static async Task<int> ListAsync(TextWriter output, CancellationToken cancellationToken)
     {
         var snapshot = await QueueStore.LoadAsync(BatonPaths.QueueFile, cancellationToken).ConfigureAwait(false);
+        var settings = snapshot.Items.Any(i => i.Stage is not null)
+            ? (await DaemonSettingsStore.LoadAsync(BatonPaths.SettingsFile, cancellationToken).ConfigureAwait(false)).Queue
+            : null;
         if (snapshot.Held)
         {
             output.WriteLine("Queue is HELD — no new launches until 'baton queue resume'. Live lanes are unaffected.");
@@ -231,6 +236,10 @@ public static class QueueCommand
                     + (item.PullRequest is { } pr ? $"  PR #{pr}" : string.Empty)
                 : string.Empty;
             output.WriteLine($"{item.Tag}  {state}  {item.Role}{stage}{external}{where}");
+            if (item.Stage is not null && settings is not null)
+            {
+                output.WriteLine($"  effective stage plan: {DescribeStagePlan(item, settings)}");
+            }
             if (item.Error is { Length: > 0 } error)
             {
                 output.WriteLine($"  error: {error}");
@@ -249,6 +258,37 @@ public static class QueueCommand
             : "Queue resumed. The next scheduler tick may launch an item.");
         return 0;
     }
+
+    private static string DescribeStagePlan(QueueItem item, QueueSettings settings)
+    {
+        try
+        {
+            return string.Join("; ", new[]
+            {
+                WorkStage.Implement, WorkStage.Review, WorkStage.Fix, WorkStage.ReReview, WorkStage.Continue,
+            }.Select(stage =>
+            {
+                var resolved = QueueTierTable.ResolveForStage(
+                    item, stage, settings, WorkerRoleCatalog.QueueTierFor, WorkerRoleCatalog.QueueTierForRole);
+                return $"{WorkStages.Token(stage)}={resolved.Adapter ?? "role-default"}/"
+                    + $"{resolved.Model ?? "role-default"}/{resolved.Effort ?? "role-default"} "
+                    + $"({SelectionSourceToken(resolved.SelectionSource)})";
+            }));
+        }
+        catch (KeyNotFoundException ex)
+        {
+            return $"unavailable ({ex.Message})";
+        }
+    }
+
+    private static string SelectionSourceToken(QueueSelectionSource source) => source switch
+    {
+        QueueSelectionSource.StageDefault => "stage-default",
+        QueueSelectionSource.StageOverride => "stage-override",
+        QueueSelectionSource.LifecyclePin => "lifecycle-pin",
+        QueueSelectionSource.PersistedLifecycleCompatibility => "persisted-compatibility",
+        _ => throw new ArgumentOutOfRangeException(nameof(source), source, "Unknown selection source."),
+    };
 
     private static async Task<int> ImportAsync(QueueOptions options, TextWriter output, CancellationToken cancellationToken)
     {
@@ -333,10 +373,36 @@ public static class QueueCommand
                 Adapter = adapter,
                 Model = options.Model,
                 Effort = options.Effort,
+                StageSelections = options.StageSelections,
+                LifecyclePin = options.LifecyclePin,
             },
             settings,
             WorkerRoleCatalog.QueueTierFor,
             WorkerRoleCatalog.QueueTierForRole);
+
+        if (options.Lifecycle)
+        {
+            var lifecycleItem = new QueueItem
+            {
+                Tag = options.Tag!,
+                Role = options.Role!,
+                Workspace = "",
+                SpecFile = "",
+                ScopeClass = options.ScopeClass?.ToLowerInvariant(),
+                Adapter = adapter,
+                Model = options.Model,
+                Effort = options.Effort,
+                Reason = options.Reason,
+                StageSelections = options.StageSelections,
+                LifecyclePin = options.LifecyclePin,
+                Stage = WorkStage.Implement,
+            };
+
+            ValidateLifecycleSelections(lifecycleItem, settings);
+            tier = QueueTierTable.ResolveForStage(
+                lifecycleItem, WorkStage.Implement, settings,
+                WorkerRoleCatalog.QueueTierFor, WorkerRoleCatalog.QueueTierForRole);
+        }
 
         if (adapters.Count > 0
             && (tier.Adapter is null || !adapters.Contains(tier.Adapter, StringComparer.OrdinalIgnoreCase)))
@@ -352,6 +418,57 @@ public static class QueueCommand
         }
 
         return (adapter, tier, adapterFromModel);
+    }
+
+    /// <summary>
+    /// Every explicitly selected lifecycle stage is validated before worktree provisioning, so an
+    /// invalid later review/fix choice cannot survive until it spends a worker launch. The resolver
+    /// remains the source of the actual adapter for a partial selection.
+    /// </summary>
+    private static void ValidateLifecycleSelections(QueueItem item, QueueSettings settings)
+    {
+        foreach (var stage in new[]
+                 {
+                     WorkStage.Implement, WorkStage.Review, WorkStage.Fix, WorkStage.ReReview, WorkStage.Continue,
+                 })
+        {
+            var (selection, source) = QueueTierTable.SelectionForStage(item, stage);
+            if (selection?.Model is not { } model || source == QueueSelectionSource.StageDefault)
+            {
+                continue;
+            }
+
+            var candidates = WorkerModelCatalog.AdaptersFor(model);
+            if (selection.Adapter is not null)
+            {
+                ValidateAdapterModel(selection.Adapter, model);
+                // Match ordinary queue-add semantics: a named adapter's own offline rules are the
+                // authority when the shared model catalog has no candidate for this model.
+                if (candidates.Count == 0)
+                {
+                    continue;
+                }
+            }
+            else if (candidates.Count == 0)
+            {
+                throw new CliArgumentException(
+                    $"--model '{model}' has no recorded adapter candidate; specify --adapter to use its model validation.");
+            }
+
+            var tier = QueueTierTable.ResolveForStage(
+                item, stage, settings, WorkerRoleCatalog.QueueTierFor, WorkerRoleCatalog.QueueTierForRole);
+            if (tier.Adapter is null || !candidates.Contains(tier.Adapter, StringComparer.OrdinalIgnoreCase))
+            {
+                var actualAdapter = tier.Adapter ?? "unconfigured";
+                throw new CliArgumentException(
+                    $"The {WorkStages.Token(stage)} selection's model '{model}' is known by "
+                    + $"{string.Join(", ", candidates)}, but the resolved {actualAdapter} adapter cannot use it.");
+            }
+
+            // A model inferred through a role/scope tier still receives that adapter's offline
+            // validation; selecting a later stage is no exemption from add-time refusal.
+            ValidateAdapterModel(tier.Adapter, model);
+        }
     }
 
     private static void ValidateAdapterModel(string adapter, string model)
