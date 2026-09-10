@@ -5,8 +5,9 @@ namespace Baton.Projection;
 /// <summary>
 /// The single register for "which execution(s) could be arrested right now" (#1556 PR 1, collapsing
 /// the three-place predicate PR #1528 review finding F10 named). A candidate is either a currently
-/// <see cref="StepStatus.Running"/> step's latest execution, a quota-parked one (#1607 — <see cref="StepStatus.Failed"/>
-/// with a scheduled <see cref="StepState.RetryNotBefore"/>), or a step-less supplementary execution
+/// <see cref="StepStatus.Running"/> step's latest execution, a quota-parked one (#1607 — an un-foreclosed
+/// <see cref="StepStatus.Failed"/> with <see cref="FailureClassification.ExhaustedUntil"/>, whether its reset is
+/// scheduled or unknown), or a step-less supplementary execution
 /// still awaiting completion.
 /// <para>
 /// Three call sites used to restate this shape independently: <c>RunningExecutionResolver</c>'s
@@ -45,7 +46,7 @@ public static class ArrestableExecutions
 
         foreach (var step in state.Steps)
         {
-            if (step.LatestExecutionId is not { } executionId || !IsStepArrestable(step.Status, step.RetryNotBefore))
+            if (step.LatestExecutionId is not { } executionId || !IsStepArrestable(step))
             {
                 continue;
             }
@@ -87,13 +88,24 @@ public static class ArrestableExecutions
         ArgumentNullException.ThrowIfNull(state);
 
         var candidates = state.Steps
-            .Where(s => s.LatestExecutionId is not null && IsStepArrestable(s.Status, s.RetryNotBefore))
+            .Where(s => s.LatestExecutionId is not null && IsStepArrestable(s))
             .Select(s => s.LatestExecutionId!.Value)
             .ToList();
 
         return new SingleLaneResult(candidates.Count == 1 ? candidates[0] : null, candidates);
     }
 
-    private static bool IsStepArrestable(StepStatus status, DateTimeOffset? retryNotBefore) =>
-        status == StepStatus.Running || (status == StepStatus.Failed && retryNotBefore is not null);
+    /// <summary>
+    /// The canonical step-tied arrest predicate. An un-foreclosed scheduled retry remains arrestable.
+    /// An <see cref="FailureClassification.ExhaustedUntil"/> failure with no recorded reset is also
+    /// a park: <c>MutationInterface</c> deliberately leaves it without a retry obligation when it
+    /// cannot derive a reset or fallback. A foreclosure closes either shape, while an ordinary failed
+    /// step with neither a retry obligation nor the quota-park classification remains terminal.
+    /// </summary>
+    private static bool IsStepArrestable(StepState step) =>
+        step.Status == StepStatus.Running
+        || (step.Status == StepStatus.Failed
+            && !step.RetryForeclosed
+            && (step.RetryNotBefore is not null
+                || step.LatestFailureClassification == FailureClassification.ExhaustedUntil));
 }

@@ -58,4 +58,38 @@ public class CancelCommandParkedRoomLevelTargetingTests
             DirectoryCleanup.DeleteRecursively(testRoot);
         }
     }
+
+    [Fact]
+    public async Task Bare_cancel_against_a_live_pumps_unknown_reset_quota_park_writes_the_latest_request_file_instead_of_refusing()
+    {
+        var testRoot = Path.Combine(Path.GetTempPath(), $"cli-e2e-{Guid.NewGuid():N}");
+        var roomDirectory = Path.Combine(testRoot, "task");
+        try
+        {
+            await WriteUnknownResetParkedStepFixtureAsync(testRoot, roomDirectory);
+
+            using (ConcurrencyGuard.Acquire(roomDirectory, "test holder simulating a live pump"))
+            {
+                var result = await CancelCommand.ExecuteAsync(
+                    new CancelOptions(roomDirectory, ExecutionId: null, BindingsFilePath: "ignored"),
+                    Adapters,
+                    TestContext.Current.CancellationToken,
+                    pumpAnswerWindow: TimeSpan.FromMilliseconds(200));
+
+                Assert.Equal(StepStatus.Failed, result.State.Steps.Single().Status);
+                Assert.Null(result.State.Steps.Single().RetryNotBefore);
+                Assert.Equal(FailureClassification.ExhaustedUntil, result.State.Steps.Single().LatestFailureClassification);
+                Assert.True(result.CancellationQueued, "the simulated pump never answered and never let go");
+
+                var content = await CancelRequestFile.TryReadAsync(
+                    Path.Combine(roomDirectory, CancelRequestFile.FileName), TestContext.Current.CancellationToken);
+                Assert.NotNull(content);
+                Assert.Equal(CancelRequestFile.LatestTarget, content.Target);
+            }
+        }
+        finally
+        {
+            DirectoryCleanup.DeleteRecursively(testRoot);
+        }
+    }
 }
