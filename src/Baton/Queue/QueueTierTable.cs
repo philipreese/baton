@@ -154,7 +154,87 @@ public static class QueueTierTable
             || Differs(item.Model, tier.Model)
             || Differs(item.Effort, tier.Effort));
 
-        return new QueueTierResolution(key, adapter, model, effort, isOverride, isOverride ? item.Reason : null);
+        return new QueueTierResolution(
+            key, adapter, model, effort, isOverride, isOverride ? item.Reason : null, QueueSelectionSource.StageDefault);
+    }
+
+    /// <summary>
+    /// Resolves a lifecycle stage through the same role/scope resolver as an ordinary dispatch.
+    /// A new item normally supplies only a stage selection; an explicit whole-item pin and the
+    /// documented pre-2181 compatibility shape are the only ways item axes travel to another stage.
+    /// </summary>
+    public static QueueTierResolution ResolveForStage(
+        QueueItem item,
+        WorkStage stage,
+        QueueSettings settings,
+        Func<string, QueueTierSettings?> namedTiers,
+        Func<string, QueueTierSettings?> roleTiers)
+    {
+        ArgumentNullException.ThrowIfNull(item);
+        if (WorkStages.IsTerminal(stage))
+        {
+            throw new ArgumentOutOfRangeException(nameof(stage), stage, "The ready stage does not dispatch.");
+        }
+
+        var (selection, source) = SelectionForStage(item, stage);
+        var resolved = Resolve(item with
+        {
+            Role = WorkStages.RoleFor(stage),
+            Adapter = selection?.Adapter,
+            Model = selection?.Model,
+            Effort = selection?.Effort,
+            Reason = selection?.Reason,
+        }, settings, namedTiers, roleTiers);
+
+        return resolved with { SelectionSource = source };
+    }
+
+    /// <summary>The raw selection and its provenance for one dispatchable stage.</summary>
+    public static (QueueStageSelection? Selection, QueueSelectionSource Source) SelectionForStage(
+        QueueItem item, WorkStage stage)
+    {
+        ArgumentNullException.ThrowIfNull(item);
+        if (WorkStages.IsTerminal(stage))
+        {
+            throw new ArgumentOutOfRangeException(nameof(stage), stage, "The ready stage does not dispatch.");
+        }
+
+        if (item.LifecyclePin)
+        {
+            return (new QueueStageSelection
+            {
+                Stage = stage,
+                Adapter = item.Adapter,
+                Model = item.Model,
+                Effort = item.Effort,
+                Reason = item.Reason,
+            }, QueueSelectionSource.LifecyclePin);
+        }
+
+        if (item.StageSelections is not null)
+        {
+            var selection = item.StageSelections.SingleOrDefault(s => s.Stage == stage);
+            return selection is null
+                ? (null, QueueSelectionSource.StageDefault)
+                : (selection, QueueSelectionSource.StageOverride);
+        }
+
+        // Compatibility is intentionally narrow: only old lifecycle-shaped rows with at least one
+        // stored axis retain the historic carry-forward behaviour. Stage-less dispatch requests and
+        // rows with no stored axes remain ordinary resolver inputs.
+        if (item.Stage is not null && (item.Adapter is not null || item.Model is not null || item.Effort is not null))
+        {
+            return (new QueueStageSelection
+            {
+                Stage = stage,
+                Adapter = item.Adapter,
+                Model = item.Model,
+                Effort = item.Effort,
+                Reason = item.Reason,
+            }, QueueSelectionSource.PersistedLifecycleCompatibility);
+        }
+
+        return (null, QueueSelectionSource.StageDefault);
     }
 
     private static bool Differs(string? itemValue, string? tierValue) =>
@@ -260,4 +340,5 @@ public sealed record QueueTierResolution(
     string? Model,
     string? Effort,
     bool IsOverride,
-    string? OverrideReason);
+    string? OverrideReason,
+    QueueSelectionSource SelectionSource = QueueSelectionSource.StageDefault);

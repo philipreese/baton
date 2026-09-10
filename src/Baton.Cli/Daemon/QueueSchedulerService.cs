@@ -205,8 +205,11 @@ public sealed class QueueSchedulerService : BackgroundService
             try
             {
                 _ = WorkerRoleCatalog.For(item.Role);
-                tier = QueueTierTable.Resolve(
-                    item, settings, WorkerRoleCatalog.QueueTierFor, WorkerRoleCatalog.QueueTierForRole);
+                tier = item.Stage is { } stage
+                    ? QueueTierTable.ResolveForStage(
+                        item, stage, settings, WorkerRoleCatalog.QueueTierFor, WorkerRoleCatalog.QueueTierForRole)
+                    : QueueTierTable.Resolve(
+                        item, settings, WorkerRoleCatalog.QueueTierFor, WorkerRoleCatalog.QueueTierForRole);
             }
             catch (KeyNotFoundException ex)
             {
@@ -333,7 +336,8 @@ public sealed class QueueSchedulerService : BackgroundService
                         now, item.Tag, QueueDecisionEntry.Waited,
                         QueueWaitReasons.Token(QueueWaitReason.RunwayHeld),
                         decision.LiveWeight, decision.FreeGb, decision.FloorGb,
-                        tier.TierKey, tier.Adapter, tier.Model, tier.Effort, tier.IsOverride, tier.OverrideReason),
+                        tier.TierKey, tier.Adapter, tier.Model, tier.Effort, tier.IsOverride, tier.OverrideReason,
+                        SelectionSource: tier.SelectionSource),
                     cancellationToken).ConfigureAwait(false);
                 return interval;
             }
@@ -354,7 +358,7 @@ public sealed class QueueSchedulerService : BackgroundService
                     now, item.Tag, QueueDecisionEntry.Launched, null,
                     decision.LiveWeight, decision.FreeGb, decision.FloorGb,
                     tier.TierKey, tier.Adapter, tier.Model, tier.Effort, tier.IsOverride, tier.OverrideReason,
-                    outcome.RoomDirectory ?? roomDirectory),
+                    outcome.RoomDirectory ?? roomDirectory, tier.SelectionSource),
                 CancellationToken.None).ConfigureAwait(false);
 
             return interval;
@@ -432,7 +436,8 @@ public sealed class QueueSchedulerService : BackgroundService
             new QueueDecisionEntry(
                 now, item.Tag, QueueDecisionEntry.Failed, error,
                 decision.LiveWeight, decision.FreeGb, decision.FloorGb,
-                tier.TierKey, tier.Adapter, tier.Model, tier.Effort, tier.IsOverride, tier.OverrideReason, room),
+                tier.TierKey, tier.Adapter, tier.Model, tier.Effort, tier.IsOverride, tier.OverrideReason, room,
+                tier.SelectionSource),
             cancellationToken).ConfigureAwait(false);
     }
 
