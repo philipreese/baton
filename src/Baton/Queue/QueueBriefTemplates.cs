@@ -348,7 +348,8 @@ public static class QueueBriefTemplates
 
         Write your findings as a ReviewVerdict to `$BATON_OUTPUT_DIR/verdict.json` — severity
         high/medium/low, status confirmed/refuted/unverified, and a claim you have not verified is
-        `unverified` rather than `confirmed`.
+        `unverified` rather than `confirmed`. Set `"reviewedRef": "{{SHA}}"` exactly: it is the full
+        commit SHA this review covers; a branch name or PR number cannot prove current-head coverage.
 
         ## Verdict
 
@@ -375,7 +376,8 @@ public static class QueueBriefTemplates
 
         Write your findings as a ReviewVerdict to `$BATON_OUTPUT_DIR/verdict.json` — severity
         high/medium/low, status confirmed/refuted/unverified, and a claim you have not verified is
-        `unverified` rather than `confirmed`.
+        `unverified` rather than `confirmed`. Set `"reviewedRef": "{{SHA}}"` exactly: it is the full
+        commit SHA this review covers; a branch name or PR number cannot prove current-head coverage.
 
         ## Verdict
 

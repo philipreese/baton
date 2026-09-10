@@ -23,9 +23,9 @@ public sealed class WorkItemAdvancerTests
 
     private const string PushedSha = "aaaaaaaabbbbbbbbccccccccdddddddd";
 
-    private sealed class FakeGh(string stdout, int exitCode = 0) : IGhCliRunner
+    private sealed class FakeGh(string stdout, int exitCode = 0, string requiredBucket = "pass") : IGhCliRunner
     {
-        private bool _isDraft = true;
+        private bool _isDraft = !stdout.Contains("\"isDraft\":false", StringComparison.Ordinal);
 
         public List<string[]> Calls { get; } = [];
 
@@ -41,7 +41,9 @@ public sealed class WorkItemAdvancerTests
             if (args is ["pr", "checks", ..])
             {
                 return Task.FromResult(new GhCliResult(
-                    Started: true, 0, "[{\"name\":\"ci\",\"bucket\":\"pass\",\"state\":\"SUCCESS\"}]", string.Empty));
+                    Started: true, 0,
+                    $$$"""[{"name":"ci","bucket":"{{{requiredBucket}}}","state":"SUCCESS"}]""",
+                    string.Empty));
             }
 
             if (args is ["pr", "ready", ..])
@@ -50,15 +52,16 @@ public sealed class WorkItemAdvancerTests
                 return Task.FromResult(new GhCliResult(Started: true, 0, "ok", string.Empty));
             }
 
-            var observed = stdout.Replace(
-                "\"isDraft\":true", $"\"isDraft\":{_isDraft.ToString().ToLowerInvariant()}",
-                StringComparison.Ordinal);
+            var desiredDraft = $"\"isDraft\":{_isDraft.ToString().ToLowerInvariant()}";
+            var observed = stdout
+                .Replace("\"isDraft\":true", desiredDraft, StringComparison.Ordinal)
+                .Replace("\"isDraft\":false", desiredDraft, StringComparison.Ordinal);
             return Task.FromResult(new GhCliResult(Started: true, 0, observed, string.Empty));
         }
     }
 
-    private static string PrJson(int number, string headSha) =>
-        $$$"""{"number":{{{number}}},"state":"OPEN","isDraft":true,"headRefOid":"{{{headSha}}}","statusCheckRollup":[]}""";
+    private static string PrJson(int number, string headSha, bool isDraft = true) =>
+        $$$"""[{"number":{{{number}}},"state":"OPEN","isDraft":{{{isDraft.ToString().ToLowerInvariant()}}},"headRefOid":"{{{headSha}}}","statusCheckRollup":[]}]""";
 
     /// <summary>
     /// A blocking verdict whose blocking-ness is its <c>decision</c> and nothing else. The finding is
@@ -272,7 +275,7 @@ public sealed class WorkItemAdvancerTests
     }
 
     [Fact]
-    public async Task An_approving_verdict_makes_the_item_ready_and_it_is_never_dispatched_again()
+    public async Task An_approving_verdict_makes_the_item_ready_until_a_new_head_forces_a_draft_re_review()
     {
         var home = CreateTempHome();
         using var scope = BatonEnvironmentSnapshot.BeginScope(BatonEnvironmentSnapshot.Blank with { HomeOverride = home });
@@ -289,12 +292,66 @@ public sealed class WorkItemAdvancerTests
             Assert.Equal(WorkStage.Ready, item.Stage);
             Assert.Contains("approved", Assert.Single(facts).Reason!, StringComparison.Ordinal);
 
-            // The scheduler is what refuses to launch it (QueueSchedulerTests pins that arm); what this
-            // arm pins is the other half — the advancer never moves it on, so a ready item cannot walk
-            // itself into another round on the next tick.
+            // A same-head observation is idempotent: no transition fact and no new round.
             var again = await advancer.AdvanceAsync(Now.AddMinutes(1), Ct);
             Assert.Empty(again);
             Assert.Equal(WorkStage.Ready, (await ReadBackAsync()).Stage);
+
+            // A later push invalidates the approval that made the item ready. The existing PR is
+            // first re-drafted and only then is a cold re-review queued for the new exact head.
+            const string newHead = "eeeeeeeeffffffff1111111122222222";
+            var changedGh = new FakeGh(PrJson(77, newHead, isDraft: false));
+            var changedFacts = await new WorkItemAdvancer(
+                changedGh, (_, _) => Task.FromResult<string?>(newHead))
+                .AdvanceAsync(Now.AddMinutes(2), Ct);
+
+            item = await ReadBackAsync();
+            Assert.NotEmpty(changedGh.Calls);
+            Assert.NotEmpty(changedFacts);
+            Assert.Contains("approval is stale", Assert.Single(changedFacts).Reason!, StringComparison.Ordinal);
+            Assert.Equal(WorkStage.ReReview, item.Stage);
+            Assert.Contains(changedGh.Calls, args => args is ["pr", "ready", "77", "--undo"]);
+            Assert.Contains(newHead, await File.ReadAllTextAsync(item.SpecFile, Ct), StringComparison.Ordinal);
+        }
+        finally
+        {
+            DirectoryCleanup.DeleteRecursively(home);
+        }
+    }
+
+    [Fact]
+    public async Task A_same_head_check_regression_re_drafts_then_restores_ready_without_another_review()
+    {
+        var home = CreateTempHome();
+        using var scope = BatonEnvironmentSnapshot.BeginScope(BatonEnvironmentSnapshot.Blank with { HomeOverride = home });
+        try
+        {
+            var room = await WriteSettledRoomAsync(home, WorkflowOutcome.Succeeded, ApprovingVerdict);
+            await SeedAsync(home, WorkStage.Review, room);
+            await new WorkItemAdvancer(
+                new FakeGh(PrJson(77, PushedSha)), (_, _) => Task.FromResult<string?>(PushedSha))
+                .AdvanceAsync(Now, Ct);
+
+            var pendingGh = new FakeGh(
+                PrJson(77, PushedSha, isDraft: false), requiredBucket: "pending");
+            Assert.Empty(await new WorkItemAdvancer(
+                pendingGh, (_, _) => Task.FromResult<string?>(PushedSha))
+                .AdvanceAsync(Now.AddMinutes(1), Ct));
+
+            var waiting = await ReadBackAsync();
+            Assert.Equal(WorkStage.Ready, waiting.Stage);
+            Assert.Contains("required checks are pending", waiting.Error!, StringComparison.Ordinal);
+            Assert.Contains(pendingGh.Calls, args => args is ["pr", "ready", "77", "--undo"]);
+
+            var passingGh = new FakeGh(PrJson(77, PushedSha, isDraft: true));
+            Assert.Empty(await new WorkItemAdvancer(
+                passingGh, (_, _) => Task.FromResult<string?>(PushedSha))
+                .AdvanceAsync(Now.AddMinutes(2), Ct));
+
+            var restored = await ReadBackAsync();
+            Assert.Equal(WorkStage.Ready, restored.Stage);
+            Assert.Null(restored.Error);
+            Assert.Contains(passingGh.Calls, args => args is ["pr", "ready", "77"]);
         }
         finally
         {
@@ -557,8 +614,8 @@ public sealed class WorkItemAdvancerTests
             await SeedAsync(home, WorkStage.Implement, room);
 
             const string prWithChecks = $$"""
-                {"number":77,"state":"OPEN","isDraft":true,"headRefOid":"{{PushedSha}}",
-                 "statusCheckRollup":[{"name":"gates","conclusion":"FAILURE"}]}
+                [{"number":77,"state":"OPEN","isDraft":true,"headRefOid":"{{PushedSha}}",
+                  "statusCheckRollup":[{"name":"gates","conclusion":"FAILURE"}]}]
                 """;
             await new WorkItemAdvancer(new FakeGh(prWithChecks), (_, _) => Task.FromResult<string?>(PushedSha))
                 .AdvanceAsync(Now, Ct);

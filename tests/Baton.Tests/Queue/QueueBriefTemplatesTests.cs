@@ -147,6 +147,7 @@ public sealed class QueueBriefTemplatesTests
 
         Assert.Contains(@"""decision"": ""approve""", brief, StringComparison.Ordinal);
         Assert.Contains(@"""decision"": ""block""", brief, StringComparison.Ordinal);
+        Assert.Contains(@"""reviewedRef"": ""deadbeef""", brief, StringComparison.Ordinal);
         Assert.Contains("this item for a person rather than carrying the round", brief, StringComparison.Ordinal);
     }
 

@@ -60,17 +60,20 @@ public sealed class WorkItemAdvancer
     {
         var snapshot = await QueueStore.LoadAsync(BatonPaths.QueueFile, cancellationToken).ConfigureAwait(false);
 
-        // Settled, staged, not already ready, and not one this advance has already given up on. State
+        // Settled, staged, and not one this advance has already given up on. Ready items are included
+        // even though they have no room: their persisted verdict must be reconciled against a later
+        // GitHub head/check change. State
         // rather than the sentinel: QueueSchedulerService's own done detection has already read the room
         // this tick and is the one thing that moves an item out of `launched`, so re-deriving settledness
         // here would be a second reader of the same file that can disagree with the first. The
         // `Halted` half is what stops a NeedsOperator item being re-observed on every tick forever —
         // see QueueItem.Halted for what that cost.
         var candidates = snapshot.Items
-            .Where(i => i.Stage is { } stage && !WorkStages.IsTerminal(stage)
-                && i.State is QueueItemState.Done or QueueItemState.Failed
-                && !i.Halted
-                && i.RoomDirectory is { Length: > 0 })
+            .Where(i => i.Stage is { } stage && !i.Halted
+                && (stage == WorkStage.Ready
+                    ? i.State == QueueItemState.Queued
+                    : i.State is QueueItemState.Done or QueueItemState.Failed
+                        && i.RoomDirectory is { Length: > 0 }))
             .ToList();
         if (candidates.Count == 0)
         {
@@ -94,14 +97,18 @@ public sealed class WorkItemAdvancer
         QueueItem item, DateTimeOffset now, CancellationToken cancellationToken)
     {
         var stage = item.Stage!.Value;
-        var room = item.RoomDirectory!;
-        var sentinel = await TerminalSentinelWriter.TryReadAsync(room, cancellationToken).ConfigureAwait(false);
+        var room = item.RoomDirectory;
+        var sentinel = room is null
+            ? null
+            : await TerminalSentinelWriter.TryReadAsync(room, cancellationToken).ConfigureAwait(false);
 
         // A room with no sentinel that the scheduler has nonetheless resolved is one it failed for
         // never having been created (its own roomless sweep). "Failed with no outcome word" is exactly
         // what the lifecycle's not-succeeded arm reads, so the item still advances rather than sticking.
-        var outcome = sentinel?.State ?? WorkflowOutcome.Failed;
-        var verdictPath = FindVerdict(sentinel);
+        var outcome = item.Stage == WorkStage.Ready
+            ? WorkflowOutcome.Succeeded
+            : sentinel?.State ?? WorkflowOutcome.Failed;
+        var verdictPath = item.Stage == WorkStage.Ready ? item.LastVerdict : FindVerdict(sentinel);
         var verdict = verdictPath is null ? null : TryReadVerdict(verdictPath);
 
         var pr = await ReadPullRequestAsync(item, cancellationToken).ConfigureAwait(false);
@@ -113,6 +120,7 @@ public sealed class WorkItemAdvancer
             reading.IsDraft, reading.RequiredChecks);
 
         var transition = WorkItemLifecycle.Decide(Observation(pr));
+        var readinessMutated = false;
 
         // A readiness mutation is never trusted from the command receipt. Re-observe the PR after
         // every attempt, then ask the pure lifecycle again. The bounded loop covers the one real
@@ -154,6 +162,7 @@ public sealed class WorkItemAdvancer
                     recordFailure: true).ConfigureAwait(false);
             }
 
+            readinessMutated = true;
             pr = after;
             transition = WorkItemLifecycle.Decide(Observation(pr));
         }
@@ -163,6 +172,29 @@ public sealed class WorkItemAdvancer
             return await RetainReconciliationAsync(
                 item, "GitHub readiness did not converge after three confirmed observations; the obligation remains",
                 pr, now, room, recordFailure: true).ConfigureAwait(false);
+        }
+
+        // A current, green, already-ready PR and a closed/merged PR are stable terminal observations.
+        // Do not rewrite queue.json or emit another transition fact on every daemon tick.
+        if (stage == WorkStage.Ready
+            && transition.Kind == WorkItemTransitionKind.None
+            && pr.Succeeded
+            && (pr.IsOpen == false
+                || pr.IsOpen == true && pr.IsDraft == false
+                    && pr.RequiredChecks == PullRequestChecks.Passing))
+        {
+            if (readinessMutated || item.Error is not null)
+            {
+                await MarkAsync(item.Tag, existing => existing with
+                {
+                    PullRequest = pr.Number ?? existing.PullRequest,
+                    Checks = pr.Checks ?? existing.Checks,
+                    ChecksObservedAt = pr.Checks is null ? existing.ChecksObservedAt : now,
+                    Error = null,
+                }).ConfigureAwait(false);
+            }
+
+            return null;
         }
 
         return transition.Kind switch
@@ -188,7 +220,7 @@ public sealed class WorkItemAdvancer
     /// a ledger fact; an ordinary pending-check wait does not pretend to be a failure.
     /// </summary>
     private static async Task<QueueDecisionEntry?> RetainReconciliationAsync(
-        QueueItem item, string reason, PullRequestObservation pr, DateTimeOffset now, string room,
+        QueueItem item, string reason, PullRequestObservation pr, DateTimeOffset now, string? room,
         bool recordFailure)
     {
         await MarkAsync(item.Tag, existing => existing with
@@ -219,7 +251,7 @@ public sealed class WorkItemAdvancer
         ReviewVerdict? verdict,
         string? verdictPath,
         DateTimeOffset now,
-        string room,
+        string? room,
         CancellationToken cancellationToken)
     {
         var next = transition.NextStage!.Value;
@@ -283,7 +315,7 @@ public sealed class WorkItemAdvancer
         PullRequestObservation pr,
         string? verdictPath,
         DateTimeOffset now,
-        string room)
+        string? room)
     {
         await MarkAsync(item.Tag, existing => existing with
         {
@@ -307,7 +339,7 @@ public sealed class WorkItemAdvancer
         WorkItemTransition transition,
         string? verdictPath,
         DateTimeOffset now,
-        string room)
+        string? room)
     {
         // Failed, not silently left: every arm that reaches here is one where the queue would have to
         // guess, and a guess dispatches a lane against evidence nobody checked. The reason is on the
@@ -336,7 +368,7 @@ public sealed class WorkItemAdvancer
     /// </summary>
     private static QueueDecisionEntry Fact(
         QueueItem item, WorkStage from, WorkStage to, WorkItemTransition transition,
-        DateTimeOffset now, string room) =>
+        DateTimeOffset now, string? room) =>
         new(now, item.Tag, QueueDecisionEntry.Advanced,
             $"{WorkStages.Token(from)} → {WorkStages.Token(to)}: {transition.Reason}",
             LiveWeight: 0, FreeGb: null, FloorGb: 0, Room: room);
@@ -429,14 +461,20 @@ public sealed class WorkItemAdvancer
         try
         {
             using var document = JsonDocument.Parse(result.Stdout);
-            var candidates = document.RootElement.ValueKind == JsonValueKind.Array
-                ? document.RootElement.EnumerateArray().Where(e => e.ValueKind == JsonValueKind.Object).ToList()
-                : document.RootElement.ValueKind == JsonValueKind.Object
-                    ? [document.RootElement]
-                    : [];
+            if (document.RootElement.ValueKind != JsonValueKind.Array)
+            {
+                return PullRequestObservation.Failed("gh pr list returned a non-array JSON value");
+            }
+
+            var candidates = document.RootElement.EnumerateArray().ToList();
             if (candidates.Count == 0)
             {
                 return PullRequestObservation.NoPullRequest;
+            }
+
+            if (candidates.Any(e => e.ValueKind != JsonValueKind.Object))
+            {
+                return PullRequestObservation.Failed("gh pr list returned a non-object pull-request entry");
             }
 
             var root = candidates.FirstOrDefault(e => string.Equals(Text(e, "state"), "OPEN", StringComparison.OrdinalIgnoreCase));
@@ -449,11 +487,12 @@ public sealed class WorkItemAdvancer
                 ? n.GetInt32()
                 : (int?)null;
             var state = Text(root, "state");
-            var isOpen = state is null || string.Equals(state, "OPEN", StringComparison.OrdinalIgnoreCase)
-                ? true
-                : state is "CLOSED" or "MERGED"
-                    ? false
-                    : (bool?)null;
+            var isOpen = state?.ToUpperInvariant() switch
+            {
+                "OPEN" => true,
+                "CLOSED" or "MERGED" => false,
+                _ => (bool?)null,
+            };
             var isDraft = root.TryGetProperty("isDraft", out var d)
                 && d.ValueKind is JsonValueKind.True or JsonValueKind.False
                     ? d.GetBoolean()
@@ -462,9 +501,18 @@ public sealed class WorkItemAdvancer
             var checks = PullRequestChecks.Summarize(
                 root.TryGetProperty("statusCheckRollup", out var rollup) ? rollup : null);
 
-            return number is null
-                ? PullRequestObservation.Failed("gh pr list returned a PR without a number")
-                : new PullRequestObservation(true, number, headSha, isOpen, isDraft, checks, null, null);
+            if (number is null)
+            {
+                return PullRequestObservation.Failed("gh pr list returned a PR without a number");
+            }
+
+            if (isOpen is null || isDraft is null || headSha is not { Length: > 0 })
+            {
+                return PullRequestObservation.Failed(
+                    $"gh pr list returned incomplete state for PR #{number}");
+            }
+
+            return new PullRequestObservation(true, number, headSha, isOpen, isDraft, checks, null, null);
         }
         catch (JsonException ex)
         {

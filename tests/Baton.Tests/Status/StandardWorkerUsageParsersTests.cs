@@ -241,23 +241,22 @@ public sealed class StandardWorkerUsageParsersTests
         Assert.Equal(0, parser.CountToolSteps(agentResponseLine));
     }
 
-    [Fact]
-    public void Agy_CountWriteToolSteps_counts_only_terminal_write_family_calls()
+    [Theory]
+    [InlineData("write_to_file", 1)]
+    [InlineData("replace_file_content", 1)]
+    [InlineData("multi_replace_file_content", 1)]
+    [InlineData("generate_image", 1)]
+    [InlineData("view_file", 0)]
+    public void Agy_CountWriteToolSteps_counts_only_terminal_write_family_calls(string tool, int expected)
     {
         var parser = new AgyUsageParser();
-        const string activeWrite = """
-            {"event":"step_update","step_update":{"state":"ACTIVE","step_type":"tool","tool_name":"write_to_file","tool_info":{"name":"write_to_file"}}}
-            """;
-        const string doneWrite = """
-            {"event":"step_update","step_update":{"state":"DONE","step_type":"tool","tool_name":"write_to_file","tool_info":{"name":"write_to_file"}}}
-            """;
-        const string doneRead = """
-            {"event":"step_update","step_update":{"state":"DONE","step_type":"tool","tool_name":"view_file","tool_info":{"name":"view_file"}}}
-            """;
+        var active = """{"event":"step_update","step_update":{"state":"ACTIVE","step_type":"tool","tool_name":"TOOL","tool_info":{"name":"TOOL"}}}"""
+            .Replace("TOOL", tool, StringComparison.Ordinal);
+        var done = """{"event":"step_update","step_update":{"state":"DONE","step_type":"tool","tool_name":"TOOL","tool_info":{"name":"TOOL"}}}"""
+            .Replace("TOOL", tool, StringComparison.Ordinal);
 
-        Assert.Equal(0, parser.CountWriteToolSteps(activeWrite));
-        Assert.Equal(1, parser.CountWriteToolSteps(doneWrite));
-        Assert.Equal(0, parser.CountWriteToolSteps(doneRead));
+        Assert.Equal(0, parser.CountWriteToolSteps(active));
+        Assert.Equal(expected, parser.CountWriteToolSteps(done));
     }
 
     [Fact]
@@ -290,15 +289,19 @@ public sealed class StandardWorkerUsageParsersTests
         Assert.Equal("Bash", parser.TryParseToolName(multiToolLine));
     }
 
-    [Fact]
-    public void Claude_CountWriteToolSteps_counts_every_write_family_block_and_no_read_blocks()
+    [Theory]
+    [InlineData("Edit", 1)]
+    [InlineData("Write", 1)]
+    [InlineData("NotebookEdit", 1)]
+    [InlineData("Read", 0)]
+    [InlineData("Bash", 0)]
+    public void Claude_CountWriteToolSteps_counts_the_write_family(string tool, int expected)
     {
         var parser = new ClaudeUsageParser();
-        const string line = """
-            {"type":"assistant","message":{"content":[{"type":"tool_use","name":"Edit"},{"type":"tool_use","name":"Read"},{"type":"tool_use","name":"NotebookEdit"}]}}
-            """;
+        var line = """{"type":"assistant","message":{"content":[{"type":"tool_use","name":"TOOL"}]}}"""
+            .Replace("TOOL", tool, StringComparison.Ordinal);
 
-        Assert.Equal(2, parser.CountWriteToolSteps(line));
+        Assert.Equal(expected, parser.CountWriteToolSteps(line));
     }
 
     [Fact]

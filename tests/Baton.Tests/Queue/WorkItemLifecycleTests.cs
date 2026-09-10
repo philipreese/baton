@@ -141,13 +141,14 @@ public sealed class WorkItemLifecycleTests
     }
 
     [Fact]
-    public void An_approving_verdict_stops_and_a_ready_item_is_then_never_dispatched_again()
+    public void An_approving_verdict_stops_and_a_same_head_ready_item_is_not_dispatched_again()
     {
         var approved = WorkItemLifecycle.Decide(At(WorkStage.Review, verdict: Verdict(ReviewDecision.Approve)));
         Assert.Equal(WorkStage.Ready, approved.NextStage);
 
         // The item as the advancer leaves it: ready, and re-observed on the next tick.
-        var again = WorkItemLifecycle.Decide(At(WorkStage.Ready));
+        var again = WorkItemLifecycle.Decide(At(
+            WorkStage.Ready, verdict: Verdict(ReviewDecision.Approve), prDraft: false));
 
         Assert.Equal(WorkItemTransitionKind.None, again.Kind);
         Assert.Null(again.NextStage);
@@ -223,6 +224,41 @@ public sealed class WorkItemLifecycleTests
         Assert.Equal(WorkItemTransitionKind.NeedsOperator, transition.Kind);
         Assert.Equal(PullRequestReadinessAction.None, transition.PullRequestAction);
         Assert.Contains("will not reopen", transition.Reason, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void A_ready_item_with_a_new_head_is_re_drafted_and_re_reviewed()
+    {
+        var stale = new ReviewVerdict("1111111122222222", [], Decision: ReviewDecision.Approve);
+
+        var transition = WorkItemLifecycle.Decide(At(
+            WorkStage.Ready, verdict: stale, prDraft: false));
+
+        Assert.Equal(WorkItemTransitionKind.Dispatch, transition.Kind);
+        Assert.Equal(WorkStage.ReReview, transition.NextStage);
+        Assert.Equal(PullRequestReadinessAction.MarkDraft, transition.PullRequestAction);
+    }
+
+    [Fact]
+    public void A_ready_item_with_same_head_pending_checks_is_re_drafted_without_duplicate_review()
+    {
+        var transition = WorkItemLifecycle.Decide(At(
+            WorkStage.Ready, verdict: Verdict(ReviewDecision.Approve), prDraft: false,
+            requiredChecks: PullRequestChecks.Pending));
+
+        Assert.Equal(WorkItemTransitionKind.None, transition.Kind);
+        Assert.Null(transition.NextStage);
+        Assert.Equal(PullRequestReadinessAction.MarkDraft, transition.PullRequestAction);
+    }
+
+    [Fact]
+    public void A_closed_ready_PR_is_terminal_and_never_reopened()
+    {
+        var transition = WorkItemLifecycle.Decide(At(
+            WorkStage.Ready, verdict: Verdict(ReviewDecision.Approve), prOpen: false, prDraft: false));
+
+        Assert.Equal(WorkItemTransitionKind.None, transition.Kind);
+        Assert.Equal(PullRequestReadinessAction.None, transition.PullRequestAction);
     }
 
     [Fact]

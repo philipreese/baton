@@ -3,8 +3,10 @@ using System.Text.Json;
 namespace Baton.Queue;
 
 /// <summary>
-/// One word for what a pull request's checks are doing, reduced from <c>gh pr view --json
-/// statusCheckRollup</c> (#1912 slice 1). The board's PR row carries it; nothing gates on it.
+/// One vocabulary for what a pull request's checks are doing. <see cref="Summarize"/> reduces the
+/// display-only <c>statusCheckRollup</c> (#1912 slice 1), while <see cref="TrySummarizeRequired"/>
+/// independently reduces current-head required checks for readiness (#2131). The board field remains
+/// display-only; lifecycle policy receives the required-check reading as a separate value.
 /// </summary>
 /// <remarks>
 /// <para>

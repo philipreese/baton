@@ -264,6 +264,19 @@ public sealed class RoleDefaultSkillsTests : IDisposable
         Assert.DoesNotContain("AGENTS.md", Content("baton-advise"), StringComparison.Ordinal);
     }
 
+    [Fact]
+    public void The_implement_package_requires_draft_creation_and_same_context_result_validation()
+    {
+        var content = SkillPackageReader.LoadPackage(
+            Path.Combine(ShippedSkillsDirectory, "baton-implement")).Content;
+
+        Assert.Contains("gh pr create --draft", content, StringComparison.Ordinal);
+        Assert.Contains("End-of-implementation self-check", content, StringComparison.Ordinal);
+        Assert.Contains("Confirm final HEAD is pushed", content, StringComparison.Ordinal);
+        Assert.Contains("Re-read the stored PR body and `changes.md`", content, StringComparison.Ordinal);
+        Assert.Contains("result validation, not an independent review", content, StringComparison.Ordinal);
+    }
+
     [Theory]
     [InlineData("baton-implement", "read_files")]
     [InlineData("baton-implement", "write_files")]

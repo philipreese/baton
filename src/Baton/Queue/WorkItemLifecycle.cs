@@ -48,12 +48,13 @@ public static class WorkItemLifecycle
     {
         ArgumentNullException.ThrowIfNull(observation);
 
-        // Ready is checked FIRST, ahead of even "has it settled": an approved item must not be
-        // re-derived from a room that is re-read every tick forever. QueueScheduler's own IsReady is
-        // the other half of this rule, and spec/baton.md §13 is where the rule itself lives.
-        if (WorkStages.IsTerminal(observation.Stage))
+        // A ready item is still reconciled against GitHub. It has no live room to re-read, but its
+        // persisted verdict is the evidence that made it ready; a later head must invalidate that
+        // evidence and put the PR back through a cold review. The scheduler still treats Ready as
+        // terminal, so this observation can never launch it directly.
+        if (observation.Stage == WorkStage.Ready)
         {
-            return WorkItemTransition.None("the item is ready — the conductor merges or resolves it");
+            return DecideReadyItem(observation);
         }
 
         if (string.IsNullOrWhiteSpace(observation.TerminalOutcome))
@@ -98,6 +99,73 @@ public static class WorkItemLifecycle
             WorkStage.Review or WorkStage.ReReview => DecideFromVerdict(observation),
             _ => DecideAfterMutatingLane(observation),
         };
+    }
+
+    /// <summary>
+    /// Reconciles the visible ready signal after the approving room has been retired. Current-head
+    /// approval remains in the persisted verdict; a new head dispatches a re-review, while a
+    /// same-head check regression only re-drafts and waits so it cannot duplicate review or CI.
+    /// </summary>
+    private static WorkItemTransition DecideReadyItem(WorkItemObservation observation)
+    {
+        if (!observation.PullRequestObservationSucceeded)
+        {
+            return WorkItemTransition.None(
+                "GitHub pull-request observation failed; retaining the ready item for reconciliation");
+        }
+
+        if (observation.PullRequest is null)
+        {
+            return WorkItemTransition.NeedsOperator(
+                $"the ready item no longer has a pull request on '{observation.Branch}' — the queue will not "
+                + "guess or open one");
+        }
+
+        // Closed and merged are terminal forge states. Observing either is enough to stop; readiness
+        // reconciliation must never turn it into an open PR again.
+        if (observation.PullRequestIsOpen == false)
+        {
+            return WorkItemTransition.None(
+                $"PR #{observation.PullRequest} is closed or merged — no readiness mutation is permitted");
+        }
+
+        if (observation.PullRequestIsOpen is null || observation.PullRequestIsDraft is null)
+        {
+            return WorkItemTransition.None(
+                $"PR #{observation.PullRequest} open/draft state was not readable; retaining the ready item "
+                + "for reconciliation");
+        }
+
+        if (observation.Verdict is not { Decision: ReviewDecision.Approve } verdict)
+        {
+            return EnsureDraft(observation, WorkItemTransition.NeedsOperator(
+                $"the ready item has no readable approving verdict for PR #{observation.PullRequest}; "
+                + "the queue will not preserve a ready signal without that evidence"));
+        }
+
+        if (!ReviewCoversCurrentHead(verdict, observation.PullRequestHeadSha))
+        {
+            return EnsureDraft(observation, Dispatch(
+                observation,
+                WorkStage.ReReview,
+                $"the ready item's approval covers {verdict.ReviewedRef}, but PR #{observation.PullRequest} "
+                + $"is now at {Short(observation.PullRequestHeadSha)} — the approval is stale"));
+        }
+
+        if (observation.RequiredChecks != PullRequestChecks.Passing)
+        {
+            return EnsureDraft(observation, WorkItemTransition.None(
+                $"the ready item's current-head approval remains valid, but required checks are "
+                + $"{observation.RequiredChecks ?? "unknown"}; retaining the draft until they pass"));
+        }
+
+        return observation.PullRequestIsDraft == true
+            ? WorkItemTransition.Stop(
+                WorkStage.Ready,
+                $"current-head approval and required checks for PR #{observation.PullRequest} are valid again",
+                PullRequestReadinessAction.MarkReady)
+            : WorkItemTransition.None(
+                $"PR #{observation.PullRequest} remains ready on its approved current head");
     }
 
     /// <summary>

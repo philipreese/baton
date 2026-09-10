@@ -551,4 +551,22 @@ public sealed class QueueBoardTests
         Assert.Null(PullRequestChecks.Summarize(System.Text.Json.JsonDocument.Parse("null").RootElement));
         Assert.Null(PullRequestChecks.Summarize(System.Text.Json.JsonDocument.Parse("{}").RootElement));
     }
+
+    [Theory]
+    [InlineData("""[]""", PullRequestChecks.None)]
+    [InlineData("""[{"bucket":"pass"},{"bucket":"skipping"}]""", PullRequestChecks.Passing)]
+    [InlineData("""[{"bucket":"pass"},{"bucket":"pending"}]""", PullRequestChecks.Pending)]
+    [InlineData("""[{"bucket":"pass"},{"bucket":"fail"}]""", PullRequestChecks.Failing)]
+    [InlineData("""[{"bucket":"cancel"}]""", PullRequestChecks.Failing)]
+    public void Required_check_buckets_fail_closed_without_conflating_an_empty_set(
+        string json, string expected) =>
+        Assert.Equal(expected, PullRequestChecks.TrySummarizeRequired(json));
+
+    [Theory]
+    [InlineData("""{}""")]
+    [InlineData("""[{"name":"ci"}]""")]
+    [InlineData("""[42]""")]
+    [InlineData("""not-json""")]
+    public void Unreadable_required_check_evidence_is_unknown(string json) =>
+        Assert.Null(PullRequestChecks.TrySummarizeRequired(json));
 }
