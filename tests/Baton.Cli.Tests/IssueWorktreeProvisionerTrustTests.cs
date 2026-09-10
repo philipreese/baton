@@ -18,6 +18,8 @@ namespace Baton.Cli.Tests;
 /// </remarks>
 public sealed class IssueWorktreeProvisionerTrustTests : IDisposable
 {
+    private const string CapturedRepository = "github.com/right/repository";
+
     private readonly string _root = Path.Combine(Path.GetTempPath(), $"provision-trust-{Guid.NewGuid():N}");
 
     [Fact]
@@ -32,7 +34,7 @@ public sealed class IssueWorktreeProvisionerTrustTests : IDisposable
 
         var output = new StringWriter();
         var provisioned = await IssueWorktreeProvisioner.ProvisionAsync(
-            2076, repository, _root, Runner(worktree), Probe(commonDir, repository, worktree),
+            2076, repository, _root, CapturedRepository, Runner(worktree), Probe(commonDir, repository, worktree),
             output, TestContext.Current.CancellationToken);
 
         Assert.Equal(worktree, provisioned);
@@ -59,7 +61,7 @@ public sealed class IssueWorktreeProvisionerTrustTests : IDisposable
         // against, and the verb's own pre-#2076 widening is what it still gets.
         var output = new StringWriter();
         var provisioned = await IssueWorktreeProvisioner.ProvisionAsync(
-            2076, repository, _root, Runner(worktree), Probe(commonDir, repository, worktree),
+            2076, repository, _root, CapturedRepository, Runner(worktree), Probe(commonDir, repository, worktree),
             output, TestContext.Current.CancellationToken);
 
         var recorded = ProjectCeilingStore.TryGet(provisioned, ProjectCeilingStore.DefaultPath);
@@ -94,7 +96,7 @@ public sealed class IssueWorktreeProvisionerTrustTests : IDisposable
 
         var output = new StringWriter();
         var refusal = await Assert.ThrowsAsync<ProjectNotTrustedException>(() => IssueWorktreeProvisioner.ProvisionAsync(
-            2076, repository, _root, Runner(worktree), (_, _) => Task.FromResult<RepositoryIdentity?>(null),
+            2076, repository, _root, CapturedRepository, Runner(worktree), (_, _) => Task.FromResult<RepositoryIdentity?>(null),
             output, TestContext.Current.CancellationToken));
 
         Assert.Equal(worktree, refusal.ProjectPath);
@@ -122,7 +124,7 @@ public sealed class IssueWorktreeProvisionerTrustTests : IDisposable
 
         var output = new StringWriter();
         var refusal = await Assert.ThrowsAsync<ProjectNotTrustedException>(() => IssueWorktreeProvisioner.ProvisionAsync(
-            2121, repository, _root, Runner(worktree), Probe(commonDir, repository, worktree),
+            2121, repository, _root, CapturedRepository, Runner(worktree), Probe(commonDir, repository, worktree),
             output, TestContext.Current.CancellationToken));
 
         Assert.Equal(worktree, refusal.ProjectPath);
@@ -153,7 +155,7 @@ public sealed class IssueWorktreeProvisionerTrustTests : IDisposable
 
         var output = new StringWriter();
         var provisioned = await IssueWorktreeProvisioner.ProvisionAsync(
-            2121, repository, _root, Runner(worktree), Probe(commonDir, repository, worktree),
+            2121, repository, _root, CapturedRepository, Runner(worktree), Probe(commonDir, repository, worktree),
             output, TestContext.Current.CancellationToken);
 
         var recorded = ProjectCeilingStore.TryGet(provisioned, ProjectCeilingStore.DefaultPath);
@@ -185,7 +187,7 @@ public sealed class IssueWorktreeProvisionerTrustTests : IDisposable
 
         var output = new StringWriter();
         var provisioned = await IssueWorktreeProvisioner.ProvisionAsync(
-            2121, repository, _root, Runner(worktree), Probe(commonDir, repository, worktree),
+            2121, repository, _root, CapturedRepository, Runner(worktree), Probe(commonDir, repository, worktree),
             output, TestContext.Current.CancellationToken);
 
         var recorded = ProjectCeilingStore.TryGet(provisioned, ProjectCeilingStore.DefaultPath);
@@ -220,7 +222,7 @@ public sealed class IssueWorktreeProvisionerTrustTests : IDisposable
 
         var output = new StringWriter();
         var refusal = await Assert.ThrowsAsync<ProjectNotTrustedException>(() => IssueWorktreeProvisioner.ProvisionAsync(
-            2121, repository, _root, Runner(worktree), probe,
+            2121, repository, _root, CapturedRepository, Runner(worktree), probe,
             output, TestContext.Current.CancellationToken));
 
         Assert.Equal(worktree, refusal.ProjectPath);
@@ -238,6 +240,42 @@ public sealed class IssueWorktreeProvisionerTrustTests : IDisposable
         Assert.DoesNotContain($"'{worktree}' is a git checkout", refusal.TryInvocation, StringComparison.Ordinal);
         Assert.Null(ProjectCeilingStore.TryGetRecord(worktree, ProjectCeilingStore.DefaultPath));
         Assert.Equal(string.Empty, output.ToString());
+    }
+
+    [Fact]
+    public async Task Captured_repository_scopes_issue_view_and_develop_when_ambient_repository_conflicts()
+    {
+        using var home = new IsolatedBatonHome();
+        const string ambientGhRepo = "github.com/wrong/repository";
+        var repository = MakeDirectory("baton");
+        var worktree = Path.Combine(_root, "w2212");
+        var commonDir = Path.Combine(repository, ".git");
+        var calls = new List<string[]>();
+        async Task<(int ExitCode, string Output)> Runner(
+            string fileName, IReadOnlyList<string> args, string _, CancellationToken cancellationToken)
+        {
+            calls.Add(args.ToArray());
+            if (fileName == "git")
+            {
+                Directory.CreateDirectory(worktree);
+            }
+
+            await Task.CompletedTask;
+            return (0, args is ["issue", "view", ..] ? "{\"title\":\"right\",\"body\":\"repo\"}" : string.Empty);
+        }
+
+        var issue = await IssueWorktreeProvisioner.FetchIssueAsync(
+            2212, repository, CapturedRepository, Runner, TestContext.Current.CancellationToken);
+        await IssueWorktreeProvisioner.ProvisionAsync(
+            2212, repository, _root, CapturedRepository, Runner, Probe(commonDir, repository, worktree),
+            TextWriter.Null, TestContext.Current.CancellationToken);
+
+        Assert.NotEqual(ambientGhRepo, CapturedRepository);
+        Assert.Equal(("right", "repo"), issue);
+        Assert.Contains(calls, args => args is
+            ["issue", "view", "2212", "--json", "title,body", "--repo", CapturedRepository]);
+        Assert.Contains(calls, args => args is
+            ["issue", "develop", "2212", "--name", "2212-lane", "--repo", CapturedRepository]);
     }
 
     /// <summary>Reports both spawns successful and creates the worktree the way <c>git worktree add</c> would.</summary>

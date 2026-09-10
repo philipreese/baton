@@ -72,15 +72,21 @@ public static class QueueCommand
                 .Items.FirstOrDefault(i => string.Equals(i.Tag, tag, StringComparison.Ordinal)),
             tag);
 
+        var sourceRepository = repositoryDirectory ?? Directory.GetCurrentDirectory();
+        var lifecycleRepository = options.Lifecycle
+            ? await ResolveLifecycleRepositoryAsync(sourceRepository, cancellationToken).ConfigureAwait(false)
+            : null;
+
         // Provisioning first, before anything is written to the queue: a `gh issue develop` that fails
         // must leave no half-added item behind, the same pre-provision-refusal placement
         // DispatchCommand's own drain/continue checks use.
         var workspace = options.Issue is { } issue
             ? await IssueWorktreeProvisioner.ProvisionAsync(
                 issue,
-                repositoryDirectory ?? Directory.GetCurrentDirectory(),
+                sourceRepository,
                 (await DaemonSettingsStore.LoadAsync(BatonPaths.SettingsFile, cancellationToken).ConfigureAwait(false))
                     .Queue.WorktreeRoot,
+                lifecycleRepository!,
                 output: output,
                 cancellationToken: cancellationToken).ConfigureAwait(false)
             : Path.GetFullPath(options.WorkspaceDirectory!);
@@ -118,6 +124,7 @@ public static class QueueCommand
             Issue = options.Issue,
             Stage = options.Lifecycle ? WorkStage.Implement : null,
             Branch = options.Lifecycle ? IssueWorktreeProvisioner.BranchNameFor(options.Issue!.Value) : null,
+            Repository = lifecycleRepository,
             // Explicit false distinguishes a newly-created lifecycle item from a pre-#2131 item
             // whose persisted history has no trustworthy automatic-fix budget.
             AutomaticFixUsed = options.Lifecycle ? false : null,
@@ -133,7 +140,7 @@ public static class QueueCommand
             // instructions keeps them, and gets the standing rules and the ship block for free.
             var (title, body) = specSource is null
                 ? await IssueWorktreeProvisioner.FetchIssueAsync(
-                    options.Issue!.Value, repositoryDirectory ?? Directory.GetCurrentDirectory(),
+                    options.Issue!.Value, sourceRepository, lifecycleRepository!,
                     cancellationToken: cancellationToken).ConfigureAwait(false)
                 : ($"Implement #{options.Issue}", await File.ReadAllTextAsync(specSource, cancellationToken).ConfigureAwait(false));
 
@@ -182,6 +189,26 @@ public static class QueueCommand
     }
 
     /// <summary>
+    /// Captures the existing canonical remote identity before provisioning can mutate anything. The
+    /// common-directory fallback is deliberately insufficient: it identifies local worktrees for
+    /// accounting, but cannot be passed to <c>gh --repo</c> as lifecycle ownership.
+    /// </summary>
+    private static async Task<string> ResolveLifecycleRepositoryAsync(
+        string sourceRepository, CancellationToken cancellationToken)
+    {
+        var identity = await RepositoryIdentityResolver
+            .TryResolveAsync(sourceRepository, cancellationToken).ConfigureAwait(false);
+        if (identity?.RemoteValue is not { Length: > 0 } repository)
+        {
+            throw new CliArgumentException(
+                $"Cannot establish a canonical remote repository identity for lifecycle work from '{sourceRepository}'.",
+                "configure that checkout's origin remote, then re-run 'baton queue add --lifecycle'.");
+        }
+
+        return repository;
+    }
+
+    /// <summary>
     /// Every refusal `add` makes twice — once before it touches anything, once under the file lock.
     /// One method so the two can never word them differently.
     /// </summary>
@@ -195,6 +222,14 @@ public static class QueueCommand
     /// </remarks>
     private static void RefuseIfNotReplaceable(QueueItem? existing, string tag)
     {
+        if (existing?.ReadinessMutationClaim is { Length: > 0 })
+        {
+            throw new CliArgumentException(
+                $"Item '{tag}' has an in-flight pull-request readiness update. Re-adding it would supersede "
+                + "an operation that is already authorized.",
+                "wait for the daemon to finish reconciliation, then retry.");
+        }
+
         if (existing is { State: QueueItemState.Launched })
         {
             throw new CliArgumentException(
@@ -328,7 +363,8 @@ public static class QueueCommand
         await QueueStore.MutateAsync(BatonPaths.QueueFile, snapshot =>
         {
             observed = snapshot.Items.FirstOrDefault(item => string.Equals(item.Tag, tag, StringComparison.Ordinal));
-            if (observed?.State != QueueItemState.Queued)
+            if (observed?.State != QueueItemState.Queued
+                || observed.ReadinessMutationClaim is { Length: > 0 })
             {
                 return snapshot;
             }
@@ -345,6 +381,10 @@ public static class QueueCommand
         {
             case null:
                 throw new CliArgumentException($"Queue item '{tag}' does not exist.", "run 'baton queue list' to see recorded tags.");
+            case { ReadinessMutationClaim: { Length: > 0 } }:
+                throw new CliArgumentException(
+                    $"Queue item '{tag}' has an in-flight pull-request readiness update and cannot be cancelled yet.",
+                    "the operation was already claimed; wait for reconciliation to finish, then retry cancellation.");
             case { State: QueueItemState.Queued }:
                 await QueueDecisionLedgerStore.AppendCancellationAsync(
                     cancelledAt, tag, BatonPaths.QueueDecisionLedgerFile, cancellationToken).ConfigureAwait(false);
@@ -395,6 +435,16 @@ public static class QueueCommand
         await QueueStore.MutateAsync(BatonPaths.QueueFile, snapshot =>
         {
             var importedTags = imported.Select(i => i.Tag).ToHashSet(StringComparer.Ordinal);
+            var claimed = snapshot.Items.FirstOrDefault(
+                item => item.ReadinessMutationClaim is { Length: > 0 } && importedTags.Contains(item.Tag));
+            if (claimed is not null)
+            {
+                throw new CliArgumentException(
+                    $"Item '{claimed.Tag}' has an in-flight pull-request readiness update. Importing it would "
+                    + "supersede an operation that is already authorized.",
+                    "remove that tag from the import, or wait for reconciliation to finish and retry.");
+            }
+
             var cancelled = snapshot.Items.FirstOrDefault(
                 item => item.State == QueueItemState.Cancelled && importedTags.Contains(item.Tag));
             if (cancelled is not null)

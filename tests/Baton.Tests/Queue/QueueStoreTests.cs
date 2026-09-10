@@ -62,6 +62,7 @@ public sealed class QueueStoreTests
             var staged = Item("staged") with
             {
                 Stage = WorkStage.Review,
+                Repository = "github.com/aer-works/baton",
                 StageSelections =
                 [
                     new QueueStageSelection
@@ -81,6 +82,8 @@ public sealed class QueueStoreTests
             var read = await QueueStore.LoadAsync(path, Ct);
             Assert.Equal("gpt-5.6-sol", read.Items[0].StageSelections!.Single().Model);
             Assert.Equal(600_000, read.Items[0].TokenBudget);
+            Assert.Equal("github.com/aer-works/baton", read.Items[0].Repository);
+            Assert.Null(read.Items[1].Repository);
             var (_, source) = QueueTierTable.SelectionForStage(read.Items[1], WorkStage.ReReview);
             Assert.Equal(QueueSelectionSource.PersistedLifecycleCompatibility, source);
         }

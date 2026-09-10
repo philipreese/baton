@@ -431,6 +431,57 @@ public sealed class QueueCommandTests
     }
 
     [Fact]
+    public async Task Re_adding_a_tag_with_a_claimed_readiness_mutation_is_refused_before_the_spec_copy()
+    {
+        var home = CreateTempHome();
+        using var scope = BatonEnvironmentSnapshot.BeginScope(BatonEnvironmentSnapshot.Blank with { HomeOverride = home });
+        try
+        {
+            var workspace = Path.Combine(home, "w2131");
+            Directory.CreateDirectory(workspace);
+            Directory.CreateDirectory(BatonPaths.QueueSpecsDirectory);
+            var spec = BatonPaths.QueueSpecFile("2131-lane");
+            await File.WriteAllTextAsync(spec, "the claimed row's brief", Ct);
+            await QueueStore.MutateAsync(
+                BatonPaths.QueueFile,
+                state => state with
+                {
+                    Items =
+                    [
+                        new QueueItem
+                        {
+                            Tag = "2131-lane",
+                            Role = "implement",
+                            Workspace = workspace,
+                            SpecFile = spec,
+                            Stage = WorkStage.Implement,
+                            ReadinessMutationClaim = "active-claim",
+                        },
+                    ],
+                },
+                Ct);
+            var replacement = Path.Combine(home, "replacement.md");
+            await File.WriteAllTextAsync(replacement, "replacement brief", Ct);
+
+            var refusal = await Assert.ThrowsAsync<CliArgumentException>(() => QueueCommand.ExecuteAsync(
+                new QueueOptions(
+                    QueueVerb.Add, Tag: "2131-lane", Role: "implement", SpecFilePath: replacement,
+                    WorkspaceDirectory: workspace),
+                TextWriter.Null,
+                Ct));
+
+            Assert.Contains("already authorized", refusal.Message, StringComparison.Ordinal);
+            Assert.Equal("the claimed row's brief", await File.ReadAllTextAsync(spec, Ct));
+            Assert.Equal("active-claim", Assert.Single(
+                (await QueueStore.LoadAsync(BatonPaths.QueueFile, Ct)).Items).ReadinessMutationClaim);
+        }
+        finally
+        {
+            DirectoryCleanup.DeleteRecursively(home);
+        }
+    }
+
+    [Fact]
     public async Task Re_adding_a_work_item_past_implement_is_refused_before_its_brief_is_overwritten()
     {
         var home = CreateTempHome();
@@ -798,6 +849,46 @@ public sealed class QueueCommandTests
             var repeat = await Assert.ThrowsAsync<CliArgumentException>(() => QueueCommand.ExecuteAsync(
                 new QueueOptions(QueueVerb.Cancel, Tag: "2159-lane"), TextWriter.Null, Ct));
             Assert.Contains("already cancelled", repeat.Message, StringComparison.Ordinal);
+        }
+        finally
+        {
+            DirectoryCleanup.DeleteRecursively(home);
+        }
+    }
+
+    [Fact]
+    public async Task Cancel_refuses_after_a_readiness_mutation_is_claimed()
+    {
+        var home = CreateTempHome();
+        using var scope = BatonEnvironmentSnapshot.BeginScope(BatonEnvironmentSnapshot.Blank with { HomeOverride = home });
+        try
+        {
+            await QueueStore.MutateAsync(BatonPaths.QueueFile, state => state with
+            {
+                Items =
+                [
+                    new QueueItem
+                    {
+                        Tag = "2131-lane",
+                        Role = "review",
+                        Workspace = home,
+                        SpecFile = BatonPaths.QueueSpecFile("2131-lane"),
+                        Stage = WorkStage.Ready,
+                        State = QueueItemState.Queued,
+                        ReadinessMutationClaim = "active-claim",
+                    },
+                ],
+            }, Ct);
+
+            var refusal = await Assert.ThrowsAsync<CliArgumentException>(() => QueueCommand.ExecuteAsync(
+                new QueueOptions(QueueVerb.Cancel, Tag: "2131-lane"), TextWriter.Null, Ct));
+
+            Assert.Contains("in-flight pull-request readiness update", refusal.Message, StringComparison.Ordinal);
+            var item = Assert.Single((await QueueStore.LoadAsync(BatonPaths.QueueFile, Ct)).Items);
+            Assert.Equal(QueueItemState.Queued, item.State);
+            Assert.Null(item.CancelledAt);
+            Assert.Equal("active-claim", item.ReadinessMutationClaim);
+            Assert.Empty(await QueueDecisionLedgerStore.ReadAllAsync(BatonPaths.QueueDecisionLedgerFile, Ct));
         }
         finally
         {

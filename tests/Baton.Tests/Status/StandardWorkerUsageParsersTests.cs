@@ -241,6 +241,24 @@ public sealed class StandardWorkerUsageParsersTests
         Assert.Equal(0, parser.CountToolSteps(agentResponseLine));
     }
 
+    [Theory]
+    [InlineData("write_to_file", 1)]
+    [InlineData("replace_file_content", 1)]
+    [InlineData("multi_replace_file_content", 1)]
+    [InlineData("generate_image", 1)]
+    [InlineData("view_file", 0)]
+    public void Agy_CountWriteToolSteps_counts_only_terminal_write_family_calls(string tool, int expected)
+    {
+        var parser = new AgyUsageParser();
+        var active = """{"event":"step_update","step_update":{"state":"ACTIVE","step_type":"tool","tool_name":"TOOL","tool_info":{"name":"TOOL"}}}"""
+            .Replace("TOOL", tool, StringComparison.Ordinal);
+        var done = """{"event":"step_update","step_update":{"state":"DONE","step_type":"tool","tool_name":"TOOL","tool_info":{"name":"TOOL"}}}"""
+            .Replace("TOOL", tool, StringComparison.Ordinal);
+
+        Assert.Equal(0, parser.CountWriteToolSteps(active));
+        Assert.Equal(expected, parser.CountWriteToolSteps(done));
+    }
+
     [Fact]
     public void Agy_parser_TryParseIncrementalUsage_ReturnsFalse_for_a_DONE_tool_step_even_if_it_carried_usage()
     {
@@ -269,6 +287,21 @@ public sealed class StandardWorkerUsageParsersTests
 
         // Distinct from TryParseToolName, which deliberately reports only the FIRST block's name.
         Assert.Equal("Bash", parser.TryParseToolName(multiToolLine));
+    }
+
+    [Theory]
+    [InlineData("Edit", 1)]
+    [InlineData("Write", 1)]
+    [InlineData("NotebookEdit", 1)]
+    [InlineData("Read", 0)]
+    [InlineData("Bash", 0)]
+    public void Claude_CountWriteToolSteps_counts_the_write_family(string tool, int expected)
+    {
+        var parser = new ClaudeUsageParser();
+        var line = """{"type":"assistant","message":{"content":[{"type":"tool_use","name":"TOOL"}]}}"""
+            .Replace("TOOL", tool, StringComparison.Ordinal);
+
+        Assert.Equal(expected, parser.CountWriteToolSteps(line));
     }
 
     [Fact]

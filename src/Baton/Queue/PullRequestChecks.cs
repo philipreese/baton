@@ -3,8 +3,10 @@ using System.Text.Json;
 namespace Baton.Queue;
 
 /// <summary>
-/// One word for what a pull request's checks are doing, reduced from <c>gh pr view --json
-/// statusCheckRollup</c> (#1912 slice 1). The board's PR row carries it; nothing gates on it.
+/// One vocabulary for what a pull request's checks are doing. <see cref="Summarize"/> reduces the
+/// display-only <c>statusCheckRollup</c> (#1912 slice 1), while <see cref="TrySummarizeRequired"/>
+/// independently reduces current-head required checks for readiness (#2131). The board field remains
+/// display-only; lifecycle policy receives the required-check reading as a separate value.
 /// </summary>
 /// <remarks>
 /// <para>
@@ -81,6 +83,55 @@ public static class PullRequestChecks
         return verdicts.Contains(Failing) ? Failing
             : verdicts.Contains(Pending) ? Pending
             : Passing;
+    }
+
+    /// <summary>
+    /// Reduces the JSON emitted by <c>gh pr checks --required --json bucket,...</c>. The command's
+    /// exit code describes the check result, so callers deliberately parse its output even when that
+    /// receipt is non-zero. Null means no trustworthy JSON evidence; an empty array means
+    /// <see cref="None"/>, not passing.
+    /// </summary>
+    public static string? TrySummarizeRequired(string json)
+    {
+        try
+        {
+            using var document = JsonDocument.Parse(json);
+            if (document.RootElement.ValueKind != JsonValueKind.Array)
+            {
+                return null;
+            }
+
+            var verdicts = new List<string>();
+            foreach (var element in document.RootElement.EnumerateArray())
+            {
+                if (element.ValueKind != JsonValueKind.Object)
+                {
+                    return null;
+                }
+
+                var bucket = Text(element, "bucket");
+                if (bucket is null)
+                {
+                    return null;
+                }
+
+                verdicts.Add(bucket.ToUpperInvariant() switch
+                {
+                    "PASS" or "SKIPPING" => Passing,
+                    "PENDING" => Pending,
+                    _ => Failing,
+                });
+            }
+
+            return verdicts.Count == 0 ? None
+                : verdicts.Contains(Failing) ? Failing
+                : verdicts.Contains(Pending) ? Pending
+                : Passing;
+        }
+        catch (JsonException)
+        {
+            return null;
+        }
     }
 
     /// <summary>

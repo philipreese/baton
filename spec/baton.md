@@ -1713,12 +1713,14 @@ rests on. An operator cancellation landing inside this check's own window settle
 mirroring the ordinary verify window's identical carve-out — never a `VerifyFailed`/`VerifyNotRun`
 misreporting an execution the operator asked to stop.
 
-**Known gap, stated rather than closed here.** This check asks only "is the workspace's CURRENT `HEAD`
-pushed, with an open PR" — never "did THIS execution move `HEAD` or open that PR". A redispatch into an
-already-pushed, already-PR'd workspace that changes nothing still settles `Succeeded`. Distinguishing that
-would mean comparing against a pre-dispatch SHA, or gating on `OutcomeClassification.WorkspaceChanged`
-(already computed for `ChangesTree` roles) — a materially different assertion than the two the issue
-named, left for a follow-up rather than folded in here.
+**Measured-zero implementation self-check (#2131 slice 2).** A write-granted implementation that
+finishes naturally with a satisfied contract, a measured count of zero write-tool calls, and a measured unchanged
+worktree settles `Failed` / `Permanent`, not `Succeeded`; a pre-existing pushed branch and PR cannot turn
+that no-op into delivery. `OutcomeClassifier.BuildSucceededClassification` owns the conjunction. Neither
+half alone is enough: a changed tree can have been written through shell, and an unchanged tree after a
+write-tool call can be a truthful declared-output-only result. A null write-tool count (unsupported parser,
+missing/unreadable capture, or a capture-loss marker) and an unmeasurable workspace comparison remain
+unknown rather than being promoted to zero/unchanged, so this rule does not fail either carve-out.
 
 **Withholding the vendor subagent tool (#1802).** A role's catalog entry may set
 `WorkerRole.AllowsSubagents` (`allows_subagents` in `WorkerRoles.json`; that member's own doc carries
@@ -7048,7 +7050,9 @@ written:
 | implement / continue | succeeded-shaped, PR open | **review** | there is something to review |
 | fix | succeeded-shaped, PR open | **re-review** | the prior verdict's findings are being checked |
 | implement / fix / continue | succeeded-shaped, no PR | **operator** | the queue never opens a PR |
-| review / re-review | succeeded-shaped, `decision: approve` | **ready** | the conductor merges; the queue never does |
+| review / re-review | succeeded-shaped, `decision: approve`, exact full `reviewedRef` = current PR head, required checks passing | **ready** | only current-head approval plus green required checks may clear draft |
+| review / re-review | succeeded-shaped, `decision: approve`, stale `reviewedRef` | **re-review** | a new head invalidates the approval and the PR is reconciled to draft first |
+| review / re-review | succeeded-shaped, exact-head `decision: approve`, required checks pending, failing, or unknown | **wait in draft** | approval is retained while required checks are re-observed; it is not readiness evidence by itself |
 | review / re-review | succeeded-shaped, `decision: block`, `automaticFixUsed: false` | **fix** | the one automatic fix has not been used |
 | review / re-review | succeeded-shaped, `decision: block`, `automaticFixUsed: true` or absent | **operator** | a second fix or untrustworthy legacy history needs conductor judgment |
 | review / re-review | succeeded-shaped, verdict with no decision | **operator** | never guessed from the findings |
@@ -7058,6 +7062,15 @@ written:
 | review / re-review | anything else | **re-review** | a reviewer has nothing to push |
 | any stage, round at the ceiling | anything | **operator** | two of those arms are cycles with no natural end |
 | ready | anything | nothing | it stops here |
+
+**Draft is the lifecycle's visible readiness signal, not merge authority.** Every open PR with an
+unfinished review, fix, continuation, stale-approval, or required-check obligation is reconciled to draft.
+The I/O owner reads the exact PR number, head, draft state, and required checks immediately before a
+transition, claims the queue row before a readiness mutation, re-reads GitHub afterward, and retains an
+unconfirmed obligation for another tick. A head change makes an already-ready item draft and dispatches a
+cold re-review; a same-head required-check regression makes it draft and waits without duplicating review.
+Only an exact-head approval with passing required checks may be marked ready. Closed or merged PRs are
+observed but never reopened, and no lifecycle path merges: merge authority remains conductor-only.
 
 **"Succeeded-shaped" is the set, never the one word.** Both terminal words §3's table calls
 succeeded-shaped — `Succeeded` and `FinishedDuringTeardown` — take every row above identically, through

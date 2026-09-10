@@ -44,6 +44,16 @@ public sealed record RepositoryIdentity
     public string Value { get; }
 
     /// <summary>
+    /// <see cref="Value"/> when it came from a remote URL and therefore has the canonical
+    /// <c>host/owner/repo</c> shape; otherwise <see langword="null"/>. A git-common-directory
+    /// fallback identifies local checkouts for accounting, but cannot name a forge repository for an
+    /// explicitly targeted remote operation.
+    /// </summary>
+    public string? RemoteValue => Value.StartsWith(GitDirectoryPrefix, StringComparison.Ordinal)
+        ? null
+        : Value;
+
+    /// <summary>
     /// The filename stem <see cref="Value"/> is stored under. Readable prefix plus a digest suffix —
     /// see the type remarks for why the digest is not optional.
     /// </summary>

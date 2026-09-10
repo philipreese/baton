@@ -112,6 +112,49 @@ public sealed class OutcomeClassifierWorkProductTests : IDisposable
         Assert.True(classification.Hollow);
     }
 
+    [Fact]
+    public void A_write_granted_lane_with_a_measured_zero_write_calls_and_an_unchanged_tree_fails()
+    {
+        var (worktree, outputDirectory) = ProvisionUntouchedWorktree();
+        File.WriteAllText(Path.Combine(outputDirectory, "changes.md"), "claimed completion");
+        var contract = new WorkerContract("implement", [], [new ProducedOutput("changes.md")], []);
+
+        var classification = OutcomeClassifier.Classify(
+            new CoreDispatchResult(0, CoreExitReason.Natural),
+            contract,
+            outputDirectory,
+            changesTreeWorkingDirectory: worktree,
+            changesTree: true,
+            writeToolCallCount: 0);
+
+        Assert.Equal(OutcomeVerdict.Failed, classification.Verdict);
+        Assert.Equal(FailureClassification.Permanent, classification.FailureClassification);
+        Assert.Contains("zero write-tool calls", classification.Reason!, StringComparison.Ordinal);
+        Assert.False(classification.WorkspaceChanged);
+    }
+
+    [Fact]
+    public void An_unchanged_tree_with_a_write_call_retains_the_existing_hollow_success_reading()
+    {
+        // The polarity control above: only the measured count changes. The conjunction, not an
+        // unchanged tree by itself, is the failure signature approved in #2131.
+        var (worktree, outputDirectory) = ProvisionUntouchedWorktree();
+        File.WriteAllText(Path.Combine(outputDirectory, "changes.md"), "truthful no-op result");
+        var contract = new WorkerContract("implement", [], [new ProducedOutput("changes.md")], []);
+
+        var classification = OutcomeClassifier.Classify(
+            new CoreDispatchResult(0, CoreExitReason.Natural),
+            contract,
+            outputDirectory,
+            changesTreeWorkingDirectory: worktree,
+            changesTree: true,
+            writeToolCallCount: 1);
+
+        Assert.Equal(OutcomeVerdict.Succeeded, classification.Verdict);
+        Assert.False(classification.WorkspaceChanged);
+        Assert.False(classification.Hollow);
+    }
+
     /// <summary>
     /// A real git repository with one commit. Returns the repo path and the branch to provision a
     /// worktree of, mirroring <c>Workspaces.WorktreeProvisionerTests.CreateRepoWithBranch</c>.

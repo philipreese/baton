@@ -89,8 +89,28 @@ public sealed record QueueItem
     /// </summary>
     public string? Branch { get; init; }
 
+    /// <summary>
+    /// The immutable canonical <c>host/owner/repo</c> identity that owns this lifecycle, captured from
+    /// the source repository when the item is added. Null on non-lifecycle requests and on historical
+    /// lifecycle rows; the latter is uncertainty, never permission to infer an owner from mutable
+    /// workspace or CLI context.
+    /// </summary>
+    public string? Repository { get; init; }
+
     /// <summary>The pull request the lifecycle is tracking, once one is open on <see cref="Branch"/>.</summary>
     public int? PullRequest { get; init; }
+
+    /// <summary>
+    /// Opaque ownership token for a readiness reconciliation that has crossed its local linearization
+    /// point. While present, cancellation and same-tag replacement must not supersede the row: the
+    /// already-authorized GitHub mutation is allowed to finish and commit its observation first.
+    /// </summary>
+    /// <remarks>
+    /// The token is durable so a daemon restart can atomically replace an orphaned claim and recover
+    /// after re-observing GitHub. It is not a lease and no network call runs while the queue lock is
+    /// held. <c>WorkItemAdvancer</c> is the sole writer; <c>QueueCommand</c> is the command-side reader.
+    /// </remarks>
+    public string? ReadinessMutationClaim { get; init; }
 
     /// <summary>
     /// The verdict the last review produced, as an absolute path to that room's <c>verdict.json</c>.
@@ -139,12 +159,13 @@ public sealed record QueueItem
     /// tokens). Null until one has.
     /// </summary>
     /// <remarks>
-    /// <b>Recorded rather than read at display time</b>, and it is deliberately not current: the advance
-    /// only reads a work item whose lane has SETTLED, so a <see cref="WorkStage.Ready"/> item's word is
-    /// frozen at the moment it went ready. <see cref="ChecksObservedAt"/> is what makes that legible, and
-    /// no reader may render one without the other — a stale green with no age beside it is a mechanism
-    /// reading as a guarantee. Nothing gates on this field; it exists because #1912's board row asks
-    /// "what is this PR waiting on" and a checks word is half that answer.
+    /// <b>Recorded rather than read at display time</b>, and it is deliberately only the advancer's
+    /// latest observation: settled lanes and ready-item reconciliation can refresh it, but no display
+    /// read spawns GitHub. <see cref="ChecksObservedAt"/> is what makes that legible, and no reader may
+    /// render one without the other — a stale green with no age beside it is a mechanism reading as a
+    /// guarantee. Nothing gates on this field; readiness uses a separate required-check observation.
+    /// This field exists because #1912's board row asks "what is this PR waiting on" and a checks word
+    /// is half that answer.
     /// </remarks>
     public string? Checks { get; init; }
 

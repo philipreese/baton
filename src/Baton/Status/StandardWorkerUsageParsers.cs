@@ -394,6 +394,40 @@ public sealed class ClaudeUsageParser : IWorkerUsageParser
         }
     }
 
+    public bool SupportsWriteToolStepCounting => true;
+
+    /// <summary>#2131 slice 2: every claude write-family <c>tool_use</c> block in this turn.</summary>
+    public int? CountWriteToolSteps(string rawLine)
+    {
+        if (string.IsNullOrWhiteSpace(rawLine))
+        {
+            return 0;
+        }
+
+        try
+        {
+            using var doc = JsonDocument.Parse(rawLine);
+            var root = doc.RootElement;
+            if (root.ValueKind != JsonValueKind.Object
+                || !root.TryGetProperty("type", out var typeProp) || typeProp.GetString() != "assistant"
+                || !root.TryGetProperty("message", out var message) || message.ValueKind != JsonValueKind.Object
+                || !message.TryGetProperty("content", out var content) || content.ValueKind != JsonValueKind.Array)
+            {
+                return 0;
+            }
+
+            return content.EnumerateArray().Count(block =>
+                block.ValueKind == JsonValueKind.Object
+                && block.TryGetProperty("type", out var blockType) && blockType.GetString() == "tool_use"
+                && block.TryGetProperty("name", out var name)
+                && name.GetString() is "Edit" or "Write" or "NotebookEdit");
+        }
+        catch (JsonException)
+        {
+            return 0;
+        }
+    }
+
     /// <summary>
     /// #1927: the model claude reports having RUN — the terminal <c>"type":"result"</c> event's own
     /// <c>model</c>, falling back to an assistant turn's <c>message.model</c> when the result event
@@ -877,6 +911,25 @@ public sealed class AgyUsageParser : IWorkerUsageParser
         {
             return 0;
         }
+    }
+
+    public bool SupportsWriteToolStepCounting => true;
+
+    /// <summary>
+    /// #2131 slice 2: agy's terminal write-family steps. The names mirror the adapter grant's
+    /// write-tool family; the terminal anchor is shared with <see cref="CountToolSteps"/> so ACTIVE
+    /// and DONE lines for one call cannot double-count it.
+    /// </summary>
+    public int? CountWriteToolSteps(string rawLine)
+    {
+        if (!TryReadTerminalToolInfo(rawLine, out var toolInfo)
+            || !toolInfo.TryGetProperty("name", out var name))
+        {
+            return 0;
+        }
+
+        return name.GetString() is "write_to_file" or "replace_file_content"
+            or "multi_replace_file_content" or "generate_image" ? 1 : 0;
     }
 
     /// <summary>

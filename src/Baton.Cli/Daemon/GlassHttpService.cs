@@ -82,7 +82,9 @@ internal sealed class GlassHttpService : BackgroundService
 
     /// <summary>The prefixes actually bound, in bind order — empty until <see cref="ExecuteAsync"/>
     /// has started, and empty forever when the listener is off or every bind was refused.</summary>
-    internal IReadOnlyList<string> BoundPrefixes { get; private set; } = [];
+    private IReadOnlyList<string> _boundPrefixes = [];
+
+    internal IReadOnlyList<string> BoundPrefixes => Volatile.Read(ref _boundPrefixes);
 
     protected override async Task ExecuteAsync(CancellationToken stoppingToken)
     {
@@ -131,10 +133,12 @@ internal sealed class GlassHttpService : BackgroundService
             }
         }
 
-        BoundPrefixes = bound;
         // Surfaced on the heartbeat (spec/baton.md §7) so a reverse proxy pointed at the wrong
-        // address is diagnosable from the glass itself rather than only from this log line.
+        // address is diagnosable from the glass itself rather than only from this log line. Publish
+        // the shared ledger first: observing BoundPrefixes is the startup-ready signal used by local
+        // callers, so it must never become visible before the matching heartbeat value.
         DaemonTickLedger.Instance.RecordGlassBoundPrefixes(bound);
+        Volatile.Write(ref _boundPrefixes, bound);
         if (listeners.Count == 0)
         {
             _log.WriteLine("GlassHttpService: no address could be bound; the glass is not being served.");

@@ -86,6 +86,28 @@ public interface IWorkerUsageParser
     int CountToolSteps(string rawLine) => 0;
 
     /// <summary>
+    /// #2131 slice 2: how many workspace/output write-family tool calls
+    /// <paramref name="rawLine"/> reports, over the same call-side event population as
+    /// <see cref="CountToolSteps"/>. A caller sums this over the captured stream and uses a measured
+    /// zero together with an unchanged tree to reject a write-granted lane's hollow success.
+    /// <para>
+    /// Shell commands are deliberately not inferred as writes: their command text is not a reliable
+    /// account of side effects, while the worktree probe independently observes any side effect that
+    /// did land. Each vendor parser owns its write-tool spellings, as it already owns its shell-tool
+    /// spelling in <see cref="ShellCommandLines"/>. Null means this parser has no write-tool signal;
+    /// it must never be folded into a measured zero.
+    /// </para>
+    /// </summary>
+    bool SupportsWriteToolStepCounting => false;
+
+    /// <summary>
+    /// Returns this line's write-family count when <see cref="SupportsWriteToolStepCounting"/> is
+    /// true. Null is the fail-closed unsupported signal; callers must preserve it rather than adding
+    /// it as zero.
+    /// </summary>
+    int? CountWriteToolSteps(string rawLine) => null;
+
+    /// <summary>
     /// #1927: the model name <paramref name="rawLine"/> reports the vendor CLI as having actually RUN,
     /// or null when this line reports none. Read at settle over the whole captured stream
     /// (<c>ExecutionUsageProjector</c>), which keeps the LAST non-null answer, and landing on
