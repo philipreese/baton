@@ -243,6 +243,8 @@ public static class CodexAppServerBroker
     /// <summary>
     /// One bounded lifecycle around response and cleanup. <see cref="Task.WaitAsync(CancellationToken)"/>
     /// enforces both bounds even when an underlying stream or cleanup operation ignores its token.
+    /// A phase that outlives its wait is observed asynchronously: its late exception is diagnostic and
+    /// cannot become an unobserved task or extend the foreground deadline.
     /// </summary>
     internal static async Task<JsonObject?> ReadRateLimitsWithinBoundsAsync(
         Func<CancellationToken, Task<JsonObject>> read,
@@ -269,9 +271,10 @@ public static class CodexAppServerBroker
         CancellationToken cancellationToken)
     {
         var responseToken = responseTimeout.Token;
+        Task<JsonObject>? readTask = null;
         try
         {
-            var readTask = Task.Run(() =>
+            readTask = Task.Run(() =>
             {
                 responseToken.ThrowIfCancellationRequested();
                 return read(responseToken);
@@ -280,10 +283,12 @@ public static class CodexAppServerBroker
         }
         catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
         {
+            _ = ObserveLatePhaseAsync(readTask, error, "read");
             throw;
         }
         catch (OperationCanceledException) when (responseTimeout.IsCancellationRequested)
         {
+            _ = ObserveLatePhaseAsync(readTask, error, "read");
             await error.WriteLineAsync(
                 $"Codex rate-limit harvest did not answer within {responseBound.TotalSeconds:0}s.")
                 .ConfigureAwait(false);
@@ -300,13 +305,15 @@ public static class CodexAppServerBroker
             using var cleanupTimeout = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
             cleanupTimeout.CancelAfter(cleanupBound);
             var cleanupToken = cleanupTimeout.Token;
+            Task? cleanupTask = null;
             try
             {
-                var cleanupTask = Task.Run(() => cleanup(cleanupToken), CancellationToken.None);
+                cleanupTask = Task.Run(() => cleanup(cleanupToken), CancellationToken.None);
                 await cleanupTask.WaitAsync(cleanupToken).ConfigureAwait(false);
             }
             catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
             {
+                _ = ObserveLatePhaseAsync(cleanupTask, error, "cleanup");
                 // Cleanup was dispatched before cancellation is propagated. The production delegate
                 // owns the process until its kill/exit/drain attempt finishes, even if the caller no
                 // longer waits for it.
@@ -314,6 +321,7 @@ public static class CodexAppServerBroker
             }
             catch (OperationCanceledException) when (cleanupTimeout.IsCancellationRequested)
             {
+                _ = ObserveLatePhaseAsync(cleanupTask, error, "cleanup");
                 await error.WriteLineAsync(
                     $"Codex rate-limit harvest cleanup did not finish within {cleanupBound.TotalSeconds:0}s.")
                     .ConfigureAwait(false);
@@ -322,6 +330,37 @@ public static class CodexAppServerBroker
             {
                 await error.WriteLineAsync($"Codex rate-limit harvest cleanup failed: {ex.Message}")
                     .ConfigureAwait(false);
+            }
+        }
+    }
+
+    private static async Task ObserveLatePhaseAsync(Task? task, TextWriter error, string phase)
+    {
+        if (task is null)
+        {
+            return;
+        }
+
+        try
+        {
+            await task.ConfigureAwait(false);
+        }
+        catch (OperationCanceledException)
+        {
+            // Cancellation is the expected late outcome after the phase's token was cancelled.
+        }
+        catch (Exception ex)
+        {
+            try
+            {
+                await error.WriteLineAsync(
+                    $"Codex rate-limit harvest {phase} failed after its deadline: {ex.Message}")
+                    .ConfigureAwait(false);
+            }
+            catch (Exception)
+            {
+                // The caller may have disposed its diagnostic writer after the foreground returned.
+                // The phase exception has still been observed, and this observer must never fault too.
             }
         }
     }
@@ -361,11 +400,11 @@ public static class CodexAppServerBroker
                     .ConfigureAwait(false);
             }
         }
-        catch (Exception ex) when (ex is Win32Exception or IOException or UnauthorizedAccessException
-            or ArgumentException or InvalidOperationException)
+        catch (Exception)
         {
             // The foreground path has already reported timeout or cancellation. This continuation
-            // exists only to observe late startup and make a best-effort process-tree cleanup.
+            // exists only to observe every late startup/cleanup outcome and make a best-effort
+            // process-tree cleanup. It must never become a second unobserved task.
         }
     }
 

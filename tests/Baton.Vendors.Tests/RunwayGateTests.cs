@@ -459,7 +459,7 @@ public class RunwayGateTests
         var decision = RunwayGate.Evaluate("codex", snapshot, new RunwayThresholds(), Now);
 
         Assert.Equal(RunwayDisposition.Hold, decision.Disposition);
-        Assert.Contains("codex 300-minute", decision.Reason, StringComparison.Ordinal);
+        Assert.Contains("conflicting or malformed account window evidence", decision.Reason, StringComparison.Ordinal);
     }
 
     [Fact]

@@ -228,6 +228,41 @@ public sealed class CodexAppServerBrokerTests
     }
 
     [Fact]
+    public async Task Synchronous_read_prefix_late_fault_is_observed_without_extending_the_response_bound()
+    {
+        using var releaseRead = new ManualResetEventSlim();
+        using var error = new SignalingStringWriter("read failed after its deadline");
+        var stopwatch = Stopwatch.StartNew();
+        try
+        {
+            var result = await CodexAppServerBroker.ReadRateLimitsWithinBoundsAsync(
+                _ =>
+                {
+                    releaseRead.Wait();
+                    throw new IOException("late read fault");
+                },
+                _ => Task.CompletedTask,
+                error,
+                TimeSpan.FromMilliseconds(25),
+                TimeSpan.FromMilliseconds(25),
+                TestContext.Current.CancellationToken);
+
+            stopwatch.Stop();
+            Assert.Null(result);
+            Assert.True(stopwatch.Elapsed < TimeSpan.FromSeconds(5), $"elapsed {stopwatch.Elapsed}");
+            Assert.Contains("did not answer within", error.ToString(), StringComparison.Ordinal);
+
+            releaseRead.Set();
+            await error.Signal.WaitAsync(TimeSpan.FromSeconds(60), TestContext.Current.CancellationToken);
+            Assert.Contains("late read fault", error.ToString(), StringComparison.Ordinal);
+        }
+        finally
+        {
+            releaseRead.Set();
+        }
+    }
+
+    [Fact]
     public async Task Synchronous_cleanup_prefix_is_inside_the_cleanup_bound()
     {
         using var releaseCleanup = new ManualResetEventSlim();
@@ -248,6 +283,41 @@ public sealed class CodexAppServerBrokerTests
         releaseCleanup.Set();
         Assert.True(result!["ok"]!.GetValue<bool>());
         Assert.Contains("cleanup did not finish within", error.ToString(), StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task Synchronous_cleanup_prefix_late_fault_is_observed_without_extending_the_cleanup_bound()
+    {
+        using var releaseCleanup = new ManualResetEventSlim();
+        using var error = new SignalingStringWriter("cleanup failed after its deadline");
+        var stopwatch = Stopwatch.StartNew();
+        try
+        {
+            var result = await CodexAppServerBroker.ReadRateLimitsWithinBoundsAsync(
+                _ => Task.FromResult(new JsonObject { ["ok"] = true }),
+                _ =>
+                {
+                    releaseCleanup.Wait();
+                    throw new Win32Exception("late cleanup fault");
+                },
+                error,
+                TimeSpan.FromSeconds(1),
+                TimeSpan.FromMilliseconds(25),
+                TestContext.Current.CancellationToken);
+
+            stopwatch.Stop();
+            Assert.True(result!["ok"]!.GetValue<bool>());
+            Assert.True(stopwatch.Elapsed < TimeSpan.FromSeconds(5), $"elapsed {stopwatch.Elapsed}");
+            Assert.Contains("cleanup did not finish within", error.ToString(), StringComparison.Ordinal);
+
+            releaseCleanup.Set();
+            await error.Signal.WaitAsync(TimeSpan.FromSeconds(60), TestContext.Current.CancellationToken);
+            Assert.Contains("late cleanup fault", error.ToString(), StringComparison.Ordinal);
+        }
+        finally
+        {
+            releaseCleanup.Set();
+        }
     }
 
     [Fact]
@@ -787,4 +857,23 @@ public sealed class CodexAppServerBrokerTests
 
     private static string[] Lines(StringWriter writer) =>
         writer.ToString().Split(['\r', '\n'], StringSplitOptions.RemoveEmptyEntries);
+
+    private sealed class SignalingStringWriter(string expected) : StringWriter
+    {
+        private readonly TaskCompletionSource _signal =
+            new(TaskCreationOptions.RunContinuationsAsynchronously);
+
+        public Task Signal => _signal.Task;
+
+        public override Task WriteLineAsync(string? value)
+        {
+            var write = base.WriteLineAsync(value);
+            if (value?.Contains(expected, StringComparison.Ordinal) == true)
+            {
+                _signal.TrySetResult();
+            }
+
+            return write;
+        }
+    }
 }

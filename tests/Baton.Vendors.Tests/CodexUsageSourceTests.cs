@@ -198,6 +198,51 @@ public class CodexUsageSourceTests
         }
     }
 
+    /// <summary>
+    /// Both source identities claim the account's weekly duration. A malformed secondary must not be
+    /// erased by selecting the valid primary, and two readable but conflicting rows are not unique
+    /// account-duration evidence either. This crosses the parser and both gate entry points.
+    /// </summary>
+    [Theory]
+    [InlineData("malformed")]
+    [InlineData("conflicting")]
+    public void Duplicate_account_duration_evidence_is_never_admissible(string duplicateShape)
+    {
+        JsonObject duplicate = duplicateShape switch
+        {
+            "malformed" => new JsonObject
+            {
+                ["usedPercent"] = "unknown",
+                ["windowDurationMins"] = CodexUsageSource.WeeklyDurationMins,
+                ["resetsAt"] = 1_800_000_001,
+            },
+            "conflicting" => Window(49, CodexUsageSource.WeeklyDurationMins, 1_800_000_001),
+            _ => throw new ArgumentOutOfRangeException(nameof(duplicateShape)),
+        };
+        var result = new JsonObject
+        {
+            ["rateLimitsByLimitId"] = new JsonObject
+            {
+                [CodexUsageSource.AccountLimitId] = Bucket(
+                    CodexUsageSource.AccountLimitId,
+                    Window(48, CodexUsageSource.WeeklyDurationMins, 1_800_000_000),
+                    duplicate),
+            },
+        };
+
+        var snapshot = CodexUsageSource.Parse(result, Now);
+        var decision = RunwayGate.Evaluate(
+            CodexUsageSource.AccountLimitId, snapshot, new RunwayThresholds(), Now);
+
+        Assert.Equal(2, snapshot.Windows.Count(window =>
+            window.LimitId == CodexUsageSource.AccountLimitId
+            && window.WindowDurationMins == CodexUsageSource.WeeklyDurationMins));
+        Assert.False(RunwayGate.IsUsable(snapshot, new RunwayThresholds(), Now));
+        Assert.Equal(RunwayDisposition.Hold, decision.Disposition);
+        Assert.Contains("conflicting or malformed", decision.Reason!, StringComparison.Ordinal);
+        Assert.Empty(decision.Counters);
+    }
+
     [Fact]
     public void Successful_unrecognized_result_is_an_empty_vendor_snapshot()
     {

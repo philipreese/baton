@@ -4187,15 +4187,17 @@ on that process and records the post-launch fault if it exits unsettled, nothing
 launch/adopt contract). For one whose engine is dead it does nothing but log: the probe above is what
 records that arrest, and the pump is still never re-driven.
 
-### The quota ledger — what is new build, stated correctly
+### Account usage and the runway ledger — shipped
 
-Polls vendor CLIs' print-mode `/usage`; accumulation from lane logs is attribution only, never the
-reset-time source of truth. Historically, quota data rode the push mailbox (§6). I could not find a `/usage`-polling
-implementation, a runway projection, or push delivery for quota anywhere in `src/` at HEAD — that part
-is genuinely **(new build)**.
+Vendor-account counters are the reset-time source of truth; accumulation from lane logs is attribution
+only. The daemon now harvests those counters, persists the per-vendor snapshots, projects them to the
+fleet surfaces, and uses them for the runway decisions and admission ledger described below. Historically,
+quota data rode the push mailbox (§6), and the pre-build inventory for this section found none of that
+account-usage harvest or runway projection in `src/`. That finding is historical: the implementation is
+shipped, including push delivery of the projection, and is no longer an open build instruction.
 
-What is **not** new build, and must not be re-derived: `FailureClassification`
-(`src/Baton/Domain/FailureClassification.cs`) has **four** values —
+What predated that build, and still must not be re-derived, is the failure vocabulary.
+`FailureClassification` (`src/Baton/Domain/FailureClassification.cs`) has **four** values —
 `Retryable, Permanent, ExhaustedUntil, ToolDenied` — not two. `ExhaustedUntil` is load-bearing
 throughout the scheduler, not a stub: it appears across `Baton/Scheduling/RetryEngine.cs`,
 `Baton/Mutation/MutationInterface.cs`, `Baton/Outcomes/OutcomeClassifier.cs`,
@@ -4203,9 +4205,8 @@ throughout the scheduler, not a stub: it appears across `Baton/Scheduling/RetryE
 a vendor-reported reset time into an `ExhaustedUntil` classification and a `retryNotBefore` instant
 (`src/Baton.Vendors/AgyWorkerAdapter.cs`). So: the classification vocabulary, the retry/
 dependency handling built on top of it, and at least one adapter's refusal-message parse into
-`ExhaustedUntil` all exist today. What is missing is specifically the proactive `/usage` poll, the
-runway projection, and the push delivery — build against that gap, not against a two-value enum that
-does not exist.
+`ExhaustedUntil` all exist today. The account-counter harvest and runway work extended that existing
+failure vocabulary; they did not replace or reduce it.
 
 **Shipped account-usage sources.** `agy -p "/usage"` and `claude -p "/usage"` answer structured
 usage data without a model turn — measured live, with a dated primary-source transcript for the
@@ -4413,7 +4414,7 @@ live only in the admission ledger, which is what that file is for.
 
 ### The burn ledger — shipped (#1570)
 
-Distinct from the runway ledger above (the `/usage` poll, still unbuilt): this is the *burn* half —
+Distinct from the shipped account-usage harvest and runway ledger above: this is the *burn* half —
 which lane spent what, on which vendor — cross-room, append-only JSONL at `BatonPaths.QuotaLedgerFile`
 (`{BatonPaths.Root}/quota-ledger.jsonl`), guarded by the identical named-`Mutex` mechanism §8 documents
 for `room-registry.jsonl`. That mechanism was extracted to `MutexGuardedFileLock`

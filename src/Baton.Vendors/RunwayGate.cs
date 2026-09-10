@@ -198,11 +198,14 @@ public static class RunwayGate
         }
 
         var selector = WindowSelectors[CodexUsageSource.AccountLimitId];
-        var week = Find(snapshot, selector, weekly: true);
-        var session = Find(snapshot, selector, weekly: false);
+        if (!TrySelectWindows(snapshot, selector, out var week, out var session, out var sessionIsUnexposed))
+        {
+            return false;
+        }
+
         return snapshot.Source == VendorUsageProvenance.Vendor
             && week?.PercentUsed is not null
-            && (session?.PercentUsed is not null || SessionIsUnexposed(snapshot, selector));
+            && (session?.PercentUsed is not null || sessionIsUnexposed);
     }
 
     /// <summary>
@@ -264,10 +267,18 @@ public static class RunwayGate
                 SnapshotHarvestedAt: snapshot.HarvestedAt);
         }
 
-        var week = Find(snapshot, selector, weekly: true);
-        var session = Find(snapshot, selector, weekly: false);
-        var sessionIsUnexposed = session is null && SessionIsUnexposed(snapshot, selector);
-        var counters = Counters(snapshot, selector);
+        if (!TrySelectWindows(snapshot, selector, out var week, out var session, out var sessionIsUnexposed))
+        {
+            return new RunwayDecision(
+                vendor,
+                RunwayDisposition.Hold,
+                "the harvested snapshot carries conflicting or malformed account window evidence — "
+                    + "the vendor's report was not readable",
+                [],
+                SnapshotHarvestedAt: snapshot.HarvestedAt);
+        }
+
+        var counters = Counters(week, session);
 
         if (week is null || (session is null && !sessionIsUnexposed))
         {
@@ -326,26 +337,66 @@ public static class RunwayGate
         now - snapshot.HarvestedAt <= thresholds.EffectiveMaxSnapshotAge;
 
     /// <summary>
-    /// The authenticated 0.153.2 account exposes a weekly primary and a null secondary. That null (or
-    /// an omitted secondary on a compatible server) means there is no account session counter to gate,
-    /// not that a 300-minute counter failed to parse. An exposed account window with an unknown or
-    /// unexpected duration is different: it may be applicable, so it keeps the fail-closed missing-window
-    /// result. Per-model buckets never enter this check because their <c>limitId</c> is not the account.
+    /// Selects the complete evidence set the decision rests on. Text-named vendors retain their exact
+    /// name lookup. Codex additionally validates the account identity/exposure/duration matrix before
+    /// selecting either duration: primary and secondary source identities are unique; omitted and raw
+    /// null are the only unexposed forms; every exposed row has a supported duration; and each duration
+    /// occurs at most once. Thus a valid weekly sibling cannot hide a malformed or conflicting duplicate.
+    /// Per-model buckets never enter the matrix because their <c>limitId</c> is not the account.
     /// </summary>
-    private static bool SessionIsUnexposed(VendorUsageSnapshot snapshot, WindowSelector selector)
+    private static bool TrySelectWindows(
+        VendorUsageSnapshot snapshot,
+        WindowSelector selector,
+        out VendorUsageWindow? week,
+        out VendorUsageWindow? session,
+        out bool sessionIsUnexposed)
     {
-        if (!selector.SessionMayBeUnexposed)
+        week = null;
+        session = null;
+        sessionIsUnexposed = false;
+
+        if (selector.LimitId is null)
+        {
+            week = FindByName(snapshot, selector.WeekName);
+            session = FindByName(snapshot, selector.SessionName);
+            return true;
+        }
+
+        var accountWindows = snapshot.Windows
+            .Where(window => string.Equals(window.LimitId, selector.LimitId, StringComparison.Ordinal))
+            .ToArray();
+        var knownKinds = new[] { "primary", "secondary" };
+        if (accountWindows.Any(window => !knownKinds.Contains(window.WindowKind, StringComparer.Ordinal))
+            || knownKinds.Any(kind => accountWindows.Count(
+                window => string.Equals(window.WindowKind, kind, StringComparison.Ordinal)) > 1))
         {
             return false;
         }
 
-        return snapshot.Windows
-            .Where(window => string.Equals(window.LimitId, selector.LimitId, StringComparison.Ordinal))
-            .All(window => window.WindowDurationMins == selector.WeekDurationMins
-                || (window.WindowDurationMins is null
-                    && window.PercentUsed is null
-                    && window.ResetsAt is null
-                    && string.Equals(window.RawLine, "null", StringComparison.Ordinal)));
+        static bool IsUnexposed(VendorUsageWindow window) =>
+            string.Equals(window.RawLine, "null", StringComparison.Ordinal)
+            && window.PercentUsed is null
+            && window.ResetsAt is null
+            && window.WindowDurationMins is null;
+
+        var exposed = accountWindows.Where(window => !IsUnexposed(window)).ToArray();
+        if (exposed.Any(window => window.WindowDurationMins != selector.WeekDurationMins
+                && window.WindowDurationMins != selector.SessionDurationMins))
+        {
+            return false;
+        }
+
+        var weekly = exposed.Where(window => window.WindowDurationMins == selector.WeekDurationMins).ToArray();
+        var sessions = exposed.Where(window => window.WindowDurationMins == selector.SessionDurationMins).ToArray();
+        if (weekly.Length > 1 || sessions.Length > 1)
+        {
+            return false;
+        }
+
+        week = weekly.SingleOrDefault();
+        session = sessions.SingleOrDefault();
+        sessionIsUnexposed = selector.SessionMayBeUnexposed && session is null;
+        return true;
     }
 
     /// <summary>
@@ -389,20 +440,10 @@ public static class RunwayGate
     private static string Hours(TimeSpan span) =>
         span.TotalHours.ToString("0.#", System.Globalization.CultureInfo.InvariantCulture);
 
-    private static VendorUsageWindow? Find(VendorUsageSnapshot snapshot, WindowSelector selector, bool weekly)
-    {
-        var name = weekly ? selector.WeekName : selector.SessionName;
-        if (name is not null)
-        {
-            return snapshot.Windows.FirstOrDefault(
-                w => string.Equals(w.Name, name, StringComparison.Ordinal));
-        }
-
-        var duration = weekly ? selector.WeekDurationMins : selector.SessionDurationMins;
-        return snapshot.Windows.FirstOrDefault(w =>
-            string.Equals(w.LimitId, selector.LimitId, StringComparison.Ordinal)
-            && w.WindowDurationMins == duration);
-    }
+    private static VendorUsageWindow? FindByName(VendorUsageSnapshot snapshot, string? name) =>
+        name is null
+            ? null
+            : snapshot.Windows.FirstOrDefault(w => string.Equals(w.Name, name, StringComparison.Ordinal));
 
     private static string Expected(WindowSelector selector, bool weekly)
     {
@@ -421,10 +462,18 @@ public static class RunwayGate
     /// beside numbers that did not decide anything.</summary>
     private static IReadOnlyList<RunwayCounter> Counters(VendorUsageSnapshot snapshot, WindowSelector selector)
     {
+        return TrySelectWindows(snapshot, selector, out var week, out var session, out _)
+            ? Counters(week, session)
+            : [];
+    }
+
+    private static IReadOnlyList<RunwayCounter> Counters(
+        VendorUsageWindow? week, VendorUsageWindow? session)
+    {
         List<RunwayCounter> counters = [];
-        foreach (var weekly in new[] { true, false })
+        foreach (var window in new[] { week, session })
         {
-            if (Find(snapshot, selector, weekly) is { } window)
+            if (window is not null)
             {
                 counters.Add(new RunwayCounter(window.Name, window.PercentUsed));
             }
