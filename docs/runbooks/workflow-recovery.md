@@ -1,27 +1,27 @@
-# Recover a missed post-merge workflow
+# Recover a missed CI run
 
-Use this runbook only when a normal post-merge workflow did not start for the current `main` head.
-It is a bounded recovery path, not a way to rerun historical revisions after `main` moves.
+An authorized operator can dispatch `CI` on `main` with `expected_sha` set to the
+current remote main commit. Verify the missing run and intended revision first.
+This is CI recovery only; it does not publish a release or repair release-please.
 
-Before dispatching, have an independent reviewer confirm the missing run, the intended workflow, and
-the current `main` SHA. Record the SHA from `origin/main`; do not substitute the SHA that was current
-when the incident was first noticed if `main` has since advanced.
+Each test, gates and pack job checks the live main ref before running checkout code.
+A stale SHA, non-main selection, malformed input or API failure makes that job fail.
+All checkouts use the immutable event SHA. The check is an admission check: main may
+advance after admission, but this run continues to validate only its recorded SHA.
+It never establishes validation for a different revision.
 
-In the Actions workflow page, select either `CI` or `release-please`, choose the `main` branch, and
-run the workflow with `expected_sha` set to that exact current `main` SHA. Both workflows reject a
-manual selection outside `refs/heads/main`, an empty SHA, or a SHA that differs from the revision
-GitHub selected. A rejected dispatch is intentionally red.
+Inspect the `CI recovery` result, not the ordinary `ci` job, which is skipped on
+manual runs. Recovery succeeds only when test, gates and pack all succeed; a failed,
+cancelled, skipped or missing result is an error. Ordinary PR/push jobs keep their
+existing dependency paths; the extra aggregate runs only for manual recovery.
 
-The CI recovery runs the ordinary main test shards, the cold gates job, and the main-only pack and
-installed-tool verification. Its final `ci` job fails if any of those manual-recovery jobs is skipped,
-cancelled, or fails. Ordinary push and pull-request behavior remains unchanged.
+For example, after checking the current remote main SHA:
 
-The release recovery is restricted by the same target guard and then invokes the existing release
-action against that exact current main revision. It retains the workflow's existing per-ref
-concurrency and release action state handling; do not manufacture a source change, force-push, or
-dispatch it for a historical SHA. Review the resulting release PR or release state before taking any
-further action.
+```powershell
+gh workflow run ci.yml --ref main -f expected_sha=<verified-main-sha>
+```
 
-This runbook does not establish that a later `main` dispatch validated an earlier SHA. If the affected
-revision is no longer the current `main` head, stop and investigate rather than using this recovery
-entry point. Do not activate or merge this workflow change without independent review.
+Independent review and green CI are required before activating workflow changes.
+An already-authorized operator does not need a second reviewer for each invocation.
+The release recovery portion of #2197 remains open; do not use this command as
+evidence that an unpublished release has been published.

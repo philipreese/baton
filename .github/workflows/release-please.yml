@@ -2,15 +2,6 @@ on:
   push:
     branches:
       - main
-  # record-once-ok: #2197 .github/workflows/ci.yml
-  # A recovery dispatch is deliberately bound to the selected main head below. It is not a way to
-  # release an older SHA after main has advanced; see docs/runbooks/workflow-recovery.md.
-  workflow_dispatch:
-    inputs:
-      expected_sha:
-        description: "The exact current main SHA to recover"
-        required: true
-        type: string
 
 permissions:
   contents: write
@@ -28,30 +19,7 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
-  recovery_target:
-    name: Verify recovery target
-    runs-on: ubuntu-latest
-    timeout-minutes: 5
-    steps:
-      - name: Reject a stale or non-main manual target
-        env:
-          EVENT_NAME: ${{ github.event_name }}
-          REF: ${{ github.ref }}
-          SHA: ${{ github.sha }}
-          EXPECTED_SHA: ${{ inputs.expected_sha }}
-        shell: bash
-        run: |
-          if [ "$EVENT_NAME" != "workflow_dispatch" ]; then
-            exit 0
-          fi
-          if [ "$REF" != "refs/heads/main" ] || [ -z "$EXPECTED_SHA" ] || [ "$SHA" != "$EXPECTED_SHA" ]; then
-            echo "::error::Recovery dispatch must select main and name its exact current SHA."
-            exit 1
-          fi
-          echo "Recovery target verified: $SHA"
-
   release-please:
-    needs: recovery_target
     runs-on: ubuntu-latest
     steps:
       # #1369: an operator PAT, not the default token. github.token made every release
@@ -61,5 +29,3 @@ jobs:
       - uses: googleapis/release-please-action@v4
         with:
           token: ${{ secrets.BATON_RELEASE_PLEASE }}
-          # Keep a recovery dispatch on the same release branch as the ordinary main push.
-          target-branch: main
