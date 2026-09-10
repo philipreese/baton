@@ -8,8 +8,8 @@ version = "0.1.0"
 
 # Disable MSBuild out-of-process node reuse. With reuse on (the default), a build leaves persistent
 # worker nodes alive to be reused by the NEXT build, shared across all worktrees for the user. Two
-# builds running at once â€” e.g. a self-dispatched worker running `pixi run gates` in one worktree
-# while another build runs in a sibling worktree â€” then race over that shared node pool: one recycles
+# builds running at once — e.g. a self-dispatched worker running `pixi run gates` in one worktree
+# while another build runs in a sibling worktree — then race over that shared node pool: one recycles
 # a node the other is mid-pipe with, the pipe breaks (`System.IO.IOException: Pipe is broken`), and
 # MSBuild reports `MSB4166: Child node exited prematurely`, killing the whole build. Set here in the
 # activation env (not a shell) so EVERY `pixi run` build inherits it, including a dispatched worker's
@@ -19,7 +19,7 @@ version = "0.1.0"
 # #1671: also disable Roslyn's shared VBCSCompiler.exe server -- same activation-env scope as
 # MSBUILDDISABLENODEREUSE above, same reason (a memory-bound box, one fewer long-lived process per
 # machine). Why this scope and not a Directory.Build.props condition, and what it costs: spec/baton.md
-# Â§11 C-13.
+# §11 C-13.
 [activation.env]
 MSBUILDDISABLENODEREUSE = "1"
 UseSharedCompilation = "false"
@@ -71,7 +71,7 @@ build = { cmd = "python tools/buildlock.py dotnet build" }
 # absent from the inner loop, where a session runs this dozens of times.
 # #1833: `dotnet test` runs on Microsoft.Testing.Platform (MTP) now (root `global.json`), not
 # VSTest -- xunit.v3 4.0.0 requires it on the .NET 10 SDK. Why the bump closes #984 at its source:
-# spec/baton.md Â§11 C-17. `--minimum-expected-tests 1` on every leg below is the zero-test-leg guard
+# spec/baton.md §11 C-17. `--minimum-expected-tests 1` on every leg below is the zero-test-leg guard
 # `tools/buildlock.py`'s docstring names as a known silent-failure mode: MTP already refuses a
 # filtered assembly that matches zero tests (exit 8) UNLESS the whole invocation is unfiltered, in
 # which case a leg that somehow ran no tests at all would otherwise exit 0 -- this flag turns that
@@ -85,7 +85,7 @@ build = { cmd = "python tools/buildlock.py dotnet build" }
 # replayed test leg is then a genuine earlier pass over the same source. Same shape one level up, in
 # `gates`: `lint` always executes, so `test-no-build` below never grades a build that did not happen.
 test = { cmd = "python tools/buildlock.py dotnet build --no-incremental && python tools/buildlock.py --replay dotnet test --no-build --minimum-expected-tests 1" }
-# Sharded test tasks for CI (#1363) â€” see .github/workflows/ci.yml
+# Sharded test tasks for CI (#1363) — see .github/workflows/ci.yml
 #
 # #2010: neither leg of either shard opts into replay, unlike `test` above. These two run in CI and
 # nowhere else, and a fresh checkout has no receipt to replay, so the flag would buy nothing here
@@ -114,7 +114,7 @@ test-other = { cmd = "python tools/buildlock.py dotnet build --no-incremental &&
 # "Zero tests ran" (exit 5, invalid command line) rather than actually running serialized. MTP's own
 # equivalent is `--max-parallel-test-modules 1`, MEASURED to serialize the five xUnit test projects'
 # testhost processes exactly as `-m:1` did (run durations summed rather than overlapped, same shape
-# spec/baton.md Â§11 C-13 measured for the VSTest-era knob); in-assembly parallelism is still
+# spec/baton.md §11 C-13 measured for the VSTest-era knob); in-assembly parallelism is still
 # untouched. `--minimum-expected-tests 1` joins it for the same zero-test-leg guard `test` above
 # carries.
 test-no-build = { cmd = "python tools/buildlock.py --replay dotnet test --no-build --max-parallel-test-modules 1 --minimum-expected-tests 1" }
@@ -153,7 +153,7 @@ fmt-check = { cmd = "python tools/buildlock.py --replay dotnet format --verify-n
 lint = { cmd = "python tools/buildlock.py dotnet build -warnaserror --no-incremental" }
 
 # M13 Phase 1 (#107): packs Baton.Cli as an installable global dotnet tool (nupkg) -- pure managed
-# code since #1474, no native library to embed. Not part of `build`/`test`/`lint` â€” packing isn't
+# code since #1474, no native library to embed. Not part of `build`/`test`/`lint` — packing isn't
 # needed for everyday development, only for the install round trip this phase's runbook-style
 # verification exercises (`dotnet tool install --global --add-source bin/pack <PackageId>`).
 pack = { cmd = "python tools/buildlock.py dotnet pack src/Baton.Cli/Baton.Cli.csproj -o bin/pack" }
@@ -179,12 +179,12 @@ smoke-preflight = { cmd = "python -u tools/smoke-preflight/preflight.py" }
 # Not in that set, despite the neighbouring names: smoke-preflight, vendor-survey and vendor-check
 # are all free and start no billable session -- each says so where it is defined.
 #
-# M11 Phase 4 (#87), the milestone's completion gate: a real draft â†’ review workflow through
+# M11 Phase 4 (#87), the milestone's completion gate: a real draft → review workflow through
 # `baton run` against `claude`, never `pixi run test`'s stub/shell-stub path.
 # docs/runbooks/live-claude-smoke.md
 # #1833: the smoke project moved to MTP with the rest (root `global.json` applies to every `dotnet
 # test`), so these three use `--project` and xunit's own `--filter-class` -- VSTest's positional
-# project path and `--filter FullyQualifiedName~â€¦` no longer parse here (review finding on #1843).
+# project path and `--filter FullyQualifiedName~…` no longer parse here (review finding on #1843).
 smoke-claude = { cmd = "dotnet test --project tests/Baton.Cli.SmokeTests/Baton.Cli.SmokeTests.csproj --minimum-expected-tests 1", depends-on = ["smoke-preflight"] }
 
 # #649's completion gate: a withheld-write worker writes its declared output into BATON_OUTPUT_DIR and
@@ -192,7 +192,7 @@ smoke-claude = { cmd = "dotnet test --project tests/Baton.Cli.SmokeTests/Baton.C
 # live run covers the composition. docs/runbooks/live-claude-smoke.md
 smoke-readonly = { cmd = "dotnet test --project tests/Baton.Cli.SmokeTests/Baton.Cli.SmokeTests.csproj --filter-class Baton.Cli.SmokeTests.LiveReadOnlyReviewerSmokeTest --minimum-expected-tests 1", depends-on = ["smoke-preflight"] }
 
-# M12 Phase 4 (#98), this milestone's completion gate: a real draft (`claude`) â†’ review (`agy`)
+# M12 Phase 4 (#98), this milestone's completion gate: a real draft (`claude`) → review (`agy`)
 # workflow, paused at review's declared PausePoint and resumed via `baton decide`. Needs BOTH vendors.
 # docs/runbooks/live-mixed-vendor-smoke.md
 smoke-mixed-vendor = { cmd = "dotnet test --project tests/Baton.Cli.SmokeTests/Baton.Cli.SmokeTests.csproj --filter-class Baton.Cli.SmokeTests.LiveMixedVendorPausedRunSmokeTest --minimum-expected-tests 1", depends-on = ["smoke-preflight"] }
@@ -208,28 +208,28 @@ vendor-probe = { cmd = "dotnet run --project tools/Baton.VendorProbe -- --out do
 
 # Vendor documentation survey (#527): the reading half of the same problem. `vendor-probe` above
 # measures the binaries; this mirrors both vendors' published documentation and harvests the
-# sentences that actually change decisions. Unlike vendor-probe it is safe anywhere â€” it only
+# sentences that actually change decisions. Unlike vendor-probe it is safe anywhere — it only
 # fetches public docs, drives no CLI, and spends no subscription usage.
 #
 # Both vendors publish a machine-readable index (claude: llms.txt with raw .md per page; agy:
 # llms.txt + sitemap.xml, server-rendered). Reading ~250 pages by hand isn't repeatable, and a
-# summarizing fetch is lossy â€” that produced the first, wrong reading of claude's `defer`. Every
+# summarizing fetch is lossy — that produced the first, wrong reading of claude's `defer`. Every
 # finding that changed a decision was one sentence sharing a recognisable grammar ("Bare mode skips
 # OAuth and keychain reads"), so this harvests that class corpus-wide: 100% page coverage at ~1% of
 # the bytes; docs/vendor-coverage.md holds each page's disposition, so coverage stays checkable, not asserted.
 #
-# Re-run on every vendor version bump â€” VendorProbeStalenessTests already fails when a CLI moves.
+# Re-run on every vendor version bump — VendorProbeStalenessTests already fails when a CLI moves.
 vendor-survey = { cmd = "python tools/vendor-survey/vendor_survey.py" }
 
 # Vendor behaviour verification (#527): the third leg. vendor-survey reads what the vendors *say*;
 # this runs what they *do*. Every check here is a behaviour an AER design decision rests on, and the
 # audit that produced them found four vendor statements to be wrong and two that contradicted each
-# other â€” so a doc page changing is a reason to re-run this, not a reason to trust the new page.
+# other — so a doc page changing is a reason to re-run this, not a reason to trust the new page.
 #
 # Live and paid, per the block above smoke-claude. Checks that would touch the operator's own
 # ~/.claude or ~/.gemini are skipped unless --allow-config-writes is passed.
 #
-# The rules every check here is built on are in tools/vendor-verify/README.md Â§ "The three rules",
+# The rules every check here is built on are in tools/vendor-verify/README.md § "The three rules",
 # not restated here -- an inline list goes stale the next time one is added.
 #
 # A full run is long -- every arm is a real CLI session -- so run it per group and unbuffered:
@@ -288,7 +288,7 @@ audit-staleness-ext-selftest = { cmd = "python -u tools/audit-completeness/stale
 audit-waitceiling = { cmd = "python -u tools/audit-completeness/waitceiling.py" }
 audit-waitceiling-selftest = { cmd = "python -u tools/audit-completeness/waitceiling.py --selftest" }
 
-# #1242 / decision 0055: phrases a decision record has RETIRED â€” the previous name of a renamed
+# #1242 / decision 0055: phrases a decision record has RETIRED — the previous name of a renamed
 # object, stale by definition, so the check has no false positives to triage. Not a vocabulary lint:
 # telling authority-"grant" from permission-"grant" needs the sentence's meaning, which is why 0055
 # bans only the phrase that has no legitimate remaining use.
@@ -299,7 +299,7 @@ audit-retiredphrases-selftest = { cmd = "python -u tools/audit-completeness/reti
 audit-speccitations = { cmd = "python -u tools/audit-completeness/speccitations.py" }
 audit-speccitations-selftest = { cmd = "python -u tools/audit-completeness/speccitations.py --selftest" }
 
-# #1430: see commentspecrefs.py's own docstring for what it enforces on Â§ refs in code comments.
+# #1430: see commentspecrefs.py's own docstring for what it enforces on § refs in code comments.
 audit-commentspecrefs = { cmd = "python -u tools/audit-completeness/commentspecrefs.py" }
 audit-commentspecrefs-selftest = { cmd = "python -u tools/audit-completeness/commentspecrefs.py --selftest" }
 
@@ -318,7 +318,7 @@ audit-clitripwire-selftest = { cmd = "python -u tools/audit-completeness/clitrip
 buildlock-selftest = { cmd = "python -u tools/buildlock.py --selftest" }
 
 # #1206: the flake-watch reporter's control arm. The reporter itself only ever runs in the scheduled
-# flake-watch workflow, which is exactly why its selftest belongs in the local gates â€” a reporter that
+# flake-watch workflow, which is exactly why its selftest belongs in the local gates — a reporter that
 # has quietly stopped being able to report is indistinguishable, from the outside, from a quiet suite.
 flake-watch-selftest = { cmd = "python -u tools/flake-watch/summarize.py --selftest" }
 diff-shape = { cmd = "python -u tools/diff-shape/diff_shape.py" }

@@ -12,6 +12,30 @@ on:
         type: string
 
 jobs:
+  recovery_target:
+    if: github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: read
+    steps:
+      - name: Admit selected main revision without checkout
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          EXPECTED_SHA: ${{ inputs.expected_sha }}
+        run: |
+          set -euo pipefail
+          if [ "$GITHUB_REF" != "refs/heads/main" ] || [[ ! "$EXPECTED_SHA" =~ ^[0-9a-f]{40}$ ]] || [ "$GITHUB_SHA" != "$EXPECTED_SHA" ]; then
+            echo "::error::Select main and provide its exact SHA."
+            exit 1
+          fi
+          live_sha=$(gh api "repos/$GITHUB_REPOSITORY/git/ref/heads/main" --jq .object.sha)
+          if [ "$live_sha" != "$EXPECTED_SHA" ]; then
+            echo "::error::Main moved before recovery admission."
+            exit 1
+          fi
+
   # Detects which areas a PR touched, so the heavy jobs below can skip when irrelevant.
   # pull_request ONLY: paths-filter uses the API there (no checkout needed), but on push it shells
   # out to `git` and dies without a checkout (#410). On push the heavy jobs ignore this job entirely
@@ -44,11 +68,11 @@ jobs:
               - '.github/workflows/**'
 
   test:
-    needs: changes
+    needs: [changes, recovery_target]
     # PR: run only when .NET-relevant files changed. Push to main: always run (main stays green).
     # !cancelled() makes this a status-check expression, so a skipped `changes` (PR-only, #410)
     # does not skip this job on push.
-    if: ${{ !cancelled() && (github.event_name != 'pull_request' || needs.changes.outputs.dotnet == 'true') }}
+    if: ${{ !cancelled() && (github.event_name != 'workflow_dispatch' || needs.recovery_target.result == 'success') && (github.event_name != 'pull_request' || needs.changes.outputs.dotnet == 'true') }}
     name: test (${{ matrix.name }})
     timeout-minutes: 17
     strategy:
@@ -70,16 +94,9 @@ jobs:
       - uses: actions/checkout@v4
         with:
           ref: ${{ github.sha }}
-      - name: Admit manual CI recovery
-        if: github.event_name == 'workflow_dispatch'
-        shell: bash
-        env:
-          GH_TOKEN: ${{ github.token }}
-          EXPECTED_SHA: ${{ inputs.expected_sha }}
-        run: python tools/workflow-recovery/check.py target
 
       # run-install/cache are off: the pixi env is deliberately empty (the .NET SDK is a system
-      # install, not a conda package â€” GitHub's standard runner images ship it already), and
+      # install, not a conda package — GitHub's standard runner images ship it already), and
       # setup-pixi's `pixi list` step fails hard on an empty environment. `pixi run` performs the
       # (trivial) implicit install on first use instead.
       # #1117: the pixi binary download itself flaked ("socket hang up") four times on
@@ -94,7 +111,7 @@ jobs:
           run-install: false
           cache: false
       # 30s backoff before the retry: the first live firing (run 31640170988, ubuntu) lost
-      # both attempts to a CDN 503 seconds apart â€” a pause is what gives attempt 2 a chance
+      # both attempts to a CDN 503 seconds apart — a pause is what gives attempt 2 a chance
       # a back-to-back retry measurably did not have.
       - if: steps.pixi-attempt-1.outcome == 'failure'
         shell: bash
@@ -106,7 +123,7 @@ jobs:
           cache: false
 
       # Caches NuGet restore keyed off every packages.lock.json in the repo (the xunit test
-      # projects â€” Baton.Tests, Baton.Vendors.Tests â€” are the only ones with real
+      # projects — Baton.Tests, Baton.Vendors.Tests — are the only ones with real
       # PackageReferences). cache-dependency-path must be explicit: cache: true alone only looks
       # for a lock file at the repo root, not recursively.
       - uses: actions/setup-dotnet@v4
@@ -137,7 +154,7 @@ jobs:
 
       # Diagnostic for the #398 file-lock flake class. On a Windows test failure, capture whether
       # Defender real-time protection is actually on (PR #922 measured that windows-latest excludes
-      # C:\ and D:\ whole-drive, so realtime is almost certainly irrelevant to these files â€” this
+      # C:\ and D:\ whole-drive, so realtime is almost certainly irrelevant to these files — this
       # confirms it) plus a snapshot of the scan-capable services. The transient handle itself is
       # already gone by the time this post-hoc step runs, which is exactly why the in-process holder
       # name now rides in FlowJournalHeldException's message (src/Baton/Store/FileHolderProbe.cs);
@@ -179,7 +196,7 @@ jobs:
         run: pixi run dotnet build-server shutdown
         if: always()
 
-  # M13 Phase 3 (#109): packs baton into a nupkg â€” Windows-only (#1405), so this is a single-RID
+  # M13 Phase 3 (#109): packs baton into a nupkg — Windows-only (#1405), so this is a single-RID
   # (win-x64) package, not a multi-RID one (see the `Pack baton` step below for what that packs
   # post-#1474). Runs after `test`
   # so it only packs a library that already passed lint and test.
@@ -191,7 +208,7 @@ jobs:
     # needs.test.result check restores the "only pack a green build" guarantee that the implicit
     # needs-success gate provided before !cancelled() removed it.
     if: ${{ !cancelled() && (github.event_name == 'push' || github.event_name == 'workflow_dispatch') && needs.test.result == 'success' }}
-    needs: test
+    needs: [test, recovery_target]
     runs-on: windows-latest
     timeout-minutes: 5
     env:
@@ -202,13 +219,6 @@ jobs:
       - uses: actions/checkout@v4
         with:
           ref: ${{ github.sha }}
-      - name: Admit manual CI recovery
-        if: github.event_name == 'workflow_dispatch'
-        shell: bash
-        env:
-          GH_TOKEN: ${{ github.token }}
-          EXPECTED_SHA: ${{ inputs.expected_sha }}
-        run: python tools/workflow-recovery/check.py target
 
       # #1117: the pixi binary download itself flaked ("socket hang up") four times on
       # 2026-08-12, failing runs before any repo code executed. One bounded retry; a second
@@ -222,7 +232,7 @@ jobs:
           run-install: false
           cache: false
       # 30s backoff before the retry: the first live firing (run 31640170988, ubuntu) lost
-      # both attempts to a CDN 503 seconds apart â€” a pause is what gives attempt 2 a chance
+      # both attempts to a CDN 503 seconds apart — a pause is what gives attempt 2 a chance
       # a back-to-back retry measurably did not have.
       - if: steps.pixi-attempt-1.outcome == 'failure'
         shell: bash
@@ -239,7 +249,7 @@ jobs:
           cache: true
           cache-dependency-path: "**/packages.lock.json"
 
-      # Pure managed code since #1474 â€” no native library to build or embed, so nothing to fetch
+      # Pure managed code since #1474 — no native library to build or embed, so nothing to fetch
       # from another leg's artifact.
       - name: Pack baton
         run: pixi run pack
@@ -251,8 +261,8 @@ jobs:
           path: bin/pack/*.nupkg
 
       # M13 Phase 4 (#110), the milestone's completion gate: unattended, since (unlike
-      # smoke-claude/smoke-mixed-vendor) it needs no live vendor auth -- install â†’ run against a
-      # locally-stubbed claude binary â†’ assert the declared output landed on disk â†’ uninstall.
+      # smoke-claude/smoke-mixed-vendor) it needs no live vendor auth -- install → run against a
+      # locally-stubbed claude binary → assert the declared output landed on disk → uninstall.
       - name: Verify installed-tool round trip
         run: pixi run verify-pack
 
@@ -275,7 +285,7 @@ jobs:
   # pixi task a human or the pre-push hook runs, never a hand-picked list of individual
   # `pixi run <member>` steps mirroring tools/gates/gates.py's own membership (what let a member
   # added there, or in pixi.toml, go unrun in CI until someone remembered to add a step). What
-  # `--ci` enforces: spec/baton.md Â§11 C-12. Unconditional -- no `changes` filter: several members
+  # `--ci` enforces: spec/baton.md §11 C-12. Unconditional -- no `changes` filter: several members
   # (audit-completeness et al.) must catch a docs-only or decisions-only PR too, same reason the
   # former `audit` job ran unconditionally; the cost is that this job now also runs the full
   # build+test+lint on every PR regardless of what changed, which `test`'s own path-filtered shards
@@ -288,6 +298,8 @@ jobs:
   # local `pixi run gates` run has always done, so this makes CI match local behaviour rather than
   # regressing it, but it is a real loss of precision worth naming rather than leaving silent.
   gates:
+    needs: recovery_target
+    if: ${{ !cancelled() && (github.event_name != 'workflow_dispatch' || needs.recovery_target.result == 'success') }}
     runs-on: windows-latest
     timeout-minutes: 15
     env:
@@ -297,14 +309,6 @@ jobs:
       - uses: actions/checkout@v4
         with:
           ref: ${{ github.sha }}
-      - name: Admit manual CI recovery
-        if: github.event_name == 'workflow_dispatch'
-        shell: bash
-        env:
-          GH_TOKEN: ${{ github.token }}
-          EXPECTED_SHA: ${{ inputs.expected_sha }}
-        run: python tools/workflow-recovery/check.py target
-        with:
           # audit-recordonce diffs against origin/main. A shallow clone cannot see it, and the check
           # fails closed rather than passing on an unreadable diff -- so the depth is what makes it
           # run at all.
@@ -325,7 +329,7 @@ jobs:
           run-install: false
           cache: false
       # 30s backoff before the retry: the first live firing (run 31640170988, ubuntu) lost
-      # both attempts to a CDN 503 seconds apart â€” a pause is what gives attempt 2 a chance
+      # both attempts to a CDN 503 seconds apart — a pause is what gives attempt 2 a chance
       # a back-to-back retry measurably did not have.
       - if: steps.pixi-attempt-1.outcome == 'failure'
         shell: bash
@@ -372,17 +376,23 @@ jobs:
 
   recovery_ci:
     name: CI recovery
-    needs: [test, gates, pack]
+    needs: [recovery_target, test, gates, pack]
     if: ${{ always() && github.event_name == 'workflow_dispatch' }}
     runs-on: ubuntu-latest
     timeout-minutes: 5
     steps:
-      - uses: actions/checkout@v4
-        with:
-          ref: ${{ github.sha }}
       - name: Require complete recovery coverage
+        shell: bash
         env:
+          TARGET_RESULT: ${{ needs.recovery_target.result }}
           TEST_RESULT: ${{ needs.test.result }}
           GATES_RESULT: ${{ needs.gates.result }}
           PACK_RESULT: ${{ needs.pack.result }}
-        run: python tools/workflow-recovery/check.py aggregate
+        run: |
+          set -euo pipefail
+          for result in "$TARGET_RESULT" "$TEST_RESULT" "$GATES_RESULT" "$PACK_RESULT"; do
+            if [ "$result" != "success" ]; then
+              echo "::error::Recovery requires successful admission, tests, gates and packaging."
+              exit 1
+            fi
+          done

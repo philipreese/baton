@@ -290,7 +290,7 @@ def run_gates(names, runner, shutdown=shutdown_build_servers):
     """Run each gate, print a per-gate line, return (failed, blocked) name lists (#1796).
 
     #1671: also shuts down the MSBuild build servers after every gate whose name starts with
-    "test", pass or fail. Why that scope: spec/baton.md Â§11 C-13.
+    "test", pass or fail. Why that scope: spec/baton.md §11 C-13.
     """
     failed = []
     blocked = []
@@ -581,7 +581,7 @@ def covered_members(cwd=None, max_age_s=RECEIPT_MAX_AGE_S):
 
 
 # ---------------------------------------------------------------------------------------------
-# Telemetry (#1671). What is recorded, when, and why a separate sidecar: spec/baton.md Â§11 C-13.
+# Telemetry (#1671). What is recorded, when, and why a separate sidecar: spec/baton.md §11 C-13.
 # Every function here is best-effort: a telemetry read that fails must never turn a gates run red.
 # ---------------------------------------------------------------------------------------------
 
@@ -625,7 +625,7 @@ def _free_physical_mb():
 def _is_build_process(name, commandline):
     """Pure filter: MSBuild.exe/VBCSCompiler.exe by name, a test host by command line.
 
-    Why a test host needs the command-line half: spec/baton.md Â§11 C-13. Kept pure and
+    Why a test host needs the command-line half: spec/baton.md §11 C-13. Kept pure and
     fixture-tested (selftest below) so the WMI call in `_build_process_count` stays a thin,
     untested-by-necessity adapter.
     """

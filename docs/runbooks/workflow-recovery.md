@@ -4,9 +4,9 @@ An authorized operator can dispatch `CI` on `main` with `expected_sha` set to th
 current remote main commit. Verify the missing run and intended revision first.
 This is CI recovery only; it does not publish a release or repair release-please.
 
-Each test, gates and pack job checks the live main ref before running checkout code.
+A manual-only preflight checks the live main ref before any repository checkout or code execution.
 A stale SHA, non-main selection, malformed input or API failure makes that job fail.
-All checkouts use the immutable event SHA. The check is an admission check: main may
+All checkouts use the immutable event SHA. The preflight is an admission check: main may
 advance after admission, but this run continues to validate only its recorded SHA.
 It never establishes validation for a different revision.
 

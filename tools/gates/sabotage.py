@@ -54,9 +54,8 @@ def fixture(name: str):
 def _sabotage_workflow_recovery() -> None:
     with tempfile.TemporaryDirectory() as td:
         dest = Path(td)
-        paths = ["tools/workflow-recovery/check.py", "tools/workflow-recovery/selftest.py",
-                 ".github/workflows/ci.yml", "pixi.toml", "tools/gates/gates.py"]
-        for relative in paths:
+        for relative in ["tools/workflow-recovery/selftest.py", ".github/workflows/ci.yml",
+                         "pixi.toml", "tools/gates/gates.py"]:
             target = dest / relative
             target.parent.mkdir(parents=True, exist_ok=True)
             shutil.copy2(ROOT / relative, target)
@@ -66,21 +65,14 @@ def _sabotage_workflow_recovery() -> None:
                 cwd=dest, capture_output=True, text=True, timeout=30)
         baseline = run()
         assert baseline.returncode == 0, baseline.stdout + baseline.stderr
-        check = dest / "tools/workflow-recovery/check.py"
-        original = check.read_text(encoding="utf-8")
-        needle = "or live_sha != expected"
-        assert needle in original
-        check.write_text(original.replace(needle, ""), encoding="utf-8")
-        mutated = run()
-        assert mutated.returncode != 0 and "AssertionError" in mutated.stderr, mutated.stderr
-        check.write_text(original, encoding="utf-8")
         workflow = dest / ".github/workflows/ci.yml"
-        original_workflow = workflow.read_text(encoding="utf-8")
-        needle = "needs.test.result == 'success'"
-        assert needle in original_workflow
-        workflow.write_text(original_workflow.replace(needle, "needs.test.result != 'success'"), encoding="utf-8")
-        mutated = run()
-        assert mutated.returncode != 0 and "AssertionError" in mutated.stderr, mutated.stderr
+        original = workflow.read_text(encoding="utf-8")
+        for before, after in [('[ "$live_sha" != "$EXPECTED_SHA" ]', '[ "$live_sha" = "$EXPECTED_SHA" ]'),
+                              ("needs.test.result == 'success'", "needs.test.result != 'success'")]:
+            assert before in original
+            workflow.write_text(original.replace(before, after), encoding="utf-8")
+            mutated = run()
+            assert mutated.returncode != 0 and "AssertionError" in mutated.stderr, mutated.stderr
 
 @fixture("audit-completeness")
 def _sabotage_audit_completeness() -> None:
