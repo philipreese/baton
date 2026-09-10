@@ -489,14 +489,15 @@ public sealed class RepeatedToolCallLedger
     private static string CommandKey(string commandLine) => "cmd " + commandLine;
 
     /// <summary>
-    /// <b>A read is keyed on the whole request, not on the path alone (#2002 re-review HIGH).</b> A
-    /// read tool that takes a range returns a WINDOW, so a second call naming a different one is a new
-    /// question about the same unchanged file — and denying it with
+    /// <b>A read is keyed on the returned window, not on the path alone (#2002 re-review HIGH).</b> A
+    /// read tool that takes a range returns a WINDOW, so a second call naming a different one can be a
+    /// new question about the same unchanged file — and denying it with
     /// <see cref="HookReadDenial"/> ("its content is above in your transcript") asserts something
-    /// false: the room holds the first window and asked for a second. <paramref name="request"/> is
-    /// the caller's normalised spelling of every argument beyond the path that narrows what comes
-    /// back, empty when there is none; a caller that cannot account for an argument passes no request
-    /// at all and skips this rung instead (see <see cref="RepeatedToolCallHook.JudgeRead"/>).
+    /// false when the room holds the first window and asked for a second. The broker can see its
+    /// budget and Unicode adjustment, so it passes the semantic served-window bounds. A hook runs
+    /// before its vendor's read and cannot know that served window; it instead passes the normalised
+    /// raw range arguments as the conservative identity, and skips this rung when it cannot account
+    /// for every narrowing argument (see <see cref="RepeatedToolCallHook.JudgeRead"/>).
     /// <para>
     /// The separator is a NUL so <see cref="ForgetRead"/> can forget every window of one path with a
     /// single prefix pass without <c>C:\foo</c> also matching <c>C:\foobar</c>. An absent request and
