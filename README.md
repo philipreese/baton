@@ -157,7 +157,7 @@ HTTP-error fallback behavior has not been browser-tested yet.
 ## Vendor authentication
 
 Baton does not authenticate to any model provider. It spawns the vendor's own first-party CLI
-(`claude`, `agy`) as a subprocess, and that CLI uses whatever login the operator already established
+(`claude`, `agy`, `codex`) as a subprocess, and that CLI uses whatever login the operator already established
 on their own machine.
 
 **Baton never reads, copies, forwards, or stores a vendor credential** — no API keys, no OAuth tokens,
