@@ -146,8 +146,11 @@ public static class CodexAppServerBroker
     /// <summary>
     /// Reads authenticated account limits through the broker's isolated home and app-server
     /// lifecycle, stopping before any thread or model turn is started. The whole source owns a
-    /// 45-second bound: forty seconds for initialize/read and five reserved for kill, exit, and stderr
-    /// drain so a server that starts but never answers cannot stop the serial daemon harvest loop.
+    /// 45-second managed bound: forty seconds shared by isolated-home preparation, process start,
+    /// initialize, and read, with five reserved for kill, exit, and stderr drain. A synchronous OS
+    /// call is run off the harvester thread so the managed deadline can return; .NET cannot forcibly
+    /// stop an arbitrary blocked OS call, so late process creation is observed and cleaned up when it
+    /// eventually returns.
     /// </summary>
     internal static Task<JsonObject?> ReadRateLimitsAsync(CancellationToken cancellationToken) =>
         ReadRateLimitsAsync(
@@ -179,11 +182,30 @@ public static class CodexAppServerBroker
         {
             throw new ArgumentOutOfRangeException(nameof(sourceBound));
         }
+        cancellationToken.ThrowIfCancellationRequested();
 
+        var responseBound = sourceBound - cleanupReserve;
+        using var responseTimeout = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
+        responseTimeout.CancelAfter(responseBound);
+
+        var startTask = Task.Run(startAppServer, CancellationToken.None);
         Process? started;
         try
         {
-            started = startAppServer();
+            started = await startTask.WaitAsync(responseTimeout.Token).ConfigureAwait(false);
+        }
+        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+        {
+            _ = StopLateRateLimitsProcessAsync(startTask);
+            throw;
+        }
+        catch (OperationCanceledException) when (responseTimeout.IsCancellationRequested)
+        {
+            _ = StopLateRateLimitsProcessAsync(startTask);
+            await error.WriteLineAsync(
+                $"Codex rate-limit harvest did not start within {responseBound.TotalSeconds:0}s.")
+                .ConfigureAwait(false);
+            return null;
         }
         catch (Exception ex) when (ex is Win32Exception or IOException or UnauthorizedAccessException
             or ArgumentException or InvalidOperationException)
@@ -199,7 +221,7 @@ public static class CodexAppServerBroker
             return null;
         }
 
-        using var process = started;
+        var process = started;
         Task stderrDrain = Task.CompletedTask;
         return await ReadRateLimitsWithinBoundsAsync(
             token =>
@@ -212,7 +234,8 @@ public static class CodexAppServerBroker
             },
             token => StopRateLimitsProcessAsync(process, stderrDrain, token),
             error,
-            sourceBound - cleanupReserve,
+            responseTimeout,
+            responseBound,
             cleanupReserve,
             cancellationToken).ConfigureAwait(false);
     }
@@ -231,9 +254,29 @@ public static class CodexAppServerBroker
     {
         using var responseTimeout = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
         responseTimeout.CancelAfter(responseBound);
+        return await ReadRateLimitsWithinBoundsAsync(
+            read, cleanup, error, responseTimeout, responseBound, cleanupBound, cancellationToken)
+            .ConfigureAwait(false);
+    }
+
+    private static async Task<JsonObject?> ReadRateLimitsWithinBoundsAsync(
+        Func<CancellationToken, Task<JsonObject>> read,
+        Func<CancellationToken, Task> cleanup,
+        TextWriter error,
+        CancellationTokenSource responseTimeout,
+        TimeSpan responseBound,
+        TimeSpan cleanupBound,
+        CancellationToken cancellationToken)
+    {
+        var responseToken = responseTimeout.Token;
         try
         {
-            return await read(responseTimeout.Token).WaitAsync(responseTimeout.Token).ConfigureAwait(false);
+            var readTask = Task.Run(() =>
+            {
+                responseToken.ThrowIfCancellationRequested();
+                return read(responseToken);
+            }, CancellationToken.None);
+            return await readTask.WaitAsync(responseToken).ConfigureAwait(false);
         }
         catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
         {
@@ -256,14 +299,18 @@ public static class CodexAppServerBroker
         {
             using var cleanupTimeout = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
             cleanupTimeout.CancelAfter(cleanupBound);
+            var cleanupToken = cleanupTimeout.Token;
             try
             {
-                await cleanup(cleanupTimeout.Token).WaitAsync(cleanupTimeout.Token).ConfigureAwait(false);
+                var cleanupTask = Task.Run(() => cleanup(cleanupToken), CancellationToken.None);
+                await cleanupTask.WaitAsync(cleanupToken).ConfigureAwait(false);
             }
             catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
             {
-                // The caller's own bound wins. The cleanup delegate is invoked before WaitAsync sees
-                // cancellation, so the production delegate has already issued the process-tree kill.
+                // Cleanup was dispatched before cancellation is propagated. The production delegate
+                // owns the process until its kill/exit/drain attempt finishes, even if the caller no
+                // longer waits for it.
+                throw;
             }
             catch (OperationCanceledException) when (cleanupTimeout.IsCancellationRequested)
             {
@@ -279,16 +326,47 @@ public static class CodexAppServerBroker
         }
     }
 
-    private static async Task StopRateLimitsProcessAsync(
+    internal static async Task StopRateLimitsProcessAsync(
         Process process, Task stderrDrain, CancellationToken cancellationToken)
     {
-        if (!process.HasExited)
+        try
         {
-            process.Kill(entireProcessTree: true);
-        }
+            if (!process.HasExited)
+            {
+                process.Kill(entireProcessTree: true);
+            }
 
-        await process.WaitForExitAsync(cancellationToken).ConfigureAwait(false);
-        await stderrDrain.WaitAsync(cancellationToken).ConfigureAwait(false);
+            await process.WaitForExitAsync(cancellationToken).ConfigureAwait(false);
+            await stderrDrain.WaitAsync(cancellationToken).ConfigureAwait(false);
+        }
+        finally
+        {
+            process.Dispose();
+        }
+    }
+
+    /// <summary>
+    /// Observes a preparation/start call that outlived its caller. If it eventually creates a
+    /// process, that process still enters the production process-tree cleanup path rather than
+    /// becoming an orphan. The wait itself is intentionally detached: the caller's managed deadline
+    /// has already elapsed, and managed cancellation cannot stop arbitrary synchronous OS startup.
+    /// </summary>
+    private static async Task StopLateRateLimitsProcessAsync(Task<Process?> startTask)
+    {
+        try
+        {
+            if (await startTask.ConfigureAwait(false) is { } process)
+            {
+                await StopRateLimitsProcessAsync(process, Task.CompletedTask, CancellationToken.None)
+                    .ConfigureAwait(false);
+            }
+        }
+        catch (Exception ex) when (ex is Win32Exception or IOException or UnauthorizedAccessException
+            or ArgumentException or InvalidOperationException)
+        {
+            // The foreground path has already reported timeout or cancellation. This continuation
+            // exists only to observe late startup and make a best-effort process-tree cleanup.
+        }
     }
 
     internal static async Task<int> RunProtocolAsync(

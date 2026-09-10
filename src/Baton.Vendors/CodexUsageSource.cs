@@ -135,6 +135,14 @@ public sealed class CodexUsageSource : IVendorUsageSource
 
         if (node is not JsonObject window)
         {
+            windows.Add(new VendorUsageWindow(
+                Name(limitId, limitName, kind, durationMins: null),
+                PercentUsed: null,
+                ResetsAt: null,
+                RawLine: node.ToJsonString(),
+                LimitId: limitId,
+                WindowKind: kind,
+                WindowDurationMins: null));
             return;
         }
 

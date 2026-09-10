@@ -139,6 +139,65 @@ public class CodexUsageSourceTests
         Assert.Equal(23, Assert.Single(snapshot.Windows, window => window.WindowKind == "secondary").PercentUsed);
     }
 
+    /// <summary>
+    /// The measured account has no session window, so omitted and explicit null both mean unexposed.
+    /// An exposed malformed value is different evidence: parser-through-gate must retain it and hold
+    /// rather than turn it into the same admitting absence.
+    /// </summary>
+    [Theory]
+    [InlineData("omitted", RunwayDisposition.Admit)]
+    [InlineData("null", RunwayDisposition.Admit)]
+    [InlineData("malformed-object", RunwayDisposition.Hold)]
+    [InlineData("non-object", RunwayDisposition.Hold)]
+    public void Account_secondary_preserves_absent_null_and_malformed_polarity(
+        string secondaryShape,
+        RunwayDisposition expected)
+    {
+        JsonNode? secondary = secondaryShape switch
+        {
+            "null" or "omitted" => null,
+            "malformed-object" => new JsonObject
+            {
+                ["usedPercent"] = "unknown",
+                ["windowDurationMins"] = new JsonObject(),
+                ["resetsAt"] = false,
+            },
+            "non-object" => "unreadable",
+            _ => throw new ArgumentOutOfRangeException(nameof(secondaryShape)),
+        };
+        var bucket = new JsonObject
+        {
+            ["limitId"] = CodexUsageSource.AccountLimitId,
+            ["primary"] = Window(48, CodexUsageSource.WeeklyDurationMins, 1_800_000_000),
+            ["secondary"] = secondary,
+        };
+        if (secondaryShape == "omitted")
+        {
+            bucket.Remove("secondary");
+        }
+        var result = new JsonObject
+        {
+            ["rateLimitsByLimitId"] = new JsonObject
+            {
+                [CodexUsageSource.AccountLimitId] = bucket,
+            },
+        };
+
+        var snapshot = CodexUsageSource.Parse(result, Now);
+        var decision = RunwayGate.Evaluate(
+            CodexUsageSource.AccountLimitId, snapshot, new RunwayThresholds(), Now);
+
+        Assert.Equal(expected, decision.Disposition);
+        if (expected == RunwayDisposition.Hold)
+        {
+            var evidence = Assert.Single(snapshot.Windows, window => window.WindowKind == "secondary");
+            Assert.Null(evidence.PercentUsed);
+            Assert.Null(evidence.WindowDurationMins);
+            Assert.NotEqual("null", evidence.RawLine);
+            Assert.Contains("not readable", decision.Reason!, StringComparison.Ordinal);
+        }
+    }
+
     [Fact]
     public void Successful_unrecognized_result_is_an_empty_vendor_snapshot()
     {

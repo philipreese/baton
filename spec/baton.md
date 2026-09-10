@@ -4207,12 +4207,13 @@ dependency handling built on top of it, and at least one adapter's refusal-messa
 runway projection, and the push delivery — build against that gap, not against a two-value enum that
 does not exist.
 
-**Both vendors' `/usage` support.** Both `agy -p "/usage"` and `claude -p "/usage"` answer
-structured usage data without a model turn — measured live, with a dated primary-source transcript
-for the `agy` half recorded in `docs/vendor-capabilities.md` (the vendor register, which outranks
-this paragraph on vendor facts). Nothing in `src/` at HEAD implements a `/usage` poll for either
-vendor yet — the measurement is the settled basis the quota ledger is built against, not a shipped
-code path. Both vendors participate in the ledger.
+**Shipped account-usage sources.** `agy -p "/usage"` and `claude -p "/usage"` answer structured
+usage data without a model turn — measured live, with a dated primary-source transcript for the
+`agy` half recorded in `docs/vendor-capabilities.md` (the vendor register, which outranks this
+paragraph on vendor facts). `AgyUsageSlashCommandSource` and `ClaudeUsageSlashCommandSource` ship
+those reads. Codex uses its authenticated app-server `account/rateLimits/read` method through
+`CodexUsageSource`; it does not manufacture a five-hour window when the account exposes only a
+weekly one. All three sources persist the snapshots consumed by the runway section below.
 
 ### Runway hold (#1848) — shipped
 

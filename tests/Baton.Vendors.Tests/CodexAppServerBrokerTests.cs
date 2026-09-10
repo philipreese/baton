@@ -130,6 +130,212 @@ public sealed class CodexAppServerBrokerTests
     }
 
     [Fact]
+    public async Task Synchronous_startup_is_bounded_and_a_late_process_is_stopped()
+    {
+        using var releaseStartup = new ManualResetEventSlim();
+        var processExited = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        using var error = new StringWriter();
+        var stopwatch = Stopwatch.StartNew();
+        try
+        {
+            var result = await CodexAppServerBroker.ReadRateLimitsAsync(
+                () =>
+                {
+                    releaseStartup.Wait();
+                    var process = StartSleepingProcess();
+                    process.EnableRaisingEvents = true;
+                    process.Exited += (_, _) => processExited.TrySetResult();
+                    if (process.HasExited)
+                    {
+                        processExited.TrySetResult();
+                    }
+                    return process;
+                },
+                error,
+                TimeSpan.FromMilliseconds(150),
+                TimeSpan.FromMilliseconds(50),
+                TestContext.Current.CancellationToken);
+
+            stopwatch.Stop();
+            Assert.Null(result);
+            Assert.True(stopwatch.Elapsed < TimeSpan.FromSeconds(5), $"elapsed {stopwatch.Elapsed}");
+            Assert.Contains("did not start within", error.ToString(), StringComparison.Ordinal);
+
+            releaseStartup.Set();
+            await processExited.Task.WaitAsync(
+                TimeSpan.FromSeconds(5), TestContext.Current.CancellationToken);
+        }
+        finally
+        {
+            releaseStartup.Set();
+        }
+    }
+
+    [Fact]
+    public async Task Caller_cancellation_during_synchronous_startup_is_propagated()
+    {
+        using var cancellation = new CancellationTokenSource();
+        using var releaseStartup = new ManualResetEventSlim();
+        var startupEntered = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        using var error = new StringWriter();
+        try
+        {
+            var harvest = CodexAppServerBroker.ReadRateLimitsAsync(
+                () =>
+                {
+                    startupEntered.TrySetResult();
+                    releaseStartup.Wait();
+                    return null;
+                },
+                error,
+                TimeSpan.FromSeconds(5),
+                TimeSpan.FromSeconds(1),
+                cancellation.Token);
+
+            await startupEntered.Task.WaitAsync(
+                TimeSpan.FromSeconds(5), TestContext.Current.CancellationToken);
+            cancellation.Cancel();
+
+            await Assert.ThrowsAnyAsync<OperationCanceledException>(() => harvest);
+        }
+        finally
+        {
+            releaseStartup.Set();
+        }
+    }
+
+    [Fact]
+    public async Task Synchronous_read_prefix_is_inside_the_response_bound()
+    {
+        using var releaseRead = new ManualResetEventSlim();
+        using var error = new StringWriter();
+
+        var result = await CodexAppServerBroker.ReadRateLimitsWithinBoundsAsync(
+            _ =>
+            {
+                releaseRead.Wait();
+                return Task.FromResult(new JsonObject());
+            },
+            _ => Task.CompletedTask,
+            error,
+            TimeSpan.FromMilliseconds(25),
+            TimeSpan.FromMilliseconds(25),
+            TestContext.Current.CancellationToken);
+
+        releaseRead.Set();
+        Assert.Null(result);
+        Assert.Contains("did not answer within", error.ToString(), StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task Synchronous_cleanup_prefix_is_inside_the_cleanup_bound()
+    {
+        using var releaseCleanup = new ManualResetEventSlim();
+        using var error = new StringWriter();
+
+        var result = await CodexAppServerBroker.ReadRateLimitsWithinBoundsAsync(
+            _ => Task.FromResult(new JsonObject { ["ok"] = true }),
+            _ =>
+            {
+                releaseCleanup.Wait();
+                return Task.CompletedTask;
+            },
+            error,
+            TimeSpan.FromSeconds(1),
+            TimeSpan.FromMilliseconds(25),
+            TestContext.Current.CancellationToken);
+
+        releaseCleanup.Set();
+        Assert.True(result!["ok"]!.GetValue<bool>());
+        Assert.Contains("cleanup did not finish within", error.ToString(), StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task Successful_read_runs_the_production_process_cleanup_to_exit()
+    {
+        var processExited = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var process = StartSleepingProcess();
+        process.EnableRaisingEvents = true;
+        process.Exited += (_, _) => processExited.TrySetResult();
+        using var error = new StringWriter();
+
+        var result = await CodexAppServerBroker.ReadRateLimitsWithinBoundsAsync(
+            _ => Task.FromResult(new JsonObject { ["ok"] = true }),
+            token => CodexAppServerBroker.StopRateLimitsProcessAsync(
+                process, Task.CompletedTask, token),
+            error,
+            TimeSpan.FromSeconds(1),
+            TimeSpan.FromSeconds(5),
+            TestContext.Current.CancellationToken);
+
+        await processExited.Task.WaitAsync(
+            TimeSpan.FromSeconds(5), TestContext.Current.CancellationToken);
+        Assert.True(result!["ok"]!.GetValue<bool>());
+        Assert.Equal(string.Empty, error.ToString());
+    }
+
+    [Fact]
+    public async Task Caller_cancellation_during_read_is_propagated_after_cleanup_is_dispatched()
+    {
+        using var cancellation = new CancellationTokenSource();
+        var readStarted = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var read = new TaskCompletionSource<JsonObject>(TaskCreationOptions.RunContinuationsAsynchronously);
+        var cleanupStarted = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        using var error = new StringWriter();
+
+        var harvest = CodexAppServerBroker.ReadRateLimitsWithinBoundsAsync(
+            _ =>
+            {
+                readStarted.TrySetResult();
+                return read.Task;
+            },
+            _ =>
+            {
+                cleanupStarted.TrySetResult();
+                return Task.CompletedTask;
+            },
+            error,
+            TimeSpan.FromSeconds(5),
+            TimeSpan.FromSeconds(1),
+            cancellation.Token);
+
+        await readStarted.Task.WaitAsync(
+            TimeSpan.FromSeconds(5), TestContext.Current.CancellationToken);
+        cancellation.Cancel();
+
+        await Assert.ThrowsAnyAsync<OperationCanceledException>(() => harvest);
+        await cleanupStarted.Task.WaitAsync(
+            TimeSpan.FromSeconds(5), TestContext.Current.CancellationToken);
+    }
+
+    [Fact]
+    public async Task Caller_cancellation_during_cleanup_cannot_return_the_successful_read()
+    {
+        using var cancellation = new CancellationTokenSource();
+        var cleanupStarted = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var cleanup = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        using var error = new StringWriter();
+
+        var harvest = CodexAppServerBroker.ReadRateLimitsWithinBoundsAsync(
+            _ => Task.FromResult(new JsonObject { ["staged"] = "success" }),
+            _ =>
+            {
+                cleanupStarted.TrySetResult();
+                return cleanup.Task;
+            },
+            error,
+            TimeSpan.FromSeconds(5),
+            TimeSpan.FromSeconds(1),
+            cancellation.Token);
+
+        await cleanupStarted.Task.WaitAsync(
+            TimeSpan.FromSeconds(5), TestContext.Current.CancellationToken);
+        cancellation.Cancel();
+
+        await Assert.ThrowsAnyAsync<OperationCanceledException>(() => harvest);
+    }
+
+    [Fact]
     public async Task Protocol_translates_thread_tools_response_usage_and_terminal_success_to_exec_jsonl()
     {
         var root = Path.Combine(Path.GetTempPath(), $"baton-codex-broker-{Guid.NewGuid():N}");
@@ -447,6 +653,33 @@ public sealed class CodexAppServerBrokerTests
                 ["turnId"] = "turn-1",
             },
         }.ToJsonString();
+
+    private static Process StartSleepingProcess()
+    {
+        var startInfo = new ProcessStartInfo
+        {
+            FileName = OperatingSystem.IsWindows() ? "cmd.exe" : "/bin/sh",
+            RedirectStandardInput = true,
+            RedirectStandardOutput = true,
+            RedirectStandardError = true,
+            UseShellExecute = false,
+            CreateNoWindow = true,
+        };
+        if (OperatingSystem.IsWindows())
+        {
+            startInfo.ArgumentList.Add("/d");
+            startInfo.ArgumentList.Add("/c");
+            startInfo.ArgumentList.Add("ping -n 30 127.0.0.1 > nul");
+        }
+        else
+        {
+            startInfo.ArgumentList.Add("-c");
+            startInfo.ArgumentList.Add("sleep 30");
+        }
+
+        return Process.Start(startInfo)
+            ?? throw new InvalidOperationException("Could not start the cleanup test process.");
+    }
 
     /// <summary>
     /// #1996 re-review MEDIUM, and the checker that drift had none of: the instruction constraining
