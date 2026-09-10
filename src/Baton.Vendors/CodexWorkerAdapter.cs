@@ -103,7 +103,8 @@ public sealed class CodexWorkerAdapter : IWorkerAdapter, IPermissionGrantTransla
 
         var permissionMode = ResolvePermissionMode(invocation);
         var isWindows = OperatingSystem.IsWindows();
-        var prompt = BuildPrompt(invocation.PromptTemplate, contract, isWindows, invocation.Skills);
+        var prompt = BuildPrompt(
+            invocation.PromptTemplate, contract, isWindows, invocation.Skills, OutputInstructionMode.FilePath);
         var outputDirectory = WorkerEnvironmentReference.For("BATON_OUTPUT_DIR", isWindows);
 
         List<string> args = ["exec"];
@@ -701,7 +702,8 @@ public sealed class CodexWorkerAdapter : IWorkerAdapter, IPermissionGrantTransla
         }
 
         var isWindows = OperatingSystem.IsWindows();
-        var prompt = BuildPrompt(invocation.PromptTemplate, contract, isWindows, invocation.Skills);
+        var prompt = BuildPrompt(
+            invocation.PromptTemplate, contract, isWindows, invocation.Skills, OutputInstructionMode.DeclaredOutputTool);
         var outputDirectory = WorkerEnvironmentReference.For("BATON_OUTPUT_DIR", isWindows);
         var configPath = outputDirectory + (isWindows ? "\\" : "/") + BrokerConfigFileName;
         var hostDllPath = Path.Combine(AppContext.BaseDirectory, "Baton.Cli.dll");
@@ -807,7 +809,8 @@ public sealed class CodexWorkerAdapter : IWorkerAdapter, IPermissionGrantTransla
     /// </param>
     private static string BuildPrompt(
         string promptTemplate, WorkerContract contract, bool isWindows,
-        IReadOnlyList<SkillPackage>? declaredSkills = null)
+        IReadOnlyList<SkillPackage>? declaredSkills,
+        OutputInstructionMode outputInstructionMode)
     {
         var prompt = new StringBuilder(
             SkillInlining.InlineSkills(promptTemplate, workingDirectory: null, declaredSkills));
@@ -822,15 +825,35 @@ public sealed class CodexWorkerAdapter : IWorkerAdapter, IPermissionGrantTransla
 
         if (contract.ProducedOutputs.Count > 0)
         {
-            prompt.Append("\nWrite each output to the exact path shown, creating parent directories as needed. For a single output, make the final response exactly the complete file content as well:\n");
-            var outputDirectory = WorkerEnvironmentReference.For("BATON_OUTPUT_DIR", isWindows);
-            foreach (var output in contract.ProducedOutputs)
+            switch (outputInstructionMode)
             {
-                prompt.Append($"- {output.Name}: {outputDirectory}{(isWindows ? '\\' : '/')}{output.Name}\n");
+                case OutputInstructionMode.FilePath:
+                    prompt.Append("\nWrite each output to the exact path shown, creating parent directories as needed. For a single output, make the final response exactly the complete file content as well:\n");
+                    var outputDirectory = WorkerEnvironmentReference.For("BATON_OUTPUT_DIR", isWindows);
+                    foreach (var output in contract.ProducedOutputs)
+                    {
+                        prompt.Append($"- {output.Name}: {outputDirectory}{(isWindows ? '\\' : '/')}{output.Name}\n");
+                    }
+                    break;
+                case OutputInstructionMode.DeclaredOutputTool:
+                    prompt.Append($"\nWrite each declared output with {CodexDynamicToolPolicy.WriteOutputTool}: pass its exact declared name as `name` and its complete UTF-8 file content as `content`. Do not use a filesystem path. For a single output, make the final response exactly the complete file content as well:\n");
+                    foreach (var output in contract.ProducedOutputs)
+                    {
+                        prompt.Append($"- name={output.Name}\n");
+                    }
+                    break;
+                default:
+                    throw new ArgumentOutOfRangeException(nameof(outputInstructionMode), outputInstructionMode, null);
             }
         }
 
         return prompt.ToString();
+    }
+
+    private enum OutputInstructionMode
+    {
+        FilePath,
+        DeclaredOutputTool,
     }
 
     private static bool TryParseStartedItem(JsonElement root, out WorkerProgressEvent? progressEvent)

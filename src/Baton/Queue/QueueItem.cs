@@ -42,6 +42,19 @@ public sealed record QueueItem
 
     public string? Effort { get; init; }
 
+    /// <summary>
+    /// Per-stage axes for a lifecycle item. Null, rather than an empty list, is significant for a
+    /// pre-stage-selection persisted item; see <see cref="QueueTierTable.ResolveForStage"/>.
+    /// </summary>
+    public IReadOnlyList<QueueStageSelection>? StageSelections { get; init; }
+
+    /// <summary>
+    /// An explicit whole-lifecycle pin. When true, <see cref="Adapter"/>, <see cref="Model"/> and
+    /// <see cref="Effort"/> apply to every lifecycle stage. It is distinct from merely naming axes
+    /// for the initial implement stage.
+    /// </summary>
+    public bool LifecyclePin { get; init; }
+
     /// <summary>Wall-clock ceiling forwarded as <c>--timeout</c>; null keeps the role's tier timeout.</summary>
     public int? TimeoutMinutes { get; init; }
 

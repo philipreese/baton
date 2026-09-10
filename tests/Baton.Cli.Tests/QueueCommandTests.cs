@@ -180,6 +180,66 @@ public sealed class QueueCommandTests
     }
 
     [Fact]
+    public async Task Add_refuses_an_invalid_later_stage_selection_before_provisioning_or_worker_spend()
+    {
+        var home = CreateTempHome();
+        using var scope = BatonEnvironmentSnapshot.BeginScope(BatonEnvironmentSnapshot.Blank with { HomeOverride = home });
+        try
+        {
+            var refusal = await Assert.ThrowsAsync<CliArgumentException>(() => QueueCommand.ExecuteAsync(
+                new QueueOptions(
+                    QueueVerb.Add, Tag: "2181-lane", Role: "implement", Issue: 2181, Lifecycle: true,
+                    ScopeClass: "tooling",
+                    StageSelections:
+                    [
+                        new QueueStageSelection { Stage = WorkStage.Review, Model = "opus", Reason = "test" },
+                    ]),
+                TextWriter.Null,
+                Ct));
+
+            Assert.Contains("review selection", refusal.Message, StringComparison.Ordinal);
+            Assert.False(File.Exists(BatonPaths.QueueFile));
+            Assert.False(Directory.Exists(BatonPaths.QueueSpecsDirectory));
+        }
+        finally
+        {
+            DirectoryCleanup.DeleteRecursively(home);
+        }
+    }
+
+    [Fact]
+    public void A_model_only_stage_selection_keeps_its_unique_models_adapter()
+    {
+        var selections = QueueCommand.NormalizeLifecycleStageSelections(
+            [new QueueStageSelection { Stage = WorkStage.Review, Model = "gpt-5.6-sol" }], scopeClass: null);
+
+        Assert.Equal("codex", Assert.Single(selections!).Adapter);
+    }
+
+    [Fact]
+    public async Task Add_refuses_an_adapter_only_lifecycle_pin_with_an_inherited_incompatible_model_before_provisioning()
+    {
+        var home = CreateTempHome();
+        using var scope = BatonEnvironmentSnapshot.BeginScope(BatonEnvironmentSnapshot.Blank with { HomeOverride = home });
+        try
+        {
+            var refusal = await Assert.ThrowsAsync<CliArgumentException>(() => QueueCommand.ExecuteAsync(
+                new QueueOptions(
+                    QueueVerb.Add, Tag: "2181-pin", Role: "implement", Issue: 2181, Lifecycle: true,
+                    ScopeClass: "tooling", Adapter: "agy", LifecyclePin: true),
+                TextWriter.Null, Ct));
+
+            Assert.Contains("cannot use", refusal.Message, StringComparison.Ordinal);
+            Assert.False(File.Exists(BatonPaths.QueueFile));
+            Assert.False(Directory.Exists(BatonPaths.QueueSpecsDirectory));
+        }
+        finally
+        {
+            DirectoryCleanup.DeleteRecursively(home);
+        }
+    }
+
+    [Fact]
     public async Task Add_prints_an_unscoped_roles_resolved_adapter_without_a_model()
     {
         var home = CreateTempHome();
@@ -511,6 +571,45 @@ public sealed class QueueCommandTests
             await QueueCommand.ExecuteAsync(new QueueOptions(QueueVerb.List), output, Ct);
 
             Assert.DoesNotContain("Waiting on", output.ToString(), StringComparison.Ordinal);
+        }
+        finally
+        {
+            DirectoryCleanup.DeleteRecursively(home);
+        }
+    }
+
+    [Fact]
+    public async Task List_prints_each_lifecycle_stages_effective_choice_and_provenance()
+    {
+        var home = CreateTempHome();
+        using var scope = BatonEnvironmentSnapshot.BeginScope(BatonEnvironmentSnapshot.Blank with { HomeOverride = home });
+        try
+        {
+            await QueueStore.MutateAsync(
+                BatonPaths.QueueFile,
+                s => s with
+                {
+                    Items =
+                    [
+                        new QueueItem
+                        {
+                            Tag = "2181-lane",
+                            Role = "implement",
+                            Workspace = home,
+                            SpecFile = BatonPaths.QueueSpecFile("2181-lane"),
+                            Stage = WorkStage.Implement,
+                            StageSelections = [],
+                        },
+                    ],
+                },
+                Ct);
+
+            var output = new StringWriter();
+            await QueueCommand.ExecuteAsync(new QueueOptions(QueueVerb.List), output, Ct);
+
+            Assert.Contains("effective stage plan: implement=", output.ToString(), StringComparison.Ordinal);
+            Assert.Contains("review=", output.ToString(), StringComparison.Ordinal);
+            Assert.Contains("(stage-default)", output.ToString(), StringComparison.Ordinal);
         }
         finally
         {

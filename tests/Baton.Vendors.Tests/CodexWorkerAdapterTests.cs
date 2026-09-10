@@ -159,6 +159,23 @@ public sealed class CodexWorkerAdapterTests
     }
 
     [Fact]
+    public void Brokered_prompt_names_the_declared_output_tool_and_exact_output_names()
+    {
+        var contract = new WorkerContract(
+            "reviewer", [], [new ProducedOutput("report.md"), new ProducedOutput("notes.md")], []);
+
+        var target = new CodexWorkerAdapter().Resolve(
+            new WorkerInvocation("Review.", PermissionGrant: new PermissionGrant(ReadFiles: true)), contract);
+
+        Assert.Contains(CodexDynamicToolPolicy.WriteOutputTool, target.PromptText, StringComparison.Ordinal);
+        Assert.Contains("name=report.md", target.PromptText, StringComparison.Ordinal);
+        Assert.Contains("name=notes.md", target.PromptText, StringComparison.Ordinal);
+        Assert.Contains("complete UTF-8 file content as `content`", target.PromptText, StringComparison.Ordinal);
+        Assert.DoesNotContain(CodexDynamicToolPolicy.WriteTextTool, target.PromptText, StringComparison.Ordinal);
+        Assert.DoesNotContain(OutputDirectory, target.PromptText, StringComparison.Ordinal);
+    }
+
+    [Fact]
     public void Single_output_contract_emits_one_output_last_message_path()
     {
         var target = new CodexWorkerAdapter().Resolve(

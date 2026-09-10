@@ -731,6 +731,13 @@ baton queue add --issue 1934 --lifecycle --scope engine
 `<n>-lane`). Pass `--spec <file>` to supply the brief's "## Do" section yourself instead of taking the
 issue body. The briefs come from `~/.baton/queue/templates/` — edit those files and your edits stick.
 
+Lifecycle adapter/model/effort axes select `implement` only unless a stage is named. Use
+`--stage review` (or `fix`, `re-review`, or `continue`) before that stage's axes to select it
+explicitly; `baton queue add --issue 2181 --lifecycle --lifecycle-pin --model <model>` is the
+separate, deliberate whole-lifecycle pin for an experiment. `baton queue list` prints every stage's
+effective choice and whether it came from a stage default, stage override, lifecycle pin, or the
+compatibility rule for a persisted item.
+
 `baton queue list` shows each item's state, stage and room. `baton queue hold` / `resume` pause new
 launches without stopping the daemon or touching live lanes. Every decision, including each stage
 change and the evidence it was derived from, lands in `~/.baton/fleet/queue.jsonl`.
