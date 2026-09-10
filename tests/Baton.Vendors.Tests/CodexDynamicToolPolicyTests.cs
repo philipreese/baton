@@ -831,7 +831,7 @@ public sealed class CodexDynamicToolPolicyTests
 
         var replay = await fixture.ExecuteAsync(
             CodexDynamicToolPolicy.RunCommandTool, new { command = command.CommandLine });
-        Assert.True(replay.Success, replay.Text);
+        Assert.False(replay.Success, replay.Text);
         Assert.Contains("replayed: identical command", replay.Text, StringComparison.Ordinal);
         Assert.True(replay.Text.Length <= 12_000, $"replay returned {replay.Text.Length} characters");
         Assert.Single(File.ReadAllLines(command.CounterPath));
@@ -1035,6 +1035,63 @@ public sealed class CodexDynamicToolPolicyTests
         Assert.Single(File.ReadAllLines(volatileCommand.CounterPath));
     }
 
+    /// <summary>
+    /// A normal process exit only settles capture; it does not prove either exit success or mutation
+    /// safety. Both exit dispositions invoke the same external-diff helper and restore its target's
+    /// stat pair, so only broad post-execution invalidation can expose the same-length mutation. The
+    /// non-zero arm also proves the recorded disposition remains a failed replay, not a successful
+    /// result inferred from normal completion.
+    /// </summary>
+    [Theory]
+    [InlineData(0, true)]
+    [InlineData(7, false)]
+    public async Task Normally_completed_volatile_helper_invalidates_unrelated_caches(
+        int helperExitCode, bool expectedSuccess)
+    {
+        using var fixture = new PolicyFixture(
+            new PermissionGrant(ReadFiles: true, RunShellCommands: true), ["report.md"]);
+        var volatileCommand = CompletedExternalDiffCommand(
+            fixture.Workspace, $"volatile-exit-{helperExitCode}", helperExitCode);
+        var originalStamp = File.GetLastWriteTimeUtc(volatileCommand.MutatedPath);
+        var cachedCommand = OperatingSystem.IsWindows()
+            ? $"type {Path.GetFileName(volatileCommand.MutatedPath)}"
+            : $"cat ./{Path.GetFileName(volatileCommand.MutatedPath)}";
+
+        var commandBefore = await fixture.ExecuteAsync(
+            CodexDynamicToolPolicy.RunCommandTool, new { command = cachedCommand });
+        var readBefore = await fixture.ExecuteAsync(
+            CodexDynamicToolPolicy.ReadTextTool, new { path = volatileCommand.MutatedPath });
+        var completed = await fixture.ExecuteAsync(
+            CodexDynamicToolPolicy.RunCommandTool, new { command = volatileCommand.CommandLine });
+        File.SetLastWriteTimeUtc(volatileCommand.MutatedPath, originalStamp);
+
+        CodexDynamicToolResult? failedReplay = null;
+        if (!expectedSuccess)
+        {
+            failedReplay = await fixture.ExecuteAsync(
+                CodexDynamicToolPolicy.RunCommandTool, new { command = volatileCommand.CommandLine });
+        }
+
+        var readAfter = await fixture.ExecuteAsync(
+            CodexDynamicToolPolicy.ReadTextTool, new { path = volatileCommand.MutatedPath });
+        var commandAfter = await fixture.ExecuteAsync(
+            CodexDynamicToolPolicy.RunCommandTool, new { command = cachedCommand });
+
+        Assert.Contains("before", commandBefore.Text, StringComparison.Ordinal);
+        Assert.Equal("before", readBefore.Text);
+        Assert.Equal(expectedSuccess, completed.Success);
+        Assert.Equal("AFTER!", readAfter.Text);
+        Assert.DoesNotContain("replayed: identical read", readAfter.Text, StringComparison.Ordinal);
+        Assert.Contains("AFTER!", commandAfter.Text, StringComparison.Ordinal);
+        Assert.DoesNotContain("replayed: identical command", commandAfter.Text, StringComparison.Ordinal);
+        if (failedReplay is not null)
+        {
+            Assert.False(failedReplay.Success, failedReplay.Text);
+            Assert.Contains("replayed: identical command", failedReplay.Text, StringComparison.Ordinal);
+        }
+        Assert.Single(File.ReadAllLines(volatileCommand.CounterPath));
+    }
+
     [Fact]
     public async Task Changed_or_oversized_retained_file_is_rejected_without_reading_the_replacement()
     {
@@ -1086,21 +1143,41 @@ public sealed class CodexDynamicToolPolicyTests
         Assert.Contains("synthetic open failure", didNotStart.Text, StringComparison.Ordinal);
         Assert.False(File.Exists(unopened.CounterPath));
 
+        var captureOpens = 0;
         using var writeFailure = new PolicyFixture(
-            new PermissionGrant(RunShellCommands: true),
+            new PermissionGrant(ReadFiles: true, RunShellCommands: true),
             ["report.md"],
-            commandCaptureStreamFactory: _ => new WriteFailingStream());
-        var started = HangingSideEffectCommand(writeFailure.Workspace, "failed-capture");
+            commandCaptureStreamFactory: path => ++captureOpens is 3 or 4
+                ? new WriteFailingStream()
+                : WritableCaptureStream(path));
+        var started = HangingExternalDiffCommand(writeFailure.Workspace, "failed-capture");
+        var originalStamp = File.GetLastWriteTimeUtc(started.MutatedPath);
+        var cachedCommand = OperatingSystem.IsWindows()
+            ? $"type {Path.GetFileName(started.MutatedPath)}"
+            : $"cat ./{Path.GetFileName(started.MutatedPath)}";
+        await writeFailure.ExecuteAsync(
+            CodexDynamicToolPolicy.RunCommandTool, new { command = cachedCommand });
+        await writeFailure.ExecuteAsync(
+            CodexDynamicToolPolicy.ReadTextTool, new { path = started.MutatedPath });
 
         var failed = await writeFailure.ExecuteAsync(
             CodexDynamicToolPolicy.RunCommandTool, new { command = started.CommandLine });
+        File.SetLastWriteTimeUtc(started.MutatedPath, originalStamp);
         var replay = await writeFailure.ExecuteAsync(
             CodexDynamicToolPolicy.RunCommandTool, new { command = started.CommandLine });
+        var readAfter = await writeFailure.ExecuteAsync(
+            CodexDynamicToolPolicy.ReadTextTool, new { path = started.MutatedPath });
+        var commandAfter = await writeFailure.ExecuteAsync(
+            CodexDynamicToolPolicy.RunCommandTool, new { command = cachedCommand });
 
         Assert.False(failed.Success);
         Assert.Contains("retaining its output failed", failed.Text, StringComparison.Ordinal);
         Assert.False(replay.Success);
         Assert.Contains("replayed: identical command", replay.Text, StringComparison.Ordinal);
+        Assert.Equal("AFTER!", readAfter.Text);
+        Assert.DoesNotContain("replayed: identical read", readAfter.Text, StringComparison.Ordinal);
+        Assert.Contains("AFTER!", commandAfter.Text, StringComparison.Ordinal);
+        Assert.DoesNotContain("replayed: identical command", commandAfter.Text, StringComparison.Ordinal);
         Assert.Single(File.ReadAllLines(started.CounterPath));
     }
 
@@ -1140,10 +1217,18 @@ public sealed class CodexDynamicToolPolicyTests
     public async Task Caller_cancellation_propagates_but_an_identical_retry_cannot_repeat_side_effects()
     {
         using var fixture = new PolicyFixture(
-            new PermissionGrant(RunShellCommands: true),
+            new PermissionGrant(ReadFiles: true, RunShellCommands: true),
             ["report.md"],
             commandCeiling: _ => TimeSpan.FromSeconds(5));
-        var command = HangingSideEffectCommand(fixture.Workspace, "cancelled");
+        var command = HangingExternalDiffCommand(fixture.Workspace, "cancelled");
+        var originalStamp = File.GetLastWriteTimeUtc(command.MutatedPath);
+        var cachedCommand = OperatingSystem.IsWindows()
+            ? $"type {Path.GetFileName(command.MutatedPath)}"
+            : $"cat ./{Path.GetFileName(command.MutatedPath)}";
+        await fixture.ExecuteAsync(
+            CodexDynamicToolPolicy.RunCommandTool, new { command = cachedCommand });
+        await fixture.ExecuteAsync(
+            CodexDynamicToolPolicy.ReadTextTool, new { path = command.MutatedPath });
         // wait-ok: cancellation is the behavior under test and kills the synthetic hanging child.
         using var cancellation = new CancellationTokenSource(TimeSpan.FromMilliseconds(150));
 
@@ -1151,12 +1236,21 @@ public sealed class CodexDynamicToolPolicyTests
             CodexDynamicToolPolicy.RunCommandTool,
             new { command = command.CommandLine },
             cancellation.Token));
+        File.SetLastWriteTimeUtc(command.MutatedPath, originalStamp);
         var replay = await fixture.ExecuteAsync(
             CodexDynamicToolPolicy.RunCommandTool, new { command = command.CommandLine });
+        var readAfter = await fixture.ExecuteAsync(
+            CodexDynamicToolPolicy.ReadTextTool, new { path = command.MutatedPath });
+        var commandAfter = await fixture.ExecuteAsync(
+            CodexDynamicToolPolicy.RunCommandTool, new { command = cachedCommand });
 
         Assert.False(replay.Success);
         Assert.Contains("replayed: identical command", replay.Text, StringComparison.Ordinal);
         Assert.Contains("cancelled after it started", replay.Text, StringComparison.Ordinal);
+        Assert.Equal("AFTER!", readAfter.Text);
+        Assert.DoesNotContain("replayed: identical read", readAfter.Text, StringComparison.Ordinal);
+        Assert.Contains("AFTER!", commandAfter.Text, StringComparison.Ordinal);
+        Assert.DoesNotContain("replayed: identical command", commandAfter.Text, StringComparison.Ordinal);
         Assert.Single(File.ReadAllLines(command.CounterPath));
     }
 
@@ -1874,19 +1968,29 @@ public sealed class CodexDynamicToolPolicyTests
     private static (string CommandLine, string CounterPath, string MutatedPath) HangingExternalDiffCommand(
         string directory, string name)
     {
+        var terminalCommand = OperatingSystem.IsWindows()
+            ? "exec ping -n 30 127.0.0.1 >/dev/null"
+            : "exec sleep 30";
+        return ExternalDiffCommand(directory, name, terminalCommand);
+    }
+
+    private static (string CommandLine, string CounterPath, string MutatedPath) CompletedExternalDiffCommand(
+        string directory, string name, int exitCode) =>
+        ExternalDiffCommand(directory, name, $"exit {exitCode}");
+
+    private static (string CommandLine, string CounterPath, string MutatedPath) ExternalDiffCommand(
+        string directory, string name, string terminalCommand)
+    {
         var counterPath = Path.Combine(directory, $"{name}-runs.txt");
         var mutatedName = $"{name}-mutated.txt";
         var mutatedPath = Path.Combine(directory, mutatedName);
         File.WriteAllText(mutatedPath, "before");
         var helperName = $"{name}-diff.sh";
         var helperPath = Path.Combine(directory, helperName);
-        var hang = OperatingSystem.IsWindows()
-            ? "exec ping -n 30 127.0.0.1 >/dev/null"
-            : "exec sleep 30";
         File.WriteAllText(
             helperPath,
             $"#!/bin/sh\nprintf 'ran\\n' >> {name}-runs.txt\nprintf 'AFTER!' > {mutatedName}\n"
-            + $"printf 'BEFORE-HANG\\n'\n{hang}\n");
+            + $"printf 'HELPER-RAN\\n'\n{terminalCommand}\n");
         if (!OperatingSystem.IsWindows())
         {
             File.SetUnixFileMode(
@@ -1913,6 +2017,15 @@ public sealed class CodexDynamicToolPolicyTests
 
         return ("git diff --ext-diff", counterPath, mutatedPath);
     }
+
+    private static Stream WritableCaptureStream(string path) =>
+        new FileStream(
+            path,
+            FileMode.CreateNew,
+            FileAccess.Write,
+            FileShare.Read,
+            bufferSize: 4096,
+            FileOptions.Asynchronous | FileOptions.SequentialScan);
 
     private static void RunGitSetup(string directory, params string[] arguments)
     {

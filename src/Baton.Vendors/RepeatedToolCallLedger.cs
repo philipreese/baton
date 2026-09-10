@@ -22,7 +22,8 @@ public enum RepeatVerdict
 /// <see cref="RepeatVerdict.Execute"/>. <paramref name="ReplayedOutput"/> is the previous command
 /// output, and is null for reads — see the ledger's remarks for why a read is re-read from disk
 /// rather than served from memory. <paramref name="ReplayedSuccess"/> preserves the recorded tool
-/// disposition so a timeout or capture failure cannot come back as a successful replay.
+/// disposition so a non-zero exit, timeout, cancellation, or capture failure cannot come back as a
+/// successful replay. It is not a statement about capture completion or mutation safety.
 /// </summary>
 public sealed record RepeatDecision(
     RepeatVerdict Verdict,
@@ -109,10 +110,10 @@ public sealed class RepeatedToolCallLedger
     /// instrument. #2002's measured offender was polling LOCAL processes it had backgrounded itself,
     /// which rule 1 removes at the source.
     /// <para>
-    /// <b>A successful command on this list is treated as an observation.</b> Its own answer stays
-    /// fresh and the other cached observations remain available. A failed attempt is different: a
-    /// helper such as an external diff driver may already have mutated the tree before the failure,
-    /// so that outcome invalidates the other entries — see <see cref="ForgetAllCommands"/>.
+    /// <b>A command with a successful tool result on this list remains fresh.</b> That controls only
+    /// whether its own output is recorded. It does not claim the command was read-only: the broker
+    /// invalidates unrelated cached observations after every actual execution because a helper such
+    /// as an external diff driver may have mutated the tree on any exit path.
     /// </para>
     /// </summary>
     public static readonly IReadOnlyList<string> VolatileCommandPrefixes =
@@ -156,10 +157,10 @@ public sealed class RepeatedToolCallLedger
         var key = CommandKey(commandLine);
         var hasEntry = TryTouch(key, out var entry);
 
-        // A volatile command is exempt only after a successful observation. Once Baton has started
-        // one and then timed out, been cancelled, or lost its capture, retrying is no longer a poll:
-        // an external diff driver or other helper may already have performed side effects. Consult
-        // that terminal failure before applying the normal volatile re-read exemption.
+        // A volatile command is exempt only after a successful tool result. Once Baton has started
+        // one and it exited non-zero, timed out, was cancelled, or lost its capture, retrying is no
+        // longer a poll: an external diff driver or other helper may already have performed side
+        // effects. Consult that failed result before applying the normal volatile re-read exemption.
         if (IsVolatile(commandLine)
             && (!hasEntry
                 || entry.Output is null
@@ -219,6 +220,8 @@ public sealed class RepeatedToolCallLedger
     /// half would give this path the very defect the command half was added to fix: read a file, run
     /// <c>dotnet format</c>, re-read it — same byte count inside one filesystem tick — and be told it
     /// has not changed.
+    /// Volatile commands take the same eviction path before returning: their freshness exemption says
+    /// only that they may run again, not that a helper cannot mutate the tree while they run.
     /// </para>
     /// </summary>
     public string? ClassifyHookCommand(string commandLine)
@@ -226,6 +229,8 @@ public sealed class RepeatedToolCallLedger
         ArgumentNullException.ThrowIfNull(commandLine);
         if (IsVolatile(commandLine))
         {
+            ForgetAllCommands();
+            ForgetAllReads();
             return null;
         }
 
@@ -247,17 +252,20 @@ public sealed class RepeatedToolCallLedger
 
     /// <summary>
     /// Stores what a <see cref="RepeatVerdict.Execute"/> command actually printed, so the next ask
-    /// inside <see cref="Window"/> can be answered with it. A command whose output is never recorded
-    /// simply executes again — the ledger never refuses on an answer it does not hold. Successful
-    /// volatile observations remain unrecorded so they can be re-read, but a terminal volatile
-    /// failure is force-recorded because its helpers may already have performed side effects.
+    /// inside <see cref="Window"/> can be answered with it. <paramref name="toolSucceeded"/> is the
+    /// result disposition consumed by <see cref="RepeatDecision.ReplayedSuccess"/>: true means exit
+    /// code zero with trustworthy capture; false includes a non-zero exit, timeout, cancellation, or
+    /// capture failure. It is not capture-completion or mutation-safety state. A command whose output
+    /// is never recorded simply executes again — the ledger never refuses on an answer it does not
+    /// hold. Successful volatile observations remain unrecorded so they can be re-read, but a failed
+    /// volatile result is force-recorded so its side effects cannot be repeated immediately.
     /// </summary>
-    public void RecordCommandOutput(string commandLine, string output, bool succeeded = true)
+    public void RecordCommandOutput(string commandLine, string output, bool toolSucceeded = true)
     {
         ArgumentNullException.ThrowIfNull(commandLine);
         ArgumentNullException.ThrowIfNull(output);
         var key = CommandKey(commandLine);
-        if (IsVolatile(commandLine) && succeeded)
+        if (IsVolatile(commandLine) && toolSucceeded)
         {
             // A successful retry after a prior failure is a fresh observation, not a cached result.
             // Remove the admission placeholder so subsequent successful asks remain entry-free too.
@@ -268,7 +276,7 @@ public sealed class RepeatedToolCallLedger
         if (TryTouch(key, out var entry))
         {
             entry.Output = output;
-            entry.OutputSucceeded = succeeded;
+            entry.OutputSucceeded = toolSucceeded;
             return;
         }
 
@@ -281,7 +289,7 @@ public sealed class RepeatedToolCallLedger
             {
                 ExecutedAt = _timeProvider.GetUtcNow(),
                 Output = output,
-                OutputSucceeded = succeeded,
+                OutputSucceeded = toolSucceeded,
             });
         }
     }
@@ -386,10 +394,11 @@ public sealed class RepeatedToolCallLedger
     /// other entry was recorded against a tree that no longer exists.
     /// </para>
     /// <para>
-    /// A successful command on <see cref="VolatileCommandPrefixes"/> does not call this. A failed one
-    /// does, because a helper may have mutated before failing. Everything else is assumed to have
-    /// written, which is the fail-closed direction — it costs a re-run, where the other direction
-    /// cost a wrong answer reported as a fresh one.
+    /// The broker calls this for every command that actually ran, including successful commands on
+    /// <see cref="VolatileCommandPrefixes"/>. The hook calls it before every admitted command because
+    /// it cannot observe completion. Freshness preference does not prove read-only behavior. This
+    /// fail-closed direction costs a re-run of an unrelated command after every execution; the other
+    /// direction can report a stale answer as fresh after a mutating helper.
     /// </para>
     /// </summary>
     public void ForgetAllCommands(string? exceptCommandLine = null)

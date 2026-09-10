@@ -217,6 +217,29 @@ public sealed class RepeatedToolCallTests
     }
 
     /// <summary>
+    /// The hook cannot observe a command's eventual exit, so it invalidates before admitting every
+    /// volatile command. The repeated status calls prove freshness is unchanged; the unrelated
+    /// command and read prove that freshness is no longer mistaken for read-only behavior.
+    /// </summary>
+    [Fact]
+    public void A_volatile_hook_command_stays_fresh_and_invalidates_unrelated_entries()
+    {
+        var ledger = new RepeatedToolCallLedger();
+        const string cachedCommand = "dotnet test";
+        const string cachedPath = "C:/synthetic/source.cs";
+        var stamp = new DateTimeOffset(2026, 9, 10, 12, 0, 0, TimeSpan.Zero);
+
+        Assert.Null(ledger.ClassifyHookCommand(cachedCommand));
+        Assert.Null(ledger.ClassifyHookRead(cachedPath, stamp, length: 10));
+
+        Assert.Null(ledger.ClassifyHookCommand("git status --short"));
+        Assert.Null(ledger.ClassifyHookCommand("git status --short"));
+
+        Assert.Null(ledger.ClassifyHookRead(cachedPath, stamp, length: 10));
+        Assert.Null(ledger.ClassifyHookCommand(cachedCommand));
+    }
+
+    /// <summary>
     /// Outside the window nothing is a repeat: the world may have moved, and the ledger has no way to
     /// say it did not. The polarity partner of the 12-seconds-later replay above.
     /// </summary>

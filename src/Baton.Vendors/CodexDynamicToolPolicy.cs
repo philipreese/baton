@@ -1236,7 +1236,7 @@ public sealed class CodexDynamicToolPolicy
         {
             await ObserveCaptureCompletionAsync(stdout, stderr).ConfigureAwait(false);
             var failedCapture = RenderCommandCaptureFailure(captureFailure);
-            RecordExecutedCommandOutcome(commandLine, failedCapture, succeeded: false);
+            RecordExecutedCommandOutcome(commandLine, failedCapture, toolSucceeded: false);
             if (callerCancelled)
             {
                 throw new OperationCanceledException(cancellationToken);
@@ -1262,24 +1262,21 @@ public sealed class CodexDynamicToolPolicy
         var displayed = RenderCommandResult(status, retained!, stdoutText!, stderrText!);
         if (callerCancelled)
         {
-            RecordExecutedCommandOutcome(commandLine, displayed, succeeded: false);
+            RecordExecutedCommandOutcome(commandLine, displayed, toolSucceeded: false);
             throw new OperationCanceledException(cancellationToken);
         }
         if (timeoutFailure is not null)
         {
-            RecordExecutedCommandOutcome(commandLine, displayed, succeeded: false);
+            RecordExecutedCommandOutcome(commandLine, displayed, toolSucceeded: false);
             return CodexDynamicToolResult.Failed(displayed);
         }
         // #2002: a command is the broker's other write path, and the loud one -- see ForgetAllReads
-        // and ForgetAllCommands. Unless the ledger can prove it read-only, this command may have
-        // rewritten the tree every OTHER remembered output was observed against, so those go; this
-        // command's own entry is kept, because it observed the tree AFTER its own change and an
-        // immediate re-ask of it is the population rule 2 exists for. Eviction runs BEFORE the record
-        // below for exactly that reason -- reversing the two would drop the entry just recorded.
-        // #2002: recorded whatever the exit code was, because a re-ask of a command that just failed
-        // is the same wasted step as a re-ask of one that succeeded — the #1951 lane re-issued the
-        // same failing `dotnet test` four times.
-        RecordExecutedCommandOutcome(commandLine, displayed, succeeded: true);
+        // and ForgetAllCommands. Completion says that capture is trustworthy; it says neither that
+        // the exit was successful nor that a freshness-exempt command was mutation-free. Record the
+        // actual tool disposition so a non-zero exit replays as a failure, and evict unrelated state
+        // for every command that ran. The command's own failed entry remains available so a retry
+        // cannot repeat side effects.
+        RecordExecutedCommandOutcome(commandLine, displayed, toolSucceeded: process.ExitCode == 0);
 
         // A non-zero exit is the command's own answer, with bounded channel previews and a recovery
         // reference — `pixi run test` with three failing tests is the case that matters, and its
@@ -1414,14 +1411,15 @@ public sealed class CodexDynamicToolPolicy
                + $"may already have happened. Capture failure: {detail}";
     }
 
-    private void RecordExecutedCommandOutcome(string commandLine, string output, bool succeeded)
+    private void RecordExecutedCommandOutcome(string commandLine, string output, bool toolSucceeded)
     {
-        if (!RepeatedToolCallLedger.IsVolatile(commandLine) || !succeeded)
-        {
-            _repeats.ForgetAllCommands(exceptCommandLine: commandLine);
-            _repeats.ForgetAllReads();
-        }
-        _repeats.RecordCommandOutput(commandLine, output, succeeded);
+        // Reaching this method means Process.Start succeeded. Even a normally completed volatile
+        // observation may have invoked a mutating helper, so freshness preference is never evidence
+        // that unrelated cached answers remain safe. This deliberately pays one re-read/re-run after
+        // every actual execution instead of maintaining a fragile command-syntax read-only list.
+        _repeats.ForgetAllCommands(exceptCommandLine: commandLine);
+        _repeats.ForgetAllReads();
+        _repeats.RecordCommandOutput(commandLine, output, toolSucceeded);
     }
 
     private static string ReadVerifiedCommandWindow(
