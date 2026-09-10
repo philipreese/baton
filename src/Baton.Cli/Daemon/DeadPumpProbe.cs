@@ -211,7 +211,12 @@ public sealed class DeadPumpProbe : BackgroundService
             // #1556 PR 1's single register for "what could be arrested right now" — a Running step's
             // latest execution, a quota-parked one, or a step-less supplementary execution. Reused, never
             // restated: a second copy of this predicate is exactly what that class collapsed.
-            var targets = ArrestableExecutions.All(state, snapshot);
+            // An unknown-reset quota park has no scheduled work requiring a pump. It remains
+            // operator-cancellable, but absence of a pump is not evidence of an orphan.
+            var targets = ArrestableExecutions.All(state, snapshot)
+                .Where(target => target.Status != StepStatus.Failed ||
+                    state.Steps.Single(step => step.StepId == target.StepId).RetryNotBefore is not null)
+                .ToList();
             if (targets.Count == 0)
             {
                 return 0;
