@@ -14,7 +14,10 @@ public sealed record VendorUsageWindow(
     string Name,
     int? PercentUsed,
     DateTimeOffset? ResetsAt,
-    string RawLine);
+    string RawLine,
+    string? LimitId = null,
+    string? WindowKind = null,
+    int? WindowDurationMins = null);
 
 /// <summary>
 /// One harvest of a single vendor's headless <c>/usage</c> report (issue #1391, reporting slice only
@@ -39,9 +42,9 @@ public sealed record VendorUsageSnapshot(
     VendorUsageProvenance Source = VendorUsageProvenance.Vendor);
 
 /// <summary>
-/// Where a <see cref="VendorUsageSnapshot"/>'s numbers came from (#1904). A closed set of two, so
-/// "is this the vendor's own counter?" is a field read rather than an inference from which adapter
-/// tag happens to be on the snapshot.
+/// Where a <see cref="VendorUsageSnapshot"/>'s numbers came from (#1904). Kept backward-compatible
+/// with persisted interim snapshots: current sources report vendor counters, while
+/// <see cref="Derived"/> identifies snapshots written by the retired ledger estimate.
 /// </summary>
 [JsonConverter(typeof(JsonStringEnumConverter<VendorUsageProvenance>))]
 public enum VendorUsageProvenance
@@ -50,9 +53,8 @@ public enum VendorUsageProvenance
     [JsonStringEnumMemberName("vendor")] Vendor,
 
     /// <summary>
-    /// Baton derived these numbers from its own records because the vendor exposes no plan counter
-    /// Baton has measured. Never presentable as the vendor's own reading — see
-    /// <see cref="CodexUsageSource"/> for the one implementation and exactly what it derives from.
+    /// Baton derived these numbers from its own records. No current source writes this value; it is
+    /// retained so pre-#1904 persisted snapshots remain readable and honestly labelled.
     /// </summary>
     [JsonStringEnumMemberName("derived")] Derived,
 }

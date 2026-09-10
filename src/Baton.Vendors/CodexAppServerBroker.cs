@@ -47,6 +47,7 @@ public static class CodexAppServerBroker
     private const int InitializeRequestId = 1;
     private const int ThreadRequestId = 2;
     private const int TurnRequestId = 3;
+    private const int RateLimitsRequestId = 2;
     internal static readonly Encoding JsonLineEncoding = new UTF8Encoding(encoderShouldEmitUTF8Identifier: false);
 
     public static async Task<int> RunAsync(
@@ -139,6 +140,64 @@ public static class CodexAppServerBroker
         }
     }
 
+    /// <summary>
+    /// Reads authenticated account limits through the broker's isolated home and app-server
+    /// lifecycle, stopping before any thread or model turn is started.
+    /// </summary>
+    internal static async Task<JsonObject?> ReadRateLimitsAsync(CancellationToken cancellationToken)
+    {
+        string isolatedHome;
+        try
+        {
+            isolatedHome = CodexIsolatedHome.Prepare(BatonPaths.Root);
+        }
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or ArgumentException)
+        {
+            Console.Error.WriteLine($"Codex rate-limit harvest failed: {ex.Message}");
+            return null;
+        }
+
+        using var process = StartAppServer(Environment.CurrentDirectory, allowsSubagents: false, isolatedHome);
+        if (process is null)
+        {
+            Console.Error.WriteLine("Codex rate-limit harvest could not start codex app-server.");
+            return null;
+        }
+
+        var stderrDrain = DrainStderrAsync(process.StandardError, Console.Error, cancellationToken);
+        try
+        {
+            return await ReadRateLimitsProtocolAsync(
+                process.StandardInput, process.StandardOutput, Console.Error, cancellationToken)
+                .ConfigureAwait(false);
+        }
+        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+        {
+            throw;
+        }
+        catch (Exception ex) when (ex is IOException or JsonException or InvalidOperationException)
+        {
+            Console.Error.WriteLine($"Codex rate-limit harvest failed: {ex.Message}");
+            return null;
+        }
+        finally
+        {
+            process.StandardInput.Close();
+            if (!process.HasExited)
+            {
+                try
+                {
+                    process.Kill(entireProcessTree: true);
+                }
+                catch (InvalidOperationException)
+                {
+                    // The process raced the reader to a normal exit.
+                }
+            }
+            await stderrDrain.ConfigureAwait(false);
+        }
+    }
+
     internal static async Task<int> RunProtocolAsync(
         CodexBrokerConfiguration configuration,
         string prompt,
@@ -149,27 +208,7 @@ public static class CodexAppServerBroker
         TextWriter error,
         CancellationToken cancellationToken)
     {
-        await SendAsync(serverInput, new JsonObject
-        {
-            ["method"] = "initialize",
-            ["id"] = InitializeRequestId,
-            ["params"] = new JsonObject
-            {
-                ["clientInfo"] = new JsonObject
-                {
-                    ["name"] = "baton",
-                    ["title"] = "Baton Codex broker",
-                    ["version"] = "1",
-                },
-                ["capabilities"] = new JsonObject { ["experimentalApi"] = true },
-            },
-        }, cancellationToken).ConfigureAwait(false);
-        await ReadResponseAsync(serverOutput, InitializeRequestId, error, cancellationToken).ConfigureAwait(false);
-        await SendAsync(serverInput, new JsonObject
-        {
-            ["method"] = "initialized",
-            ["params"] = new JsonObject(),
-        }, cancellationToken).ConfigureAwait(false);
+        await InitializeAsync(serverInput, serverOutput, error, cancellationToken).ConfigureAwait(false);
 
         var threadParams = BuildThreadParams(configuration, policy);
         await SendAsync(serverInput, new JsonObject
@@ -268,7 +307,58 @@ public static class CodexAppServerBroker
         throw new IOException("Codex app-server closed stdout before a terminal turn event.");
     }
 
-    private static Process? StartAppServer(CodexBrokerConfiguration configuration, string isolatedHome)
+    internal static async Task<JsonObject> ReadRateLimitsProtocolAsync(
+        TextWriter serverInput,
+        TextReader serverOutput,
+        TextWriter error,
+        CancellationToken cancellationToken)
+    {
+        await InitializeAsync(serverInput, serverOutput, error, cancellationToken).ConfigureAwait(false);
+        await SendAsync(serverInput, new JsonObject
+        {
+            ["method"] = "account/rateLimits/read",
+            ["id"] = RateLimitsRequestId,
+            ["params"] = new JsonObject(),
+        }, cancellationToken).ConfigureAwait(false);
+        var response = await ReadResponseAsync(
+            serverOutput, RateLimitsRequestId, error, cancellationToken).ConfigureAwait(false);
+        return response["result"] as JsonObject
+            ?? throw new InvalidOperationException("Codex app-server returned no rate-limit result.");
+    }
+
+    private static async Task InitializeAsync(
+        TextWriter serverInput,
+        TextReader serverOutput,
+        TextWriter error,
+        CancellationToken cancellationToken)
+    {
+        await SendAsync(serverInput, new JsonObject
+        {
+            ["method"] = "initialize",
+            ["id"] = InitializeRequestId,
+            ["params"] = new JsonObject
+            {
+                ["clientInfo"] = new JsonObject
+                {
+                    ["name"] = "baton",
+                    ["title"] = "Baton Codex broker",
+                    ["version"] = "1",
+                },
+                ["capabilities"] = new JsonObject { ["experimentalApi"] = true },
+            },
+        }, cancellationToken).ConfigureAwait(false);
+        await ReadResponseAsync(serverOutput, InitializeRequestId, error, cancellationToken).ConfigureAwait(false);
+        await SendAsync(serverInput, new JsonObject
+        {
+            ["method"] = "initialized",
+            ["params"] = new JsonObject(),
+        }, cancellationToken).ConfigureAwait(false);
+    }
+
+    private static Process? StartAppServer(CodexBrokerConfiguration configuration, string isolatedHome) =>
+        StartAppServer(configuration.WorkingDirectory, configuration.AllowsSubagents, isolatedHome);
+
+    private static Process? StartAppServer(string? workingDirectory, bool allowsSubagents, string isolatedHome)
     {
         var startInfo = ChildProcessStartInfo.Create(CodexExecutableResolver.Resolve(), startInfo =>
         {
@@ -282,11 +372,11 @@ public static class CodexAppServerBroker
             startInfo.StandardInputEncoding = JsonLineEncoding;
             startInfo.StandardOutputEncoding = JsonLineEncoding;
             startInfo.StandardErrorEncoding = JsonLineEncoding;
-            startInfo.WorkingDirectory = configuration.WorkingDirectory ?? Environment.CurrentDirectory;
+            startInfo.WorkingDirectory = workingDirectory ?? Environment.CurrentDirectory;
         });
         startInfo.ArgumentList.Add("app-server");
         startInfo.ArgumentList.Add("--stdio");
-        foreach (var feature in DisabledFeatures(configuration.AllowsSubagents))
+        foreach (var feature in DisabledFeatures(allowsSubagents))
         {
             startInfo.ArgumentList.Add("--disable");
             startInfo.ArgumentList.Add(feature);

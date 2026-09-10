@@ -79,7 +79,8 @@ public static class VendorUsageProjectionReader
                     rings?.TryGetValue(w.Name, out ring);
                     var (ratePctPerHour, minutesToExhaustion) = VendorUsageBurn.Derive(ring, w.PercentUsed);
                     return new VendorUsageWindowView(
-                        w.Name, w.PercentUsed, w.ResetsAt, w.RawLine, ratePctPerHour, minutesToExhaustion);
+                        w.Name, w.PercentUsed, w.ResetsAt, w.RawLine, ratePctPerHour,
+                        minutesToExhaustion, w.LimitId, w.WindowKind, w.WindowDurationMins);
                 })
                 .ToList();
             entries.Add(new VendorUsageProjectionView(
@@ -146,7 +147,16 @@ public sealed record VendorUsageWindowView(
     double? RatePctPerHour = null,
     [property: JsonPropertyName("minutesToExhaustion")]
     [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
-    double? MinutesToExhaustion = null);
+    double? MinutesToExhaustion = null,
+    [property: JsonPropertyName("limitId")]
+    [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    string? LimitId = null,
+    [property: JsonPropertyName("windowKind")]
+    [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    string? WindowKind = null,
+    [property: JsonPropertyName("windowDurationMins")]
+    [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    int? WindowDurationMins = null);
 
 /// <summary>
 /// <c>fleet_status</c>'s top-level response shape since issue #1391 — was a bare JSON array of
