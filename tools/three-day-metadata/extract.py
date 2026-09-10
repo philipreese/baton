@@ -77,7 +77,8 @@ QUOTA_OUTCOMES = {
 
 EXACT_WINDOW_DURATION = timedelta(hours=72)
 
-# Ordered, complete work-mix proxy vocabulary. The first matching predicate wins.
+# Ordered, complete work-mix proxy marker vocabulary. The first marker within
+# each evidence source wins; classify_work defines precedence between sources.
 WORK_MIX_RULES = (
     ("review", ("review", "rereview")),
     ("repair", ("fix", "repair", "cleanup")),
@@ -335,9 +336,18 @@ def identity_conflicts(source: str, rows: list[dict[str, Any]]) -> int:
 
 
 def classify_work(item: dict[str, Any]) -> str:
-    text = " ".join(str(item.get(field) or "") for field in ("Tag", "Reason", "Role")).lower()
-    for label, needles in WORK_MIX_RULES:
-        if any(needle in text for needle in needles):
+    def classify_text(raw: Any) -> str | None:
+        text = str(raw or "").lower()
+        for label, needles in WORK_MIX_RULES:
+            if any(needle in text for needle in needles):
+                return label
+        return None
+
+    # Stage is an explicit lifecycle discriminator. A strong tag marker is next
+    # because it can distinguish a fix from the generic implement role. Role is
+    # still explicit and therefore precedes free-form operator prose in Reason.
+    for field in ("Stage", "Tag", "Role", "Reason"):
+        if label := classify_text(item.get(field)):
             return label
     return "other"
 
@@ -487,31 +497,50 @@ def select_lifecycle_evidence(
             for row in (*execution_events, *execution_quotas)
             if (stamp := parse_time(row.get("at"))) is not None
         ]
-        if any(window.contains(stamp) for stamp in observed_times):
-            observed_in_window_ids.add(execution)
-            intersecting_ids.add(execution)
-            continue
         starts = [
             stamp
             for row in execution_events
             if row.get("type") in {"executionAttemptStarted", "executionStarted"}
             and (stamp := parse_time(row.get("at"))) is not None
         ]
-        if not starts or min(starts) > window.end:
-            continue
-        ends = [
+        explicit_ends = [
             stamp
             for row in execution_events
             if (row.get("type") in TERMINAL_EVENT_OUTCOMES or row.get("type") == "executionExited")
             and (stamp := parse_time(row.get("at"))) is not None
         ]
-        ends.extend(
+        quota_ends = [
             stamp
             for row in execution_quotas
             if (stamp := parse_time(row.get("at"))) is not None
-        )
-        if not ends or max(ends) >= window.start:
+        ]
+        earliest_start = min(starts) if starts else None
+        latest_explicit_end = max(explicit_ends) if explicit_ends else None
+        observed_in_window = any(window.contains(stamp) for stamp in observed_times)
+
+        # Enumerate explicit interval bounds before considering incidental
+        # metadata. A capture or quota row cannot reopen an execution whose
+        # recorded terminal interval ended before the frozen window.
+        if latest_explicit_end is not None and latest_explicit_end < window.start:
+            continue
+        if earliest_start is not None and earliest_start > window.end:
+            continue
+        if earliest_start is not None and latest_explicit_end is not None:
+            intersects = earliest_start <= window.end and latest_explicit_end >= window.start
+        elif observed_in_window:
+            intersects = True
+        elif earliest_start is not None:
+            # With no explicit terminal event, a missing later bound remains
+            # censored/open. A quota timestamp is the only available fallback
+            # bound and may still show that the execution ended pre-window.
+            intersects = not quota_ends or max(quota_ends) >= window.start
+        else:
+            intersects = False
+
+        if intersects:
             intersecting_ids.add(execution)
+            if observed_in_window:
+                observed_in_window_ids.add(execution)
 
     joined_events = [
         row
@@ -797,6 +826,31 @@ def apply_exclusions(
     return primary, exclusion_rows, unmatched_ids, matched_ids, status
 
 
+def exclusion_report_text(
+    requested_ids: set[str], matched_ids: set[str], unmatched_ids: list[str]
+) -> tuple[list[str], list[str]]:
+    """Return limitations and next actions consistent with exact-ID matching."""
+    if not requested_ids:
+        return ([
+            "The exact Fable runaway execution IDs were not supplied; no statistical outlier was substituted."
+        ], [
+            "Exact room and execution IDs, with UTC boundaries, for the operator-identified Fable runaway episode."
+        ])
+    if not matched_ids:
+        return ([
+            "The supplied Fable runaway execution IDs matched no interval-overlapping lifecycle; no exclusion was applied and no statistical outlier was substituted."
+        ], [
+            "Correct or confirm the supplied Fable runaway room and execution IDs, with UTC boundaries, because none matched an interval-overlapping lifecycle."
+        ])
+    if unmatched_ids:
+        return ([
+            "Matched Fable runaway execution IDs were excluded from the primary view, but some supplied IDs matched no interval-overlapping lifecycle; no statistical outlier was substituted for them."
+        ], [
+            "Resolve the unmatched supplied Fable runaway execution IDs and confirm their UTC boundaries."
+        ])
+    return [], []
+
+
 def count_by(rows: Iterable[dict[str, Any]], fields: tuple[str, ...]) -> list[dict[str, Any]]:
     counts = Counter(tuple(row.get(field) for field in fields) for row in rows)
     result = []
@@ -959,6 +1013,9 @@ def build_dataset(input_dir: Path, handoff_path: Path | None, exclusion_path: Pa
         matched_exclusion_ids,
         exclusion_status,
     ) = apply_exclusions(exclusion_ids, lifecycles)
+    exclusion_limitations, exclusion_missing_extraction = exclusion_report_text(
+        exclusion_ids, matched_exclusion_ids, unmatched_exclusion_ids
+    )
     candidates = fable_candidates(tables["queue"], lifecycles)
 
     attribution_state_counts = count_by(lifecycles, ("conductor_attribution_state",))
@@ -1059,8 +1116,7 @@ def build_dataset(input_dir: Path, handoff_path: Path | None, exclusion_path: Pa
             "No authoritative conductor handoff intervals or personal conductor usage were supplied."
         ] if not handoffs else [
             "Supplied handoff intervals attribute worker lifecycles only; personal conductor usage remains unavailable, and interval gaps or overlaps stay explicit rather than being allocated."
-        ]) + [
-            "The exact Fable runaway execution IDs were not supplied; no statistical outlier was substituted.",
+        ]) + exclusion_limitations + [
             "Queue decision rows are observed decisions, not a duration measure; suppressed repeats are unknown.",
             "Queue events do not represent full attempt cost, and missing usage fields remain null rather than zero.",
             "Issue, pull-request, review, check, merge, and deployment timestamps are absent from the local snapshot.",
@@ -1072,8 +1128,7 @@ def build_dataset(input_dir: Path, handoff_path: Path | None, exclusion_path: Pa
             "Authoritative UTC conductor ownership intervals, including temporary/shared ownership, plus measured personal conductor usage by interval."
         ] if not handoffs else [
             "Measured personal conductor usage by supplied ownership interval."
-        ]) + [
-            "Exact room and execution IDs, with UTC boundaries, for the operator-identified Fable runaway episode.",
+        ]) + exclusion_missing_extraction + [
             "Window-scoped issue/PR/review/check/merge/deploy timestamps joined by issue, PR, exact head, and deployed revision.",
             "Upstream inventory for rows skipped while the snapshot was created, plus confirmation that the named locked post-cutoff room has no event at or before the cutoff.",
             "Complete per-attempt usage availability/completeness markers and lineage across initial work, repair, and re-review.",
@@ -1569,6 +1624,10 @@ def selftest() -> None:
             "room": "before", "ExecutionId": "before-1", "type": "executionExited",
             "at": "2026-09-07T20:10:00Z",
         },
+        {
+            "room": "before", "ExecutionId": "before-1", "type": "captureResolved",
+            "at": "2026-09-07T20:40:00Z",
+        },
     ]
     crossing_quotas = [{
         "room": "crossing", "execution": "crossing-1", "at": "2026-09-07T20:35:00Z",
@@ -1635,7 +1694,16 @@ def selftest() -> None:
         "before", "after", None,
     }
 
-    # The declared first-match work-mix rule applies even when Role is not review.
+    # Explicit stage, strong tag, and explicit role evidence precede incidental
+    # reason prose; Reason remains a fallback when those sources are silent.
+    assert classify_work({
+        "Tag": "conductor-2194-implement",
+        "Role": "implement",
+        "Reason": "implementation work; independent review separately",
+    }) == "implementation"
+    assert classify_work({
+        "Stage": "Fix", "Role": "implement", "Reason": "review after completion",
+    }) == "repair"
     assert classify_work({"Role": "advise", "Reason": "rereview the evidence"}) == "review"
     assert queue_reason_category({"decision": "waited", "reason": "private novel text"}) == "other"
 
@@ -1710,6 +1778,31 @@ def selftest() -> None:
     ]
     assert unmatched == ["missing-id"] and matched_ids == {"crossing-1"}
     assert status == "applied_matched_exact_ids_with_unmatched_requests"
+
+    # A fully matched exact exclusion must not retain the no-ID limitation or
+    # request the already supplied IDs again in the rendered report.
+    matched_limitations, matched_missing = exclusion_report_text(
+        {"crossing-1"}, {"crossing-1"}, []
+    )
+    matched_report_fixture = {
+        **report_fixture,
+        "exclusion_manifest": {
+            **report_fixture["exclusion_manifest"],
+            "status": "applied_exact_ids",
+            "primary_lifecycle_rows": 0,
+            "exact_exclusions": [
+                {"execution": "crossing-1", "matched_lifecycle": True},
+            ],
+            "unmatched_exclusion_ids": [],
+        },
+        "primary": {**report_fixture["primary"], "lifecycle_row_count": 0, "same_as_inclusive": False},
+        "minimum_missing_extraction": matched_missing,
+        "limitations": matched_limitations,
+    }
+    matched_report = render_report(matched_report_fixture, 20)
+    assert "The exact Fable runaway execution IDs were not supplied" not in matched_report
+    assert "Exact room and execution IDs, with UTC boundaries" not in matched_report
+    assert "Status: **applied_exact_ids**" in matched_report
 
     print("three-day-metadata selftest: PASS (measurement-integrity controls)")
 
