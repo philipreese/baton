@@ -143,6 +143,38 @@ public sealed class QueueImportTests
     }
 
     [Fact]
+    public void A_stage_marker_with_explicit_skills_is_refused_instead_of_imported_as_an_ordinary_item()
+    {
+        const string json = """
+        [
+          {
+            "tag": "snapshot-shaped",
+            "role": "review",
+            "workspace": "C:\\repos\\w2231",
+            "stage": "Review",
+            "skills": ["house-style"]
+          }
+        ]
+        """;
+
+        var ex = Assert.Throws<QueueStoreException>(() => QueueImport.Parse(json, SpecFor, Now));
+        Assert.Contains("scratchpad runner format", ex.Message, StringComparison.Ordinal);
+        Assert.Contains("no lifecycle stages", ex.Message, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void An_unknown_non_lifecycle_field_does_not_turn_the_scratchpad_importer_into_a_snapshot_validator()
+    {
+        const string json = """
+        [{ "tag": "scratchpad", "role": "review", "workspace": "C:\\repos\\w2231", "futureField": 1 }]
+        """;
+
+        var item = Assert.Single(QueueImport.Parse(json, SpecFor, Now));
+        Assert.Null(item.Stage);
+        Assert.Null(item.Skills);
+    }
+
+    [Fact]
     public void A_file_that_is_not_the_runners_shape_is_refused_with_a_sentence()
     {
         var ex = Assert.Throws<QueueStoreException>(() => QueueImport.Parse("""{"queue": 3}""", SpecFor, Now));

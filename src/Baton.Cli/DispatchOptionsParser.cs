@@ -305,6 +305,13 @@ public static class DispatchOptionsParser
         var sawBlank = false;
         foreach (var value in rawValues)
         {
+            if (value is null)
+            {
+                throw new CliArgumentException(
+                    "A skill declaration cannot be null; every '--skill' entry must name a package.",
+                    "remove null skill entries, or replace each one with the skill package name to attach.");
+            }
+
             var trimmed = value.Trim();
             if (trimmed.Length == 0)
             {

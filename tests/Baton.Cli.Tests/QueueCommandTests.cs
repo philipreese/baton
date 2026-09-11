@@ -1244,6 +1244,32 @@ public sealed class QueueCommandTests
     }
 
     [Fact]
+    public async Task Import_refuses_a_null_skill_entry_without_writing_the_queue()
+    {
+        var home = CreateTempHome();
+        using var scope = BatonEnvironmentSnapshot.BeginScope(BatonEnvironmentSnapshot.Blank with { HomeOverride = home });
+        try
+        {
+            var import = Path.Combine(home, "scratchpad.json");
+            await File.WriteAllTextAsync(
+                import,
+                """[{ "tag": "skills", "role": "review", "workspace": "C:\\scratch\\w2231", "skills": [null] }]""",
+                Ct);
+
+            var refusal = await Assert.ThrowsAsync<CliArgumentException>(() => QueueCommand.ExecuteAsync(
+                new QueueOptions(QueueVerb.Import, ImportFilePath: import), TextWriter.Null, Ct));
+
+            Assert.Contains("cannot be null", refusal.Message, StringComparison.Ordinal);
+            Assert.Contains("remove null skill entries", refusal.TryInvocation!, StringComparison.Ordinal);
+            Assert.False(File.Exists(BatonPaths.QueueFile));
+        }
+        finally
+        {
+            DirectoryCleanup.DeleteRecursively(home);
+        }
+    }
+
+    [Fact]
     public async Task Cancel_reports_a_missing_tag_without_recording_a_false_cancellation()
     {
         var home = CreateTempHome();
