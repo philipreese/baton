@@ -45,6 +45,12 @@ public sealed class DirectGhPullRequestCreateTests
     [InlineData("sh -c \"gh pr create --fill\"")]
     [InlineData("cmd /c \"gh pr create --fill\"")]
     [InlineData("pwsh -Command \"gh pr create --fill\"")]
+    [InlineData("cmd /c \"gh pr create&echo done\"")]
+    [InlineData("cmd /c \"gh pr create&&echo done\"")]
+    [InlineData("cmd /c \"gh pr create|echo done\"")]
+    [InlineData("cmd /c \"gh pr create||echo done\"")]
+    [InlineData("sh -c 'gh pr create;true'")]
+    [InlineData("sh -c \"gh pr create\ntrue\"")]
     public void Ambiguous_or_out_of_scope_create_is_refused(string commandLine)
     {
         var compiled = DirectGhPullRequestCreate.Compile(commandLine, Provenance);

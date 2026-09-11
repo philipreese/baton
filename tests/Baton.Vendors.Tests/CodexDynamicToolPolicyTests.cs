@@ -1791,6 +1791,32 @@ public sealed class CodexDynamicToolPolicyTests
         Assert.False(File.Exists(fixture.DirectGhArguments));
     }
 
+    [Theory]
+    [InlineData("cmd /c \"{gh} pr create&echo done\"")]
+    [InlineData("cmd /c \"{gh} pr create&&echo done\"")]
+    [InlineData("cmd /c \"{gh} pr create|echo done\"")]
+    [InlineData("cmd /c \"{gh} pr create||echo done\"")]
+    [InlineData("sh -c '{gh} pr create;true'")]
+    [InlineData("sh -c \"{gh} pr create\ntrue\"")]
+    public async Task Attached_control_in_a_readable_shell_wrapped_create_is_refused_before_spawn(
+        string commandTemplate)
+    {
+        using var fixture = new PolicyFixture(
+            WorkerRoleCatalog.For("implement").Grant,
+            ["changes.md"],
+            directGhOutput: "https://github.com/aer-works/baton/pull/2005");
+        var gh = ShimGh(fixture.Workspace, "unexpected shell fallback");
+        var commandLine = commandTemplate.Replace("{gh}", gh, StringComparison.Ordinal);
+
+        var result = await fixture.ExecuteAsync(
+            CodexDynamicToolPolicy.RunCommandTool, new { command = commandLine });
+
+        Assert.False(result.Success);
+        Assert.Contains(GrantRefusal.Marker, result.Text, StringComparison.Ordinal);
+        Assert.Contains("gh pr create", result.Text, StringComparison.Ordinal);
+        Assert.False(File.Exists(fixture.DirectGhArguments));
+    }
+
     [Fact]
     public async Task A_normal_non_create_shell_workflow_still_executes()
     {
@@ -1798,6 +1824,19 @@ public sealed class CodexDynamicToolPolicyTests
 
         var result = await fixture.ExecuteAsync(
             CodexDynamicToolPolicy.RunCommandTool, new { command = "echo ordinary-workflow" });
+
+        Assert.True(result.Success, result.Text);
+        Assert.Contains("ordinary-workflow", result.Text, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task A_non_create_command_with_attached_control_still_executes()
+    {
+        using var fixture = new PolicyFixture(WorkerRoleCatalog.For("implement").Grant, ["changes.md"]);
+
+        var result = await fixture.ExecuteAsync(
+            CodexDynamicToolPolicy.RunCommandTool,
+            new { command = "echo ordinary-workflow&&echo done" });
 
         Assert.True(result.Success, result.Text);
         Assert.Contains("ordinary-workflow", result.Text, StringComparison.Ordinal);

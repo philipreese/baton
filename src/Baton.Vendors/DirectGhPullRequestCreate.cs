@@ -163,7 +163,12 @@ internal static class DirectGhPullRequestCreate
 
     private static bool ContainsCreateTokens(string text)
     {
+        // This is conservative recognition, not shell parsing: a readable wrapper body that
+        // attaches a control operator to any word must not hide `gh pr create` from the direct
+        // compiler. Newlines are already whitespace separators below; the remaining supported
+        // wrapper controls are lexical boundaries whether they occur once or doubled.
         var tokens = text.Split((char[]?)null, StringSplitOptions.RemoveEmptyEntries)
+            .SelectMany(token => token.Split(['&', '|', ';'], StringSplitOptions.RemoveEmptyEntries))
             .Select(StripShellWrapperCharacters)
             .ToArray();
         for (var i = 0; i + 2 < tokens.Length; i++)
