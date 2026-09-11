@@ -9,6 +9,32 @@ that carried them: `git show v0.35.0:src/Baton.Cli/CHANGELOG.md` (likewise `src/
 `release-please-config.json`. Everything below this line predates the split: the repo's single
 shared version through `0.14.0`.
 
+## [0.47.0](https://github.com/philipreese/baton/compare/v0.46.0...v0.47.0) (2026-09-11)
+
+
+### Features
+
+* **dispatch:** Refuse brief and grant mismatches before vendor launch ([#2237](https://github.com/philipreese/baton/issues/2237)) ([843d6fd](https://github.com/philipreese/baton/commit/843d6fdb89a987322e8c340d18b052e59eb84770))
+* **memory:** Make projection durable and automatic ([#2223](https://github.com/philipreese/baton/issues/2223)) ([408d2ee](https://github.com/philipreese/baton/commit/408d2eea076a4664ff7c46a4e2db426cc83eecb2))
+* **queue:** Preserve declared worker skills ([#2232](https://github.com/philipreese/baton/issues/2232)) ([5f86400](https://github.com/philipreese/baton/commit/5f864000c3564e2bd922c570206c814cce3f2156))
+
+
+### Bug Fixes
+
+* **broker:** Verify pull request ownership ([#2230](https://github.com/philipreese/baton/issues/2230)) ([fedede9](https://github.com/philipreese/baton/commit/fedede9e88c981b8ed88cafc439a3ae4fdd00e5f))
+* **ci:** Add validated release recovery ([#2227](https://github.com/philipreese/baton/issues/2227)) ([8283e4e](https://github.com/philipreese/baton/commit/8283e4e1fa1a8cfa1e92b00280c633b3dc50ff30))
+* **dispatch:** Refuse conductor-tier worker models ([#2235](https://github.com/philipreese/baton/issues/2235)) ([1d2a124](https://github.com/philipreese/baton/commit/1d2a124e1c88b6e66f90c927a2b1aa205f813dd1))
+* **glass:** Restore-grouped-PR-twin-cues ([#2224](https://github.com/philipreese/baton/issues/2224)) ([8681da4](https://github.com/philipreese/baton/commit/8681da488b0c60cdba63dbcde8aa518ad3f78bd1))
+* **queue:** Add measurement completion role ([#2226](https://github.com/philipreese/baton/issues/2226)) ([523878a](https://github.com/philipreese/baton/commit/523878a30d33cb9d74b462409e06efd79bf95989))
+* **queue:** Resolve repository for issue provisioning ([#2228](https://github.com/philipreese/baton/issues/2228)) ([ae1840c](https://github.com/philipreese/baton/commit/ae1840cf6e7b8dd4982893031766c0a6be159470))
+* **queue:** Separate current PR observations ([#2220](https://github.com/philipreese/baton/issues/2220)) ([1e4d0ab](https://github.com/philipreese/baton/commit/1e4d0abf65480c9063bbff05a2b071e1051fb5f6))
+* **vendors:** Make volatile timeout phase proof deterministic ([#2221](https://github.com/philipreese/baton/issues/2221)) ([43cd559](https://github.com/philipreese/baton/commit/43cd5592bb04d23d54b1afd7ada24002f45ce6c6))
+
+
+### Tests
+
+* **vendors:** Synchronize volatile failure fixture ([#2229](https://github.com/philipreese/baton/issues/2229)) ([3ee9bfa](https://github.com/philipreese/baton/commit/3ee9bfa9048d937ff67c370c79a6fc5118430cea))
+
 ## [0.46.0](https://github.com/philipreese/baton/compare/v0.45.0...v0.46.0) (2026-09-11)
 
 
