@@ -50,6 +50,19 @@ public sealed record QueueItem
     public IReadOnlyList<string>? Skills { get; init; }
 
     /// <summary>
+    /// Explicit capabilities this task needs. Null is a compatibility row whose requirements are
+    /// unknown; an empty list is an explicit declaration of none. <see cref="TaskRequirements"/>
+    /// owns the vocabulary and normalization.
+    /// </summary>
+    public IReadOnlyList<string>? Requirements { get; init; }
+
+    /// <summary>
+    /// The most recent local admission comparison. Kept on the item as well as the append-only queue
+    /// ledger so the current queue row stays inspectable after the role catalog changes.
+    /// </summary>
+    public TaskRequirementAdmission? LastAdmission { get; init; }
+
+    /// <summary>
     /// Per-stage axes for a lifecycle item. Null, rather than an empty list, is significant for a
     /// pre-stage-selection persisted item; see <see cref="QueueTierTable.ResolveForStage"/>.
     /// </summary>

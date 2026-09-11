@@ -68,6 +68,29 @@ public sealed class QueueOptionsParserTests
     }
 
     [Fact]
+    public void Add_normalizes_declared_task_requirements_and_writes_an_explicit_empty_declaration()
+    {
+        var declared = QueueOptionsParser.Parse([
+            "add", "t", "--role", "implement", "--spec", "b.md", "--workspace", "C:\\x",
+            "--require", " File-Write ", "--require", "artifact:Gate-Receipt.json", "--require", "file-write",
+        ]);
+
+        Assert.Equal(["file-write", "artifact:gate-receipt.json"], declared.Requirements);
+        Assert.Empty(QueueOptionsParser.Parse(
+            ["add", "t", "--role", "review", "--spec", "b.md", "--workspace", "C:\\x"]).Requirements!);
+    }
+
+    [Fact]
+    public void Add_refuses_an_unknown_task_requirement()
+    {
+        var ex = Assert.Throws<CliArgumentException>(() => QueueOptionsParser.Parse([
+            "add", "t", "--role", "review", "--spec", "b.md", "--workspace", "C:\\x", "--require", "deploy",
+        ]));
+
+        Assert.Contains("Unknown task requirement", ex.Message, StringComparison.Ordinal);
+    }
+
+    [Fact]
     public void Add_refuses_contradictory_skill_values_and_any_lifecycle_skill_policy()
     {
         var contradictory = Assert.Throws<CliArgumentException>(() => QueueOptionsParser.Parse([

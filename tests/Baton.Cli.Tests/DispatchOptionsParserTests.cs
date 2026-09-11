@@ -682,4 +682,15 @@ public class DispatchOptionsParserTests
     {
         Assert.Contains("--override-runway <reason>", DispatchOptionsParser.Usage, StringComparison.Ordinal);
     }
+
+    [Fact]
+    public void It_normalizes_direct_dispatch_requirement_declarations()
+    {
+        var options = DispatchOptionsParser.Parse([
+            "advise", "--spec", "brief.md", "--require", " File-Write ", "--require", "artifact:Gate-Receipt.json",
+        ]);
+
+        Assert.Equal(["file-write", "artifact:gate-receipt.json"], options.Requirements);
+        Assert.Contains("--require <capability>", DispatchOptionsParser.Usage, StringComparison.Ordinal);
+    }
 }

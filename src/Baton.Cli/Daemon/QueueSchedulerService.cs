@@ -202,9 +202,10 @@ public sealed class QueueSchedulerService : BackgroundService
 
             var item = decision.Item!;
             QueueTierResolution tier;
+            WorkerRole role;
             try
             {
-                _ = WorkerRoleCatalog.For(item.Role);
+                role = WorkerRoleCatalog.For(item.Role);
                 tier = item.Stage is { } stage
                     ? QueueTierTable.ResolveForStage(
                         item, stage, settings, WorkerRoleCatalog.QueueTierFor, WorkerRoleCatalog.QueueTierForRole)
@@ -260,6 +261,27 @@ public sealed class QueueSchedulerService : BackgroundService
                 return interval;
             }
 
+            // The role catalog is read on every admission, rather than trusting the grant that was
+            // current when queue add ran. A role change between those moments is exactly the stale
+            // authority this preflight is meant to catch, and this check is still before a room claim,
+            // worktree operation, or vendor spawn.
+            var admission = TaskRequirementPreflight.Evaluate(
+                item, role, settings.RequireDeclaredRequirements);
+            if (admission.Result == TaskRequirementAdmission.Refused)
+            {
+                var missing = admission.Missing is { Count: > 0 }
+                    ? string.Join(", ", admission.Missing)
+                    : "an invalid requirement declaration";
+                await FailAsync(
+                    item,
+                    $"task requirements are incompatible with role '{item.Role}'s effective grant: missing {missing}. "
+                    + "Choose a role whose grant supplies the requirement, or amend the task declaration; requirements never grant authority.",
+                    room: null, now, decision, tier, cancellationToken, admission).ConfigureAwait(false);
+                return interval;
+            }
+
+            item = item with { LastAdmission = admission };
+
             // The launch is RECORDED BEFORE IT IS STARTED, and started under the same token it was recorded
             // under -- spec/baton.md §13 states that ruling and the duplicate-worker failure it closes.
             // What belongs here rather than there: the two writes are deliberately asymmetric. The ITEM is
@@ -278,7 +300,8 @@ public sealed class QueueSchedulerService : BackgroundService
             await QueueStore.MutateAsync(BatonPaths.QueueFile, snapshot =>
             {
                 var current = snapshot.Items.FirstOrDefault(i => string.Equals(i.Tag, item.Tag, StringComparison.Ordinal));
-                if (current?.State != QueueItemState.Queued)
+                if (current?.State != QueueItemState.Queued
+                    || !HasSameAdmissionDeclaration(current, item))
                 {
                     return snapshot;
                 }
@@ -292,6 +315,7 @@ public sealed class QueueSchedulerService : BackgroundService
                         RoomDirectory = roomDirectory,
                         LaunchedAt = now,
                         Error = null,
+                        LastAdmission = admission,
                     }),
                 };
             }, CancellationToken.None).ConfigureAwait(false);
@@ -354,7 +378,7 @@ public sealed class QueueSchedulerService : BackgroundService
                         QueueWaitReasons.Token(QueueWaitReason.RunwayHeld),
                         decision.LiveWeight, decision.FreeGb, decision.FloorGb,
                         tier.TierKey, tier.Adapter, tier.Model, tier.Effort, tier.IsOverride, tier.OverrideReason,
-                        SelectionSource: tier.SelectionSource),
+                        SelectionSource: tier.SelectionSource, Admission: admission),
                     cancellationToken).ConfigureAwait(false);
                 return interval;
             }
@@ -375,7 +399,7 @@ public sealed class QueueSchedulerService : BackgroundService
                     now, item.Tag, QueueDecisionEntry.Launched, null,
                     decision.LiveWeight, decision.FreeGb, decision.FloorGb,
                     tier.TierKey, tier.Adapter, tier.Model, tier.Effort, tier.IsOverride, tier.OverrideReason,
-                    outcome.RoomDirectory ?? roomDirectory, tier.SelectionSource),
+                    outcome.RoomDirectory ?? roomDirectory, tier.SelectionSource, admission),
                 CancellationToken.None).ConfigureAwait(false);
 
             return interval;
@@ -437,7 +461,8 @@ public sealed class QueueSchedulerService : BackgroundService
         DateTimeOffset now,
         QueueDecision decision,
         QueueTierResolution tier,
-        CancellationToken cancellationToken)
+        CancellationToken cancellationToken,
+        TaskRequirementAdmission? admission = null)
     {
         // RoomDirectory is assigned, never merged with what the item already carried: the pre-launch
         // mark writes the room the dispatch was GOING to use, and a refusal that never provisioned it
@@ -447,6 +472,7 @@ public sealed class QueueSchedulerService : BackgroundService
             State = QueueItemState.Failed,
             Error = error,
             RoomDirectory = room,
+            LastAdmission = admission ?? existing.LastAdmission,
         }).ConfigureAwait(false);
 
         await RecordAsync(
@@ -454,7 +480,7 @@ public sealed class QueueSchedulerService : BackgroundService
                 now, item.Tag, QueueDecisionEntry.Failed, error,
                 decision.LiveWeight, decision.FreeGb, decision.FloorGb,
                 tier.TierKey, tier.Adapter, tier.Model, tier.Effort, tier.IsOverride, tier.OverrideReason, room,
-                tier.SelectionSource),
+                tier.SelectionSource, admission),
             cancellationToken).ConfigureAwait(false);
     }
 
@@ -650,6 +676,20 @@ public sealed class QueueSchedulerService : BackgroundService
     private static IReadOnlyList<QueueItem> Replace(
         IReadOnlyList<QueueItem> items, string tag, Func<QueueItem, QueueItem> update) =>
         items.Select(i => string.Equals(i.Tag, tag, StringComparison.Ordinal) ? update(i) : i).ToList();
+
+    /// <summary>
+    /// The preflight verdict is meaningful only for the exact role and requirement declaration it
+    /// inspected. Queue replacement is allowed while an item is queued, so claiming by tag/state
+    /// alone could otherwise launch a just-replaced imported task under the old verdict.
+    /// </summary>
+    private static bool HasSameAdmissionDeclaration(QueueItem current, QueueItem admitted) =>
+        string.Equals(current.Role, admitted.Role, StringComparison.Ordinal)
+        && SameRequirements(current.Requirements, admitted.Requirements);
+
+    private static bool SameRequirements(IReadOnlyList<string>? left, IReadOnlyList<string>? right) =>
+        left is null || right is null
+            ? left is null && right is null
+            : left.SequenceEqual(right, StringComparer.Ordinal);
 
     /// <summary>
     /// The live tally, over the SAME room scan <c>fleet_status</c> and

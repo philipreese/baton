@@ -225,7 +225,7 @@ A harness invokes work two ways, both in `src/Baton.Cli/Program.cs`:
   workflow nobody has decided.
 - **`baton dispatch <name> [--spec <spec-file> | --spec - | --spec-text <text>] [--adapter <name>] [--model <name>] [--effort <name>]
   [--room-dir <dir>] [--workspace <dir>] [--workflow-id <id>] [--output <path>] [--timeout <minutes>]
-  [--token-budget <n>] [--max-tool-steps <n>] [--billed-rate-limit <n>] [--label <text>] [--workstream <slug>]`**
+  [--token-budget <n>] [--max-tool-steps <n>] [--billed-rate-limit <n>] [--require <capability>] [--label <text>] [--workstream <slug>]`**
   — the one-shot form: `<name>` resolves to either a worker role (needs a spec) or a built-in
   template (`src/Baton.Cli/DispatchOptionsParser.cs`). A role's task prompt has three mutually exclusive
   sources (#1518): a file (`--spec`), stdin (`--spec -`, refused outright on a non-redirected terminal
@@ -238,7 +238,12 @@ A harness invokes work two ways, both in `src/Baton.Cli/Program.cs`:
   second `baton dispatch review` reruns rather than resuming the first's terminal snapshot. Bindings are
   written into the room directory by `DispatchCommand.ExecuteAsync`
   (`src/Baton.Cli/DispatchCommand.cs`, via `WorkerBindingConfigWriter.SaveToFileAsync`) before
-  `RunCommand` is invoked underneath it. `--timeout` (#1442) overrides the dispatched role's own
+  `RunCommand` is invoked underneath it. `--require` uses the queue requirement vocabulary and
+  compares a role dispatch to its materialized binding's actual grant and output contract before the
+  room directory or a vendor process exists; a mismatch cannot widen the grant and refuses with the
+  missing capability. The admitted declaration is retained on `bindings.json`. A non-empty declaration
+  is refused for a workflow template because it has multiple grants rather than one role to compare.
+  `--timeout` (#1442) overrides the dispatched role's own
   catalog timeout for just this dispatch, recorded into that same `bindings.json` (never
   `workflow.json` — a worker's timeout has always been kept off the frozen `WorkflowDefinitionSnapshot`,
   the M7 Phase 7 split `WorkerBindingConfigEntry`'s own doc states). It is the escape hatch for a role
@@ -430,7 +435,7 @@ carry is the conductor's own merging rules, which are the conductor's and never 
 | Verb | Usage | Source |
 |---|---|---|
 | `run` | `baton run <workflow-file> --bindings <bindings-file> [--room-dir <dir>] [--workflow-id <id>] [--echo-worker] [--register] [--wait] [--wait-timeout <minutes>]` | `RunOptionsParser.cs` |
-| `dispatch` | `baton dispatch <name> [--spec <spec-file> \| --spec - \| --spec-text <text>] [--attach <file>] [--skill <name>] [--no-default-skills] [--adapter <name>] [--model <name>] [--effort <name>] [--room-dir <dir>] [--workspace <dir>] [--workflow-id <id>] [--output <path>] [--timeout <minutes>] [--token-budget <n>] [--max-tool-steps <n>] [--billed-rate-limit <n>] [--verify <cmd>] [--verify-cmd <cmd>] [--verify-timeout <minutes>] [--expect-pr <true\|false>] [--continue <room-dir>] [--override-runway <reason>] [--label <text>] [--workstream <slug>] [--repo <checkout-dir>] [--list-capabilities]` | `DispatchOptionsParser.cs` |
+| `dispatch` | `baton dispatch <name> [--spec <spec-file> \| --spec - \| --spec-text <text>] [--attach <file>] [--skill <name>] [--require <capability>] [--no-default-skills] [--adapter <name>] [--model <name>] [--effort <name>] [--room-dir <dir>] [--workspace <dir>] [--workflow-id <id>] [--output <path>] [--timeout <minutes>] [--token-budget <n>] [--max-tool-steps <n>] [--billed-rate-limit <n>] [--verify <cmd>] [--verify-cmd <cmd>] [--verify-timeout <minutes>] [--expect-pr <true\|false>] [--continue <room-dir>] [--override-runway <reason>] [--label <text>] [--workstream <slug>] [--repo <checkout-dir>] [--list-capabilities]` | `DispatchOptionsParser.cs` |
 | `redispatch` | `baton redispatch <room-dir> [--spec <amended-brief>] [--attach <file>] [--adapter <name>] [--model <name>] [--effort <name>] [--workspace <dir>] [--output <path>] [--timeout <minutes>] [--token-budget <n>] [--max-tool-steps <n>] [--billed-rate-limit <n>] [--verify <cmd>] [--skill <name>] [--no-default-skills] [--label <text>] [--workstream <slug>]` | `RedispatchOptionsParser.cs` |
 | `resume` | `baton resume <room-dir> --worker <role> (--message <text> \| --message-file <path>) --bindings <bindings-file> [--workflow-id <id>]` | `ResumeOptionsParser.cs` |
 | `decide` | `baton decide <room-dir> --execution <execution-id> --type resume\|reject\|retry-with-revision\|supersede [--target-step <step-id>] [--supplementary <execution-id>] --bindings <bindings-file> [--workflow-id <id>]` | `DecideOptionsParser.cs` |
@@ -6955,6 +6960,20 @@ launcher forwards every retained name as its own `--skill`, `<name>` argument pa
 a shell string. A lifecycle item refuses any explicit `--skill` for now: choosing per-stage versus
 whole-lifecycle attachment is policy, and the queue does not silently choose one.
 
+`--require <capability>` is repeatable task metadata, not a grant request. The initial vocabulary is
+`repository-read`, `file-write`, `shell`, `network`, `github-read`, `github-write`, and
+`artifact:<declared-output-name>`. Before claiming a room, provisioning a worktree, or starting a
+vendor process, the scheduler reads the current role catalog and compares these requirements to the
+effective grant — including its scoped `gh` shell patterns and declared output contract. A mismatch
+fails that item with the missing capability and a remedy; it never widens a role or guesses from the
+brief's prose. The item and its decision-ledger fact retain requested requirements, the effective
+grant, the admission result, and zero vendor usage for that refusal, so the avoided spend remains
+auditable. `queue list` prints each declaration and aggregate coverage. A missing `requirements` field
+is visibly `unknown` during compatibility migration (distinct from a present empty list). When every
+producer has been upgraded, `Queue.RequireDeclaredRequirements: true` fails an execution-bearing
+legacy row closed; legacy read-only rows remain unknown. This switch is deliberately explicit: coverage
+is observable before the fail-closed transition rather than inferred from a date or a brief.
+
 **No verb launches anything.** Adding an item is a durable request; the running daemon is the only
 thing that dispatches, which is what keeps one auditable path into a room. `hold`/`resume` pause
 launches without stopping the daemon — the usage harvester, the projection writer and the delivery
@@ -7023,6 +7042,7 @@ gap silently, and neither is a setting anyone means.
 | `Tiers` | see below | Overlaid on the shipped table entry by entry, so naming one key does not lose the others. |
 | `AdapterDefaultModels` | `agy` → `gemini-3.8-flash-high` | Model for an item whose tier names an adapter and no model. |
 | `WorktreeRoot` | parent of the invoking checkout | Where `--issue` puts `w<n>`. |
+| `RequireDeclaredRequirements` | `false` | After requirement-producer migration, refuse a requirement-less execution-bearing legacy row; read-only legacy rows stay visibly unknown. |
 
 **Lane weights: implement 1.0 on every adapter, `review` 0.** One function computes both the live
 tally over running rooms and the candidate's own weight; two copies would drift and the cap would
@@ -7331,7 +7351,9 @@ and cost ledgers share. Fields: `at`, `tag`, `decision` (`launched` | `waited` |
 `liveWeight`,
 `freeGb` (absent when unmeasured), `floorGb`, `tier`, `adapter`, `model`, `effort`, `tierOverride`,
 `overrideReason`, `room`, `selectionSource` (`StageDefault` | `StageOverride` | `LifecyclePin` |
-`PersistedLifecycleCompatibility`).
+`PersistedLifecycleCompatibility`), and optional `admission` (`requestedRequirements`, `effectiveGrant`,
+`result`, `missing`, `vendorUsage`). An admission refusal records `vendorUsage: 0`: it happened before
+any vendor process could run.
 
 **`cancelled` is the retained pre-launch cancellation fact.** Its `at` is the item's
 `CancelledAt`, its `tag` names that retained item, and its reason is `operator cancelled before

@@ -15,7 +15,7 @@ public static class DispatchOptionsParser
 {
     /// <summary>The one copy of <c>baton dispatch</c>'s usage line, printed here on error and by <c>Program</c>.</summary>
     public const string Usage =
-        "Usage: baton dispatch <name> [--spec <spec-file> | --spec - | --spec-text <text>] [--attach <file>] [--skill <name>] [--no-default-skills] [--adapter <name>] [--model <name>] [--effort <name>] [--room-dir <dir>] [--workspace <dir>] [--workflow-id <id>] [--output <path>] [--timeout <minutes>] [--token-budget <n>] [--max-tool-steps <n>] [--billed-rate-limit <n>] [--verify <cmd>] [--verify-cmd <cmd>] [--verify-timeout <minutes>] [--expect-pr <true|false>] [--continue <room-dir>] [--override-runway <reason>] [--label <text>] [--workstream <slug>] [--repo <checkout-dir>] [--list-capabilities]";
+        "Usage: baton dispatch <name> [--spec <spec-file> | --spec - | --spec-text <text>] [--attach <file>] [--skill <name>] [--require <capability>] [--no-default-skills] [--adapter <name>] [--model <name>] [--effort <name>] [--room-dir <dir>] [--workspace <dir>] [--workflow-id <id>] [--output <path>] [--timeout <minutes>] [--token-budget <n>] [--max-tool-steps <n>] [--billed-rate-limit <n>] [--verify <cmd>] [--verify-cmd <cmd>] [--verify-timeout <minutes>] [--expect-pr <true|false>] [--continue <room-dir>] [--override-runway <reason>] [--label <text>] [--workstream <slug>] [--repo <checkout-dir>] [--list-capabilities]";
 
     /// <summary>
     /// <c>--label</c>'s cap (#1499) — a Fleet Glass room title, not a description; long enough for "the
@@ -80,6 +80,7 @@ public static class DispatchOptionsParser
         string? overrideRunwayReason = null;
         var attachments = new List<string>();
         var skills = new List<string>();
+        var requirements = new List<string>();
         var noDefaultSkills = false;
         var listCapabilities = false;
 
@@ -124,6 +125,9 @@ public static class DispatchOptionsParser
                     break;
                 case "--skill":
                     skills.Add(RequireValue(args, ref i, arg));
+                    break;
+                case "--require":
+                    requirements.Add(RequireValue(args, ref i, arg));
                     break;
                 case "--adapter":
                     adapter = RequireValue(args, ref i, arg);
@@ -279,7 +283,20 @@ public static class DispatchOptionsParser
             verifyTimeout,
             overrideRunwayReason,
             NormalizeSkills(skills),
-            noDefaultSkills);
+            noDefaultSkills,
+            requirements.Count > 0 ? NormalizeRequirements(requirements) : null);
+    }
+
+    private static IReadOnlyList<string> NormalizeRequirements(IReadOnlyList<string> requirements)
+    {
+        try
+        {
+            return Baton.Queue.TaskRequirements.Normalize(requirements);
+        }
+        catch (ArgumentException ex)
+        {
+            throw new CliArgumentException(ex.Message, "pass a supported --require value, or remove the declaration.");
+        }
     }
 
     /// <summary>

@@ -89,6 +89,44 @@ public static class QueueCommand
 
         var settings = await DaemonSettingsStore.LoadAsync(BatonPaths.SettingsFile, cancellationToken).ConfigureAwait(false);
         var (adapter, tier, adapterFromModel, stageSelections) = ResolveTierForAdd(options, settings.Queue);
+        IReadOnlyList<string> requirements;
+        try
+        {
+            // QueueOptionsParser owns CLI syntax, but this command also has an in-process test and
+            // host seam. Keep the persisted record canonical on both paths; null here means an old
+            // imported row, never a freshly added task.
+            requirements = TaskRequirements.Normalize(options.Requirements ?? []);
+        }
+        catch (ArgumentException ex)
+        {
+            throw new CliArgumentException(ex.Message, "pass a supported --require value, or remove the declaration.");
+        }
+
+        // `--issue` provisions a worktree at queue-add time. Check the role against this task's
+        // declaration before that side effect, not merely later in the daemon; the scheduler repeats
+        // it for imported/hand-edited rows and any role-catalog change between add and launch.
+        var role = WorkerRoleCatalog.For(options.Role!);
+        var admission = TaskRequirementPreflight.Evaluate(
+            new QueueItem
+            {
+                Tag = options.Tag!,
+                Role = options.Role!,
+                Workspace = "",
+                SpecFile = "",
+                Requirements = requirements,
+            },
+            role,
+            settings.Queue.RequireDeclaredRequirements);
+        if (admission.Result == TaskRequirementAdmission.Refused)
+        {
+            var missing = admission.Missing is { Count: > 0 }
+                ? string.Join(", ", admission.Missing)
+                : "an invalid requirement declaration";
+            throw new CliArgumentException(
+                $"Task requirements are incompatible with role '{options.Role}'s effective grant: missing {missing}. "
+                + "Requirements never grant authority.",
+                "choose a role whose grant supplies the requirement, or amend --require before queueing the task.");
+        }
 
         // #2142: queue admission uses the already-resolved tuple the launcher will forward, not the
         // raw item fields and not RoleDispatch's display-only stamp. Refuse before the early tag read,
@@ -150,6 +188,8 @@ public static class QueueCommand
             Model = options.Model,
             Effort = options.Effort,
             Skills = options.Skills,
+            Requirements = requirements,
+            LastAdmission = admission,
             StageSelections = stageSelections,
             LifecyclePin = options.LifecyclePin,
             TimeoutMinutes = options.TimeoutMinutes,
@@ -338,7 +378,22 @@ public static class QueueCommand
             {
                 output.WriteLine($"  error: {error}");
             }
+            output.WriteLine(item.Requirements is null
+                ? "  requirements: unknown (legacy migration row)"
+                : $"  requirements: {(item.Requirements.Count == 0 ? "none" : string.Join(", ", item.Requirements))}");
+            if (item.LastAdmission is { } admission)
+            {
+                var missing = admission.Missing is { Count: > 0 }
+                    ? $"; missing {string.Join(", ", admission.Missing)}"
+                    : string.Empty;
+                output.WriteLine($"  admission: {admission.Result}{missing}; effective grant: "
+                    + $"{(admission.EffectiveGrant.Count == 0 ? "none" : string.Join(", ", admission.EffectiveGrant))}");
+            }
         }
+
+        var known = snapshot.Items.Count(item => item.Requirements is not null);
+        output.WriteLine($"Requirement coverage: {known}/{snapshot.Items.Count} declared; "
+            + $"{snapshot.Items.Count - known} unknown migration row(s).");
 
         return 0;
     }

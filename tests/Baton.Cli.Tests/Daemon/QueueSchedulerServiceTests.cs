@@ -217,6 +217,282 @@ public sealed class QueueSchedulerServiceTests
     }
 
     [Fact]
+    public async Task A_write_and_shell_brief_under_advise_is_refused_before_a_room_or_vendor_launch()
+    {
+        var home = CreateTempHome();
+        using var scope = BatonEnvironmentSnapshot.BeginScope(BatonEnvironmentSnapshot.Blank with { HomeOverride = home });
+        try
+        {
+            await QueueStore.MutateAsync(BatonPaths.QueueFile, s => s with
+            {
+                Items = [Item(role: "advise") with { Requirements = ["file-write", "shell"] }],
+            }, Ct);
+            var launched = false;
+            var service = Service((_, _) =>
+            {
+                launched = true;
+                return Task.FromResult(new QueueLaunchOutcome(null));
+            });
+
+            await service.TickOnceAsync(Ct);
+
+            Assert.False(launched);
+            var item = Assert.Single((await QueueStore.LoadAsync(BatonPaths.QueueFile, Ct)).Items);
+            Assert.Equal(QueueItemState.Failed, item.State);
+            Assert.Null(item.RoomDirectory);
+            Assert.Equal(TaskRequirementAdmission.Refused, item.LastAdmission!.Result);
+            Assert.Equal(["file-write", "shell"], item.LastAdmission.Missing);
+            Assert.Equal(0, item.LastAdmission.VendorUsage);
+            var fact = Assert.Single(await QueueDecisionLedgerStore.ReadAllAsync(BatonPaths.QueueDecisionLedgerFile, Ct));
+            Assert.Equal(TaskRequirementAdmission.Refused, fact.Admission!.Result);
+            Assert.Equal(0, fact.Admission.VendorUsage);
+        }
+        finally
+        {
+            Cleanup(home);
+        }
+    }
+
+    [Fact]
+    public async Task Compatible_implement_requirements_are_admitted_and_recorded_before_launch()
+    {
+        var home = CreateTempHome();
+        using var scope = BatonEnvironmentSnapshot.BeginScope(BatonEnvironmentSnapshot.Blank with { HomeOverride = home });
+        try
+        {
+            await QueueStore.MutateAsync(BatonPaths.QueueFile, s => s with
+            {
+                Items = [Item() with { Requirements = ["file-write", "shell", "github-write"] }],
+            }, Ct);
+            var service = Service((request, _) => Task.FromResult(new QueueLaunchOutcome(request.RoomDirectory)));
+
+            await service.TickOnceAsync(Ct);
+
+            var item = Assert.Single((await QueueStore.LoadAsync(BatonPaths.QueueFile, Ct)).Items);
+            Assert.Equal(QueueItemState.Launched, item.State);
+            Assert.Equal(TaskRequirementAdmission.Admitted, item.LastAdmission!.Result);
+            var fact = Assert.Single(await QueueDecisionLedgerStore.ReadAllAsync(BatonPaths.QueueDecisionLedgerFile, Ct));
+            Assert.Equal(QueueDecisionEntry.Launched, fact.Decision);
+            Assert.Equal(TaskRequirementAdmission.Admitted, fact.Admission!.Result);
+            Assert.Contains("github-write", fact.Admission.EffectiveGrant);
+        }
+        finally
+        {
+            Cleanup(home);
+        }
+    }
+
+    [Fact]
+    public async Task GitHub_read_and_write_requirements_are_distinguished_by_the_role_grant()
+    {
+        var home = CreateTempHome();
+        using var scope = BatonEnvironmentSnapshot.BeginScope(BatonEnvironmentSnapshot.Blank with { HomeOverride = home });
+        try
+        {
+            await File.WriteAllTextAsync(BatonPaths.SettingsFile, "{\"Queue\":{\"GapSeconds\":0}}", Ct);
+            await QueueStore.MutateAsync(BatonPaths.QueueFile, s => s with
+            {
+                Items = [
+                    Item("read", role: "review") with { Requirements = ["github-read"] },
+                    Item("write", role: "review") with { Requirements = ["github-write"] },
+                ],
+            }, Ct);
+            var launches = new List<QueueLaunchRequest>();
+            var service = Service((request, _) =>
+            {
+                launches.Add(request);
+                return Task.FromResult(new QueueLaunchOutcome(request.RoomDirectory));
+            });
+
+            await service.TickOnceAsync(Ct);
+            await service.TickOnceAsync(Ct);
+
+            Assert.Equal("read", Assert.Single(launches).Item.Tag);
+            var items = (await QueueStore.LoadAsync(BatonPaths.QueueFile, Ct)).Items;
+            var rejected = Assert.Single(items, item => item.Tag == "write");
+            Assert.Equal(QueueItemState.Failed, rejected.State);
+            Assert.Equal(["github-write"], rejected.LastAdmission!.Missing);
+            Assert.Contains("github-read", items.Single(item => item.Tag == "read").LastAdmission!.EffectiveGrant);
+        }
+        finally
+        {
+            Cleanup(home);
+        }
+    }
+
+    [Fact]
+    public async Task A_required_gate_receipt_is_refused_when_the_role_does_not_declare_that_artifact()
+    {
+        var home = CreateTempHome();
+        using var scope = BatonEnvironmentSnapshot.BeginScope(BatonEnvironmentSnapshot.Blank with { HomeOverride = home });
+        try
+        {
+            await QueueStore.MutateAsync(BatonPaths.QueueFile, s => s with
+            {
+                Items = [Item(role: "review") with { Requirements = ["artifact:gate-receipt.json"] }],
+            }, Ct);
+            var service = Service((_, _) => throw new InvalidOperationException("mismatched role must not launch"));
+
+            await service.TickOnceAsync(Ct);
+
+            var item = Assert.Single((await QueueStore.LoadAsync(BatonPaths.QueueFile, Ct)).Items);
+            Assert.Equal(QueueItemState.Failed, item.State);
+            Assert.Equal(["artifact:gate-receipt.json"], item.LastAdmission!.Missing);
+            Assert.Contains("artifact:verdict.json", item.LastAdmission.EffectiveGrant);
+        }
+        finally
+        {
+            Cleanup(home);
+        }
+    }
+
+    [Fact]
+    public async Task Missing_requirements_fail_closed_for_execution_rows_after_migration_but_read_only_legacy_rows_remain_unknown()
+    {
+        var home = CreateTempHome();
+        using var scope = BatonEnvironmentSnapshot.BeginScope(BatonEnvironmentSnapshot.Blank with { HomeOverride = home });
+        try
+        {
+            await File.WriteAllTextAsync(BatonPaths.SettingsFile, "{\"Queue\":{\"RequireDeclaredRequirements\":true}}", Ct);
+            await QueueStore.MutateAsync(BatonPaths.QueueFile, s => s with
+            {
+                Items = [Item("execution"), Item("legacy-read", role: "advise")],
+            }, Ct);
+            var launched = new List<string>();
+            var service = Service((request, _) =>
+            {
+                launched.Add(request.Item.Tag);
+                return Task.FromResult(new QueueLaunchOutcome(request.RoomDirectory));
+            });
+
+            await service.TickOnceAsync(Ct);
+            await service.TickOnceAsync(Ct);
+
+            var items = (await QueueStore.LoadAsync(BatonPaths.QueueFile, Ct)).Items;
+            var execution = items.Single(item => item.Tag == "execution");
+            Assert.Equal(QueueItemState.Failed, execution.State);
+            Assert.Equal(TaskRequirementAdmission.Refused, execution.LastAdmission!.Result);
+            Assert.Equal(["declared requirements"], execution.LastAdmission.Missing);
+            Assert.Equal(["legacy-read"], launched);
+            Assert.Equal(TaskRequirementAdmission.Unknown, items.Single(item => item.Tag == "legacy-read").LastAdmission!.Result);
+        }
+        finally
+        {
+            Cleanup(home);
+        }
+    }
+
+    [Fact]
+    public async Task A_role_catalog_change_is_rechecked_at_launch_instead_of_trusting_queue_time_assumptions()
+    {
+        var home = CreateTempHome();
+        var roles = Path.Combine(home, "roles.json");
+        await File.WriteAllTextAsync(roles, """
+            [{"id":"implement","tier":"standard","read_files":true,"write_files":false,"run_shell_commands":true,"network_access":true,"timeout_minutes":10,"verdict_schema":false,"purpose":"test","outputs":[{"name":"changes.md","schema":"none","instruction":"test"}]}]
+            """, Ct);
+        using var scope = BatonEnvironmentSnapshot.BeginScope(BatonEnvironmentSnapshot.Blank with
+        {
+            HomeOverride = home,
+            WorkerRolesPathOverride = roles,
+            WorkerTiersPathOverride = Path.Combine(AppContext.BaseDirectory, "WorkerTiers.json"),
+        });
+        try
+        {
+            await QueueStore.MutateAsync(BatonPaths.QueueFile, s => s with
+            {
+                Items = [Item() with { Requirements = ["file-write"] }],
+            }, Ct);
+            var service = Service((_, _) => throw new InvalidOperationException("changed grant must be rechecked"));
+
+            await service.TickOnceAsync(Ct);
+
+            var item = Assert.Single((await QueueStore.LoadAsync(BatonPaths.QueueFile, Ct)).Items);
+            Assert.Equal(QueueItemState.Failed, item.State);
+            Assert.Equal(["file-write"], item.LastAdmission!.Missing);
+        }
+        finally
+        {
+            Cleanup(home);
+        }
+    }
+
+    [Fact]
+    public async Task A_replaced_requirement_declaration_is_revalidated_before_the_launch_claim()
+    {
+        var home = CreateTempHome();
+        using var scope = BatonEnvironmentSnapshot.BeginScope(BatonEnvironmentSnapshot.Blank with { HomeOverride = home });
+        try
+        {
+            await QueueStore.MutateAsync(BatonPaths.QueueFile, s => s with
+            {
+                Items = [Item(role: "advise") with { Requirements = [] }],
+            }, Ct);
+            var launchCount = 0;
+            var replaced = false;
+            var service = new QueueSchedulerService(
+                (_, _) =>
+                {
+                    launchCount++;
+                    return Task.FromResult(new QueueLaunchOutcome(null));
+                },
+                _ => Task.FromResult(0.0),
+                () => 16.0,
+                () => DateTimeOffset.UtcNow,
+                beforeLaunchClaim: async _ =>
+                {
+                    if (replaced)
+                    {
+                        return;
+                    }
+
+                    replaced = true;
+                    await QueueStore.MutateAsync(BatonPaths.QueueFile, snapshot => snapshot with
+                    {
+                        Items = snapshot.Items.Select(item => item with { Requirements = ["file-write"] }).ToList(),
+                    }, Ct);
+                });
+
+            await service.TickOnceAsync(Ct);
+
+            Assert.True(replaced);
+            Assert.Equal(0, launchCount);
+            var item = Assert.Single((await QueueStore.LoadAsync(BatonPaths.QueueFile, Ct)).Items);
+            Assert.Equal(QueueItemState.Failed, item.State);
+            Assert.Equal(["file-write"], item.LastAdmission!.Missing);
+        }
+        finally
+        {
+            Cleanup(home);
+        }
+    }
+
+    [Fact]
+    public async Task A_legacy_read_only_review_row_remains_unknown_after_requirement_migration()
+    {
+        var home = CreateTempHome();
+        using var scope = BatonEnvironmentSnapshot.BeginScope(BatonEnvironmentSnapshot.Blank with { HomeOverride = home });
+        try
+        {
+            await File.WriteAllTextAsync(BatonPaths.SettingsFile, "{\"Queue\":{\"RequireDeclaredRequirements\":true}}", Ct);
+            await QueueStore.MutateAsync(BatonPaths.QueueFile, s => s with
+            {
+                Items = [Item(role: "review")],
+            }, Ct);
+            var service = Service((request, _) => Task.FromResult(new QueueLaunchOutcome(request.RoomDirectory)));
+
+            await service.TickOnceAsync(Ct);
+
+            var item = Assert.Single((await QueueStore.LoadAsync(BatonPaths.QueueFile, Ct)).Items);
+            Assert.Equal(QueueItemState.Launched, item.State);
+            Assert.Equal(TaskRequirementAdmission.Unknown, item.LastAdmission!.Result);
+        }
+        finally
+        {
+            Cleanup(home);
+        }
+    }
+
+    [Fact]
     public async Task A_saved_blank_and_named_skill_pair_fails_instead_of_dropping_the_blank()
     {
         var home = CreateTempHome();

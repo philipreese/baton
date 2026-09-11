@@ -52,6 +52,9 @@ public enum QueueVerb
 /// item from a newly added lifecycle item that intentionally leaves every stage at its tier.</param>
 /// <param name="LifecyclePin">Makes the ordinary axes an explicit whole-lifecycle pin rather than an
 /// implement-stage selection. Valid only with <paramref name="Lifecycle"/>.</param>
+/// <param name="Requirements">Explicit task capabilities that must already be present in the effective
+/// role grant. Null is reserved for imported/legacy unknown rows; queue add writes an empty list when
+/// no <c>--require</c> flag is supplied.</param>
 public sealed record QueueOptions(
     QueueVerb Verb,
     string? Tag = null,
@@ -72,4 +75,5 @@ public sealed record QueueOptions(
     bool Lifecycle = false,
     IReadOnlyList<QueueStageSelection>? StageSelections = null,
     bool LifecyclePin = false,
-    IReadOnlyList<string>? Skills = null);
+    IReadOnlyList<string>? Skills = null,
+    IReadOnlyList<string>? Requirements = null);
