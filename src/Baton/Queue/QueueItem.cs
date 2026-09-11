@@ -90,10 +90,11 @@ public sealed record QueueItem
     public string? Branch { get; init; }
 
     /// <summary>
-    /// The immutable canonical <c>host/owner/repo</c> identity that owns this lifecycle, captured from
-    /// the source repository when the item is added. Null on non-lifecycle requests and on historical
-    /// lifecycle rows; the latter is uncertainty, never permission to infer an owner from mutable
-    /// workspace or CLI context.
+    /// The immutable canonical <c>host/owner/repo</c> identity that owns an issue-provisioned
+    /// workspace, captured from the source repository when the item is added. Null on explicit-workspace
+    /// requests and on historical lifecycle rows; the latter is uncertainty, never permission to infer
+    /// an owner from mutable workspace or CLI context. Lifecycle-only readers also require
+    /// <see cref="Stage"/>; repository provenance does not opt a dispatch request into that lifecycle.
     /// </summary>
     public string? Repository { get; init; }
 
