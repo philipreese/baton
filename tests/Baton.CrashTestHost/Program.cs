@@ -17,6 +17,20 @@ using Baton.Store;
 // job-contained path every worker takes); `spawn-detached <pidFile>` starts one through
 // DetachedProcess (the path a queue-launched lane takes). Either way the host writes the sleeper's
 // pid to <pidFile> and then waits to be killed; the test asserts the sleeper's fate.
+// #2190: when a copy of this apphost is named git/git.exe, the two read-only probe argv below make a
+// hermetic native executable for the public dispatch provenance route. No shell or callback seam is
+// involved: GhPullRequestCreateProvenanceResolver starts the copied apphost directly.
+if (args is ["config", "--get", "remote.origin.url"])
+{
+    await Console.Out.WriteLineAsync("https://github.com/aer-works/baton.git");
+    return 0;
+}
+if (args is ["rev-parse", "--abbrev-ref", "HEAD"])
+{
+    await Console.Out.WriteLineAsync("2190-verified-pr-ownership");
+    return 0;
+}
+
 if (args.Length == 2 && args[0] is "spawn-contained" or "spawn-detached")
 {
     return await SpawnArmAsync(args[0], args[1]);

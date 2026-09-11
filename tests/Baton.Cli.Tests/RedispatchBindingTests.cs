@@ -56,6 +56,19 @@ public class RedispatchBindingTests
     }
 
     [Fact]
+    public void Redispatch_inherits_the_conductor_captured_pull_request_identity()
+    {
+        var identity = new GhPullRequestCreateIdentity(
+            "aer-works/baton", "2190-verified-pr-ownership");
+        var parent = ParentEntry(adapter: "codex") with { PullRequestCreateIdentity = identity };
+
+        var entry = RedispatchCommand.InheritBinding(
+            parent, new RedispatchOptions("parent-room", "new-room"));
+
+        Assert.Same(identity, entry.PullRequestCreateIdentity);
+    }
+
+    [Fact]
     public void An_explicit_adapter_override_wins_over_the_inherited_one()
     {
         var parent = ParentEntry(adapter: "claude");

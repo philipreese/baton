@@ -14,12 +14,12 @@ namespace Baton.Vendors;
 /// </para>
 /// <para>
 /// <b>Two entry points, one rule, because the two enforcement points know different things.</b>
-/// <see cref="RefusalFor"/> is the NUMBER-aware one, used by the codex broker's run-command path
-/// (<see cref="CodexDynamicToolPolicy"/>): that path sees a command's output, so it can learn the
-/// room's own PR number from the <c>gh pr create</c> it ran and then admit exactly that number.
+/// <see cref="RefusalFor"/> is the EVIDENCE-aware one, used by the codex broker's run-command path
+/// (<see cref="CodexDynamicToolPolicy"/>): only its broker-controlled direct-create path can supply
+/// a verified repository/number pair. General shell output supplies nothing.
 /// <see cref="RefusalForOwnBranchOnly"/> is the one a <c>PreToolUse</c> hook can use
 /// (<c>HookCheckCommand</c> for claude, <c>AgyHookCheckCommand</c> for agy). A hook decides BEFORE a
-/// command runs and never sees <c>gh pr create</c>'s stdout, so it can never learn the number — and
+/// command runs and never sees <c>gh pr create</c>'s stdout, so it can never learn the evidence — and
 /// does not need it: a governed <c>gh pr</c> verb with NO pull-request selector is resolved by
 /// <c>gh</c> from the branch the room is standing on, which is the room's own by construction. So the
 /// hook rule is "no selector", and EVERY selector is refused, including the room's own number, which
@@ -98,7 +98,8 @@ public sealed class OwnPullRequestOnlyRule
 
     /// <summary>
     /// Every governed verb. <c>create</c> is deliberately absent — opening its own PR is the lane's
-    /// job, and on the broker path it is also the one command that TEACHES this rule the number.
+    /// job, and <see cref="CodexDynamicToolPolicy"/> separately compiles its one supported spelling
+    /// to a trusted executable and exact argv before offering verified evidence here.
     /// <c>gh issue view</c> is untouched: issues are the shared context a lane is dispatched against,
     /// and the measured contamination came through PRs.
     /// </summary>
@@ -107,21 +108,19 @@ public sealed class OwnPullRequestOnlyRule
 
     // The two shapes a PR selector comes in, matching what Status.DeliveryReferenceResolver pins for
     // `delivery-pr.txt` -- a bare number or a github.com pull URL. Anchored here, because a selector
-    // is a whole token; the scanning twin below is what reads `gh pr create`'s stdout.
+    // is a whole token. A URL also carries the repository half of the comparison.
     private static readonly Regex PullRequestArgument = new(
-        @"^#?(?:https://github\.com/[\w.-]+/[\w.-]+/pull/)?(\d+)/?$", RegexOptions.Compiled);
-
-    private static readonly Regex CreatedPullRequestUrl = new(
-        @"https://github\.com/[\w.-]+/[\w.-]+/pull/(\d+)", RegexOptions.Compiled);
+        @"^#?(?:https://github\.com/(?<owner>[\w.-]+)/(?<repo>[\w.-]+)/pull/)?(?<number>\d+)/?$",
+        RegexOptions.Compiled | RegexOptions.IgnoreCase);
 
     /// <summary>
-    /// The pull request this room opened, once a <c>gh pr create</c> it ran has reported one; null
-    /// before that, which refuses every governed read. In-memory and per-run: it shadows
+    /// The verified repository and pull request this room opened; null before that, which refuses
+    /// every governed read. In-memory and per-run: it shadows
     /// <c>Status.DeliveryReferenceOutputNames.PullRequest</c> (<c>delivery-pr.txt</c>), which is the
     /// durable record of the same fact but is written by the worker at the end of its run, far too
     /// late to gate the reads this rule gates.
     /// </summary>
-    public int? OwnPullRequest { get; private set; }
+    public PullRequestOwnershipEvidence? OwnPullRequest { get; private set; }
 
     /// <summary>
     /// Whether this rule governs a grant at all. It does <b>unless</b> the grant's own
@@ -157,52 +156,15 @@ public sealed class OwnPullRequestOnlyRule
     public string? Refuse(string? commandLine) => RefusalFor(commandLine, OwnPullRequest);
 
     /// <summary>
-    /// Records the room's own PR number from a <c>gh pr create</c> that succeeded. Call this only
-    /// with the output of a command that exited zero: <c>gh</c> prints the new PR's URL on stdout,
-    /// and that URL is the only thing here that can open the rule's gate.
-    /// <para>
-    /// <b>This is the gate-OPENING side, so it is anchored harder than the refusing side.</b> A line
-    /// only teaches the room a number when <c>gh pr create</c> heads its LAST segment. Two separate
-    /// reasons, and the second is why the head alone is not enough:
-    /// <list type="number">
-    /// <item>HEAD, because a mention is not an invocation: <c>echo "gh pr create" &amp;&amp; curl -s
-    /// …/pulls</c> says the three words and prints a sibling's <c>html_url</c>.</item>
-    /// <item>LAST, because the output this method is handed is the WHOLE line's
-    /// (<c>CodexDynamicToolPolicy</c> concatenates the process's streams) and the last URL in it
-    /// wins. <c>gh pr create --fill &amp;&amp; curl -s …/pulls</c> is a genuine create, at a segment
-    /// head, exiting zero — and the URL it teaches would be the curl's. Output is not attributable
-    /// per segment, so the anchor has to be: nothing ran after the create.</item>
-    /// </list>
-    /// Over-matching is fail-closed when it refuses and fail-OPEN here, which is why this side takes
-    /// the loss in every ambiguous case below.
-    /// </para>
-    /// <para>
-    /// Known and accepted, all in the refusing direction — the room stays locked out of reading its
-    /// own PR for the rest of the run, and the refusal names the rule. A <c>gh pr create</c> that
-    /// fails with "a pull request for branch X already exists" names the room's real PR and exits
-    /// NON-zero, so the caller never offers it here. A create that is not at a segment head
-    /// (<c>GH_TOKEN=… gh pr create</c>) teaches nothing. Nor does one with anything after it:
-    /// <c>gh pr create --fill | tee pr.txt</c> by rule 2, and <c>gh pr create --fill &gt;
-    /// delivery-pr.txt</c> for a second reason on top of it — the URL went to the file rather than to
-    /// the output this method reads. <c>git push -u origin HEAD &amp;&amp; gh pr create --fill</c>,
-    /// the habit the lanes actually have, is unaffected: the create is last. Widening the caller to
-    /// parse a failed command's output is how a sibling's URL quoted in an error message would become
-    /// this room's "own" PR.
-    /// </para>
+    /// Accepts one already-verified ownership value. This class consumes evidence; it never derives
+    /// evidence from a command line or general shell output. The direct-create broker path and the
+    /// later verified-lineage path are compatible producers of the same immutable value.
     /// </summary>
-    public void ObserveCommandOutput(string? commandLine, string? output)
+    public void Observe(PullRequestOwnershipEvidence? evidence)
     {
-        if (output is null || !IsLastSegmentGhPrCreate(commandLine))
+        if (OwnPullRequest is null && evidence is not null)
         {
-            return;
-        }
-
-        // The LAST url in the output: `gh pr create` can print progress lines mentioning an earlier
-        // PR, and the one it created is the one it prints last.
-        var matches = CreatedPullRequestUrl.Matches(output);
-        if (matches.Count > 0 && int.TryParse(matches[^1].Groups[1].Value, out var number))
-        {
-            OwnPullRequest = number;
+            OwnPullRequest = evidence;
         }
     }
 
@@ -217,15 +179,16 @@ public sealed class OwnPullRequestOnlyRule
     /// <c>ShellCommandPatternMatcher</c>'s.
     /// </para>
     /// </summary>
-    /// <param name="ownPullRequest">The room's own PR number, or null before it has opened one.</param>
-    public static string? RefusalFor(string? commandLine, int? ownPullRequest)
+    /// <param name="ownPullRequest">Verified repository-qualified evidence, or null before create.</param>
+    public static string? RefusalFor(
+        string? commandLine, PullRequestOwnershipEvidence? ownPullRequest)
     {
         if (ReadsPullRequestsWithoutSayingGhPr(commandLine) is { } route)
         {
             return Refusal(route, ownPullRequest);
         }
 
-        foreach (var (subCommand, selectors, unjudgeable) in GhPrInvocations(commandLine))
+        foreach (var (subCommand, selectors, repositories, unjudgeable) in GhPrInvocations(commandLine))
         {
             if (unjudgeable)
             {
@@ -258,11 +221,26 @@ public sealed class OwnPullRequestOnlyRule
                 return Refusal("this room has not opened a pull request yet", null);
             }
 
+            foreach (var requestedRepository in repositories)
+            {
+                if (GitHubRepository.TryCanonicalize(requestedRepository) != ownPullRequest.Repository)
+                {
+                    return Refusal(
+                        $"`gh pr {subCommand}` targets repository `{requestedRepository}`, not "
+                        + $"`{ownPullRequest.Repository}`", ownPullRequest);
+                }
+            }
+
             foreach (var selector in selectors)
             {
                 var match = PullRequestArgument.Match(selector);
-                if (match.Success && int.TryParse(match.Groups[1].Value, out var requested)
-                    && requested == ownPullRequest)
+                var selectorRepository = match.Groups["owner"].Success
+                    ? GitHubRepository.TryCanonicalize(
+                        $"{match.Groups["owner"].Value}/{match.Groups["repo"].Value}")
+                    : ownPullRequest.Repository;
+                if (match.Success && int.TryParse(match.Groups["number"].Value, out var requested)
+                    && requested == ownPullRequest.Number
+                    && selectorRepository == ownPullRequest.Repository)
                 {
                     continue;
                 }
@@ -289,7 +267,7 @@ public sealed class OwnPullRequestOnlyRule
             return BranchOnlyRefusal(route);
         }
 
-        foreach (var (subCommand, selectors, unjudgeable) in GhPrInvocations(commandLine))
+        foreach (var (subCommand, selectors, _, unjudgeable) in GhPrInvocations(commandLine))
         {
             if (unjudgeable)
             {
@@ -323,10 +301,10 @@ public sealed class OwnPullRequestOnlyRule
         return null;
     }
 
-    private static string Refusal(string what, int? ownPullRequest)
+    private static string Refusal(string what, PullRequestOwnershipEvidence? ownPullRequest)
     {
-        var own = ownPullRequest is { } number
-            ? $"This room opened #{number}; that is the only pull request it may read."
+        var own = ownPullRequest is { } evidence
+            ? $"This room opened {evidence.Repository}#{evidence.Number}; that is the only pull request it may read."
             : "No `gh pr` read is allowed until this room's own `gh pr create` reports one.";
         return $"Baton refuses this command: {what} — {Rule}. {own} "
             + "`gh issue view` is unaffected.";
@@ -378,7 +356,8 @@ public sealed class OwnPullRequestOnlyRule
     /// its verb or its selector. The sub-command is returned raw, including one that is a variable
     /// and one this rule does not govern, because those are the caller's two different answers.
     /// </summary>
-    private static IEnumerable<(string SubCommand, IReadOnlyList<string> Selectors, bool Unjudgeable)>
+    private static IEnumerable<(string SubCommand, IReadOnlyList<string> Selectors,
+        IReadOnlyList<string> Repositories, bool Unjudgeable)>
         GhPrInvocations(string? commandLine)
     {
         foreach (var tokens in Segments(commandLine))
@@ -395,7 +374,7 @@ public sealed class OwnPullRequestOnlyRule
             {
                 // The verb itself is unexpanded, so there is no sub-command to look up: this line
                 // may be any of them, `gh pr view <a sibling>` included.
-                yield return (subCommand, [], true);
+                yield return (subCommand, [], [], true);
                 continue;
             }
 
@@ -408,8 +387,36 @@ public sealed class OwnPullRequestOnlyRule
             yield return (
                 subCommand,
                 SelectorsIn(tokens, i + 3, positional),
+                RepositoriesIn(tokens, i + 3),
                 HasUnjudgeableSelector(tokens, i + 3, positional));
         }
+    }
+
+    private static IReadOnlyList<string> RepositoriesIn(IReadOnlyList<string> tokens, int start)
+    {
+        var repositories = new List<string>();
+        for (var i = start; i < tokens.Count; i++)
+        {
+            if (tokens[i].StartsWith("--repo=", StringComparison.OrdinalIgnoreCase))
+            {
+                repositories.Add(tokens[i]["--repo=".Length..]);
+            }
+            else if (tokens[i] == "-R")
+            {
+                repositories.Add(i + 1 < tokens.Count ? tokens[++i] : string.Empty);
+            }
+            else if (tokens[i].StartsWith("-R", StringComparison.Ordinal))
+            {
+                // gh accepts the short repository selector attached to its value (-Rowner/repo).
+                // Empty and equals-prefixed spellings canonicalize to null and therefore fail closed.
+                repositories.Add(tokens[i][2..]);
+            }
+            else if (tokens[i] == "--repo")
+            {
+                repositories.Add(i + 1 < tokens.Count ? tokens[++i] : string.Empty);
+            }
+        }
+        return repositories;
     }
 
     /// <summary>
@@ -484,19 +491,6 @@ public sealed class OwnPullRequestOnlyRule
     }
 
     private static readonly string[] CommandIntroducingKeywords = ["do", "then", "else"];
-
-    /// <summary>Whether the LAST segment of the line starts with <c>gh pr create</c>; see
-    /// <see cref="ObserveCommandOutput"/> for why this side is anchored twice over and the refusing
-    /// side only once. Deliberately NOT sharing the refusing side's head skip: an environment prefix
-    /// or a loop keyword is a reason to refuse a read and never a reason to trust an output.</summary>
-    private static bool IsLastSegmentGhPrCreate(string? commandLine)
-    {
-        var segments = Segments(commandLine);
-        return segments.Count > 0
-            && segments[^1] is { Count: >= 3 } tokens && IsGh(tokens[0])
-            && tokens[1].Equals("pr", StringComparison.OrdinalIgnoreCase)
-            && tokens[2].Equals("create", StringComparison.OrdinalIgnoreCase);
-    }
 
     // A token the shell has yet to expand: `$X`/`${X}`/the `$` a substitution collapses to (sh),
     // `%X%` and a `for /f` loop variable (cmd), or a leftover backtick. Read only in a SELECTOR

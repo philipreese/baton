@@ -714,6 +714,12 @@ public sealed class CodexWorkerAdapter : IWorkerAdapter, IPermissionGrantTransla
                 "Baton.Cli.dll alongside Baton.Vendors.dll.");
         }
 
+        var pullRequestCreateProvenance =
+            GhPullRequestCreateProvenanceResolver.RequiresTrustedIdentity(grant)
+            ? GhPullRequestCreateProvenanceResolver.TryResolve(
+                invocation.WorkingDirectory, invocation.PullRequestCreateIdentity)
+            : null;
+
         var configuration = new CodexBrokerConfiguration(
             invocation.WorkingDirectory,
             invocation.Model,
@@ -722,7 +728,8 @@ public sealed class CodexWorkerAdapter : IWorkerAdapter, IPermissionGrantTransla
             invocation.ResumeSession,
             grant,
             contract.ProducedOutputs.Select(output => output.Name).ToArray(),
-            invocation.AllowsSubagents);
+            invocation.AllowsSubagents,
+            pullRequestCreateProvenance);
         var configJson = JsonSerializer.Serialize(configuration);
 
         return new CoreDispatchTarget(

@@ -110,6 +110,20 @@ public static class DispatchCommand
         var workspace = options.WorkspaceDirectory ?? workspaceDirectory ?? Directory.GetCurrentDirectory();
         var (definition, bindings) = await MaterializeAsync(options, workspace, cancellationToken).ConfigureAwait(false);
 
+        // #2190: a cold dispatch is the trust boundary. Capture repository/head before the room or
+        // worker exists, then persist it with the binding. Continuations inherit the veteran room's
+        // already-captured identity below; probing its worker-controlled checkout would rebrand a
+        // mutable remote as trusted.
+        if (options.ContinueFromRoomDirectoryPath is null)
+        {
+            bindings = bindings.ToDictionary(
+                pair => pair.Key,
+                pair => GhPullRequestCreateProvenanceResolver.CaptureIdentityFor(
+                    pair.Value,
+                    pair.Value.WorkingDirectory ?? pair.Value.Worktree?.Repository ?? workspace),
+                StringComparer.Ordinal);
+        }
+
         // #1499: stamped onto every entry -- a composed template's bindings.json holds one per phase.
         if (options.Label is not null)
         {
@@ -1538,7 +1552,13 @@ public static class DispatchCommand
         }
 
         var parentExecutionId = parentTerminal.Steps.FirstOrDefault()?.Execution;
-        var resumedEntry = entry with { SessionId = parentEntry.SessionId, ResumeSession = true };
+        var resumedEntry = entry with
+        {
+            SessionId = parentEntry.SessionId,
+            ResumeSession = true,
+            // #2190: continuing a worker-controlled workspace must never re-probe its mutable remote.
+            PullRequestCreateIdentity = parentEntry.PullRequestCreateIdentity,
+        };
         var provenance = new ContinuationProvenance(continueFromRoomDirectoryPath, parentExecutionId, parentEntry.SessionId);
         return (resumedEntry, provenance);
     }

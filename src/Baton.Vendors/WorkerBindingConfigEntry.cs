@@ -212,6 +212,14 @@ namespace Baton.Vendors;
 /// is not this change.
 /// </param>
 /// <param name="EffortSource">Which rung answered for <paramref name="EffortResolved"/>; same vocabulary as <paramref name="ModelSource"/>.</param>
+/// <param name="PullRequestCreateIdentity">
+/// #2190: serialized repository/head authority for Codex's brokered direct-create route. A fresh
+/// conductor dispatch, or an explicit conductor workspace replacement on redispatch, is the trusted
+/// writer; continuations, ordinary redispatch and exhaustion fallback only preserve that value.
+/// Legacy and hand-authored bindings default to null and direct create then fails closed unless the
+/// hand-authored value came from equally trusted conductor input. The durable contract is
+/// spec/baton.md §9.
+/// </param>
 public sealed record WorkerBindingConfigEntry(
     string Adapter,
     WorkerContract Contract,
@@ -268,7 +276,10 @@ public sealed record WorkerBindingConfigEntry(
     // other flag on this record: a hand-authored bindings.json (baton run/resume/decide) that omits it
     // keeps the pre-#2029 behaviour of being graded by the workspace's own declaration, rather than
     // silently skipping a gate.
-    bool VerifiesWorkspace = true);
+    bool VerifiesWorkspace = true,
+    // #2190: conductor-captured before the workspace is worker-controlled and persisted so resume
+    // never re-derives repository/head authority from mutable Git metadata.
+    GhPullRequestCreateIdentity? PullRequestCreateIdentity = null);
 
 /// <summary>
 /// #1927: the closed vocabulary <see cref="WorkerBindingConfigEntry.ModelSource"/> and

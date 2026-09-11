@@ -249,7 +249,8 @@ public static class WorkerBindingResolver
             // source repository rather than the ephemeral, room-scoped worktree path above.
             WorktreeSourceRepository: entry.WorktreeSourceRepository,
             AllowsSubagents: entry.AllowsSubagents,
-            Skills: skills);
+            Skills: skills,
+            PullRequestCreateIdentity: entry.PullRequestCreateIdentity);
         var target = adapter.Resolve(invocation, entry.Contract);
 
         if (onWorkerStdoutLine is not null)

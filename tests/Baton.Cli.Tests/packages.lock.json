@@ -487,9 +487,15 @@
       "baton": {
         "type": "Project",
         "dependencies": {
-          "Baton.Engine.RestoreGraphName": "[0.14.0, )",
-          "Baton.Vendors": "[0.14.0, )",
+          "Baton.Engine.RestoreGraphName": "[0.46.0, )",
+          "Baton.Vendors": "[0.46.0, )",
           "Microsoft.Extensions.Hosting": "[10.0.0, )"
+        }
+      },
+      "baton.crashtesthost": {
+        "type": "Project",
+        "dependencies": {
+          "Baton.Engine.RestoreGraphName": "[0.46.0, )"
         }
       },
       "Baton.Engine.RestoreGraphName": {
@@ -498,7 +504,7 @@
       "baton.vendors": {
         "type": "Project",
         "dependencies": {
-          "Baton.Engine.RestoreGraphName": "[0.14.0, )"
+          "Baton.Engine.RestoreGraphName": "[0.46.0, )"
         }
       }
     }

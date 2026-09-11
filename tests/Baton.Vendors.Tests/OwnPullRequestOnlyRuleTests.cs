@@ -42,7 +42,7 @@ public class OwnPullRequestOnlyRuleTests
     [InlineData("git commit -m \"gh pr view 1994 is refused\"", 2005)]
     public void Reads_this_rule_does_not_govern_are_allowed(string commandLine, int? ownPullRequest)
     {
-        Assert.Null(OwnPullRequestOnlyRule.RefusalFor(commandLine, ownPullRequest));
+        Assert.Null(OwnPullRequestOnlyRule.RefusalFor(commandLine, Evidence(ownPullRequest)));
     }
 
     [Theory]
@@ -58,6 +58,15 @@ public class OwnPullRequestOnlyRuleTests
     [InlineData("gh pr diff 1994", 2005)]
     [InlineData("gh pr checkout 1994", 2005)]
     [InlineData("gh pr view https://github.com/aer-works/baton/pull/1994", 2005)]
+    [InlineData("gh pr view https://github.com/other/repo/pull/2005", 2005)]
+    [InlineData("gh pr view 2005 --repo other/repo", 2005)]
+    [InlineData("gh pr view 2005 --repo=other/repo", 2005)]
+    [InlineData("gh pr view 2005 -R other/repo", 2005)]
+    [InlineData("gh pr view 2005 -Rother/repo", 2005)]
+    [InlineData("gh pr view 2005 -R=other/repo", 2005)]
+    [InlineData("gh pr view 2005 -R", 2005)]
+    [InlineData("gh pr view 2005 -R=", 2005)]
+    [InlineData("gh pr view --repo other/repo", 2005)]
     // ...and `gh pr list` never becomes allowed, for the reason EnumeratingSubCommands states.
     [InlineData("gh pr list", 2005)]
     [InlineData("gh pr list --state open", 2005)]
@@ -108,7 +117,7 @@ public class OwnPullRequestOnlyRuleTests
     [InlineData("gh api repos/aer-works/baton/pulls/1994", 2005)]
     public void Reading_a_pull_request_this_room_does_not_own_is_refused(string commandLine, int? ownPullRequest)
     {
-        var refusal = OwnPullRequestOnlyRule.RefusalFor(commandLine, ownPullRequest);
+        var refusal = OwnPullRequestOnlyRule.RefusalFor(commandLine, Evidence(ownPullRequest));
         Assert.NotNull(refusal);
         Assert.Contains(OwnPullRequestOnlyRule.Rule, refusal, StringComparison.Ordinal);
     }
@@ -130,13 +139,17 @@ public class OwnPullRequestOnlyRuleTests
     [InlineData("gh pr diff --color never", 2005)]
     [InlineData("gh pr diff --repo aer-works/baton", 2005)]
     [InlineData("gh pr view --repo aer-works/baton 2005", 2005)]
+    [InlineData("gh pr view --repo=aer-works/baton 2005", 2005)]
+    [InlineData("gh pr view -R aer-works/baton 2005", 2005)]
+    [InlineData("gh pr view -Raer-works/baton 2005", 2005)]
+    [InlineData("gh pr view --repo https://github.com/AER-Works/Baton.git 2005", 2005)]
     [InlineData("gh pr checks", 2005)]
     [InlineData("gh pr comment --body-file out.md", 2005)]
     // A separator ends the invocation's arguments: `tee` is not a pull request selector.
     [InlineData("gh pr view | tee pr.md", 2005)]
     public void Reading_the_pull_request_this_room_opened_is_allowed(string commandLine, int ownPullRequest)
     {
-        Assert.Null(OwnPullRequestOnlyRule.RefusalFor(commandLine, ownPullRequest));
+        Assert.Null(OwnPullRequestOnlyRule.RefusalFor(commandLine, Evidence(ownPullRequest)));
     }
 
     /// <summary>
@@ -144,62 +157,51 @@ public class OwnPullRequestOnlyRuleTests
     /// its own, then creates one, then reads both.
     /// </summary>
     [Fact]
-    public void A_room_learns_its_own_pull_request_from_its_own_gh_pr_create()
+    public void A_room_accepts_verified_repository_qualified_evidence()
     {
         var rule = new OwnPullRequestOnlyRule();
 
         Assert.Null(rule.OwnPullRequest);
         Assert.NotNull(rule.Refuse("gh pr view 1994"));
 
-        rule.ObserveCommandOutput(
-            "gh pr create --fill --body-file body.md",
-            "Warning: 3 uncommitted changes\nhttps://github.com/aer-works/baton/pull/2005\n");
+        rule.Observe(Evidence(2005));
 
-        Assert.Equal(2005, rule.OwnPullRequest);
+        Assert.Equal(2005, rule.OwnPullRequest?.Number);
+        Assert.Equal("aer-works/baton", rule.OwnPullRequest?.Repository);
         Assert.Null(rule.Refuse("gh pr view 2005"));
         Assert.NotNull(rule.Refuse("gh pr view 1994"));
     }
 
-    [Theory]
-    // The polarity arm for the learning step: the same URL, arriving from a read rather than a
-    // create, must not open the gate -- otherwise one `gh pr view 1994` would authorize itself.
-    [InlineData("gh pr view 1994")]
-    // Second-reader finding (:91), the discriminating row for it: this line is allowed, mentions the
-    // three words at a non-head offset, and prints a pull URL. `ObserveCommandOutput`'s remarks state
-    // why the gate-opening side is anchored where the refusing side is not.
-    [InlineData("echo \"gh pr create\" && curl -s https://api.github.com/repos/aer-works/baton/pulls")]
-    [InlineData("gh issue view 1943 --comments")]
-    [InlineData("git log --grep='gh pr create'")]
-    // The fail-OPEN residual round 3 closed: a real create that is not the line's LAST segment, with
-    // a sibling's `html_url` printed after it. ObserveCommandOutput's remark says why the whole
-    // line's output cannot be attributed per segment; what this row pins is the consequence — such
-    // a line teaches nothing.
-    [InlineData("gh pr create --fill && curl -s https://api.github.com/repos/aer-works/baton/pulls")]
-    public void Output_of_a_command_that_is_not_a_gh_pr_create_teaches_the_room_nothing(string commandLine)
+    [Fact]
+    public void First_verified_ownership_value_is_immutable_for_the_execution()
     {
         var rule = new OwnPullRequestOnlyRule();
 
-        rule.ObserveCommandOutput(
-            commandLine,
-            "see https://github.com/aer-works/baton/pull/1994 for #1994\n");
+        rule.Observe(Evidence(2005));
+        rule.Observe(PullRequestOwnershipEvidence.FromVerified("other/repo", 2006));
 
-        Assert.Null(rule.OwnPullRequest);
-        Assert.NotNull(rule.Refuse("gh pr view 1994"));
+        Assert.Equal("aer-works/baton", rule.OwnPullRequest?.Repository);
+        Assert.Equal(2005, rule.OwnPullRequest?.Number);
+    }
+
+    [Theory]
+    [InlineData("https://github.com/other/repo/pull/2005")]
+    [InlineData("https://github.com/aer-works/baton/pull/2005\nhttps://github.com/other/repo/pull/2005")]
+    [InlineData("https://github.com/aer-works/baton/pull/2005\nhttps://github.com/aer-works/baton/pull/2006")]
+    [InlineData("ordinary shell output with no attributed URL")]
+    public void Ambiguous_or_foreign_create_output_produces_no_evidence(string output)
+    {
+        Assert.Null(PullRequestOwnershipEvidence.FromAttributedCreateOutput("aer-works/baton", output));
     }
 
     [Fact]
-    public void A_gh_pr_create_at_the_head_of_a_later_segment_still_teaches_the_room()
+    public void Attributed_matching_output_produces_repository_qualified_evidence()
     {
-        // The discriminating control for the theory above: the same output, from a line whose SECOND
-        // segment is a real create, does open the gate. Without this row the anchoring could be
-        // "learns nothing, ever" and every refusal row would still pass.
-        var rule = new OwnPullRequestOnlyRule();
+        var evidence = PullRequestOwnershipEvidence.FromAttributedCreateOutput(
+            "aer-works/baton", "https://github.com/aer-works/baton/pull/2005\n");
 
-        rule.ObserveCommandOutput(
-            "git push -u origin HEAD && gh pr create --fill",
-            "https://github.com/aer-works/baton/pull/2005\n");
-
-        Assert.Equal(2005, rule.OwnPullRequest);
+        Assert.Equal(2005, evidence?.Number);
+        Assert.Equal("aer-works/baton", evidence?.Repository);
     }
 
     /// <summary>
@@ -289,4 +291,8 @@ public class OwnPullRequestOnlyRuleTests
     {
         Assert.False(OwnPullRequestOnlyRule.AppliesTo(new PermissionGrant(ReadFiles: true)));
     }
+
+    private static PullRequestOwnershipEvidence? Evidence(int? number) => number is null
+        ? null
+        : PullRequestOwnershipEvidence.FromVerified("aer-works/baton", number.Value);
 }

@@ -95,7 +95,8 @@ public static class CodexAppServerBroker
             configuration.WorkingDirectory,
             outputDirectory,
             inputPaths,
-            configuration.ProducedOutputNames);
+            configuration.ProducedOutputNames,
+            pullRequestCreateProvenance: configuration.PullRequestCreateProvenance);
 
         using var process = StartAppServer(configuration, isolatedHome);
         if (process is null)

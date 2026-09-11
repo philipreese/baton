@@ -663,7 +663,7 @@ public static class ShellCommandPatternMatcher
     /// <c>-File x.ps1</c> body reads as readable and matches nothing: a script file is the
     /// compiled-code exposure spec/baton.md §9's #2114 paragraph accepts, not a spelling this closes.
     /// </summary>
-    private static bool TryReadShellWrapperBody(string segment, out string? body)
+    internal static bool TryReadShellWrapperBody(string segment, out string? body)
     {
         body = null;
         var trimmed = segment.TrimStart();

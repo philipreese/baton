@@ -81,6 +81,21 @@ public sealed class DispatchContinueEndToEndTests : IDisposable
         {
             var parentRoom = await DispatchTerminalParentWithSessionAsync(
                 testRoot, "Check X.", "codex-thread-123", adapter: "codex");
+            var parentBindingsPath = Path.Combine(parentRoom, "bindings.json");
+            var parentBindings = await WorkerBindingConfigParser.LoadFromFileAsync(
+                parentBindingsPath, TestContext.Current.CancellationToken);
+            var expectedIdentity = new GhPullRequestCreateIdentity(
+                "aer-works/baton", "2190-verified-pr-ownership");
+            await WorkerBindingConfigWriter.SaveToFileAsync(
+                new Dictionary<string, WorkerBindingConfigEntry>
+                {
+                    ["advise"] = parentBindings["advise"] with
+                    {
+                        PullRequestCreateIdentity = expectedIdentity,
+                    },
+                },
+                parentBindingsPath,
+                TestContext.Current.CancellationToken);
             var followUpSpecPath = await WriteSpecAsync(testRoot, "Now check Y.");
             var childRoom = Path.Combine(testRoot, "child");
             var options = new DispatchOptions(
@@ -93,6 +108,7 @@ public sealed class DispatchContinueEndToEndTests : IDisposable
                 Path.Combine(childRoom, "bindings.json"), TestContext.Current.CancellationToken);
             Assert.Equal("codex-thread-123", childBindings["advise"].SessionId);
             Assert.True(childBindings["advise"].ResumeSession);
+            Assert.Equal(expectedIdentity, childBindings["advise"].PullRequestCreateIdentity);
         }
         finally
         {

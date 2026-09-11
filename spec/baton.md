@@ -5048,6 +5048,49 @@ explicitly on every call (`DecideOptionsParser.cs`: *"pass --bindings <path-to-b
 naming the same bindings the paused room was dispatched with"*) — there is no separate global
 last-used-file fallback the CLI path is ever subject to.
 
+**`PullRequestCreateIdentity` is serialized repository/head authority, not ordinary harness
+configuration (#2190).** Its JSON value is `{Repository, HeadBranch}`. A cold `baton dispatch`
+captures it from the conductor-selected workspace with an absolute, link-free workspace identity and
+an absolute Git executable resolved outside that workspace; an explicit conductor-selected
+`baton redispatch --workspace` is the other capture boundary. A same-room continuation, an ordinary
+redispatch, and a declared exhaustion fallback may copy that recorded value but never re-probe mutable
+worker Git metadata. Capture is required when either the primary binding or its fallback can activate
+the Codex broker. The readers are the binding resolver, worker invocation, Codex adapter and broker;
+they use it only to compile the supported standalone `gh pr create` spelling into direct argv with
+trusted `--repo` and `--head`. A legacy binding with no field remains null and direct create refuses.
+A harness-authored binding may populate the field only when the harness is acting as the conductor
+and has independently verified the same repository/head inputs; worker-authored data and shell output
+have no authority to populate it. General shell output never mints PR ownership evidence.
+
+Readable-wrapper recognition uses the outer native shell's syntax (`cmd` on Windows, `/bin/sh`
+elsewhere), then the selected wrapper family's syntax for its body. Windows command-head `@`
+(attached or separated by whitespace) and unquoted caret escapes are recognized; apostrophes are
+literal in cmd, while POSIX apostrophes quote and backslashes escape. Recognition does not impose
+the wrapper grammar restrictions on ordinary
+native commands. Inside readable wrappers, the supported conservative grammar is literal simple
+commands, quoted word fragments, family-specific escapes, command separators, simple file redirection,
+environment assignments and `env` options (`--`, `-i`/`--ignore-environment`, `-u`/`--unset`,
+`-C`/`--chdir`), with at most four launcher/body descents.
+POSIX `-c` consumes one body argument; cmd and PowerShell command tails retain argument quoting.
+Multiword cmd/PowerShell tails containing escapes consumed by the outer shell conservatively refuse:
+reusing their raw spelling would restore escapes no longer delivered to the inner shell, while
+joining decoded words would lose literal quoting. Use direct commands for these tails.
+Dynamic expansions, compound constructs, unknown launcher options, malformed bodies, here-documents,
+descriptor duplication and excess nesting refuse with a direct-command alternative, even when a
+create invocation cannot be established. Script-file execution remains within the ambient-authority
+boundary below; recognition neither evaluates scripts nor supplies a full shell sandbox.
+
+The implement role's general shell plus network grant is **not a security sandbox for arbitrary
+interpreters**. The broker recognizes bare create plus direct environment assignments, the `env`
+launcher, and the shell-wrapper families already parsed by `ShellCommandPatternMatcher`; a non-bare
+create in those readable forms refuses before native-shell spawn. An arbitrary interpreter or script
+can itself start another executable, and the existing grant model cannot prove or prevent every such
+indirect `gh pr create` without removing useful general shell authority or pretending to parse program
+semantics. Such an indirect invocation still cannot mint Baton's ownership evidence, but it can carry
+the operator user's ambient CLI authority. The conductor must therefore decide whether that residual
+authority is acceptable for an implement lane; the direct-only guarantee is scoped to Baton's
+recognized command routes, not to every behavior of every program the granted shell can execute.
+
 **The three-scope model survives: project ceiling ∩ room ∩ step, always narrowing, never widening.**
 `bindings.json` is only the **room ∩ step** half of that intersection. The **project ceiling** — the
 owner's own control on what any harness-authored `bindings.json` can grant in the first place — lives
