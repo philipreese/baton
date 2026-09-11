@@ -39,8 +39,16 @@ public sealed class MemoryProjectionSweep : BackgroundService
     internal async Task SweepOnceAsync(TextWriter? diagnostics = null, CancellationToken cancellationToken = default)
     {
         diagnostics ??= Console.Error;
+        var blockedByImport = await MemoryImportOperationStore
+            .RecoverPendingAsync(diagnostics, cancellationToken).ConfigureAwait(false);
         foreach (var location in CanonicalStoreInventory.Scan(BatonPaths.Root))
         {
+            if (blockedByImport.Contains(location.Slug)
+                || blockedByImport.Contains(FleetMemory.Slug))
+            {
+                continue;
+            }
+
             var stored = await MemoryStore.ReadAllAsync(location.EntriesFile, cancellationToken).ConfigureAwait(false);
             var obligation = await MemoryProjectionObligationStore.ReadAsync(location.Slug, cancellationToken)
                 .ConfigureAwait(false);

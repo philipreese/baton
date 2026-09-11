@@ -141,6 +141,13 @@ public static class MemoryProjectionObligationStore
 
                 RequireSameOwner(obligation, current);
 
+                if (MemoryImportOperationStore.BlocksProjection(obligation.RepositorySlug))
+                {
+                    throw new IOException(
+                        $"Canonical memory store '{obligation.RepositorySlug}' belongs to an unsettled import; " +
+                        "publication is fenced until durable recovery completes.");
+                }
+
                 publish();
                 return true;
             });
@@ -171,7 +178,12 @@ public static class MemoryProjectionObligationStore
             obligation,
             current =>
             {
-                var failures = current.FailedAttempts + 1;
+                if (current.Status != MemoryProjectionObligationStatus.Pending)
+                {
+                    throw new InvalidDataException("An escalated projection obligation cannot record another automatic failure.");
+                }
+
+                var failures = checked(current.FailedAttempts + 1);
                 var escalated = failures >= EscalationAttemptCount;
                 DateTime? next = escalated ? null : nowUtc + BackoffAfter(failures);
                 var updated = current with
@@ -202,6 +214,7 @@ public static class MemoryProjectionObligationStore
     public static TimeSpan BackoffAfter(int failedAttempts)
     {
         ArgumentOutOfRangeException.ThrowIfLessThan(failedAttempts, 1);
+        ArgumentOutOfRangeException.ThrowIfGreaterThan(failedAttempts, EscalationAttemptCount);
         var multiplier = Math.Pow(2, failedAttempts - 1);
         return TimeSpan.FromTicks(Math.Min(
             (long)(InitialBackoff.Ticks * multiplier),
@@ -266,9 +279,11 @@ public static class MemoryProjectionObligationStore
             || obligation.FailedAttempts < 0
             || !Enum.IsDefined(obligation.Status)
             || (obligation.Status == MemoryProjectionObligationStatus.Pending
-                && obligation.NextAttemptUtc is null)
+                && (obligation.NextAttemptUtc is null
+                    || obligation.FailedAttempts >= EscalationAttemptCount))
             || (obligation.Status == MemoryProjectionObligationStatus.Escalated
-                && obligation.NextAttemptUtc is not null))
+                && (obligation.NextAttemptUtc is not null
+                    || obligation.FailedAttempts < EscalationAttemptCount)))
         {
             throw new InvalidDataException("Memory projection obligation has an incomplete or invalid shape.");
         }

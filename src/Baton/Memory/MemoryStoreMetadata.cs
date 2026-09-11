@@ -8,7 +8,11 @@ namespace Baton.Memory;
 /// The durable identity of one canonical memory store. It is deliberately independent of entry rows
 /// and projection obligations so an empty, fully projected store remains discoverable after restart.
 /// </summary>
-public sealed record MemoryStoreMetadata(int Version, string Repository, string RepositorySlug)
+public sealed record MemoryStoreMetadata(
+    int Version,
+    string Repository,
+    string RepositorySlug,
+    MemoryStoreInitializationStatus InitializationStatus = MemoryStoreInitializationStatus.Ready)
 {
     public const int CurrentVersion = 1;
 }
@@ -72,7 +76,10 @@ public static class MemoryStoreMetadataStore
 
                         Directory.CreateDirectory(Path.GetDirectoryName(path)!);
                         var metadata = new MemoryStoreMetadata(
-                            MemoryStoreMetadata.CurrentVersion, repository, repositorySlug);
+                            MemoryStoreMetadata.CurrentVersion,
+                            repository,
+                            repositorySlug,
+                            MemoryStoreInitializationStatus.Initializing);
                         var tempPath = $"{path}.{Guid.NewGuid():N}.tmp";
                         try
                         {
@@ -89,6 +96,44 @@ public static class MemoryStoreMetadataStore
                     });
             },
             CancellationToken.None);
+    }
+
+    /// <summary>
+    /// Marks an initialized store publishable after its first canonical append is known to be
+    /// parseable. The identity is rechecked under the metadata lock and another writer's ready state
+    /// is retained; no rollback or deletion participates in initialization recovery.
+    /// </summary>
+    public static Task CompleteInitializationAsync(
+        string repository,
+        string repositorySlug,
+        CancellationToken cancellationToken = default)
+    {
+        var path = BatonPaths.MemoryStoreMetadataFile(repositorySlug);
+        return Task.Run(
+            () => MutexGuardedFileLock.RunUnderLock(
+                path,
+                LockNamePrefix,
+                LockTimeout,
+                () =>
+                {
+                    var existing = ReadUnlocked(path)
+                        ?? throw new InvalidDataException($"Memory store metadata '{path}' disappeared during initialization.");
+                    if (!string.Equals(existing.Repository, repository, StringComparison.OrdinalIgnoreCase)
+                        || !string.Equals(existing.RepositorySlug, repositorySlug, StringComparison.OrdinalIgnoreCase))
+                    {
+                        throw new InvalidDataException(
+                            $"Memory store metadata '{path}' names '{existing.Repository}' / " +
+                            $"'{existing.RepositorySlug}', not '{repository}' / '{repositorySlug}'.");
+                    }
+
+                    if (existing.InitializationStatus == MemoryStoreInitializationStatus.Ready)
+                    {
+                        return;
+                    }
+
+                    WriteUnlocked(path, existing with { InitializationStatus = MemoryStoreInitializationStatus.Ready });
+                }),
+            cancellationToken);
     }
 
     /// <summary>
@@ -114,6 +159,19 @@ public static class MemoryStoreMetadataStore
         return MutexGuardedFileLock.RunUnderLock(
             path, LockNamePrefix, LockTimeout, () => ReadUnlocked(path));
     }
+
+    /// <summary>
+    /// Whether metadata and the entries ledger jointly establish a publishable canonical snapshot.
+    /// A legacy ledger remains valid; an initializing store requires at least one parseable row.
+    /// </summary>
+    public static bool IsPublishable(MemoryStoreMetadata? metadata, string entriesFilePath) =>
+        metadata?.InitializationStatus switch
+        {
+            MemoryStoreInitializationStatus.Ready => true,
+            MemoryStoreInitializationStatus.Initializing => MemoryStore.HasAnyParseableEntry(entriesFilePath),
+            null => File.Exists(entriesFilePath),
+            _ => false,
+        };
 
     private static MemoryStoreMetadata? ReadUnlocked(string path)
     {
@@ -146,6 +204,7 @@ public static class MemoryStoreMetadataStore
         if (metadata.Version != MemoryStoreMetadata.CurrentVersion
             || metadata.Repository is not { Length: > 0 }
             || metadata.RepositorySlug is not { Length: > 0 }
+            || !Enum.IsDefined(metadata.InitializationStatus)
             || !string.Equals(metadata.RepositorySlug, Path.GetFileName(
                 Path.GetDirectoryName(Path.GetDirectoryName(path))!), StringComparison.OrdinalIgnoreCase)
             || !string.Equals(
@@ -156,6 +215,34 @@ public static class MemoryStoreMetadataStore
 
         return metadata;
     }
+
+    private static void WriteUnlocked(string path, MemoryStoreMetadata metadata)
+    {
+        Directory.CreateDirectory(Path.GetDirectoryName(path)!);
+        var tempPath = $"{path}.{Guid.NewGuid():N}.tmp";
+        try
+        {
+            File.WriteAllText(
+                tempPath,
+                JsonSerializer.Serialize(metadata, Json) + "\n",
+                new UTF8Encoding(false));
+            File.Move(tempPath, path, overwrite: true);
+        }
+        finally
+        {
+            File.Delete(tempPath);
+        }
+    }
+}
+
+/// <summary>Whether a metadata-created store has crossed its first-row publication boundary.</summary>
+public enum MemoryStoreInitializationStatus
+{
+    /// <summary>Existing stores and stores with a completed first append are publishable.</summary>
+    Ready = 0,
+
+    /// <summary>The first append has not yet been proven parseable and inventory must fail closed.</summary>
+    Initializing = 1,
 }
 
 /// <summary>Resolves and validates the identity provenance of one canonical store.</summary>

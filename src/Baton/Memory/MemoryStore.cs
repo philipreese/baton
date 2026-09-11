@@ -96,6 +96,30 @@ public static class MemoryStore
         Ledger.ReadAllAsync(entriesFilePath, cancellationToken);
 
     /// <summary>
+    /// Whether an initialization-time ledger contains at least one parseable canonical row. Unlike
+    /// <see cref="ReadAllAsync"/>, I/O failure is not collapsed to an empty store: inventory must not
+    /// publish a metadata-only or torn first append.
+    /// </summary>
+    internal static bool HasAnyParseableEntry(string entriesFilePath) =>
+        Ledger.RunUnderLockAsync(
+                entriesFilePath,
+                () => Ledger.ReadAllUnlocked(entriesFilePath).Count > 0,
+                CancellationToken.None)
+            .GetAwaiter().GetResult();
+
+    /// <summary>Strict rows for durable import settlement; I/O failure must retain the intent.</summary>
+    internal static Task<IReadOnlyList<MemoryEntry>> ReadAllStrictAsync(
+        string entriesFilePath, CancellationToken cancellationToken = default) =>
+        Ledger.RunUnderLockAsync(
+            entriesFilePath, () => Ledger.ReadAllUnlocked(entriesFilePath), cancellationToken);
+
+    /// <summary>Strict link rows for durable import settlement; I/O failure must retain the intent.</summary>
+    internal static Task<IReadOnlyList<MemorySupersessionLink>> ReadLinksStrictAsync(
+        string linksFilePath, CancellationToken cancellationToken = default) =>
+        LinkLedger.RunUnderLockAsync(
+            linksFilePath, () => LinkLedger.ReadAllUnlocked(linksFilePath), cancellationToken);
+
+    /// <summary>
     /// Appends the subset of <paramref name="links"/> whose <see cref="MemorySupersessionLink.Id"/> is
     /// not already in <paramref name="linksFilePath"/>. Idempotent for the same reason
     /// <see cref="AppendAsync"/> is: the id is the pair, so recomputing a link that is already recorded
@@ -316,6 +340,24 @@ public static class MemoryStore
         RemoveRowsAsync(Ledger, entry => entry.Id, entryIds, entriesFilePath, cancellationToken);
 
     /// <summary>
+    /// Removes only rows carrying <paramref name="operationId"/> as well as a requested id. New
+    /// manifests use this ownership fence so a stale/double undo cannot delete a row another writer
+    /// reintroduced after the original operation's row disappeared.
+    /// </summary>
+    public static Task<int> RemoveOwnedAsync(
+        IReadOnlyList<string> entryIds,
+        string operationId,
+        string entriesFilePath,
+        CancellationToken cancellationToken = default) =>
+        RemoveRowsAsync(
+            Ledger,
+            entry => entry.Id,
+            entryIds,
+            entriesFilePath,
+            cancellationToken,
+            entry => string.Equals(entry.ImportOperationId, operationId, StringComparison.Ordinal));
+
+    /// <summary>
     /// The links half of the same reversal: removes exactly the link rows in
     /// <paramref name="linkIds"/> and returns how many were removed. An undo that removed an import's
     /// entries and left its links behind would leave rows that resolve to nothing
@@ -325,6 +367,20 @@ public static class MemoryStore
     public static Task<int> RemoveLinksAsync(
         IReadOnlyList<string> linkIds, string linksFilePath, CancellationToken cancellationToken = default) =>
         RemoveRowsAsync(LinkLedger, link => link.Id, linkIds, linksFilePath, cancellationToken);
+
+    /// <summary>The link-ledger half of <see cref="RemoveOwnedAsync"/>.</summary>
+    public static Task<int> RemoveOwnedLinksAsync(
+        IReadOnlyList<string> linkIds,
+        string operationId,
+        string linksFilePath,
+        CancellationToken cancellationToken = default) =>
+        RemoveRowsAsync(
+            LinkLedger,
+            link => link.Id,
+            linkIds,
+            linksFilePath,
+            cancellationToken,
+            link => string.Equals(link.ImportOperationId, operationId, StringComparison.Ordinal));
 
     /// <summary>
     /// <see cref="RemoveAsync"/>'s body, over either of this store's two ledgers. One implementation
@@ -337,7 +393,8 @@ public static class MemoryStore
         Func<TRow, string> keySelector,
         IReadOnlyList<string> keys,
         string filePath,
-        CancellationToken cancellationToken)
+        CancellationToken cancellationToken,
+        Func<TRow, bool>? ownershipPredicate = null)
         where TRow : class
     {
         ArgumentNullException.ThrowIfNull(keys);
@@ -358,7 +415,8 @@ public static class MemoryStore
                 var removed = 0;
                 foreach (var row in ledger.ReadAllUnlocked(filePath))
                 {
-                    if (removing.Contains(keySelector(row)))
+                    if (removing.Contains(keySelector(row))
+                        && (ownershipPredicate is null || ownershipPredicate(row)))
                     {
                         removed++;
                     }

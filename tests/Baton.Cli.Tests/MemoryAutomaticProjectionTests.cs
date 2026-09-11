@@ -26,6 +26,7 @@ public sealed class MemoryAutomaticProjectionTests : IDisposable
 
     public void Dispose()
     {
+        MemoryImportOperationStore.BoundaryObserver = null;
         _scope.Dispose();
         DirectoryCleanup.DeleteRecursively(_root);
     }
@@ -469,6 +470,12 @@ public sealed class MemoryAutomaticProjectionTests : IDisposable
             new MemoryProjectionObligation(
                 "escalated-with-due", Repository, Slug, MemoryProjectionObligationStatus.Escalated,
                 MemoryProjectionObligationStore.EscalationAttemptCount, now, now, now, "failure", "repair"),
+            new MemoryProjectionObligation(
+                "escalated-before-budget", Repository, Slug, MemoryProjectionObligationStatus.Escalated,
+                0, now, now, null, "failure", "repair"),
+            new MemoryProjectionObligation(
+                "pending-overflow", Repository, Slug, MemoryProjectionObligationStatus.Pending,
+                int.MaxValue, now, now, now, "failure", null),
         };
         var path = BatonPaths.MemorySyncPendingFile(Slug);
         Directory.CreateDirectory(Path.GetDirectoryName(path)!);
@@ -575,6 +582,242 @@ public sealed class MemoryAutomaticProjectionTests : IDisposable
 
         Assert.False(File.Exists(BatonPaths.MemoryEntriesFile(Slug)));
         Assert.False(File.Exists(metadataPath));
+    }
+
+    [Fact]
+    public async Task Failed_or_torn_first_append_never_enters_inventory_or_projection()
+    {
+        var targetRoot = await CreateTargetAsync();
+        var target = Path.Combine(targetRoot, ClaudeProjectionTarget.ProjectionFileName);
+        var entries = BatonPaths.MemoryEntriesFile(Slug);
+        Directory.CreateDirectory(entries);
+
+        var failure = await Assert.ThrowsAnyAsync<Exception>(() => MemoryAddCommand.ExecuteAsync(
+            MemoryAddOptionsParser.Parse([
+                "--repository", Repository, "--kind", "durable-fact", "--text", "cannot append",
+            ]),
+            TextWriter.Null,
+            assertedByOverride: "test",
+            cancellationToken: TestContext.Current.CancellationToken,
+            claudeHomeOverride: ClaudeHome,
+            userHomeOverride: UserHome));
+        Assert.True(failure is IOException or UnauthorizedAccessException, failure.ToString());
+        Assert.Empty(CanonicalStoreInventory.Scan(BatonPaths.Root));
+
+        Directory.Delete(entries);
+        File.WriteAllText(entries, "{\"id\":\"torn-first-row");
+        Assert.Empty(CanonicalStoreInventory.Scan(BatonPaths.Root));
+
+        Assert.Equal(0, await MemorySyncCommand.ExecuteAsync(
+            MemorySyncOptionsParser.Parse(["--repository", Repository, "--apply"]),
+            TextWriter.Null,
+            ClaudeHome,
+            TestContext.Current.CancellationToken,
+            UserHome));
+        Assert.False(File.Exists(target));
+
+        var writes = 0;
+        var sweep = new MemoryProjectionSweep(
+            () => DateTime.UtcNow,
+            ClaudeHome,
+            UserHome,
+            (path, bytes) =>
+            {
+                writes++;
+                File.WriteAllBytes(path, bytes);
+            });
+        await sweep.SweepOnceAsync(cancellationToken: TestContext.Current.CancellationToken);
+        Assert.True(writes > 0);
+        Assert.Contains("cannot append", File.ReadAllText(target), StringComparison.Ordinal);
+        Assert.Single(CanonicalStoreInventory.Scan(BatonPaths.Root));
+    }
+
+    [Fact]
+    public async Task Interrupted_multi_repository_intent_fences_publication_then_recovers_and_undoes()
+    {
+        var targetRoot = await CreateTargetAsync();
+        var target = Path.Combine(targetRoot, ClaudeProjectionTarget.ProjectionFileName);
+        var operationId = Guid.NewGuid().ToString("N");
+        var first = Entry("first repository") with { ImportOperationId = operationId };
+        var second = Entry("second repository", OtherRepository) with { ImportOperationId = operationId };
+        var manifestPath = BatonPaths.MemoryImportManifestFile($"fixture-{operationId}");
+        var intent = Intent(operationId, first, second);
+        intent.Write(manifestPath);
+
+        using var cancellation = new CancellationTokenSource();
+        MemoryImportOperationStore.BoundaryObserver = boundary =>
+        {
+            if (string.Equals(boundary, $"entries:{Slug}", StringComparison.Ordinal))
+            {
+                cancellation.Cancel();
+            }
+        };
+        await Assert.ThrowsAnyAsync<OperationCanceledException>(() =>
+            MemoryImportOperationStore.ApplyAsync(manifestPath, intent, cancellation.Token));
+        MemoryImportOperationStore.BoundaryObserver = null;
+
+        Assert.Single(await MemoryStore.ReadAllAsync(
+            BatonPaths.MemoryEntriesFile(Slug), TestContext.Current.CancellationToken));
+        Assert.Empty(await MemoryStore.ReadAllAsync(
+            BatonPaths.MemoryEntriesFile(FleetMemory.SlugFor(OtherRepository)),
+            TestContext.Current.CancellationToken));
+        Assert.Equal(ImportOperationState.Intent, ImportManifest.Read(manifestPath).OperationState);
+        Assert.True(MemoryImportOperationStore.BlocksProjection(Slug));
+
+        Assert.Equal(1, await MemorySyncCommand.ExecuteAsync(
+            MemorySyncOptionsParser.Parse(["--repository", Repository, "--apply"]),
+            TextWriter.Null,
+            ClaudeHome,
+            TestContext.Current.CancellationToken,
+            UserHome));
+        Assert.False(File.Exists(target));
+
+        await MemoryImportOperationStore.RecoverPendingAsync(
+            TextWriter.Null, TestContext.Current.CancellationToken);
+        var settled = ImportManifest.Read(manifestPath);
+        Assert.Equal(ImportOperationState.Settled, settled.OperationState);
+        Assert.Equal(2, settled.Appended.Count());
+        Assert.Single(await MemoryStore.ReadAllAsync(
+            BatonPaths.MemoryEntriesFile(FleetMemory.SlugFor(OtherRepository)),
+            TestContext.Current.CancellationToken));
+
+        Assert.Equal(0, await MemorySyncCommand.ExecuteAsync(
+            MemorySyncOptionsParser.Parse(["--repository", Repository, "--apply"]),
+            TextWriter.Null,
+            ClaudeHome,
+            TestContext.Current.CancellationToken,
+            UserHome));
+        Assert.True(File.Exists(target));
+
+        Assert.Equal(0, await MemoryImportCommand.ExecuteAsync(
+            MemoryImportOptionsParser.Parse(["--undo", manifestPath]),
+            TextWriter.Null,
+            ClaudeHome,
+            TestContext.Current.CancellationToken,
+            UserHome));
+        Assert.Empty(await MemoryStore.ReadAllAsync(
+            BatonPaths.MemoryEntriesFile(Slug), TestContext.Current.CancellationToken));
+        Assert.Empty(await MemoryStore.ReadAllAsync(
+            BatonPaths.MemoryEntriesFile(FleetMemory.SlugFor(OtherRepository)),
+            TestContext.Current.CancellationToken));
+    }
+
+    [Fact]
+    public async Task Intent_never_claims_or_undoes_a_concurrent_writers_row()
+    {
+        var operationId = Guid.NewGuid().ToString("N");
+        var existing = Entry("concurrent winner");
+        await MemoryStore.AppendAsync(
+            [existing], BatonPaths.MemoryEntriesFile(Slug), TestContext.Current.CancellationToken);
+        var planned = existing with { ImportOperationId = operationId };
+        var manifestPath = BatonPaths.MemoryImportManifestFile($"fixture-{operationId}");
+        var intent = Intent(operationId, planned);
+        intent.Write(manifestPath);
+
+        var settled = await MemoryImportOperationStore.ApplyAsync(
+            manifestPath, intent, TestContext.Current.CancellationToken);
+        Assert.Empty(settled.Appended);
+
+        Assert.Equal(0, await MemoryImportCommand.ExecuteAsync(
+            MemoryImportOptionsParser.Parse(["--undo", manifestPath]),
+            TextWriter.Null,
+            ClaudeHome,
+            TestContext.Current.CancellationToken,
+            UserHome));
+        Assert.Single(await MemoryStore.ReadAllAsync(
+            BatonPaths.MemoryEntriesFile(Slug), TestContext.Current.CancellationToken));
+    }
+
+    [Fact]
+    public async Task Settled_undo_does_not_delete_a_row_reintroduced_by_another_writer()
+    {
+        var operationId = Guid.NewGuid().ToString("N");
+        var unowned = Entry("reintroduced winner");
+        var planned = unowned with { ImportOperationId = operationId };
+        var entriesFile = BatonPaths.MemoryEntriesFile(Slug);
+        var manifestPath = BatonPaths.MemoryImportManifestFile($"fixture-{operationId}");
+        var intent = Intent(operationId, planned);
+        intent.Write(manifestPath);
+        var settled = await MemoryImportOperationStore.ApplyAsync(
+            manifestPath, intent, TestContext.Current.CancellationToken);
+        Assert.Single(settled.Appended);
+
+        Assert.Equal(1, await MemoryStore.RemoveOwnedAsync(
+            [planned.Id], operationId, entriesFile, TestContext.Current.CancellationToken));
+        await MemoryStore.AppendAsync([unowned], entriesFile, TestContext.Current.CancellationToken);
+
+        Assert.Equal(1, await MemoryImportCommand.ExecuteAsync(
+            MemoryImportOptionsParser.Parse(["--undo", manifestPath]),
+            TextWriter.Null,
+            ClaudeHome,
+            TestContext.Current.CancellationToken,
+            UserHome));
+        var survivor = Assert.Single(await MemoryStore.ReadAllAsync(
+            entriesFile, TestContext.Current.CancellationToken));
+        Assert.Null(survivor.ImportOperationId);
+    }
+
+    [Theory]
+    [InlineData("after-first-repository")]
+    [InlineData("after-second-repository")]
+    [InlineData("after-links")]
+    [InlineData("before-settlement")]
+    public async Task Every_import_interruption_boundary_replays_to_exact_settlement_and_undo(string interruption)
+    {
+        var operationId = Guid.NewGuid().ToString("N");
+        var first = Entry("live") with { ImportOperationId = operationId };
+        var archived = Entry("archived") with { ImportOperationId = operationId };
+        var other = Entry("other", OtherRepository) with { ImportOperationId = operationId };
+        var link = MemorySupersessionLink.Create(first.Id, archived.Id, Repository, DateTime.UtcNow)
+        with
+        { ImportOperationId = operationId };
+        var entries = new[] { first, archived, other };
+        var links = new[] { link };
+        var manifestPath = BatonPaths.MemoryImportManifestFile($"fixture-{operationId}");
+        var intent = IntentWithLinks(operationId, entries, links);
+        intent.Write(manifestPath);
+
+        var otherSlug = FleetMemory.SlugFor(OtherRepository);
+        var boundary = interruption switch
+        {
+            "after-first-repository" => $"entries:{Slug}",
+            "after-second-repository" => $"entries:{otherSlug}",
+            "after-links" => $"links:{Slug}",
+            _ => "before-settlement",
+        };
+        MemoryImportOperationStore.BoundaryObserver = observed =>
+        {
+            if (string.Equals(observed, boundary, StringComparison.Ordinal))
+            {
+                throw new IOException($"fixture interruption at {observed}");
+            }
+        };
+
+        await Assert.ThrowsAsync<IOException>(() => MemoryImportOperationStore.ApplyAsync(
+            manifestPath, intent, TestContext.Current.CancellationToken));
+        MemoryImportOperationStore.BoundaryObserver = null;
+        Assert.Equal(ImportOperationState.Intent, ImportManifest.Read(manifestPath).OperationState);
+        Assert.True(MemoryImportOperationStore.BlocksProjection(Slug));
+        Assert.True(MemoryImportOperationStore.BlocksProjection(otherSlug));
+
+        await MemoryImportOperationStore.RecoverPendingAsync(
+            TextWriter.Null, TestContext.Current.CancellationToken);
+        var settled = ImportManifest.Read(manifestPath);
+        Assert.Equal(3, settled.Appended.Count());
+        Assert.Single(settled.AppendedLinks);
+
+        Assert.Equal(0, await MemoryImportCommand.ExecuteAsync(
+            MemoryImportOptionsParser.Parse(["--undo", manifestPath]),
+            TextWriter.Null,
+            ClaudeHome,
+            TestContext.Current.CancellationToken,
+            UserHome));
+        Assert.Empty(await MemoryStore.ReadAllAsync(
+            BatonPaths.MemoryEntriesFile(Slug), TestContext.Current.CancellationToken));
+        Assert.Empty(await MemoryStore.ReadAllAsync(
+            BatonPaths.MemoryEntriesFile(otherSlug), TestContext.Current.CancellationToken));
+        Assert.Empty(await MemoryStore.ReadLinksAsync(
+            BatonPaths.MemoryLinksFile(Slug), TestContext.Current.CancellationToken));
     }
 
     [Fact]
@@ -727,4 +970,38 @@ public sealed class MemoryAutomaticProjectionTests : IDisposable
             default,
             default);
     }
+
+    private static ImportManifest Intent(string operationId, params MemoryEntry[] entries) =>
+        IntentWithLinks(operationId, entries, []);
+
+    private static ImportManifest IntentWithLinks(
+        string operationId,
+        IReadOnlyList<MemoryEntry> entries,
+        IReadOnlyList<MemorySupersessionLink> links) =>
+        new(
+            ImportManifest.CurrentVersion,
+            DateTime.UtcNow,
+            BatonPaths.Root,
+            entries.Select(entry => new ImportManifestRow(
+                entry.SourcePath,
+                entry.Sha256,
+                entry.SourceMtimeUtc,
+                Encoding.UTF8.GetByteCount(entry.Text),
+                entry.SourceVendor,
+                entry.SourceScope,
+                entry.Id,
+                entry.Repository,
+                BatonPaths.MemoryEntriesFile(FleetMemory.SlugFor(entry.Repository)),
+                AlreadyPresent: true)).ToList(),
+            Unfiled: [],
+            Machinery: [],
+            Links: links.Select(link => new ImportLinkRow(
+                link.Id,
+                link.Repository,
+                BatonPaths.MemoryLinksFile(FleetMemory.SlugFor(link.Repository)),
+                AlreadyPresent: true)).ToList(),
+            OperationId: operationId,
+            OperationState: ImportOperationState.Intent,
+            PlannedEntries: entries,
+            PlannedLinks: links);
 }

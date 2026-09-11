@@ -34,6 +34,7 @@ namespace Baton.Memory;
 /// <param name="SupersededId">The <see cref="MemoryEntry.Id"/> of the entry that is replaced.</param>
 /// <param name="Repository">The subject both entries are filed under. Recorded so a row is readable on its own.</param>
 /// <param name="RecordedAtUtc">When the link was first computed. Deliberately NOT part of <paramref name="Id"/>.</param>
+/// <param name="ImportOperationId">The durable import intent that first appended this link, when any.</param>
 public sealed record MemorySupersessionLink(
     [property: JsonPropertyName("id")]
     string Id,
@@ -44,7 +45,10 @@ public sealed record MemorySupersessionLink(
     [property: JsonPropertyName("repository")]
     string Repository,
     [property: JsonPropertyName("recordedAtUtc")]
-    DateTime RecordedAtUtc)
+    DateTime RecordedAtUtc,
+    [property: JsonPropertyName("importOperationId")]
+    [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    string? ImportOperationId = null)
 {
     /// <summary>
     /// The id a given ordered pair produces: <c>&lt;superseding&gt;:&lt;superseded&gt;</c>. Readable

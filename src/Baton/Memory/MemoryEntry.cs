@@ -171,6 +171,10 @@ public enum MemoryKindSource
 /// lane's <c>role/vendor/room</c> inside one, which <c>MemoryLaneAssertion</c> states is a reading of
 /// the environment rather than a credential.
 /// </param>
+/// <param name="ImportOperationId">
+/// The durable import intent that first appended this row. Absent for legacy and non-import rows.
+/// It is ownership evidence only and deliberately does not participate in <see cref="Derive"/>.
+/// </param>
 public sealed record MemoryEntry(
     [property: JsonPropertyName("id")]
     string Id,
@@ -205,7 +209,10 @@ public sealed record MemoryEntry(
     IReadOnlyList<string>? Evidence = null,
     [property: JsonPropertyName("assertedBy")]
     [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
-    string? AssertedBy = null)
+    string? AssertedBy = null,
+    [property: JsonPropertyName("importOperationId")]
+    [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    string? ImportOperationId = null)
 {
     /// <summary>
     /// The id of the entry a given source file produces for a given subject: a 32-hex-character

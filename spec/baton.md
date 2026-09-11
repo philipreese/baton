@@ -6569,8 +6569,8 @@ is the enumeration `sync` walks and `audit` prints, and `MemoryFactOrigin.Fleet`
 section says which store it came from.
 
 **`baton memory import` — phase B, shipped. Non-destructive by construction, and reversible.** Every
-source is opened read-only and left byte-identical; the verb writes in exactly two places, both under
-Baton's own root: the per-repository store and one `ImportManifest`. What an entry carries is a UTF-8
+source is opened read-only and left byte-identical; its full write boundary is the automatic-projection
+contract above. What an entry carries is a UTF-8
 **decode** of the source's bytes with the byte digest beside it, both taken from **one** read — the
 digest is the authority on what the file held, and taking it from the earlier inventory walk instead
 would let a file edited in between be stored under a digest describing a version nobody kept. The

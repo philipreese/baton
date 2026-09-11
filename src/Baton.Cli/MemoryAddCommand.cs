@@ -112,21 +112,8 @@ public static class MemoryAddCommand
             return 0;
         }
 
-        await MemoryStoreMetadataStore.EnsureAsync(repository, slug, cancellationToken).ConfigureAwait(false);
-
-        // Metadata initialization is the canonical commit boundary. It re-checks cancellation after
-        // acquiring its mutex; once it succeeds, finish the first append so metadata cannot describe
-        // an empty store solely because cancellation arrived between these two durable writes.
-        var appended = await MemoryStore.AppendAndGetAppendedAsync([entry], entriesFile, CancellationToken.None)
-            .ConfigureAwait(false);
-        if (appended.Count == 0)
-        {
-            output.WriteLine(
-                $"REFUSED  this memory became entry {entry.Id}, but a concurrent writer appended it first.");
-            output.WriteLine("         Nothing was appended by this call, so it did not create a manifest or a projection obligation.");
-            return 1;
-        }
-
+        var operationId = Guid.NewGuid().ToString("N");
+        var ownedEntry = entry with { ImportOperationId = operationId };
         var manifest = new ImportManifest(
             ImportManifest.CurrentVersion,
             entry.ImportedAtUtc,
@@ -142,13 +129,33 @@ public static class MemoryAddCommand
                 entry.SourceScope,
                 entry.Id,
                 entry.Repository,
-                entriesFile)],
+                entriesFile,
+                AlreadyPresent: true)],
             Unfiled: [],
-            Machinery: []);
+            Machinery: [],
+            OperationId: operationId,
+            OperationState: ImportOperationState.Intent,
+            PlannedEntries: [ownedEntry],
+            PlannedLinks: []);
 
         var manifestPath = BatonPaths.MemoryImportManifestFile(
-            "add-" + entry.ImportedAtUtc.ToString("yyyyMMdd'T'HHmmss'.'fff'Z'", CultureInfo.InvariantCulture));
+            "add-" + entry.ImportedAtUtc.ToString("yyyyMMdd'T'HHmmss'.'fff'Z'", CultureInfo.InvariantCulture)
+            + "-" + operationId[..8]);
+
+        // The atomic intent is the canonical boundary. Cancellation or I/O failure after this point
+        // leaves a replay plan and exact per-row ownership instead of a metadata-only success shape.
+        cancellationToken.ThrowIfCancellationRequested();
         manifest.Write(manifestPath);
+        output.WriteLine($"RECOVERY {manifestPath} -- durable intent recorded; retry or undo is safe after interruption.");
+        manifest = await MemoryImportOperationStore
+            .ApplyAsync(manifestPath, manifest, cancellationToken).ConfigureAwait(false);
+        if (!manifest.Appended.Any())
+        {
+            output.WriteLine(
+                $"REFUSED  this memory became entry {entry.Id}, but a concurrent writer appended it first.");
+            output.WriteLine("         Nothing was appended by this call, so its durable intent owns no canonical row.");
+            return 1;
+        }
 
         output.WriteLine($"ADDED    {entry.Id} to {entriesFile}");
         WriteWouldAdd(output, entry, entriesFile);

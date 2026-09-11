@@ -123,6 +123,9 @@ public static class MemoryRetractCommand
             return 1;
         }
 
+        await MemoryStoreMetadataStore.CompleteInitializationAsync(
+            entry.Repository, slug, CancellationToken.None).ConfigureAwait(false);
+
         output.WriteLine($"RETRACTED {entry.Id} ({MemoryJsonNames.Of(entry.Kind)}) in {entriesFile}");
         output.WriteLine($"         reason      {retraction.Reason}");
         output.WriteLine($"         retractedBy {retraction.RetractedBy}");

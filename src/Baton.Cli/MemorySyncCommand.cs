@@ -84,8 +84,8 @@ public static class MemorySyncCommand
             foreach (var slug in slugs)
             {
                 var metadata = MemoryStoreMetadataStore.ReadIfPresent(slug);
-                if (!File.Exists(BatonPaths.MemoryEntriesFile(slug))
-                    && metadata is null)
+                if (!MemoryStoreMetadataStore.IsPublishable(
+                        metadata, BatonPaths.MemoryEntriesFile(slug)))
                 {
                     continue;
                 }
@@ -276,7 +276,7 @@ public static class MemorySyncCommand
         // no-store answer independent of that behaviour rather than resting on it, and because taking a
         // named mutex to discover a file is absent is work with no result. The store-is-empty case is
         // still handled below: an existing but empty file is a different state from an absent one.
-        if (!File.Exists(entriesFile) && metadata is null)
+        if (!MemoryStoreMetadataStore.IsPublishable(metadata, entriesFile))
         {
             return null;
         }

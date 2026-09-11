@@ -50,7 +50,7 @@ public static class CanonicalStoreInventory
             var memory = Path.Combine(directory, BatonPaths.MemoryDirectoryName);
             var entries = Path.Combine(memory, BatonPaths.MemoryEntriesFileName);
             var metadata = MemoryStoreMetadataStore.ReadIfPresent(slug, batonRoot);
-            if (metadata is not null || File.Exists(entries))
+            if (MemoryStoreMetadataStore.IsPublishable(metadata, entries))
             {
                 stores.Add(new CanonicalStoreLocation(
                     slug,

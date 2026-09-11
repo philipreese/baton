@@ -157,14 +157,19 @@ public static class MemoryImportCommand
             .GroupBy(f => f.Path, StringComparer.OrdinalIgnoreCase)
             .ToDictionary(g => g.Key, g => g.First().SizeBytes, StringComparer.OrdinalIgnoreCase);
 
+        var operationId = options.DryRun ? null : Guid.NewGuid().ToString("N");
         var rows = new List<ImportManifestRow>();
         var linkRows = new List<ImportLinkRow>();
+        var plannedEntries = new List<MemoryEntry>();
+        var plannedLinks = new List<MemorySupersessionLink>();
         foreach (var group in plan.Entries.GroupBy(e => e.Repository, StringComparer.OrdinalIgnoreCase))
         {
             var slug = FleetMemory.SlugFor(group.Key);
             var entriesFile = BatonPaths.MemoryEntriesFile(slug);
             var linksFile = BatonPaths.MemoryLinksFile(slug);
-            var entries = group.ToList();
+            var entries = group.Select(e => operationId is null
+                ? e
+                : e with { ImportOperationId = operationId }).ToList();
 
             // Read first so the manifest can say which rows THIS run appended: an undo must not remove
             // an entry an earlier import wrote. The append itself re-checks under its own lock, so this
@@ -177,36 +182,24 @@ public static class MemoryImportCommand
             // defect: importing the live roots and the archive in separate runs used to land no link at
             // all, because each run could only see its own half of every pair.
             var links = MemoryImportPlan.LinkSupersession(
-                [.. stored, .. entries.Where(e => !existing.Contains(e.Id))], importedAtUtc);
+                    [.. stored, .. entries.Where(e => !existing.Contains(e.Id))], importedAtUtc)
+                .Select(link => operationId is null
+                    ? link
+                    : link with { ImportOperationId = operationId })
+                .ToList();
             var existingLinks = (await MemoryStore.ReadLinksAsync(linksFile, cancellationToken).ConfigureAwait(false))
                 .Select(l => l.Id)
                 .ToHashSet(StringComparer.Ordinal);
 
-            // A dry run has no lock-held append to observe, so it remains an advisory preview based on
-            // the earlier reads. An applied manifest instead records the result decided under each
-            // owning ledger lock: a concurrent import may have won between those reads and this call.
-            HashSet<string> appendedEntryIds;
-            if (options.DryRun)
-            {
-                appendedEntryIds = entries
-                    .Where(e => !existing.Contains(e.Id))
-                    .Select(e => e.Id)
-                    .ToHashSet(StringComparer.Ordinal);
-            }
-            else
-            {
-                // Once metadata initialization succeeds, this call has crossed its canonical commit
-                // boundary. The first append must finish even if cancellation arrived while metadata
-                // was being written; otherwise store.json could outlive a row that never committed.
-                await MemoryStoreMetadataStore.EnsureAsync(group.Key, slug, cancellationToken).ConfigureAwait(false);
-                appendedEntryIds = (await MemoryStore.AppendAndGetAppendedAsync(
-                        entries, entriesFile, CancellationToken.None)
-                    .ConfigureAwait(false)).Select(e => e.Id).ToHashSet(StringComparer.Ordinal);
-            }
+            // A dry run remains an advisory preview. An applied run records every candidate as
+            // unowned in its intent; settlement derives exact ownership from operation ids written in
+            // the same canonical rows, so a crash cannot put an append beyond its manifest.
+            var appendedEntryIds = options.DryRun
+                ? entries.Where(e => !existing.Contains(e.Id)).Select(e => e.Id).ToHashSet(StringComparer.Ordinal)
+                : [];
             var appendedLinkIds = options.DryRun
                 ? links.Where(l => !existingLinks.Contains(l.Id)).Select(l => l.Id).ToHashSet(StringComparer.Ordinal)
-                : (await MemoryStore.AppendLinksAndGetAppendedAsync(links, linksFile, cancellationToken)
-                    .ConfigureAwait(false)).Select(l => l.Id).ToHashSet(StringComparer.Ordinal);
+                : [];
 
             // An input batch can itself repeat an id. The ledger writes only its first occurrence;
             // consume each returned id once so undo expects one removal rather than claiming both
@@ -216,14 +209,25 @@ public static class MemoryImportCommand
                 e.SourcePath, e.Sha256, e.SourceMtimeUtc,
                 sizeByPath.TryGetValue(e.SourcePath, out var size) ? size : 0,
                 e.SourceVendor, e.SourceScope, e.Id, e.Repository, entriesFile,
-                AlreadyPresent: !appendedEntryIds.Contains(e.Id) || !ownedEntryIds.Add(e.Id))));
+                AlreadyPresent: !options.DryRun
+                    || !appendedEntryIds.Contains(e.Id)
+                    || !ownedEntryIds.Add(e.Id))));
 
             var ownedLinkIds = new HashSet<string>(StringComparer.Ordinal);
             linkRows.AddRange(links.Select(l => new ImportLinkRow(
                 l.Id, l.Repository, linksFile,
-                AlreadyPresent: !appendedLinkIds.Contains(l.Id) || !ownedLinkIds.Add(l.Id))));
+                AlreadyPresent: !options.DryRun
+                    || !appendedLinkIds.Contains(l.Id)
+                    || !ownedLinkIds.Add(l.Id))));
+
+            if (!options.DryRun)
+            {
+                plannedEntries.AddRange(entries);
+                plannedLinks.AddRange(links);
+            }
         }
 
+        var hasCanonicalPlan = plannedEntries.Count > 0 || plannedLinks.Count > 0;
         var manifest = new ImportManifest(
             ImportManifest.CurrentVersion,
             DateTime.UtcNow,
@@ -235,14 +239,29 @@ public static class MemoryImportCommand
             linkRows.OrderBy(l => l.LinksFilePath, StringComparer.OrdinalIgnoreCase)
                 .ThenBy(l => l.LinkId, StringComparer.Ordinal).ToList(),
             plan.ProjectionsSkipped,
-            plan.Dropped);
+            plan.Dropped,
+            operationId,
+            !options.DryRun && hasCanonicalPlan ? ImportOperationState.Intent : ImportOperationState.Settled,
+            !options.DryRun && hasCanonicalPlan ? plannedEntries : null,
+            !options.DryRun && hasCanonicalPlan ? plannedLinks : null);
 
         string? manifestPath = null;
         if (!options.DryRun)
         {
             manifestPath = BatonPaths.MemoryImportManifestFile(
-                "import-" + manifest.ImportedAtUtc.ToString("yyyyMMdd'T'HHmmss'.'fff'Z'", CultureInfo.InvariantCulture));
+                "import-" + manifest.ImportedAtUtc.ToString("yyyyMMdd'T'HHmmss'.'fff'Z'", CultureInfo.InvariantCulture)
+                + "-" + operationId![..8]);
+
+            // This atomic write is the canonical operation boundary. After it succeeds, the complete
+            // multi-repository plan is recoverable and all ownership bookkeeping is non-cancellable.
+            cancellationToken.ThrowIfCancellationRequested();
             manifest.Write(manifestPath);
+            output.WriteLine($"RECOVERY {manifestPath} -- durable intent recorded; retry or undo is safe after interruption.");
+            if (manifest.OperationState == ImportOperationState.Intent)
+            {
+                manifest = await MemoryImportOperationStore
+                    .ApplyAsync(manifestPath, manifest, cancellationToken).ConfigureAwait(false);
+            }
         }
 
         WriteReport(output, options, manifest, manifestPath);
@@ -652,6 +671,14 @@ public static class MemoryImportCommand
             return 1;
         }
 
+        if (manifest.OperationState == ImportOperationState.Intent)
+        {
+            // Undo never guesses at a partially applied intent. First finish the idempotent plan and
+            // settle exact ownership, then replay that durable result backwards.
+            manifest = await MemoryImportOperationStore
+                .ApplyAsync(manifestPath, manifest, CancellationToken.None).ConfigureAwait(false);
+        }
+
         var shortfalls = new List<string>();
         var changedRepositories = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
         var removed = 0;
@@ -661,7 +688,12 @@ public static class MemoryImportCommand
             var repository = group.First().Repository;
             await MemoryStoreMetadataStore.EnsureAsync(
                 repository, FleetMemory.SlugFor(repository), cancellationToken).ConfigureAwait(false);
-            var count = await MemoryStore.RemoveAsync(expected, group.Key, cancellationToken).ConfigureAwait(false);
+            var count = manifest.OperationId is { Length: > 0 } operationId
+                ? await MemoryStore.RemoveOwnedAsync(
+                    expected, operationId, group.Key, cancellationToken).ConfigureAwait(false)
+                : await MemoryStore.RemoveAsync(expected, group.Key, cancellationToken).ConfigureAwait(false);
+            await MemoryStoreMetadataStore.CompleteInitializationAsync(
+                repository, FleetMemory.SlugFor(repository), CancellationToken.None).ConfigureAwait(false);
             removed += count;
             if (count > 0)
             {
@@ -678,7 +710,10 @@ public static class MemoryImportCommand
         foreach (var group in manifest.AppendedLinks.GroupBy(l => l.LinksFilePath, StringComparer.OrdinalIgnoreCase))
         {
             var expected = group.Select(l => l.LinkId).Distinct(StringComparer.Ordinal).ToList();
-            var count = await MemoryStore.RemoveLinksAsync(expected, group.Key, cancellationToken).ConfigureAwait(false);
+            var count = manifest.OperationId is { Length: > 0 } operationId
+                ? await MemoryStore.RemoveOwnedLinksAsync(
+                    expected, operationId, group.Key, cancellationToken).ConfigureAwait(false)
+                : await MemoryStore.RemoveLinksAsync(expected, group.Key, cancellationToken).ConfigureAwait(false);
             removedLinks += count;
             if (count > 0)
             {

@@ -80,7 +80,9 @@ internal sealed class JsonLinesLedger<TEntry>(
     /// deduplicated against anything and is always appended. Creates the file and its parent directory
     /// if neither exists; a no-op when nothing survives the filter, never opening the file to write zero
     /// bytes. Each store's own <c>AppendAsync</c> documents why its ledger needs the skip and against
-    /// which repeated-settle shapes.
+    /// which repeated-settle shapes. A non-empty torn tail that lacks a newline is terminated before
+    /// the new rows, so recovery produces a separately parseable row instead of concatenating valid
+    /// JSON onto an unparseable first append.
     /// </summary>
     public async Task AppendAsync(IReadOnlyList<TEntry> entries, string ledgerFilePath, CancellationToken cancellationToken = default) =>
         _ = await AppendAndGetAppendedAsync(entries, ledgerFilePath, cancellationToken).ConfigureAwait(false);
@@ -127,6 +129,11 @@ internal sealed class JsonLinesLedger<TEntry>(
             }
 
             var builder = new StringBuilder();
+            if (NeedsLineSeparator(ledgerFilePath))
+            {
+                builder.Append('\n');
+            }
+
             foreach (var entry in toAppend)
             {
                 builder.Append(JsonSerializer.Serialize(entry, SerializerOptions)).Append('\n');
@@ -140,6 +147,24 @@ internal sealed class JsonLinesLedger<TEntry>(
 
             return (IReadOnlyList<TEntry>)toAppend;
         }, cancellationToken);
+    }
+
+    private static bool NeedsLineSeparator(string ledgerFilePath)
+    {
+        if (!File.Exists(ledgerFilePath))
+        {
+            return false;
+        }
+
+        using var stream = new FileStream(
+            ledgerFilePath, FileMode.Open, FileAccess.Read, FileShare.ReadWrite);
+        if (stream.Length == 0)
+        {
+            return false;
+        }
+
+        stream.Seek(-1, SeekOrigin.End);
+        return stream.ReadByte() != '\n';
     }
 
     /// <summary>
