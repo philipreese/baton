@@ -284,6 +284,17 @@ public static class BatonPaths
     public const string MemoryEntriesFileName = "entries.jsonl";
 
     /// <summary>
+    /// <c>{Root}/&lt;repository-slug&gt;/memory/store.json</c> — the canonical store's durable
+    /// repository identity. Unlike an entry row or projection obligation, this remains when an undo
+    /// empties the store and when no projection is pending.
+    /// </summary>
+    public static string MemoryStoreMetadataFile(string repositorySlug) =>
+        Path.Combine(MemoryDirectory(repositorySlug), MemoryStoreMetadataFileName);
+
+    /// <summary>Filename of <see cref="MemoryStoreMetadataFile"/> relative to <see cref="MemoryDirectory"/>.</summary>
+    public const string MemoryStoreMetadataFileName = "store.json";
+
+    /// <summary>
     /// <c>{Root}/&lt;repository-slug&gt;/memory/links.jsonl</c> — one repository's append-only
     /// supersession links (#1852 phase B, Q2). <b>A second file rather than a field on an entry</b>
     /// because <see cref="MemoryEntriesFile"/> is append-only with no overwrite and an entry's id is

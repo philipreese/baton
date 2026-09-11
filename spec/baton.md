@@ -6525,14 +6525,18 @@ every repository because fleet entries lead every repository projection. Dry run
 trigger nothing.
 
 **Canonical commit and projection completion are two results.** A successful canonical write is not
-rolled back when projection fails. Before publication Baton writes
+rolled back when projection fails. Each canonical store keeps its repository identity independently
+in `<repo-slug>/memory/store.json`, so inventory, full-store sync, and the daemon safety sweep still
+know an empty store after undo and restart without relying on a pending projection claim. Before publication Baton writes
 `<repo-slug>/memory/sync-pending.json`; failure keeps that durable obligation with the error, attempt
 count and next retry. Safe-to-repeat retries back off at one, two, four and eight minutes; the fifth
 failed attempt changes the obligation from `pending` to `escalated`, stops automatic retries, logs the
 escalation, and names the manual `memory sync --apply` recovery after the root or permission failure
 is repaired. There is no claim expiry: ownership is not completion. A successful publication removes
 only its own matching obligation. Neither canonical commit nor projection completion claims that a
-vendor loaded or consumed the file.
+vendor loaded or consumed the file. If creating the obligation itself fails after the canonical
+mutation, the verb reports committed-but-unprojected without promising a pending claim; the durable
+store identity preserves recovery once the obligation path is repaired.
 
 **Every authored entry records who asserted it, and `operator` never stands in for a lane that could
 not be read.** `AssertedBy` is `operator` outside a lane and the lane's `role/vendor/room` inside one,

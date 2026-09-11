@@ -105,7 +105,8 @@ public static class MemoryImportCommand
         var userHome = userHomeOverride ?? MemoryRootInventory.DefaultUserHome;
         var batonRoot = BatonPaths.Root;
 
-        var aliases = await ResolveAliasesAsync(options, cancellationToken).ConfigureAwait(false);
+        var aliasResolution = await ResolveAliasesAsync(options, cancellationToken).ConfigureAwait(false);
+        var aliases = aliasResolution.Aliases;
 
         var sources = new List<MemoryImportSource>();
         var machineryRoots = new List<MachineryRoot>();
@@ -164,6 +165,11 @@ public static class MemoryImportCommand
             var entriesFile = BatonPaths.MemoryEntriesFile(slug);
             var linksFile = BatonPaths.MemoryLinksFile(slug);
             var entries = group.ToList();
+
+            if (!options.DryRun)
+            {
+                await MemoryStoreMetadataStore.EnsureAsync(group.Key, slug, cancellationToken).ConfigureAwait(false);
+            }
 
             // Read first so the manifest can say which rows THIS run appended: an undo must not remove
             // an entry an earlier import wrote. The append itself re-checks under its own lock, so this
@@ -235,7 +241,7 @@ public static class MemoryImportCommand
         {
             var changedRepositories = manifest.Appended.Select(r => r.Repository)
                 .Concat(manifest.AppendedLinks.Select(l => l.Repository))
-                .Concat(options.Assertions.Select(a => a.Repository));
+                .Concat(aliasResolution.AppendedAssertions.Select(a => a.Repository));
             await ProjectChangedRepositoriesAsync(
                 changedRepositories,
                 output,
@@ -255,7 +261,7 @@ public static class MemoryImportCommand
     /// written, which is what makes a dry run a preview of the real thing rather than a preview of a
     /// different one.
     /// </summary>
-    private static async Task<IReadOnlyList<MemoryAliasEntry>> ResolveAliasesAsync(
+    private static async Task<AliasResolution> ResolveAliasesAsync(
         MemoryImportOptions options, CancellationToken cancellationToken)
     {
         var recorded = await MemoryAliasStore
@@ -263,7 +269,7 @@ public static class MemoryImportCommand
 
         if (options.Assertions.Count == 0)
         {
-            return recorded;
+            return new AliasResolution(recorded, []);
         }
 
         var assertedBy = options.AssertedBy is { Length: > 0 } who ? who : Environment.UserName;
@@ -275,14 +281,20 @@ public static class MemoryImportCommand
                 DateTime.UtcNow))
             .ToList();
 
-        if (!options.DryRun)
-        {
-            await MemoryAliasStore
-                .AppendAsync(asserted, BatonPaths.MemoryAliasFile, cancellationToken).ConfigureAwait(false);
-        }
+        var appended = options.DryRun
+            ? asserted.Where(candidate => !recorded.Any(existing => string.Equals(
+                    existing.Path, candidate.Path, StringComparison.Ordinal)))
+                .ToList()
+            : await MemoryAliasStore.AppendAndGetAppendedAsync(
+                    asserted, BatonPaths.MemoryAliasFile, cancellationToken)
+                .ConfigureAwait(false);
 
-        return [.. recorded, .. asserted];
+        return new AliasResolution([.. recorded, .. appended], appended);
     }
+
+    private sealed record AliasResolution(
+        IReadOnlyList<MemoryAliasEntry> Aliases,
+        IReadOnlyList<MemoryAliasEntry> AppendedAssertions);
 
     /// <summary>
     /// One Claude root's subject: the git probe at its resolved checkout, then an operator assertion
@@ -630,6 +642,9 @@ public static class MemoryImportCommand
         foreach (var group in manifest.Appended.GroupBy(r => r.EntriesFilePath, StringComparer.OrdinalIgnoreCase))
         {
             var expected = group.Select(r => r.EntryId).Distinct(StringComparer.Ordinal).ToList();
+            var repository = group.First().Repository;
+            await MemoryStoreMetadataStore.EnsureAsync(
+                repository, FleetMemory.SlugFor(repository), cancellationToken).ConfigureAwait(false);
             var count = await MemoryStore.RemoveAsync(expected, group.Key, cancellationToken).ConfigureAwait(false);
             removed += count;
             if (count > 0)

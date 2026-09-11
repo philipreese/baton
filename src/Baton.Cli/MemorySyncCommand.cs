@@ -77,11 +77,14 @@ public static class MemorySyncCommand
         var repositoryFacts = ReadRepositoryFacts(options);
         var slugs = StoredRepositorySlugs(options.Repository).ToList();
         var obligations = new Dictionary<string, MemoryProjectionObligation>(StringComparer.OrdinalIgnoreCase);
+        var failures = new List<SyncFailureReport>();
+        var unclaimed = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
         if (options.Apply)
         {
             foreach (var slug in slugs)
             {
-                if (!File.Exists(BatonPaths.MemoryEntriesFile(slug)))
+                if (!File.Exists(BatonPaths.MemoryEntriesFile(slug))
+                    && MemoryStoreMetadataStore.TryRead(slug) is null)
                 {
                     continue;
                 }
@@ -95,11 +98,24 @@ public static class MemorySyncCommand
                 var stored = await MemoryStore.ReadAllAsync(
                     BatonPaths.MemoryEntriesFile(slug), cancellationToken).ConfigureAwait(false);
                 var repository = stored.FirstOrDefault()?.Repository
+                    ?? MemoryStoreMetadataStore.TryRead(slug)?.Repository
                     ?? (FleetMemory.IsFleet(slug) ? FleetMemory.Slug : options.Repository);
                 if (repository is { Length: > 0 })
                 {
-                    obligations[slug] = await MemoryProjectionObligationStore.ReplaceAsync(
-                        repository, slug, utcNow(), cancellationToken).ConfigureAwait(false);
+                    try
+                    {
+                        obligations[slug] = await MemoryProjectionObligationStore.ReplaceAsync(
+                            repository, slug, utcNow(), cancellationToken).ConfigureAwait(false);
+                    }
+                    catch (Exception ex) when (ex is not OperationCanceledException)
+                    {
+                        unclaimed.Add(slug);
+                        failures.Add(new SyncFailureReport(
+                            repository,
+                            BatonPaths.MemorySyncPendingFile(slug),
+                            $"{ex.GetType().Name}: {ex.Message}",
+                            ObligationRecorded: false));
+                    }
                 }
             }
         }
@@ -112,24 +128,31 @@ public static class MemorySyncCommand
         }
         catch (Exception ex) when (ex is not OperationCanceledException && options.Apply)
         {
-            var recorded = new List<MemoryProjectionObligation>();
             foreach (var obligation in obligations.Values)
             {
                 if (await MemoryProjectionObligationStore.FailAsync(
                         obligation, ex, utcNow(), cancellationToken).ConfigureAwait(false))
                 {
-                    recorded.Add(obligation);
+                    failures.Add(new SyncFailureReport(
+                        obligation.Repository,
+                        BatonPaths.MemorySyncPendingFile(obligation.RepositorySlug),
+                        $"{ex.GetType().Name}: {ex.Message}",
+                        ObligationRecorded: true));
                 }
             }
 
-            WriteFailedProjection(output, options.Format, recorded, ex);
-            return recorded.Count > 0 ? 1 : 0;
+            WriteFailedProjection(output, options.Format, failures);
+            return failures.Count > 0 ? 1 : 0;
         }
 
         var reports = new List<SyncRepositoryReport>();
-        var failures = new List<SyncFailureReport>();
         foreach (var slug in slugs)
         {
+            if (unclaimed.Contains(slug))
+            {
+                continue;
+            }
+
             obligations.TryGetValue(slug, out var obligation);
             try
             {
@@ -167,7 +190,8 @@ public static class MemorySyncCommand
                 failures.Add(new SyncFailureReport(
                     obligation?.Repository ?? slug,
                     BatonPaths.MemorySyncPendingFile(slug),
-                    $"{ex.GetType().Name}: {ex.Message}"));
+                    $"{ex.GetType().Name}: {ex.Message}",
+                    ObligationRecorded: obligation is not null));
             }
         }
 
@@ -245,7 +269,7 @@ public static class MemorySyncCommand
         // no-store answer independent of that behaviour rather than resting on it, and because taking a
         // named mutex to discover a file is absent is work with no result. The store-is-empty case is
         // still handled below: an existing but empty file is a different state from an absent one.
-        if (!File.Exists(entriesFile))
+        if (!File.Exists(entriesFile) && MemoryStoreMetadataStore.TryRead(slug) is null)
         {
             return null;
         }
@@ -265,6 +289,7 @@ public static class MemorySyncCommand
                     FleetMemory.EntriesFile, FleetMemory.LinksFile, FleetMemory.RetractionsFile, cancellationToken)
                 .ConfigureAwait(false);
         var fleetStorePath = !isFleet && File.Exists(FleetMemory.EntriesFile) ? FleetMemory.EntriesFile : null;
+        var storeRepository = MemoryStoreMetadataStore.TryRead(slug)?.Repository;
 
         return await MemoryStore.RunUnderEntriesLockAsync(
             entriesFile,
@@ -281,6 +306,7 @@ public static class MemorySyncCommand
                 var resolved = MemoryStore.Resolve(stored, links, retractions);
                 var repository = stored.FirstOrDefault()?.Repository
                     ?? obligation?.Repository
+                    ?? storeRepository
                     ?? options.Repository!;
 
                 // Named, never counted — the posture every other omission on this surface takes
@@ -675,17 +701,32 @@ public static class MemorySyncCommand
         foreach (var failure in report.Failures)
         {
             output.WriteLine();
-            output.WriteLine($"SYNC PENDING -- {failure.Repository}: {failure.Error}");
-            output.WriteLine($"  durable obligation: {failure.ObligationPath}");
-            output.WriteLine(
-                "  The canonical commit remains saved. Baton did not complete its owned projection, " +
-                "and this says nothing about vendor loading or consumption; the daemon will retry safely.");
+            if (failure.ObligationRecorded)
+            {
+                output.WriteLine($"SYNC PENDING -- {failure.Repository}: {failure.Error}");
+                output.WriteLine($"  durable obligation: {failure.ObligationPath}");
+                output.WriteLine(
+                    "  The canonical store remains saved. Baton did not complete its owned projection, " +
+                    "and this says nothing about vendor loading or consumption; the daemon will retry safely.");
+            }
+            else
+            {
+                output.WriteLine($"COMMITTED BUT UNPROJECTED -- {failure.Repository}: {failure.Error}");
+                output.WriteLine($"  durable obligation NOT recorded at: {failure.ObligationPath}");
+                output.WriteLine(
+                    "  The store's durable identity remains inventory-visible. Repair this path; a later " +
+                    "daemon sweep or 'baton memory sync --apply' can reclaim and project it.");
+            }
         }
 
         if (report.Repositories.Count == 0)
         {
             output.WriteLine();
-            output.WriteLine("No repository has a canonical memory store yet. Run 'baton memory import' first.");
+            output.WriteLine(
+                report.Failures.Count == 0
+                    ? "No repository has a canonical memory store yet. Run 'baton memory import' first."
+                    : "No projection report completed for the failed store(s) above; their canonical " +
+                      "state remains saved and was not reported as projected.");
             WriteNonTargets(output, report.NonTargetRoots);
             WriteCheckVerdict(output, report);
             return;
@@ -721,14 +762,8 @@ public static class MemorySyncCommand
     private static void WriteFailedProjection(
         TextWriter output,
         MemoryAuditOutputFormat format,
-        IEnumerable<MemoryProjectionObligation> obligations,
-        Exception error)
+        IReadOnlyList<SyncFailureReport> failures)
     {
-        var failures = obligations.Select(o => new SyncFailureReport(
-            o.Repository,
-            BatonPaths.MemorySyncPendingFile(o.RepositorySlug),
-            $"{error.GetType().Name}: {error.Message}")).ToList();
-
         if (format == MemoryAuditOutputFormat.Json)
         {
             output.WriteLine(JsonSerializer.Serialize(new { failures }, ReportJson));
@@ -737,13 +772,25 @@ public static class MemorySyncCommand
 
         foreach (var failure in failures)
         {
-            output.WriteLine($"SYNC PENDING -- {failure.Repository}: {failure.Error}");
-            output.WriteLine($"  durable obligation: {failure.ObligationPath}");
+            output.WriteLine(
+                failure.ObligationRecorded
+                    ? $"SYNC PENDING -- {failure.Repository}: {failure.Error}"
+                    : $"COMMITTED BUT UNPROJECTED -- {failure.Repository}: {failure.Error}");
+            output.WriteLine(
+                failure.ObligationRecorded
+                    ? $"  durable obligation: {failure.ObligationPath}"
+                    : $"  durable obligation NOT recorded at: {failure.ObligationPath}");
         }
 
         output.WriteLine(
             "The canonical store remains authoritative. No Baton-owned projection was reported complete, " +
             "and no vendor loading or consumption is claimed.");
+        if (failures.Any(f => !f.ObligationRecorded))
+        {
+            output.WriteLine(
+                "The store identity remains inventory-visible; repair the obligation path so a later " +
+                "daemon sweep or manual sync can claim and project it.");
+        }
     }
 
     /// <summary>
@@ -862,7 +909,8 @@ public static class MemorySyncCommand
     private sealed record SyncFailureReport(
         [property: JsonPropertyName("repository")] string Repository,
         [property: JsonPropertyName("obligationPath")] string ObligationPath,
-        [property: JsonPropertyName("error")] string Error);
+        [property: JsonPropertyName("error")] string Error,
+        [property: JsonPropertyName("obligationRecorded")] bool ObligationRecorded);
 
     private sealed record SyncRepositoryReport(
         [property: JsonPropertyName("repository")] string Repository,

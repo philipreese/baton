@@ -112,6 +112,8 @@ public static class MemoryAddCommand
             return 0;
         }
 
+        await MemoryStoreMetadataStore.EnsureAsync(repository, slug, cancellationToken).ConfigureAwait(false);
+
         var appended = await MemoryStore.AppendAndGetAppendedAsync([entry], entriesFile, cancellationToken)
             .ConfigureAwait(false);
         if (appended.Count == 0)

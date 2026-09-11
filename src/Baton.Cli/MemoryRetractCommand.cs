@@ -108,6 +108,8 @@ public static class MemoryRetractCommand
         var retraction = MemoryRetraction.Create(
             entry.Id, entry.Repository, options.Reason, retractedByOverride ?? MemoryLaneAssertion.Resolve(), DateTime.UtcNow);
 
+        await MemoryStoreMetadataStore.EnsureAsync(entry.Repository, slug, cancellationToken).ConfigureAwait(false);
+
         var appended = await MemoryStore.AppendRetractionsAndGetAppendedAsync(
             [retraction], retractionsFile, cancellationToken).ConfigureAwait(false);
         if (appended.Count == 0)

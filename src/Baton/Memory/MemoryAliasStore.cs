@@ -88,6 +88,17 @@ public static class MemoryAliasStore
         Ledger.AppendAsync(entries, aliasFilePath, cancellationToken);
 
     /// <summary>
+    /// Appends assertions and returns exactly the rows this call inserted, as decided under the alias
+    /// ledger lock. Projection triggers use this rather than requested assertions, so a duplicate
+    /// no-op cannot create or replace a projection obligation.
+    /// </summary>
+    public static Task<IReadOnlyList<MemoryAliasEntry>> AppendAndGetAppendedAsync(
+        IReadOnlyList<MemoryAliasEntry> entries,
+        string aliasFilePath,
+        CancellationToken cancellationToken = default) =>
+        Ledger.AppendAndGetAppendedAsync(entries, aliasFilePath, cancellationToken);
+
+    /// <summary>
     /// The repository <paramref name="checkoutPath"/> is asserted to belong to, or
     /// <see langword="null"/>. Paths are compared through <see cref="BatonPaths.RecordKeyComparer"/>,
     /// so two spellings of one directory resolve to one assertion.

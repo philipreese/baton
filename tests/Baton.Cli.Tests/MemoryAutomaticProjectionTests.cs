@@ -156,6 +156,117 @@ public sealed class MemoryAutomaticProjectionTests : IDisposable
     }
 
     [Fact]
+    public async Task Obligation_creation_failure_reports_unrecorded_commit_and_inventory_recovers_it()
+    {
+        var root = await CreateTargetAsync();
+        var obligationPath = BatonPaths.MemorySyncPendingFile(Slug);
+        Directory.CreateDirectory(obligationPath); // A directory at the file path makes claim publication fail.
+
+        var output = new StringWriter();
+        var exit = await MemoryAddCommand.ExecuteAsync(
+            MemoryAddOptionsParser.Parse([
+                "--repository", Repository, "--kind", "durable-fact", "--text", "recoverable commit",
+            ]),
+            output,
+            assertedByOverride: "test",
+            cancellationToken: TestContext.Current.CancellationToken,
+            claudeHomeOverride: ClaudeHome,
+            userHomeOverride: UserHome);
+
+        Assert.Equal(0, exit);
+        Assert.Single(await MemoryStore.ReadAllAsync(
+            BatonPaths.MemoryEntriesFile(Slug), TestContext.Current.CancellationToken));
+        Assert.Contains("COMMITTED BUT UNPROJECTED", output.ToString(), StringComparison.Ordinal);
+        Assert.Contains("PROJECTION IS UNRECORDED", output.ToString(), StringComparison.Ordinal);
+        Assert.DoesNotContain("PROJECTION IS PENDING", output.ToString(), StringComparison.Ordinal);
+        Assert.True(File.Exists(BatonPaths.MemoryStoreMetadataFile(Slug)));
+
+        Directory.Delete(obligationPath);
+        var restarted = new MemoryProjectionSweep(() => DateTime.UtcNow, ClaudeHome, UserHome, null);
+        await restarted.SweepOnceAsync(cancellationToken: TestContext.Current.CancellationToken);
+
+        Assert.Contains(
+            "recoverable commit",
+            File.ReadAllText(Path.Combine(root, ClaudeProjectionTarget.ProjectionFileName)),
+            StringComparison.Ordinal);
+        Assert.Null(await MemoryProjectionObligationStore.ReadAsync(Slug, TestContext.Current.CancellationToken));
+    }
+
+    [Fact]
+    public async Task Empty_store_identity_survives_undo_and_restart_without_a_pending_claim()
+    {
+        var root = await CreateTargetAsync();
+        var target = Path.Combine(root, ClaudeProjectionTarget.ProjectionFileName);
+        File.WriteAllText(Path.Combine(root, "user_only.md"), "the only canonical row");
+
+        var importOutput = new StringWriter();
+        Assert.Equal(0, await MemoryImportCommand.ExecuteAsync(
+            MemoryImportOptionsParser.Parse(["--root", root]),
+            importOutput,
+            ClaudeHome,
+            TestContext.Current.CancellationToken,
+            UserHome));
+        var manifestPath = importOutput.ToString().Split('\n')
+            .Select(line => line.Trim())
+            .First(line => line.StartsWith("Manifest: ", StringComparison.Ordinal))["Manifest: ".Length..];
+
+        Assert.Equal(0, await MemoryImportCommand.ExecuteAsync(
+            MemoryImportOptionsParser.Parse(["--undo", manifestPath]),
+            TextWriter.Null,
+            ClaudeHome,
+            TestContext.Current.CancellationToken,
+            UserHome));
+        Assert.Empty(await MemoryStore.ReadAllAsync(
+            BatonPaths.MemoryEntriesFile(Slug), TestContext.Current.CancellationToken));
+        Assert.Null(await MemoryProjectionObligationStore.ReadAsync(Slug, TestContext.Current.CancellationToken));
+        var location = Assert.Single(CanonicalStoreInventory.Scan(BatonPaths.Root), l => l.Slug == Slug);
+        Assert.Equal(Repository, location.Repository);
+
+        File.WriteAllText(target, "stale projection bytes");
+        var restarted = new MemoryProjectionSweep(() => DateTime.UtcNow, ClaudeHome, UserHome, null);
+        await restarted.SweepOnceAsync(cancellationToken: TestContext.Current.CancellationToken);
+
+        Assert.DoesNotContain("stale projection bytes", File.ReadAllText(target), StringComparison.Ordinal);
+        Assert.Contains(MemoryProjection.FormatMarker, File.ReadAllText(target), StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task Duplicate_alias_assertion_does_not_replace_an_escalated_obligation()
+    {
+        var root = await CreateTargetAsync();
+        var now = new DateTime(2026, 9, 10, 12, 0, 0, DateTimeKind.Utc);
+        var obligation = await MemoryProjectionObligationStore.ReplaceAsync(
+            Repository, Slug, now, TestContext.Current.CancellationToken);
+        for (var attempt = 0; attempt < MemoryProjectionObligationStore.EscalationAttemptCount; attempt++)
+        {
+            Assert.True(await MemoryProjectionObligationStore.FailAsync(
+                obligation,
+                new UnauthorizedAccessException("fixture escalation"),
+                now.AddMinutes(attempt),
+                TestContext.Current.CancellationToken));
+        }
+
+        var before = Assert.IsType<MemoryProjectionObligation>(
+            await MemoryProjectionObligationStore.ReadAsync(Slug, TestContext.Current.CancellationToken));
+        Assert.Equal(MemoryProjectionObligationStatus.Escalated, before.Status);
+
+        var output = new StringWriter();
+        Assert.Equal(0, await MemoryImportCommand.ExecuteAsync(
+            MemoryImportOptionsParser.Parse([
+                "--assert", $"{root}={Repository}", "--asserted-by", "test",
+            ]),
+            output,
+            ClaudeHome,
+            TestContext.Current.CancellationToken,
+            UserHome));
+
+        var after = Assert.IsType<MemoryProjectionObligation>(
+            await MemoryProjectionObligationStore.ReadAsync(Slug, TestContext.Current.CancellationToken));
+        Assert.Equal(before, after);
+        Assert.DoesNotContain("AUTOMATIC PROJECTION", output.ToString(), StringComparison.Ordinal);
+    }
+
+    [Fact]
     public async Task Repeated_failure_backs_off_then_escalates_and_stops_automatic_attempts()
     {
         await CreateTargetAsync();
@@ -208,46 +319,59 @@ public sealed class MemoryAutomaticProjectionTests : IDisposable
     }
 
     [Fact]
-    public async Task A_concurrent_canonical_append_cannot_be_lost_behind_an_older_projection()
+    public async Task A_superseded_attempt_cannot_publish_its_stale_snapshot()
     {
-        var root = await CreateTargetAsync();
-        var entriesFile = BatonPaths.MemoryEntriesFile(Slug);
-        await MemoryStore.AppendAsync([Entry("older snapshot")], entriesFile, TestContext.Current.CancellationToken);
+        var repositoryRoot = await CreateTargetAsync();
+        var fleetRoot = await CreateFleetTargetAsync();
+        await MemoryStoreMetadataStore.EnsureAsync(
+            Repository, Slug, TestContext.Current.CancellationToken);
+        await MemoryStoreMetadataStore.EnsureAsync(
+            FleetMemory.Slug, FleetMemory.Slug, TestContext.Current.CancellationToken);
+        await MemoryStore.AppendAsync(
+            [Entry("stale repository snapshot")],
+            BatonPaths.MemoryEntriesFile(Slug),
+            TestContext.Current.CancellationToken);
+        await MemoryStore.AppendAsync(
+            [Entry("fleet pause", FleetMemory.Slug)],
+            FleetMemory.EntriesFile,
+            TestContext.Current.CancellationToken);
+
+        var repositoryTarget = Path.Combine(repositoryRoot, ClaudeProjectionTarget.ProjectionFileName);
+        var fleetTarget = Path.Combine(fleetRoot, ClaudeProjectionTarget.ProjectionFileName);
+        File.WriteAllText(repositoryTarget, "newer projection sentinel");
 
         using var writerEntered = new ManualResetEventSlim();
         using var releaseWriter = new ManualResetEventSlim();
         var first = MemorySyncCommand.ExecuteAsync(
-            MemorySyncOptionsParser.Parse(["--repository", Repository, "--apply"]),
+            MemorySyncOptionsParser.Parse(["--apply"]),
             TextWriter.Null,
             ClaudeHome,
             TestContext.Current.CancellationToken,
             UserHome,
             projectionWriterOverride: (path, bytes) =>
             {
-                writerEntered.Set();
-                releaseWriter.Wait(TestContext.Current.CancellationToken);
+                if (string.Equals(path, fleetTarget, StringComparison.OrdinalIgnoreCase))
+                {
+                    writerEntered.Set();
+                    releaseWriter.Wait(TestContext.Current.CancellationToken);
+                }
+
                 File.WriteAllBytes(path, bytes);
             });
 
         Assert.True(writerEntered.Wait(TimeSpan.FromSeconds(30), TestContext.Current.CancellationToken));
-        var append = MemoryStore.AppendAsync(
-            [Entry("newer canonical write")], entriesFile, TestContext.Current.CancellationToken);
-        Assert.False(append.IsCompleted); // Publication holds the store snapshot boundary.
+        var oldRepositoryAttempt = Assert.IsType<MemoryProjectionObligation>(
+            await MemoryProjectionObligationStore.ReadAsync(Slug, TestContext.Current.CancellationToken));
+        var newerRepositoryAttempt = await MemoryProjectionObligationStore.ReplaceAsync(
+            Repository, Slug, DateTime.UtcNow, TestContext.Current.CancellationToken);
+        Assert.NotEqual(oldRepositoryAttempt.AttemptId, newerRepositoryAttempt.AttemptId);
 
         releaseWriter.Set();
         Assert.Equal(0, await first);
-        await append;
-
-        Assert.Equal(0, await MemorySyncCommand.ExecuteAsync(
-            MemorySyncOptionsParser.Parse(["--repository", Repository, "--apply"]),
-            TextWriter.Null,
-            ClaudeHome,
-            TestContext.Current.CancellationToken,
-            UserHome));
-
-        var projected = File.ReadAllText(Path.Combine(root, ClaudeProjectionTarget.ProjectionFileName));
-        Assert.Contains("older snapshot", projected, StringComparison.Ordinal);
-        Assert.Contains("newer canonical write", projected, StringComparison.Ordinal);
+        Assert.Equal("newer projection sentinel", File.ReadAllText(repositoryTarget));
+        Assert.Equal(
+            newerRepositoryAttempt,
+            await MemoryProjectionObligationStore.ReadAsync(Slug, TestContext.Current.CancellationToken));
     }
 
     private async Task<string> CreateTargetAsync()
@@ -261,14 +385,25 @@ public sealed class MemoryAutomaticProjectionTests : IDisposable
         return root;
     }
 
-    private static MemoryEntry Entry(string text)
+    private async Task<string> CreateFleetTargetAsync()
+    {
+        var root = Path.Combine(ClaudeHome, "projects", "c--fleet", "memory");
+        Directory.CreateDirectory(root);
+        await MemoryAliasStore.AppendAsync(
+            [new MemoryAliasEntry(BatonPaths.RecordKey(root), FleetMemory.Slug, "test", default)],
+            BatonPaths.MemoryAliasFile,
+            TestContext.Current.CancellationToken);
+        return root;
+    }
+
+    private static MemoryEntry Entry(string text, string repository = Repository)
     {
         var path = $"C:/fixture/{Guid.NewGuid():N}.md";
         var digest = Convert.ToHexString(System.Security.Cryptography.SHA256.HashData(Encoding.UTF8.GetBytes(text)))
             .ToLowerInvariant();
         return new MemoryEntry(
-            MemoryEntry.Derive(Repository, path, digest),
-            Repository,
+            MemoryEntry.Derive(repository, path, digest),
+            repository,
             MemoryKind.DurableFact,
             MemoryKindSource.Declared,
             text,
