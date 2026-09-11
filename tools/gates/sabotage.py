@@ -75,6 +75,7 @@ def _sabotage_workflow_recovery() -> None:
             workflow.write_text(original.replace(before, after), encoding="utf-8")
             mutated = run()
             assert mutated.returncode != 0 and "AssertionError" in mutated.stderr, mutated.stderr
+        workflow.write_text(original, encoding="utf-8")
         release_workflow = dest / ".github/workflows/release-please.yml"
         release_original = release_workflow.read_text(encoding="utf-8")
         release_workflow.write_text(

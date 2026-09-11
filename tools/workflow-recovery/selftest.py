@@ -168,6 +168,7 @@ def check_release_workflow(text):
     for script in (target_script,revalidate_script):
         assert run_script(script,env)==0
         for changes in ({'GITHUB_REF':'refs/heads/topic'},{'EXPECTED_SHA':''},
+                        {'EXPECTED_SHA':'bad','GITHUB_SHA':'bad','LIVE_SHA':'bad'},
                         {'EXPECTED_SHA':'b'*40},{'GITHUB_SHA':'b'*40},
                         {'LIVE_SHA':'b'*40},{'API_FAIL':'1'}):
             assert run_script(script,env|changes)!=0,changes
@@ -207,9 +208,12 @@ def main():
         refused(lambda before=before,after=after:check_workflow(text.replace(before,after)))
     release_text=(ROOT/'.github/workflows/release-please.yml').read_text(encoding='utf-8')
     check_release_workflow(release_text)
-    for before,after in (('[ "$live_sha" != "$EXPECTED_SHA" ]','[ "$live_sha" = "$EXPECTED_SHA" ]'),
+    for before,after in ((' || [[ ! "$EXPECTED_SHA" =~ ^[0-9a-f]{40}$ ]]',''),
+                         ('[ "$live_sha" != "$EXPECTED_SHA" ]','[ "$live_sha" = "$EXPECTED_SHA" ]'),
                          ("needs.recovery_target.result == 'success'","needs.recovery_target.result != 'success'"),
                          ('needs: [recovery_target, release-please]','needs: [release-please]'),
+                         ('[ "$TARGET_RESULT" != "success" ]','[ -n "$TARGET_RESULT" ] && [ "$TARGET_RESULT" != "success" ]'),
+                         ('[ "$RELEASE_RESULT" != "success" ]','[ -n "$RELEASE_RESULT" ] && [ "$RELEASE_RESULT" != "success" ]'),
                          ('RELEASE_RESULT: ${{ needs.release-please.result }}','RELEASE_RESULT: success')):
         assert before in release_text
         refused(lambda before=before,after=after:check_release_workflow(release_text.replace(before,after)))
