@@ -165,15 +165,24 @@ public static class QueueBoard
             var knownState = PullRequestObservationStates.IsKnown(observation?.State)
                 ? observation!.State
                 : null;
-            var isCurrent = knownState is not null
-                && observation is { Error: null, ObservedAt: { } observedAt }
-                && observationNow >= observedAt
-                && observationNow - observedAt <= freshness;
+            // A failed refresh may retain the last successful reading, but a hand-edited or old
+            // partial record must not become terminal evidence merely because its state word happens
+            // to parse. The successful reader always writes these fields together and a later failed
+            // attempt preserves all three together. Identity failures clear them together before the
+            // projection sees the record.
+            var hasTrustedLastKnown = knownState is not null
+                && observation is { HeadSha: { Length: > 0 }, ObservedAt: { } observedAt }
+                && observedAt <= observation.AttemptedAt
+                && observation.AttemptedAt <= observationNow
+                && observedAt <= observationNow;
+            var isCurrent = hasTrustedLastKnown
+                && observation is { Error: null, ObservedAt: { } currentObservedAt }
+                && observationNow - currentObservedAt <= freshness;
             var freshnessWord = isCurrent
                 ? PullRequestObservationFreshness.Current
-                : observation is null || observation.ObservedAt is null
-                    ? PullRequestObservationFreshness.Unknown
-                    : PullRequestObservationFreshness.Stale;
+                : hasTrustedLastKnown
+                    ? PullRequestObservationFreshness.Stale
+                    : PullRequestObservationFreshness.Unknown;
             var lanes = group.Select(item => new QueuePullRequestLaneView(
                 Tag: item.Tag,
                 Stage: WorkStages.Token(item.Stage!.Value),
@@ -193,17 +202,23 @@ public static class QueueBoard
             var view = new QueuePullRequestView(
                 Repository: repository,
                 PullRequest: pr,
-                PullRequestState: knownState,
+                PullRequestState: hasTrustedLastKnown ? knownState : null,
                 ObservationFreshness: freshnessWord,
-                ObservedAt: observation?.ObservedAt,
+                ObservedAt: hasTrustedLastKnown ? observation!.ObservedAt : null,
                 AttemptedAt: observation?.AttemptedAt,
                 ObservationError: observation?.Error
-                    ?? (observation is not null && knownState is null ? "stored PR state is malformed" : null),
-                HeadSha: observation?.HeadSha,
+                    ?? (observation is not null && !hasTrustedLastKnown
+                        ? "stored PR observation is malformed or untrusted"
+                        : null),
+                HeadSha: hasTrustedLastKnown ? observation!.HeadSha : null,
                 Deployment: QueueDeploymentStates.NotRecorded,
                 Lanes: lanes);
 
-            if (isCurrent && PullRequestObservationStates.IsTerminal(knownState))
+            // History is a last-known presentation, not a current-proof surface. Keeping a trusted
+            // terminal observation here after it ages prevents the default five-minute bounded refresher
+            // from moving rows in and out of follow-up against the shorter projection freshness
+            // window. A confirmed open observation still returns the PR to follow-up below.
+            if (hasTrustedLastKnown && PullRequestObservationStates.IsTerminal(knownState))
             {
                 pullRequestHistory.Add(view);
             }

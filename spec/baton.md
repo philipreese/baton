@@ -7029,14 +7029,19 @@ one qualified PR per poll through its existing `IGhCliRunner`; attempt stamps ro
 set across later polls instead of bursting forge reads. Each read has the existing 20-second child-process
 bound and host cancellation, runs outside the queue lock and the scheduler's launch path, and conditionally
 writes only keys still named by the locked snapshot. Every distinct surviving workspace for a shared PR is
-validated, and any drift makes the observation unknown. The freshness window is the fleet projection's
-existing three-tick threshold, applied to attempts as the retry backoff too: a fresh confirmed `open` remains
-current follow-up, while fresh confirmed `merged` and `closed` are distinct rows in collapsed history.
-Missing, malformed, failed, or stale evidence remains in current follow-up as `unknown` or “last known
-… stale”; `closed` is never cached forever because it is re-read after that window and a reopened PR
-returns to follow-up. Observation changes neither item state, stage, round, cancellation history,
-dispatch, readiness, merge/close state, nor deployment state. Deployment therefore reads “not
-recorded”, never “none”. Each historical checks word remains attached to its lane and to
+validated, and any drift invalidates the prior reading and makes the observation unknown. The freshness
+window is the fleet projection's existing three-tick threshold, applied to attempts as the retry backoff too:
+a fresh confirmed `open` remains current follow-up, while a trustworthy last-known `merged` or `closed`
+observation stays in collapsed history after it becomes stale. History names both staleness and the last
+check; it does not oscillate back into follow-up during the default five-minute poll or a multi-key rotation.
+A transient failed refresh retains a structurally complete prior reading as explicitly stale last-known
+evidence. Missing, malformed, partial, future-dated, or identity-mismatched evidence is `unknown` and remains
+in current follow-up, so unknown work is never concealed. `closed` is never cached forever because it is
+still re-read after the retry window, and a confirmed reopened PR returns to follow-up. Stale terminal
+evidence is presentation history only: it is never current proof for readiness, merge, deployment, or any
+external action. Observation changes neither item state, stage, round, cancellation history, dispatch,
+readiness, merge/close state, nor deployment state. Deployment therefore reads “not recorded”, never
+“none”. Each historical checks word remains attached to its lane and to
 `checksHeadSha`; a legacy row without that field renders “commit unknown” rather than borrowing the
 independent PR observation's head.
 

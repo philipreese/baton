@@ -236,12 +236,12 @@ check("(control) an unheld queue does not",
 // -- PR stages --
 {
   const out = queuePrTableHtml({ pullRequests: [
-    { repository: "github.com/acme/one", pr: 2028, prState: "open", freshness: "current", observedAt: "2026-09-07T11:59:30Z", headSha: "aaaaaaaa11111111", deployment: "not-recorded", lanes: [
+    { repository: "github.com/acme/one", pr: 2028, prState: "open", freshness: "current", observedAt: "2026-09-07T11:59:30Z", attemptedAt: "2026-09-07T11:59:30Z", headSha: "aaaaaaaa11111111", deployment: "not-recorded", lanes: [
       { tag: "a", stage: "review", state: "Done", round: 1, verdict: "block", checks: "failing", checksObservedAt: "2026-09-07T11:00:00Z", checksHeadSha: "bbbbbbbb22222222" },
       { tag: "cancelled", stage: "review", state: "Cancelled", round: 2 },
       { tag: "halted", stage: "fix", state: "Failed", round: 2, halted: true },
     ] },
-    { repository: "github.com/acme/two", pr: 2035, prState: "closed", freshness: "stale", observedAt: "2026-09-07T09:00:00Z", observationError: "gh pr view exited 1", deployment: "not-recorded", lanes: [
+    { repository: "github.com/acme/two", pr: 2035, freshness: "unknown", attemptedAt: "2026-09-07T11:59:30Z", observationError: "repository identity invalid", deployment: "not-recorded", lanes: [
       { tag: "b", stage: "ready", state: "Queued", round: 3, verdict: "approve", checks: "passing", checksObservedAt: "2026-09-07T11:59:30Z" },
     ] },
   ] });
@@ -254,18 +254,26 @@ check("(control) an unheld queue does not",
   check("(control) checks never observed says so, not 'passing'", out.includes("checks not observed"));
   check("a halted work item remains marked on its grouped PR row", out.includes("halted lane"));
   check("a cancelled lane on a confirmed-open PR is labelled explicitly", out.includes("cancelled lane · open PR"));
-  check("stale closed evidence remains follow-up and says last known, never current closed",
-        out.includes("last known closed · stale") && out.includes("lookup: gh pr view exited 1"));
+  check("invalidated identity remains visible follow-up as unknown",
+        out.includes("unknown") && out.includes("lookup: repository identity invalid"));
+  check("every observation exposes when it was last checked",
+        out.includes("last checked just now") && out.includes("last confirmed just now"));
   check("deployment absence says not recorded rather than none", out.includes(">not recorded</td>"));
   check("(control) no PR renders an explicit empty line",
         queuePrTableHtml({ pullRequests: [] }).includes("No open or unknown pull request needs follow-up."));
 
   const history = queuePrHistoryHtml({ pullRequestHistory: [
-    { repository: "github.com/acme/one", pr: 2192, prState: "merged", freshness: "current", observedAt: "2026-09-07T11:59:30Z", deployment: "not-recorded", lanes: [
+    { repository: "github.com/acme/one", pr: 2192, prState: "merged", freshness: "current", observedAt: "2026-09-07T11:59:30Z", attemptedAt: "2026-09-07T11:59:30Z", deployment: "not-recorded", lanes: [
       { tag: "2192-lane", stage: "review", state: "Cancelled", round: 1, checks: "failing", checksObservedAt: "2026-09-07T10:00:00Z" },
+    ] },
+    { repository: "github.com/acme/two", pr: 2035, prState: "closed", freshness: "stale", observedAt: "2026-09-07T09:00:00Z", attemptedAt: "2026-09-07T11:59:30Z", observationError: "gh pr view exited 1", deployment: "not-recorded", lanes: [
+      { tag: "b", stage: "ready", state: "Queued", round: 3, verdict: "approve" },
     ] },
   ] });
   check("a fresh merged PR is distinct collapsed history with cancellation retained", history.includes("Completed PR history") && history.includes("merged") && history.includes("cancelled lane"));
+  check("stale trustworthy terminal history is prominent and honestly aged",
+        history.includes("last known closed · stale") && history.includes("last checked just now")
+          && history.includes("last confirmed 3h ago") && history.includes("lookup: gh pr view exited 1"));
   check("(control) no completed PR produces no history section", queuePrHistoryHtml({ pullRequestHistory: [] }) === "");
 }
 

@@ -509,7 +509,7 @@ public sealed class QueueBoardTests
     }
 
     [Fact]
-    public void Open_and_uncertain_PRs_stay_in_follow_up_and_one_qualified_PR_reuses_one_observation_across_lanes()
+    public void Open_and_unknown_PRs_stay_in_follow_up_while_trusted_stale_terminal_evidence_stays_in_history()
     {
         var now = DateTimeOffset.Parse("2026-09-10T12:00:00Z");
         var items = new[]
@@ -527,18 +527,18 @@ public sealed class QueueBoardTests
         var board = Project(items, observations: observations, observationNow: now,
             observationFreshness: TimeSpan.FromMinutes(2));
 
-        Assert.Equal(2, board.PullRequests.Count);
+        Assert.Single(board.PullRequests);
         var shared = Assert.Single(board.PullRequests, p => p.Repository == "github.com/acme/one");
         Assert.Equal(PullRequestObservationFreshness.Current, shared.ObservationFreshness);
         Assert.Equal(2, shared.Lanes.Count);
-        var stale = Assert.Single(board.PullRequests, p => p.Repository == "github.com/acme/two");
+        var stale = Assert.Single(board.PullRequestHistory, p => p.Repository == "github.com/acme/two");
         Assert.Equal(PullRequestObservationFreshness.Stale, stale.ObservationFreshness);
         Assert.Equal(PullRequestObservationStates.Closed, stale.PullRequestState);
-        Assert.Empty(board.PullRequestHistory);
+        Assert.Equal("lookup failed", stale.ObservationError);
     }
 
     [Fact]
-    public void Missing_or_malformed_observation_is_unknown_and_a_fresh_reopen_returns_closed_history_to_follow_up()
+    public void Missing_malformed_or_untrusted_observation_is_unknown_and_a_fresh_reopen_returns_to_follow_up()
     {
         var now = DateTimeOffset.Parse("2026-09-10T12:00:00Z");
         var item = Item("lane", WorkStage.Ready, 1, QueueItemState.Queued, pr: 7,
@@ -554,6 +554,26 @@ public sealed class QueueBoardTests
         Assert.Equal(PullRequestObservationFreshness.Unknown, malformedRow.ObservationFreshness);
         Assert.NotNull(malformedRow.ObservationError);
 
+        // A known terminal word alone is not trustworthy evidence. The successful reader writes the
+        // head and observation stamp with it; accepting a partial stored row would conceal unknown
+        // work in history after a hand edit or an incompatible old writer.
+        var partial = new QueuePullRequestObservation(
+            "github.com/acme/one", 7, PullRequestObservationStates.Merged, null, now, now, null);
+        var partialRow = Assert.Single(Project([item], observations: [partial], observationNow: now,
+            observationFreshness: TimeSpan.FromMinutes(2)).PullRequests);
+        Assert.Equal(PullRequestObservationFreshness.Unknown, partialRow.ObservationFreshness);
+        Assert.Null(partialRow.PullRequestState);
+        Assert.Empty(Project([item], observations: [partial], observationNow: now,
+            observationFreshness: TimeSpan.FromMinutes(2)).PullRequestHistory);
+
+        var future = new QueuePullRequestObservation(
+            "github.com/acme/one", 7, PullRequestObservationStates.Merged, "future-head",
+            now.AddMinutes(1), now.AddMinutes(1), null);
+        var futureRow = Assert.Single(Project([item], observations: [future], observationNow: now,
+            observationFreshness: TimeSpan.FromMinutes(2)).PullRequests);
+        Assert.Equal(PullRequestObservationFreshness.Unknown, futureRow.ObservationFreshness);
+        Assert.Null(futureRow.ObservedAt);
+
         var reopened = new QueuePullRequestObservation(
             "github.com/acme/one", 7, PullRequestObservationStates.Open, "new-head", now, now, null);
         var reopenedBoard = Project([item], observations: [reopened], observationNow: now,
@@ -561,6 +581,59 @@ public sealed class QueueBoardTests
         Assert.Single(reopenedBoard.PullRequests);
         Assert.Empty(reopenedBoard.PullRequestHistory);
         Assert.Equal(PullRequestObservationStates.Open, reopenedBoard.PullRequests[0].PullRequestState);
+    }
+
+    [Fact]
+    public void Terminal_history_does_not_oscillate_during_the_real_five_minute_poll_and_ninety_second_freshness_gap()
+    {
+        var firstPoll = DateTimeOffset.Parse("2026-09-10T12:00:00Z");
+        var defaultPollInterval = TimeSpan.FromMinutes(5);
+        var defaultFreshness = TimeSpan.FromSeconds(90);
+        var nextPoll = firstPoll + defaultPollInterval;
+        var items = new[]
+        {
+            Item("merged", WorkStage.Review, 1, QueueItemState.Cancelled, pr: 7,
+                repository: "github.com/acme/one"),
+            Item("closed", WorkStage.Ready, 2, QueueItemState.Queued, pr: 8,
+                repository: "github.com/acme/one"),
+        };
+        var firstReadings = new[]
+        {
+            new QueuePullRequestObservation(
+                "github.com/acme/one", 7, PullRequestObservationStates.Merged, "head-7",
+                firstPoll, firstPoll, null),
+            new QueuePullRequestObservation(
+                "github.com/acme/one", 8, PullRequestObservationStates.Closed, "head-8",
+                firstPoll, firstPoll, null),
+        };
+
+        var betweenPolls = Project(items, observations: firstReadings, observationNow: nextPoll,
+            observationFreshness: defaultFreshness);
+
+        Assert.Empty(betweenPolls.PullRequests);
+        Assert.Equal(2, betweenPolls.PullRequestHistory.Count);
+        Assert.All(betweenPolls.PullRequestHistory, row =>
+            Assert.Equal(PullRequestObservationFreshness.Stale, row.ObservationFreshness));
+
+        // The next bounded read can confirm a reopening. That positive observation returns only that
+        // qualified key to follow-up; the other stale terminal key remains stable history.
+        var reopenedReadings = firstReadings
+            .Select(reading => reading.PullRequest == 7
+                ? reading with
+                {
+                    State = PullRequestObservationStates.Open,
+                    HeadSha = "reopened-head-7",
+                    ObservedAt = nextPoll,
+                    AttemptedAt = nextPoll,
+                }
+                : reading)
+            .ToList();
+        var reopened = Project(items, observations: reopenedReadings, observationNow: nextPoll,
+            observationFreshness: defaultFreshness);
+
+        Assert.Equal(7, Assert.Single(reopened.PullRequests).PullRequest);
+        Assert.Equal(PullRequestObservationStates.Open, reopened.PullRequests[0].PullRequestState);
+        Assert.Equal(8, Assert.Single(reopened.PullRequestHistory).PullRequest);
     }
 
     [Fact]

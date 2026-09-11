@@ -1540,8 +1540,11 @@ function queuePrRowsHtml(prs, heading){
       : current && (p.prState === "merged" || p.prState === "closed") ? p.prState
       : p.prState ? `last known ${p.prState} · ${p.freshness || "unknown"}` : "unknown";
     const observed = age(p.observedAt);
+    const attempted = age(p.attemptedAt);
+    const lastChecked = attempted === null ? "last checked unknown"
+      : attempted === "just now" ? "last checked just now" : `last checked ${attempted} ago`;
     const observationAge = observed === null ? "never confirmed"
-      : observed === "just now" ? "confirmed just now" : `confirmed ${observed} ago`;
+      : observed === "just now" ? "last confirmed just now" : `last confirmed ${observed} ago`;
     const lanes = (Array.isArray(p.lanes) ? p.lanes : []).map(l => {
       const checksAge = age(l.checksObservedAt);
       const checks = l.checks
@@ -1558,7 +1561,7 @@ function queuePrRowsHtml(prs, heading){
     }).join("") || "retained lane unavailable";
     const error = p.observationError ? `<div class="q-halt">lookup: ${esc(p.observationError)}</div>` : "";
     return `<tr><td>${esc((p.repository ? p.repository + " " : "repository unknown ") + "#" + p.pr)}</td>`
-      + `<td>${esc(prState)}<div class="queueboard-note">${esc(observationAge)}${p.headSha ? " · " + esc(p.headSha.slice(0, 8)) : ""}</div>${error}</td>`
+      + `<td>${esc(prState)}<div class="queueboard-note">${esc(lastChecked)} · ${esc(observationAge)}${p.headSha ? " · " + esc(p.headSha.slice(0, 8)) : ""}</div>${error}</td>`
       + `<td class="q-tag">${lanes}</td>`
       + `<td>${esc(p.deployment === "not-recorded" ? "not recorded" : p.deployment || "not recorded")}</td></tr>`;
   }).join("");

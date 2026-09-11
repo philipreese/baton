@@ -1283,6 +1283,8 @@ public sealed class WorkItemAdvancerTests
 
             var gh = new ObservationGh();
             var firstProcess = new WorkItemAdvancer(gh, (_, _) => Task.FromResult<string?>(null));
+            Assert.Equal(TimeSpan.FromMinutes(5), DeliveryPoller.DefaultInterval);
+            Assert.Equal(TimeSpan.FromSeconds(90), FleetProjectionWriter.StaleAfter());
             await firstProcess.RefreshPullRequestObservationsAsync(Now, Ct);
             await firstProcess.RefreshPullRequestObservationsAsync(Now, Ct);
             Assert.Equal(2, gh.Calls.Count);
@@ -1299,23 +1301,28 @@ public sealed class WorkItemAdvancerTests
 
             gh.State = "OPEN";
             var reopened = new WorkItemAdvancer(gh, (_, _) => Task.FromResult<string?>(null));
-            await reopened.RefreshPullRequestObservationsAsync(Now.AddMinutes(2), Ct);
-            await reopened.RefreshPullRequestObservationsAsync(Now.AddMinutes(2), Ct);
+            var nextDeliveryPoll = Now + DeliveryPoller.DefaultInterval;
+            await reopened.RefreshPullRequestObservationsAsync(nextDeliveryPoll, Ct);
+            await reopened.RefreshPullRequestObservationsAsync(nextDeliveryPoll, Ct);
             Assert.Equal(4, gh.Calls.Count);
             stored = await QueueStore.LoadAsync(BatonPaths.QueueFile, Ct);
             Assert.All(stored.PullRequestObservations!, o => Assert.Equal(PullRequestObservationStates.Open, o.State));
 
+            // A failed refresh keeps the prior repository-qualified reading, but stamps both the
+            // failed attempt and its error so the projection can call it stale rather than current.
             gh.RawOutput = "{ malformed";
             var malformed = new WorkItemAdvancer(gh, (_, _) => Task.FromResult<string?>(null));
-            await malformed.RefreshPullRequestObservationsAsync(Now.AddMinutes(4), Ct);
-            await malformed.RefreshPullRequestObservationsAsync(Now.AddMinutes(4), Ct);
+            var followingDeliveryPoll = nextDeliveryPoll + DeliveryPoller.DefaultInterval;
+            await malformed.RefreshPullRequestObservationsAsync(followingDeliveryPoll, Ct);
+            await malformed.RefreshPullRequestObservationsAsync(followingDeliveryPoll, Ct);
             stored = await QueueStore.LoadAsync(BatonPaths.QueueFile, Ct);
             Assert.All(stored.PullRequestObservations!, o =>
             {
                 Assert.Equal(PullRequestObservationStates.Open, o.State);
+                Assert.NotNull(o.HeadSha);
                 Assert.NotNull(o.Error);
-                Assert.Equal(Now.AddMinutes(2), o.ObservedAt);
-                Assert.Equal(Now.AddMinutes(4), o.AttemptedAt);
+                Assert.Equal(nextDeliveryPoll, o.ObservedAt);
+                Assert.Equal(followingDeliveryPoll, o.AttemptedAt);
             });
             Assert.All(gh.Calls, call => Assert.Equal(["pr", "view"], call.Take(2)));
         }
@@ -1391,6 +1398,14 @@ public sealed class WorkItemAdvancerTests
                 // The missing workspace comes first: selecting only the first lane used to skip all
                 // validation and accept forge evidence despite the surviving drifted sibling.
                 Items = [Lane("missing", Path.Combine(home, "missing")), Lane("valid", valid), Lane("drifted", drifted)],
+                PullRequestObservations =
+                [
+                    // A previous terminal observation makes this a provenance test: drift must
+                    // invalidate it, not merely attach an error while leaving history trusted.
+                    new QueuePullRequestObservation(
+                        Repository, 77, PullRequestObservationStates.Merged, "trusted-head",
+                        Now.AddMinutes(-5), Now.AddMinutes(-5), null),
+                ],
             }, Ct);
             var gh = new ObservationGh();
             var advancer = new WorkItemAdvancer(
@@ -1406,6 +1421,9 @@ public sealed class WorkItemAdvancerTests
             var observation = Assert.Single(
                 (await QueueStore.LoadAsync(BatonPaths.QueueFile, Ct)).PullRequestObservations!);
             Assert.Null(observation.State);
+            Assert.Null(observation.HeadSha);
+            Assert.Null(observation.ObservedAt);
+            Assert.Equal(Now, observation.AttemptedAt);
             Assert.Contains(drifted, observation.Error!, StringComparison.OrdinalIgnoreCase);
         }
         finally

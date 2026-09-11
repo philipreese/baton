@@ -631,7 +631,7 @@ public sealed class WorkItemAdvancer
         var canonical = RepositoryIdentity.From("https://" + key.Repository, gitCommonDirectoryPath: null);
         if (!string.Equals(canonical?.RemoteValue, key.Repository, StringComparison.Ordinal))
         {
-            return FailedBoardObservation(key, prior, now, "the stored repository identity is invalid");
+            return InvalidBoardObservation(key, now, "the stored repository identity is invalid");
         }
 
         var survivingWorkspaces = workspaces
@@ -644,8 +644,8 @@ public sealed class WorkItemAdvancer
                 var current = await _repositoryIdentity(workspace, cancellationToken).ConfigureAwait(false);
                 if (!string.Equals(current?.RemoteValue, key.Repository, StringComparison.Ordinal))
                 {
-                    return FailedBoardObservation(
-                        key, prior, now,
+                    return InvalidBoardObservation(
+                        key, now,
                         $"repository context at '{workspace}' drifted from persisted '{key.Repository}'");
                 }
             }
@@ -710,6 +710,16 @@ public sealed class WorkItemAdvancer
     private static QueuePullRequestObservation FailedBoardObservation(
         QualifiedPullRequest key, QueuePullRequestObservation? prior, DateTimeOffset now, string error) =>
         new(key.Repository, key.PullRequest, prior?.State, prior?.HeadSha, prior?.ObservedAt, now, error);
+
+    /// <summary>
+    /// Identity failure invalidates the provenance of a prior reading, unlike a transient forge
+    /// failure where the repository-qualified key remains trusted and the prior reading stays useful
+    /// as explicitly stale history.
+    /// </summary>
+    private static QueuePullRequestObservation InvalidBoardObservation(
+        QualifiedPullRequest key, DateTimeOffset now, string error) =>
+        new(key.Repository, key.PullRequest, State: null, HeadSha: null, ObservedAt: null,
+            AttemptedAt: now, Error: error);
 
     /// <summary>
     /// Discovers the branch's PR from an open-only, head-scoped list, then reads required checks and
