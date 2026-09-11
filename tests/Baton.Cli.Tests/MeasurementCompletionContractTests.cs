@@ -6,6 +6,7 @@ using Baton.Mutation;
 using Baton.Queue;
 using Baton.Status;
 using Baton.Store;
+using Baton.Tests.Shared;
 using Baton.Vendors;
 
 namespace Baton.Cli.Tests;
@@ -52,7 +53,7 @@ public sealed class MeasurementCompletionContractTests : IDisposable
         string branch, string spec, string reportText)
     {
         var root = TempPath("prior-shape");
-        var (workspace, origin) = CreatePushedWorkspace(root, branch);
+        var (workspace, origin) = await CreatePushedWorkspaceAsync(root, branch);
         try
         {
             var noPr = WriteFakeGh(root, "[]");
@@ -63,19 +64,29 @@ public sealed class MeasurementCompletionContractTests : IDisposable
 
             var reportFixture = Path.Combine(root, "report-fixture.md");
             await File.WriteAllTextAsync(reportFixture, reportText, Ct);
+            var stdoutFixture = Path.Combine(root, "codex-shell-call.jsonl");
+            await File.WriteAllTextAsync(
+                stdoutFixture,
+                "{\"type\":\"item.started\",\"item\":{\"type\":\"command_execution\",\"command\":\"copy report fixture\"}}",
+                Ct);
             var adapters = new Dictionary<string, IWorkerAdapter>
             {
-                ["fake"] = new ContractOutputWorkerAdapter(
+                // Local fake execution, real shipped parser identity. Codex counts this shell call as
+                // a tool step but correctly reports zero write-family calls; that measured zero is the
+                // live-parser shape which exposed the implementation self-check collision.
+                ["codex"] = new ContractOutputWorkerAdapter(
                     satisfyOutputs: true,
-                    outputFixtures: new Dictionary<string, string> { ["report.md"] = reportFixture }),
+                    outputFixtures: new Dictionary<string, string> { ["report.md"] = reportFixture },
+                    stdoutFixture: stdoutFixture),
             };
             var specPath = await WriteSpecAsync(root, spec);
             var room = Path.Combine(root, "room");
 
             var result = await DispatchCommand.ExecuteAsync(
-                new DispatchOptions("measure", specPath, room, Adapter: "fake", WorkspaceDirectory: workspace),
+                new DispatchOptions("measure", specPath, room, Adapter: "codex", WorkspaceDirectory: workspace),
                 adapters,
-                Ct);
+                Ct,
+                evaluateRunway: RunwayTestGate.Admit);
 
             var step = Assert.Single(result.State.Steps);
             Assert.Equal("measure", step.StepId.Value);
@@ -87,6 +98,7 @@ public sealed class MeasurementCompletionContractTests : IDisposable
             Assert.False(binding.DeliversBranch);
             Assert.False(binding.ExpectPr);
             Assert.False(binding.VerifiesWorkspace);
+            Assert.Equal("codex", binding.Adapter);
             Assert.Equal(OutputSchema.NonEmptyText, Assert.Single(binding.Contract.ProducedOutputs).Schema);
 
             var events = await new FlowEventLogReader(Path.Combine(room, BatonPaths.FlowLogFileName)).ReadAllAsync(Ct);
@@ -94,8 +106,55 @@ public sealed class MeasurementCompletionContractTests : IDisposable
             Assert.Empty(events.OfType<FlowEvent.VerifyFailed>());
             Assert.Empty(events.OfType<FlowEvent.VerifyNotRun>());
 
-            var delivered = Path.Combine(room, "artifacts", $"execution_{step.LatestExecutionId}", "report.md");
+            var executionArtifacts = Path.Combine(room, "artifacts", $"execution_{step.LatestExecutionId}");
+            Assert.Equal(
+                0,
+                MutationInterface.CountWriteToolCallsFromStdoutLog(
+                    new CodexUsageParser(), executionArtifacts));
+            var delivered = Path.Combine(executionArtifacts, "report.md");
             Assert.Equal(reportText, (await File.ReadAllTextAsync(delivered, Ct)).Trim());
+        }
+        finally
+        {
+            DirectoryCleanup.DeleteRecursively(root);
+            if (Directory.Exists(origin))
+            {
+                DirectoryCleanup.DeleteRecursively(origin);
+            }
+        }
+    }
+
+    [Fact]
+    public async Task Ordinary_implementation_with_the_same_live_parser_zero_write_metadata_still_fails()
+    {
+        var root = TempPath("implement-zero-write");
+        var (workspace, origin) = await CreatePushedWorkspaceAsync(root, "implement-zero-write");
+        try
+        {
+            var stdoutFixture = Path.Combine(root, "codex-shell-call.jsonl");
+            await File.WriteAllTextAsync(
+                stdoutFixture,
+                "{\"type\":\"item.started\",\"item\":{\"type\":\"command_execution\",\"command\":\"echo claimed completion\"}}",
+                Ct);
+            var adapters = new Dictionary<string, IWorkerAdapter>
+            {
+                ["codex"] = new ContractOutputWorkerAdapter(
+                    satisfyOutputs: true,
+                    stdoutFixture: stdoutFixture),
+            };
+            var specPath = await WriteSpecAsync(root, "Implement without changing the repository.");
+            var room = Path.Combine(root, "room");
+
+            var result = await DispatchCommand.ExecuteAsync(
+                new DispatchOptions("implement", specPath, room, Adapter: "codex", WorkspaceDirectory: workspace),
+                adapters,
+                Ct,
+                evaluateRunway: RunwayTestGate.Admit);
+
+            var step = Assert.Single(result.State.Steps);
+            Assert.Equal(StepStatus.Failed, step.Status);
+            Assert.Equal(FailureClassification.Permanent, step.LatestFailureClassification);
+            Assert.Contains("zero write-tool calls", step.LatestFailureReason!, StringComparison.Ordinal);
         }
         finally
         {
@@ -218,29 +277,29 @@ public sealed class MeasurementCompletionContractTests : IDisposable
         return path;
     }
 
-    private static (string Workspace, string Origin) CreatePushedWorkspace(string root, string branch)
+    private static async Task<(string Workspace, string Origin)> CreatePushedWorkspaceAsync(string root, string branch)
     {
         Directory.CreateDirectory(root);
         var origin = Path.Combine(root, "origin.git");
-        RunGit(root, "init", "--bare", origin);
+        await RunGitAsync(root, "init", "--bare", origin);
         var workspace = Path.Combine(root, "workspace");
         Directory.CreateDirectory(workspace);
-        RunGit(workspace, "init", "--initial-branch", "main");
-        RunGit(workspace, "config", "user.name", "Baton Test");
-        RunGit(workspace, "config", "user.email", "test@example.invalid");
+        await RunGitAsync(workspace, "init", "--initial-branch", "main");
+        await RunGitAsync(workspace, "config", "user.name", "Baton Test");
+        await RunGitAsync(workspace, "config", "user.email", "test@example.invalid");
         File.WriteAllText(Path.Combine(workspace, "README.md"), "fixture");
-        RunGit(workspace, "add", "README.md");
-        RunGit(workspace, "commit", "-m", "fixture");
-        RunGit(workspace, "remote", "add", "origin", origin);
-        RunGit(workspace, "checkout", "-b", branch);
+        await RunGitAsync(workspace, "add", "README.md");
+        await RunGitAsync(workspace, "commit", "-m", "fixture");
+        await RunGitAsync(workspace, "remote", "add", "origin", origin);
+        await RunGitAsync(workspace, "checkout", "-b", branch);
         File.WriteAllText(Path.Combine(workspace, "measurement.txt"), branch);
-        RunGit(workspace, "add", "measurement.txt");
-        RunGit(workspace, "commit", "-m", "measurement fixture");
-        RunGit(workspace, "push", "--set-upstream", "origin", branch);
+        await RunGitAsync(workspace, "add", "measurement.txt");
+        await RunGitAsync(workspace, "commit", "-m", "measurement fixture");
+        await RunGitAsync(workspace, "push", "--set-upstream", "origin", branch);
         return (workspace, origin);
     }
 
-    private static void RunGit(string workingDirectory, params string[] arguments)
+    private static async Task RunGitAsync(string workingDirectory, params string[] arguments)
     {
         var startInfo = new ProcessStartInfo("git")
         {
@@ -256,9 +315,8 @@ public sealed class MeasurementCompletionContractTests : IDisposable
 
         using var process = Process.Start(startInfo)
             ?? throw new InvalidOperationException($"Could not start git {string.Join(' ', arguments)}.");
-        var stdout = process.StandardOutput.ReadToEnd();
-        var stderr = process.StandardError.ReadToEnd();
-        process.WaitForExit();
+        var (stdout, stderr) = await BoundedProcessWait.RunToExitAsync(
+            process, TimeSpan.FromSeconds(30), Ct);
         Assert.True(process.ExitCode == 0,
             $"git {string.Join(' ', arguments)} failed with {process.ExitCode}: {stderr}{stdout}");
     }

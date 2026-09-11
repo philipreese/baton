@@ -1724,14 +1724,24 @@ report remains an unsatisfied output and cannot settle succeeded. Its binding se
 validator is the completion check, and no workspace gate, commit, push, or PR is demanded. This does
 not alter `implement`: that role still sets both `VerifiesWorkspace` and `DeliversBranch`, with
 `ExpectPr` true by default, whatever its brief or `changes.md` says. The measurement grant reuses
-implement's executable categories and existing arrest ceilings but adds shell denies for commit,
-push, PR mutation, and issue mutation; choosing a completion contract widens no authority. The single
-supported queue invocation is documented in `docs/dispatch.md` under Roles.
+implement's executable categories and existing arrest ceilings and retains positional shell denies
+for direct commit, push, PR-mutation, and issue-mutation spellings as defense in depth. Those denies
+are not a categorical no-shipping sandbox: `ShellCommandPatternMatcher` anchors command families at
+the beginning of a segment, so alternate forms such as `git -C . push`, `gh --repo owner/repo pr edit`,
+or a leading redirection are outside what it can enforce. The role instruction and operator policy
+remain the broader no-shipping boundary; making that boundary mechanical requires a separately
+approved controlled-execution policy, not a completion-contract change or a silent matcher rewrite.
+The single supported queue invocation is documented in `docs/dispatch.md` under Roles.
 
-**Measured-zero implementation self-check (#2131 slice 2).** A write-granted implementation that
+**Measured-zero implementation self-check (#2131 slice 2).** A write-granted, workspace-verified
+implementation that
 finishes naturally with a satisfied contract, a measured count of zero write-tool calls, and a measured unchanged
 worktree settles `Failed` / `Permanent`, not `Succeeded`; a pre-existing pushed branch and PR cannot turn
-that no-op into delivery. `OutcomeClassifier.BuildSucceededClassification` owns the conjunction. Neither
+that no-op into delivery. `OutcomeClassifier.BuildSucceededClassification` owns the conjunction and
+uses the binding's existing `VerifiesWorkspace` policy as its discriminator. `ChangesTree` remains a
+separate diagnostic: it records that the executable role can write the workspace, so a measurement
+that creates and cleans fixtures can still report `workspaceChanged: false` without being graded as
+an implementation. Neither
 half alone is enough: a changed tree can have been written through shell, and an unchanged tree after a
 write-tool call can be a truthful declared-output-only result. A null write-tool count (unsupported parser,
 missing/unreadable capture, or a capture-loss marker) and an unmeasurable workspace comparison remain

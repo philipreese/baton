@@ -85,7 +85,9 @@ public sealed record WorkerTier([property: JsonRequired] string Adapter, string?
 /// changes the tree (<c>implement</c>, <c>janitor</c>): their own work is what the audits grade.
 /// <c>measure</c> deliberately stays false even though its grant permits temporary fixture writes:
 /// its delivered result is an outbox report and its brief may forbid builds or product changes, so a
-/// workspace gate would grade something the completion contract does not claim. False also remains
+/// workspace gate would grade something the completion contract does not claim. In other words,
+/// <see cref="PermissionGrant.WriteFiles"/> describes execution authority while this flag describes
+/// completion grading; neither value can be inferred from the other. False also remains
 /// the rule for every role whose grant withholds <see cref="PermissionGrant.WriteFiles"/>; the shipped
 /// membership is pinned by name in <c>WorkerRoleCatalogTests</c>. Such a role writes nothing to the
 /// workspace and so would be graded on someone else's red tree. What a read-shaped role IS verified

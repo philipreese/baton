@@ -28,12 +28,18 @@ namespace Baton.Cli.Tests.TestSupport;
 /// vendor adapter ever handed an auto-provisioned worktree, so the false arm has no vendor tag of
 /// its own to be dispatched under.
 /// </param>
+/// <param name="stdoutFixture">
+/// Optional file emitted verbatim on stdout before producing outputs. This lets an end-to-end test
+/// run a local fake process under a shipped adapter name while exercising that adapter's real stream
+/// parser metadata, instead of making an unsupported fake parser turn a measured count into null.
+/// </param>
 internal sealed class ContractOutputWorkerAdapter(
     bool satisfyOutputs,
     IReadOnlyDictionary<string, string>? outputFixtures = null,
     IReadOnlyList<WorkerCapabilityItem>? capabilities = null,
     int failureExitCode = 0,
-    bool bindsDispatchedWorkspaceReadable = false) : IWorkerAdapter
+    bool bindsDispatchedWorkspaceReadable = false,
+    string? stdoutFixture = null) : IWorkerAdapter
 {
     public bool BindsDispatchedWorkspaceReadable => bindsDispatchedWorkspaceReadable;
 
@@ -48,11 +54,22 @@ internal sealed class ContractOutputWorkerAdapter(
 
     public CoreDispatchTarget Resolve(WorkerInvocation invocation, WorkerContract contract)
     {
-        var script = satisfyOutputs && contract.ProducedOutputs.Count > 0
-            ? string.Join(" & ", contract.ProducedOutputs.Select(o => WriteCommand(o.Name)))
-            : $"exit {failureExitCode}";
+        var commands = new List<string>();
+        if (stdoutFixture is not null)
+        {
+            commands.Add($"type {stdoutFixture}");
+        }
 
-        return new CoreDispatchTarget("cmd", ["/c", script], invocation.WorkingDirectory);
+        if (satisfyOutputs && contract.ProducedOutputs.Count > 0)
+        {
+            commands.AddRange(contract.ProducedOutputs.Select(o => WriteCommand(o.Name)));
+        }
+        else
+        {
+            commands.Add($"exit {failureExitCode}");
+        }
+
+        return new CoreDispatchTarget("cmd", ["/c", string.Join(" & ", commands)], invocation.WorkingDirectory);
     }
 
     private string WriteCommand(string outputName)

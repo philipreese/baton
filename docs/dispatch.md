@@ -409,7 +409,7 @@ declared name(s) — `baton resolve` is the one permitted writer here (spec/bato
 |------|------|--------|-----|
 | `advise` | standard | `advice.md` | Weighing an open design question before building — a second opinion. |
 | `implement` | standard | `changes.md` | A bounded change whose approach is already decided; exercises the write path. |
-| `measure` | standard | `report.md` (non-empty) | Running a conductor-selected measurement with executable tools and isolated fixtures, while denying commit/push/PR/issue mutation. Its declared report is the completion contract; it runs no workspace gate and requires no branch or PR. |
+| `measure` | standard | `report.md` (non-empty) | Running a conductor-selected measurement with executable tools and isolated fixtures. Its declared report is the completion contract; it runs no workspace gate and requires no branch or PR. |
 | `review` | frontier | `report.md`, `verdict.json` | Adversarial review of a claim; the default for a PR touching `src/` or asserting something in `docs/`. |
 | `consolidate` | frontier | `consolidation.md` | Reading one issue's thread and merged PRs against the code and writing the current-state block a person rewrites the body from (#2043). Read-only over `gh` and the tree — a strict narrowing of `review`'s grant — and it opens no PR. |
 | `patch` | frontier | `patch.diff` | Proposing code changes as an applyable diff without mutating the workspace. |
@@ -426,6 +426,11 @@ baton queue add <tag> --role measure --spec <brief.md> --workspace <checkout-dir
 Use `--issue <n>` instead of `--workspace <checkout-dir>` when the queue should provision the issue
 worktree. `baton queue list` shows `measure` on the retained row; the launched room records the same
 role in `bindings.json` and `flow.jsonl`. Brief text and `report.md` contents cannot change that choice.
+
+<!-- record-once-ok: #2225 spec/baton.md -->
+The role's positional shell denies are defense in depth, not a categorical no-shipping sandbox.
+`spec/baton.md` §3 records the matcher limits, the broader operator-policy boundary, and what a
+mechanically enforced boundary would require.
 
 Each tier pins one vendor, model and effort in
 [`src/Baton.Vendors/WorkerTiers.json`](../src/Baton.Vendors/WorkerTiers.json). The shipped pins are the

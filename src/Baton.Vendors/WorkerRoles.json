@@ -81,12 +81,12 @@
     "token_budget": { "claude": 600000, "agy": 1200000, "codex": 600000 },
     "max_tool_steps": 610,
     "billed_rate_limit": null,
-    "purpose": "A conductor-selected measurement with executable tools and an artifact-only completion contract. It may create and clean up isolated local fixtures, but its shell grant is a strict narrowing of implement: commit, push, PR mutation and issue mutation are denied. The role is selected before launch and persisted through the ordinary queue and binding records; worker prose and report content cannot turn an implement lane into this contract. A non-empty report is the whole delivered result, so no workspace gate, branch push or PR is required. The token, tool-step and timeout defaults reuse implement's existing ceilings rather than inventing measurement calibration; a bounded brief may override them downward through the queue's existing flags.",
+    "purpose": "A conductor-selected measurement with executable tools and an artifact-only completion contract. It may create and clean up isolated local fixtures. Its grant retains positional deny patterns for direct commit, push, PR-mutation and issue-mutation spellings as defense in depth, but the unscoped shell matcher is not a categorical shell sandbox and cannot cover alternate CLI spellings; the role instruction and operator policy remain the broader no-shipping boundary. The role is selected before launch and persisted through the ordinary queue and binding records; worker prose and report content cannot turn an implement lane into this contract. A non-empty report is the whole delivered result, so no workspace gate, branch push or PR is required. The token, tool-step and timeout defaults reuse implement's existing ceilings rather than inventing measurement calibration; a bounded brief may override them downward through the queue's existing flags.",
     "outputs": [
       {
         "name": "report.md",
         "schema": "non_empty_text",
-        "instruction": "Write the measurement report -- method, evidence, validation performed, results, uncertainty, and any reproducible local artifact paths -- to $BATON_OUTPUT_DIR/report.md. Do not commit, push, open or edit a PR, or mutate an issue; those shipping operations are outside this role's grant. The report must contain non-whitespace content or the declared output contract fails."
+        "instruction": "Write the measurement report -- method, evidence, validation performed, results, uncertainty, and any reproducible local artifact paths -- to $BATON_OUTPUT_DIR/report.md. Do not commit, push, open or edit a PR, or mutate an issue. Direct spellings are covered by positional deny patterns, but those patterns are not a categorical shell sandbox; alternate CLI spellings remain prohibited by this role instruction and operator policy. The report must contain non-whitespace content or the declared output contract fails."
       }
     ]
   },
