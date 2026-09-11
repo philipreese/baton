@@ -284,6 +284,17 @@ public static class BatonPaths
     public const string MemoryEntriesFileName = "entries.jsonl";
 
     /// <summary>
+    /// <c>{Root}/&lt;repository-slug&gt;/memory/store.json</c> — the canonical store's durable
+    /// repository identity. Unlike an entry row or projection obligation, this remains when an undo
+    /// empties the store and when no projection is pending.
+    /// </summary>
+    public static string MemoryStoreMetadataFile(string repositorySlug) =>
+        Path.Combine(MemoryDirectory(repositorySlug), MemoryStoreMetadataFileName);
+
+    /// <summary>Filename of <see cref="MemoryStoreMetadataFile"/> relative to <see cref="MemoryDirectory"/>.</summary>
+    public const string MemoryStoreMetadataFileName = "store.json";
+
+    /// <summary>
     /// <c>{Root}/&lt;repository-slug&gt;/memory/links.jsonl</c> — one repository's append-only
     /// supersession links (#1852 phase B, Q2). <b>A second file rather than a field on an entry</b>
     /// because <see cref="MemoryEntriesFile"/> is append-only with no overwrite and an entry's id is
@@ -308,6 +319,18 @@ public static class BatonPaths
 
     /// <summary>Filename of <see cref="MemoryRetractionsFile"/> relative to <see cref="MemoryDirectory"/>.</summary>
     public const string MemoryRetractionsFileName = "retractions.jsonl";
+
+    /// <summary>
+    /// <c>{Root}/&lt;repository-slug&gt;/memory/sync-pending.json</c> — the durable obligation left
+    /// while that store's latest projection has not completed (#2138). The file is Baton-owned state,
+    /// not a vendor-consumption receipt; <c>Baton.Memory.MemoryProjectionObligationStore</c> owns its
+    /// transitions and removes it only after the corresponding publication completes.
+    /// </summary>
+    public static string MemorySyncPendingFile(string repositorySlug) =>
+        Path.Combine(MemoryDirectory(repositorySlug), MemorySyncPendingFileName);
+
+    /// <summary>Filename of <see cref="MemorySyncPendingFile"/> relative to <see cref="MemoryDirectory"/>.</summary>
+    public const string MemorySyncPendingFileName = "sync-pending.json";
 
     /// <summary>
     /// <c>{Root}/memory-aliases.jsonl</c> — see <c>Baton.Memory.MemoryAliasStore</c> for what it holds

@@ -126,14 +126,16 @@ public sealed class MemoryImportTests : IDisposable
     }
 
     /// <summary>
-    /// Path to SHA-256, over every file under <paramref name="directory"/>. The instrument for the
-    /// non-destructive claim: it is a statement about bytes, so it is measured in bytes rather than
-    /// inferred from the absence of a write call.
+    /// Path to SHA-256 over every vendor-authored file under <paramref name="directory"/>. Baton's
+    /// generated projection is excluded: #2138 deliberately adds or replaces that owned cache after
+    /// import, while the non-destructive claim remains byte-for-byte over every source file.
     /// </summary>
     private static Dictionary<string, string> DigestTree(string directory) =>
         !Directory.Exists(directory)
             ? new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase)
             : Directory.EnumerateFiles(directory, "*", SearchOption.AllDirectories)
+            .Where(p => !string.Equals(
+                Path.GetFileName(p), ClaudeProjectionTarget.ProjectionFileName, StringComparison.OrdinalIgnoreCase))
             .ToDictionary(p => p, Digest, StringComparer.OrdinalIgnoreCase);
 
     /// <summary>One file's SHA-256, for the arms whose claim is about a single file's bytes.</summary>
@@ -558,6 +560,91 @@ public sealed class MemoryImportTests : IDisposable
     }
 
     /// <summary>
+    /// A transient failure reading either canonical input to the separate-root plan cannot be mistaken
+    /// for an empty input and made durable. The healthy retry proves the one-shot failure control did
+    /// not merely make imports unable to finish.
+    /// </summary>
+    [Theory]
+    [InlineData("entries")]
+    [InlineData("aliases")]
+    public async Task A_failed_canonical_planning_read_cannot_settle_or_publish_an_incomplete_separate_root_import(
+        string input)
+    {
+        const string repository = "github.com/philipreese/baton";
+        await BuildStandardFixtureAsync();
+        var liveRoot = Path.Combine(ClaudeHome, "projects", "C--baton", "memory");
+        var archived = WriteArchivedRoot("c--baton-memory", ("user_who.md", "the older who"));
+
+        // Record the archive assertion with the live-only import. Run 2 can therefore prove both
+        // canonical dependencies independently: alias discovery files the archive, and stored entries
+        // supply the live half that is absent from the archive-only plan.
+        await RunAsync(
+            "--root", liveRoot,
+            "--assert", $"{archived}={repository}",
+            "--asserted-by", "the-test");
+        Assert.Empty(await LinksAsync(repository));
+
+        var importsDirectory = Path.Combine(BatonPaths.Root, BatonPaths.MemoryImportsDirectoryName);
+        var manifestCount = Directory.GetFiles(importsDirectory).Length;
+        var target = Path.Combine(liveRoot, ClaudeProjectionTarget.ProjectionFileName);
+        var published = File.ReadAllBytes(target);
+        var deniedPath = input == "aliases"
+            ? BatonPaths.MemoryAliasFile
+            : BatonPaths.MemoryEntriesFile(RepositoryIdentity.FileSlugFor(repository));
+        var failures = 0;
+
+        IDisposable? DenyOnce(string candidate)
+        {
+            if (failures != 0 || !BatonPaths.RecordKeyComparer.Equals(candidate, deniedPath))
+            {
+                return null;
+            }
+
+            failures++;
+            return new FileStream(deniedPath, FileMode.Open, FileAccess.Read, FileShare.None);
+        }
+
+        if (input == "aliases")
+        {
+            JsonLinesLedger<MemoryAliasEntry>.ReadScopeOverride = DenyOnce;
+        }
+        else
+        {
+            JsonLinesLedger<MemoryEntry>.ReadScopeOverride = DenyOnce;
+        }
+
+        try
+        {
+            await Assert.ThrowsAsync<IOException>(() => RunAsync("--root", archived));
+        }
+        finally
+        {
+            JsonLinesLedger<MemoryAliasEntry>.ReadScopeOverride = null;
+            JsonLinesLedger<MemoryEntry>.ReadScopeOverride = null;
+        }
+
+        Assert.Equal(1, failures);
+        Assert.Equal(manifestCount, Directory.GetFiles(importsDirectory).Length);
+        Assert.Equal(published, File.ReadAllBytes(target));
+        Assert.DoesNotContain(await StoreAsync(repository), entry => entry.Text == "the older who");
+        Assert.Empty(await LinksAsync(repository));
+
+        // Both canonical reads are healthy again. The archive-only retry must settle the complete
+        // relationship and run the automatic projection path without exposing the historical note.
+        var recovered = await RunAsync("--root", archived);
+        Assert.Contains("Supersession links: 1   recorded: 1", recovered, StringComparison.Ordinal);
+        Assert.Contains("AUTOMATIC PROJECTION FINISHED", recovered, StringComparison.Ordinal);
+        Assert.Equal(manifestCount + 1, Directory.GetFiles(importsDirectory).Length);
+
+        var store = await StoreAsync(repository);
+        var note = Assert.Single(store, entry => entry.Text == "the older who");
+        var live = Assert.Single(store, entry => entry.Text == "who we are");
+        Assert.Equal([live.Id], note.SupersededBy);
+        Assert.Equal([note.Id], live.Supersedes);
+        Assert.DoesNotContain("the older who", File.ReadAllText(target), StringComparison.Ordinal);
+    }
+
+    /// <summary>
     /// An undo that removed nothing exits non-zero and says so, and one replayed against a different
     /// storage root refuses before touching anything.
     /// </summary>
@@ -577,7 +664,21 @@ public sealed class MemoryImportTests : IDisposable
         // Arm 1: the manifest says it was written under another storage root. Every store path in it is
         // absolute under that root, so replaying it here could only remove nothing and report success.
         var elsewhere = Path.Combine(_root, "some-other-baton-root");
-        var moved = ImportManifest.Read(manifestPath) with { BatonRoot = elsewhere };
+        var original = ImportManifest.Read(manifestPath);
+        // Keep the relocated record internally coherent so this tests the root fence, not corrupt
+        // accounting-path validation (which now runs on every operation-record read).
+        var moved = original with
+        {
+            BatonRoot = elsewhere,
+            Entries = original.Entries.Select(row => row with
+            {
+                EntriesFilePath = Path.Combine(elsewhere, Path.GetRelativePath(BatonPaths.Root, row.EntriesFilePath)),
+            }).ToList(),
+            Links = original.Links?.Select(row => row with
+            {
+                LinksFilePath = Path.Combine(elsewhere, Path.GetRelativePath(BatonPaths.Root, row.LinksFilePath)),
+            }).ToList(),
+        };
         moved.Write(manifestPath + ".moved.json");
 
         var (refusedCode, refusedText) = await RunRawAsync("--undo", manifestPath + ".moved.json");

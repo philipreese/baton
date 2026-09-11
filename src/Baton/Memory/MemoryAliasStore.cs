@@ -26,7 +26,10 @@ public sealed record MemoryAliasEntry(
     DateTime AssertedAtUtc,
     [property: JsonPropertyName("reason")]
     [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
-    string? Reason = null);
+    string? Reason = null,
+    [property: JsonPropertyName("importOperationId")]
+    [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    string? ImportOperationId = null);
 
 /// <summary>
 /// The append-only <c>aliases.jsonl</c> beside the canonical stores: paths whose repository identity
@@ -75,7 +78,11 @@ public static class MemoryAliasStore
     /// not by an append that silently shadows an earlier row a reader would still see.
     /// </summary>
     internal static readonly JsonLinesLedger<MemoryAliasEntry> Ledger =
-        new("baton-memory-aliases", "memory alias store", entry => entry.Path);
+        new(
+            "baton-memory-aliases",
+            "memory alias store",
+            entry => entry.Path,
+            keyComparer: BatonPaths.RecordKeyComparer);
 
     /// <summary>Every assertion in the file, oldest first. A missing file is an empty list.</summary>
     public static Task<IReadOnlyList<MemoryAliasEntry>> ReadAllAsync(
@@ -85,7 +92,23 @@ public static class MemoryAliasStore
     /// <summary>Appends assertions whose path is not already recorded.</summary>
     public static Task AppendAsync(
         IReadOnlyList<MemoryAliasEntry> entries, string aliasFilePath, CancellationToken cancellationToken = default) =>
-        Ledger.AppendAsync(entries, aliasFilePath, cancellationToken);
+        AppendAndGetAppendedAsync(entries, aliasFilePath, cancellationToken);
+
+    /// <summary>
+    /// Appends assertions and returns exactly the rows this call inserted, as decided under the alias
+    /// ledger lock. Projection triggers use this rather than requested assertions, so a duplicate
+    /// no-op cannot create or replace a projection obligation.
+    /// </summary>
+    public static Task<IReadOnlyList<MemoryAliasEntry>> AppendAndGetAppendedAsync(
+        IReadOnlyList<MemoryAliasEntry> entries,
+        string aliasFilePath,
+        CancellationToken cancellationToken = default) =>
+        MemoryCanonicalGeneration.AppendAsync(Ledger, entries, aliasFilePath, cancellationToken);
+
+    /// <summary>Assertions for publication; discovery must not hide an unreadable target mapping.</summary>
+    public static Task<IReadOnlyList<MemoryAliasEntry>> ReadAllStrictAsync(
+        string aliasFilePath, CancellationToken cancellationToken = default) =>
+        Ledger.RunUnderLockAsync(aliasFilePath, () => Ledger.ReadAllUnlocked(aliasFilePath, requireReadable: true), cancellationToken);
 
     /// <summary>
     /// The repository <paramref name="checkoutPath"/> is asserted to belong to, or

@@ -32,6 +32,13 @@ namespace Baton.Cli;
 /// </remarks>
 public static class MemoryAuditCommand
 {
+    private static readonly AsyncLocal<Action?> CountObservation = new();
+    internal static Action? CountObserver
+    {
+        get => CountObservation.Value;
+        set => CountObservation.Value = value;
+    }
+
     /// <summary>
     /// <c>WhenWritingNull</c>, matching every other Baton JSON view: an absent field is absent, never
     /// <c>null</c> and never <c>0</c>. A root with no resolved checkout simply has no
@@ -110,15 +117,22 @@ public static class MemoryAuditCommand
         var vendorRoots = MemoryRootInventory.ScanVendorRoots(
             userHome, batonRoot, limits: null, cancellationToken);
         var retractions = await ReadRetractionsAsync(batonRoot, cancellationToken).ConfigureAwait(false);
+        var countGeneration = MemoryCanonicalGeneration.Capture(batonRoot);
         var canonicalStores = await ScanCanonicalStoresAsync(batonRoot, options.Repository, cancellationToken)
             .ConfigureAwait(false);
+        var health = MemoryImportOperationHealth.Sample(batonRoot);
+        var operationProblems = health.Problems;
+        canonicalStores = canonicalStores.Select(store => health.Generation != countGeneration
+            || operationProblems.Any(problem => problem.Blocks(store.Slug))
+            ? store with { EntryCount = null }
+            : store).ToList();
 
         if (options.Format == MemoryAuditOutputFormat.Json)
         {
             output.WriteLine(JsonSerializer.Serialize(
                 new MemoryAuditJsonView(
                     claudeHome, userHome, report.Roots, report.Findings, report.Counts, vendorRoots, retractions,
-                    canonicalStores),
+                    canonicalStores, operationProblems),
                 ViewSerializerOptions));
             return 0;
         }
@@ -127,6 +141,10 @@ public static class MemoryAuditCommand
         WriteVendorRoots(output, vendorRoots);
         WriteRetractions(output, retractions);
         WriteCanonicalStores(output, batonRoot, options.Repository, canonicalStores);
+        foreach (var problem in operationProblems)
+        {
+            output.WriteLine($"  IMPORT {problem.State.ToUpperInvariant()} -- {problem.Detail}");
+        }
         return 0;
     }
 
@@ -182,8 +200,8 @@ public static class MemoryAuditCommand
     /// </summary>
     /// <remarks>
     /// <b>Rows are counted and never printed</b>, which keeps this half inside the verb's own
-    /// read-only-and-content-blind claim: an entry's text goes nowhere, and the one field read out of
-    /// a row is its subject, so the report can say whose store a slug is without decoding the slug.
+    /// read-only-and-content-blind claim: an entry's text goes nowhere. Durable metadata is the
+    /// authoritative subject; a row supplies it only for a genuinely metadata-less legacy store.
     /// A selected store that does not exist is reported as absent rather than dropped, because "no
     /// fleet store yet" is an answer an operator acts on and an empty list is not.
     /// </remarks>
@@ -199,14 +217,27 @@ public static class MemoryAuditCommand
                 continue;
             }
 
-            var entries = await MemoryStore.ReadAllAsync(store.EntriesFile, cancellationToken).ConfigureAwait(false);
+            CountObserver?.Invoke();
+            IReadOnlyList<MemoryEntry> entries;
+            try
+            {
+                entries = await MemoryStore.ReadAllStrictAsync(store.EntriesFile, cancellationToken).ConfigureAwait(false);
+            }
+            catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or WaitHandleCannotBeOpenedException)
+            {
+                rows.Add(new CanonicalStoreRow(store.Slug, store.Repository, store.IsFleet,
+                    store.EntriesFile, Present: true, EntryCount: null,
+                    CountError: $"{ex.GetType().Name}: {ex.Message}"));
+                continue;
+            }
+            var storeRepository = MemoryStoreIdentity.Resolve(store.Slug, store.Repository, entries);
             rows.Add(new CanonicalStoreRow(
                 store.Slug,
-                store.IsFleet ? FleetMemory.Slug : entries.Count > 0 ? entries[0].Repository : null,
+                storeRepository,
                 store.IsFleet,
                 store.EntriesFile,
                 Present: true,
-                entries.Count));
+                store.OperationProblems is { Count: > 0 } ? null : entries.Count));
         }
 
         if (selectedSlug is not null && rows.Count == 0)
@@ -224,9 +255,8 @@ public static class MemoryAuditCommand
     }
 
     /// <summary>
-    /// One canonical store in the report. <paramref name="Repository"/> is the subject its rows carry
-    /// (<c>fleet</c> for the fleet store); absent when the store holds no row yet, since a slug alone
-    /// cannot say whose it is.
+    /// One canonical store in the report. <paramref name="Repository"/> is its durable metadata
+    /// identity, or the subject its rows carry for a genuinely metadata-less legacy store.
     /// </summary>
     private sealed record CanonicalStoreRow(
         string Slug,
@@ -234,7 +264,8 @@ public static class MemoryAuditCommand
         bool IsFleet,
         string EntriesFile,
         bool Present,
-        int EntryCount);
+        int? EntryCount,
+        string? CountError = null);
 
     /// <summary>
     /// The JSON contract: the report plus the two roots it was taken over, so a stored report says
@@ -257,7 +288,8 @@ public static class MemoryAuditCommand
         MemoryAuditCounts Counts,
         IReadOnlyList<VendorMemoryRoot> VendorRoots,
         IReadOnlyList<MemoryRetraction> Retractions,
-        IReadOnlyList<CanonicalStoreRow> CanonicalStores);
+        IReadOnlyList<CanonicalStoreRow> CanonicalStores,
+        IReadOnlyList<MemoryImportOperationProblem> ImportOperations);
 
     /// <summary>
     /// The retractions, under their own heading, each with the reason and author verbatim — the
@@ -410,7 +442,11 @@ public static class MemoryAuditCommand
             output.WriteLine(
                 store.Present
                     ? $"    {(store.IsFleet ? "FLEET" : "repository=" + (store.Repository ?? "(no rows yet)"))} " +
-                      $"slug={store.Slug} entries={store.EntryCount.ToString("N0", CultureInfo.InvariantCulture)}"
+                      $"slug={store.Slug} " + (store.EntryCount is { } count
+                          ? $"entries={count.ToString("N0", CultureInfo.InvariantCulture)}"
+                          : store.CountError is { } error
+                              ? $"entries=(unavailable -- {error})"
+                              : "entries=(withheld -- incomplete import ownership; see import diagnostics)")
                     : $"    ABSENT -- no store has been created for '{store.Repository}' on this machine; " +
                       "'baton memory add' or 'baton memory import' creates it.");
         }

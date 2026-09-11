@@ -16,8 +16,9 @@ namespace Baton.Cli;
 /// <b>Non-destructive by construction, not by care.</b> The only file-opening this command does on a
 /// source is a read: <see cref="MemoryRootInventory"/> streams a digest, and
 /// <see cref="ReadSourceFiles"/> reads text through <see cref="FileAccess.Read"/>. There is no code
-/// path here that opens a source for writing, moves one, or deletes one — the destructive verbs do
-/// not exist to be reached by a bug. Everything this command writes lives under
+/// path here that opens a source for writing, moves one, or deletes one. After a canonical change,
+/// #2138's shared projector may replace only Baton's generated cache file in an already-discovered
+/// root; canonical rows, manifests, aliases and pending obligations remain under
 /// <see cref="BatonPaths.Root"/>.
 /// </para>
 /// <para>
@@ -57,7 +58,8 @@ public static class MemoryImportCommand
         TextWriter output,
         string? claudeHomeOverride = null,
         CancellationToken cancellationToken = default,
-        string? userHomeOverride = null)
+        string? userHomeOverride = null,
+        Action<string, byte[]>? projectionWriterOverride = null)
     {
         ArgumentNullException.ThrowIfNull(options);
         ArgumentNullException.ThrowIfNull(output);
@@ -74,8 +76,20 @@ public static class MemoryImportCommand
         }
 
         return options.UndoManifestPath is { Length: > 0 } manifestPath
-            ? await UndoAsync(manifestPath, output, cancellationToken).ConfigureAwait(false)
-            : await ImportAsync(options, output, claudeHomeOverride, userHomeOverride, cancellationToken)
+            ? await UndoAsync(
+                manifestPath,
+                output,
+                claudeHomeOverride,
+                userHomeOverride,
+                projectionWriterOverride,
+                cancellationToken).ConfigureAwait(false)
+            : await ImportAsync(
+                options,
+                output,
+                claudeHomeOverride,
+                userHomeOverride,
+                projectionWriterOverride,
+                cancellationToken)
                 .ConfigureAwait(false);
     }
 
@@ -84,13 +98,15 @@ public static class MemoryImportCommand
         TextWriter output,
         string? claudeHomeOverride,
         string? userHomeOverride,
+        Action<string, byte[]>? projectionWriterOverride,
         CancellationToken cancellationToken)
     {
         var claudeHome = claudeHomeOverride ?? MemoryRootInventory.DefaultClaudeHome;
         var userHome = userHomeOverride ?? MemoryRootInventory.DefaultUserHome;
         var batonRoot = BatonPaths.Root;
 
-        var aliases = await ResolveAliasesAsync(options, cancellationToken).ConfigureAwait(false);
+        var aliasResolution = await ResolveAliasesAsync(options, cancellationToken).ConfigureAwait(false);
+        var aliases = aliasResolution.Aliases;
 
         var sources = new List<MemoryImportSource>();
         var machineryRoots = new List<MachineryRoot>();
@@ -141,19 +157,24 @@ public static class MemoryImportCommand
             .GroupBy(f => f.Path, StringComparer.OrdinalIgnoreCase)
             .ToDictionary(g => g.Key, g => g.First().SizeBytes, StringComparer.OrdinalIgnoreCase);
 
+        var operationId = options.DryRun ? null : Guid.NewGuid().ToString("N");
         var rows = new List<ImportManifestRow>();
         var linkRows = new List<ImportLinkRow>();
+        var plannedEntries = new List<MemoryEntry>();
+        var plannedLinks = new List<MemorySupersessionLink>();
         foreach (var group in plan.Entries.GroupBy(e => e.Repository, StringComparer.OrdinalIgnoreCase))
         {
             var slug = FleetMemory.SlugFor(group.Key);
             var entriesFile = BatonPaths.MemoryEntriesFile(slug);
             var linksFile = BatonPaths.MemoryLinksFile(slug);
-            var entries = group.ToList();
+            var entries = group.Select(e => operationId is null
+                ? e
+                : e with { ImportOperationId = operationId }).ToList();
 
-            // Read first so the manifest can say which rows THIS run appended: an undo must not remove
-            // an entry an earlier import wrote. The append itself re-checks under its own lock, so this
-            // read is a report input and never the thing that keeps the file free of duplicates.
-            var stored = await MemoryStore.ReadAllAsync(entriesFile, cancellationToken).ConfigureAwait(false);
+            // Read strictly before recording intent: existing rows decide both which entries this run
+            // can own and which live/archive supersession links the durable plan must carry. The append
+            // itself still re-checks under its own lock, so this snapshot is not the duplicate fence.
+            var stored = await MemoryStore.ReadAllStrictAsync(entriesFile, cancellationToken).ConfigureAwait(false);
             var existing = stored.Select(e => e.Id).ToHashSet(StringComparer.Ordinal);
 
             // The link population is the STORE plus this run, never this run alone — MemoryImportPlan
@@ -161,22 +182,24 @@ public static class MemoryImportCommand
             // defect: importing the live roots and the archive in separate runs used to land no link at
             // all, because each run could only see its own half of every pair.
             var links = MemoryImportPlan.LinkSupersession(
-                [.. stored, .. entries.Where(e => !existing.Contains(e.Id))], importedAtUtc);
+                    [.. stored, .. entries.Where(e => !existing.Contains(e.Id))], importedAtUtc)
+                .Select(link => operationId is null
+                    ? link
+                    : link with { ImportOperationId = operationId })
+                .ToList();
             var existingLinks = (await MemoryStore.ReadLinksAsync(linksFile, cancellationToken).ConfigureAwait(false))
                 .Select(l => l.Id)
                 .ToHashSet(StringComparer.Ordinal);
 
-            // A dry run has no lock-held append to observe, so it remains an advisory preview based on
-            // the earlier reads. An applied manifest instead records the result decided under each
-            // owning ledger lock: a concurrent import may have won between those reads and this call.
+            // A dry run remains an advisory preview. An applied run records every candidate as
+            // unowned in its intent; settlement derives exact ownership from operation ids written in
+            // the same canonical rows, so a crash cannot put an append beyond its manifest.
             var appendedEntryIds = options.DryRun
                 ? entries.Where(e => !existing.Contains(e.Id)).Select(e => e.Id).ToHashSet(StringComparer.Ordinal)
-                : (await MemoryStore.AppendAndGetAppendedAsync(entries, entriesFile, cancellationToken)
-                    .ConfigureAwait(false)).Select(e => e.Id).ToHashSet(StringComparer.Ordinal);
+                : [];
             var appendedLinkIds = options.DryRun
                 ? links.Where(l => !existingLinks.Contains(l.Id)).Select(l => l.Id).ToHashSet(StringComparer.Ordinal)
-                : (await MemoryStore.AppendLinksAndGetAppendedAsync(links, linksFile, cancellationToken)
-                    .ConfigureAwait(false)).Select(l => l.Id).ToHashSet(StringComparer.Ordinal);
+                : [];
 
             // An input batch can itself repeat an id. The ledger writes only its first occurrence;
             // consume each returned id once so undo expects one removal rather than claiming both
@@ -186,14 +209,27 @@ public static class MemoryImportCommand
                 e.SourcePath, e.Sha256, e.SourceMtimeUtc,
                 sizeByPath.TryGetValue(e.SourcePath, out var size) ? size : 0,
                 e.SourceVendor, e.SourceScope, e.Id, e.Repository, entriesFile,
-                AlreadyPresent: !appendedEntryIds.Contains(e.Id) || !ownedEntryIds.Add(e.Id))));
+                AlreadyPresent: !options.DryRun
+                    || !appendedEntryIds.Contains(e.Id)
+                    || !ownedEntryIds.Add(e.Id))));
 
             var ownedLinkIds = new HashSet<string>(StringComparer.Ordinal);
             linkRows.AddRange(links.Select(l => new ImportLinkRow(
                 l.Id, l.Repository, linksFile,
-                AlreadyPresent: !appendedLinkIds.Contains(l.Id) || !ownedLinkIds.Add(l.Id))));
+                AlreadyPresent: !options.DryRun
+                    || !appendedLinkIds.Contains(l.Id)
+                    || !ownedLinkIds.Add(l.Id))));
+
+            if (!options.DryRun)
+            {
+                plannedEntries.AddRange(entries);
+                plannedLinks.AddRange(links);
+            }
         }
 
+        var plannedAliases = aliasResolution.AppendedAssertions
+            .Select(a => a with { ImportOperationId = operationId }).ToList();
+        var hasCanonicalPlan = plannedEntries.Count > 0 || plannedLinks.Count > 0 || plannedAliases.Count > 0;
         var manifest = new ImportManifest(
             ImportManifest.CurrentVersion,
             DateTime.UtcNow,
@@ -205,36 +241,70 @@ public static class MemoryImportCommand
             linkRows.OrderBy(l => l.LinksFilePath, StringComparer.OrdinalIgnoreCase)
                 .ThenBy(l => l.LinkId, StringComparer.Ordinal).ToList(),
             plan.ProjectionsSkipped,
-            plan.Dropped);
+            plan.Dropped,
+            operationId,
+            !options.DryRun && hasCanonicalPlan ? ImportOperationState.Intent : ImportOperationState.Settled,
+            !options.DryRun && hasCanonicalPlan ? plannedEntries : null,
+            !options.DryRun && hasCanonicalPlan ? plannedLinks : null,
+            !options.DryRun && hasCanonicalPlan ? plannedAliases : null);
 
         string? manifestPath = null;
         if (!options.DryRun)
         {
             manifestPath = BatonPaths.MemoryImportManifestFile(
-                "import-" + manifest.ImportedAtUtc.ToString("yyyyMMdd'T'HHmmss'.'fff'Z'", CultureInfo.InvariantCulture));
+                "import-" + manifest.ImportedAtUtc.ToString("yyyyMMdd'T'HHmmss'.'fff'Z'", CultureInfo.InvariantCulture)
+                + "-" + operationId![..8]);
+
+            // This atomic write is the canonical operation boundary. After it succeeds, the complete
+            // multi-repository plan is recoverable and all ownership bookkeeping is non-cancellable.
+            cancellationToken.ThrowIfCancellationRequested();
             manifest.Write(manifestPath);
+            output.WriteLine($"RECOVERY {manifestPath} -- durable intent recorded; retry or undo is safe after interruption.");
+            if (manifest.OperationState == ImportOperationState.Intent)
+            {
+                manifest = await MemoryImportOperationStore
+                    .ApplyAsync(manifestPath, manifest, cancellationToken).ConfigureAwait(false);
+            }
         }
 
         WriteReport(output, options, manifest, manifestPath);
+        if (manifest.PlannedAliases is { Count: > 0 })
+        {
+            output.WriteLine("Target assertions are recorded in this durable operation; undo retains those assertions.");
+        }
+        if (!options.DryRun)
+        {
+            var changedRepositories = manifest.Appended.Select(r => r.Repository)
+                .Concat(manifest.AppendedLinks.Select(l => l.Repository))
+                .Concat((manifest.AcceptedAliases ?? []).Where(a => a.ImportOperationId == operationId).Select(a => a.Repository));
+            await ProjectChangedRepositoriesAsync(
+                changedRepositories,
+                output,
+                claudeHome,
+                userHome,
+                projectionWriterOverride,
+                cancellationToken).ConfigureAwait(false);
+        }
+
         return 0;
     }
 
     /// <summary>
     /// The alias store as this run sees it: what is already recorded, plus anything <c>--assert</c>
-    /// added. The new rows are persisted first (so a later run reuses them without the flag) and
-    /// returned either way — under <c>--dry-run</c> they apply to the computed plan and are not
-    /// written, which is what makes a dry run a preview of the real thing rather than a preview of a
-    /// different one.
+    /// proposes. Resolution writes nothing: assertions participate in planning, then the durable
+    /// import intent precedes their append just as it precedes entry and link appends. A failed
+    /// source read, canonical alias read, or intent write therefore cannot leave an unreported target
+    /// association or silently forget an accepted one.
     /// </summary>
-    private static async Task<IReadOnlyList<MemoryAliasEntry>> ResolveAliasesAsync(
+    private static async Task<AliasResolution> ResolveAliasesAsync(
         MemoryImportOptions options, CancellationToken cancellationToken)
     {
         var recorded = await MemoryAliasStore
-            .ReadAllAsync(BatonPaths.MemoryAliasFile, cancellationToken).ConfigureAwait(false);
+            .ReadAllStrictAsync(BatonPaths.MemoryAliasFile, cancellationToken).ConfigureAwait(false);
 
         if (options.Assertions.Count == 0)
         {
-            return recorded;
+            return new AliasResolution(recorded, []);
         }
 
         var assertedBy = options.AssertedBy is { Length: > 0 } who ? who : Environment.UserName;
@@ -246,14 +316,23 @@ public static class MemoryImportCommand
                 DateTime.UtcNow))
             .ToList();
 
-        if (!options.DryRun)
+        var resolvedAssertions = recorded.ToList();
+        foreach (var assertion in asserted)
         {
-            await MemoryAliasStore
-                .AppendAsync(asserted, BatonPaths.MemoryAliasFile, cancellationToken).ConfigureAwait(false);
+            var existing = resolvedAssertions.FirstOrDefault(a => BatonPaths.RecordKeyComparer.Equals(a.Path, assertion.Path));
+            if (existing is not null && !string.Equals(existing.Repository, assertion.Repository, StringComparison.OrdinalIgnoreCase))
+                throw new CliArgumentException($"--assert '{assertion.Path}' conflicts with the accepted repository '{existing.Repository}'.");
+            resolvedAssertions.Add(assertion);
         }
+        var knownPaths = recorded.Select(existing => existing.Path).ToHashSet(BatonPaths.RecordKeyComparer);
+        var appended = asserted.Where(candidate => knownPaths.Add(candidate.Path)).ToList();
 
-        return [.. recorded, .. asserted];
+        return new AliasResolution([.. recorded, .. appended], appended);
     }
+
+    private sealed record AliasResolution(
+        IReadOnlyList<MemoryAliasEntry> Aliases,
+        IReadOnlyList<MemoryAliasEntry> AppendedAssertions);
 
     /// <summary>
     /// One Claude root's subject: the git probe at its resolved checkout, then an operator assertion
@@ -571,7 +650,12 @@ public static class MemoryImportCommand
     /// </para>
     /// </remarks>
     private static async Task<int> UndoAsync(
-        string manifestPath, TextWriter output, CancellationToken cancellationToken)
+        string manifestPath,
+        TextWriter output,
+        string? claudeHomeOverride,
+        string? userHomeOverride,
+        Action<string, byte[]>? projectionWriterOverride,
+        CancellationToken cancellationToken)
     {
         var manifest = ImportManifest.Read(manifestPath);
 
@@ -590,32 +674,12 @@ public static class MemoryImportCommand
             return 1;
         }
 
-        var shortfalls = new List<string>();
-        var removed = 0;
-        foreach (var group in manifest.Appended.GroupBy(r => r.EntriesFilePath, StringComparer.OrdinalIgnoreCase))
-        {
-            var expected = group.Select(r => r.EntryId).Distinct(StringComparer.Ordinal).ToList();
-            var count = await MemoryStore.RemoveAsync(expected, group.Key, cancellationToken).ConfigureAwait(false);
-            removed += count;
-
-            if (count != expected.Count)
-            {
-                shortfalls.Add($"  {group.Key}: expected {expected.Count}, removed {count}");
-            }
-        }
-
-        var removedLinks = 0;
-        foreach (var group in manifest.AppendedLinks.GroupBy(l => l.LinksFilePath, StringComparer.OrdinalIgnoreCase))
-        {
-            var expected = group.Select(l => l.LinkId).Distinct(StringComparer.Ordinal).ToList();
-            var count = await MemoryStore.RemoveLinksAsync(expected, group.Key, cancellationToken).ConfigureAwait(false);
-            removedLinks += count;
-
-            if (count != expected.Count)
-            {
-                shortfalls.Add($"  {group.Key}: expected {expected.Count} link(s), removed {count}");
-            }
-        }
+        var reversal = await MemoryImportOperationStore.ReverseAsync(manifestPath, cancellationToken).ConfigureAwait(false);
+        manifest = reversal.Manifest;
+        var shortfalls = reversal.Shortfalls;
+        var changedRepositories = reversal.ChangedRepositories;
+        var removed = reversal.RemovedEntries;
+        var removedLinks = reversal.RemovedLinks;
 
         output.WriteLine(
             $"Removed {removed} canonical entr{(removed == 1 ? "y" : "ies")} and {removedLinks} " +
@@ -624,6 +688,14 @@ public static class MemoryImportCommand
         output.WriteLine(
             "No source memory file was touched -- the import never wrote to one, so there is nothing on " +
             "the vendors' side to restore.");
+
+        await ProjectChangedRepositoriesAsync(
+            changedRepositories,
+            output,
+            claudeHomeOverride ?? MemoryRootInventory.DefaultClaudeHome,
+            userHomeOverride ?? MemoryRootInventory.DefaultUserHome,
+            projectionWriterOverride,
+            cancellationToken).ConfigureAwait(false);
 
         if (shortfalls.Count == 0)
         {
@@ -641,6 +713,36 @@ public static class MemoryImportCommand
         }
 
         return 1;
+    }
+
+    /// <summary>
+    /// Projects each changed subject once. A fleet change projects every store, so it subsumes the
+    /// repository-specific calls in the same import.
+    /// </summary>
+    private static async Task ProjectChangedRepositoriesAsync(
+        IEnumerable<string> repositories,
+        TextWriter output,
+        string claudeHome,
+        string userHome,
+        Action<string, byte[]>? projectionWriterOverride,
+        CancellationToken cancellationToken)
+    {
+        var changed = repositories.Distinct(StringComparer.OrdinalIgnoreCase).ToList();
+        if (changed.Any(FleetMemory.IsFleet))
+        {
+            changed = [FleetMemory.Slug];
+        }
+
+        foreach (var repository in changed.OrderBy(r => r, StringComparer.OrdinalIgnoreCase))
+        {
+            await MemoryProjectionTrigger.ProjectAfterCanonicalWriteAsync(
+                repository,
+                output,
+                claudeHome,
+                userHome,
+                projectionWriterOverride,
+                cancellationToken).ConfigureAwait(false);
+        }
     }
 
     /// <summary>

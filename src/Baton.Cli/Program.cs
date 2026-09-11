@@ -322,8 +322,9 @@ try
     // #1852: a noun-first verb group like `room`/`rooms` above -- `audit` (phase A, read-only) and
     // `import` (phase B, which writes only under BatonPaths.Root) and `sync` (phase C, the projection
     // half, which writes only into vendor memory roots that already exist and only under `--apply`)
-    // and `add` (#2071, the ongoing write path -- one entry per call, under BatonPaths.Root only)
-    // and `retract` (#2113 -- one retraction row per call, under BatonPaths.Root only, deleting nothing).
+    // and `add` (#2071, the ongoing write path -- one entry per call) and `retract` (#2113 -- one
+    // retraction row per call, deleting nothing). #2138 makes successful writes through those three
+    // verbs invoke sync's owned-cache projection; canonical rows and obligations stay under BatonPaths.Root.
     // None produces a CommandResult, so they join the groups here rather than the switch below.
     if (args[0] == "memory")
     {

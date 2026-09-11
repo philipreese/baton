@@ -1,4 +1,3 @@
-using System.Text;
 using System.Text.Json;
 using Baton.Status;
 
@@ -75,7 +74,7 @@ public static class MemoryStore
     /// </summary>
     public static Task AppendAsync(
         IReadOnlyList<MemoryEntry> entries, string entriesFilePath, CancellationToken cancellationToken = default) =>
-        Ledger.AppendAsync(entries, entriesFilePath, cancellationToken);
+        AppendAndGetAppendedAsync(entries, entriesFilePath, cancellationToken);
 
     /// <summary>
     /// Appends entries and returns exactly the rows this call inserted, as decided under this store's
@@ -84,7 +83,7 @@ public static class MemoryStore
     /// </summary>
     public static Task<IReadOnlyList<MemoryEntry>> AppendAndGetAppendedAsync(
         IReadOnlyList<MemoryEntry> entries, string entriesFilePath, CancellationToken cancellationToken = default) =>
-        Ledger.AppendAndGetAppendedAsync(entries, entriesFilePath, cancellationToken);
+        MemoryCanonicalGeneration.AppendAsync(Ledger, entries, entriesFilePath, cancellationToken);
 
     /// <summary>
     /// This file's entries as they sit on disk, oldest first — <b>with no supersession resolved</b>.
@@ -96,6 +95,30 @@ public static class MemoryStore
         Ledger.ReadAllAsync(entriesFilePath, cancellationToken);
 
     /// <summary>
+    /// Whether an initialization-time ledger contains at least one parseable canonical row. Unlike
+    /// <see cref="ReadAllAsync"/>, I/O failure is not collapsed to an empty store: inventory must not
+    /// publish a metadata-only or torn first append.
+    /// </summary>
+    internal static bool HasAnyParseableEntry(string entriesFilePath) =>
+        Ledger.RunUnderLockAsync(
+                entriesFilePath,
+                () => Ledger.ReadAllUnlocked(entriesFilePath).Count > 0,
+                CancellationToken.None)
+            .GetAwaiter().GetResult();
+
+    /// <summary>Strict rows for settlement and projection; I/O failure cannot become an empty snapshot.</summary>
+    public static Task<IReadOnlyList<MemoryEntry>> ReadAllStrictAsync(
+        string entriesFilePath, CancellationToken cancellationToken = default) =>
+        Ledger.RunUnderLockAsync(
+            entriesFilePath, () => Ledger.ReadAllUnlocked(entriesFilePath, requireReadable: true), cancellationToken);
+
+    /// <summary>Strict link rows for durable import settlement; I/O failure must retain the intent.</summary>
+    public static Task<IReadOnlyList<MemorySupersessionLink>> ReadLinksStrictAsync(
+        string linksFilePath, CancellationToken cancellationToken = default) =>
+        LinkLedger.RunUnderLockAsync(
+            linksFilePath, () => LinkLedger.ReadAllUnlocked(linksFilePath, requireReadable: true), cancellationToken);
+
+    /// <summary>
     /// Appends the subset of <paramref name="links"/> whose <see cref="MemorySupersessionLink.Id"/> is
     /// not already in <paramref name="linksFilePath"/>. Idempotent for the same reason
     /// <see cref="AppendAsync"/> is: the id is the pair, so recomputing a link that is already recorded
@@ -103,14 +126,14 @@ public static class MemoryStore
     /// </summary>
     public static Task AppendLinksAsync(
         IReadOnlyList<MemorySupersessionLink> links, string linksFilePath, CancellationToken cancellationToken = default) =>
-        LinkLedger.AppendAsync(links, linksFilePath, cancellationToken);
+        AppendLinksAndGetAppendedAsync(links, linksFilePath, cancellationToken);
 
     /// <summary>
     /// Appends links and returns exactly the rows this call inserted, under the links ledger lock.
     /// </summary>
     public static Task<IReadOnlyList<MemorySupersessionLink>> AppendLinksAndGetAppendedAsync(
         IReadOnlyList<MemorySupersessionLink> links, string linksFilePath, CancellationToken cancellationToken = default) =>
-        LinkLedger.AppendAndGetAppendedAsync(links, linksFilePath, cancellationToken);
+        MemoryCanonicalGeneration.AppendAsync(LinkLedger, links, linksFilePath, cancellationToken);
 
     /// <summary>This file's supersession links, oldest first.</summary>
     public static Task<IReadOnlyList<MemorySupersessionLink>> ReadLinksAsync(
@@ -124,12 +147,36 @@ public static class MemoryStore
     /// </summary>
     public static Task AppendRetractionsAsync(
         IReadOnlyList<MemoryRetraction> retractions, string retractionsFilePath, CancellationToken cancellationToken = default) =>
-        RetractionLedger.AppendAsync(retractions, retractionsFilePath, cancellationToken);
+        AppendRetractionsAndGetAppendedAsync(retractions, retractionsFilePath, cancellationToken);
+
+    /// <summary>Appends retractions and returns the rows this call inserted under the owning lock.</summary>
+    public static Task<IReadOnlyList<MemoryRetraction>> AppendRetractionsAndGetAppendedAsync(
+        IReadOnlyList<MemoryRetraction> retractions,
+        string retractionsFilePath,
+        CancellationToken cancellationToken = default) =>
+        MemoryCanonicalGeneration.AppendAsync(RetractionLedger, retractions, retractionsFilePath, cancellationToken);
 
     /// <summary>This file's retractions, oldest first.</summary>
     public static Task<IReadOnlyList<MemoryRetraction>> ReadRetractionsAsync(
         string retractionsFilePath, CancellationToken cancellationToken = default) =>
         RetractionLedger.ReadAllAsync(retractionsFilePath, cancellationToken);
+
+    /// <summary>Retractions for publication; a failed read must not restore retracted facts.</summary>
+    public static Task<IReadOnlyList<MemoryRetraction>> ReadRetractionsStrictAsync(
+        string retractionsFilePath, CancellationToken cancellationToken = default) =>
+        RetractionLedger.RunUnderLockAsync(
+            retractionsFilePath, () => RetractionLedger.ReadAllUnlocked(retractionsFilePath, requireReadable: true), cancellationToken);
+
+    /// <summary>A resolved snapshot whose every canonical input propagates read failures.</summary>
+    public static async Task<IReadOnlyList<MemoryEntry>> ReadResolvedStrictAsync(
+        string entriesFilePath, string linksFilePath, string retractionsFilePath,
+        CancellationToken cancellationToken = default)
+    {
+        var entries = await ReadAllStrictAsync(entriesFilePath, cancellationToken).ConfigureAwait(false);
+        var links = await ReadLinksStrictAsync(linksFilePath, cancellationToken).ConfigureAwait(false);
+        var retractions = await ReadRetractionsStrictAsync(retractionsFilePath, cancellationToken).ConfigureAwait(false);
+        return Resolve(entries, links, retractions);
+    }
 
     /// <summary>
     /// One repository's entries with their retractions applied from
@@ -241,35 +288,11 @@ public static class MemoryStore
             map.TryGetValue(key, out var set) ? set.ToList() : null;
     }
 
-    /// <summary>
-    /// Runs <paramref name="work"/> holding this store's lock on <paramref name="entriesFilePath"/> —
-    /// the entry point for a caller that must not observe a half-written store, and the only way to
-    /// take that lock from outside this assembly.
-    /// </summary>
+    /// <summary>Runs a synchronous read callback under this entries ledger's lock.</summary>
     /// <remarks>
-    /// <para>
-    /// <b>Why a projection writer needs it</b> (#1852 phase C). <c>baton memory sync</c> reads a
-    /// repository's entries and links and then writes derived files into a vendor root; without this,
-    /// a concurrent <c>baton memory import</c> could append between the two reads, and the projection
-    /// would be a cache of a store state that never existed. Holding the entries lock across the whole
-    /// read-project-write is what makes the projection a function of one observed store.
-    /// </para>
-    /// <para>
-    /// <b>The links file's lock is deliberately not taken here.</b> <see cref="ReadResolvedAsync"/>'s
-    /// remarks state the rule this preserves: the two are acquired one at a time and never nested, so
-    /// two callers cannot take them in opposite orders. A projection reading links under the entries
-    /// lock sees a links file that may have grown; the cost is one link discovered on the next run
-    /// rather than this one, which is the direction that fails closed.
-    /// </para>
+    /// The callback must not mutate canonical memory or acquire its generation lock. Projection
+    /// instead uses a detached strict read and validates all input generations before publication.
     /// </remarks>
-    /// <param name="entriesFilePath">The store file to lock and read.</param>
-    /// <param name="work">
-    /// Runs holding the lock, handed the entries as they sit on disk — <b>synchronous on purpose</b>.
-    /// An async body here would mean awaiting inside a held <see cref="MutexGuardedFileLock"/>, and the
-    /// only way to keep the lock across that await is to block on it, which is a deadlock waiting for a
-    /// caller with a synchronization context. Everything a projection does under this lock (project,
-    /// write bytes) is synchronous already.
-    /// </param>
     public static Task<TResult> RunUnderEntriesLockAsync<TResult>(
         string entriesFilePath,
         Func<IReadOnlyList<MemoryEntry>, TResult> work,
@@ -309,6 +332,24 @@ public static class MemoryStore
         RemoveRowsAsync(Ledger, entry => entry.Id, entryIds, entriesFilePath, cancellationToken);
 
     /// <summary>
+    /// Removes only rows carrying <paramref name="operationId"/> as well as a requested id. New
+    /// manifests use this ownership fence so a stale/double undo cannot delete a row another writer
+    /// reintroduced after the original operation's row disappeared.
+    /// </summary>
+    public static Task<int> RemoveOwnedAsync(
+        IReadOnlyList<string> entryIds,
+        string operationId,
+        string entriesFilePath,
+        CancellationToken cancellationToken = default) =>
+        RemoveRowsAsync(
+            Ledger,
+            entry => entry.Id,
+            entryIds,
+            entriesFilePath,
+            cancellationToken,
+            entry => string.Equals(entry.ImportOperationId, operationId, StringComparison.Ordinal));
+
+    /// <summary>
     /// The links half of the same reversal: removes exactly the link rows in
     /// <paramref name="linkIds"/> and returns how many were removed. An undo that removed an import's
     /// entries and left its links behind would leave rows that resolve to nothing
@@ -318,6 +359,20 @@ public static class MemoryStore
     public static Task<int> RemoveLinksAsync(
         IReadOnlyList<string> linkIds, string linksFilePath, CancellationToken cancellationToken = default) =>
         RemoveRowsAsync(LinkLedger, link => link.Id, linkIds, linksFilePath, cancellationToken);
+
+    /// <summary>The link-ledger half of <see cref="RemoveOwnedAsync"/>.</summary>
+    public static Task<int> RemoveOwnedLinksAsync(
+        IReadOnlyList<string> linkIds,
+        string operationId,
+        string linksFilePath,
+        CancellationToken cancellationToken = default) =>
+        RemoveRowsAsync(
+            LinkLedger,
+            link => link.Id,
+            linkIds,
+            linksFilePath,
+            cancellationToken,
+            link => string.Equals(link.ImportOperationId, operationId, StringComparison.Ordinal));
 
     /// <summary>
     /// <see cref="RemoveAsync"/>'s body, over either of this store's two ledgers. One implementation
@@ -330,7 +385,8 @@ public static class MemoryStore
         Func<TRow, string> keySelector,
         IReadOnlyList<string> keys,
         string filePath,
-        CancellationToken cancellationToken)
+        CancellationToken cancellationToken,
+        Func<TRow, bool>? ownershipPredicate = null)
         where TRow : class
     {
         ArgumentNullException.ThrowIfNull(keys);
@@ -347,46 +403,61 @@ public static class MemoryStore
             filePath,
             () =>
             {
-                var kept = new List<TRow>();
+                // Preserve every unselected byte, including invalid UTF-8, blank lines and torn
+                // JSON. A tolerant parsed-list rewrite would erase evidence of unrelated damage.
+                var bytes = File.ReadAllBytes(filePath);
+                using var kept = new MemoryStream();
                 var removed = 0;
-                foreach (var row in ledger.ReadAllUnlocked(filePath))
+                for (var start = 0; start < bytes.Length;)
                 {
-                    if (removing.Contains(keySelector(row)))
+                    var newline = Array.IndexOf(bytes, (byte)'\n', start);
+                    var end = newline < 0 ? bytes.Length : newline + 1;
+                    TRow? row = null;
+                    try
+                    {
+                        row = JsonSerializer.Deserialize<TRow>(bytes.AsSpan(start, end - start), ledger.SerializerOptions);
+                    }
+                    catch (JsonException)
+                    {
+                        // Unparseable is unselected; retain its exact bytes in the atomic rewrite.
+                    }
+                    if (row is not null && removing.Contains(keySelector(row))
+                        && (ownershipPredicate is null || ownershipPredicate(row)))
                     {
                         removed++;
                     }
                     else
                     {
-                        kept.Add(row);
+                        kept.Write(bytes, start, end - start);
                     }
+                    start = end;
                 }
 
                 if (removed > 0)
                 {
-                    WriteAllUnlocked(ledger, filePath, kept);
+                    WriteAllUnlocked(filePath, kept.ToArray());
                 }
 
                 return removed;
             },
-            cancellationToken);
+            cancellationToken, transaction: mutation => MemoryCanonicalGeneration.MutateLedger(filePath, mutation));
     }
 
     /// <summary>
-    /// Replaces the file's contents with one JSON line per row, atomically. Callers must already
+    /// Replaces the file's contents with the retained raw bytes, atomically. Callers must already
     /// hold that ledger's <see cref="MutexGuardedFileLock"/>; this method takes none.
     /// </summary>
-    private static void WriteAllUnlocked<TRow>(
-        JsonLinesLedger<TRow> ledger, string filePath, IReadOnlyList<TRow> rows)
-        where TRow : class
+    private static void WriteAllUnlocked(string filePath, byte[] bytes)
     {
         var tempPath = $"{filePath}.{Guid.NewGuid():N}.tmp";
-        var builder = new StringBuilder();
-        foreach (var row in rows)
+        try
         {
-            builder.Append(JsonSerializer.Serialize(row, ledger.SerializerOptions)).Append('\n');
+            File.WriteAllBytes(tempPath, bytes);
+            File.Move(tempPath, filePath, overwrite: true);
         }
-
-        File.WriteAllBytes(tempPath, Encoding.UTF8.GetBytes(builder.ToString()));
-        File.Move(tempPath, filePath, overwrite: true);
+        finally
+        {
+            File.Delete(tempPath);
+        }
     }
 }

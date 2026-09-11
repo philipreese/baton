@@ -40,7 +40,9 @@ public sealed class MemoryRetractTests : IDisposable
             MemoryAddOptionsParser.Parse(["--text", text, "--kind", "durable-fact", "--repository", Repository]),
             writer,
             AuthoredMemory.Operator,
-            cancellationToken: TestContext.Current.CancellationToken);
+            cancellationToken: TestContext.Current.CancellationToken,
+            claudeHomeOverride: Path.Combine(_root, "claude"),
+            userHomeOverride: Path.Combine(_root, "home"));
 
         Assert.Equal(0, exitCode);
         var entry = Assert.Single(await MemoryStore.ReadAllAsync(EntriesFile, TestContext.Current.CancellationToken));
@@ -57,7 +59,9 @@ public sealed class MemoryRetractTests : IDisposable
             MemoryRetractOptionsParser.Parse(args),
             writer,
             retractedBy,
-            cancellationToken: TestContext.Current.CancellationToken);
+            cancellationToken: TestContext.Current.CancellationToken,
+            claudeHomeOverride: Path.Combine(_root, "claude"),
+            userHomeOverride: Path.Combine(_root, "home"));
 
         return (exitCode, writer.ToString());
     }

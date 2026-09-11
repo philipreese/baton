@@ -174,6 +174,29 @@ public sealed class JsonLinesLedgerTests
     }
 
     [Fact]
+    public async Task Append_terminates_a_torn_tail_before_writing_the_recovery_row()
+    {
+        var ledger = KeyedLedger();
+        var path = TempLedgerPath();
+        try
+        {
+            await File.WriteAllTextAsync(
+                path, "{\"execution\":\"torn", TestContext.Current.CancellationToken);
+
+            await ledger.AppendAsync(
+                [new TestEntry("exec-recovered", 10)], path, TestContext.Current.CancellationToken);
+
+            var recovered = Assert.Single(await ledger.ReadAllAsync(
+                path, TestContext.Current.CancellationToken));
+            Assert.Equal("exec-recovered", recovered.Execution);
+        }
+        finally
+        {
+            FileCleanup.Delete(path);
+        }
+    }
+
+    [Fact]
     public async Task An_empty_file_reads_as_no_entries()
     {
         var ledger = KeyedLedger();

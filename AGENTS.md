@@ -17,9 +17,9 @@ Read the route that matches the task before acting; do not load every linked doc
   [`spec/baton.md` §12](spec/baton.md#12-memory-vendor-memory-roots-and-batons-canonical-store-1852).
   Baton's store is authoritative for Baton-authored entries; only the Baton-owned file written into
   each discovered vendor root by `sync` is a projection/cache. Other vendor-authored memory files
-  remain import sources and are not touched by `sync`. `add` and `import` do not sync automatically:
-  automatic projection
-  [#2138](https://github.com/philipreese/baton/issues/2138) and the projection index
+  remain import sources and are not touched by `sync`. Successful `add`, `retract`, and `import`
+  canonical writes invoke that same projection automatically; the daemon repeats it as a safety
+  sweep and persists projection failures for bounded retry. The projection index
   [#2139](https://github.com/philipreese/baton/issues/2139) remain open. Documentation links do not
   prove that a vendor loads a projection; that measurement remains [#2177](https://github.com/philipreese/baton/issues/2177).
 - **Performing a worker role:** read the role package before beginning:

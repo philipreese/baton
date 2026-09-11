@@ -40,11 +40,16 @@ namespace Baton.Status;
 /// construction-site choice instead of a hidden convention.
 /// </param>
 /// <param name="serializerOptions">Defaults to the compact, non-indented options both stores use.</param>
+/// <param name="keyComparer">
+/// The comparer for non-empty dedupe keys. Defaults to ordinal for execution ids; path-keyed stores
+/// pass the path comparer their public contract documents.
+/// </param>
 internal sealed class JsonLinesLedger<TEntry>(
     string lockNamePrefix,
     string ledgerDisplayName,
     Func<TEntry, string?> executionIdSelector,
-    JsonSerializerOptions? serializerOptions = null)
+    JsonSerializerOptions? serializerOptions = null,
+    IEqualityComparer<string>? keyComparer = null)
     where TEntry : class
 {
     /// <summary>Same generous timeout <c>RoomRegistryStore</c> uses, for the same reason: every critical
@@ -68,6 +73,15 @@ internal sealed class JsonLinesLedger<TEntry>(
     /// <summary>Test-only observation of each shared read-check-then-append operation.</summary>
     internal Action<int>? AppendOperationObserver { get; set; }
 
+    private static readonly AsyncLocal<Func<string, IDisposable?>?> ReadScope = new();
+
+    /// <summary>Fixture-only scope around an actual read, including exceptional completion.</summary>
+    internal static Func<string, IDisposable?>? ReadScopeOverride
+    {
+        get => ReadScope.Value;
+        set => ReadScope.Value = value;
+    }
+
     /// <summary>
     /// Appends the subset of <paramref name="entries"/> whose execution id is not already present in
     /// <paramref name="ledgerFilePath"/>, in ONE read-check-then-append critical section — two lock
@@ -75,7 +89,9 @@ internal sealed class JsonLinesLedger<TEntry>(
     /// deduplicated against anything and is always appended. Creates the file and its parent directory
     /// if neither exists; a no-op when nothing survives the filter, never opening the file to write zero
     /// bytes. Each store's own <c>AppendAsync</c> documents why its ledger needs the skip and against
-    /// which repeated-settle shapes.
+    /// which repeated-settle shapes. A non-empty torn tail that lacks a newline is terminated before
+    /// the new rows, so recovery produces a separately parseable row instead of concatenating valid
+    /// JSON onto an unparseable first append.
     /// </summary>
     public async Task AppendAsync(IReadOnlyList<TEntry> entries, string ledgerFilePath, CancellationToken cancellationToken = default) =>
         _ = await AppendAndGetAppendedAsync(entries, ledgerFilePath, cancellationToken).ConfigureAwait(false);
@@ -86,7 +102,8 @@ internal sealed class JsonLinesLedger<TEntry>(
     /// so a caller recording ownership can never claim a row a concurrent append won first.
     /// </summary>
     internal Task<IReadOnlyList<TEntry>> AppendAndGetAppendedAsync(
-        IReadOnlyList<TEntry> entries, string ledgerFilePath, CancellationToken cancellationToken = default)
+        IReadOnlyList<TEntry> entries, string ledgerFilePath, CancellationToken cancellationToken = default,
+        Func<Func<IReadOnlyList<TEntry>>, IReadOnlyList<TEntry>>? transaction = null)
     {
         ArgumentNullException.ThrowIfNull(entries);
         ArgumentException.ThrowIfNullOrEmpty(ledgerFilePath);
@@ -105,7 +122,7 @@ internal sealed class JsonLinesLedger<TEntry>(
                 .Select(executionIdSelector)
                 .Where(id => id is { Length: > 0 })
                 .Select(id => id!)
-                .ToHashSet(StringComparer.Ordinal);
+                .ToHashSet(keyComparer ?? StringComparer.Ordinal);
 
             var toAppend = new List<TEntry>(entries.Count);
             foreach (var entry in entries)
@@ -122,6 +139,11 @@ internal sealed class JsonLinesLedger<TEntry>(
             }
 
             var builder = new StringBuilder();
+            if (NeedsLineSeparator(ledgerFilePath))
+            {
+                builder.Append('\n');
+            }
+
             foreach (var entry in toAppend)
             {
                 builder.Append(JsonSerializer.Serialize(entry, SerializerOptions)).Append('\n');
@@ -134,7 +156,25 @@ internal sealed class JsonLinesLedger<TEntry>(
             stream.Flush();
 
             return (IReadOnlyList<TEntry>)toAppend;
-        }, cancellationToken);
+        }, cancellationToken, transaction);
+    }
+
+    private static bool NeedsLineSeparator(string ledgerFilePath)
+    {
+        if (!File.Exists(ledgerFilePath))
+        {
+            return false;
+        }
+
+        using var stream = new FileStream(
+            ledgerFilePath, FileMode.Open, FileAccess.Read, FileShare.ReadWrite);
+        if (stream.Length == 0)
+        {
+            return false;
+        }
+
+        stream.Seek(-1, SeekOrigin.End);
+        return stream.ReadByte() != '\n';
     }
 
     /// <summary>
@@ -168,22 +208,29 @@ internal sealed class JsonLinesLedger<TEntry>(
     /// <summary>
     /// The read half, factored out so a read-then-write happens inside ONE lock acquisition rather than
     /// two — two separate acquisitions would let a concurrent writer land in the gap between them,
-    /// silently truncated away by whichever finishes second. Callers must already hold the
-    /// <see cref="MutexGuardedFileLock"/> on <paramref name="ledgerFilePath"/>; this method takes none.
+    /// silently truncated away by whichever finishes second. Read-modify-write callers must already
+    /// hold the <see cref="MutexGuardedFileLock"/> on <paramref name="ledgerFilePath"/>; this method
+    /// takes none. A read-only ownership reconciliation may take an independent file snapshot without
+    /// nesting ledger mutexes, provided it propagates sharing/I/O failures as a publication fence.
+    /// With <paramref name="requireReadable"/>, only an open reporting a missing file/directory
+    /// means empty; File.Exists must not disguise a denied or invalid canonical input as absence.
     /// </summary>
-    internal IReadOnlyList<TEntry> ReadAllUnlocked(string ledgerFilePath)
+    internal IReadOnlyList<TEntry> ReadAllUnlocked(string ledgerFilePath, bool requireReadable = false)
     {
-        if (!File.Exists(ledgerFilePath))
+        if (!requireReadable && !File.Exists(ledgerFilePath))
         {
             return [];
         }
-
+        using var readScope = ReadScopeOverride?.Invoke(ledgerFilePath);
         string text;
-        using (var stream = new FileStream(ledgerFilePath, FileMode.Open, FileAccess.Read, FileShare.Read))
-        using (var reader = new StreamReader(stream, Encoding.UTF8))
+        try
         {
+            using var stream = new FileStream(ledgerFilePath, FileMode.Open, FileAccess.Read, FileShare.Read);
+            using var reader = new StreamReader(stream, Encoding.UTF8);
             text = reader.ReadToEnd();
         }
+        catch (FileNotFoundException) { return []; }
+        catch (DirectoryNotFoundException) { return []; }
 
         var result = new List<TEntry>();
         foreach (var line in text.Split('\n', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries))
@@ -226,8 +273,15 @@ internal sealed class JsonLinesLedger<TEntry>(
     /// <see cref="Mutex.ReleaseMutex"/> throw; <see cref="MutexGuardedFileLock"/>'s own remarks state
     /// this, and the one-<c>Task.Run</c>-from-the-outside shape here is what honours it.
     /// </summary>
-    internal Task<T> RunUnderLockAsync<T>(string ledgerFilePath, Func<T> body, CancellationToken cancellationToken) =>
-        Task.Run(() => MutexGuardedFileLock.RunUnderLock(ledgerFilePath, LockNamePrefix, LockTimeout, body), cancellationToken);
+    internal Task<T> RunUnderLockAsync<T>(string ledgerFilePath, Func<T> body, CancellationToken cancellationToken,
+        Func<Func<T>, T>? transaction = null) =>
+        Task.Run(() =>
+        {
+            T Locked() => MutexGuardedFileLock.RunUnderLock(ledgerFilePath, LockNamePrefix, LockTimeout, body);
+            // An optional store transaction runs BEFORE the ledger lock, on this same worker thread.
+            // Neither lock crosses an await, and pre-append observations remain outside both locks.
+            return transaction is null ? Locked() : transaction(Locked);
+        }, cancellationToken);
 
     /// <summary>Action-returning overload of <see cref="RunUnderLockAsync{T}"/>.</summary>
     private Task RunUnderLockAsync(string ledgerFilePath, Action body, CancellationToken cancellationToken) =>

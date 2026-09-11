@@ -48,7 +48,9 @@ public sealed class MemoryAddTests : IDisposable
             MemoryAddOptionsParser.Parse(args),
             writer,
             assertedBy,
-            cancellationToken: TestContext.Current.CancellationToken);
+            cancellationToken: TestContext.Current.CancellationToken,
+            claudeHomeOverride: Path.Combine(_root, "claude"),
+            userHomeOverride: Path.Combine(_root, "home"));
 
         return (exitCode, writer.ToString());
     }
@@ -148,12 +150,13 @@ public sealed class MemoryAddTests : IDisposable
     }
 
     [Fact]
-    public async Task It_names_the_command_that_regenerates_the_projections_and_does_not_run_it()
+    public async Task It_runs_the_shared_projection_without_claiming_vendor_consumption()
     {
         var (_, output) = await RunAsync(
             AuthoredMemory.Operator, "--text", "fixture alpha", "--kind", "durable-fact", "--repository", Repository);
 
-        Assert.Contains($"baton memory sync --repository {Repository} --apply", output, StringComparison.Ordinal);
+        Assert.Contains("AUTOMATIC PROJECTION FINISHED", output, StringComparison.Ordinal);
+        Assert.Contains("does not establish that a vendor loaded or consumed", output, StringComparison.Ordinal);
     }
 
     /// <summary>
@@ -179,7 +182,9 @@ public sealed class MemoryAddTests : IDisposable
         var undoExit = await MemoryImportCommand.ExecuteAsync(
             MemoryImportOptionsParser.Parse(["--undo", manifestPath]),
             undoWriter,
-            cancellationToken: TestContext.Current.CancellationToken);
+            claudeHomeOverride: Path.Combine(_root, "claude"),
+            cancellationToken: TestContext.Current.CancellationToken,
+            userHomeOverride: Path.Combine(_root, "home"));
 
         Assert.Equal(0, undoExit);
         Assert.Empty(await StoredAsync());
@@ -257,7 +262,7 @@ public sealed class MemoryAddTests : IDisposable
         var entry = Assert.Single(await MemoryStore.ReadAllAsync(fleetEntries, TestContext.Current.CancellationToken));
         Assert.Equal("fleet", entry.Repository);
         Assert.Equal(MemoryKind.OperatorPreference, entry.Kind);
-        Assert.Contains("baton memory sync --repository fleet --apply", output, StringComparison.Ordinal);
+        Assert.Contains("AUTOMATIC PROJECTION FINISHED", output, StringComparison.Ordinal);
     }
 
     [Fact]

@@ -37,13 +37,25 @@ namespace Baton.Cli;
 /// and the one an operator can act on.
 /// </para>
 /// <para>
-/// <b>Reads and writes happen under the canonical store's own lock</b>
-/// (<see cref="MemoryStore.RunUnderEntriesLockAsync"/>), so a concurrent <c>baton memory import</c>
-/// cannot append between the read that fed a projection and the write that lands it.
+/// <see cref="MemoryCanonicalGeneration"/> validates all canonical inputs under the publication
+/// lock. A concurrent mutation invalidates the snapshot before its target writes can begin.
 /// </para>
 /// </remarks>
 public static class MemorySyncCommand
 {
+    private static readonly AsyncLocal<Action?> SnapshotObservation = new();
+    private static readonly AsyncLocal<Action<string>?> CanonicalReadObservation = new();
+    internal static Action<string>? CanonicalReadObserver
+    {
+        get => CanonicalReadObservation.Value;
+        set => CanonicalReadObservation.Value = value;
+    }
+    internal static Action? SnapshotObserver
+    {
+        get => SnapshotObservation.Value;
+        set => SnapshotObservation.Value = value;
+    }
+
     /// <param name="claudeHomeOverride">Test seam — see <see cref="MemoryImportCommand.ExecuteAsync"/>'s own parameter doc.</param>
     /// <param name="userHomeOverride">Test seam for the non-Claude vendor roots, separate for the same reason.</param>
     public static async Task<int> ExecuteAsync(
@@ -51,7 +63,10 @@ public static class MemorySyncCommand
         TextWriter output,
         string? claudeHomeOverride = null,
         CancellationToken cancellationToken = default,
-        string? userHomeOverride = null)
+        string? userHomeOverride = null,
+        IReadOnlyDictionary<string, MemoryProjectionObligation>? obligationsOverride = null,
+        Action<string, byte[]>? projectionWriterOverride = null,
+        Func<DateTime>? utcNowOverride = null)
     {
         ArgumentNullException.ThrowIfNull(options);
         ArgumentNullException.ThrowIfNull(output);
@@ -69,19 +84,159 @@ public static class MemorySyncCommand
 
         var claudeHome = claudeHomeOverride ?? MemoryRootInventory.DefaultClaudeHome;
         var userHome = userHomeOverride ?? MemoryRootInventory.DefaultUserHome;
+        var utcNow = utcNowOverride ?? (() => DateTime.UtcNow);
 
         var repositoryFacts = ReadRepositoryFacts(options);
-        var discovery = await DiscoverTargetsAsync(claudeHome, userHome, cancellationToken)
-            .ConfigureAwait(false);
+        var slugs = StoredRepositorySlugs(options.Repository).ToList();
+        var obligations = new Dictionary<string, MemoryProjectionObligation>(StringComparer.OrdinalIgnoreCase);
+        var failures = new List<SyncFailureReport>();
+        var unclaimed = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        if (options.Apply)
+        {
+            foreach (var slug in slugs)
+            {
+                var metadata = MemoryStoreMetadataStore.ReadIfPresent(slug);
+                if (!MemoryStoreMetadataStore.IsPublishable(
+                        metadata, BatonPaths.MemoryEntriesFile(slug)))
+                {
+                    continue;
+                }
+
+                IReadOnlyList<MemoryEntry> stored = [];
+                Exception? inputFailure = null;
+                try
+                {
+                    CanonicalReadObserver?.Invoke("identity");
+                    stored = await MemoryStore.ReadAllStrictAsync(
+                        BatonPaths.MemoryEntriesFile(slug), cancellationToken).ConfigureAwait(false);
+                }
+                catch (Exception ex) when (ex is not OperationCanceledException)
+                {
+                    inputFailure = ex;
+                }
+                MemoryProjectionObligation? claimed = null;
+                obligationsOverride?.TryGetValue(slug, out claimed);
+                var repository = MemoryStoreIdentity.Resolve(
+                    slug,
+                    metadata?.Repository,
+                    stored,
+                    claimed,
+                    options.Repository);
+                if (repository is { Length: > 0 })
+                {
+                    if (claimed is not null)
+                    {
+                        obligations[slug] = claimed;
+                    }
+
+                    else try
+                        {
+                            obligations[slug] = await MemoryProjectionObligationStore.ReplaceAsync(
+                                repository, slug, utcNow(), cancellationToken).ConfigureAwait(false);
+                        }
+                        catch (Exception ex) when (ex is not OperationCanceledException)
+                        {
+                            unclaimed.Add(slug);
+                            failures.Add(new SyncFailureReport(
+                                repository,
+                                BatonPaths.MemorySyncPendingFile(slug),
+                                $"{ex.GetType().Name}: {ex.Message}",
+                                ObligationRecorded: false));
+                        }
+                }
+
+                if (inputFailure is not null)
+                {
+                    // Identity can establish a recovery claim, never a successful snapshot.
+                    unclaimed.Add(slug);
+                    if (obligations.TryGetValue(slug, out var pending))
+                    {
+                        await MemoryProjectionObligationStore.FailAsync(
+                            pending, inputFailure, utcNow(), cancellationToken).ConfigureAwait(false);
+                    }
+                    failures.Add(new SyncFailureReport(repository ?? slug,
+                        BatonPaths.MemoryEntriesFile(slug),
+                        $"{inputFailure.GetType().Name}: {inputFailure.Message}",
+                        ObligationRecorded: pending is not null));
+                }
+            }
+        }
+
+        var generation = MemoryCanonicalGeneration.Capture(BatonPaths.Root);
+        TargetDiscovery discovery;
+        try
+        {
+            CanonicalReadObserver?.Invoke("discovery");
+            discovery = await DiscoverTargetsAsync(claudeHome, userHome, cancellationToken)
+                .ConfigureAwait(false);
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException && options.Apply)
+        {
+            foreach (var obligation in obligations.Values)
+            {
+                if (await MemoryProjectionObligationStore.FailAsync(
+                        obligation, ex, utcNow(), cancellationToken).ConfigureAwait(false))
+                {
+                    failures.Add(new SyncFailureReport(
+                        obligation.Repository,
+                        BatonPaths.MemorySyncPendingFile(obligation.RepositorySlug),
+                        $"{ex.GetType().Name}: {ex.Message}",
+                        ObligationRecorded: true));
+                }
+            }
+
+            WriteFailedProjection(output, options.Format, failures);
+            return 1;
+        }
 
         var reports = new List<SyncRepositoryReport>();
-        foreach (var slug in StoredRepositorySlugs(options.Repository))
+        foreach (var slug in slugs)
         {
-            var report = await SyncOneAsync(
-                slug, options, repositoryFacts, discovery.ByRepository, cancellationToken).ConfigureAwait(false);
-            if (report is not null)
+            if (unclaimed.Contains(slug))
             {
-                reports.Add(report);
+                continue;
+            }
+
+            obligations.TryGetValue(slug, out var obligation);
+            try
+            {
+                var report = await SyncOneAsync(
+                    slug,
+                    options,
+                    repositoryFacts,
+                    discovery.ByRepository,
+                    obligation,
+                    generation,
+                    projectionWriterOverride,
+                    cancellationToken).ConfigureAwait(false);
+                if (report is not null)
+                {
+                    reports.Add(report);
+                }
+
+                if (obligation is not null)
+                {
+                    await MemoryProjectionObligationStore.CompleteAsync(obligation, cancellationToken)
+                        .ConfigureAwait(false);
+                }
+            }
+            catch (Exception ex) when (ex is not OperationCanceledException && options.Apply)
+            {
+                if (obligation is not null)
+                {
+                    var recorded = await MemoryProjectionObligationStore.FailAsync(
+                        obligation, ex, utcNow(), cancellationToken).ConfigureAwait(false);
+                    if (!recorded)
+                    {
+                        continue;
+                    }
+                }
+
+                failures.Add(new SyncFailureReport(
+                    obligation?.Repository ?? slug,
+                    BatonPaths.MemorySyncPendingFile(slug),
+                    $"{ex.GetType().Name}: {ex.Message}",
+                    ObligationRecorded: obligation is not null));
             }
         }
 
@@ -91,7 +246,8 @@ public static class MemorySyncCommand
             options.RepositoryFactsDirectory,
             repositoryFacts.Count,
             reports.OrderBy(r => r.Repository, StringComparer.Ordinal).ToList(),
-            discovery.NonTargets);
+            discovery.NonTargets,
+            failures);
 
         if (options.Format == MemoryAuditOutputFormat.Json)
         {
@@ -102,7 +258,7 @@ public static class MemorySyncCommand
             WriteText(output, syncReport);
         }
 
-        return options.Check && StaleTargetCount(syncReport) > 0 ? 1 : 0;
+        return failures.Count > 0 || (options.Check && StaleTargetCount(syncReport) > 0) ? 1 : 0;
     }
 
     /// <summary>
@@ -129,24 +285,25 @@ public static class MemorySyncCommand
     private const string UnchangedDisposition = "unchanged";
 
     /// <summary>
-    /// One repository's projection, computed and — under <c>--apply</c> — written, with the store's
-    /// entries read inside its own lock.
+    /// One repository's projection, validated against the shared canonical generation at publication.
     /// </summary>
     /// <remarks>
-    /// The links and retractions files are read <b>before</b> the entries lock is taken, never inside
-    /// it: <see cref="MemoryStore.ReadResolvedAsync"/>'s remarks carry the rule (the locks are never
-    /// nested), and a link or retraction appended in the gap is picked up by the next run rather than
-    /// deadlocking this one.
+    /// Ledger locks are released after each read. Publication acquires generation then obligation;
+    /// a changed fleet, repository or alias input rejects the snapshot and retains its retry claim.
     /// </remarks>
     private static async Task<SyncRepositoryReport?> SyncOneAsync(
         string slug,
         MemorySyncOptions options,
         IReadOnlyList<MemoryProjectionCandidate> repositoryFacts,
         IReadOnlyDictionary<string, List<ProjectionTarget>> targetsByRepository,
+        MemoryProjectionObligation? obligation,
+        string generation,
+        Action<string, byte[]>? projectionWriterOverride,
         CancellationToken cancellationToken)
     {
         var entriesFile = BatonPaths.MemoryEntriesFile(slug);
         var isFleet = FleetMemory.IsFleet(slug);
+        var metadata = MemoryStoreMetadataStore.ReadIfPresent(slug);
 
         // Checked BEFORE the lock. `--repository <id>` names a slug rather than selecting a directory
         // that exists, so an identity with no store reaches here -- a typo is enough. Measured, so the
@@ -156,77 +313,100 @@ public static class MemorySyncCommand
         // no-store answer independent of that behaviour rather than resting on it, and because taking a
         // named mutex to discover a file is absent is work with no result. The store-is-empty case is
         // still handled below: an existing but empty file is a different state from an absent one.
-        if (!File.Exists(entriesFile))
+        if (!MemoryStoreMetadataStore.IsPublishable(metadata, entriesFile))
         {
             return null;
         }
 
+        CanonicalReadObserver?.Invoke("snapshot");
         var links = await MemoryStore
-            .ReadLinksAsync(BatonPaths.MemoryLinksFile(slug), cancellationToken).ConfigureAwait(false);
+            .ReadLinksStrictAsync(BatonPaths.MemoryLinksFile(slug), cancellationToken).ConfigureAwait(false);
         var retractions = await MemoryStore
-            .ReadRetractionsAsync(BatonPaths.MemoryRetractionsFile(slug), cancellationToken).ConfigureAwait(false);
+            .ReadRetractionsStrictAsync(BatonPaths.MemoryRetractionsFile(slug), cancellationToken).ConfigureAwait(false);
 
-        // The fleet store is read BEFORE this repository's lock is taken and under its own, never
-        // nested -- MemoryStore.ReadResolvedAsync's rule. A repository's projection merges it in ahead
+        // The fleet ledgers are read under their own locks, never nested. Generation validation
+        // rejects changes between these reads. A repository's projection merges fleet entries ahead
         // of the repository's entries (#2112); the fleet's own projection is the fleet store alone, so
         // for that slug this is empty and the entries below carry the origin instead.
-        var fleet = isFleet || !File.Exists(FleetMemory.EntriesFile)
+        var fleet = isFleet
             ? []
-            : await MemoryStore.ReadResolvedAsync(
+            : await MemoryStore.ReadResolvedStrictAsync(
                     FleetMemory.EntriesFile, FleetMemory.LinksFile, FleetMemory.RetractionsFile, cancellationToken)
                 .ConfigureAwait(false);
         var fleetStorePath = !isFleet && File.Exists(FleetMemory.EntriesFile) ? FleetMemory.EntriesFile : null;
+        SnapshotObserver?.Invoke();
+        var stored = await MemoryStore.ReadAllStrictAsync(entriesFile, cancellationToken).ConfigureAwait(false);
+        var repository = MemoryStoreIdentity.Resolve(
+            slug,
+            metadata?.Repository,
+            stored,
+            obligation,
+            options.Repository);
+        if (repository is null)
+        {
+            return null;
+        }
 
-        return await MemoryStore.RunUnderEntriesLockAsync(
-            entriesFile,
-            stored =>
+        var resolved = MemoryStore.Resolve(stored, links, retractions);
+
+        // Named, never counted — the posture every other omission on this surface takes
+        // (ProjectionOmission's remarks). The projector never sees a retracted entry, since
+        // Resolve drops it first, so the omission is accounted for here from the raw rows.
+        var retracted = RetractedOmissions(stored, retractions);
+        var candidates = fleet
+            .Select(e => new MemoryProjectionCandidate(e, MemoryFactOrigin.Fleet))
+            .Concat(resolved.Select(e => new MemoryProjectionCandidate(
+                e, isFleet ? MemoryFactOrigin.Fleet : MemoryFactOrigin.Vendor)))
+            .Concat(repositoryFacts.Where(f => string.Equals(
+                f.Entry.Repository, repository, StringComparison.OrdinalIgnoreCase)))
+            .ToList();
+
+        var projection = MemoryProjection.Build(
+            repository, entriesFile, candidates, ProjectionBudget.Default, fleetStorePath);
+
+        var targets = targetsByRepository.TryGetValue(repository, out var found)
+            ? found.OrderBy(t => t.FilePath, StringComparer.OrdinalIgnoreCase).ToList()
+            : [];
+
+        var writes = new List<SyncTargetReport>();
+        if (options.Apply && obligation is not null)
+        {
+            var published = MemoryProjectionObligationStore.TryPublishCurrent(
+                obligation,
+                generation,
+                () =>
+                {
+                    foreach (var target in targets)
+                    {
+                        writes.Add(WriteOrPreview(
+                            target, projection.Bytes, apply: true, projectionWriterOverride));
+                    }
+                });
+
+            if (!published)
             {
-                if (stored.Count == 0)
-                {
-                    return null;
-                }
+                writes.AddRange(targets.Select(target => SupersededReport(target, projection.Bytes)));
+            }
+        }
+        else
+        {
+            foreach (var target in targets)
+            {
+                writes.Add(WriteOrPreview(target, projection.Bytes, options.Apply, projectionWriterOverride));
+            }
+        }
 
-                var resolved = MemoryStore.Resolve(stored, links, retractions);
-                var repository = stored[0].Repository;
-
-                // Named, never counted — the posture every other omission on this surface takes
-                // (ProjectionOmission's remarks). The projector never sees a retracted entry, since
-                // Resolve drops it first, so the omission is accounted for here from the raw rows.
-                var retracted = RetractedOmissions(stored, retractions);
-                var candidates = fleet
-                    .Select(e => new MemoryProjectionCandidate(e, MemoryFactOrigin.Fleet))
-                    .Concat(resolved.Select(e => new MemoryProjectionCandidate(
-                        e, isFleet ? MemoryFactOrigin.Fleet : MemoryFactOrigin.Vendor)))
-                    .Concat(repositoryFacts.Where(f => string.Equals(
-                        f.Entry.Repository, repository, StringComparison.OrdinalIgnoreCase)))
-                    .ToList();
-
-                var projection = MemoryProjection.Build(
-                    repository, entriesFile, candidates, ProjectionBudget.Default, fleetStorePath);
-
-                var targets = targetsByRepository.TryGetValue(repository, out var found)
-                    ? found.OrderBy(t => t.FilePath, StringComparer.OrdinalIgnoreCase).ToList()
-                    : [];
-
-                var writes = new List<SyncTargetReport>();
-                foreach (var target in targets)
-                {
-                    writes.Add(WriteOrPreview(target, projection.Bytes, options.Apply));
-                }
-
-                return new SyncRepositoryReport(
-                    repository,
-                    entriesFile,
-                    projection.BodySha256,
-                    projection.ProjectedEntryIds.Count,
-                    writes,
-                    targets.Count == 0 ? NoTargetGuidance(repository) : null,
-                    retracted,
-                    projection.Superseded,
-                    projection.Overridden,
-                    projection.Dropped);
-            },
-            cancellationToken).ConfigureAwait(false);
+        return new SyncRepositoryReport(
+            repository,
+            entriesFile,
+            projection.BodySha256,
+            projection.ProjectedEntryIds.Count,
+            writes,
+            targets.Count == 0 ? NoTargetGuidance(repository) : null,
+            retracted,
+            projection.Superseded,
+            projection.Overridden,
+            projection.Dropped);
     }
 
     /// <summary>
@@ -288,16 +468,32 @@ public static class MemorySyncCommand
     /// exists by construction, and a missing one is a root that vanished mid-run rather than a
     /// directory this verb should mint.
     /// </remarks>
-    private static SyncTargetReport WriteOrPreview(ProjectionTarget target, byte[] bytes, bool apply)
+    private static SyncTargetReport WriteOrPreview(
+        ProjectionTarget target,
+        byte[] bytes,
+        bool apply,
+        Action<string, byte[]>? projectionWriterOverride)
     {
         var existing = File.Exists(target.FilePath) ? File.ReadAllBytes(target.FilePath) : null;
         var unchanged = existing is not null && existing.AsSpan().SequenceEqual(bytes);
 
         if (apply && !unchanged)
         {
-            var tempPath = $"{target.FilePath}.{Guid.NewGuid():N}.tmp";
-            File.WriteAllBytes(tempPath, bytes);
-            File.Move(tempPath, target.FilePath, overwrite: true);
+            if (!Directory.Exists(target.RootDirectoryPath))
+            {
+                throw new DirectoryNotFoundException(
+                    $"Discovered vendor memory root '{target.RootDirectoryPath}' disappeared before publication; " +
+                    "Baton will not recreate a vendor root.");
+            }
+
+            if (projectionWriterOverride is not null)
+            {
+                projectionWriterOverride(target.FilePath, bytes);
+            }
+            else
+            {
+                WriteAtomic(target.FilePath, bytes);
+            }
         }
 
         return new SyncTargetReport(
@@ -307,6 +503,29 @@ public static class MemorySyncCommand
             unchanged ? UnchangedDisposition : existing is null ? (apply ? "created" : "would create") : (apply ? "rewritten" : "would rewrite"),
             bytes.Length,
             Convert.ToHexString(SHA256.HashData(bytes)).ToLowerInvariant());
+    }
+
+    private static SyncTargetReport SupersededReport(ProjectionTarget target, byte[] bytes) =>
+        new(
+            target.Vendor,
+            target.RootDirectoryPath,
+            target.FilePath,
+            "not published: a newer projection attempt owns this store",
+            bytes.Length,
+            Convert.ToHexString(SHA256.HashData(bytes)).ToLowerInvariant());
+
+    private static void WriteAtomic(string filePath, byte[] bytes)
+    {
+        var tempPath = $"{filePath}.{Guid.NewGuid():N}.tmp";
+        try
+        {
+            File.WriteAllBytes(tempPath, bytes);
+            File.Move(tempPath, filePath, overwrite: true);
+        }
+        finally
+        {
+            File.Delete(tempPath);
+        }
     }
 
     /// <summary>
@@ -348,7 +567,7 @@ public static class MemorySyncCommand
         var nonTargets = new List<NonTargetRoot>();
 
         var aliases = await MemoryAliasStore
-            .ReadAllAsync(BatonPaths.MemoryAliasFile, cancellationToken).ConfigureAwait(false);
+            .ReadAllStrictAsync(BatonPaths.MemoryAliasFile, cancellationToken).ConfigureAwait(false);
 
         foreach (var root in MemoryRootInventory.Scan(claudeHome, cancellationToken))
         {
@@ -518,10 +737,35 @@ public static class MemorySyncCommand
                   "empty population on this run. Pass '--repository-facts <dir>' with '--repository <id>' " +
                   "to weigh checked-in facts against the vendor-sourced ones.");
 
+        foreach (var failure in report.Failures)
+        {
+            output.WriteLine();
+            if (failure.ObligationRecorded)
+            {
+                output.WriteLine($"SYNC PENDING -- {failure.Repository}: {failure.Error}");
+                output.WriteLine($"  durable obligation: {failure.ObligationPath}");
+                output.WriteLine(
+                    "  The canonical store remains saved. Baton did not complete its owned projection, " +
+                    "and this says nothing about vendor loading or consumption; the daemon will retry safely.");
+            }
+            else
+            {
+                output.WriteLine($"COMMITTED BUT UNPROJECTED -- {failure.Repository}: {failure.Error}");
+                output.WriteLine($"  durable obligation NOT recorded at: {failure.ObligationPath}");
+                output.WriteLine(
+                    "  The store's durable identity remains inventory-visible. Repair this path; a later " +
+                    "daemon sweep or 'baton memory sync --apply' can reclaim and project it.");
+            }
+        }
+
         if (report.Repositories.Count == 0)
         {
             output.WriteLine();
-            output.WriteLine("No repository has a canonical memory store yet. Run 'baton memory import' first.");
+            output.WriteLine(
+                report.Failures.Count == 0
+                    ? "No repository has a canonical memory store yet. Run 'baton memory import' first."
+                    : "No projection report completed for the failed store(s) above; their canonical " +
+                      "state remains saved and was not reported as projected.");
             WriteNonTargets(output, report.NonTargetRoots);
             WriteCheckVerdict(output, report);
             return;
@@ -552,6 +796,40 @@ public static class MemorySyncCommand
 
         WriteNonTargets(output, report.NonTargetRoots);
         WriteCheckVerdict(output, report);
+    }
+
+    private static void WriteFailedProjection(
+        TextWriter output,
+        MemoryAuditOutputFormat format,
+        IReadOnlyList<SyncFailureReport> failures)
+    {
+        if (format == MemoryAuditOutputFormat.Json)
+        {
+            output.WriteLine(JsonSerializer.Serialize(new { failures }, ReportJson));
+            return;
+        }
+
+        foreach (var failure in failures)
+        {
+            output.WriteLine(
+                failure.ObligationRecorded
+                    ? $"SYNC PENDING -- {failure.Repository}: {failure.Error}"
+                    : $"COMMITTED BUT UNPROJECTED -- {failure.Repository}: {failure.Error}");
+            output.WriteLine(
+                failure.ObligationRecorded
+                    ? $"  durable obligation: {failure.ObligationPath}"
+                    : $"  durable obligation NOT recorded at: {failure.ObligationPath}");
+        }
+
+        output.WriteLine(
+            "The canonical store remains authoritative. No Baton-owned projection was reported complete, " +
+            "and no vendor loading or consumption is claimed.");
+        if (failures.Any(f => !f.ObligationRecorded))
+        {
+            output.WriteLine(
+                "The store identity remains inventory-visible; repair the obligation path so a later " +
+                "daemon sweep or manual sync can claim and project it.");
+        }
     }
 
     /// <summary>
@@ -664,7 +942,14 @@ public static class MemorySyncCommand
         [property: JsonPropertyName("repositoryFactsDirectory")] string? RepositoryFactsDirectory,
         [property: JsonPropertyName("repositoryFactsConsidered")] int RepositoryFactsConsidered,
         [property: JsonPropertyName("repositories")] IReadOnlyList<SyncRepositoryReport> Repositories,
-        [property: JsonPropertyName("nonTargetRoots")] IReadOnlyList<NonTargetRoot> NonTargetRoots);
+        [property: JsonPropertyName("nonTargetRoots")] IReadOnlyList<NonTargetRoot> NonTargetRoots,
+        [property: JsonPropertyName("failures")] IReadOnlyList<SyncFailureReport> Failures);
+
+    private sealed record SyncFailureReport(
+        [property: JsonPropertyName("repository")] string Repository,
+        [property: JsonPropertyName("obligationPath")] string ObligationPath,
+        [property: JsonPropertyName("error")] string Error,
+        [property: JsonPropertyName("obligationRecorded")] bool ObligationRecorded);
 
     private sealed record SyncRepositoryReport(
         [property: JsonPropertyName("repository")] string Repository,

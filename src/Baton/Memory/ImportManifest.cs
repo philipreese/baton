@@ -172,7 +172,25 @@ public sealed record ImportManifest(
     IReadOnlyList<ImportSkippedRow>? ProjectionsSkipped = null,
     [property: JsonPropertyName("dropped")]
     [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
-    IReadOnlyList<ImportSkippedRow>? Dropped = null)
+    IReadOnlyList<ImportSkippedRow>? Dropped = null,
+    [property: JsonPropertyName("operationId")]
+    [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    string? OperationId = null,
+    [property: JsonPropertyName("operationState")]
+    [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingDefault)]
+    ImportOperationState OperationState = ImportOperationState.Settled,
+    [property: JsonPropertyName("plannedEntries")]
+    [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    IReadOnlyList<MemoryEntry>? PlannedEntries = null,
+    [property: JsonPropertyName("plannedLinks")]
+    [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    IReadOnlyList<MemorySupersessionLink>? PlannedLinks = null,
+    [property: JsonPropertyName("plannedAliases")]
+    [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    IReadOnlyList<MemoryAliasEntry>? PlannedAliases = null,
+    [property: JsonPropertyName("acceptedAliases")]
+    [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    IReadOnlyList<MemoryAliasEntry>? AcceptedAliases = null)
 {
     /// <summary>
     /// The only version this build writes, and the only one <see cref="Read"/> accepts.
@@ -205,10 +223,20 @@ public sealed record ImportManifest(
     public IEnumerable<ImportLinkRow> AppendedLinks => (Links ?? []).Where(l => !l.AlreadyPresent);
 
     /// <summary>
-    /// Writes the manifest to <paramref name="manifestFilePath"/>, creating its directory. UTF-8
-    /// without a byte-order mark, for the reason <c>MemoryStore</c>'s rewrite states.
+    /// Writes the manifest to <paramref name="manifestFilePath"/>, creating its directory. The
+    /// per-call temporary sibling is moved into place so a crash leaves either the prior intent or
+    /// the complete settlement, never JSON that loses reversal ownership.
     /// </summary>
     public void Write(string manifestFilePath)
+    {
+        MemoryCanonicalGeneration.Mutate(BatonRoot, () =>
+        {
+            WriteUnlocked(manifestFilePath);
+            return true;
+        });
+    }
+
+    private void WriteUnlocked(string manifestFilePath)
     {
         ArgumentException.ThrowIfNullOrEmpty(manifestFilePath);
 
@@ -218,7 +246,16 @@ public sealed record ImportManifest(
             Directory.CreateDirectory(directory);
         }
 
-        File.WriteAllBytes(manifestFilePath, Encoding.UTF8.GetBytes(JsonSerializer.Serialize(this, SerializerOptions)));
+        var tempPath = $"{manifestFilePath}.{Guid.NewGuid():N}.tmp";
+        try
+        {
+            File.WriteAllBytes(tempPath, Encoding.UTF8.GetBytes(JsonSerializer.Serialize(this, SerializerOptions)));
+            File.Move(tempPath, manifestFilePath, overwrite: true);
+        }
+        finally
+        {
+            File.Delete(tempPath);
+        }
     }
 
     /// <summary>
@@ -259,8 +296,42 @@ public sealed record ImportManifest(
                 $"understands version {CurrentVersion} only. Undo it with the build that wrote it.");
         }
 
+        if (!Enum.IsDefined(manifest.OperationState)
+            || manifest.OperationState == ImportOperationState.Intent
+            && (manifest.OperationId is not { Length: > 0 } || manifest.PlannedEntries is null))
+        {
+            throw new BatonMemoryException(
+                $"The import manifest at '{manifestFilePath}' has incomplete operation recovery state.");
+        }
+
+        try
+        {
+            MemoryImportOperationStore.ValidateRecord(manifest);
+        }
+        catch (Exception ex) when (ex is InvalidDataException or ArgumentException or NotSupportedException)
+        {
+            throw new BatonMemoryException(
+                $"The import manifest at '{manifestFilePath}' has corrupt operation state: {ex.Message}", ex);
+        }
+
         return manifest;
     }
+}
+
+/// <summary>The durable boundary of an import manifest.</summary>
+public enum ImportOperationState
+{
+    /// <summary>The exact ownership result is durable; new records retain the plan for validation.</summary>
+    Settled = 0,
+
+    /// <summary>The plan is durable and must be rolled forward before any affected store is published.</summary>
+    Intent = 1,
+
+    /// <summary>Undo is durable authority; recovery must remove owned rows, never reapply the plan.</summary>
+    Reversing = 2,
+
+    /// <summary>Reversal finished. Retained accounting and aliases remain verifiable after restart.</summary>
+    Reversed = 3,
 }
 
 /// <summary>

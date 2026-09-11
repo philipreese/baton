@@ -196,6 +196,7 @@ public class DaemonHostTests
                 }).WaitAsync(TimeSpan.FromSeconds(60), TestContext.Current.CancellationToken);
 
             Assert.Contains(hostedServices!, s => s is WatchSweep);
+            Assert.Contains(hostedServices!, s => s is MemoryProjectionSweep);
             Assert.True(applicationStarted);
         }
         finally
