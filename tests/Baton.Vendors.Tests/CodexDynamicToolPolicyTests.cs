@@ -965,33 +965,199 @@ public sealed class CodexDynamicToolPolicyTests
     public async Task Timed_out_volatile_diff_gets_one_retry_after_expiry_then_replays_that_failure()
     {
         var clock = new StepClock(new DateTimeOffset(2026, 9, 10, 12, 0, 0, TimeSpan.Zero));
+        var expectedAttempt = 0;
         using var fixture = new PolicyFixture(
             new PermissionGrant(RunShellCommands: true),
             ["report.md"],
             // wait-ok: injected ceiling reaches the timeout branch quickly; the child is killed there.
             commandCeiling: _ => TimeSpan.FromMilliseconds(500),
-            timeProvider: clock);
+            timeProvider: clock,
+            // This rendezvous runs after Process.Start and immediately before CancelAfter. Waiting
+            // for attempt N here therefore controls the timeout boundary; it is not a ready signal
+            // racing a timeout that was already armed.
+            beforeCommandTimeoutStarts: (fixture, cancellationToken) => WaitForCommandAttempt(
+                Path.Combine(fixture.Workspace, "volatile-timeout-runs.txt"),
+                ++expectedAttempt,
+                cancellationToken,
+                "external-diff helper"));
         var command = HangingExternalDiffCommand(fixture.Workspace, "volatile-timeout");
 
         var firstFailure = await fixture.ExecuteAsync(
             CodexDynamicToolPolicy.RunCommandTool, new { command = command.CommandLine });
+        AssertExternalDiffAttempts(command.CounterPath, 1, "first timeout");
         var immediateReplay = await fixture.ExecuteAsync(
             CodexDynamicToolPolicy.RunCommandTool, new { command = command.CommandLine });
+        AssertExternalDiffAttempts(command.CounterPath, 1, "immediate replay");
         clock.Advance(RepeatedToolCallLedger.Window + TimeSpan.FromSeconds(1));
         var failureAfterExpiry = await fixture.ExecuteAsync(
             CodexDynamicToolPolicy.RunCommandTool, new { command = command.CommandLine });
+        AssertExternalDiffAttempts(command.CounterPath, 2, "post-expiry timeout");
         var replayAfterExpiry = await fixture.ExecuteAsync(
             CodexDynamicToolPolicy.RunCommandTool, new { command = command.CommandLine });
+        AssertExternalDiffAttempts(command.CounterPath, 2, "final replay");
 
         Assert.False(firstFailure.Success, firstFailure.Text);
         Assert.Contains("default command ceiling", firstFailure.Text, StringComparison.Ordinal);
         Assert.False(immediateReplay.Success, immediateReplay.Text);
         Assert.Contains("replayed: identical command", immediateReplay.Text, StringComparison.Ordinal);
         Assert.False(failureAfterExpiry.Success, failureAfterExpiry.Text);
+        Assert.Contains("default command ceiling", failureAfterExpiry.Text, StringComparison.Ordinal);
         Assert.DoesNotContain("replayed: identical command", failureAfterExpiry.Text, StringComparison.Ordinal);
         Assert.False(replayAfterExpiry.Success, replayAfterExpiry.Text);
+        Assert.Contains("default command ceiling", replayAfterExpiry.Text, StringComparison.Ordinal);
         Assert.Contains("replayed: identical command", replayAfterExpiry.Text, StringComparison.Ordinal);
-        Assert.Equal(2, File.ReadAllLines(command.CounterPath).Length);
+    }
+
+    [Fact]
+    public async Task Throwing_pre_timeout_rendezvous_cleans_up_started_command_and_replays_failure()
+    {
+        List<DisposalTrackingStream> captures = [];
+        using var fixture = new PolicyFixture(
+            new PermissionGrant(RunShellCommands: true),
+            ["report.md"],
+            commandCaptureStreamFactory: path =>
+            {
+                var capture = new DisposalTrackingStream(WritableCaptureStream(path));
+                captures.Add(capture);
+                return capture;
+            },
+            beforeCommandTimeoutStarts: (fixture, cancellationToken) =>
+            {
+                WaitForCommandAttempt(
+                    Path.Combine(fixture.Workspace, "throwing-rendezvous-runs.txt"),
+                    1,
+                    cancellationToken,
+                    "hanging child");
+                throw new InvalidOperationException("synthetic rendezvous failure");
+            });
+        var command = HangingSideEffectCommand(fixture.Workspace, "throwing-rendezvous");
+
+        var failed = await fixture.ExecuteAsync(
+            CodexDynamicToolPolicy.RunCommandTool, new { command = command.CommandLine });
+        var replay = await fixture.ExecuteAsync(
+            CodexDynamicToolPolicy.RunCommandTool, new { command = command.CommandLine });
+
+        Assert.False(failed.Success, failed.Text);
+        Assert.Contains("test-only pre-timeout rendezvous failed", failed.Text, StringComparison.Ordinal);
+        Assert.Contains("synthetic rendezvous failure", failed.Text, StringComparison.Ordinal);
+        Assert.Contains("BEFORE-HANG", failed.Text, StringComparison.Ordinal);
+        Assert.False(replay.Success, replay.Text);
+        Assert.Contains("replayed: identical command", replay.Text, StringComparison.Ordinal);
+        Assert.Contains("synthetic rendezvous failure", replay.Text, StringComparison.Ordinal);
+        Assert.Single(File.ReadAllLines(command.CounterPath));
+        Assert.False(File.Exists(command.CompletionPath));
+        Assert.Equal(2, captures.Count);
+        Assert.All(captures, capture => Assert.True(capture.IsDisposed));
+    }
+
+    [Fact]
+    public async Task Uncancelled_rendezvous_cancellation_is_recorded_as_callback_failure_not_timeout()
+    {
+        using var fixture = new PolicyFixture(
+            new PermissionGrant(RunShellCommands: true),
+            ["report.md"],
+            beforeCommandTimeoutStarts: (fixture, cancellationToken) =>
+            {
+                WaitForCommandAttempt(
+                    Path.Combine(fixture.Workspace, "uncancelled-rendezvous-runs.txt"),
+                    1,
+                    cancellationToken,
+                    "hanging child");
+                throw new OperationCanceledException("synthetic uncancelled rendezvous cancellation");
+            });
+        var command = HangingSideEffectCommand(fixture.Workspace, "uncancelled-rendezvous");
+
+        var failed = await fixture.ExecuteAsync(
+            CodexDynamicToolPolicy.RunCommandTool, new { command = command.CommandLine });
+        var replay = await fixture.ExecuteAsync(
+            CodexDynamicToolPolicy.RunCommandTool, new { command = command.CommandLine });
+
+        Assert.False(failed.Success, failed.Text);
+        Assert.Contains("test-only pre-timeout rendezvous failed", failed.Text, StringComparison.Ordinal);
+        Assert.Contains(
+            "OperationCanceledException: synthetic uncancelled rendezvous cancellation",
+            failed.Text,
+            StringComparison.Ordinal);
+        Assert.DoesNotContain("default command ceiling", failed.Text, StringComparison.Ordinal);
+        Assert.Contains("BEFORE-HANG", failed.Text, StringComparison.Ordinal);
+        Assert.False(replay.Success, replay.Text);
+        Assert.Contains("replayed: identical command", replay.Text, StringComparison.Ordinal);
+        Assert.Contains("synthetic uncancelled rendezvous cancellation", replay.Text, StringComparison.Ordinal);
+        Assert.Single(File.ReadAllLines(command.CounterPath));
+        Assert.False(File.Exists(command.CompletionPath));
+    }
+
+    [Fact]
+    public async Task Cancelled_pre_timeout_rendezvous_cleans_up_and_records_failure_before_propagating()
+    {
+        List<DisposalTrackingStream> captures = [];
+        CancellationTokenSource? callerCancellation = null;
+        using var fixture = new PolicyFixture(
+            new PermissionGrant(RunShellCommands: true),
+            ["report.md"],
+            commandCaptureStreamFactory: path =>
+            {
+                var capture = new DisposalTrackingStream(WritableCaptureStream(path));
+                captures.Add(capture);
+                return capture;
+            },
+            beforeCommandTimeoutStarts: (fixture, cancellationToken) =>
+            {
+                WaitForCommandAttempt(
+                    Path.Combine(fixture.Workspace, "cancelled-rendezvous-runs.txt"),
+                    1,
+                    cancellationToken,
+                    "hanging child");
+                callerCancellation!.Cancel();
+                cancellationToken.ThrowIfCancellationRequested();
+            });
+        var command = HangingSideEffectCommand(fixture.Workspace, "cancelled-rendezvous");
+        using var cancellation = new CancellationTokenSource();
+        callerCancellation = cancellation;
+
+        await Assert.ThrowsAnyAsync<OperationCanceledException>(() => fixture.ExecuteWithCancellationAsync(
+            CodexDynamicToolPolicy.RunCommandTool,
+            new { command = command.CommandLine },
+            cancellation.Token));
+        var replay = await fixture.ExecuteAsync(
+            CodexDynamicToolPolicy.RunCommandTool, new { command = command.CommandLine });
+
+        Assert.False(replay.Success, replay.Text);
+        Assert.Contains("replayed: identical command", replay.Text, StringComparison.Ordinal);
+        Assert.Contains("Command was cancelled after it started.", replay.Text, StringComparison.Ordinal);
+        Assert.Contains("BEFORE-HANG", replay.Text, StringComparison.Ordinal);
+        Assert.Single(File.ReadAllLines(command.CounterPath));
+        Assert.False(File.Exists(command.CompletionPath));
+        Assert.Equal(2, captures.Count);
+        Assert.All(captures, capture => Assert.True(capture.IsDisposed));
+    }
+
+    [Fact]
+    public void Completed_command_attempt_marker_is_readable_while_its_writer_remains_open()
+    {
+        if (!OperatingSystem.IsWindows())
+        {
+            Assert.Skip("Windows enforces the marker file sharing contract this control exercises");
+            return;
+        }
+
+        using var fixture = new PolicyFixture(
+            new PermissionGrant(RunShellCommands: true),
+            ["report.md"]);
+        var markerPath = Path.Combine(fixture.Workspace, "open-marker-runs.txt");
+        using var marker = new FileStream(
+            markerPath,
+            FileMode.CreateNew,
+            FileAccess.Write,
+            FileShare.Read);
+
+        marker.Write("ra"u8);
+        marker.Flush(flushToDisk: true);
+        Assert.Equal(0, ExternalDiffAttemptCount(markerPath));
+
+        marker.Write("n\r\n"u8);
+        marker.Flush(flushToDisk: true);
+        Assert.Equal(1, ExternalDiffAttemptCount(markerPath));
     }
 
     [Fact]
@@ -1969,33 +2135,34 @@ public sealed class CodexDynamicToolPolicyTests
         return "./overflow";
     }
 
-    private static (string CommandLine, string CounterPath) HangingSideEffectCommand(
+    private static (string CommandLine, string CounterPath, string CompletionPath) HangingSideEffectCommand(
         string directory, string name)
     {
         var counterPath = Path.Combine(directory, $"{name}-runs.txt");
+        var completionPath = Path.Combine(directory, $"{name}-completed.txt");
         var capturePayload = new string('x', 5_000);
         if (OperatingSystem.IsWindows())
         {
             var scriptName = $"{name}.cmd";
             File.WriteAllText(
                 Path.Combine(directory, scriptName),
-                $"@echo off\r\n@echo ran>>{name}-runs.txt\r\n@echo BEFORE-HANG\r\n"
+                $"@echo off\r\n@echo BEFORE-HANG\r\n@echo ran>>{name}-runs.txt\r\n"
                 + $"@echo {capturePayload}\r\n"
-                + "@ping -n 30 127.0.0.1 >nul\r\n");
-            return (scriptName, counterPath);
+                + $"@ping -n 30 127.0.0.1 >nul\r\n@echo completed>{name}-completed.txt\r\n");
+            return (scriptName, counterPath, completionPath);
         }
 
         var scriptPath = Path.Combine(directory, name);
         File.WriteAllText(
             scriptPath,
-            $"#!/bin/sh\nprintf 'ran\\n' >> {name}-runs.txt\nprintf 'BEFORE-HANG\\n'\n"
-            + $"printf '%s\\n' '{capturePayload}'\nsleep 30\n");
+            $"#!/bin/sh\nprintf 'BEFORE-HANG\\n'\nprintf 'ran\\n' >> {name}-runs.txt\n"
+            + $"printf '%s\\n' '{capturePayload}'\nsleep 30\nprintf 'completed\\n' > {name}-completed.txt\n");
         File.SetUnixFileMode(
             scriptPath,
             UnixFileMode.UserRead | UnixFileMode.UserWrite | UnixFileMode.UserExecute
             | UnixFileMode.GroupRead | UnixFileMode.GroupExecute
             | UnixFileMode.OtherRead | UnixFileMode.OtherExecute);
-        return ($"./{name}", counterPath);
+        return ($"./{name}", counterPath, completionPath);
     }
 
     private static (
@@ -2064,6 +2231,51 @@ public sealed class CodexDynamicToolPolicyTests
         File.WriteAllText(trackedPath, "after changed\n");
 
         return ("git diff --ext-diff", counterPath, mutatedPath, readyPath);
+    }
+
+    private static void WaitForCommandAttempt(
+        string counterPath,
+        int expectedAttempts,
+        CancellationToken cancellationToken,
+        string commandDescription)
+    {
+        var entered = SpinWait.SpinUntil(
+            () =>
+            {
+                cancellationToken.ThrowIfCancellationRequested();
+                return ExternalDiffAttemptCount(counterPath) >= expectedAttempts;
+            },
+            TimeSpan.FromSeconds(10));
+        Assert.True(
+            entered,
+            $"timeout setup: {commandDescription} attempt {expectedAttempts} did not enter before the timer gate");
+    }
+
+    private static void AssertExternalDiffAttempts(string counterPath, int expected, string phase)
+    {
+        var actual = ExternalDiffAttemptCount(counterPath);
+        Assert.True(
+            actual == expected,
+            $"{phase}: expected {expected} external-diff helper attempt(s), actual {actual}");
+    }
+
+    private static int ExternalDiffAttemptCount(string counterPath)
+    {
+        if (!File.Exists(counterPath))
+        {
+            return 0;
+        }
+
+        // cmd.exe can still hold its append handle when the rendezvous first sees this file. Share
+        // with that writer, and count only newline-terminated markers so a partial append is not
+        // mistaken for readiness.
+        using var stream = new FileStream(
+            counterPath,
+            FileMode.Open,
+            FileAccess.Read,
+            FileShare.ReadWrite | FileShare.Delete);
+        using var reader = new StreamReader(stream);
+        return reader.ReadToEnd().Count(character => character == '\n');
     }
 
     private static Stream WritableCaptureStream(string path) =>
@@ -2156,6 +2368,64 @@ public sealed class CodexDynamicToolPolicyTests
             ValueTask.FromException(new IOException("synthetic capture write failure"));
     }
 
+    private sealed class DisposalTrackingStream(Stream inner) : Stream
+    {
+        public bool IsDisposed { get; private set; }
+
+        public override bool CanRead => inner.CanRead;
+        public override bool CanSeek => inner.CanSeek;
+        public override bool CanWrite => inner.CanWrite;
+        public override long Length => inner.Length;
+        public override long Position
+        {
+            get => inner.Position;
+            set => inner.Position = value;
+        }
+
+        public override void Flush() => inner.Flush();
+
+        public override Task FlushAsync(CancellationToken cancellationToken) =>
+            inner.FlushAsync(cancellationToken);
+
+        public override int Read(byte[] buffer, int offset, int count) =>
+            inner.Read(buffer, offset, count);
+
+        public override long Seek(long offset, SeekOrigin origin) => inner.Seek(offset, origin);
+
+        public override void SetLength(long value) => inner.SetLength(value);
+
+        public override void Write(byte[] buffer, int offset, int count) =>
+            inner.Write(buffer, offset, count);
+
+        public override Task WriteAsync(
+            byte[] buffer, int offset, int count, CancellationToken cancellationToken) =>
+            inner.WriteAsync(buffer, offset, count, cancellationToken);
+
+        public override ValueTask WriteAsync(
+            ReadOnlyMemory<byte> buffer, CancellationToken cancellationToken = default) =>
+            inner.WriteAsync(buffer, cancellationToken);
+
+        protected override void Dispose(bool disposing)
+        {
+            if (disposing && !IsDisposed)
+            {
+                IsDisposed = true;
+                inner.Dispose();
+            }
+            base.Dispose(disposing);
+        }
+
+        public override async ValueTask DisposeAsync()
+        {
+            if (!IsDisposed)
+            {
+                IsDisposed = true;
+                await inner.DisposeAsync();
+            }
+            GC.SuppressFinalize(this);
+        }
+    }
+
     private sealed class StepClock(DateTimeOffset start) : TimeProvider
     {
         private DateTimeOffset _now = start;
@@ -2173,7 +2443,8 @@ public sealed class CodexDynamicToolPolicyTests
             bool createInput = false,
             Func<ShellCommandClass, TimeSpan>? commandCeiling = null,
             Func<string, Stream>? commandCaptureStreamFactory = null,
-            TimeProvider? timeProvider = null)
+            TimeProvider? timeProvider = null,
+            Action<PolicyFixture, CancellationToken>? beforeCommandTimeoutStarts = null)
         {
             Root = Path.Combine(Path.GetTempPath(), $"baton-codex-policy-{Guid.NewGuid():N}");
             Workspace = Path.Combine(Root, "workspace");
@@ -2186,7 +2457,7 @@ public sealed class CodexDynamicToolPolicyTests
             {
                 File.WriteAllText(Input, "input");
             }
-            Policy = commandCaptureStreamFactory is null
+            Policy = commandCaptureStreamFactory is null && beforeCommandTimeoutStarts is null
                 ? new CodexDynamicToolPolicy(
                     grant, Workspace, Output, createInput ? [Input] : [], outputs, commandCeiling,
                     timeProvider)
@@ -2198,7 +2469,10 @@ public sealed class CodexDynamicToolPolicyTests
                     outputs,
                     commandCeiling,
                     timeProvider,
-                    commandCaptureStreamFactory);
+                    commandCaptureStreamFactory,
+                    beforeCommandTimeoutStarts is null
+                        ? null
+                        : cancellationToken => beforeCommandTimeoutStarts(this, cancellationToken));
         }
 
         public string Root { get; }
