@@ -579,6 +579,11 @@ public static class QueueLauncher
         Add("--token-budget", options.TokenBudget?.ToString(CultureInfo.InvariantCulture));
         Add("--max-tool-steps", options.MaxToolSteps?.ToString(CultureInfo.InvariantCulture));
         Add("--override-runway", options.OverrideRunwayReason);
+        foreach (var skill in options.Skills ?? [])
+        {
+            Add("--skill", skill);
+        }
+
         return arguments;
 
         void Add(string flag, string? value)
@@ -949,7 +954,8 @@ public static class QueueLauncher
                     : item.Tag),
             TokenBudget: item.TokenBudget,
             MaxToolSteps: item.MaxToolSteps,
-            OverrideRunwayReason: item.OverrideRunwayReason);
+            OverrideRunwayReason: item.OverrideRunwayReason,
+            Skills: item.Skills);
     }
 
     /// <summary>

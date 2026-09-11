@@ -6933,9 +6933,17 @@ satisfied rather than avoided: `WorkItemLifecycle` is the code that advances the
 ### The verbs
 
 `baton queue add <tag> --role <role> --spec <file> (--issue <n> | --workspace <dir>) [--scope
-engine|tooling|docs] [--adapter] [--model] [--effort] [--timeout <minutes>] [--max-tool-steps]
+engine|tooling|docs] [--adapter] [--model] [--effort] [--skill <name>] [--timeout <minutes>] [--max-tool-steps]
 [--token-budget] [--override-runway <reason>] [--reason <why>]`, plus `list`, `hold`, `resume`, `cancel <tag>`, and
 `import <file>`.
+
+`--skill <name>` is repeatable on an ordinary dispatch request. Its declaration uses dispatch's own
+normalization — surrounding whitespace is removed, first-seen order is retained, duplicates collapse,
+and a blank alongside a named skill is refused — then persists on the queue item. An absent field on an
+older item keeps the existing dispatch defaults. Import carries and normalizes the same field, and the
+launcher forwards every retained name as its own `--skill`, `<name>` argument pair rather than composing
+a shell string. A lifecycle item refuses any explicit `--skill` for now: choosing per-stage versus
+whole-lifecycle attachment is policy, and the queue does not silently choose one.
 
 **No verb launches anything.** Adding an item is a durable request; the running daemon is the only
 thing that dispatches, which is what keeps one auditable path into a room. `hold`/`resume` pause

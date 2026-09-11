@@ -15,6 +15,7 @@ public static class QueueOptionsParser
         "Usage: baton queue add <tag> --role <role> --spec <file> (--issue <n> | --workspace <dir>) " +
         "[--lifecycle [--stage implement|review|fix|re-review|continue] | --lifecycle-pin] " +
         "[--scope engine|tooling|docs] [--adapter <a>] [--model <m>] [--effort <e>] " +
+        "[--skill <name>] " +
         "[--timeout <minutes>] " +
         "[--max-tool-steps <n>] [--token-budget <n>] [--override-runway <reason>] [--reason <why>] | " +
         "baton queue list | baton queue hold | baton queue resume | baton queue cancel <tag> | baton queue import <file>. " +
@@ -88,6 +89,7 @@ public static class QueueOptionsParser
         long? tokenBudget = null;
         var lifecycle = false;
         var lifecyclePin = false;
+        var skills = new List<string>();
         WorkStage? selectedStage = null;
         var stageSelections = new Dictionary<WorkStage, QueueStageSelection>();
 
@@ -120,6 +122,9 @@ public static class QueueOptionsParser
                     continue;
                 case "--reason":
                     SetReason(selectedStage, stageSelections, TakeValue(args, ref i, "--reason"), ref reason);
+                    continue;
+                case "--skill":
+                    skills.Add(TakeValue(args, ref i, "--skill"));
                     continue;
                 case "--stage":
                     selectedStage = ParseStage(TakeValue(args, ref i, "--stage"));
@@ -201,6 +206,14 @@ public static class QueueOptionsParser
         if (lifecyclePin && !lifecycle)
         {
             throw new CliArgumentException("'--lifecycle-pin' applies only to a '--lifecycle' work item.");
+        }
+
+        if (lifecycle && skills.Count > 0)
+        {
+            throw new CliArgumentException(
+                "Explicit '--skill <name>' declarations are not supported for '--lifecycle' work items yet: "
+                + "the queue has no declared policy for whether skills apply to one stage or the whole lifecycle.",
+                "drop '--skill', or queue an ordinary single-dispatch item with '--role'.");
         }
 
         if (lifecyclePin && selectedStage is not null)
@@ -353,7 +366,8 @@ public static class QueueOptionsParser
         return new QueueOptions(
             QueueVerb.Add, tag, role, spec, issue, workspace, scope, adapter, model, effort,
             timeout, maxToolSteps, tokenBudget, overrideRunway, reason, ImportFilePath: null, Lifecycle: lifecycle,
-            StageSelections: lifecycle ? stageSelections.Values.ToList() : null, LifecyclePin: lifecyclePin);
+            StageSelections: lifecycle ? stageSelections.Values.ToList() : null, LifecyclePin: lifecyclePin,
+            Skills: DispatchOptionsParser.NormalizeSkills(skills));
     }
 
     private static void SetAdapter(

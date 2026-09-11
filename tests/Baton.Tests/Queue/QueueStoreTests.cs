@@ -39,13 +39,19 @@ public sealed class QueueStoreTests
         var path = TempQueuePath();
         try
         {
-            await QueueStore.MutateAsync(path, s => s with { Items = [Item("a"), Item("b")], Held = true }, Ct);
+            await QueueStore.MutateAsync(path, s => s with
+            {
+                Items = [Item("a") with { Skills = ["house-style", "thorough-review"] }, Item("b")],
+                Held = true,
+            }, Ct);
             var read = await QueueStore.LoadAsync(path, Ct);
 
             Assert.Equal(["a", "b"], read.Items.Select(i => i.Tag));
             Assert.True(read.Held);
             Assert.Equal("engine", read.Items[0].ScopeClass);
             Assert.Equal(QueueItemState.Queued, read.Items[0].State);
+            Assert.Equal(["house-style", "thorough-review"], read.Items[0].Skills);
+            Assert.Null(read.Items[1].Skills);
         }
         finally
         {

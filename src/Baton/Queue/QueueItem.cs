@@ -43,6 +43,13 @@ public sealed record QueueItem
     public string? Effort { get; init; }
 
     /// <summary>
+    /// Normalized explicit skill package names for an ordinary single-dispatch item. Null is the
+    /// backward-compatible shape for entries written before queue skill declarations existed.
+    /// Lifecycle items refuse this field at admission until a stage policy is explicitly defined.
+    /// </summary>
+    public IReadOnlyList<string>? Skills { get; init; }
+
+    /// <summary>
     /// Per-stage axes for a lifecycle item. Null, rather than an empty list, is significant for a
     /// pre-stage-selection persisted item; see <see cref="QueueTierTable.ResolveForStage"/>.
     /// </summary>

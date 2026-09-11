@@ -133,6 +133,7 @@ public static class QueueImport
                 Adapter = Trimmed(entry.Adapter),
                 Model = Trimmed(entry.Model),
                 Effort = Trimmed(entry.Effort),
+                Skills = entry.Skills,
                 TimeoutMinutes = entry.Timeout,
                 MaxToolSteps = entry.MaxToolSteps,
                 TokenBudget = entry.TokenBudget,
@@ -160,6 +161,7 @@ public static class QueueImport
         public string? Role { get; init; }
         public string? Model { get; init; }
         public string? Effort { get; init; }
+        public IReadOnlyList<string>? Skills { get; init; }
 
         /// <summary>The runner's <c>timeout</c>, in minutes — the same unit <c>baton dispatch
         /// --timeout</c> takes, so it is carried across unconverted.</summary>

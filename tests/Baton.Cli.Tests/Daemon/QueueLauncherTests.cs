@@ -674,6 +674,7 @@ public sealed class QueueLauncherTests : IDisposable
             TokenBudget = 250_000,
             MaxToolSteps = 400,
             OverrideRunwayReason = "conductor lane, week resets in 2h",
+            Skills = ["house-style", "thorough-review"],
         };
         var tier = new QueueTierResolution("engine", "claude", "opus", "high", IsOverride: true, OverrideReason: "spec says opus");
         var room = Path.Combine(BatonPaths.Rooms, "queue-t7-0badf00d");
@@ -682,6 +683,9 @@ public sealed class QueueLauncherTests : IDisposable
         var argv = QueueLauncher.BuildArguments(expected);
 
         Assert.Equal("dispatch", argv[0]);
+        Assert.Equal(
+            ["--skill", "house-style", "--skill", "thorough-review"],
+            argv.SkipWhile(argument => argument != "--skill").Take(4));
         var parsed = DispatchOptionsParser.Parse(argv.Skip(1).ToList());
         Assert.Equal(expected.Name, parsed.Name);
         Assert.Equal(expected.SpecFilePath, parsed.SpecFilePath);
@@ -695,6 +699,7 @@ public sealed class QueueLauncherTests : IDisposable
         Assert.Equal(expected.TokenBudget, parsed.TokenBudget);
         Assert.Equal(expected.MaxToolSteps, parsed.MaxToolSteps);
         Assert.Equal(expected.OverrideRunwayReason, parsed.OverrideRunwayReason);
+        Assert.Equal(expected.Skills, parsed.Skills);
 
         // Optional fields the queue never sets stay absent rather than being sent as empty flags.
         var minimal = QueueLauncher.BuildArguments(QueueLauncher.BuildOptions(new QueueLaunchRequest(

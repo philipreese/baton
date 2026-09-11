@@ -17,6 +17,7 @@ public sealed class QueueImportTests
         "role": "implement",
         "model": "opus",
         "effort": "high",
+        "skills": ["house-style", "thorough-review"],
         "timeout": 95,
         "workspace": "C:\\repos\\w1934",
         "issue": 1934,
@@ -50,6 +51,7 @@ public sealed class QueueImportTests
         Assert.Equal("implement", first.Role);
         Assert.Equal("opus", first.Model);
         Assert.Equal("high", first.Effort);
+        Assert.Equal(["house-style", "thorough-review"], first.Skills);
         Assert.Equal(95, first.TimeoutMinutes);
         Assert.Equal(@"C:\repos\w1934", first.Workspace);
         Assert.Equal(1934, first.Issue);
