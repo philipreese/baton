@@ -58,6 +58,14 @@ public static class FleetEventKinds
     public static readonly IReadOnlySet<FleetEventKind> All = Enum.GetValues<FleetEventKind>().ToHashSet();
 }
 
+/// <summary>The only two code-authorship claims a lifecycle attempt may make.</summary>
+[JsonConverter(typeof(JsonStringEnumConverter<FleetRevisionKind>))]
+public enum FleetRevisionKind
+{
+    Implementation,
+    Repair,
+}
+
 [JsonConverter(typeof(Converter))]
 public readonly record struct FleetWorkId(string Value)
 {
@@ -91,6 +99,18 @@ public readonly record struct FleetRevisionId(string Value)
     {
         protected override FleetRevisionId Create(string value) => new(value);
         protected override string GetValue(FleetRevisionId id) => id.Value;
+    }
+}
+
+[JsonConverter(typeof(Converter))]
+public readonly record struct FleetCheckRunId(string Value)
+{
+    public override string ToString() => Value;
+
+    private sealed class Converter : StringIdJsonConverter<FleetCheckRunId>
+    {
+        protected override FleetCheckRunId Create(string value) => new(value);
+        protected override string GetValue(FleetCheckRunId id) => id.Value;
     }
 }
 
@@ -159,7 +179,13 @@ public sealed record FleetEventDraft(
     long? ElapsedMilliseconds = null,
     DateTimeOffset? LastMeaningfulProgressAt = null,
     FleetEventUsage? Usage = null,
-    IReadOnlyList<string>? ArtifactReferences = null);
+    IReadOnlyList<string>? ArtifactReferences = null,
+    FleetRevisionKind? RevisionKind = null,
+    FleetCheckRunId? CheckRunId = null,
+    string? CheckName = null,
+    string? CheckStatus = null,
+    DateTimeOffset? CheckStartedAt = null,
+    DateTimeOffset? CheckCompletedAt = null);
 
 /// <summary>One durable line in <c>fleet/events.jsonl</c>.</summary>
 public sealed record FleetEvent(
@@ -216,7 +242,19 @@ public sealed record FleetEvent(
     [property: JsonPropertyName("usage")]
     [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)] FleetEventUsage? Usage = null,
     [property: JsonPropertyName("artifactReferences")]
-    [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)] IReadOnlyList<string>? ArtifactReferences = null)
+    [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)] IReadOnlyList<string>? ArtifactReferences = null,
+    [property: JsonPropertyName("revisionKind")]
+    [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)] FleetRevisionKind? RevisionKind = null,
+    [property: JsonPropertyName("checkRunId")]
+    [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)] FleetCheckRunId? CheckRunId = null,
+    [property: JsonPropertyName("checkName")]
+    [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)] string? CheckName = null,
+    [property: JsonPropertyName("checkStatus")]
+    [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)] string? CheckStatus = null,
+    [property: JsonPropertyName("checkStartedAt")]
+    [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)] DateTimeOffset? CheckStartedAt = null,
+    [property: JsonPropertyName("checkCompletedAt")]
+    [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)] DateTimeOffset? CheckCompletedAt = null)
 {
     internal static FleetEvent From(long id, FleetEventDraft draft) => new(
         id, draft.OccurredAt.ToUniversalTime(), draft.Kind, draft.DedupeKey, draft.AttemptId,
@@ -225,7 +263,8 @@ public sealed record FleetEvent(
         draft.Effort, draft.DeclaredRole, draft.EffectiveGrant, draft.RequestedRequirements,
         draft.MissingCapabilities, draft.AdmissionDecision, draft.Outcome, draft.OutcomeDetail, draft.ReviewVerdict,
         draft.CheckConclusion, draft.ElapsedMilliseconds, draft.LastMeaningfulProgressAt?.ToUniversalTime(),
-        draft.Usage, draft.ArtifactReferences);
+        draft.Usage, draft.ArtifactReferences, draft.RevisionKind, draft.CheckRunId, draft.CheckName,
+        draft.CheckStatus, draft.CheckStartedAt?.ToUniversalTime(), draft.CheckCompletedAt?.ToUniversalTime());
 }
 
 /// <summary>

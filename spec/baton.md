@@ -7015,6 +7015,15 @@ artifact references only when one execution is unambiguous in the terminal senti
 identity, admission, cost, usage, or terminal detail remains absent/unknown — never fabricated as
 zero. Historical/imported rows without an attempt id emit no guessed lineage and are not backfilled.
 
+A code attempt retains the workspace's exact HEAD before launch. `revisionProduced` is written only
+when an implement, fix, or continuation attempt later settles at a different HEAD; its closed
+`revisionKind` is `implementation` for implement and `repair` for fix/continuation. Review and
+re-review never claim a revision, and an absent or unchanged baseline produces no authorship fact.
+The board may still reduce `statusCheckRollup` to one display word, but durable `checkObserved` facts
+do not: each producer-identified check run carries its id, name, status, conclusion, start/completion
+instants, and the PR head revision it checks. Missing fields stay absent, overlapping runs stay
+distinct, and a changed state for one run is a new observation rather than a dedupe collision.
+
 **No verb launches anything.** Adding an item is a durable request; the running daemon is the only
 thing that dispatches, which is what keeps one auditable path into a room. `hold`/`resume` pause
 launches without stopping the daemon — the usage harvester, the projection writer and the delivery

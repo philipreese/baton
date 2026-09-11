@@ -53,6 +53,24 @@ internal static class WorkspaceHead
     }
 
     /// <summary>
+    /// The current full HEAD when it can be observed locally, or null when git has no answer. Queue
+    /// launch attribution uses this fail-open reading because an unavailable baseline must suppress a
+    /// later revision-produced claim, not refuse otherwise valid work.
+    /// </summary>
+    public static async Task<string?> TryCaptureAsync(
+        string workingDirectory, CancellationToken cancellationToken = default)
+    {
+        var result = await RunRevParseAsync(workingDirectory, ["HEAD"], cancellationToken).ConfigureAwait(false);
+        if (!result.Started || result.ExitCode != 0)
+        {
+            return null;
+        }
+
+        var head = result.Stdout.Trim();
+        return head.Length > 0 ? head : null;
+    }
+
+    /// <summary>
     /// The branch name checked out at <paramref name="workingDirectory"/> — <c>git rev-parse
     /// --abbrev-ref HEAD</c> — or <see langword="null"/> when there is no named branch to report.
     /// <para>

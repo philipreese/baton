@@ -1226,7 +1226,7 @@ public sealed class WorkItemAdvancerTests
     }
 
     [Fact]
-    public async Task Producer_owned_revision_pr_check_and_review_observations_share_immutable_ids()
+    public async Task Review_attempt_observes_pr_check_and_verdict_without_claiming_the_existing_revision()
     {
         var home = CreateTempHome();
         using var scope = BatonEnvironmentSnapshot.BeginScope(BatonEnvironmentSnapshot.Blank with { HomeOverride = home });
@@ -1242,7 +1242,9 @@ public sealed class WorkItemAdvancerTests
             var pr = $$$"""
                 [{"number":77,"state":"OPEN","isDraft":true,"headRefOid":"{{{FullPushedSha}}}",
                   "headRefName":"1934-lane","baseRefName":"main","isCrossRepository":false,
-                  "statusCheckRollup":[]}]
+                  "statusCheckRollup":[{"databaseId":101,"name":"gates","status":"COMPLETED",
+                    "conclusion":"SUCCESS","startedAt":"2026-09-11T15:00:00Z",
+                    "completedAt":"2026-09-11T15:02:00Z"}]}]
                 """;
             var advancer = new WorkItemAdvancer(
                 new FakeGh(pr),
@@ -1257,16 +1259,150 @@ public sealed class WorkItemAdvancerTests
 
             Assert.All(events, entry => Assert.Equal(attemptId, entry.AttemptId));
             Assert.Equal(
-                [FleetEventKind.RevisionProduced, FleetEventKind.PullRequestBound,
-                    FleetEventKind.CheckObserved, FleetEventKind.ReviewVerdictObserved],
+                [FleetEventKind.PullRequestBound, FleetEventKind.CheckObserved, FleetEventKind.ReviewVerdictObserved],
                 events.Select(entry => entry.Kind));
-            Assert.Equal(new FleetRevisionId(FullPushedSha), events[0].RevisionId);
-            Assert.Equal(77, events[1].PullRequestId);
-            Assert.Equal(PullRequestChecks.None, events[2].CheckConclusion);
-            Assert.Equal(new FleetReviewRoundId("1934-lane:2"), events[3].ReviewRoundId);
-            Assert.Equal("approve", events[3].ReviewVerdict);
+            Assert.DoesNotContain(events, entry => entry.Kind == FleetEventKind.RevisionProduced);
+            Assert.Equal(77, events[0].PullRequestId);
+            Assert.Equal(new FleetCheckRunId("101"), events[1].CheckRunId);
+            Assert.Equal("gates", events[1].CheckName);
+            Assert.Equal("COMPLETED", events[1].CheckStatus);
+            Assert.Equal("SUCCESS", events[1].CheckConclusion);
+            Assert.Equal(new FleetReviewRoundId("1934-lane:2"), events[2].ReviewRoundId);
+            Assert.Equal("approve", events[2].ReviewVerdict);
             // This fixture's reviewedRef is not a full immutable SHA, so it stays absent.
-            Assert.Null(events[3].RevisionId);
+            Assert.Null(events[2].RevisionId);
+        }
+        finally
+        {
+            DirectoryCleanup.DeleteRecursively(home);
+        }
+    }
+
+    [Theory]
+    [InlineData(WorkStage.Implement, FleetRevisionKind.Implementation)]
+    [InlineData(WorkStage.Fix, FleetRevisionKind.Repair)]
+    public async Task A_code_stage_that_changes_head_records_the_revision_it_produced(
+        WorkStage stage, FleetRevisionKind revisionKind)
+    {
+        var home = CreateTempHome();
+        using var scope = BatonEnvironmentSnapshot.BeginScope(BatonEnvironmentSnapshot.Blank with { HomeOverride = home });
+        try
+        {
+            var room = await WriteSettledRoomAsync(home, WorkflowOutcome.Succeeded, verdictJson: null);
+            var seeded = await SeedAsync(home, stage, room);
+            var attemptId = new FleetAttemptId($"attempt-{WorkStages.Token(stage)}");
+            await QueueStore.MutateAsync(
+                BatonPaths.QueueFile,
+                state => state with
+                {
+                    Items = [seeded with
+                    {
+                        AttemptId = attemptId,
+                        AttemptBaseRevision = MergeSha,
+                    }],
+                }, Ct);
+            var events = new List<FleetEventDraft>();
+            var advancer = new WorkItemAdvancer(
+                new FakeGh(PrJson(77, FullPushedSha)),
+                (_, _) => Task.FromResult<string?>(FullPushedSha),
+                appendFleetEvent: (draft, _) =>
+                {
+                    events.Add(draft);
+                    return Task.FromResult<FleetEvent?>(null);
+                });
+
+            await advancer.AdvanceAsync(Now, Ct);
+
+            var revision = Assert.Single(events, entry => entry.Kind == FleetEventKind.RevisionProduced);
+            Assert.Equal(attemptId, revision.AttemptId);
+            Assert.Equal(new FleetRevisionId(FullPushedSha), revision.RevisionId);
+            Assert.Equal(revisionKind, revision.RevisionKind);
+        }
+        finally
+        {
+            DirectoryCleanup.DeleteRecursively(home);
+        }
+    }
+
+    [Fact]
+    public async Task A_code_stage_that_does_not_change_head_records_no_revision()
+    {
+        var home = CreateTempHome();
+        using var scope = BatonEnvironmentSnapshot.BeginScope(BatonEnvironmentSnapshot.Blank with { HomeOverride = home });
+        try
+        {
+            var room = await WriteSettledRoomAsync(home, WorkflowOutcome.Succeeded, verdictJson: null);
+            var seeded = await SeedAsync(home, WorkStage.Implement, room);
+            await QueueStore.MutateAsync(
+                BatonPaths.QueueFile,
+                state => state with
+                {
+                    Items = [seeded with
+                    {
+                        AttemptId = new FleetAttemptId("attempt-no-op"),
+                        AttemptBaseRevision = FullPushedSha,
+                    }],
+                }, Ct);
+            var events = new List<FleetEventDraft>();
+
+            await new WorkItemAdvancer(
+                new FakeGh(PrJson(77, FullPushedSha)),
+                (_, _) => Task.FromResult<string?>(FullPushedSha),
+                appendFleetEvent: (draft, _) =>
+                {
+                    events.Add(draft);
+                    return Task.FromResult<FleetEvent?>(null);
+                }).AdvanceAsync(Now, Ct);
+
+            Assert.DoesNotContain(events, entry => entry.Kind == FleetEventKind.RevisionProduced);
+        }
+        finally
+        {
+            DirectoryCleanup.DeleteRecursively(home);
+        }
+    }
+
+    [Fact]
+    public async Task Overlapping_check_transitions_are_distinct_and_replays_are_idempotent()
+    {
+        var home = CreateTempHome();
+        using var scope = BatonEnvironmentSnapshot.BeginScope(BatonEnvironmentSnapshot.Blank with { HomeOverride = home });
+        try
+        {
+            var room = await WriteSettledRoomAsync(home, WorkflowOutcome.Succeeded, ApprovingVerdict);
+            var seeded = await SeedAsync(home, WorkStage.Review, room, round: 2);
+            await QueueStore.MutateAsync(
+                BatonPaths.QueueFile,
+                state => state with { Items = [seeded with { AttemptId = new FleetAttemptId("attempt-checks") }] }, Ct);
+            var pr = $$$"""
+                [{"number":77,"state":"OPEN","isDraft":true,"headRefOid":"{{{FullPushedSha}}}",
+                  "headRefName":"1934-lane","baseRefName":"main","isCrossRepository":false,
+                  "statusCheckRollup":[
+                    {"databaseId":101,"name":"gates","status":"IN_PROGRESS","startedAt":"2026-09-11T15:00:00Z"},
+                    {"detailsUrl":"https://github.com/aer-works/baton/actions/runs/88/job/202",
+                     "name":"gates","status":"IN_PROGRESS","startedAt":"2026-09-11T15:01:00Z"},
+                    {"databaseId":101,"name":"gates","status":"COMPLETED","conclusion":"SUCCESS",
+                     "startedAt":"2026-09-11T15:00:00Z","completedAt":"2026-09-11T15:02:00Z"}]}]
+                """;
+            var log = new FleetEventLog(
+                Path.Combine(home, "events.jsonl"), Path.Combine(home, "events.1.jsonl"), 100_000);
+            var advancer = new WorkItemAdvancer(
+                new FakeGh(pr),
+                (_, _) => Task.FromResult<string?>(FullPushedSha),
+                appendFleetEvent: log.Append);
+
+            await advancer.AdvanceAsync(Now, Ct);
+            await advancer.AdvanceAsync(Now.AddMinutes(1), Ct);
+
+            var checks = (await log.ReadAfter(0, Ct))
+                .Where(entry => entry.Kind == FleetEventKind.CheckObserved)
+                .ToList();
+            Assert.Equal(3, checks.Count);
+            Assert.Equal(["101", "202", "101"], checks.Select(entry => entry.CheckRunId!.Value.Value));
+            Assert.Equal(["IN_PROGRESS", "IN_PROGRESS", "COMPLETED"], checks.Select(entry => entry.CheckStatus));
+            Assert.Null(checks[0].CheckConclusion);
+            Assert.Equal("SUCCESS", checks[2].CheckConclusion);
+            Assert.Equal(DateTimeOffset.Parse("2026-09-11T15:02:00Z"), checks[2].CheckCompletedAt);
         }
         finally
         {

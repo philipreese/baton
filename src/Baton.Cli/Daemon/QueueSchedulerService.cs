@@ -43,6 +43,7 @@ public sealed class QueueSchedulerService : BackgroundService
     private readonly Func<CancellationToken, Task<double>> _liveWeight;
     private readonly Func<double?> _freeGb;
     private readonly Func<DateTimeOffset> _now;
+    private readonly Func<string, CancellationToken, Task<string?>> _workspaceHead;
     private readonly WorkItemAdvancer _advancer;
     private readonly Func<CancellationToken, Task>? _beforeLaunchClaim;
     private readonly Func<FleetEventDraft, CancellationToken, Task<FleetEvent?>> _appendFleetEvent;
@@ -68,13 +69,15 @@ public sealed class QueueSchedulerService : BackgroundService
         WorkItemAdvancer? advancer = null,
         Func<CancellationToken, Task<IReadOnlyList<QueueLaneAdoption>>>? adopt = null,
         Func<CancellationToken, Task>? beforeLaunchClaim = null,
-        Func<FleetEventDraft, CancellationToken, Task<FleetEvent?>>? appendFleetEvent = null)
+        Func<FleetEventDraft, CancellationToken, Task<FleetEvent?>>? appendFleetEvent = null,
+        Func<string, CancellationToken, Task<string?>>? workspaceHead = null)
     {
         _launch = launch ?? QueueLauncher.LaunchAsync;
         _adopt = adopt ?? QueueLauncher.AdoptLaunchedLanesAsync;
         _liveWeight = liveWeight ?? CountLiveWeightAsync;
         _freeGb = freeGb ?? FreePhysicalMemory.TryReadGiB;
         _now = now ?? (() => DateTimeOffset.UtcNow);
+        _workspaceHead = workspaceHead ?? WorkspaceHead.TryCaptureAsync;
         _beforeLaunchClaim = beforeLaunchClaim;
         _appendFleetEvent = appendFleetEvent ?? ((_, _) => Task.FromResult<FleetEvent?>(null));
         _advancer = advancer ?? new WorkItemAdvancer(null, null, appendFleetEvent: _appendFleetEvent);
@@ -288,7 +291,18 @@ public sealed class QueueSchedulerService : BackgroundService
                 return interval;
             }
 
-            item = item with { LastAdmission = admission, AttemptId = attemptId };
+            // Only a stage allowed to author code receives a pre-attempt revision baseline. Review
+            // and re-review can observe an existing HEAD but can never become its producer merely by
+            // finishing while it is checked out.
+            var attemptBaseRevision = item.Stage is WorkStage.Implement or WorkStage.Fix or WorkStage.Continue
+                ? await _workspaceHead(item.Workspace, cancellationToken).ConfigureAwait(false)
+                : null;
+            item = item with
+            {
+                LastAdmission = admission,
+                AttemptId = attemptId,
+                AttemptBaseRevision = attemptBaseRevision,
+            };
 
             // The producer records the admitted declaration before a process can exist. A later
             // cancellation may win the queue claim, but that does not erase the admission decision
@@ -331,6 +345,7 @@ public sealed class QueueSchedulerService : BackgroundService
                         Error = null,
                         LastAdmission = admission,
                         AttemptId = attemptId,
+                        AttemptBaseRevision = attemptBaseRevision,
                     }),
                 };
             }, CancellationToken.None).ConfigureAwait(false);
@@ -399,6 +414,7 @@ public sealed class QueueSchedulerService : BackgroundService
                     LaunchedAt = null,
                     ParentAttemptId = existing.AttemptId ?? existing.ParentAttemptId,
                     AttemptId = null,
+                    AttemptBaseRevision = null,
                 }).ConfigureAwait(false);
                 await RecordAsync(
                     new QueueDecisionEntry(
@@ -734,11 +750,14 @@ public sealed class QueueSchedulerService : BackgroundService
 
     /// <summary>
     /// The preflight verdict is meaningful only for the exact role and requirement declaration it
-    /// inspected. Queue replacement is allowed while an item is queued, so claiming by tag/state
-    /// alone could otherwise launch a just-replaced imported task under the old verdict.
+    /// inspected. The pre-attempt revision is likewise evidence about one exact workspace and stage.
+    /// Queue replacement is allowed while an item is queued, so claiming by tag/state alone could
+    /// otherwise launch a just-replaced imported task under an old verdict or revision baseline.
     /// </summary>
     private static bool HasSameAdmissionDeclaration(QueueItem current, QueueItem admitted) =>
         string.Equals(current.Role, admitted.Role, StringComparison.Ordinal)
+        && current.Stage == admitted.Stage
+        && string.Equals(current.Workspace, admitted.Workspace, StringComparison.Ordinal)
         && SameRequirements(current.Requirements, admitted.Requirements);
 
     private static bool SameRequirements(IReadOnlyList<string>? left, IReadOnlyList<string>? right) =>

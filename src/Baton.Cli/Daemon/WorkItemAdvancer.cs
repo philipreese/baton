@@ -370,6 +370,7 @@ public sealed class WorkItemAdvancer
             LaunchedAt = null,
             ParentAttemptId = existing.AttemptId ?? existing.ParentAttemptId,
             AttemptId = null,
+            AttemptBaseRevision = null,
             Error = null,
             ReadinessMutationClaim = null,
         }, () =>
@@ -983,10 +984,11 @@ public sealed class WorkItemAdvancer
             return false;
         }
 
-        var checks = PullRequestChecks.Summarize(
-            root.TryGetProperty("statusCheckRollup", out var rollup) ? rollup : null);
+        var statusCheckRollup = root.TryGetProperty("statusCheckRollup", out var rollup) ? rollup : (JsonElement?)null;
+        var checks = PullRequestChecks.Summarize(statusCheckRollup);
+        var checkRuns = PullRequestChecks.ObserveRuns(statusCheckRollup);
         observation = new PullRequestObservation(
-            true, number, headSha, mergeSha, isOpen, isDraft, checks, null, null);
+            true, number, headSha, mergeSha, isOpen, isDraft, checks, checkRuns, null, null);
         return true;
     }
 
@@ -1029,12 +1031,22 @@ public sealed class WorkItemAdvancer
             DeclaredRole: item.Role,
             EffectiveGrant: item.LastAdmission?.EffectiveGrant);
 
-        if (workspaceHead is { Length: > 0 } producedHead)
+        var revisionKind = stage switch
+        {
+            WorkStage.Implement => FleetRevisionKind.Implementation,
+            WorkStage.Fix or WorkStage.Continue => FleetRevisionKind.Repair,
+            _ => (FleetRevisionKind?)null,
+        };
+        if (revisionKind is not null
+            && item.AttemptBaseRevision is { Length: > 0 } baseRevision
+            && workspaceHead is { Length: > 0 } producedHead
+            && !string.Equals(baseRevision, producedHead, StringComparison.OrdinalIgnoreCase))
         {
             await _appendFleetEvent(
                 Base(FleetEventKind.RevisionProduced, $"revision:{attemptId.Value}:{producedHead}") with
                 {
                     RevisionId = new FleetRevisionId(producedHead),
+                    RevisionKind = revisionKind,
                 }, cancellationToken).ConfigureAwait(false);
         }
 
@@ -1047,14 +1059,21 @@ public sealed class WorkItemAdvancer
                     RevisionId = new FleetRevisionId(pullRequestHead),
                 }, cancellationToken).ConfigureAwait(false);
 
-            if (pr.Checks is { Length: > 0 } checks)
+            foreach (var check in pr.CheckRuns)
             {
                 await _appendFleetEvent(
-                    Base(FleetEventKind.CheckObserved, $"check:{attemptId.Value}:{number}:{pullRequestHead}:{checks}") with
+                    Base(
+                        FleetEventKind.CheckObserved,
+                        CheckDedupeKey(attemptId, number, pullRequestHead, check)) with
                     {
                         PullRequestId = number,
                         RevisionId = new FleetRevisionId(pullRequestHead),
-                        CheckConclusion = checks,
+                        CheckRunId = new FleetCheckRunId(check.CheckRunId),
+                        CheckName = check.Name,
+                        CheckStatus = check.Status,
+                        CheckConclusion = check.Conclusion,
+                        CheckStartedAt = check.StartedAt,
+                        CheckCompletedAt = check.CompletedAt,
                     }, cancellationToken).ConfigureAwait(false);
             }
         }
@@ -1090,6 +1109,23 @@ public sealed class WorkItemAdvancer
     private static bool IsFullSha(string value) =>
         value.Length == 40 && value.All(char.IsAsciiHexDigit);
 
+    private static string CheckDedupeKey(
+        FleetAttemptId attemptId,
+        int pullRequest,
+        string revision,
+        PullRequestCheckRun check) =>
+        string.Join(
+            ':',
+            "check",
+            attemptId.Value,
+            pullRequest.ToString(CultureInfo.InvariantCulture),
+            revision,
+            check.CheckRunId,
+            check.Status ?? "unknown",
+            check.Conclusion ?? "unknown",
+            check.StartedAt?.ToUniversalTime().ToString("O", CultureInfo.InvariantCulture) ?? "unknown",
+            check.CompletedAt?.ToUniversalTime().ToString("O", CultureInfo.InvariantCulture) ?? "unknown");
+
     private static Task<FleetEvent?> AppendOperationalFleetEventAsync(
         FleetEventDraft draft, CancellationToken cancellationToken) =>
         FleetEventLog.OpenOperational().Append(draft, cancellationToken);
@@ -1105,16 +1141,17 @@ public sealed class WorkItemAdvancer
         bool? IsOpen,
         bool? IsDraft,
         string? Checks,
+        IReadOnlyList<PullRequestCheckRun> CheckRuns,
         string? RequiredChecks,
         string? Error)
     {
         internal static PullRequestObservation NoPullRequest { get; } =
-            new(true, null, null, null, false, null, null, null, null);
+            new(true, null, null, null, false, null, null, [], null, null);
 
         internal static PullRequestObservation Failed(
             string error, PullRequestObservation? last = null) =>
             new(false, last?.Number, last?.HeadSha, last?.MergeSha, last?.IsOpen, last?.IsDraft,
-                last?.Checks, null, error);
+                last?.Checks, last?.CheckRuns ?? [], null, error);
     }
 
     /// <summary>

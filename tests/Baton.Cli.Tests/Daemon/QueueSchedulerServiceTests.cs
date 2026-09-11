@@ -623,6 +623,49 @@ public sealed class QueueSchedulerServiceTests
     }
 
     [Fact]
+    public async Task A_code_attempt_persists_its_pre_launch_revision_before_the_worker_starts()
+    {
+        var home = CreateTempHome();
+        using var scope = BatonEnvironmentSnapshot.BeginScope(BatonEnvironmentSnapshot.Blank with { HomeOverride = home });
+        try
+        {
+            const string baseRevision = "89abcdef0123456789abcdef0123456789abcdef";
+            await QueueStore.MutateAsync(
+                BatonPaths.QueueFile,
+                state => state with { Items = [Item() with { Stage = WorkStage.Implement }] }, Ct);
+            var headObserved = false;
+            QueueLaunchRequest? launched = null;
+            var service = new QueueSchedulerService(
+                (request, _) =>
+                {
+                    Assert.True(headObserved);
+                    launched = request;
+                    return Task.FromResult(new QueueLaunchOutcome(request.RoomDirectory));
+                },
+                _ => Task.FromResult(0d),
+                () => 16d,
+                () => DateTimeOffset.UtcNow,
+                workspaceHead: (_, _) =>
+                {
+                    headObserved = true;
+                    return Task.FromResult<string?>(baseRevision);
+                });
+
+            await service.TickOnceAsync(Ct);
+
+            var persisted = Assert.Single((await QueueStore.LoadAsync(BatonPaths.QueueFile, Ct)).Items);
+            Assert.Equal(baseRevision, persisted.AttemptBaseRevision);
+            Assert.Equal(baseRevision, launched!.Item.AttemptBaseRevision);
+            Assert.NotNull(persisted.AttemptId);
+            Assert.Equal(persisted.AttemptId, launched.Item.AttemptId);
+        }
+        finally
+        {
+            Cleanup(home);
+        }
+    }
+
+    [Fact]
     public async Task Admission_and_attempt_start_share_the_producer_owned_attempt_id()
     {
         var home = CreateTempHome();

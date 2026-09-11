@@ -226,6 +226,13 @@ public sealed record QueueItem
     /// </summary>
     public FleetAttemptId? AttemptId { get; init; }
 
+    /// <summary>
+    /// The workspace HEAD captured immediately before the current launch was claimed. It is the
+    /// producer-owned baseline used to decide whether this attempt actually produced a revision;
+    /// null on historical rows, review attempts, and whenever the local git probe had no answer.
+    /// </summary>
+    public string? AttemptBaseRevision { get; init; }
+
     /// <summary>The immediately preceding lifecycle attempt, when this row was queued from one.</summary>
     public FleetAttemptId? ParentAttemptId { get; init; }
 
