@@ -48,6 +48,8 @@ public static class QueueBoard
     /// <param name="verdictDecision">Reads an item's last recorded verdict; null when there is none.
     /// A delegate rather than a field on the item, because a verdict is a file on disk and this
     /// function does no I/O.</param>
+    /// <param name="observationNow">The explicit instant used to classify PR observation freshness.
+    /// It is required so identical inputs always produce an identical projection.</param>
     public static QueueBoardView Project(
         IReadOnlyList<QueueItem> items,
         bool held,
@@ -58,8 +60,8 @@ public static class QueueBoard
         QueueDecisionEntry? lastDecision,
         Func<QueueItem, bool> briefExists,
         Func<QueueItem, string?> verdictDecision,
+        DateTimeOffset observationNow,
         IReadOnlyList<QueuePullRequestObservation>? pullRequestObservations = null,
-        DateTimeOffset? observationNow = null,
         TimeSpan? observationFreshness = null)
     {
         ArgumentNullException.ThrowIfNull(items);
@@ -142,7 +144,6 @@ public static class QueueBoard
         var observations = (pullRequestObservations ?? [])
             .GroupBy(o => new QualifiedPullRequest(o.Repository, o.PullRequest))
             .ToDictionary(g => g.Key, g => g.OrderByDescending(o => o.AttemptedAt).First());
-        var now = observationNow ?? DateTimeOffset.UtcNow;
         var freshness = observationFreshness ?? TimeSpan.Zero;
         var prItems = OrderTwinsAdjacent(items)
             .Where(item => item.Stage is not null && item.PullRequest is not null)
@@ -166,8 +167,8 @@ public static class QueueBoard
                 : null;
             var isCurrent = knownState is not null
                 && observation is { Error: null, ObservedAt: { } observedAt }
-                && now >= observedAt
-                && now - observedAt <= freshness;
+                && observationNow >= observedAt
+                && observationNow - observedAt <= freshness;
             var freshnessWord = isCurrent
                 ? PullRequestObservationFreshness.Current
                 : observation is null || observation.ObservedAt is null

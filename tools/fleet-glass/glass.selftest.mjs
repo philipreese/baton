@@ -239,6 +239,7 @@ check("(control) an unheld queue does not",
     { repository: "github.com/acme/one", pr: 2028, prState: "open", freshness: "current", observedAt: "2026-09-07T11:59:30Z", headSha: "aaaaaaaa11111111", deployment: "not-recorded", lanes: [
       { tag: "a", stage: "review", state: "Done", round: 1, verdict: "block", checks: "failing", checksObservedAt: "2026-09-07T11:00:00Z", checksHeadSha: "bbbbbbbb22222222" },
       { tag: "cancelled", stage: "review", state: "Cancelled", round: 2 },
+      { tag: "halted", stage: "fix", state: "Failed", round: 2, halted: true },
     ] },
     { repository: "github.com/acme/two", pr: 2035, prState: "closed", freshness: "stale", observedAt: "2026-09-07T09:00:00Z", observationError: "gh pr view exited 1", deployment: "not-recorded", lanes: [
       { tag: "b", stage: "ready", state: "Queued", round: 3, verdict: "approve", checks: "passing", checksObservedAt: "2026-09-07T11:59:30Z" },
@@ -250,6 +251,8 @@ check("(control) an unheld queue does not",
   check("a PR with no verdict yet says so rather than rendering blank", out.includes("no verdict"));
   check("historical checks name their commit, while legacy checks say commit unknown",
         out.includes("failing (1h ago; bbbbbbbb)") && out.includes("passing (just now; commit unknown)"));
+  check("(control) checks never observed says so, not 'passing'", out.includes("checks not observed"));
+  check("a halted work item remains marked on its grouped PR row", out.includes("halted lane"));
   check("a cancelled lane on a confirmed-open PR is labelled explicitly", out.includes("cancelled lane · open PR"));
   check("stale closed evidence remains follow-up and says last known, never current closed",
         out.includes("last known closed · stale") && out.includes("lookup: gh pr view exited 1"));

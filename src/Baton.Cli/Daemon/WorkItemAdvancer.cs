@@ -41,6 +41,7 @@ public sealed class WorkItemAdvancer
     private readonly IGhCliRunner _gh;
     private readonly Func<string, CancellationToken, Task<string?>> _workspaceHead;
     private readonly Func<string, CancellationToken, Task<RepositoryIdentity?>>? _repositoryIdentity;
+    private readonly TimeSpan _boardObservationTimeout;
 
     public WorkItemAdvancer()
         : this(null, null, RepositoryIdentityResolver.TryResolveAsync)
@@ -52,11 +53,13 @@ public sealed class WorkItemAdvancer
     internal WorkItemAdvancer(
         IGhCliRunner? gh,
         Func<string, CancellationToken, Task<string?>>? workspaceHead,
-        Func<string, CancellationToken, Task<RepositoryIdentity?>>? repositoryIdentity = null)
+        Func<string, CancellationToken, Task<RepositoryIdentity?>>? repositoryIdentity = null,
+        TimeSpan? boardObservationTimeout = null)
     {
         _gh = gh ?? new GhCliRunner();
         _workspaceHead = workspaceHead ?? ReadWorkspaceHeadAsync;
         _repositoryIdentity = repositoryIdentity;
+        _boardObservationTimeout = boardObservationTimeout ?? WorkspaceDeliveryProbe.SpawnTimeout;
     }
 
     /// <summary>
@@ -68,8 +71,6 @@ public sealed class WorkItemAdvancer
         DateTimeOffset now, CancellationToken cancellationToken)
     {
         var snapshot = await QueueStore.LoadAsync(BatonPaths.QueueFile, cancellationToken).ConfigureAwait(false);
-        await RefreshPullRequestObservationsAsync(snapshot, now, cancellationToken).ConfigureAwait(false);
-        snapshot = await QueueStore.LoadAsync(BatonPaths.QueueFile, cancellationToken).ConfigureAwait(false);
 
         // Settled, staged, and not one this advance has already given up on. Ready items are included
         // even though they have no room: their persisted verdict must be reconciled against a later
@@ -536,14 +537,15 @@ public sealed class WorkItemAdvancer
     }
 
     /// <summary>
-    /// Refreshes independent board evidence on the queue scheduler's existing cadence. There is at
-    /// most one read per distinct repository/number, never one per retained lane. Reads finish before
+    /// Refreshes independent board evidence on the existing delivery poller's forge cadence. There is
+    /// at most one read per poll, never one per retained lane. Reads finish before
     /// the queue lock is acquired; the mutation re-derives the live key set so a late result cannot
     /// recreate evidence for a PR whose last lane was removed meanwhile.
     /// </summary>
-    private async Task RefreshPullRequestObservationsAsync(
-        QueueSnapshot snapshot, DateTimeOffset now, CancellationToken cancellationToken)
+    internal async Task RefreshPullRequestObservationsAsync(
+        DateTimeOffset now, CancellationToken cancellationToken)
     {
+        var snapshot = await QueueStore.LoadAsync(BatonPaths.QueueFile, cancellationToken).ConfigureAwait(false);
         var keys = ObservationKeys(snapshot.Items);
         var existing = (snapshot.PullRequestObservations ?? [])
             .GroupBy(o => new QualifiedPullRequest(o.Repository, o.PullRequest))
@@ -552,19 +554,31 @@ public sealed class WorkItemAdvancer
         var due = keys
             .Where(key => !existing.TryGetValue(key, out var cached)
                 || cached.AttemptedAt > now || now - cached.AttemptedAt >= retryAfter)
-            // Reuse the CLI's existing bounded GitHub traversal ceiling rather than introducing an
-            // unmeasured observation-load setting. Attempt stamps rotate a larger retained history
-            // over later scheduler ticks instead of letting its first page starve the rest.
-            .Take(LedgerBackfillCommand.MaxPullRequests)
+            // Oldest attempt first is the rotation. This matters when the delivery cadence is wider
+            // than the retry window: every cached key may be due, and insertion order would otherwise
+            // select the same first PR forever.
+            .OrderBy(key => existing.TryGetValue(key, out var cached)
+                ? cached.AttemptedAt
+                : DateTimeOffset.MinValue)
+            .ThenBy(key => key.Repository, StringComparer.Ordinal)
+            .ThenBy(key => key.PullRequest)
+            // One network read per delivery-poller tick is the explicit rate bound. Attempt stamps
+            // rotate a larger retained history across later polls instead of bursting every due key.
+            .Take(1)
             .ToList();
 
         var refreshed = new Dictionary<QualifiedPullRequest, QueuePullRequestObservation>();
         foreach (var key in due)
         {
             existing.TryGetValue(key, out var prior);
-            var item = snapshot.Items.First(i => i.PullRequest == key.PullRequest
-                && string.Equals(i.Repository, key.Repository, StringComparison.Ordinal));
-            refreshed[key] = await ReadBoardObservationAsync(key, item.Workspace, prior, now, cancellationToken)
+            var workspaces = snapshot.Items
+                .Where(i => i.PullRequest == key.PullRequest
+                    && string.Equals(i.Repository, key.Repository, StringComparison.Ordinal))
+                .Select(i => i.Workspace)
+                .Where(workspace => !string.IsNullOrWhiteSpace(workspace))
+                .Distinct(StringComparer.OrdinalIgnoreCase)
+                .ToList();
+            refreshed[key] = await ReadBoardObservationAsync(key, workspaces, prior, now, cancellationToken)
                 .ConfigureAwait(false);
         }
 
@@ -609,7 +623,7 @@ public sealed class WorkItemAdvancer
 
     private async Task<QueuePullRequestObservation> ReadBoardObservationAsync(
         QualifiedPullRequest key,
-        string workspace,
+        IReadOnlyList<string> workspaces,
         QueuePullRequestObservation? prior,
         DateTimeOffset now,
         CancellationToken cancellationToken)
@@ -620,24 +634,44 @@ public sealed class WorkItemAdvancer
             return FailedBoardObservation(key, prior, now, "the stored repository identity is invalid");
         }
 
-        if (Directory.Exists(workspace) && _repositoryIdentity is not null)
+        var survivingWorkspaces = workspaces
+            .Where(Directory.Exists)
+            .ToList();
+        if (_repositoryIdentity is not null)
         {
-            var current = await _repositoryIdentity(workspace, cancellationToken).ConfigureAwait(false);
-            if (!string.Equals(current?.RemoteValue, key.Repository, StringComparison.Ordinal))
+            foreach (var workspace in survivingWorkspaces)
             {
-                return FailedBoardObservation(
-                    key, prior, now, $"repository context drifted from persisted '{key.Repository}'");
+                var current = await _repositoryIdentity(workspace, cancellationToken).ConfigureAwait(false);
+                if (!string.Equals(current?.RemoteValue, key.Repository, StringComparison.Ordinal))
+                {
+                    return FailedBoardObservation(
+                        key, prior, now,
+                        $"repository context at '{workspace}' drifted from persisted '{key.Repository}'");
+                }
             }
         }
 
-        var workingDirectory = Directory.Exists(workspace)
-            ? workspace
-            : Path.GetDirectoryName(BatonPaths.QueueFile)!;
-        var result = await _gh.RunAsync(
-            workingDirectory,
-            ["pr", "view", key.PullRequest.ToString(CultureInfo.InvariantCulture),
-             "--json", BoardObservationJsonFields, "--repo", key.Repository],
-            cancellationToken).ConfigureAwait(false);
+        var workingDirectory = survivingWorkspaces.FirstOrDefault()
+            ?? Path.GetDirectoryName(BatonPaths.QueueFile)!;
+        GhCliResult result;
+        using (var bound = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken))
+        {
+            bound.CancelAfter(_boardObservationTimeout);
+            try
+            {
+                result = await _gh.RunAsync(
+                    workingDirectory,
+                    ["pr", "view", key.PullRequest.ToString(CultureInfo.InvariantCulture),
+                     "--json", BoardObservationJsonFields, "--repo", key.Repository],
+                    bound.Token).WaitAsync(bound.Token).ConfigureAwait(false);
+            }
+            catch (OperationCanceledException) when (!cancellationToken.IsCancellationRequested)
+            {
+                return FailedBoardObservation(
+                    key, prior, now,
+                    $"gh pr view timed out after {_boardObservationTimeout.TotalSeconds.ToString(CultureInfo.InvariantCulture)} seconds");
+            }
+        }
         if (!result.Started || result.ExitCode != 0)
         {
             return FailedBoardObservation(

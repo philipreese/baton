@@ -7024,12 +7024,13 @@ change to how they are derived can never move an item to a different stage.
 **Current PR state is a repository-qualified observation, not a lane outcome (#2200).** The queue
 snapshot's top-level `pullRequestObservations` collection keys one read by canonical
 `host/owner/repo` plus PR number and shares it across every retained lane with that key; same-number
-PRs in different repositories remain different observations. Each tick is capped by
-`LedgerBackfillCommand.MaxPullRequests`, the existing bounded GitHub traversal ceiling; attempt
-stamps rotate a larger retained set across later ticks. The scheduler refreshes these through
-its existing `IGhCliRunner` on its existing cadence, outside the queue lock, and conditionally writes
-only keys still named by the locked snapshot. The freshness window is the fleet projection's existing
-three-tick threshold, applied to attempts as the retry backoff too: a fresh confirmed `open` remains
+PRs in different repositories remain different observations. The existing `DeliveryPoller` refreshes
+one qualified PR per poll through its existing `IGhCliRunner`; attempt stamps rotate a larger retained
+set across later polls instead of bursting forge reads. Each read has the existing 20-second child-process
+bound and host cancellation, runs outside the queue lock and the scheduler's launch path, and conditionally
+writes only keys still named by the locked snapshot. Every distinct surviving workspace for a shared PR is
+validated, and any drift makes the observation unknown. The freshness window is the fleet projection's
+existing three-tick threshold, applied to attempts as the retry backoff too: a fresh confirmed `open` remains
 current follow-up, while fresh confirmed `merged` and `closed` are distinct rows in collapsed history.
 Missing, malformed, failed, or stale evidence remains in current follow-up as `unknown` or “last known
 … stale”; `closed` is never cached forever because it is re-read after that window and a reopened PR

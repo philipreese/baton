@@ -59,7 +59,8 @@ public sealed class QueueBoardTests
         TimeSpan? observationFreshness = null) =>
         QueueBoard.Project(
             items, held, settings ?? new QueueSettings(), lanes ?? [], freeGb, Noon, lastDecision,
-            briefExists ?? (_ => true), verdict ?? (_ => null), observations, observationNow, observationFreshness);
+            briefExists ?? (_ => true), verdict ?? (_ => null),
+            observationNow ?? new DateTimeOffset(Noon), observations, observationFreshness);
 
     [Fact]
     public void Slots_report_the_cap_the_live_total_and_the_floor_beside_the_reading()
@@ -100,7 +101,8 @@ public sealed class QueueBoardTests
     {
         var night = QueueBoard.Project(
             [], false, new QueueSettings(), [], 1.0,
-            new DateTime(2026, 9, 7, 23, 0, 0, DateTimeKind.Local), null, _ => true, _ => null);
+            new DateTime(2026, 9, 7, 23, 0, 0, DateTimeKind.Local), null, _ => true, _ => null,
+            new DateTimeOffset(2026, 9, 8, 3, 0, 0, TimeSpan.Zero));
 
         Assert.True(night.Slots.NightBand);
         Assert.Equal(QueueSettings.DefaultFloorGbNight, night.Slots.FloorGb);
