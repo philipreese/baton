@@ -263,7 +263,12 @@ public static class MemoryProjectionObligationStore
         if (obligation.AttemptId is not { Length: > 0 }
             || obligation.Repository is not { Length: > 0 }
             || obligation.RepositorySlug is not { Length: > 0 }
-            || obligation.FailedAttempts < 0)
+            || obligation.FailedAttempts < 0
+            || !Enum.IsDefined(obligation.Status)
+            || (obligation.Status == MemoryProjectionObligationStatus.Pending
+                && obligation.NextAttemptUtc is null)
+            || (obligation.Status == MemoryProjectionObligationStatus.Escalated
+                && obligation.NextAttemptUtc is not null))
         {
             throw new InvalidDataException("Memory projection obligation has an incomplete or invalid shape.");
         }

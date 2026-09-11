@@ -114,7 +114,10 @@ public static class MemoryAddCommand
 
         await MemoryStoreMetadataStore.EnsureAsync(repository, slug, cancellationToken).ConfigureAwait(false);
 
-        var appended = await MemoryStore.AppendAndGetAppendedAsync([entry], entriesFile, cancellationToken)
+        // Metadata initialization is the canonical commit boundary. It re-checks cancellation after
+        // acquiring its mutex; once it succeeds, finish the first append so metadata cannot describe
+        // an empty store solely because cancellation arrived between these two durable writes.
+        var appended = await MemoryStore.AppendAndGetAppendedAsync([entry], entriesFile, CancellationToken.None)
             .ConfigureAwait(false);
         if (appended.Count == 0)
         {

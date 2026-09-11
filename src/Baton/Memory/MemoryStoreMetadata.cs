@@ -16,9 +16,12 @@ public sealed record MemoryStoreMetadata(int Version, string Repository, string 
 /// <summary>Owns the immutable <c>store.json</c> identity metadata for canonical memory stores.</summary>
 public static class MemoryStoreMetadataStore
 {
-    private const string LockNamePrefix = "baton-memory-store-metadata";
+    internal const string LockNamePrefix = "baton-memory-store-metadata";
     private static readonly TimeSpan LockTimeout = TimeSpan.FromSeconds(30);
     private static readonly JsonSerializerOptions Json = new(JsonSerializerDefaults.Web) { WriteIndented = true };
+
+    /// <summary>Test-only observation that an ensure operation has entered its worker thread.</summary>
+    internal static Action<string>? EnsureOperationObserver { get; set; }
 
     /// <summary>
     /// Creates the metadata before a canonical mutation. Repeated calls for the same identity write
@@ -40,54 +43,74 @@ public static class MemoryStoreMetadataStore
 
         var path = BatonPaths.MemoryStoreMetadataFile(repositorySlug);
         return Task.Run(
-            () => MutexGuardedFileLock.RunUnderLock(
-                path,
-                LockNamePrefix,
-                LockTimeout,
-                () =>
-                {
-                    var existing = ReadUnlocked(path);
-                    if (existing is not null)
+            () =>
+            {
+                EnsureOperationObserver?.Invoke(path);
+                MutexGuardedFileLock.RunUnderLock(
+                    path,
+                    LockNamePrefix,
+                    LockTimeout,
+                    () =>
                     {
-                        if (!string.Equals(existing.Repository, repository, StringComparison.OrdinalIgnoreCase)
-                            || !string.Equals(existing.RepositorySlug, repositorySlug, StringComparison.OrdinalIgnoreCase))
+                        // Task.Run's token only prevents work that has not started. Cancellation can arrive
+                        // while this worker is already waiting for the mutex, so observe it again inside
+                        // the critical section before store.json can be created.
+                        cancellationToken.ThrowIfCancellationRequested();
+                        var existing = ReadUnlocked(path);
+                        if (existing is not null)
                         {
-                            throw new InvalidDataException(
-                                $"Memory store metadata '{path}' names '{existing.Repository}' / " +
-                                $"'{existing.RepositorySlug}', not '{repository}' / '{repositorySlug}'.");
+                            if (!string.Equals(existing.Repository, repository, StringComparison.OrdinalIgnoreCase)
+                                || !string.Equals(existing.RepositorySlug, repositorySlug, StringComparison.OrdinalIgnoreCase))
+                            {
+                                throw new InvalidDataException(
+                                    $"Memory store metadata '{path}' names '{existing.Repository}' / " +
+                                    $"'{existing.RepositorySlug}', not '{repository}' / '{repositorySlug}'.");
+                            }
+
+                            return;
                         }
 
-                        return;
-                    }
-
-                    Directory.CreateDirectory(Path.GetDirectoryName(path)!);
-                    var metadata = new MemoryStoreMetadata(
-                        MemoryStoreMetadata.CurrentVersion, repository, repositorySlug);
-                    var tempPath = $"{path}.{Guid.NewGuid():N}.tmp";
-                    try
-                    {
-                        File.WriteAllText(
-                            tempPath,
-                            JsonSerializer.Serialize(metadata, Json) + "\n",
-                            new UTF8Encoding(false));
-                        File.Move(tempPath, path);
-                    }
-                    finally
-                    {
-                        File.Delete(tempPath);
-                    }
-                }),
-            cancellationToken);
+                        Directory.CreateDirectory(Path.GetDirectoryName(path)!);
+                        var metadata = new MemoryStoreMetadata(
+                            MemoryStoreMetadata.CurrentVersion, repository, repositorySlug);
+                        var tempPath = $"{path}.{Guid.NewGuid():N}.tmp";
+                        try
+                        {
+                            File.WriteAllText(
+                                tempPath,
+                                JsonSerializer.Serialize(metadata, Json) + "\n",
+                                new UTF8Encoding(false));
+                            File.Move(tempPath, path);
+                        }
+                        finally
+                        {
+                            File.Delete(tempPath);
+                        }
+                    });
+            },
+            CancellationToken.None);
     }
 
     /// <summary>
     /// Reads metadata for inventory and recovery. Only a genuinely absent file identifies a legacy
     /// store; malformed, mismatched and inaccessible metadata fail closed so rows cannot relabel it.
     /// </summary>
-    public static MemoryStoreMetadata? ReadIfPresent(string repositorySlug)
+    public static MemoryStoreMetadata? ReadIfPresent(string repositorySlug) =>
+        ReadIfPresent(repositorySlug, BatonPaths.Root);
+
+    /// <summary>
+    /// Reads metadata relative to the root whose inventory is being scanned. Only a genuinely absent
+    /// file identifies a legacy store; malformed, mismatched and inaccessible metadata fail closed.
+    /// </summary>
+    public static MemoryStoreMetadata? ReadIfPresent(string repositorySlug, string batonRoot)
     {
         ArgumentException.ThrowIfNullOrEmpty(repositorySlug);
-        var path = BatonPaths.MemoryStoreMetadataFile(repositorySlug);
+        ArgumentException.ThrowIfNullOrEmpty(batonRoot);
+        var path = Path.Combine(
+            batonRoot,
+            repositorySlug,
+            BatonPaths.MemoryDirectoryName,
+            BatonPaths.MemoryStoreMetadataFileName);
         return MutexGuardedFileLock.RunUnderLock(
             path, LockNamePrefix, LockTimeout, () => ReadUnlocked(path));
     }

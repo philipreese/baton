@@ -166,11 +166,6 @@ public static class MemoryImportCommand
             var linksFile = BatonPaths.MemoryLinksFile(slug);
             var entries = group.ToList();
 
-            if (!options.DryRun)
-            {
-                await MemoryStoreMetadataStore.EnsureAsync(group.Key, slug, cancellationToken).ConfigureAwait(false);
-            }
-
             // Read first so the manifest can say which rows THIS run appended: an undo must not remove
             // an entry an earlier import wrote. The append itself re-checks under its own lock, so this
             // read is a report input and never the thing that keeps the file free of duplicates.
@@ -190,10 +185,24 @@ public static class MemoryImportCommand
             // A dry run has no lock-held append to observe, so it remains an advisory preview based on
             // the earlier reads. An applied manifest instead records the result decided under each
             // owning ledger lock: a concurrent import may have won between those reads and this call.
-            var appendedEntryIds = options.DryRun
-                ? entries.Where(e => !existing.Contains(e.Id)).Select(e => e.Id).ToHashSet(StringComparer.Ordinal)
-                : (await MemoryStore.AppendAndGetAppendedAsync(entries, entriesFile, cancellationToken)
+            HashSet<string> appendedEntryIds;
+            if (options.DryRun)
+            {
+                appendedEntryIds = entries
+                    .Where(e => !existing.Contains(e.Id))
+                    .Select(e => e.Id)
+                    .ToHashSet(StringComparer.Ordinal);
+            }
+            else
+            {
+                // Once metadata initialization succeeds, this call has crossed its canonical commit
+                // boundary. The first append must finish even if cancellation arrived while metadata
+                // was being written; otherwise store.json could outlive a row that never committed.
+                await MemoryStoreMetadataStore.EnsureAsync(group.Key, slug, cancellationToken).ConfigureAwait(false);
+                appendedEntryIds = (await MemoryStore.AppendAndGetAppendedAsync(
+                        entries, entriesFile, CancellationToken.None)
                     .ConfigureAwait(false)).Select(e => e.Id).ToHashSet(StringComparer.Ordinal);
+            }
             var appendedLinkIds = options.DryRun
                 ? links.Where(l => !existingLinks.Contains(l.Id)).Select(l => l.Id).ToHashSet(StringComparer.Ordinal)
                 : (await MemoryStore.AppendLinksAndGetAppendedAsync(links, linksFile, cancellationToken)
@@ -281,13 +290,20 @@ public static class MemoryImportCommand
                 DateTime.UtcNow))
             .ToList();
 
-        var appended = options.DryRun
-            ? asserted.Where(candidate => !recorded.Any(existing => BatonPaths.RecordKeyComparer.Equals(
-                    existing.Path, candidate.Path)))
-                .ToList()
-            : await MemoryAliasStore.AppendAndGetAppendedAsync(
+        IReadOnlyList<MemoryAliasEntry> appended;
+        if (options.DryRun)
+        {
+            var knownPaths = recorded
+                .Select(existing => existing.Path)
+                .ToHashSet(BatonPaths.RecordKeyComparer);
+            appended = asserted.Where(candidate => knownPaths.Add(candidate.Path)).ToList();
+        }
+        else
+        {
+            appended = await MemoryAliasStore.AppendAndGetAppendedAsync(
                     asserted, BatonPaths.MemoryAliasFile, cancellationToken)
                 .ConfigureAwait(false);
+        }
 
         return new AliasResolution([.. recorded, .. appended], appended);
     }

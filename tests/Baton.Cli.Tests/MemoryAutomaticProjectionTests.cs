@@ -1,4 +1,5 @@
 using System.Text;
+using System.Text.Json;
 using Baton.Accounting;
 using Baton.Cli.Daemon;
 using Baton.Memory;
@@ -310,6 +311,56 @@ public sealed class MemoryAutomaticProjectionTests : IDisposable
     }
 
     [Fact]
+    public async Task Dry_run_same_batch_aliases_keep_the_first_case_equivalent_assertion()
+    {
+        var root = Path.Combine(ClaudeHome, "projects", "c--unresolved", "memory");
+        Directory.CreateDirectory(root);
+        File.WriteAllText(Path.Combine(root, "user_fact.md"), "fixture alias fact");
+        var caseVariantRoot = root.ToUpperInvariant();
+        Assert.NotEqual(root, caseVariantRoot, StringComparer.Ordinal);
+
+        var output = new StringWriter();
+        Assert.Equal(0, await MemoryImportCommand.ExecuteAsync(
+            MemoryImportOptionsParser.Parse([
+                "--dry-run",
+                "--root", root,
+                "--assert", $"{root}={Repository}",
+                "--assert", $"{caseVariantRoot}={OtherRepository}",
+                "--asserted-by", "test",
+            ]),
+            output,
+            ClaudeHome,
+            TestContext.Current.CancellationToken,
+            UserHome));
+
+        Assert.Contains($"repository={Repository}", output.ToString(), StringComparison.Ordinal);
+        Assert.DoesNotContain($"repository={OtherRepository}", output.ToString(), StringComparison.Ordinal);
+        Assert.False(File.Exists(BatonPaths.MemoryAliasFile));
+    }
+
+    [Fact]
+    public void Custom_root_inventory_reads_metadata_from_the_scanned_root()
+    {
+        var customRoot = Path.Combine(_root, "custom-baton");
+        var customMetadata = Path.Combine(
+            customRoot, Slug, BatonPaths.MemoryDirectoryName, BatonPaths.MemoryStoreMetadataFileName);
+        Directory.CreateDirectory(Path.GetDirectoryName(customMetadata)!);
+        File.WriteAllText(
+            customMetadata,
+            JsonSerializer.Serialize(
+                new MemoryStoreMetadata(MemoryStoreMetadata.CurrentVersion, Repository, Slug),
+                new JsonSerializerOptions(JsonSerializerDefaults.Web)));
+
+        var processMetadata = BatonPaths.MemoryStoreMetadataFile(Slug);
+        Directory.CreateDirectory(Path.GetDirectoryName(processMetadata)!);
+        File.WriteAllText(processMetadata, "{ invalid process-root metadata");
+
+        var location = Assert.Single(CanonicalStoreInventory.Scan(customRoot));
+        Assert.Equal(Repository, location.Repository);
+        Assert.Equal(Slug, location.Slug);
+    }
+
+    [Fact]
     public async Task Store_metadata_refuses_a_foreign_row_before_any_projection()
     {
         var foreignRoot = await CreateTargetAsync(OtherRepository, "c--foreign");
@@ -354,7 +405,7 @@ public sealed class MemoryAutomaticProjectionTests : IDisposable
             UserHome));
         Assert.False(File.Exists(target));
 
-        File.Delete(metadataPath);
+        FileCleanup.EnsureDeleted(metadataPath);
         Directory.CreateDirectory(metadataPath);
         var inaccessible = await Assert.ThrowsAnyAsync<Exception>(() => MemorySyncCommand.ExecuteAsync(
             MemorySyncOptionsParser.Parse(["--repository", Repository, "--apply"]),
@@ -404,6 +455,35 @@ public sealed class MemoryAutomaticProjectionTests : IDisposable
     }
 
     [Fact]
+    public async Task Undefined_and_stalled_obligation_states_are_rejected_on_read()
+    {
+        var now = DateTime.UtcNow;
+        var invalid = new[]
+        {
+            new MemoryProjectionObligation(
+                "undefined", Repository, Slug, (MemoryProjectionObligationStatus)99,
+                0, now, null, now, null, null),
+            new MemoryProjectionObligation(
+                "pending-without-due", Repository, Slug, MemoryProjectionObligationStatus.Pending,
+                0, now, null, null, null, null),
+            new MemoryProjectionObligation(
+                "escalated-with-due", Repository, Slug, MemoryProjectionObligationStatus.Escalated,
+                MemoryProjectionObligationStore.EscalationAttemptCount, now, now, now, "failure", "repair"),
+        };
+        var path = BatonPaths.MemorySyncPendingFile(Slug);
+        Directory.CreateDirectory(Path.GetDirectoryName(path)!);
+
+        foreach (var obligation in invalid)
+        {
+            File.WriteAllText(
+                path,
+                JsonSerializer.Serialize(obligation, new JsonSerializerOptions(JsonSerializerDefaults.Web)));
+            await Assert.ThrowsAsync<InvalidDataException>(() => MemoryProjectionObligationStore.ReadAsync(
+                Slug, TestContext.Current.CancellationToken));
+        }
+    }
+
+    [Fact]
     public async Task Cancellation_after_commit_reports_pending_without_reporting_projection_finished()
     {
         await CreateTargetAsync();
@@ -435,12 +515,41 @@ public sealed class MemoryAutomaticProjectionTests : IDisposable
     }
 
     [Fact]
-    public async Task Cancellation_before_commit_still_cancels_without_creating_a_store()
+    public async Task Cancellation_while_metadata_initialization_waits_does_not_create_a_store()
     {
-        using var cancellation = new CancellationTokenSource();
-        cancellation.Cancel();
+        var metadataPath = BatonPaths.MemoryStoreMetadataFile(Slug);
+        using var holderReady = new ManualResetEventSlim();
+        using var releaseHolder = new ManualResetEventSlim();
+        using var ensureStarted = new ManualResetEventSlim();
+        var holder = Task.Run(
+            () =>
+            {
+                using var mutex = new Mutex(
+                    initiallyOwned: false,
+                    MutexGuardedFileLock.BuildMutexName(metadataPath, MemoryStoreMetadataStore.LockNamePrefix));
+                Assert.True(mutex.WaitOne(TimeSpan.FromMinutes(1)));
+                try
+                {
+                    holderReady.Set();
+                    releaseHolder.Wait(TestContext.Current.CancellationToken);
+                }
+                finally
+                {
+                    mutex.ReleaseMutex();
+                }
+            },
+            TestContext.Current.CancellationToken);
+        Assert.True(holderReady.Wait(TimeSpan.FromSeconds(30), TestContext.Current.CancellationToken));
 
-        await Assert.ThrowsAnyAsync<OperationCanceledException>(() => MemoryAddCommand.ExecuteAsync(
+        using var cancellation = new CancellationTokenSource();
+        MemoryStoreMetadataStore.EnsureOperationObserver = path =>
+        {
+            if (string.Equals(path, metadataPath, StringComparison.OrdinalIgnoreCase))
+            {
+                ensureStarted.Set();
+            }
+        };
+        var add = MemoryAddCommand.ExecuteAsync(
             MemoryAddOptionsParser.Parse([
                 "--repository", Repository, "--kind", "durable-fact", "--text", "must not commit",
             ]),
@@ -448,10 +557,24 @@ public sealed class MemoryAutomaticProjectionTests : IDisposable
             assertedByOverride: "test",
             cancellationToken: cancellation.Token,
             claudeHomeOverride: ClaudeHome,
-            userHomeOverride: UserHome));
+            userHomeOverride: UserHome);
+
+        try
+        {
+            Assert.True(ensureStarted.Wait(TimeSpan.FromSeconds(30), TestContext.Current.CancellationToken));
+            cancellation.Cancel();
+            releaseHolder.Set();
+            await Assert.ThrowsAnyAsync<OperationCanceledException>(() => add);
+            await holder;
+        }
+        finally
+        {
+            MemoryStoreMetadataStore.EnsureOperationObserver = null;
+            releaseHolder.Set();
+        }
 
         Assert.False(File.Exists(BatonPaths.MemoryEntriesFile(Slug)));
-        Assert.False(File.Exists(BatonPaths.MemoryStoreMetadataFile(Slug)));
+        Assert.False(File.Exists(metadataPath));
     }
 
     [Fact]
