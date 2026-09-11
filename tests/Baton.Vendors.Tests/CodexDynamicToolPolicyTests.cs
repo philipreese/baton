@@ -1867,6 +1867,45 @@ public sealed class CodexDynamicToolPolicyTests
             Assert.Contains("fixture stopped before process spawn", result.Text, StringComparison.Ordinal);
     }
 
+    [Theory]
+    [InlineData("@cmd /c \"gh pr create --fill\"", true, false)]
+    [InlineData("c^md /c \"gh pr create --fill\"", true, false)]
+    [InlineData("@cmd /c \"echo ordinary\"", false, false)]
+    [InlineData("c^md /c \"echo ordinary\"", false, false)]
+    [InlineData("git log --grep=don't", false, false)]
+    [InlineData("s\\h -c \"gh pr create --fill\"", false, true)]
+    [InlineData("s\\h -c \"echo ordinary\"", false, false)]
+    [InlineData("'cmd' /c \"gh pr create --fill\"", false, true)]
+    [InlineData("echo ordinary;cmd /c \"gh pr create --fill\"", false, true)]
+    [InlineData("echo ordinary^&cmd /c \"gh pr create --fill\"", false, true)]
+    [InlineData("echo ordinary\\&cmd /c \"gh pr create --fill\"", true, false)]
+    [InlineData("echo %PATH% $HOME *.cs {literal}", false, false)]
+    [InlineData("echo ordinary > out.txt 2>&1", false, false)]
+    [InlineData("if ordinary", false, false)]
+    public async Task Native_outer_shell_polarity_is_enforced_before_spawn(
+        string commandLine, bool windowsRefused, bool posixRefused)
+    {
+        var refused = OperatingSystem.IsWindows() ? windowsRefused : posixRefused;
+        var spawnPathReached = false;
+        using var fixture = new PolicyFixture(
+            WorkerRoleCatalog.For("implement").Grant, ["changes.md"],
+            commandCaptureStreamFactory: _ =>
+            {
+                spawnPathReached = true;
+                throw new IOException("fixture stopped before process spawn");
+            },
+            directGhOutput: "https://github.com/aer-works/baton/pull/2005");
+
+        var result = await fixture.ExecuteAsync(
+            CodexDynamicToolPolicy.RunCommandTool, new { command = commandLine });
+
+        Assert.Equal(!refused, spawnPathReached);
+        Assert.Equal(refused, result.Text.Contains(GrantRefusal.Marker, StringComparison.Ordinal));
+        Assert.False(File.Exists(fixture.DirectGhArguments));
+        if (!refused)
+            Assert.Contains("fixture stopped before process spawn", result.Text, StringComparison.Ordinal);
+    }
+
     [Fact]
     public async Task A_literal_create_mention_in_a_native_wrapper_reaches_real_output()
     {

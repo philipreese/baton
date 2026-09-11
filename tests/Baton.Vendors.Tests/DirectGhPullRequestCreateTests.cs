@@ -78,7 +78,7 @@ public sealed class DirectGhPullRequestCreateTests
     [InlineData("cmd /c \"echo gh pr create^&echo done\"", false)]
     [InlineData("pwsh -NoProfile -Command \"g`h pr create\"", true)]
     [InlineData("pwsh -Command \"& 'gh' pr create\"", true)]
-    [InlineData("powershell -Command Write-Output 'gh pr create&echo done'", false)]
+    [InlineData("powershell -Command Write-Output \"gh pr create&echo done\"", false)]
     [InlineData("pwsh -Command \"Write-Output 'it''s gh pr create&echo done'\"", false)]
     [InlineData("sh script.sh", false)]
     [InlineData("pwsh -File script.ps1", false)]
@@ -88,6 +88,34 @@ public sealed class DirectGhPullRequestCreateTests
         Assert.Equal(create, compiled.IsCreateCommand);
         Assert.Null(compiled.Arguments);
         if (create) Assert.NotNull(compiled.Refusal);
+    }
+
+    [Theory]
+    [InlineData("@cmd /c \"gh pr create\"", true, false)]
+    [InlineData("c^md /c \"gh pr create\"", true, false)]
+    [InlineData("s\\h -c \"gh pr create\"", false, true)]
+    [InlineData("'cmd' /c \"gh pr create\"", false, true)]
+    [InlineData("echo safe;cmd /c \"gh pr create\"", false, true)]
+    [InlineData("echo safe^&cmd /c \"gh pr create\"", false, true)]
+    [InlineData("echo safe\\&cmd /c \"gh pr create\"", true, false)]
+    [InlineData("git log --grep=don't", false, false)]
+    [InlineData("env -i c^md /c \"gh pr create\"", true, false)]
+    [InlineData("env -i s\\h -c \"gh pr create\"", false, true)]
+    [InlineData("env -i echo $HOME *.cs", false, false)]
+    [InlineData("sh -c \"g'h' pr create&&true\"", true, true)]
+    [InlineData("sh -c \"printf 'gh pr create&echo done'\"", false, false)]
+    [InlineData("cmd /c \"@g^h pr create&echo done\"", true, true)]
+    [InlineData("cmd /c \"echo gh pr create^&echo done\"", false, false)]
+    [InlineData("pwsh -Command \"g`h pr create\"", true, true)]
+    [InlineData("pwsh -Command \"Write-Output 'gh pr create&echo done'\"", false, false)]
+    [InlineData("sh -c \"env -i cmd /c 'gh pr create'\"", true, true)]
+    public void Outer_and_inner_shell_modes_have_independent_lexical_rules(
+        string command, bool windowsCreate, bool posixCreate)
+    {
+        Assert.Equal(windowsCreate ? ShellCreateLexicalClassifier.Result.Create : ShellCreateLexicalClassifier.Result.Ordinary,
+            ShellCreateLexicalClassifier.Classify(command, windows: true));
+        Assert.Equal(posixCreate ? ShellCreateLexicalClassifier.Result.Create : ShellCreateLexicalClassifier.Result.Ordinary,
+            ShellCreateLexicalClassifier.Classify(command, windows: false));
     }
 
     [Theory]

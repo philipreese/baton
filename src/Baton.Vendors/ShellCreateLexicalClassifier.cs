@@ -5,31 +5,33 @@ namespace Baton.Vendors;
 /// <summary>
 /// Recognition only: literal simple commands, environment launchers, and the existing shell-wrapper
 /// families. Never produces argv or evaluates expansions, scripts, or compound shell grammar.
-/// Dynamic words, compound constructs, unknown launcher options, and nesting beyond four levels
-/// return Unsupported. The caller supplies a direct-command alternative instead of guessing.
+/// Within wrapper bodies, dynamic words and compound constructs return Unsupported, as do unknown
+/// launcher options and nesting beyond four levels. The caller supplies a direct-command alternative.
 /// </summary>
 internal static class ShellCreateLexicalClassifier
 {
     internal enum Result { Ordinary, Create, Unsupported }
-    private enum Shell { Envelope, Posix, Cmd, PowerShell }
+    private enum Shell { Posix, Cmd, PowerShell }
     private sealed record Word(string Value, string Raw);
 
-    public static Result Classify(string? commandLine) => string.IsNullOrWhiteSpace(commandLine)
-        ? Result.Ordinary : ClassifyList(commandLine, Shell.Envelope, 0);
+    public static Result Classify(string? commandLine) => Classify(commandLine, OperatingSystem.IsWindows());
 
-    private static Result ClassifyList(string text, Shell shell, int depth)
+    internal static Result Classify(string? commandLine, bool windows) => string.IsNullOrWhiteSpace(commandLine)
+        ? Result.Ordinary : ClassifyList(commandLine, windows ? Shell.Cmd : Shell.Posix, 0, bounded: false);
+
+    private static Result ClassifyList(string text, Shell shell, int depth, bool bounded)
     {
         if (depth > 4) return Result.Unsupported;
-        if (!TryLex(text, shell, out var commands)) return Result.Unsupported;
+        if (!TryLex(text, shell, bounded, out var commands)) return Result.Unsupported;
         foreach (var words in commands)
         {
-            var result = ClassifyCommand(words, shell, depth);
+            var result = ClassifyCommand(words, shell, depth, bounded);
             if (result != Result.Ordinary) return result;
         }
         return Result.Ordinary;
     }
 
-    private static Result ClassifyCommand(IReadOnlyList<Word> words, Shell shell, int depth)
+    private static Result ClassifyCommand(IReadOnlyList<Word> words, Shell shell, int depth, bool bounded)
     {
         if (depth > 4) return Result.Unsupported;
         var index = 0;
@@ -54,7 +56,7 @@ internal static class ShellCreateLexicalClassifier
                 break;
             }
             return index >= words.Count ? Result.Ordinary
-                : ClassifyCommand(words.Skip(index).ToArray(), shell, depth + 1);
+                : ClassifyCommand(words.Skip(index).ToArray(), shell, depth + 1, bounded);
         }
         if (head == "gh" && index + 2 < words.Count
             && words[index + 1].Value.Equals("pr", StringComparison.OrdinalIgnoreCase)
@@ -66,7 +68,7 @@ internal static class ShellCreateLexicalClassifier
         if (ShellCommandPatternMatcher.TryReadShellWrapperBody(head, out _))
             return ClassifyWrapper(words.Skip(index).ToArray(), head, depth);
 
-        if (shell != Shell.Envelope && head is "if" or "then" or "else" or "elif" or "fi"
+        if (bounded && head is "if" or "then" or "else" or "elif" or "fi"
             or "for" or "foreach" or "while" or "until" or "do" or "done" or "case" or "esac"
             or "function" or "time" or "coproc" or "eval" or "exec" or "command" or "call"
             or "start" or "invoke-expression" or "iex" or "." or "source" or "!"
@@ -97,7 +99,7 @@ internal static class ShellCreateLexicalClassifier
                 // argument quotes rather than joining decoded values and inventing operators.
                 var body = shell == Shell.Posix || i == words.Count - 1
                     ? words[i].Value : string.Join(" ", words.Skip(i).Select(word => word.Raw));
-                return ClassifyList(body, shell, depth + 1);
+                return ClassifyList(body, shell, depth + 1, bounded: true);
             }
             if (shell == Shell.PowerShell && option is "-file" or "-f") return Result.Ordinary;
             if (shell == Shell.Posix && !option.StartsWith('-')) return Result.Ordinary; // script path
@@ -110,7 +112,10 @@ internal static class ShellCreateLexicalClassifier
         return Result.Unsupported;
     }
 
-    private static bool TryLex(string text, Shell shell, out List<List<Word>> commands)
+    // Shell selects native syntax at every layer; bounded applies only inside a readable wrapper.
+    // Ordinary native commands retain the unscoped shell policy's permissive treatment of grammar
+    // outside recognition. CodexDynamicToolPolicy spawns cmd on Windows and /bin/sh elsewhere.
+    private static bool TryLex(string text, Shell shell, bool bounded, out List<List<Word>> commands)
     {
         commands = [];
         var words = new List<Word>();
@@ -133,10 +138,7 @@ internal static class ShellCreateLexicalClassifier
             var singleLiteral = quote == '\'' && shell != Shell.Cmd;
             var escape = !singleLiteral && (shell == Shell.Posix && c == '\\'
                 || shell == Shell.Cmd && quote == '\0' && c == '^'
-                || shell == Shell.PowerShell && c == '`'
-                || shell == Shell.Envelope && c == '\\' && i + 1 < text.Length
-                    && (text[i + 1] == '"' || !OperatingSystem.IsWindows()
-                        && (quote == '\0' || text[i + 1] is '\\' or '$' or '`' or '\n')));
+                || shell == Shell.PowerShell && c == '`');
             if (escape)
             {
                 if (i + 1 == text.Length) return false;
@@ -155,7 +157,7 @@ internal static class ShellCreateLexicalClassifier
                 value.Append(c);
                 continue;
             }
-            if (!singleLiteral && shell != Shell.Envelope
+            if (!singleLiteral && bounded
                 && (shell == Shell.Cmd ? c is '%' or '!' : c == '$' || shell == Shell.Posix && c == '`'))
                 return false;
             if (quote != '\0')
@@ -181,19 +183,19 @@ internal static class ShellCreateLexicalClassifier
                 i--;
                 continue;
             }
-            if (c is '(' or ')' or '{' or '}' && shell != Shell.Envelope) return false;
-            if (shell == Shell.Envelope && c is '(' or ')')
+            if (c is '(' or ')' or '{' or '}' && bounded) return false;
+            if (!bounded && c is '(' or ')')
             {
                 EndWord(i);
                 commands.Add(words);
                 words = [];
                 continue;
             }
-            if (shell is Shell.Posix or Shell.PowerShell && c is '*' or '?' or '[') return false;
+            if (bounded && shell is Shell.Posix or Shell.PowerShell && c is '*' or '?' or '[') return false;
             if (shell == Shell.PowerShell && (c == '@' || text.AsSpan(i).StartsWith("--%"))) return false;
             if (c is '<' or '>')
             {
-                if (shell == Shell.Envelope)
+                if (!bounded)
                 {
                     EndWord(i);
                     commands.Add(words);
@@ -222,7 +224,7 @@ internal static class ShellCreateLexicalClassifier
             value.Append(c);
         }
         EndWord(text.Length);
-        if (quote != '\0' || skipRedirectTarget) return false;
+        if (bounded && quote != '\0' || skipRedirectTarget) return false;
         commands.Add(words);
         return true;
     }

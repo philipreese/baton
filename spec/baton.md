@@ -5062,6 +5062,20 @@ A harness-authored binding may populate the field only when the harness is actin
 and has independently verified the same repository/head inputs; worker-authored data and shell output
 have no authority to populate it. General shell output never mints PR ownership evidence.
 
+Readable-wrapper recognition uses the outer native shell's syntax (`cmd` on Windows, `/bin/sh`
+elsewhere), then the selected wrapper family's syntax for its body. Windows command-head `@` and
+unquoted caret escapes are recognized; apostrophes are literal in cmd, while POSIX apostrophes quote
+and backslashes escape. Recognition does not impose the wrapper grammar restrictions on ordinary
+native commands. Inside readable wrappers, the supported conservative grammar is literal simple
+commands, quoted word fragments, family-specific escapes, command separators, simple file redirection,
+environment assignments and `env` options (`--`, `-i`/`--ignore-environment`, `-u`/`--unset`,
+`-C`/`--chdir`), with at most four launcher/body descents.
+POSIX `-c` consumes one body argument; cmd and PowerShell command tails retain argument quoting.
+Dynamic expansions, compound constructs, unknown launcher options, malformed bodies, here-documents,
+descriptor duplication and excess nesting refuse with a direct-command alternative, even when a
+create invocation cannot be established. Script-file execution remains within the ambient-authority
+boundary below; recognition neither evaluates scripts nor supplies a full shell sandbox.
+
 The implement role's general shell plus network grant is **not a security sandbox for arbitrary
 interpreters**. The broker recognizes bare create plus direct environment assignments, the `env`
 launcher, and the shell-wrapper families already parsed by `ShellCommandPatternMatcher`; a non-bare
