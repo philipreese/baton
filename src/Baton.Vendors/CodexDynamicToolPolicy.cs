@@ -89,7 +89,7 @@ public sealed class CodexDynamicToolPolicy
     private readonly HashSet<string> _declaredOutputs;
     private readonly Func<ShellCommandClass, TimeSpan> _commandCeiling;
     private readonly Func<string, Stream> _commandCaptureStreamFactory;
-    private readonly Action? _beforeCommandTimeoutStartsForTest;
+    private readonly Action<CancellationToken>? _beforeCommandTimeoutStartsForTest;
     private readonly Dictionary<string, RetainedCommandOutput> _commandOutputs =
         new(StringComparer.Ordinal);
 
@@ -161,7 +161,7 @@ public sealed class CodexDynamicToolPolicy
         Func<ShellCommandClass, TimeSpan>? commandCeiling,
         TimeProvider? timeProvider,
         Func<string, Stream>? commandCaptureStreamFactory,
-        Action? beforeCommandTimeoutStartsForTest = null)
+        Action<CancellationToken>? beforeCommandTimeoutStartsForTest = null)
         : this(
             grant, workingDirectory, outputDirectory, inputPaths, producedOutputNames,
             commandCeiling, timeProvider)
@@ -1180,20 +1180,35 @@ public sealed class CodexDynamicToolPolicy
 
         using var processLifetime = process;
         using var timeout = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
-        // The callback is an internal fixture seam: waiting for a child-process marker here proves
-        // the timer below begins after that marker, rather than merely hoping the child starts before
-        // a timer that is already running. Production construction always leaves it null.
-        _beforeCommandTimeoutStartsForTest?.Invoke();
-        timeout.CancelAfter(ceiling);
+        var testRendezvous = _beforeCommandTimeoutStartsForTest;
+        if (testRendezvous is null)
+        {
+            // Keep the production ordering unchanged: its ceiling is armed before capture starts.
+            timeout.CancelAfter(ceiling);
+        }
         var stdout = CaptureCommandChannelAsync(
             process.StandardOutput, stdoutPath, "stdout", stdoutDestination);
         var stderr = CaptureCommandChannelAsync(
             process.StandardError, stderrPath, "stderr", stderrDestination);
+        // The callback is an internal fixture seam: waiting for a child-process marker here proves
+        // the timer below begins after that marker, rather than merely hoping the child starts before
+        // a timer that is already running. Capture begins first so this test-only seam shares the
+        // command's post-spawn kill, drain, disposal and outcome-recording boundary. Production
+        // construction always leaves the callback null and follows the unchanged arm above.
         string? timeoutFailure = null;
         var callerCancelled = false;
         Exception? captureFailure = null;
+        Exception? rendezvousFailure = null;
+        var rendezvousIsRunning = false;
         try
         {
+            if (testRendezvous is not null)
+            {
+                rendezvousIsRunning = true;
+                testRendezvous(cancellationToken);
+                rendezvousIsRunning = false;
+                timeout.CancelAfter(ceiling);
+            }
             await WaitForExitOrCaptureFailureAsync(process, timeout.Token, stdout, stderr)
                 .ConfigureAwait(false);
         }
@@ -1209,6 +1224,11 @@ public sealed class CodexDynamicToolPolicy
         {
             KillProcessTree(process);
             callerCancelled = true;
+        }
+        catch (Exception ex) when (rendezvousIsRunning)
+        {
+            KillProcessTree(process);
+            rendezvousFailure = ex;
         }
         catch (Exception ex) when (IsCommandCaptureFailure(ex))
         {
@@ -1265,7 +1285,9 @@ public sealed class CodexDynamicToolPolicy
 
         var status = callerCancelled
             ? "Command was cancelled after it started."
-            : timeoutFailure ?? $"Command exited {process.ExitCode}.";
+            : rendezvousFailure is not null
+                ? RenderTestRendezvousFailure(rendezvousFailure)
+                : timeoutFailure ?? $"Command exited {process.ExitCode}.";
         var displayed = RenderCommandResult(status, retained!, stdoutText!, stderrText!);
         if (callerCancelled)
         {
@@ -1273,6 +1295,11 @@ public sealed class CodexDynamicToolPolicy
             throw new OperationCanceledException(cancellationToken);
         }
         if (timeoutFailure is not null)
+        {
+            RecordExecutedCommandOutcome(commandLine, displayed, toolSucceeded: false);
+            return CodexDynamicToolResult.Failed(displayed);
+        }
+        if (rendezvousFailure is not null)
         {
             RecordExecutedCommandOutcome(commandLine, displayed, toolSucceeded: false);
             return CodexDynamicToolResult.Failed(displayed);
@@ -1401,6 +1428,19 @@ public sealed class CodexDynamicToolPolicy
 
     private static string RenderCommandCaptureFailure(Exception failure)
     {
+        var detail = RenderBoundedExceptionDetail(failure);
+        return "Baton ran the command, but retaining its output failed. The command's outcome cannot "
+               + "be recovered, and Baton will not run an identical retry because its side effects "
+               + $"may already have happened. Capture failure: {detail}";
+    }
+
+    private static string RenderTestRendezvousFailure(Exception failure) =>
+        "Baton ran the command, but its test-only pre-timeout rendezvous failed. Baton stopped the "
+        + "process tree and will not run an identical retry because its side effects may already "
+        + $"have happened. Rendezvous failure: {RenderBoundedExceptionDetail(failure)}";
+
+    private static string RenderBoundedExceptionDetail(Exception failure)
+    {
         var detail = $"{failure.GetType().Name}: {failure.Message}";
         const int maxDetailCharacters = 1_000;
         if (detail.Length > maxDetailCharacters)
@@ -1412,10 +1452,7 @@ public sealed class CodexDynamicToolPolicy
             }
             detail = detail[..end] + "…";
         }
-
-        return "Baton ran the command, but retaining its output failed. The command's outcome cannot "
-               + "be recovered, and Baton will not run an identical retry because its side effects "
-               + $"may already have happened. Capture failure: {detail}";
+        return detail;
     }
 
     private void RecordExecutedCommandOutcome(string commandLine, string output, bool toolSucceeded)
