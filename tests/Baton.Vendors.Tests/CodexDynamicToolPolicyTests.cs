@@ -1163,17 +1163,32 @@ public sealed class CodexDynamicToolPolicyTests
     [Fact]
     public async Task Failed_volatile_diff_invalidates_cached_command_and_read_but_keeps_its_failure()
     {
+        var rendezvousArmed = false;
+        var rendezvousWaits = 0;
+        (string CommandLine, string CounterPath, string MutatedPath, string ReadyPath)? rendezvousCommand = null;
         using var fixture = new PolicyFixture(
             new PermissionGrant(ReadFiles: true, RunShellCommands: true),
             ["report.md"],
-            // wait-ok: helper readiness proves both side effects were atomically published before the
-            // injected ceiling starts; the child is then killed promptly in the timeout branch.
+            // wait-ok: once armed for the volatile command, helper readiness proves both side effects
+            // were published before the injected ceiling starts; the timeout branch then kills it.
             commandCeiling: _ => TimeSpan.FromMilliseconds(500),
-            beforeCommandTimeoutStarts: (fixture, cancellationToken) => WaitForExternalDiffReady(
-                Path.Combine(fixture.Workspace, "volatile-cache-ready.txt"),
-                Path.Combine(fixture.Workspace, "volatile-cache-runs.txt"),
-                cancellationToken));
+            beforeCommandTimeoutStarts: (_, cancellationToken) =>
+            {
+                if (!rendezvousArmed)
+                {
+                    return;
+                }
+
+                rendezvousWaits++;
+                Assert.True(rendezvousCommand.HasValue);
+                var command = rendezvousCommand.Value;
+                WaitForExternalDiffReady(
+                    command.ReadyPath,
+                    command.CounterPath,
+                    cancellationToken);
+            });
         var volatileCommand = HangingExternalDiffCommand(fixture.Workspace, "volatile-cache");
+        rendezvousCommand = volatileCommand;
         var originalStamp = File.GetLastWriteTimeUtc(volatileCommand.MutatedPath);
         var cachedCommand = OperatingSystem.IsWindows()
             ? $"type {Path.GetFileName(volatileCommand.MutatedPath)}"
@@ -1183,8 +1198,18 @@ public sealed class CodexDynamicToolPolicyTests
             CodexDynamicToolPolicy.RunCommandTool, new { command = cachedCommand });
         var readBefore = await fixture.ExecuteAsync(
             CodexDynamicToolPolicy.ReadTextTool, new { path = volatileCommand.MutatedPath });
-        var failed = await fixture.ExecuteAsync(
-            CodexDynamicToolPolicy.RunCommandTool, new { command = volatileCommand.CommandLine });
+        CodexDynamicToolResult failed;
+        rendezvousArmed = true;
+        try
+        {
+            failed = await fixture.ExecuteAsync(
+                CodexDynamicToolPolicy.RunCommandTool, new { command = volatileCommand.CommandLine });
+        }
+        finally
+        {
+            rendezvousArmed = false;
+        }
+
         // Make the stat pair identical so only explicit invalidation can expose the helper's mutation.
         File.SetLastWriteTimeUtc(volatileCommand.MutatedPath, originalStamp);
         var failureReplay = await fixture.ExecuteAsync(
@@ -1194,16 +1219,44 @@ public sealed class CodexDynamicToolPolicyTests
         var commandAfter = await fixture.ExecuteAsync(
             CodexDynamicToolPolicy.RunCommandTool, new { command = cachedCommand });
 
+        Assert.True(commandBefore.Success, commandBefore.Text);
         Assert.Contains("before", commandBefore.Text, StringComparison.Ordinal);
+        Assert.True(readBefore.Success, readBefore.Text);
         Assert.Equal("before", readBefore.Text);
-        Assert.False(failed.Success, failed.Text);
+        AssertCommandCeilingTimeout(failed);
+        Assert.True(readAfter.Success, readAfter.Text);
         Assert.Equal("AFTER!", readAfter.Text);
         Assert.DoesNotContain("replayed: identical read", readAfter.Text, StringComparison.Ordinal);
+        Assert.True(commandAfter.Success, commandAfter.Text);
         Assert.Contains("AFTER!", commandAfter.Text, StringComparison.Ordinal);
         Assert.DoesNotContain("replayed: identical command", commandAfter.Text, StringComparison.Ordinal);
         Assert.False(failureReplay.Success, failureReplay.Text);
         Assert.Contains("replayed: identical command", failureReplay.Text, StringComparison.Ordinal);
         Assert.Single(File.ReadAllLines(volatileCommand.CounterPath));
+        Assert.Equal(1, rendezvousWaits);
+    }
+
+    [Fact]
+    public async Task Missing_ready_rendezvous_failure_is_not_accepted_as_command_ceiling_timeout()
+    {
+        using var fixture = new PolicyFixture(
+            new PermissionGrant(RunShellCommands: true),
+            ["report.md"],
+            commandCeiling: _ => TimeSpan.FromMilliseconds(500),
+            beforeCommandTimeoutStarts: (_, _) =>
+                throw new InvalidOperationException("synthetic missing ready marker"));
+        var command = HangingSideEffectCommand(fixture.Workspace, "missing-ready");
+
+        var failed = await fixture.ExecuteAsync(
+            CodexDynamicToolPolicy.RunCommandTool, new { command = command.CommandLine });
+
+        Assert.False(failed.Success, failed.Text);
+        Assert.Contains("test-only pre-timeout rendezvous failed", failed.Text, StringComparison.Ordinal);
+        Assert.Contains("synthetic missing ready marker", failed.Text, StringComparison.Ordinal);
+        Assert.DoesNotContain("default command ceiling", failed.Text, StringComparison.Ordinal);
+        var rejection = Record.Exception(() => AssertCommandCeilingTimeout(failed));
+        Assert.NotNull(rejection);
+        Assert.Contains("default command ceiling", rejection.Message, StringComparison.Ordinal);
     }
 
     /// <summary>
@@ -2281,6 +2334,13 @@ public sealed class CodexDynamicToolPolicyTests
         Assert.True(
             actual == expected,
             $"{phase}: expected {expected} external-diff helper attempt(s), actual {actual}");
+    }
+
+    private static void AssertCommandCeilingTimeout(CodexDynamicToolResult result)
+    {
+        Assert.False(result.Success, result.Text);
+        Assert.Contains("default command ceiling", result.Text, StringComparison.Ordinal);
+        Assert.DoesNotContain("test-only pre-timeout rendezvous failed", result.Text, StringComparison.Ordinal);
     }
 
     private static int ExternalDiffAttemptCount(string counterPath)
