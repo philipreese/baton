@@ -40,7 +40,7 @@ def condition(expression, event, results=None, dotnet='true', cancelled=False):
 
 def jobs_from(text):
     assert not re.search(r'^\s+[^#\n]*[&*][A-Za-z_]',text,re.M)
-    pieces=re.split(r'^  ([a-z_]+):\n',text.split('jobs:\n',1)[1],flags=re.M)
+    pieces=re.split(r'^  ([a-z_-]+):\n',text.split('jobs:\n',1)[1],flags=re.M)
     jobs=dict(zip(pieces[1::2],pieces[2::2]))
     for block in jobs.values():
         for step in re.split(r'^      - ',block,flags=re.M)[1:]:
@@ -51,10 +51,15 @@ def jobs_from(text):
     return jobs
 
 
-def script_from(block):
+def scripts_from(block):
     matches=re.findall(r'^        run: \|\n((?:          [^\n]*\n)+)',block,re.M)
+    return ['\n'.join(line[10:] for line in match.splitlines()) for match in matches]
+
+
+def script_from(block):
+    matches=scripts_from(block)
     assert len(matches)==1
-    return '\n'.join(line[10:] for line in matches[0].splitlines())
+    return matches[0]
 
 
 def bash():
@@ -125,6 +130,70 @@ def check_workflow(text):
             assert run_script(aggregate_script,results|{key:status})!=0
 
 
+def check_release_workflow(text):
+    jobs=jobs_from(text)
+    assert set(jobs)=={'recovery_target','release-please','release_recovery'}
+    target=jobs['recovery_target']
+    release=jobs['release-please']
+    aggregate=jobs['release_recovery']
+    assert field(release,'needs')=='[recovery_target]'
+    assert field(aggregate,'needs')=='[recovery_target, release-please]'
+    assert 'group: release-please-${{ github.ref }}' in text
+    assert 'cancel-in-progress: true' in text
+    assert text.count('uses: googleapis/release-please-action@v4')==1
+    assert 'token: ${{ secrets.BATON_RELEASE_PLEASE }}' in release
+    assert 'continue-on-error' not in text
+    assert release.count("if: github.event_name == 'workflow_dispatch'")==1
+    assert release.count("if: ${{ always() && github.event_name == 'workflow_dispatch' }}")==1
+    assert (release.index('name: Revalidate selected main revision') <
+            release.index('uses: googleapis/release-please-action@v4') <
+            release.index('name: Detect concurrent main advance'))
+    for event in ('push','workflow_dispatch'):
+        assert condition(field(target,'if'),event)==(event=='workflow_dispatch')
+        assert condition(field(aggregate,'if'),event)==(event=='workflow_dispatch')
+        for target_result in ('success','failure','cancelled','skipped',''):
+            expected=event=='push' or target_result=='success'
+            assert condition(field(release,'if'),event,{'recovery_target':target_result})==expected
+
+    assert 'uses:' not in target and 'contents: read' in target
+    assert 'EXPECTED_SHA: ${{ inputs.expected_sha }}' in target
+    assert 'GH_TOKEN: ${{ github.token }}' in target
+    target_script=script_from(target)
+    release_scripts=scripts_from(release)
+    assert len(release_scripts)==2
+    revalidate_script,advance_script=release_scripts
+    sha='a'*40
+    env=dict(GITHUB_REF='refs/heads/main',GITHUB_SHA=sha,EXPECTED_SHA=sha,
+             GITHUB_REPOSITORY='owner/repo',LIVE_SHA=sha)
+    for script in (target_script,revalidate_script):
+        assert run_script(script,env)==0
+        for changes in ({'GITHUB_REF':'refs/heads/topic'},{'EXPECTED_SHA':''},
+                        {'EXPECTED_SHA':'b'*40},{'GITHUB_SHA':'b'*40},
+                        {'LIVE_SHA':'b'*40},{'API_FAIL':'1'}):
+            assert run_script(script,env|changes)!=0,changes
+    assert run_script(advance_script,env)==0
+    assert run_script(advance_script,env|{'LIVE_SHA':'b'*40})!=0
+    assert run_script(advance_script,env|{'API_FAIL':'1'})!=0
+
+    # A repeated admission is state-free and reaches the same sole release owner. The
+    # action then applies its existing manifest/tag state, so update and no-op semantics
+    # stay with release-please rather than a second release implementation here.
+    for _ in range(2):
+        assert run_script(target_script,env)==0
+        assert run_script(revalidate_script,env)==0
+        assert run_script(advance_script,env)==0
+
+    assert 'uses:' not in aggregate and 'continue-on-error' not in aggregate
+    for key,job in [('TARGET','recovery_target'),('RELEASE','release-please')]:
+        assert key+'_RESULT: ${{ needs.'+job+'.result }}' in aggregate
+    results={'TARGET_RESULT':'success','RELEASE_RESULT':'success'}
+    aggregate_script=script_from(aggregate)
+    assert run_script(aggregate_script,results)==0
+    for key in results:
+        for status in ('failure','cancelled','skipped',''):
+            assert run_script(aggregate_script,results|{key:status})!=0
+
+
 def main():
     text=(ROOT/'.github/workflows/ci.yml').read_text(encoding='utf-8')
     check_workflow(text)
@@ -136,13 +205,21 @@ def main():
                          ('        shell: bash\n','        with:\n          fetch-depth: 0\n        shell: bash\n')):
         assert before in text
         refused(lambda before=before,after=after:check_workflow(text.replace(before,after)))
+    release_text=(ROOT/'.github/workflows/release-please.yml').read_text(encoding='utf-8')
+    check_release_workflow(release_text)
+    for before,after in (('[ "$live_sha" != "$EXPECTED_SHA" ]','[ "$live_sha" = "$EXPECTED_SHA" ]'),
+                         ("needs.recovery_target.result == 'success'","needs.recovery_target.result != 'success'"),
+                         ('needs: [recovery_target, release-please]','needs: [release-please]'),
+                         ('RELEASE_RESULT: ${{ needs.release-please.result }}','RELEASE_RESULT: success')):
+        assert before in release_text
+        refused(lambda before=before,after=after:check_release_workflow(release_text.replace(before,after)))
     pixi=tomllib.loads((ROOT/'pixi.toml').read_text(encoding='utf-8'))
     assert pixi['tasks']['workflow-recovery-selftest']['cmd']=='python tools/workflow-recovery/selftest.py'
     gates=ast.parse((ROOT/'tools/gates/gates.py').read_text(encoding='utf-8'))
     overlap=next(node.value for node in gates.body if isinstance(node,ast.Assign)
                  and any(isinstance(target,ast.Name) and target.id=='OVERLAP' for target in node.targets))
     assert 'workflow-recovery-selftest' in ast.literal_eval(overlap)
-    print('Actual preflight/aggregate scripts, event conditions, step shape and mutations passed')
+    print('Actual CI/release preflight and aggregate scripts, event conditions, races, repeats, step shape and mutations passed')
 
 
 if __name__=='__main__':

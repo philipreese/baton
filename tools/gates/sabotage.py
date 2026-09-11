@@ -57,7 +57,7 @@ def _sabotage_workflow_recovery() -> None:
     with tempfile.TemporaryDirectory() as td:
         dest = Path(td)
         for relative in ["tools/workflow-recovery/selftest.py", ".github/workflows/ci.yml",
-                         "pixi.toml", "tools/gates/gates.py"]:
+                         ".github/workflows/release-please.yml", "pixi.toml", "tools/gates/gates.py"]:
             target = dest / relative
             target.parent.mkdir(parents=True, exist_ok=True)
             shutil.copy2(ROOT / relative, target)
@@ -75,6 +75,13 @@ def _sabotage_workflow_recovery() -> None:
             workflow.write_text(original.replace(before, after), encoding="utf-8")
             mutated = run()
             assert mutated.returncode != 0 and "AssertionError" in mutated.stderr, mutated.stderr
+        release_workflow = dest / ".github/workflows/release-please.yml"
+        release_original = release_workflow.read_text(encoding="utf-8")
+        release_workflow.write_text(
+            release_original.replace("RELEASE_RESULT: ${{ needs.release-please.result }}",
+                                     "RELEASE_RESULT: success"), encoding="utf-8")
+        mutated = run()
+        assert mutated.returncode != 0 and "AssertionError" in mutated.stderr, mutated.stderr
 
 
 @fixture("ci-selftest")
