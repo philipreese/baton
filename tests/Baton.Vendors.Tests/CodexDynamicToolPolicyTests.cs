@@ -1229,13 +1229,46 @@ public sealed class CodexDynamicToolPolicyTests
             CodexDynamicToolPolicy.RunCommandTool, new { command = cachedCommand });
         await fixture.ExecuteAsync(
             CodexDynamicToolPolicy.ReadTextTool, new { path = command.MutatedPath });
-        // wait-ok: cancellation is the behavior under test and kills the synthetic hanging child.
-        using var cancellation = new CancellationTokenSource(TimeSpan.FromMilliseconds(150));
-
-        await Assert.ThrowsAnyAsync<OperationCanceledException>(() => fixture.ExecuteWithCancellationAsync(
+        var ready = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        using var readyWatcher = new FileSystemWatcher(
+            fixture.Workspace, Path.GetFileName(command.ReadyPath))
+        {
+            NotifyFilter = NotifyFilters.FileName,
+            EnableRaisingEvents = true,
+        };
+        readyWatcher.Created += (_, _) => ready.TrySetResult();
+        readyWatcher.Renamed += (_, _) => ready.TrySetResult();
+        using var cancellation = new CancellationTokenSource();
+        var execution = fixture.ExecuteWithCancellationAsync(
             CodexDynamicToolPolicy.RunCommandTool,
             new { command = command.CommandLine },
-            cancellation.Token));
+            cancellation.Token);
+
+        try
+        {
+            if (File.Exists(command.ReadyPath))
+            {
+                ready.TrySetResult();
+            }
+            // wait-ok: bounded hang backstop; the helper atomically publishes ready after both side effects.
+            await ready.Task.WaitAsync(
+                TimeSpan.FromSeconds(2), TestContext.Current.CancellationToken);
+            Assert.True(File.Exists(command.ReadyPath), "helper readiness must precede caller cancellation");
+            await cancellation.CancelAsync();
+            await Assert.ThrowsAnyAsync<OperationCanceledException>(() => execution);
+        }
+        finally
+        {
+            await cancellation.CancelAsync();
+            try
+            {
+                // wait-ok: cleanup backstop; cancellation kills the synthetic hanging child.
+                await execution.WaitAsync(TimeSpan.FromSeconds(5), CancellationToken.None);
+            }
+            catch (OperationCanceledException) when (cancellation.IsCancellationRequested)
+            {
+            }
+        }
         File.SetLastWriteTimeUtc(command.MutatedPath, originalStamp);
         var replay = await fixture.ExecuteAsync(
             CodexDynamicToolPolicy.RunCommandTool, new { command = command.CommandLine });
@@ -1965,7 +1998,11 @@ public sealed class CodexDynamicToolPolicyTests
         return ($"./{name}", counterPath);
     }
 
-    private static (string CommandLine, string CounterPath, string MutatedPath) HangingExternalDiffCommand(
+    private static (
+        string CommandLine,
+        string CounterPath,
+        string MutatedPath,
+        string ReadyPath) HangingExternalDiffCommand(
         string directory, string name)
     {
         var terminalCommand = OperatingSystem.IsWindows()
@@ -1974,22 +2011,33 @@ public sealed class CodexDynamicToolPolicyTests
         return ExternalDiffCommand(directory, name, terminalCommand);
     }
 
-    private static (string CommandLine, string CounterPath, string MutatedPath) CompletedExternalDiffCommand(
+    private static (
+        string CommandLine,
+        string CounterPath,
+        string MutatedPath,
+        string ReadyPath) CompletedExternalDiffCommand(
         string directory, string name, int exitCode) =>
         ExternalDiffCommand(directory, name, $"exit {exitCode}");
 
-    private static (string CommandLine, string CounterPath, string MutatedPath) ExternalDiffCommand(
+    private static (
+        string CommandLine,
+        string CounterPath,
+        string MutatedPath,
+        string ReadyPath) ExternalDiffCommand(
         string directory, string name, string terminalCommand)
     {
         var counterPath = Path.Combine(directory, $"{name}-runs.txt");
         var mutatedName = $"{name}-mutated.txt";
         var mutatedPath = Path.Combine(directory, mutatedName);
+        var readyName = $"{name}-ready.txt";
+        var readyPath = Path.Combine(directory, readyName);
         File.WriteAllText(mutatedPath, "before");
         var helperName = $"{name}-diff.sh";
         var helperPath = Path.Combine(directory, helperName);
         File.WriteAllText(
             helperPath,
             $"#!/bin/sh\nprintf 'ran\\n' >> {name}-runs.txt\nprintf 'AFTER!' > {mutatedName}\n"
+            + $"printf 'ready\\n' > {readyName}.tmp\nmv {readyName}.tmp {readyName}\n"
             + $"printf 'HELPER-RAN\\n'\n{terminalCommand}\n");
         if (!OperatingSystem.IsWindows())
         {
@@ -2015,7 +2063,7 @@ public sealed class CodexDynamicToolPolicyTests
         RunGitSetup(directory, "add", ".gitattributes", "tracked.txt");
         File.WriteAllText(trackedPath, "after changed\n");
 
-        return ("git diff --ext-diff", counterPath, mutatedPath);
+        return ("git diff --ext-diff", counterPath, mutatedPath, readyPath);
     }
 
     private static Stream WritableCaptureStream(string path) =>
