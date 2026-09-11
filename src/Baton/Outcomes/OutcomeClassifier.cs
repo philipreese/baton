@@ -206,6 +206,14 @@ public static class OutcomeClassifier
     /// the crash-recovery path, which therefore keeps today's text: an unnamed PR fails closed to a
     /// summary that still sends a conductor to look.
     /// </param>
+    /// <param name="verifiesWorkspace">
+    /// Whether the role's completion policy grades repository work. Distinct from
+    /// <paramref name="changesTree"/>, which describes the role's write-capable execution shape and
+    /// therefore still controls the diagnostic <c>workspaceChanged</c>/<c>hollow</c> fields. A
+    /// measurement may write and clean up fixtures while delivering only a declared artifact, so its
+    /// workspace diagnostics remain measurable without applying the implementation-only zero-write
+    /// self-check.
+    /// </param>
     public static OutcomeClassification Classify(
         CoreDispatchResult result,
         WorkerContract contract,
@@ -224,7 +232,8 @@ public static class OutcomeClassifier
         int? hookVerdictCount = null,
         string? workspaceHeadShaAtStart = null,
         Func<string?, string?, Workspaces.WorkspaceMutationReading?>? workspaceMutationProbe = null,
-        int? openPullRequest = null)
+        int? openPullRequest = null,
+        bool verifiesWorkspace = true)
     {
         ArgumentNullException.ThrowIfNull(result);
         ArgumentNullException.ThrowIfNull(contract);
@@ -251,7 +260,7 @@ public static class OutcomeClassifier
             {
                 return BuildSucceededClassification(
                     contract, changesTreeWorkingDirectory, worktreeBaseRef, changesTree, result.EnginePlacedFiles,
-                    writeToolCallCount);
+                    writeToolCallCount, verifiesWorkspace);
             }
 
             // #1373: a timeout kill stays retryable only over an empty workspace. The ruling, the
@@ -318,7 +327,7 @@ public static class OutcomeClassifier
                 {
                     var completion = BuildSucceededClassification(
                         contract, changesTreeWorkingDirectory, worktreeBaseRef, changesTree,
-                        result.EnginePlacedFiles, writeToolCallCount);
+                        result.EnginePlacedFiles, writeToolCallCount, verifiesWorkspace);
                     return completion.Verdict == OutcomeVerdict.Succeeded
                         ? completion with { FinishedDuringTeardown = true }
                         : completion;
@@ -525,7 +534,7 @@ public static class OutcomeClassifier
 
             return BuildSucceededClassification(
                 contract, changesTreeWorkingDirectory, worktreeBaseRef, changesTree, result.EnginePlacedFiles,
-                writeToolCallCount);
+                writeToolCallCount, verifiesWorkspace);
         }
 
         // #1593: Natural exit 0 with unsatisfied contract settles Indeterminate (spec/baton.md §3 Producers).
@@ -862,7 +871,8 @@ public static class OutcomeClassifier
     /// </summary>
     private static OutcomeClassification BuildSucceededClassification(
         WorkerContract contract, string? changesTreeWorkingDirectory, string? worktreeBaseRef, bool changesTree,
-        IReadOnlyList<Domain.EnginePlacedFile>? enginePlacedFiles, int? writeToolCallCount)
+        IReadOnlyList<Domain.EnginePlacedFile>? enginePlacedFiles, int? writeToolCallCount,
+        bool verifiesWorkspace)
     {
         if (!changesTree)
         {
@@ -883,13 +893,17 @@ public static class OutcomeClassifier
             return new OutcomeClassification(OutcomeVerdict.Succeeded);
         }
 
-        // #2131 slice 2: this is the measured no-op signature, and both halves are required. An
+        // #2131 slice 2: this is the measured IMPLEMENTATION no-op signature, and both halves are
+        // required. VerifiesWorkspace is the existing completion-policy discriminator: ChangesTree
+        // remains true for an artifact-only measurement because its executable grant can write and
+        // clean up fixtures, but that authority is not a claim that repository work is its deliverable.
+        // An
         // unchanged tree alone remains the pre-existing hollow signal (a write may legitimately have
         // targeted only a declared output), while a zero call count alone says nothing about shell
         // writes or a clean commit. Null is unmeasured and cannot be promoted into zero. The binding's
         // ChangesTree bit is derived from the write+shell grant at dispatch, so read-shaped roles never
         // reach this branch.
-        if (!workspaceChanged && writeToolCallCount == 0)
+        if (verifiesWorkspace && !workspaceChanged && writeToolCallCount == 0)
         {
             return new OutcomeClassification(
                 OutcomeVerdict.Failed,

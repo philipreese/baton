@@ -405,6 +405,11 @@ public class RoleDispatchTests
         {
             ["advise"] = false,
             ["implement"] = true,
+            // #2225: fixture writes are permitted so measurements can exercise real local seams, but
+            // the role's delivered result is its outbox report and it verifies neither the workspace
+            // nor delivery. ChangesTree remains a provenance signal derived from the grant, not a
+            // completion-contract switch.
+            ["measure"] = true,
             ["review"] = false,
             ["patch"] = false,
             ["fact-check"] = false,

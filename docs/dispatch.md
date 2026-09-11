@@ -103,9 +103,10 @@ an ambiguous captured-response outcome does (spec/baton.md §3).
 
 ### The per-execution token budget (#1623, per-adapter default #1745)
 
-`implement`/`review`/`advise`/`consolidate` carry default budgets; every other role runs unwatched unless `--token-budget` is passed.
+`implement`/`measure`/`review`/`advise`/`consolidate` carry default budgets; every other role runs unwatched unless `--token-budget` is passed.
 A role's catalog entry is either one figure that applies no matter which adapter runs it (today's
-shape, and still what `implement`/`advise`/`consolidate` use) or a map keyed by adapter name (`review`'s shape, both
+shape, and still what `advise`/`consolidate` use) or a map keyed by adapter name (`implement`/`measure`/
+`review`'s shape; `measure` deliberately reuses `implement`'s map rather than introducing a new calibration, and `review`'s
 values presently equal — spec/baton.md §3 has why and states the resolution rule for an
 unconfigured adapter). Usage is read incrementally from the vendor's own `stream-json` output
 as it arrives, not just the terminal line, so a poll loop or a runaway tool-call sequence is caught
@@ -408,12 +409,28 @@ declared name(s) — `baton resolve` is the one permitted writer here (spec/bato
 |------|------|--------|-----|
 | `advise` | standard | `advice.md` | Weighing an open design question before building — a second opinion. |
 | `implement` | standard | `changes.md` | A bounded change whose approach is already decided; exercises the write path. |
+| `measure` | standard | `report.md` (non-empty) | Running a conductor-selected measurement with executable tools and isolated fixtures. Its declared report is the completion contract; it runs no workspace gate and requires no branch or PR. |
 | `review` | frontier | `report.md`, `verdict.json` | Adversarial review of a claim; the default for a PR touching `src/` or asserting something in `docs/`. |
 | `consolidate` | frontier | `consolidation.md` | Reading one issue's thread and merged PRs against the code and writing the current-state block a person rewrites the body from (#2043). Read-only over `gh` and the tree — a strict narrowing of `review`'s grant — and it opens no PR. |
 | `patch` | frontier | `patch.diff` | Proposing code changes as an applyable diff without mutating the workspace. |
 | `fact-check` | minimal | `findings.md` | Confirming an exhaustive, supplied list of facts against the repo — not for noticing what the list omits. |
 | `janitor` | cheap | `janitor.md`, `branch.diff` | Running named mechanical checkers to green after an implementer, without changing behaviour. |
 | `orchestrate` | orchestrator | `turn-actions.json` | A resident room turn that reads room state and emits turn actions. |
+
+Queue measurement-only work through the supported conductor path by selecting the role before launch:
+
+```
+baton queue add <tag> --role measure --spec <brief.md> --workspace <checkout-dir>
+```
+
+Use `--issue <n>` instead of `--workspace <checkout-dir>` when the queue should provision the issue
+worktree. `baton queue list` shows `measure` on the retained row; the launched room records the same
+role in `bindings.json` and `flow.jsonl`. Brief text and `report.md` contents cannot change that choice.
+
+<!-- record-once-ok: #2225 spec/baton.md -->
+The role's positional shell denies are defense in depth, not a categorical no-shipping sandbox.
+`spec/baton.md` §3 records the matcher limits, the broader operator-policy boundary, and what a
+mechanically enforced boundary would require.
 
 Each tier pins one vendor, model and effort in
 [`src/Baton.Vendors/WorkerTiers.json`](../src/Baton.Vendors/WorkerTiers.json). The shipped pins are the
