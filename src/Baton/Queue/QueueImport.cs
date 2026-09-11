@@ -110,6 +110,16 @@ public static class QueueImport
                     + "file, so the two rows would share a brief. Rename one and re-run.");
             }
 
+            if (entry.Stage.ValueKind is not JsonValueKind.Undefined and not JsonValueKind.Null
+                && entry.Skills is { Count: > 0 })
+            {
+                throw new QueueStoreException(
+                    $"Import refused: item '{entry.Tag}' carries both 'stage' and explicit 'skills'. This command "
+                    + "imports the scratchpad runner format, which has no lifecycle stages, and cannot choose "
+                    + "whether those skills apply to one stage or the whole lifecycle. Re-add the lifecycle item "
+                    + "without skills instead.");
+            }
+
             if (string.IsNullOrWhiteSpace(entry.Role))
             {
                 throw new QueueStoreException($"Import refused: item '{entry.Tag}' names no role.");
@@ -133,6 +143,7 @@ public static class QueueImport
                 Adapter = Trimmed(entry.Adapter),
                 Model = Trimmed(entry.Model),
                 Effort = Trimmed(entry.Effort),
+                Skills = entry.Skills,
                 TimeoutMinutes = entry.Timeout,
                 MaxToolSteps = entry.MaxToolSteps,
                 TokenBudget = entry.TokenBudget,
@@ -160,6 +171,13 @@ public static class QueueImport
         public string? Role { get; init; }
         public string? Model { get; init; }
         public string? Effort { get; init; }
+        public IReadOnlyList<string>? Skills { get; init; }
+
+        /// <summary>
+        /// Not part of the scratchpad format. Retained only as a marker so a queue-snapshot-shaped row
+        /// cannot silently lose its lifecycle discriminator while keeping an explicit skill policy.
+        /// </summary>
+        public JsonElement Stage { get; init; }
 
         /// <summary>The runner's <c>timeout</c>, in minutes — the same unit <c>baton dispatch
         /// --timeout</c> takes, so it is carried across unconverted.</summary>

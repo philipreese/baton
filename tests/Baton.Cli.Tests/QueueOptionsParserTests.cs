@@ -55,6 +55,34 @@ public sealed class QueueOptionsParserTests
     }
 
     [Fact]
+    public void Add_normalizes_repeated_skill_names_and_leaves_an_absent_declaration_null()
+    {
+        var declared = QueueOptionsParser.Parse([
+            "add", "t", "--role", "review", "--spec", "b.md", "--workspace", "C:\\x",
+            "--skill", " house-style ", "--skill", "thorough-review", "--skill", "house-style",
+        ]);
+
+        Assert.Equal(["house-style", "thorough-review"], declared.Skills);
+        Assert.Null(QueueOptionsParser.Parse(
+            ["add", "t", "--role", "review", "--spec", "b.md", "--workspace", "C:\\x"]).Skills);
+    }
+
+    [Fact]
+    public void Add_refuses_contradictory_skill_values_and_any_lifecycle_skill_policy()
+    {
+        var contradictory = Assert.Throws<CliArgumentException>(() => QueueOptionsParser.Parse([
+            "add", "t", "--role", "review", "--spec", "b.md", "--workspace", "C:\\x",
+            "--skill", "", "--skill", "house-style",
+        ]));
+        Assert.Contains("contradictory", contradictory.Message, StringComparison.Ordinal);
+
+        var lifecycle = Assert.Throws<CliArgumentException>(() => QueueOptionsParser.Parse([
+            "add", "2231-lane", "--issue", "2231", "--lifecycle", "--skill", "house-style",
+        ]));
+        Assert.Contains("one stage or the whole lifecycle", lifecycle.Message, StringComparison.Ordinal);
+    }
+
+    [Fact]
     public void Add_refuses_an_issue_and_a_workspace_together()
     {
         var ex = Assert.Throws<CliArgumentException>(() => QueueOptionsParser.Parse(
@@ -223,5 +251,11 @@ public sealed class QueueOptionsParserTests
         Assert.Throws<CliArgumentException>(() => QueueOptionsParser.Parse([]));
         var ex = Assert.Throws<CliArgumentException>(() => QueueOptionsParser.Parse(["drain"]));
         Assert.Contains("drain", ex.Message, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void Queue_add_advertises_the_skill_flag()
+    {
+        Assert.Contains("--skill <name>", QueueOptionsParser.Usage, StringComparison.Ordinal);
     }
 }

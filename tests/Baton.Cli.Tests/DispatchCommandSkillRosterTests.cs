@@ -1,8 +1,10 @@
 using System.Text.RegularExpressions;
 using Baton.Cli;
+using Baton.Cli.Daemon;
 using Baton.Cli.Tests.TestSupport;
 using Baton.Dispatch;
 using Baton.Domain;
+using Baton.Queue;
 using Baton.Status;
 using Baton.Vendors;
 using Xunit;
@@ -246,9 +248,21 @@ public sealed class DispatchCommandSkillRosterTests
                 Path.Combine(repoSkill, "SKILL.md"), "description: Repo thing", TestContext.Current.CancellationToken);
 
             var specPath = await WriteSpecAsync(testRoot, "Review the change.");
-            var options = new DispatchOptions(
-                "review", specPath, Path.Combine(testRoot, "room"), Adapter: "claude-worker",
-                WorkspaceDirectory: workspace, Skills: ["house-style"]);
+            var room = Path.Combine(testRoot, "room");
+            var queuedItem = new QueueItem
+            {
+                Tag = "declared-skill",
+                Role = "review",
+                SpecFile = specPath,
+                Workspace = workspace,
+                Skills = ["house-style"],
+            };
+            var launchOptions = QueueLauncher.BuildOptions(new QueueLaunchRequest(
+                queuedItem,
+                new QueueTierResolution("docs", "claude-worker", null, null, IsOverride: false, OverrideReason: null),
+                room));
+            var argv = QueueLauncher.BuildArguments(launchOptions);
+            var options = DispatchOptionsParser.Parse(argv.Skip(1).ToList());
             var adapters = new Dictionary<string, IWorkerAdapter>
             {
                 ["claude-worker"] = new DelegatingDiscoveryWorkerAdapter(new ClaudeWorkerAdapter()),
@@ -263,6 +277,9 @@ public sealed class DispatchCommandSkillRosterTests
             // #2110: the role's default leads the declared line, the operator's name follows it.
             Assert.Contains("Skills (declared): baton-review, house-style", text, StringComparison.Ordinal);
             Assert.DoesNotContain("repo-thing", text, StringComparison.Ordinal);
+            var bindings = await WorkerBindingConfigParser.LoadFromFileAsync(
+                BatonPaths.RoomBindingsFile(room), TestContext.Current.CancellationToken);
+            Assert.Equal(["baton-review", "house-style"], bindings["review"].Skills);
         }
         finally
         {

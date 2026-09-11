@@ -17,6 +17,7 @@ public sealed class QueueImportTests
         "role": "implement",
         "model": "opus",
         "effort": "high",
+        "skills": ["house-style", "thorough-review"],
         "timeout": 95,
         "workspace": "C:\\repos\\w1934",
         "issue": 1934,
@@ -50,6 +51,7 @@ public sealed class QueueImportTests
         Assert.Equal("implement", first.Role);
         Assert.Equal("opus", first.Model);
         Assert.Equal("high", first.Effort);
+        Assert.Equal(["house-style", "thorough-review"], first.Skills);
         Assert.Equal(95, first.TimeoutMinutes);
         Assert.Equal(@"C:\repos\w1934", first.Workspace);
         Assert.Equal(1934, first.Issue);
@@ -138,6 +140,38 @@ public sealed class QueueImportTests
         """;
 
         Assert.Equal(2, QueueImport.Parse(json, SpecFor, Now).Count);
+    }
+
+    [Fact]
+    public void A_stage_marker_with_explicit_skills_is_refused_instead_of_imported_as_an_ordinary_item()
+    {
+        const string json = """
+        [
+          {
+            "tag": "snapshot-shaped",
+            "role": "review",
+            "workspace": "C:\\repos\\w2231",
+            "stage": "Review",
+            "skills": ["house-style"]
+          }
+        ]
+        """;
+
+        var ex = Assert.Throws<QueueStoreException>(() => QueueImport.Parse(json, SpecFor, Now));
+        Assert.Contains("scratchpad runner format", ex.Message, StringComparison.Ordinal);
+        Assert.Contains("no lifecycle stages", ex.Message, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void An_unknown_non_lifecycle_field_does_not_turn_the_scratchpad_importer_into_a_snapshot_validator()
+    {
+        const string json = """
+        [{ "tag": "scratchpad", "role": "review", "workspace": "C:\\repos\\w2231", "futureField": 1 }]
+        """;
+
+        var item = Assert.Single(QueueImport.Parse(json, SpecFor, Now));
+        Assert.Null(item.Stage);
+        Assert.Null(item.Skills);
     }
 
     [Fact]

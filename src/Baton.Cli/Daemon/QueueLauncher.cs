@@ -579,6 +579,11 @@ public static class QueueLauncher
         Add("--token-budget", options.TokenBudget?.ToString(CultureInfo.InvariantCulture));
         Add("--max-tool-steps", options.MaxToolSteps?.ToString(CultureInfo.InvariantCulture));
         Add("--override-runway", options.OverrideRunwayReason);
+        foreach (var skill in options.Skills ?? [])
+        {
+            Add("--skill", skill);
+        }
+
         return arguments;
 
         void Add(string flag, string? value)
@@ -949,7 +954,28 @@ public static class QueueLauncher
                     : item.Tag),
             TokenBudget: item.TokenBudget,
             MaxToolSteps: item.MaxToolSteps,
-            OverrideRunwayReason: item.OverrideRunwayReason);
+            OverrideRunwayReason: item.OverrideRunwayReason,
+            Skills: NormalizeSkillsForLaunch(item));
+    }
+
+    /// <summary>
+    /// Applies the queue's lifecycle policy and dispatch's own skill normalization to a persisted
+    /// item. Queue add and import validate their inputs, but a saved row can predate that validation
+    /// or be hand-edited, so daemon admission and the launch boundary both call this method.
+    /// </summary>
+    internal static IReadOnlyList<string>? NormalizeSkillsForLaunch(QueueItem item)
+    {
+        ArgumentNullException.ThrowIfNull(item);
+
+        if (item.Stage is not null && item.Skills is { Count: > 0 })
+        {
+            throw new CliArgumentException(
+                $"Queue item '{item.Tag}' is a lifecycle item and cannot carry explicit skills: the queue "
+                + "has no declared policy for whether they apply to one stage or the whole lifecycle.",
+                "remove the persisted Skills field and re-add the lifecycle item without --skill.");
+        }
+
+        return item.Skills is null ? null : DispatchOptionsParser.NormalizeSkills(item.Skills);
     }
 
     /// <summary>

@@ -149,6 +149,7 @@ public static class QueueCommand
             Adapter = adapter,
             Model = options.Model,
             Effort = options.Effort,
+            Skills = options.Skills,
             StageSelections = stageSelections,
             LifecyclePin = options.LifecyclePin,
             TimeoutMinutes = options.TimeoutMinutes,
@@ -458,7 +459,12 @@ public static class QueueCommand
         }
 
         var json = await File.ReadAllTextAsync(path, cancellationToken).ConfigureAwait(false);
-        var imported = QueueImport.Parse(json, BatonPaths.QueueSpecFile, DateTimeOffset.UtcNow);
+        var imported = QueueImport.Parse(json, BatonPaths.QueueSpecFile, DateTimeOffset.UtcNow)
+            .Select(item => item with
+            {
+                Skills = item.Skills is null ? null : DispatchOptionsParser.NormalizeSkills(item.Skills),
+            })
+            .ToList();
 
         // The spec each imported item points at is baton's own path, which the runner never wrote to.
         // Said out loud per item rather than assumed: a QUEUED import with no spec on disk would fail

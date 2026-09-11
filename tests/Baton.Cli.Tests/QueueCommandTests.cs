@@ -184,7 +184,8 @@ public sealed class QueueCommandTests
 
             await QueueCommand.ExecuteAsync(
                 new QueueOptions(
-                    QueueVerb.Add, Tag: "2225-implement", Role: "implement", SpecFilePath: brief, Issue: 2225),
+                    QueueVerb.Add, Tag: "2225-implement", Role: "implement", SpecFilePath: brief, Issue: 2225,
+                    Skills: ["house-style"]),
                 TextWriter.Null,
                 Ct,
                 sourceRepository,
@@ -200,6 +201,7 @@ public sealed class QueueCommandTests
             Assert.Null(item.Stage);
             Assert.Null(item.Branch);
             Assert.Null(item.AutomaticFixUsed);
+            Assert.Equal(["house-style"], item.Skills);
         }
         finally
         {
@@ -1209,6 +1211,57 @@ public sealed class QueueCommandTests
             var fact = Assert.Single(await QueueDecisionLedgerStore.ReadAllAsync(BatonPaths.QueueDecisionLedgerFile, Ct));
             Assert.Equal(QueueDecisionEntry.Cancelled, fact.Decision);
             Assert.Equal(cancelledAt, fact.At);
+        }
+        finally
+        {
+            DirectoryCleanup.DeleteRecursively(home);
+        }
+    }
+
+    [Fact]
+    public async Task Import_normalizes_and_persists_declared_skills()
+    {
+        var home = CreateTempHome();
+        using var scope = BatonEnvironmentSnapshot.BeginScope(BatonEnvironmentSnapshot.Blank with { HomeOverride = home });
+        try
+        {
+            var import = Path.Combine(home, "scratchpad.json");
+            await File.WriteAllTextAsync(
+                import,
+                """[{ "tag": "skills", "role": "review", "workspace": "C:\\scratch\\w2231", "skills": [" house-style ", "thorough-review", "house-style"] }]""",
+                Ct);
+
+            await QueueCommand.ExecuteAsync(
+                new QueueOptions(QueueVerb.Import, ImportFilePath: import), TextWriter.Null, Ct);
+
+            var item = Assert.Single((await QueueStore.LoadAsync(BatonPaths.QueueFile, Ct)).Items);
+            Assert.Equal(["house-style", "thorough-review"], item.Skills);
+        }
+        finally
+        {
+            DirectoryCleanup.DeleteRecursively(home);
+        }
+    }
+
+    [Fact]
+    public async Task Import_refuses_a_null_skill_entry_without_writing_the_queue()
+    {
+        var home = CreateTempHome();
+        using var scope = BatonEnvironmentSnapshot.BeginScope(BatonEnvironmentSnapshot.Blank with { HomeOverride = home });
+        try
+        {
+            var import = Path.Combine(home, "scratchpad.json");
+            await File.WriteAllTextAsync(
+                import,
+                """[{ "tag": "skills", "role": "review", "workspace": "C:\\scratch\\w2231", "skills": [null] }]""",
+                Ct);
+
+            var refusal = await Assert.ThrowsAsync<CliArgumentException>(() => QueueCommand.ExecuteAsync(
+                new QueueOptions(QueueVerb.Import, ImportFilePath: import), TextWriter.Null, Ct));
+
+            Assert.Contains("cannot be null", refusal.Message, StringComparison.Ordinal);
+            Assert.Contains("remove null skill entries", refusal.TryInvocation!, StringComparison.Ordinal);
+            Assert.False(File.Exists(BatonPaths.QueueFile));
         }
         finally
         {

@@ -112,6 +112,136 @@ public sealed class QueueSchedulerServiceTests
         }
     }
 
+    [Fact]
+    public async Task A_saved_lifecycle_item_with_explicit_skills_fails_once_before_launch()
+    {
+        var home = CreateTempHome();
+        using var scope = BatonEnvironmentSnapshot.BeginScope(BatonEnvironmentSnapshot.Blank with { HomeOverride = home });
+        try
+        {
+            await QueueStore.MutateAsync(BatonPaths.QueueFile, s => s with
+            {
+                Items = [Item(role: "review") with { Stage = WorkStage.Review, Skills = ["house-style"] }],
+            }, Ct);
+            var launchCount = 0;
+            var service = Service((_, _) =>
+            {
+                launchCount++;
+                return Task.FromResult(new QueueLaunchOutcome(null));
+            });
+
+            await service.TickOnceAsync(Ct);
+            await service.TickOnceAsync(Ct);
+
+            Assert.Equal(0, launchCount);
+            var item = Assert.Single((await QueueStore.LoadAsync(BatonPaths.QueueFile, Ct)).Items);
+            Assert.Equal(QueueItemState.Failed, item.State);
+            Assert.Null(item.RoomDirectory);
+            Assert.Null(item.LaunchedAt);
+            Assert.Contains("lifecycle item", item.Error!, StringComparison.Ordinal);
+            Assert.Contains("remove the persisted Skills field", item.Error, StringComparison.Ordinal);
+        }
+        finally
+        {
+            Cleanup(home);
+        }
+    }
+
+    [Fact]
+    public async Task A_saved_null_skill_entry_fails_with_a_remedy_instead_of_throwing_from_the_tick()
+    {
+        var home = CreateTempHome();
+        using var scope = BatonEnvironmentSnapshot.BeginScope(BatonEnvironmentSnapshot.Blank with { HomeOverride = home });
+        try
+        {
+            await QueueStore.MutateAsync(BatonPaths.QueueFile, s => s with
+            {
+                Items = [Item() with { Skills = [null!] }],
+            }, Ct);
+            var launched = false;
+            var service = Service((_, _) =>
+            {
+                launched = true;
+                return Task.FromResult(new QueueLaunchOutcome(null));
+            });
+
+            await service.TickOnceAsync(Ct);
+
+            Assert.False(launched);
+            var item = Assert.Single((await QueueStore.LoadAsync(BatonPaths.QueueFile, Ct)).Items);
+            Assert.Equal(QueueItemState.Failed, item.State);
+            Assert.Contains("cannot be null", item.Error!, StringComparison.Ordinal);
+            Assert.Contains("remove null skill entries", item.Error, StringComparison.Ordinal);
+        }
+        finally
+        {
+            Cleanup(home);
+        }
+    }
+
+    [Fact]
+    public async Task A_saved_blank_and_named_skill_pair_fails_instead_of_dropping_the_blank()
+    {
+        var home = CreateTempHome();
+        using var scope = BatonEnvironmentSnapshot.BeginScope(BatonEnvironmentSnapshot.Blank with { HomeOverride = home });
+        try
+        {
+            await QueueStore.MutateAsync(BatonPaths.QueueFile, s => s with
+            {
+                Items = [Item() with { Skills = ["", "house-style"] }],
+            }, Ct);
+            var launched = false;
+            var service = Service((_, _) =>
+            {
+                launched = true;
+                return Task.FromResult(new QueueLaunchOutcome(null));
+            });
+
+            await service.TickOnceAsync(Ct);
+
+            Assert.False(launched);
+            var item = Assert.Single((await QueueStore.LoadAsync(BatonPaths.QueueFile, Ct)).Items);
+            Assert.Equal(QueueItemState.Failed, item.State);
+            Assert.Contains("contradictory", item.Error!, StringComparison.Ordinal);
+            Assert.Contains("house-style", item.Error, StringComparison.Ordinal);
+        }
+        finally
+        {
+            Cleanup(home);
+        }
+    }
+
+    [Fact]
+    public async Task A_saved_valid_skill_list_is_normalized_before_launch()
+    {
+        var home = CreateTempHome();
+        using var scope = BatonEnvironmentSnapshot.BeginScope(BatonEnvironmentSnapshot.Blank with { HomeOverride = home });
+        try
+        {
+            await QueueStore.MutateAsync(BatonPaths.QueueFile, s => s with
+            {
+                Items = [Item() with { Skills = [" house-style ", "house-style", "thorough-review"] }],
+            }, Ct);
+            QueueLaunchRequest? seen = null;
+            var service = Service((request, _) =>
+            {
+                seen = request;
+                return Task.FromResult(new QueueLaunchOutcome(request.RoomDirectory));
+            });
+
+            await service.TickOnceAsync(Ct);
+
+            Assert.Equal(["house-style", "thorough-review"], seen!.Item.Skills);
+            Assert.Equal(
+                QueueItemState.Launched,
+                Assert.Single((await QueueStore.LoadAsync(BatonPaths.QueueFile, Ct)).Items).State);
+        }
+        finally
+        {
+            Cleanup(home);
+        }
+    }
+
 
     private static string CreateTempHome()
     {
@@ -165,6 +295,7 @@ public sealed class QueueSchedulerServiceTests
             // launch does not re-derive it.
             Assert.Equal("claude", seen!.Tier.Adapter);
             Assert.Equal("opus", seen.Tier.Model);
+            Assert.Null(seen.Item.Skills);
 
             var fact = Assert.Single(await QueueDecisionLedgerStore.ReadAllAsync(BatonPaths.QueueDecisionLedgerFile, Ct));
             Assert.Equal("launched", fact.Decision);

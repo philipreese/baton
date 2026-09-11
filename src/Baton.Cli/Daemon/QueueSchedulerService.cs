@@ -232,6 +232,23 @@ public sealed class QueueSchedulerService : BackgroundService
                 return interval;
             }
 
+            // Queue add and import validate skills, but saved rows can predate that validation or be
+            // hand-edited. Re-apply the shared launch policy before claiming a room: an invalid row
+            // becomes one actionable Failed item rather than crashing the daemon or entering a launch
+            // retry loop, and a valid row reaches the launcher in dispatch-normalized form.
+            try
+            {
+                item = item with { Skills = QueueLauncher.NormalizeSkillsForLaunch(item) };
+            }
+            catch (CliArgumentException ex)
+            {
+                var remedy = ex.TryInvocation is { Length: > 0 } ? $" Try: {ex.TryInvocation}" : string.Empty;
+                await FailAsync(
+                    item, ex.Message + remedy, room: null, now, decision, tier, cancellationToken)
+                    .ConfigureAwait(false);
+                return interval;
+            }
+
             // #2142: imported and hand-edited legacy rows bypass queue add, so apply the same
             // final-tuple policy before claiming a room or spawning a lane. This is a refusal, not a
             // fallback: the item records the actionable repair and no vendor process is started.
