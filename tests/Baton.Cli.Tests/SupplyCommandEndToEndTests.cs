@@ -77,8 +77,6 @@ public class SupplyCommandEndToEndTests
             await SnapshotBinder.PersistAsync(
                 snapshot, Path.Combine(roomDirectory, "snapshot.json"), TestContext.Current.CancellationToken);
 
-            // Model is deliberately omitted: Codex's recorded default is Astra, a conductor-only
-            // model. The supply pump would otherwise launch a after minting the supplementary execution.
             var conductorConfig = new Dictionary<string, WorkerBindingConfigEntry>
             {
                 ["a"] = new WorkerBindingConfigEntry(

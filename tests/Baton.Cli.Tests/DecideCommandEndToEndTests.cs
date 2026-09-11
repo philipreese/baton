@@ -75,8 +75,6 @@ public class DecideCommandEndToEndTests
             Assert.Equal(WorkflowStatus.Paused, paused.State.Status);
             var executionId = paused.State.Steps.Single(step => step.StepId.Value == "a").LatestExecutionId!.Value;
 
-            // Model is deliberately omitted: Codex's recorded default is Astra, a conductor-only
-            // model. The decision would otherwise make b ready and dispatch it in the settling pump.
             var conductorConfig = new Dictionary<string, WorkerBindingConfigEntry>
             {
                 ["a"] = new WorkerBindingConfigEntry(
