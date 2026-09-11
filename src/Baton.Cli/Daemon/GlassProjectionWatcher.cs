@@ -3,10 +3,10 @@ using Baton.Status;
 namespace Baton.Cli.Daemon;
 
 /// <summary>
-/// #1946 — "the projection file changed", as a version number every <c>/events</c> subscriber can
-/// wait on. Watches the file <see cref="FleetProjectionWriter"/> already writes
-/// (<see cref="BatonPaths.FleetProjectionFile"/>); no second derivation of the fleet row exists or
-/// may be added here.
+/// #1946/#2140 — a file-change signal the shared <c>/events</c> loop can wait on. Production creates
+/// one for <see cref="BatonPaths.FleetProjectionFile"/> and one for
+/// <see cref="BatonPaths.FleetEventsFile"/>. It derives no content: projection versions remain
+/// transient reload hints, while durable event ids come only from <see cref="FleetEventLog"/>.
 /// </summary>
 /// <remarks>
 /// <para>

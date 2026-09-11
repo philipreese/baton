@@ -10,18 +10,17 @@ namespace Baton.Cli.Daemon;
 /// <summary>
 /// #1946 slice 1 — the tailnet plane's listener (spec/baton.md §11 C-11): GET routes serving
 /// <see cref="GlassPage"/>, its static install metadata, the fleet projection the daemon already
-/// writes, and a stream of that file's changes. Off unless <see cref="GlassListenerSettings.Listen"/>
-/// is set.
+/// writes, Baton's durable fleet-event tail, and a stream carrying both sources. Off unless
+/// <see cref="GlassListenerSettings.Listen"/> is set.
 /// </summary>
 /// <remarks>
 /// <para>
 /// <b>THE SLICE BOUNDARY, and it is the whole reason this plane exists.</b> Apart from the page's
-/// static install metadata, the route table below serves the FLEET ROW ONLY — the same payload the
-/// mailbox already carries. No stdout tail beyond what the projection file itself contains, no room
-/// artifacts, no per-room timeline endpoint, no arrest verb. Drill-down (live stdout tail, full
-/// timeline, room artifacts) is slice 2, and C-11 rules that it may live ONLY on this plane: it must
-/// never be added to the worker-served or artifact copies, whose secret gate and KV write cap are
-/// the two walls that forced a second plane in the first place.
+/// static install metadata, the route table below serves the fleet row plus Baton's event facts. It
+/// still serves no stdout tail beyond what the projection file itself contains, no room artifacts,
+/// no per-room timeline endpoint, and no arrest verb. Those drill-down surfaces may live ONLY on
+/// this plane: they must never be added to worker-served or artifact copies, whose secret gate and
+/// KV write cap are the two walls that forced a second plane in the first place.
 /// </para>
 /// <para>
 /// <b>Read-only, and structurally so.</b> Every route is a GET; a request with any other method is
@@ -58,11 +57,20 @@ internal sealed class GlassHttpService : BackgroundService
 
     private readonly DaemonSettings _settings;
     private readonly string _projectionPath;
-    private readonly GlassProjectionWatcher _watcher;
+    private readonly GlassProjectionWatcher _projectionWatcher;
+    private readonly GlassProjectionWatcher _eventWatcher;
+    private readonly FleetEventLog _eventLog;
     private readonly TextWriter _log;
 
     public GlassHttpService(DaemonSettings settings)
-        : this(settings, BatonPaths.FleetProjectionFile, null, null)
+        : this(
+            settings,
+            BatonPaths.FleetProjectionFile,
+            null,
+            null,
+            BatonPaths.FleetEventsFile,
+            BatonPaths.FleetEventsRolloverFile,
+            RoomRetentionSweep.GetThresholdBytes())
     {
     }
 
@@ -70,13 +78,24 @@ internal sealed class GlassHttpService : BackgroundService
     /// test never depends on the machine's own <c>~/.baton</c> nor races xunit's parallel collections
     /// on <see cref="Console.Error"/>.</summary>
     internal GlassHttpService(
-        DaemonSettings settings, string projectionPath, TimeSpan? pollInterval, TextWriter? log)
+        DaemonSettings settings,
+        string projectionPath,
+        TimeSpan? pollInterval,
+        TextWriter? log,
+        string? eventsPath = null,
+        string? eventsRolloverPath = null,
+        long? eventsMaxBytes = null)
     {
         ArgumentNullException.ThrowIfNull(settings);
         ArgumentException.ThrowIfNullOrEmpty(projectionPath);
         _settings = settings;
         _projectionPath = projectionPath;
-        _watcher = new GlassProjectionWatcher(projectionPath, pollInterval);
+        var eventPath = eventsPath ?? Path.Combine(Path.GetDirectoryName(projectionPath)!, BatonPaths.FleetEventsFileName);
+        var rolloverPath = eventsRolloverPath
+            ?? Path.Combine(Path.GetDirectoryName(eventPath)!, BatonPaths.FleetEventsRolloverFileName);
+        _projectionWatcher = new GlassProjectionWatcher(projectionPath, pollInterval);
+        _eventWatcher = new GlassProjectionWatcher(eventPath, pollInterval);
+        _eventLog = new FleetEventLog(eventPath, rolloverPath, eventsMaxBytes ?? RoomRetentionSweep.GetThresholdBytes());
         _log = log ?? Console.Out;
     }
 
@@ -151,7 +170,8 @@ internal sealed class GlassHttpService : BackgroundService
         try
         {
             var pumps = listeners.Select(l => AcceptLoopAsync(l, stoppingToken)).ToList();
-            pumps.Add(_watcher.RunAsync(stoppingToken));
+            pumps.Add(_projectionWatcher.RunAsync(stoppingToken));
+            pumps.Add(_eventWatcher.RunAsync(stoppingToken));
             await Task.WhenAll(pumps).ConfigureAwait(false);
         }
         finally
@@ -334,12 +354,10 @@ internal sealed class GlassHttpService : BackgroundService
     }
 
     /// <summary>
-    /// Server-Sent Events: one <c>projection</c> event per observed change to the projection file,
-    /// and nothing else but keep-alive comments. C-11 chose SSE over a WebSocket precisely because
-    /// the primary client is a phone that sleeps constantly and <c>EventSource</c> gives reconnect
-    /// for free; the event id carried here is the watcher's version, which a reconnecting client
-    /// sends back as <c>Last-Event-ID</c> so an event that landed while it was asleep is delivered
-    /// rather than silently skipped.
+    /// Server-Sent Events: durable <c>fleet</c> facts replayed from the retained live log after the
+    /// client's <c>Last-Event-ID</c>, plus the existing transient <c>projection</c> reload hint. Only
+    /// durable facts carry SSE ids; a projection version resets on daemon restart and therefore must
+    /// never become the client's durable cursor.
     /// </summary>
     private async Task WriteEventStreamAsync(HttpListenerContext context, CancellationToken stoppingToken)
     {
@@ -348,44 +366,72 @@ internal sealed class GlassHttpService : BackgroundService
         context.Response.ContentType = "text/event-stream; charset=utf-8";
         context.Response.SendChunked = true;
 
-        var known = _watcher.Version;
+        var cursor = 0L;
         if (long.TryParse(
                 context.Request.Headers["Last-Event-ID"], NumberStyles.Integer, CultureInfo.InvariantCulture,
                 out var resumeFrom) && resumeFrom >= 0)
         {
-            known = Math.Min(known, resumeFrom);
+            cursor = resumeFrom;
         }
+
+        var knownProjection = _projectionWatcher.Version;
+        var knownEventsVersion = _eventWatcher.Version;
 
         var stream = context.Response.OutputStream;
         await WriteAsciiAsync(stream, ": connected\n\n").ConfigureAwait(false);
 
         while (!stoppingToken.IsCancellationRequested)
         {
-            long version;
+            var replay = await _eventLog.ReadAfter(cursor, stoppingToken).ConfigureAwait(false);
+            foreach (var entry in replay)
+            {
+                cursor = entry.Id;
+                await WriteAsciiAsync(
+                        stream,
+                        $"id: {entry.Id.ToString(CultureInfo.InvariantCulture)}\nevent: fleet\ndata: "
+                        + FleetEventLog.Serialize(entry) + "\n\n")
+                    .ConfigureAwait(false);
+            }
+
+            var projectionVersion = _projectionWatcher.Version;
+            if (projectionVersion > knownProjection)
+            {
+                knownProjection = projectionVersion;
+                await WriteAsciiAsync(
+                        stream,
+                        $"event: projection\ndata: {{\"version\":{projectionVersion.ToString(CultureInfo.InvariantCulture)}}}\n\n")
+                    .ConfigureAwait(false);
+            }
+
+            if (replay.Count > 0)
+            {
+                continue;
+            }
+
+            using var waitStop = CancellationTokenSource.CreateLinkedTokenSource(stoppingToken);
+            var projectionWait = _projectionWatcher.WaitForChangeAsync(knownProjection, waitStop.Token);
+            var eventWait = _eventWatcher.WaitForChangeAsync(knownEventsVersion, waitStop.Token);
+            var keepAlive = Task.Delay(SseKeepAlive, waitStop.Token);
             try
             {
-                version = await _watcher.WaitForChangeAsync(known, stoppingToken)
-                    .WaitAsync(SseKeepAlive, stoppingToken).ConfigureAwait(false);
-            }
-            catch (TimeoutException)
-            {
-                // No change within the keep-alive window -- a comment frame, which is NOT an event:
-                // "emits on a change and not otherwise" is a property of `event:` frames, and a client
-                // sees nothing here.
-                await WriteAsciiAsync(stream, ": keep-alive\n\n").ConfigureAwait(false);
-                continue;
+                var completed = await Task.WhenAny(projectionWait, eventWait, keepAlive).ConfigureAwait(false);
+                if (completed == keepAlive)
+                {
+                    await WriteAsciiAsync(stream, ": keep-alive\n\n").ConfigureAwait(false);
+                }
+                else if (completed == eventWait)
+                {
+                    knownEventsVersion = await eventWait.ConfigureAwait(false);
+                }
             }
             catch (OperationCanceledException)
             {
                 return;
             }
-
-            known = version;
-            await WriteAsciiAsync(
-                    stream,
-                    $"id: {version.ToString(CultureInfo.InvariantCulture)}\nevent: projection\ndata: " +
-                    $"{{\"version\":{version.ToString(CultureInfo.InvariantCulture)}}}\n\n")
-                .ConfigureAwait(false);
+            finally
+            {
+                await waitStop.CancelAsync().ConfigureAwait(false);
+            }
         }
     }
 

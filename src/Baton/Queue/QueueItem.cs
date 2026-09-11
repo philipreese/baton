@@ -1,4 +1,5 @@
 using System.Text.Json.Serialization;
+using Baton.Domain;
 
 namespace Baton.Queue;
 
@@ -217,6 +218,16 @@ public sealed record QueueItem
     public DateTimeOffset? AddedAt { get; init; }
 
     public DateTimeOffset? LaunchedAt { get; init; }
+
+    /// <summary>
+    /// Stable fleet-history identity for the current launch attempt. Generated in the same queue
+    /// mutation that claims the launch, before a room or vendor process exists; null on historical
+    /// rows and while no attempt has been claimed.
+    /// </summary>
+    public FleetAttemptId? AttemptId { get; init; }
+
+    /// <summary>The immediately preceding lifecycle attempt, when this row was queued from one.</summary>
+    public FleetAttemptId? ParentAttemptId { get; init; }
 
     /// <summary>When an operator cancelled this request before launch. Its item and spec remain in the
     /// queue history; cancellation is a fact, not deletion.</summary>
