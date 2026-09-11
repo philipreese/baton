@@ -189,6 +189,7 @@ public static class QueueCommand
             Effort = options.Effort,
             Skills = options.Skills,
             Requirements = requirements,
+            LastAdmission = admission,
             StageSelections = stageSelections,
             LifecyclePin = options.LifecyclePin,
             TimeoutMinutes = options.TimeoutMinutes,

@@ -159,6 +159,9 @@ namespace Baton.Cli;
 /// dispatch. Applies to a template dispatch too, since every phase is a role. The rule is
 /// spec/baton.md §2, "Role default skills".
 /// </param>
+/// <param name="Requirements">Explicit task capabilities which must already be present in the
+/// materialized role grant. Null means the caller did not declare any; the CLI parser normalizes an
+/// explicit <c>--require</c> list before this record is created.</param>
 public sealed record DispatchOptions(
     string Name,
     string? SpecFilePath,
@@ -187,4 +190,5 @@ public sealed record DispatchOptions(
     TimeSpan? VerifyTimeout = null,
     string? OverrideRunwayReason = null,
     IReadOnlyList<string>? Skills = null,
-    bool NoDefaultSkills = false);
+    bool NoDefaultSkills = false,
+    IReadOnlyList<string>? Requirements = null);

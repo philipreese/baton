@@ -1,6 +1,8 @@
 using Baton.Domain;
 using Baton.Runway;
 
+using Baton.Queue;
+
 namespace Baton.Vendors;
 
 /// <summary>
@@ -279,7 +281,12 @@ public sealed record WorkerBindingConfigEntry(
     bool VerifiesWorkspace = true,
     // #2190: conductor-captured before the workspace is worker-controlled and persisted so resume
     // never re-derives repository/head authority from mutable Git metadata.
-    GhPullRequestCreateIdentity? PullRequestCreateIdentity = null);
+    GhPullRequestCreateIdentity? PullRequestCreateIdentity = null,
+    // #2234: retained task-demand declaration and the exact pre-vendor comparison, appended for
+    // bindings.json compatibility. Neither field grants authority; readers can distinguish a task
+    // that asked for nothing from an older binding that predates requirement declarations.
+    IReadOnlyList<string>? TaskRequirements = null,
+    TaskRequirementAdmission? TaskRequirementAdmission = null);
 
 /// <summary>
 /// #1927: the closed vocabulary <see cref="WorkerBindingConfigEntry.ModelSource"/> and

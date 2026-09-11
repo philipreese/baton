@@ -3,6 +3,7 @@ using Baton.Accounting;
 using Baton.Vendors;
 using Baton.Domain;
 using Baton.Runway;
+using Baton.Queue;
 using Baton.Status;
 using Baton.Templates;
 
@@ -109,6 +110,43 @@ public static class DispatchCommand
 
         var workspace = options.WorkspaceDirectory ?? workspaceDirectory ?? Directory.GetCurrentDirectory();
         var (definition, bindings) = await MaterializeAsync(options, workspace, cancellationToken).ConfigureAwait(false);
+
+        // Requirements are declared task demand, never a mechanism to widen a role. Materialization
+        // has resolved the actual binding grant (including any output-contract narrowing), but no room
+        // or vendor process exists yet, making this the direct-dispatch equivalent of queue admission.
+        if (options.Requirements is not null)
+        {
+            if (bindings.Count != 1)
+            {
+                throw new CliArgumentException(
+                    "'--require' applies to one role's effective grant and cannot be used with a workflow template.",
+                    "dispatch the role directly, or omit --require for the template.");
+            }
+
+            var (workerName, binding) = bindings.Single();
+            var admission = TaskRequirementPreflight.Evaluate(
+                options.Requirements, binding.PermissionGrant,
+                binding.Contract.ProducedOutputs.Select(output => output.Name));
+            if (admission.Result == TaskRequirementAdmission.Refused)
+            {
+                var missing = admission.Missing is { Count: > 0 }
+                    ? string.Join(", ", admission.Missing)
+                    : "an invalid requirement declaration";
+                throw new CliArgumentException(
+                    $"Task requirements are incompatible with worker '{workerName}'s effective grant: missing {missing}. "
+                    + "Requirements never grant authority.",
+                    "choose a role whose grant supplies the requirement, or amend --require before dispatching.");
+            }
+
+            bindings = new Dictionary<string, WorkerBindingConfigEntry>(bindings, StringComparer.Ordinal)
+            {
+                [workerName] = binding with
+                {
+                    TaskRequirements = admission.Requested,
+                    TaskRequirementAdmission = admission,
+                },
+            };
+        }
 
         // #2190: a cold dispatch is the trust boundary. Capture repository/head before the room or
         // worker exists, then persist it with the binding. Continuations inherit the veteran room's

@@ -19,11 +19,13 @@ internal static class TaskRequirementPreflight
         ArgumentNullException.ThrowIfNull(item);
         ArgumentNullException.ThrowIfNull(role);
 
-        var effectiveGrant = EffectiveGrant(role);
+        var effectiveGrant = EffectiveGrant(role.Grant, role.Outputs.Select(output => output.Name));
         if (item.Requirements is null)
         {
             var executionBearing = TaskRequirements.IsExecutionBearing(
-                role.Grant.WriteFiles, role.Grant.RunShellCommands, role.Grant.NetworkAccess);
+                role.Grant.WriteFiles,
+                role.Grant.RunShellCommands && !role.Grant.ShellCommandsAreReadOnly,
+                role.Grant.NetworkAccess);
             return requireDeclaredRequirements && executionBearing
                 ? new TaskRequirementAdmission(
                     null, effectiveGrant, TaskRequirementAdmission.Refused,
@@ -50,9 +52,36 @@ internal static class TaskRequirementPreflight
             : new TaskRequirementAdmission(requested, effectiveGrant, TaskRequirementAdmission.Refused, missing, VendorUsage: 0);
     }
 
-    private static IReadOnlyList<string> EffectiveGrant(WorkerRole role)
+    /// <summary>
+    /// Direct dispatch has already materialized a binding, whose grant can be narrower than the raw
+    /// role declaration. Compare against that actual runtime grant, not a second reconstruction.
+    /// </summary>
+    internal static TaskRequirementAdmission Evaluate(
+        IReadOnlyList<string> requested, PermissionGrant? grant, IEnumerable<string> declaredOutputs)
     {
-        var grant = role.Grant;
+        ArgumentNullException.ThrowIfNull(requested);
+        ArgumentNullException.ThrowIfNull(declaredOutputs);
+
+        var effectiveGrant = EffectiveGrant(grant ?? new PermissionGrant(), declaredOutputs);
+        try
+        {
+            requested = TaskRequirements.Normalize(requested);
+        }
+        catch (ArgumentException ex)
+        {
+            return new TaskRequirementAdmission(
+                requested, effectiveGrant, TaskRequirementAdmission.Refused, [ex.Message], VendorUsage: 0);
+        }
+
+        var granted = effectiveGrant.ToHashSet(StringComparer.Ordinal);
+        var missing = requested.Where(requirement => !granted.Contains(requirement)).ToList();
+        return missing.Count == 0
+            ? new TaskRequirementAdmission(requested, effectiveGrant, TaskRequirementAdmission.Admitted)
+            : new TaskRequirementAdmission(requested, effectiveGrant, TaskRequirementAdmission.Refused, missing, VendorUsage: 0);
+    }
+
+    private static IReadOnlyList<string> EffectiveGrant(PermissionGrant grant, IEnumerable<string> declaredOutputs)
+    {
         var capabilities = new List<string>();
         if (grant.ReadFiles)
         {
@@ -87,8 +116,8 @@ internal static class TaskRequirementPreflight
             capabilities.Add(TaskRequirements.GitHubWrite);
         }
 
-        capabilities.AddRange(role.Outputs
-            .Select(output => TaskRequirements.ArtifactPrefix + output.Name.Trim().ToLowerInvariant()));
+        capabilities.AddRange(declaredOutputs
+            .Select(output => TaskRequirements.ArtifactPrefix + output.Trim().ToLowerInvariant()));
         return capabilities;
     }
 
@@ -96,5 +125,6 @@ internal static class TaskRequirementPreflight
         grant.RunShellCommands
         && ShellCommandPatternMatcher.EvaluateChainedCommand(
             command, grant.ShellCommandPatterns, grant.DeniedShellCommandPatterns,
-            grant.DeniedShellCommandExceptions).IsAllowed;
+            grant.DeniedShellCommandExceptions).IsAllowed
+        && !ShellCommandPatternMatcher.IsDeniedByOptionToken(command, grant.DeniedShellOptionTokens);
 }

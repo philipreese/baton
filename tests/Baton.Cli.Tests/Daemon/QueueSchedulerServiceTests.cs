@@ -380,6 +380,82 @@ public sealed class QueueSchedulerServiceTests
     }
 
     [Fact]
+    public async Task A_replaced_requirement_declaration_is_revalidated_before_the_launch_claim()
+    {
+        var home = CreateTempHome();
+        using var scope = BatonEnvironmentSnapshot.BeginScope(BatonEnvironmentSnapshot.Blank with { HomeOverride = home });
+        try
+        {
+            await QueueStore.MutateAsync(BatonPaths.QueueFile, s => s with
+            {
+                Items = [Item(role: "advise") with { Requirements = [] }],
+            }, Ct);
+            var launchCount = 0;
+            var replaced = false;
+            var service = new QueueSchedulerService(
+                (_, _) =>
+                {
+                    launchCount++;
+                    return Task.FromResult(new QueueLaunchOutcome(null));
+                },
+                _ => Task.FromResult(0.0),
+                () => 16.0,
+                () => DateTimeOffset.UtcNow,
+                beforeLaunchClaim: async _ =>
+                {
+                    if (replaced)
+                    {
+                        return;
+                    }
+
+                    replaced = true;
+                    await QueueStore.MutateAsync(BatonPaths.QueueFile, snapshot => snapshot with
+                    {
+                        Items = snapshot.Items.Select(item => item with { Requirements = ["file-write"] }).ToList(),
+                    }, Ct);
+                });
+
+            await service.TickOnceAsync(Ct);
+
+            Assert.True(replaced);
+            Assert.Equal(0, launchCount);
+            var item = Assert.Single((await QueueStore.LoadAsync(BatonPaths.QueueFile, Ct)).Items);
+            Assert.Equal(QueueItemState.Failed, item.State);
+            Assert.Equal(["file-write"], item.LastAdmission!.Missing);
+        }
+        finally
+        {
+            Cleanup(home);
+        }
+    }
+
+    [Fact]
+    public async Task A_legacy_read_only_review_row_remains_unknown_after_requirement_migration()
+    {
+        var home = CreateTempHome();
+        using var scope = BatonEnvironmentSnapshot.BeginScope(BatonEnvironmentSnapshot.Blank with { HomeOverride = home });
+        try
+        {
+            await File.WriteAllTextAsync(BatonPaths.SettingsFile, "{\"Queue\":{\"RequireDeclaredRequirements\":true}}", Ct);
+            await QueueStore.MutateAsync(BatonPaths.QueueFile, s => s with
+            {
+                Items = [Item(role: "review")],
+            }, Ct);
+            var service = Service((request, _) => Task.FromResult(new QueueLaunchOutcome(request.RoomDirectory)));
+
+            await service.TickOnceAsync(Ct);
+
+            var item = Assert.Single((await QueueStore.LoadAsync(BatonPaths.QueueFile, Ct)).Items);
+            Assert.Equal(QueueItemState.Launched, item.State);
+            Assert.Equal(TaskRequirementAdmission.Unknown, item.LastAdmission!.Result);
+        }
+        finally
+        {
+            Cleanup(home);
+        }
+    }
+
+    [Fact]
     public async Task A_saved_blank_and_named_skill_pair_fails_instead_of_dropping_the_blank()
     {
         var home = CreateTempHome();

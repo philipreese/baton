@@ -68,7 +68,8 @@ public static class TaskRequirements
 
     /// <summary>Whether a legacy requirement-less row has execution authority that needs migration
     /// completion before it can safely remain unknown.</summary>
-    public static bool IsExecutionBearing(bool fileWrite, bool shell, bool network) => fileWrite || shell || network;
+    public static bool IsExecutionBearing(bool fileWrite, bool shellCanMutate, bool network) =>
+        fileWrite || shellCanMutate || network;
 }
 
 /// <summary>

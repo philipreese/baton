@@ -300,7 +300,8 @@ public sealed class QueueSchedulerService : BackgroundService
             await QueueStore.MutateAsync(BatonPaths.QueueFile, snapshot =>
             {
                 var current = snapshot.Items.FirstOrDefault(i => string.Equals(i.Tag, item.Tag, StringComparison.Ordinal));
-                if (current?.State != QueueItemState.Queued)
+                if (current?.State != QueueItemState.Queued
+                    || !HasSameAdmissionDeclaration(current, item))
                 {
                     return snapshot;
                 }
@@ -675,6 +676,20 @@ public sealed class QueueSchedulerService : BackgroundService
     private static IReadOnlyList<QueueItem> Replace(
         IReadOnlyList<QueueItem> items, string tag, Func<QueueItem, QueueItem> update) =>
         items.Select(i => string.Equals(i.Tag, tag, StringComparison.Ordinal) ? update(i) : i).ToList();
+
+    /// <summary>
+    /// The preflight verdict is meaningful only for the exact role and requirement declaration it
+    /// inspected. Queue replacement is allowed while an item is queued, so claiming by tag/state
+    /// alone could otherwise launch a just-replaced imported task under the old verdict.
+    /// </summary>
+    private static bool HasSameAdmissionDeclaration(QueueItem current, QueueItem admitted) =>
+        string.Equals(current.Role, admitted.Role, StringComparison.Ordinal)
+        && SameRequirements(current.Requirements, admitted.Requirements);
+
+    private static bool SameRequirements(IReadOnlyList<string>? left, IReadOnlyList<string>? right) =>
+        left is null || right is null
+            ? left is null && right is null
+            : left.SequenceEqual(right, StringComparer.Ordinal);
 
     /// <summary>
     /// The live tally, over the SAME room scan <c>fleet_status</c> and

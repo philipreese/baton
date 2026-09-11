@@ -103,6 +103,8 @@ public sealed class QueueCommandTests
 
             var item = Assert.Single((await QueueStore.LoadAsync(BatonPaths.QueueFile, Ct)).Items);
             Assert.Equal(["file-write", "shell"], item.Requirements);
+            Assert.Equal("admitted", item.LastAdmission!.Result);
+            Assert.Equal(["file-write", "shell"], item.LastAdmission.Requested);
             var output = new StringWriter();
             await QueueCommand.ExecuteAsync(new QueueOptions(QueueVerb.List), output, Ct);
             Assert.Contains("requirements: file-write, shell", output.ToString(), StringComparison.Ordinal);

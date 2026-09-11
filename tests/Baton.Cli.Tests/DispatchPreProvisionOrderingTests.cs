@@ -149,6 +149,47 @@ public sealed class DispatchPreProvisionOrderingTests : IDisposable
     }
 
     [Fact]
+    public async Task A_direct_dispatch_requirement_mismatch_refuses_before_creating_a_room()
+    {
+        var testRoot = Path.Combine(Path.GetTempPath(), $"dispatch-order-requirements-{Guid.NewGuid():N}");
+        try
+        {
+            var options = (await BuildDispatchAsync(testRoot)) with { Requirements = ["file-write", "shell"] };
+
+            var refusal = await Assert.ThrowsAsync<CliArgumentException>(() => DispatchCommand.ExecuteAsync(
+                options, Adapters, TestContext.Current.CancellationToken, evaluateRunway: Admit));
+
+            Assert.Contains("file-write, shell", refusal.Message, StringComparison.Ordinal);
+            Assert.False(Directory.Exists(options.RoomDirectoryPath));
+        }
+        finally
+        {
+            DirectoryCleanup.DeleteRecursively(testRoot);
+        }
+    }
+
+    [Fact]
+    public async Task A_direct_dispatch_persists_its_requirement_admission_on_the_binding()
+    {
+        var testRoot = Path.Combine(Path.GetTempPath(), $"dispatch-order-requirements-record-{Guid.NewGuid():N}");
+        try
+        {
+            var options = (await BuildDispatchAsync(testRoot)) with { Requirements = [] };
+
+            await DispatchCommand.ExecuteAsync(options, Adapters, TestContext.Current.CancellationToken, evaluateRunway: Admit);
+
+            var binding = Assert.Single(await WorkerBindingConfigParser.LoadFromFileAsync(
+                BatonPaths.RoomBindingsFile(options.RoomDirectoryPath), TestContext.Current.CancellationToken)).Value;
+            Assert.Empty(binding.TaskRequirements!);
+            Assert.Equal("admitted", binding.TaskRequirementAdmission!.Result);
+        }
+        finally
+        {
+            DirectoryCleanup.DeleteRecursively(testRoot);
+        }
+    }
+
+    [Fact]
     public async Task An_explicit_claude_model_reaches_the_dispatch_binding()
     {
         var testRoot = Path.Combine(Path.GetTempPath(), $"dispatch-order-claude-explicit-{Guid.NewGuid():N}");
