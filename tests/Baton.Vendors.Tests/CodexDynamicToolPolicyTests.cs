@@ -965,23 +965,33 @@ public sealed class CodexDynamicToolPolicyTests
     public async Task Timed_out_volatile_diff_gets_one_retry_after_expiry_then_replays_that_failure()
     {
         var clock = new StepClock(new DateTimeOffset(2026, 9, 10, 12, 0, 0, TimeSpan.Zero));
+        var expectedAttempt = 0;
         using var fixture = new PolicyFixture(
             new PermissionGrant(RunShellCommands: true),
             ["report.md"],
             // wait-ok: injected ceiling reaches the timeout branch quickly; the child is killed there.
             commandCeiling: _ => TimeSpan.FromMilliseconds(500),
-            timeProvider: clock);
+            timeProvider: clock,
+            // This rendezvous runs after Process.Start and immediately before CancelAfter. Waiting
+            // for attempt N here therefore controls the timeout boundary; it is not a ready signal
+            // racing a timeout that was already armed.
+            beforeCommandTimeoutStarts: fixture => WaitForExternalDiffAttempt(
+                Path.Combine(fixture.Workspace, "volatile-timeout-runs.txt"), ++expectedAttempt));
         var command = HangingExternalDiffCommand(fixture.Workspace, "volatile-timeout");
 
         var firstFailure = await fixture.ExecuteAsync(
             CodexDynamicToolPolicy.RunCommandTool, new { command = command.CommandLine });
+        AssertExternalDiffAttempts(command.CounterPath, 1, "first timeout");
         var immediateReplay = await fixture.ExecuteAsync(
             CodexDynamicToolPolicy.RunCommandTool, new { command = command.CommandLine });
+        AssertExternalDiffAttempts(command.CounterPath, 1, "immediate replay");
         clock.Advance(RepeatedToolCallLedger.Window + TimeSpan.FromSeconds(1));
         var failureAfterExpiry = await fixture.ExecuteAsync(
             CodexDynamicToolPolicy.RunCommandTool, new { command = command.CommandLine });
+        AssertExternalDiffAttempts(command.CounterPath, 2, "post-expiry timeout");
         var replayAfterExpiry = await fixture.ExecuteAsync(
             CodexDynamicToolPolicy.RunCommandTool, new { command = command.CommandLine });
+        AssertExternalDiffAttempts(command.CounterPath, 2, "final replay");
 
         Assert.False(firstFailure.Success, firstFailure.Text);
         Assert.Contains("default command ceiling", firstFailure.Text, StringComparison.Ordinal);
@@ -991,7 +1001,6 @@ public sealed class CodexDynamicToolPolicyTests
         Assert.DoesNotContain("replayed: identical command", failureAfterExpiry.Text, StringComparison.Ordinal);
         Assert.False(replayAfterExpiry.Success, replayAfterExpiry.Text);
         Assert.Contains("replayed: identical command", replayAfterExpiry.Text, StringComparison.Ordinal);
-        Assert.Equal(2, File.ReadAllLines(command.CounterPath).Length);
     }
 
     [Fact]
@@ -2018,6 +2027,27 @@ public sealed class CodexDynamicToolPolicyTests
         return ("git diff --ext-diff", counterPath, mutatedPath);
     }
 
+    private static void WaitForExternalDiffAttempt(string counterPath, int expectedAttempts)
+    {
+        var entered = SpinWait.SpinUntil(
+            () => ExternalDiffAttemptCount(counterPath) >= expectedAttempts,
+            TimeSpan.FromSeconds(10));
+        Assert.True(
+            entered,
+            $"timeout setup: external-diff helper attempt {expectedAttempts} did not enter before the timer gate");
+    }
+
+    private static void AssertExternalDiffAttempts(string counterPath, int expected, string phase)
+    {
+        var actual = ExternalDiffAttemptCount(counterPath);
+        Assert.True(
+            actual == expected,
+            $"{phase}: expected {expected} external-diff helper attempt(s), actual {actual}");
+    }
+
+    private static int ExternalDiffAttemptCount(string counterPath) =>
+        File.Exists(counterPath) ? File.ReadAllLines(counterPath).Length : 0;
+
     private static Stream WritableCaptureStream(string path) =>
         new FileStream(
             path,
@@ -2125,7 +2155,8 @@ public sealed class CodexDynamicToolPolicyTests
             bool createInput = false,
             Func<ShellCommandClass, TimeSpan>? commandCeiling = null,
             Func<string, Stream>? commandCaptureStreamFactory = null,
-            TimeProvider? timeProvider = null)
+            TimeProvider? timeProvider = null,
+            Action<PolicyFixture>? beforeCommandTimeoutStarts = null)
         {
             Root = Path.Combine(Path.GetTempPath(), $"baton-codex-policy-{Guid.NewGuid():N}");
             Workspace = Path.Combine(Root, "workspace");
@@ -2138,7 +2169,7 @@ public sealed class CodexDynamicToolPolicyTests
             {
                 File.WriteAllText(Input, "input");
             }
-            Policy = commandCaptureStreamFactory is null
+            Policy = commandCaptureStreamFactory is null && beforeCommandTimeoutStarts is null
                 ? new CodexDynamicToolPolicy(
                     grant, Workspace, Output, createInput ? [Input] : [], outputs, commandCeiling,
                     timeProvider)
@@ -2150,7 +2181,8 @@ public sealed class CodexDynamicToolPolicyTests
                     outputs,
                     commandCeiling,
                     timeProvider,
-                    commandCaptureStreamFactory);
+                    commandCaptureStreamFactory,
+                    beforeCommandTimeoutStarts is null ? null : () => beforeCommandTimeoutStarts(this));
         }
 
         public string Root { get; }

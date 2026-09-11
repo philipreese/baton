@@ -89,6 +89,7 @@ public sealed class CodexDynamicToolPolicy
     private readonly HashSet<string> _declaredOutputs;
     private readonly Func<ShellCommandClass, TimeSpan> _commandCeiling;
     private readonly Func<string, Stream> _commandCaptureStreamFactory;
+    private readonly Action? _beforeCommandTimeoutStartsForTest;
     private readonly Dictionary<string, RetainedCommandOutput> _commandOutputs =
         new(StringComparer.Ordinal);
 
@@ -142,13 +143,14 @@ public sealed class CodexDynamicToolPolicy
             .Select(NormalizeRelativeOutput).ToHashSet(PathComparer);
         _commandCeiling = commandCeiling ?? ShellCommandCeilings.For;
         _commandCaptureStreamFactory = CreateCommandCaptureStream;
+        _beforeCommandTimeoutStartsForTest = null;
         _repeats = new RepeatedToolCallLedger(timeProvider);
         _ownPullRequestOnly = OwnPullRequestOnlyRule.AppliesTo(grant) ? new OwnPullRequestOnlyRule() : null;
     }
 
     /// <summary>
-    /// Test-only seam for a capture destination that opens successfully and then fails while the
-    /// child is running. Production always uses <see cref="CreateCommandCaptureStream"/>.
+    /// Test-only seams for a capture destination that fails while the child is running and for a
+    /// rendezvous immediately before the real command timeout is armed. Production uses neither.
     /// </summary>
     internal CodexDynamicToolPolicy(
         PermissionGrant grant,
@@ -158,13 +160,14 @@ public sealed class CodexDynamicToolPolicy
         IEnumerable<string> producedOutputNames,
         Func<ShellCommandClass, TimeSpan>? commandCeiling,
         TimeProvider? timeProvider,
-        Func<string, Stream> commandCaptureStreamFactory)
+        Func<string, Stream>? commandCaptureStreamFactory,
+        Action? beforeCommandTimeoutStartsForTest = null)
         : this(
             grant, workingDirectory, outputDirectory, inputPaths, producedOutputNames,
             commandCeiling, timeProvider)
     {
-        _commandCaptureStreamFactory = commandCaptureStreamFactory
-            ?? throw new ArgumentNullException(nameof(commandCaptureStreamFactory));
+        _commandCaptureStreamFactory = commandCaptureStreamFactory ?? CreateCommandCaptureStream;
+        _beforeCommandTimeoutStartsForTest = beforeCommandTimeoutStartsForTest;
     }
 
     /// <summary>
@@ -1177,6 +1180,10 @@ public sealed class CodexDynamicToolPolicy
 
         using var processLifetime = process;
         using var timeout = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
+        // The callback is an internal fixture seam: waiting for a child-process marker here proves
+        // the timer below begins after that marker, rather than merely hoping the child starts before
+        // a timer that is already running. Production construction always leaves it null.
+        _beforeCommandTimeoutStartsForTest?.Invoke();
         timeout.CancelAfter(ceiling);
         var stdout = CaptureCommandChannelAsync(
             process.StandardOutput, stdoutPath, "stdout", stdoutDestination);
