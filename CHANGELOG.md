@@ -9,6 +9,25 @@ that carried them: `git show v0.35.0:src/Baton.Cli/CHANGELOG.md` (likewise `src/
 `release-please-config.json`. Everything below this line predates the split: the repo's single
 shared version through `0.14.0`.
 
+## [0.46.0](https://github.com/philipreese/baton/compare/v0.45.0...v0.46.0) (2026-09-11)
+
+
+### Features
+
+* **queue:** Enforce implementation and PR readiness checks ([c6fba8a](https://github.com/philipreese/baton/commit/c6fba8a5139fc51273f293f3917febc77155d842))
+* **tools:** Add offline metadata comparison extractor ([abe8cfd](https://github.com/philipreese/baton/commit/abe8cfdba1cdb3c0fd61f7c8761ade87c239915f))
+
+
+### Bug Fixes
+
+* **glass:** Distinguish unavailable quota evidence ([b4ef2f2](https://github.com/philipreese/baton/commit/b4ef2f26688a9379d292475f94e7dc383c2e126c))
+
+
+### Tests
+
+* **codex:** Synchronize cancellation handshake ([#2218](https://github.com/philipreese/baton/issues/2218)) ([6263049](https://github.com/philipreese/baton/commit/626304982780939121625aea43d1579cfab48455))
+* **glass:** Move selftest failures accumulator before check calls ([#2219](https://github.com/philipreese/baton/issues/2219)) ([d70bb0f](https://github.com/philipreese/baton/commit/d70bb0f959e3cc5813c8f906ba090e68606ff657))
+
 ## [0.45.0](https://github.com/philipreese/baton/compare/v0.44.4...v0.45.0) (2026-09-10)
 
 
