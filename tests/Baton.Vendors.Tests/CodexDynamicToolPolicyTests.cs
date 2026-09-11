@@ -1051,6 +1051,43 @@ public sealed class CodexDynamicToolPolicyTests
     }
 
     [Fact]
+    public async Task Uncancelled_rendezvous_cancellation_is_recorded_as_callback_failure_not_timeout()
+    {
+        using var fixture = new PolicyFixture(
+            new PermissionGrant(RunShellCommands: true),
+            ["report.md"],
+            beforeCommandTimeoutStarts: (fixture, cancellationToken) =>
+            {
+                WaitForCommandAttempt(
+                    Path.Combine(fixture.Workspace, "uncancelled-rendezvous-runs.txt"),
+                    1,
+                    cancellationToken,
+                    "hanging child");
+                throw new OperationCanceledException("synthetic uncancelled rendezvous cancellation");
+            });
+        var command = HangingSideEffectCommand(fixture.Workspace, "uncancelled-rendezvous");
+
+        var failed = await fixture.ExecuteAsync(
+            CodexDynamicToolPolicy.RunCommandTool, new { command = command.CommandLine });
+        var replay = await fixture.ExecuteAsync(
+            CodexDynamicToolPolicy.RunCommandTool, new { command = command.CommandLine });
+
+        Assert.False(failed.Success, failed.Text);
+        Assert.Contains("test-only pre-timeout rendezvous failed", failed.Text, StringComparison.Ordinal);
+        Assert.Contains(
+            "OperationCanceledException: synthetic uncancelled rendezvous cancellation",
+            failed.Text,
+            StringComparison.Ordinal);
+        Assert.DoesNotContain("default command ceiling", failed.Text, StringComparison.Ordinal);
+        Assert.Contains("BEFORE-HANG", failed.Text, StringComparison.Ordinal);
+        Assert.False(replay.Success, replay.Text);
+        Assert.Contains("replayed: identical command", replay.Text, StringComparison.Ordinal);
+        Assert.Contains("synthetic uncancelled rendezvous cancellation", replay.Text, StringComparison.Ordinal);
+        Assert.Single(File.ReadAllLines(command.CounterPath));
+        Assert.False(File.Exists(command.CompletionPath));
+    }
+
+    [Fact]
     public async Task Cancelled_pre_timeout_rendezvous_cleans_up_and_records_failure_before_propagating()
     {
         List<DisposalTrackingStream> captures = [];
@@ -1093,6 +1130,34 @@ public sealed class CodexDynamicToolPolicyTests
         Assert.False(File.Exists(command.CompletionPath));
         Assert.Equal(2, captures.Count);
         Assert.All(captures, capture => Assert.True(capture.IsDisposed));
+    }
+
+    [Fact]
+    public void Completed_command_attempt_marker_is_readable_while_its_writer_remains_open()
+    {
+        if (!OperatingSystem.IsWindows())
+        {
+            Assert.Skip("Windows enforces the marker file sharing contract this control exercises");
+            return;
+        }
+
+        using var fixture = new PolicyFixture(
+            new PermissionGrant(RunShellCommands: true),
+            ["report.md"]);
+        var markerPath = Path.Combine(fixture.Workspace, "open-marker-runs.txt");
+        using var marker = new FileStream(
+            markerPath,
+            FileMode.CreateNew,
+            FileAccess.Write,
+            FileShare.Read);
+
+        marker.Write("ra"u8);
+        marker.Flush(flushToDisk: true);
+        Assert.Equal(0, ExternalDiffAttemptCount(markerPath));
+
+        marker.Write("n\r\n"u8);
+        marker.Flush(flushToDisk: true);
+        Assert.Equal(1, ExternalDiffAttemptCount(markerPath));
     }
 
     [Fact]
@@ -2048,7 +2113,7 @@ public sealed class CodexDynamicToolPolicyTests
             var scriptName = $"{name}.cmd";
             File.WriteAllText(
                 Path.Combine(directory, scriptName),
-                $"@echo off\r\n@echo ran>>{name}-runs.txt\r\n@echo BEFORE-HANG\r\n"
+                $"@echo off\r\n@echo BEFORE-HANG\r\n@echo ran>>{name}-runs.txt\r\n"
                 + $"@echo {capturePayload}\r\n"
                 + $"@ping -n 30 127.0.0.1 >nul\r\n@echo completed>{name}-completed.txt\r\n");
             return (scriptName, counterPath, completionPath);
@@ -2057,7 +2122,7 @@ public sealed class CodexDynamicToolPolicyTests
         var scriptPath = Path.Combine(directory, name);
         File.WriteAllText(
             scriptPath,
-            $"#!/bin/sh\nprintf 'ran\\n' >> {name}-runs.txt\nprintf 'BEFORE-HANG\\n'\n"
+            $"#!/bin/sh\nprintf 'BEFORE-HANG\\n'\nprintf 'ran\\n' >> {name}-runs.txt\n"
             + $"printf '%s\\n' '{capturePayload}'\nsleep 30\nprintf 'completed\\n' > {name}-completed.txt\n");
         File.SetUnixFileMode(
             scriptPath,
@@ -2146,8 +2211,24 @@ public sealed class CodexDynamicToolPolicyTests
             $"{phase}: expected {expected} external-diff helper attempt(s), actual {actual}");
     }
 
-    private static int ExternalDiffAttemptCount(string counterPath) =>
-        File.Exists(counterPath) ? File.ReadAllLines(counterPath).Length : 0;
+    private static int ExternalDiffAttemptCount(string counterPath)
+    {
+        if (!File.Exists(counterPath))
+        {
+            return 0;
+        }
+
+        // cmd.exe can still hold its append handle when the rendezvous first sees this file. Share
+        // with that writer, and count only newline-terminated markers so a partial append is not
+        // mistaken for readiness.
+        using var stream = new FileStream(
+            counterPath,
+            FileMode.Open,
+            FileAccess.Read,
+            FileShare.ReadWrite | FileShare.Delete);
+        using var reader = new StreamReader(stream);
+        return reader.ReadToEnd().Count(character => character == '\n');
+    }
 
     private static Stream WritableCaptureStream(string path) =>
         new FileStream(

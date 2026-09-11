@@ -1212,7 +1212,14 @@ public sealed class CodexDynamicToolPolicy
             await WaitForExitOrCaptureFailureAsync(process, timeout.Token, stdout, stderr)
                 .ConfigureAwait(false);
         }
-        catch (OperationCanceledException) when (!cancellationToken.IsCancellationRequested)
+        catch (OperationCanceledException ex) when (
+            rendezvousIsRunning && !cancellationToken.IsCancellationRequested)
+        {
+            KillProcessTree(process);
+            rendezvousFailure = ex;
+        }
+        catch (OperationCanceledException) when (
+            !rendezvousIsRunning && !cancellationToken.IsCancellationRequested)
         {
             KillProcessTree(process);
             // A timeout is a failure of a command the grant ALLOWED and Baton RAN. It costs the step
