@@ -7021,6 +7021,30 @@ defaults its tag to `<n>-lane`. The item carries `issue`, its worktree, `branch`
 there: those two are display surface, not policy** — no arm of the table below reads either, so a
 change to how they are derived can never move an item to a different stage.
 
+**Current PR state is a repository-qualified observation, not a lane outcome (#2200).** The queue
+snapshot's top-level `pullRequestObservations` collection keys one read by canonical
+`host/owner/repo` plus PR number and shares it across every retained lane with that key; same-number
+PRs in different repositories remain different observations. The existing `DeliveryPoller` refreshes
+one qualified PR per poll through its existing `IGhCliRunner`; attempt stamps rotate a larger retained
+set across later polls instead of bursting forge reads. Each read has the existing 20-second child-process
+bound and host cancellation, runs outside the queue lock and the scheduler's launch path, and conditionally
+writes only keys still named by the locked snapshot. Every distinct surviving workspace for a shared PR is
+validated, and any drift invalidates the prior reading and makes the observation unknown. The freshness
+window is the fleet projection's existing three-tick threshold, applied to attempts as the retry backoff too:
+a fresh confirmed `open` remains current follow-up, while a trustworthy last-known `merged` or `closed`
+observation stays in collapsed history after it becomes stale. History names both staleness and the last
+check; it does not oscillate back into follow-up during the default five-minute poll or a multi-key rotation.
+A transient failed refresh retains a structurally complete prior reading as explicitly stale last-known
+evidence. Missing, malformed, partial, future-dated, or identity-mismatched evidence is `unknown` and remains
+in current follow-up, so unknown work is never concealed. `closed` is never cached forever because it is
+still re-read after the retry window, and a confirmed reopened PR returns to follow-up. Stale terminal
+evidence is presentation history only: it is never current proof for readiness, merge, deployment, or any
+external action. Observation changes neither item state, stage, round, cancellation history, dispatch,
+readiness, merge/close state, nor deployment state. Deployment therefore reads “not recorded”, never
+“none”. Each historical checks word remains attached to its lane and to
+`checksHeadSha`; a legacy row without that field renders “commit unknown” rather than borrowing the
+independent PR observation's head.
+
 **Lifecycle selection is stage-specific by default (#2181).** On a newly added work item, bare
 `--adapter`, `--model` and `--effort` select the initial `implement` stage only; after every advance,
 the next stage resolves its own role/scope tier through the existing queue tier resolver. An operator

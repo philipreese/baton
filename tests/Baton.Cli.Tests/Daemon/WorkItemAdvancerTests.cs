@@ -92,6 +92,37 @@ public sealed class WorkItemAdvancerTests
         }
     }
 
+    private sealed class ObservationGh(Func<IReadOnlyList<string>, Task>? onCall = null) : IGhCliRunner
+    {
+        public List<string[]> Calls { get; } = [];
+        public string State { get; set; } = "MERGED";
+        public string? RawOutput { get; set; }
+        public int ExitCode { get; set; }
+
+        public async Task<GhCliResult> RunAsync(
+            string workingDirectory, IReadOnlyList<string> args, CancellationToken cancellationToken)
+        {
+            Calls.Add(args.ToArray());
+            if (onCall is not null)
+            {
+                await onCall(args);
+            }
+
+            var number = int.Parse(args[2], System.Globalization.CultureInfo.InvariantCulture);
+            return new GhCliResult(true, ExitCode,
+                RawOutput ?? $$$"""{"number":{{{number}}},"state":"{{{State}}}","headRefOid":"head-{{{number}}}"}""",
+                string.Empty);
+        }
+    }
+
+    private sealed class DelegateGh(
+        Func<string, IReadOnlyList<string>, CancellationToken, Task<GhCliResult>> run) : IGhCliRunner
+    {
+        public Task<GhCliResult> RunAsync(
+            string workingDirectory, IReadOnlyList<string> args, CancellationToken cancellationToken) =>
+            run(workingDirectory, args, cancellationToken);
+    }
+
     private static string PrJson(int number, string headSha, bool isDraft = true) =>
         $"[{PrObject(number, headSha, isDraft)}]";
 
@@ -1181,6 +1212,7 @@ public sealed class WorkItemAdvancerTests
             var item = await ReadBackAsync();
             Assert.Equal(PullRequestChecks.Failing, item.Checks);
             Assert.Equal(Now, item.ChecksObservedAt);
+            Assert.Equal(PushedSha, item.ChecksHeadSha);
         }
         finally
         {
@@ -1214,6 +1246,278 @@ public sealed class WorkItemAdvancerTests
             var item = await ReadBackAsync();
             Assert.Equal(PullRequestChecks.Passing, item.Checks);
             Assert.Equal(observedAt, item.ChecksObservedAt);
+        }
+        finally
+        {
+            DirectoryCleanup.DeleteRecursively(home);
+        }
+    }
+
+    [Fact]
+    public async Task Board_observations_are_persisted_once_per_qualified_PR_refresh_after_restart_and_can_reopen()
+    {
+        var home = CreateTempHome();
+        using var scope = BatonEnvironmentSnapshot.BeginScope(BatonEnvironmentSnapshot.Blank with { HomeOverride = home });
+        try
+        {
+            Directory.CreateDirectory(BatonPaths.Queue);
+            var one = new QueueItem
+            {
+                Tag = "one",
+                Role = "review",
+                Stage = WorkStage.Review,
+                State = QueueItemState.Cancelled,
+                Repository = Repository,
+                PullRequest = 77,
+                Workspace = home,
+                SpecFile = Path.Combine(home, "one.md"),
+            };
+            var shared = one with { Tag = "shared", SpecFile = Path.Combine(home, "shared.md") };
+            var other = one with
+            {
+                Tag = "other",
+                Repository = "github.com/aer-works/other",
+                SpecFile = Path.Combine(home, "other.md"),
+            };
+            await QueueStore.MutateAsync(BatonPaths.QueueFile, s => s with { Items = [one, shared, other] }, Ct);
+
+            var gh = new ObservationGh();
+            var firstProcess = new WorkItemAdvancer(gh, (_, _) => Task.FromResult<string?>(null));
+            Assert.Equal(TimeSpan.FromMinutes(5), DeliveryPoller.DefaultInterval);
+            Assert.Equal(TimeSpan.FromSeconds(90), FleetProjectionWriter.StaleAfter());
+            await firstProcess.RefreshPullRequestObservationsAsync(Now, Ct);
+            await firstProcess.RefreshPullRequestObservationsAsync(Now, Ct);
+            Assert.Equal(2, gh.Calls.Count);
+
+            var stored = await QueueStore.LoadAsync(BatonPaths.QueueFile, Ct);
+            Assert.Equal(2, stored.PullRequestObservations!.Count);
+            Assert.All(stored.PullRequestObservations, o => Assert.Equal(PullRequestObservationStates.Merged, o.State));
+
+            // A new advancer represents a daemon restart. The persisted attempt stamp applies the
+            // existing three-projection-tick freshness window, so restart does not burst the forge.
+            await new WorkItemAdvancer(gh, (_, _) => Task.FromResult<string?>(null))
+                .RefreshPullRequestObservationsAsync(Now.AddMinutes(1), Ct);
+            Assert.Equal(2, gh.Calls.Count);
+
+            gh.State = "OPEN";
+            var reopened = new WorkItemAdvancer(gh, (_, _) => Task.FromResult<string?>(null));
+            var nextDeliveryPoll = Now + DeliveryPoller.DefaultInterval;
+            await reopened.RefreshPullRequestObservationsAsync(nextDeliveryPoll, Ct);
+            await reopened.RefreshPullRequestObservationsAsync(nextDeliveryPoll, Ct);
+            Assert.Equal(4, gh.Calls.Count);
+            stored = await QueueStore.LoadAsync(BatonPaths.QueueFile, Ct);
+            Assert.All(stored.PullRequestObservations!, o => Assert.Equal(PullRequestObservationStates.Open, o.State));
+
+            // A failed refresh keeps the prior repository-qualified reading, but stamps both the
+            // failed attempt and its error so the projection can call it stale rather than current.
+            gh.RawOutput = "{ malformed";
+            var malformed = new WorkItemAdvancer(gh, (_, _) => Task.FromResult<string?>(null));
+            var followingDeliveryPoll = nextDeliveryPoll + DeliveryPoller.DefaultInterval;
+            await malformed.RefreshPullRequestObservationsAsync(followingDeliveryPoll, Ct);
+            await malformed.RefreshPullRequestObservationsAsync(followingDeliveryPoll, Ct);
+            stored = await QueueStore.LoadAsync(BatonPaths.QueueFile, Ct);
+            Assert.All(stored.PullRequestObservations!, o =>
+            {
+                Assert.Equal(PullRequestObservationStates.Open, o.State);
+                Assert.NotNull(o.HeadSha);
+                Assert.NotNull(o.Error);
+                Assert.Equal(nextDeliveryPoll, o.ObservedAt);
+                Assert.Equal(followingDeliveryPoll, o.AttemptedAt);
+            });
+            Assert.All(gh.Calls, call => Assert.Equal(["pr", "view"], call.Take(2)));
+        }
+        finally
+        {
+            DirectoryCleanup.DeleteRecursively(home);
+        }
+    }
+
+    [Fact]
+    public async Task A_lookup_that_finishes_after_the_last_lane_is_removed_cannot_resurrect_its_key()
+    {
+        var home = CreateTempHome();
+        using var scope = BatonEnvironmentSnapshot.BeginScope(BatonEnvironmentSnapshot.Blank with { HomeOverride = home });
+        try
+        {
+            Directory.CreateDirectory(BatonPaths.Queue);
+            var item = new QueueItem
+            {
+                Tag = "gone",
+                Role = "review",
+                Stage = WorkStage.Review,
+                State = QueueItemState.Cancelled,
+                Repository = Repository,
+                PullRequest = 77,
+                Workspace = home,
+                SpecFile = Path.Combine(home, "gone.md"),
+            };
+            await QueueStore.MutateAsync(BatonPaths.QueueFile, s => s with { Items = [item] }, Ct);
+            var gh = new ObservationGh(async _ =>
+            {
+                await QueueStore.MutateAsync(BatonPaths.QueueFile, s => s with { Items = [] }, Ct);
+            });
+
+            await new WorkItemAdvancer(gh, (_, _) => Task.FromResult<string?>(null))
+                .RefreshPullRequestObservationsAsync(Now, Ct);
+
+            var stored = await QueueStore.LoadAsync(BatonPaths.QueueFile, Ct);
+            Assert.Empty(stored.Items);
+            Assert.Empty(stored.PullRequestObservations ?? []);
+        }
+        finally
+        {
+            DirectoryCleanup.DeleteRecursively(home);
+        }
+    }
+
+    [Fact]
+    public async Task A_shared_PR_is_unknown_when_any_surviving_lane_workspace_has_repository_drift()
+    {
+        var home = CreateTempHome();
+        using var scope = BatonEnvironmentSnapshot.BeginScope(BatonEnvironmentSnapshot.Blank with { HomeOverride = home });
+        try
+        {
+            Directory.CreateDirectory(BatonPaths.Queue);
+            var valid = Path.Combine(home, "valid");
+            var drifted = Path.Combine(home, "drifted");
+            Directory.CreateDirectory(valid);
+            Directory.CreateDirectory(drifted);
+            QueueItem Lane(string tag, string workspace) => new()
+            {
+                Tag = tag,
+                Role = "review",
+                Stage = WorkStage.Review,
+                State = QueueItemState.Cancelled,
+                Repository = Repository,
+                PullRequest = 77,
+                Workspace = workspace,
+                SpecFile = Path.Combine(home, tag + ".md"),
+            };
+            await QueueStore.MutateAsync(BatonPaths.QueueFile, s => s with
+            {
+                // The missing workspace comes first: selecting only the first lane used to skip all
+                // validation and accept forge evidence despite the surviving drifted sibling.
+                Items = [Lane("missing", Path.Combine(home, "missing")), Lane("valid", valid), Lane("drifted", drifted)],
+                PullRequestObservations =
+                [
+                    // A previous terminal observation makes this a provenance test: drift must
+                    // invalidate it, not merely attach an error while leaving history trusted.
+                    new QueuePullRequestObservation(
+                        Repository, 77, PullRequestObservationStates.Merged, "trusted-head",
+                        Now.AddMinutes(-5), Now.AddMinutes(-5), null),
+                ],
+            }, Ct);
+            var gh = new ObservationGh();
+            var advancer = new WorkItemAdvancer(
+                gh,
+                (_, _) => Task.FromResult<string?>(null),
+                (workspace, _) => Task.FromResult<RepositoryIdentity?>(workspace == valid
+                    ? ExpectedRepositoryIdentity
+                    : RepositoryIdentity.From("https://github.com/aer-works/other.git", null)));
+
+            await advancer.RefreshPullRequestObservationsAsync(Now, Ct);
+
+            Assert.Empty(gh.Calls);
+            var observation = Assert.Single(
+                (await QueueStore.LoadAsync(BatonPaths.QueueFile, Ct)).PullRequestObservations!);
+            Assert.Null(observation.State);
+            Assert.Null(observation.HeadSha);
+            Assert.Null(observation.ObservedAt);
+            Assert.Equal(Now, observation.AttemptedAt);
+            Assert.Contains(drifted, observation.Error!, StringComparison.OrdinalIgnoreCase);
+        }
+        finally
+        {
+            DirectoryCleanup.DeleteRecursively(home);
+        }
+    }
+
+    [Fact]
+    public async Task A_hung_board_forge_read_is_abandoned_at_the_observation_timeout()
+    {
+        var home = CreateTempHome();
+        using var scope = BatonEnvironmentSnapshot.BeginScope(BatonEnvironmentSnapshot.Blank with { HomeOverride = home });
+        try
+        {
+            Directory.CreateDirectory(BatonPaths.Queue);
+            var item = new QueueItem
+            {
+                Tag = "hung",
+                Role = "review",
+                Stage = WorkStage.Review,
+                State = QueueItemState.Cancelled,
+                Repository = Repository,
+                PullRequest = 77,
+                Workspace = home,
+                SpecFile = Path.Combine(home, "hung.md"),
+            };
+            await QueueStore.MutateAsync(BatonPaths.QueueFile, s => s with { Items = [item] }, Ct);
+            var never = new TaskCompletionSource<GhCliResult>(TaskCreationOptions.RunContinuationsAsynchronously);
+            var gh = new DelegateGh((_, _, _) => never.Task);
+            var advancer = new WorkItemAdvancer(
+                gh,
+                (_, _) => Task.FromResult<string?>(null),
+                repositoryIdentity: null,
+                boardObservationTimeout: TimeSpan.FromMilliseconds(20));
+
+            await advancer.RefreshPullRequestObservationsAsync(Now, Ct).WaitAsync(TimeSpan.FromMinutes(1), Ct);
+
+            var observation = Assert.Single(
+                (await QueueStore.LoadAsync(BatonPaths.QueueFile, Ct)).PullRequestObservations!);
+            Assert.Null(observation.State);
+            Assert.Contains("timed out", observation.Error!, StringComparison.Ordinal);
+        }
+        finally
+        {
+            DirectoryCleanup.DeleteRecursively(home);
+        }
+    }
+
+    [Fact]
+    public async Task Observation_refresh_attempts_one_qualified_PR_per_poll_and_rotates_the_remainder()
+    {
+        var home = CreateTempHome();
+        using var scope = BatonEnvironmentSnapshot.BeginScope(BatonEnvironmentSnapshot.Blank with { HomeOverride = home });
+        try
+        {
+            Directory.CreateDirectory(BatonPaths.Queue);
+            var items = Enumerable.Range(1, 3)
+                .Select(number => new QueueItem
+                {
+                    Tag = $"pr-{number}",
+                    Role = "review",
+                    Stage = WorkStage.Review,
+                    State = QueueItemState.Cancelled,
+                    Repository = Repository,
+                    PullRequest = number,
+                    Workspace = home,
+                    SpecFile = Path.Combine(home, $"pr-{number}.md"),
+                })
+                .ToList();
+            await QueueStore.MutateAsync(BatonPaths.QueueFile, s => s with { Items = items }, Ct);
+            var gh = new ObservationGh();
+            var advancer = new WorkItemAdvancer(gh, (_, _) => Task.FromResult<string?>(null));
+
+            await advancer.RefreshPullRequestObservationsAsync(Now, Ct);
+            Assert.Single(gh.Calls);
+
+            await advancer.RefreshPullRequestObservationsAsync(Now, Ct);
+            Assert.Equal(2, gh.Calls.Count);
+            await advancer.RefreshPullRequestObservationsAsync(Now, Ct);
+            Assert.Equal(3, gh.Calls.Count);
+            Assert.Equal(3, (await QueueStore.LoadAsync(BatonPaths.QueueFile, Ct)).PullRequestObservations!.Count);
+
+            // All three attempts are still inside the established retry window, so a fourth poll
+            // performs no read rather than starting again at the first key.
+            await advancer.RefreshPullRequestObservationsAsync(Now.AddSeconds(1), Ct);
+            Assert.Equal(3, gh.Calls.Count);
+
+            // Once every key is due again, the oldest attempt rotates: refreshing #1 makes #2 the
+            // next oldest instead of insertion order selecting #1 on every later poll.
+            await advancer.RefreshPullRequestObservationsAsync(Now.AddMinutes(2), Ct);
+            await advancer.RefreshPullRequestObservationsAsync(Now.AddMinutes(2), Ct);
+            Assert.Equal("1", gh.Calls[^2][2]);
+            Assert.Equal("2", gh.Calls[^1][2]);
         }
         finally
         {

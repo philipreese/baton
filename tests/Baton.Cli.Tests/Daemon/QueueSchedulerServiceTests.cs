@@ -19,6 +19,19 @@ public sealed class QueueSchedulerServiceTests
 {
     private static CancellationToken Ct => TestContext.Current.CancellationToken;
 
+    private sealed class HungGh(TaskCompletionSource<bool> started) : IGhCliRunner
+    {
+        private readonly TaskCompletionSource<GhCliResult> _never =
+            new(TaskCreationOptions.RunContinuationsAsynchronously);
+
+        public Task<GhCliResult> RunAsync(
+            string workingDirectory, IReadOnlyList<string> args, CancellationToken cancellationToken)
+        {
+            started.TrySetResult(true);
+            return _never.Task;
+        }
+    }
+
     [Fact]
     public async Task An_unknown_unscoped_role_fails_one_item_and_the_next_unscoped_item_launches()
     {
@@ -161,6 +174,67 @@ public sealed class QueueSchedulerServiceTests
         }
         finally
         {
+            Cleanup(home);
+        }
+    }
+
+    [Fact]
+    public async Task A_hung_board_forge_refresh_does_not_block_an_unrelated_queue_launch()
+    {
+        var home = CreateTempHome();
+        using var scope = BatonEnvironmentSnapshot.BeginScope(BatonEnvironmentSnapshot.Blank with { HomeOverride = home });
+        using var refreshCancellation = CancellationTokenSource.CreateLinkedTokenSource(Ct);
+        try
+        {
+            var observed = Item("observed") with
+            {
+                Role = "review",
+                Stage = WorkStage.Review,
+                State = QueueItemState.Cancelled,
+                Repository = "github.com/aer-works/baton",
+                PullRequest = 77,
+                Workspace = home,
+            };
+            await QueueStore.MutateAsync(
+                BatonPaths.QueueFile,
+                s => s with { Items = [observed, Item("unrelated")] },
+                Ct);
+            var forgeStarted = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
+            var gh = new HungGh(forgeStarted);
+            var advancer = new WorkItemAdvancer(
+                gh,
+                (_, _) => Task.FromResult<string?>(null),
+                repositoryIdentity: null,
+                boardObservationTimeout: TimeSpan.FromMinutes(1));
+            var poll = new DeliveryPoller(gh, advancer).PollOnceAsync(refreshCancellation.Token);
+            await forgeStarted.Task.WaitAsync(TimeSpan.FromMinutes(1), Ct);
+
+            var launched = new TaskCompletionSource<string>(TaskCreationOptions.RunContinuationsAsynchronously);
+            var scheduler = new QueueSchedulerService(
+                (request, _) =>
+                {
+                    launched.TrySetResult(request.Item.Tag);
+                    return Task.FromResult(new QueueLaunchOutcome(request.RoomDirectory));
+                },
+                _ => Task.FromResult(0d),
+                () => 16d,
+                () => DateTimeOffset.UtcNow,
+                advancer);
+
+            await scheduler.TickOnceAsync(Ct).WaitAsync(TimeSpan.FromMinutes(1), Ct);
+
+            Assert.Equal("unrelated", await launched.Task.WaitAsync(TimeSpan.FromMinutes(1), Ct));
+            Assert.False(poll.IsCompleted);
+            Assert.Equal(
+                QueueItemState.Launched,
+                (await QueueStore.LoadAsync(BatonPaths.QueueFile, Ct)).Items.Single(i => i.Tag == "unrelated").State);
+
+            refreshCancellation.Cancel();
+            await Assert.ThrowsAnyAsync<OperationCanceledException>(() => poll);
+        }
+        finally
+        {
+            refreshCancellation.Cancel();
             Cleanup(home);
         }
     }

@@ -36,10 +36,12 @@ public sealed class WorkItemAdvancer
 {
     private const string PullRequestJsonFields =
         "number,state,isDraft,headRefOid,statusCheckRollup,headRefName,baseRefName,isCrossRepository";
+    private const string BoardObservationJsonFields = "number,state,headRefOid";
 
     private readonly IGhCliRunner _gh;
     private readonly Func<string, CancellationToken, Task<string?>> _workspaceHead;
     private readonly Func<string, CancellationToken, Task<RepositoryIdentity?>>? _repositoryIdentity;
+    private readonly TimeSpan _boardObservationTimeout;
 
     public WorkItemAdvancer()
         : this(null, null, RepositoryIdentityResolver.TryResolveAsync)
@@ -51,11 +53,13 @@ public sealed class WorkItemAdvancer
     internal WorkItemAdvancer(
         IGhCliRunner? gh,
         Func<string, CancellationToken, Task<string?>>? workspaceHead,
-        Func<string, CancellationToken, Task<RepositoryIdentity?>>? repositoryIdentity = null)
+        Func<string, CancellationToken, Task<RepositoryIdentity?>>? repositoryIdentity = null,
+        TimeSpan? boardObservationTimeout = null)
     {
         _gh = gh ?? new GhCliRunner();
         _workspaceHead = workspaceHead ?? ReadWorkspaceHeadAsync;
         _repositoryIdentity = repositoryIdentity;
+        _boardObservationTimeout = boardObservationTimeout ?? WorkspaceDeliveryProbe.SpawnTimeout;
     }
 
     /// <summary>
@@ -238,6 +242,7 @@ public sealed class WorkItemAdvancer
                     PullRequest = pr.Number ?? existing.PullRequest,
                     Checks = pr.Checks ?? existing.Checks,
                     ChecksObservedAt = pr.Checks is null ? existing.ChecksObservedAt : now,
+                    ChecksHeadSha = pr.Checks is null ? existing.ChecksHeadSha : pr.HeadSha,
                     Error = null,
                     ReadinessMutationClaim = null,
                 }).ConfigureAwait(false);
@@ -281,6 +286,7 @@ public sealed class WorkItemAdvancer
             PullRequest = pr.Number ?? existing.PullRequest,
             Checks = pr.Checks ?? existing.Checks,
             ChecksObservedAt = pr.Checks is null ? existing.ChecksObservedAt : now,
+            ChecksHeadSha = pr.Checks is null ? existing.ChecksHeadSha : pr.HeadSha,
             Error = reason,
             ReadinessMutationClaim = null,
         }).ConfigureAwait(false);
@@ -344,6 +350,7 @@ public sealed class WorkItemAdvancer
             // be satisfied by an age that outlives its reading.
             Checks = pr.Checks ?? existing.Checks,
             ChecksObservedAt = pr.Checks is null ? existing.ChecksObservedAt : now,
+            ChecksHeadSha = pr.Checks is null ? existing.ChecksHeadSha : pr.HeadSha,
             LastVerdict = verdictPath ?? existing.LastVerdict,
             // The lifecycle is the one authority that says a BLOCK may spend this budget. Preserve
             // false, true, and legacy-null through every other transition so retries and
@@ -378,6 +385,7 @@ public sealed class WorkItemAdvancer
             PullRequest = pr.Number ?? existing.PullRequest,
             Checks = pr.Checks ?? existing.Checks,
             ChecksObservedAt = pr.Checks is null ? existing.ChecksObservedAt : now,
+            ChecksHeadSha = pr.Checks is null ? existing.ChecksHeadSha : pr.HeadSha,
             LastVerdict = verdictPath ?? existing.LastVerdict,
             State = QueueItemState.Queued,
             RoomDirectory = null,
@@ -527,6 +535,191 @@ public sealed class WorkItemAdvancer
             CancellationToken.None).ConfigureAwait(false);
         return claimed;
     }
+
+    /// <summary>
+    /// Refreshes independent board evidence on the existing delivery poller's forge cadence. There is
+    /// at most one read per poll, never one per retained lane. Reads finish before
+    /// the queue lock is acquired; the mutation re-derives the live key set so a late result cannot
+    /// recreate evidence for a PR whose last lane was removed meanwhile.
+    /// </summary>
+    internal async Task RefreshPullRequestObservationsAsync(
+        DateTimeOffset now, CancellationToken cancellationToken)
+    {
+        var snapshot = await QueueStore.LoadAsync(BatonPaths.QueueFile, cancellationToken).ConfigureAwait(false);
+        var keys = ObservationKeys(snapshot.Items);
+        var existing = (snapshot.PullRequestObservations ?? [])
+            .GroupBy(o => new QualifiedPullRequest(o.Repository, o.PullRequest))
+            .ToDictionary(g => g.Key, g => g.OrderByDescending(o => o.AttemptedAt).First());
+        var retryAfter = FleetProjectionWriter.StaleAfter();
+        var due = keys
+            .Where(key => !existing.TryGetValue(key, out var cached)
+                || cached.AttemptedAt > now || now - cached.AttemptedAt >= retryAfter)
+            // Oldest attempt first is the rotation. This matters when the delivery cadence is wider
+            // than the retry window: every cached key may be due, and insertion order would otherwise
+            // select the same first PR forever.
+            .OrderBy(key => existing.TryGetValue(key, out var cached)
+                ? cached.AttemptedAt
+                : DateTimeOffset.MinValue)
+            .ThenBy(key => key.Repository, StringComparer.Ordinal)
+            .ThenBy(key => key.PullRequest)
+            // One network read per delivery-poller tick is the explicit rate bound. Attempt stamps
+            // rotate a larger retained history across later polls instead of bursting every due key.
+            .Take(1)
+            .ToList();
+
+        var refreshed = new Dictionary<QualifiedPullRequest, QueuePullRequestObservation>();
+        foreach (var key in due)
+        {
+            existing.TryGetValue(key, out var prior);
+            var workspaces = snapshot.Items
+                .Where(i => i.PullRequest == key.PullRequest
+                    && string.Equals(i.Repository, key.Repository, StringComparison.Ordinal))
+                .Select(i => i.Workspace)
+                .Where(workspace => !string.IsNullOrWhiteSpace(workspace))
+                .Distinct(StringComparer.OrdinalIgnoreCase)
+                .ToList();
+            refreshed[key] = await ReadBoardObservationAsync(key, workspaces, prior, now, cancellationToken)
+                .ConfigureAwait(false);
+        }
+
+        if (refreshed.Count == 0 && existing.Keys.All(keys.Contains) && existing.Count == keys.Count)
+        {
+            return;
+        }
+
+        await QueueStore.MutateAsync(
+            BatonPaths.QueueFile,
+            current =>
+            {
+                var currentKeys = ObservationKeys(current.Items);
+                var observations = (current.PullRequestObservations ?? [])
+                    .Where(o => currentKeys.Contains(new QualifiedPullRequest(o.Repository, o.PullRequest)))
+                    .GroupBy(o => new QualifiedPullRequest(o.Repository, o.PullRequest))
+                    .ToDictionary(g => g.Key, g => g.OrderByDescending(o => o.AttemptedAt).First());
+                foreach (var pair in refreshed)
+                {
+                    if (currentKeys.Contains(pair.Key))
+                    {
+                        observations[pair.Key] = pair.Value;
+                    }
+                }
+
+                return current with
+                {
+                    PullRequestObservations = observations.Values
+                        .OrderBy(o => o.Repository, StringComparer.Ordinal)
+                        .ThenBy(o => o.PullRequest)
+                        .ToList(),
+                };
+            },
+            CancellationToken.None).ConfigureAwait(false);
+    }
+
+    private static HashSet<QualifiedPullRequest> ObservationKeys(IReadOnlyList<QueueItem> items) =>
+        items
+            .Where(i => i.Stage is not null && i.PullRequest is > 0 && i.Repository is { Length: > 0 })
+            .Select(i => new QualifiedPullRequest(i.Repository!, i.PullRequest!.Value))
+            .ToHashSet();
+
+    private async Task<QueuePullRequestObservation> ReadBoardObservationAsync(
+        QualifiedPullRequest key,
+        IReadOnlyList<string> workspaces,
+        QueuePullRequestObservation? prior,
+        DateTimeOffset now,
+        CancellationToken cancellationToken)
+    {
+        var canonical = RepositoryIdentity.From("https://" + key.Repository, gitCommonDirectoryPath: null);
+        if (!string.Equals(canonical?.RemoteValue, key.Repository, StringComparison.Ordinal))
+        {
+            return InvalidBoardObservation(key, now, "the stored repository identity is invalid");
+        }
+
+        var survivingWorkspaces = workspaces
+            .Where(Directory.Exists)
+            .ToList();
+        if (_repositoryIdentity is not null)
+        {
+            foreach (var workspace in survivingWorkspaces)
+            {
+                var current = await _repositoryIdentity(workspace, cancellationToken).ConfigureAwait(false);
+                if (!string.Equals(current?.RemoteValue, key.Repository, StringComparison.Ordinal))
+                {
+                    return InvalidBoardObservation(
+                        key, now,
+                        $"repository context at '{workspace}' drifted from persisted '{key.Repository}'");
+                }
+            }
+        }
+
+        var workingDirectory = survivingWorkspaces.FirstOrDefault()
+            ?? Path.GetDirectoryName(BatonPaths.QueueFile)!;
+        GhCliResult result;
+        using (var bound = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken))
+        {
+            bound.CancelAfter(_boardObservationTimeout);
+            try
+            {
+                result = await _gh.RunAsync(
+                    workingDirectory,
+                    ["pr", "view", key.PullRequest.ToString(CultureInfo.InvariantCulture),
+                     "--json", BoardObservationJsonFields, "--repo", key.Repository],
+                    bound.Token).WaitAsync(bound.Token).ConfigureAwait(false);
+            }
+            catch (OperationCanceledException) when (!cancellationToken.IsCancellationRequested)
+            {
+                return FailedBoardObservation(
+                    key, prior, now,
+                    $"gh pr view timed out after {_boardObservationTimeout.TotalSeconds.ToString(CultureInfo.InvariantCulture)} seconds");
+            }
+        }
+        if (!result.Started || result.ExitCode != 0)
+        {
+            return FailedBoardObservation(
+                key, prior, now,
+                !result.Started ? "gh pr view did not start" : $"gh pr view exited {result.ExitCode}");
+        }
+
+        try
+        {
+            using var document = JsonDocument.Parse(result.Stdout);
+            var root = document.RootElement;
+            var number = root.ValueKind == JsonValueKind.Object
+                && root.TryGetProperty("number", out var n) && n.TryGetInt32(out var parsed) ? parsed : 0;
+            var state = Text(root, "state")?.ToUpperInvariant() switch
+            {
+                "OPEN" => PullRequestObservationStates.Open,
+                "MERGED" => PullRequestObservationStates.Merged,
+                "CLOSED" => PullRequestObservationStates.Closed,
+                _ => null,
+            };
+            var head = Text(root, "headRefOid");
+            if (number != key.PullRequest || state is null || head is not { Length: > 0 })
+            {
+                return FailedBoardObservation(key, prior, now, "gh pr view returned malformed or mismatched PR evidence");
+            }
+
+            return new QueuePullRequestObservation(
+                key.Repository, key.PullRequest, state, head, now, now, Error: null);
+        }
+        catch (JsonException ex)
+        {
+            return FailedBoardObservation(key, prior, now, $"gh pr view returned malformed JSON: {ex.Message}");
+        }
+    }
+
+    private static QueuePullRequestObservation FailedBoardObservation(
+        QualifiedPullRequest key, QueuePullRequestObservation? prior, DateTimeOffset now, string error) =>
+        new(key.Repository, key.PullRequest, prior?.State, prior?.HeadSha, prior?.ObservedAt, now, error);
+
+    /// <summary>
+    /// Identity failure invalidates the provenance of a prior reading, unlike a transient forge
+    /// failure where the repository-qualified key remains trusted and the prior reading stays useful
+    /// as explicitly stale history.
+    /// </summary>
+    private static QueuePullRequestObservation InvalidBoardObservation(
+        QualifiedPullRequest key, DateTimeOffset now, string error) =>
+        new(key.Repository, key.PullRequest, State: null, HeadSha: null, ObservedAt: null,
+            AttemptedAt: now, Error: error);
 
     /// <summary>
     /// Discovers the branch's PR from an open-only, head-scoped list, then reads required checks and
