@@ -1,4 +1,5 @@
 using System.Globalization;
+using Baton.Accounting;
 using Baton.Queue;
 using Baton.Status;
 using Baton.Vendors;
@@ -23,13 +24,43 @@ public static class QueueCommand
         TextWriter output,
         CancellationToken cancellationToken = default,
         string? repositoryDirectory = null)
+        => ExecuteAsync(
+            options,
+            output,
+            cancellationToken,
+            repositoryDirectory,
+            RepositoryIdentityResolver.TryResolveAsync,
+            static (issue, sourceRepository, worktreeRoot, repository, writer, token) =>
+                IssueWorktreeProvisioner.ProvisionAsync(
+                    issue,
+                    sourceRepository,
+                    worktreeRoot,
+                    repository,
+                    output: writer,
+                    cancellationToken: token));
+
+    /// <summary>
+    /// Test seam for the complete queue-add route. Production supplies the canonical repository
+    /// resolver and issue provisioner above; tests replace both so they exercise admission and the
+    /// durable row without spawning <c>gh</c>/<c>git</c> or creating a live forge branch.
+    /// </summary>
+    internal static Task<int> ExecuteAsync(
+        QueueOptions options,
+        TextWriter output,
+        CancellationToken cancellationToken,
+        string? repositoryDirectory,
+        Func<string, CancellationToken, Task<RepositoryIdentity?>> repositoryResolver,
+        Func<int, string, string?, string, TextWriter, CancellationToken, Task<string>> issueProvisioner)
     {
         ArgumentNullException.ThrowIfNull(options);
         ArgumentNullException.ThrowIfNull(output);
+        ArgumentNullException.ThrowIfNull(repositoryResolver);
+        ArgumentNullException.ThrowIfNull(issueProvisioner);
 
         return options.Verb switch
         {
-            QueueVerb.Add => AddAsync(options, output, repositoryDirectory, cancellationToken),
+            QueueVerb.Add => AddAsync(
+                options, output, repositoryDirectory, repositoryResolver, issueProvisioner, cancellationToken),
             QueueVerb.List => ListAsync(output, cancellationToken),
             QueueVerb.Hold => SetHoldAsync(true, output, cancellationToken),
             QueueVerb.Resume => SetHoldAsync(false, output, cancellationToken),
@@ -40,7 +71,12 @@ public static class QueueCommand
     }
 
     private static async Task<int> AddAsync(
-        QueueOptions options, TextWriter output, string? repositoryDirectory, CancellationToken cancellationToken)
+        QueueOptions options,
+        TextWriter output,
+        string? repositoryDirectory,
+        Func<string, CancellationToken, Task<RepositoryIdentity?>> repositoryResolver,
+        Func<int, string, string?, string, TextWriter, CancellationToken, Task<string>> issueProvisioner,
+        CancellationToken cancellationToken)
     {
         var tag = options.Tag!;
         var specSource = options.SpecFilePath;
@@ -73,22 +109,21 @@ public static class QueueCommand
             tag);
 
         var sourceRepository = repositoryDirectory ?? Directory.GetCurrentDirectory();
-        var lifecycleRepository = options.Lifecycle
-            ? await ResolveLifecycleRepositoryAsync(sourceRepository, cancellationToken).ConfigureAwait(false)
+        var issueRepository = options.Issue is not null
+            ? await ResolveIssueRepositoryAsync(sourceRepository, repositoryResolver, cancellationToken).ConfigureAwait(false)
             : null;
 
         // Provisioning first, before anything is written to the queue: a `gh issue develop` that fails
         // must leave no half-added item behind, the same pre-provision-refusal placement
         // DispatchCommand's own drain/continue checks use.
         var workspace = options.Issue is { } issue
-            ? await IssueWorktreeProvisioner.ProvisionAsync(
+            ? await issueProvisioner(
                 issue,
                 sourceRepository,
-                (await DaemonSettingsStore.LoadAsync(BatonPaths.SettingsFile, cancellationToken).ConfigureAwait(false))
-                    .Queue.WorktreeRoot,
-                lifecycleRepository!,
-                output: output,
-                cancellationToken: cancellationToken).ConfigureAwait(false)
+                settings.Queue.WorktreeRoot,
+                issueRepository!,
+                output,
+                cancellationToken).ConfigureAwait(false)
             : Path.GetFullPath(options.WorkspaceDirectory!);
 
         if (!Directory.Exists(workspace))
@@ -124,7 +159,7 @@ public static class QueueCommand
             Issue = options.Issue,
             Stage = options.Lifecycle ? WorkStage.Implement : null,
             Branch = options.Lifecycle ? IssueWorktreeProvisioner.BranchNameFor(options.Issue!.Value) : null,
-            Repository = lifecycleRepository,
+            Repository = issueRepository,
             // Explicit false distinguishes a newly-created lifecycle item from a pre-#2131 item
             // whose persisted history has no trustworthy automatic-fix budget.
             AutomaticFixUsed = options.Lifecycle ? false : null,
@@ -140,7 +175,7 @@ public static class QueueCommand
             // instructions keeps them, and gets the standing rules and the ship block for free.
             var (title, body) = specSource is null
                 ? await IssueWorktreeProvisioner.FetchIssueAsync(
-                    options.Issue!.Value, sourceRepository, lifecycleRepository!,
+                    options.Issue!.Value, sourceRepository, issueRepository!,
                     cancellationToken: cancellationToken).ConfigureAwait(false)
                 : ($"Implement #{options.Issue}", await File.ReadAllTextAsync(specSource, cancellationToken).ConfigureAwait(false));
 
@@ -189,20 +224,21 @@ public static class QueueCommand
     }
 
     /// <summary>
-    /// Captures the existing canonical remote identity before provisioning can mutate anything. The
+    /// Captures the existing canonical remote identity before issue provisioning can mutate anything. The
     /// common-directory fallback is deliberately insufficient: it identifies local worktrees for
     /// accounting, but cannot be passed to <c>gh --repo</c> as lifecycle ownership.
     /// </summary>
-    private static async Task<string> ResolveLifecycleRepositoryAsync(
-        string sourceRepository, CancellationToken cancellationToken)
+    private static async Task<string> ResolveIssueRepositoryAsync(
+        string sourceRepository,
+        Func<string, CancellationToken, Task<RepositoryIdentity?>> repositoryResolver,
+        CancellationToken cancellationToken)
     {
-        var identity = await RepositoryIdentityResolver
-            .TryResolveAsync(sourceRepository, cancellationToken).ConfigureAwait(false);
+        var identity = await repositoryResolver(sourceRepository, cancellationToken).ConfigureAwait(false);
         if (identity?.RemoteValue is not { Length: > 0 } repository)
         {
             throw new CliArgumentException(
-                $"Cannot establish a canonical remote repository identity for lifecycle work from '{sourceRepository}'.",
-                "configure that checkout's origin remote, then re-run 'baton queue add --lifecycle'.");
+                $"Cannot establish a canonical remote repository identity for issue provisioning from '{sourceRepository}'.",
+                "configure that checkout's origin remote, then re-run 'baton queue add --issue <n>'.");
         }
 
         return repository;
