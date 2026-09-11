@@ -11,6 +11,7 @@ namespace Baton.Cli.Tests;
 public sealed class MemoryAutomaticProjectionTests : IDisposable
 {
     private const string Repository = "github.com/philipreese/baton";
+    private const string OtherRepository = "github.com/example/other";
     private readonly string _root = Path.Combine(Path.GetTempPath(), $"baton-2138-{Guid.NewGuid():N}");
     private readonly IDisposable _scope;
 
@@ -222,6 +223,19 @@ public sealed class MemoryAutomaticProjectionTests : IDisposable
         var location = Assert.Single(CanonicalStoreInventory.Scan(BatonPaths.Root), l => l.Slug == Slug);
         Assert.Equal(Repository, location.Repository);
 
+        var auditOutput = new StringWriter();
+        Assert.Equal(0, await MemoryAuditCommand.ExecuteAsync(
+            new MemoryAuditOptions(),
+            auditOutput,
+            ClaudeHome,
+            TestContext.Current.CancellationToken,
+            UserHome,
+            BatonPaths.Root));
+        Assert.Contains(
+            $"repository={Repository} slug={Slug} entries=0",
+            auditOutput.ToString(),
+            StringComparison.Ordinal);
+
         File.WriteAllText(target, "stale projection bytes");
         var restarted = new MemoryProjectionSweep(() => DateTime.UtcNow, ClaudeHome, UserHome, null);
         await restarted.SweepOnceAsync(cancellationToken: TestContext.Current.CancellationToken);
@@ -251,9 +265,11 @@ public sealed class MemoryAutomaticProjectionTests : IDisposable
         Assert.Equal(MemoryProjectionObligationStatus.Escalated, before.Status);
 
         var output = new StringWriter();
+        var caseVariantRoot = root.ToUpperInvariant();
+        Assert.NotEqual(root, caseVariantRoot, StringComparer.Ordinal);
         Assert.Equal(0, await MemoryImportCommand.ExecuteAsync(
             MemoryImportOptionsParser.Parse([
-                "--assert", $"{root}={Repository}", "--asserted-by", "test",
+                "--assert", $"{caseVariantRoot}={Repository}", "--asserted-by", "test",
             ]),
             output,
             ClaudeHome,
@@ -264,6 +280,178 @@ public sealed class MemoryAutomaticProjectionTests : IDisposable
             await MemoryProjectionObligationStore.ReadAsync(Slug, TestContext.Current.CancellationToken));
         Assert.Equal(before, after);
         Assert.DoesNotContain("AUTOMATIC PROJECTION", output.ToString(), StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task Case_variant_alias_is_also_a_noop_in_dry_run_resolution()
+    {
+        var root = await CreateTargetAsync();
+        File.WriteAllText(Path.Combine(root, "user_fact.md"), "fixture alias fact");
+        var caseVariantRoot = root.ToUpperInvariant();
+        Assert.NotEqual(root, caseVariantRoot, StringComparer.Ordinal);
+
+        var output = new StringWriter();
+        Assert.Equal(0, await MemoryImportCommand.ExecuteAsync(
+            MemoryImportOptionsParser.Parse([
+                "--dry-run",
+                "--root", root,
+                "--assert", $"{caseVariantRoot}={OtherRepository}",
+                "--asserted-by", "test",
+            ]),
+            output,
+            ClaudeHome,
+            TestContext.Current.CancellationToken,
+            UserHome));
+
+        Assert.Contains($"repository={Repository}", output.ToString(), StringComparison.Ordinal);
+        Assert.DoesNotContain($"repository={OtherRepository}", output.ToString(), StringComparison.Ordinal);
+        Assert.Single(await MemoryAliasStore.ReadAllAsync(
+            BatonPaths.MemoryAliasFile, TestContext.Current.CancellationToken));
+    }
+
+    [Fact]
+    public async Task Store_metadata_refuses_a_foreign_row_before_any_projection()
+    {
+        var foreignRoot = await CreateTargetAsync(OtherRepository, "c--foreign");
+        var foreignTarget = Path.Combine(foreignRoot, ClaudeProjectionTarget.ProjectionFileName);
+        await MemoryStoreMetadataStore.EnsureAsync(
+            Repository, Slug, TestContext.Current.CancellationToken);
+        await MemoryStore.AppendAsync(
+            [Entry("foreign row", OtherRepository)],
+            BatonPaths.MemoryEntriesFile(Slug),
+            TestContext.Current.CancellationToken);
+
+        var error = await Assert.ThrowsAsync<InvalidDataException>(() => MemorySyncCommand.ExecuteAsync(
+            MemorySyncOptionsParser.Parse(["--repository", Repository, "--apply"]),
+            TextWriter.Null,
+            ClaudeHome,
+            TestContext.Current.CancellationToken,
+            UserHome));
+
+        Assert.Contains(Repository, error.Message, StringComparison.OrdinalIgnoreCase);
+        Assert.Contains(OtherRepository, error.Message, StringComparison.OrdinalIgnoreCase);
+        Assert.False(File.Exists(foreignTarget));
+        Assert.Null(await MemoryProjectionObligationStore.ReadAsync(Slug, TestContext.Current.CancellationToken));
+    }
+
+    [Fact]
+    public async Task Invalid_or_inaccessible_metadata_never_falls_back_to_legacy_rows()
+    {
+        var root = await CreateTargetAsync();
+        var target = Path.Combine(root, ClaudeProjectionTarget.ProjectionFileName);
+        await MemoryStore.AppendAsync(
+            [Entry("legacy-looking row")],
+            BatonPaths.MemoryEntriesFile(Slug),
+            TestContext.Current.CancellationToken);
+        var metadataPath = BatonPaths.MemoryStoreMetadataFile(Slug);
+
+        File.WriteAllText(metadataPath, "{ not valid json");
+        await Assert.ThrowsAsync<InvalidDataException>(() => MemorySyncCommand.ExecuteAsync(
+            MemorySyncOptionsParser.Parse(["--repository", Repository, "--apply"]),
+            TextWriter.Null,
+            ClaudeHome,
+            TestContext.Current.CancellationToken,
+            UserHome));
+        Assert.False(File.Exists(target));
+
+        File.Delete(metadataPath);
+        Directory.CreateDirectory(metadataPath);
+        var inaccessible = await Assert.ThrowsAnyAsync<Exception>(() => MemorySyncCommand.ExecuteAsync(
+            MemorySyncOptionsParser.Parse(["--repository", Repository, "--apply"]),
+            TextWriter.Null,
+            ClaudeHome,
+            TestContext.Current.CancellationToken,
+            UserHome));
+        Assert.True(inaccessible is IOException or UnauthorizedAccessException, inaccessible.ToString());
+        Assert.False(File.Exists(target));
+    }
+
+    [Fact]
+    public async Task Mismatched_obligation_is_refused_before_any_projection()
+    {
+        var root = await CreateTargetAsync();
+        var target = Path.Combine(root, ClaudeProjectionTarget.ProjectionFileName);
+        await MemoryStoreMetadataStore.EnsureAsync(
+            Repository, Slug, TestContext.Current.CancellationToken);
+        await MemoryStore.AppendAsync(
+            [Entry("owned row")],
+            BatonPaths.MemoryEntriesFile(Slug),
+            TestContext.Current.CancellationToken);
+        var mismatched = new MemoryProjectionObligation(
+            "fixture-attempt",
+            OtherRepository,
+            Slug,
+            MemoryProjectionObligationStatus.Pending,
+            0,
+            DateTime.UtcNow,
+            null,
+            DateTime.UtcNow,
+            null,
+            null);
+
+        await Assert.ThrowsAsync<InvalidDataException>(() => MemorySyncCommand.ExecuteAsync(
+            MemorySyncOptionsParser.Parse(["--repository", Repository, "--apply"]),
+            TextWriter.Null,
+            ClaudeHome,
+            TestContext.Current.CancellationToken,
+            UserHome,
+            new Dictionary<string, MemoryProjectionObligation>(StringComparer.OrdinalIgnoreCase)
+            {
+                [Slug] = mismatched,
+            }));
+
+        Assert.False(File.Exists(target));
+    }
+
+    [Fact]
+    public async Task Cancellation_after_commit_reports_pending_without_reporting_projection_finished()
+    {
+        await CreateTargetAsync();
+        using var cancellation = new CancellationTokenSource();
+        var output = new StringWriter();
+
+        var exit = await MemoryAddCommand.ExecuteAsync(
+            MemoryAddOptionsParser.Parse([
+                "--repository", Repository, "--kind", "durable-fact", "--text", "committed before cancellation",
+            ]),
+            output,
+            assertedByOverride: "test",
+            cancellationToken: cancellation.Token,
+            claudeHomeOverride: ClaudeHome,
+            userHomeOverride: UserHome,
+            projectionWriterOverride: (_, _) =>
+            {
+                cancellation.Cancel();
+                cancellation.Token.ThrowIfCancellationRequested();
+            });
+
+        Assert.Equal(0, exit);
+        Assert.Single(await MemoryStore.ReadAllAsync(
+            BatonPaths.MemoryEntriesFile(Slug), TestContext.Current.CancellationToken));
+        Assert.NotNull(await MemoryProjectionObligationStore.ReadAsync(
+            Slug, TestContext.Current.CancellationToken));
+        Assert.Contains("CANONICAL COMMIT SUCCEEDED; PROJECTION IS PENDING", output.ToString(), StringComparison.Ordinal);
+        Assert.DoesNotContain("AUTOMATIC PROJECTION FINISHED", output.ToString(), StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task Cancellation_before_commit_still_cancels_without_creating_a_store()
+    {
+        using var cancellation = new CancellationTokenSource();
+        cancellation.Cancel();
+
+        await Assert.ThrowsAnyAsync<OperationCanceledException>(() => MemoryAddCommand.ExecuteAsync(
+            MemoryAddOptionsParser.Parse([
+                "--repository", Repository, "--kind", "durable-fact", "--text", "must not commit",
+            ]),
+            TextWriter.Null,
+            assertedByOverride: "test",
+            cancellationToken: cancellation.Token,
+            claudeHomeOverride: ClaudeHome,
+            userHomeOverride: UserHome));
+
+        Assert.False(File.Exists(BatonPaths.MemoryEntriesFile(Slug)));
+        Assert.False(File.Exists(BatonPaths.MemoryStoreMetadataFile(Slug)));
     }
 
     [Fact]
@@ -374,12 +562,14 @@ public sealed class MemoryAutomaticProjectionTests : IDisposable
             await MemoryProjectionObligationStore.ReadAsync(Slug, TestContext.Current.CancellationToken));
     }
 
-    private async Task<string> CreateTargetAsync()
+    private async Task<string> CreateTargetAsync(
+        string repository = Repository,
+        string directoryName = "c--fixture")
     {
-        var root = Path.Combine(ClaudeHome, "projects", "c--fixture", "memory");
+        var root = Path.Combine(ClaudeHome, "projects", directoryName, "memory");
         Directory.CreateDirectory(root);
         await MemoryAliasStore.AppendAsync(
-            [new MemoryAliasEntry(BatonPaths.RecordKey(root), Repository, "test", default)],
+            [new MemoryAliasEntry(BatonPaths.RecordKey(root), repository, "test", default)],
             BatonPaths.MemoryAliasFile,
             TestContext.Current.CancellationToken);
         return root;

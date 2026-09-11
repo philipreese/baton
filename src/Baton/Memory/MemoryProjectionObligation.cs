@@ -72,6 +72,12 @@ public static class MemoryProjectionObligationStore
     {
         ArgumentException.ThrowIfNullOrEmpty(repository);
         ArgumentException.ThrowIfNullOrEmpty(repositorySlug);
+        if (!string.Equals(FleetMemory.SlugFor(repository), repositorySlug, StringComparison.OrdinalIgnoreCase))
+        {
+            throw new ArgumentException(
+                $"Repository '{repository}' does not belong to projection obligation slug '{repositorySlug}'.",
+                nameof(repositorySlug));
+        }
 
         return Task.Run(
             () => MutexGuardedFileLock.RunUnderLock(
@@ -106,7 +112,7 @@ public static class MemoryProjectionObligationStore
         var path = BatonPaths.MemorySyncPendingFile(repositorySlug);
         return Task.Run(
             () => MutexGuardedFileLock.RunUnderLock(
-                path, LockNamePrefix, LockTimeout, () => ReadUnlocked(path)),
+                path, LockNamePrefix, LockTimeout, () => ReadValidatedUnlocked(path, repositorySlug)),
             cancellationToken);
     }
 
@@ -118,6 +124,7 @@ public static class MemoryProjectionObligationStore
     {
         ArgumentNullException.ThrowIfNull(obligation);
         ArgumentNullException.ThrowIfNull(publish);
+        Validate(obligation, obligation.RepositorySlug);
         var path = BatonPaths.MemorySyncPendingFile(obligation.RepositorySlug);
 
         return MutexGuardedFileLock.RunUnderLock(
@@ -126,11 +133,13 @@ public static class MemoryProjectionObligationStore
             LockTimeout,
             () =>
             {
-                var current = ReadUnlocked(path);
+                var current = ReadValidatedUnlocked(path, obligation.RepositorySlug);
                 if (current is null || !string.Equals(current.AttemptId, obligation.AttemptId, StringComparison.Ordinal))
                 {
                     return false;
                 }
+
+                RequireSameOwner(obligation, current);
 
                 publish();
                 return true;
@@ -204,6 +213,7 @@ public static class MemoryProjectionObligationStore
         Func<MemoryProjectionObligation, MemoryProjectionObligation?> mutation,
         CancellationToken cancellationToken)
     {
+        Validate(obligation, obligation.RepositorySlug);
         var path = BatonPaths.MemorySyncPendingFile(obligation.RepositorySlug);
         return Task.Run(
             () => MutexGuardedFileLock.RunUnderLock(
@@ -212,11 +222,13 @@ public static class MemoryProjectionObligationStore
                 LockTimeout,
                 () =>
                 {
-                    var current = ReadUnlocked(path);
+                    var current = ReadValidatedUnlocked(path, obligation.RepositorySlug);
                     if (current is null || !string.Equals(current.AttemptId, obligation.AttemptId, StringComparison.Ordinal))
                     {
                         return false;
                     }
+
+                    RequireSameOwner(obligation, current);
 
                     mutation(current);
                     return true;
@@ -235,8 +247,45 @@ public static class MemoryProjectionObligationStore
             ?? throw new InvalidDataException($"Memory projection obligation '{path}' contains JSON null.");
     }
 
+    private static MemoryProjectionObligation? ReadValidatedUnlocked(string path, string expectedSlug)
+    {
+        var obligation = ReadUnlocked(path);
+        if (obligation is not null)
+        {
+            Validate(obligation, expectedSlug);
+        }
+
+        return obligation;
+    }
+
+    private static void Validate(MemoryProjectionObligation obligation, string expectedSlug)
+    {
+        if (obligation.AttemptId is not { Length: > 0 }
+            || obligation.Repository is not { Length: > 0 }
+            || obligation.RepositorySlug is not { Length: > 0 }
+            || obligation.FailedAttempts < 0)
+        {
+            throw new InvalidDataException("Memory projection obligation has an incomplete or invalid shape.");
+        }
+
+        _ = MemoryStoreIdentity.Resolve(expectedSlug, null, [], obligation);
+    }
+
+    private static void RequireSameOwner(
+        MemoryProjectionObligation expected,
+        MemoryProjectionObligation current)
+    {
+        if (!string.Equals(expected.Repository, current.Repository, StringComparison.OrdinalIgnoreCase)
+            || !string.Equals(expected.RepositorySlug, current.RepositorySlug, StringComparison.OrdinalIgnoreCase))
+        {
+            throw new InvalidDataException(
+                $"Projection obligation '{current.AttemptId}' changed identity while owned by the same attempt.");
+        }
+    }
+
     private static void WriteUnlocked(MemoryProjectionObligation obligation)
     {
+        Validate(obligation, obligation.RepositorySlug);
         var path = BatonPaths.MemorySyncPendingFile(obligation.RepositorySlug);
         Directory.CreateDirectory(Path.GetDirectoryName(path)!);
         var tempPath = $"{path}.{Guid.NewGuid():N}.tmp";

@@ -49,7 +49,7 @@ public static class CanonicalStoreInventory
             var slug = Path.GetFileName(directory);
             var memory = Path.Combine(directory, BatonPaths.MemoryDirectoryName);
             var entries = Path.Combine(memory, BatonPaths.MemoryEntriesFileName);
-            var metadata = MemoryStoreMetadataStore.TryRead(slug);
+            var metadata = MemoryStoreMetadataStore.ReadIfPresent(slug);
             if (metadata is not null || File.Exists(entries))
             {
                 stores.Add(new CanonicalStoreLocation(

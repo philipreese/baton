@@ -182,8 +182,8 @@ public static class MemoryAuditCommand
     /// </summary>
     /// <remarks>
     /// <b>Rows are counted and never printed</b>, which keeps this half inside the verb's own
-    /// read-only-and-content-blind claim: an entry's text goes nowhere, and the one field read out of
-    /// a row is its subject, so the report can say whose store a slug is without decoding the slug.
+    /// read-only-and-content-blind claim: an entry's text goes nowhere. Durable metadata is the
+    /// authoritative subject; a row supplies it only for a genuinely metadata-less legacy store.
     /// A selected store that does not exist is reported as absent rather than dropped, because "no
     /// fleet store yet" is an answer an operator acts on and an empty list is not.
     /// </remarks>
@@ -200,9 +200,10 @@ public static class MemoryAuditCommand
             }
 
             var entries = await MemoryStore.ReadAllAsync(store.EntriesFile, cancellationToken).ConfigureAwait(false);
+            var storeRepository = MemoryStoreIdentity.Resolve(store.Slug, store.Repository, entries);
             rows.Add(new CanonicalStoreRow(
                 store.Slug,
-                store.IsFleet ? FleetMemory.Slug : entries.Count > 0 ? entries[0].Repository : null,
+                storeRepository,
                 store.IsFleet,
                 store.EntriesFile,
                 Present: true,
@@ -224,9 +225,8 @@ public static class MemoryAuditCommand
     }
 
     /// <summary>
-    /// One canonical store in the report. <paramref name="Repository"/> is the subject its rows carry
-    /// (<c>fleet</c> for the fleet store); absent when the store holds no row yet, since a slug alone
-    /// cannot say whose it is.
+    /// One canonical store in the report. <paramref name="Repository"/> is its durable metadata
+    /// identity, or the subject its rows carry for a genuinely metadata-less legacy store.
     /// </summary>
     private sealed record CanonicalStoreRow(
         string Slug,

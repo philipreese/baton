@@ -42,13 +42,31 @@ internal static class MemoryProjectionTrigger
                 obligationsOverride: null,
                 projectionWriterOverride).ConfigureAwait(false);
         }
-        catch (Exception ex) when (ex is not OperationCanceledException)
+        catch (Exception ex)
         {
             exitCode = 1;
             syncOutput.WriteLine($"COMMITTED BUT UNPROJECTED -- {repository}: {ex.GetType().Name}: {ex.Message}");
             syncOutput.WriteLine(
                 "  Projection recovery state could not be confirmed. The canonical store and its durable " +
                 "identity remain saved; repair the reported path and retry or allow the daemon to sweep it.");
+
+            // Cancellation is authoritative before the canonical append. Once the append commits,
+            // it cannot erase that fact from the result. Replace any interrupted attempt with a
+            // recovery claim for this canonical state, using a non-cancelable token.
+            if (ex is OperationCanceledException)
+            {
+                try
+                {
+                    var slug = FleetMemory.SlugFor(repository);
+                    await MemoryProjectionObligationStore.ReplaceAsync(
+                        repository, slug, DateTime.UtcNow, CancellationToken.None).ConfigureAwait(false);
+                }
+                catch (Exception recoveryError)
+                {
+                    syncOutput.WriteLine(
+                        $"COMMITTED RECOVERY UNRECORDED -- {recoveryError.GetType().Name}: {recoveryError.Message}");
+                }
+            }
         }
 
         output.Write(syncOutput.ToString());
@@ -64,9 +82,9 @@ internal static class MemoryProjectionTrigger
         try
         {
             pending = await MemoryProjectionObligationStore.ReadAsync(
-                FleetMemory.SlugFor(repository), cancellationToken).ConfigureAwait(false);
+                FleetMemory.SlugFor(repository), CancellationToken.None).ConfigureAwait(false);
         }
-        catch (Exception ex) when (ex is not OperationCanceledException)
+        catch (Exception)
         {
             // The sync report above already carries the concrete storage failure. This read only
             // selects truthful summary wording and must not turn the committed mutation into a throw.

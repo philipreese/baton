@@ -40,11 +40,16 @@ namespace Baton.Status;
 /// construction-site choice instead of a hidden convention.
 /// </param>
 /// <param name="serializerOptions">Defaults to the compact, non-indented options both stores use.</param>
+/// <param name="keyComparer">
+/// The comparer for non-empty dedupe keys. Defaults to ordinal for execution ids; path-keyed stores
+/// pass the path comparer their public contract documents.
+/// </param>
 internal sealed class JsonLinesLedger<TEntry>(
     string lockNamePrefix,
     string ledgerDisplayName,
     Func<TEntry, string?> executionIdSelector,
-    JsonSerializerOptions? serializerOptions = null)
+    JsonSerializerOptions? serializerOptions = null,
+    IEqualityComparer<string>? keyComparer = null)
     where TEntry : class
 {
     /// <summary>Same generous timeout <c>RoomRegistryStore</c> uses, for the same reason: every critical
@@ -105,7 +110,7 @@ internal sealed class JsonLinesLedger<TEntry>(
                 .Select(executionIdSelector)
                 .Where(id => id is { Length: > 0 })
                 .Select(id => id!)
-                .ToHashSet(StringComparer.Ordinal);
+                .ToHashSet(keyComparer ?? StringComparer.Ordinal);
 
             var toAppend = new List<TEntry>(entries.Count);
             foreach (var entry in entries)

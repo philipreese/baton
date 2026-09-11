@@ -44,7 +44,9 @@ public sealed class MemoryProjectionSweep : BackgroundService
             var stored = await MemoryStore.ReadAllAsync(location.EntriesFile, cancellationToken).ConfigureAwait(false);
             var obligation = await MemoryProjectionObligationStore.ReadAsync(location.Slug, cancellationToken)
                 .ConfigureAwait(false);
-            if (stored.Count == 0 && obligation is null && location.Repository is null)
+            var repository = MemoryStoreIdentity.Resolve(
+                location.Slug, location.Repository, stored, obligation);
+            if (repository is null)
             {
                 continue;
             }
@@ -64,7 +66,7 @@ public sealed class MemoryProjectionSweep : BackgroundService
 
             var exitCode = await MemorySyncCommand.ExecuteAsync(
                 new MemorySyncOptions(
-                    stored.FirstOrDefault()?.Repository ?? obligation?.Repository ?? location.Repository,
+                    repository,
                     Apply: true,
                     Check: false,
                     MemoryAuditOutputFormat.Text,

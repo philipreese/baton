@@ -282,8 +282,8 @@ public static class MemoryImportCommand
             .ToList();
 
         var appended = options.DryRun
-            ? asserted.Where(candidate => !recorded.Any(existing => string.Equals(
-                    existing.Path, candidate.Path, StringComparison.Ordinal)))
+            ? asserted.Where(candidate => !recorded.Any(existing => BatonPaths.RecordKeyComparer.Equals(
+                    existing.Path, candidate.Path)))
                 .ToList()
             : await MemoryAliasStore.AppendAndGetAppendedAsync(
                     asserted, BatonPaths.MemoryAliasFile, cancellationToken)

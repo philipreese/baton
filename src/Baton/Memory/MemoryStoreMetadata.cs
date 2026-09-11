@@ -81,38 +81,45 @@ public static class MemoryStoreMetadataStore
     }
 
     /// <summary>
-    /// Reads metadata for inventory and recovery. A malformed or inaccessible file is reported and
-    /// treated as absent so a legacy non-empty entries file can still supply its row identity.
+    /// Reads metadata for inventory and recovery. Only a genuinely absent file identifies a legacy
+    /// store; malformed, mismatched and inaccessible metadata fail closed so rows cannot relabel it.
     /// </summary>
-    public static MemoryStoreMetadata? TryRead(string repositorySlug)
+    public static MemoryStoreMetadata? ReadIfPresent(string repositorySlug)
     {
         ArgumentException.ThrowIfNullOrEmpty(repositorySlug);
         var path = BatonPaths.MemoryStoreMetadataFile(repositorySlug);
-        try
-        {
-            return MutexGuardedFileLock.RunUnderLock(
-                path, LockNamePrefix, LockTimeout, () => ReadUnlocked(path));
-        }
-        catch (Exception ex) when (ex is IOException
-                                   or UnauthorizedAccessException
-                                   or WaitHandleCannotBeOpenedException
-                                   or JsonException
-                                   or InvalidDataException)
-        {
-            Console.Error.WriteLine($"Could not read memory store metadata at '{path}': {ex.Message}.");
-            return null;
-        }
+        return MutexGuardedFileLock.RunUnderLock(
+            path, LockNamePrefix, LockTimeout, () => ReadUnlocked(path));
     }
 
     private static MemoryStoreMetadata? ReadUnlocked(string path)
     {
-        if (!File.Exists(path))
+        string text;
+        try
+        {
+            using var stream = new FileStream(path, FileMode.Open, FileAccess.Read, FileShare.Read);
+            using var reader = new StreamReader(stream, Encoding.UTF8);
+            text = reader.ReadToEnd();
+        }
+        catch (FileNotFoundException)
+        {
+            return null;
+        }
+        catch (DirectoryNotFoundException)
         {
             return null;
         }
 
-        var metadata = JsonSerializer.Deserialize<MemoryStoreMetadata>(File.ReadAllText(path, Encoding.UTF8), Json)
-            ?? throw new InvalidDataException($"Memory store metadata '{path}' contains JSON null.");
+        MemoryStoreMetadata metadata;
+        try
+        {
+            metadata = JsonSerializer.Deserialize<MemoryStoreMetadata>(text, Json)
+                ?? throw new InvalidDataException($"Memory store metadata '{path}' contains JSON null.");
+        }
+        catch (JsonException ex)
+        {
+            throw new InvalidDataException($"Memory store metadata '{path}' is malformed.", ex);
+        }
         if (metadata.Version != MemoryStoreMetadata.CurrentVersion
             || metadata.Repository is not { Length: > 0 }
             || metadata.RepositorySlug is not { Length: > 0 }
@@ -125,5 +132,88 @@ public static class MemoryStoreMetadataStore
         }
 
         return metadata;
+    }
+}
+
+/// <summary>Resolves and validates the identity provenance of one canonical store.</summary>
+public static class MemoryStoreIdentity
+{
+    /// <summary>
+    /// Returns the store identity in provenance order: durable metadata, legacy rows, legacy
+    /// obligation, then an explicitly selected legacy slug. Every supplied source must agree, and
+    /// every identity must derive the directory slug; disagreement is corrupt state, never fallback.
+    /// </summary>
+    public static string? Resolve(
+        string repositorySlug,
+        string? metadataRepository,
+        IReadOnlyList<MemoryEntry> entries,
+        MemoryProjectionObligation? obligation = null,
+        string? selectedLegacyRepository = null)
+    {
+        ArgumentException.ThrowIfNullOrEmpty(repositorySlug);
+        ArgumentNullException.ThrowIfNull(entries);
+
+        var repository = metadataRepository
+            ?? entries.FirstOrDefault()?.Repository
+            ?? obligation?.Repository
+            ?? selectedLegacyRepository
+            ?? (FleetMemory.IsFleet(repositorySlug) ? FleetMemory.Slug : null);
+
+        if (repository is null)
+        {
+            return null;
+        }
+
+        ValidateSource(repositorySlug, repository, "resolved store identity");
+
+        if (metadataRepository is { Length: > 0 })
+        {
+            RequireMatch(repository, metadataRepository, "store metadata");
+        }
+
+        foreach (var entry in entries)
+        {
+            RequireMatch(repository, entry.Repository, $"entry '{entry.Id}'");
+            ValidateSource(repositorySlug, entry.Repository, $"entry '{entry.Id}'");
+        }
+
+        if (obligation is not null)
+        {
+            if (!string.Equals(obligation.RepositorySlug, repositorySlug, StringComparison.OrdinalIgnoreCase))
+            {
+                throw new InvalidDataException(
+                    $"Projection obligation '{obligation.AttemptId}' names store slug " +
+                    $"'{obligation.RepositorySlug}', not '{repositorySlug}'.");
+            }
+
+            RequireMatch(repository, obligation.Repository, $"projection obligation '{obligation.AttemptId}'");
+            ValidateSource(repositorySlug, obligation.Repository, $"projection obligation '{obligation.AttemptId}'");
+        }
+
+        if (selectedLegacyRepository is { Length: > 0 })
+        {
+            RequireMatch(repository, selectedLegacyRepository, "selected repository");
+        }
+
+        return repository;
+    }
+
+    private static void RequireMatch(string repository, string candidate, string source)
+    {
+        if (!string.Equals(repository, candidate, StringComparison.OrdinalIgnoreCase))
+        {
+            throw new InvalidDataException(
+                $"Canonical memory store identity '{repository}' conflicts with {source} identity '{candidate}'.");
+        }
+    }
+
+    private static void ValidateSource(string repositorySlug, string repository, string source)
+    {
+        if (repository is not { Length: > 0 }
+            || !string.Equals(FleetMemory.SlugFor(repository), repositorySlug, StringComparison.OrdinalIgnoreCase))
+        {
+            throw new InvalidDataException(
+                $"Canonical memory store slug '{repositorySlug}' does not belong to {source} '{repository}'.");
+        }
     }
 }

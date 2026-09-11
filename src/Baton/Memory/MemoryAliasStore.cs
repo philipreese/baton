@@ -75,7 +75,11 @@ public static class MemoryAliasStore
     /// not by an append that silently shadows an earlier row a reader would still see.
     /// </summary>
     internal static readonly JsonLinesLedger<MemoryAliasEntry> Ledger =
-        new("baton-memory-aliases", "memory alias store", entry => entry.Path);
+        new(
+            "baton-memory-aliases",
+            "memory alias store",
+            entry => entry.Path,
+            keyComparer: BatonPaths.RecordKeyComparer);
 
     /// <summary>Every assertion in the file, oldest first. A missing file is an empty list.</summary>
     public static Task<IReadOnlyList<MemoryAliasEntry>> ReadAllAsync(

@@ -83,25 +83,31 @@ public static class MemorySyncCommand
         {
             foreach (var slug in slugs)
             {
+                var metadata = MemoryStoreMetadataStore.ReadIfPresent(slug);
                 if (!File.Exists(BatonPaths.MemoryEntriesFile(slug))
-                    && MemoryStoreMetadataStore.TryRead(slug) is null)
+                    && metadata is null)
                 {
-                    continue;
-                }
-
-                if (obligationsOverride?.TryGetValue(slug, out var claimed) == true)
-                {
-                    obligations[slug] = claimed;
                     continue;
                 }
 
                 var stored = await MemoryStore.ReadAllAsync(
                     BatonPaths.MemoryEntriesFile(slug), cancellationToken).ConfigureAwait(false);
-                var repository = stored.FirstOrDefault()?.Repository
-                    ?? MemoryStoreMetadataStore.TryRead(slug)?.Repository
-                    ?? (FleetMemory.IsFleet(slug) ? FleetMemory.Slug : options.Repository);
+                MemoryProjectionObligation? claimed = null;
+                obligationsOverride?.TryGetValue(slug, out claimed);
+                var repository = MemoryStoreIdentity.Resolve(
+                    slug,
+                    metadata?.Repository,
+                    stored,
+                    claimed,
+                    options.Repository);
                 if (repository is { Length: > 0 })
                 {
+                    if (claimed is not null)
+                    {
+                        obligations[slug] = claimed;
+                        continue;
+                    }
+
                     try
                     {
                         obligations[slug] = await MemoryProjectionObligationStore.ReplaceAsync(
@@ -260,6 +266,7 @@ public static class MemorySyncCommand
     {
         var entriesFile = BatonPaths.MemoryEntriesFile(slug);
         var isFleet = FleetMemory.IsFleet(slug);
+        var metadata = MemoryStoreMetadataStore.ReadIfPresent(slug);
 
         // Checked BEFORE the lock. `--repository <id>` names a slug rather than selecting a directory
         // that exists, so an identity with no store reaches here -- a typo is enough. Measured, so the
@@ -269,7 +276,7 @@ public static class MemorySyncCommand
         // no-store answer independent of that behaviour rather than resting on it, and because taking a
         // named mutex to discover a file is absent is work with no result. The store-is-empty case is
         // still handled below: an existing but empty file is a different state from an absent one.
-        if (!File.Exists(entriesFile) && MemoryStoreMetadataStore.TryRead(slug) is null)
+        if (!File.Exists(entriesFile) && metadata is null)
         {
             return null;
         }
@@ -289,25 +296,22 @@ public static class MemorySyncCommand
                     FleetMemory.EntriesFile, FleetMemory.LinksFile, FleetMemory.RetractionsFile, cancellationToken)
                 .ConfigureAwait(false);
         var fleetStorePath = !isFleet && File.Exists(FleetMemory.EntriesFile) ? FleetMemory.EntriesFile : null;
-        var storeRepository = MemoryStoreMetadataStore.TryRead(slug)?.Repository;
-
         return await MemoryStore.RunUnderEntriesLockAsync(
             entriesFile,
             stored =>
             {
-                if (stored.Count == 0)
+                var repository = MemoryStoreIdentity.Resolve(
+                    slug,
+                    metadata?.Repository,
+                    stored,
+                    obligation,
+                    options.Repository);
+                if (repository is null)
                 {
-                    if (obligation?.Repository is not { Length: > 0 } && options.Repository is not { Length: > 0 })
-                    {
-                        return null;
-                    }
+                    return null;
                 }
 
                 var resolved = MemoryStore.Resolve(stored, links, retractions);
-                var repository = stored.FirstOrDefault()?.Repository
-                    ?? obligation?.Repository
-                    ?? storeRepository
-                    ?? options.Repository!;
 
                 // Named, never counted — the posture every other omission on this surface takes
                 // (ProjectionOmission's remarks). The projector never sees a retracted entry, since
