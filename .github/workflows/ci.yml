@@ -197,11 +197,11 @@ jobs:
         if: always()
 
   # M13 Phase 3 (#109): packs baton into a nupkg — Windows-only (#1405), so this is a single-RID
-  # (win-x64) package, not a multi-RID one (see the `Pack baton` step below for what that packs
+  # (win-x64) package, not a multi-RID one (see the `pack` task in `pixi.toml` for what that packs
   # post-#1474). Runs after `test`
   # so it only packs a library that already passed lint and test.
-  # Pushes to main only: it verifies packaging integrity, not the correctness of the change under
-  # review, so main is the right place for it.
+  # Main pushes and admitted recovery dispatches only: this verifies packaging integrity, not the
+  # correctness of a change under review, so main is the right revision for it.
   pack:
     # !cancelled() opts this out of the changes-skip propagation on push (#412; the changes job is
     # PR-only per #410, and its skip otherwise cascades through `test` to here). The explicit
@@ -251,20 +251,17 @@ jobs:
 
       # Pure managed code since #1474 — no native library to build or embed, so nothing to fetch
       # from another leg's artifact.
-      - name: Pack baton
-        run: pixi run pack
+      # M13 Phase 4 (#110), the milestone's completion gate: unattended, since (unlike
+      # smoke-claude/smoke-mixed-vendor) it needs no live vendor auth -- install → run against a
+      # locally-stubbed claude binary → assert the declared output landed on disk → uninstall.
+      - name: Verify installed-tool round trip
+        run: pixi run verify-pack
 
       - name: Upload packed nupkg
         uses: actions/upload-artifact@v4
         with:
           name: aer-nupkg
           path: bin/pack/*.nupkg
-
-      # M13 Phase 4 (#110), the milestone's completion gate: unattended, since (unlike
-      # smoke-claude/smoke-mixed-vendor) it needs no live vendor auth -- install → run against a
-      # locally-stubbed claude binary → assert the declared output landed on disk → uninstall.
-      - name: Verify installed-tool round trip
-        run: pixi run verify-pack
 
   # record-once-ok: #2182 spec/baton.md
   # The sole gates/test aggregate. `diff-shape` and `pr-body-lint` remain separate required checks.
