@@ -41,6 +41,40 @@ def _init_git_repo(path: Path) -> None:
     subprocess.run(["git", "config", "user.name", "Sabotage"], cwd=path, check=True, env=env)
 
 
+# Match the bounded Windows access-refusal policy established by the snapshot atomic-swap cleanup:
+# exponential backoff from 10 ms to 200 ms, with about one second of total waiting (#2095).
+TEMP_TREE_RETRY_FIRST_DELAY_S = 0.01
+TEMP_TREE_RETRY_MAX_DELAY_S = 0.2
+TEMP_TREE_RETRY_BUDGET_S = 1.0
+
+
+def _remove_temp_tree(
+    path: Path,
+    remove: Callable[[Path], object] = shutil.rmtree,
+    sleep: Callable[[float], object] = time.sleep,
+    retry_permission_errors: bool = os.name == "nt",
+) -> int:
+    """Remove a fixture tree, retrying only bounded Windows access refusals."""
+    attempts, waited, delay = 0, 0.0, TEMP_TREE_RETRY_FIRST_DELAY_S
+    while True:
+        attempts += 1
+        try:
+            remove(path)
+            return attempts
+        except PermissionError as error:
+            if not retry_permission_errors:
+                raise
+            if waited >= TEMP_TREE_RETRY_BUDGET_S:
+                error.add_note(
+                    f"temporary fixture cleanup of {path} still refused after {attempts} "
+                    f"attempts over {waited:.2f} s; a live resource owner may remain"
+                )
+                raise
+            sleep(delay)
+            waited += delay
+            delay = min(delay * 2, TEMP_TREE_RETRY_MAX_DELAY_S)
+
+
 FIXTURES: dict[str, Callable[[], None]] = {}
 
 
@@ -54,8 +88,8 @@ def fixture(name: str):
 
 @fixture("workflow-recovery-selftest")
 def _sabotage_workflow_recovery() -> None:
-    with tempfile.TemporaryDirectory() as td:
-        dest = Path(td)
+    dest = Path(tempfile.mkdtemp(prefix="workflow-recovery-sabotage-"))
+    try:
         for relative in ["tools/workflow-recovery/selftest.py", ".github/workflows/ci.yml",
                          ".github/workflows/release-please.yml", "pixi.toml", "tools/gates/gates.py"]:
             target = dest / relative
@@ -83,6 +117,8 @@ def _sabotage_workflow_recovery() -> None:
                                      "RELEASE_RESULT: success"), encoding="utf-8")
         mutated = run()
         assert mutated.returncode != 0 and "AssertionError" in mutated.stderr, mutated.stderr
+    finally:
+        _remove_temp_tree(dest)
 
 
 @fixture("ci-selftest")
@@ -666,9 +702,109 @@ def run_all_fixtures() -> tuple[int, list[str]]:
     return passed, failures
 
 
-def selftest() -> int:
-    """Selftest for the ratchet logic: prove it trips on unlisted, orphaned, or duplicated members."""
+def _start_directory_owner(root: Path, seconds: float) -> subprocess.Popen:
+    """Start a Windows child that holds a non-delete-shared handle to root."""
+    owner = subprocess.Popen(
+        [sys.executable, "-B", "-c",
+         "import ctypes,sys,time; k=ctypes.windll.kernel32; "
+         "k.CreateFileW.restype=ctypes.c_void_p; "
+         "h=k.CreateFileW('.',0x80000000,3,None,3,0x02000000,None); "
+         "assert h != ctypes.c_void_p(-1).value; print('ready',flush=True); "
+         "time.sleep(float(sys.argv[1]))", str(seconds)],
+        cwd=root,
+        stdout=subprocess.PIPE,
+        text=True,
+    )
+    assert owner.stdout is not None
+    assert owner.stdout.readline().strip() == "ready"
+    owner.stdout.close()
+    return owner
+
+
+def _cleanup_retry_selftest() -> list[str]:
+    """Prove transient sharing clears, while persistent and unrelated failures escape."""
     failures: list[str] = []
+    refusal = PermissionError(32, "synthetic sharing violation", "fixture")
+    calls = 0
+    sleeps: list[float] = []
+
+    def refuse_then_succeed(_path: Path) -> None:
+        nonlocal calls
+        calls += 1
+        if calls <= 3:
+            raise refusal
+
+    attempts = _remove_temp_tree(
+        Path("synthetic"), refuse_then_succeed, sleeps.append, retry_permission_errors=True)
+    if attempts != 4 or calls != 4 or sleeps != [0.01, 0.02, 0.04]:
+        failures.append(f"transient cleanup control used attempts={attempts}, sleeps={sleeps}")
+
+    sleeps.clear()
+    try:
+        _remove_temp_tree(
+            Path("synthetic"), lambda _path: (_ for _ in ()).throw(refusal),
+            sleeps.append, retry_permission_errors=True)
+    except PermissionError as error:
+        if error is not refusal or len(sleeps) != 9 or not (1.0 <= sum(sleeps) < 1.2):
+            failures.append(f"persistent cleanup control did not exhaust the bounded budget: {sleeps}")
+    else:
+        failures.append("persistent cleanup control was swallowed or retried without bound")
+
+    unrelated_calls = 0
+
+    def unrelated(_path: Path) -> None:
+        nonlocal unrelated_calls
+        unrelated_calls += 1
+        raise FileNotFoundError(2, "synthetic missing tree", "fixture")
+
+    try:
+        _remove_temp_tree(
+            Path("synthetic"), unrelated, sleeps.append, retry_permission_errors=True)
+    except FileNotFoundError:
+        if unrelated_calls != 1:
+            failures.append("non-sharing cleanup failure was retried")
+    else:
+        failures.append("non-sharing cleanup failure was swallowed")
+
+    if os.name != "nt":
+        return failures
+
+    root = Path(tempfile.mkdtemp(prefix="sabotage-cleanup-selftest-"))
+    owner = _start_directory_owner(root, 0.2)
+    try:
+        attempts = _remove_temp_tree(root)
+        if attempts <= 1:
+            failures.append("real directory-sharing control did not require a retry")
+    except PermissionError as exc:
+        failures.append(f"cleanup did not outlive a short-lived directory owner: {exc}")
+    finally:
+        owner.wait(timeout=5)
+        if root.exists():
+            _remove_temp_tree(root)
+
+    root = Path(tempfile.mkdtemp(prefix="sabotage-cleanup-live-owner-"))
+    owner = _start_directory_owner(root, 5.0)
+    try:
+        try:
+            _remove_temp_tree(root)
+        except PermissionError as error:
+            if not any("live resource owner may remain" in note for note in error.__notes__):
+                failures.append("exhausted cleanup did not identify a possible live owner")
+        else:
+            failures.append("cleanup masked a directory handle held beyond its retry budget")
+    finally:
+        if owner.poll() is None:
+            owner.terminate()
+        owner.wait(timeout=5)
+        if root.exists():
+            _remove_temp_tree(root)
+
+    return failures
+
+
+def selftest() -> int:
+    """Selftest the cleanup boundary and ratchet logic."""
+    failures = _cleanup_retry_selftest()
 
     # 1. Uncovered member trips ratchet and names the member citing #1601
     faults_uncovered = check_ratchet(["uncovered-gate-member", "fmt-check"])
@@ -709,6 +845,12 @@ def main(argv: list[str] | None = None) -> int:
     argv = sys.argv[1:] if argv is None else argv
     if "--selftest" in argv:
         return selftest()
+
+    cleanup_failures = _cleanup_retry_selftest()
+    if cleanup_failures:
+        print(f"gate-sabotage: cleanup selftest FAIL -- {'; '.join(cleanup_failures)}", file=sys.stderr)
+        return 1
+    print("gate-sabotage: cleanup selftest OK (transient, persistent, and unrelated arms discriminate)")
 
     print("gate-sabotage: verifying sabotage fixtures and gates ratchet (#1601)")
     members = _load_gate_members()
