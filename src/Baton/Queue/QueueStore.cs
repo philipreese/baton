@@ -4,7 +4,11 @@ using Baton.Status;
 
 namespace Baton.Queue;
 
-/// <summary>The whole queue file: the items, in operator order, and the hold flag.</summary>
+/// <summary>
+/// The whole queue file: items in operator order, the hold flag, and independent current-PR
+/// observations. Observations are top-level so refreshing forge evidence cannot rewrite a lane's
+/// lifecycle history.
+/// </summary>
 /// <param name="Items">Every item, whatever its state. Nothing is pruned automatically — a done item
 /// stays visible to <c>baton queue list</c> until the operator clears it.</param>
 /// <param name="Held">
@@ -13,7 +17,10 @@ namespace Baton.Queue;
 /// </param>
 public sealed record QueueSnapshot(
     [property: JsonPropertyName("items")] IReadOnlyList<QueueItem> Items,
-    [property: JsonPropertyName("held")] bool Held = false)
+    [property: JsonPropertyName("held")] bool Held = false,
+    [property: JsonPropertyName("pullRequestObservations")]
+    [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    IReadOnlyList<QueuePullRequestObservation>? PullRequestObservations = null)
 {
     public static readonly QueueSnapshot Empty = new([]);
 }

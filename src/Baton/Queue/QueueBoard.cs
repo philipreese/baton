@@ -57,7 +57,10 @@ public static class QueueBoard
         DateTime localNow,
         QueueDecisionEntry? lastDecision,
         Func<QueueItem, bool> briefExists,
-        Func<QueueItem, string?> verdictDecision)
+        Func<QueueItem, string?> verdictDecision,
+        IReadOnlyList<QueuePullRequestObservation>? pullRequestObservations = null,
+        DateTimeOffset? observationNow = null,
+        TimeSpan? observationFreshness = null)
     {
         ArgumentNullException.ThrowIfNull(items);
         ArgumentNullException.ThrowIfNull(settings);
@@ -135,27 +138,78 @@ public static class QueueBoard
         }
 
         var pullRequests = new List<QueuePullRequestView>();
-        foreach (var item in OrderTwinsAdjacent(items))
-        {
-            if (item.Stage is not { } stage || item.PullRequest is not { } pr)
-            {
-                continue;
-            }
+        var pullRequestHistory = new List<QueuePullRequestView>();
+        var observations = (pullRequestObservations ?? [])
+            .GroupBy(o => new QualifiedPullRequest(o.Repository, o.PullRequest))
+            .ToDictionary(g => g.Key, g => g.OrderByDescending(o => o.AttemptedAt).First());
+        var now = observationNow ?? DateTimeOffset.UtcNow;
+        var freshness = observationFreshness ?? TimeSpan.Zero;
+        var prItems = OrderTwinsAdjacent(items)
+            .Where(item => item.Stage is not null && item.PullRequest is not null)
+            .GroupBy(item => item.Repository is { Length: > 0 } repository
+                ? $"{repository}\0{item.PullRequest}"
+                : $"\0{item.Tag}", StringComparer.Ordinal);
 
-            pullRequests.Add(new QueuePullRequestView(
+        foreach (var group in prItems)
+        {
+            var first = group.First();
+            var repository = first.Repository;
+            var pr = first.PullRequest!.Value;
+            var qualified = repository is { Length: > 0 }
+                ? new QualifiedPullRequest(repository, pr)
+                : null;
+            var observation = qualified is not null && observations.TryGetValue(qualified, out var found)
+                ? found
+                : null;
+            var knownState = PullRequestObservationStates.IsKnown(observation?.State)
+                ? observation!.State
+                : null;
+            var isCurrent = knownState is not null
+                && observation is { Error: null, ObservedAt: { } observedAt }
+                && now >= observedAt
+                && now - observedAt <= freshness;
+            var freshnessWord = isCurrent
+                ? PullRequestObservationFreshness.Current
+                : observation is null || observation.ObservedAt is null
+                    ? PullRequestObservationFreshness.Unknown
+                    : PullRequestObservationFreshness.Stale;
+            var lanes = group.Select(item => new QueuePullRequestLaneView(
                 Tag: item.Tag,
-                PullRequest: pr,
-                Stage: WorkStages.Token(stage),
+                Stage: WorkStages.Token(item.Stage!.Value),
                 State: item.State,
                 Round: item.Round,
                 Issue: item.Issue,
                 Branch: item.Branch,
+                Room: item.RoomDirectory,
                 Verdict: verdictDecision(item),
                 Checks: item.Checks,
                 ChecksObservedAt: item.ChecksObservedAt,
+                ChecksHeadSha: item.ChecksHeadSha,
                 Halted: item.Halted,
                 Arm: ArmLabel(item),
-                TwinIssue: item.Issue is { } prIssue && twinIssues.Contains(prIssue) ? prIssue : null));
+                TwinIssue: item.Issue is { } prIssue && twinIssues.Contains(prIssue) ? prIssue : null))
+                .ToList();
+            var view = new QueuePullRequestView(
+                Repository: repository,
+                PullRequest: pr,
+                PullRequestState: knownState,
+                ObservationFreshness: freshnessWord,
+                ObservedAt: observation?.ObservedAt,
+                AttemptedAt: observation?.AttemptedAt,
+                ObservationError: observation?.Error
+                    ?? (observation is not null && knownState is null ? "stored PR state is malformed" : null),
+                HeadSha: observation?.HeadSha,
+                Deployment: QueueDeploymentStates.NotRecorded,
+                Lanes: lanes);
+
+            if (isCurrent && PullRequestObservationStates.IsTerminal(knownState))
+            {
+                pullRequestHistory.Add(view);
+            }
+            else
+            {
+                pullRequests.Add(view);
+            }
         }
 
         return new QueueBoardView(
@@ -163,7 +217,8 @@ public static class QueueBoard
             Slots: slots,
             LastDecisionAt: lastDecision?.At,
             Pending: pending,
-            PullRequests: pullRequests);
+            PullRequests: pullRequests,
+            PullRequestHistory: pullRequestHistory);
     }
 
     /// <summary>
@@ -394,15 +449,15 @@ public sealed record QueuePendingView(
     [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
     int? TwinIssue);
 
-/// <summary>One PR row: where the loop has got to on a work item that has a pull request open.</summary>
+/// <summary>One retained lane link beneath a repository-qualified PR row.</summary>
 /// <param name="Verdict">Whatever the caller's <c>verdictDecision</c> delegate returned — its own
 /// implementation is where the reading rule lives (<c>FleetProjectionWriter.ReadVerdictDecision</c>).</param>
 /// <param name="Checks">Copied verbatim off <see cref="QueueItem.Checks"/>, whose remarks are the
 /// register for what it means and why it must never be rendered without
-/// <paramref name="ChecksObservedAt"/>.</param>
-public sealed record QueuePullRequestView(
+/// <paramref name="ChecksObservedAt"/> or attributed to a commit other than
+/// <paramref name="ChecksHeadSha"/>.</param>
+public sealed record QueuePullRequestLaneView(
     [property: JsonPropertyName("tag")] string Tag,
-    [property: JsonPropertyName("pr")] int PullRequest,
     [property: JsonPropertyName("stage")] string Stage,
     [property: JsonPropertyName("state")] QueueItemState State,
     [property: JsonPropertyName("round")] int Round,
@@ -412,6 +467,9 @@ public sealed record QueuePullRequestView(
     [property: JsonPropertyName("branch")]
     [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
     string? Branch,
+    [property: JsonPropertyName("room")]
+    [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    string? Room,
     [property: JsonPropertyName("verdict")]
     [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
     string? Verdict,
@@ -421,6 +479,9 @@ public sealed record QueuePullRequestView(
     [property: JsonPropertyName("checksObservedAt")]
     [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
     DateTimeOffset? ChecksObservedAt,
+    [property: JsonPropertyName("checksHeadSha")]
+    [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    string? ChecksHeadSha,
     [property: JsonPropertyName("halted")] bool Halted,
     [property: JsonPropertyName("arm")]
     [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
@@ -428,6 +489,72 @@ public sealed record QueuePullRequestView(
     [property: JsonPropertyName("twinIssue")]
     [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
     int? TwinIssue);
+
+/// <summary>One repository-qualified PR observation and all retained lanes that refer to it.</summary>
+public sealed record QueuePullRequestView(
+    [property: JsonPropertyName("repository")]
+    [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    string? Repository,
+    [property: JsonPropertyName("pr")] int PullRequest,
+    [property: JsonPropertyName("prState")]
+    [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    string? PullRequestState,
+    [property: JsonPropertyName("freshness")] string ObservationFreshness,
+    [property: JsonPropertyName("observedAt")]
+    [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    DateTimeOffset? ObservedAt,
+    [property: JsonPropertyName("attemptedAt")]
+    [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    DateTimeOffset? AttemptedAt,
+    [property: JsonPropertyName("observationError")]
+    [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    string? ObservationError,
+    [property: JsonPropertyName("headSha")]
+    [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    string? HeadSha,
+    [property: JsonPropertyName("deployment")] string Deployment,
+    [property: JsonPropertyName("lanes")] IReadOnlyList<QueuePullRequestLaneView> Lanes);
+
+public sealed record QueuePullRequestObservation(
+    [property: JsonPropertyName("repository")] string Repository,
+    [property: JsonPropertyName("pr")] int PullRequest,
+    [property: JsonPropertyName("state")]
+    [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    string? State,
+    [property: JsonPropertyName("headSha")]
+    [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    string? HeadSha,
+    [property: JsonPropertyName("observedAt")]
+    [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    DateTimeOffset? ObservedAt,
+    [property: JsonPropertyName("attemptedAt")] DateTimeOffset AttemptedAt,
+    [property: JsonPropertyName("error")]
+    [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    string? Error);
+
+public sealed record QualifiedPullRequest(string Repository, int PullRequest);
+
+public static class PullRequestObservationStates
+{
+    public const string Open = "open";
+    public const string Merged = "merged";
+    public const string Closed = "closed";
+
+    public static bool IsKnown(string? state) => state is Open or Merged or Closed;
+    public static bool IsTerminal(string? state) => state is Merged or Closed;
+}
+
+public static class PullRequestObservationFreshness
+{
+    public const string Current = "current";
+    public const string Stale = "stale";
+    public const string Unknown = "unknown";
+}
+
+public static class QueueDeploymentStates
+{
+    public const string NotRecorded = "not-recorded";
+}
 
 /// <summary>The whole <c>queue</c> section of the fleet projection.</summary>
 /// <param name="LastDecisionAt">When the scheduler last recorded a decision. <b>Not this tick</b> —
@@ -441,4 +568,5 @@ public sealed record QueueBoardView(
     [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
     DateTimeOffset? LastDecisionAt,
     [property: JsonPropertyName("pending")] IReadOnlyList<QueuePendingView> Pending,
-    [property: JsonPropertyName("pullRequests")] IReadOnlyList<QueuePullRequestView> PullRequests);
+    [property: JsonPropertyName("pullRequests")] IReadOnlyList<QueuePullRequestView> PullRequests,
+    [property: JsonPropertyName("pullRequestHistory")] IReadOnlyList<QueuePullRequestView> PullRequestHistory);

@@ -172,6 +172,13 @@ public sealed record QueueItem
     /// <summary>When <see cref="Checks"/> was read. Absent whenever that is.</summary>
     public DateTimeOffset? ChecksObservedAt { get; init; }
 
+    /// <summary>
+    /// The PR head commit that <see cref="Checks"/> describes. Null on historical rows written before
+    /// this evidence was retained; readers must say "commit unknown" rather than associating those
+    /// checks with a later observed head.
+    /// </summary>
+    public string? ChecksHeadSha { get; init; }
+
     /// <summary>The directory the worker runs in. Always set by the time an item is queued — an
     /// <c>--issue</c> item gets it from the worktree provisioned at add time.</summary>
     public required string Workspace { get; init; }

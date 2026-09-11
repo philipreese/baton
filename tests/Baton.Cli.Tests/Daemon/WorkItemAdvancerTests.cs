@@ -92,6 +92,29 @@ public sealed class WorkItemAdvancerTests
         }
     }
 
+    private sealed class ObservationGh(Func<IReadOnlyList<string>, Task>? onCall = null) : IGhCliRunner
+    {
+        public List<string[]> Calls { get; } = [];
+        public string State { get; set; } = "MERGED";
+        public string? RawOutput { get; set; }
+        public int ExitCode { get; set; }
+
+        public async Task<GhCliResult> RunAsync(
+            string workingDirectory, IReadOnlyList<string> args, CancellationToken cancellationToken)
+        {
+            Calls.Add(args.ToArray());
+            if (onCall is not null)
+            {
+                await onCall(args);
+            }
+
+            var number = int.Parse(args[2], System.Globalization.CultureInfo.InvariantCulture);
+            return new GhCliResult(true, ExitCode,
+                RawOutput ?? $$$"""{"number":{{{number}}},"state":"{{{State}}}","headRefOid":"head-{{{number}}}"}""",
+                string.Empty);
+        }
+    }
+
     private static string PrJson(int number, string headSha, bool isDraft = true) =>
         $"[{PrObject(number, headSha, isDraft)}]";
 
@@ -1181,6 +1204,7 @@ public sealed class WorkItemAdvancerTests
             var item = await ReadBackAsync();
             Assert.Equal(PullRequestChecks.Failing, item.Checks);
             Assert.Equal(Now, item.ChecksObservedAt);
+            Assert.Equal(PushedSha, item.ChecksHeadSha);
         }
         finally
         {
@@ -1214,6 +1238,152 @@ public sealed class WorkItemAdvancerTests
             var item = await ReadBackAsync();
             Assert.Equal(PullRequestChecks.Passing, item.Checks);
             Assert.Equal(observedAt, item.ChecksObservedAt);
+        }
+        finally
+        {
+            DirectoryCleanup.DeleteRecursively(home);
+        }
+    }
+
+    [Fact]
+    public async Task Board_observations_are_persisted_once_per_qualified_PR_refresh_after_restart_and_can_reopen()
+    {
+        var home = CreateTempHome();
+        using var scope = BatonEnvironmentSnapshot.BeginScope(BatonEnvironmentSnapshot.Blank with { HomeOverride = home });
+        try
+        {
+            Directory.CreateDirectory(BatonPaths.Queue);
+            var one = new QueueItem
+            {
+                Tag = "one",
+                Role = "review",
+                Stage = WorkStage.Review,
+                State = QueueItemState.Cancelled,
+                Repository = Repository,
+                PullRequest = 77,
+                Workspace = home,
+                SpecFile = Path.Combine(home, "one.md"),
+            };
+            var shared = one with { Tag = "shared", SpecFile = Path.Combine(home, "shared.md") };
+            var other = one with
+            {
+                Tag = "other",
+                Repository = "github.com/aer-works/other",
+                SpecFile = Path.Combine(home, "other.md"),
+            };
+            await QueueStore.MutateAsync(BatonPaths.QueueFile, s => s with { Items = [one, shared, other] }, Ct);
+
+            var gh = new ObservationGh();
+            var firstProcess = new WorkItemAdvancer(gh, (_, _) => Task.FromResult<string?>(null));
+            Assert.Empty(await firstProcess.AdvanceAsync(Now, Ct));
+            Assert.Equal(2, gh.Calls.Count);
+
+            var stored = await QueueStore.LoadAsync(BatonPaths.QueueFile, Ct);
+            Assert.Equal(2, stored.PullRequestObservations!.Count);
+            Assert.All(stored.PullRequestObservations, o => Assert.Equal(PullRequestObservationStates.Merged, o.State));
+
+            // A new advancer represents a daemon restart. The persisted attempt stamp applies the
+            // existing three-projection-tick freshness window, so restart does not burst the forge.
+            Assert.Empty(await new WorkItemAdvancer(gh, (_, _) => Task.FromResult<string?>(null))
+                .AdvanceAsync(Now.AddMinutes(1), Ct));
+            Assert.Equal(2, gh.Calls.Count);
+
+            gh.State = "OPEN";
+            Assert.Empty(await new WorkItemAdvancer(gh, (_, _) => Task.FromResult<string?>(null))
+                .AdvanceAsync(Now.AddMinutes(2), Ct));
+            Assert.Equal(4, gh.Calls.Count);
+            stored = await QueueStore.LoadAsync(BatonPaths.QueueFile, Ct);
+            Assert.All(stored.PullRequestObservations!, o => Assert.Equal(PullRequestObservationStates.Open, o.State));
+
+            gh.RawOutput = "{ malformed";
+            Assert.Empty(await new WorkItemAdvancer(gh, (_, _) => Task.FromResult<string?>(null))
+                .AdvanceAsync(Now.AddMinutes(4), Ct));
+            stored = await QueueStore.LoadAsync(BatonPaths.QueueFile, Ct);
+            Assert.All(stored.PullRequestObservations!, o =>
+            {
+                Assert.Equal(PullRequestObservationStates.Open, o.State);
+                Assert.NotNull(o.Error);
+                Assert.Equal(Now.AddMinutes(2), o.ObservedAt);
+                Assert.Equal(Now.AddMinutes(4), o.AttemptedAt);
+            });
+            Assert.All(gh.Calls, call => Assert.Equal(["pr", "view"], call.Take(2)));
+        }
+        finally
+        {
+            DirectoryCleanup.DeleteRecursively(home);
+        }
+    }
+
+    [Fact]
+    public async Task A_lookup_that_finishes_after_the_last_lane_is_removed_cannot_resurrect_its_key()
+    {
+        var home = CreateTempHome();
+        using var scope = BatonEnvironmentSnapshot.BeginScope(BatonEnvironmentSnapshot.Blank with { HomeOverride = home });
+        try
+        {
+            Directory.CreateDirectory(BatonPaths.Queue);
+            var item = new QueueItem
+            {
+                Tag = "gone",
+                Role = "review",
+                Stage = WorkStage.Review,
+                State = QueueItemState.Cancelled,
+                Repository = Repository,
+                PullRequest = 77,
+                Workspace = home,
+                SpecFile = Path.Combine(home, "gone.md"),
+            };
+            await QueueStore.MutateAsync(BatonPaths.QueueFile, s => s with { Items = [item] }, Ct);
+            var gh = new ObservationGh(async _ =>
+            {
+                await QueueStore.MutateAsync(BatonPaths.QueueFile, s => s with { Items = [] }, Ct);
+            });
+
+            await new WorkItemAdvancer(gh, (_, _) => Task.FromResult<string?>(null)).AdvanceAsync(Now, Ct);
+
+            var stored = await QueueStore.LoadAsync(BatonPaths.QueueFile, Ct);
+            Assert.Empty(stored.Items);
+            Assert.Empty(stored.PullRequestObservations ?? []);
+        }
+        finally
+        {
+            DirectoryCleanup.DeleteRecursively(home);
+        }
+    }
+
+    [Fact]
+    public async Task Observation_load_uses_the_existing_GitHub_cap_and_rotates_the_remainder_next_tick()
+    {
+        var home = CreateTempHome();
+        using var scope = BatonEnvironmentSnapshot.BeginScope(BatonEnvironmentSnapshot.Blank with { HomeOverride = home });
+        try
+        {
+            Directory.CreateDirectory(BatonPaths.Queue);
+            var items = Enumerable.Range(1, LedgerBackfillCommand.MaxPullRequests + 1)
+                .Select(number => new QueueItem
+                {
+                    Tag = $"pr-{number}",
+                    Role = "review",
+                    Stage = WorkStage.Review,
+                    State = QueueItemState.Cancelled,
+                    Repository = Repository,
+                    PullRequest = number,
+                    Workspace = home,
+                    SpecFile = Path.Combine(home, $"pr-{number}.md"),
+                })
+                .ToList();
+            await QueueStore.MutateAsync(BatonPaths.QueueFile, s => s with { Items = items }, Ct);
+            var gh = new ObservationGh();
+            var advancer = new WorkItemAdvancer(gh, (_, _) => Task.FromResult<string?>(null));
+
+            await advancer.AdvanceAsync(Now, Ct);
+            Assert.Equal(LedgerBackfillCommand.MaxPullRequests, gh.Calls.Count);
+
+            await advancer.AdvanceAsync(Now.AddSeconds(1), Ct);
+            Assert.Equal(LedgerBackfillCommand.MaxPullRequests + 1, gh.Calls.Count);
+            Assert.Equal(
+                LedgerBackfillCommand.MaxPullRequests + 1,
+                (await QueueStore.LoadAsync(BatonPaths.QueueFile, Ct)).PullRequestObservations!.Count);
         }
         finally
         {

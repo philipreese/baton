@@ -7021,6 +7021,24 @@ defaults its tag to `<n>-lane`. The item carries `issue`, its worktree, `branch`
 there: those two are display surface, not policy** — no arm of the table below reads either, so a
 change to how they are derived can never move an item to a different stage.
 
+**Current PR state is a repository-qualified observation, not a lane outcome (#2200).** The queue
+snapshot's top-level `pullRequestObservations` collection keys one read by canonical
+`host/owner/repo` plus PR number and shares it across every retained lane with that key; same-number
+PRs in different repositories remain different observations. Each tick is capped by
+`LedgerBackfillCommand.MaxPullRequests`, the existing bounded GitHub traversal ceiling; attempt
+stamps rotate a larger retained set across later ticks. The scheduler refreshes these through
+its existing `IGhCliRunner` on its existing cadence, outside the queue lock, and conditionally writes
+only keys still named by the locked snapshot. The freshness window is the fleet projection's existing
+three-tick threshold, applied to attempts as the retry backoff too: a fresh confirmed `open` remains
+current follow-up, while fresh confirmed `merged` and `closed` are distinct rows in collapsed history.
+Missing, malformed, failed, or stale evidence remains in current follow-up as `unknown` or “last known
+… stale”; `closed` is never cached forever because it is re-read after that window and a reopened PR
+returns to follow-up. Observation changes neither item state, stage, round, cancellation history,
+dispatch, readiness, merge/close state, nor deployment state. Deployment therefore reads “not
+recorded”, never “none”. Each historical checks word remains attached to its lane and to
+`checksHeadSha`; a legacy row without that field renders “commit unknown” rather than borrowing the
+independent PR observation's head.
+
 **Lifecycle selection is stage-specific by default (#2181).** On a newly added work item, bare
 `--adapter`, `--model` and `--effort` select the initial `implement` stage only; after every advance,
 the next stage resolves its own role/scope tier through the existing queue tier resolver. An operator
