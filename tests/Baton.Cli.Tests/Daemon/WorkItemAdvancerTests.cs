@@ -1378,7 +1378,8 @@ public sealed class WorkItemAdvancerTests
                 [{"number":77,"state":"OPEN","isDraft":true,"headRefOid":"{{{FullPushedSha}}}",
                   "headRefName":"1934-lane","baseRefName":"main","isCrossRepository":false,
                   "statusCheckRollup":[
-                    {"databaseId":101,"name":"gates","status":"IN_PROGRESS","startedAt":"2026-09-11T15:00:00Z"},
+                    {"databaseId":101,"name":"gates","status":"IN_PROGRESS","conclusion":"",
+                     "startedAt":"2026-09-11T15:00:00Z","completedAt":"0001-01-01T00:00:00Z"},
                     {"detailsUrl":"https://github.com/aer-works/baton/actions/runs/88/job/202",
                      "name":"gates","status":"IN_PROGRESS","startedAt":"2026-09-11T15:01:00Z"},
                     {"databaseId":101,"name":"gates","status":"COMPLETED","conclusion":"SUCCESS",
@@ -1401,6 +1402,7 @@ public sealed class WorkItemAdvancerTests
             Assert.Equal(["101", "202", "101"], checks.Select(entry => entry.CheckRunId!.Value.Value));
             Assert.Equal(["IN_PROGRESS", "IN_PROGRESS", "COMPLETED"], checks.Select(entry => entry.CheckStatus));
             Assert.Null(checks[0].CheckConclusion);
+            Assert.Null(checks[0].CheckCompletedAt);
             Assert.Equal("SUCCESS", checks[2].CheckConclusion);
             Assert.Equal(DateTimeOffset.Parse("2026-09-11T15:02:00Z"), checks[2].CheckCompletedAt);
         }

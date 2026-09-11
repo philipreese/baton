@@ -208,13 +208,16 @@ public static class PullRequestChecks
     }
 
     private static string? Text(JsonElement element, string property) =>
-        element.TryGetProperty(property, out var value) && value.ValueKind == JsonValueKind.String
-            ? value.GetString()
+        element.TryGetProperty(property, out var value)
+        && value.ValueKind == JsonValueKind.String
+        && value.GetString() is { Length: > 0 } text
+            ? text
             : null;
 
     private static DateTimeOffset? Instant(JsonElement element, string property) =>
         Text(element, property) is { Length: > 0 } text
         && DateTimeOffset.TryParse(text, out var parsed)
+        && parsed > DateTimeOffset.MinValue
             ? parsed
             : null;
 
