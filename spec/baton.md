@@ -6515,9 +6515,24 @@ one has a source path, so `MemoryEntry.Derive`'s three facts collapse to (subjec
 remarks carry what the stand-in buys and the two things it is not — no file is written at it, and
 `SourceVendor` rather than the path is what tells an authored row from an imported one. The row is
 reversed by the manifest machinery that already exists (`baton memory import --undo`), one row per add,
-rather than a second reversal format. **`add` does not regenerate the projections**; it prints the
-`baton memory sync … --apply` that does, because sync writes into vendor roots and an add that put
-bytes there unasked is the surprising half of the pair.
+rather than a second reversal format.
+
+**Successful canonical writes project automatically (#2138).** The trigger set is stated once:
+`memory add`, `memory retract`, and applied `memory import` (including undo and a new target assertion)
+run the same idempotent projection function as `memory sync --apply`; the daemon runs it every two
+minutes as a safety sweep for a crash or a write that bypassed those verbs. A fleet write reprojects
+every repository because fleet entries lead every repository projection. Dry runs and refused writes
+trigger nothing.
+
+**Canonical commit and projection completion are two results.** A successful canonical write is not
+rolled back when projection fails. Before publication Baton writes
+`<repo-slug>/memory/sync-pending.json`; failure keeps that durable obligation with the error, attempt
+count and next retry. Safe-to-repeat retries back off at one, two, four and eight minutes; the fifth
+failed attempt changes the obligation from `pending` to `escalated`, stops automatic retries, logs the
+escalation, and names the manual `memory sync --apply` recovery after the root or permission failure
+is repaired. There is no claim expiry: ownership is not completion. A successful publication removes
+only its own matching obligation. Neither canonical commit nor projection completion claims that a
+vendor loaded or consumed the file.
 
 **Every authored entry records who asserted it, and `operator` never stands in for a lane that could
 not be read.** `AssertedBy` is `operator` outside a lane and the lane's `role/vendor/room` inside one,
@@ -6605,8 +6620,9 @@ that hold the byte-identity up (a total `(repository, kind, id)` order, pinned `
 invariant-culture numbers) and why the hash covers the body and not the header. **Byte-identity is
 therefore a per-machine claim**: absolute source paths and the store path are rendered into the output,
 so the same store on two machines projects two different files, and "an unchanged store produces no
-diff" is a statement about one machine over time. **`--apply` is the only thing that puts a byte on
-disk**, and short of it the verb has no filesystem effect whatever — `MemorySyncCommand`'s remarks
+diff" is a statement about one machine over time. **Within the manual `sync` verb, `--apply` is the
+only mode that puts a byte on disk**; #2138's write triggers and daemon sweep call that same apply
+function directly. Short of apply the verb has no filesystem effect whatever — `MemorySyncCommand`'s remarks
 carry why that has to be said as a negative rather than left as "it only reports".
 
 **`--check` turns "would rewrite" from a disposition into an exit code (#2040), so a CI step can gate

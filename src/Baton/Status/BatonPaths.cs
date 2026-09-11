@@ -310,6 +310,18 @@ public static class BatonPaths
     public const string MemoryRetractionsFileName = "retractions.jsonl";
 
     /// <summary>
+    /// <c>{Root}/&lt;repository-slug&gt;/memory/sync-pending.json</c> — the durable obligation left
+    /// while that store's latest projection has not completed (#2138). The file is Baton-owned state,
+    /// not a vendor-consumption receipt; <c>Baton.Memory.MemoryProjectionObligationStore</c> owns its
+    /// transitions and removes it only after the corresponding publication completes.
+    /// </summary>
+    public static string MemorySyncPendingFile(string repositorySlug) =>
+        Path.Combine(MemoryDirectory(repositorySlug), MemorySyncPendingFileName);
+
+    /// <summary>Filename of <see cref="MemorySyncPendingFile"/> relative to <see cref="MemoryDirectory"/>.</summary>
+    public const string MemorySyncPendingFileName = "sync-pending.json";
+
+    /// <summary>
     /// <c>{Root}/memory-aliases.jsonl</c> — see <c>Baton.Memory.MemoryAliasStore</c> for what it holds
     /// and when it is consulted. <b>Machine-wide, so deliberately not inside a repository directory</b>:
     /// it maps a checkout path to the repository it belongs to, and filing it under that answer would

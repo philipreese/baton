@@ -126,14 +126,16 @@ public sealed class MemoryImportTests : IDisposable
     }
 
     /// <summary>
-    /// Path to SHA-256, over every file under <paramref name="directory"/>. The instrument for the
-    /// non-destructive claim: it is a statement about bytes, so it is measured in bytes rather than
-    /// inferred from the absence of a write call.
+    /// Path to SHA-256 over every vendor-authored file under <paramref name="directory"/>. Baton's
+    /// generated projection is excluded: #2138 deliberately adds or replaces that owned cache after
+    /// import, while the non-destructive claim remains byte-for-byte over every source file.
     /// </summary>
     private static Dictionary<string, string> DigestTree(string directory) =>
         !Directory.Exists(directory)
             ? new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase)
             : Directory.EnumerateFiles(directory, "*", SearchOption.AllDirectories)
+            .Where(p => !string.Equals(
+                Path.GetFileName(p), ClaudeProjectionTarget.ProjectionFileName, StringComparison.OrdinalIgnoreCase))
             .ToDictionary(p => p, Digest, StringComparer.OrdinalIgnoreCase);
 
     /// <summary>One file's SHA-256, for the arms whose claim is about a single file's bytes.</summary>

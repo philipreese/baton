@@ -126,6 +126,13 @@ public static class MemoryStore
         IReadOnlyList<MemoryRetraction> retractions, string retractionsFilePath, CancellationToken cancellationToken = default) =>
         RetractionLedger.AppendAsync(retractions, retractionsFilePath, cancellationToken);
 
+    /// <summary>Appends retractions and returns the rows this call inserted under the owning lock.</summary>
+    public static Task<IReadOnlyList<MemoryRetraction>> AppendRetractionsAndGetAppendedAsync(
+        IReadOnlyList<MemoryRetraction> retractions,
+        string retractionsFilePath,
+        CancellationToken cancellationToken = default) =>
+        RetractionLedger.AppendAndGetAppendedAsync(retractions, retractionsFilePath, cancellationToken);
+
     /// <summary>This file's retractions, oldest first.</summary>
     public static Task<IReadOnlyList<MemoryRetraction>> ReadRetractionsAsync(
         string retractionsFilePath, CancellationToken cancellationToken = default) =>

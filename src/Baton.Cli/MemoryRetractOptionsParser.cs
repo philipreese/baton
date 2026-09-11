@@ -48,9 +48,9 @@ public static class MemoryRetractOptionsParser
         "'assertedBy': 'operator' outside a lane, '<role>/<vendor>/<room>' inside one. A reading of the",
         "environment, not a credential.",
         "",
-        "THIS COMMAND DOES NOT REGENERATE THE VENDOR PROJECTIONS. It prints the exact command that does",
-        "-- 'baton memory sync --repository <id> --apply' -- rather than running it, because sync writes",
-        "into vendor memory roots and a retract should not put bytes anywhere you did not ask it to.",
+        "A SUCCESSFUL RETRACTION RUNS THE SAME IDEMPOTENT PROJECTION AS 'baton memory sync --apply'. If",
+        "projection fails, the retraction remains committed and sync-pending.json records a durable",
+        "daemon retry. Projection completion does not prove that a vendor loaded or consumed the cache.",
     ];
 
     public static MemoryRetractOptions Parse(IReadOnlyList<string> args)

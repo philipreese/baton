@@ -16,8 +16,9 @@ namespace Baton.Cli;
 /// <b>Non-destructive by construction, not by care.</b> The only file-opening this command does on a
 /// source is a read: <see cref="MemoryRootInventory"/> streams a digest, and
 /// <see cref="ReadSourceFiles"/> reads text through <see cref="FileAccess.Read"/>. There is no code
-/// path here that opens a source for writing, moves one, or deletes one — the destructive verbs do
-/// not exist to be reached by a bug. Everything this command writes lives under
+/// path here that opens a source for writing, moves one, or deletes one. After a canonical change,
+/// #2138's shared projector may replace only Baton's generated cache file in an already-discovered
+/// root; canonical rows, manifests, aliases and pending obligations remain under
 /// <see cref="BatonPaths.Root"/>.
 /// </para>
 /// <para>
@@ -57,7 +58,8 @@ public static class MemoryImportCommand
         TextWriter output,
         string? claudeHomeOverride = null,
         CancellationToken cancellationToken = default,
-        string? userHomeOverride = null)
+        string? userHomeOverride = null,
+        Action<string, byte[]>? projectionWriterOverride = null)
     {
         ArgumentNullException.ThrowIfNull(options);
         ArgumentNullException.ThrowIfNull(output);
@@ -74,8 +76,20 @@ public static class MemoryImportCommand
         }
 
         return options.UndoManifestPath is { Length: > 0 } manifestPath
-            ? await UndoAsync(manifestPath, output, cancellationToken).ConfigureAwait(false)
-            : await ImportAsync(options, output, claudeHomeOverride, userHomeOverride, cancellationToken)
+            ? await UndoAsync(
+                manifestPath,
+                output,
+                claudeHomeOverride,
+                userHomeOverride,
+                projectionWriterOverride,
+                cancellationToken).ConfigureAwait(false)
+            : await ImportAsync(
+                options,
+                output,
+                claudeHomeOverride,
+                userHomeOverride,
+                projectionWriterOverride,
+                cancellationToken)
                 .ConfigureAwait(false);
     }
 
@@ -84,6 +98,7 @@ public static class MemoryImportCommand
         TextWriter output,
         string? claudeHomeOverride,
         string? userHomeOverride,
+        Action<string, byte[]>? projectionWriterOverride,
         CancellationToken cancellationToken)
     {
         var claudeHome = claudeHomeOverride ?? MemoryRootInventory.DefaultClaudeHome;
@@ -216,6 +231,20 @@ public static class MemoryImportCommand
         }
 
         WriteReport(output, options, manifest, manifestPath);
+        if (!options.DryRun)
+        {
+            var changedRepositories = manifest.Appended.Select(r => r.Repository)
+                .Concat(manifest.AppendedLinks.Select(l => l.Repository))
+                .Concat(options.Assertions.Select(a => a.Repository));
+            await ProjectChangedRepositoriesAsync(
+                changedRepositories,
+                output,
+                claudeHome,
+                userHome,
+                projectionWriterOverride,
+                cancellationToken).ConfigureAwait(false);
+        }
+
         return 0;
     }
 
@@ -571,7 +600,12 @@ public static class MemoryImportCommand
     /// </para>
     /// </remarks>
     private static async Task<int> UndoAsync(
-        string manifestPath, TextWriter output, CancellationToken cancellationToken)
+        string manifestPath,
+        TextWriter output,
+        string? claudeHomeOverride,
+        string? userHomeOverride,
+        Action<string, byte[]>? projectionWriterOverride,
+        CancellationToken cancellationToken)
     {
         var manifest = ImportManifest.Read(manifestPath);
 
@@ -591,12 +625,17 @@ public static class MemoryImportCommand
         }
 
         var shortfalls = new List<string>();
+        var changedRepositories = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
         var removed = 0;
         foreach (var group in manifest.Appended.GroupBy(r => r.EntriesFilePath, StringComparer.OrdinalIgnoreCase))
         {
             var expected = group.Select(r => r.EntryId).Distinct(StringComparer.Ordinal).ToList();
             var count = await MemoryStore.RemoveAsync(expected, group.Key, cancellationToken).ConfigureAwait(false);
             removed += count;
+            if (count > 0)
+            {
+                changedRepositories.Add(group.First().Repository);
+            }
 
             if (count != expected.Count)
             {
@@ -610,6 +649,10 @@ public static class MemoryImportCommand
             var expected = group.Select(l => l.LinkId).Distinct(StringComparer.Ordinal).ToList();
             var count = await MemoryStore.RemoveLinksAsync(expected, group.Key, cancellationToken).ConfigureAwait(false);
             removedLinks += count;
+            if (count > 0)
+            {
+                changedRepositories.Add(group.First().Repository);
+            }
 
             if (count != expected.Count)
             {
@@ -624,6 +667,14 @@ public static class MemoryImportCommand
         output.WriteLine(
             "No source memory file was touched -- the import never wrote to one, so there is nothing on " +
             "the vendors' side to restore.");
+
+        await ProjectChangedRepositoriesAsync(
+            changedRepositories,
+            output,
+            claudeHomeOverride ?? MemoryRootInventory.DefaultClaudeHome,
+            userHomeOverride ?? MemoryRootInventory.DefaultUserHome,
+            projectionWriterOverride,
+            cancellationToken).ConfigureAwait(false);
 
         if (shortfalls.Count == 0)
         {
@@ -641,6 +692,36 @@ public static class MemoryImportCommand
         }
 
         return 1;
+    }
+
+    /// <summary>
+    /// Projects each changed subject once. A fleet change projects every store, so it subsumes the
+    /// repository-specific calls in the same import.
+    /// </summary>
+    private static async Task ProjectChangedRepositoriesAsync(
+        IEnumerable<string> repositories,
+        TextWriter output,
+        string claudeHome,
+        string userHome,
+        Action<string, byte[]>? projectionWriterOverride,
+        CancellationToken cancellationToken)
+    {
+        var changed = repositories.Distinct(StringComparer.OrdinalIgnoreCase).ToList();
+        if (changed.Any(FleetMemory.IsFleet))
+        {
+            changed = [FleetMemory.Slug];
+        }
+
+        foreach (var repository in changed.OrderBy(r => r, StringComparer.OrdinalIgnoreCase))
+        {
+            await MemoryProjectionTrigger.ProjectAfterCanonicalWriteAsync(
+                repository,
+                output,
+                claudeHome,
+                userHome,
+                projectionWriterOverride,
+                cancellationToken).ConfigureAwait(false);
+        }
     }
 
     /// <summary>
