@@ -1166,8 +1166,13 @@ public sealed class CodexDynamicToolPolicyTests
         using var fixture = new PolicyFixture(
             new PermissionGrant(ReadFiles: true, RunShellCommands: true),
             ["report.md"],
-            // wait-ok: injected ceiling reaches the timeout branch quickly; the child is killed there.
-            commandCeiling: _ => TimeSpan.FromMilliseconds(500));
+            // wait-ok: helper readiness proves both side effects were atomically published before the
+            // injected ceiling starts; the child is then killed promptly in the timeout branch.
+            commandCeiling: _ => TimeSpan.FromMilliseconds(500),
+            beforeCommandTimeoutStarts: (fixture, cancellationToken) => WaitForExternalDiffReady(
+                Path.Combine(fixture.Workspace, "volatile-cache-ready.txt"),
+                Path.Combine(fixture.Workspace, "volatile-cache-runs.txt"),
+                cancellationToken));
         var volatileCommand = HangingExternalDiffCommand(fixture.Workspace, "volatile-cache");
         var originalStamp = File.GetLastWriteTimeUtc(volatileCommand.MutatedPath);
         var cachedCommand = OperatingSystem.IsWindows()
@@ -2249,6 +2254,25 @@ public sealed class CodexDynamicToolPolicyTests
         Assert.True(
             entered,
             $"timeout setup: {commandDescription} attempt {expectedAttempts} did not enter before the timer gate");
+    }
+
+    private static void WaitForExternalDiffReady(
+        string readyPath,
+        string counterPath,
+        CancellationToken cancellationToken)
+    {
+        var published = SpinWait.SpinUntil(
+            () =>
+            {
+                cancellationToken.ThrowIfCancellationRequested();
+                return File.Exists(readyPath);
+            },
+            TimeSpan.FromSeconds(10));
+        Assert.True(
+            published,
+            $"timeout setup: external-diff helper did not publish readiness; attempts observed: "
+            + ExternalDiffAttemptCount(counterPath));
+        Assert.Equal(1, ExternalDiffAttemptCount(counterPath));
     }
 
     private static void AssertExternalDiffAttempts(string counterPath, int expected, string phase)
