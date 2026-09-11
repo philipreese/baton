@@ -58,6 +58,9 @@ internal sealed class ContractOutputWorkerAdapter(
         if (stdoutFixture is not null)
         {
             commands.Add($"type {stdoutFixture}");
+            // Keep cmd's copy status line off the JSONL event line, even when a fixture omits its
+            // terminal newline.
+            commands.Add("echo.");
         }
 
         if (satisfyOutputs && contract.ProducedOutputs.Count > 0)

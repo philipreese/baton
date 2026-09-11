@@ -67,7 +67,8 @@ public sealed class MeasurementCompletionContractTests : IDisposable
             var stdoutFixture = Path.Combine(root, "codex-shell-call.jsonl");
             await File.WriteAllTextAsync(
                 stdoutFixture,
-                "{\"type\":\"item.started\",\"item\":{\"type\":\"command_execution\",\"command\":\"copy report fixture\"}}",
+                "{\"type\":\"item.started\",\"item\":{\"type\":\"command_execution\",\"command\":\"copy report fixture\"}}"
+                    + Environment.NewLine,
                 Ct);
             var adapters = new Dictionary<string, IWorkerAdapter>
             {
@@ -108,6 +109,10 @@ public sealed class MeasurementCompletionContractTests : IDisposable
 
             var executionArtifacts = Path.Combine(room, "artifacts", $"execution_{step.LatestExecutionId}");
             Assert.Equal(
+                1,
+                File.ReadLines(Path.Combine(executionArtifacts, ".stdout.log"))
+                    .Sum(new CodexUsageParser().CountToolSteps));
+            Assert.Equal(
                 0,
                 MutationInterface.CountWriteToolCallsFromStdoutLog(
                     new CodexUsageParser(), executionArtifacts));
@@ -134,7 +139,8 @@ public sealed class MeasurementCompletionContractTests : IDisposable
             var stdoutFixture = Path.Combine(root, "codex-shell-call.jsonl");
             await File.WriteAllTextAsync(
                 stdoutFixture,
-                "{\"type\":\"item.started\",\"item\":{\"type\":\"command_execution\",\"command\":\"echo claimed completion\"}}",
+                "{\"type\":\"item.started\",\"item\":{\"type\":\"command_execution\",\"command\":\"echo claimed completion\"}}"
+                    + Environment.NewLine,
                 Ct);
             var adapters = new Dictionary<string, IWorkerAdapter>
             {
