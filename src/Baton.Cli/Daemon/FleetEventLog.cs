@@ -1,6 +1,7 @@
 using System.Text;
 using System.Text.Json;
 using System.Text.Json.Serialization;
+using Baton;
 using Baton.Domain;
 using Baton.Status;
 
@@ -228,6 +229,27 @@ public sealed record FleetEvent(
 }
 
 /// <summary>
+/// A complete fleet-event row could not be read. Only a syntactically incomplete final row without
+/// its newline is recoverable; every complete malformed row is durable-source corruption.
+/// </summary>
+public sealed class FleetEventLogReadException : BatonFlowException
+{
+    public FleetEventLogReadException(string filePath, int lineNumber, Exception innerException)
+        : base(
+            $"Fleet event log '{filePath}' contains a malformed complete row at line {lineNumber}: "
+            + innerException.Message,
+            innerException)
+    {
+        FilePath = filePath;
+        LineNumber = lineNumber;
+    }
+
+    public string FilePath { get; }
+
+    public int LineNumber { get; }
+}
+
+/// <summary>
 /// The sole append/replay seam for #2140. IDs and durable dedupe are assigned under one cross-process
 /// mutex; the last valid id is read from both live and rollover files so rotation cannot reset it.
 /// </summary>
@@ -240,6 +262,14 @@ public sealed class FleetEventLog
     private readonly string _livePath;
     private readonly string _rolloverPath;
     private readonly long _maxLiveBytes;
+
+    internal string LivePath => _livePath;
+
+    internal static FleetEventLog OpenOperational() =>
+        new(
+            BatonPaths.FleetEventsFile,
+            BatonPaths.FleetEventsRolloverFile,
+            RoomRetentionSweep.GetThresholdBytes());
 
     public FleetEventLog(string livePath, string rolloverPath, long maxLiveBytes)
     {
@@ -270,14 +300,19 @@ public sealed class FleetEventLog
         ArgumentOutOfRangeException.ThrowIfLessThan(cursor, 0);
         return Task.Run(() => MutexGuardedFileLock.RunUnderLock(
             _livePath, LockNamePrefix, LockTimeout,
-            () => (IReadOnlyList<FleetEvent>)Read(_livePath).Where(e => e.Id > cursor).ToList()), cancellationToken);
+            () => (IReadOnlyList<FleetEvent>)Read(_livePath).Events.Where(e => e.Id > cursor).ToList()), cancellationToken);
     }
 
     internal static string Serialize(FleetEvent entry) => JsonSerializer.Serialize(entry, Json);
 
     private FleetEvent? AppendLocked(FleetEventDraft draft)
     {
-        var retained = Read(_rolloverPath).Concat(Read(_livePath)).ToList();
+        var rollover = Read(_rolloverPath);
+        var live = Read(_livePath);
+        RemoveTornTail(_rolloverPath, rollover.TornTailOffset);
+        RemoveTornTail(_livePath, live.TornTailOffset);
+
+        var retained = rollover.Events.Concat(live.Events).ToList();
         if (retained.Any(e => string.Equals(e.DedupeKey, draft.DedupeKey, StringComparison.Ordinal)))
         {
             return null;
@@ -320,36 +355,125 @@ public sealed class FleetEventLog
         return entry;
     }
 
-    private static IReadOnlyList<FleetEvent> Read(string path)
+    private static FleetEventReadResult Read(string path)
     {
         if (!File.Exists(path))
         {
-            return [];
+            return new([], null);
         }
 
         var result = new List<FleetEvent>();
-        using var stream = new FileStream(path, FileMode.Open, FileAccess.Read, FileShare.ReadWrite | FileShare.Delete);
-        using var reader = new StreamReader(stream, Encoding.UTF8);
-        while (reader.ReadLine() is { } line)
+        var bytes = File.ReadAllBytes(path);
+        var offset = 0;
+        var lineNumber = 0;
+        while (offset < bytes.Length)
         {
-            if (string.IsNullOrWhiteSpace(line))
+            lineNumber++;
+            var newline = Array.IndexOf(bytes, (byte)'\n', offset);
+            var terminated = newline >= 0;
+            var end = terminated ? newline : bytes.Length;
+            if (end > offset && bytes[end - 1] == '\r')
             {
+                end--;
+            }
+
+            var row = bytes.AsSpan(offset, end - offset);
+            if (IsJsonWhitespace(row))
+            {
+                offset = terminated ? newline + 1 : bytes.Length;
                 continue;
             }
 
             try
             {
-                if (JsonSerializer.Deserialize<FleetEvent>(line, Json) is { } entry)
+                result.Add(ParseCompleteRow(row));
+            }
+            catch (Exception ex) when (ex is JsonException or InvalidOperationException or FormatException or OverflowException)
+            {
+                if (ex is JsonException && !terminated && IsIncompleteJsonPrefix(row))
                 {
-                    result.Add(entry);
+                    return new(result, offset);
                 }
+
+                throw new FleetEventLogReadException(path, lineNumber, ex);
+            }
+
+            offset = terminated ? newline + 1 : bytes.Length;
+        }
+
+        return new(result, null);
+    }
+
+    private static FleetEvent ParseCompleteRow(ReadOnlySpan<byte> row)
+    {
+        using var document = JsonDocument.Parse(row.ToArray());
+        var root = document.RootElement;
+        if (root.ValueKind != JsonValueKind.Object
+            || !root.TryGetProperty("id", out var id) || id.ValueKind != JsonValueKind.Number
+            || !id.TryGetInt64(out var parsedId) || parsedId <= 0
+            || !root.TryGetProperty("at", out var at) || at.ValueKind != JsonValueKind.String
+            || !at.TryGetDateTimeOffset(out _)
+            || !root.TryGetProperty("kind", out var kind) || kind.ValueKind != JsonValueKind.String
+            || !root.TryGetProperty("dedupeKey", out var dedupeKey)
+            || dedupeKey.ValueKind != JsonValueKind.String
+            || string.IsNullOrEmpty(dedupeKey.GetString()))
+        {
+            throw new JsonException("Expected id, at, kind, and non-empty dedupeKey fields.");
+        }
+
+        return root.Deserialize<FleetEvent>(Json)
+            ?? throw new JsonException("Expected a fleet event object.");
+    }
+
+    private static bool IsIncompleteJsonPrefix(ReadOnlySpan<byte> row)
+    {
+        try
+        {
+            using var _ = JsonDocument.Parse(row.ToArray());
+            return false;
+        }
+        catch (JsonException)
+        {
+            try
+            {
+                var reader = new Utf8JsonReader(row, isFinalBlock: false, state: default);
+                while (reader.Read())
+                {
+                }
+
+                return true;
             }
             catch (JsonException)
             {
-                // A torn tail is not a fact. The next append is a complete new line and remains readable.
+                return false;
+            }
+        }
+    }
+
+    private static bool IsJsonWhitespace(ReadOnlySpan<byte> row)
+    {
+        foreach (var value in row)
+        {
+            if (value != ' ' && value != '\t' && value != '\r')
+            {
+                return false;
             }
         }
 
-        return result;
+        return true;
     }
+
+    private static void RemoveTornTail(string path, long? offset)
+    {
+        if (offset is not { } truncateAt)
+        {
+            return;
+        }
+
+        using var stream = new FileStream(path, FileMode.Open, FileAccess.Write, FileShare.Read);
+        stream.SetLength(truncateAt);
+        stream.Flush(flushToDisk: true);
+    }
+
+    private sealed record FleetEventReadResult(IReadOnlyList<FleetEvent> Events, long? TornTailOffset);
 }

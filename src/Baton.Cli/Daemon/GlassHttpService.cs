@@ -57,8 +57,8 @@ internal sealed class GlassHttpService : BackgroundService
 
     private readonly DaemonSettings _settings;
     private readonly string _projectionPath;
-    private readonly GlassProjectionWatcher _projectionWatcher;
-    private readonly GlassProjectionWatcher _eventWatcher;
+    private readonly GlassFileWatcher _projectionWatcher;
+    private readonly GlassFileWatcher _eventWatcher;
     private readonly FleetEventLog _eventLog;
     private readonly TextWriter _log;
 
@@ -68,9 +68,7 @@ internal sealed class GlassHttpService : BackgroundService
             BatonPaths.FleetProjectionFile,
             null,
             null,
-            BatonPaths.FleetEventsFile,
-            BatonPaths.FleetEventsRolloverFile,
-            RoomRetentionSweep.GetThresholdBytes())
+            FleetEventLog.OpenOperational())
     {
     }
 
@@ -85,18 +83,44 @@ internal sealed class GlassHttpService : BackgroundService
         string? eventsPath = null,
         string? eventsRolloverPath = null,
         long? eventsMaxBytes = null)
+        : this(
+            settings,
+            projectionPath,
+            pollInterval,
+            log,
+            OpenTestEventLog(projectionPath, eventsPath, eventsRolloverPath, eventsMaxBytes))
+    {
+    }
+
+    private GlassHttpService(
+        DaemonSettings settings,
+        string projectionPath,
+        TimeSpan? pollInterval,
+        TextWriter? log,
+        FleetEventLog eventLog)
     {
         ArgumentNullException.ThrowIfNull(settings);
         ArgumentException.ThrowIfNullOrEmpty(projectionPath);
         _settings = settings;
         _projectionPath = projectionPath;
-        var eventPath = eventsPath ?? Path.Combine(Path.GetDirectoryName(projectionPath)!, BatonPaths.FleetEventsFileName);
-        var rolloverPath = eventsRolloverPath
-            ?? Path.Combine(Path.GetDirectoryName(eventPath)!, BatonPaths.FleetEventsRolloverFileName);
-        _projectionWatcher = new GlassProjectionWatcher(projectionPath, pollInterval);
-        _eventWatcher = new GlassProjectionWatcher(eventPath, pollInterval);
-        _eventLog = new FleetEventLog(eventPath, rolloverPath, eventsMaxBytes ?? RoomRetentionSweep.GetThresholdBytes());
+        _projectionWatcher = new GlassFileWatcher(projectionPath, pollInterval);
+        _eventWatcher = new GlassFileWatcher(eventLog.LivePath, pollInterval);
+        _eventLog = eventLog;
         _log = log ?? Console.Out;
+    }
+
+    private static FleetEventLog OpenTestEventLog(
+        string projectionPath,
+        string? eventsPath,
+        string? eventsRolloverPath,
+        long? eventsMaxBytes)
+    {
+        var livePath = eventsPath
+            ?? Path.Combine(Path.GetDirectoryName(projectionPath)!, BatonPaths.FleetEventsFileName);
+        var rolloverPath = eventsRolloverPath
+            ?? Path.Combine(Path.GetDirectoryName(livePath)!, BatonPaths.FleetEventsRolloverFileName);
+        return new FleetEventLog(
+            livePath, rolloverPath, eventsMaxBytes ?? RoomRetentionSweep.GetThresholdBytes());
     }
 
     /// <summary>The prefixes actually bound, in bind order — empty until <see cref="ExecuteAsync"/>
@@ -222,7 +246,7 @@ internal sealed class GlassHttpService : BackgroundService
                 return;
             }
 
-            // ROUTE TABLE -- fleet row only; see this class's own remarks for the slice boundary and
+            // ROUTE TABLE -- fleet row plus durable fleet facts; see this class's own remarks for
             // why drill-down must not be added here or to the artifact/worker copies.
             switch (context.Request.Url?.AbsolutePath)
             {
@@ -274,7 +298,15 @@ internal sealed class GlassHttpService : BackgroundService
                                        or OperationCanceledException)
         {
             // A client that walked away mid-response (a phone locking its screen is the common case)
-            // must not surface as a daemon fault. Anything else propagates.
+            // must not surface as a daemon fault. Durable-log corruption is mapped below; anything
+            // else propagates.
+        }
+        catch (FleetEventLogReadException ex)
+        {
+            // HandleAsync is deliberately detached so one SSE subscriber cannot block the accept
+            // loop. That makes this the one place a durable-log corruption must be made observable;
+            // merely faulting the discarded Task would hide it again.
+            _log.WriteLine($"GlassHttpService: {ex.Message}");
         }
         finally
         {

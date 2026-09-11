@@ -26,7 +26,7 @@ namespace Baton.Cli.Daemon;
 /// subscribed to.
 /// </para>
 /// </remarks>
-internal sealed class GlassProjectionWatcher
+internal sealed class GlassFileWatcher
 {
     internal static readonly TimeSpan DefaultPollInterval = TimeSpan.FromSeconds(1);
 
@@ -38,7 +38,7 @@ internal sealed class GlassProjectionWatcher
     private long _version;
     private TaskCompletionSource _changed = new(TaskCreationOptions.RunContinuationsAsynchronously);
 
-    internal GlassProjectionWatcher(string path, TimeSpan? pollInterval = null)
+    internal GlassFileWatcher(string path, TimeSpan? pollInterval = null)
     {
         ArgumentException.ThrowIfNullOrEmpty(path);
         _path = path;

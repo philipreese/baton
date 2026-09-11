@@ -1092,11 +1092,7 @@ public sealed class WorkItemAdvancer
 
     private static Task<FleetEvent?> AppendOperationalFleetEventAsync(
         FleetEventDraft draft, CancellationToken cancellationToken) =>
-        new FleetEventLog(
-                BatonPaths.FleetEventsFile,
-                BatonPaths.FleetEventsRolloverFile,
-                RoomRetentionSweep.GetThresholdBytes())
-            .Append(draft, cancellationToken);
+        FleetEventLog.OpenOperational().Append(draft, cancellationToken);
 
     private static string[] RepositoryArgs(QueueItem item, params string[] args) =>
         [.. args, "--repo", item.Repository!];
