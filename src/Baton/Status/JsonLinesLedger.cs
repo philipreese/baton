@@ -73,6 +73,15 @@ internal sealed class JsonLinesLedger<TEntry>(
     /// <summary>Test-only observation of each shared read-check-then-append operation.</summary>
     internal Action<int>? AppendOperationObserver { get; set; }
 
+    private static readonly AsyncLocal<Func<string, IDisposable?>?> ReadScope = new();
+
+    /// <summary>Fixture-only scope around an actual read, including exceptional completion.</summary>
+    internal static Func<string, IDisposable?>? ReadScopeOverride
+    {
+        get => ReadScope.Value;
+        set => ReadScope.Value = value;
+    }
+
     /// <summary>
     /// Appends the subset of <paramref name="entries"/> whose execution id is not already present in
     /// <paramref name="ledgerFilePath"/>, in ONE read-check-then-append critical section — two lock
@@ -203,20 +212,25 @@ internal sealed class JsonLinesLedger<TEntry>(
     /// hold the <see cref="MutexGuardedFileLock"/> on <paramref name="ledgerFilePath"/>; this method
     /// takes none. A read-only ownership reconciliation may take an independent file snapshot without
     /// nesting ledger mutexes, provided it propagates sharing/I/O failures as a publication fence.
+    /// With <paramref name="requireReadable"/>, only an open reporting a missing file/directory
+    /// means empty; File.Exists must not disguise a denied or invalid canonical input as absence.
     /// </summary>
-    internal IReadOnlyList<TEntry> ReadAllUnlocked(string ledgerFilePath)
+    internal IReadOnlyList<TEntry> ReadAllUnlocked(string ledgerFilePath, bool requireReadable = false)
     {
-        if (!File.Exists(ledgerFilePath))
+        if (!requireReadable && !File.Exists(ledgerFilePath))
         {
             return [];
         }
-
+        using var readScope = ReadScopeOverride?.Invoke(ledgerFilePath);
         string text;
-        using (var stream = new FileStream(ledgerFilePath, FileMode.Open, FileAccess.Read, FileShare.Read))
-        using (var reader = new StreamReader(stream, Encoding.UTF8))
+        try
         {
+            using var stream = new FileStream(ledgerFilePath, FileMode.Open, FileAccess.Read, FileShare.Read);
+            using var reader = new StreamReader(stream, Encoding.UTF8);
             text = reader.ReadToEnd();
         }
+        catch (FileNotFoundException) { return []; }
+        catch (DirectoryNotFoundException) { return []; }
 
         var result = new List<TEntry>();
         foreach (var line in text.Split('\n', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries))

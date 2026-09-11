@@ -326,6 +326,12 @@ public enum ImportOperationState
 
     /// <summary>The plan is durable and must be rolled forward before any affected store is published.</summary>
     Intent = 1,
+
+    /// <summary>Undo is durable authority; recovery must remove owned rows, never reapply the plan.</summary>
+    Reversing = 2,
+
+    /// <summary>Reversal finished. Retained accounting and aliases remain verifiable after restart.</summary>
+    Reversed = 3,
 }
 
 /// <summary>

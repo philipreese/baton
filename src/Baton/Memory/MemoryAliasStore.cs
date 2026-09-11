@@ -105,9 +105,10 @@ public static class MemoryAliasStore
         CancellationToken cancellationToken = default) =>
         MemoryCanonicalGeneration.AppendAsync(Ledger, entries, aliasFilePath, cancellationToken);
 
-    internal static Task<IReadOnlyList<MemoryAliasEntry>> ReadAllStrictAsync(
+    /// <summary>Assertions for publication; discovery must not hide an unreadable target mapping.</summary>
+    public static Task<IReadOnlyList<MemoryAliasEntry>> ReadAllStrictAsync(
         string aliasFilePath, CancellationToken cancellationToken = default) =>
-        Ledger.RunUnderLockAsync(aliasFilePath, () => Ledger.ReadAllUnlocked(aliasFilePath), cancellationToken);
+        Ledger.RunUnderLockAsync(aliasFilePath, () => Ledger.ReadAllUnlocked(aliasFilePath, requireReadable: true), cancellationToken);
 
     /// <summary>
     /// The repository <paramref name="checkoutPath"/> is asserted to belong to, or

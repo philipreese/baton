@@ -11,8 +11,9 @@ public static class MemoryCanonicalGeneration
 {
     private const string FileName = "memory-generation";
 
-    // Lock order: generation, then one ledger or obligation. Snapshot reads release their ledger
-    // locks before publication. No caller may acquire this mutex while holding a ledger mutex.
+    // Lock order: operation (when replaying/reversing), generation, then one ledger or obligation.
+    // Snapshot reads release their ledger locks before publication. No caller may acquire generation
+    // while holding a ledger mutex, or acquire operation while holding generation/metadata/ledger.
     private static T Locked<T>(string root, Func<T> action) => MutexGuardedFileLock.RunUnderLock(
         Path.Combine(root, FileName), "baton-memory-canonical", TimeSpan.FromSeconds(30), action);
 

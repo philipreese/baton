@@ -65,6 +65,9 @@ public static class MemoryImportOperationHealth
                     if (manifest.OperationState == ImportOperationState.Intent)
                         problems.Add(new("pending", $"'{path}' awaits replay; canonical counts are partial.",
                             MemoryImportOperationStore.AffectedSlugs(manifest)));
+                    if (manifest.OperationState == ImportOperationState.Reversing)
+                        problems.Add(new("pending", $"'{path}' awaits reversal; canonical counts are partial.",
+                            MemoryImportOperationStore.AffectedSlugs(manifest)));
                 }
                 catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or BatonMemoryException or InvalidDataException)
                 {
@@ -73,7 +76,7 @@ public static class MemoryImportOperationHealth
                 }
             }
 
-            foreach (var manifest in records.Values.Where(m => m.OperationState == ImportOperationState.Settled))
+            foreach (var manifest in records.Values.Where(m => m.OperationState != ImportOperationState.Intent))
             {
                 // Aliases survive undo. Every accepted assertion must retain its exact owner.
                 // Old settlements implicitly owned their plan.
@@ -109,9 +112,9 @@ public static class MemoryImportOperationHealth
                 var pending = manifest.OperationState == ImportOperationState.Intent;
                 var accounted = row.Kind switch
                 {
-                    "entry" => manifest.Entries.Any(e => (pending || !e.AlreadyPresent)
+                    "entry" => manifest.OperationState != ImportOperationState.Reversed && manifest.Entries.Any(e => (pending || !e.AlreadyPresent)
                         && MemoryImportOperationStore.OwnershipKey(e.Repository, e.EntryId) == key),
-                    "link" => (manifest.Links ?? []).Any(l => (pending || !l.AlreadyPresent)
+                    "link" => manifest.OperationState != ImportOperationState.Reversed && (manifest.Links ?? []).Any(l => (pending || !l.AlreadyPresent)
                         && MemoryImportOperationStore.OwnershipKey(l.Repository, l.LinkId) == key),
                     _ => (pending ? manifest.PlannedAliases ?? [] : manifest.AcceptedAliases ?? manifest.PlannedAliases ?? []).Any(a =>
                         a.ImportOperationId == row.Operation &&

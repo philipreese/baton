@@ -22,19 +22,42 @@ public static class MemoryImportOperationStore
     /// Applies every row in a durable intent, then replaces the intent atomically with the exact
     /// ownership observed from the canonical rows themselves. Cancellation leaves the intent replayable.
     /// </summary>
-    public static async Task<ImportManifest> ApplyAsync(
+    public static Task<ImportManifest> ApplyAsync(
         string manifestPath,
         ImportManifest intent,
         CancellationToken cancellationToken = default)
     {
-        ArgumentException.ThrowIfNullOrEmpty(manifestPath);
         ArgumentNullException.ThrowIfNull(intent);
+        return RunOperationAsync(manifestPath, () => ApplyCoreAsync(manifestPath, cancellationToken), cancellationToken);
+    }
+
+    // Lock order: operation -> metadata (released before ledger work), or operation -> generation
+    // -> one ledger. Publication takes generation -> obligation and never takes operation.
+    // The mutex owner synchronously waits for the async body; acquire/release stay on one thread.
+    // No nested body may call a public operation entry point and reacquire from another thread.
+    private static Task<T> RunOperationAsync<T>(string manifestPath, Func<Task<T>> action, CancellationToken cancellationToken) =>
+        Task.Run(() =>
+        {
+            var record = ImportManifest.Read(manifestPath);
+            var key = record.OperationId is { } id
+                ? Path.Combine(record.BatonRoot, BatonPaths.MemoryImportsDirectoryName, id)
+                : manifestPath;
+            BoundaryObserver?.Invoke("before-operation-lock");
+            return MutexGuardedFileLock.RunUnderLock(key, "baton-memory-operation", TimeSpan.FromSeconds(30),
+                () => action().GetAwaiter().GetResult());
+        }, cancellationToken);
+
+    private static async Task<ImportManifest> ApplyCoreAsync(
+        string manifestPath,
+        CancellationToken cancellationToken = default)
+    {
+        ArgumentException.ThrowIfNullOrEmpty(manifestPath);
         cancellationToken.ThrowIfCancellationRequested();
 
         // Disk is the authority even when a caller still holds a pre-interruption object.
-        intent = ImportManifest.Read(manifestPath);
+        var intent = ImportManifest.Read(manifestPath);
         RequireRoot(intent, BatonPaths.Root);
-        if (intent.OperationState == ImportOperationState.Settled)
+        if (intent.OperationState != ImportOperationState.Intent)
         {
             return intent;
         }
@@ -143,8 +166,8 @@ public static class MemoryImportOperationStore
     }
 
     /// <summary>
-    /// Replays every pending intent after restart. A failed intent remains durable and its affected
-    /// stores remain fenced from publication; other stores may continue through the sweep.
+    /// Recovers pending imports and reversals after restart. A failed operation remains durable and
+    /// its affected stores remain fenced from publication; other stores may continue through the sweep.
     /// </summary>
     public static async Task<IReadOnlySet<string>> RecoverPendingAsync(
         TextWriter diagnostics,
@@ -166,7 +189,7 @@ public static class MemoryImportOperationStore
                 continue;
             }
 
-            if (manifest.OperationState != ImportOperationState.Intent)
+            if (manifest.OperationState is not (ImportOperationState.Intent or ImportOperationState.Reversing))
             {
                 continue;
             }
@@ -174,8 +197,16 @@ public static class MemoryImportOperationStore
             var affected = AffectedSlugs(manifest);
             try
             {
-                await ApplyAsync(path, manifest, CancellationToken.None).ConfigureAwait(false);
-                diagnostics.WriteLine($"Memory import recovery: settled '{path}'.");
+                if (manifest.OperationState == ImportOperationState.Reversing)
+                {
+                    await ReverseAsync(path, CancellationToken.None).ConfigureAwait(false);
+                    diagnostics.WriteLine($"Memory import recovery: reversed '{path}'.");
+                }
+                else
+                {
+                    var current = await ApplyAsync(path, manifest, CancellationToken.None).ConfigureAwait(false);
+                    diagnostics.WriteLine($"Memory import recovery: {current.OperationState.ToString().ToLowerInvariant()} '{path}'.");
+                }
             }
             catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or InvalidDataException or BatonMemoryException)
             {
@@ -204,6 +235,87 @@ public static class MemoryImportOperationStore
         ArgumentException.ThrowIfNullOrEmpty(repositorySlug);
         return MemoryImportOperationHealth.Scan(BatonPaths.Root).Any(p => p.Blocks(repositorySlug));
     }
+
+    /// <summary>Reverses durable ownership under the same exclusion as replay.</summary>
+    public static Task<MemoryImportReversal> ReverseAsync(string manifestPath, CancellationToken cancellationToken = default) =>
+        RunOperationAsync(manifestPath, () => ReverseCoreAsync(manifestPath, cancellationToken), cancellationToken);
+
+    private static async Task<MemoryImportReversal> ReverseCoreAsync(string manifestPath, CancellationToken cancellationToken)
+    {
+        var manifest = ImportManifest.Read(manifestPath);
+        RequireRoot(manifest, BatonPaths.Root);
+        if (manifest.OperationState == ImportOperationState.Intent)
+        {
+            // Undo never guesses at a partially applied intent. First finish the idempotent plan and
+            // settle exact ownership, then replay that durable result backwards.
+            manifest = await ApplyCoreAsync(manifestPath, CancellationToken.None).ConfigureAwait(false);
+        }
+
+        if (manifest.OperationState == ImportOperationState.Settled)
+        {
+            manifest = manifest with { OperationState = ImportOperationState.Reversing };
+            manifest.Write(manifestPath);
+        }
+        BoundaryObserver?.Invoke("reversal-intent");
+
+        var shortfalls = new List<string>();
+        var changedRepositories = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        var removed = 0;
+        foreach (var group in manifest.Appended.GroupBy(r => r.EntriesFilePath, StringComparer.OrdinalIgnoreCase))
+        {
+            var expected = group.Select(r => r.EntryId).Distinct(StringComparer.Ordinal).ToList();
+            var repository = group.First().Repository;
+            await MemoryStoreMetadataStore.EnsureAsync(
+                repository, FleetMemory.SlugFor(repository), cancellationToken).ConfigureAwait(false);
+            var count = manifest.OperationId is { Length: > 0 } operationId
+                ? await MemoryStore.RemoveOwnedAsync(
+                    expected, operationId, group.Key, cancellationToken).ConfigureAwait(false)
+                : await MemoryStore.RemoveAsync(expected, group.Key, cancellationToken).ConfigureAwait(false);
+            await MemoryStoreMetadataStore.CompleteInitializationAsync(
+                repository, FleetMemory.SlugFor(repository), CancellationToken.None).ConfigureAwait(false);
+            BoundaryObserver?.Invoke($"reversed-entries:{FleetMemory.SlugFor(repository)}");
+            removed += count;
+            if (count > 0)
+            {
+                changedRepositories.Add(group.First().Repository);
+            }
+
+            if (count != expected.Count)
+            {
+                shortfalls.Add($"  {group.Key}: expected {expected.Count}, removed {count}");
+            }
+        }
+
+        var removedLinks = 0;
+        foreach (var group in manifest.AppendedLinks.GroupBy(l => l.LinksFilePath, StringComparer.OrdinalIgnoreCase))
+        {
+            var expected = group.Select(l => l.LinkId).Distinct(StringComparer.Ordinal).ToList();
+            var count = manifest.OperationId is { Length: > 0 } operationId
+                ? await MemoryStore.RemoveOwnedLinksAsync(
+                    expected, operationId, group.Key, cancellationToken).ConfigureAwait(false)
+                : await MemoryStore.RemoveLinksAsync(expected, group.Key, cancellationToken).ConfigureAwait(false);
+            BoundaryObserver?.Invoke($"reversed-links:{FleetMemory.SlugFor(group.First().Repository)}");
+            removedLinks += count;
+            if (count > 0)
+            {
+                changedRepositories.Add(group.First().Repository);
+            }
+
+            if (count != expected.Count)
+            {
+                shortfalls.Add($"  {group.Key}: expected {expected.Count} link(s), removed {count}");
+            }
+        }
+
+        if (manifest.OperationState != ImportOperationState.Reversed)
+        {
+            manifest = manifest with { OperationState = ImportOperationState.Reversed };
+            manifest.Write(manifestPath);
+        }
+        BoundaryObserver?.Invoke("reversed");
+        return new(manifest, removed, removedLinks, changedRepositories, shortfalls);
+    }
+
 
     internal static IEnumerable<string> ManifestPaths(string batonRoot)
     {
@@ -251,12 +363,12 @@ public static class MemoryImportOperationStore
 
         var hasPlan = intent.PlannedEntries is not null || intent.PlannedLinks is not null
             || intent.PlannedAliases is not null || intent.AcceptedAliases is not null;
-        if (intent.OperationId is null && intent.OperationState == ImportOperationState.Settled && !hasPlan)
+        if (intent.OperationId is null && intent.OperationState != ImportOperationState.Intent && !hasPlan)
         {
             return; // Pre-operation manifests retain their existing undo/path compatibility.
         }
 
-        if (intent.OperationState == ImportOperationState.Settled
+        if (intent.OperationState != ImportOperationState.Intent
             && (intent.Appended.Select(e => OwnershipKey(e.Repository, e.EntryId)).Distinct().Count() != intent.Appended.Count()
                 || intent.AppendedLinks.Select(l => OwnershipKey(l.Repository, l.LinkId)).Distinct().Count() != intent.AppendedLinks.Count()))
         {

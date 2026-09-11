@@ -218,7 +218,18 @@ public static class MemoryAuditCommand
             }
 
             CountObserver?.Invoke();
-            var entries = await MemoryStore.ReadAllAsync(store.EntriesFile, cancellationToken).ConfigureAwait(false);
+            IReadOnlyList<MemoryEntry> entries;
+            try
+            {
+                entries = await MemoryStore.ReadAllStrictAsync(store.EntriesFile, cancellationToken).ConfigureAwait(false);
+            }
+            catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or WaitHandleCannotBeOpenedException)
+            {
+                rows.Add(new CanonicalStoreRow(store.Slug, store.Repository, store.IsFleet,
+                    store.EntriesFile, Present: true, EntryCount: null,
+                    CountError: $"{ex.GetType().Name}: {ex.Message}"));
+                continue;
+            }
             var storeRepository = MemoryStoreIdentity.Resolve(store.Slug, store.Repository, entries);
             rows.Add(new CanonicalStoreRow(
                 store.Slug,
@@ -253,7 +264,8 @@ public static class MemoryAuditCommand
         bool IsFleet,
         string EntriesFile,
         bool Present,
-        int? EntryCount);
+        int? EntryCount,
+        string? CountError = null);
 
     /// <summary>
     /// The JSON contract: the report plus the two roots it was taken over, so a stored report says
@@ -432,7 +444,9 @@ public static class MemoryAuditCommand
                     ? $"    {(store.IsFleet ? "FLEET" : "repository=" + (store.Repository ?? "(no rows yet)"))} " +
                       $"slug={store.Slug} " + (store.EntryCount is { } count
                           ? $"entries={count.ToString("N0", CultureInfo.InvariantCulture)}"
-                          : "entries=(withheld -- incomplete import ownership; see import diagnostics)")
+                          : store.CountError is { } error
+                              ? $"entries=(unavailable -- {error})"
+                              : "entries=(withheld -- incomplete import ownership; see import diagnostics)")
                     : $"    ABSENT -- no store has been created for '{store.Repository}' on this machine; " +
                       "'baton memory add' or 'baton memory import' creates it.");
         }

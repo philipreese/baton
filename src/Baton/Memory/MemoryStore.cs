@@ -110,13 +110,13 @@ public static class MemoryStore
     public static Task<IReadOnlyList<MemoryEntry>> ReadAllStrictAsync(
         string entriesFilePath, CancellationToken cancellationToken = default) =>
         Ledger.RunUnderLockAsync(
-            entriesFilePath, () => Ledger.ReadAllUnlocked(entriesFilePath), cancellationToken);
+            entriesFilePath, () => Ledger.ReadAllUnlocked(entriesFilePath, requireReadable: true), cancellationToken);
 
     /// <summary>Strict link rows for durable import settlement; I/O failure must retain the intent.</summary>
-    internal static Task<IReadOnlyList<MemorySupersessionLink>> ReadLinksStrictAsync(
+    public static Task<IReadOnlyList<MemorySupersessionLink>> ReadLinksStrictAsync(
         string linksFilePath, CancellationToken cancellationToken = default) =>
         LinkLedger.RunUnderLockAsync(
-            linksFilePath, () => LinkLedger.ReadAllUnlocked(linksFilePath), cancellationToken);
+            linksFilePath, () => LinkLedger.ReadAllUnlocked(linksFilePath, requireReadable: true), cancellationToken);
 
     /// <summary>
     /// Appends the subset of <paramref name="links"/> whose <see cref="MemorySupersessionLink.Id"/> is
@@ -160,6 +160,23 @@ public static class MemoryStore
     public static Task<IReadOnlyList<MemoryRetraction>> ReadRetractionsAsync(
         string retractionsFilePath, CancellationToken cancellationToken = default) =>
         RetractionLedger.ReadAllAsync(retractionsFilePath, cancellationToken);
+
+    /// <summary>Retractions for publication; a failed read must not restore retracted facts.</summary>
+    public static Task<IReadOnlyList<MemoryRetraction>> ReadRetractionsStrictAsync(
+        string retractionsFilePath, CancellationToken cancellationToken = default) =>
+        RetractionLedger.RunUnderLockAsync(
+            retractionsFilePath, () => RetractionLedger.ReadAllUnlocked(retractionsFilePath, requireReadable: true), cancellationToken);
+
+    /// <summary>A resolved snapshot whose every canonical input propagates read failures.</summary>
+    public static async Task<IReadOnlyList<MemoryEntry>> ReadResolvedStrictAsync(
+        string entriesFilePath, string linksFilePath, string retractionsFilePath,
+        CancellationToken cancellationToken = default)
+    {
+        var entries = await ReadAllStrictAsync(entriesFilePath, cancellationToken).ConfigureAwait(false);
+        var links = await ReadLinksStrictAsync(linksFilePath, cancellationToken).ConfigureAwait(false);
+        var retractions = await ReadRetractionsStrictAsync(retractionsFilePath, cancellationToken).ConfigureAwait(false);
+        return Resolve(entries, links, retractions);
+    }
 
     /// <summary>
     /// One repository's entries with their retractions applied from

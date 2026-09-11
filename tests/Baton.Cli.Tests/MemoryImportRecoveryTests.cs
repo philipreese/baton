@@ -2,6 +2,7 @@ using System.Text.Json;
 using Baton.Cli.Daemon;
 using Baton.Memory;
 using Baton.Status;
+using Baton.Tests.Shared;
 
 namespace Baton.Cli.Tests;
 
@@ -129,7 +130,7 @@ public sealed partial class MemoryAutomaticProjectionTests
         await MemoryStoreMetadataStore.EnsureAsync(Repository, Slug, TestContext.Current.CancellationToken);
         await MemoryStore.AppendAsync([first], BatonPaths.MemoryEntriesFile(Slug), TestContext.Current.CancellationToken);
         await MemoryStoreMetadataStore.CompleteInitializationAsync(Repository, Slug, TestContext.Current.CancellationToken);
-        if (state == "missing") File.Delete(path);
+        if (state == "missing") FileCleanup.EnsureDeleted(path);
         if (state == "corrupt") File.WriteAllText(path, "{torn");
         if (state == "partial") (intent with { Entries = [intent.Entries[0]] }).Write(path);
         if (state == "duplicate-record") intent.Write(path + ".duplicate.json");

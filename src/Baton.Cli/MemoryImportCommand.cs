@@ -673,60 +673,12 @@ public static class MemoryImportCommand
             return 1;
         }
 
-        if (manifest.OperationState == ImportOperationState.Intent)
-        {
-            // Undo never guesses at a partially applied intent. First finish the idempotent plan and
-            // settle exact ownership, then replay that durable result backwards.
-            manifest = await MemoryImportOperationStore
-                .ApplyAsync(manifestPath, manifest, CancellationToken.None).ConfigureAwait(false);
-        }
-
-        var shortfalls = new List<string>();
-        var changedRepositories = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
-        var removed = 0;
-        foreach (var group in manifest.Appended.GroupBy(r => r.EntriesFilePath, StringComparer.OrdinalIgnoreCase))
-        {
-            var expected = group.Select(r => r.EntryId).Distinct(StringComparer.Ordinal).ToList();
-            var repository = group.First().Repository;
-            await MemoryStoreMetadataStore.EnsureAsync(
-                repository, FleetMemory.SlugFor(repository), cancellationToken).ConfigureAwait(false);
-            var count = manifest.OperationId is { Length: > 0 } operationId
-                ? await MemoryStore.RemoveOwnedAsync(
-                    expected, operationId, group.Key, cancellationToken).ConfigureAwait(false)
-                : await MemoryStore.RemoveAsync(expected, group.Key, cancellationToken).ConfigureAwait(false);
-            await MemoryStoreMetadataStore.CompleteInitializationAsync(
-                repository, FleetMemory.SlugFor(repository), CancellationToken.None).ConfigureAwait(false);
-            removed += count;
-            if (count > 0)
-            {
-                changedRepositories.Add(group.First().Repository);
-            }
-
-            if (count != expected.Count)
-            {
-                shortfalls.Add($"  {group.Key}: expected {expected.Count}, removed {count}");
-            }
-        }
-
-        var removedLinks = 0;
-        foreach (var group in manifest.AppendedLinks.GroupBy(l => l.LinksFilePath, StringComparer.OrdinalIgnoreCase))
-        {
-            var expected = group.Select(l => l.LinkId).Distinct(StringComparer.Ordinal).ToList();
-            var count = manifest.OperationId is { Length: > 0 } operationId
-                ? await MemoryStore.RemoveOwnedLinksAsync(
-                    expected, operationId, group.Key, cancellationToken).ConfigureAwait(false)
-                : await MemoryStore.RemoveLinksAsync(expected, group.Key, cancellationToken).ConfigureAwait(false);
-            removedLinks += count;
-            if (count > 0)
-            {
-                changedRepositories.Add(group.First().Repository);
-            }
-
-            if (count != expected.Count)
-            {
-                shortfalls.Add($"  {group.Key}: expected {expected.Count} link(s), removed {count}");
-            }
-        }
+        var reversal = await MemoryImportOperationStore.ReverseAsync(manifestPath, cancellationToken).ConfigureAwait(false);
+        manifest = reversal.Manifest;
+        var shortfalls = reversal.Shortfalls;
+        var changedRepositories = reversal.ChangedRepositories;
+        var removed = reversal.RemovedEntries;
+        var removedLinks = reversal.RemovedLinks;
 
         output.WriteLine(
             $"Removed {removed} canonical entr{(removed == 1 ? "y" : "ies")} and {removedLinks} " +

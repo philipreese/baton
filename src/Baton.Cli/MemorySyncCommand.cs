@@ -44,6 +44,12 @@ namespace Baton.Cli;
 public static class MemorySyncCommand
 {
     private static readonly AsyncLocal<Action?> SnapshotObservation = new();
+    private static readonly AsyncLocal<Action<string>?> CanonicalReadObservation = new();
+    internal static Action<string>? CanonicalReadObserver
+    {
+        get => CanonicalReadObservation.Value;
+        set => CanonicalReadObservation.Value = value;
+    }
     internal static Action? SnapshotObserver
     {
         get => SnapshotObservation.Value;
@@ -96,8 +102,18 @@ public static class MemorySyncCommand
                     continue;
                 }
 
-                var stored = await MemoryStore.ReadAllAsync(
-                    BatonPaths.MemoryEntriesFile(slug), cancellationToken).ConfigureAwait(false);
+                IReadOnlyList<MemoryEntry> stored = [];
+                Exception? inputFailure = null;
+                try
+                {
+                    CanonicalReadObserver?.Invoke("identity");
+                    stored = await MemoryStore.ReadAllStrictAsync(
+                        BatonPaths.MemoryEntriesFile(slug), cancellationToken).ConfigureAwait(false);
+                }
+                catch (Exception ex) when (ex is not OperationCanceledException)
+                {
+                    inputFailure = ex;
+                }
                 MemoryProjectionObligation? claimed = null;
                 obligationsOverride?.TryGetValue(slug, out claimed);
                 var repository = MemoryStoreIdentity.Resolve(
@@ -111,23 +127,37 @@ public static class MemorySyncCommand
                     if (claimed is not null)
                     {
                         obligations[slug] = claimed;
-                        continue;
                     }
 
-                    try
+                    else try
+                        {
+                            obligations[slug] = await MemoryProjectionObligationStore.ReplaceAsync(
+                                repository, slug, utcNow(), cancellationToken).ConfigureAwait(false);
+                        }
+                        catch (Exception ex) when (ex is not OperationCanceledException)
+                        {
+                            unclaimed.Add(slug);
+                            failures.Add(new SyncFailureReport(
+                                repository,
+                                BatonPaths.MemorySyncPendingFile(slug),
+                                $"{ex.GetType().Name}: {ex.Message}",
+                                ObligationRecorded: false));
+                        }
+                }
+
+                if (inputFailure is not null)
+                {
+                    // Identity can establish a recovery claim, never a successful snapshot.
+                    unclaimed.Add(slug);
+                    if (obligations.TryGetValue(slug, out var pending))
                     {
-                        obligations[slug] = await MemoryProjectionObligationStore.ReplaceAsync(
-                            repository, slug, utcNow(), cancellationToken).ConfigureAwait(false);
+                        await MemoryProjectionObligationStore.FailAsync(
+                            pending, inputFailure, utcNow(), cancellationToken).ConfigureAwait(false);
                     }
-                    catch (Exception ex) when (ex is not OperationCanceledException)
-                    {
-                        unclaimed.Add(slug);
-                        failures.Add(new SyncFailureReport(
-                            repository,
-                            BatonPaths.MemorySyncPendingFile(slug),
-                            $"{ex.GetType().Name}: {ex.Message}",
-                            ObligationRecorded: false));
-                    }
+                    failures.Add(new SyncFailureReport(repository ?? slug,
+                        BatonPaths.MemoryEntriesFile(slug),
+                        $"{inputFailure.GetType().Name}: {inputFailure.Message}",
+                        ObligationRecorded: pending is not null));
                 }
             }
         }
@@ -136,6 +166,7 @@ public static class MemorySyncCommand
         TargetDiscovery discovery;
         try
         {
+            CanonicalReadObserver?.Invoke("discovery");
             discovery = await DiscoverTargetsAsync(claudeHome, userHome, cancellationToken)
                 .ConfigureAwait(false);
         }
@@ -155,7 +186,7 @@ public static class MemorySyncCommand
             }
 
             WriteFailedProjection(output, options.Format, failures);
-            return failures.Count > 0 ? 1 : 0;
+            return 1;
         }
 
         var reports = new List<SyncRepositoryReport>();
@@ -287,18 +318,19 @@ public static class MemorySyncCommand
             return null;
         }
 
+        CanonicalReadObserver?.Invoke("snapshot");
         var links = await MemoryStore
-            .ReadLinksAsync(BatonPaths.MemoryLinksFile(slug), cancellationToken).ConfigureAwait(false);
+            .ReadLinksStrictAsync(BatonPaths.MemoryLinksFile(slug), cancellationToken).ConfigureAwait(false);
         var retractions = await MemoryStore
-            .ReadRetractionsAsync(BatonPaths.MemoryRetractionsFile(slug), cancellationToken).ConfigureAwait(false);
+            .ReadRetractionsStrictAsync(BatonPaths.MemoryRetractionsFile(slug), cancellationToken).ConfigureAwait(false);
 
         // The fleet ledgers are read under their own locks, never nested. Generation validation
         // rejects changes between these reads. A repository's projection merges fleet entries ahead
         // of the repository's entries (#2112); the fleet's own projection is the fleet store alone, so
         // for that slug this is empty and the entries below carry the origin instead.
-        var fleet = isFleet || !File.Exists(FleetMemory.EntriesFile)
+        var fleet = isFleet
             ? []
-            : await MemoryStore.ReadResolvedAsync(
+            : await MemoryStore.ReadResolvedStrictAsync(
                     FleetMemory.EntriesFile, FleetMemory.LinksFile, FleetMemory.RetractionsFile, cancellationToken)
                 .ConfigureAwait(false);
         var fleetStorePath = !isFleet && File.Exists(FleetMemory.EntriesFile) ? FleetMemory.EntriesFile : null;
@@ -535,7 +567,7 @@ public static class MemorySyncCommand
         var nonTargets = new List<NonTargetRoot>();
 
         var aliases = await MemoryAliasStore
-            .ReadAllAsync(BatonPaths.MemoryAliasFile, cancellationToken).ConfigureAwait(false);
+            .ReadAllStrictAsync(BatonPaths.MemoryAliasFile, cancellationToken).ConfigureAwait(false);
 
         foreach (var root in MemoryRootInventory.Scan(claudeHome, cancellationToken))
         {
