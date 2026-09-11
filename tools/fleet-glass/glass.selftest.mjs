@@ -237,9 +237,9 @@ check("(control) an unheld queue does not",
 {
   const out = queuePrTableHtml({ pullRequests: [
     { repository: "github.com/acme/one", pr: 2028, prState: "open", freshness: "current", observedAt: "2026-09-07T11:59:30Z", attemptedAt: "2026-09-07T11:59:30Z", headSha: "aaaaaaaa11111111", deployment: "not-recorded", lanes: [
-      { tag: "a", stage: "review", state: "Done", round: 1, verdict: "block", checks: "failing", checksObservedAt: "2026-09-07T11:00:00Z", checksHeadSha: "bbbbbbbb22222222" },
+      { tag: "a", stage: "review", state: "Done", round: 1, verdict: "block", checks: "failing", checksObservedAt: "2026-09-07T11:00:00Z", checksHeadSha: "bbbbbbbb22222222", twinIssue: 1530 },
       { tag: "cancelled", stage: "review", state: "Cancelled", round: 2 },
-      { tag: "halted", stage: "fix", state: "Failed", round: 2, halted: true },
+      { tag: "halted", stage: "fix", state: "Failed", round: 2, halted: true, twinIssue: 1600 },
     ] },
     { repository: "github.com/acme/two", pr: 2035, freshness: "unknown", attemptedAt: "2026-09-07T11:59:30Z", observationError: "repository identity invalid", deployment: "not-recorded", lanes: [
       { tag: "b", stage: "ready", state: "Queued", round: 3, verdict: "approve", checks: "passing", checksObservedAt: "2026-09-07T11:59:30Z" },
@@ -254,6 +254,11 @@ check("(control) an unheld queue does not",
   check("(control) checks never observed says so, not 'passing'", out.includes("checks not observed"));
   check("a halted work item remains marked on its grouped PR row", out.includes("halted lane"));
   check("a cancelled lane on a confirmed-open PR is labelled explicitly", out.includes("cancelled lane · open PR"));
+  check("grouped current lanes retain their own twin markers, including different twins",
+        out.includes("twin #1530") && out.includes("twin #1600")
+          && (out.match(/q-pr-lane twin/g) || []).length === 2);
+  check("a grouped non-twin lane has no twin marker",
+        /<div class="q-pr-lane">cancelled ·/.test(out));
   check("invalidated identity remains visible follow-up as unknown",
         out.includes("unknown") && out.includes("lookup: repository identity invalid"));
   check("every observation exposes when it was last checked",
@@ -264,13 +269,14 @@ check("(control) an unheld queue does not",
 
   const history = queuePrHistoryHtml({ pullRequestHistory: [
     { repository: "github.com/acme/one", pr: 2192, prState: "merged", freshness: "current", observedAt: "2026-09-07T11:59:30Z", attemptedAt: "2026-09-07T11:59:30Z", deployment: "not-recorded", lanes: [
-      { tag: "2192-lane", stage: "review", state: "Cancelled", round: 1, checks: "failing", checksObservedAt: "2026-09-07T10:00:00Z" },
+      { tag: "2192-lane", stage: "review", state: "Cancelled", round: 1, checks: "failing", checksObservedAt: "2026-09-07T10:00:00Z", twinIssue: 1700 },
     ] },
     { repository: "github.com/acme/two", pr: 2035, prState: "closed", freshness: "stale", observedAt: "2026-09-07T09:00:00Z", attemptedAt: "2026-09-07T11:59:30Z", observationError: "gh pr view exited 1", deployment: "not-recorded", lanes: [
       { tag: "b", stage: "ready", state: "Queued", round: 3, verdict: "approve" },
     ] },
   ] });
   check("a fresh merged PR is distinct collapsed history with cancellation retained", history.includes("Completed PR history") && history.includes("merged") && history.includes("cancelled lane"));
+  check("completed history retains its per-lane twin marker", history.includes("twin #1700"));
   check("stale trustworthy terminal history is prominent and honestly aged",
         history.includes("last known closed · stale") && history.includes("last checked just now")
           && history.includes("last confirmed 3h ago") && history.includes("lookup: gh pr view exited 1"));

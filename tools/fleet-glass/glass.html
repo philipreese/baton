@@ -166,6 +166,8 @@ h2{font-family:'Sora',sans-serif; font-size:.85rem; margin:1.4rem 0 .5rem; color
 .queueboard th{text-align:left; font:600 .66rem 'Public Sans'; letter-spacing:.05em; text-transform:uppercase; color:var(--ink-soft); padding:.2rem .5rem .2rem 0; border-bottom:1px solid var(--line);}
 .queueboard td{padding:.22rem .5rem .22rem 0; vertical-align:top; white-space:nowrap;}
 .queueboard tr.twin td{background:var(--chip-idle);}
+.queueboard .q-pr-lane.twin{background:var(--chip-idle);}
+.queueboard .q-twin{font:600 .66rem var(--mono); color:var(--ink-soft);}
 .queueboard .q-next{color:var(--run); font-weight:600;}
 .queueboard .q-halt{color:var(--bad); font-weight:600;}
 .queueboard .q-tag{font-family:var(--mono);}
@@ -1557,7 +1559,13 @@ function queuePrRowsHtml(prs, heading){
       const link = l.room
         ? `<a class="inboxlink" data-room="${esc(l.room)}">${esc(l.tag)}</a>`
         : esc(l.tag);
-      return `<div>${link} · ${lifecycle} · round ${esc(l.round)} · ${esc(l.verdict || "no verdict")} · ${esc(checks)}</div>`;
+      const twin = l.twinIssue != null
+        ? ` class="q-pr-lane twin"`
+        : ` class="q-pr-lane"`;
+      const twinLabel = l.twinIssue != null
+        ? `<span class="q-twin">twin #${esc(l.twinIssue)}</span> `
+        : "";
+      return `<div${twin}>${twinLabel}${link} · ${lifecycle} · round ${esc(l.round)} · ${esc(l.verdict || "no verdict")} · ${esc(checks)}</div>`;
     }).join("") || "retained lane unavailable";
     const error = p.observationError ? `<div class="q-halt">lookup: ${esc(p.observationError)}</div>` : "";
     return `<tr><td>${esc((p.repository ? p.repository + " " : "repository unknown ") + "#" + p.pr)}</td>`
