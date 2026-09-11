@@ -22,7 +22,9 @@ public sealed class QueueBoardTests
         string? adapter = null,
         string? model = null,
         string? checks = null,
-        DateTimeOffset? checksObservedAt = null) => new()
+        DateTimeOffset? checksObservedAt = null,
+        string? repository = null,
+        string? checksHeadSha = null) => new()
         {
             Tag = tag,
             Role = stage is { } s && !WorkStages.IsTerminal(s) ? WorkStages.RoleFor(s) : "implement",
@@ -31,12 +33,14 @@ public sealed class QueueBoardTests
             State = state,
             Round = round,
             PullRequest = pr,
+            Repository = repository,
             Halted = halted,
             External = external,
             Adapter = adapter,
             Model = model,
             Checks = checks,
             ChecksObservedAt = checksObservedAt,
+            ChecksHeadSha = checksHeadSha,
             Workspace = @"C:\w",
             SpecFile = @"C:\w\spec.md",
         };
@@ -49,10 +53,14 @@ public sealed class QueueBoardTests
         QueueDecisionEntry? lastDecision = null,
         Func<QueueItem, bool>? briefExists = null,
         Func<QueueItem, string?>? verdict = null,
-        QueueSettings? settings = null) =>
+        QueueSettings? settings = null,
+        IReadOnlyList<QueuePullRequestObservation>? observations = null,
+        DateTimeOffset? observationNow = null,
+        TimeSpan? observationFreshness = null) =>
         QueueBoard.Project(
             items, held, settings ?? new QueueSettings(), lanes ?? [], freeGb, Noon, lastDecision,
-            briefExists ?? (_ => true), verdict ?? (_ => null));
+            briefExists ?? (_ => true), verdict ?? (_ => null),
+            observationNow ?? new DateTimeOffset(Noon), observations, observationFreshness);
 
     [Fact]
     public void Slots_report_the_cap_the_live_total_and_the_floor_beside_the_reading()
@@ -93,7 +101,8 @@ public sealed class QueueBoardTests
     {
         var night = QueueBoard.Project(
             [], false, new QueueSettings(), [], 1.0,
-            new DateTime(2026, 9, 7, 23, 0, 0, DateTimeKind.Local), null, _ => true, _ => null);
+            new DateTime(2026, 9, 7, 23, 0, 0, DateTimeKind.Local), null, _ => true, _ => null,
+            new DateTimeOffset(2026, 9, 8, 3, 0, 0, TimeSpan.Zero));
 
         Assert.True(night.Slots.NightBand);
         Assert.Equal(QueueSettings.DefaultFloorGbNight, night.Slots.FloorGb);
@@ -428,23 +437,24 @@ public sealed class QueueBoardTests
         Assert.Equal([2028, 2035], board.PullRequests.Select(p => p.PullRequest));
 
         var first = board.PullRequests[0];
-        Assert.Equal("review", first.Stage);
-        Assert.Equal("block", first.Verdict);
-        Assert.Equal(PullRequestChecks.Failing, first.Checks);
-        Assert.Equal(observedAt, first.ChecksObservedAt);
+        var firstLane = Assert.Single(first.Lanes);
+        Assert.Equal("review", firstLane.Stage);
+        Assert.Equal("block", firstLane.Verdict);
+        Assert.Equal(PullRequestChecks.Failing, firstLane.Checks);
+        Assert.Equal(observedAt, firstLane.ChecksObservedAt);
 
         // A `ready` item leaves the pending table (nothing will dispatch it) but MUST stay on the PR
         // table -- it is exactly the row the conductor is looking for.
-        Assert.Equal("ready", board.PullRequests[1].Stage);
+        Assert.Equal("ready", Assert.Single(board.PullRequests[1].Lanes).Stage);
         Assert.DoesNotContain(board.Pending, p => p.Tag == "b");
 
         // Control: an item with no PR yet produces no PR row rather than one reading `#0`.
-        Assert.DoesNotContain(board.PullRequests, p => p.Tag == "no-pr");
+        Assert.DoesNotContain(board.PullRequests.SelectMany(p => p.Lanes), p => p.Tag == "no-pr");
 
         // Never observed stays absent on both halves together, so a reader cannot render a word with
         // no age or an age with no word.
-        Assert.Null(board.PullRequests[1].Checks);
-        Assert.Null(board.PullRequests[1].ChecksObservedAt);
+        Assert.Null(Assert.Single(board.PullRequests[1].Lanes).Checks);
+        Assert.Null(Assert.Single(board.PullRequests[1].Lanes).ChecksObservedAt);
     }
 
     [Fact]
@@ -456,14 +466,174 @@ public sealed class QueueBoardTests
         ]);
 
         var row = Assert.Single(board.PullRequests);
-        Assert.Equal(QueueItemState.Cancelled, row.State);
+        Assert.Equal(QueueItemState.Cancelled, Assert.Single(row.Lanes).State);
         Assert.Empty(board.Pending);
 
         // Control: active PR rows retain their actual queue state, rather than every PR row acquiring
         // the cancellation marker because it has a pull request.
         Assert.Equal(
             QueueItemState.Queued,
-            Assert.Single(Project([Item("active", stage: WorkStage.Review, issue: 1, pr: 2)]).PullRequests).State);
+            Assert.Single(Assert.Single(Project([Item("active", stage: WorkStage.Review, issue: 1, pr: 2)]).PullRequests).Lanes).State);
+    }
+
+    [Fact]
+    public void Fresh_terminal_observations_move_to_history_without_changing_cancelled_lane_evidence()
+    {
+        var now = DateTimeOffset.Parse("2026-09-10T12:00:00Z");
+        var item = Item(
+            "2192-lane", WorkStage.Review, 2192, QueueItemState.Cancelled, round: 1, pr: 2192,
+            checks: PullRequestChecks.Failing, checksObservedAt: now.AddHours(-4),
+            repository: "github.com/acme/one");
+        var observation = new QueuePullRequestObservation(
+            "github.com/acme/one", 2192, PullRequestObservationStates.Merged, "abcdef", now, now, null);
+        var closedItem = Item(
+            "2193-lane", WorkStage.Ready, 2193, QueueItemState.Queued, pr: 2193,
+            repository: "github.com/acme/one");
+        var closedObservation = new QueuePullRequestObservation(
+            "github.com/acme/one", 2193, PullRequestObservationStates.Closed, "fedcba", now, now, null);
+
+        var board = Project([item, closedItem], observations: [observation, closedObservation], observationNow: now,
+            observationFreshness: TimeSpan.FromMinutes(2));
+
+        Assert.Empty(board.PullRequests);
+        Assert.Equal(2, board.PullRequestHistory.Count);
+        var completed = Assert.Single(board.PullRequestHistory, p => p.PullRequestState == PullRequestObservationStates.Merged);
+        Assert.Single(board.PullRequestHistory, p => p.PullRequestState == PullRequestObservationStates.Closed);
+        var lane = Assert.Single(completed.Lanes);
+        Assert.Equal(PullRequestObservationStates.Merged, completed.PullRequestState);
+        Assert.Equal(QueueItemState.Cancelled, lane.State);
+        Assert.Equal("review", lane.Stage);
+        Assert.Equal(PullRequestChecks.Failing, lane.Checks);
+        Assert.Null(lane.ChecksHeadSha);
+        Assert.Equal(QueueDeploymentStates.NotRecorded, completed.Deployment);
+    }
+
+    [Fact]
+    public void Open_and_unknown_PRs_stay_in_follow_up_while_trusted_stale_terminal_evidence_stays_in_history()
+    {
+        var now = DateTimeOffset.Parse("2026-09-10T12:00:00Z");
+        var items = new[]
+        {
+            Item("cancelled", WorkStage.Review, 1, QueueItemState.Cancelled, pr: 7, repository: "github.com/acme/one"),
+            Item("ready", WorkStage.Ready, 2, QueueItemState.Queued, pr: 7, repository: "github.com/acme/one"),
+            Item("other-repo", WorkStage.Ready, 3, QueueItemState.Queued, pr: 7, repository: "github.com/acme/two"),
+        };
+        var observations = new[]
+        {
+            new QueuePullRequestObservation("github.com/acme/one", 7, PullRequestObservationStates.Open, "aaa", now, now, null),
+            new QueuePullRequestObservation("github.com/acme/two", 7, PullRequestObservationStates.Closed, "bbb", now.AddHours(-1), now, "lookup failed"),
+        };
+
+        var board = Project(items, observations: observations, observationNow: now,
+            observationFreshness: TimeSpan.FromMinutes(2));
+
+        Assert.Single(board.PullRequests);
+        var shared = Assert.Single(board.PullRequests, p => p.Repository == "github.com/acme/one");
+        Assert.Equal(PullRequestObservationFreshness.Current, shared.ObservationFreshness);
+        Assert.Equal(2, shared.Lanes.Count);
+        var stale = Assert.Single(board.PullRequestHistory, p => p.Repository == "github.com/acme/two");
+        Assert.Equal(PullRequestObservationFreshness.Stale, stale.ObservationFreshness);
+        Assert.Equal(PullRequestObservationStates.Closed, stale.PullRequestState);
+        Assert.Equal("lookup failed", stale.ObservationError);
+    }
+
+    [Fact]
+    public void Missing_malformed_or_untrusted_observation_is_unknown_and_a_fresh_reopen_returns_to_follow_up()
+    {
+        var now = DateTimeOffset.Parse("2026-09-10T12:00:00Z");
+        var item = Item("lane", WorkStage.Ready, 1, QueueItemState.Queued, pr: 7,
+            repository: "github.com/acme/one");
+
+        var missing = Assert.Single(Project([item], observationNow: now,
+            observationFreshness: TimeSpan.FromMinutes(2)).PullRequests);
+        Assert.Equal(PullRequestObservationFreshness.Unknown, missing.ObservationFreshness);
+
+        var malformed = new QueuePullRequestObservation("github.com/acme/one", 7, "vanished", null, null, now, null);
+        var malformedRow = Assert.Single(Project([item], observations: [malformed], observationNow: now,
+            observationFreshness: TimeSpan.FromMinutes(2)).PullRequests);
+        Assert.Equal(PullRequestObservationFreshness.Unknown, malformedRow.ObservationFreshness);
+        Assert.NotNull(malformedRow.ObservationError);
+
+        // A known terminal word alone is not trustworthy evidence. The successful reader writes the
+        // head and observation stamp with it; accepting a partial stored row would conceal unknown
+        // work in history after a hand edit or an incompatible old writer.
+        var partial = new QueuePullRequestObservation(
+            "github.com/acme/one", 7, PullRequestObservationStates.Merged, null, now, now, null);
+        var partialRow = Assert.Single(Project([item], observations: [partial], observationNow: now,
+            observationFreshness: TimeSpan.FromMinutes(2)).PullRequests);
+        Assert.Equal(PullRequestObservationFreshness.Unknown, partialRow.ObservationFreshness);
+        Assert.Null(partialRow.PullRequestState);
+        Assert.Empty(Project([item], observations: [partial], observationNow: now,
+            observationFreshness: TimeSpan.FromMinutes(2)).PullRequestHistory);
+
+        var future = new QueuePullRequestObservation(
+            "github.com/acme/one", 7, PullRequestObservationStates.Merged, "future-head",
+            now.AddMinutes(1), now.AddMinutes(1), null);
+        var futureRow = Assert.Single(Project([item], observations: [future], observationNow: now,
+            observationFreshness: TimeSpan.FromMinutes(2)).PullRequests);
+        Assert.Equal(PullRequestObservationFreshness.Unknown, futureRow.ObservationFreshness);
+        Assert.Null(futureRow.ObservedAt);
+
+        var reopened = new QueuePullRequestObservation(
+            "github.com/acme/one", 7, PullRequestObservationStates.Open, "new-head", now, now, null);
+        var reopenedBoard = Project([item], observations: [reopened], observationNow: now,
+            observationFreshness: TimeSpan.FromMinutes(2));
+        Assert.Single(reopenedBoard.PullRequests);
+        Assert.Empty(reopenedBoard.PullRequestHistory);
+        Assert.Equal(PullRequestObservationStates.Open, reopenedBoard.PullRequests[0].PullRequestState);
+    }
+
+    [Fact]
+    public void Terminal_history_does_not_oscillate_during_the_real_five_minute_poll_and_ninety_second_freshness_gap()
+    {
+        var firstPoll = DateTimeOffset.Parse("2026-09-10T12:00:00Z");
+        var defaultPollInterval = TimeSpan.FromMinutes(5);
+        var defaultFreshness = TimeSpan.FromSeconds(90);
+        var nextPoll = firstPoll + defaultPollInterval;
+        var items = new[]
+        {
+            Item("merged", WorkStage.Review, 1, QueueItemState.Cancelled, pr: 7,
+                repository: "github.com/acme/one"),
+            Item("closed", WorkStage.Ready, 2, QueueItemState.Queued, pr: 8,
+                repository: "github.com/acme/one"),
+        };
+        var firstReadings = new[]
+        {
+            new QueuePullRequestObservation(
+                "github.com/acme/one", 7, PullRequestObservationStates.Merged, "head-7",
+                firstPoll, firstPoll, null),
+            new QueuePullRequestObservation(
+                "github.com/acme/one", 8, PullRequestObservationStates.Closed, "head-8",
+                firstPoll, firstPoll, null),
+        };
+
+        var betweenPolls = Project(items, observations: firstReadings, observationNow: nextPoll,
+            observationFreshness: defaultFreshness);
+
+        Assert.Empty(betweenPolls.PullRequests);
+        Assert.Equal(2, betweenPolls.PullRequestHistory.Count);
+        Assert.All(betweenPolls.PullRequestHistory, row =>
+            Assert.Equal(PullRequestObservationFreshness.Stale, row.ObservationFreshness));
+
+        // The next bounded read can confirm a reopening. That positive observation returns only that
+        // qualified key to follow-up; the other stale terminal key remains stable history.
+        var reopenedReadings = firstReadings
+            .Select(reading => reading.PullRequest == 7
+                ? reading with
+                {
+                    State = PullRequestObservationStates.Open,
+                    HeadSha = "reopened-head-7",
+                    ObservedAt = nextPoll,
+                    AttemptedAt = nextPoll,
+                }
+                : reading)
+            .ToList();
+        var reopened = Project(items, observations: reopenedReadings, observationNow: nextPoll,
+            observationFreshness: defaultFreshness);
+
+        Assert.Equal(7, Assert.Single(reopened.PullRequests).PullRequest);
+        Assert.Equal(PullRequestObservationStates.Open, reopened.PullRequests[0].PullRequestState);
+        Assert.Equal(8, Assert.Single(reopened.PullRequestHistory).PullRequest);
     }
 
     [Fact]

@@ -1713,10 +1713,35 @@ rests on. An operator cancellation landing inside this check's own window settle
 mirroring the ordinary verify window's identical carve-out — never a `VerifyFailed`/`VerifyNotRun`
 misreporting an execution the operator asked to stop.
 
-**Measured-zero implementation self-check (#2131 slice 2).** A write-granted implementation that
+**Conductor-selected measurement completion (#2225).** `measure` is the executable-tool role for a
+measurement whose delivered result is an artifact rather than a repository change. The selection is
+made before launch as the queue item's ordinary `role` value; `queue.json`, `baton queue list`, the
+launched room's `bindings.json`, and its `ExecutionRequest.Worker` history therefore all expose the
+same value, and a daemon restart/replay reads it from the retained row rather than reconstructing it
+from prose. The role declares one `report.md` with `non_empty_text`, so a missing or whitespace-only
+report remains an unsatisfied output and cannot settle succeeded. Its binding sets
+`VerifiesWorkspace: false` and `DeliversBranch: false`: after an exit 0 the existing output-contract
+validator is the completion check, and no workspace gate, commit, push, or PR is demanded. This does
+not alter `implement`: that role still sets both `VerifiesWorkspace` and `DeliversBranch`, with
+`ExpectPr` true by default, whatever its brief or `changes.md` says. The measurement grant reuses
+implement's executable categories and existing arrest ceilings and retains positional shell denies
+for direct commit, push, PR-mutation, and issue-mutation spellings as defense in depth. Those denies
+are not a categorical no-shipping sandbox: `ShellCommandPatternMatcher` anchors command families at
+the beginning of a segment, so alternate forms such as `git -C . push`, `gh --repo owner/repo pr edit`,
+or a leading redirection are outside what it can enforce. The role instruction and operator policy
+remain the broader no-shipping boundary; making that boundary mechanical requires a separately
+approved controlled-execution policy, not a completion-contract change or a silent matcher rewrite.
+The single supported queue invocation is documented in `docs/dispatch.md` under Roles.
+
+**Measured-zero implementation self-check (#2131 slice 2).** A write-granted, workspace-verified
+implementation that
 finishes naturally with a satisfied contract, a measured count of zero write-tool calls, and a measured unchanged
 worktree settles `Failed` / `Permanent`, not `Succeeded`; a pre-existing pushed branch and PR cannot turn
-that no-op into delivery. `OutcomeClassifier.BuildSucceededClassification` owns the conjunction. Neither
+that no-op into delivery. `OutcomeClassifier.BuildSucceededClassification` owns the conjunction and
+uses the binding's existing `VerifiesWorkspace` policy as its discriminator. `ChangesTree` remains a
+separate diagnostic: it records that the executable role can write the workspace, so a measurement
+that creates and cleans fixtures can still report `workspaceChanged: false` without being graded as
+an implementation. Neither
 half alone is enough: a changed tree can have been written through shell, and an unchanged tree after a
 write-tool call can be a truthful declared-output-only result. A null write-tool count (unsupported parser,
 missing/unreadable capture, or a capture-loss marker) and an unmeasurable workspace comparison remain
@@ -1970,7 +1995,7 @@ to dispatch.
 
 **The tool-step cap (#1682, second producer, independent of usage parsing) — unit fixed and
 false-positive floor measured (#1686 review F1/F2).** `WorkerRole` carries `MaxToolSteps`
-(`implement` 610, `review` 100, `consolidate` 150, `advise` unset; every other role none) — a second, independent arrest
+(`implement` 610, `measure` 610, `review` 100, `consolidate` 150, `advise` unset; every other role none) — a second, independent arrest
 trigger on the running COUNT of tool-step lines, entirely apart from whether usage ever parses on the
 stream at all (a stream with malformed or absent usage lines still gets the tool-step protection;
 `TokenBudgetMonitorTests.The_tool_step_cap_fires_at_cap_plus_one_with_zero_usage_lines` proves this).
@@ -7040,6 +7065,30 @@ defaults its tag to `<n>-lane`. The item carries `issue`, its worktree, `branch`
 (#1912; `Baton.Queue.QueueItem.Checks` is the register for both). **What is ruled here rather than
 there: those two are display surface, not policy** — no arm of the table below reads either, so a
 change to how they are derived can never move an item to a different stage.
+
+**Current PR state is a repository-qualified observation, not a lane outcome (#2200).** The queue
+snapshot's top-level `pullRequestObservations` collection keys one read by canonical
+`host/owner/repo` plus PR number and shares it across every retained lane with that key; same-number
+PRs in different repositories remain different observations. The existing `DeliveryPoller` refreshes
+one qualified PR per poll through its existing `IGhCliRunner`; attempt stamps rotate a larger retained
+set across later polls instead of bursting forge reads. Each read has the existing 20-second child-process
+bound and host cancellation, runs outside the queue lock and the scheduler's launch path, and conditionally
+writes only keys still named by the locked snapshot. Every distinct surviving workspace for a shared PR is
+validated, and any drift invalidates the prior reading and makes the observation unknown. The freshness
+window is the fleet projection's existing three-tick threshold, applied to attempts as the retry backoff too:
+a fresh confirmed `open` remains current follow-up, while a trustworthy last-known `merged` or `closed`
+observation stays in collapsed history after it becomes stale. History names both staleness and the last
+check; it does not oscillate back into follow-up during the default five-minute poll or a multi-key rotation.
+A transient failed refresh retains a structurally complete prior reading as explicitly stale last-known
+evidence. Missing, malformed, partial, future-dated, or identity-mismatched evidence is `unknown` and remains
+in current follow-up, so unknown work is never concealed. `closed` is never cached forever because it is
+still re-read after the retry window, and a confirmed reopened PR returns to follow-up. Stale terminal
+evidence is presentation history only: it is never current proof for readiness, merge, deployment, or any
+external action. Observation changes neither item state, stage, round, cancellation history, dispatch,
+readiness, merge/close state, nor deployment state. Deployment therefore reads “not recorded”, never
+“none”. Each historical checks word remains attached to its lane and to
+`checksHeadSha`; a legacy row without that field renders “commit unknown” rather than borrowing the
+independent PR observation's head.
 
 **Lifecycle selection is stage-specific by default (#2181).** On a newly added work item, bare
 `--adapter`, `--model` and `--effort` select the initial `implement` stage only; after every advance,

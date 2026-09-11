@@ -36,6 +36,7 @@ public sealed class DeliveryPoller : BackgroundService
     private static readonly HashSet<string> PendingStates = new(StringComparer.OrdinalIgnoreCase) { "PENDING", "EXPECTED" };
 
     private readonly IGhCliRunner _gh;
+    private readonly WorkItemAdvancer _boardObservationAdvancer;
     private bool _ghMissingWarned;
     private readonly HashSet<string> _missingProjectRootWarnedRooms = new(StringComparer.Ordinal);
 
@@ -45,8 +46,14 @@ public sealed class DeliveryPoller : BackgroundService
     }
 
     public DeliveryPoller(IGhCliRunner gh)
+        : this(gh, new WorkItemAdvancer(gh, null, RepositoryIdentityResolver.TryResolveAsync))
+    {
+    }
+
+    internal DeliveryPoller(IGhCliRunner gh, WorkItemAdvancer boardObservationAdvancer)
     {
         _gh = gh;
+        _boardObservationAdvancer = boardObservationAdvancer;
     }
 
     public static TimeSpan GetInterval()
@@ -98,6 +105,24 @@ public sealed class DeliveryPoller : BackgroundService
     /// <summary>One tick's worth of work over every discovered room — public entry point for tests.</summary>
     internal async Task PollOnceAsync(CancellationToken cancellationToken = default)
     {
+        // Queue-board PR state is another read-only forge observation, so it shares this service's
+        // established bounded cadence. It deliberately does not run inside the queue scheduler:
+        // a slow forge can delay this diagnostic sweep, never an unrelated lane launch.
+        try
+        {
+            await _boardObservationAdvancer
+                .RefreshPullRequestObservationsAsync(DateTimeOffset.UtcNow, cancellationToken)
+                .ConfigureAwait(false);
+        }
+        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+        {
+            throw;
+        }
+        catch (Exception ex)
+        {
+            Console.Error.WriteLine($"DeliveryPoller: queue-board refresh failed: {ex.Message}");
+        }
+
         var discovered = await FleetStatusTool.DiscoverRoomsAsync([], cancellationToken).ConfigureAwait(false);
         foreach (var room in discovered)
         {

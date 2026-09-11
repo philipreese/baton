@@ -30,7 +30,7 @@ if (beginAt < 0 || endAt < 0 || endAt < beginAt) {
   process.exit(1);
 }
 const source = html.slice(html.indexOf("\n", beginAt) + 1, endAt).replace(/^\s*\/\/.*$/gm, "");
-const REQUIRED = ["queueSlotsLineHtml", "queueLanesTableHtml", "queuePendingTableHtml", "queuePrTableHtml", "queueBoardHtml"];
+const REQUIRED = ["queueSlotsLineHtml", "queueLanesTableHtml", "queuePendingTableHtml", "queuePrTableHtml", "queuePrRowsHtml", "queuePrHistoryHtml", "queueBoardHtml"];
 const missing = REQUIRED.filter(fn => !source.includes(`function ${fn}`));
 if (missing.length) {
   console.error(`glass.selftest.mjs: FAIL -- the marked block no longer defines: ${missing.join(", ")}`);
@@ -123,7 +123,7 @@ check("a valid weekly-only account renders its vendor window without manufacturi
       && !vendorUsageSink.innerHTML.includes("5h"));
 
 const panel = new Function("esc", "age", `${source}\nreturn { ${REQUIRED.join(", ")} };`)(esc, age);
-const { queueSlotsLineHtml, queuePendingTableHtml, queuePrTableHtml, queueLanesTableHtml, queueBoardHtml } = panel;
+const { queueSlotsLineHtml, queuePendingTableHtml, queuePrTableHtml, queuePrHistoryHtml, queueLanesTableHtml, queueBoardHtml } = panel;
 
 // -- no board is THREE facts, and each gets its own word (#1912 fix round) --
 // FleetProjectionWriter.BuildQueueSectionAsync's remarks are the register for which state produces
@@ -236,22 +236,51 @@ check("(control) an unheld queue does not",
 // -- PR stages --
 {
   const out = queuePrTableHtml({ pullRequests: [
-    { tag: "a", pr: 2028, stage: "review", round: 1, verdict: "block", checks: "failing", checksObservedAt: "2026-09-07T11:00:00Z", halted: false },
-    { tag: "b", pr: 2035, stage: "ready", round: 3, verdict: "approve", checks: "passing", checksObservedAt: "2026-09-07T11:59:30Z", halted: false },
-    { tag: "c", pr: 2040, stage: "fix", round: 2, halted: true },
-    { tag: "cancelled", pr: 2173, stage: "review", round: 2, state: "Cancelled", halted: false },
+    { repository: "github.com/acme/one", pr: 2028, prState: "open", freshness: "current", observedAt: "2026-09-07T11:59:30Z", attemptedAt: "2026-09-07T11:59:30Z", headSha: "aaaaaaaa11111111", deployment: "not-recorded", lanes: [
+      { tag: "a", stage: "review", state: "Done", round: 1, verdict: "block", checks: "failing", checksObservedAt: "2026-09-07T11:00:00Z", checksHeadSha: "bbbbbbbb22222222", twinIssue: 1530 },
+      { tag: "cancelled", stage: "review", state: "Cancelled", round: 2 },
+      { tag: "halted", stage: "fix", state: "Failed", round: 2, halted: true, twinIssue: 1600 },
+    ] },
+    { repository: "github.com/acme/two", pr: 2035, freshness: "unknown", attemptedAt: "2026-09-07T11:59:30Z", observationError: "repository identity invalid", deployment: "not-recorded", lanes: [
+      { tag: "b", stage: "ready", state: "Queued", round: 3, verdict: "approve", checks: "passing", checksObservedAt: "2026-09-07T11:59:30Z" },
+    ] },
   ] });
   check("the PR number is rendered", out.includes("#2028") && out.includes("#2035"));
-  check("every stage this table can carry renders", out.includes(">review</td>") && out.includes(">ready</td>"));
+  check("one qualified PR row retains multiple lane links", (out.match(/github.com\/acme\/one #2028/g) || []).length === 1 && out.includes(">a</a>") === false && out.includes("a · review"));
   check("the last verdict decision is rendered", out.includes("block") && out.includes("approve"));
   check("a PR with no verdict yet says so rather than rendering blank", out.includes("no verdict"));
-  check("the checks word carries its OWN age -- the advancer reads only settled lanes, so it is never this instant's",
-        out.includes("failing (1h ago)") && out.includes("passing (just now)"));
-  check("(control) checks never observed says so, not 'passing'", out.includes("not observed"));
-  check("a halted work item is marked on its PR row", out.includes("halted"));
-  check("a cancelled work item is marked on its PR row", out.includes("review · cancelled"));
+  check("historical checks name their commit, while legacy checks say commit unknown",
+        out.includes("failing (1h ago; bbbbbbbb)") && out.includes("passing (just now; commit unknown)"));
+  check("(control) checks never observed says so, not 'passing'", out.includes("checks not observed"));
+  check("a halted work item remains marked on its grouped PR row", out.includes("halted lane"));
+  check("a cancelled lane on a confirmed-open PR is labelled explicitly", out.includes("cancelled lane · open PR"));
+  check("grouped current lanes retain their own twin markers, including different twins",
+        out.includes("twin #1530") && out.includes("twin #1600")
+          && (out.match(/q-pr-lane twin/g) || []).length === 2);
+  check("a grouped non-twin lane has no twin marker",
+        /<div class="q-pr-lane">cancelled ·/.test(out));
+  check("invalidated identity remains visible follow-up as unknown",
+        out.includes("unknown") && out.includes("lookup: repository identity invalid"));
+  check("every observation exposes when it was last checked",
+        out.includes("last checked just now") && out.includes("last confirmed just now"));
+  check("deployment absence says not recorded rather than none", out.includes(">not recorded</td>"));
   check("(control) no PR renders an explicit empty line",
-        queuePrTableHtml({ pullRequests: [] }).includes("No work item has a pull request open."));
+        queuePrTableHtml({ pullRequests: [] }).includes("No open or unknown pull request needs follow-up."));
+
+  const history = queuePrHistoryHtml({ pullRequestHistory: [
+    { repository: "github.com/acme/one", pr: 2192, prState: "merged", freshness: "current", observedAt: "2026-09-07T11:59:30Z", attemptedAt: "2026-09-07T11:59:30Z", deployment: "not-recorded", lanes: [
+      { tag: "2192-lane", stage: "review", state: "Cancelled", round: 1, checks: "failing", checksObservedAt: "2026-09-07T10:00:00Z", twinIssue: 1700 },
+    ] },
+    { repository: "github.com/acme/two", pr: 2035, prState: "closed", freshness: "stale", observedAt: "2026-09-07T09:00:00Z", attemptedAt: "2026-09-07T11:59:30Z", observationError: "gh pr view exited 1", deployment: "not-recorded", lanes: [
+      { tag: "b", stage: "ready", state: "Queued", round: 3, verdict: "approve" },
+    ] },
+  ] });
+  check("a fresh merged PR is distinct collapsed history with cancellation retained", history.includes("Completed PR history") && history.includes("merged") && history.includes("cancelled lane"));
+  check("completed history retains its per-lane twin marker", history.includes("twin #1700"));
+  check("stale trustworthy terminal history is prominent and honestly aged",
+        history.includes("last known closed · stale") && history.includes("last checked just now")
+          && history.includes("last confirmed 3h ago") && history.includes("lookup: gh pr view exited 1"));
+  check("(control) no completed PR produces no history section", queuePrHistoryHtml({ pullRequestHistory: [] }) === "");
 }
 
 // -- the standing-verdict age: a collapsed ledger row can be hours old and still current --

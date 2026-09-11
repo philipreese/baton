@@ -61,7 +61,25 @@ public sealed class GhCliRunner : IGhCliRunner
         {
             var stdoutTask = process.StandardOutput.ReadToEndAsync(cancellationToken);
             var stderrTask = process.StandardError.ReadToEndAsync(cancellationToken);
-            await process.WaitForExitAsync(cancellationToken).ConfigureAwait(false);
+            try
+            {
+                await process.WaitForExitAsync(cancellationToken).ConfigureAwait(false);
+            }
+            catch (OperationCanceledException)
+            {
+                // WaitForExitAsync only cancels the wait. Kill the whole tree so a timed-out forge
+                // read cannot leave gh or its credential/network helpers behind after the bound fires.
+                try
+                {
+                    process.Kill(entireProcessTree: true);
+                }
+                catch (Exception ex) when (ex is InvalidOperationException or Win32Exception or NotSupportedException)
+                {
+                }
+
+                throw;
+            }
+
             var stdout = await stdoutTask.ConfigureAwait(false);
             var stderr = await stderrTask.ConfigureAwait(false);
             return new GhCliResult(Started: true, process.ExitCode, stdout, stderr);

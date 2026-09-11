@@ -340,6 +340,22 @@ public sealed class DeliveryPollerTests : IDisposable
         Assert.Equal(1799, opened.PullRequestNumber);
     }
 
+    [Fact]
+    public async Task A_malformed_queue_does_not_suppress_existing_room_reconciliation()
+    {
+        var room = await CreateRoomAsync("https://github.com/philipreese/baton/pull/1799", projectRoot: null);
+        Directory.CreateDirectory(Path.GetDirectoryName(BatonPaths.QueueFile)!);
+        File.WriteAllText(BatonPaths.QueueFile, "{");
+        var gh = new FakeGhCliRunner { NextResult = new GhCliResult(Started: true, ExitCode: 0, OpenJson, string.Empty) };
+        var poller = new DeliveryPoller(gh);
+
+        await poller.PollOnceAsync(TestContext.Current.CancellationToken);
+
+        Assert.Equal(1, gh.CallCount);
+        var opened = Assert.Single((await ReadEventsAsync(room)).OfType<FlowEvent.DeliveryPrOpened>());
+        Assert.Equal(1799, opened.PullRequestNumber);
+    }
+
     private sealed class FakeGhCliRunner : IGhCliRunner
     {
         public GhCliResult NextResult { get; set; } = new(Started: true, ExitCode: 0, "{}", string.Empty);

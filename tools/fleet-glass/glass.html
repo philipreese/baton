@@ -166,6 +166,8 @@ h2{font-family:'Sora',sans-serif; font-size:.85rem; margin:1.4rem 0 .5rem; color
 .queueboard th{text-align:left; font:600 .66rem 'Public Sans'; letter-spacing:.05em; text-transform:uppercase; color:var(--ink-soft); padding:.2rem .5rem .2rem 0; border-bottom:1px solid var(--line);}
 .queueboard td{padding:.22rem .5rem .22rem 0; vertical-align:top; white-space:nowrap;}
 .queueboard tr.twin td{background:var(--chip-idle);}
+.queueboard .q-pr-lane.twin{background:var(--chip-idle);}
+.queueboard .q-twin{font:600 .66rem var(--mono); color:var(--ink-soft);}
 .queueboard .q-next{color:var(--run); font-weight:600;}
 .queueboard .q-halt{color:var(--bad); font-weight:600;}
 .queueboard .q-tag{font-family:var(--mono);}
@@ -1530,27 +1532,54 @@ function queuePendingTableHtml(q){
 }
 function queuePrTableHtml(q){
   const prs = Array.isArray(q.pullRequests) ? q.pullRequests : [];
-  if(!prs.length) return `<div class="queueboard-note q-empty">No work item has a pull request open.</div>`;
+  if(!prs.length) return `<div class="queueboard-note q-empty">No open or unknown pull request needs follow-up.</div>`;
+  return queuePrRowsHtml(prs, "current follow-up");
+}
+function queuePrRowsHtml(prs, heading){
   const rows = prs.map(p => {
-    const cls = p.twinIssue ? ' class="twin"' : "";
-    // The age is part of the value, never an optional garnish: the advancer only looks at a settled
-    // lane, so a `ready` item's checks word is frozen at the moment it went ready and rendering it
-    // bare would read as this instant's (QueueItem.Checks carries that rule on the producing side).
-    const observed = age(p.checksObservedAt);
-    const checks = p.checks
-      ? `${p.checks} (${observed === null ? "age unknown" : observed === "just now" ? "just now" : observed + " ago"})`
-      : "not observed";
-    const stage = p.state === "Cancelled" ? `<span class="q-halt">${esc(p.stage)} · cancelled</span>`
-      : p.halted ? `<span class="q-halt">${esc(p.stage)} · halted</span>` : esc(p.stage);
-    return `<tr${cls}><td>${esc("#" + p.pr)}</td>`
-      + `<td class="q-tag">${esc(p.tag)}</td>`
-      + `<td>${stage}</td>`
-      + `<td>${esc(p.round)}</td>`
-      + `<td>${esc(p.verdict || "no verdict")}</td>`
-      + `<td>${esc(checks)}</td></tr>`;
+    const current = p.freshness === "current";
+    const prState = current && p.prState === "open" ? "open"
+      : current && (p.prState === "merged" || p.prState === "closed") ? p.prState
+      : p.prState ? `last known ${p.prState} · ${p.freshness || "unknown"}` : "unknown";
+    const observed = age(p.observedAt);
+    const attempted = age(p.attemptedAt);
+    const lastChecked = attempted === null ? "last checked unknown"
+      : attempted === "just now" ? "last checked just now" : `last checked ${attempted} ago`;
+    const observationAge = observed === null ? "never confirmed"
+      : observed === "just now" ? "last confirmed just now" : `last confirmed ${observed} ago`;
+    const lanes = (Array.isArray(p.lanes) ? p.lanes : []).map(l => {
+      const checksAge = age(l.checksObservedAt);
+      const checks = l.checks
+        ? `${l.checks} (${checksAge === null ? "age unknown" : checksAge === "just now" ? "just now" : checksAge + " ago"}; ${l.checksHeadSha ? l.checksHeadSha.slice(0, 8) : "commit unknown"})`
+        : "checks not observed";
+      const cancelledOpen = current && p.prState === "open" && l.state === "Cancelled";
+      const lifecycle = cancelledOpen ? `<span class="q-halt">cancelled lane · open PR</span>`
+        : l.state === "Cancelled" ? `<span class="q-halt">cancelled lane</span>`
+        : l.halted ? `<span class="q-halt">halted lane</span>` : esc(l.stage);
+      const link = l.room
+        ? `<a class="inboxlink" data-room="${esc(l.room)}">${esc(l.tag)}</a>`
+        : esc(l.tag);
+      const twin = l.twinIssue != null
+        ? ` class="q-pr-lane twin"`
+        : ` class="q-pr-lane"`;
+      const twinLabel = l.twinIssue != null
+        ? `<span class="q-twin">twin #${esc(l.twinIssue)}</span> `
+        : "";
+      return `<div${twin}>${twinLabel}${link} · ${lifecycle} · round ${esc(l.round)} · ${esc(l.verdict || "no verdict")} · ${esc(checks)}</div>`;
+    }).join("") || "retained lane unavailable";
+    const error = p.observationError ? `<div class="q-halt">lookup: ${esc(p.observationError)}</div>` : "";
+    return `<tr><td>${esc((p.repository ? p.repository + " " : "repository unknown ") + "#" + p.pr)}</td>`
+      + `<td>${esc(prState)}<div class="queueboard-note">${esc(lastChecked)} · ${esc(observationAge)}${p.headSha ? " · " + esc(p.headSha.slice(0, 8)) : ""}</div>${error}</td>`
+      + `<td class="q-tag">${lanes}</td>`
+      + `<td>${esc(p.deployment === "not-recorded" ? "not recorded" : p.deployment || "not recorded")}</td></tr>`;
   }).join("");
-  return `<table><thead><tr><th>pr</th><th>item</th><th>stage</th><th>round</th><th>last verdict</th><th>checks</th></tr></thead>`
+  return `<table><thead><tr><th>${esc(heading)}</th><th>PR state</th><th>retained lanes</th><th>deployment</th></tr></thead>`
     + `<tbody>${rows}</tbody></table>`;
+}
+function queuePrHistoryHtml(q){
+  const prs = Array.isArray(q.pullRequestHistory) ? q.pullRequestHistory : [];
+  if(!prs.length) return "";
+  return `<details><summary>Completed PR history · ${esc(prs.length)}</summary>${queuePrRowsHtml(prs, "completed PR")}</details>`;
 }
 function queueBoardHtml(q, unavailableReason){
   // Three ways there is no board, three different answers (#1912 fix round). FleetProjectionWriter's
@@ -1580,6 +1609,7 @@ function queueBoardHtml(q, unavailableReason){
     + queueLanesTableHtml(q)
     + queuePendingTableHtml(q)
     + queuePrTableHtml(q)
+    + queuePrHistoryHtml(q)
     + `<div class="queueboard-note">${esc(decidedNote)}</div>`
     + `</div>`;
 }

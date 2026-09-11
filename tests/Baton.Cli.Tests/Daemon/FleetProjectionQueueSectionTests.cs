@@ -198,6 +198,40 @@ public sealed class FleetProjectionQueueSectionTests : IDisposable
         });
 
         var row = Assert.Single((await BuildAsync()).GetProperty("queue").GetProperty("pullRequests").EnumerateArray());
-        Assert.Equal("Cancelled", row.GetProperty("state").GetString());
+        Assert.Equal("Cancelled", row.GetProperty("lanes")[0].GetProperty("state").GetString());
+        Assert.Equal("unknown", row.GetProperty("freshness").GetString());
+    }
+
+    [Fact]
+    public async Task A_cancelled_lane_with_a_fresh_merged_observation_projects_as_completed_history()
+    {
+        var now = DateTimeOffset.UtcNow;
+        var item = Item("2192-lane", WorkStage.Review, 2192, pr: 2192) with
+        {
+            Repository = "github.com/aer-works/baton",
+            State = QueueItemState.Cancelled,
+            Checks = PullRequestChecks.Failing,
+            ChecksObservedAt = now.AddHours(-4),
+        };
+        await WriteQueueAsync(item);
+        await QueueStore.MutateAsync(
+            BatonPaths.QueueFile,
+            snapshot => snapshot with
+            {
+                PullRequestObservations =
+                [
+                    new QueuePullRequestObservation(
+                        item.Repository!, 2192, PullRequestObservationStates.Merged,
+                        "abcdef", now, now, null),
+                ],
+            },
+            CancellationToken.None);
+
+        var queue = (await BuildAsync()).GetProperty("queue");
+        Assert.Empty(queue.GetProperty("pullRequests").EnumerateArray());
+        var completed = Assert.Single(queue.GetProperty("pullRequestHistory").EnumerateArray());
+        Assert.Equal("merged", completed.GetProperty("prState").GetString());
+        Assert.Equal("Cancelled", completed.GetProperty("lanes")[0].GetProperty("state").GetString());
+        Assert.False(completed.GetProperty("lanes")[0].TryGetProperty("checksHeadSha", out _));
     }
 }

@@ -2,6 +2,12 @@ on:
   push:
     branches:
       - main
+  workflow_dispatch:
+    inputs:
+      expected_sha:
+        description: "Exact current main SHA selected for release-please recovery"
+        required: true
+        type: string
 
 permissions:
   contents: write
@@ -19,9 +25,57 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
+  recovery_target:
+    if: github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: read
+    steps:
+      - name: Admit selected main revision without checkout
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          EXPECTED_SHA: ${{ inputs.expected_sha }}
+        run: |
+          set -euo pipefail
+          if [ "$GITHUB_REF" != "refs/heads/main" ] || [[ ! "$EXPECTED_SHA" =~ ^[0-9a-f]{40}$ ]] || [ "$GITHUB_SHA" != "$EXPECTED_SHA" ]; then
+            echo "::error::Select main and provide its exact SHA."
+            exit 1
+          fi
+          live_sha=$(gh api "repos/$GITHUB_REPOSITORY/git/ref/heads/main" --jq .object.sha)
+          if [ "$live_sha" != "$EXPECTED_SHA" ]; then
+            echo "::error::Main moved before recovery admission."
+            exit 1
+          fi
+
   release-please:
+    needs: [recovery_target]
+    if: ${{ !cancelled() && (github.event_name != 'workflow_dispatch' || needs.recovery_target.result == 'success') }}
     runs-on: ubuntu-latest
     steps:
+      # release-please accepts a target branch, not an immutable target commit. Recheck the
+      # admitted revision immediately before it runs, then fail the recovery if main moves
+      # before the action finishes. The shared concurrency group also lets a newer main push
+      # cancel this run, but neither mechanism is represented as commit pinning.
+      - name: Revalidate selected main revision
+        if: github.event_name == 'workflow_dispatch'
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          EXPECTED_SHA: ${{ inputs.expected_sha }}
+        run: |
+          set -euo pipefail
+          if [ "$GITHUB_REF" != "refs/heads/main" ] || [[ ! "$EXPECTED_SHA" =~ ^[0-9a-f]{40}$ ]] || [ "$GITHUB_SHA" != "$EXPECTED_SHA" ]; then
+            echo "::error::Select main and provide its exact SHA."
+            exit 1
+          fi
+          live_sha=$(gh api "repos/$GITHUB_REPOSITORY/git/ref/heads/main" --jq .object.sha)
+          if [ "$live_sha" != "$EXPECTED_SHA" ]; then
+            echo "::error::Main moved after recovery admission."
+            exit 1
+          fi
+
       # #1369: an operator PAT, not the default token. github.token made every release
       # PR bot-authored -- a permanent "first-time contributor" needing a manual
       # approve-workflows click -- and default-token-created PRs never trigger
@@ -29,3 +83,38 @@ jobs:
       - uses: googleapis/release-please-action@v4
         with:
           token: ${{ secrets.BATON_RELEASE_PLEASE }}
+
+      - name: Detect concurrent main advance
+        if: ${{ always() && github.event_name == 'workflow_dispatch' }}
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          EXPECTED_SHA: ${{ inputs.expected_sha }}
+        run: |
+          set -euo pipefail
+          live_sha=$(gh api "repos/$GITHUB_REPOSITORY/git/ref/heads/main" --jq .object.sha)
+          if [ "$live_sha" != "$EXPECTED_SHA" ]; then
+            echo "::error::Main advanced while release-please was running; inspect the action result and current release state before retrying."
+            exit 1
+          fi
+
+  release_recovery:
+    name: Release recovery
+    needs: [recovery_target, release-please]
+    if: ${{ always() && github.event_name == 'workflow_dispatch' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: read
+    steps:
+      - name: Require admitted and completed release-please work
+        shell: bash
+        env:
+          TARGET_RESULT: ${{ needs.recovery_target.result }}
+          RELEASE_RESULT: ${{ needs.release-please.result }}
+        run: |
+          set -euo pipefail
+          if [ "$TARGET_RESULT" != "success" ] || [ "$RELEASE_RESULT" != "success" ]; then
+            echo "::error::Recovery requires successful admission and release-please completion."
+            exit 1
+          fi

@@ -134,6 +134,27 @@ public sealed class OutcomeClassifierWorkProductTests : IDisposable
     }
 
     [Fact]
+    public void An_artifact_only_lane_with_measured_zero_write_calls_and_an_unchanged_tree_succeeds()
+    {
+        var (worktree, outputDirectory) = ProvisionUntouchedWorktree();
+        File.WriteAllText(Path.Combine(outputDirectory, "report.md"), "measured result");
+        var contract = new WorkerContract("measure", [], [new ProducedOutput("report.md")], []);
+
+        var classification = OutcomeClassifier.Classify(
+            new CoreDispatchResult(0, CoreExitReason.Natural),
+            contract,
+            outputDirectory,
+            changesTreeWorkingDirectory: worktree,
+            changesTree: true,
+            writeToolCallCount: 0,
+            verifiesWorkspace: false);
+
+        Assert.Equal(OutcomeVerdict.Succeeded, classification.Verdict);
+        Assert.False(classification.WorkspaceChanged);
+        Assert.False(classification.Hollow);
+    }
+
+    [Fact]
     public void An_unchanged_tree_with_a_write_call_retains_the_existing_hollow_success_reading()
     {
         // The polarity control above: only the measured count changes. The conjunction, not an

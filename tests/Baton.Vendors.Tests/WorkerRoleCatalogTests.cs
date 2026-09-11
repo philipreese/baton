@@ -670,7 +670,7 @@ public class WorkerRoleCatalogTests
     /// true would still satisfy any predicate written over `write_files`.
     /// </summary>
     [Fact]
-    public void The_shipped_tree_changing_roles_verify_the_workspace_and_the_read_shaped_ones_do_not()
+    public void The_shipped_workspace_delivery_roles_verify_the_workspace_and_the_others_do_not()
     {
         using var env = ShippedDefault();
 
@@ -679,11 +679,12 @@ public class WorkerRoleCatalogTests
             Assert.True(WorkerRoleCatalog.For(id).VerifiesWorkspace, $"role '{id}' must be graded by the workspace's own gates.");
         }
 
-        foreach (var id in new[] { "review", "advise", "patch", "fact-check", "orchestrate", "consolidate" })
+        foreach (var id in new[] { "review", "advise", "measure", "patch", "fact-check", "orchestrate", "consolidate" })
         {
             Assert.False(
                 WorkerRoleCatalog.For(id).VerifiesWorkspace,
-                $"role '{id}' writes nothing to the workspace, so the workspace's audits cannot be grading it (#2029).");
+                $"role '{id}' does not deliver repository changes, so workspace gates must not grade it (#2029). " +
+                "VerifiesWorkspace is completion policy, not a claim that the role lacks temporary workspace-write authority.");
         }
     }
 
@@ -736,6 +737,74 @@ public class WorkerRoleCatalogTests
             "[" + Role("r", "t")[..^1] + ", \"verifies_workspace\": false}]");
 
         Assert.False(WorkerRoleCatalog.For("r").VerifiesWorkspace);
+    }
+
+    /// <summary>
+    /// #2225: measurement is selected as a role before launch, not inferred from a brief or report.
+    /// Its executable-tool categories match implement so the two prior hermetic measurements remain
+    /// possible. Positional shipping denies remain as defense in depth without being described as a
+    /// categorical shell boundary. Completion is the non-empty report contract alone: no workspace
+    /// gates, branch delivery or PR lookup.
+    /// </summary>
+    [Fact]
+    public void The_shipped_measure_role_has_executable_tools_but_an_artifact_only_completion_contract()
+    {
+        using var env = ShippedDefault();
+
+        var implement = WorkerRoleCatalog.For("implement");
+        var measure = WorkerRoleCatalog.For("measure");
+
+        Assert.Equal(implement.Grant.ReadFiles, measure.Grant.ReadFiles);
+        Assert.Equal(implement.Grant.WriteFiles, measure.Grant.WriteFiles);
+        Assert.Equal(implement.Grant.RunShellCommands, measure.Grant.RunShellCommands);
+        Assert.Equal(implement.Grant.NetworkAccess, measure.Grant.NetworkAccess);
+        Assert.False(measure.DeliversBranch);
+        Assert.False(measure.VerifiesWorkspace);
+        Assert.False(measure.AllowsSubagents);
+        Assert.Null(measure.VerifyPixiTask);
+
+        Assert.NotNull(measure.Grant.DeniedShellCommandPatterns);
+        Assert.Empty(implement.Grant.DeniedShellCommandPatterns!
+            .Except(measure.Grant.DeniedShellCommandPatterns!, StringComparer.Ordinal));
+        Assert.Contains("git commit*", measure.Grant.DeniedShellCommandPatterns);
+        Assert.Contains("git push*", measure.Grant.DeniedShellCommandPatterns);
+        Assert.Contains("gh pr create*", measure.Grant.DeniedShellCommandPatterns);
+
+        var report = Assert.Single(measure.Outputs);
+        Assert.Equal("report.md", report.Name);
+        Assert.Equal(OutputSchema.NonEmptyText, report.Schema);
+
+        var binding = RoleDispatch.ToBinding(measure, "Worker text cannot select implementation completion.");
+        Assert.False(binding.DeliversBranch);
+        Assert.False(binding.ExpectPr);
+        Assert.False(binding.VerifiesWorkspace);
+        Assert.Equal(OutputSchema.NonEmptyText, Assert.Single(binding.Contract.ProducedOutputs).Schema);
+
+        var ordinaryImplement = RoleDispatch.ToBinding(
+            implement, "This worker-authored text asks to skip push and PR verification.");
+        Assert.True(ordinaryImplement.DeliversBranch);
+        Assert.True(ordinaryImplement.ExpectPr);
+        Assert.True(ordinaryImplement.VerifiesWorkspace);
+    }
+
+    [Fact]
+    public void The_measure_role_documents_that_its_shipping_denials_are_positional_not_categorical()
+    {
+        using var env = ShippedDefault();
+
+        var measure = WorkerRoleCatalog.For("measure");
+        var allowed = measure.Grant.ShellCommandPatterns;
+        var denied = measure.Grant.DeniedShellCommandPatterns;
+
+        Assert.False(ShellCommandPatternMatcher.EvaluateChainedCommand("git push", allowed, denied).IsAllowed);
+        Assert.False(ShellCommandPatternMatcher.EvaluateChainedCommand("gh pr edit 1", allowed, denied).IsAllowed);
+
+        // The positional matcher's known limit: these remain operator-policy violations, but are not
+        // mechanically refused by this deny-only grant. Pin the limit so prose cannot overclaim it.
+        Assert.True(ShellCommandPatternMatcher.EvaluateChainedCommand("git -C . push", allowed, denied).IsAllowed);
+        Assert.True(ShellCommandPatternMatcher.EvaluateChainedCommand("gh --repo owner/repo pr edit 1", allowed, denied).IsAllowed);
+        Assert.True(ShellCommandPatternMatcher.EvaluateChainedCommand(">out.txt git push", allowed, denied).IsAllowed);
+        Assert.Contains("not a categorical shell sandbox", measure.Purpose, StringComparison.Ordinal);
     }
 
     /// <summary>#1745: spec/baton.md §3 has why `review` and why its two values are equal.</summary>

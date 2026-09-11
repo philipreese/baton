@@ -1128,6 +1128,7 @@ public static class MutationInterface
                         string? worktreeBaseRef = null;
                         IWorkerResponseParser? responseParser = null;
                         var changesTree = false;
+                        var verifiesWorkspace = true;
                         string? changesTreeWorkingDirectory = null;
                         Func<string, int>? countHookVerdicts = null;
                         try
@@ -1153,6 +1154,10 @@ public static class MutationInterface
                                 // recorded at dispatch and a catalog grant that changed since then
                                 // cannot diverge the two.
                                 changesTree = p.ChangesTree;
+                                // #2225: separate execution authority from completion grading. A
+                                // measurement can write temporary fixtures (ChangesTree true) while
+                                // its declared artifact, not repository work, is the deliverable.
+                                verifiesWorkspace = p.VerifiesWorkspace;
                                 // #1622/#1390: deliberately NOT gated on p.IsWorktree the way worktreePath
                                 // above is -- see OutcomeClassifier.Classify's own parameter doc for why a
                                 // tree-changing role never gets an auto-provisioned worktree, so that gate
@@ -1234,7 +1239,8 @@ public static class MutationInterface
                             usageParser: usageParser, worktreeBaseRef: worktreeBaseRef, changesTree: changesTree,
                             changesTreeWorkingDirectory: changesTreeWorkingDirectory, toolCallCount: toolCallCount,
                             writeToolCallCount: writeToolCallCount, hookVerdictCount: hookVerdictCount,
-                            workspaceHeadShaAtStart: workspaceHeadShaAtStart);
+                            workspaceHeadShaAtStart: workspaceHeadShaAtStart,
+                            verifiesWorkspace: verifiesWorkspace);
 
                         // #1709: no TokenBudgetMonitor in scope on this path -- this classifies a
                         // RECORDED exit from a possibly-defunct workspace, never a live process, so
@@ -2240,7 +2246,8 @@ public static class MutationInterface
                 dispatchResult, binding.Contract, prepared.OutputDirectory, binding.FailureClassifier, timeProvider,
                 grantAuditMode, worktreePath, binding.ResponseParser, usageParser, binding.WorktreeBaseSha, binding.ChangesTree,
                 changesTreeWorkingDirectory, toolCallCount, writeToolCallCount, hookVerdictCount,
-                workspaceHeadShaAtStart, openPullRequest: openPullRequest);
+                workspaceHeadShaAtStart, openPullRequest: openPullRequest,
+                verifiesWorkspace: binding.VerifiesWorkspace);
 
             // #1623 (contract: spec/baton.md §3): the engine's own verify
             // step, spawned here -- between Classify returning Succeeded and the outcome event append

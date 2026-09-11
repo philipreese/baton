@@ -415,7 +415,10 @@ public sealed class FleetProjectionWriter : BackgroundService
                 DateTime.Now,
                 lastDecision,
                 item => item.SpecFile is { Length: > 0 } spec && File.Exists(spec),
-                ReadVerdictDecision));
+                ReadVerdictDecision,
+                DateTimeOffset.UtcNow,
+                snapshot.PullRequestObservations,
+                StaleAfter()));
         }
         catch (Exception ex) when (ex is not OperationCanceledException)
         {

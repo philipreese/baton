@@ -1,3 +1,4 @@
+using Baton.Accounting;
 using Baton.Queue;
 using Baton.Status;
 using Xunit;
@@ -120,6 +121,219 @@ public sealed class QueueCommandTests
         var home = Path.Combine(Path.GetTempPath(), "baton_queue_cmd_" + Guid.NewGuid().ToString("n"));
         Directory.CreateDirectory(home);
         return home;
+    }
+
+    [Fact]
+    public async Task Add_measure_issue_resolves_repository_and_queues_the_provisioned_workspace()
+    {
+        var home = CreateTempHome();
+        using var scope = BatonEnvironmentSnapshot.BeginScope(BatonEnvironmentSnapshot.Blank with { HomeOverride = home });
+        try
+        {
+            var sourceRepository = Path.Combine(home, "source");
+            var workspace = Path.Combine(home, "w2202");
+            var brief = Path.Combine(home, "brief.md");
+            Directory.CreateDirectory(sourceRepository);
+            await File.WriteAllTextAsync(brief, "measure completion evidence", Ct);
+            string? provisionedRepository = null;
+
+            var exit = await QueueCommand.ExecuteAsync(
+                new QueueOptions(
+                    QueueVerb.Add, Tag: "2202-measure", Role: "measure", SpecFilePath: brief, Issue: 2202),
+                TextWriter.Null,
+                Ct,
+                sourceRepository,
+                (path, _) => Task.FromResult(RepositoryIdentity.From("https://github.com/Owner/Repo.git", null)),
+                (issue, source, _, repository, _, _) =>
+                {
+                    Assert.Equal(2202, issue);
+                    Assert.Equal(sourceRepository, source);
+                    provisionedRepository = repository;
+                    Directory.CreateDirectory(workspace);
+                    return Task.FromResult(workspace);
+                });
+
+            Assert.Equal(0, exit);
+            Assert.Equal("github.com/owner/repo", provisionedRepository);
+            var item = Assert.Single((await QueueStore.LoadAsync(BatonPaths.QueueFile, Ct)).Items);
+            Assert.Equal("measure", item.Role);
+            Assert.Equal(2202, item.Issue);
+            Assert.Equal(workspace, item.Workspace);
+            Assert.Equal("github.com/owner/repo", item.Repository);
+            Assert.Null(item.Stage);
+            Assert.Null(item.Branch);
+        }
+        finally
+        {
+            DirectoryCleanup.DeleteRecursively(home);
+        }
+    }
+
+    [Fact]
+    public async Task Add_ordinary_issue_records_repository_without_enabling_lifecycle()
+    {
+        var home = CreateTempHome();
+        using var scope = BatonEnvironmentSnapshot.BeginScope(BatonEnvironmentSnapshot.Blank with { HomeOverride = home });
+        try
+        {
+            var sourceRepository = Path.Combine(home, "source");
+            var workspace = Path.Combine(home, "w2225");
+            var brief = Path.Combine(home, "brief.md");
+            Directory.CreateDirectory(sourceRepository);
+            await File.WriteAllTextAsync(brief, "one ordinary lane", Ct);
+
+            await QueueCommand.ExecuteAsync(
+                new QueueOptions(
+                    QueueVerb.Add, Tag: "2225-implement", Role: "implement", SpecFilePath: brief, Issue: 2225),
+                TextWriter.Null,
+                Ct,
+                sourceRepository,
+                (_, _) => Task.FromResult(RepositoryIdentity.From("git@github.com:Owner/Repo.git", null)),
+                (_, _, _, _, _, _) =>
+                {
+                    Directory.CreateDirectory(workspace);
+                    return Task.FromResult(workspace);
+                });
+
+            var item = Assert.Single((await QueueStore.LoadAsync(BatonPaths.QueueFile, Ct)).Items);
+            Assert.Equal("github.com/owner/repo", item.Repository);
+            Assert.Null(item.Stage);
+            Assert.Null(item.Branch);
+            Assert.Null(item.AutomaticFixUsed);
+        }
+        finally
+        {
+            DirectoryCleanup.DeleteRecursively(home);
+        }
+    }
+
+    [Fact]
+    public async Task Add_lifecycle_issue_keeps_lifecycle_fields_with_the_same_repository_provenance()
+    {
+        var home = CreateTempHome();
+        using var scope = BatonEnvironmentSnapshot.BeginScope(BatonEnvironmentSnapshot.Blank with { HomeOverride = home });
+        try
+        {
+            var sourceRepository = Path.Combine(home, "source");
+            var workspace = Path.Combine(home, "w2225");
+            var brief = Path.Combine(home, "brief.md");
+            Directory.CreateDirectory(sourceRepository);
+            await File.WriteAllTextAsync(brief, "lifecycle implementation", Ct);
+
+            await QueueCommand.ExecuteAsync(
+                new QueueOptions(
+                    QueueVerb.Add, Tag: "2225-lane", Role: "implement", SpecFilePath: brief,
+                    Issue: 2225, Lifecycle: true),
+                TextWriter.Null,
+                Ct,
+                sourceRepository,
+                (_, _) => Task.FromResult(RepositoryIdentity.From("https://github.com/Owner/Repo", null)),
+                (_, _, _, _, _, _) =>
+                {
+                    Directory.CreateDirectory(workspace);
+                    return Task.FromResult(workspace);
+                });
+
+            var item = Assert.Single((await QueueStore.LoadAsync(BatonPaths.QueueFile, Ct)).Items);
+            Assert.Equal("github.com/owner/repo", item.Repository);
+            Assert.Equal(WorkStage.Implement, item.Stage);
+            Assert.Equal("2225-lane", item.Branch);
+            Assert.False(item.AutomaticFixUsed);
+        }
+        finally
+        {
+            DirectoryCleanup.DeleteRecursively(home);
+        }
+    }
+
+    [Fact]
+    public async Task Add_explicit_workspace_does_not_resolve_or_record_repository_provenance()
+    {
+        var home = CreateTempHome();
+        using var scope = BatonEnvironmentSnapshot.BeginScope(BatonEnvironmentSnapshot.Blank with { HomeOverride = home });
+        try
+        {
+            var workspace = Path.Combine(home, "workspace");
+            var brief = Path.Combine(home, "brief.md");
+            Directory.CreateDirectory(workspace);
+            await File.WriteAllTextAsync(brief, "use this workspace", Ct);
+            var resolverCalled = false;
+            var provisionerCalled = false;
+
+            await QueueCommand.ExecuteAsync(
+                new QueueOptions(
+                    QueueVerb.Add, Tag: "explicit-workspace", Role: "implement",
+                    SpecFilePath: brief, WorkspaceDirectory: workspace),
+                TextWriter.Null,
+                Ct,
+                repositoryDirectory: null,
+                (_, _) =>
+                {
+                    resolverCalled = true;
+                    return Task.FromResult<RepositoryIdentity?>(null);
+                },
+                (_, _, _, _, _, _) =>
+                {
+                    provisionerCalled = true;
+                    return Task.FromResult(workspace);
+                });
+
+            Assert.False(resolverCalled);
+            Assert.False(provisionerCalled);
+            var item = Assert.Single((await QueueStore.LoadAsync(BatonPaths.QueueFile, Ct)).Items);
+            Assert.Equal(Path.GetFullPath(workspace), item.Workspace);
+            Assert.Null(item.Repository);
+        }
+        finally
+        {
+            DirectoryCleanup.DeleteRecursively(home);
+        }
+    }
+
+    [Theory]
+    [InlineData(true)]
+    [InlineData(false)]
+    public async Task Add_issue_refuses_missing_or_local_only_repository_before_provisioning_or_queue_mutation(
+        bool missingIdentity)
+    {
+        var home = CreateTempHome();
+        using var scope = BatonEnvironmentSnapshot.BeginScope(BatonEnvironmentSnapshot.Blank with { HomeOverride = home });
+        try
+        {
+            var sourceRepository = Path.Combine(home, "source");
+            var workspace = Path.Combine(home, "w2225");
+            var brief = Path.Combine(home, "brief.md");
+            Directory.CreateDirectory(sourceRepository);
+            await File.WriteAllTextAsync(brief, "must not be copied", Ct);
+            var provisionerCalled = false;
+            var identity = missingIdentity
+                ? null
+                : RepositoryIdentity.From(null, Path.Combine(sourceRepository, ".git"));
+
+            var refusal = await Assert.ThrowsAsync<CliArgumentException>(() => QueueCommand.ExecuteAsync(
+                new QueueOptions(
+                    QueueVerb.Add, Tag: "repository-refusal", Role: "measure", SpecFilePath: brief, Issue: 2225),
+                TextWriter.Null,
+                Ct,
+                sourceRepository,
+                (_, _) => Task.FromResult(identity),
+                (_, _, _, _, _, _) =>
+                {
+                    provisionerCalled = true;
+                    Directory.CreateDirectory(workspace);
+                    return Task.FromResult(workspace);
+                }));
+
+            Assert.Contains("canonical remote repository identity", refusal.Message, StringComparison.Ordinal);
+            Assert.False(provisionerCalled);
+            Assert.False(Directory.Exists(workspace));
+            Assert.False(File.Exists(BatonPaths.QueueFile));
+            Assert.False(Directory.Exists(BatonPaths.QueueSpecsDirectory));
+        }
+        finally
+        {
+            DirectoryCleanup.DeleteRecursively(home);
+        }
     }
 
     [Fact]
