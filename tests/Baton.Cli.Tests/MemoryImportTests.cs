@@ -560,6 +560,91 @@ public sealed class MemoryImportTests : IDisposable
     }
 
     /// <summary>
+    /// A transient failure reading either canonical input to the separate-root plan cannot be mistaken
+    /// for an empty input and made durable. The healthy retry proves the one-shot failure control did
+    /// not merely make imports unable to finish.
+    /// </summary>
+    [Theory]
+    [InlineData("entries")]
+    [InlineData("aliases")]
+    public async Task A_failed_canonical_planning_read_cannot_settle_or_publish_an_incomplete_separate_root_import(
+        string input)
+    {
+        const string repository = "github.com/philipreese/baton";
+        await BuildStandardFixtureAsync();
+        var liveRoot = Path.Combine(ClaudeHome, "projects", "C--baton", "memory");
+        var archived = WriteArchivedRoot("c--baton-memory", ("user_who.md", "the older who"));
+
+        // Record the archive assertion with the live-only import. Run 2 can therefore prove both
+        // canonical dependencies independently: alias discovery files the archive, and stored entries
+        // supply the live half that is absent from the archive-only plan.
+        await RunAsync(
+            "--root", liveRoot,
+            "--assert", $"{archived}={repository}",
+            "--asserted-by", "the-test");
+        Assert.Empty(await LinksAsync(repository));
+
+        var importsDirectory = Path.Combine(BatonPaths.Root, BatonPaths.MemoryImportsDirectoryName);
+        var manifestCount = Directory.GetFiles(importsDirectory).Length;
+        var target = Path.Combine(liveRoot, ClaudeProjectionTarget.ProjectionFileName);
+        var published = File.ReadAllBytes(target);
+        var deniedPath = input == "aliases"
+            ? BatonPaths.MemoryAliasFile
+            : BatonPaths.MemoryEntriesFile(RepositoryIdentity.FileSlugFor(repository));
+        var failures = 0;
+
+        IDisposable? DenyOnce(string candidate)
+        {
+            if (failures != 0 || !BatonPaths.RecordKeyComparer.Equals(candidate, deniedPath))
+            {
+                return null;
+            }
+
+            failures++;
+            return new FileStream(deniedPath, FileMode.Open, FileAccess.Read, FileShare.None);
+        }
+
+        if (input == "aliases")
+        {
+            JsonLinesLedger<MemoryAliasEntry>.ReadScopeOverride = DenyOnce;
+        }
+        else
+        {
+            JsonLinesLedger<MemoryEntry>.ReadScopeOverride = DenyOnce;
+        }
+
+        try
+        {
+            await Assert.ThrowsAsync<IOException>(() => RunAsync("--root", archived));
+        }
+        finally
+        {
+            JsonLinesLedger<MemoryAliasEntry>.ReadScopeOverride = null;
+            JsonLinesLedger<MemoryEntry>.ReadScopeOverride = null;
+        }
+
+        Assert.Equal(1, failures);
+        Assert.Equal(manifestCount, Directory.GetFiles(importsDirectory).Length);
+        Assert.Equal(published, File.ReadAllBytes(target));
+        Assert.DoesNotContain(await StoreAsync(repository), entry => entry.Text == "the older who");
+        Assert.Empty(await LinksAsync(repository));
+
+        // Both canonical reads are healthy again. The archive-only retry must settle the complete
+        // relationship and run the automatic projection path without exposing the historical note.
+        var recovered = await RunAsync("--root", archived);
+        Assert.Contains("Supersession links: 1   recorded: 1", recovered, StringComparison.Ordinal);
+        Assert.Contains("AUTOMATIC PROJECTION FINISHED", recovered, StringComparison.Ordinal);
+        Assert.Equal(manifestCount + 1, Directory.GetFiles(importsDirectory).Length);
+
+        var store = await StoreAsync(repository);
+        var note = Assert.Single(store, entry => entry.Text == "the older who");
+        var live = Assert.Single(store, entry => entry.Text == "who we are");
+        Assert.Equal([live.Id], note.SupersededBy);
+        Assert.Equal([note.Id], live.Supersedes);
+        Assert.DoesNotContain("the older who", File.ReadAllText(target), StringComparison.Ordinal);
+    }
+
+    /// <summary>
     /// An undo that removed nothing exits non-zero and says so, and one replayed against a different
     /// storage root refuses before touching anything.
     /// </summary>

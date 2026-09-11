@@ -171,10 +171,10 @@ public static class MemoryImportCommand
                 ? e
                 : e with { ImportOperationId = operationId }).ToList();
 
-            // Read first so the manifest can say which rows THIS run appended: an undo must not remove
-            // an entry an earlier import wrote. The append itself re-checks under its own lock, so this
-            // read is a report input and never the thing that keeps the file free of duplicates.
-            var stored = await MemoryStore.ReadAllAsync(entriesFile, cancellationToken).ConfigureAwait(false);
+            // Read strictly before recording intent: existing rows decide both which entries this run
+            // can own and which live/archive supersession links the durable plan must carry. The append
+            // itself still re-checks under its own lock, so this snapshot is not the duplicate fence.
+            var stored = await MemoryStore.ReadAllStrictAsync(entriesFile, cancellationToken).ConfigureAwait(false);
             var existing = stored.Select(e => e.Id).ToHashSet(StringComparer.Ordinal);
 
             // The link population is the STORE plus this run, never this run alone — MemoryImportPlan
@@ -293,13 +293,14 @@ public static class MemoryImportCommand
     /// The alias store as this run sees it: what is already recorded, plus anything <c>--assert</c>
     /// proposes. Resolution writes nothing: assertions participate in planning, then the durable
     /// import intent precedes their append just as it precedes entry and link appends. A failed
-    /// source read or intent write therefore cannot leave an unreported target association.
+    /// source read, canonical alias read, or intent write therefore cannot leave an unreported target
+    /// association or silently forget an accepted one.
     /// </summary>
     private static async Task<AliasResolution> ResolveAliasesAsync(
         MemoryImportOptions options, CancellationToken cancellationToken)
     {
         var recorded = await MemoryAliasStore
-            .ReadAllAsync(BatonPaths.MemoryAliasFile, cancellationToken).ConfigureAwait(false);
+            .ReadAllStrictAsync(BatonPaths.MemoryAliasFile, cancellationToken).ConfigureAwait(false);
 
         if (options.Assertions.Count == 0)
         {
