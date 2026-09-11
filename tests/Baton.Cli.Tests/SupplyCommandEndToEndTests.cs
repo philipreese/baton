@@ -51,6 +51,67 @@ public class SupplyCommandEndToEndTests
     }
 
     [Fact]
+    public async Task Supplying_with_an_omitted_Codex_model_refuses_before_mutating_or_launching()
+    {
+        var testRoot = Path.Combine(Path.GetTempPath(), $"cli-supply-conductor-model-{Guid.NewGuid():N}");
+        var roomDirectory = Path.Combine(testRoot, "task");
+        try
+        {
+            var observingCodex = new ResumeObservingWorkerAdapter();
+            var adapters = new Dictionary<string, IWorkerAdapter>
+            {
+                ["shell"] = new ShellCommandWorkerAdapter(),
+                ["codex"] = observingCodex,
+            };
+
+            // Persist the ready state a crashed run would leave behind. Supply's settling pump must
+            // launch a here after it mints the supplementary execution, making this a launch-path
+            // regression rather than a refusal against an unreachable bindings entry.
+            Directory.CreateDirectory(roomDirectory);
+            var definition = new WorkflowDefinition(
+                new WorkflowTemplateId("supply-ready-worker"),
+                1,
+                [new WorkflowStepDefinition(
+                    new StepId("a"), "a", [], ["out_a"], [], new RetryPolicy(1))]);
+            var snapshot = SnapshotBinder.Bind(definition);
+            await SnapshotBinder.PersistAsync(
+                snapshot, Path.Combine(roomDirectory, "snapshot.json"), TestContext.Current.CancellationToken);
+
+            // Model is deliberately omitted: Codex's recorded default is Astra, a conductor-only
+            // model. The supply pump would otherwise launch a after minting the supplementary execution.
+            var conductorConfig = new Dictionary<string, WorkerBindingConfigEntry>
+            {
+                ["a"] = new WorkerBindingConfigEntry(
+                    "codex", new WorkerContract("a", [], [new ProducedOutput("out_a")], []),
+                    "must not launch", TimeSpan.FromSeconds(30)),
+            };
+            var bindingsFilePath = Path.Combine(testRoot, "bindings.json");
+            await File.WriteAllTextAsync(
+                bindingsFilePath, JsonSerializer.Serialize(conductorConfig), TestContext.Current.CancellationToken);
+            var sourceFilePath = Path.Combine(testRoot, "revision.txt");
+            await File.WriteAllTextAsync(sourceFilePath, "the-revision", TestContext.Current.CancellationToken);
+            var logPath = Path.Combine(roomDirectory, "flow.jsonl");
+            await File.WriteAllTextAsync(logPath, string.Empty, TestContext.Current.CancellationToken);
+            var flowBeforeSupply = await File.ReadAllTextAsync(logPath, TestContext.Current.CancellationToken);
+            var artifactsRoot = Path.Combine(roomDirectory, "artifacts");
+
+            var thrown = await Assert.ThrowsAsync<ConductorOnlyWorkerModelException>(
+                () => SupplyCommand.ExecuteAsync(
+                    new SupplyOptions(roomDirectory, "human", "revision", sourceFilePath, bindingsFilePath),
+                    adapters, TestContext.Current.CancellationToken));
+
+            Assert.Contains("Astra", thrown.Message, StringComparison.Ordinal);
+            Assert.Equal(flowBeforeSupply, await File.ReadAllTextAsync(logPath, TestContext.Current.CancellationToken));
+            Assert.False(Directory.Exists(artifactsRoot));
+            Assert.Empty(observingCodex.ObservedInvocations);
+        }
+        finally
+        {
+            DirectoryCleanup.DeleteRecursively(testRoot);
+        }
+    }
+
+    [Fact]
     public async Task Supplying_against_a_task_whose_journal_is_held_open_by_another_process_throws_FlowJournalHeldException_not_a_raw_IOException()
     {
         // #816's population: SupplyCommand shares the same FlowEventLogWriter construction as

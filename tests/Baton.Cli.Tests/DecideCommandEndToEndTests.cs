@@ -54,6 +54,59 @@ public class DecideCommandEndToEndTests
     }
 
     [Fact]
+    public async Task Deciding_with_an_omitted_Codex_model_refuses_before_mutating_or_launching()
+    {
+        var testRoot = Path.Combine(Path.GetTempPath(), $"cli-decide-conductor-model-{Guid.NewGuid():N}");
+        var roomDirectory = Path.Combine(testRoot, "task");
+        try
+        {
+            var observingCodex = new ResumeObservingWorkerAdapter();
+            var adapters = new Dictionary<string, IWorkerAdapter>
+            {
+                ["shell"] = new ShellCommandWorkerAdapter(),
+                ["codex"] = observingCodex,
+            };
+            var workflowFilePath = await WriteApprovalGateWorkflowAsync(testRoot);
+            var bindingsFilePath = await WriteApprovalGateBindingsAsync(testRoot);
+
+            var paused = await RunCommand.ExecuteAsync(
+                new RunOptions(workflowFilePath, bindingsFilePath, roomDirectory), adapters,
+                cancellationToken: TestContext.Current.CancellationToken);
+            Assert.Equal(WorkflowStatus.Paused, paused.State.Status);
+            var executionId = paused.State.Steps.Single(step => step.StepId.Value == "a").LatestExecutionId!.Value;
+
+            // Model is deliberately omitted: Codex's recorded default is Astra, a conductor-only
+            // model. The decision would otherwise make b ready and dispatch it in the settling pump.
+            var conductorConfig = new Dictionary<string, WorkerBindingConfigEntry>
+            {
+                ["a"] = new WorkerBindingConfigEntry(
+                    "shell", new WorkerContract("a", [], [new ProducedOutput("out_a")], []),
+                    WriteFileCommand("out_a", "a-out"), TimeSpan.FromSeconds(30)),
+                ["b"] = new WorkerBindingConfigEntry(
+                    "codex", new WorkerContract("b", ["out_a"], [new ProducedOutput("out_b")], []),
+                    "must not launch", TimeSpan.FromSeconds(30)),
+            };
+            await File.WriteAllTextAsync(
+                bindingsFilePath, JsonSerializer.Serialize(conductorConfig), TestContext.Current.CancellationToken);
+            var logPath = Path.Combine(roomDirectory, "flow.jsonl");
+            var flowBeforeDecision = await File.ReadAllTextAsync(logPath, TestContext.Current.CancellationToken);
+
+            var thrown = await Assert.ThrowsAsync<ConductorOnlyWorkerModelException>(
+                () => DecideCommand.ExecuteAsync(
+                    new DecideOptions(roomDirectory, executionId.Value, DecisionType.Resume, null, null, bindingsFilePath),
+                    adapters, cancellationToken: TestContext.Current.CancellationToken));
+
+            Assert.Contains("Astra", thrown.Message, StringComparison.Ordinal);
+            Assert.Equal(flowBeforeDecision, await File.ReadAllTextAsync(logPath, TestContext.Current.CancellationToken));
+            Assert.Empty(observingCodex.ObservedInvocations);
+        }
+        finally
+        {
+            DirectoryCleanup.DeleteRecursively(testRoot);
+        }
+    }
+
+    [Fact]
     public async Task Deciding_against_a_task_whose_journal_is_held_open_by_another_process_throws_FlowJournalHeldException_not_a_raw_IOException()
     {
         // #816's measured crash, decide's half; see FlowEventLogWriterTests for the mechanism.

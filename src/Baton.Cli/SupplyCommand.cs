@@ -82,6 +82,11 @@ public static class SupplyCommand
 
         var bindingConfig = await WorkerBindingConfigParser.LoadFromFileAsync(options.BindingsFilePath, cancellationToken)
             .ConfigureAwait(false);
+
+        // Supplying an input can make a step ready and StartWorkflowAsync then dispatches that fresh
+        // worker execution. Refuse before provisioning or minting the supplementary execution.
+        WorkerBindingResolver.RefuseConductorOnlyWorkerModels(bindingConfig);
+
         var (provisionedConfig, provisionedWorktrees) =
             WorktreeWorkspaces.Provision(bindingConfig, options.RoomDirectoryPath);
         var profiles = await BatonProfileStore.LoadAsync(BatonProfileStore.DefaultPath, cancellationToken).ConfigureAwait(false);
