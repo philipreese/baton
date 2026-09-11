@@ -1797,15 +1797,20 @@ public sealed class CodexDynamicToolPolicyTests
     [InlineData("cmd /c \"{gh} pr create|echo done\"")]
     [InlineData("cmd /c \"{gh} pr create||echo done\"")]
     [InlineData("sh -c '{gh} pr create;true'")]
-    [InlineData("sh -c \"{gh} pr create\ntrue\"")]
     public async Task Attached_control_in_a_readable_shell_wrapped_create_is_refused_before_spawn(
         string commandTemplate)
     {
+        var spawnPathReached = false;
         using var fixture = new PolicyFixture(
             WorkerRoleCatalog.For("implement").Grant,
             ["changes.md"],
+            commandCaptureStreamFactory: _ =>
+            {
+                spawnPathReached = true;
+                throw new IOException("fixture stopped before process spawn");
+            },
             directGhOutput: "https://github.com/aer-works/baton/pull/2005");
-        var gh = ShimGh(fixture.Workspace, "unexpected shell fallback");
+        var gh = commandTemplate.StartsWith("sh", StringComparison.Ordinal) ? "./gh" : ".\\gh";
         var commandLine = commandTemplate.Replace("{gh}", gh, StringComparison.Ordinal);
 
         var result = await fixture.ExecuteAsync(
@@ -1815,6 +1820,65 @@ public sealed class CodexDynamicToolPolicyTests
         Assert.Contains(GrantRefusal.Marker, result.Text, StringComparison.Ordinal);
         Assert.Contains("gh pr create", result.Text, StringComparison.Ordinal);
         Assert.False(File.Exists(fixture.DirectGhArguments));
+        Assert.False(spawnPathReached);
+    }
+
+    [Theory]
+    [InlineData("sh -c \"g'h' pr create&&true\"", true)]
+    [InlineData("bash -c \"g\\h p\\r cre\\ate;true\"", true)]
+    [InlineData("zsh -c \"echo safe|g'h' pr create\"", true)]
+    [InlineData("cmd /c \"g^h p^r cre^ate&echo done\"", true)]
+    [InlineData("cmd /c \"g\"\"h pr create||echo done\"", true)]
+    [InlineData("pwsh -Command \"g`h pr create; Write-Output done\"", true)]
+    [InlineData("powershell -Command \"& 'gh' pr create\"", true)]
+    [InlineData("sh -c \"printf '%s\\n' 'gh pr create&echo done'\"", false)]
+    [InlineData("sh -c \"echo gh pr create\"", false)]
+    [InlineData("sh -c \"echo g'h' pr create\\&echo done\"", false)]
+    [InlineData("cmd /c \"echo gh pr create^&echo done\"", false)]
+    [InlineData("pwsh -Command \"Write-Output 'gh pr create&echo done'\"", false)]
+    [InlineData("env MESSAGE='gh pr create&echo done' echo ordinary", false)]
+    [InlineData("sh -c \"echo $CLI\"", true)]
+    [InlineData("sh -c \"if true; then gh pr create; fi\"", true)]
+    [InlineData("env -S 'gh pr create'", true)]
+    // Newline is pre-existing coverage, not regression evidence for this repair.
+    [InlineData("sh -c \"gh pr create\ntrue\"", true)]
+    public async Task Wrapper_lexical_polarity_is_enforced_before_any_process_can_spawn(
+        string commandLine, bool refused)
+    {
+        var spawnPathReached = false;
+        using var fixture = new PolicyFixture(
+            new PermissionGrant(RunShellCommands: true), ["changes.md"],
+            commandCaptureStreamFactory: _ =>
+            {
+                // The first durable sink is opened before Process.Start. Stop even a broken
+                // classifier here: these adversarial commands must never reach a real CLI.
+                spawnPathReached = true;
+                throw new IOException("fixture stopped before process spawn");
+            },
+            directGhOutput: "https://github.com/aer-works/baton/pull/2005");
+
+        var result = await fixture.ExecuteAsync(
+            CodexDynamicToolPolicy.RunCommandTool, new { command = commandLine });
+
+        Assert.Equal(!refused, spawnPathReached);
+        Assert.Equal(refused, result.Text.Contains(GrantRefusal.Marker, StringComparison.Ordinal));
+        Assert.False(File.Exists(fixture.DirectGhArguments));
+        if (!refused)
+            Assert.Contains("fixture stopped before process spawn", result.Text, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task A_literal_create_mention_in_a_native_wrapper_reaches_real_output()
+    {
+        using var fixture = new PolicyFixture(WorkerRoleCatalog.For("implement").Grant, ["changes.md"]);
+        var command = OperatingSystem.IsWindows()
+            ? "cmd /c echo \"gh pr create&echo done\""
+            : "sh -c \"printf '%s\\n' 'gh pr create&echo done'\"";
+
+        var result = await fixture.ExecuteAsync(CodexDynamicToolPolicy.RunCommandTool, new { command });
+
+        Assert.True(result.Success, result.Text);
+        Assert.Contains("gh pr create&echo done", result.Text, StringComparison.Ordinal);
     }
 
     [Fact]

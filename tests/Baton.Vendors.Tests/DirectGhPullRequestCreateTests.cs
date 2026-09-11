@@ -50,7 +50,6 @@ public sealed class DirectGhPullRequestCreateTests
     [InlineData("cmd /c \"gh pr create|echo done\"")]
     [InlineData("cmd /c \"gh pr create||echo done\"")]
     [InlineData("sh -c 'gh pr create;true'")]
-    [InlineData("sh -c \"gh pr create\ntrue\"")]
     public void Ambiguous_or_out_of_scope_create_is_refused(string commandLine)
     {
         var compiled = DirectGhPullRequestCreate.Compile(commandLine, Provenance);
@@ -58,6 +57,62 @@ public sealed class DirectGhPullRequestCreateTests
         Assert.True(compiled.IsCreateCommand);
         Assert.Null(compiled.Arguments);
         Assert.NotNull(compiled.Refusal);
+    }
+
+    [Theory]
+    [InlineData("sh -c \"g'h' p'r' cre'ate'&&true\"", true)]
+    [InlineData("bash -lc \"g\\h pr create\"", true)]
+    [InlineData("sh -c \"echo safe;env -i gh pr create\"", true)]
+    [InlineData("sh -c \"printf '%s\\n' 'gh pr create&echo done'\"", false)]
+    [InlineData("sh -c \"printf '%s\\n' gh pr create\"", false)]
+    [InlineData("sh -c \"printf '%s\\n' 'g'\\''h pr create|true'\"", false)]
+    [InlineData("sh -c \"echo safe > out.txt; gh pr create\"", true)]
+    [InlineData("sh -c \"echo gh pr create > out.txt\"", false)]
+    [InlineData("sh -c \"# gh pr create\necho safe\"", false)]
+    [InlineData("sh -c \"echo safe # gh pr create\"", false)]
+    [InlineData("sh -c gh pr create", false)]
+    [InlineData("env -u MESSAGE echo gh pr create", false)]
+    [InlineData("env -i sh -c \"g'h' pr create\"", true)]
+    [InlineData("cmd /d /s /c \"@g^h pr create&echo done\"", true)]
+    [InlineData("cmd /c echo \"gh pr create&echo done\"", false)]
+    [InlineData("cmd /c \"echo gh pr create^&echo done\"", false)]
+    [InlineData("pwsh -NoProfile -Command \"g`h pr create\"", true)]
+    [InlineData("pwsh -Command \"& 'gh' pr create\"", true)]
+    [InlineData("powershell -Command Write-Output 'gh pr create&echo done'", false)]
+    [InlineData("pwsh -Command \"Write-Output 'it''s gh pr create&echo done'\"", false)]
+    [InlineData("sh script.sh", false)]
+    [InlineData("pwsh -File script.ps1", false)]
+    public void Wrapper_lexical_command_positions_preserve_literal_data(string command, bool create)
+    {
+        var compiled = DirectGhPullRequestCreate.Compile(command, Provenance);
+        Assert.Equal(create, compiled.IsCreateCommand);
+        Assert.Null(compiled.Arguments);
+        if (create) Assert.NotNull(compiled.Refusal);
+    }
+
+    [Theory]
+    [InlineData("sh -c \"$CLI pr create\"")]
+    [InlineData("sh -c \"g? pr create\"")]
+    [InlineData("sh -c \"if true; then gh pr create; fi\"")]
+    [InlineData("sh -c \"! gh pr create\"")]
+    [InlineData("cmd /c \"%CLI% pr create\"")]
+    [InlineData("cmd /c \"call gh pr create\"")]
+    [InlineData("pwsh -Command \"& $cli pr create\"")]
+    [InlineData("pwsh -EncodedCommand ZwBoAA==")]
+    [InlineData("env -S 'gh pr create'")]
+    [InlineData("sh -c \"cat <<EOF\ngh pr create\nEOF\"")]
+    public void Unsupported_wrapper_grammar_refuses_with_a_direct_command_alternative(string command)
+    {
+        var compiled = DirectGhPullRequestCreate.Compile(command, Provenance);
+        Assert.Null(compiled.Arguments);
+        Assert.Contains("cannot classify", compiled.Refusal, StringComparison.Ordinal);
+        Assert.Contains("separate tool call", compiled.Refusal, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void Newline_separator_retains_pre_existing_create_refusal_coverage()
+    {
+        Assert.NotNull(DirectGhPullRequestCreate.Compile("sh -c \"gh pr create\ntrue\"", Provenance).Refusal);
     }
 
     [Fact]

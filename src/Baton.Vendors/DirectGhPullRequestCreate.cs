@@ -21,7 +21,14 @@ internal static class DirectGhPullRequestCreate
 
     public static Compilation Compile(string? commandLine, GhPullRequestCreateProvenance? provenance)
     {
-        if (!LooksLikeCreateInvocation(commandLine))
+        var classification = ShellCreateLexicalClassifier.Classify(commandLine);
+        if (classification == ShellCreateLexicalClassifier.Result.Unsupported)
+        {
+            return Refuse("Baton cannot classify this shell wrapper's syntax without interpreting it. "
+                + "Use simple literal commands, or run one standalone bare `gh pr create` with "
+                + "literal options in a separate tool call; use direct commands for other work.");
+        }
+        if (classification == ShellCreateLexicalClassifier.Result.Ordinary)
         {
             return new Compilation(false, null, null);
         }
@@ -123,156 +130,6 @@ internal static class DirectGhPullRequestCreate
 
     private static Compilation Refuse(string reason) => new(true, null, reason);
 
-    private static bool LooksLikeCreateInvocation(string? commandLine)
-    {
-        if (string.IsNullOrWhiteSpace(commandLine))
-        {
-            return false;
-        }
-
-        foreach (var segment in ShellSegments(commandLine))
-        {
-            var words = LooseWords(segment);
-            var executableIndex = 0;
-            while (executableIndex < words.Count && IsEnvironmentAssignment(words[executableIndex]))
-            {
-                executableIndex++;
-            }
-
-            // These are the two prefix families the existing shell policy already recognizes as
-            // changing command interpretation. Scan their tokenized bodies conservatively: they may
-            // move gh away from argv[0], but must never move create back to the native shell. This is
-            // deliberately not a parser for arbitrary interpreters.
-            var environmentPrefixed = words.Count > 0 && IsEnvironmentLauncher(words[0])
-                && ContainsCreateTokens(segment);
-            var shellWrapped = ShellCommandPatternMatcher.TryReadShellWrapperBody(
-                segment, out var wrapperBody)
-                && wrapperBody is not null && ContainsCreateTokens(wrapperBody);
-            if (IsCreateAt(words, executableIndex) || environmentPrefixed || shellWrapped)
-            {
-                return true;
-            }
-        }
-        return false;
-    }
-
-    private static bool IsCreateAt(IReadOnlyList<string> words, int index) =>
-        words.Count >= index + 3 && IsGhName(words[index])
-        && words[index + 1].Equals("pr", StringComparison.OrdinalIgnoreCase)
-        && words[index + 2].Equals("create", StringComparison.OrdinalIgnoreCase);
-
-    private static bool ContainsCreateTokens(string text)
-    {
-        // This is conservative recognition, not shell parsing: a readable wrapper body that
-        // attaches a control operator to any word must not hide `gh pr create` from the direct
-        // compiler. Newlines are already whitespace separators below; the remaining supported
-        // wrapper controls are lexical boundaries whether they occur once or doubled.
-        var tokens = text.Split((char[]?)null, StringSplitOptions.RemoveEmptyEntries)
-            .SelectMany(token => token.Split(['&', '|', ';'], StringSplitOptions.RemoveEmptyEntries))
-            .Select(StripShellWrapperCharacters)
-            .ToArray();
-        for (var i = 0; i + 2 < tokens.Length; i++)
-        {
-            if (IsCreateAt(tokens, i))
-            {
-                return true;
-            }
-        }
-        return false;
-    }
-
-    private static string StripShellWrapperCharacters(string token)
-    {
-        var start = 0;
-        while (start < token.Length && token[start] is '`' or '(' or '\'' or '"')
-        {
-            start++;
-        }
-        if (start + 1 < token.Length && token[start] == '$' && token[start + 1] == '(')
-        {
-            start += 2;
-        }
-
-        var end = token.Length;
-        while (end > start && token[end - 1] is '`' or ')' or '\'' or '"' or ';')
-        {
-            end--;
-        }
-        return token[start..end];
-    }
-
-    private static bool IsEnvironmentAssignment(string token)
-    {
-        var equals = token.IndexOf('=');
-        return equals > 0 && (char.IsAsciiLetter(token[0]) || token[0] == '_')
-            && token[..equals].All(c => char.IsAsciiLetterOrDigit(c) || c == '_');
-    }
-
-    private static bool IsEnvironmentLauncher(string token)
-    {
-        var name = token.Replace('\\', '/');
-        name = name[(name.LastIndexOf('/') + 1)..];
-        return name.Equals("env", StringComparison.OrdinalIgnoreCase)
-            || name.Equals("env.exe", StringComparison.OrdinalIgnoreCase);
-    }
-
-    private static IEnumerable<string> ShellSegments(string commandLine)
-    {
-        var start = 0;
-        char quote = '\0';
-        for (var i = 0; i < commandLine.Length; i++)
-        {
-            var c = commandLine[i];
-            if (quote != '\0')
-            {
-                if (c == quote)
-                {
-                    quote = '\0';
-                }
-                continue;
-            }
-            if (c is '"' or '\'')
-            {
-                quote = c;
-            }
-            else if (c is ';' or '|' or '&' or '<' or '>' or '\r' or '\n' or '(' or ')')
-            {
-                yield return commandLine[start..i];
-                start = i + 1;
-            }
-        }
-        yield return commandLine[start..];
-    }
-
-    private static IReadOnlyList<string> LooseWords(string segment)
-    {
-        var words = new List<string>();
-        var current = new System.Text.StringBuilder();
-        char quote = '\0';
-        foreach (var c in segment)
-        {
-            if (quote != '\0')
-            {
-                if (c == quote) quote = '\0'; else current.Append(c);
-            }
-            else if (c is '"' or '\'') quote = c;
-            else if (char.IsWhiteSpace(c))
-            {
-                if (current.Length > 0) { words.Add(current.ToString()); current.Clear(); }
-            }
-            else current.Append(c);
-        }
-        if (current.Length > 0) words.Add(current.ToString());
-        return words;
-    }
-
-    private static bool IsGhName(string token)
-    {
-        var name = token.Replace('\\', '/');
-        name = name[(name.LastIndexOf('/') + 1)..];
-        return name.Equals("gh", StringComparison.OrdinalIgnoreCase)
-            || name.Equals("gh.exe", StringComparison.OrdinalIgnoreCase);
-    }
 
     private static bool TryTokenize(string commandLine, out IReadOnlyList<string> tokens, out string? error)
     {
