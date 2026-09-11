@@ -12,7 +12,7 @@ internal static class ShellCreateLexicalClassifier
 {
     internal enum Result { Ordinary, Create, Unsupported }
     private enum Shell { Posix, Cmd, PowerShell }
-    private sealed record Word(string Value, string Raw);
+    private sealed record Word(string Value, string Raw, bool ConsumedEscape);
 
     public static Result Classify(string? commandLine) => Classify(commandLine, OperatingSystem.IsWindows());
 
@@ -36,6 +36,10 @@ internal static class ShellCreateLexicalClassifier
         if (depth > 4) return Result.Unsupported;
         var index = 0;
         while (index < words.Count && IsAssignment(words[index].Value)) index++;
+        // Cmd's echo-suppression prefix may occupy its own word (or several).
+        if (shell == Shell.Cmd)
+            while (index < words.Count && words[index].Value.Length > 0
+                && words[index].Value.All(c => c == '@')) index++;
         if (index == words.Count) return Result.Ordinary;
         var head = Name(shell == Shell.Cmd ? words[index].Value.TrimStart('@') : words[index].Value);
         if (head == "env")
@@ -95,8 +99,11 @@ internal static class ShellCreateLexicalClassifier
             {
                 if (++i == words.Count) return Result.Unsupported;
                 // POSIX -c executes exactly one argument; following arguments bind $0/$1.
-                // cmd and PowerShell also accept an unquoted command tail. Preserve its raw
-                // argument quotes rather than joining decoded values and inventing operators.
+                // A multiword cmd/PowerShell tail needs quotes retained, but Raw can restore
+                // escapes consumed by the outer shell. Refuse that ambiguous transport instead
+                // of classifying text different from what the nested shell actually receives.
+                if (shell != Shell.Posix && i < words.Count - 1
+                    && words.Skip(i).Any(word => word.ConsumedEscape)) return Result.Unsupported;
                 var body = shell == Shell.Posix || i == words.Count - 1
                     ? words[i].Value : string.Join(" ", words.Skip(i).Select(word => word.Raw));
                 return ClassifyList(body, shell, depth + 1, bounded: true);
@@ -123,11 +130,13 @@ internal static class ShellCreateLexicalClassifier
         var start = -1;
         char quote = '\0';
         var skipRedirectTarget = false;
+        var consumedEscape = false;
         void EndWord(int end)
         {
             if (start < 0) return;
-            if (!skipRedirectTarget) words.Add(new Word(value.ToString(), text[start..end]));
+            if (!skipRedirectTarget) words.Add(new Word(value.ToString(), text[start..end], consumedEscape));
             skipRedirectTarget = false;
+            consumedEscape = false;
             value.Clear();
             start = -1;
         }
@@ -149,6 +158,7 @@ internal static class ShellCreateLexicalClassifier
                     continue;
                 }
                 if (start < 0) start = i;
+                consumedEscape = true;
                 c = text[++i];
                 if (c == '\n') continue;
                 // PowerShell's escape sequences can generate characters; refuse those instead

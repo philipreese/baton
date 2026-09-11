@@ -92,6 +92,11 @@ public sealed class DirectGhPullRequestCreateTests
 
     [Theory]
     [InlineData("@cmd /c \"gh pr create\"", true, false)]
+    [InlineData("@ cmd /c gh pr create --fill", true, false)]
+    [InlineData("@\tcmd /c gh pr create --fill", true, false)]
+    [InlineData("@@ @ cmd /c gh pr create --fill", true, false)]
+    [InlineData("@ cmd /c gh --version", false, false)]
+    [InlineData("@ cmd /c echo gh pr create --fill", false, false)]
     [InlineData("c^md /c \"gh pr create\"", true, false)]
     [InlineData("s\\h -c \"gh pr create\"", false, true)]
     [InlineData("'cmd' /c \"gh pr create\"", false, true)]
@@ -116,6 +121,16 @@ public sealed class DirectGhPullRequestCreateTests
             ShellCreateLexicalClassifier.Classify(command, windows: true));
         Assert.Equal(posixCreate ? ShellCreateLexicalClassifier.Result.Create : ShellCreateLexicalClassifier.Result.Ordinary,
             ShellCreateLexicalClassifier.Classify(command, windows: false));
+    }
+
+    [Theory]
+    [InlineData("cmd /c echo safe ^& gh pr create --fill")]
+    [InlineData("cmd /c echo safe ^& gh --version")]
+    [InlineData("pwsh -Command echo safe ^& gh pr create --fill")]
+    public void Consumed_outer_cmd_escapes_in_multiword_tails_are_explicitly_unsupported(string command)
+    {
+        Assert.Equal(ShellCreateLexicalClassifier.Result.Unsupported,
+            ShellCreateLexicalClassifier.Classify(command, windows: true));
     }
 
     [Theory]

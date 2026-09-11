@@ -5063,14 +5063,18 @@ and has independently verified the same repository/head inputs; worker-authored 
 have no authority to populate it. General shell output never mints PR ownership evidence.
 
 Readable-wrapper recognition uses the outer native shell's syntax (`cmd` on Windows, `/bin/sh`
-elsewhere), then the selected wrapper family's syntax for its body. Windows command-head `@` and
-unquoted caret escapes are recognized; apostrophes are literal in cmd, while POSIX apostrophes quote
-and backslashes escape. Recognition does not impose the wrapper grammar restrictions on ordinary
+elsewhere), then the selected wrapper family's syntax for its body. Windows command-head `@`
+(attached or separated by whitespace) and unquoted caret escapes are recognized; apostrophes are
+literal in cmd, while POSIX apostrophes quote and backslashes escape. Recognition does not impose
+the wrapper grammar restrictions on ordinary
 native commands. Inside readable wrappers, the supported conservative grammar is literal simple
 commands, quoted word fragments, family-specific escapes, command separators, simple file redirection,
 environment assignments and `env` options (`--`, `-i`/`--ignore-environment`, `-u`/`--unset`,
 `-C`/`--chdir`), with at most four launcher/body descents.
 POSIX `-c` consumes one body argument; cmd and PowerShell command tails retain argument quoting.
+Multiword cmd/PowerShell tails containing escapes consumed by the outer shell conservatively refuse:
+reusing their raw spelling would restore escapes no longer delivered to the inner shell, while
+joining decoded words would lose literal quoting. Use direct commands for these tails.
 Dynamic expansions, compound constructs, unknown launcher options, malformed bodies, here-documents,
 descriptor duplication and excess nesting refuse with a direct-command alternative, even when a
 create invocation cannot be established. Script-file execution remains within the ambient-authority
