@@ -6982,7 +6982,7 @@ in the CLI rather than in the background host. `<root>` — which the issue left
 `Queue.WorktreeRoot`, defaulting to **the parent directory of the checkout the verb was invoked from**,
 which is the sibling-repos layout the runner assumed.
 
-`import <file>` reads the runner's own shape (`{tag, role, model, effort, timeout, workspace|issue,
+`import <file>` reads the runner's own shape (`{tag, role, model, effort, skills, timeout, workspace|issue,
 adapter, maxToolSteps, tokenBudget, overrideRunway, reason, pinModel, external}`) for Q7's cutover. A
 **launched tag comes in launched** — resetting it would re-dispatch a lane the operator already has
 running. The import refuses as a whole rather than importing the readable subset: a partial import at
