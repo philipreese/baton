@@ -90,6 +90,8 @@ public sealed class CodexDynamicToolPolicy
     private readonly Func<ShellCommandClass, TimeSpan> _commandCeiling;
     private readonly Func<string, Stream> _commandCaptureStreamFactory;
     private readonly Action<CancellationToken>? _beforeCommandTimeoutStartsForTest;
+    private readonly GhPullRequestCreateProvenance? _pullRequestCreateProvenance;
+    private readonly IReadOnlyList<string> _directGhPrefixArguments;
     private readonly Dictionary<string, RetainedCommandOutput> _commandOutputs =
         new(StringComparer.Ordinal);
 
@@ -127,7 +129,8 @@ public sealed class CodexDynamicToolPolicy
         IEnumerable<string> inputPaths,
         IEnumerable<string> producedOutputNames,
         Func<ShellCommandClass, TimeSpan>? commandCeiling = null,
-        TimeProvider? timeProvider = null)
+        TimeProvider? timeProvider = null,
+        GhPullRequestCreateProvenance? pullRequestCreateProvenance = null)
     {
         ArgumentNullException.ThrowIfNull(grant);
         ArgumentException.ThrowIfNullOrWhiteSpace(outputDirectory);
@@ -144,6 +147,9 @@ public sealed class CodexDynamicToolPolicy
         _commandCeiling = commandCeiling ?? ShellCommandCeilings.For;
         _commandCaptureStreamFactory = CreateCommandCaptureStream;
         _beforeCommandTimeoutStartsForTest = null;
+        _pullRequestCreateProvenance = ValidatePullRequestCreateProvenance(
+            pullRequestCreateProvenance, _workspaceRoot);
+        _directGhPrefixArguments = [];
         _repeats = new RepeatedToolCallLedger(timeProvider);
         _ownPullRequestOnly = OwnPullRequestOnlyRule.AppliesTo(grant) ? new OwnPullRequestOnlyRule() : null;
     }
@@ -161,13 +167,24 @@ public sealed class CodexDynamicToolPolicy
         Func<ShellCommandClass, TimeSpan>? commandCeiling,
         TimeProvider? timeProvider,
         Func<string, Stream>? commandCaptureStreamFactory,
-        Action<CancellationToken>? beforeCommandTimeoutStartsForTest = null)
+        Action<CancellationToken>? beforeCommandTimeoutStartsForTest = null,
+        GhPullRequestCreateProvenance? pullRequestCreateProvenance = null,
+        IReadOnlyList<string>? directGhPrefixArguments = null)
         : this(
             grant, workingDirectory, outputDirectory, inputPaths, producedOutputNames,
-            commandCeiling, timeProvider)
+            commandCeiling, timeProvider, pullRequestCreateProvenance)
     {
         _commandCaptureStreamFactory = commandCaptureStreamFactory ?? CreateCommandCaptureStream;
         _beforeCommandTimeoutStartsForTest = beforeCommandTimeoutStartsForTest;
+        _directGhPrefixArguments = directGhPrefixArguments ?? [];
+        if (_directGhPrefixArguments.Count > 0)
+        {
+            // Explicit fixture seam: production construction has no prefix and still requires the
+            // resolved executable itself to be named gh/gh.exe. Tests may put a script interpreter
+            // here so argv can be recorded without installing or invoking a real CLI.
+            _pullRequestCreateProvenance = ValidatePullRequestCreateProvenance(
+                pullRequestCreateProvenance, _workspaceRoot, requireGhFileName: false);
+        }
     }
 
     /// <summary>
@@ -1074,6 +1091,15 @@ public sealed class CodexDynamicToolPolicy
                 siblingPullRequestRefusal, GrantRules.OwnPullRequestOnly);
         }
 
+        // #2190: only this compiler can select the direct process path. Any create shape it
+        // recognizes either becomes exact argv or is refused; it never falls through to the shell.
+        var directCreate = DirectGhPullRequestCreate.Compile(commandLine, _pullRequestCreateProvenance);
+        if (directCreate.Refusal is { } createRefusal)
+        {
+            return CodexDynamicToolResult.Refused(createRefusal, GrantRules.OwnPullRequestOnly);
+        }
+        var directCreateArguments = directCreate.Arguments;
+
         // #1998: the ceiling is per command CLASS. A shipping or gate command is known to be progressing
         // while it runs — a `git push` here spends most of its wall clock inside the repository's own
         // pre-push gate — so the flat ceiling killed finished work rather than runaway work. The classes,
@@ -1091,7 +1117,8 @@ public sealed class CodexDynamicToolPolicy
         // NativeShell, because the branch below spawns COMSPEC on Windows and /bin/sh elsewhere —
         // the same condition, read from the one place that states what each family does with a bare
         // `&` (#2002 review LOW).
-        if (BackgroundingShapeDetector.Detect(commandLine, BackgroundingShapeDetector.NativeShell)
+        if (directCreateArguments is null
+            && BackgroundingShapeDetector.Detect(commandLine, BackgroundingShapeDetector.NativeShell)
             is { } backgroundingShape)
         {
             return CodexDynamicToolResult.Refused(BackgroundingShapeDetector.Refusal(
@@ -1123,16 +1150,27 @@ public sealed class CodexDynamicToolPolicy
         }
 
         var startInfo = ChildProcessStartInfo.Create(
-            OperatingSystem.IsWindows() ? Environment.GetEnvironmentVariable("COMSPEC") ?? "cmd.exe" : "/bin/sh",
-            startInfo =>
+            directCreateArguments is not null
+                ? _pullRequestCreateProvenance!.ExecutablePath
+                : OperatingSystem.IsWindows()
+                    ? Environment.GetEnvironmentVariable("COMSPEC") ?? "cmd.exe"
+                    : "/bin/sh",
+            info =>
         {
-            startInfo.WorkingDirectory = _workspaceRoot ?? _outputRoot;
-            startInfo.RedirectStandardOutput = true;
-            startInfo.RedirectStandardError = true;
-            startInfo.StandardOutputEncoding = Encoding.UTF8;
-            startInfo.StandardErrorEncoding = Encoding.UTF8;
+            info.WorkingDirectory = _workspaceRoot ?? _outputRoot;
+            info.RedirectStandardOutput = true;
+            info.RedirectStandardError = true;
+            info.StandardOutputEncoding = Encoding.UTF8;
+            info.StandardErrorEncoding = Encoding.UTF8;
         });
-        if (OperatingSystem.IsWindows())
+        if (directCreateArguments is not null)
+        {
+            foreach (var argument in _directGhPrefixArguments.Concat(directCreateArguments))
+            {
+                startInfo.ArgumentList.Add(argument);
+            }
+        }
+        else if (OperatingSystem.IsWindows())
         {
             startInfo.ArgumentList.Add("/d");
             startInfo.ArgumentList.Add("/s");
@@ -1280,14 +1318,13 @@ public sealed class CodexDynamicToolPolicy
 
         _commandOutputs.Add(reference, retained!);
 
-        if (!callerCancelled && timeoutFailure is null && process.ExitCode == 0)
+        if (directCreateArguments is not null
+            && !callerCancelled && timeoutFailure is null && process.ExitCode == 0)
         {
-            // #2001: the one place a room can learn its own PR number while it is still running —
-            // `gh pr create` prints the new PR's URL, and only a create that SUCCEEDED opened one.
-            // Read the retained channels before the bounded preview is rendered. The synthetic PR
-            // fixture places the URL outside the preview and proves this observation still opens the
-            // room's own-PR gate.
-            _ownPullRequestOnly?.ObserveCommandOutput(commandLine, stdoutText + stderrText);
+            // The URL is attributable to the one preselected executable and exact argv above.
+            // General-shell output never reaches this evidence producer.
+            _ownPullRequestOnly?.Observe(PullRequestOwnershipEvidence.FromAttributedCreateOutput(
+                _pullRequestCreateProvenance!.Repository, stdoutText + stderrText));
         }
 
         var status = callerCancelled
@@ -1387,6 +1424,29 @@ public sealed class CodexDynamicToolPolicy
     private static Stream CreateCommandCaptureStream(string path) => new FileStream(
         path, FileMode.CreateNew, FileAccess.Write, FileShare.Read, bufferSize: 4096,
         FileOptions.Asynchronous | FileOptions.SequentialScan);
+
+    private static GhPullRequestCreateProvenance? ValidatePullRequestCreateProvenance(
+        GhPullRequestCreateProvenance? provenance, string? workspaceRoot, bool requireGhFileName = true)
+    {
+        if (provenance is null || workspaceRoot is null
+            || !Path.IsPathFullyQualified(provenance.ExecutablePath)
+            || !File.Exists(provenance.ExecutablePath)
+            || GhExecutableResolver.IsWithin(workspaceRoot, provenance.ExecutablePath)
+            || requireGhFileName && !Path.GetFileName(provenance.ExecutablePath).Equals(
+                OperatingSystem.IsWindows() ? "gh.exe" : "gh", StringComparison.OrdinalIgnoreCase)
+            || GitHubRepository.TryCanonicalize(provenance.Repository) is not { } repository
+            || string.IsNullOrWhiteSpace(provenance.HeadBranch)
+            || provenance.HeadBranch.Equals("HEAD", StringComparison.Ordinal))
+        {
+            return null;
+        }
+
+        return provenance with
+        {
+            ExecutablePath = Path.GetFullPath(provenance.ExecutablePath),
+            Repository = repository,
+        };
+    }
 
     private static async Task WaitForExitOrCaptureFailureAsync(
         Process process,

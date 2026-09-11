@@ -1693,38 +1693,37 @@ public sealed class CodexDynamicToolPolicyTests
     }
 
     /// <summary>
-    /// The gate-OPENING half of the same wiring, which is the only half that needs a process: the
-    /// policy hands <c>gh pr create</c>'s combined output to
-    /// <see cref="OwnPullRequestOnlyRule.ObserveCommandOutput"/> when the command exited zero, and the
-    /// number it learns there admits exactly that pull request on the NEXT ask.
-    /// <para>
-    /// A shim <c>gh</c> in the workspace root — invoked as <c>.\gh</c> / <c>./gh</c>, never bare, so
-    /// a real <c>gh</c> on the machine's PATH can never be the thing that runs — prints the URL a
-    /// create prints. The control arm is read first and is what makes the pass attributable: the SAME
-    /// <c>gh pr view 2005</c> is refused before the create and allowed after it, so a build that
-    /// stopped calling <c>ObserveCommandOutput</c> fails the second arm while a build that admitted
-    /// every number fails the first.
-    /// </para>
+    /// The #2190 production shape end to end through a hermetic fake: a preselected executable
+    /// outside the workspace receives exact argv, including a quoted Windows title as one value.
+    /// Its attributed, successful, repository-matching output opens exactly one repository-qualified
+    /// read. The interpreter prefix is an explicit internal test seam; production accepts only a
+    /// native file named gh/gh.exe and supplies no prefix.
     /// </summary>
     [Fact]
-    public async Task The_broker_learns_this_rooms_pull_request_from_its_own_gh_pr_create()
+    public async Task The_broker_learns_ownership_only_from_direct_verified_gh_create()
     {
-        using var fixture = new PolicyFixture(WorkerRoleCatalog.For("implement").Grant, ["changes.md"]);
         const string ownPullRequestUrl = "https://github.com/aer-works/baton/pull/2005";
+        using var fixture = new PolicyFixture(
+            WorkerRoleCatalog.For("implement").Grant,
+            ["changes.md"],
+            directGhOutput: ownPullRequestUrl);
         var gh = ShimGh(fixture.Workspace, ownPullRequestUrl, surroundingCharacters: 3_500);
 
         var before = await fixture.ExecuteAsync(
             CodexDynamicToolPolicy.RunCommandTool, new { command = $"{gh} pr view 2005" });
         var create = await fixture.ExecuteAsync(
-            CodexDynamicToolPolicy.RunCommandTool, new { command = $"{gh} pr create --fill" });
+            CodexDynamicToolPolicy.RunCommandTool,
+            new { command = "gh pr create --draft --title \"fix(codex): Example [proof]\" --body-file body.md" });
         var after = await fixture.ExecuteAsync(
             CodexDynamicToolPolicy.RunCommandTool, new { command = $"{gh} pr view 2005" });
 
         Assert.False(before.Success);
         Assert.Contains("has not opened a pull request yet", before.Text, StringComparison.Ordinal);
         Assert.True(create.Success, create.Text);
-        Assert.DoesNotContain(ownPullRequestUrl, create.Text, StringComparison.Ordinal);
-        Assert.True(create.Text.Length <= 12_000, $"command returned {create.Text.Length} characters");
+        Assert.Equal(
+            ["pr", "create", "--draft", "--title", "fix(codex): Example [proof]", "--body-file",
+             "body.md", "--repo", "aer-works/baton", "--head", "2190-verified-pr-ownership"],
+            File.ReadAllLines(fixture.DirectGhArguments));
         Assert.True(after.Success, after.Text);
         Assert.DoesNotContain(OwnPullRequestOnlyRule.Rule, after.Text, StringComparison.Ordinal);
         // And the sibling stays refused with the room's own number now named in the refusal, so the
@@ -1732,7 +1731,83 @@ public sealed class CodexDynamicToolPolicyTests
         var sibling = await fixture.ExecuteAsync(
             CodexDynamicToolPolicy.RunCommandTool, new { command = $"{gh} pr view 1994" });
         Assert.False(sibling.Success);
-        Assert.Contains("This room opened #2005", sibling.Text, StringComparison.Ordinal);
+        Assert.Contains("This room opened aer-works/baton#2005", sibling.Text, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task A_workspace_local_gh_create_is_refused_without_spawning_it()
+    {
+        using var fixture = new PolicyFixture(WorkerRoleCatalog.For("implement").Grant, ["changes.md"]);
+        var marker = Path.Combine(fixture.Workspace, "spawned.txt");
+        var gh = ShimGh(fixture.Workspace, "https://github.com/aer-works/baton/pull/2005");
+
+        var result = await fixture.ExecuteAsync(
+            CodexDynamicToolPolicy.RunCommandTool, new { command = $"{gh} pr create --fill > {marker}" });
+
+        Assert.False(result.Success);
+        Assert.Contains("Direct `gh pr create`", result.Text, StringComparison.Ordinal);
+        Assert.False(File.Exists(marker));
+    }
+
+    [Theory]
+    [InlineData("gh pr create --title \"$(whoami)\"")]
+    [InlineData("gh pr create --fill | tee pr.txt")]
+    [InlineData("gh pr create --fill > pr.txt")]
+    [InlineData("gh pr create --fill && echo done")]
+    [InlineData("git push && gh pr create --fill")]
+    public async Task Ambiguous_create_is_refused_before_the_direct_executable_spawns(string commandLine)
+    {
+        using var fixture = new PolicyFixture(
+            WorkerRoleCatalog.For("implement").Grant,
+            ["changes.md"],
+            directGhOutput: "https://github.com/aer-works/baton/pull/2005");
+
+        var result = await fixture.ExecuteAsync(
+            CodexDynamicToolPolicy.RunCommandTool, new { command = commandLine });
+
+        Assert.False(result.Success);
+        Assert.False(File.Exists(fixture.DirectGhArguments));
+    }
+
+    [Theory]
+    [InlineData("https://github.com/other/repo/pull/2005", 0)]
+    [InlineData("https://github.com/aer-works/baton/pull/2005", 7)]
+    public async Task Foreign_or_nonzero_direct_create_does_not_mint_ownership(
+        string output, int exitCode)
+    {
+        using var fixture = new PolicyFixture(
+            WorkerRoleCatalog.For("implement").Grant,
+            ["changes.md"],
+            directGhOutput: output,
+            directGhExitCode: exitCode);
+        var gh = ShimGh(fixture.Workspace, "view fixture");
+
+        _ = await fixture.ExecuteAsync(
+            CodexDynamicToolPolicy.RunCommandTool, new { command = "gh pr create --fill" });
+        var read = await fixture.ExecuteAsync(
+            CodexDynamicToolPolicy.RunCommandTool, new { command = $"{gh} pr view 2005" });
+
+        Assert.False(read.Success);
+        Assert.Contains("has not opened a pull request yet", read.Text, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task General_shell_output_never_mints_ownership()
+    {
+        using var fixture = new PolicyFixture(WorkerRoleCatalog.For("implement").Grant, ["changes.md"]);
+        var gh = ShimGh(fixture.Workspace, "view fixture");
+        var outputCommand = OperatingSystem.IsWindows()
+            ? "echo https://github.com/aer-works/baton/pull/2005"
+            : "printf '%s\\n' https://github.com/aer-works/baton/pull/2005";
+
+        var output = await fixture.ExecuteAsync(
+            CodexDynamicToolPolicy.RunCommandTool, new { command = outputCommand });
+        var read = await fixture.ExecuteAsync(
+            CodexDynamicToolPolicy.RunCommandTool, new { command = $"{gh} pr view 2005" });
+
+        Assert.True(output.Success, output.Text);
+        Assert.False(read.Success);
+        Assert.Contains("has not opened a pull request yet", read.Text, StringComparison.Ordinal);
     }
 
     /// <summary>
@@ -2444,7 +2519,9 @@ public sealed class CodexDynamicToolPolicyTests
             Func<ShellCommandClass, TimeSpan>? commandCeiling = null,
             Func<string, Stream>? commandCaptureStreamFactory = null,
             TimeProvider? timeProvider = null,
-            Action<PolicyFixture, CancellationToken>? beforeCommandTimeoutStarts = null)
+            Action<PolicyFixture, CancellationToken>? beforeCommandTimeoutStarts = null,
+            string? directGhOutput = null,
+            int directGhExitCode = 0)
         {
             Root = Path.Combine(Path.GetTempPath(), $"baton-codex-policy-{Guid.NewGuid():N}");
             Workspace = Path.Combine(Root, "workspace");
@@ -2457,7 +2534,40 @@ public sealed class CodexDynamicToolPolicyTests
             {
                 File.WriteAllText(Input, "input");
             }
+            GhPullRequestCreateProvenance? provenance = null;
+            IReadOnlyList<string>? directPrefix = null;
+            if (directGhOutput is not null)
+            {
+                DirectGhArguments = Path.Combine(Root, "fake-gh-argv.txt");
+                if (OperatingSystem.IsWindows())
+                {
+                    var script = Path.Combine(Root, "fake-gh.ps1");
+                    var escapedArguments = DirectGhArguments.Replace("'", "''", StringComparison.Ordinal);
+                    var escapedOutput = directGhOutput.Replace("'", "''", StringComparison.Ordinal);
+                    File.WriteAllText(script,
+                        $"$args | Set-Content -LiteralPath '{escapedArguments}' -Encoding utf8\r\n"
+                        + $"Write-Output '{escapedOutput}'\r\nexit {directGhExitCode}\r\n");
+                    var systemRoot = Environment.GetFolderPath(Environment.SpecialFolder.Windows);
+                    var interpreter = Path.Combine(
+                        systemRoot, "System32", "WindowsPowerShell", "v1.0", "powershell.exe");
+                    provenance = new GhPullRequestCreateProvenance(
+                        interpreter, "aer-works/baton", "2190-verified-pr-ownership");
+                    directPrefix = ["-NoProfile", "-NonInteractive", "-File", script];
+                }
+                else
+                {
+                    var script = Path.Combine(Root, "fake-gh.sh");
+                    File.WriteAllText(script,
+                        $"printf '%s\\n' \"$@\" > '{DirectGhArguments}'\n"
+                        + $"printf '%s\\n' '{directGhOutput}'\nexit {directGhExitCode}\n");
+                    provenance = new GhPullRequestCreateProvenance(
+                        "/bin/sh", "aer-works/baton", "2190-verified-pr-ownership");
+                    directPrefix = [script];
+                }
+            }
+
             Policy = commandCaptureStreamFactory is null && beforeCommandTimeoutStarts is null
+                && provenance is null
                 ? new CodexDynamicToolPolicy(
                     grant, Workspace, Output, createInput ? [Input] : [], outputs, commandCeiling,
                     timeProvider)
@@ -2472,13 +2582,16 @@ public sealed class CodexDynamicToolPolicyTests
                     commandCaptureStreamFactory,
                     beforeCommandTimeoutStarts is null
                         ? null
-                        : cancellationToken => beforeCommandTimeoutStarts(this, cancellationToken));
+                        : cancellationToken => beforeCommandTimeoutStarts(this, cancellationToken),
+                    provenance,
+                    directPrefix);
         }
 
         public string Root { get; }
         public string Workspace { get; }
         public string Output { get; }
         public string Input { get; }
+        public string DirectGhArguments { get; } = string.Empty;
         public CodexDynamicToolPolicy Policy { get; }
 
         public Task<CodexDynamicToolResult> ApplyPatchAsync(string patch) =>
