@@ -59,11 +59,38 @@ public static class FleetEventKinds
 }
 
 /// <summary>The only two code-authorship claims a lifecycle attempt may make.</summary>
-[JsonConverter(typeof(JsonStringEnumConverter<FleetRevisionKind>))]
+[JsonConverter(typeof(FleetRevisionKindJsonConverter))]
 public enum FleetRevisionKind
 {
     Implementation,
     Repair,
+}
+
+internal sealed class FleetRevisionKindJsonConverter : JsonConverter<FleetRevisionKind>
+{
+    public override FleetRevisionKind Read(ref Utf8JsonReader reader, Type typeToConvert, JsonSerializerOptions options)
+    {
+        var token = reader.GetString() ?? throw new JsonException("Expected a revision kind string.");
+        foreach (var kind in Enum.GetValues<FleetRevisionKind>())
+        {
+            if (string.Equals(token, JsonNamingPolicy.CamelCase.ConvertName(kind.ToString()), StringComparison.Ordinal))
+            {
+                return kind;
+            }
+        }
+
+        throw new JsonException($"Unknown revision kind '{token}'.");
+    }
+
+    public override void Write(Utf8JsonWriter writer, FleetRevisionKind value, JsonSerializerOptions options)
+    {
+        if (!Enum.IsDefined(value))
+        {
+            throw new JsonException($"Unknown revision kind numeric value '{(int)value}'.");
+        }
+
+        writer.WriteStringValue(JsonNamingPolicy.CamelCase.ConvertName(value.ToString()));
+    }
 }
 
 [JsonConverter(typeof(Converter))]

@@ -70,6 +70,23 @@ public sealed class FleetEventLogTests : IDisposable
         Assert.All(FleetEventKinds.All, kind => Assert.True(Enum.IsDefined(kind)));
     }
 
+    [Theory]
+    [InlineData(FleetRevisionKind.Implementation, "implementation")]
+    [InlineData(FleetRevisionKind.Repair, "repair")]
+    public void Revision_kinds_use_the_specified_lowercase_wire_tokens(
+        FleetRevisionKind revisionKind, string expectedToken)
+    {
+        var draft = new FleetEventDraft(
+            FleetEventKind.RevisionProduced,
+            $"revision:{expectedToken}",
+            DateTimeOffset.Parse("2026-09-11T16:00:00Z"),
+            RevisionKind: revisionKind);
+
+        using var json = JsonDocument.Parse(FleetEventLog.Serialize(FleetEvent.From(1, draft)));
+
+        Assert.Equal(expectedToken, json.RootElement.GetProperty("revisionKind").GetString());
+    }
+
     [Fact]
     public async Task A_numeric_value_outside_the_named_vocabulary_never_reaches_disk()
     {
