@@ -86,6 +86,74 @@ public sealed class QueueCommandTests
         }
     }
 
+    [Fact]
+    public async Task Add_persists_declared_requirements_and_list_exposes_migration_coverage()
+    {
+        var home = CreateTempHome();
+        using var scope = BatonEnvironmentSnapshot.BeginScope(BatonEnvironmentSnapshot.Blank with { HomeOverride = home });
+        try
+        {
+            var brief = Path.Combine(home, "brief.md");
+            await File.WriteAllTextAsync(brief, "implement this", Ct);
+
+            await QueueCommand.ExecuteAsync(
+                new QueueOptions(QueueVerb.Add, Tag: "declared", Role: "implement",
+                    SpecFilePath: brief, WorkspaceDirectory: home, Requirements: ["file-write", "shell"]),
+                TextWriter.Null, Ct);
+
+            var item = Assert.Single((await QueueStore.LoadAsync(BatonPaths.QueueFile, Ct)).Items);
+            Assert.Equal(["file-write", "shell"], item.Requirements);
+            var output = new StringWriter();
+            await QueueCommand.ExecuteAsync(new QueueOptions(QueueVerb.List), output, Ct);
+            Assert.Contains("requirements: file-write, shell", output.ToString(), StringComparison.Ordinal);
+            Assert.Contains("Requirement coverage: 1/1 declared", output.ToString(), StringComparison.Ordinal);
+        }
+        finally
+        {
+            DirectoryCleanup.DeleteRecursively(home);
+        }
+    }
+
+    [Fact]
+    public async Task Add_refuses_a_requirement_mismatch_before_issue_worktree_provisioning()
+    {
+        var home = CreateTempHome();
+        using var scope = BatonEnvironmentSnapshot.BeginScope(BatonEnvironmentSnapshot.Blank with { HomeOverride = home });
+        try
+        {
+            var brief = Path.Combine(home, "brief.md");
+            await File.WriteAllTextAsync(brief, "measure this", Ct);
+            var resolvedRepository = false;
+            var provisioned = false;
+
+            var refusal = await Assert.ThrowsAsync<CliArgumentException>(() => QueueCommand.ExecuteAsync(
+                new QueueOptions(QueueVerb.Add, Tag: "mismatch", Role: "advise", SpecFilePath: brief,
+                    Issue: 2234, Requirements: ["file-write", "shell"]),
+                TextWriter.Null,
+                Ct,
+                home,
+                (_, _) =>
+                {
+                    resolvedRepository = true;
+                    return Task.FromResult<RepositoryIdentity?>(null);
+                },
+                (_, _, _, _, _, _) =>
+                {
+                    provisioned = true;
+                    return Task.FromResult("never");
+                }));
+
+            Assert.Contains("file-write, shell", refusal.Message, StringComparison.Ordinal);
+            Assert.False(resolvedRepository);
+            Assert.False(provisioned);
+            Assert.False(File.Exists(BatonPaths.QueueFile));
+        }
+        finally
+        {
+            DirectoryCleanup.DeleteRecursively(home);
+        }
+    }
+
     [Theory]
     [InlineData(null, "claude-sonnet-4-6", "multiple candidate adapters: claude, agy; specify --adapter")]
     [InlineData("codex", "opus", "absent from the recorded Codex capability snapshot")]

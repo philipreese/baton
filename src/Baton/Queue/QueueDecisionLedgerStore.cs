@@ -27,6 +27,9 @@ namespace Baton.Queue;
 /// <param name="Room">The room the item launched into; absent for a wait, present for a failure that had already provisioned one.</param>
 /// <param name="SelectionSource">Whether the effective axes came from a stage default, stage override,
 /// explicit lifecycle pin or persisted-item compatibility rule.</param>
+/// <param name="Admission">The preflight comparison of declared task requirements to the live role
+/// grant. Present on an admission refusal and its successful control launch; a refusal carries zero
+/// vendor usage because no vendor process was started.</param>
 public sealed record QueueDecisionEntry(
     [property: JsonPropertyName("at")] DateTimeOffset At,
     [property: JsonPropertyName("tag")]
@@ -63,7 +66,10 @@ public sealed record QueueDecisionEntry(
     [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
     string? Room = null,
     [property: JsonPropertyName("selectionSource")]
-    QueueSelectionSource SelectionSource = QueueSelectionSource.StageDefault)
+    QueueSelectionSource SelectionSource = QueueSelectionSource.StageDefault,
+    [property: JsonPropertyName("admission")]
+    [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    TaskRequirementAdmission? Admission = null)
 {
     public const string Launched = "launched";
     public const string Waited = "waited";

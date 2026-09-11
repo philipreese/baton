@@ -72,6 +72,14 @@ public sealed record QueueSettings
     /// </summary>
     public string? WorktreeRoot { get; init; }
 
+    /// <summary>
+    /// Migration switch for requirement-less persisted items. False (the shipped compatibility
+    /// posture) leaves them visibly unknown. Once every producer writes <c>requirements</c>, set it
+    /// true to refuse an execution-bearing legacy row that lacks the declaration; read-only legacy
+    /// rows remain unknown because their missing metadata cannot spend shell/write/network authority.
+    /// </summary>
+    public bool RequireDeclaredRequirements { get; init; }
+
     [JsonIgnore]
     public double EffectiveMaxLiveWeight => MaxLiveWeight > 0 ? MaxLiveWeight : DefaultMaxLiveWeight;
 

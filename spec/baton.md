@@ -6945,6 +6945,20 @@ launcher forwards every retained name as its own `--skill`, `<name>` argument pa
 a shell string. A lifecycle item refuses any explicit `--skill` for now: choosing per-stage versus
 whole-lifecycle attachment is policy, and the queue does not silently choose one.
 
+`--require <capability>` is repeatable task metadata, not a grant request. The initial vocabulary is
+`repository-read`, `file-write`, `shell`, `network`, `github-read`, `github-write`, and
+`artifact:<declared-output-name>`. Before claiming a room, provisioning a worktree, or starting a
+vendor process, the scheduler reads the current role catalog and compares these requirements to the
+effective grant — including its scoped `gh` shell patterns and declared output contract. A mismatch
+fails that item with the missing capability and a remedy; it never widens a role or guesses from the
+brief's prose. The item and its decision-ledger fact retain requested requirements, the effective
+grant, the admission result, and zero vendor usage for that refusal, so the avoided spend remains
+auditable. `queue list` prints each declaration and aggregate coverage. A missing `requirements` field
+is visibly `unknown` during compatibility migration (distinct from a present empty list). When every
+producer has been upgraded, `Queue.RequireDeclaredRequirements: true` fails an execution-bearing
+legacy row closed; legacy read-only rows remain unknown. This switch is deliberately explicit: coverage
+is observable before the fail-closed transition rather than inferred from a date or a brief.
+
 **No verb launches anything.** Adding an item is a durable request; the running daemon is the only
 thing that dispatches, which is what keeps one auditable path into a room. `hold`/`resume` pause
 launches without stopping the daemon — the usage harvester, the projection writer and the delivery
@@ -7013,6 +7027,7 @@ gap silently, and neither is a setting anyone means.
 | `Tiers` | see below | Overlaid on the shipped table entry by entry, so naming one key does not lose the others. |
 | `AdapterDefaultModels` | `agy` → `gemini-3.8-flash-high` | Model for an item whose tier names an adapter and no model. |
 | `WorktreeRoot` | parent of the invoking checkout | Where `--issue` puts `w<n>`. |
+| `RequireDeclaredRequirements` | `false` | After requirement-producer migration, refuse a requirement-less execution-bearing legacy row; read-only legacy rows stay visibly unknown. |
 
 **Lane weights: implement 1.0 on every adapter, `review` 0.** One function computes both the live
 tally over running rooms and the candidate's own weight; two copies would drift and the cap would
@@ -7320,7 +7335,9 @@ and cost ledgers share. Fields: `at`, `tag`, `decision` (`launched` | `waited` |
 `liveWeight`,
 `freeGb` (absent when unmeasured), `floorGb`, `tier`, `adapter`, `model`, `effort`, `tierOverride`,
 `overrideReason`, `room`, `selectionSource` (`StageDefault` | `StageOverride` | `LifecyclePin` |
-`PersistedLifecycleCompatibility`).
+`PersistedLifecycleCompatibility`), and optional `admission` (`requestedRequirements`, `effectiveGrant`,
+`result`, `missing`, `vendorUsage`). An admission refusal records `vendorUsage: 0`: it happened before
+any vendor process could run.
 
 **`cancelled` is the retained pre-launch cancellation fact.** Its `at` is the item's
 `CancelledAt`, its `tag` names that retained item, and its reason is `operator cancelled before
