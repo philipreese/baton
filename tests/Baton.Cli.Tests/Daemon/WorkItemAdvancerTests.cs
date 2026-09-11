@@ -1,5 +1,6 @@
 using Baton.Cli.Daemon;
 using Baton.Accounting;
+using Baton.Domain;
 using Baton.Queue;
 using Baton.Status;
 using Baton.Tests.Shared;
@@ -24,6 +25,10 @@ public sealed class WorkItemAdvancerTests
     private static readonly DateTimeOffset Now = new(2026, 9, 6, 12, 0, 0, TimeSpan.Zero);
 
     private const string PushedSha = "aaaaaaaabbbbbbbbccccccccdddddddd";
+
+    private const string FullPushedSha = "0123456789abcdef0123456789abcdef01234567";
+
+    private const string MergeSha = "89abcdef0123456789abcdef0123456789abcdef";
 
     private const string Repository = "github.com/aer-works/baton";
 
@@ -1213,6 +1218,264 @@ public sealed class WorkItemAdvancerTests
             Assert.Equal(PullRequestChecks.Failing, item.Checks);
             Assert.Equal(Now, item.ChecksObservedAt);
             Assert.Equal(PushedSha, item.ChecksHeadSha);
+        }
+        finally
+        {
+            DirectoryCleanup.DeleteRecursively(home);
+        }
+    }
+
+    [Fact]
+    public async Task Review_attempt_observes_pr_check_and_verdict_without_claiming_the_existing_revision()
+    {
+        var home = CreateTempHome();
+        using var scope = BatonEnvironmentSnapshot.BeginScope(BatonEnvironmentSnapshot.Blank with { HomeOverride = home });
+        try
+        {
+            var room = await WriteSettledRoomAsync(home, WorkflowOutcome.Succeeded, ApprovingVerdict);
+            var seeded = await SeedAsync(home, WorkStage.Review, room, round: 2);
+            var attemptId = new FleetAttemptId("attempt-review-2");
+            await QueueStore.MutateAsync(
+                BatonPaths.QueueFile,
+                state => state with { Items = [seeded with { AttemptId = attemptId }] }, Ct);
+            var events = new List<FleetEventDraft>();
+            var pr = $$$"""
+                [{"number":77,"state":"OPEN","isDraft":true,"headRefOid":"{{{FullPushedSha}}}",
+                  "headRefName":"1934-lane","baseRefName":"main","isCrossRepository":false,
+                  "statusCheckRollup":[{"databaseId":101,"name":"gates","status":"COMPLETED",
+                    "conclusion":"SUCCESS","startedAt":"2026-09-11T15:00:00Z",
+                    "completedAt":"2026-09-11T15:02:00Z"}]}]
+                """;
+            var advancer = new WorkItemAdvancer(
+                new FakeGh(pr),
+                (_, _) => Task.FromResult<string?>(FullPushedSha),
+                appendFleetEvent: (draft, _) =>
+                {
+                    events.Add(draft);
+                    return Task.FromResult<FleetEvent?>(null);
+                });
+
+            await advancer.AdvanceAsync(Now, Ct);
+
+            Assert.All(events, entry => Assert.Equal(attemptId, entry.AttemptId));
+            Assert.Equal(
+                [FleetEventKind.PullRequestBound, FleetEventKind.CheckObserved, FleetEventKind.ReviewVerdictObserved],
+                events.Select(entry => entry.Kind));
+            Assert.DoesNotContain(events, entry => entry.Kind == FleetEventKind.RevisionProduced);
+            Assert.Equal(77, events[0].PullRequestId);
+            Assert.Equal(new FleetCheckRunId("101"), events[1].CheckRunId);
+            Assert.Equal("gates", events[1].CheckName);
+            Assert.Equal("COMPLETED", events[1].CheckStatus);
+            Assert.Equal("SUCCESS", events[1].CheckConclusion);
+            Assert.Equal(new FleetReviewRoundId("1934-lane:2"), events[2].ReviewRoundId);
+            Assert.Equal("approve", events[2].ReviewVerdict);
+            // This fixture's reviewedRef is not a full immutable SHA, so it stays absent.
+            Assert.Null(events[2].RevisionId);
+        }
+        finally
+        {
+            DirectoryCleanup.DeleteRecursively(home);
+        }
+    }
+
+    [Theory]
+    [InlineData(WorkStage.Implement, FleetRevisionKind.Implementation)]
+    [InlineData(WorkStage.Fix, FleetRevisionKind.Repair)]
+    public async Task A_code_stage_that_changes_head_records_the_revision_it_produced(
+        WorkStage stage, FleetRevisionKind revisionKind)
+    {
+        var home = CreateTempHome();
+        using var scope = BatonEnvironmentSnapshot.BeginScope(BatonEnvironmentSnapshot.Blank with { HomeOverride = home });
+        try
+        {
+            var room = await WriteSettledRoomAsync(home, WorkflowOutcome.Succeeded, verdictJson: null);
+            var seeded = await SeedAsync(home, stage, room);
+            var attemptId = new FleetAttemptId($"attempt-{WorkStages.Token(stage)}");
+            await QueueStore.MutateAsync(
+                BatonPaths.QueueFile,
+                state => state with
+                {
+                    Items = [seeded with
+                    {
+                        AttemptId = attemptId,
+                        AttemptBaseRevision = MergeSha,
+                    }],
+                }, Ct);
+            var events = new List<FleetEventDraft>();
+            var advancer = new WorkItemAdvancer(
+                new FakeGh(PrJson(77, FullPushedSha)),
+                (_, _) => Task.FromResult<string?>(FullPushedSha),
+                appendFleetEvent: (draft, _) =>
+                {
+                    events.Add(draft);
+                    return Task.FromResult<FleetEvent?>(null);
+                });
+
+            await advancer.AdvanceAsync(Now, Ct);
+
+            var revision = Assert.Single(events, entry => entry.Kind == FleetEventKind.RevisionProduced);
+            Assert.Equal(attemptId, revision.AttemptId);
+            Assert.Equal(new FleetRevisionId(FullPushedSha), revision.RevisionId);
+            Assert.Equal(revisionKind, revision.RevisionKind);
+        }
+        finally
+        {
+            DirectoryCleanup.DeleteRecursively(home);
+        }
+    }
+
+    [Fact]
+    public async Task A_code_stage_that_does_not_change_head_records_no_revision()
+    {
+        var home = CreateTempHome();
+        using var scope = BatonEnvironmentSnapshot.BeginScope(BatonEnvironmentSnapshot.Blank with { HomeOverride = home });
+        try
+        {
+            var room = await WriteSettledRoomAsync(home, WorkflowOutcome.Succeeded, verdictJson: null);
+            var seeded = await SeedAsync(home, WorkStage.Implement, room);
+            await QueueStore.MutateAsync(
+                BatonPaths.QueueFile,
+                state => state with
+                {
+                    Items = [seeded with
+                    {
+                        AttemptId = new FleetAttemptId("attempt-no-op"),
+                        AttemptBaseRevision = FullPushedSha,
+                    }],
+                }, Ct);
+            var events = new List<FleetEventDraft>();
+
+            await new WorkItemAdvancer(
+                new FakeGh(PrJson(77, FullPushedSha)),
+                (_, _) => Task.FromResult<string?>(FullPushedSha),
+                appendFleetEvent: (draft, _) =>
+                {
+                    events.Add(draft);
+                    return Task.FromResult<FleetEvent?>(null);
+                }).AdvanceAsync(Now, Ct);
+
+            Assert.DoesNotContain(events, entry => entry.Kind == FleetEventKind.RevisionProduced);
+        }
+        finally
+        {
+            DirectoryCleanup.DeleteRecursively(home);
+        }
+    }
+
+    [Fact]
+    public async Task Overlapping_check_transitions_are_distinct_and_replays_are_idempotent()
+    {
+        var home = CreateTempHome();
+        using var scope = BatonEnvironmentSnapshot.BeginScope(BatonEnvironmentSnapshot.Blank with { HomeOverride = home });
+        try
+        {
+            var room = await WriteSettledRoomAsync(home, WorkflowOutcome.Succeeded, ApprovingVerdict);
+            var seeded = await SeedAsync(home, WorkStage.Review, room, round: 2);
+            await QueueStore.MutateAsync(
+                BatonPaths.QueueFile,
+                state => state with { Items = [seeded with { AttemptId = new FleetAttemptId("attempt-checks") }] }, Ct);
+            var pr = $$$"""
+                [{"number":77,"state":"OPEN","isDraft":true,"headRefOid":"{{{FullPushedSha}}}",
+                  "headRefName":"1934-lane","baseRefName":"main","isCrossRepository":false,
+                  "statusCheckRollup":[
+                    {"databaseId":101,"name":"gates","status":"IN_PROGRESS","conclusion":"",
+                     "startedAt":"2026-09-11T15:00:00Z","completedAt":"0001-01-01T00:00:00Z"},
+                    {"detailsUrl":"https://github.com/aer-works/baton/actions/runs/88/job/202",
+                     "name":"gates","status":"IN_PROGRESS","startedAt":"2026-09-11T15:01:00Z"},
+                    {"databaseId":101,"name":"gates","status":"COMPLETED","conclusion":"SUCCESS",
+                     "startedAt":"2026-09-11T15:00:00Z","completedAt":"2026-09-11T15:02:00Z"}]}]
+                """;
+            var log = new FleetEventLog(
+                Path.Combine(home, "events.jsonl"), Path.Combine(home, "events.1.jsonl"), 100_000);
+            var advancer = new WorkItemAdvancer(
+                new FakeGh(pr),
+                (_, _) => Task.FromResult<string?>(FullPushedSha),
+                appendFleetEvent: log.Append);
+
+            await advancer.AdvanceAsync(Now, Ct);
+            await advancer.AdvanceAsync(Now.AddMinutes(1), Ct);
+
+            var checks = (await log.ReadAfter(0, Ct))
+                .Where(entry => entry.Kind == FleetEventKind.CheckObserved)
+                .ToList();
+            Assert.Equal(3, checks.Count);
+            Assert.Equal(["101", "202", "101"], checks.Select(entry => entry.CheckRunId!.Value.Value));
+            Assert.Equal(["IN_PROGRESS", "IN_PROGRESS", "COMPLETED"], checks.Select(entry => entry.CheckStatus));
+            Assert.Null(checks[0].CheckConclusion);
+            Assert.Null(checks[0].CheckCompletedAt);
+            Assert.Equal("SUCCESS", checks[2].CheckConclusion);
+            Assert.Equal(DateTimeOffset.Parse("2026-09-11T15:02:00Z"), checks[2].CheckCompletedAt);
+        }
+        finally
+        {
+            DirectoryCleanup.DeleteRecursively(home);
+        }
+    }
+
+    [Fact]
+    public async Task Structured_merge_observation_uses_the_forge_owned_merge_revision()
+    {
+        var home = CreateTempHome();
+        using var scope = BatonEnvironmentSnapshot.BeginScope(BatonEnvironmentSnapshot.Blank with { HomeOverride = home });
+        try
+        {
+            var room = await WriteSettledRoomAsync(home, WorkflowOutcome.Succeeded, verdictJson: null);
+            var seeded = await SeedAsync(home, WorkStage.Implement, room);
+            var attemptId = new FleetAttemptId("attempt-merge");
+            await QueueStore.MutateAsync(
+                BatonPaths.QueueFile,
+                state => state with { Items = [seeded with { AttemptId = attemptId }] }, Ct);
+            var events = new List<FleetEventDraft>();
+            var pr = $$$"""
+                [{"number":77,"state":"MERGED","isDraft":false,"headRefOid":"{{{FullPushedSha}}}",
+                  "headRefName":"1934-lane","baseRefName":"main","isCrossRepository":false,
+                  "statusCheckRollup":[],"mergeCommit":{"oid":"{{{MergeSha}}}"}}]
+                """;
+            var advancer = new WorkItemAdvancer(
+                new FakeGh(pr),
+                (_, _) => Task.FromResult<string?>(FullPushedSha),
+                appendFleetEvent: (draft, _) =>
+                {
+                    events.Add(draft);
+                    return Task.FromResult<FleetEvent?>(null);
+                });
+
+            await advancer.AdvanceAsync(Now, Ct);
+
+            var merged = Assert.Single(events, entry => entry.Kind == FleetEventKind.MergeObserved);
+            Assert.Equal(attemptId, merged.AttemptId);
+            Assert.Equal(77, merged.PullRequestId);
+            Assert.Equal(new FleetRevisionId(MergeSha), merged.RevisionId);
+            Assert.Equal("merged", merged.Outcome);
+        }
+        finally
+        {
+            DirectoryCleanup.DeleteRecursively(home);
+        }
+    }
+
+    [Fact]
+    public async Task Historical_item_without_an_attempt_id_emits_no_guessed_lineage()
+    {
+        var home = CreateTempHome();
+        using var scope = BatonEnvironmentSnapshot.BeginScope(BatonEnvironmentSnapshot.Blank with { HomeOverride = home });
+        try
+        {
+            var room = await WriteSettledRoomAsync(home, WorkflowOutcome.Succeeded, verdictJson: null);
+            await SeedAsync(home, WorkStage.Implement, room);
+            var events = new List<FleetEventDraft>();
+            var advancer = new WorkItemAdvancer(
+                new FakeGh(PrJson(77, PushedSha)),
+                (_, _) => Task.FromResult<string?>(PushedSha),
+                appendFleetEvent: (draft, _) =>
+                {
+                    events.Add(draft);
+                    return Task.FromResult<FleetEvent?>(null);
+                });
+
+            await advancer.AdvanceAsync(Now, Ct);
+
+            Assert.Empty(events);
         }
         finally
         {

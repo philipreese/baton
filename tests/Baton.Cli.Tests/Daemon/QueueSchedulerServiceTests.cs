@@ -623,6 +623,88 @@ public sealed class QueueSchedulerServiceTests
     }
 
     [Fact]
+    public async Task A_code_attempt_persists_its_pre_launch_revision_before_the_worker_starts()
+    {
+        var home = CreateTempHome();
+        using var scope = BatonEnvironmentSnapshot.BeginScope(BatonEnvironmentSnapshot.Blank with { HomeOverride = home });
+        try
+        {
+            const string baseRevision = "89abcdef0123456789abcdef0123456789abcdef";
+            await QueueStore.MutateAsync(
+                BatonPaths.QueueFile,
+                state => state with { Items = [Item() with { Stage = WorkStage.Implement }] }, Ct);
+            var headObserved = false;
+            QueueLaunchRequest? launched = null;
+            var service = new QueueSchedulerService(
+                (request, _) =>
+                {
+                    Assert.True(headObserved);
+                    launched = request;
+                    return Task.FromResult(new QueueLaunchOutcome(request.RoomDirectory));
+                },
+                _ => Task.FromResult(0d),
+                () => 16d,
+                () => DateTimeOffset.UtcNow,
+                workspaceHead: (_, _) =>
+                {
+                    headObserved = true;
+                    return Task.FromResult<string?>(baseRevision);
+                });
+
+            await service.TickOnceAsync(Ct);
+
+            var persisted = Assert.Single((await QueueStore.LoadAsync(BatonPaths.QueueFile, Ct)).Items);
+            Assert.Equal(baseRevision, persisted.AttemptBaseRevision);
+            Assert.Equal(baseRevision, launched!.Item.AttemptBaseRevision);
+            Assert.NotNull(persisted.AttemptId);
+            Assert.Equal(persisted.AttemptId, launched.Item.AttemptId);
+        }
+        finally
+        {
+            Cleanup(home);
+        }
+    }
+
+    [Fact]
+    public async Task Admission_and_attempt_start_share_the_producer_owned_attempt_id()
+    {
+        var home = CreateTempHome();
+        using var scope = BatonEnvironmentSnapshot.BeginScope(BatonEnvironmentSnapshot.Blank with { HomeOverride = home });
+        try
+        {
+            await QueueStore.MutateAsync(BatonPaths.QueueFile, s => s with { Items = [Item()] }, Ct);
+            var events = new List<FleetEventDraft>();
+            var service = new QueueSchedulerService(
+                (request, _) => Task.FromResult(new QueueLaunchOutcome(request.RoomDirectory)),
+                _ => Task.FromResult(0d),
+                () => 16d,
+                () => new DateTimeOffset(2026, 9, 11, 18, 0, 0, TimeSpan.Zero),
+                appendFleetEvent: (draft, _) =>
+                {
+                    events.Add(draft);
+                    return Task.FromResult<FleetEvent?>(null);
+                });
+
+            await service.TickOnceAsync(Ct);
+
+            Assert.Collection(
+                events,
+                admission => Assert.Equal(FleetEventKind.AdmissionDecided, admission.Kind),
+                started => Assert.Equal(FleetEventKind.AttemptStarted, started.Kind));
+            Assert.NotNull(events[0].AttemptId);
+            Assert.Equal(events[0].AttemptId, events[1].AttemptId);
+            Assert.Equal(
+                events[0].AttemptId,
+                Assert.Single((await QueueStore.LoadAsync(BatonPaths.QueueFile, Ct)).Items).AttemptId);
+            Assert.Null(events[1].ExecutionId);
+        }
+        finally
+        {
+            Cleanup(home);
+        }
+    }
+
+    [Fact]
     public async Task A_hung_board_forge_refresh_does_not_block_an_unrelated_queue_launch()
     {
         var home = CreateTempHome();
@@ -1117,6 +1199,71 @@ public sealed class QueueSchedulerServiceTests
             var item = Assert.Single((await QueueStore.LoadAsync(BatonPaths.QueueFile, Ct)).Items);
             Assert.Equal(QueueItemState.Done, item.State);
             Assert.Null(item.Error);
+        }
+        finally
+        {
+            Cleanup(home);
+        }
+    }
+
+    [Fact]
+    public async Task Terminal_settlement_records_only_status_owned_usage_and_identifiers_before_closing_the_item()
+    {
+        var home = CreateTempHome();
+        using var scope = BatonEnvironmentSnapshot.BeginScope(BatonEnvironmentSnapshot.Blank with { HomeOverride = home });
+        try
+        {
+            var room = Path.Combine(home, "rooms", "queue-t1-events");
+            Directory.CreateDirectory(room);
+            await File.WriteAllTextAsync(
+                Path.Combine(room, TerminalSentinelWriter.TerminalSentinelFileName),
+                """{"state":"Succeeded","steps":[{"id":"implement","state":"Succeeded","execution":"execution-1","usage":{"wallClockMs":1234,"tokensIn":17,"toolSteps":4,"refusedToolSteps":1,"repeatedToolSteps":2}}],"outputs":["artifact.md"],"error":"terminal detail"}""",
+                Ct);
+            var attemptId = new FleetAttemptId("attempt-1");
+            await QueueStore.MutateAsync(
+                BatonPaths.QueueFile,
+                s => s with
+                {
+                    Items =
+                    [
+                        Item() with
+                        {
+                            State = QueueItemState.Launched,
+                            RoomDirectory = room,
+                            LaunchedAt = new DateTimeOffset(2026, 9, 11, 17, 0, 0, TimeSpan.Zero),
+                            AttemptId = attemptId,
+                            LastAdmission = new TaskRequirementAdmission([], ["file-write"], TaskRequirementAdmission.Admitted),
+                        },
+                    ],
+                },
+                Ct);
+            var events = new List<FleetEventDraft>();
+            var service = new QueueSchedulerService(
+                (_, _) => Task.FromResult(new QueueLaunchOutcome(null)),
+                _ => Task.FromResult(0d),
+                () => 16d,
+                () => new DateTimeOffset(2026, 9, 11, 18, 0, 0, TimeSpan.Zero),
+                appendFleetEvent: (draft, _) =>
+                {
+                    events.Add(draft);
+                    return Task.FromResult<FleetEvent?>(null);
+                });
+
+            await service.ResolveFinishedItemsAsync(Ct);
+
+            var settled = Assert.Single(events, e => e.Kind == FleetEventKind.AttemptSettled);
+            Assert.Equal(attemptId, settled.AttemptId);
+            Assert.Equal(new ExecutionId("execution-1"), settled.ExecutionId);
+            Assert.Equal(1234, settled.ElapsedMilliseconds);
+            Assert.Equal(17, settled.Usage!.InputTokens);
+            Assert.Equal(4, settled.Usage.ToolSteps);
+            Assert.Equal(1, settled.Usage.RefusedToolSteps);
+            Assert.Equal(2, settled.Usage.RepeatedToolSteps);
+            Assert.Equal(["artifact.md"], settled.ArtifactReferences);
+            Assert.Equal("terminal detail", settled.OutcomeDetail);
+            Assert.Equal(
+                QueueItemState.Done,
+                Assert.Single((await QueueStore.LoadAsync(BatonPaths.QueueFile, Ct)).Items).State);
         }
         finally
         {

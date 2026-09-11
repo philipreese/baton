@@ -3,10 +3,10 @@ using Baton.Status;
 namespace Baton.Cli.Daemon;
 
 /// <summary>
-/// #1946 — "the projection file changed", as a version number every <c>/events</c> subscriber can
-/// wait on. Watches the file <see cref="FleetProjectionWriter"/> already writes
-/// (<see cref="BatonPaths.FleetProjectionFile"/>); no second derivation of the fleet row exists or
-/// may be added here.
+/// #1946/#2140 — a file-change signal the shared <c>/events</c> loop can wait on. Production creates
+/// one for <see cref="BatonPaths.FleetProjectionFile"/> and one for
+/// <see cref="BatonPaths.FleetEventsFile"/>. It derives no content: projection versions remain
+/// transient reload hints, while durable event ids come only from <see cref="FleetEventLog"/>.
 /// </summary>
 /// <remarks>
 /// <para>
@@ -26,7 +26,7 @@ namespace Baton.Cli.Daemon;
 /// subscribed to.
 /// </para>
 /// </remarks>
-internal sealed class GlassProjectionWatcher
+internal sealed class GlassFileWatcher
 {
     internal static readonly TimeSpan DefaultPollInterval = TimeSpan.FromSeconds(1);
 
@@ -38,7 +38,7 @@ internal sealed class GlassProjectionWatcher
     private long _version;
     private TaskCompletionSource _changed = new(TaskCreationOptions.RunContinuationsAsynchronously);
 
-    internal GlassProjectionWatcher(string path, TimeSpan? pollInterval = null)
+    internal GlassFileWatcher(string path, TimeSpan? pollInterval = null)
     {
         ArgumentException.ThrowIfNullOrEmpty(path);
         _path = path;

@@ -5,6 +5,7 @@ using System.Text;
 using System.Text.Json;
 using System.Text.RegularExpressions;
 using Baton.Cli.Daemon;
+using Baton.Domain;
 using Baton.Tests.Shared;
 using Baton.Vendors;
 
@@ -46,11 +47,19 @@ public sealed class GlassHttpServiceTests : IDisposable
         return port;
     }
 
-    private sealed record Harness(GlassHttpService Service, string BaseUrl, string ProjectionPath, StringWriter Log);
+    private sealed record Harness(
+        GlassHttpService Service,
+        string BaseUrl,
+        string ProjectionPath,
+        string EventsPath,
+        string EventsRolloverPath,
+        StringWriter Log);
 
     private async Task<Harness> StartAsync(CancellationToken cancellationToken, bool listen = true, string? projection = null)
     {
         var projectionPath = Path.Combine(_tempHome, "projection.json");
+        var eventsPath = Path.Combine(_tempHome, Baton.Status.BatonPaths.FleetEventsFileName);
+        var eventsRolloverPath = Path.Combine(_tempHome, Baton.Status.BatonPaths.FleetEventsRolloverFileName);
         if (projection is not null)
         {
             await File.WriteAllTextAsync(projectionPath, projection, cancellationToken);
@@ -62,7 +71,10 @@ public sealed class GlassHttpServiceTests : IDisposable
             new DaemonSettings { Glass = new GlassListenerSettings { Listen = listen, Port = port } },
             projectionPath,
             TimeSpan.FromMilliseconds(25),
-            log);
+            log,
+            eventsPath,
+            eventsRolloverPath,
+            eventsMaxBytes: 100_000);
 
         await service.StartAsync(cancellationToken);
 
@@ -76,7 +88,8 @@ public sealed class GlassHttpServiceTests : IDisposable
             await Task.Delay(25, cancellationToken);
         }
 
-        return new Harness(service, $"http://127.0.0.1:{port}", projectionPath, log);
+        return new Harness(
+            service, $"http://127.0.0.1:{port}", projectionPath, eventsPath, eventsRolloverPath, log);
     }
 
     [Fact]
@@ -435,11 +448,62 @@ public sealed class GlassHttpServiceTests : IDisposable
 
             await WaitForAsync(
                 () => lines.Contains("event: projection"), TimeSpan.FromSeconds(15));
-            Assert.Contains(lines, line => Regex.IsMatch(line, @"^id: \d+$"));
             Assert.Contains(lines, line => line.StartsWith("data: {\"version\":", StringComparison.Ordinal));
+            Assert.DoesNotContain(lines, line => line.StartsWith("id:", StringComparison.Ordinal));
 
             await pumpStop.CancelAsync();
             await pump.ContinueWith(_ => { }, TaskScheduler.Default);
+        }
+        finally
+        {
+            await harness.Service.StopAsync(CancellationToken.None);
+        }
+    }
+
+    [Fact]
+    public async Task Replays_retained_fleet_events_after_Last_Event_ID_and_uses_their_durable_ids()
+    {
+        using var cts = new CancellationTokenSource(TimeSpan.FromMinutes(2));
+        var harness = await StartAsync(cts.Token, projection: """{"rooms":[]}""");
+        try
+        {
+            var log = new FleetEventLog(harness.EventsPath, harness.EventsRolloverPath, maxLiveBytes: 100_000);
+            var attempt = new FleetAttemptId("attempt-replay");
+            for (var index = 1; index <= 3; index++)
+            {
+                await log.Append(
+                    new FleetEventDraft(
+                        FleetEventKind.AttemptProgressed,
+                        $"progress:{index}",
+                        DateTimeOffset.UtcNow,
+                        AttemptId: attempt,
+                        Outcome: $"checkpoint-{index}"),
+                    cts.Token);
+            }
+
+            using var client = new HttpClient { Timeout = Timeout.InfiniteTimeSpan };
+            using var request = new HttpRequestMessage(HttpMethod.Get, $"{harness.BaseUrl}/events");
+            request.Headers.TryAddWithoutValidation("Last-Event-ID", "1");
+            using var response = await client.SendAsync(
+                request, HttpCompletionOption.ResponseHeadersRead, cts.Token);
+            await using var stream = await response.Content.ReadAsStreamAsync(cts.Token);
+            using var reader = new StreamReader(stream, Encoding.UTF8);
+
+            var lines = new List<string>();
+            var sawThird = false;
+            while (!sawThird || lines.Count == 0 || lines[^1] != string.Empty)
+            {
+                var line = (await reader.ReadLineAsync(cts.Token))!;
+                lines.Add(line);
+                sawThird |= line == "id: 3";
+            }
+
+            Assert.DoesNotContain("id: 1", lines);
+            Assert.Contains("id: 2", lines);
+            Assert.Contains("id: 3", lines);
+            Assert.Equal(2, lines.Count(line => line == "event: fleet"));
+            Assert.Contains(lines, line => line.Contains("checkpoint-2", StringComparison.Ordinal));
+            Assert.Contains(lines, line => line.Contains("checkpoint-3", StringComparison.Ordinal));
         }
         finally
         {

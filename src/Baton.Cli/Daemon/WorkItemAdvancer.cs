@@ -35,16 +35,21 @@ namespace Baton.Cli.Daemon;
 public sealed class WorkItemAdvancer
 {
     private const string PullRequestJsonFields =
-        "number,state,isDraft,headRefOid,statusCheckRollup,headRefName,baseRefName,isCrossRepository";
+        "number,state,isDraft,headRefOid,statusCheckRollup,headRefName,baseRefName,isCrossRepository,mergeCommit";
     private const string BoardObservationJsonFields = "number,state,headRefOid";
 
     private readonly IGhCliRunner _gh;
     private readonly Func<string, CancellationToken, Task<string?>> _workspaceHead;
     private readonly Func<string, CancellationToken, Task<RepositoryIdentity?>>? _repositoryIdentity;
     private readonly TimeSpan _boardObservationTimeout;
+    private readonly Func<FleetEventDraft, CancellationToken, Task<FleetEvent?>> _appendFleetEvent;
 
     public WorkItemAdvancer()
-        : this(null, null, RepositoryIdentityResolver.TryResolveAsync)
+        : this(
+            null,
+            null,
+            RepositoryIdentityResolver.TryResolveAsync,
+            appendFleetEvent: AppendOperationalFleetEventAsync)
     {
     }
 
@@ -54,12 +59,14 @@ public sealed class WorkItemAdvancer
         IGhCliRunner? gh,
         Func<string, CancellationToken, Task<string?>>? workspaceHead,
         Func<string, CancellationToken, Task<RepositoryIdentity?>>? repositoryIdentity = null,
-        TimeSpan? boardObservationTimeout = null)
+        TimeSpan? boardObservationTimeout = null,
+        Func<FleetEventDraft, CancellationToken, Task<FleetEvent?>>? appendFleetEvent = null)
     {
         _gh = gh ?? new GhCliRunner();
         _workspaceHead = workspaceHead ?? ReadWorkspaceHeadAsync;
         _repositoryIdentity = repositoryIdentity;
         _boardObservationTimeout = boardObservationTimeout ?? WorkspaceDeliveryProbe.SpawnTimeout;
+        _appendFleetEvent = appendFleetEvent ?? ((_, _) => Task.FromResult<FleetEvent?>(null));
     }
 
     /// <summary>
@@ -130,6 +137,8 @@ public sealed class WorkItemAdvancer
 
         var pr = await ReadPullRequestAsync(item, cancellationToken).ConfigureAwait(false);
         var head = await _workspaceHead(item.Workspace, cancellationToken).ConfigureAwait(false);
+        await RecordOwnedObservationsAsync(item, stage, verdict, pr, head, now, cancellationToken)
+            .ConfigureAwait(false);
 
         WorkItemObservation Observation(PullRequestObservation reading) => new(
             stage, item.Round, item.AutomaticFixUsed, item.Branch, outcome, verdict,
@@ -359,6 +368,9 @@ public sealed class WorkItemAdvancer
             State = QueueItemState.Queued,
             RoomDirectory = null,
             LaunchedAt = null,
+            ParentAttemptId = existing.AttemptId ?? existing.ParentAttemptId,
+            AttemptId = null,
+            AttemptBaseRevision = null,
             Error = null,
             ReadinessMutationClaim = null,
         }, () =>
@@ -947,6 +959,10 @@ public sealed class WorkItemAdvancer
                 ? d.GetBoolean()
                 : (bool?)null;
         var headSha = Text(root, "headRefOid");
+        var mergeSha = root.TryGetProperty("mergeCommit", out var merge)
+            && merge.ValueKind == JsonValueKind.Object
+            ? Text(merge, "oid")
+            : null;
         var headBranch = Text(root, "headRefName");
         var baseBranch = Text(root, "baseRefName");
         var sameRepository = root.TryGetProperty("isCrossRepository", out var cross)
@@ -968,10 +984,11 @@ public sealed class WorkItemAdvancer
             return false;
         }
 
-        var checks = PullRequestChecks.Summarize(
-            root.TryGetProperty("statusCheckRollup", out var rollup) ? rollup : null);
+        var statusCheckRollup = root.TryGetProperty("statusCheckRollup", out var rollup) ? rollup : (JsonElement?)null;
+        var checks = PullRequestChecks.Summarize(statusCheckRollup);
+        var checkRuns = PullRequestChecks.ObserveRuns(statusCheckRollup);
         observation = new PullRequestObservation(
-            true, number, headSha, isOpen, isDraft, checks, null, null);
+            true, number, headSha, mergeSha, isOpen, isDraft, checks, checkRuns, null, null);
         return true;
     }
 
@@ -980,6 +997,139 @@ public sealed class WorkItemAdvancer
             ? value.GetString()
             : null;
 
+    private async Task RecordOwnedObservationsAsync(
+        QueueItem item,
+        WorkStage stage,
+        ReviewVerdict? verdict,
+        PullRequestObservation pr,
+        string? workspaceHead,
+        DateTimeOffset observedAt,
+        CancellationToken cancellationToken)
+    {
+        if (item.AttemptId is not { } attemptId)
+        {
+            // Historical/imported rows have no producer-owned attempt id. Do not manufacture one
+            // from their tag, room path, branch or timestamps.
+            return;
+        }
+
+        FleetEventDraft Base(FleetEventKind kind, string key) => new(
+            kind,
+            key,
+            observedAt,
+            AttemptId: attemptId,
+            ParentAttemptId: item.ParentAttemptId,
+            WorkId: new FleetWorkId(item.Tag),
+            RoomId: item.RoomDirectory is { Length: > 0 } room
+                ? new FleetRoomId(BatonPaths.RecordKey(room))
+                : null,
+            IssueId: item.Issue,
+            PullRequestId: pr.Number ?? item.PullRequest,
+            Vendor: item.Adapter,
+            Model: item.Model,
+            Effort: item.Effort,
+            DeclaredRole: item.Role,
+            EffectiveGrant: item.LastAdmission?.EffectiveGrant);
+
+        var revisionKind = stage switch
+        {
+            WorkStage.Implement => FleetRevisionKind.Implementation,
+            WorkStage.Fix or WorkStage.Continue => FleetRevisionKind.Repair,
+            _ => (FleetRevisionKind?)null,
+        };
+        if (revisionKind is not null
+            && item.AttemptBaseRevision is { Length: > 0 } baseRevision
+            && workspaceHead is { Length: > 0 } producedHead
+            && !string.Equals(baseRevision, producedHead, StringComparison.OrdinalIgnoreCase))
+        {
+            await _appendFleetEvent(
+                Base(FleetEventKind.RevisionProduced, $"revision:{attemptId.Value}:{producedHead}") with
+                {
+                    RevisionId = new FleetRevisionId(producedHead),
+                    RevisionKind = revisionKind,
+                }, cancellationToken).ConfigureAwait(false);
+        }
+
+        if (pr is { Succeeded: true, Number: { } number, HeadSha: { Length: > 0 } pullRequestHead })
+        {
+            await _appendFleetEvent(
+                Base(FleetEventKind.PullRequestBound, $"pr-bound:{attemptId.Value}:{number}:{pullRequestHead}") with
+                {
+                    PullRequestId = number,
+                    RevisionId = new FleetRevisionId(pullRequestHead),
+                }, cancellationToken).ConfigureAwait(false);
+
+            foreach (var check in pr.CheckRuns)
+            {
+                await _appendFleetEvent(
+                    Base(
+                        FleetEventKind.CheckObserved,
+                        CheckDedupeKey(attemptId, number, pullRequestHead, check)) with
+                    {
+                        PullRequestId = number,
+                        RevisionId = new FleetRevisionId(pullRequestHead),
+                        CheckRunId = new FleetCheckRunId(check.CheckRunId),
+                        CheckName = check.Name,
+                        CheckStatus = check.Status,
+                        CheckConclusion = check.Conclusion,
+                        CheckStartedAt = check.StartedAt,
+                        CheckCompletedAt = check.CompletedAt,
+                    }, cancellationToken).ConfigureAwait(false);
+            }
+        }
+
+        if (stage is WorkStage.Review or WorkStage.ReReview && verdict is not null)
+        {
+            var reviewedRevision = IsFullSha(verdict.ReviewedRef)
+                ? new FleetRevisionId(verdict.ReviewedRef)
+                : (FleetRevisionId?)null;
+            await _appendFleetEvent(
+                Base(
+                    FleetEventKind.ReviewVerdictObserved,
+                    $"review:{attemptId.Value}:{item.Round}:{verdict.ReviewedRef}:{verdict.Decision?.ToString() ?? "unknown"}") with
+                {
+                    RevisionId = reviewedRevision,
+                    ReviewRoundId = new FleetReviewRoundId($"{item.Tag}:{item.Round}"),
+                    ReviewVerdict = verdict.Decision?.ToString().ToLowerInvariant(),
+                }, cancellationToken).ConfigureAwait(false);
+        }
+
+        if (pr is { Succeeded: true, Number: { } mergedNumber, MergeSha: { Length: > 0 } mergeSha })
+        {
+            await _appendFleetEvent(
+                Base(FleetEventKind.MergeObserved, $"merge:{attemptId.Value}:{mergedNumber}:{mergeSha}") with
+                {
+                    PullRequestId = mergedNumber,
+                    RevisionId = new FleetRevisionId(mergeSha),
+                    Outcome = "merged",
+                }, cancellationToken).ConfigureAwait(false);
+        }
+    }
+
+    private static bool IsFullSha(string value) =>
+        value.Length == 40 && value.All(char.IsAsciiHexDigit);
+
+    private static string CheckDedupeKey(
+        FleetAttemptId attemptId,
+        int pullRequest,
+        string revision,
+        PullRequestCheckRun check) =>
+        string.Join(
+            ':',
+            "check",
+            attemptId.Value,
+            pullRequest.ToString(CultureInfo.InvariantCulture),
+            revision,
+            check.CheckRunId,
+            check.Status ?? "unknown",
+            check.Conclusion ?? "unknown",
+            check.StartedAt?.ToUniversalTime().ToString("O", CultureInfo.InvariantCulture) ?? "unknown",
+            check.CompletedAt?.ToUniversalTime().ToString("O", CultureInfo.InvariantCulture) ?? "unknown");
+
+    private static Task<FleetEvent?> AppendOperationalFleetEventAsync(
+        FleetEventDraft draft, CancellationToken cancellationToken) =>
+        FleetEventLog.OpenOperational().Append(draft, cancellationToken);
+
     private static string[] RepositoryArgs(QueueItem item, params string[] args) =>
         [.. args, "--repo", item.Repository!];
 
@@ -987,19 +1137,21 @@ public sealed class WorkItemAdvancer
         bool Succeeded,
         int? Number,
         string? HeadSha,
+        string? MergeSha,
         bool? IsOpen,
         bool? IsDraft,
         string? Checks,
+        IReadOnlyList<PullRequestCheckRun> CheckRuns,
         string? RequiredChecks,
         string? Error)
     {
         internal static PullRequestObservation NoPullRequest { get; } =
-            new(true, null, null, false, null, null, null, null);
+            new(true, null, null, null, false, null, null, [], null, null);
 
         internal static PullRequestObservation Failed(
             string error, PullRequestObservation? last = null) =>
-            new(false, last?.Number, last?.HeadSha, last?.IsOpen, last?.IsDraft,
-                last?.Checks, null, error);
+            new(false, last?.Number, last?.HeadSha, last?.MergeSha, last?.IsOpen, last?.IsDraft,
+                last?.Checks, last?.CheckRuns ?? [], null, error);
     }
 
     /// <summary>

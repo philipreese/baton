@@ -5029,18 +5029,21 @@ name, deliberately not touched by this exemption. A retention prune with no `--s
 `--state Indeterminate` selects them explicitly (or any other `--state` value excludes them) if that
 default is unwanted.
 
-**The automatic prune is held until #2140 lands (#2111 operator ruling, 2026-09-08).** Pruning deletes
+**The automatic prune remains held while #2140 lands in slices (#2111 operator ruling,
+2026-09-08).** Pruning deletes
 prompts, stdout and diffs — a room's only evidence once it is gone — so before `RoomRetentionSweep`'s
 automatic path deletes a single room on an operator's machine unattended, the durable fleet event log
 (#2140, "glass cut, piece 3" of #2075: `~/.baton/fleet/events.jsonl`, append-only, monotonic ids) must
-carry that room's verdict text and terminal fact. #2140 is unbuilt as of this paragraph, so
+carry that room's verdict text and terminal fact. The first #2140 substrate slice records
+producer-owned conductor attempts prospectively but does not cover every terminal room already
+eligible for pruning, so
 `RoomRetentionSweep.ExecuteAsync`'s automatic call goes through a wrapper,
 `ExecuteAutomaticRoomsRetentionPruneAsync`, that no-ops and logs the hold once per daemon process
 instead of reaching `ExecuteRoomsRetentionPruneAsync` (`RoomRetentionSweep.AutomaticPruneHoldReason`
-names the reason string). This hold is deliberately **not** a probe for the log file's existence — the
-shape isn't built, and "carries verdict text and terminal fact" isn't something a probe could verify —
-so it fails closed on a constant rather than silently opening the day an unrelated file first appears
-at that path. **The hold applies only to the unattended path.** `baton rooms prune --terminal`, typed
+names the reason string). This hold is deliberately **not** a probe for the log file's existence —
+"carries verdict text and terminal fact" is not something a file-exists probe could verify — so it
+still fails closed on a constant rather than silently opening when the first event file appears.
+**The hold applies only to the unattended path.** `baton rooms prune --terminal`, typed
 by hand, is unaffected and deletes exactly as it always has — an operator watching the command run is
 the evidence the automatic path does not yet have another source for. The daemon logs each prune that
 actually deletes something, with the room count and the retention window, on stdout
@@ -6209,6 +6212,22 @@ corrections travel as briefs through `redispatch --spec`, #1495/#1381) guarantee
 Revisit only if a genuinely interactive surface is ever ruled in — which §10's mid-run-steering
 ruling currently forbids.
 
+**Durable SSE cursor (#2140, first substrate slice).** The cursor belongs to Baton's event record,
+not to the projection writer's process lifetime. `FleetEventLog.Append` is the single writer seam for
+`{Root}/fleet/events.jsonl`: it assigns a strictly increasing integer `id`, normalizes `at` to UTC,
+and writes one compact JSON object per line under the storage-root-scoped file lock. A reconnecting
+`GET /events` client sends `Last-Event-ID`; the daemon first replays retained rows from the live file
+whose id is greater than that cursor and then follows new appends as `event: fleet`. The operational
+rollover `{Root}/fleet/events.1.jsonl` is deliberately not replayed: it exists to recover the next id
+and bounded duplicate keys across rotation, not to impersonate the future compact all-time history.
+The existing retention-sweep byte threshold is reused as this operational JSONL ceiling, so this
+slice introduces no new numerical budget.
+
+Projection change notification remains a separate `event: projection` frame with no SSE `id`, and
+`fleet/heartbeat.json` plus the projection version keep their existing polling semantics. This split
+is structural: an ephemeral projection version can wake the current page, but it cannot overwrite a
+durable browser cursor or claim replay across daemon restart.
+
 **Slice 1 landed 2026-09-07 (#1946): the page, not yet the drill-down.** `GlassHttpService` (§7)
 serves the repo's one `glass.html` — embedded in `Baton.Cli`, and marked with a `baton-glass-source`
 meta that switches the page onto a same-origin read — plus `{Root}/fleet/projection.json` as-is and
@@ -6944,6 +6963,11 @@ satisfied rather than avoided: `WorkItemLifecycle` is the code that advances the
   the scratch file has been rewritten. The tag is a slug (lower-case letters, digits, `-`, `_`,
   1–64 chars) because it names this file and labels the room.
 - **`~/.baton/fleet/queue.jsonl`** — the decision ledger. See "The recorded fact" below.
+- **`~/.baton/fleet/events.jsonl`** — Baton's prospective append-only event record, with one
+  operational rollover at `events.1.jsonl`. `FleetEventLog.Append` owns monotonic ids, UTC timestamps,
+  retained-window duplicate suppression, rotation, and live-file replay; C-11 owns its SSE contract. This is
+  an operational retained tail, not the compact all-time history promised by the later reporting
+  slice.
 
 ### The verbs
 
@@ -6973,6 +6997,32 @@ is visibly `unknown` during compatibility migration (distinct from a present emp
 producer has been upgraded, `Queue.RequireDeclaredRequirements: true` fails an execution-bearing
 legacy row closed; legacy read-only rows remain unknown. This switch is deliberately explicit: coverage
 is observable before the fail-closed transition rather than inferred from a date or a brief.
+
+**The fleet-event vocabulary and identity rule (#2140).** The closed vocabulary is `workQueued`,
+`admissionDecided`, `attemptStarted`, `attemptProgressed`, `attemptRefused`,
+`attemptRetryScheduled`, `attemptSettled`, `revisionProduced`, `reviewVerdictObserved`,
+`pullRequestBound`, `checkObserved`, `mergeObserved`, `releaseObserved`, `deploymentObserved`,
+`daemonStarted`, and `daemonStopped`. The first producer slice writes the facts the conductor queue
+already owns: admission, start/refusal/settlement, workspace revision, review verdict, PR binding,
+check observation, and structured merge observation. Release and deployment remain absent
+until a Baton producer owns structured evidence for them; a merge is not a deployment.
+
+Every prospective execution attempt gets a producer-generated `attemptId`, persisted on the queue
+row before launch and copied to its events. `parentAttemptId`, `workId`, `roomId`, `executionId`,
+`issueId`, `pullRequestId`, `revisionId`, and `reviewRoundId` are separately typed correlation fields,
+not strings recovered from room names or time proximity. A terminal event copies execution usage and
+artifact references only when one execution is unambiguous in the terminal sentinel. Missing
+identity, admission, cost, usage, or terminal detail remains absent/unknown — never fabricated as
+zero. Historical/imported rows without an attempt id emit no guessed lineage and are not backfilled.
+
+A code attempt retains the workspace's exact HEAD before launch. `revisionProduced` is written only
+when an implement, fix, or continuation attempt later settles at a different HEAD; its closed
+`revisionKind` is `implementation` for implement and `repair` for fix/continuation. Review and
+re-review never claim a revision, and an absent or unchanged baseline produces no authorship fact.
+The board may still reduce `statusCheckRollup` to one display word, but durable `checkObserved` facts
+do not: each producer-identified check run carries its id, name, status, conclusion, start/completion
+instants, and the PR head revision it checks. Missing fields stay absent, overlapping runs stay
+distinct, and a changed state for one run is a new observation rather than a dedupe collision.
 
 **No verb launches anything.** Adding an item is a durable request; the running daemon is the only
 thing that dispatches, which is what keeps one auditable path into a room. `hold`/`resume` pause

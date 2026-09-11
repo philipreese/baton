@@ -86,6 +86,54 @@ public static class PullRequestChecks
     }
 
     /// <summary>
+    /// Preserves each producer-owned check-run observation in <c>statusCheckRollup</c>. A classic
+    /// status context has no check-run identity and is therefore absent from this result; it still
+    /// participates in <see cref="Summarize"/>, but is never given a made-up id.
+    /// </summary>
+    public static IReadOnlyList<PullRequestCheckRun> ObserveRuns(JsonElement? rollup)
+    {
+        if (rollup is not { ValueKind: JsonValueKind.Array } array)
+        {
+            return [];
+        }
+
+        var observations = new List<PullRequestCheckRun>();
+        foreach (var element in array.EnumerateArray())
+        {
+            if (element.ValueKind != JsonValueKind.Object)
+            {
+                continue;
+            }
+
+            var typeName = Text(element, "__typename");
+            if (typeName is { Length: > 0 } && !string.Equals(typeName, "CheckRun", StringComparison.Ordinal))
+            {
+                continue;
+            }
+
+            if (typeName is null && Text(element, "name") is null)
+            {
+                continue;
+            }
+
+            if (CheckRunId(element) is not { } checkRunId)
+            {
+                continue;
+            }
+
+            observations.Add(new PullRequestCheckRun(
+                checkRunId,
+                Text(element, "name"),
+                Text(element, "status"),
+                Text(element, "conclusion"),
+                Instant(element, "startedAt"),
+                Instant(element, "completedAt")));
+        }
+
+        return observations;
+    }
+
+    /// <summary>
     /// Reduces the JSON emitted by <c>gh pr checks --required --json bucket,...</c>. The command's
     /// exit code describes the check result, so callers deliberately parse its output even when that
     /// receipt is non-zero. Null means no trustworthy JSON evidence; an empty array means
@@ -160,13 +208,74 @@ public static class PullRequestChecks
     }
 
     private static string? Text(JsonElement element, string property) =>
-        element.TryGetProperty(property, out var value) && value.ValueKind == JsonValueKind.String
-            ? value.GetString()
+        element.TryGetProperty(property, out var value)
+        && value.ValueKind == JsonValueKind.String
+        && value.GetString() is { Length: > 0 } text
+            ? text
             : null;
 
     private static DateTimeOffset? Instant(JsonElement element, string property) =>
         Text(element, property) is { Length: > 0 } text
         && DateTimeOffset.TryParse(text, out var parsed)
+        && parsed > DateTimeOffset.MinValue
             ? parsed
             : null;
+
+    private static string? CheckRunId(JsonElement element)
+    {
+        if (element.TryGetProperty("databaseId", out var databaseId))
+        {
+            if (databaseId.ValueKind == JsonValueKind.Number
+                && databaseId.TryGetInt64(out var numericId)
+                && numericId > 0)
+            {
+                return numericId.ToString(System.Globalization.CultureInfo.InvariantCulture);
+            }
+
+            if (databaseId.ValueKind == JsonValueKind.String && databaseId.GetString() is { Length: > 0 } textId)
+            {
+                return textId;
+            }
+        }
+
+        if (Text(element, "id") is { Length: > 0 } nodeId)
+        {
+            return nodeId;
+        }
+
+        // gh's measured statusCheckRollup shape omits databaseId but gives the canonical Actions
+        // job URL. The numeric /job/{id} segment is GitHub-owned immutable identity, not a name or
+        // timestamp inference. Non-Actions URLs stay unknown rather than borrowing the whole URL.
+        if (Text(element, "detailsUrl") is not { Length: > 0 } details
+            || !Uri.TryCreate(details, UriKind.Absolute, out var uri))
+        {
+            return null;
+        }
+
+        var segments = uri.AbsolutePath.Split('/', StringSplitOptions.RemoveEmptyEntries);
+        for (var index = 0; index + 1 < segments.Length; index++)
+        {
+            if (string.Equals(segments[index], "job", StringComparison.Ordinal)
+                && long.TryParse(
+                    segments[index + 1],
+                    System.Globalization.NumberStyles.None,
+                    System.Globalization.CultureInfo.InvariantCulture,
+                    out var jobId)
+                && jobId > 0)
+            {
+                return jobId.ToString(System.Globalization.CultureInfo.InvariantCulture);
+            }
+        }
+
+        return null;
+    }
 }
+
+/// <summary>One immutable check-run reading copied from a pull request's status rollup.</summary>
+public sealed record PullRequestCheckRun(
+    string CheckRunId,
+    string? Name,
+    string? Status,
+    string? Conclusion,
+    DateTimeOffset? StartedAt,
+    DateTimeOffset? CompletedAt);

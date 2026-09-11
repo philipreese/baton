@@ -406,6 +406,21 @@ public static class BatonPaths
     public const string FleetHeartbeatFileName = "heartbeat.json";
 
     /// <summary>
+    /// <c>{Root}/fleet/events.jsonl</c> — Baton's append-only fleet event stream (#2140). It is a
+    /// second surface beside <see cref="FleetHeartbeatFile"/> and <see cref="FleetProjectionFile"/>:
+    /// neither existing file is replaced or derived from this one.
+    /// </summary>
+    public static string FleetEventsFile => Path.Combine(Root, FleetDirectoryName, FleetEventsFileName);
+
+    /// <summary>The single operational rollover of <see cref="FleetEventsFile"/>. SSE replay excludes it.</summary>
+    public static string FleetEventsRolloverFile =>
+        Path.Combine(Root, FleetDirectoryName, FleetEventsRolloverFileName);
+
+    public const string FleetEventsFileName = "events.jsonl";
+
+    public const string FleetEventsRolloverFileName = "events.1.jsonl";
+
+    /// <summary>
     /// <c>{Root}/fleet/watchdog.txt</c> — the one line <c>DaemonWatchdog</c> writes when it declares
     /// the daemon hung, and the reason it is a file of its own rather than another field in
     /// <see cref="FleetHeartbeatFile"/> beside it: the heartbeat is rewritten by the next healthy
