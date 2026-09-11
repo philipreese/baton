@@ -297,7 +297,7 @@ public sealed partial class MemoryAutomaticProjectionTests : IDisposable
             MemoryImportOptionsParser.Parse([
                 "--dry-run",
                 "--root", root,
-                "--assert", $"{caseVariantRoot}={OtherRepository}",
+                "--assert", $"{caseVariantRoot}={Repository.ToUpperInvariant()}",
                 "--asserted-by", "test",
             ]),
             output,
@@ -326,7 +326,7 @@ public sealed partial class MemoryAutomaticProjectionTests : IDisposable
                 "--dry-run",
                 "--root", root,
                 "--assert", $"{root}={Repository}",
-                "--assert", $"{caseVariantRoot}={OtherRepository}",
+                "--assert", $"{caseVariantRoot}={Repository.ToUpperInvariant()}",
                 "--asserted-by", "test",
             ]),
             output,

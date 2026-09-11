@@ -119,16 +119,17 @@ public static class MemoryProjectionObligationStore
 
     /// <summary>
     /// Runs all target replacements only if <paramref name="obligation"/> is still current. The
-    /// current-id test and replacements share one lock, which is the publication fence.
+    /// current-id test and replacements share one lock. The outer canonical generation transaction
+    /// rejects changes to any snapshot input and excludes mutations throughout target replacement.
     /// </summary>
-    public static bool TryPublishCurrent(MemoryProjectionObligation obligation, Action publish)
+    public static bool TryPublishCurrent(MemoryProjectionObligation obligation, string generation, Action publish)
     {
         ArgumentNullException.ThrowIfNull(obligation);
         ArgumentNullException.ThrowIfNull(publish);
         Validate(obligation, obligation.RepositorySlug);
         var path = BatonPaths.MemorySyncPendingFile(obligation.RepositorySlug);
 
-        return MutexGuardedFileLock.RunUnderLock(
+        return MemoryCanonicalGeneration.ReadCurrent(BatonPaths.Root, generation, () => MutexGuardedFileLock.RunUnderLock(
             path,
             LockNamePrefix,
             LockTimeout,
@@ -151,7 +152,7 @@ public static class MemoryProjectionObligationStore
 
                 publish();
                 return true;
-            });
+            }));
     }
 
     /// <summary>Closes only the obligation that actually published; a newer one is left untouched.</summary>

@@ -37,13 +37,19 @@ namespace Baton.Cli;
 /// and the one an operator can act on.
 /// </para>
 /// <para>
-/// <b>Reads and writes happen under the canonical store's own lock</b>
-/// (<see cref="MemoryStore.RunUnderEntriesLockAsync"/>), so a concurrent <c>baton memory import</c>
-/// cannot append between the read that fed a projection and the write that lands it.
+/// <see cref="MemoryCanonicalGeneration"/> validates all canonical inputs under the publication
+/// lock. A concurrent mutation invalidates the snapshot before its target writes can begin.
 /// </para>
 /// </remarks>
 public static class MemorySyncCommand
 {
+    private static readonly AsyncLocal<Action?> SnapshotObservation = new();
+    internal static Action? SnapshotObserver
+    {
+        get => SnapshotObservation.Value;
+        set => SnapshotObservation.Value = value;
+    }
+
     /// <param name="claudeHomeOverride">Test seam — see <see cref="MemoryImportCommand.ExecuteAsync"/>'s own parameter doc.</param>
     /// <param name="userHomeOverride">Test seam for the non-Claude vendor roots, separate for the same reason.</param>
     public static async Task<int> ExecuteAsync(
@@ -126,6 +132,7 @@ public static class MemorySyncCommand
             }
         }
 
+        var generation = MemoryCanonicalGeneration.Capture(BatonPaths.Root);
         TargetDiscovery discovery;
         try
         {
@@ -168,6 +175,7 @@ public static class MemorySyncCommand
                     repositoryFacts,
                     discovery.ByRepository,
                     obligation,
+                    generation,
                     projectionWriterOverride,
                     cancellationToken).ConfigureAwait(false);
                 if (report is not null)
@@ -246,14 +254,11 @@ public static class MemorySyncCommand
     private const string UnchangedDisposition = "unchanged";
 
     /// <summary>
-    /// One repository's projection, computed and — under <c>--apply</c> — written, with the store's
-    /// entries read inside its own lock.
+    /// One repository's projection, validated against the shared canonical generation at publication.
     /// </summary>
     /// <remarks>
-    /// The links and retractions files are read <b>before</b> the entries lock is taken, never inside
-    /// it: <see cref="MemoryStore.ReadResolvedAsync"/>'s remarks carry the rule (the locks are never
-    /// nested), and a link or retraction appended in the gap is picked up by the next run rather than
-    /// deadlocking this one.
+    /// Ledger locks are released after each read. Publication acquires generation then obligation;
+    /// a changed fleet, repository or alias input rejects the snapshot and retains its retry claim.
     /// </remarks>
     private static async Task<SyncRepositoryReport?> SyncOneAsync(
         string slug,
@@ -261,6 +266,7 @@ public static class MemorySyncCommand
         IReadOnlyList<MemoryProjectionCandidate> repositoryFacts,
         IReadOnlyDictionary<string, List<ProjectionTarget>> targetsByRepository,
         MemoryProjectionObligation? obligation,
+        string generation,
         Action<string, byte[]>? projectionWriterOverride,
         CancellationToken cancellationToken)
     {
@@ -286,8 +292,8 @@ public static class MemorySyncCommand
         var retractions = await MemoryStore
             .ReadRetractionsAsync(BatonPaths.MemoryRetractionsFile(slug), cancellationToken).ConfigureAwait(false);
 
-        // The fleet store is read BEFORE this repository's lock is taken and under its own, never
-        // nested -- MemoryStore.ReadResolvedAsync's rule. A repository's projection merges it in ahead
+        // The fleet ledgers are read under their own locks, never nested. Generation validation
+        // rejects changes between these reads. A repository's projection merges fleet entries ahead
         // of the repository's entries (#2112); the fleet's own projection is the fleet store alone, so
         // for that slug this is empty and the entries below carry the origin instead.
         var fleet = isFleet || !File.Exists(FleetMemory.EntriesFile)
@@ -296,82 +302,79 @@ public static class MemorySyncCommand
                     FleetMemory.EntriesFile, FleetMemory.LinksFile, FleetMemory.RetractionsFile, cancellationToken)
                 .ConfigureAwait(false);
         var fleetStorePath = !isFleet && File.Exists(FleetMemory.EntriesFile) ? FleetMemory.EntriesFile : null;
-        return await MemoryStore.RunUnderEntriesLockAsync(
-            entriesFile,
-            stored =>
-            {
-                var repository = MemoryStoreIdentity.Resolve(
-                    slug,
-                    metadata?.Repository,
-                    stored,
-                    obligation,
-                    options.Repository);
-                if (repository is null)
-                {
-                    return null;
-                }
+        SnapshotObserver?.Invoke();
+        var stored = await MemoryStore.ReadAllStrictAsync(entriesFile, cancellationToken).ConfigureAwait(false);
+        var repository = MemoryStoreIdentity.Resolve(
+            slug,
+            metadata?.Repository,
+            stored,
+            obligation,
+            options.Repository);
+        if (repository is null)
+        {
+            return null;
+        }
 
-                var resolved = MemoryStore.Resolve(stored, links, retractions);
+        var resolved = MemoryStore.Resolve(stored, links, retractions);
 
-                // Named, never counted — the posture every other omission on this surface takes
-                // (ProjectionOmission's remarks). The projector never sees a retracted entry, since
-                // Resolve drops it first, so the omission is accounted for here from the raw rows.
-                var retracted = RetractedOmissions(stored, retractions);
-                var candidates = fleet
-                    .Select(e => new MemoryProjectionCandidate(e, MemoryFactOrigin.Fleet))
-                    .Concat(resolved.Select(e => new MemoryProjectionCandidate(
-                        e, isFleet ? MemoryFactOrigin.Fleet : MemoryFactOrigin.Vendor)))
-                    .Concat(repositoryFacts.Where(f => string.Equals(
-                        f.Entry.Repository, repository, StringComparison.OrdinalIgnoreCase)))
-                    .ToList();
+        // Named, never counted — the posture every other omission on this surface takes
+        // (ProjectionOmission's remarks). The projector never sees a retracted entry, since
+        // Resolve drops it first, so the omission is accounted for here from the raw rows.
+        var retracted = RetractedOmissions(stored, retractions);
+        var candidates = fleet
+            .Select(e => new MemoryProjectionCandidate(e, MemoryFactOrigin.Fleet))
+            .Concat(resolved.Select(e => new MemoryProjectionCandidate(
+                e, isFleet ? MemoryFactOrigin.Fleet : MemoryFactOrigin.Vendor)))
+            .Concat(repositoryFacts.Where(f => string.Equals(
+                f.Entry.Repository, repository, StringComparison.OrdinalIgnoreCase)))
+            .ToList();
 
-                var projection = MemoryProjection.Build(
-                    repository, entriesFile, candidates, ProjectionBudget.Default, fleetStorePath);
+        var projection = MemoryProjection.Build(
+            repository, entriesFile, candidates, ProjectionBudget.Default, fleetStorePath);
 
-                var targets = targetsByRepository.TryGetValue(repository, out var found)
-                    ? found.OrderBy(t => t.FilePath, StringComparer.OrdinalIgnoreCase).ToList()
-                    : [];
+        var targets = targetsByRepository.TryGetValue(repository, out var found)
+            ? found.OrderBy(t => t.FilePath, StringComparer.OrdinalIgnoreCase).ToList()
+            : [];
 
-                var writes = new List<SyncTargetReport>();
-                if (options.Apply && obligation is not null)
-                {
-                    var published = MemoryProjectionObligationStore.TryPublishCurrent(
-                        obligation,
-                        () =>
-                        {
-                            foreach (var target in targets)
-                            {
-                                writes.Add(WriteOrPreview(
-                                    target, projection.Bytes, apply: true, projectionWriterOverride));
-                            }
-                        });
-
-                    if (!published)
-                    {
-                        writes.AddRange(targets.Select(target => SupersededReport(target, projection.Bytes)));
-                    }
-                }
-                else
+        var writes = new List<SyncTargetReport>();
+        if (options.Apply && obligation is not null)
+        {
+            var published = MemoryProjectionObligationStore.TryPublishCurrent(
+                obligation,
+                generation,
+                () =>
                 {
                     foreach (var target in targets)
                     {
-                        writes.Add(WriteOrPreview(target, projection.Bytes, options.Apply, projectionWriterOverride));
+                        writes.Add(WriteOrPreview(
+                            target, projection.Bytes, apply: true, projectionWriterOverride));
                     }
-                }
+                });
 
-                return new SyncRepositoryReport(
-                    repository,
-                    entriesFile,
-                    projection.BodySha256,
-                    projection.ProjectedEntryIds.Count,
-                    writes,
-                    targets.Count == 0 ? NoTargetGuidance(repository) : null,
-                    retracted,
-                    projection.Superseded,
-                    projection.Overridden,
-                    projection.Dropped);
-            },
-            cancellationToken).ConfigureAwait(false);
+            if (!published)
+            {
+                writes.AddRange(targets.Select(target => SupersededReport(target, projection.Bytes)));
+            }
+        }
+        else
+        {
+            foreach (var target in targets)
+            {
+                writes.Add(WriteOrPreview(target, projection.Bytes, options.Apply, projectionWriterOverride));
+            }
+        }
+
+        return new SyncRepositoryReport(
+            repository,
+            entriesFile,
+            projection.BodySha256,
+            projection.ProjectedEntryIds.Count,
+            writes,
+            targets.Count == 0 ? NoTargetGuidance(repository) : null,
+            retracted,
+            projection.Superseded,
+            projection.Overridden,
+            projection.Dropped);
     }
 
     /// <summary>

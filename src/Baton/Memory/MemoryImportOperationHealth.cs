@@ -12,17 +12,23 @@ public sealed record MemoryImportOperationProblem(string State, string Detail, I
 /// <summary>Reconciles canonical ownership with durable operation records for publication and audit.</summary>
 public static class MemoryImportOperationHealth
 {
-    public static IReadOnlyList<MemoryImportOperationProblem> Scan(string batonRoot)
+    public static IReadOnlyList<MemoryImportOperationProblem> Scan(string batonRoot) => Sample(batonRoot).Problems;
+
+    public static (string Generation, IReadOnlyList<MemoryImportOperationProblem> Problems) Sample(string batonRoot)
+    {
+        var sample = MemoryCanonicalGeneration.Inspect(batonRoot, () => ScanUnlocked(batonRoot));
+        return (sample.Generation, sample.Value);
+    }
+
+    private static IReadOnlyList<MemoryImportOperationProblem> ScanUnlocked(string batonRoot)
     {
         var problems = new List<MemoryImportOperationProblem>();
         var owned = new List<OwnedRow>();
         var records = new Dictionary<string, ImportManifest>(StringComparer.Ordinal);
         try
         {
-            // Read ledgers before enumerating manifests: any operation visible in a row must already
-            // have written its record. These are independent read snapshots, not cross-store locks:
-            // publication already holds its entries mutex, so nesting another store's mutex can
-            // deadlock two publishers. Sharing/I/O failure fences loudly; no tolerant I/O fallback.
+            // The canonical generation mutex excludes ledger and manifest mutations across this
+            // entire read. No ledger mutex is nested; sharing/I/O failures still fence loudly.
             if (Directory.Exists(batonRoot))
             {
                 foreach (var directory in Directory.EnumerateDirectories(batonRoot))
@@ -41,7 +47,8 @@ public static class MemoryImportOperationHealth
                     }
                 }
             }
-            foreach (var row in MemoryAliasStore.Ledger.ReadAllUnlocked(Path.Combine(batonRoot, BatonPaths.MemoryAliasFileName)))
+            var aliases = MemoryAliasStore.Ledger.ReadAllUnlocked(Path.Combine(batonRoot, BatonPaths.MemoryAliasFileName));
+            foreach (var row in aliases)
             {
                 if (row.ImportOperationId is not null)
                     owned.Add(new(row.ImportOperationId, row.Repository, row.Path, FleetMemory.SlugFor(row.Repository), "alias"));
@@ -63,6 +70,19 @@ public static class MemoryImportOperationHealth
                 {
                     // A corrupt file cannot reliably identify its affected repositories: fence all.
                     problems.Add(new("corrupt", $"'{path}': {ex.Message}", new HashSet<string>()));
+                }
+            }
+
+            foreach (var manifest in records.Values.Where(m => m.OperationState == ImportOperationState.Settled))
+            {
+                // Aliases survive undo. Every accepted assertion must retain its exact owner.
+                // Old settlements implicitly owned their plan.
+                foreach (var accepted in manifest.AcceptedAliases ?? manifest.PlannedAliases ?? [])
+                {
+                    var matches = aliases.Where(a => BatonPaths.RecordKeyComparer.Equals(a.Path, accepted.Path)).ToList();
+                    if (matches.Count != 1 || matches[0] != accepted)
+                        problems.Add(new("corrupt", $"Operation '{manifest.OperationId}' lost accepted alias ownership for '{accepted.Path}'.",
+                            MemoryImportOperationStore.AffectedSlugs(manifest)));
                 }
             }
 
@@ -93,7 +113,8 @@ public static class MemoryImportOperationHealth
                         && MemoryImportOperationStore.OwnershipKey(e.Repository, e.EntryId) == key),
                     "link" => (manifest.Links ?? []).Any(l => (pending || !l.AlreadyPresent)
                         && MemoryImportOperationStore.OwnershipKey(l.Repository, l.LinkId) == key),
-                    _ => (manifest.PlannedAliases ?? []).Any(a =>
+                    _ => (pending ? manifest.PlannedAliases ?? [] : manifest.AcceptedAliases ?? manifest.PlannedAliases ?? []).Any(a =>
+                        a.ImportOperationId == row.Operation &&
                         MemoryImportOperationStore.OwnershipKey(a.Repository, a.Path) == key),
                 };
                 if (!accounted || !string.Equals(row.Slug, FleetMemory.SlugFor(row.Repository), StringComparison.OrdinalIgnoreCase)

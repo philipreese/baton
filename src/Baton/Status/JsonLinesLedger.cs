@@ -93,7 +93,8 @@ internal sealed class JsonLinesLedger<TEntry>(
     /// so a caller recording ownership can never claim a row a concurrent append won first.
     /// </summary>
     internal Task<IReadOnlyList<TEntry>> AppendAndGetAppendedAsync(
-        IReadOnlyList<TEntry> entries, string ledgerFilePath, CancellationToken cancellationToken = default)
+        IReadOnlyList<TEntry> entries, string ledgerFilePath, CancellationToken cancellationToken = default,
+        Func<Func<IReadOnlyList<TEntry>>, IReadOnlyList<TEntry>>? transaction = null)
     {
         ArgumentNullException.ThrowIfNull(entries);
         ArgumentException.ThrowIfNullOrEmpty(ledgerFilePath);
@@ -146,7 +147,7 @@ internal sealed class JsonLinesLedger<TEntry>(
             stream.Flush();
 
             return (IReadOnlyList<TEntry>)toAppend;
-        }, cancellationToken);
+        }, cancellationToken, transaction);
     }
 
     private static bool NeedsLineSeparator(string ledgerFilePath)
@@ -258,8 +259,15 @@ internal sealed class JsonLinesLedger<TEntry>(
     /// <see cref="Mutex.ReleaseMutex"/> throw; <see cref="MutexGuardedFileLock"/>'s own remarks state
     /// this, and the one-<c>Task.Run</c>-from-the-outside shape here is what honours it.
     /// </summary>
-    internal Task<T> RunUnderLockAsync<T>(string ledgerFilePath, Func<T> body, CancellationToken cancellationToken) =>
-        Task.Run(() => MutexGuardedFileLock.RunUnderLock(ledgerFilePath, LockNamePrefix, LockTimeout, body), cancellationToken);
+    internal Task<T> RunUnderLockAsync<T>(string ledgerFilePath, Func<T> body, CancellationToken cancellationToken,
+        Func<Func<T>, T>? transaction = null) =>
+        Task.Run(() =>
+        {
+            T Locked() => MutexGuardedFileLock.RunUnderLock(ledgerFilePath, LockNamePrefix, LockTimeout, body);
+            // An optional store transaction runs BEFORE the ledger lock, on this same worker thread.
+            // Neither lock crosses an await, and pre-append observations remain outside both locks.
+            return transaction is null ? Locked() : transaction(Locked);
+        }, cancellationToken);
 
     /// <summary>Action-returning overload of <see cref="RunUnderLockAsync{T}"/>.</summary>
     private Task RunUnderLockAsync(string ledgerFilePath, Action body, CancellationToken cancellationToken) =>

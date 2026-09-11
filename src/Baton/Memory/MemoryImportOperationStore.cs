@@ -44,9 +44,24 @@ public static class MemoryImportOperationStore
         var plannedEntries = intent.PlannedEntries!;
         var plannedLinks = intent.PlannedLinks ?? [];
 
-        await MemoryAliasStore.AppendAsync(
+        var appendedAliases = await MemoryAliasStore.AppendAndGetAppendedAsync(
             intent.PlannedAliases ?? [], BatonPaths.MemoryAliasFile, cancellationToken).ConfigureAwait(false);
         BoundaryObserver?.Invoke("aliases");
+        var aliases = await MemoryAliasStore.ReadAllStrictAsync(BatonPaths.MemoryAliasFile, cancellationToken)
+            .ConfigureAwait(false);
+        var acceptedAliases = new List<MemoryAliasEntry>();
+        foreach (var planned in intent.PlannedAliases ?? [])
+        {
+            var accepted = aliases.Where(a => BatonPaths.RecordKeyComparer.Equals(a.Path, planned.Path)).ToList();
+            if (accepted.Count != 1 || !string.Equals(accepted[0].Repository, planned.Repository, StringComparison.OrdinalIgnoreCase)
+                || appendedAliases.Any(a => BatonPaths.RecordKeyComparer.Equals(a.Path, planned.Path) && a != accepted[0]))
+            {
+                throw new BatonMemoryException(
+                    $"Alias assertion '{planned.Path}' for '{planned.Repository}' conflicts with the accepted ledger; " +
+                    "the import remains pending before dependent entries are written.");
+            }
+            acceptedAliases.Add(accepted[0]);
+        }
 
         // The intent is the commit boundary. Cancellation may stop between ledgers, but it cannot
         // strand unowned rows: every append carries this operation id and the same intent is replayable.
@@ -113,6 +128,7 @@ public static class MemoryImportOperationStore
             Links = (intent.Links ?? []).Select(row =>
                 row with { AlreadyPresent = !ownedLinks.Remove(OwnershipKey(row.Repository, row.LinkId)) }).ToList(),
             OperationState = ImportOperationState.Settled,
+            AcceptedAliases = acceptedAliases,
             // Keep the plan: settlement must remain checkable against its accounting after restart.
         };
         if (ownedEntries.Count != 0 || ownedLinks.Count != 0)
@@ -122,6 +138,7 @@ public static class MemoryImportOperationStore
 
         BoundaryObserver?.Invoke("before-settlement");
         settled.Write(manifestPath);
+        BoundaryObserver?.Invoke("settled");
         return settled;
     }
 
@@ -232,7 +249,8 @@ public static class MemoryImportOperationStore
             throw new InvalidDataException("Incomplete memory operation accounting.");
         }
 
-        var hasPlan = intent.PlannedEntries is not null || intent.PlannedLinks is not null || intent.PlannedAliases is not null;
+        var hasPlan = intent.PlannedEntries is not null || intent.PlannedLinks is not null
+            || intent.PlannedAliases is not null || intent.AcceptedAliases is not null;
         if (intent.OperationId is null && intent.OperationState == ImportOperationState.Settled && !hasPlan)
         {
             return; // Pre-operation manifests retain their existing undo/path compatibility.
@@ -272,8 +290,17 @@ public static class MemoryImportOperationStore
                 intent.Entries.Select(e => OwnershipKey(e.Repository, e.EntryId)));
             RequireSameBag((intent.PlannedLinks ?? []).Select(l => OwnershipKey(l.Repository, l.Id)),
                 (intent.Links ?? []).Select(l => OwnershipKey(l.Repository, l.LinkId)));
+            if (intent.AcceptedAliases is { } accepted)
+            {
+                if (accepted.Any(a => a is null || string.IsNullOrWhiteSpace(a.Path) || string.IsNullOrWhiteSpace(a.Repository)))
+                    throw new InvalidDataException("Incomplete accepted alias ownership.");
+                RequireSameBag((intent.PlannedAliases ?? []).Select(a => AliasKey(a)), accepted.Select(a => AliasKey(a)));
+            }
         }
     }
+
+    private static OwnershipIdentity AliasKey(MemoryAliasEntry alias) =>
+        OwnershipKey(alias.Repository, BatonPaths.RecordKey(alias.Path).ToUpperInvariant());
 
     private static void RequireCanonicalPath(string root, string repository, string path, string filename)
     {

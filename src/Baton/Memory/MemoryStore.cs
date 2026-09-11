@@ -74,7 +74,7 @@ public static class MemoryStore
     /// </summary>
     public static Task AppendAsync(
         IReadOnlyList<MemoryEntry> entries, string entriesFilePath, CancellationToken cancellationToken = default) =>
-        Ledger.AppendAsync(entries, entriesFilePath, cancellationToken);
+        AppendAndGetAppendedAsync(entries, entriesFilePath, cancellationToken);
 
     /// <summary>
     /// Appends entries and returns exactly the rows this call inserted, as decided under this store's
@@ -83,7 +83,7 @@ public static class MemoryStore
     /// </summary>
     public static Task<IReadOnlyList<MemoryEntry>> AppendAndGetAppendedAsync(
         IReadOnlyList<MemoryEntry> entries, string entriesFilePath, CancellationToken cancellationToken = default) =>
-        Ledger.AppendAndGetAppendedAsync(entries, entriesFilePath, cancellationToken);
+        MemoryCanonicalGeneration.AppendAsync(Ledger, entries, entriesFilePath, cancellationToken);
 
     /// <summary>
     /// This file's entries as they sit on disk, oldest first — <b>with no supersession resolved</b>.
@@ -106,8 +106,8 @@ public static class MemoryStore
                 CancellationToken.None)
             .GetAwaiter().GetResult();
 
-    /// <summary>Strict rows for durable import settlement; I/O failure must retain the intent.</summary>
-    internal static Task<IReadOnlyList<MemoryEntry>> ReadAllStrictAsync(
+    /// <summary>Strict rows for settlement and projection; I/O failure cannot become an empty snapshot.</summary>
+    public static Task<IReadOnlyList<MemoryEntry>> ReadAllStrictAsync(
         string entriesFilePath, CancellationToken cancellationToken = default) =>
         Ledger.RunUnderLockAsync(
             entriesFilePath, () => Ledger.ReadAllUnlocked(entriesFilePath), cancellationToken);
@@ -126,14 +126,14 @@ public static class MemoryStore
     /// </summary>
     public static Task AppendLinksAsync(
         IReadOnlyList<MemorySupersessionLink> links, string linksFilePath, CancellationToken cancellationToken = default) =>
-        LinkLedger.AppendAsync(links, linksFilePath, cancellationToken);
+        AppendLinksAndGetAppendedAsync(links, linksFilePath, cancellationToken);
 
     /// <summary>
     /// Appends links and returns exactly the rows this call inserted, under the links ledger lock.
     /// </summary>
     public static Task<IReadOnlyList<MemorySupersessionLink>> AppendLinksAndGetAppendedAsync(
         IReadOnlyList<MemorySupersessionLink> links, string linksFilePath, CancellationToken cancellationToken = default) =>
-        LinkLedger.AppendAndGetAppendedAsync(links, linksFilePath, cancellationToken);
+        MemoryCanonicalGeneration.AppendAsync(LinkLedger, links, linksFilePath, cancellationToken);
 
     /// <summary>This file's supersession links, oldest first.</summary>
     public static Task<IReadOnlyList<MemorySupersessionLink>> ReadLinksAsync(
@@ -147,14 +147,14 @@ public static class MemoryStore
     /// </summary>
     public static Task AppendRetractionsAsync(
         IReadOnlyList<MemoryRetraction> retractions, string retractionsFilePath, CancellationToken cancellationToken = default) =>
-        RetractionLedger.AppendAsync(retractions, retractionsFilePath, cancellationToken);
+        AppendRetractionsAndGetAppendedAsync(retractions, retractionsFilePath, cancellationToken);
 
     /// <summary>Appends retractions and returns the rows this call inserted under the owning lock.</summary>
     public static Task<IReadOnlyList<MemoryRetraction>> AppendRetractionsAndGetAppendedAsync(
         IReadOnlyList<MemoryRetraction> retractions,
         string retractionsFilePath,
         CancellationToken cancellationToken = default) =>
-        RetractionLedger.AppendAndGetAppendedAsync(retractions, retractionsFilePath, cancellationToken);
+        MemoryCanonicalGeneration.AppendAsync(RetractionLedger, retractions, retractionsFilePath, cancellationToken);
 
     /// <summary>This file's retractions, oldest first.</summary>
     public static Task<IReadOnlyList<MemoryRetraction>> ReadRetractionsAsync(
@@ -271,35 +271,11 @@ public static class MemoryStore
             map.TryGetValue(key, out var set) ? set.ToList() : null;
     }
 
-    /// <summary>
-    /// Runs <paramref name="work"/> holding this store's lock on <paramref name="entriesFilePath"/> —
-    /// the entry point for a caller that must not observe a half-written store, and the only way to
-    /// take that lock from outside this assembly.
-    /// </summary>
+    /// <summary>Runs a synchronous read callback under this entries ledger's lock.</summary>
     /// <remarks>
-    /// <para>
-    /// <b>Why a projection writer needs it</b> (#1852 phase C). <c>baton memory sync</c> reads a
-    /// repository's entries and links and then writes derived files into a vendor root; without this,
-    /// a concurrent <c>baton memory import</c> could append between the two reads, and the projection
-    /// would be a cache of a store state that never existed. Holding the entries lock across the whole
-    /// read-project-write is what makes the projection a function of one observed store.
-    /// </para>
-    /// <para>
-    /// <b>The links file's lock is deliberately not taken here.</b> <see cref="ReadResolvedAsync"/>'s
-    /// remarks state the rule this preserves: the two are acquired one at a time and never nested, so
-    /// two callers cannot take them in opposite orders. A projection reading links under the entries
-    /// lock sees a links file that may have grown; the cost is one link discovered on the next run
-    /// rather than this one, which is the direction that fails closed.
-    /// </para>
+    /// The callback must not mutate canonical memory or acquire its generation lock. Projection
+    /// instead uses a detached strict read and validates all input generations before publication.
     /// </remarks>
-    /// <param name="entriesFilePath">The store file to lock and read.</param>
-    /// <param name="work">
-    /// Runs holding the lock, handed the entries as they sit on disk — <b>synchronous on purpose</b>.
-    /// An async body here would mean awaiting inside a held <see cref="MutexGuardedFileLock"/>, and the
-    /// only way to keep the lock across that await is to block on it, which is a deadlock waiting for a
-    /// caller with a synchronization context. Everything a projection does under this lock (project,
-    /// write bytes) is synchronous already.
-    /// </param>
     public static Task<TResult> RunUnderEntriesLockAsync<TResult>(
         string entriesFilePath,
         Func<IReadOnlyList<MemoryEntry>, TResult> work,
@@ -447,7 +423,7 @@ public static class MemoryStore
 
                 return removed;
             },
-            cancellationToken);
+            cancellationToken, transaction: mutation => MemoryCanonicalGeneration.MutateLedger(filePath, mutation));
     }
 
     /// <summary>

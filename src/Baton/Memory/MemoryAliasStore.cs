@@ -92,7 +92,7 @@ public static class MemoryAliasStore
     /// <summary>Appends assertions whose path is not already recorded.</summary>
     public static Task AppendAsync(
         IReadOnlyList<MemoryAliasEntry> entries, string aliasFilePath, CancellationToken cancellationToken = default) =>
-        Ledger.AppendAsync(entries, aliasFilePath, cancellationToken);
+        AppendAndGetAppendedAsync(entries, aliasFilePath, cancellationToken);
 
     /// <summary>
     /// Appends assertions and returns exactly the rows this call inserted, as decided under the alias
@@ -103,7 +103,11 @@ public static class MemoryAliasStore
         IReadOnlyList<MemoryAliasEntry> entries,
         string aliasFilePath,
         CancellationToken cancellationToken = default) =>
-        Ledger.AppendAndGetAppendedAsync(entries, aliasFilePath, cancellationToken);
+        MemoryCanonicalGeneration.AppendAsync(Ledger, entries, aliasFilePath, cancellationToken);
+
+    internal static Task<IReadOnlyList<MemoryAliasEntry>> ReadAllStrictAsync(
+        string aliasFilePath, CancellationToken cancellationToken = default) =>
+        Ledger.RunUnderLockAsync(aliasFilePath, () => Ledger.ReadAllUnlocked(aliasFilePath), cancellationToken);
 
     /// <summary>
     /// The repository <paramref name="checkoutPath"/> is asserted to belong to, or

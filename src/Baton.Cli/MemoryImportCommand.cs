@@ -276,8 +276,7 @@ public static class MemoryImportCommand
         {
             var changedRepositories = manifest.Appended.Select(r => r.Repository)
                 .Concat(manifest.AppendedLinks.Select(l => l.Repository))
-                .Concat((await MemoryAliasStore.ReadAllAsync(BatonPaths.MemoryAliasFile, CancellationToken.None)
-                    .ConfigureAwait(false)).Where(a => a.ImportOperationId == operationId).Select(a => a.Repository));
+                .Concat((manifest.AcceptedAliases ?? []).Where(a => a.ImportOperationId == operationId).Select(a => a.Repository));
             await ProjectChangedRepositoriesAsync(
                 changedRepositories,
                 output,
@@ -316,6 +315,14 @@ public static class MemoryImportCommand
                 DateTime.UtcNow))
             .ToList();
 
+        var resolvedAssertions = recorded.ToList();
+        foreach (var assertion in asserted)
+        {
+            var existing = resolvedAssertions.FirstOrDefault(a => BatonPaths.RecordKeyComparer.Equals(a.Path, assertion.Path));
+            if (existing is not null && !string.Equals(existing.Repository, assertion.Repository, StringComparison.OrdinalIgnoreCase))
+                throw new CliArgumentException($"--assert '{assertion.Path}' conflicts with the accepted repository '{existing.Repository}'.");
+            resolvedAssertions.Add(assertion);
+        }
         var knownPaths = recorded.Select(existing => existing.Path).ToHashSet(BatonPaths.RecordKeyComparer);
         var appended = asserted.Where(candidate => knownPaths.Add(candidate.Path)).ToList();
 

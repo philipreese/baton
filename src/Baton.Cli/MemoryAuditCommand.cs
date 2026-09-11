@@ -32,6 +32,13 @@ namespace Baton.Cli;
 /// </remarks>
 public static class MemoryAuditCommand
 {
+    private static readonly AsyncLocal<Action?> CountObservation = new();
+    internal static Action? CountObserver
+    {
+        get => CountObservation.Value;
+        set => CountObservation.Value = value;
+    }
+
     /// <summary>
     /// <c>WhenWritingNull</c>, matching every other Baton JSON view: an absent field is absent, never
     /// <c>null</c> and never <c>0</c>. A root with no resolved checkout simply has no
@@ -110,9 +117,15 @@ public static class MemoryAuditCommand
         var vendorRoots = MemoryRootInventory.ScanVendorRoots(
             userHome, batonRoot, limits: null, cancellationToken);
         var retractions = await ReadRetractionsAsync(batonRoot, cancellationToken).ConfigureAwait(false);
+        var countGeneration = MemoryCanonicalGeneration.Capture(batonRoot);
         var canonicalStores = await ScanCanonicalStoresAsync(batonRoot, options.Repository, cancellationToken)
             .ConfigureAwait(false);
-        var operationProblems = MemoryImportOperationHealth.Scan(batonRoot);
+        var health = MemoryImportOperationHealth.Sample(batonRoot);
+        var operationProblems = health.Problems;
+        canonicalStores = canonicalStores.Select(store => health.Generation != countGeneration
+            || operationProblems.Any(problem => problem.Blocks(store.Slug))
+            ? store with { EntryCount = null }
+            : store).ToList();
 
         if (options.Format == MemoryAuditOutputFormat.Json)
         {
@@ -204,6 +217,7 @@ public static class MemoryAuditCommand
                 continue;
             }
 
+            CountObserver?.Invoke();
             var entries = await MemoryStore.ReadAllAsync(store.EntriesFile, cancellationToken).ConfigureAwait(false);
             var storeRepository = MemoryStoreIdentity.Resolve(store.Slug, store.Repository, entries);
             rows.Add(new CanonicalStoreRow(

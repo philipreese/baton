@@ -187,7 +187,10 @@ public sealed record ImportManifest(
     IReadOnlyList<MemorySupersessionLink>? PlannedLinks = null,
     [property: JsonPropertyName("plannedAliases")]
     [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
-    IReadOnlyList<MemoryAliasEntry>? PlannedAliases = null)
+    IReadOnlyList<MemoryAliasEntry>? PlannedAliases = null,
+    [property: JsonPropertyName("acceptedAliases")]
+    [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    IReadOnlyList<MemoryAliasEntry>? AcceptedAliases = null)
 {
     /// <summary>
     /// The only version this build writes, and the only one <see cref="Read"/> accepts.
@@ -225,6 +228,15 @@ public sealed record ImportManifest(
     /// the complete settlement, never JSON that loses reversal ownership.
     /// </summary>
     public void Write(string manifestFilePath)
+    {
+        MemoryCanonicalGeneration.Mutate(BatonRoot, () =>
+        {
+            WriteUnlocked(manifestFilePath);
+            return true;
+        });
+    }
+
+    private void WriteUnlocked(string manifestFilePath)
     {
         ArgumentException.ThrowIfNullOrEmpty(manifestFilePath);
 
