@@ -117,6 +117,11 @@ public static class ResumeCommand
                 "pass --worker naming a key present in the bindings file.");
         }
 
+        // A resume mints and dispatches a fresh worker execution. Refuse conductor-only models
+        // before reusing a workspace, resolving the adapter, or opening the resume writer.
+        WorkerBindingResolver.RefuseConductorOnlyWorkerModels(
+            new Dictionary<string, WorkerBindingConfigEntry> { [options.Worker] = entry });
+
         // See WorkerCannotResumeException's own doc for why this is the refusal today rather than a
         // captured-automatically session id.
         if (entry.SessionId is null)

@@ -120,6 +120,14 @@ public sealed record ExecutionUsageView(
     [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
     string? ModelEchoed = null,
     /// <summary>
+    /// A loud, named anomaly when the vendor stream reports a conductor-only model for a worker.
+    /// The payload preserves requested, bind-resolved and observed identities separately; it is absent
+    /// for ordinary substitutions because this narrow signal is not a general model-policy framework.
+    /// </summary>
+    [property: JsonPropertyName("modelAnomaly")]
+    [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    ConductorOnlyModelAnomaly? ModelAnomaly = null,
+    /// <summary>
     /// #1882: how long <see cref="Mutation.VerifyStepRunner"/>'s commands took, in milliseconds. NOT a
     /// token figure and not part of any Σ above. Attribution, the all-or-nothing pairing with
     /// <see cref="VerifyResultsBytes"/>, and what an absent sidecar means are spec/baton.md §3's
@@ -365,6 +373,11 @@ public static class ExecutionUsageProjector
             }
 
             workerNameByExecutionId.TryGetValue(executionId, out var workerName);
+            BindingStamp? bindingStamp = null;
+            if (workerName is not null)
+            {
+                bindings.TryGetValue(workerName, out bindingStamp);
+            }
             resolvedBindings.TryGetValue(executionId, out var resolvedBinding);
             var reading = TryReadWorkerUsage(artifactsRootPath, executionId, workerName, resolvedBinding.Adapter, bindings, adapters);
             var usage = reading?.Terminal;
@@ -429,6 +442,8 @@ public static class ExecutionUsageProjector
             long? peakBilledInWindow = peakBilledInWindowByExecutionId.TryGetValue(executionId, out var recordedPeak)
                 ? recordedPeak
                 : null;
+            var requestedModel = resolvedBinding.Model;
+            var resolvedModel = requestedModel ?? bindingStamp?.ModelResolved;
 
             result[executionId] = new ExecutionUsageView(
                 wallClockMs,
@@ -448,6 +463,8 @@ public static class ExecutionUsageProjector
                 // usage line was never parsed (an arrest, a truncated capture), which is precisely the
                 // execution whose model a reader most needs named.
                 reading?.ModelEchoed,
+                ConductorOnlyModelCatalog.ObservedAnomaly(
+                    executionId, requestedModel, resolvedModel, reading?.ModelEchoed),
                 // #1882: both figures together or neither -- see VerifyStepMs's own remarks.
                 string.Equals(executionId, verifyStepExecutionId, StringComparison.Ordinal) ? verifyStep!.TotalWallClockMs : null,
                 string.Equals(executionId, verifyStepExecutionId, StringComparison.Ordinal) ? verifyStep!.ResultsBytes : null,
@@ -518,7 +535,7 @@ public static class ExecutionUsageProjector
     private static readonly System.Collections.Concurrent.ConcurrentDictionary<string, byte> DisagreementWarnedExecutionIds =
         new(StringComparer.Ordinal);
 
-    private static IReadOnlyDictionary<string, string> TryLoadBindings(string? roomDirectoryPath)
+    private static IReadOnlyDictionary<string, BindingStamp> TryLoadBindings(string? roomDirectoryPath)
     {
         if (roomDirectoryPath is null)
         {
@@ -540,7 +557,7 @@ public static class ExecutionUsageProjector
                 return EmptyBindings;
             }
 
-            var result = new Dictionary<string, string>(StringComparer.Ordinal);
+            var result = new Dictionary<string, BindingStamp>(StringComparer.Ordinal);
             foreach (var prop in doc.RootElement.EnumerateObject())
             {
                 if (prop.Value.ValueKind == JsonValueKind.Object
@@ -549,7 +566,13 @@ public static class ExecutionUsageProjector
                     && adapterProp.GetString() is { } adapterName
                     && !string.IsNullOrWhiteSpace(adapterName))
                 {
-                    result[prop.Name] = adapterName;
+                    var modelResolved = prop.Value.TryGetProperty("ModelResolved", out var resolvedProp)
+                        && resolvedProp.ValueKind == JsonValueKind.String
+                        && resolvedProp.GetString() is { } resolved
+                        && !string.IsNullOrWhiteSpace(resolved)
+                            ? resolved
+                            : null;
+                    result[prop.Name] = new BindingStamp(adapterName, modelResolved);
                 }
             }
 
@@ -561,8 +584,10 @@ public static class ExecutionUsageProjector
         }
     }
 
-    private static readonly IReadOnlyDictionary<string, string> EmptyBindings =
-        new Dictionary<string, string>(StringComparer.Ordinal);
+    private sealed record BindingStamp(string Adapter, string? ModelResolved);
+
+    private static readonly IReadOnlyDictionary<string, BindingStamp> EmptyBindings =
+        new Dictionary<string, BindingStamp>(StringComparer.Ordinal);
 
     /// <summary>
     /// #1706: one captured stream read once, yielding both the terminal reading and the live-billed Σ
@@ -632,7 +657,7 @@ public static class ExecutionUsageProjector
         string executionId,
         string? workerName,
         string? recordedAdapter,
-        IReadOnlyDictionary<string, string> bindings,
+        IReadOnlyDictionary<string, BindingStamp> bindings,
         IReadOnlyDictionary<string, TParser>? adapters)
         where TParser : IWorkerUsageParser
     {
@@ -643,7 +668,10 @@ public static class ExecutionUsageProjector
         var adapterName = recordedAdapter;
         if (adapterName is null && workerName is not null)
         {
-            bindings.TryGetValue(workerName, out adapterName);
+            if (bindings.TryGetValue(workerName, out var binding))
+            {
+                adapterName = binding.Adapter;
+            }
         }
 
         if (adapterName is null)

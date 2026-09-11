@@ -163,13 +163,12 @@ public static class DispatchCommand
             bindings = new Dictionary<string, WorkerBindingConfigEntry> { [continuedWorkerName] = resumedEntry };
         }
 
-        // #2142: the display-only ModelResolved stamp must never answer this policy. The final binding
-        // tuple's Model is what reaches the vendor argv, so reject only an effective Claude invocation
-        // that still lacks it. This is after role/template resolution and continuation inheritance, but
+        // The requested model reaches the vendor argv; ModelResolved supplies a bind-time default only
+        // when it is absent. This is after role/template resolution and continuation inheritance, but
         // before runway admission, room provisioning, or any other dispatch write.
         foreach (var (workerName, binding) in bindings)
         {
-            if (ClaudeInvocationModelPolicy.RefusalMessage(binding.Adapter, binding.Model) is { } refusal)
+            if (ClaudeInvocationModelPolicy.RefusalMessage(binding.Adapter, binding.Model, binding.ModelResolved) is { } refusal)
             {
                 throw new CliArgumentException(
                     $"Worker '{workerName}' {refusal}",

@@ -76,6 +76,26 @@ public static class WorkerBindingResolver
     }
 
     /// <summary>
+    /// Refuses conductor-only worker models before callers create a room or provision a worktree.
+    /// Fresh-launch entry points call this after loading bindings and before their first room write;
+    /// resolver-only consumers retain their established fixture and recovery semantics.
+    /// </summary>
+    public static void RefuseConductorOnlyWorkerModels(
+        IReadOnlyDictionary<string, WorkerBindingConfigEntry> config)
+    {
+        ArgumentNullException.ThrowIfNull(config);
+
+        foreach (var (workerName, entry) in config)
+        {
+            if (ConductorOnlyModelCatalog.ConductorOnlyWorkerRefusal(
+                    entry.Adapter, entry.Model, entry.ModelResolved) is { } refusal)
+            {
+                throw new ConductorOnlyWorkerModelException(workerName, refusal);
+            }
+        }
+    }
+
+    /// <summary>
     /// Same resolution as <see cref="Resolve"/>, but per-entry and deferred: every bind-time refusal
     /// above only fires for an entry some caller actually looks up by name, never for the rest of the
     /// file merely because it was present (#662). <c>baton run</c> still wants <see cref="Resolve"/>'s

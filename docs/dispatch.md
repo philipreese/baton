@@ -445,9 +445,10 @@ own weighting, which no vendor publishes.
 
 - **`frontier` — claude opus, high.** Unmoved, and the one pin both reads agreed on: the
   `claude-opus-5`/`high` row. Engine work does not move.
-- **`standard` — codex `gpt-6-astra`, medium.** The `gpt-6-astra`/`medium` row matches
-  `claude-opus-5`/`high` on quality at a fraction of its agent steps, and the ruling scopes this tier to
-  the tooling-shaped implement work. It also spends a separate subscription pool:
+<!-- record-once-ok: #2233 src/Baton.Vendors/WorkerTiers.json -->
+- **`standard` — codex `gpt-5.6-sol`, medium.** Astra is conductor-only and cannot be selected for a
+  worker lane; `standard` therefore uses the lower worker model for tooling-shaped implement work. It
+  still spends a separate subscription pool:
   [`benchmarks/subscription-usage/2026-09-04`](../benchmarks/subscription-usage/2026-09-04/README.md)
   attributes an early weekly Claude exhaustion to fleet volume with cache re-reads as the amplifier, so
   moving bounded implement work off claude is the point of the change as much as the score is. `advise`

@@ -185,6 +185,53 @@ public class RunCommandEndToEndTests
         }
     }
 
+    /// <summary>
+    /// A hand-authored bindings file reaches <c>baton run</c> without DispatchCommand.  It must reject
+    /// Astra before a worktree or worker process can be provisioned, even when the supplied adapter
+    /// registry would otherwise reject the unknown adapter later.
+    /// </summary>
+    [Fact]
+    public async Task A_direct_run_refuses_an_Astra_binding_before_any_room_side_effect()
+    {
+        var testRoot = Path.Combine(Path.GetTempPath(), $"cli-e2e-{Guid.NewGuid():N}");
+        var roomDirectory = Path.Combine(testRoot, "task");
+        try
+        {
+            var workflowFilePath = await WriteThreeStepWorkflowAsync(testRoot);
+            var bindingsFilePath = Path.Combine(testRoot, "bindings.json");
+            var config = new Dictionary<string, WorkerBindingConfigEntry>
+            {
+                ["architect"] = new WorkerBindingConfigEntry(
+                    "codex",
+                    new WorkerContract("architect", [], [new ProducedOutput("plan")], []),
+                    "must never run",
+                    TimeSpan.FromSeconds(30),
+                    Model: "gpt-6-astra"),
+            };
+            await File.WriteAllTextAsync(bindingsFilePath, JsonSerializer.Serialize(config), TestContext.Current.CancellationToken);
+
+            var ex = await Assert.ThrowsAsync<ConductorOnlyWorkerModelException>(
+                () => RunCommand.ExecuteAsync(
+                    new RunOptions(
+                        workflowFilePath, bindingsFilePath, roomDirectory, ProjectRootDirectory: testRoot, Register: true),
+                    Adapters,
+                    cancellationToken: TestContext.Current.CancellationToken));
+
+            Assert.Contains("Astra is conductor-only", ex.Message, StringComparison.Ordinal);
+            Assert.False(Directory.Exists(roomDirectory));
+            Assert.False(File.Exists(Path.Combine(roomDirectory, BatonPaths.SnapshotFileName)));
+            Assert.False(Directory.Exists(Path.Combine(roomDirectory, "worktrees")));
+            Assert.False(File.Exists(Path.Combine(roomDirectory, "flow.jsonl")));
+            var registrations = await RoomRegistryStore.ReadDistinctByRoomAsync(
+                BatonPaths.RoomRegistryFile, TestContext.Current.CancellationToken);
+            Assert.DoesNotContain(registrations, entry => entry.RoomPath == BatonPaths.RecordKey(roomDirectory));
+        }
+        finally
+        {
+            DirectoryCleanup.DeleteRecursively(testRoot);
+        }
+    }
+
     [Fact]
     public async Task A_malformed_bindings_file_throws_a_typed_config_exception()
     {

@@ -74,6 +74,34 @@ public sealed class RedispatchCommandEndToEndTests : IDisposable
     }
 
     /// <summary>
+    /// Redispatch builds its inherited binding outside DispatchCommand.  A conductor model override
+    /// must therefore refuse before the child room, lineage marker, or bindings snapshot is written.
+    /// </summary>
+    [Fact]
+    public async Task Redispatch_refuses_an_Astra_override_before_creating_the_child_room()
+    {
+        var testRoot = Path.Combine(Path.GetTempPath(), $"redispatch-e2e-{Guid.NewGuid():N}");
+        try
+        {
+            var parentRoom = await DispatchTerminalParentAsync(testRoot, "Weigh the options for X.");
+            var childRoom = Path.Combine(testRoot, "child");
+
+            var ex = await Assert.ThrowsAsync<ConductorOnlyWorkerModelException>(
+                () => RedispatchCommand.ExecuteAsync(
+                    new RedispatchOptions(parentRoom, childRoom, Model: "gpt-6-astra"),
+                    Adapters,
+                    TestContext.Current.CancellationToken));
+
+            Assert.Contains("Astra is conductor-only", ex.Message, StringComparison.Ordinal);
+            Assert.False(Directory.Exists(childRoom));
+        }
+        finally
+        {
+            DirectoryCleanup.DeleteRecursively(testRoot);
+        }
+    }
+
+    /// <summary>
     /// #1518: a bare redispatch never reads a room-side spec artifact at all -- it reuses <c>workflow.json</c>
     /// plus the parent's own already-built <c>bindings.json</c> <c>PromptTemplate</c> verbatim, the same
     /// path <see cref="Redispatching_without_a_spec_reuses_the_parents_prompt_verbatim"/> exercises for a

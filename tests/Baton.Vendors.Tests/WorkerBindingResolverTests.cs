@@ -70,6 +70,20 @@ public class WorkerBindingResolverTests
     }
 
     [Fact]
+    public void The_pre_provision_admission_check_refuses_the_Codex_default()
+    {
+        var config = new Dictionary<string, WorkerBindingConfigEntry>
+        {
+            ["architect"] = new WorkerBindingConfigEntry("codex", ArchitectContract, "Draft a plan.", TimeSpan.FromMinutes(5)),
+        };
+        var ex = Assert.Throws<ConductorOnlyWorkerModelException>(
+            () => WorkerBindingResolver.RefuseConductorOnlyWorkerModels(config));
+
+        Assert.Equal("architect", ex.WorkerName);
+        Assert.Contains("Astra is conductor-only", ex.Message, StringComparison.Ordinal);
+    }
+
+    [Fact]
     public void An_entry_naming_an_unregistered_adapter_throws()
     {
         var config = new Dictionary<string, WorkerBindingConfigEntry>

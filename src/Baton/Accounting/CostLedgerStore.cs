@@ -214,6 +214,8 @@ public static partial class CostLedgerStore
                     && modelResolvedByWorker.TryGetValue(modelWorker, out var stampedModel)
                         ? stampedModel
                         : null);
+            var modelAnomaly = ConductorOnlyModelCatalog.ObservedAnomaly(
+                executionId, binding.Model, resolvedModel, usage.ModelEchoed);
 
             var (apiUsd, apiStatus, planUsd, planStatus, estimateReason) =
                 Estimate(catalog, planFactors, binding.Adapter, resolvedModel, tokens, usage.ModelsObserved, pricedAt);
@@ -251,6 +253,7 @@ public static partial class CostLedgerStore
                 Model: resolvedModel,
                 // #1927: recorded beside Model rather than merged into it -- see CostLedgerEntry.ModelEchoed.
                 ModelEchoed: usage.ModelEchoed,
+                ModelAnomaly: modelAnomaly,
                 ModelsObserved: usage.ModelsObserved,
                 Outcome: outcome,
                 Issue: delivery?.Issue,

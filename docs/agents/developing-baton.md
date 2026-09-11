@@ -351,6 +351,9 @@ registers).
 - Types: `feat`, `fix`, `perf`, `refactor`, `docs`, `ci`, `test`, `chore`
 - No direct commits to `main`. All changes via PR.
 - Always create branches from issues (e.g., using `gh issue develop`).
+- Before independent review begins, the implementation commit may be amended. Once review begins,
+  append each repair as a new commit and preserve those review-round boundaries on the PR branch;
+  the repository's squash merge policy produces the single commit on `main`.
 - Close issues in the PR body (`Closes #n`), not in commit messages.
 - Each issue is scoped to ship as a standalone PR (one-to-one). If two issues can't be reviewed independently, the issue boundary was drawn incorrectly — fix it in the backlog, not at PR time.
 - **Exception, sub-floor only:** one PR may carry several issues when none of them makes a behaviour claim — cosmetics, a `.gitignore` rule, doc scoping. Same floor as the `second-reader` gate's. Each keeps its own commit and its own `Closes #n`, so history stays per-issue. Anything changing `src/` behaviour stays one-to-one.

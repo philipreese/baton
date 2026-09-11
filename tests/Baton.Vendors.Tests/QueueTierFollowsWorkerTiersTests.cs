@@ -105,7 +105,7 @@ public sealed class QueueTierFollowsWorkerTiersTests
     /// <see cref="AppContext.BaseDirectory"/> rather than letting <c>ResolvePath</c> fall through.
     /// </summary>
     [Fact]
-    public void The_shipped_tier_file_puts_tooling_on_codex_gpt_6_astra_medium()
+    public void The_shipped_tier_file_puts_tooling_on_codex_gpt_5_6_sol_medium()
     {
         using var env = BatonEnvironmentSnapshot.BeginScope(BatonEnvironmentSnapshot.Blank with
         {
@@ -116,7 +116,7 @@ public sealed class QueueTierFollowsWorkerTiersTests
             ToolingItem(), new QueueSettings(), WorkerRoleCatalog.QueueTierFor, WorkerRoleCatalog.QueueTierForRole);
 
         Assert.Equal("codex", resolved.Adapter);
-        Assert.Equal("gpt-6-astra", resolved.Model);
+        Assert.Equal("gpt-5.6-sol", resolved.Model);
         Assert.Equal("medium", resolved.Effort);
     }
 }

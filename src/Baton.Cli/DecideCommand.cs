@@ -84,6 +84,11 @@ public static class DecideCommand
 
         var bindingConfig = await WorkerBindingConfigParser.LoadFromFileAsync(options.BindingsFilePath, cancellationToken)
             .ConfigureAwait(false);
+
+        // A decision can make a downstream step ready and its settling pump dispatches that fresh
+        // worker execution. Admission must precede provisioning and the decision journal mutation.
+        WorkerBindingResolver.RefuseConductorOnlyWorkerModels(bindingConfig);
+
         var (provisionedConfig, provisionedWorktrees) =
             WorktreeWorkspaces.Provision(bindingConfig, options.RoomDirectoryPath);
         var profiles = await BatonProfileStore.LoadAsync(BatonProfileStore.DefaultPath, cancellationToken).ConfigureAwait(false);

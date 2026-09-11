@@ -110,6 +110,60 @@ public class ResumeCommandEndToEndTests : IDisposable
     }
 
     [Fact]
+    public async Task Resuming_an_omitted_Codex_model_refuses_before_any_resume_write_or_vendor_launch()
+    {
+        var testRoot = Path.Combine(Path.GetTempPath(), $"cli-resume-conductor-model-{Guid.NewGuid():N}");
+        var roomDirectory = Path.Combine(testRoot, "task");
+        try
+        {
+            var adapter = new ResumeObservingWorkerAdapter();
+            var adapters = new Dictionary<string, IWorkerAdapter>
+            {
+                ["observer"] = adapter,
+                ["codex"] = adapter,
+            };
+            var workflowFilePath = await WriteOneStepWorkflowAsync(testRoot);
+            var bindingsFilePath = await WriteObservingBindingsAsync(testRoot, sessionId: "sess-observer");
+
+            var runResult = await RunCommand.ExecuteAsync(
+                new RunOptions(workflowFilePath, bindingsFilePath, roomDirectory), adapters,
+                cancellationToken: TestContext.Current.CancellationToken);
+            Assert.Equal(WorkflowStatus.Terminal, runResult.State.Status);
+            Assert.Single(adapter.ObservedInvocations);
+
+            var logPath = Path.Combine(roomDirectory, "flow.jsonl");
+            var flowBeforeResume = await File.ReadAllTextAsync(logPath, TestContext.Current.CancellationToken);
+            var artifactsRootPath = Path.Combine(roomDirectory, Baton.Artifacts.ArtifactManager.ArtifactsDirectoryName);
+            Assert.Single(Directory.GetDirectories(artifactsRootPath, "execution_*"));
+
+            // Model is deliberately omitted: Codex's recorded default is Astra, which remains a
+            // conductor-only model even when the binding itself does not spell it out.
+            var conductorConfig = new Dictionary<string, WorkerBindingConfigEntry>
+            {
+                ["observer"] = new WorkerBindingConfigEntry(
+                    "codex", new WorkerContract("observer", [], [new ProducedOutput("plan.md")], []),
+                    "must not resume", TimeSpan.FromSeconds(30), SessionId: "sess-codex-astra"),
+            };
+            await File.WriteAllTextAsync(
+                bindingsFilePath, JsonSerializer.Serialize(conductorConfig), TestContext.Current.CancellationToken);
+
+            var thrown = await Assert.ThrowsAsync<ConductorOnlyWorkerModelException>(
+                () => ResumeCommand.ExecuteAsync(
+                    new ResumeOptions(roomDirectory, "observer", "do not launch", null, bindingsFilePath), adapters,
+                    TestContext.Current.CancellationToken));
+
+            Assert.Contains("Astra", thrown.Message, StringComparison.Ordinal);
+            Assert.Equal(flowBeforeResume, await File.ReadAllTextAsync(logPath, TestContext.Current.CancellationToken));
+            Assert.Single(Directory.GetDirectories(artifactsRootPath, "execution_*"));
+            Assert.Single(adapter.ObservedInvocations);
+        }
+        finally
+        {
+            DirectoryCleanup.DeleteRecursively(testRoot);
+        }
+    }
+
+    [Fact]
     public async Task A_resumed_reviews_verdict_has_its_model_written_instruments_stripped()
     {
         // #1911 low 1: `baton resume` puts a fresh worker turn into a bound room, and a resumed review

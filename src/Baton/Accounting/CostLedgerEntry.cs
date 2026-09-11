@@ -1,5 +1,6 @@
 using System.Text.Json;
 using System.Text.Json.Serialization;
+using Baton.Domain;
 
 namespace Baton.Accounting;
 
@@ -246,6 +247,13 @@ public sealed record CostLedgerEntry(
     [property: JsonPropertyName("modelEchoed")]
     [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
     string? ModelEchoed = null,
+    /// <summary>
+    /// A named anomaly when the captured vendor stream reports a conductor-only model on a worker.
+    /// It preserves the three model facts rather than collapsing an observed substitution into intent.
+    /// </summary>
+    [property: JsonPropertyName("modelAnomaly")]
+    [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    ConductorOnlyModelAnomaly? ModelAnomaly = null,
     /// <summary>
     /// The models this row's token dimensions were summed ACROSS, off the vendor's own per-model
     /// breakdown (claude's terminal <c>modelUsage</c> keys — one entry per model the whole execution

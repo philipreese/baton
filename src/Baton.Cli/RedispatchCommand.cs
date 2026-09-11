@@ -227,6 +227,12 @@ public static class RedispatchCommand
                 + $"{DispatchOptionsParser.WarnTimeoutMinutes} minutes (2h) — a typo here can strand a lane for a long time.");
         }
 
+        // Redispatch materializes its inherited binding itself, rather than passing through dispatch.
+        // Keep this before the child room write so an overridden or legacy conductor model leaves no
+        // provisioned child for an operator to mistake for a runnable lane.
+        WorkerBindingResolver.RefuseConductorOnlyWorkerModels(
+            new Dictionary<string, WorkerBindingConfigEntry> { [workerName] = entry });
+
         Directory.CreateDirectory(options.RoomDirectoryPath);
 
         // #1619: the navigational half of the ruling -- the redispatched room's workstream is whatever

@@ -108,7 +108,7 @@ public sealed class CostLedgerStoreTests
     }
 
     private static List<LogEntry> SettledExecution(
-        ExecutionId executionId, string adapter, string model, DateTime start, string worker = "implement") =>
+        ExecutionId executionId, string adapter, string? model, DateTime start, string worker = "implement") =>
     [
         new LogEntry.FlowLogEntry(new FlowEvent.ExecutionRequestAccepted(AcceptedRequest(executionId, worker, adapter, model))),
         new LogEntry.CoreLogEntry(new CoreEvent.ExecutionStarted(executionId, Pid: 1), start),
@@ -257,6 +257,71 @@ public sealed class CostLedgerStoreTests
             // fixture's stream carries no event naming a model, which is the agy shape. Kept out of the
             // reserved list above so a reader cannot conclude from it that the field is unwritten.
             Assert.Null(row.ModelEchoed);
+        }
+        finally
+        {
+            DirectoryCleanup.DeleteRecursively(room);
+        }
+    }
+
+    [Fact]
+    public void A_conductor_model_echo_is_a_named_cost_ledger_anomaly_with_model_provenance()
+    {
+        var room = NewRoom();
+        try
+        {
+            var executionId = new ExecutionId("exec-fable-echo");
+            WriteCapturedStream(
+                room,
+                executionId,
+                ClaudeTerminalLine,
+                liveUsageLine: """{"type":"assistant","message":{"id":"msg-fable","model":"claude-fable-5-1","usage":{"input_tokens":2,"cache_creation_input_tokens":10,"cache_read_input_tokens":5,"output_tokens":3}}}""");
+
+            var row = Assert.Single(CostLedgerStore.BuildEntries(
+                SettledExecution(executionId, "claude", model: null, Start),
+                room,
+                Repository,
+                modelResolvedByWorker: new Dictionary<string, string> { ["implement"] = "sonnet" }));
+
+            var anomaly = Assert.IsType<ConductorOnlyModelAnomaly>(row.ModelAnomaly);
+            Assert.Equal(ConductorOnlyModelCatalog.ObservedAnomalyName, anomaly.Name);
+            Assert.Equal("Fable", anomaly.Family);
+            Assert.Equal(executionId.Value, anomaly.Execution);
+            Assert.Null(anomaly.RequestedModel);
+            Assert.Equal("sonnet", anomaly.ResolvedModel);
+            Assert.Equal("claude-fable-5-1", anomaly.ObservedModel);
+        }
+        finally
+        {
+            DirectoryCleanup.DeleteRecursively(room);
+        }
+    }
+
+    [Fact]
+    public void An_Astra_echo_keeps_Codex_model_provenance_distinct_in_the_cost_ledger()
+    {
+        var room = NewRoom();
+        try
+        {
+            var executionId = new ExecutionId("exec-codex-astra-echo");
+            WriteCapturedStream(
+                room,
+                executionId,
+                ClaudeTerminalLine,
+                liveUsageLine: """{"type":"assistant","message":{"id":"msg-astra","model":"gpt-6-astra","usage":{"input_tokens":2,"cache_creation_input_tokens":10,"cache_read_input_tokens":5,"output_tokens":3}}}""");
+
+            var row = Assert.Single(CostLedgerStore.BuildEntries(
+                SettledExecution(executionId, "claude", model: "gpt-6-astra", Start),
+                room,
+                Repository,
+                modelResolvedByWorker: new Dictionary<string, string> { ["implement"] = "gpt-6-astra" }));
+
+            var anomaly = Assert.IsType<ConductorOnlyModelAnomaly>(row.ModelAnomaly);
+            Assert.Equal("Astra", anomaly.Family);
+            Assert.Equal(executionId.Value, anomaly.Execution);
+            Assert.Equal("gpt-6-astra", anomaly.RequestedModel);
+            Assert.Equal("gpt-6-astra", anomaly.ResolvedModel);
+            Assert.Equal("gpt-6-astra", anomaly.ObservedModel);
         }
         finally
         {
