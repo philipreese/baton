@@ -212,6 +212,14 @@ namespace Baton.Vendors;
 /// is not this change.
 /// </param>
 /// <param name="EffortSource">Which rung answered for <paramref name="EffortResolved"/>; same vocabulary as <paramref name="ModelSource"/>.</param>
+/// <param name="PullRequestCreateIdentity">
+/// #2190: serialized repository/head authority for Codex's brokered direct-create route. A fresh
+/// conductor dispatch, or an explicit conductor workspace replacement on redispatch, is the trusted
+/// writer; continuations, ordinary redispatch and exhaustion fallback only preserve that value.
+/// Legacy and hand-authored bindings default to null and direct create then fails closed unless the
+/// hand-authored value came from equally trusted conductor input. The durable contract is
+/// spec/baton.md §9.
+/// </param>
 public sealed record WorkerBindingConfigEntry(
     string Adapter,
     WorkerContract Contract,

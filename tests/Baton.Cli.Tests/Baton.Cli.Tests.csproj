@@ -35,6 +35,7 @@
     <ProjectReference Include="..\..\src\Baton.Cli\Baton.Cli.csproj" />
     <ProjectReference Include="..\..\src\Baton.Vendors\Baton.Vendors.csproj" />
     <ProjectReference Include="..\..\src\Baton\Baton.csproj" />
+    <ProjectReference Include="..\Baton.CrashTestHost\Baton.CrashTestHost.csproj" />
   </ItemGroup>
 
 </Project>

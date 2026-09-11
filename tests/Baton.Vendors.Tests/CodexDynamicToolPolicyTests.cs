@@ -1770,6 +1770,40 @@ public sealed class CodexDynamicToolPolicyTests
     }
 
     [Theory]
+    [InlineData("GH_REPO=other/repo gh pr create --fill")]
+    [InlineData("env GH_REPO=other/repo gh pr create --fill")]
+    [InlineData("sh -c \"gh pr create --fill\"")]
+    [InlineData("cmd /c \"gh pr create --fill\"")]
+    [InlineData("pwsh -Command \"gh pr create --fill\"")]
+    public async Task Environment_prefixed_and_readable_shell_wrapped_create_is_refused_before_spawn(
+        string commandLine)
+    {
+        using var fixture = new PolicyFixture(
+            WorkerRoleCatalog.For("implement").Grant,
+            ["changes.md"],
+            directGhOutput: "https://github.com/aer-works/baton/pull/2005");
+
+        var result = await fixture.ExecuteAsync(
+            CodexDynamicToolPolicy.RunCommandTool, new { command = commandLine });
+
+        Assert.False(result.Success);
+        Assert.Contains("standalone bare `gh pr create`", result.Text, StringComparison.Ordinal);
+        Assert.False(File.Exists(fixture.DirectGhArguments));
+    }
+
+    [Fact]
+    public async Task A_normal_non_create_shell_workflow_still_executes()
+    {
+        using var fixture = new PolicyFixture(WorkerRoleCatalog.For("implement").Grant, ["changes.md"]);
+
+        var result = await fixture.ExecuteAsync(
+            CodexDynamicToolPolicy.RunCommandTool, new { command = "echo ordinary-workflow" });
+
+        Assert.True(result.Success, result.Text);
+        Assert.Contains("ordinary-workflow", result.Text, StringComparison.Ordinal);
+    }
+
+    [Theory]
     [InlineData("https://github.com/other/repo/pull/2005", 0)]
     [InlineData("https://github.com/aer-works/baton/pull/2005", 7)]
     public async Task Foreign_or_nonzero_direct_create_does_not_mint_ownership(

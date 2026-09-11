@@ -40,6 +40,11 @@ public sealed class DirectGhPullRequestCreateTests
     [InlineData("gh pr create -R other/repo")]
     [InlineData("gh pr create --head another-branch")]
     [InlineData("gh pr create --label ready")]
+    [InlineData("GH_REPO=other/repo gh pr create --fill")]
+    [InlineData("env GH_REPO=other/repo gh pr create --fill")]
+    [InlineData("sh -c \"gh pr create --fill\"")]
+    [InlineData("cmd /c \"gh pr create --fill\"")]
+    [InlineData("pwsh -Command \"gh pr create --fill\"")]
     public void Ambiguous_or_out_of_scope_create_is_refused(string commandLine)
     {
         var compiled = DirectGhPullRequestCreate.Compile(commandLine, Provenance);
@@ -134,6 +139,65 @@ public sealed class DirectGhPullRequestCreateTests
     }
 
     [Fact]
+    public void Identity_capture_normalizes_a_relative_conductor_workspace_before_probing()
+    {
+        var workspace = Directory.GetCurrentDirectory();
+        var hostBin = Path.Combine(Path.GetTempPath(), $"baton-gh-relative-{Guid.NewGuid():N}");
+        Directory.CreateDirectory(hostBin);
+        var trustedGit = Path.Combine(hostBin, OperatingSystem.IsWindows() ? "git.exe" : "git");
+        File.WriteAllText(trustedGit, "host fixture");
+        MakeExecutable(trustedGit);
+        try
+        {
+            var identity = GhPullRequestCreateProvenanceResolver.TryCaptureIdentity(
+                ".",
+                hostBin,
+                OperatingSystem.IsWindows(),
+                (executable, directory, arguments) =>
+                {
+                    Assert.Equal(trustedGit, executable);
+                    Assert.Equal(workspace, directory);
+                    return arguments[0] == "config"
+                        ? "https://github.com/aer-works/baton.git"
+                        : "2190-verified-pr-ownership";
+                });
+
+            Assert.Equal("aer-works/baton", identity?.Repository);
+            Assert.Equal("2190-verified-pr-ownership", identity?.HeadBranch);
+        }
+        finally
+        {
+            DirectoryCleanup.DeleteRecursively(hostBin);
+        }
+    }
+
+    [Fact]
+    public void A_codex_exhaustion_fallback_captures_identity_for_a_non_codex_primary()
+    {
+        var expected = new GhPullRequestCreateIdentity("aer-works/baton", "fallback-branch");
+        var entry = new WorkerBindingConfigEntry(
+            "claude",
+            new WorkerContract("implement", [], [], []),
+            "prompt",
+            TimeSpan.FromMinutes(1),
+            PermissionGrant: WorkerRoleCatalog.For("implement").Grant,
+            FallbackOnExhaustion: new FallbackBinding("codex"));
+
+        var captured = GhPullRequestCreateProvenanceResolver.CaptureIdentityFor(
+            entry,
+            ".",
+            directory =>
+            {
+                Assert.Equal(".", directory);
+                return expected;
+            });
+
+        Assert.Equal(expected, captured.PullRequestCreateIdentity);
+        Assert.Equal(expected, WorkerBindingResolver.ToFallbackEntry(
+            captured, captured.FallbackOnExhaustion!).PullRequestCreateIdentity);
+    }
+
+    [Fact]
     public void Resolver_rejects_an_outside_directory_alias_into_the_workspace()
     {
         var root = Path.Combine(Path.GetTempPath(), $"baton-gh-alias-{Guid.NewGuid():N}");
@@ -147,13 +211,13 @@ public sealed class DirectGhPullRequestCreateTests
         MakeExecutable(workspaceGh);
         try
         {
-            try
+            if (OperatingSystem.IsWindows())
+            {
+                CreateWindowsJunction(outsideAlias, workspaceBin);
+            }
+            else
             {
                 Directory.CreateSymbolicLink(outsideAlias, workspaceBin);
-            }
-            catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
-            {
-                return;
             }
 
             Assert.Null(OutsideWorkspaceExecutableResolver.TryResolve(
@@ -214,5 +278,26 @@ public sealed class DirectGhPullRequestCreateTests
         {
             File.SetUnixFileMode(path, File.GetUnixFileMode(path) | UnixFileMode.UserExecute);
         }
+    }
+
+    private static void CreateWindowsJunction(string junction, string target)
+    {
+        var startInfo = new System.Diagnostics.ProcessStartInfo(
+            Environment.GetEnvironmentVariable("COMSPEC") ?? "cmd.exe")
+        {
+            UseShellExecute = false,
+            RedirectStandardOutput = true,
+            RedirectStandardError = true,
+            Arguments = $"/d /c mklink /J \"{junction}\" \"{target}\"",
+        };
+        using var process = System.Diagnostics.Process.Start(startInfo);
+        Assert.NotNull(process);
+        var stdout = process.StandardOutput.ReadToEnd();
+        var stderr = process.StandardError.ReadToEnd();
+        process.WaitForExit();
+        Assert.True(process.ExitCode == 0,
+            $"Windows junction fixture is required but mklink exited {process.ExitCode}: {stdout}{stderr}");
+        Assert.True((new DirectoryInfo(junction).Attributes & FileAttributes.ReparsePoint) != 0,
+            "mklink did not produce a junction/reparse point.");
     }
 }

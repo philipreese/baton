@@ -41,25 +41,26 @@ public static class GhPullRequestCreateProvenanceResolver
         Func<string, string, IReadOnlyList<string>, string?> gitProbe)
     {
         ArgumentNullException.ThrowIfNull(gitProbe);
-        if (string.IsNullOrWhiteSpace(repositoryDirectory) || !Directory.Exists(repositoryDirectory))
+        var normalizedDirectory = TryNormalizeExistingDirectory(repositoryDirectory);
+        if (normalizedDirectory is null)
         {
             return null;
         }
 
         var git = OutsideWorkspaceExecutableResolver.TryResolve(
-            searchPath, repositoryDirectory, "git", isWindows);
+            searchPath, normalizedDirectory, "git", isWindows);
         if (git is null)
         {
             return null;
         }
 
-        var origin = gitProbe(git, repositoryDirectory, ["config", "--get", "remote.origin.url"]);
+        var origin = gitProbe(git, normalizedDirectory, ["config", "--get", "remote.origin.url"]);
         var identity = RepositoryIdentity.From(origin, gitCommonDirectoryPath: null)?.RemoteValue;
         var repository = identity is not null
             && identity.StartsWith("github.com/", StringComparison.Ordinal)
                 ? GitHubRepository.TryCanonicalize(identity)
                 : null;
-        var branch = gitProbe(git, repositoryDirectory, ["rev-parse", "--abbrev-ref", "HEAD"])?.Trim();
+        var branch = gitProbe(git, normalizedDirectory, ["rev-parse", "--abbrev-ref", "HEAD"])?.Trim();
         return repository is not null && !string.IsNullOrWhiteSpace(branch)
             && !branch.Equals("HEAD", StringComparison.Ordinal)
                 ? new GhPullRequestCreateIdentity(repository, branch)
@@ -84,8 +85,8 @@ public static class GhPullRequestCreateProvenanceResolver
         string? searchPath,
         bool isWindows)
     {
-        if (string.IsNullOrWhiteSpace(workingDirectory) || !Directory.Exists(workingDirectory)
-            || expectedIdentity is null)
+        var normalizedDirectory = TryNormalizeExistingDirectory(workingDirectory);
+        if (normalizedDirectory is null || expectedIdentity is null)
         {
             return null;
         }
@@ -99,27 +100,56 @@ public static class GhPullRequestCreateProvenanceResolver
         }
 
         var executable = OutsideWorkspaceExecutableResolver.TryResolve(
-            searchPath, workingDirectory, "gh", isWindows);
+            searchPath, normalizedDirectory, "gh", isWindows);
         return executable is null
             ? null
             : new GhPullRequestCreateProvenance(executable, repository, branch);
     }
 
     /// <summary>
-    /// Stamps a fresh or explicitly workspace-moved Codex binding. Other adapters and roles without
-    /// the direct-create authority retain their existing value without probing Git.
+    /// Stamps a fresh or explicitly workspace-moved binding whenever its primary or declared
+    /// exhaustion fallback can reach the Codex direct-create broker. Other bindings retain their
+    /// existing value without probing Git.
     /// </summary>
     public static WorkerBindingConfigEntry CaptureIdentityFor(
-        WorkerBindingConfigEntry entry, string? repositoryDirectory)
+        WorkerBindingConfigEntry entry, string? repositoryDirectory) =>
+        CaptureIdentityFor(entry, repositoryDirectory, TryCaptureIdentity);
+
+    internal static WorkerBindingConfigEntry CaptureIdentityFor(
+        WorkerBindingConfigEntry entry,
+        string? repositoryDirectory,
+        Func<string?, GhPullRequestCreateIdentity?> captureIdentity)
     {
         ArgumentNullException.ThrowIfNull(entry);
-        if (!entry.Adapter.Equals("codex", StringComparison.OrdinalIgnoreCase)
+        ArgumentNullException.ThrowIfNull(captureIdentity);
+        var hasCodexConsumer = entry.Adapter.Equals("codex", StringComparison.OrdinalIgnoreCase)
+            || entry.FallbackOnExhaustion?.Adapter.Equals(
+                "codex", StringComparison.OrdinalIgnoreCase) == true;
+        if (!hasCodexConsumer
             || !RequiresTrustedIdentity(entry.PermissionGrant))
         {
             return entry;
         }
 
-        return entry with { PullRequestCreateIdentity = TryCaptureIdentity(repositoryDirectory) };
+        return entry with { PullRequestCreateIdentity = captureIdentity(repositoryDirectory) };
+    }
+
+    private static string? TryNormalizeExistingDirectory(string? directory)
+    {
+        if (string.IsNullOrWhiteSpace(directory))
+        {
+            return null;
+        }
+        try
+        {
+            var fullPath = Path.GetFullPath(directory);
+            return Directory.Exists(fullPath) ? fullPath : null;
+        }
+        catch (Exception ex) when (ex is ArgumentException or IOException or NotSupportedException
+            or UnauthorizedAccessException)
+        {
+            return null;
+        }
     }
 
     internal static bool RequiresTrustedIdentity(PermissionGrant? grant) =>

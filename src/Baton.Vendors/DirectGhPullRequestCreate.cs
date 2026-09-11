@@ -133,14 +133,82 @@ internal static class DirectGhPullRequestCreate
         foreach (var segment in ShellSegments(commandLine))
         {
             var words = LooseWords(segment);
-            if (words.Count >= 3 && IsGhName(words[0])
-                && words[1].Equals("pr", StringComparison.OrdinalIgnoreCase)
-                && words[2].Equals("create", StringComparison.OrdinalIgnoreCase))
+            var executableIndex = 0;
+            while (executableIndex < words.Count && IsEnvironmentAssignment(words[executableIndex]))
+            {
+                executableIndex++;
+            }
+
+            // These are the two prefix families the existing shell policy already recognizes as
+            // changing command interpretation. Scan their tokenized bodies conservatively: they may
+            // move gh away from argv[0], but must never move create back to the native shell. This is
+            // deliberately not a parser for arbitrary interpreters.
+            var environmentPrefixed = words.Count > 0 && IsEnvironmentLauncher(words[0])
+                && ContainsCreateTokens(segment);
+            var shellWrapped = ShellCommandPatternMatcher.TryReadShellWrapperBody(
+                segment, out var wrapperBody)
+                && wrapperBody is not null && ContainsCreateTokens(wrapperBody);
+            if (IsCreateAt(words, executableIndex) || environmentPrefixed || shellWrapped)
             {
                 return true;
             }
         }
         return false;
+    }
+
+    private static bool IsCreateAt(IReadOnlyList<string> words, int index) =>
+        words.Count >= index + 3 && IsGhName(words[index])
+        && words[index + 1].Equals("pr", StringComparison.OrdinalIgnoreCase)
+        && words[index + 2].Equals("create", StringComparison.OrdinalIgnoreCase);
+
+    private static bool ContainsCreateTokens(string text)
+    {
+        var tokens = text.Split((char[]?)null, StringSplitOptions.RemoveEmptyEntries)
+            .Select(StripShellWrapperCharacters)
+            .ToArray();
+        for (var i = 0; i + 2 < tokens.Length; i++)
+        {
+            if (IsCreateAt(tokens, i))
+            {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    private static string StripShellWrapperCharacters(string token)
+    {
+        var start = 0;
+        while (start < token.Length && token[start] is '`' or '(' or '\'' or '"')
+        {
+            start++;
+        }
+        if (start + 1 < token.Length && token[start] == '$' && token[start + 1] == '(')
+        {
+            start += 2;
+        }
+
+        var end = token.Length;
+        while (end > start && token[end - 1] is '`' or ')' or '\'' or '"' or ';')
+        {
+            end--;
+        }
+        return token[start..end];
+    }
+
+    private static bool IsEnvironmentAssignment(string token)
+    {
+        var equals = token.IndexOf('=');
+        return equals > 0 && (char.IsAsciiLetter(token[0]) || token[0] == '_')
+            && token[..equals].All(c => char.IsAsciiLetterOrDigit(c) || c == '_');
+    }
+
+    private static bool IsEnvironmentLauncher(string token)
+    {
+        var name = token.Replace('\\', '/');
+        name = name[(name.LastIndexOf('/') + 1)..];
+        return name.Equals("env", StringComparison.OrdinalIgnoreCase)
+            || name.Equals("env.exe", StringComparison.OrdinalIgnoreCase);
     }
 
     private static IEnumerable<string> ShellSegments(string commandLine)
