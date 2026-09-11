@@ -120,11 +120,8 @@ public class WorkerRoleCatalogTests
         Assert.False(advise.Grant.RunShellCommands);
 
         var implement = WorkerRoleCatalog.For("implement");
-        // #1863 (operator ruling, 2026-09-06): standard is codex gpt-6-astra/medium, ending #1861's
-        // interim claude opus/medium. docs/dispatch.md's tier paragraph carries the measurement; the
-        // grant shape below is vendor-independent and unchanged by the tier move.
         Assert.Equal("codex", implement.Adapter);
-        Assert.Equal("gpt-6-astra", implement.Model);
+        Assert.Equal("gpt-5.6-sol", implement.Model);
         Assert.Equal("medium", implement.Effort);
         Assert.True(implement.Grant.RunShellCommands);
         // #1355: network stays granted here -- a CATEGORICAL RunShellCommands grant without

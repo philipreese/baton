@@ -35,6 +35,7 @@ public sealed class DispatchPreProvisionOrderingTests : IDisposable
         {
             ["fake"] = new ContractOutputWorkerAdapter(satisfyOutputs: true),
             ["claude"] = new ContractOutputWorkerAdapter(satisfyOutputs: true),
+            ["codex"] = new ContractOutputWorkerAdapter(satisfyOutputs: true),
         };
 
     private static readonly IReadOnlyList<RunwayCounter> Counters =
@@ -166,6 +167,54 @@ public sealed class DispatchPreProvisionOrderingTests : IDisposable
             var bindings = await WorkerBindingConfigParser.LoadFromFileAsync(
                 BatonPaths.RoomBindingsFile(options.RoomDirectoryPath), TestContext.Current.CancellationToken);
             Assert.Equal("sonnet", Assert.Single(bindings).Value.Model);
+        }
+        finally
+        {
+            DirectoryCleanup.DeleteRecursively(testRoot);
+        }
+    }
+
+    [Theory]
+    [InlineData("claude", "claude-fable-5-1", "Fable")]
+    [InlineData("codex", "gpt-6-astra", "Astra")]
+    public async Task An_explicit_conductor_model_refuses_before_room_or_vendor_creation(
+        string adapter, string model, string family)
+    {
+        var testRoot = Path.Combine(Path.GetTempPath(), $"dispatch-order-conductor-{family}-{Guid.NewGuid():N}");
+        try
+        {
+            var options = (await BuildDispatchAsync(testRoot)) with
+            {
+                Name = "janitor",
+                Adapter = adapter,
+                Model = model,
+            };
+
+            var refusal = await Assert.ThrowsAsync<CliArgumentException>(() => DispatchCommand.ExecuteAsync(
+                options, Adapters, TestContext.Current.CancellationToken, evaluateRunway: Admit));
+
+            Assert.Contains("conductor-only", refusal.Message, StringComparison.Ordinal);
+            Assert.False(Directory.Exists(options.RoomDirectoryPath));
+        }
+        finally
+        {
+            DirectoryCleanup.DeleteRecursively(testRoot);
+        }
+    }
+
+    [Fact]
+    public async Task An_unpinned_codex_dispatch_refuses_its_recorded_Astra_default_before_room_creation()
+    {
+        var testRoot = Path.Combine(Path.GetTempPath(), $"dispatch-order-codex-default-{Guid.NewGuid():N}");
+        try
+        {
+            var options = (await BuildDispatchAsync(testRoot)) with { Name = "janitor", Adapter = "codex" };
+
+            var refusal = await Assert.ThrowsAsync<CliArgumentException>(() => DispatchCommand.ExecuteAsync(
+                options, Adapters, TestContext.Current.CancellationToken, evaluateRunway: Admit));
+
+            Assert.Contains("Astra is conductor-only", refusal.Message, StringComparison.Ordinal);
+            Assert.False(Directory.Exists(options.RoomDirectoryPath));
         }
         finally
         {

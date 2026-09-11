@@ -61,7 +61,7 @@ public sealed class QueueSchedulerServiceTests
             await service.TickOnceAsync(Ct);
             var launch = Assert.Single(launches);
             Assert.Equal("good", launch.Item.Tag);
-            Assert.Equal(("codex", "gpt-6-astra", "medium"),
+            Assert.Equal(("codex", "gpt-5.6-sol", "medium"),
                 (launch.Tier.Adapter, launch.Tier.Model, launch.Tier.Effort));
             var items = (await QueueStore.LoadAsync(BatonPaths.QueueFile, Ct)).Items;
             Assert.Equal(QueueItemState.Launched, items[1].State);
@@ -105,6 +105,43 @@ public sealed class QueueSchedulerServiceTests
             var fact = Assert.Single(await QueueDecisionLedgerStore.ReadAllAsync(BatonPaths.QueueDecisionLedgerFile, Ct));
             Assert.Equal(QueueDecisionEntry.Failed, fact.Decision);
             Assert.Equal("legacy", fact.Tag);
+        }
+        finally
+        {
+            Cleanup(home);
+        }
+    }
+
+    [Fact]
+    public async Task A_persisted_Codex_Astra_item_fails_without_claiming_a_room_or_launching()
+    {
+        var home = CreateTempHome();
+        using var scope = BatonEnvironmentSnapshot.BeginScope(BatonEnvironmentSnapshot.Blank with { HomeOverride = home });
+        try
+        {
+            // QueueStore is the persisted/imported seam: old queue snapshots can bypass queue add.
+            await QueueStore.MutateAsync(BatonPaths.QueueFile, s => s with
+            {
+                Items = [Item("imported-astra", scope: null) with { Adapter = "codex", Model = "gpt-6-astra" }],
+            }, Ct);
+            var launched = false;
+            var service = Service((_, _) =>
+            {
+                launched = true;
+                return Task.FromResult(new QueueLaunchOutcome(null));
+            });
+
+            await service.TickOnceAsync(Ct);
+
+            Assert.False(launched);
+            var item = Assert.Single((await QueueStore.LoadAsync(BatonPaths.QueueFile, Ct)).Items);
+            Assert.Equal(QueueItemState.Failed, item.State);
+            Assert.Null(item.RoomDirectory);
+            Assert.Null(item.LaunchedAt);
+            Assert.Contains("Astra is conductor-only", item.Error!, StringComparison.Ordinal);
+            var fact = Assert.Single(await QueueDecisionLedgerStore.ReadAllAsync(BatonPaths.QueueDecisionLedgerFile, Ct));
+            Assert.Equal(QueueDecisionEntry.Failed, fact.Decision);
+            Assert.Equal("imported-astra", fact.Tag);
         }
         finally
         {

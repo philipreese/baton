@@ -112,6 +112,14 @@ public static class RunCommand
         ArgumentNullException.ThrowIfNull(options);
         ArgumentNullException.ThrowIfNull(adapters);
 
+        var bindingConfig = await WorkerBindingConfigParser.LoadFromFileAsync(options.BindingsFilePath, cancellationToken)
+            .ConfigureAwait(false);
+
+        // This must precede every room-side effect. Run accepts hand-authored bindings.json directly,
+        // so DispatchCommand's earlier admission check is not sufficient; refusing after registration
+        // or snapshot persistence leaves a non-runnable room that looks like a real dispatch.
+        WorkerBindingResolver.RefuseConductorOnlyWorkerModels(bindingConfig);
+
         // #1649: captured before WorktreeWorkspaces.Provision below runs (and therefore before the
         // sweep further down) — CancelRequestFile.DeleteStalePendingRequestAsync uses this to tell a
         // request written no earlier than THIS invocation started (a concurrent writer racing that
@@ -136,9 +144,6 @@ public static class RunCommand
         {
             snapshot = await BindAndPersistAsync(RequireWorkflowFilePath(options), snapshotPath, cancellationToken).ConfigureAwait(false);
         }
-
-        var bindingConfig = await WorkerBindingConfigParser.LoadFromFileAsync(options.BindingsFilePath, cancellationToken)
-            .ConfigureAwait(false);
 
         RefuseIfRoomDirectoryIsSensitive(bindingConfig, adapters, options.RoomDirectoryPath);
 

@@ -20,7 +20,6 @@ public sealed class QueueCommandTests
     [Theory]
     [InlineData("agy", null, "gemini-3.8-flash-high")]
     [InlineData("claude", "sonnet", "sonnet")]
-    [InlineData("codex", null, "role default model")]
     [InlineData("claude", "claude-opus-4-8", "claude-opus-4-8")]
     [InlineData("claude", "sonnet[1m]", "sonnet[1m]")]
     [InlineData("agy", "future-agy-model", "future-agy-model")]
@@ -77,6 +76,35 @@ public sealed class QueueCommandTests
 
             Assert.Contains("standing model policy", refusal.Message, StringComparison.Ordinal);
             Assert.Equal("pass --model sonnet, --model opus, or --model haiku.", refusal.TryInvocation);
+            Assert.False(File.Exists(BatonPaths.QueueFile));
+            Assert.False(Directory.Exists(BatonPaths.QueueSpecsDirectory));
+        }
+        finally
+        {
+            DirectoryCleanup.DeleteRecursively(home);
+        }
+    }
+
+    [Theory]
+    [InlineData("claude", "claude-fable-5-1", "Fable")]
+    [InlineData("codex", "gpt-6-astra", "Astra")]
+    [InlineData("codex", null, "Astra")]
+    public async Task Add_refuses_conductor_models_or_their_resolved_default_before_any_queue_side_effect(
+        string adapter, string? model, string family)
+    {
+        var home = CreateTempHome();
+        using var scope = BatonEnvironmentSnapshot.BeginScope(BatonEnvironmentSnapshot.Blank with { HomeOverride = home });
+        try
+        {
+            var brief = Path.Combine(home, "brief.md");
+            await File.WriteAllTextAsync(brief, "implement this", Ct);
+
+            var refusal = await Assert.ThrowsAsync<CliArgumentException>(() => QueueCommand.ExecuteAsync(
+                new QueueOptions(QueueVerb.Add, Tag: "conductor-only", Role: "implement",
+                    SpecFilePath: brief, WorkspaceDirectory: home, Adapter: adapter, Model: model),
+                TextWriter.Null, Ct));
+
+            Assert.Contains($"{family} is conductor-only", refusal.Message, StringComparison.Ordinal);
             Assert.False(File.Exists(BatonPaths.QueueFile));
             Assert.False(Directory.Exists(BatonPaths.QueueSpecsDirectory));
         }
@@ -481,6 +509,39 @@ public sealed class QueueCommandTests
     }
 
     [Fact]
+    public async Task Add_refuses_an_Astra_selection_for_a_later_lifecycle_stage_before_provisioning()
+    {
+        var home = CreateTempHome();
+        using var scope = BatonEnvironmentSnapshot.BeginScope(BatonEnvironmentSnapshot.Blank with { HomeOverride = home });
+        try
+        {
+            var refusal = await Assert.ThrowsAsync<CliArgumentException>(() => QueueCommand.ExecuteAsync(
+                new QueueOptions(
+                    QueueVerb.Add, Tag: "astra-review", Role: "implement", Issue: 2233, Lifecycle: true,
+                    StageSelections:
+                    [
+                        new QueueStageSelection
+                        {
+                            Stage = WorkStage.Review,
+                            Adapter = "codex",
+                            Model = "gpt-6-astra",
+                            Reason = "must not become a later-stage escape hatch",
+                        },
+                    ]),
+                TextWriter.Null, Ct));
+
+            Assert.Contains("review selection", refusal.Message, StringComparison.Ordinal);
+            Assert.Contains("Astra is conductor-only", refusal.Message, StringComparison.Ordinal);
+            Assert.False(File.Exists(BatonPaths.QueueFile));
+            Assert.False(Directory.Exists(BatonPaths.QueueSpecsDirectory));
+        }
+        finally
+        {
+            DirectoryCleanup.DeleteRecursively(home);
+        }
+    }
+
+    [Fact]
     public void A_model_only_stage_selection_keeps_its_unique_models_adapter()
     {
         var selections = QueueCommand.NormalizeLifecycleStageSelections(
@@ -532,7 +593,7 @@ public sealed class QueueCommandTests
                 output,
                 Ct);
 
-            Assert.Contains("tier: codex / gpt-6-astra / medium", output.ToString(), StringComparison.Ordinal);
+            Assert.Contains("tier: codex / gpt-5.6-sol / medium", output.ToString(), StringComparison.Ordinal);
             Assert.DoesNotContain("role default adapter", output.ToString(), StringComparison.Ordinal);
         }
         finally

@@ -47,7 +47,7 @@ public static class LedgerCsv
     public static IReadOnlyList<string> Columns { get; } =
     [
         "sourceKind", "repository", "room", "parentRoom", "workstream", "workflow", "step", "execution",
-        "attempt", "role", "adapter", "model", "modelEchoed", "modelsObserved", "effort", "outcome",
+        "attempt", "role", "adapter", "model", "modelEchoed", "modelAnomaly", "modelsObserved", "effort", "outcome",
         "issue", "pr", "startedAt", "endedAt", "tokensIn", "tokensOut", "cacheRead", "cacheCreation",
         "thinking", "turns", "wallClockMs", "toolSteps", "refusedToolSteps", "repeatedToolSteps",
         "verifyStepMs", "verifyResultsBytes", "pushWaitMs", "prePushGateMs",

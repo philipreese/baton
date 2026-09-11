@@ -282,7 +282,9 @@ A harness invokes work two ways, both in `src/Baton.Cli/Program.cs`:
   is the constraint the design rests on: those four are DISPLAY fields and may never feed dispatch.** The
   measured defect (#1927: a room rendering a bare `agy`) is a rendering one, and repairing it by writing a
   default into the fields that become the vendor's argv would silence a class of vendor-chosen behaviour
-  the operator never asked to change. §6's schema states how the render surfaces read the pair back.
+  the operator never asked to change. Admission may inspect a resolved stamp to refuse a conductor-only
+  vendor default, but it still never turns that stamp into an argv value. §6's schema states how the
+  render surfaces read the pair back.
 
   `--token-budget` (#1623) overrides the dispatched role's own default per-execution
   token ceiling — §3's "Engine-run verify and the token budget" subsection is the full contract; this
@@ -2573,6 +2575,9 @@ where `ExecutionUsageView` is
   "billedTokens"?: number, "liveBilledTokens"?: number, "billedUnderReadTokens"?: number,
   "billedReconciliationUnavailable"?: string, "peakBilledInWindow"?: number,
   "modelsObserved"?: string[], "modelEchoed"?: string,
+  "modelAnomaly"?: { "name": "conductor-only-model-observed", "family": string,
+                      "execution": string, "requestedModel"?: string, "resolvedModel"?: string,
+                      "observedModel"?: string },
   "verifyStepMs"?: number, "verifyResultsBytes"?: number,
   "toolSteps"?: number, "refusedToolSteps"?: number, "repeatedToolSteps"?: number,
   "emptyToolResults"?: number }
@@ -2634,6 +2639,11 @@ same reader that derives the token dimensions, over the same captured bytes, and
 computed BEFORE the truncation guards — a stream whose reconciliation is unavailable is exactly the
 stream whose model is still worth naming. §7's ledger row states which event each vendor's answer comes
 from, which one may not be read, and what its absence means; that ruling is not restated here.
+
+**A stream echo of Fable or Astra is `conductor-only-model-observed` (#2233).** The execution usage
+view and its durable cost-ledger row carry one named anomaly with the execution id plus requested,
+resolved and observed models. It is an observation, not a retroactive launch control: the spend already
+happened, so the signal stays loud on both live status reads and later ledger analysis.
 
 **The two added by #1882 are not token figures at all, and are attributed to ONE execution.**
 `verifyStepMs` and `verifyResultsBytes` are the wall clock of the room's pre-turn verify step (the
@@ -7095,13 +7105,14 @@ when `--adapter` is named. With zero candidates, a named adapter's own validatio
 The resolved adapter's offline rules also check models when no adapter was named. These refusals
 precede row writes, spec copies, and worktree provisioning. Import does not perform this add-time validation.
 
-**Claude invocation models fail closed (#2142).** Queue admission, including every explicitly selected
-lifecycle stage, refuses a resolved Claude adapter with no nonblank invocation model before provisioning,
-spec copies or queue writes. The scheduler applies the same check to persisted/imported items before
-launch, and dispatch checks its final binding after template and continuation resolution but before
-provisioning or runway reservation. A display-only model stamp is not an invocation model. The refusal
-names the standing model policy and requires an explicit model; a resolved configured or role model
-remains valid. This rule neither supplies a shipped Claude default nor changes exhaustion handling.
+**Conductor-only worker models fail closed (#2233).** The one conductor-model catalog classifies Fable
+and Astra. Queue admission, including every explicitly selected lifecycle stage, refuses either model
+and refuses an omitted model when the resolved vendor default is conductor-only or cannot be proven safe
+(Claude). The scheduler applies the same check to persisted/imported items before launch, and dispatch
+checks its final binding after template and continuation resolution but before provisioning or runway
+reservation. A display-only model stamp is never an invocation model, though admission may inspect it
+to refuse an unsafe vendor default. No command-line exception exists: changing this classification or a
+catalog default is the deliberate policy change. Conductor sessions are outside this worker-lane rule.
 
 **`sonnet` is not promoted.** An item that asks for it gets it, and the launch fact says the tier was
 departed from. Nothing in the queue substitutes a model.

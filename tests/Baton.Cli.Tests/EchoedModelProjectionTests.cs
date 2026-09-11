@@ -180,6 +180,91 @@ public sealed class EchoedModelProjectionTests
         Assert.Equal("claude-opus-4-6-20260115", view.ModelEchoed);
     }
 
+    [Fact]
+    public void A_conductor_model_echo_is_a_named_live_anomaly_with_requested_resolved_and_observed_models()
+    {
+        var testRoot = Path.Combine(Path.GetTempPath(), $"echoed-model-anomaly-{Guid.NewGuid():N}");
+        try
+        {
+            var executionId = new ExecutionId("exec-fable-anomaly");
+            WriteBindings(testRoot, "worker", "claude", modelResolved: "sonnet");
+            var start = new DateTime(2026, 9, 6, 12, 0, 0, DateTimeKind.Utc);
+            var entries = new List<LogEntry>
+            {
+                new LogEntry.FlowLogEntry(new FlowEvent.ExecutionRequestAccepted(
+                    AcceptedRequest(executionId, "worker", model: "sonnet"))),
+                new LogEntry.CoreLogEntry(new CoreEvent.ExecutionStarted(executionId, Pid: 1), start),
+                new LogEntry.CoreLogEntry(new CoreEvent.ExecutionExited(executionId, 0, CoreExitReason.Natural), start.AddSeconds(2)),
+            };
+            var outputDir = ArtifactManager.ResolveOutputDirectory(testRoot, executionId);
+            Directory.CreateDirectory(outputDir);
+            File.WriteAllText(
+                Path.Combine(outputDir, ExecutionStreamLogger.StdoutLogFileName),
+                """{"type":"assistant","message":{"model":"claude-fable-5-1","content":[]}}""" + "\n"
+                + """{"type":"result","num_turns":1,"usage":{"input_tokens":2,"output_tokens":1}}""" + "\n");
+
+            var view = Assert.Single(ExecutionUsageProjector.BuildByExecutionId(
+                entries, testRoot, WorkerAdapterRegistry.Default, testRoot)).Value;
+
+            var anomaly = Assert.IsType<ConductorOnlyModelAnomaly>(view.ModelAnomaly);
+            Assert.Equal(ConductorOnlyModelCatalog.ObservedAnomalyName, anomaly.Name);
+            Assert.Equal(executionId.Value, anomaly.Execution);
+            Assert.Equal("sonnet", anomaly.RequestedModel);
+            Assert.Equal("sonnet", anomaly.ResolvedModel);
+            Assert.Equal("claude-fable-5-1", anomaly.ObservedModel);
+            Assert.Contains(
+                "\"modelAnomaly\":{\"name\":\"conductor-only-model-observed\"",
+                JsonSerializer.Serialize(view),
+                StringComparison.Ordinal);
+        }
+        finally
+        {
+            DirectoryCleanup.DeleteRecursively(testRoot);
+        }
+    }
+
+    [Fact]
+    public void An_Astra_echo_carries_the_Codex_default_identity_without_collapsing_its_model_provenance()
+    {
+        // Codex currently reports no model echo in its captured stream. This uses the measured Claude
+        // echo envelope to exercise the vendor-neutral Astra catalog entry, while retaining Codex's
+        // persisted default identifier as every provenance value.
+        var testRoot = Path.Combine(Path.GetTempPath(), $"echoed-model-astra-{Guid.NewGuid():N}");
+        try
+        {
+            var executionId = new ExecutionId("exec-codex-astra-anomaly");
+            WriteBindings(testRoot, "worker", "claude", modelResolved: "gpt-6-astra");
+            var start = new DateTime(2026, 9, 6, 12, 0, 0, DateTimeKind.Utc);
+            var entries = new List<LogEntry>
+            {
+                new LogEntry.FlowLogEntry(new FlowEvent.ExecutionRequestAccepted(
+                    AcceptedRequest(executionId, "worker", model: "gpt-6-astra"))),
+                new LogEntry.CoreLogEntry(new CoreEvent.ExecutionStarted(executionId, Pid: 1), start),
+                new LogEntry.CoreLogEntry(new CoreEvent.ExecutionExited(executionId, 0, CoreExitReason.Natural), start.AddSeconds(2)),
+            };
+            var outputDir = ArtifactManager.ResolveOutputDirectory(testRoot, executionId);
+            Directory.CreateDirectory(outputDir);
+            File.WriteAllText(
+                Path.Combine(outputDir, ExecutionStreamLogger.StdoutLogFileName),
+                """{"type":"assistant","message":{"model":"gpt-6-astra","content":[]}}""" + "\n"
+                + """{"type":"result","num_turns":1,"usage":{"input_tokens":2,"output_tokens":1}}""" + "\n");
+
+            var anomaly = Assert.IsType<ConductorOnlyModelAnomaly>(Assert.Single(
+                ExecutionUsageProjector.BuildByExecutionId(
+                    entries, testRoot, WorkerAdapterRegistry.Default, testRoot)).Value.ModelAnomaly);
+
+            Assert.Equal("Astra", anomaly.Family);
+            Assert.Equal(executionId.Value, anomaly.Execution);
+            Assert.Equal("gpt-6-astra", anomaly.RequestedModel);
+            Assert.Equal("gpt-6-astra", anomaly.ResolvedModel);
+            Assert.Equal("gpt-6-astra", anomaly.ObservedModel);
+        }
+        finally
+        {
+            DirectoryCleanup.DeleteRecursively(testRoot);
+        }
+    }
+
     private static ExecutionUsageView ProjectSingle(string adapter, params string[] streamLines) =>
         Project(adapter, rolledLines: null, markerFileNames: [], streamLines);
 
@@ -229,7 +314,7 @@ public sealed class EchoedModelProjectionTests
         }
     }
 
-    private static ExecutionRequest AcceptedRequest(ExecutionId executionId, string worker) => new(
+    private static ExecutionRequest AcceptedRequest(ExecutionId executionId, string worker, string? model = null) => new(
         executionId,
         new WorkflowId("wf-echoed-model"),
         new StepId(worker),
@@ -238,15 +323,18 @@ public sealed class EchoedModelProjectionTests
         Outputs: [],
         Timeout: TimeSpan.FromSeconds(30),
         Environment: [],
-        UpstreamExecutionIds: new Dictionary<StepId, ExecutionId>());
+        UpstreamExecutionIds: new Dictionary<StepId, ExecutionId>(),
+        Model: model);
 
-    private static void WriteBindings(string roomDirectoryPath, string workerName, string adapter)
+    private static void WriteBindings(
+        string roomDirectoryPath, string workerName, string adapter, string? modelResolved = null)
     {
         Directory.CreateDirectory(roomDirectoryPath);
         var config = new Dictionary<string, WorkerBindingConfigEntry>
         {
             [workerName] = new(
-                adapter, new WorkerContract(workerName, [], [], []), "unused prompt", TimeSpan.FromSeconds(30)),
+                adapter, new WorkerContract(workerName, [], [], []), "unused prompt", TimeSpan.FromSeconds(30),
+                ModelResolved: modelResolved),
         };
 
         File.WriteAllText(

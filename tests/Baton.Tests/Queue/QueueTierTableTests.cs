@@ -35,7 +35,7 @@ public sealed class QueueTierTableTests
     /// per-axis rule.
     /// </summary>
     private static Func<string, QueueTierSettings?> NamedTiers(
-        string adapter = "codex", string model = "gpt-6-astra", string effort = "medium") =>
+        string adapter = "codex", string model = "gpt-5.6-sol", string effort = "medium") =>
         name => string.Equals(name, "standard", StringComparison.Ordinal)
             ? new QueueTierSettings { Tier = name, Adapter = adapter, Model = model, Effort = effort }
             : null;
@@ -81,7 +81,7 @@ public sealed class QueueTierTableTests
             Item("implement", "tooling"), new QueueSettings(),
             NamedTiers(adapter: "claude", model: "opus", effort: "low"), NoNamedTiers);
 
-        Assert.Equal(("codex", "gpt-6-astra", "medium"), (shipped.Adapter, shipped.Model, shipped.Effort));
+        Assert.Equal(("codex", "gpt-5.6-sol", "medium"), (shipped.Adapter, shipped.Model, shipped.Effort));
         Assert.Equal(("claude", "opus", "low"), (moved.Adapter, moved.Model, moved.Effort));
         // Following a tier is not departing from one: the item asked for nothing.
         Assert.False(shipped.IsOverride);
@@ -119,7 +119,7 @@ public sealed class QueueTierTableTests
         var resolved = QueueTierTable.Resolve(Item("implement", "tooling"), settings, NamedTiers(), NoNamedTiers);
 
         Assert.Equal("codex", resolved.Adapter);
-        Assert.Equal("gpt-6-astra", resolved.Model);
+        Assert.Equal("gpt-5.6-sol", resolved.Model);
         Assert.Equal("high", resolved.Effort);
     }
 
@@ -291,7 +291,7 @@ public sealed class QueueTierTableTests
             defaults, WorkStage.Review, new QueueSettings(), NamedTiers(), NoNamedTiers);
 
         Assert.Equal(QueueSelectionSource.StageDefault, implement.SelectionSource);
-        Assert.Equal(("codex", "gpt-6-astra", "medium"), (implement.Adapter, implement.Model, implement.Effort));
+        Assert.Equal(("codex", "gpt-5.6-sol", "medium"), (implement.Adapter, implement.Model, implement.Effort));
         Assert.Equal(QueueSelectionSource.StageDefault, review.SelectionSource);
         Assert.Equal(("codex", "gpt-5.6-sol", "high"), (review.Adapter, review.Model, review.Effort));
 
