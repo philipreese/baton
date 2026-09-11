@@ -184,7 +184,10 @@ public sealed record ImportManifest(
     IReadOnlyList<MemoryEntry>? PlannedEntries = null,
     [property: JsonPropertyName("plannedLinks")]
     [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
-    IReadOnlyList<MemorySupersessionLink>? PlannedLinks = null)
+    IReadOnlyList<MemorySupersessionLink>? PlannedLinks = null,
+    [property: JsonPropertyName("plannedAliases")]
+    [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    IReadOnlyList<MemoryAliasEntry>? PlannedAliases = null)
 {
     /// <summary>
     /// The only version this build writes, and the only one <see cref="Read"/> accepts.
@@ -289,6 +292,16 @@ public sealed record ImportManifest(
                 $"The import manifest at '{manifestFilePath}' has incomplete operation recovery state.");
         }
 
+        try
+        {
+            MemoryImportOperationStore.ValidateRecord(manifest);
+        }
+        catch (Exception ex) when (ex is InvalidDataException or ArgumentException or NotSupportedException)
+        {
+            throw new BatonMemoryException(
+                $"The import manifest at '{manifestFilePath}' has corrupt operation state: {ex.Message}", ex);
+        }
+
         return manifest;
     }
 }
@@ -296,7 +309,7 @@ public sealed record ImportManifest(
 /// <summary>The durable boundary of an import manifest.</summary>
 public enum ImportOperationState
 {
-    /// <summary>The exact ownership result is durable and no replay data is required.</summary>
+    /// <summary>The exact ownership result is durable; new records retain the plan for validation.</summary>
     Settled = 0,
 
     /// <summary>The plan is durable and must be rolled forward before any affected store is published.</summary>

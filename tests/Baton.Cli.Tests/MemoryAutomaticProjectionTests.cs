@@ -9,7 +9,7 @@ using Baton.Tests.Shared;
 namespace Baton.Cli.Tests;
 
 /// <summary>#2138 controls. Every home and vendor root in this file is a disposable fixture.</summary>
-public sealed class MemoryAutomaticProjectionTests : IDisposable
+public sealed partial class MemoryAutomaticProjectionTests : IDisposable
 {
     private const string Repository = "github.com/philipreese/baton";
     private const string OtherRepository = "github.com/example/other";
@@ -476,6 +476,12 @@ public sealed class MemoryAutomaticProjectionTests : IDisposable
             new MemoryProjectionObligation(
                 "pending-overflow", Repository, Slug, MemoryProjectionObligationStatus.Pending,
                 int.MaxValue, now, now, now, "failure", null),
+            new MemoryProjectionObligation(
+                "escalated-overflow", Repository, Slug, MemoryProjectionObligationStatus.Escalated,
+                int.MaxValue, now, now, null, "failure", "repair"),
+            new MemoryProjectionObligation(
+                "escalated-over-budget", Repository, Slug, MemoryProjectionObligationStatus.Escalated,
+                MemoryProjectionObligationStore.EscalationAttemptCount + 1, now, now, null, "failure", "repair"),
         };
         var path = BatonPaths.MemorySyncPendingFile(Slug);
         Directory.CreateDirectory(Path.GetDirectoryName(path)!);

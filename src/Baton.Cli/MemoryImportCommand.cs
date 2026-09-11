@@ -227,7 +227,9 @@ public static class MemoryImportCommand
             }
         }
 
-        var hasCanonicalPlan = plannedEntries.Count > 0 || plannedLinks.Count > 0;
+        var plannedAliases = aliasResolution.AppendedAssertions
+            .Select(a => a with { ImportOperationId = operationId }).ToList();
+        var hasCanonicalPlan = plannedEntries.Count > 0 || plannedLinks.Count > 0 || plannedAliases.Count > 0;
         var manifest = new ImportManifest(
             ImportManifest.CurrentVersion,
             DateTime.UtcNow,
@@ -243,7 +245,8 @@ public static class MemoryImportCommand
             operationId,
             !options.DryRun && hasCanonicalPlan ? ImportOperationState.Intent : ImportOperationState.Settled,
             !options.DryRun && hasCanonicalPlan ? plannedEntries : null,
-            !options.DryRun && hasCanonicalPlan ? plannedLinks : null);
+            !options.DryRun && hasCanonicalPlan ? plannedLinks : null,
+            !options.DryRun && hasCanonicalPlan ? plannedAliases : null);
 
         string? manifestPath = null;
         if (!options.DryRun)
@@ -265,11 +268,16 @@ public static class MemoryImportCommand
         }
 
         WriteReport(output, options, manifest, manifestPath);
+        if (manifest.PlannedAliases is { Count: > 0 })
+        {
+            output.WriteLine("Target assertions are recorded in this durable operation; undo retains those assertions.");
+        }
         if (!options.DryRun)
         {
             var changedRepositories = manifest.Appended.Select(r => r.Repository)
                 .Concat(manifest.AppendedLinks.Select(l => l.Repository))
-                .Concat(aliasResolution.AppendedAssertions.Select(a => a.Repository));
+                .Concat((await MemoryAliasStore.ReadAllAsync(BatonPaths.MemoryAliasFile, CancellationToken.None)
+                    .ConfigureAwait(false)).Where(a => a.ImportOperationId == operationId).Select(a => a.Repository));
             await ProjectChangedRepositoriesAsync(
                 changedRepositories,
                 output,
@@ -284,10 +292,9 @@ public static class MemoryImportCommand
 
     /// <summary>
     /// The alias store as this run sees it: what is already recorded, plus anything <c>--assert</c>
-    /// added. The new rows are persisted first (so a later run reuses them without the flag) and
-    /// returned either way — under <c>--dry-run</c> they apply to the computed plan and are not
-    /// written, which is what makes a dry run a preview of the real thing rather than a preview of a
-    /// different one.
+    /// proposes. Resolution writes nothing: assertions participate in planning, then the durable
+    /// import intent precedes their append just as it precedes entry and link appends. A failed
+    /// source read or intent write therefore cannot leave an unreported target association.
     /// </summary>
     private static async Task<AliasResolution> ResolveAliasesAsync(
         MemoryImportOptions options, CancellationToken cancellationToken)
@@ -309,20 +316,8 @@ public static class MemoryImportCommand
                 DateTime.UtcNow))
             .ToList();
 
-        IReadOnlyList<MemoryAliasEntry> appended;
-        if (options.DryRun)
-        {
-            var knownPaths = recorded
-                .Select(existing => existing.Path)
-                .ToHashSet(BatonPaths.RecordKeyComparer);
-            appended = asserted.Where(candidate => knownPaths.Add(candidate.Path)).ToList();
-        }
-        else
-        {
-            appended = await MemoryAliasStore.AppendAndGetAppendedAsync(
-                    asserted, BatonPaths.MemoryAliasFile, cancellationToken)
-                .ConfigureAwait(false);
-        }
+        var knownPaths = recorded.Select(existing => existing.Path).ToHashSet(BatonPaths.RecordKeyComparer);
+        var appended = asserted.Where(candidate => knownPaths.Add(candidate.Path)).ToList();
 
         return new AliasResolution([.. recorded, .. appended], appended);
     }

@@ -198,8 +198,10 @@ internal sealed class JsonLinesLedger<TEntry>(
     /// <summary>
     /// The read half, factored out so a read-then-write happens inside ONE lock acquisition rather than
     /// two — two separate acquisitions would let a concurrent writer land in the gap between them,
-    /// silently truncated away by whichever finishes second. Callers must already hold the
-    /// <see cref="MutexGuardedFileLock"/> on <paramref name="ledgerFilePath"/>; this method takes none.
+    /// silently truncated away by whichever finishes second. Read-modify-write callers must already
+    /// hold the <see cref="MutexGuardedFileLock"/> on <paramref name="ledgerFilePath"/>; this method
+    /// takes none. A read-only ownership reconciliation may take an independent file snapshot without
+    /// nesting ledger mutexes, provided it propagates sharing/I/O failures as a publication fence.
     /// </summary>
     internal IReadOnlyList<TEntry> ReadAllUnlocked(string ledgerFilePath)
     {

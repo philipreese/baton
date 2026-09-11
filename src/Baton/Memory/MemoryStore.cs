@@ -1,4 +1,3 @@
-using System.Text;
 using System.Text.Json;
 using Baton.Status;
 
@@ -411,24 +410,39 @@ public static class MemoryStore
             filePath,
             () =>
             {
-                var kept = new List<TRow>();
+                // Preserve every unselected byte, including invalid UTF-8, blank lines and torn
+                // JSON. A tolerant parsed-list rewrite would erase evidence of unrelated damage.
+                var bytes = File.ReadAllBytes(filePath);
+                using var kept = new MemoryStream();
                 var removed = 0;
-                foreach (var row in ledger.ReadAllUnlocked(filePath))
+                for (var start = 0; start < bytes.Length;)
                 {
-                    if (removing.Contains(keySelector(row))
+                    var newline = Array.IndexOf(bytes, (byte)'\n', start);
+                    var end = newline < 0 ? bytes.Length : newline + 1;
+                    TRow? row = null;
+                    try
+                    {
+                        row = JsonSerializer.Deserialize<TRow>(bytes.AsSpan(start, end - start), ledger.SerializerOptions);
+                    }
+                    catch (JsonException)
+                    {
+                        // Unparseable is unselected; retain its exact bytes in the atomic rewrite.
+                    }
+                    if (row is not null && removing.Contains(keySelector(row))
                         && (ownershipPredicate is null || ownershipPredicate(row)))
                     {
                         removed++;
                     }
                     else
                     {
-                        kept.Add(row);
+                        kept.Write(bytes, start, end - start);
                     }
+                    start = end;
                 }
 
                 if (removed > 0)
                 {
-                    WriteAllUnlocked(ledger, filePath, kept);
+                    WriteAllUnlocked(filePath, kept.ToArray());
                 }
 
                 return removed;
@@ -437,21 +451,20 @@ public static class MemoryStore
     }
 
     /// <summary>
-    /// Replaces the file's contents with one JSON line per row, atomically. Callers must already
+    /// Replaces the file's contents with the retained raw bytes, atomically. Callers must already
     /// hold that ledger's <see cref="MutexGuardedFileLock"/>; this method takes none.
     /// </summary>
-    private static void WriteAllUnlocked<TRow>(
-        JsonLinesLedger<TRow> ledger, string filePath, IReadOnlyList<TRow> rows)
-        where TRow : class
+    private static void WriteAllUnlocked(string filePath, byte[] bytes)
     {
         var tempPath = $"{filePath}.{Guid.NewGuid():N}.tmp";
-        var builder = new StringBuilder();
-        foreach (var row in rows)
+        try
         {
-            builder.Append(JsonSerializer.Serialize(row, ledger.SerializerOptions)).Append('\n');
+            File.WriteAllBytes(tempPath, bytes);
+            File.Move(tempPath, filePath, overwrite: true);
         }
-
-        File.WriteAllBytes(tempPath, Encoding.UTF8.GetBytes(builder.ToString()));
-        File.Move(tempPath, filePath, overwrite: true);
+        finally
+        {
+            File.Delete(tempPath);
+        }
     }
 }

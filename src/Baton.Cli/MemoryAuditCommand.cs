@@ -112,13 +112,14 @@ public static class MemoryAuditCommand
         var retractions = await ReadRetractionsAsync(batonRoot, cancellationToken).ConfigureAwait(false);
         var canonicalStores = await ScanCanonicalStoresAsync(batonRoot, options.Repository, cancellationToken)
             .ConfigureAwait(false);
+        var operationProblems = MemoryImportOperationHealth.Scan(batonRoot);
 
         if (options.Format == MemoryAuditOutputFormat.Json)
         {
             output.WriteLine(JsonSerializer.Serialize(
                 new MemoryAuditJsonView(
                     claudeHome, userHome, report.Roots, report.Findings, report.Counts, vendorRoots, retractions,
-                    canonicalStores),
+                    canonicalStores, operationProblems),
                 ViewSerializerOptions));
             return 0;
         }
@@ -127,6 +128,10 @@ public static class MemoryAuditCommand
         WriteVendorRoots(output, vendorRoots);
         WriteRetractions(output, retractions);
         WriteCanonicalStores(output, batonRoot, options.Repository, canonicalStores);
+        foreach (var problem in operationProblems)
+        {
+            output.WriteLine($"  IMPORT {problem.State.ToUpperInvariant()} -- {problem.Detail}");
+        }
         return 0;
     }
 
@@ -207,7 +212,7 @@ public static class MemoryAuditCommand
                 store.IsFleet,
                 store.EntriesFile,
                 Present: true,
-                entries.Count));
+                store.OperationProblems is { Count: > 0 } ? null : entries.Count));
         }
 
         if (selectedSlug is not null && rows.Count == 0)
@@ -234,7 +239,7 @@ public static class MemoryAuditCommand
         bool IsFleet,
         string EntriesFile,
         bool Present,
-        int EntryCount);
+        int? EntryCount);
 
     /// <summary>
     /// The JSON contract: the report plus the two roots it was taken over, so a stored report says
@@ -257,7 +262,8 @@ public static class MemoryAuditCommand
         MemoryAuditCounts Counts,
         IReadOnlyList<VendorMemoryRoot> VendorRoots,
         IReadOnlyList<MemoryRetraction> Retractions,
-        IReadOnlyList<CanonicalStoreRow> CanonicalStores);
+        IReadOnlyList<CanonicalStoreRow> CanonicalStores,
+        IReadOnlyList<MemoryImportOperationProblem> ImportOperations);
 
     /// <summary>
     /// The retractions, under their own heading, each with the reason and author verbatim — the
@@ -410,7 +416,9 @@ public static class MemoryAuditCommand
             output.WriteLine(
                 store.Present
                     ? $"    {(store.IsFleet ? "FLEET" : "repository=" + (store.Repository ?? "(no rows yet)"))} " +
-                      $"slug={store.Slug} entries={store.EntryCount.ToString("N0", CultureInfo.InvariantCulture)}"
+                      $"slug={store.Slug} " + (store.EntryCount is { } count
+                          ? $"entries={count.ToString("N0", CultureInfo.InvariantCulture)}"
+                          : "entries=(withheld -- incomplete import ownership; see import diagnostics)")
                     : $"    ABSENT -- no store has been created for '{store.Repository}' on this machine; " +
                       "'baton memory add' or 'baton memory import' creates it.");
         }

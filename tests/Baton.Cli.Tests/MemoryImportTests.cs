@@ -579,7 +579,21 @@ public sealed class MemoryImportTests : IDisposable
         // Arm 1: the manifest says it was written under another storage root. Every store path in it is
         // absolute under that root, so replaying it here could only remove nothing and report success.
         var elsewhere = Path.Combine(_root, "some-other-baton-root");
-        var moved = ImportManifest.Read(manifestPath) with { BatonRoot = elsewhere };
+        var original = ImportManifest.Read(manifestPath);
+        // Keep the relocated record internally coherent so this tests the root fence, not corrupt
+        // accounting-path validation (which now runs on every operation-record read).
+        var moved = original with
+        {
+            BatonRoot = elsewhere,
+            Entries = original.Entries.Select(row => row with
+            {
+                EntriesFilePath = Path.Combine(elsewhere, Path.GetRelativePath(BatonPaths.Root, row.EntriesFilePath)),
+            }).ToList(),
+            Links = original.Links?.Select(row => row with
+            {
+                LinksFilePath = Path.Combine(elsewhere, Path.GetRelativePath(BatonPaths.Root, row.LinksFilePath)),
+            }).ToList(),
+        };
         moved.Write(manifestPath + ".moved.json");
 
         var (refusedCode, refusedText) = await RunRawAsync("--undo", manifestPath + ".moved.json");

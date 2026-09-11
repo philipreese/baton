@@ -15,7 +15,8 @@ public sealed record CanonicalStoreLocation(
     string? Repository,
     string EntriesFile,
     string LinksFile,
-    bool IsFleet);
+    bool IsFleet,
+    IReadOnlyList<MemoryImportOperationProblem>? OperationProblems = null);
 
 /// <summary>
 /// Every canonical memory store under a Baton root — the enumeration <c>baton memory sync</c> walks
@@ -43,6 +44,7 @@ public static class CanonicalStoreInventory
             return [];
         }
 
+        var problems = MemoryImportOperationHealth.Scan(batonRoot);
         var stores = new List<CanonicalStoreLocation>();
         foreach (var directory in Directory.EnumerateDirectories(batonRoot))
         {
@@ -57,7 +59,8 @@ public static class CanonicalStoreInventory
                     metadata?.Repository,
                     entries,
                     Path.Combine(memory, BatonPaths.MemoryLinksFileName),
-                    FleetMemory.IsFleet(slug)));
+                    FleetMemory.IsFleet(slug),
+                    problems.Where(p => p.Blocks(slug)).ToList()));
             }
         }
 

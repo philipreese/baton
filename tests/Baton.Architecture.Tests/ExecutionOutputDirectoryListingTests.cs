@@ -82,6 +82,9 @@ public class ExecutionOutputDirectoryListingTests
             "EnumerateFiles lists a ~/.claude memory root (live or archived), not an execution output directory",
         ["Baton/Memory/MemoryRootPath.cs"] =
             "EnumerateFiles lists a Claude project directory's session transcripts, not an execution output directory",
+        // Lists only {BATON_HOME}/memory-imports/*.json, the canonical operation records.
+        ["Baton/Memory/MemoryImportOperationStore.cs"] =
+            "EnumerateFiles lists the canonical memory-imports operation store, not an execution output directory",
         // #1151: walks a canonical skill package directory to plan which of its files a vendor
         // realization would place. Since S1 that directory is package.DirectoryPath — whichever
         // SkillPackageResolver rung a declared name matched, not only <workspace>/skills/<name>/ — so

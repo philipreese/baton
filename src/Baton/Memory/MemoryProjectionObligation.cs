@@ -49,6 +49,7 @@ public static class MemoryProjectionObligationStore
     /// the delays below that gives a transient at least fifteen minutes to clear while bounding noisy
     /// retries against a persistently denied root. Escalation then requires the printed manual action.
     /// </summary>
+    // FailAsync can produce Pending/0..4 or Escalated/5 only; durable reads reject all other counts.
     public const int EscalationAttemptCount = 5;
 
     public static readonly TimeSpan InitialBackoff = TimeSpan.FromMinutes(1);
@@ -283,7 +284,7 @@ public static class MemoryProjectionObligationStore
                     || obligation.FailedAttempts >= EscalationAttemptCount))
             || (obligation.Status == MemoryProjectionObligationStatus.Escalated
                 && (obligation.NextAttemptUtc is not null
-                    || obligation.FailedAttempts < EscalationAttemptCount)))
+                    || obligation.FailedAttempts != EscalationAttemptCount)))
         {
             throw new InvalidDataException("Memory projection obligation has an incomplete or invalid shape.");
         }

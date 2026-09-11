@@ -43,7 +43,8 @@ public sealed class MemoryProjectionSweep : BackgroundService
             .RecoverPendingAsync(diagnostics, cancellationToken).ConfigureAwait(false);
         foreach (var location in CanonicalStoreInventory.Scan(BatonPaths.Root))
         {
-            if (blockedByImport.Contains(location.Slug)
+            if (location.OperationProblems is { Count: > 0 }
+                || blockedByImport.Contains(location.Slug)
                 || blockedByImport.Contains(FleetMemory.Slug))
             {
                 continue;

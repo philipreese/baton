@@ -26,7 +26,10 @@ public sealed record MemoryAliasEntry(
     DateTime AssertedAtUtc,
     [property: JsonPropertyName("reason")]
     [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
-    string? Reason = null);
+    string? Reason = null,
+    [property: JsonPropertyName("importOperationId")]
+    [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    string? ImportOperationId = null);
 
 /// <summary>
 /// The append-only <c>aliases.jsonl</c> beside the canonical stores: paths whose repository identity
