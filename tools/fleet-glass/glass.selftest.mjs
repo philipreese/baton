@@ -74,6 +74,11 @@ const { vendorUsageRowHtml, vendorUsageHtml } = new Function("esc", "age", "$", 
   age,
   (id) => id === "vendorusage" ? vendorUsageSink : null);
 
+const failures = [];
+function check(name, cond) {
+  if (!cond) failures.push(name);
+}
+
 const vendorUsageSink = { innerHTML: "" };
 const explicitNullRow = vendorUsageRowHtml("codex", {
   name: "codex · unavailable (secondary)",
@@ -119,11 +124,6 @@ check("a valid weekly-only account renders its vendor window without manufacturi
 
 const panel = new Function("esc", "age", `${source}\nreturn { ${REQUIRED.join(", ")} };`)(esc, age);
 const { queueSlotsLineHtml, queuePendingTableHtml, queuePrTableHtml, queueLanesTableHtml, queueBoardHtml } = panel;
-
-const failures = [];
-function check(name, cond) {
-  if (!cond) failures.push(name);
-}
 
 // -- no board is THREE facts, and each gets its own word (#1912 fix round) --
 // FleetProjectionWriter.BuildQueueSectionAsync's remarks are the register for which state produces
