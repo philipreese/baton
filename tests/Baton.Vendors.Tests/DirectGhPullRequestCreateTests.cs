@@ -1,4 +1,5 @@
 using Baton.Vendors;
+using Baton.Domain;
 
 namespace Baton.Vendors.Tests;
 
@@ -81,8 +82,11 @@ public sealed class DirectGhPullRequestCreateTests
         MakeExecutable(expected);
         try
         {
-            var resolved = GhExecutableResolver.TryResolve(
-                workspace + Path.PathSeparator + trusted, workspace, OperatingSystem.IsWindows());
+            var resolved = OutsideWorkspaceExecutableResolver.TryResolve(
+                workspace + Path.PathSeparator + trusted,
+                workspace,
+                "gh",
+                OperatingSystem.IsWindows());
 
             Assert.Equal(expected, resolved);
         }
@@ -93,30 +97,108 @@ public sealed class DirectGhPullRequestCreateTests
     }
 
     [Fact]
-    public void Provenance_uses_the_binding_source_for_repository_and_workspace_for_branch()
+    public void Identity_capture_skips_a_workspace_PATH_shadowed_git()
     {
         var root = Path.Combine(Path.GetTempPath(), $"baton-gh-provenance-{Guid.NewGuid():N}");
-        var source = Path.Combine(root, "source");
         var workspace = Path.Combine(root, "workspace");
         var hostBin = Path.Combine(root, "host-bin");
-        Directory.CreateDirectory(source);
         Directory.CreateDirectory(workspace);
         Directory.CreateDirectory(hostBin);
-        var executable = Path.Combine(hostBin, OperatingSystem.IsWindows() ? "gh.exe" : "gh");
-        File.WriteAllText(executable, "fixture");
-        MakeExecutable(executable);
+        var name = OperatingSystem.IsWindows() ? "git.exe" : "git";
+        File.WriteAllText(Path.Combine(workspace, name), "workspace fake");
+        var trustedGit = Path.Combine(hostBin, name);
+        File.WriteAllText(trustedGit, "host fixture");
+        MakeExecutable(trustedGit);
         try
         {
-            var provenance = GhPullRequestCreateProvenanceResolver.TryResolve(
+            var identity = GhPullRequestCreateProvenanceResolver.TryCaptureIdentity(
                 workspace,
-                source,
-                hostBin,
+                workspace + Path.PathSeparator + hostBin,
                 OperatingSystem.IsWindows(),
-                (directory, arguments) => arguments[0] == "config"
-                    ? directory == source ? "git@github.com:AER-Works/Baton.git" : null
-                    : directory == workspace ? "2190-verified-pr-ownership" : null);
+                (executable, directory, arguments) =>
+                {
+                    Assert.Equal(trustedGit, executable);
+                    Assert.Equal(workspace, directory);
+                    return arguments[0] == "config"
+                        ? "git@github.com:AER-Works/Baton.git"
+                        : "2190-verified-pr-ownership";
+                });
 
-            Assert.Equal(executable, provenance?.ExecutablePath);
+            Assert.Equal("aer-works/baton", identity?.Repository);
+            Assert.Equal("2190-verified-pr-ownership", identity?.HeadBranch);
+        }
+        finally
+        {
+            DirectoryCleanup.DeleteRecursively(root);
+        }
+    }
+
+    [Fact]
+    public void Resolver_rejects_an_outside_directory_alias_into_the_workspace()
+    {
+        var root = Path.Combine(Path.GetTempPath(), $"baton-gh-alias-{Guid.NewGuid():N}");
+        var workspace = Path.Combine(root, "workspace");
+        var workspaceBin = Path.Combine(workspace, "bin");
+        var outsideAlias = Path.Combine(root, "host-bin");
+        Directory.CreateDirectory(workspaceBin);
+        var name = OperatingSystem.IsWindows() ? "gh.exe" : "gh";
+        var workspaceGh = Path.Combine(workspaceBin, name);
+        File.WriteAllText(workspaceGh, "workspace fake");
+        MakeExecutable(workspaceGh);
+        try
+        {
+            try
+            {
+                Directory.CreateSymbolicLink(outsideAlias, workspaceBin);
+            }
+            catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
+            {
+                return;
+            }
+
+            Assert.Null(OutsideWorkspaceExecutableResolver.TryResolve(
+                outsideAlias, workspace, "gh", OperatingSystem.IsWindows()));
+        }
+        finally
+        {
+            DirectoryCleanup.DeleteRecursively(root);
+        }
+    }
+
+    [Fact]
+    public void Resumed_binding_uses_persisted_identity_after_remote_metadata_changes()
+    {
+        var root = Path.Combine(Path.GetTempPath(), $"baton-gh-resume-{Guid.NewGuid():N}");
+        var workspace = Path.Combine(root, "workspace");
+        var hostBin = Path.Combine(root, "host-bin");
+        Directory.CreateDirectory(Path.Combine(workspace, ".git"));
+        Directory.CreateDirectory(hostBin);
+        var gh = Path.Combine(hostBin, OperatingSystem.IsWindows() ? "gh.exe" : "gh");
+        File.WriteAllText(gh, "host fixture");
+        MakeExecutable(gh);
+        try
+        {
+            var binding = new WorkerBindingConfigEntry(
+                "codex",
+                new WorkerContract("implement", [], [], []),
+                "prompt",
+                TimeSpan.FromMinutes(1),
+                PullRequestCreateIdentity: new(
+                    "aer-works/baton", "2190-verified-pr-ownership"));
+            var serialized = WorkerBindingConfigWriter.Serialize(
+                new Dictionary<string, WorkerBindingConfigEntry> { ["implement"] = binding });
+            var resumed = WorkerBindingConfigParser.Parse(serialized)["implement"];
+
+            // Worker-controlled shared Git metadata now claims a foreign repository. Resolution on
+            // resume must not execute Git or read this file.
+            File.WriteAllText(
+                Path.Combine(workspace, ".git", "config"),
+                "[remote \"origin\"]\nurl = https://github.com/other/repo.git\n");
+
+            var provenance = GhPullRequestCreateProvenanceResolver.TryResolve(
+                workspace, resumed.PullRequestCreateIdentity, hostBin, OperatingSystem.IsWindows());
+
+            Assert.Equal(gh, provenance?.ExecutablePath);
             Assert.Equal("aer-works/baton", provenance?.Repository);
             Assert.Equal("2190-verified-pr-ownership", provenance?.HeadBranch);
         }

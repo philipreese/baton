@@ -268,7 +268,10 @@ public sealed record WorkerBindingConfigEntry(
     // other flag on this record: a hand-authored bindings.json (baton run/resume/decide) that omits it
     // keeps the pre-#2029 behaviour of being graded by the workspace's own declaration, rather than
     // silently skipping a gate.
-    bool VerifiesWorkspace = true);
+    bool VerifiesWorkspace = true,
+    // #2190: conductor-captured before the workspace is worker-controlled and persisted so resume
+    // never re-derives repository/head authority from mutable Git metadata.
+    GhPullRequestCreateIdentity? PullRequestCreateIdentity = null);
 
 /// <summary>
 /// #1927: the closed vocabulary <see cref="WorkerBindingConfigEntry.ModelSource"/> and

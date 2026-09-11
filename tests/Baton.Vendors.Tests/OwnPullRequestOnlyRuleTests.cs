@@ -62,6 +62,10 @@ public class OwnPullRequestOnlyRuleTests
     [InlineData("gh pr view 2005 --repo other/repo", 2005)]
     [InlineData("gh pr view 2005 --repo=other/repo", 2005)]
     [InlineData("gh pr view 2005 -R other/repo", 2005)]
+    [InlineData("gh pr view 2005 -Rother/repo", 2005)]
+    [InlineData("gh pr view 2005 -R=other/repo", 2005)]
+    [InlineData("gh pr view 2005 -R", 2005)]
+    [InlineData("gh pr view 2005 -R=", 2005)]
     [InlineData("gh pr view --repo other/repo", 2005)]
     // ...and `gh pr list` never becomes allowed, for the reason EnumeratingSubCommands states.
     [InlineData("gh pr list", 2005)]
@@ -137,6 +141,8 @@ public class OwnPullRequestOnlyRuleTests
     [InlineData("gh pr view --repo aer-works/baton 2005", 2005)]
     [InlineData("gh pr view --repo=aer-works/baton 2005", 2005)]
     [InlineData("gh pr view -R aer-works/baton 2005", 2005)]
+    [InlineData("gh pr view -Raer-works/baton 2005", 2005)]
+    [InlineData("gh pr view --repo https://github.com/AER-Works/Baton.git 2005", 2005)]
     [InlineData("gh pr checks", 2005)]
     [InlineData("gh pr comment --body-file out.md", 2005)]
     // A separator ends the invocation's arguments: `tee` is not a pull request selector.

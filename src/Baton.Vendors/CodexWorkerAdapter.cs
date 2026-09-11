@@ -714,14 +714,10 @@ public sealed class CodexWorkerAdapter : IWorkerAdapter, IPermissionGrantTransla
                 "Baton.Cli.dll alongside Baton.Vendors.dll.");
         }
 
-        var directCreateAllowed = ShellCommandPatternMatcher.EvaluateChainedCommand(
-            "gh pr create --draft",
-            grant.ShellCommandPatterns,
-            grant.DeniedShellCommandPatterns,
-            grant.DeniedShellCommandExceptions).IsAllowed;
-        var pullRequestCreateProvenance = directCreateAllowed && OwnPullRequestOnlyRule.AppliesTo(grant)
+        var pullRequestCreateProvenance =
+            GhPullRequestCreateProvenanceResolver.RequiresTrustedIdentity(grant)
             ? GhPullRequestCreateProvenanceResolver.TryResolve(
-                invocation.WorkingDirectory, invocation.WorktreeSourceRepository)
+                invocation.WorkingDirectory, invocation.PullRequestCreateIdentity)
             : null;
 
         var configuration = new CodexBrokerConfiguration(

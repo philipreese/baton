@@ -1429,11 +1429,12 @@ public sealed class CodexDynamicToolPolicy
         GhPullRequestCreateProvenance? provenance, string? workspaceRoot, bool requireGhFileName = true)
     {
         if (provenance is null || workspaceRoot is null
-            || !Path.IsPathFullyQualified(provenance.ExecutablePath)
-            || !File.Exists(provenance.ExecutablePath)
-            || GhExecutableResolver.IsWithin(workspaceRoot, provenance.ExecutablePath)
-            || requireGhFileName && !Path.GetFileName(provenance.ExecutablePath).Equals(
-                OperatingSystem.IsWindows() ? "gh.exe" : "gh", StringComparison.OrdinalIgnoreCase)
+            || OutsideWorkspaceExecutableResolver.TryValidateAbsolute(
+                provenance.ExecutablePath,
+                workspaceRoot,
+                "gh",
+                OperatingSystem.IsWindows(),
+                requireGhFileName) is not { } executable
             || GitHubRepository.TryCanonicalize(provenance.Repository) is not { } repository
             || string.IsNullOrWhiteSpace(provenance.HeadBranch)
             || provenance.HeadBranch.Equals("HEAD", StringComparison.Ordinal))
@@ -1443,7 +1444,7 @@ public sealed class CodexDynamicToolPolicy
 
         return provenance with
         {
-            ExecutablePath = Path.GetFullPath(provenance.ExecutablePath),
+            ExecutablePath = executable,
             Repository = repository,
         };
     }

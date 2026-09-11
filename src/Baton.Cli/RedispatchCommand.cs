@@ -212,6 +212,14 @@ public static class RedispatchCommand
             };
         }
 
+        // #2190: ordinary redispatch carries the parent's immutable identity. Only an explicit
+        // conductor --workspace move establishes a new trust boundary and permits a fresh capture;
+        // a legacy parent with no identity therefore remains fail-closed instead of learning from
+        // worker-mutable Git configuration.
+        entry = options.WorkspaceDirectory is { } explicitWorkspace
+            ? GhPullRequestCreateProvenanceResolver.CaptureIdentityFor(entry, explicitWorkspace)
+            : entry with { PullRequestCreateIdentity = parentEntry.PullRequestCreateIdentity };
+
         if (options.Timeout is { } timeoutOverride && timeoutOverride > TimeSpan.FromMinutes(DispatchOptionsParser.WarnTimeoutMinutes))
         {
             Console.Error.WriteLine(

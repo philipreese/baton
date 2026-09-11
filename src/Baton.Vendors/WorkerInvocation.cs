@@ -161,5 +161,7 @@ public sealed record WorkerInvocation(
     // #1802 review: default-closed; only RoleDispatch.ToBinding (from the catalog) ever sets true.
     bool AllowsSubagents = false,
     // #1151: see the Skills doc above.
-    IReadOnlyList<SkillPackage>? Skills = null);
+    IReadOnlyList<SkillPackage>? Skills = null,
+    // #2190: durable binding authority, not a live workspace claim.
+    GhPullRequestCreateIdentity? PullRequestCreateIdentity = null);
 

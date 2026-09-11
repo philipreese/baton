@@ -401,7 +401,17 @@ public sealed class OwnPullRequestOnlyRule
             {
                 repositories.Add(tokens[i]["--repo=".Length..]);
             }
-            else if (tokens[i] is "--repo" or "-R")
+            else if (tokens[i] == "-R")
+            {
+                repositories.Add(i + 1 < tokens.Count ? tokens[++i] : string.Empty);
+            }
+            else if (tokens[i].StartsWith("-R", StringComparison.Ordinal))
+            {
+                // gh accepts the short repository selector attached to its value (-Rowner/repo).
+                // Empty and equals-prefixed spellings canonicalize to null and therefore fail closed.
+                repositories.Add(tokens[i][2..]);
+            }
+            else if (tokens[i] == "--repo")
             {
                 repositories.Add(i + 1 < tokens.Count ? tokens[++i] : string.Empty);
             }

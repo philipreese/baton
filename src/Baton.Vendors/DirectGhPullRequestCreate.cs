@@ -38,9 +38,12 @@ internal static class DirectGhPullRequestCreate
 
         if (provenance is null)
         {
-            return Refuse("Baton could not establish a trusted GitHub CLI, canonical GitHub repository, "
-                + "and named head branch before this worker started. Install gh as a native executable "
-                + "on the supervisor PATH outside the workspace and dispatch from a GitHub-backed named branch.");
+            return Refuse("Baton could not establish a trusted GitHub CLI plus a conductor-verified "
+                + "canonical repository and named head branch before this worker started. Install gh "
+                + "as a native executable on the supervisor PATH outside the workspace and dispatch "
+                + "fresh from a GitHub-backed named branch. A legacy or resumed binding without "
+                + "PullRequestCreateIdentity is intentionally refused; supply that binding field from "
+                + "conductor-verified input rather than trusting the workspace's current Git remote.");
         }
 
         var arguments = new List<string> { "pr", "create" };
