@@ -1713,6 +1713,21 @@ rests on. An operator cancellation landing inside this check's own window settle
 mirroring the ordinary verify window's identical carve-out — never a `VerifyFailed`/`VerifyNotRun`
 misreporting an execution the operator asked to stop.
 
+**Conductor-selected measurement completion (#2225).** `measure` is the executable-tool role for a
+measurement whose delivered result is an artifact rather than a repository change. The selection is
+made before launch as the queue item's ordinary `role` value; `queue.json`, `baton queue list`, the
+launched room's `bindings.json`, and its `ExecutionRequest.Worker` history therefore all expose the
+same value, and a daemon restart/replay reads it from the retained row rather than reconstructing it
+from prose. The role declares one `report.md` with `non_empty_text`, so a missing or whitespace-only
+report remains an unsatisfied output and cannot settle succeeded. Its binding sets
+`VerifiesWorkspace: false` and `DeliversBranch: false`: after an exit 0 the existing output-contract
+validator is the completion check, and no workspace gate, commit, push, or PR is demanded. This does
+not alter `implement`: that role still sets both `VerifiesWorkspace` and `DeliversBranch`, with
+`ExpectPr` true by default, whatever its brief or `changes.md` says. The measurement grant reuses
+implement's executable categories and existing arrest ceilings but adds shell denies for commit,
+push, PR mutation, and issue mutation; choosing a completion contract widens no authority. The single
+supported queue invocation is documented in `docs/dispatch.md` under Roles.
+
 **Measured-zero implementation self-check (#2131 slice 2).** A write-granted implementation that
 finishes naturally with a satisfied contract, a measured count of zero write-tool calls, and a measured unchanged
 worktree settles `Failed` / `Permanent`, not `Succeeded`; a pre-existing pushed branch and PR cannot turn
@@ -1970,7 +1985,7 @@ to dispatch.
 
 **The tool-step cap (#1682, second producer, independent of usage parsing) — unit fixed and
 false-positive floor measured (#1686 review F1/F2).** `WorkerRole` carries `MaxToolSteps`
-(`implement` 610, `review` 100, `consolidate` 150, `advise` unset; every other role none) — a second, independent arrest
+(`implement` 610, `measure` 610, `review` 100, `consolidate` 150, `advise` unset; every other role none) — a second, independent arrest
 trigger on the running COUNT of tool-step lines, entirely apart from whether usage ever parses on the
 stream at all (a stream with malformed or absent usage lines still gets the tool-step protection;
 `TokenBudgetMonitorTests.The_tool_step_cap_fires_at_cap_plus_one_with_zero_usage_lines` proves this).

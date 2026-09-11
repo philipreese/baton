@@ -58,6 +58,39 @@
     ]
   },
   {
+    "id": "measure",
+    "tier": "standard",
+    "read_files": true,
+    "write_files": true,
+    "run_shell_commands": true,
+    "network_access": true,
+    "denied_shell_command_patterns": [
+      "git commit*", "git push*", "git tag*",
+      "gh pr create*", "gh pr edit*", "gh pr merge*", "gh issue edit*", "gh issue comment*", "gh label*", "gh api*",
+      "baton *", "baton ledger --rebuild*", "baton ledger backfill*", "baton ledger export*",
+      "curl*", "wget*", "Invoke-WebRequest*", "Invoke-RestMethod*", "iwr*", "irm*", "python -c*", "python -m http.client*", "node -e*"
+    ],
+    "denied_shell_command_exceptions": [
+      "baton status*", "baton templates*", "baton audit lanes*", "baton memory audit*", "baton ledger*",
+      "baton trust --list", "baton --version*"
+    ],
+    "denied_shell_option_tokens": ["--add-label", "--remove-label", "--label"],
+    "timeout_minutes": 40,
+    "verdict_schema": false,
+    "verifies_workspace": false,
+    "token_budget": { "claude": 600000, "agy": 1200000, "codex": 600000 },
+    "max_tool_steps": 610,
+    "billed_rate_limit": null,
+    "purpose": "A conductor-selected measurement with executable tools and an artifact-only completion contract. It may create and clean up isolated local fixtures, but its shell grant is a strict narrowing of implement: commit, push, PR mutation and issue mutation are denied. The role is selected before launch and persisted through the ordinary queue and binding records; worker prose and report content cannot turn an implement lane into this contract. A non-empty report is the whole delivered result, so no workspace gate, branch push or PR is required. The token, tool-step and timeout defaults reuse implement's existing ceilings rather than inventing measurement calibration; a bounded brief may override them downward through the queue's existing flags.",
+    "outputs": [
+      {
+        "name": "report.md",
+        "schema": "non_empty_text",
+        "instruction": "Write the measurement report -- method, evidence, validation performed, results, uncertainty, and any reproducible local artifact paths -- to $BATON_OUTPUT_DIR/report.md. Do not commit, push, open or edit a PR, or mutate an issue; those shipping operations are outside this role's grant. The report must contain non-whitespace content or the declared output contract fails."
+      }
+    ]
+  },
+  {
     "id": "review",
     "tier": "frontier",
     "read_files": true,

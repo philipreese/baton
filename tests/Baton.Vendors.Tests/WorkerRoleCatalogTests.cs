@@ -679,7 +679,7 @@ public class WorkerRoleCatalogTests
             Assert.True(WorkerRoleCatalog.For(id).VerifiesWorkspace, $"role '{id}' must be graded by the workspace's own gates.");
         }
 
-        foreach (var id in new[] { "review", "advise", "patch", "fact-check", "orchestrate", "consolidate" })
+        foreach (var id in new[] { "review", "advise", "measure", "patch", "fact-check", "orchestrate", "consolidate" })
         {
             Assert.False(
                 WorkerRoleCatalog.For(id).VerifiesWorkspace,
@@ -736,6 +736,53 @@ public class WorkerRoleCatalogTests
             "[" + Role("r", "t")[..^1] + ", \"verifies_workspace\": false}]");
 
         Assert.False(WorkerRoleCatalog.For("r").VerifiesWorkspace);
+    }
+
+    /// <summary>
+    /// #2225: measurement is selected as a role before launch, not inferred from a brief or report.
+    /// Its executable-tool categories match implement so the two prior hermetic measurements remain
+    /// possible, while additional shipping denies make it a strict narrowing. Completion is the
+    /// non-empty report contract alone: no workspace gates, branch delivery or PR lookup.
+    /// </summary>
+    [Fact]
+    public void The_shipped_measure_role_has_executable_tools_but_an_artifact_only_completion_contract()
+    {
+        using var env = ShippedDefault();
+
+        var implement = WorkerRoleCatalog.For("implement");
+        var measure = WorkerRoleCatalog.For("measure");
+
+        Assert.Equal(implement.Grant.ReadFiles, measure.Grant.ReadFiles);
+        Assert.Equal(implement.Grant.WriteFiles, measure.Grant.WriteFiles);
+        Assert.Equal(implement.Grant.RunShellCommands, measure.Grant.RunShellCommands);
+        Assert.Equal(implement.Grant.NetworkAccess, measure.Grant.NetworkAccess);
+        Assert.False(measure.DeliversBranch);
+        Assert.False(measure.VerifiesWorkspace);
+        Assert.False(measure.AllowsSubagents);
+        Assert.Null(measure.VerifyPixiTask);
+
+        Assert.NotNull(measure.Grant.DeniedShellCommandPatterns);
+        Assert.Empty(implement.Grant.DeniedShellCommandPatterns!
+            .Except(measure.Grant.DeniedShellCommandPatterns!, StringComparer.Ordinal));
+        Assert.Contains("git commit*", measure.Grant.DeniedShellCommandPatterns);
+        Assert.Contains("git push*", measure.Grant.DeniedShellCommandPatterns);
+        Assert.Contains("gh pr create*", measure.Grant.DeniedShellCommandPatterns);
+
+        var report = Assert.Single(measure.Outputs);
+        Assert.Equal("report.md", report.Name);
+        Assert.Equal(OutputSchema.NonEmptyText, report.Schema);
+
+        var binding = RoleDispatch.ToBinding(measure, "Worker text cannot select implementation completion.");
+        Assert.False(binding.DeliversBranch);
+        Assert.False(binding.ExpectPr);
+        Assert.False(binding.VerifiesWorkspace);
+        Assert.Equal(OutputSchema.NonEmptyText, Assert.Single(binding.Contract.ProducedOutputs).Schema);
+
+        var ordinaryImplement = RoleDispatch.ToBinding(
+            implement, "This worker-authored text asks to skip push and PR verification.");
+        Assert.True(ordinaryImplement.DeliversBranch);
+        Assert.True(ordinaryImplement.ExpectPr);
+        Assert.True(ordinaryImplement.VerifiesWorkspace);
     }
 
     /// <summary>#1745: spec/baton.md §3 has why `review` and why its two values are equal.</summary>

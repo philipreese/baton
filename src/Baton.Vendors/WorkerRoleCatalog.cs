@@ -81,13 +81,15 @@ public sealed record WorkerTier([property: JsonRequired] string Adapter, string?
 /// <param name="VerifiesWorkspace">
 /// #2029 (contract: <c>spec/baton.md</c> §3, "Verify command resolution"): whether the engine's
 /// post-exit verify runs the WORKSPACE's own gate suite for this role — the <c>.baton/verify</c>
-/// declaration and <see cref="VerifyPixiTask"/> arms. True for the two roles that change the tree
-/// (<c>implement</c>, <c>janitor</c>): their own work is what the audits grade. False for every
-/// role whose grant withholds <see cref="PermissionGrant.WriteFiles"/> — the rule rather than a list,
-/// because the list went stale the first time a role was added (#2043); the shipped membership is
-/// pinned by name in <c>WorkerRoleCatalogTests</c>, which is also why this comment does not restate
-/// it. Such a role writes nothing to the workspace and so would be graded on someone
-/// else's red tree — the measured defect. What a read-shaped role IS verified on is its own output
+/// declaration and <see cref="VerifyPixiTask"/> arms. True for the two roles whose delivered work
+/// changes the tree (<c>implement</c>, <c>janitor</c>): their own work is what the audits grade.
+/// <c>measure</c> deliberately stays false even though its grant permits temporary fixture writes:
+/// its delivered result is an outbox report and its brief may forbid builds or product changes, so a
+/// workspace gate would grade something the completion contract does not claim. False also remains
+/// the rule for every role whose grant withholds <see cref="PermissionGrant.WriteFiles"/>; the shipped
+/// membership is pinned by name in <c>WorkerRoleCatalogTests</c>. Such a role writes nothing to the
+/// workspace and so would be graded on someone else's red tree. What a read-shaped role IS verified
+/// on is its own output
 /// contract (<see cref="ProducesVerdict"/> → <c>Domain.ReviewVerdictSchema.TryParse</c> via
 /// <c>Outcomes.ContractValidator</c>), which already gates the Succeeded classification this whole
 /// step hangs off. <b>Does not gate <c>--verify</c></b>: an operator who types a command for this
