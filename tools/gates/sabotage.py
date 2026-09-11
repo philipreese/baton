@@ -75,6 +75,29 @@ def _remove_temp_tree(
             delay = min(delay * 2, TEMP_TREE_RETRY_MAX_DELAY_S)
 
 
+def _run_temp_tree_fixture(
+    prefix: str,
+    body: Callable[[Path], None],
+    make: Callable[..., str] = tempfile.mkdtemp,
+    remove: Callable[[Path], object] = _remove_temp_tree,
+) -> None:
+    """Run a fixture body and preserve both body and cleanup failures."""
+    root = Path(make(prefix=prefix))
+    try:
+        body(root)
+    except Exception as primary:
+        try:
+            remove(root)
+        except Exception as cleanup:
+            raise ExceptionGroup(
+                "fixture assertion and temporary-tree cleanup both failed",
+                [primary, cleanup],
+            ) from None
+        raise
+    else:
+        remove(root)
+
+
 FIXTURES: dict[str, Callable[[], None]] = {}
 
 
@@ -87,27 +110,36 @@ def fixture(name: str):
 
 
 @fixture("workflow-recovery-selftest")
-def _sabotage_workflow_recovery() -> None:
-    dest = Path(tempfile.mkdtemp(prefix="workflow-recovery-sabotage-"))
-    try:
+def _sabotage_workflow_recovery(
+    run_in_temp_tree: Callable[[str, Callable[[Path], None]], None] = _run_temp_tree_fixture,
+) -> None:
+    def exercise(dest: Path) -> None:
         for relative in ["tools/workflow-recovery/selftest.py", ".github/workflows/ci.yml",
                          ".github/workflows/release-please.yml", "pixi.toml", "tools/gates/gates.py"]:
             target = dest / relative
             target.parent.mkdir(parents=True, exist_ok=True)
             shutil.copy2(ROOT / relative, target)
-        def run() -> subprocess.CompletedProcess:
-            return subprocess.run(
-                [sys.executable, "-B", str(dest / "tools/workflow-recovery/selftest.py")],
-                cwd=dest, capture_output=True, text=True, timeout=30)
-        baseline = run()
+        def run(control: str | None = None) -> tuple[subprocess.CompletedProcess, float]:
+            command = [sys.executable, "-B", str(dest / "tools/workflow-recovery/selftest.py")]
+            if control is not None:
+                command.append(control)
+            started = time.perf_counter()
+            result = subprocess.run(
+                command, cwd=dest, capture_output=True, text=True, timeout=30)
+            return result, time.perf_counter() - started
+        baseline, baseline_seconds = run()
         assert baseline.returncode == 0, baseline.stdout + baseline.stderr
         workflow = dest / ".github/workflows/ci.yml"
         original = workflow.read_text(encoding="utf-8")
-        for before, after in [('[ "$live_sha" != "$EXPECTED_SHA" ]', '[ "$live_sha" = "$EXPECTED_SHA" ]'),
-                              ("needs.test.result == 'success'", "needs.test.result != 'success'")]:
+        mutant_seconds: list[tuple[str, float]] = []
+        for before, after, control in [
+            ('[ "$live_sha" != "$EXPECTED_SHA" ]', '[ "$live_sha" = "$EXPECTED_SHA" ]', "ci-live-sha"),
+            ("needs.test.result == 'success'", "needs.test.result != 'success'", "ci-pack-success"),
+        ]:
             assert before in original
             workflow.write_text(original.replace(before, after), encoding="utf-8")
-            mutated = run()
+            mutated, seconds = run(control)
+            mutant_seconds.append((control, seconds))
             assert mutated.returncode != 0 and "AssertionError" in mutated.stderr, mutated.stderr
         workflow.write_text(original, encoding="utf-8")
         release_workflow = dest / ".github/workflows/release-please.yml"
@@ -115,10 +147,13 @@ def _sabotage_workflow_recovery() -> None:
         release_workflow.write_text(
             release_original.replace("RELEASE_RESULT: ${{ needs.release-please.result }}",
                                      "RELEASE_RESULT: success"), encoding="utf-8")
-        mutated = run()
+        mutated, seconds = run("release-result-input")
+        mutant_seconds.append(("release-result-input", seconds))
         assert mutated.returncode != 0 and "AssertionError" in mutated.stderr, mutated.stderr
-    finally:
-        _remove_temp_tree(dest)
+        timings = ", ".join(f"{name}={seconds:.3f}s" for name, seconds in mutant_seconds)
+        print(f"  workflow-recovery sabotage timing: baseline={baseline_seconds:.3f}s, {timings}")
+
+    run_in_temp_tree("workflow-recovery-sabotage-", exercise)
 
 
 @fixture("ci-selftest")
@@ -688,6 +723,18 @@ def _load_gate_members() -> list[str]:
     return sorted(set(gates.OVERLAP + gates.BUILD_PHASE + gates.AFTER_BUILD_FULL))
 
 
+def _format_fixture_failure(error: BaseException) -> str:
+    """Render nested fixture failures without hiding either side of an exception group."""
+    if isinstance(error, BaseExceptionGroup):
+        nested = "; ".join(_format_fixture_failure(item) for item in error.exceptions)
+        return f"{error.message}: {nested}"
+    detail = f"{type(error).__name__}: {error}"
+    notes = getattr(error, "__notes__", ())
+    if notes:
+        detail += f" ({'; '.join(notes)})"
+    return detail
+
+
 def run_all_fixtures() -> tuple[int, list[str]]:
     passed = 0
     failures: list[str] = []
@@ -697,8 +744,9 @@ def run_all_fixtures() -> tuple[int, list[str]]:
             passed += 1
             print(f"  OK  sabotage verified: {name} exits non-zero on violating input")
         except Exception as ex:  # noqa: BLE001
-            failures.append(f"{name}: {ex}")
-            print(f"  !!  sabotage FAILED: {name} -- {ex}")
+            detail = _format_fixture_failure(ex)
+            failures.append(f"{name}: {detail}")
+            print(f"  !!  sabotage FAILED: {name} -- {detail}")
     return passed, failures
 
 
@@ -765,6 +813,38 @@ def _cleanup_retry_selftest() -> list[str]:
             failures.append("non-sharing cleanup failure was retried")
     else:
         failures.append("non-sharing cleanup failure was swallowed")
+
+    wired_runner_calls: list[str] = []
+
+    def record_runner(prefix: str, _body: Callable[[Path], None]) -> None:
+        wired_runner_calls.append(prefix)
+
+    try:
+        _sabotage_workflow_recovery(record_runner)
+    except Exception as error:  # noqa: BLE001 -- the control reports broken fixture wiring
+        failures.append(f"workflow recovery fixture did not expose its cleanup boundary: {error}")
+    if wired_runner_calls != ["workflow-recovery-sabotage-"]:
+        failures.append(f"workflow recovery fixture bypassed bounded cleanup: {wired_runner_calls}")
+
+    primary = AssertionError("primary workflow mutation assertion")
+    cleanup = PermissionError(32, "persistent workflow cleanup refusal", "fixture")
+    try:
+        _run_temp_tree_fixture(
+            "synthetic-",
+            lambda _path: (_ for _ in ()).throw(primary),
+            lambda **_kwargs: "synthetic",
+            lambda _path: (_ for _ in ()).throw(cleanup),
+        )
+    except ExceptionGroup as errors:
+        detail = _format_fixture_failure(errors)
+        if (errors.exceptions != (primary, cleanup)
+                or "primary workflow mutation assertion" not in detail
+                or "persistent workflow cleanup refusal" not in detail):
+            failures.append(f"combined fixture failure lost diagnostic detail: {detail}")
+    except Exception as error:  # noqa: BLE001 -- wrong outer failure is itself the control result
+        failures.append(f"fixture cleanup replaced its primary assertion: {error}")
+    else:
+        failures.append("simultaneous fixture and cleanup failures were swallowed")
 
     if os.name != "nt":
         return failures
