@@ -271,6 +271,44 @@ footer{margin-top:2rem; font-size:.7rem; color:var(--ink-soft); border-top:1px s
   .board-detail-layout:not(.showing-detail) .board-detail-side{display:none;}
   .board-detail-layout.showing-detail .detail-back-btn{display:inline-block;}
 }
+/* Mobile-first stream & progressive disclosure styles (#2075 / #2241) */
+.stream-summary-grid{display:grid; grid-template-columns:1fr; gap:.5rem; margin:.6rem 0;}
+@media (min-width:640px){.stream-summary-grid{grid-template-columns:repeat(2, 1fr);}}
+@media (min-width:960px){.stream-summary-grid{grid-template-columns:repeat(4, 1fr);}}
+.stream-summary-box{background:var(--card); border:1px solid var(--line); border-radius:10px; padding:.5rem .7rem; font-size:.8rem; min-width:0; overflow-wrap:anywhere;}
+.stream-summary-label{font:700 .68rem 'Public Sans',sans-serif; text-transform:uppercase; letter-spacing:.06em; color:var(--ink-soft); margin-bottom:.25rem;}
+.stream-summary-val{color:var(--ink); line-height:1.4; overflow-wrap:anywhere;}
+.stream-val-alert{color:var(--bad); font-weight:600;}
+.stream-val-warn{color:var(--warn); font-weight:600;}
+.quota-compact{line-height:1.4; overflow-wrap:anywhere;}
+.quota-disclosure{margin-top:.3rem; font-size:.72rem;}
+.quota-disclosure summary{color:var(--accent); cursor:pointer; font-weight:600; font-size:.7rem;}
+.quota-disclosure-line{padding:.15rem 0; color:var(--ink-soft); overflow-wrap:anywhere;}
+.stream-section-title{font:700 .8rem 'Sora',sans-serif; text-transform:uppercase; letter-spacing:.06em; color:var(--ink-soft); margin:1.2rem 0 .4rem; display:flex; justify-content:space-between; align-items:center;}
+.stream-group-card{background:var(--card); border:1px solid var(--line); border-radius:12px; padding:.65rem .8rem; margin-bottom:.6rem; display:flex; flex-direction:column; gap:.35rem; min-width:0; max-width:100%;}
+.stream-group-top{display:flex; justify-content:space-between; align-items:flex-start; gap:.5rem; flex-wrap:wrap;}
+.stream-group-id{font:500 .8rem var(--mono); color:var(--ink); display:flex; flex-wrap:wrap; gap:.3rem .5rem; align-items:center; min-width:0;}
+.stream-id-chip{background:var(--paper); border:1px solid var(--line); padding:.15em .5em; border-radius:6px; white-space:nowrap;}
+.unknown-field{color:var(--ink-soft); font-style:italic; font-weight:400;}
+.stream-card-action, .stream-card-result{font-size:.78rem; line-height:1.4; overflow-wrap:anywhere;}
+.stream-receipts-details{margin-top:.3rem; font-size:.74rem;}
+.stream-receipts-details summary{color:var(--accent); cursor:pointer; font-weight:600;}
+.stream-receipts{border-top:1px solid var(--line); margin-top:.3rem; padding-top:.35rem; display:flex; flex-direction:column; gap:.25rem;}
+.stream-receipt-row{font-size:.72rem; display:flex; flex-wrap:wrap; align-items:baseline; gap:.3rem .6rem; color:var(--ink-soft); padding:.15rem 0; border-bottom:1px solid var(--paper); overflow-wrap:anywhere;}
+.stream-receipt-time{font-family:var(--mono); color:var(--ink-soft); flex-shrink:0;}
+.stream-receipt-main{color:var(--ink); font-weight:500;}
+.stream-receipt-target{font-family:var(--mono); color:var(--ink-soft);}
+.stream-receipt-status{font-size:.65rem; font-weight:700; letter-spacing:.05em; padding:.1em .4em; border-radius:4px;}
+.receipt-status-success{background:var(--chip-ok); color:var(--ok);}
+.receipt-status-failure{background:var(--chip-bad); color:var(--bad);}
+.receipt-status-cancelled{background:var(--chip-idle); color:var(--idle);}
+.receipt-status-pending{background:var(--chip-run); color:var(--run);}
+.receipt-status-refused{background:var(--chip-warn); color:var(--warn);}
+.receipt-status-indeterminate{background:var(--chip-warn); color:var(--warn);}
+.stream-receipt-evidence{font-family:var(--mono); color:var(--accent); font-size:.7rem;}
+.stream-empty{color:var(--ink-soft); font-size:.85rem; padding:.6rem 0;}
+.queueboard{max-width:100%; overflow-x:auto; -webkit-overflow-scrolling:touch;}
+@media (max-width:480px){.queueboard td{white-space:normal; word-break:break-word; overflow-wrap:anywhere; max-width:12rem;}}
 </style>
 <main>
   <div class="masthead">
@@ -291,16 +329,31 @@ footer{margin-top:2rem; font-size:.7rem; color:var(--ink-soft); border-top:1px s
   </div>
   <div class="downbeat" aria-hidden="true"></div>
   <div class="tabs">
+    <button class="tabbtn active" id="tab-btn-stream" data-tab="stream">Stream</button>
     <button class="tabbtn" id="tab-btn-fleet" data-tab="fleet">Fleet</button>
+    <button class="tabbtn" id="tab-btn-queue" data-tab="queue">Queue</button>
+    <button class="tabbtn" id="tab-btn-quota" data-tab="quota">Quota</button>
+    <button class="tabbtn" id="tab-btn-history" data-tab="history">History</button>
     <button class="tabbtn" id="tab-btn-inbox" data-tab="inbox">Deliverables</button>
   </div>
   <div id="banner"></div>
-  <div id="vendorusage"></div>
-  <div id="queueboard"></div>
+  <div class="tabpanel active" id="tab-stream">
+    <div id="stream-summary" class="stream-summary"></div>
+    <div id="stream-content" class="stream-content"></div>
+  </div>
   <div class="tabpanel" id="tab-fleet">
     <div class="stalenote" id="stalenote"></div>
     <div class="dismissnote" id="dismissnote"></div>
     <div id="content"></div>
+  </div>
+  <div class="tabpanel" id="tab-queue">
+    <div id="queueboard"></div>
+  </div>
+  <div class="tabpanel" id="tab-quota">
+    <div id="vendorusage"></div>
+  </div>
+  <div class="tabpanel" id="tab-history">
+    <div id="historycontent"></div>
   </div>
   <div class="tabpanel" id="tab-inbox">
     <div class="filter" id="filter"></div>
@@ -1613,6 +1666,446 @@ function queueBoardHtml(q, unavailableReason){
     + `<div class="queueboard-note">${esc(decidedNote)}</div>`
     + `</div>`;
 }
+function streamStatusSummaryHtml(snap, events){
+  const rooms = (snap && Array.isArray(snap.rooms)) ? snap.rooms : [];
+  const queue = (snap && snap.queue && typeof snap.queue === "object") ? snap.queue : null;
+  const vendors = (snap && Array.isArray(snap.vendors)) ? snap.vendors : [];
+  const proj = (snap && snap.projection && typeof snap.projection === "object") ? snap.projection : null;
+
+  // 1. What is moving
+  const runningRooms = rooms.filter(r => r.state === "Running");
+  const runningLanes = (queue && queue.slots && Array.isArray(queue.slots.lanes)) ? queue.slots.lanes : [];
+  let movingSummary = "";
+  if(runningRooms.length > 0 || runningLanes.length > 0){
+    const items = [];
+    for(const r of runningRooms){
+      const name = r.path ? (r.path.split(/[/\\]/).pop() || r.path) : "running lane";
+      const role = r.role || "implement";
+      const adapter = r.adapter || "running";
+      items.push(`${esc(name)} (${esc(role)} · ${esc(adapter)})`);
+    }
+    for(const l of runningLanes){
+      const tag = l.label || l.room || "lane";
+      if(!items.some(it => it.includes(tag))){
+        items.push(`${esc(tag)} (${esc(l.role || "lane")} · ${esc(l.adapter || "")})`);
+      }
+    }
+    movingSummary = `<span class="stream-val-alert">${items.length} moving</span>: ${items.join(", ")}`;
+  } else {
+    movingSummary = "No work moving · fleet is idle";
+  }
+
+  // 2. What is blocked or stale
+  const blockedItems = [];
+  const stalled = rooms.filter(r => r.state === "Stalled");
+  if(stalled.length > 0){
+    blockedItems.push(`${stalled.length} stalled room(s)`);
+  }
+  const staleRooms = rooms.filter(r => {
+    if(r.state !== "Running") return false;
+    const basis = (r.live && r.live.lastActivityAt) || null;
+    return basis && (Date.now() - Date.parse(basis) > 15 * 60000);
+  });
+  if(staleRooms.length > 0){
+    blockedItems.push(`${staleRooms.length} stale running lane(s)`);
+  }
+  if(queue && Array.isArray(queue.pending)){
+    for(const p of queue.pending){
+      if(p.halted || p.reason === "runway-held" || p.reason === "brief-missing" || p.reason === "memory"){
+        blockedItems.push(`${esc(p.tag)} (${esc(p.reason)})`);
+      }
+    }
+  }
+  if(queue && Array.isArray(queue.pullRequests)){
+    for(const pr of queue.pullRequests){
+      if(pr.freshness === "stale" || pr.observationError){
+        blockedItems.push(`PR #${esc(pr.pr)} (stale/error)`);
+      }
+      for(const l of (pr.lanes || [])){
+        if(l.verdict === "block"){
+          blockedItems.push(`PR #${esc(pr.pr)} (blocked)`);
+          break;
+        }
+        if(l.checks === "failing"){
+          blockedItems.push(`PR #${esc(pr.pr)} (checks failing)`);
+          break;
+        }
+      }
+    }
+  }
+  if(proj && proj.stale){
+    blockedItems.push("daemon projection is stale");
+  }
+  if(Array.isArray(events)){
+    for(const e of events){
+      if(e.kind === "attemptRefused" && (e.outcomeDetail || e.outcome)){
+        blockedItems.push(`attempt refused: ${esc(e.outcomeDetail || e.outcome)}`);
+        break;
+      }
+      if(e.kind === "admissionDecided" && e.admissionDecision && e.admissionDecision !== "admitted"){
+        const missing = Array.isArray(e.missingCapabilities) && e.missingCapabilities.length
+          ? `: ${e.missingCapabilities.join(", ")}` : "";
+        blockedItems.push(`admission ${esc(e.admissionDecision)}${esc(missing)}`);
+        break;
+      }
+    }
+  }
+  const blockedSummary = blockedItems.length > 0
+    ? `<span class="stream-val-alert">${blockedItems.length} blocked/stale</span>: ${blockedItems.join(", ")}`
+    : "None blocked or stale";
+
+  // 3. What needs the operator
+  const needsItems = [];
+  const indet = rooms.filter(r => r.state === "Indeterminate");
+  if(indet.length > 0){
+    needsItems.push(`${indet.length} indeterminate room(s)`);
+  }
+  if(queue && queue.held){
+    needsItems.push("queue is held");
+  }
+  if(queue && Array.isArray(queue.pullRequests)){
+    for(const pr of queue.pullRequests){
+      if(pr.observationError && pr.observationError.includes("identity invalid")){
+        needsItems.push(`PR #${esc(pr.pr)} identity invalid`);
+      }
+      for(const l of (pr.lanes || [])){
+        if(l.verdict === "block" && l.automaticFixUsed){
+          needsItems.push(`PR #${esc(pr.pr)} fix exhausted`);
+          break;
+        }
+      }
+    }
+  }
+  const needsSummary = needsItems.length > 0
+    ? `<span class="stream-val-warn">${needsItems.length} need(s) operator</span>: ${needsItems.join(", ")}`
+    : "All clear · no operator action needed";
+
+  // 4. What quota remains (progressive disclosure)
+  let quotaSummary = "Quota: unmeasured";
+  if(vendors.length > 0){
+    const bits = [];
+    const details = [];
+    for(const v of vendors){
+      const win = (v.windows || []).find(w => w.windowKind === "primary") || (v.windows || [])[0];
+      if(win){
+        const unavailable = win.rawLine === "null";
+        const pct = typeof win.percentUsed === "number" ? `${100 - win.percentUsed}% rem (${win.percentUsed}% used)`
+          : unavailable ? "unavailable" : "unknown";
+        const rAge = age(win.resetsAt);
+        const resetStr = win.resetsAt ? `resets ${rAge || "soon"}` : "";
+        bits.push(`${esc(v.adapter)}: ${esc(pct)}${resetStr ? " · " + esc(resetStr) : ""}`);
+        details.push(`${esc(v.adapter)} · ${esc(win.name || "window")}: ${esc(pct)} · ${esc(resetStr || "rolling window")}`);
+      } else {
+        bits.push(`${esc(v.adapter)}: ${esc(v.liveLanes || 0)} live lanes`);
+      }
+    }
+    const compactText = bits.join(" | ");
+    const detailList = details.map(d => `<div class="quota-disclosure-line">${d}</div>`).join("");
+    quotaSummary = `<div class="quota-compact">${compactText}</div>`
+      + (details.length ? `<details class="quota-disclosure"><summary>Quota details</summary><div class="quota-disclosure-detail">${detailList}</div></details>` : "");
+  }
+
+  return `<div class="stream-summary-grid">`
+    + `<div class="stream-summary-box moving"><div class="stream-summary-label">Moving</div><div class="stream-summary-val">${movingSummary}</div></div>`
+    + `<div class="stream-summary-box blocked"><div class="stream-summary-label">Blocked / Stale</div><div class="stream-summary-val">${blockedSummary}</div></div>`
+    + `<div class="stream-summary-box needs-you"><div class="stream-summary-label">Needs Operator</div><div class="stream-summary-val">${needsSummary}</div></div>`
+    + `<div class="stream-summary-box quota"><div class="stream-summary-label">Quota Remains</div><div class="stream-summary-val">${quotaSummary}</div></div>`
+    + `</div>`;
+}
+function streamOutcomeToken(value){
+  return typeof value === "string" ? value.toLowerCase() : null;
+}
+function streamOutcomeIsSuccess(value){
+  const token = streamOutcomeToken(value);
+  return token === "succeeded" || token === "finishedduringteardown";
+}
+function streamEventReceiptHtml(e){
+  if(!e || typeof e !== "object") return "";
+  const timeStr = age(e.at) || "just now";
+  let what = "";
+  let where = "";
+  let status = "success";
+  let evidence = "";
+  const durStr = (ms) => {
+    if(ms == null) return "unknown duration";
+    const m = Math.round(ms / 60000);
+    return m < 1 ? Math.round(ms / 1000) + "s" : m + "m";
+  };
+
+  switch(e.kind){
+    case "workQueued":
+      what = `Work queued: ${e.workId || "work"}`;
+      where = "queue.jsonl";
+      status = "pending";
+      break;
+    case "admissionDecided":
+      what = `Admission decided: ${e.admissionDecision || "unknown"}`;
+      where = "queue.jsonl";
+      status = e.admissionDecision === "admitted" ? "success" : e.admissionDecision ? "refused" : "pending";
+      break;
+    case "attemptStarted":
+      what = `Attempt started: ${e.attemptId || "attempt"}${e.declaredRole ? " (" + e.declaredRole + ")" : ""}${e.vendor ? " on " + e.vendor : ""}`;
+      where = "events.jsonl";
+      status = "pending";
+      break;
+    case "attemptProgressed":
+      what = "Attempt progressed";
+      where = "events.jsonl";
+      status = "pending";
+      break;
+    case "attemptRefused":
+      what = `Attempt refused: ${e.outcomeDetail || e.outcome || (Array.isArray(e.missingCapabilities) ? e.missingCapabilities.join(", ") : "refused")}`;
+      where = "events.jsonl";
+      status = "refused";
+      break;
+    case "attemptRetryScheduled":
+      what = "Attempt retry scheduled";
+      where = "events.jsonl";
+      status = "pending";
+      break;
+    case "attemptSettled":
+      what = `Attempt settled: ${e.outcome || "unknown"}${typeof e.elapsedMilliseconds === "number" ? " (" + durStr(e.elapsedMilliseconds) + ")" : ""}`;
+      where = "events.jsonl";
+      status = streamOutcomeIsSuccess(e.outcome) ? "success"
+        : streamOutcomeToken(e.outcome) === "cancelled" ? "cancelled"
+        : streamOutcomeToken(e.outcome) === "indeterminate" ? "indeterminate"
+        : "failure";
+      break;
+    case "revisionProduced":
+      what = `Revision produced: ${e.revisionId ? e.revisionId.slice(0, 8) : "commit unknown"}${e.revisionKind ? " (" + e.revisionKind + ")" : ""}`;
+      where = "git commit";
+      status = "success";
+      if(e.revisionId) evidence = `commit ${e.revisionId.slice(0, 8)}`;
+      break;
+    case "reviewVerdictObserved":
+      what = `Review verdict: ${e.reviewVerdict || "unknown"}`;
+      where = e.reviewRoundId ? `review round ${e.reviewRoundId}` : "verdict receipt";
+      status = e.reviewVerdict === "approve" ? "success" : e.reviewVerdict === "block" ? "failure" : "pending";
+      if(e.reviewEvidence || e.outcomeDetail) evidence = e.reviewEvidence || e.outcomeDetail;
+      break;
+    case "pullRequestBound":
+      what = `Pull request bound: #${e.pullRequestId || "unknown"}`;
+      where = `PR #${e.pullRequestId || "unknown"}`;
+      status = "success";
+      if(e.pullRequestId) evidence = `PR #${e.pullRequestId}`;
+      break;
+    case "checkObserved":
+      what = `Check observed: ${e.checkName || "check"} (${e.checkStatus || "unknown"}${e.checkConclusion ? ": " + e.checkConclusion : ""})`;
+      where = "forge checks";
+      status = streamOutcomeToken(e.checkConclusion) === "success" ? "success" : (streamOutcomeToken(e.checkConclusion) === "failure" ? "failure" : "pending");
+      if(e.checkName) evidence = `${e.checkName} (${e.checkConclusion || e.checkStatus || "check"})`;
+      break;
+    case "mergeObserved":
+      what = `Merge confirmed${e.pullRequestId ? " on PR #" + e.pullRequestId : ""}`;
+      where = "remote forge";
+      status = "success";
+      if(e.pullRequestId) evidence = `PR #${e.pullRequestId}`;
+      break;
+    case "daemonStarted":
+      what = "Daemon started";
+      where = "process lifecycle";
+      status = "success";
+      break;
+    case "daemonStopped":
+      what = "Daemon stopped";
+      where = "process lifecycle";
+      status = "cancelled";
+      break;
+    default:
+      what = `Event: ${e.kind || "unknown"}`;
+      where = "events.jsonl";
+      status = "pending";
+      break;
+  }
+
+  const evidenceSpan = evidence ? `<span class="stream-receipt-evidence">[${esc(evidence)}]</span>` : "";
+  return `<div class="stream-receipt-row">`
+    + `<span class="stream-receipt-time">${esc(timeStr)}</span> `
+    + `<span class="stream-receipt-main">${esc(what)}</span> `
+    + `<span class="stream-receipt-target">recorded in ${esc(where)}</span> `
+    + `<span class="stream-receipt-status receipt-status-${status}">${status.toUpperCase()}</span>`
+    + evidenceSpan
+    + `</div>`;
+}
+function streamGroupedEventsHtml(events, historyOnly = false){
+  const list = Array.isArray(events) ? events : [];
+  if(!list.length){
+    return `<div class="stream-empty">No events recorded in fleet stream yet.</div>`;
+  }
+
+  // Deduplicate events by monotonic id
+  const seenIds = new Set();
+  const deduped = [];
+  for(const e of list){
+    if(e && typeof e.id === "number"){
+      if(seenIds.has(e.id)) continue;
+      seenIds.add(e.id);
+      deduped.push(e);
+    }
+  }
+
+  const durStr = (ms) => {
+    if(ms == null) return "unknown duration";
+    const m = Math.round(ms / 60000);
+    return m < 1 ? Math.round(ms / 1000) + "s" : m + "m";
+  };
+
+  // Group events by correlation identity
+  const groups = new Map();
+  for(const e of deduped){
+    // An item can have multiple attempts (retry, continuation, fix). Attempt identity is the
+    // narrowest producer-owned correlation key; grouping by work first would collapse those
+    // lifecycles and let an earlier terminal result describe the current attempt.
+    const key = e.attemptId ? ("attempt:" + e.attemptId)
+      : e.workId ? ("work:" + e.workId)
+      : e.pullRequestId ? ("pr:" + e.pullRequestId)
+      : e.issueId ? ("issue:" + e.issueId)
+      : e.roomId ? ("room:" + e.roomId)
+      : (e.kind === "daemonStarted" || e.kind === "daemonStopped") ? "daemon"
+      : ("event:" + e.id);
+    if(!groups.has(key)){
+      groups.set(key, []);
+    }
+    groups.get(key).push(e);
+  }
+
+  const activeCards = [];
+  const retainedCards = [];
+
+  for(const [key, evts] of groups.entries()){
+    evts.sort((a, b) => a.id - b.id);
+    const last = evts[evts.length - 1];
+
+    // Aggregated identities without inventing missing lineage
+    const workId = evts.find(e => e.workId)?.workId || null;
+    const attemptId = evts.find(e => e.attemptId)?.attemptId || null;
+    const issueId = evts.find(e => e.issueId != null)?.issueId ?? null;
+    const pullRequestId = evts.find(e => e.pullRequestId != null)?.pullRequestId ?? null;
+    const revisionId = evts.slice().reverse().find(e => e.revisionId)?.revisionId || null;
+    const revisionKind = evts.slice().reverse().find(e => e.revisionKind)?.revisionKind || null;
+    const declaredRole = evts.find(e => e.declaredRole)?.declaredRole || null;
+    const vendor = evts.slice().reverse().find(e => e.vendor)?.vendor || null;
+
+    const settledEvt = evts.slice().reverse().find(e => e.kind === "attemptSettled");
+    const refusedEvt = evts.slice().reverse().find(e => e.kind === "attemptRefused");
+    const refusedAdmissionEvt = evts.slice().reverse().find(
+      e => e.kind === "admissionDecided" && e.admissionDecision && e.admissionDecision !== "admitted");
+    const mergedEvt = evts.slice().reverse().find(e => e.kind === "mergeObserved");
+    const daemonEvt = key === "daemon";
+
+    const isSettled = !!(settledEvt || refusedEvt || refusedAdmissionEvt || mergedEvt || daemonEvt);
+    const outcome = settledEvt ? streamOutcomeToken(settledEvt.outcome)
+      : (refusedEvt || refusedAdmissionEvt) ? "refused"
+      : mergedEvt ? "merged"
+      : daemonEvt ? (last.kind === "daemonStopped" ? "stopped" : "running")
+      : null;
+
+    const isCancelled = outcome === "cancelled";
+    const isRetained = isSettled || isCancelled;
+
+    // Unknown fields remain visibly unknown
+    const workHtml = workId ? `<span class="stream-id-chip">work: ${esc(workId)}</span>` : `<span class="stream-id-chip unknown-field">work: unknown</span>`;
+    const attemptHtml = attemptId ? `<span class="stream-id-chip">attempt: ${esc(attemptId)}</span>` : `<span class="stream-id-chip unknown-field">attempt: unknown</span>`;
+    const issueHtml = issueId != null ? `<span class="stream-id-chip">issue #${esc(issueId)}</span>` : `<span class="stream-id-chip unknown-field">issue: unknown</span>`;
+    const prHtml = pullRequestId != null ? `<span class="stream-id-chip">PR #${esc(pullRequestId)}</span>` : `<span class="stream-id-chip unknown-field">PR: unknown</span>`;
+    const revHtml = revisionId ? `<span class="stream-id-chip">${esc(revisionId.slice(0, 8))}${revisionKind ? " (" + esc(revisionKind) + ")" : ""}</span>` : `<span class="stream-id-chip unknown-field">revision: unknown</span>`;
+    const roleHtml = declaredRole ? `<span class="stream-id-chip">${esc(declaredRole)}${vendor ? " · " + esc(vendor) : ""}</span>` : `<span class="stream-id-chip unknown-field">role: unknown</span>`;
+
+    let chipClass = "c-run";
+    let chipText = "ACTIVE";
+    if(isCancelled){
+      chipClass = "c-idle";
+      chipText = "CANCELLED (RETAINED)";
+    } else if(streamOutcomeIsSuccess(settledEvt?.outcome) || outcome === "merged"){
+      chipClass = "c-ok";
+      chipText = outcome === "merged" ? "MERGED" : "SUCCEEDED";
+    } else if(outcome === "indeterminate"){
+      chipClass = "c-warn";
+      chipText = "INDETERMINATE (RETAINED)";
+    } else if(outcome === "failed" || outcome === "refused"){
+      chipClass = outcome === "refused" ? "c-warn" : "c-bad";
+      chipText = (outcome || "FAILED").toUpperCase() + " (RETAINED)";
+    }
+
+    let currentAction = "";
+    if(isSettled){
+      currentAction = refusedAdmissionEvt ? `Admission ${refusedAdmissionEvt.admissionDecision}`
+        : `Settled ${outcome || "terminal"}${settledEvt && settledEvt.elapsedMilliseconds ? " in " + durStr(settledEvt.elapsedMilliseconds) : ""}`;
+    } else {
+      currentAction = last.kind === "attemptStarted" ? `Started ${declaredRole || "execution"}${vendor ? " on " + vendor : ""}`
+        : last.kind === "attemptProgressed" ? "In progress"
+        : last.kind === "workQueued" ? "Queued for admission"
+        : last.kind === "pullRequestBound" ? `Bound to PR #${pullRequestId}`
+        : last.kind;
+    }
+
+    let lastResult = "none recorded";
+    if(settledEvt && settledEvt.outcome){
+      lastResult = `Outcome: ${outcome}${settledEvt.outcomeDetail ? " — " + settledEvt.outcomeDetail : ""}`;
+    } else if(refusedEvt){
+      lastResult = `Refused: ${refusedEvt.outcomeDetail || refusedEvt.outcome || "missing capability"}`;
+    } else if(refusedAdmissionEvt){
+      const missing = Array.isArray(refusedAdmissionEvt.missingCapabilities)
+        ? refusedAdmissionEvt.missingCapabilities.join(", ") : "no reason recorded";
+      lastResult = `Admission refused: ${missing}`;
+    } else if(mergedEvt){
+      lastResult = "PR merged cleanly";
+    } else if(revisionId){
+      lastResult = `Produced revision ${revisionId.slice(0, 8)} (${revisionKind || "code"})`;
+    } else {
+      const reviewEvt = evts.slice().reverse().find(e => e.kind === "reviewVerdictObserved");
+      if(reviewEvt && reviewEvt.reviewVerdict){
+        lastResult = `Verdict: ${reviewEvt.reviewVerdict}`;
+      } else {
+        const checkEvt = evts.slice().reverse().find(e => e.kind === "checkObserved");
+        if(checkEvt){
+          lastResult = `${checkEvt.checkName || "checks"}: ${checkEvt.checkConclusion || checkEvt.checkStatus || "observed"}`;
+        }
+      }
+    }
+
+    const receiptsHtml = evts.map(streamEventReceiptHtml).join("");
+
+    const card = `<div class="stream-group-card">`
+      + `<div class="stream-group-top">`
+      + `<div class="stream-group-id">${workHtml} ${attemptHtml} ${issueHtml} ${prHtml} ${revHtml} ${roleHtml}</div>`
+      + `<span class="chip ${chipClass}">${chipText}</span>`
+      + `</div>`
+      + `<div class="stream-card-action"><b>Current action:</b> ${esc(currentAction)}</div>`
+      + `<div class="stream-card-result"><b>Last meaningful result:</b> ${esc(lastResult)}</div>`
+      + `<details class="stream-receipts-details"><summary>Action Receipts (${evts.length})</summary><div class="stream-receipts">${receiptsHtml}</div></details>`
+      + `</div>`;
+
+    if(isRetained){
+      retainedCards.push(card);
+    } else {
+      activeCards.push(card);
+    }
+  }
+
+  if(historyOnly){
+    return retainedCards.length
+      ? `<div class="stream-section-title">Retained Lifecycle History · #2200 (${retainedCards.length})</div>` + retainedCards.join("")
+      : `<div class="stream-empty">No retained lifecycle history recorded yet.</div>`;
+  }
+
+  let out = "";
+  out += `<div class="stream-section-title">Current Work (${activeCards.length})</div>`;
+  out += activeCards.length ? activeCards.join("") : `<div class="stream-empty">No active work in flight.</div>`;
+
+  if(retainedCards.length > 0){
+    out += `<div class="stream-section-title">Retained History · #2200 (${retainedCards.length})</div>`;
+    out += retainedCards.join("");
+  }
+
+  return out;
+}
+function streamHistoryHtml(events){
+  return streamGroupedEventsHtml(events, true);
+}
+function streamHomeHtml(snap, events){
+  return streamStatusSummaryHtml(snap, events) + streamGroupedEventsHtml(events);
+}
 // <<< QUEUE-PANEL-END
 function renderQueueBoard(q, unavailableReason){ $("queueboard").innerHTML = queueBoardHtml(q, unavailableReason); }
 
@@ -1987,44 +2480,95 @@ function loadMoreInbox(){
 function applyRoute(){
   const h = location.hash;
   const onInbox = h === "#inbox" || h.startsWith("#inbox:");
-  $("tab-fleet").classList.toggle("active", !onInbox);
-  $("tab-inbox").classList.toggle("active", onInbox);
-  $("tab-btn-fleet").classList.toggle("active", !onInbox);
-  $("tab-btn-inbox").classList.toggle("active", onInbox);
+  let activeTab = "stream";
+  if(onInbox){
+    activeTab = "inbox";
+  } else if(h === "#fleet"){
+    activeTab = "fleet";
+  } else if(h === "#queue"){
+    activeTab = "queue";
+  } else if(h === "#quota"){
+    activeTab = "quota";
+  } else if(h === "#history"){
+    activeTab = "history";
+  } else if(h === "#stream" || !h){
+    activeTab = "stream";
+  }
+
+  const tabs = ["stream", "fleet", "queue", "quota", "history", "inbox"];
+  for(const t of tabs){
+    const panel = $("tab-" + t);
+    if(panel) panel.classList.toggle("active", t === activeTab);
+    const btn = $("tab-btn-" + t);
+    if(btn) btn.classList.toggle("active", t === activeTab);
+  }
+
   if(window.getSelection) { try { window.getSelection().removeAllRanges(); } catch(e){} }
-  if(!onInbox) return;
-  if(h.startsWith("#inbox:")){
-    const id = decodeURIComponent(h.slice(7));
-    const item = inboxIndex.find((m) => m.id === id) || { id };
-    if(!window.mcpHandle) return;
-    window.mcpHandle.watchTool("baton", "deliverable_read", { id }, (ev) => {
-      if(ev.type === "data"){
-        let text = ev.result.payload;
-        if(typeof text !== "string") text = JSON.stringify(text);
-        renderInboxDoc(item, text);
+  if(activeTab === "stream"){
+    renderStream();
+  } else if(activeTab === "history"){
+    renderHistory();
+  } else if(activeTab === "inbox"){
+    if(h.startsWith("#inbox:")){
+      const id = decodeURIComponent(h.slice(7));
+      const item = inboxIndex.find((m) => m.id === id) || { id };
+      if(!window.mcpHandle) return;
+      window.mcpHandle.watchTool("baton", "deliverable_read", { id }, (ev) => {
+        if(ev.type === "data"){
+          let text = ev.result.payload;
+          if(typeof text !== "string") text = JSON.stringify(text);
+          renderInboxDoc(item, text);
+        }
+      }, { refetchInterval: 0 });
+    } else {
+      // #1656 F1: a room filter pages the same way the unfiltered view does -- a fresh, server-side
+      // room-scoped fetch on every filter switch, never a client-side .filter() of the unfiltered
+      // top page (which would silently miss older items for that room, past whatever the unfiltered
+      // page happened to carry).
+      if(inboxLoadedFilter !== inboxRoomFilter){
+        inboxExtra = [];
+        inboxNextCursor = null;
+        inboxCount = null;
+        inboxLoadedFilter = inboxRoomFilter;
+        fetchInboxPage(inboxRoomFilter, null, true);
       }
-    }, { refetchInterval: 0 });
-  } else {
-    // #1656 F1: a room filter pages the same way the unfiltered view does -- a fresh, server-side
-    // room-scoped fetch on every filter switch, never a client-side .filter() of the unfiltered
-    // top page (which would silently miss older items for that room, past whatever the unfiltered
-    // page happened to carry).
-    if(inboxLoadedFilter !== inboxRoomFilter){
-      inboxExtra = [];
-      inboxNextCursor = null;
-      inboxCount = null;
-      inboxLoadedFilter = inboxRoomFilter;
-      fetchInboxPage(inboxRoomFilter, null, true);
+      const base = inboxRoomFilter ? [] : inboxIndex;
+      const knownIds = new Set(base.map(m => m && m.id));
+      const items = base.concat(inboxExtra.filter(m => m && !knownIds.has(m.id)));
+      renderInboxList(items, inboxRoomFilter, inboxCount);
     }
-    const base = inboxRoomFilter ? [] : inboxIndex;
-    const knownIds = new Set(base.map(m => m && m.id));
-    const items = base.concat(inboxExtra.filter(m => m && !knownIds.has(m.id)));
-    renderInboxList(items, inboxRoomFilter, inboxCount);
   }
 }
 let lastGood = null;
 let accumulatedTimelines = loadPersistedTimelines();
 let dismissedRooms = loadPersistedDismissed();
+let fleetEvents = [];
+const seenFleetEventIds = new Set();
+
+function recordFleetEvent(evt){
+  if(!evt || typeof evt !== "object") return;
+  if(typeof evt.id === "number"){
+    if(seenFleetEventIds.has(evt.id)) return;
+    seenFleetEventIds.add(evt.id);
+  }
+  fleetEvents.push(evt);
+  fleetEvents.sort((a, b) => (a.id ?? 0) - (b.id ?? 0));
+  renderStream();
+  renderHistory();
+}
+
+function renderStream(){
+  const summaryEl = $("stream-summary");
+  const contentEl = $("stream-content");
+  if(summaryEl) summaryEl.innerHTML = streamStatusSummaryHtml(lastGood, fleetEvents);
+  if(contentEl) contentEl.innerHTML = streamGroupedEventsHtml(fleetEvents);
+}
+
+function renderHistory(){
+  const historyEl = $("historycontent");
+  if(historyEl) historyEl.innerHTML = streamHistoryHtml(fleetEvents);
+}
+
 // #1656: the pushed snapshot's `rooms` only carries non-terminal rooms plus the newest
 // HOT_TERMINAL_CAP (pusher.py) terminal ones -- everything older lives server-side in
 // worker.js's "terminal_archive" key and is fetched a page at a time via fleet_status's own
@@ -2049,6 +2593,8 @@ function rerenderFromLastGood(){
   if(lastGood && Array.isArray(lastGood.rooms)){
     render(lastGood.rooms, lastGood.pushed_at, lastGood.underhood, lastGood.heartbeat_at, accumulatedTimelines, lastGood.stale_hidden_count, dismissedRooms, lastGood.conductor);
   }
+  renderStream();
+  renderHistory();
 }
 document.addEventListener("click", (ev) => {
   // #1678: selecting a board card (or the conductor card) just changes which room the detail pane
@@ -2140,7 +2686,13 @@ document.addEventListener("click", (ev) => {
   }
   const tabBtn = ev.target.closest(".tabbtn");
   if(tabBtn){
-    location.hash = tabBtn.dataset.tab === "inbox" ? "#inbox" : "";
+    const tab = tabBtn.dataset.tab;
+    const targetHash = tab === "stream" ? "" : "#" + tab;
+    if(location.hash === targetHash || (!location.hash && targetHash === "")){
+      applyRoute();
+    } else {
+      location.hash = targetHash;
+    }
     return;
   }
   const inboxLink = ev.target.closest(".inboxlink");
@@ -2172,6 +2724,7 @@ const DAEMON_SERVED = !!document.querySelector('meta[name="baton-glass-source"][
 // place. EventSource reconnects on its own (with Last-Event-ID), which is why a phone that sleeps
 // constantly is the client this transport was chosen for.
 function startDaemonFeed(applySnapshot){
+  const onFleetEvent = arguments[1];
   // 404 and 503 are DIFFERENT facts and must not paint the same banner: the daemon answers 404 only
   // when the projection file has never been written, and 503 when it exists but could not be read
   // this instant (a transient lock). Mapping both to null would tell an operator the daemon "has not
@@ -2203,6 +2756,22 @@ function startDaemonFeed(applySnapshot){
   load();
   const events = new EventSource("/events");
   events.addEventListener("projection", load);
+  const seenFleetIds = new Set();
+  events.addEventListener("fleet", (ev) => {
+    if(!ev || !ev.data) return;
+    try {
+      const data = JSON.parse(ev.data);
+      if(data && typeof data.id === "number"){
+        if(seenFleetIds.has(data.id)) return;
+        seenFleetIds.add(data.id);
+      }
+      if(typeof onFleetEvent === "function"){
+        onFleetEvent(data);
+      } else if(typeof recordFleetEvent === "function"){
+        recordFleetEvent(data);
+      }
+    } catch(err){}
+  });
   events.addEventListener("error", () => markDisconnected("The event stream disconnected."));
   events.addEventListener("open", () => {
     // Reconnection only proves the event stream opened. A fresh projection read is what makes the
@@ -2418,6 +2987,8 @@ function startDaemonFeed(applySnapshot){
         // #1912: same footing -- fleet-wide, absent on the mailbox delivery by construction. The second
         // argument is what tells that absence apart from the daemon's own two (queueBoardHtml says how).
         renderQueueBoard(snap.queue, snap.queueUnavailableReason);
+        renderStream();
+        renderHistory();
       } else if(snap && snap.rooms === null){
         $("content").innerHTML = "";
         $("dismissnote").innerHTML = "";
@@ -2433,7 +3004,7 @@ function startDaemonFeed(applySnapshot){
     // navigation-only worker. It caches nothing; its one bounded-timeout fallback is a static
     // failure page, never the dashboard or fleet data. A first successful online visit is needed
     // before the browser has activated this worker for a later disconnected launch.
-    startDaemonFeed(applySnapshot);
+    startDaemonFeed(applySnapshot, recordFleetEvent);
     navigator.serviceWorker?.register("/fleet-glass-service-worker.js").catch(() => undefined);
     applyRoute();
     return;

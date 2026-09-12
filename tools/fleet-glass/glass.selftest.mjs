@@ -30,7 +30,7 @@ if (beginAt < 0 || endAt < 0 || endAt < beginAt) {
   process.exit(1);
 }
 const source = html.slice(html.indexOf("\n", beginAt) + 1, endAt).replace(/^\s*\/\/.*$/gm, "");
-const REQUIRED = ["queueSlotsLineHtml", "queueLanesTableHtml", "queuePendingTableHtml", "queuePrTableHtml", "queuePrRowsHtml", "queuePrHistoryHtml", "queueBoardHtml"];
+const REQUIRED = ["queueSlotsLineHtml", "queueLanesTableHtml", "queuePendingTableHtml", "queuePrTableHtml", "queuePrRowsHtml", "queuePrHistoryHtml", "queueBoardHtml", "streamStatusSummaryHtml", "streamEventReceiptHtml", "streamGroupedEventsHtml", "streamHistoryHtml", "streamHomeHtml"];
 const missing = REQUIRED.filter(fn => !source.includes(`function ${fn}`));
 if (missing.length) {
   console.error(`glass.selftest.mjs: FAIL -- the marked block no longer defines: ${missing.join(", ")}`);
@@ -123,7 +123,7 @@ check("a valid weekly-only account renders its vendor window without manufacturi
       && !vendorUsageSink.innerHTML.includes("5h"));
 
 const panel = new Function("esc", "age", `${source}\nreturn { ${REQUIRED.join(", ")} };`)(esc, age);
-const { queueSlotsLineHtml, queuePendingTableHtml, queuePrTableHtml, queuePrHistoryHtml, queueLanesTableHtml, queueBoardHtml } = panel;
+const { queueSlotsLineHtml, queuePendingTableHtml, queuePrTableHtml, queuePrHistoryHtml, queueLanesTableHtml, queueBoardHtml, streamStatusSummaryHtml, streamEventReceiptHtml, streamGroupedEventsHtml, streamHistoryHtml, streamHomeHtml } = panel;
 
 // -- no board is THREE facts, and each gets its own word (#1912 fix round) --
 // FleetProjectionWriter.BuildQueueSectionAsync's remarks are the register for which state produces
@@ -299,6 +299,190 @@ check("(control) an unheld queue does not",
   ] });
   check("a tag carrying markup is escaped, never rendered as HTML",
         !out.includes("<img") && out.includes("&lt;img"));
+}
+
+// -- #2241 / #2075: mobile-first stream home answers the 4 questions without opening diagnostics --
+{
+  // 1. Idle fleet answers
+  const idleOut = streamStatusSummaryHtml(null, []);
+  check("idle stream summary answers what is moving", idleOut.includes("No work moving · fleet is idle"));
+  check("idle stream summary answers what is blocked or stale", idleOut.includes("None blocked or stale"));
+  check("idle stream summary answers what needs the operator", idleOut.includes("All clear · no operator action needed"));
+  check("idle stream summary answers quota status", idleOut.includes("Quota: unmeasured"));
+
+  // 2. Active, blocked, operator-needed, and quota facts
+  const snap = {
+    rooms: [
+      { path: "rooms/dispatch-implement-1234", state: "Running", role: "implement", adapter: "claude" },
+      { path: "rooms/dispatch-review-5678", state: "Stalled" },
+      { path: "rooms/dispatch-unknown-9999", state: "Indeterminate" },
+    ],
+    queue: {
+      held: true,
+      slots: { lanes: [{ label: "lane-beta", role: "implement", adapter: "codex" }] },
+      pending: [{ tag: "lane-gamma", stage: "implement", round: 1, role: "implement", reason: "runway-held" }],
+      pullRequests: [{ pr: 2241, freshness: "stale" }],
+    },
+    projection: { stale: true },
+    vendors: [{
+      adapter: "claude",
+      windows: [{ name: "claude · 5h (primary)", windowKind: "primary", percentUsed: 30, resetsAt: "2026-09-07T15:00:00Z" }],
+    }],
+  };
+  const activeEvents = [
+    { id: 10, kind: "attemptRefused", attemptId: "att-ref", outcomeDetail: "missing tool capability" },
+  ];
+  const fullOut = streamStatusSummaryHtml(snap, activeEvents);
+  check("active stream summary answers moving with running room and lane names",
+        fullOut.includes("moving") && fullOut.includes("dispatch-implement-1234") && fullOut.includes("lane-beta"));
+  check("active stream summary answers blocked/stale with stalled, queue runway-held, stale PR, stale projection, and refused attempt",
+        fullOut.includes("blocked/stale") && fullOut.includes("stalled room") && fullOut.includes("lane-gamma (runway-held)")
+        && fullOut.includes("PR #2241") && fullOut.includes("projection is stale") && fullOut.includes("attempt refused"));
+  check("active stream summary answers what needs operator with indeterminate room and held queue",
+        fullOut.includes("need(s) operator") && fullOut.includes("indeterminate room") && fullOut.includes("queue is held"));
+  check("stream summary progressively discloses quota details without column squeeze",
+        fullOut.includes("70% rem (30% used)") && fullOut.includes("<details class=\"quota-disclosure\"><summary>Quota details</summary>"));
+}
+
+// -- #2241 action receipts: compact current action and last meaningful result --
+{
+  const receiptStarted = streamEventReceiptHtml({
+    id: 1, kind: "attemptStarted", attemptId: "att-42", declaredRole: "implement", vendor: "claude", at: "2026-09-07T11:58:00Z",
+  });
+  check("attemptStarted receipt renders what, target, and status badge",
+        receiptStarted.includes("Attempt started: att-42 (implement) on claude")
+        && receiptStarted.includes("recorded in events.jsonl")
+        && receiptStarted.includes("PENDING"));
+
+  const receiptRevision = streamEventReceiptHtml({
+    id: 2, kind: "revisionProduced", revisionId: "abcdef123456", revisionKind: "code", at: "2026-09-07T11:59:00Z",
+  });
+  check("revisionProduced receipt renders revision identity and git target",
+        receiptRevision.includes("Revision produced: abcdef12 (code)") && receiptRevision.includes("recorded in git commit"));
+
+  const receiptVerdict = streamEventReceiptHtml({
+    id: 3, kind: "reviewVerdictObserved", reviewVerdict: "block", reviewEvidence: "missing check", at: "2026-09-07T11:59:30Z",
+  });
+  check("reviewVerdictObserved receipt renders verdict, failure status, and evidence",
+        receiptVerdict.includes("Review verdict: block") && receiptVerdict.includes("FAILURE") && receiptVerdict.includes("[missing check]"));
+
+  check("action receipts never output private reasoning or file:/// links",
+        !receiptStarted.includes("file:///") && !receiptRevision.includes("file:///") && !receiptVerdict.includes("file:///"));
+
+  const actualSuccessReceipt = streamEventReceiptHtml({
+    id: 4, kind: "attemptSettled", attemptId: "att-real", outcome: "Succeeded", elapsedMilliseconds: 1000,
+  });
+  check("producer-shaped title-case succeeded outcomes render as success",
+        actualSuccessReceipt.includes(">SUCCESS<") && actualSuccessReceipt.includes("receipt-status-success"));
+
+  const actualRefusalReceipt = streamEventReceiptHtml({
+    id: 5, kind: "attemptRefused", attemptId: "att-held", outcome: "runway-held",
+  });
+  check("attempt refusal renders the producer's outcome field when no detail is present",
+        actualRefusalReceipt.includes("Attempt refused: runway-held"));
+
+  const actualCheckReceipt = streamEventReceiptHtml({
+    id: 6, kind: "checkObserved", checkName: "gates", checkStatus: "COMPLETED", checkConclusion: "SUCCESS",
+  });
+  check("producer-shaped uppercase check conclusions render as success",
+        actualCheckReceipt.includes(">SUCCESS<") && actualCheckReceipt.includes("receipt-status-success"));
+}
+
+// -- #2241 identity grouping, unknown fields, current vs retained history (#2200), and deduplication --
+{
+  const events = [
+    // Duplicate monotonic id 1
+    { id: 1, workId: "w-101", attemptId: "att-101", kind: "attemptStarted", declaredRole: "implement", vendor: "claude" },
+    { id: 1, workId: "w-101", attemptId: "att-101", kind: "attemptStarted", declaredRole: "implement", vendor: "claude" },
+    { id: 2, workId: "w-101", attemptId: "att-101", kind: "attemptProgressed" },
+    { id: 3, workId: "w-101", attemptId: "att-101", kind: "revisionProduced", revisionId: "1234567890ab", revisionKind: "code" },
+
+    // Retained cancelled lifecycle (#2200)
+    { id: 4, workId: "w-102", attemptId: "att-102", pullRequestId: 2192, kind: "attemptStarted", declaredRole: "review" },
+    { id: 5, workId: "w-102", attemptId: "att-102", pullRequestId: 2192, kind: "attemptSettled", outcome: "cancelled", outcomeDetail: "cancelled by conductor" },
+
+    // Retained succeeded lifecycle
+    { id: 6, workId: "w-103", attemptId: "att-103", issueId: 2075, kind: "attemptStarted", declaredRole: "implement" },
+    { id: 7, workId: "w-103", attemptId: "att-103", issueId: 2075, kind: "attemptSettled", outcome: "succeeded", elapsedMilliseconds: 120000 },
+  ];
+
+  const streamHtml = streamGroupedEventsHtml(events);
+  check("grouped stream groups related events by identity without inventing lineage",
+        streamHtml.includes("work: w-101") && streamHtml.includes("attempt: att-101") && streamHtml.includes("12345678 (code)"));
+  check("unknown fields remain visibly unknown",
+        streamHtml.includes("issue: unknown") && streamHtml.includes("PR: unknown"));
+  check("current active work is rendered under Current Work",
+        streamHtml.includes("Current Work (1)") && streamHtml.includes("ACTIVE"));
+  check("retained cancelled lifecycle (#2200) is distinct in Retained History and never active",
+        streamHtml.includes("Retained History · #2200 (2)")
+        && streamHtml.includes("CANCELLED (RETAINED)")
+        && !streamHtml.includes("Current Work (2)"));
+  check("settled lifecycle renders duration and outcome in action receipt card",
+        streamHtml.includes("Settled succeeded in 2m") && streamHtml.includes("SUCCEEDED"));
+
+  // History tab only view
+  const historyHtml = streamHistoryHtml(events);
+  check("streamHistoryHtml renders retained history without active cards",
+        historyHtml.includes("Retained Lifecycle History · #2200 (2)")
+        && !historyHtml.includes("Current Work")
+        && historyHtml.includes("CANCELLED (RETAINED)"));
+
+  // Stream home combines both
+  const homeHtml = streamHomeHtml(null, events);
+  check("streamHomeHtml combines status summary grid and grouped event cards",
+        homeHtml.includes("stream-summary-grid") && homeHtml.includes("stream-group-card"));
+
+  // Reconnect / replay deduplication: duplicated event list produces identical render
+  const replayedEvents = [...events, ...events];
+  const replayedHomeHtml = streamHomeHtml(null, replayedEvents);
+  check("reconnect/replay duplicate events produce identical stream html output",
+        replayedHomeHtml === homeHtml);
+
+  // Read-only boundary: no mutating controls, forms, or verbs in stream output
+  check("stream HTML enforces read-only boundary with no form elements",
+        !homeHtml.includes("<form") && !homeHtml.includes("type=\"submit\""));
+  check("stream HTML contains no mutating action verbs",
+        !homeHtml.includes("baton hold") && !homeHtml.includes("baton resume")
+        && !homeHtml.includes("baton cancel") && !homeHtml.includes("baton wake")
+        && !homeHtml.includes("baton merge") && !homeHtml.includes("baton decide"));
+
+  // Tab navigation structure in glass.html contains all 6 tabs including Deliverables
+  check("glass.html tabs contain Stream, Fleet, Queue, Quota, History, and Deliverables",
+        html.includes("data-tab=\"stream\"") && html.includes("data-tab=\"fleet\"")
+        && html.includes("data-tab=\"queue\"") && html.includes("data-tab=\"quota\"")
+        && html.includes("data-tab=\"history\"") && html.includes("data-tab=\"inbox\""));
+
+  const retriedWork = [
+    { id: 20, workId: "same-work", attemptId: "attempt-one", kind: "attemptStarted" },
+    { id: 21, workId: "same-work", attemptId: "attempt-one", kind: "attemptSettled", outcome: "Indeterminate" },
+    { id: 22, workId: "same-work", attemptId: "attempt-two", parentAttemptId: "attempt-one", kind: "attemptStarted" },
+  ];
+  const retriedHtml = streamGroupedEventsHtml(retriedWork);
+  check("retry attempts sharing one work id remain separate lifecycles",
+        retriedHtml.includes("Current Work (1)")
+        && retriedHtml.includes("Retained History · #2200 (1)")
+        && retriedHtml.includes("attempt: attempt-one")
+        && retriedHtml.includes("attempt: attempt-two")
+        && retriedHtml.includes("INDETERMINATE (RETAINED)"));
+
+  const teardownHtml = streamGroupedEventsHtml([
+    { id: 23, workId: "teardown-work", attemptId: "teardown-attempt", kind: "attemptSettled", outcome: "FinishedDuringTeardown" },
+  ]);
+  check("the second succeeded-shaped terminal outcome renders as success",
+        teardownHtml.includes("SUCCEEDED") && !teardownHtml.includes("ACTIVE"));
+
+  const refusedAdmission = {
+    id: 24, workId: "review-work", attemptId: "review-attempt", kind: "admissionDecided",
+    admissionDecision: "refused", missingCapabilities: ["file-write", "network"],
+  };
+  const refusedAdmissionHtml = streamGroupedEventsHtml([refusedAdmission]);
+  check("a producer-shaped refused admission is retained rather than shown as active forever",
+        refusedAdmissionHtml.includes("Current Work (0)")
+        && refusedAdmissionHtml.includes("REFUSED (RETAINED)")
+        && refusedAdmissionHtml.includes("Admission refused: file-write, network"));
+  const refusedSummary = streamStatusSummaryHtml(null, [refusedAdmission]);
+  check("a refused admission appears in the blocked summary",
+        refusedSummary.includes("admission refused: file-write, network"));
 }
 
 if (failures.length) {
