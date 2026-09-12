@@ -669,6 +669,14 @@ public sealed partial class AgyWorkerAdapter : IWorkerAdapter, IPermissionGrantT
             args.Add(FormatPrintTimeout(timeout));
         }
 
+        // #2246: `--mode plan` is both agy's read-only-looking permission spelling and a behavioral
+        // slash command. In print mode 1.2.2 expands it into a large planning prompt that orders
+        // research, approval, and walkthrough work, directly contradicting Baton's single-turn role
+        // prompt. Baton materializes every declared role/skill into `prompt` above and its hook is the
+        // actual permission boundary (#670), so ambient slash/skill expansion is neither needed nor
+        // allowed to silently amend the lane contract.
+        args.Add("--disable-slash-commands");
+
         var environment = new List<(string Name, string Value)>
         {
             // Read by `baton agy-hook-check` inside the hook subprocess. Always set, even when

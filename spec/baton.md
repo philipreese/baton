@@ -5860,6 +5860,18 @@ rules for each declared output (`write_file(%BATON_OUTPUT_DIR%/<output>)`) in th
 instructs the worker that declared outputs are regular files rather than vendor artifacts, directing
 use of `write_to_file` without `ArtifactMetadata`.
 
+**Agy's permission spelling may not amend the lane's behavior (#2246).** Every non-interactive Agy
+binding carries `--disable-slash-commands`. Agy 1.2.2 otherwise interprets the read-only grant's
+`--mode plan` as its behavioral `/plan` command and injects a second agenda: research the codebase,
+seek approval, then create plan and walkthrough artifacts. Baton already materializes the selected
+role and skill packages into `prompt.txt`; ambient vendor slash commands and skills are therefore
+undeclared instructions, not dependencies. Disabling their expansion makes Agy warn that plan mode
+has no effect, but does not weaken a boundary: the mode already failed to deny writes in the measured
+case above, while Baton's `PreToolUse` hook is the boundary. The live
+`agy.hooks-load-from-add-dir-not-only-cwd` and
+`agy.hook-deny-holds-under-the-mode-production-uses` sentinels both run with expansion disabled; the
+latter includes `plan`, `accept-edits`, and skip-mode control arms.
+
 **Polling is not progress: three rules on the run-command grant (#2002).** Measured 2026-09-06 across
 121 rooms modified that day: one agy arm-A lane spent 53.6 % of its 207 `run_command` steps on
 `Get-Process -Id <n>` liveness polls of builds it had backgrounded itself, and byte-identical repeated

@@ -12,6 +12,7 @@ and where a row says something is *absent*, it names the surfaces that absence w
 
 | established | against | covers |
 |---|---|---|
+| 2026-09-12, `#2246` | `agy` **1.2.2** | **`--mode plan` is behavioral, not only permissional, in print mode.** An otherwise trivial `agy -p` control reported `expanded_commands:[{"name":"plan","type":"system"}]` and 14,198 input tokens. Adding `--disable-slash-commands` removed the expansion and reported 13,403 input tokens; all other prompt/model/effort/workspace inputs were identical. The CLI warned that plan mode has no effect with slash expansion disabled. Baton's hook remains the write boundary, so its production argv now disables ambient slash and vendor-skill expansion; `agy.hooks-load-from-add-dir-not-only-cwd` carries that flag in all three live control arms. |
 | 2026-09-08 <a id="probe-2026-09-08"></a>, `#2124` | `claude` **2.1.263**, `agy` **1.1.27**, `codex` **0.153.2** | All 21 probe findings re-established on the same surfaces; two readings moved. `claude --help` now includes `--permission-prompt-tool` (the claude `--permission-prompt-tool` finding in [docs/vendor-capabilities.probe.json](vendor-capabilities.probe.json)); the 2.1.258 pin probed 2026-09-04 did not. The change occurred **between the two pins**: both a version bump and four days separate them, so this does not attribute it to 2.1.263 alone. |
 | ↳ same probe | `codex` **0.153.2**, operator's account | The visible/account-sensitive `model/list` catalog dropped `gpt-5.4` (already recorded in #1875) and `gpt-5.4-mini` (the codex visible/account-sensitive `model/list` findings in [docs/vendor-capabilities.probe.json](vendor-capabilities.probe.json)); [#2126](https://github.com/aer-works/baton/issues/2126) tracks the newly observed mini departure and the embedded recording's drift. |
 | 2026-09-04, `#1853` | `codex` **0.153.2**, desktop **26.901.4073** | First subscription-authenticated Codex probe and adapter evidence: native shell-less `codex exec --json`, resumable `thread_id`, per-turn token usage, typed terminal/error events, documented sandbox/config controls, and dynamic visible model/effort discovery through app-server `model/list`. Full evidence boundaries, measurements, unknowns, and sanitized fixtures: [`vendor-codex-probe-2026-09-04.md`](vendor-codex-probe-2026-09-04.md). |
@@ -831,6 +832,14 @@ No prompt, no refusal, exit 0, and both files present on disk. Identical across 
 The name suggests otherwise on both flags, which is the whole reason this is written down. `plan`
 constrains what the model *sets out* to do, not what its tools are permitted to do; `--add-dir`
 grants visibility rather than withholding it elsewhere.
+
+**Since 1.2.2, that first sentence is more literal than Baton's adapter had accounted for (#2246).**
+In print mode `--mode plan` expands the system `/plan` command, adding instructions to research the
+codebase, seek plan approval, and produce plan/walkthrough artifacts. `--disable-slash-commands`
+removes that behavioral expansion and also makes the nominal plan mode ineffective; this does not
+weaken Baton's boundary because the measurements above already establish that mode never denied
+writes. Baton's `PreToolUse` hook remains the boundary and its add-dir sentinel now runs under the
+slash-disabled production argv.
 
 The verdict is read against the file on disk rather than the CLI's report, and that is not
 fastidiousness: the first attempt to establish this returned "workspace empty, nothing written"
