@@ -472,6 +472,13 @@ public sealed partial class AgyWorkerAdapter : IWorkerAdapter, IPermissionGrantT
     }
 
     /// <summary>
+    /// True (#2242): declared outputs under <c>BATON_OUTPUT_DIR</c> remain writable even when write
+    /// tools are withheld by this session's grant, via <c>AgyHookCheckCommand</c>'s outbox write exemption.
+    /// Matches the claude and codex adapters (#649).
+    /// </summary>
+    public bool WithheldWritesReachTheOutbox => true;
+
+    /// <summary>
     /// True (#1987): <see cref="Resolve"/> below emits an <c>--add-dir</c> for
     /// <c>WorktreeSourceRepository</c>, so what the operator dispatched against stays readable even
     /// when the worker runs in a room-local worktree. Answered here so the pre-run disclosure names
@@ -490,7 +497,7 @@ public sealed partial class AgyWorkerAdapter : IWorkerAdapter, IPermissionGrantT
         // the rule) for why this runs first on that adapter; the same ordering holds here for the same
         // reason, applied to this vendor's own downstream readers: ResolvePermissionScope, the
         // hook-liveness probe below, and every denied-tool env var.
-        invocation = ProjectCeilingGate.Apply(invocation, contract, ((IWorkerAdapter)this).WithheldWritesReachTheOutbox);
+        invocation = ProjectCeilingGate.Apply(invocation, contract, WithheldWritesReachTheOutbox);
 
         var isWindows = OperatingSystem.IsWindows();
         var prompt = BuildPrompt(invocation.PromptTemplate, contract, isWindows, invocation.WorkingDirectory, invocation.Skills);
@@ -745,8 +752,10 @@ public sealed partial class AgyWorkerAdapter : IWorkerAdapter, IPermissionGrantT
         // one per declared output, and is NOT the security boundary: AER's PreToolUse hook still
         // bounds where the write may land -- agy.hook-deny-holds-under-the-mode-production-uses
         // measures that a deny holds under this exact --mode accept-edits (#670).
+        // #2242: seeded under all non-skip scopes (including --mode plan) so withheld-write workers
+        // can produce their declared outputs into BATON_OUTPUT_DIR.
         IReadOnlyList<CoreDispatchSeedFile>? seedFiles = null;
-        if (permissionScope == "accept-edits" && agyHome is not null && contract.ProducedOutputs.Count > 0)
+        if (permissionScope != "--dangerously-skip-permissions" && agyHome is not null && contract.ProducedOutputs.Count > 0)
         {
             var outputDir = EnvironmentReference("BATON_OUTPUT_DIR", isWindows);
             var allow = contract.ProducedOutputs
@@ -1289,6 +1298,7 @@ public sealed partial class AgyWorkerAdapter : IWorkerAdapter, IPermissionGrantT
                 var separator = isWindows ? '\\' : '/';
                 prompt.Append($"- {output.Name}: {outputDir}{separator}{output.Name}\n");
             }
+            prompt.Append("Declared outputs are regular files, not vendor artifacts: use `write_to_file` without `ArtifactMetadata`.\n");
         }
 
         prompt.Append($"\n\n{ForegroundGateInstructionText}");

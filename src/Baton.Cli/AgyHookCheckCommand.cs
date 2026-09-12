@@ -374,8 +374,36 @@ public static class AgyHookCheckCommand
         scribe.Tool = toolName;
         scribe.Input = commandLine ?? writeTarget ?? readTarget;
 
+        // #649, #2242: a file-writing tool landing in the outbox is the worker's declared output, and it is
+        // allowed before the withheld branch below can reclassify it -- a withheld write is not a
+        // policy question once its target is the outbox. Hoisted here so that branch never has to
+        // special-case it. Fires only on a TRUE IsInside (a rooted outbox); a non-rooted one still
+        // falls through to the withheld branch. The withheld branch keeps its own copy as
+        // belt-and-braces defence in depth.
+        if (OutboxExemptionTools.Contains(toolName) && OutboxPath.IsInside(writeTarget, outboxDirectory))
+        {
+            Baton.Vendors.RepeatedToolCallHook.NoteWrite(outboxDirectory, writeTarget);
+            return Allow(scribe);
+        }
+
         if (IsWithheld(denied, toolName))
         {
+            // #649, #2242: the outbox is not the workspace. A withheld write landing in BATON_OUTPUT_DIR is the
+            // worker producing its declared output, which is the whole reason it was dispatched.
+            if (OutboxExemptionTools.Contains(toolName) && OutboxPath.IsInside(writeTarget, outboxDirectory))
+            {
+                Baton.Vendors.RepeatedToolCallHook.NoteWrite(outboxDirectory, writeTarget);
+                return Allow(scribe);
+            }
+
+            if (outboxDirectory is not null && !Path.IsPathRooted(outboxDirectory))
+            {
+                return DenyJson(scribe, GrantRules.UnjudgeableCall,
+                    $"AER: the '{toolName}' tool is withheld, and its outbox exemption is unavailable " +
+                    $"because BATON_OUTPUT_DIR ('{outboxDirectory}') is not an absolute path — this gate " +
+                    "cannot tell where the outbox is. Re-run with an absolute --room-dir (#668).");
+            }
+
             return DenyJson(scribe, GrantRules.WithheldTool,
                 $"AER: the '{toolName}' tool is withheld by this session's permission grant.");
         }
@@ -846,6 +874,16 @@ public static class AgyHookCheckCommand
     public static readonly IReadOnlySet<string> WriteFamilyTools = new HashSet<string>(StringComparer.Ordinal)
     {
         "write_to_file", "replace_file_content", "multi_replace_file_content", "generate_image",
+    };
+
+    /// <summary>
+    /// The file-writing tools eligible for the #649 / #2242 withheld-write outbox exemption.
+    /// <c>generate_image</c> is in <see cref="WriteFamilyTools"/> for bounding granted writes,
+    /// but is not a file deliverable mechanism and remains withheld when writes are withheld.
+    /// </summary>
+    public static readonly IReadOnlySet<string> OutboxExemptionTools = new HashSet<string>(StringComparer.Ordinal)
+    {
+        "write_to_file", "replace_file_content", "multi_replace_file_content",
     };
 
     /// <summary>

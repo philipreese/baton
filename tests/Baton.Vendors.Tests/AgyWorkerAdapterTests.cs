@@ -1774,6 +1774,50 @@ public class AgyWorkerAdapterTests
         Assert.True(target.SeedFiles is null or { Count: 0 });
     }
 
+    /// <summary>
+    /// #2242: WithheldWritesReachTheOutbox is true on agy, matching claude and codex.
+    /// </summary>
+    [Fact]
+    public void WithheldWritesReachTheOutbox_is_true_on_agy()
+    {
+        Assert.True(((IWorkerAdapter)new AgyWorkerAdapter()).WithheldWritesReachTheOutbox);
+    }
+
+    /// <summary>
+    /// #2242: #2177 repro — a non-shell measurement or review worker with WriteFiles withheld
+    /// (resolving to --mode plan) still seeds permissions.allow for all declared outputs into its
+    /// redirected home, including multiple declared outputs.
+    /// </summary>
+    [Fact]
+    public void Non_shell_withheld_write_binding_seeds_write_allow_for_all_declared_outputs()
+    {
+        var contract = new WorkerContract(
+            "reviewer", ["probe"], [new ProducedOutput("report.md"), new ProducedOutput("summary.md")], []);
+        var readOnlyGrant = new PermissionGrant(ReadFiles: true, WriteFiles: false, RunShellCommands: false, NetworkAccess: false);
+        var target = new AgyWorkerAdapter().Resolve(new WorkerInvocation("Measure probe.", PermissionGrant: readOnlyGrant), contract);
+
+        var seed = Assert.Single(target.SeedFiles!);
+        using var doc = JsonDocument.Parse(seed.Content);
+        var rules = doc.RootElement.GetProperty("permissions").GetProperty("allow")
+            .EnumerateArray().Select(e => e.GetString()!).ToArray();
+        const string expectedRef = "%BATON_OUTPUT_DIR%";
+        Assert.Equal([$"write_file({expectedRef}/report.md)", $"write_file({expectedRef}/summary.md)"], rules);
+    }
+
+    /// <summary>
+    /// #2242: prompt guidance directs native output writes without vendor artifact metadata (spec/baton.md §9).
+    /// </summary>
+    [Fact]
+    public void BuildPrompt_instructs_worker_that_declared_outputs_are_non_artifact_files_without_ArtifactMetadata()
+    {
+        var contract = new WorkerContract(
+            "reviewer", ["probe"], [new ProducedOutput("report.md")], []);
+        var readOnlyGrant = new PermissionGrant(ReadFiles: true, WriteFiles: false, RunShellCommands: false, NetworkAccess: false);
+        var target = new AgyWorkerAdapter().Resolve(new WorkerInvocation("Measure probe.", PermissionGrant: readOnlyGrant), contract);
+
+        Assert.Contains("ArtifactMetadata", target.PromptText);
+    }
+
     [Fact]
     public void Unknown_adapter_key_gemini_throws_plain_unknown_error_with_no_rename_hint()
     {
@@ -2434,16 +2478,11 @@ public class AgyWorkerAdapterTests
     }
 
     /// <summary>
-    /// #1166 review finding B: on agy a withheld write does NOT reach the outbox (#670,
-    /// <c>WithheldWritesReachTheOutbox</c> defaults false) -- so a ceiling that caps WriteFiles away
-    /// from a role grant that had it, over a contract declaring outputs, must refuse here rather than
-    /// let a worker that cannot write its declared output run to completion and pay for itself before
-    /// failing the contract check (#629). See
-    /// <see cref="ClaudeWorkerAdapterTests.A_ceiling_that_caps_away_write_files_does_not_refuse_the_contract_on_claude"/>
-    /// for the polarity partner.
+    /// #2242: on agy a withheld write now reaches the outbox (<c>WithheldWritesReachTheOutbox</c> is
+    /// true, matching claude), so capping WriteFiles away here must NOT refuse the contract.
     /// </summary>
     [Fact]
-    public void A_ceiling_that_caps_away_write_files_refuses_a_contract_declaring_outputs_on_agy()
+    public void A_ceiling_that_caps_away_write_files_does_not_refuse_the_contract_on_agy()
     {
         var project = Path.Combine(Path.GetTempPath(), $"baton-ceiling-unsatisfiable-agy-{Guid.NewGuid():N}");
         ProjectCeilingStore.Set(
@@ -2452,12 +2491,11 @@ public class AgyWorkerAdapterTests
             ProjectCeilingStore.DefaultPath);
         var roleGrant = new PermissionGrant(ReadFiles: true, WriteFiles: true);
 
-        var ex = Assert.Throws<UnsatisfiableOutputContractException>(() => new AgyWorkerAdapter().Resolve(
+        var target = new AgyWorkerAdapter().Resolve(
             new WorkerInvocation("Draft a plan.", PermissionGrant: roleGrant, WorkingDirectory: project),
-            ArchitectContract));
+            ArchitectContract);
 
-        Assert.Equal("architect", ex.WorkerName);
-        Assert.Contains("plan.md", ex.UnwritableOutputs);
+        Assert.NotNull(target);
     }
 
     // ---- #1987: the dispatched workspace is readable on every role ----

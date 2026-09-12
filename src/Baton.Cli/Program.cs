@@ -60,8 +60,8 @@ if (args.Length >= 1 && args[0] == "agy-hook-check")
     // express a command family here), so it is read and passed like the allow channel.
     var deniedShellPatterns = Environment.GetEnvironmentVariable(
         AgyHookCheckCommand.DeniedShellPatternsEnvironmentVariable);
-    // #679: the outbox reaches this gate for the GRANTED-write bound only. #649's withheld-write
-    // exemption remains claude-only and is not extended here.
+    // #679 / #2242: the outbox reaches this gate for both granted-write bounds and #649's withheld-write
+    // exemption (extended to agy by #2242).
     var agyOutputDir = Environment.GetEnvironmentVariable("BATON_OUTPUT_DIR");
     var agyWorkspaceDir = Environment.GetEnvironmentVariable(HookCheckCommand.WorkspaceEnvironmentVariable);
     // #1683 F2: the option-token deny rung, read like the two channels above.
