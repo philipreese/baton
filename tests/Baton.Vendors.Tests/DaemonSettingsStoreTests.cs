@@ -138,6 +138,33 @@ public class DaemonSettingsStoreTests
     }
 
     [Fact]
+    public async Task Saving_then_loading_round_trips_the_Glass_operator_login()
+    {
+        var path = TempPath();
+        try
+        {
+            var original = new DaemonSettings
+            {
+                Glass = new GlassListenerSettings
+                {
+                    Listen = true,
+                    Port = 8420,
+                    OperatorLogin = "operator@example.com",
+                },
+            };
+
+            await DaemonSettingsStore.SaveAsync(original, path, TestContext.Current.CancellationToken);
+            var loaded = await DaemonSettingsStore.LoadAsync(path, TestContext.Current.CancellationToken);
+
+            Assert.Equal(original.Glass, loaded.Glass);
+        }
+        finally
+        {
+            FileCleanup.Delete(path);
+        }
+    }
+
+    [Fact]
     public async Task Saving_creates_the_parent_directory_if_it_does_not_exist_yet()
     {
         var directory = Path.Combine(Path.GetTempPath(), $"baton-settings-dir-{Guid.NewGuid():N}");

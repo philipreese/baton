@@ -3,7 +3,8 @@
 Fleet Glass is served by `baton daemon` over the operator's private tailnet, from `glass.html`
 embedded in `Baton.Cli`. The daemon-served page is the only supported delivery; it keeps the
 existing manifest, service worker, projection route, and SSE route. Tailnet-only access remains
-intact.
+intact. When `Glass.OperatorLogin` is configured, that delivery alone also exposes queue
+hold/resume and confirmed room cancel through the exact identity gate in `spec/baton.md` §11 C-11.
 
 The operator-confirmed service URLs are recorded in the repo README's "Opening the glass over your
 tailnet" section.

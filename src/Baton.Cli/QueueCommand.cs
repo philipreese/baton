@@ -398,7 +398,7 @@ public static class QueueCommand
         return 0;
     }
 
-    private static async Task<int> SetHoldAsync(bool held, TextWriter output, CancellationToken cancellationToken)
+    internal static async Task<int> SetHoldAsync(bool held, TextWriter output, CancellationToken cancellationToken)
     {
         await QueueStore.MutateAsync(
             BatonPaths.QueueFile, snapshot => snapshot with { Held = held }, cancellationToken).ConfigureAwait(false);

@@ -22,11 +22,10 @@ namespace Baton.Cli.Daemon;
 /// this plane: they must never be added to worker-served or artifact copies, whose secret gate and
 /// KV write cap are the two walls that forced a second plane in the first place.
 /// </para>
-/// <para>
-/// <b>Read-only, and structurally so.</b> Every route is a GET; a request with any other method is
-/// refused with 405 before it reaches a handler. C-11's arrest reflexes (cancel,
-/// redispatch-unchanged) are explicitly NOT in this slice, and origination stays orchestrator-only.
-/// </para>
+/// <para><b>Narrow writes.</b> Reads remain open on the bound listener. Exactly three POST routes
+/// cross <see cref="GlassWriteGate"/> and then reuse Baton's queue/cancel commands; every other
+/// method and route is refused. Origination, redispatch, merge and arbitrary resolution remain
+/// desktop/operator work.</para>
 /// <para>
 /// <b><see cref="HttpListener"/>, not a web framework.</b> Baton.Cli's whole project graph carries
 /// one PackageReference (see the csproj); this route table is three GETs and an SSE loop, which the
@@ -61,6 +60,8 @@ internal sealed class GlassHttpService : BackgroundService
     private readonly GlassFileWatcher _eventWatcher;
     private readonly FleetEventLog _eventLog;
     private readonly TextWriter _log;
+    private readonly Func<bool, CancellationToken, Task<string>> _setQueueHold;
+    private readonly Func<string, CancellationToken, Task<string>> _cancelRoom;
 
     public GlassHttpService(DaemonSettings settings)
         : this(
@@ -68,7 +69,9 @@ internal sealed class GlassHttpService : BackgroundService
             BatonPaths.FleetProjectionFile,
             null,
             null,
-            FleetEventLog.OpenOperational())
+            FleetEventLog.OpenOperational(),
+            GlassWriteActions.SetQueueHoldAsync,
+            GlassWriteActions.CancelRoomAsync)
     {
     }
 
@@ -82,13 +85,17 @@ internal sealed class GlassHttpService : BackgroundService
         TextWriter? log,
         string? eventsPath = null,
         string? eventsRolloverPath = null,
-        long? eventsMaxBytes = null)
+        long? eventsMaxBytes = null,
+        Func<bool, CancellationToken, Task<string>>? setQueueHold = null,
+        Func<string, CancellationToken, Task<string>>? cancelRoom = null)
         : this(
             settings,
             projectionPath,
             pollInterval,
             log,
-            OpenTestEventLog(projectionPath, eventsPath, eventsRolloverPath, eventsMaxBytes))
+            OpenTestEventLog(projectionPath, eventsPath, eventsRolloverPath, eventsMaxBytes),
+            setQueueHold ?? GlassWriteActions.SetQueueHoldAsync,
+            cancelRoom ?? GlassWriteActions.CancelRoomAsync)
     {
     }
 
@@ -97,7 +104,9 @@ internal sealed class GlassHttpService : BackgroundService
         string projectionPath,
         TimeSpan? pollInterval,
         TextWriter? log,
-        FleetEventLog eventLog)
+        FleetEventLog eventLog,
+        Func<bool, CancellationToken, Task<string>> setQueueHold,
+        Func<string, CancellationToken, Task<string>> cancelRoom)
     {
         ArgumentNullException.ThrowIfNull(settings);
         ArgumentException.ThrowIfNullOrEmpty(projectionPath);
@@ -107,6 +116,8 @@ internal sealed class GlassHttpService : BackgroundService
         _eventWatcher = new GlassFileWatcher(eventLog.LivePath, pollInterval);
         _eventLog = eventLog;
         _log = log ?? Console.Out;
+        _setQueueHold = setQueueHold;
+        _cancelRoom = cancelRoom;
     }
 
     private static FleetEventLog OpenTestEventLog(
@@ -237,11 +248,15 @@ internal sealed class GlassHttpService : BackgroundService
     {
         try
         {
+            if (string.Equals(context.Request.HttpMethod, "POST", StringComparison.OrdinalIgnoreCase))
+            {
+                await HandleWriteAsync(context, stoppingToken).ConfigureAwait(false);
+                return;
+            }
+
             if (!string.Equals(context.Request.HttpMethod, "GET", StringComparison.OrdinalIgnoreCase))
             {
-                // Read-only is enforced here, before routing: there is no handler a non-GET could
-                // reach even if one were added below (C-11 -- this page originates nothing).
-                await WriteTextAsync(context, HttpStatusCode.MethodNotAllowed, "text/plain; charset=utf-8", "GET only.")
+                await WriteTextAsync(context, HttpStatusCode.MethodNotAllowed, "text/plain; charset=utf-8", "GET or approved POST only.")
                     .ConfigureAwait(false);
                 return;
             }
@@ -318,6 +333,80 @@ internal sealed class GlassHttpService : BackgroundService
             {
                 // Already closed by the abandoned-client path above.
             }
+        }
+    }
+
+    private async Task HandleWriteAsync(HttpListenerContext context, CancellationToken cancellationToken)
+    {
+        var route = context.Request.Url?.AbsolutePath ?? string.Empty;
+        var isQueueHold = string.Equals(route, "/queue/hold", StringComparison.Ordinal);
+        var isQueueResume = string.Equals(route, "/queue/resume", StringComparison.Ordinal);
+        const string cancelPrefix = "/rooms/";
+        const string cancelSuffix = "/cancel";
+        var isCancelShape = route.StartsWith(cancelPrefix, StringComparison.Ordinal)
+            && route.EndsWith(cancelSuffix, StringComparison.Ordinal)
+            && route.Length > cancelPrefix.Length + cancelSuffix.Length;
+        string? cancelRoomId = null;
+        if (isCancelShape)
+        {
+            try
+            {
+                cancelRoomId = Uri.UnescapeDataString(route[cancelPrefix.Length..^cancelSuffix.Length]);
+            }
+            catch (UriFormatException)
+            {
+                // An invalid escape is not a route, and must not reach either authorization or mutation.
+            }
+        }
+        var isCancel = GlassWriteActions.IsValidRoomId(cancelRoomId);
+
+        if (!isQueueHold && !isQueueResume && !isCancel)
+        {
+            await WriteTextAsync(context, HttpStatusCode.NotFound, "text/plain; charset=utf-8", "Not found.")
+                .ConfigureAwait(false);
+            return;
+        }
+
+        var identityHeaders = context.Request.Headers.GetValues(GlassWriteGate.IdentityHeader);
+        var decision = GlassWriteGate.Evaluate(
+            _settings.Glass,
+            context.Request.RemoteEndPoint?.Address,
+            identityHeaders);
+        if (!decision.IsAllowed)
+        {
+            await _eventLog.Append(
+                    new FleetEventDraft(
+                        FleetEventKind.GlassWriteRefused,
+                        $"glass-write-refused:{Guid.NewGuid():N}",
+                        DateTimeOffset.UtcNow,
+                        Outcome: "refused",
+                        OutcomeDetail: $"route={route}; login={(decision.LoginSeen ? "<redacted>" : "<missing>")}"),
+                    cancellationToken)
+                .ConfigureAwait(false);
+            await WriteTextAsync(context, HttpStatusCode.Forbidden, "text/plain; charset=utf-8", decision.Refusal!)
+                .ConfigureAwait(false);
+            return;
+        }
+
+        try
+        {
+            string receipt;
+            if (isQueueHold || isQueueResume)
+            {
+                receipt = await _setQueueHold(isQueueHold, cancellationToken).ConfigureAwait(false);
+            }
+            else
+            {
+                receipt = await _cancelRoom(cancelRoomId!, cancellationToken).ConfigureAwait(false);
+            }
+
+            await WriteTextAsync(context, HttpStatusCode.OK, "text/plain; charset=utf-8", receipt)
+                .ConfigureAwait(false);
+        }
+        catch (Exception ex) when (ex is BatonFlowException or ArgumentException or UriFormatException)
+        {
+            await WriteTextAsync(context, HttpStatusCode.Conflict, "text/plain; charset=utf-8", ex.Message)
+                .ConfigureAwait(false);
         }
     }
 

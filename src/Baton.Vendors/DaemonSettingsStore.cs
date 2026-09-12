@@ -235,6 +235,12 @@ public sealed record GlassListenerSettings
     /// </summary>
     public int Port { get; init; } = DefaultPort;
 
+    /// <summary>
+    /// Exact <c>Tailscale-User-Login</c> allowed to use the daemon-served Glass write routes.
+    /// Missing or blank disables every write while leaving reads available.
+    /// </summary>
+    public string? OperatorLogin { get; init; }
+
     /// <summary>The port in force, after the typo fallback above.</summary>
     [JsonIgnore]
     public int EffectivePort => Port is > 0 and <= 65535 ? Port : DefaultPort;

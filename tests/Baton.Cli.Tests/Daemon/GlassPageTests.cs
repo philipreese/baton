@@ -111,7 +111,7 @@ public sealed class GlassPageTests
         // connector path is never entered (`claude` does not exist in a plain browser -- reaching
         // that line at all would throw before anything rendered).
         var daemonBranch = Regex.Match(
-            html, @"if\(DAEMON_SERVED\)\{.*?\}", RegexOptions.Singleline);
+            html, @"if\(DAEMON_SERVED\)\{.*?return;", RegexOptions.Singleline);
         Assert.True(daemonBranch.Success, "glass.html must branch on DAEMON_SERVED before using the connector.");
         Assert.Contains("startDaemonFeed", daemonBranch.Value, StringComparison.Ordinal);
         Assert.Contains("return;", daemonBranch.Value, StringComparison.Ordinal);

@@ -10,10 +10,9 @@
   connector named "baton" (Settings -> Connectors -> Add custom -> the Worker's
   /mcp/<READ_SEGMENT> URL from tools/fleet-glass/secrets.local.json). Data flows fleet machine ->
   pusher.py -> Worker (worker.js) -> KV -> this page, on a 30s poll, with the viewer's own
-  connector credentials. Read-only: no write verbs execute anywhere in this file -- the two
-  clipboard buttons per room COPY a CLI verb string for the operator to paste into their own
-  Claude Code mobile session; nothing here calls baton or the engine directly (spec/baton.md §10:
-  origination and arrest both stay orchestrator-only from this page).
+  connector credentials. The artifact delivery remains read-only. On the daemon delivery only,
+  #2078 adds the three identity-gated same-origin writes shown below: queue hold/resume and room
+  cancel. Origination, redispatch, merge, labels, and arbitrary resolution remain desktop work.
 
   #1946 — ONE PAGE, TWO DELIVERIES (spec/baton.md §11 C-11). This same file is also served by
   `baton daemon` over the operator's tailnet, which injects
@@ -141,6 +140,9 @@ h2{font-family:'Sora',sans-serif; font-size:.85rem; margin:1.4rem 0 .5rem; color
 .verbs{margin-top:.35rem; display:flex; gap:.4rem; flex-wrap:wrap; align-items:center;}
 .copybtn{font:500 .68rem 'Public Sans'; padding:.25em .65em; border-radius:8px; border:1px solid var(--line); background:var(--paper); color:var(--ink-soft); cursor:pointer;}
 .copybtn:active{background:var(--chip-idle);}
+.glasswrite{font:600 .68rem 'Public Sans'; padding:.3em .7em; border-radius:8px; border:1px solid var(--accent); background:var(--card); color:var(--accent); cursor:pointer;}
+.glasswrite.danger{border-color:var(--bad); color:var(--bad);}
+.glasswrite[disabled]{opacity:.55; cursor:wait;}
 .revealbox{font:400 .68rem var(--mono); padding:.22em .4em; border-radius:6px; border:1px solid var(--line); background:var(--paper); color:var(--ink); width:12rem; max-width:100%;}
 .chip{font:600 .62rem/1 'Public Sans'; letter-spacing:.05em; padding:.28em .6em; border-radius:999px; white-space:nowrap; flex-shrink:0;}
 .c-run{background:var(--chip-run); color:var(--run);}
@@ -360,7 +362,7 @@ footer{margin-top:2rem; font-size:.7rem; color:var(--ink-soft); border-top:1px s
     <div id="inboxbanner"></div>
     <div id="inboxcontent"></div>
   </div>
-  <footer>Spike 1 · watches <span class="mono">baton / fleet_status</span> every 30s · push-fed mailbox, read-only, no write verbs · copy buttons only copy text to the clipboard · rulings happen in chat</footer>
+  <footer>Fleet Glass · daemon-fed live state · daemon writes limited to queue hold/resume and confirmed room cancel · copy buttons only copy text</footer>
 </main>
 <script>
 const $ = (id) => document.getElementById(id);
@@ -1265,6 +1267,7 @@ function roomDetailHtml(room, timelines, openTimelinePaths, derivedAt, roomsByPa
     <div class="section-heading">Timeline</div>
     ${timelineHtml(room, timelines, isTlOpen) || `<div class="ev">no timeline entries</div>`}
     ${copyButtonsHtml(room, running, terminal)}
+    ${typeof DAEMON_SERVED !== "undefined" && DAEMON_SERVED && running && room.name ? `<div class="verbs"><button class="glasswrite danger" data-glass-route="/rooms/${encodeURIComponent(room.name)}/cancel" data-glass-confirm="Cancel ${esc(room.label || room.name)}?">cancel room</button></div>` : ""}
     ${deliverables}`;
 }
 function detailPaneHtml(selectedKey, roomsByPath, conductor, timelines, openTimelinePaths, backOnclick, derivedAt){
@@ -1549,7 +1552,11 @@ function queueSlotsLineHtml(q){
   // lane at the cap, and a bare "4 / 4" would read as a guarantee the mechanism does not give.
   const caveat = "review lanes weigh 0 and start even at the cap";
   const held = q.held ? " · QUEUE HELD" : "";
+  const control = (typeof DAEMON_SERVED !== "undefined" && DAEMON_SERVED)
+    ? `<button class="glasswrite" data-glass-route="/queue/${q.held ? "resume" : "hold"}">${q.held ? "resume queue" : "hold queue"}</button>`
+    : "";
   return `<div class="queueboard-head">${esc(slots)} · ${esc(mem)} (${esc(band)})${esc(held)}</div>`
+    + (control ? `<div class="verbs">${control}</div>` : "")
     + `<div class="queueboard-note">${esc(caveat)}</div>`;
 }
 function queueLanesTableHtml(q){
@@ -1910,6 +1917,11 @@ function streamEventReceiptHtml(e){
       what = "Daemon stopped";
       where = "process lifecycle";
       status = "cancelled";
+      break;
+    case "glassWriteRefused":
+      what = `Write refused: ${e.outcomeDetail || "details unavailable"}`;
+      where = "events.jsonl";
+      status = "refused";
       break;
     default:
       what = `Event: ${e.kind || "unknown"}`;
@@ -2714,10 +2726,10 @@ const DAEMON_SERVED = !!document.querySelector('meta[name="baton-glass-source"][
 
 // #1946: the daemon's own delivery of the snapshot `applySnapshot` renders. The retired mailbox
 // path above remains only as dormant compatibility behavior.
-// GET-only and same-origin by construction: `/projection.json` is the file the daemon's
+// Reads remain GET-only and same-origin: `/projection.json` is the file the daemon's
 // FleetProjectionWriter already writes, served as-is, and `/events` is an EventSource (which cannot
-// be anything but a GET). Nothing here originates or arrests anything — C-11's read-only tripwire,
-// enforced structurally by FleetGlassReadOnlyTests.
+// be anything but a GET). #2078's three POST controls are wired separately in the DAEMON_SERVED
+// branch below and pinned by FleetGlassReadOnlyTests; nothing originates work.
 //
 // The SSE frame carries only a version number, deliberately: the page re-reads /projection.json on
 // each one, so the stream stays a change signal and the projection stays served from exactly one
@@ -3006,6 +3018,28 @@ function startDaemonFeed(applySnapshot){
     // before the browser has activated this worker for a later disconnected launch.
     startDaemonFeed(applySnapshot, recordFleetEvent);
     navigator.serviceWorker?.register("/fleet-glass-service-worker.js").catch(() => undefined);
+    // #2078: the server performs authorization; this branch only keeps controls off the artifact.
+    // No optimistic state: after the receipt, fetch and render the settled daemon projection.
+    document.addEventListener("click", async (event) => {
+      const button = event.target.closest && event.target.closest(".glasswrite");
+      if(!button) return;
+      const route = button.dataset.glassRoute;
+      if(!route || (button.dataset.glassConfirm && !window.confirm(button.dataset.glassConfirm))) return;
+      button.disabled = true;
+      try {
+        const response = await fetch(route, { method: "POST" });
+        const receipt = await response.text();
+        if(!response.ok) throw new Error(receipt || `Write refused (${response.status}).`);
+        banner(`<b>${esc(receipt)}</b> Refreshing fleet state.`);
+        const projection = await fetch("/projection.json", { cache: "no-store" });
+        if(!projection.ok) throw new Error(`Projection refresh failed (${projection.status}).`);
+        applySnapshot(await projection.json());
+      } catch(error) {
+        banner(`<b>Glass write failed.</b> ${esc(error && error.message ? error.message : String(error))}`);
+      } finally {
+        button.disabled = false;
+      }
+    });
     applyRoute();
     return;
   }
