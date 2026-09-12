@@ -701,6 +701,144 @@ public sealed class QueueSchedulerServiceTests
         }
     }
 
+    [Fact]
+    public async Task A_git_lock_inspection_access_error_fails_closed_without_starting_a_lane()
+    {
+        var home = CreateTempHome();
+        using var scope = BatonEnvironmentSnapshot.BeginScope(BatonEnvironmentSnapshot.Blank with { HomeOverride = home });
+        try
+        {
+            var workspace = Directory.CreateDirectory(Path.Combine(home, "workspace")).FullName;
+            Directory.CreateDirectory(Path.Combine(workspace, ".git"));
+            await QueueStore.MutateAsync(
+                BatonPaths.QueueFile,
+                state => state with { Items = [Item("denied") with { Workspace = workspace }] }, Ct);
+            var launched = false;
+            var service = new QueueSchedulerService(
+                (_, _) =>
+                {
+                    launched = true;
+                    return Task.FromResult(new QueueLaunchOutcome(null));
+                },
+                _ => Task.FromResult(0d),
+                () => 16d,
+                () => DateTimeOffset.UtcNow,
+                workspaceHead: (_, _) => Task.FromResult<string?>("89abcdef"),
+                workspaceLocks: candidateWorkspace => GitWorkspaceLockProbe.FindExisting(
+                    candidateWorkspace,
+                    path => path.EndsWith(".git", StringComparison.Ordinal)
+                        ? FileAttributes.Directory
+                        : throw new UnauthorizedAccessException("fixture denied")));
+
+            await service.TickOnceAsync(Ct);
+
+            Assert.False(launched);
+            var item = Assert.Single((await QueueStore.LoadAsync(BatonPaths.QueueFile, Ct)).Items);
+            Assert.Equal(QueueItemState.Failed, item.State);
+            Assert.Contains("could not inspect Git lock state", item.Error!, StringComparison.Ordinal);
+            Assert.Contains("fixture denied", item.Error, StringComparison.Ordinal);
+        }
+        finally
+        {
+            Cleanup(home);
+        }
+    }
+
+    [Fact]
+    public async Task A_linked_worktree_whose_gitdir_target_is_missing_fails_closed_without_starting_a_lane()
+    {
+        var home = CreateTempHome();
+        using var scope = BatonEnvironmentSnapshot.BeginScope(BatonEnvironmentSnapshot.Blank with { HomeOverride = home });
+        try
+        {
+            var workspace = Directory.CreateDirectory(Path.Combine(home, "workspace")).FullName;
+            File.WriteAllText(Path.Combine(workspace, ".git"), "gitdir: ../missing/workspace\n");
+            await QueueStore.MutateAsync(
+                BatonPaths.QueueFile,
+                state => state with { Items = [Item("dangling") with { Workspace = workspace }] }, Ct);
+            var launched = false;
+            var service = new QueueSchedulerService(
+                (_, _) =>
+                {
+                    launched = true;
+                    return Task.FromResult(new QueueLaunchOutcome(null));
+                },
+                _ => Task.FromResult(0d),
+                () => 16d,
+                () => DateTimeOffset.UtcNow,
+                workspaceHead: (_, _) => Task.FromResult<string?>("89abcdef"));
+
+            await service.TickOnceAsync(Ct);
+
+            Assert.False(launched);
+            var item = Assert.Single((await QueueStore.LoadAsync(BatonPaths.QueueFile, Ct)).Items);
+            Assert.Equal(QueueItemState.Failed, item.State);
+            Assert.Contains("could not inspect Git lock state", item.Error!, StringComparison.Ordinal);
+            Assert.Contains("missing", item.Error, StringComparison.OrdinalIgnoreCase);
+        }
+        finally
+        {
+            Cleanup(home);
+        }
+    }
+
+    [Fact]
+    public async Task A_cancel_that_wins_while_a_lock_is_inspected_remains_cancelled_and_launches_the_next_item()
+    {
+        var home = CreateTempHome();
+        using var scope = BatonEnvironmentSnapshot.BeginScope(BatonEnvironmentSnapshot.Blank with { HomeOverride = home });
+        try
+        {
+            var lockPath = Path.Combine(home, "index.lock");
+            File.WriteAllText(lockPath, "held");
+            await QueueStore.MutateAsync(
+                BatonPaths.QueueFile,
+                state => state with { Items = [Item("locked"), Item("next")] }, Ct);
+            var probeReached = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
+            var releaseProbe = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
+            var launches = new List<string>();
+            var probeCount = 0;
+            var service = new QueueSchedulerService(
+                (request, _) =>
+                {
+                    launches.Add(request.Item.Tag);
+                    return Task.FromResult(new QueueLaunchOutcome(null));
+                },
+                _ => Task.FromResult(0d),
+                () => 16d,
+                () => DateTimeOffset.UtcNow,
+                workspaceLocks: _ =>
+                {
+                    if (Interlocked.Increment(ref probeCount) == 1)
+                    {
+                        probeReached.TrySetResult(true);
+                        releaseProbe.Task.GetAwaiter().GetResult();
+                        return [lockPath];
+                    }
+
+                    return [];
+                });
+
+            var tick = Task.Run(() => service.TickOnceAsync(Ct), Ct);
+            await probeReached.Task.WaitAsync(Ct);
+            await QueueCommand.ExecuteAsync(new QueueOptions(QueueVerb.Cancel, Tag: "locked"), TextWriter.Null, Ct);
+            releaseProbe.TrySetResult(true);
+            await tick;
+
+            Assert.Equal(["next"], launches);
+            var items = (await QueueStore.LoadAsync(BatonPaths.QueueFile, Ct)).Items;
+            Assert.Equal(QueueItemState.Cancelled, items[0].State);
+            Assert.Equal(QueueItemState.Launched, items[1].State);
+            var facts = await QueueDecisionLedgerStore.ReadAllAsync(BatonPaths.QueueDecisionLedgerFile, Ct);
+            Assert.Contains(facts, fact => fact.Decision == QueueDecisionEntry.Cancelled && fact.Tag == "locked");
+            Assert.DoesNotContain(facts, fact => fact.Decision == QueueDecisionEntry.Failed && fact.Tag == "locked");
+        }
+        finally
+        {
+            Cleanup(home);
+        }
+    }
+
     private static QueueSchedulerService Service(
         Func<QueueLaunchRequest, CancellationToken, Task<QueueLaunchOutcome>> launch,
         double liveWeight = 0,
