@@ -55,6 +55,9 @@ public sealed class DeadPumpProbe : BackgroundService
     /// foreclosure this probe recorded is tellable from <c>baton resolve --close</c>'s.</summary>
     public const string DiagnosticName = "dead-pump probe";
 
+    /// <summary>The stable marker on this probe's <see cref="FlowEvent.ExecutionFailed"/> arm.</summary>
+    internal const string FailureReasonPrefix = "Arrested: pump dead —";
+
     private readonly DaemonSettings _settings;
 
     public DeadPumpProbe(DaemonSettings settings)
@@ -242,7 +245,7 @@ public sealed class DeadPumpProbe : BackgroundService
             {
                 // The lock's name is BatonPaths', never a literal here (#1271's tripwire).
                 var reason =
-                    $"Arrested: pump dead — no process holds this room's {BatonPaths.FlowLockFileName} and this "
+                    $"{FailureReasonPrefix} no process holds this room's {BatonPaths.FlowLockFileName} and this "
                         + $"execution never settled, so the engine was killed out from under it. Last journal event "
                         + $"{new DateTimeOffset(DateTime.SpecifyKind(lastEventUtc, DateTimeKind.Utc)):O}"
                         + (workerPidByExecution.TryGetValue(target.ExecutionId, out var workerPid)

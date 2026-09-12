@@ -2,8 +2,11 @@ using System.Diagnostics;
 using Baton.Domain;
 using Baton.Core.Internal;
 using Baton.Cli.Mcp;
+using Baton.Projection;
 using Baton.Queue;
 using Baton.Status;
+using Baton.Store;
+using Baton.Templates;
 using Baton.Vendors;
 using Microsoft.Extensions.Hosting;
 
@@ -538,16 +541,16 @@ public sealed class QueueSchedulerService : BackgroundService
     }
 
     /// <summary>
-    /// Done detection (spec/baton.md §13): every launched item whose room now carries a terminal
-    /// sentinel is moved out of <see cref="QueueItemState.Launched"/> by
+    /// Done detection (spec/baton.md §13): every launched item whose room now projects terminal is
+    /// moved out of <see cref="QueueItemState.Launched"/> by
     /// <see cref="ClassifyTerminal"/>. One queue read, one write for the whole batch — a per-item
     /// mutation would take the file lock once per launched item every tick.
     /// </summary>
     /// <remarks>
     /// Nothing here retries, resolves, or composes a continuation; the item is marked and left alone.
-    /// An item whose room is not terminal yet is untouched, which is also what happens to one whose
-    /// sentinel is momentarily unreadable — <c>TryReadAsync</c>'s "no answer yet" is indistinguishable
-    /// from "not finished", and treating it as either kind of verdict would be a guess.
+    /// The read precedence and the diagnostic gate that keeps this from racing ordinary terminal
+    /// finalization are stated once in spec/baton.md §13 (#2248); <see cref="TryProjectTerminalAsync"/>
+    /// is that fallback's implementation.
     /// <para>
     /// The one case where a missing sentinel IS a verdict is <see cref="IsRoomlessPastGrace"/>: a room
     /// that does not exist long after the launch was recorded can never produce one.
@@ -581,8 +584,9 @@ public sealed class QueueSchedulerService : BackgroundService
                     cancellationToken).ConfigureAwait(false);
             }
 
-            var sentinel = await TerminalSentinelWriter.TryReadAsync(item.RoomDirectory!, cancellationToken).ConfigureAwait(false);
-            if (sentinel is not null)
+            var terminal = await TerminalSentinelWriter.TryReadAsync(item.RoomDirectory!, cancellationToken).ConfigureAwait(false)
+                ?? await TryProjectTerminalAsync(item.RoomDirectory!, cancellationToken).ConfigureAwait(false);
+            if (terminal is not null)
             {
                 if (item.AttemptId is { } settledAttemptId)
                 {
@@ -590,10 +594,10 @@ public sealed class QueueSchedulerService : BackgroundService
                     // Launched row retries it next tick; if the queue write is interrupted afterward,
                     // the same key makes replay idempotent.
                     await _appendFleetEvent(
-                        AttemptSettledEvent(item, settledAttemptId, sentinel, _now()), cancellationToken)
+                        AttemptSettledEvent(item, settledAttemptId, terminal, _now()), cancellationToken)
                         .ConfigureAwait(false);
                 }
-                resolved[item.Tag] = ClassifyTerminal(sentinel, item.RoomDirectory!);
+                resolved[item.Tag] = ClassifyTerminal(terminal, item.RoomDirectory!);
                 continue;
             }
 
@@ -618,6 +622,56 @@ public sealed class QueueSchedulerService : BackgroundService
                     : i)
                 .ToList(),
         }, cancellationToken).ConfigureAwait(false);
+    }
+
+    /// <summary>
+    /// Projects the room's authoritative snapshot and journal into the same terminal view a sentinel
+    /// carries, without writing the room. This is the no-sentinel half of #2248; it exists because
+    /// <see cref="DeadPumpProbe"/> is deliberately bounded to one journal fact.
+    /// </summary>
+    private static async Task<WorkflowStatusView?> TryProjectTerminalAsync(
+        string roomDirectoryPath,
+        CancellationToken cancellationToken)
+    {
+        var snapshotPath = Path.Combine(roomDirectoryPath, BatonPaths.SnapshotFileName);
+        var logPath = Path.Combine(roomDirectoryPath, BatonPaths.FlowLogFileName);
+        if (!File.Exists(snapshotPath) || !File.Exists(logPath))
+        {
+            return null;
+        }
+
+        try
+        {
+            var snapshot = await SnapshotBinder.LoadFromFileAsync(snapshotPath, cancellationToken).ConfigureAwait(false);
+            var entries = await new FlowEventLogReader(logPath)
+                .ReadAllEntriesWithTimestampsAsync(cancellationToken).ConfigureAwait(false);
+            if (!entries.OfType<LogEntry.FlowLogEntry>().Any(entry => entry.Event switch
+                {
+                    FlowEvent.ExecutionFailed
+                    {
+                        FailureClassification: FailureClassification.Permanent,
+                        Reason: { } reason,
+                    } => reason.StartsWith(DeadPumpProbe.FailureReasonPrefix, StringComparison.Ordinal),
+                    FlowEvent.StepRetryForeclosed { ForeclosedBy: DeadPumpProbe.DiagnosticName } => true,
+                    _ => false,
+                }))
+            {
+                return null;
+            }
+
+            var events = entries
+                .OfType<LogEntry.FlowLogEntry>()
+                .Select(entry => entry.Event)
+                .ToList();
+            var state = StateProjector.Project(events, snapshot, ProjectionCheckpointStore.Load(roomDirectoryPath));
+            return state.Status == WorkflowStatus.Terminal
+                ? WorkflowStatusProjector.Project(state, snapshot, roomDirectoryPath, entries)
+                : null;
+        }
+        catch (Exception ex) when (ex is SnapshotLoadException or FlowEventLogReadException or IOException or UnauthorizedAccessException)
+        {
+            return null;
+        }
     }
 
     /// <summary>
