@@ -13,10 +13,10 @@ namespace Baton.Cli.Tests;
 /// could never actually provision) and not a happy-path adapter that never enters the audited branch at
 /// all (<c>DispatchCommandEndToEndTests</c>' <c>--output</c> test dispatches to an adapter the registry
 /// does not know, so the grant never flips). <see cref="ContractOutputWorkerAdapter"/> is registered
-/// under the key <c>"agy"</c> here so <c>RoleDispatch.ToBinding</c>'s
-/// <c>WorkerAdapterRegistry.Default</c> lookup resolves the real <c>AgyWorkerAdapter</c>'s
-/// <c>WithheldWritesReachTheOutbox</c> (false) and flips the grant to <c>AuditedNotEnforced</c>, while
-/// the process actually dispatched is still this file's fake — no live vendor needed.
+/// under the key <c>"command"</c> here so <c>RoleDispatch.ToBinding</c>'s
+/// <c>WorkerAdapterRegistry.Default</c> lookup resolves the real <see cref="CommandWorkerAdapter"/>'s
+/// default <c>WithheldWritesReachTheOutbox</c> answer (false) and flips the grant to
+/// <c>AuditedNotEnforced</c>, while the process actually dispatched is still this file's fake.
 /// </summary>
 // #1524: enrolled for Console.Out only now, per SerializedEnvironmentCollection's remarks.
 [Collection(SerializedEnvironmentCollection.Name)]
@@ -42,15 +42,11 @@ public sealed class DispatchAuditedWorktreeAcceptanceTests : IDisposable
     }
 
     [Fact]
-    public async Task Dispatching_fact_check_on_agy_against_a_real_git_workspace_auto_provisions_and_satisfies_the_contract_with_output()
+    public async Task Dispatching_fact_check_on_a_non_outbox_adapter_against_a_real_git_workspace_auto_provisions_and_satisfies_the_contract_with_output()
     {
-        // #1456: this file used "review" for the flat write_files:false/run_shell_commands:false/
-        // network_access:false shape every read-only role carried before that change. review no
-        // longer has it (a scoped shell now, refused outright on agy — exercised against the real
-        // adapter in AgyWorkerAdapterTests' scoped-shell refusal fact, not in this file, whose fakes
-        // always translate grants successfully); fact-check still does, and is what this R1
-        // acceptance path (audited-write worktree provisioning) is actually about -- a shape any
-        // read-only, write-widened-on-agy role exercises identically.
+        // #1456: fact-check retains the flat write_files:false/run_shell_commands:false/
+        // network_access:false shape this R1 acceptance path needs. The non-outbox adapter makes
+        // that role exercise audited-write worktree provisioning without depending on a live vendor.
         var testRoot = Path.Combine(Path.GetTempPath(), $"dispatch-agy-e2e-{Guid.NewGuid():N}");
         try
         {
@@ -60,10 +56,10 @@ public sealed class DispatchAuditedWorktreeAcceptanceTests : IDisposable
             var specPath = await WriteSpecAsync(testRoot, "Confirm the facts.");
             var roomDirectory = Path.Combine(testRoot, "task");
             var outputPath = Path.Combine(testRoot, "findings-out.md");
-            var adapters = await AgyFakeAdaptersAsync(testRoot);
+            var adapters = await NonOutboxFakeAdaptersAsync(testRoot);
 
             var options = new DispatchOptions(
-                "fact-check", specPath, roomDirectory, Adapter: "agy", WorkspaceDirectory: workspace, OutputPath: outputPath);
+                "fact-check", specPath, roomDirectory, Adapter: CommandWorkerAdapter.AdapterName, WorkspaceDirectory: workspace, OutputPath: outputPath);
 
             var result = await DispatchCommand.ExecuteAsync(options, adapters, TestContext.Current.CancellationToken, evaluateRunway: RunwayTestGate.Admit);
 
@@ -85,7 +81,7 @@ public sealed class DispatchAuditedWorktreeAcceptanceTests : IDisposable
     }
 
     [Fact]
-    public async Task Dispatching_fact_check_on_agy_prints_the_audited_write_grant_not_a_bare_write()
+    public async Task Dispatching_fact_check_on_a_non_outbox_adapter_prints_the_audited_write_grant_not_a_bare_write()
     {
         // #1355: the printed grant line has to name the audited-not-enforced write it actually
         // resolved to, not just "write" -- otherwise an invoking agent relaying the line to its own
@@ -100,9 +96,10 @@ public sealed class DispatchAuditedWorktreeAcceptanceTests : IDisposable
 
             var specPath = await WriteSpecAsync(testRoot, "Confirm the facts.");
             var roomDirectory = Path.Combine(testRoot, "task");
-            var adapters = await AgyFakeAdaptersAsync(testRoot, translatesGrants: true);
+            var adapters = await NonOutboxFakeAdaptersAsync(testRoot, translatesGrants: true);
 
-            var options = new DispatchOptions("fact-check", specPath, roomDirectory, Adapter: "agy", WorkspaceDirectory: workspace);
+            var options = new DispatchOptions(
+                "fact-check", specPath, roomDirectory, Adapter: CommandWorkerAdapter.AdapterName, WorkspaceDirectory: workspace);
 
             using var consoleOutput = new StringWriter();
             Console.SetOut(consoleOutput);
@@ -120,15 +117,11 @@ public sealed class DispatchAuditedWorktreeAcceptanceTests : IDisposable
         }
     }
 
-    // #1456: review's own shell-grant refusal on agy is asserted where it is real -- this file's
-    // fakes implement IPermissionGrantTranslator to always succeed (GrantConsumingContractOutput-
-    // WorkerAdapter.TryTranslatePermissionGrant, deliberately, for the two grant-line tests above),
-    // so dispatching "review" through them here would prove nothing about the real AgyWorkerAdapter.
-    // The real adapter's refusal is exercised directly in AgyWorkerAdapterTests (its scoped-shell
-    // refusal fact).
+    // #1456: review's scoped-shell shape is covered at its own adapter boundaries. This class uses
+    // fact-check because its flat non-shell grant isolates the audited-worktree behavior under test.
 
     [Fact]
-    public async Task Dispatching_fact_check_on_agy_against_a_workspace_that_is_itself_a_worktree_with_an_untracked_file_still_succeeds()
+    public async Task Dispatching_fact_check_on_a_non_outbox_adapter_against_a_workspace_that_is_itself_a_worktree_with_an_untracked_file_still_succeeds()
     {
         // The red test for finding 1/R1: before this fix, IsWorktree(workspace) == true routed the
         // caller's OWN directory in as WorkingDirectory (stamped IsWorktree: true without this run
@@ -152,9 +145,10 @@ public sealed class DispatchAuditedWorktreeAcceptanceTests : IDisposable
 
             var specPath = await WriteSpecAsync(testRoot, "Confirm the facts.");
             var roomDirectory = Path.Combine(testRoot, "task");
-            var adapters = await AgyFakeAdaptersAsync(testRoot);
+            var adapters = await NonOutboxFakeAdaptersAsync(testRoot);
 
-            var options = new DispatchOptions("fact-check", specPath, roomDirectory, Adapter: "agy", WorkspaceDirectory: workspace);
+            var options = new DispatchOptions(
+                "fact-check", specPath, roomDirectory, Adapter: CommandWorkerAdapter.AdapterName, WorkspaceDirectory: workspace);
 
             var result = await DispatchCommand.ExecuteAsync(options, adapters, TestContext.Current.CancellationToken, evaluateRunway: RunwayTestGate.Admit);
 
@@ -196,9 +190,10 @@ public sealed class DispatchAuditedWorktreeAcceptanceTests : IDisposable
             var fakeAdapter = new ContractOutputWorkerAdapter(
                 satisfyOutputs: true,
                 capabilities: new List<WorkerCapabilityItem> { new("untracked-skill", "skill", "Untracked skill") });
-            var adapters = new Dictionary<string, IWorkerAdapter> { ["agy"] = fakeAdapter };
+            var adapters = new Dictionary<string, IWorkerAdapter> { [CommandWorkerAdapter.AdapterName] = fakeAdapter };
 
-            var options = new DispatchOptions("fact-check", specPath, roomDirectory, Adapter: "agy", WorkspaceDirectory: workspace);
+            var options = new DispatchOptions(
+                "fact-check", specPath, roomDirectory, Adapter: CommandWorkerAdapter.AdapterName, WorkspaceDirectory: workspace);
 
             using var consoleOutput = new StringWriter();
             Console.SetOut(consoleOutput);
@@ -249,10 +244,13 @@ public sealed class DispatchAuditedWorktreeAcceptanceTests : IDisposable
 
             var specPath = await WriteSpecAsync(testRoot, "Confirm the facts.");
             var roomDirectory = Path.Combine(testRoot, "task");
-            var adapters = new Dictionary<string, IWorkerAdapter> { ["agy"] = new ContractOutputWorkerAdapter(satisfyOutputs: true) };
+            var adapters = new Dictionary<string, IWorkerAdapter>
+            {
+                [CommandWorkerAdapter.AdapterName] = new ContractOutputWorkerAdapter(satisfyOutputs: true),
+            };
 
             var options = new DispatchOptions(
-                "fact-check", specPath, roomDirectory, Adapter: "agy", WorkspaceDirectory: workspace,
+                "fact-check", specPath, roomDirectory, Adapter: CommandWorkerAdapter.AdapterName, WorkspaceDirectory: workspace,
                 Skills: ["house-style"]);
 
             using var consoleOutput = new StringWriter();
@@ -308,9 +306,9 @@ public sealed class DispatchAuditedWorktreeAcceptanceTests : IDisposable
     }
 
     /// <summary>
-    /// Dispatches <c>fact-check</c> on the <c>agy</c> tag — so the real registry entry's
-    /// <c>WithheldWritesReachTheOutbox: false</c> still widens the grant and provisions the worktree
-    /// the disclosure describes — against a fake that answers
+    /// Dispatches <c>fact-check</c> on the <c>command</c> tag — so the real registry entry's default
+    /// <c>WithheldWritesReachTheOutbox: false</c> widens the grant and provisions the worktree the
+    /// disclosure describes — against a fake that answers
     /// <paramref name="bindsDispatchedWorkspaceReadable"/>, and returns everything the dispatch printed
     /// alongside the workspace path it was pointed at.
     /// </summary>
@@ -327,12 +325,12 @@ public sealed class DispatchAuditedWorktreeAcceptanceTests : IDisposable
             var roomDirectory = Path.Combine(testRoot, "task");
             var adapters = new Dictionary<string, IWorkerAdapter>
             {
-                ["agy"] = new ContractOutputWorkerAdapter(
+                [CommandWorkerAdapter.AdapterName] = new ContractOutputWorkerAdapter(
                     satisfyOutputs: true, bindsDispatchedWorkspaceReadable: bindsDispatchedWorkspaceReadable),
             };
 
             var options = new DispatchOptions(
-                "fact-check", specPath, roomDirectory, Adapter: "agy", WorkspaceDirectory: workspace);
+                "fact-check", specPath, roomDirectory, Adapter: CommandWorkerAdapter.AdapterName, WorkspaceDirectory: workspace);
 
             using var consoleOutput = new StringWriter();
             Console.SetOut(consoleOutput);
@@ -354,14 +352,14 @@ public sealed class DispatchAuditedWorktreeAcceptanceTests : IDisposable
     }
 
     /// <param name="translatesGrants">
-    /// F2/F3: the printed-grant-line test needs the bound "agy" adapter to actually consume a grant
+    /// F2/F3: the printed-grant-line test needs the bound "command" adapter to actually consume a grant
     /// (<see cref="IPermissionGrantTranslator"/>) or <see cref="DispatchCommand"/> now prints nothing
     /// for it. The other two tests here assert on run outcome, not the grant line, so they keep the
     /// plain <see cref="ContractOutputWorkerAdapter"/> that sits outside that population -- narrower
     /// than opting every acceptance test here into WorkerBindingResolver's grant-consuming refusal
     /// checks for no reason.
     /// </param>
-    private static async Task<IReadOnlyDictionary<string, IWorkerAdapter>> AgyFakeAdaptersAsync(
+    private static async Task<IReadOnlyDictionary<string, IWorkerAdapter>> NonOutboxFakeAdaptersAsync(
         string testRoot, bool translatesGrants = false)
     {
         // A minimal conforming ReviewVerdict (decision 0043: the engine checks only that it PARSES as
@@ -372,11 +370,11 @@ public sealed class DispatchAuditedWorktreeAcceptanceTests : IDisposable
             verdictFixture, """{"reviewedRef":"HEAD","decision":"approve","findings":[]}""", TestContext.Current.CancellationToken);
 
         var outputFixtures = new Dictionary<string, string> { ["verdict.json"] = verdictFixture };
-        IWorkerAdapter agyAdapter = translatesGrants
+        IWorkerAdapter adapter = translatesGrants
             ? new GrantConsumingContractOutputWorkerAdapter(satisfyOutputs: true, outputFixtures)
             : new ContractOutputWorkerAdapter(satisfyOutputs: true, outputFixtures);
 
-        return new Dictionary<string, IWorkerAdapter> { ["agy"] = agyAdapter };
+        return new Dictionary<string, IWorkerAdapter> { [CommandWorkerAdapter.AdapterName] = adapter };
     }
 
     private static async Task<string> WriteSpecAsync(string directory, string content)
