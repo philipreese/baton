@@ -2,6 +2,8 @@ using Baton.Cli.Daemon;
 using Baton.Domain;
 using Baton.Queue;
 using Baton.Status;
+using Baton.Store;
+using Baton.Templates;
 using Xunit;
 
 namespace Baton.Cli.Tests.Daemon;
@@ -1199,6 +1201,107 @@ public sealed class QueueSchedulerServiceTests
             var item = Assert.Single((await QueueStore.LoadAsync(BatonPaths.QueueFile, Ct)).Items);
             Assert.Equal(QueueItemState.Done, item.State);
             Assert.Null(item.Error);
+        }
+        finally
+        {
+            Cleanup(home);
+        }
+    }
+
+    /// <summary>
+    /// #2248: <see cref="DeadPumpProbe"/> deliberately records only the room's terminal journal fact,
+    /// never <c>terminal.json</c>. Done detection must still consume that authoritative projection or
+    /// an adopted lane whose engine died stays launched forever.
+    /// </summary>
+    [Theory]
+    [InlineData(true)]
+    [InlineData(false)]
+    public async Task Done_detection_only_reconciles_a_terminal_journal_without_a_sentinel_for_the_dead_pump(
+        bool deadPumpDiagnostic)
+    {
+        var home = CreateTempHome();
+        using var scope = BatonEnvironmentSnapshot.BeginScope(BatonEnvironmentSnapshot.Blank with { HomeOverride = home });
+        try
+        {
+            var room = Path.Combine(home, "rooms", "queue-dead-pump");
+            Directory.CreateDirectory(room);
+            var stepId = new StepId("implement");
+            var snapshot = SnapshotBinder.Bind(new WorkflowDefinition(
+                new WorkflowTemplateId("dead-pump-queue-reconciliation"),
+                1,
+                [new WorkflowStepDefinition(stepId, "implement", [], ["changes.md"], [], new RetryPolicy(1))]));
+            await SnapshotBinder.PersistAsync(snapshot, Path.Combine(room, BatonPaths.SnapshotFileName), Ct);
+
+            var executionId = new ExecutionId("execution-dead-pump");
+            await using (var writer = new FlowEventLogWriter(Path.Combine(room, BatonPaths.FlowLogFileName)))
+            {
+                await writer.AppendAsync(
+                    new FlowEvent.ExecutionRequestAccepted(
+                        new ExecutionRequest(
+                            executionId,
+                            new WorkflowId("workflow-dead-pump"),
+                            stepId,
+                            "implement",
+                            Inputs: [],
+                            Outputs: ["changes.md"],
+                            Timeout: TimeSpan.FromMinutes(30),
+                            Environment: [],
+                            UpstreamExecutionIds: new Dictionary<StepId, ExecutionId>()),
+                        EnginePid: 999_999,
+                        EngineStartTime: null),
+                    Ct);
+                await writer.AppendAsync(
+                    new FlowEvent.ExecutionFailed(
+                        executionId,
+                        FailureClassification.Permanent,
+                        deadPumpDiagnostic
+                            ? $"{DeadPumpProbe.FailureReasonPrefix} recorded by dead-pump probe"
+                            : "ordinary permanent failure still completing terminal finalization"),
+                    Ct);
+            }
+
+            var attemptId = new FleetAttemptId("attempt-dead-pump");
+            await QueueStore.MutateAsync(
+                BatonPaths.QueueFile,
+                s => s with
+                {
+                    Items = [Item() with
+                    {
+                        State = QueueItemState.Launched,
+                        RoomDirectory = room,
+                        AttemptId = attemptId,
+                    }],
+                },
+                Ct);
+            var events = new List<FleetEventDraft>();
+            var service = new QueueSchedulerService(
+                (_, _) => Task.FromResult(new QueueLaunchOutcome(null)),
+                _ => Task.FromResult(0d),
+                () => 16d,
+                () => DateTimeOffset.UtcNow,
+                appendFleetEvent: (draft, _) =>
+                {
+                    events.Add(draft);
+                    return Task.FromResult<FleetEvent?>(null);
+                });
+
+            await service.ResolveFinishedItemsAsync(Ct);
+
+            Assert.False(File.Exists(Path.Combine(room, TerminalSentinelWriter.TerminalSentinelFileName)));
+            var item = Assert.Single((await QueueStore.LoadAsync(BatonPaths.QueueFile, Ct)).Items);
+            if (deadPumpDiagnostic)
+            {
+                Assert.Equal(QueueItemState.Failed, item.State);
+                Assert.Contains("settled Failed", item.Error, StringComparison.Ordinal);
+                var settled = Assert.Single(events, e => e.Kind == FleetEventKind.AttemptSettled);
+                Assert.Equal(attemptId, settled.AttemptId);
+                Assert.Equal(executionId, settled.ExecutionId);
+            }
+            else
+            {
+                Assert.Equal(QueueItemState.Launched, item.State);
+                Assert.DoesNotContain(events, e => e.Kind == FleetEventKind.AttemptSettled);
+            }
         }
         finally
         {

@@ -169,9 +169,10 @@ public static class QueueLauncher
     /// <remarks>
     /// <para>
     /// <b>Nothing here changes a row.</b> A dead engine is left exactly as found for the dead-pump
-    /// probe (<c>DeadPumpProbe</c>, #2094) to record, and for done detection to resolve once a
-    /// sentinel exists. A room with no probeable identity — a lane still in pre-provision when the
-    /// last daemon died, or a journal this cannot read — is left as found too, and what that costs
+    /// probe (<c>DeadPumpProbe</c>, #2094) to record, and for done detection to resolve from that
+    /// terminal journal projection (#2248). A room with no probeable identity — a lane still in
+    /// pre-provision when the last daemon died, or a journal this cannot read — is left as found too,
+    /// and what that costs
     /// is stated rather than assumed: a lane that goes on to write its ledger and snapshot is seen by
     /// the same probe on a later tick, but a room that exists and never gets a ledger has NO closer
     /// (the roomless sweep needs the room absent, the probe needs a ledger, adoption runs once per

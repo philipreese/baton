@@ -7495,8 +7495,14 @@ row a hand-dispatched one does; without that it would be invisible to `fleet_sta
 path and indistinguishable from a lane that spent nothing.
 
 An item is **done** when its room reaches a terminal state, read from the room itself — no `.done`
-sentinel files, so a restarted daemon resolves an item it never launched. **The fate comes from the
-room's own outcome word**, the one `WorkflowOutcome` writes into the sentinel (§3): the two
+sentinel files, so a restarted daemon resolves an item it never launched. `terminal.json` is the fast
+path; when it is absent or unreadable and the journal carries the dead-pump probe's diagnostic, done
+detection projects the persisted snapshot and journal read-only and acts only when that projection is
+Terminal (#2248). The diagnostic gate keeps this fallback from racing an ordinary lane's terminal
+finalization. It consumes the probe's deliberately journal-only fact (§7); every other missing,
+unreadable, or non-terminal projection remains launched rather than being guessed complete. **The
+fate comes from the room's own outcome word**, projected into the same `WorkflowStatusView` the
+sentinel carries (§3): the two
 succeeded-shaped words are done — `Succeeded`, and `FinishedDuringTeardown` (#1945, §3's row) — and
 Cancelled / Failed / Indeterminate — and any word this reader does not know, including a
 sentinel carrying none — are **failed, with the room id and that word**. Not from the sentinel's
@@ -7587,9 +7593,10 @@ measurement it rests on, and §7's reaper paragraph the line it must not cross.
   `baton status` and `baton resume` ask). **Alive**: the daemon attaches to that process, re-confirms
   the start time on the handle it actually holds (a pid alone is a number, and the OS can reuse one
   in the gap after the probe), and supervises it exactly as if it had launched it. **Dead**: the row
-  is left as found — the dead-pump probe (§7) records the arrest, and `baton resolve`/`baton
-  redispatch` are the operator's verbs from there. **Unknown** (no ledger yet, no pid stamped, an
-  unreadable journal): left as found, and what closes it depends on what the room goes on to write.
+  is left as found — the dead-pump probe (§7) records the arrest, and done detection consumes that
+  terminal journal projection without manufacturing a sentinel (#2248). `baton redispatch` remains
+  the operator's explicit retry verb after the item fails. **Unknown** (no ledger yet, no pid stamped,
+  an unreadable journal): left as found, and what closes it depends on what the room goes on to write.
   A lane that was mid-provision and then runs writes its ledger and snapshot, so the dead-pump probe
   sees it on a later tick and it degrades onto the Dead path above. **A room that exists but never
   gets a ledger — the lane died before its first journal write — has no closer at all**: the
@@ -7601,8 +7608,8 @@ measurement it rests on, and §7's reaper paragraph the line it must not cross.
   terminal yet, read the room", which is what each of these rows still is.
 - *What stays true.* Stopping the daemon still does not arrest a launched lane, and the daemon still
   never re-drives a room (§7). The cost that remains, stated: a lane whose engine died between two
-  daemons is closed out by the dead-pump probe's fact plus an operator verb, not by the queue on its
-  own — its row reads `launched` until the room carries a sentinel.
+  daemons is closed out by the dead-pump probe's fact plus the queue's read-only terminal projection;
+  nothing retries or redispatches without an operator verb.
 
 **The launch is recorded before it is started, under the same token it runs on.** The item is marked
 launched — with the room the scheduler picks and hands to the dispatch — *before* the dispatch
