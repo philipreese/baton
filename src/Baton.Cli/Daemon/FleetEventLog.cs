@@ -27,6 +27,7 @@ public enum FleetEventKind
     DeploymentObserved,
     DaemonStarted,
     DaemonStopped,
+    GlassWriteRefused,
 }
 
 internal sealed class FleetEventKindJsonConverter : JsonConverter<FleetEventKind>

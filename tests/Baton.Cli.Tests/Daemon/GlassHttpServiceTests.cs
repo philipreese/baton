@@ -55,7 +55,13 @@ public sealed class GlassHttpServiceTests : IDisposable
         string EventsRolloverPath,
         StringWriter Log);
 
-    private async Task<Harness> StartAsync(CancellationToken cancellationToken, bool listen = true, string? projection = null)
+    private async Task<Harness> StartAsync(
+        CancellationToken cancellationToken,
+        bool listen = true,
+        string? projection = null,
+        string? operatorLogin = null,
+        Func<bool, CancellationToken, Task<string>>? setQueueHold = null,
+        Func<string, CancellationToken, Task<string>>? cancelRoom = null)
     {
         var projectionPath = Path.Combine(_tempHome, "projection.json");
         var eventsPath = Path.Combine(_tempHome, Baton.Status.BatonPaths.FleetEventsFileName);
@@ -68,13 +74,23 @@ public sealed class GlassHttpServiceTests : IDisposable
         var port = FreePort();
         var log = new StringWriter();
         var service = new GlassHttpService(
-            new DaemonSettings { Glass = new GlassListenerSettings { Listen = listen, Port = port } },
+            new DaemonSettings
+            {
+                Glass = new GlassListenerSettings
+                {
+                    Listen = listen,
+                    Port = port,
+                    OperatorLogin = operatorLogin,
+                },
+            },
             projectionPath,
             TimeSpan.FromMilliseconds(25),
             log,
             eventsPath,
             eventsRolloverPath,
-            eventsMaxBytes: 100_000);
+            eventsMaxBytes: 100_000,
+            setQueueHold: setQueueHold,
+            cancelRoom: cancelRoom);
 
         await service.StartAsync(cancellationToken);
 
@@ -366,7 +382,7 @@ public sealed class GlassHttpServiceTests : IDisposable
     }
 
     [Fact]
-    public async Task Refuses_every_method_but_GET_and_404s_an_unknown_route()
+    public async Task Preserves_GET_routes_and_refuses_unapproved_methods_and_POST_routes()
     {
         using var cts = new CancellationTokenSource(TimeSpan.FromMinutes(1));
         var harness = await StartAsync(cts.Token, projection: """{"rooms":[]}""");
@@ -374,11 +390,24 @@ public sealed class GlassHttpServiceTests : IDisposable
         {
             using var client = new HttpClient { Timeout = TimeSpan.FromSeconds(30) };
 
-            foreach (var method in new[] { HttpMethod.Post, HttpMethod.Put, HttpMethod.Delete })
+            foreach (var method in new[] { HttpMethod.Put, HttpMethod.Delete })
             {
                 var response = await client.SendAsync(
                     new HttpRequestMessage(method, $"{harness.BaseUrl}/projection.json"), cts.Token);
                 Assert.Equal(HttpStatusCode.MethodNotAllowed, response.StatusCode);
+            }
+
+            foreach (var path in new[]
+                     {
+                         "/projection.json",
+                         "/rooms/room-a/resolve",
+                         "/rooms/room-a/cancel/extra",
+                         "/rooms/../cancel",
+                         "/rooms/room-a%2Fchild/cancel",
+                     })
+            {
+                var response = await client.PostAsync($"{harness.BaseUrl}{path}", null, cts.Token);
+                Assert.Equal(HttpStatusCode.NotFound, response.StatusCode);
             }
 
             // The drill-down payloads C-11 assigns to slice 2 are not served by this slice, and the
@@ -388,6 +417,92 @@ public sealed class GlassHttpServiceTests : IDisposable
                 var response = await client.GetAsync($"{harness.BaseUrl}{path}", cts.Token);
                 Assert.Equal(HttpStatusCode.NotFound, response.StatusCode);
             }
+        }
+        finally
+        {
+            await harness.Service.StopAsync(CancellationToken.None);
+        }
+    }
+
+    [Fact]
+    public async Task Executes_only_the_three_approved_POST_routes_for_the_matching_operator()
+    {
+        using var cts = new CancellationTokenSource(TimeSpan.FromMinutes(1));
+        var holds = new List<bool>();
+        var cancelled = new List<string>();
+        var harness = await StartAsync(
+            cts.Token,
+            projection: """{"rooms":[]}""",
+            operatorLogin: "operator@example.com",
+            setQueueHold: (held, _) =>
+            {
+                holds.Add(held);
+                return Task.FromResult(held ? "Queue held." : "Queue resumed.");
+            },
+            cancelRoom: (room, _) =>
+            {
+                cancelled.Add(room);
+                return Task.FromResult($"Room {room} cancelled.");
+            });
+        try
+        {
+            using var client = new HttpClient { Timeout = TimeSpan.FromSeconds(30) };
+
+            foreach (var path in new[] { "/queue/hold", "/queue/hold", "/queue/resume", "/rooms/room-a/cancel", "/rooms/room-a/cancel" })
+            {
+                using var request = new HttpRequestMessage(HttpMethod.Post, $"{harness.BaseUrl}{path}");
+                request.Headers.Add(GlassWriteGate.IdentityHeader, "operator@example.com");
+                using var response = await client.SendAsync(request, cts.Token);
+                Assert.Equal(HttpStatusCode.OK, response.StatusCode);
+            }
+
+            Assert.Equal([true, true, false], holds);
+            Assert.Equal(["room-a", "room-a"], cancelled);
+        }
+        finally
+        {
+            await harness.Service.StopAsync(CancellationToken.None);
+        }
+    }
+
+    [Theory]
+    [InlineData(null, null)]
+    [InlineData("operator@example.com", null)]
+    [InlineData("operator@example.com", "other@example.com")]
+    public async Task Refused_writes_do_not_mutate_and_append_one_redacted_fact(
+        string? operatorLogin,
+        string? requestLogin)
+    {
+        using var cts = new CancellationTokenSource(TimeSpan.FromMinutes(1));
+        var mutationCount = 0;
+        var harness = await StartAsync(
+            cts.Token,
+            projection: """{"rooms":[]}""",
+            operatorLogin: operatorLogin,
+            setQueueHold: (_, _) =>
+            {
+                mutationCount++;
+                return Task.FromResult("unexpected");
+            });
+        try
+        {
+            using var client = new HttpClient { Timeout = TimeSpan.FromSeconds(30) };
+            using var request = new HttpRequestMessage(HttpMethod.Post, $"{harness.BaseUrl}/queue/hold");
+            if (requestLogin is not null)
+            {
+                request.Headers.Add(GlassWriteGate.IdentityHeader, requestLogin);
+            }
+
+            using var response = await client.SendAsync(request, cts.Token);
+            Assert.Equal(HttpStatusCode.Forbidden, response.StatusCode);
+            Assert.Equal(0, mutationCount);
+
+            var rows = await File.ReadAllLinesAsync(harness.EventsPath, cts.Token);
+            var row = Assert.Single(rows);
+            Assert.Contains("\"kind\":\"glassWriteRefused\"", row, StringComparison.Ordinal);
+            Assert.Contains("route=/queue/hold", row, StringComparison.Ordinal);
+            Assert.DoesNotContain("operator@example.com", row, StringComparison.Ordinal);
+            Assert.DoesNotContain("other@example.com", row, StringComparison.Ordinal);
         }
         finally
         {

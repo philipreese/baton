@@ -386,6 +386,16 @@ check("(control) an unheld queue does not",
   });
   check("producer-shaped uppercase check conclusions render as success",
         actualCheckReceipt.includes(">SUCCESS<") && actualCheckReceipt.includes("receipt-status-success"));
+
+  const writeRefusedReceipt = streamEventReceiptHtml({
+    id: 7, kind: "glassWriteRefused", outcomeDetail: "route=/queue/hold; login=<redacted>",
+    at: "2026-09-12T03:00:00Z",
+  });
+  check("glass write refusal renders route, target, and refused badge without identity leak",
+        writeRefusedReceipt.includes("Write refused: route=/queue/hold; login=&lt;redacted&gt;")
+        && writeRefusedReceipt.includes("recorded in events.jsonl")
+        && writeRefusedReceipt.includes("REFUSED")
+        && !writeRefusedReceipt.includes("operator@example.com"));
 }
 
 // -- #2241 identity grouping, unknown fields, current vs retained history (#2200), and deduplication --

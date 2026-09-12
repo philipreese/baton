@@ -98,10 +98,10 @@ rather than an artifact you re-publish. Off unless you ask for it — add to `~/
 (`$BATON_HOME/settings.json`) and restart the daemon:
 
 ```json
-{ "Glass": { "Listen": true, "Port": 8420 } }
+{ "Glass": { "Listen": true, "Port": 8420, "OperatorLogin": "you@example.com" } }
 ```
 
-`Listen` and `Port` are documented on `GlassListenerSettings`
+`Listen`, `Port`, and `OperatorLogin` are documented on `GlassListenerSettings`
 (`src/Baton.Vendors/DaemonSettingsStore.cs`), which is also where the default port lives — this
 snippet is an example, not a second copy of the schema. The daemon logs the URLs it bound, once, at
 startup.
@@ -139,9 +139,11 @@ Whatever proxies in front of the daemon needs pointing at a prefix that actually
 urlacl case above is one way it can drift); `spec/baton.md` §7 states what that costs when it
 drifts and where to read `glassBoundPrefixes` off the heartbeat to catch it.
 
-The routes are `/` (the page), `/projection.json` (the fleet projection, as-is) and `/events` (a
-Server-Sent Events stream of its changes). All GET, all read-only. **You get the fleet board and
-nothing beneath it** — stdout tails, room artifacts and timelines are C-11's next slice.
+The read routes are `/` (the page), `/projection.json` (the fleet projection, as-is) and `/events`
+(a Server-Sent Events stream of its changes). With an exact `OperatorLogin`, the daemon page also
+offers identity-gated `POST /queue/hold`, `/queue/resume`, and `/rooms/<id>/cancel`; cancel requires
+confirmation. Missing or mismatched identity fails closed and reads keep working. No other writes
+are exposed. The full boundary is `spec/baton.md` §11 C-11.
 
 Validation evidence: the conductor tested the actual final-a1908337 JavaScript in in-app Chromium on
 isolated localhost. The first online visit activated the service worker; a hanging navigation showed

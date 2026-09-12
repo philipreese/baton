@@ -5661,13 +5661,13 @@ claims and does not derive.
 create or apply a label, merge a PR, or call `gh api`, on either vendor; the label itself is applied
 by the operator, per C-15 (#1730), not restated here.**
 
-**#2114 (console decision round, 2026-09-08; this paragraph is the ruling's one record — the issue
-body transcribes it, C-11 points here): a lane is contained by its role grant, not by the daemon's
-write gate — and that same deny list is where the containment lives.** The tailnet page's write gate
-(C-11's plane) identifies *tailnet* callers by the Tailscale identity header; *loopback* callers are
-trusted as the operator's own machine; a lane is a loopback caller, so the gate cannot tell it from
-the operator. `implement`/`janitor`'s standing deny list therefore also closes the daemon's write
-verbs and the shell HTTP clients a lane could reach the daemon port with. **The shape is a deny on the
+**#2114, amended by #2078 after the measured Serve-header decision (2026-09-12): a lane is contained
+by its role grant, not by the daemon's write gate — and that same deny list is where the containment
+lives.** C-11's gate accepts only a loopback backend request carrying the exact configured Tailscale
+login. A process already on the trusted host can forge both, so a lane can still look like the
+operator; the gate is the remote-user boundary, not a worker sandbox. `implement`/`janitor`'s
+standing deny list therefore also closes the daemon's write verbs and the shell HTTP clients a lane
+could reach the daemon port with. **The shape is a deny on the
 whole `baton` head with an explicit read allowlist, not a list of write verbs** (#2128 review H1/H2):
 `denied_shell_command_patterns` carries `baton *`, and the new `denied_shell_command_exceptions`
 names verbs excepted from the `baton` head deny (today: reads only; #2100 is the intended
@@ -6192,21 +6192,18 @@ quota: Cloudflare's free KV tier caps at 1,000 writes/day; a live tail at the pu
 operator's own tailnet both walls vanish: the bytes never leave the network, and no third-party
 quota is in the path.
 
-**What §6's "never a second application" still governs, and what it no longer does.** That ruling
-That historical distinction stood, un-softened, for the mailbox plane: drill-down reachable from a conversation is `room_detail`
+**What §6's "never a second application" still governs, and what it no longer does.** That
+historical distinction stood, un-softened, for the mailbox plane: drill-down reachable from a conversation is `room_detail`
 in the same MCP host, and no page grew there under the retired design. This historical entry ruled in exactly one additional surface —
-a read-only diagnostic page on the private plane — because the mailbox physically cannot carry its
+a diagnostic page on the private plane — because the mailbox physically could not carry its
 payload. The tripwire this entry inherits from §6 is restated for the new plane: the page is a
-**diagnostic**, not an application. It renders what the room record already says; v2.5 ships it
-read-only. The only interactions it may ever gain are the two **arresting** reflexes — cancel and
-redispatch-unchanged — behind confirm, executed through the same engine verbs as any terminal and
-recorded as room facts, so every observer sees the transition through the room record. The
+**diagnostic**, not a general application. #2078 adds only queue hold/resume and room cancel; cancel
+is behind confirmation, and all three reuse the existing commands so observers see their ordinary
+durable state transitions. Redispatch-unchanged was considered earlier and is not in this slice. The
 conductor/orchestrator remains the only **originator** of work: dispatch-new-lane, amended re-briefs,
 and gate approvals stay closed from the page (§10's remote-dispatch ruling, unamended). If the page
-grows an origination affordance, this entry has been violated, not extended. How the eventual write
-verbs identify their caller — tailnet callers by identity header, loopback trusted as the operator —
-and why that makes the role grant, not this gate, what contains a lane, is ruled in §9's #2114
-paragraph (2026-09-08), not here; a lane implementing the write gate reads that first.
+grows an origination affordance, this entry has been violated, not extended. §9's amended #2114
+paragraph owns why this remote-user gate does not replace a lane's role containment.
 
 **Why this is not the pairing infrastructure §10 archived.** `PairedClientsStore`, the WebSocket
 broadcast, and the tsnet sidecar existed to give a *paired remote client* a registry, reassignment,
@@ -6214,10 +6211,10 @@ and zero-config reach. A bookmark on a tailnet holds no pairing state, has no cl
 needs no reassignment — the network is the authenticator. What #1420 deleted is not what this entry
 adds; what it adds back is one HTTP listener on the daemon, priced and narrowed to this purpose.
 
-**Transport: SSE out, plain HTTP `POST` for the eventual arrest verbs — WebSocket considered and
+**Transport: SSE out, plain HTTP `POST` for the narrow write verbs — WebSocket considered and
 rejected.** The live view is one-directional; `EventSource` gives reconnect and `Last-Event-ID`
 resume for free, which matters because the primary client is a phone that sleeps constantly. The
-arrest verbs, when they arrive, are rare, discrete, and want request/response semantics — a status
+write verbs are rare, discrete, and want request/response semantics — a status
 code, per-request auth, a log line — not a frame on a stream; routing them over `POST` is the better
 design even where a socket already exists. A bidirectional channel earns its machinery only under
 chatty two-way traffic, and the steering model settled alongside this entry (arrest + rehire;
@@ -6248,11 +6245,24 @@ an SSE stream of its changes. It carries the fleet row and nothing under it. **W
 deliberately withholds is the whole reason this plane exists:** no stdout tail beyond what the
 projection file already holds, no room artifacts, no timeline endpoint. Those are slice 2, they may
 live on this plane ONLY, and adding any of them to the worker-served or artifact copies violates this
-entry rather than extending it. The read-only tripwire is enforced structurally: every route is a GET, a
-non-GET is refused before routing, and `FleetGlassReadOnlyTests` pins that the page itself performs
-no non-GET request and reads no origin but the one that served it. That test's network-sink scan was
-narrowed by #1946 from "no network requests at all" to "no *mutating* network requests", which is the
-predicate its own summary always stated; the read-only decision above is unchanged by it.
+entry rather than extending it. At slice 1 landing the tripwire was structurally GET-only;
+`FleetGlassReadOnlyTests` pinned that the page performed no non-GET request and read no origin but
+the one that served it. #2078's slice below replaces that historical route predicate.
+
+**Slice 2 write gate landed 2026-09-12 (#2078).** Reads remain ungated. `GlassWriteGate` accepts a
+mutating request only when the backend peer is loopback, exactly one nonblank
+`Tailscale-User-Login` is present, and it equals `Glass.OperatorLogin` ordinally; missing/blank
+configuration, missing/multiple identity values, tagged-device traffic, mismatch, and non-loopback
+peers fail closed. This rests on the measured `tailscale serve` path stripping caller-supplied
+identity headers and injecting the authenticated tailnet login before proxying to loopback. A
+refusal appends one `glassWriteRefused` fleet fact with route plus only `<redacted>`/`<missing>` for
+the login. The route table admits exactly `POST /queue/hold`, `POST /queue/resume`, and
+`POST /rooms/<id>/cancel`; unknown POST routes, including resolve and redispatch, are 404. The page
+renders these controls only under `DAEMON_SERVED`, confirms cancel explicitly, and refreshes the
+projection after the server receipt rather than changing displayed state optimistically.
+
+The current tripwire is the exact POST allowlist in `FleetGlassReadOnlyTests`; the artifact/MCP
+delivery remains read-only.
 
 ### C-12 — Gate receipts: one passing run per tree, CI coverage is an independent same-revision union
 

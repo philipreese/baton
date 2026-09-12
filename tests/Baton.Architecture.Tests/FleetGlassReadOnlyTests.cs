@@ -3,9 +3,8 @@ using System.Text.RegularExpressions;
 namespace Baton.Architecture.Tests;
 
 /// <summary>
-/// #1602: Fleet Glass is read-only by architectural decision (ratified; independently flagged by two
-/// external reviews as load-bearing: observability planes accrete cancel/retry/settle buttons and
-/// become a second actor in the state machine).
+/// #1602/#2078: Fleet Glass's artifact delivery and MCP dependencies remain read-only. The daemon
+/// delivery has exactly three identity-gated same-origin POST routes: queue hold/resume and cancel.
 /// <para>
 /// <b>What this checks:</b>
 /// <list type="number">
@@ -13,25 +12,19 @@ namespace Baton.Architecture.Tests;
 /// <c>deliverables_list</c>, <c>deliverable_read</c>) invoke no mutating API: no journal append
 /// (<c>FlowEventLogWriter</c>), no cancel/redispatch/dispatch entry point, no request-file write, and
 /// no mutating sentinel write.</item>
-/// <item><c>tools/fleet-glass/glass.html</c> performs no mutating network requests or tool calls; its only
-/// "verbs" are clipboard copies (<c>navigator.clipboard.writeText</c>). Since #1946 the page has a
-/// second delivery (served by <c>baton daemon</c> over the tailnet, spec/baton.md §11 C-11) and reads
-/// same-origin there; the scan's own comment carries exactly which predicate that changed and why the
-/// read-only ruling below is unaffected by it.</item>
+/// <item><c>tools/fleet-glass/glass.html</c> performs no mutating MCP calls and its sole POST sink is
+/// wired to #2078's explicit route allowlist on the daemon-served branch.</item>
 /// </list>
 /// </para>
 /// <para>
-/// <b>Ruling:</b> The Fleet Glass surface is read-only by decision (issue #1602). Observability planes
-/// must not accrete mutating buttons or actions to become a second actor in the state machine. A button
-/// or mutating action on the glass is an amendment to this decision, not a gap to fix.
+/// <b>Ruling:</b> #2078 narrowly amends #1602; new writes remain an explicit architecture change.
 /// </para>
 /// </summary>
 public class FleetGlassReadOnlyTests
 {
     private const string RulingMessagePrefix =
-        "Fleet Glass is read-only by architectural decision (issue #1602): observability planes must not " +
-        "accrete mutating buttons or actions to become a second actor in the state machine. A button or mutating " +
-        "action on the glass is an amendment to this decision, not a gap to fix.\n\n";
+        "Fleet Glass writes are limited by architectural decision (#1602/#2078): the artifact and MCP tools " +
+        "remain read-only, and the daemon page may call only the three approved identity-gated routes.\n\n";
 
     // MCP tool implementation files in C# consumed by the fleet glass pipeline.
     private static readonly string[] GlassMcpToolFiles =
@@ -208,7 +201,7 @@ public class FleetGlassReadOnlyTests
     }
 
     [Fact]
-    public void Fleet_glass_html_performs_no_mutating_actions_and_restricts_verbs_to_clipboard_copies()
+    public void Fleet_glass_html_limits_mutation_to_the_three_daemon_write_routes()
     {
         var root = RepoRoot();
         var glassPath = Path.Combine(root, "tools", "fleet-glass", "glass.html");
@@ -217,26 +210,10 @@ public class FleetGlassReadOnlyTests
         var rawHtml = File.ReadAllText(glassPath);
         var violations = new List<string>();
 
-        // 1. Verify no MUTATING network request sinks in glass.html.
-        //
-        // #1946 amended this list, and it is worth being exact about what changed. This method's own
-        // summary always stated the intent as "performs no MUTATING network requests or tool calls";
-        // the implementation over-approximated that to "no network requests at all", which was a free
-        // and correct proxy for as long as the Claude.ai artifact was the only delivery and the page
-        // therefore had no origin to read from. C-11's tailnet plane gives it one: the daemon serves
-        // the same file and the page reads `/projection.json` and subscribes to `/events`
-        // same-origin. That is the predicate being brought back in line with the stated intent -- the
-        // read-only DECISION is untouched, and the rules below are what now enforce it:
-        //   - any HTTP method other than GET is forbidden outright (a `method:` key naming anything
-        //     but GET), which is what actually distinguishes a read from a mutation;
-        //   - the transports that cannot be constrained to a same-origin GET stay forbidden
-        //     (XMLHttpRequest, sendBeacon, jQuery.ajax, WebSocket, <form method=post>);
-        //   - every `fetch(` / `new EventSource(` first argument must be a relative "/..." string
-        //     literal, so the page cannot reach any origin but the one that served it. A variable or
-        //     a template literal is refused too: a URL this test cannot read is a URL it cannot pin.
+        // 1. Keep one auditable POST sink. Its route comes only from the three controls below, all
+        // rendered behind DAEMON_SERVED; the artifact cannot paint them.
         var forbiddenNetworkSinks = new[]
         {
-            (@"\bmethod\s*:\s*[""'](?!GET[""'])[A-Za-z]+[""']", "non-GET HTTP method (mutating request)"),
             (@"\bXMLHttpRequest\b", "XMLHttpRequest API"),
             (@"\$\.ajax\b", "jQuery ajax call"),
             (@"\bnavigator\.sendBeacon\b", "navigator.sendBeacon API"),
@@ -255,6 +232,10 @@ public class FleetGlassReadOnlyTests
         }
 
         violations.AddRange(SameOriginReadViolations(htmlWithoutComments));
+        Assert.Single(Regex.Matches(htmlWithoutComments, @"\bmethod\s*:\s*[""']POST[""']").Cast<Match>());
+        Assert.Contains("data-glass-route=\"/queue/${q.held ? \"resume\" : \"hold\"}\"", htmlWithoutComments, StringComparison.Ordinal);
+        Assert.Contains("data-glass-route=\"/rooms/${encodeURIComponent(room.name)}/cancel\"", htmlWithoutComments, StringComparison.Ordinal);
+        Assert.Contains("if(DAEMON_SERVED)", htmlWithoutComments, StringComparison.Ordinal);
 
         // 2. Verify no mutating MCP tool calls (only watchTool with approved tools is permitted)
         var forbiddenMcpCallPatterns = new[]
@@ -271,7 +252,7 @@ public class FleetGlassReadOnlyTests
             }
         }
 
-        // 3. Scan for mutating verb strings and verify they are strictly allowlisted to copy buttons
+        // 3. CLI verb strings remain clipboard-only; daemon writes use HTTP route names.
         // Approved mutating verb strings in glass.html:
         // - "baton redispatch" inside copyButtonsHtml
         // - "baton cancel" inside copyButtonsHtml
@@ -324,8 +305,7 @@ public class FleetGlassReadOnlyTests
         Assert.True(
             violations.Count == 0,
             RulingMessagePrefix +
-            "glass.html must perform no mutating network calls or MCP tool executions, and any mutating verbs " +
-            "must strictly reside in clipboard copy buttons. Violations:\n  " +
+            "glass.html must keep MCP mutation absent and daemon mutation inside the approved route set. Violations:\n  " +
             string.Join("\n  ", violations));
     }
 
@@ -429,7 +409,8 @@ public class FleetGlassReadOnlyTests
             var argument = match.Groups[1].Value.Trim();
             // `(?!/)` is load-bearing: "//host/..." is protocol-relative, satisfies a bare `^("|')/`,
             // and resolves to a DIFFERENT origin.
-            if (!Regex.IsMatch(argument, @"^(""|')/(?!/)"))
+            if (!Regex.IsMatch(argument, @"^(""|')/(?!/)")
+                && !string.Equals(argument, "route", StringComparison.Ordinal))
             {
                 violations.Add(
                     $"glass.html reads from a non-same-origin or unreadable URL: `{match.Value.Trim()}` — every " +
