@@ -304,6 +304,7 @@ footer{margin-top:2rem; font-size:.7rem; color:var(--ink-soft); border-top:1px s
 .receipt-status-cancelled{background:var(--chip-idle); color:var(--idle);}
 .receipt-status-pending{background:var(--chip-run); color:var(--run);}
 .receipt-status-refused{background:var(--chip-warn); color:var(--warn);}
+.receipt-status-indeterminate{background:var(--chip-warn); color:var(--warn);}
 .stream-receipt-evidence{font-family:var(--mono); color:var(--accent); font-size:.7rem;}
 .stream-empty{color:var(--ink-soft); font-size:.85rem; padding:.6rem 0;}
 .queueboard{max-width:100%; overflow-x:auto; -webkit-overflow-scrolling:touch;}
@@ -1737,8 +1738,8 @@ function streamStatusSummaryHtml(snap, events){
   }
   if(Array.isArray(events)){
     for(const e of events){
-      if(e.kind === "attemptRefused" && e.outcomeDetail){
-        blockedItems.push(`attempt refused: ${esc(e.outcomeDetail)}`);
+      if(e.kind === "attemptRefused" && (e.outcomeDetail || e.outcome)){
+        blockedItems.push(`attempt refused: ${esc(e.outcomeDetail || e.outcome)}`);
         break;
       }
     }
@@ -1805,6 +1806,13 @@ function streamStatusSummaryHtml(snap, events){
     + `<div class="stream-summary-box quota"><div class="stream-summary-label">Quota Remains</div><div class="stream-summary-val">${quotaSummary}</div></div>`
     + `</div>`;
 }
+function streamOutcomeToken(value){
+  return typeof value === "string" ? value.toLowerCase() : null;
+}
+function streamOutcomeIsSuccess(value){
+  const token = streamOutcomeToken(value);
+  return token === "succeeded" || token === "finishedduringteardown";
+}
 function streamEventReceiptHtml(e){
   if(!e || typeof e !== "object") return "";
   const timeStr = age(e.at) || "just now";
@@ -1840,7 +1848,7 @@ function streamEventReceiptHtml(e){
       status = "pending";
       break;
     case "attemptRefused":
-      what = `Attempt refused: ${e.outcomeDetail || (Array.isArray(e.missingCapabilities) ? e.missingCapabilities.join(", ") : "refused")}`;
+      what = `Attempt refused: ${e.outcomeDetail || e.outcome || (Array.isArray(e.missingCapabilities) ? e.missingCapabilities.join(", ") : "refused")}`;
       where = "events.jsonl";
       status = "refused";
       break;
@@ -1852,7 +1860,10 @@ function streamEventReceiptHtml(e){
     case "attemptSettled":
       what = `Attempt settled: ${e.outcome || "unknown"}${typeof e.elapsedMilliseconds === "number" ? " (" + durStr(e.elapsedMilliseconds) + ")" : ""}`;
       where = "events.jsonl";
-      status = e.outcome === "succeeded" ? "success" : e.outcome === "cancelled" ? "cancelled" : "failure";
+      status = streamOutcomeIsSuccess(e.outcome) ? "success"
+        : streamOutcomeToken(e.outcome) === "cancelled" ? "cancelled"
+        : streamOutcomeToken(e.outcome) === "indeterminate" ? "indeterminate"
+        : "failure";
       break;
     case "revisionProduced":
       what = `Revision produced: ${e.revisionId ? e.revisionId.slice(0, 8) : "commit unknown"}${e.revisionKind ? " (" + e.revisionKind + ")" : ""}`;
@@ -1875,7 +1886,7 @@ function streamEventReceiptHtml(e){
     case "checkObserved":
       what = `Check observed: ${e.checkName || "check"} (${e.checkStatus || "unknown"}${e.checkConclusion ? ": " + e.checkConclusion : ""})`;
       where = "forge checks";
-      status = e.checkConclusion === "success" ? "success" : (e.checkConclusion === "failure" ? "failure" : "pending");
+      status = streamOutcomeToken(e.checkConclusion) === "success" ? "success" : (streamOutcomeToken(e.checkConclusion) === "failure" ? "failure" : "pending");
       if(e.checkName) evidence = `${e.checkName} (${e.checkConclusion || e.checkStatus || "check"})`;
       break;
     case "mergeObserved":
@@ -1936,8 +1947,11 @@ function streamGroupedEventsHtml(events, historyOnly = false){
   // Group events by correlation identity
   const groups = new Map();
   for(const e of deduped){
-    const key = e.workId ? ("work:" + e.workId)
-      : e.attemptId ? ("attempt:" + e.attemptId)
+    // An item can have multiple attempts (retry, continuation, fix). Attempt identity is the
+    // narrowest producer-owned correlation key; grouping by work first would collapse those
+    // lifecycles and let an earlier terminal result describe the current attempt.
+    const key = e.attemptId ? ("attempt:" + e.attemptId)
+      : e.workId ? ("work:" + e.workId)
       : e.pullRequestId ? ("pr:" + e.pullRequestId)
       : e.issueId ? ("issue:" + e.issueId)
       : e.roomId ? ("room:" + e.roomId)
@@ -1966,13 +1980,13 @@ function streamGroupedEventsHtml(events, historyOnly = false){
     const declaredRole = evts.find(e => e.declaredRole)?.declaredRole || null;
     const vendor = evts.slice().reverse().find(e => e.vendor)?.vendor || null;
 
-    const settledEvt = evts.find(e => e.kind === "attemptSettled");
-    const refusedEvt = evts.find(e => e.kind === "attemptRefused");
-    const mergedEvt = evts.find(e => e.kind === "mergeObserved");
+    const settledEvt = evts.slice().reverse().find(e => e.kind === "attemptSettled");
+    const refusedEvt = evts.slice().reverse().find(e => e.kind === "attemptRefused");
+    const mergedEvt = evts.slice().reverse().find(e => e.kind === "mergeObserved");
     const daemonEvt = key === "daemon";
 
     const isSettled = !!(settledEvt || refusedEvt || mergedEvt || daemonEvt);
-    const outcome = settledEvt ? settledEvt.outcome
+    const outcome = settledEvt ? streamOutcomeToken(settledEvt.outcome)
       : refusedEvt ? "refused"
       : mergedEvt ? "merged"
       : daemonEvt ? (last.kind === "daemonStopped" ? "stopped" : "running")
@@ -1994,9 +2008,12 @@ function streamGroupedEventsHtml(events, historyOnly = false){
     if(isCancelled){
       chipClass = "c-idle";
       chipText = "CANCELLED (RETAINED)";
-    } else if(outcome === "succeeded" || outcome === "merged"){
+    } else if(streamOutcomeIsSuccess(settledEvt?.outcome) || outcome === "merged"){
       chipClass = "c-ok";
       chipText = outcome === "merged" ? "MERGED" : "SUCCEEDED";
+    } else if(outcome === "indeterminate"){
+      chipClass = "c-warn";
+      chipText = "INDETERMINATE (RETAINED)";
     } else if(outcome === "failed" || outcome === "refused"){
       chipClass = outcome === "refused" ? "c-warn" : "c-bad";
       chipText = (outcome || "FAILED").toUpperCase() + " (RETAINED)";
@@ -2015,9 +2032,9 @@ function streamGroupedEventsHtml(events, historyOnly = false){
 
     let lastResult = "none recorded";
     if(settledEvt && settledEvt.outcome){
-      lastResult = `Outcome: ${settledEvt.outcome}${settledEvt.outcomeDetail ? " — " + settledEvt.outcomeDetail : ""}`;
+      lastResult = `Outcome: ${outcome}${settledEvt.outcomeDetail ? " — " + settledEvt.outcomeDetail : ""}`;
     } else if(refusedEvt){
-      lastResult = `Refused: ${refusedEvt.outcomeDetail || "missing capability"}`;
+      lastResult = `Refused: ${refusedEvt.outcomeDetail || refusedEvt.outcome || "missing capability"}`;
     } else if(mergedEvt){
       lastResult = "PR merged cleanly";
     } else if(revisionId){

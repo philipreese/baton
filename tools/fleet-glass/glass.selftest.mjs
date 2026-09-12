@@ -368,6 +368,24 @@ check("(control) an unheld queue does not",
 
   check("action receipts never output private reasoning or file:/// links",
         !receiptStarted.includes("file:///") && !receiptRevision.includes("file:///") && !receiptVerdict.includes("file:///"));
+
+  const actualSuccessReceipt = streamEventReceiptHtml({
+    id: 4, kind: "attemptSettled", attemptId: "att-real", outcome: "Succeeded", elapsedMilliseconds: 1000,
+  });
+  check("producer-shaped title-case succeeded outcomes render as success",
+        actualSuccessReceipt.includes(">SUCCESS<") && actualSuccessReceipt.includes("receipt-status-success"));
+
+  const actualRefusalReceipt = streamEventReceiptHtml({
+    id: 5, kind: "attemptRefused", attemptId: "att-held", outcome: "runway-held",
+  });
+  check("attempt refusal renders the producer's outcome field when no detail is present",
+        actualRefusalReceipt.includes("Attempt refused: runway-held"));
+
+  const actualCheckReceipt = streamEventReceiptHtml({
+    id: 6, kind: "checkObserved", checkName: "gates", checkStatus: "COMPLETED", checkConclusion: "SUCCESS",
+  });
+  check("producer-shaped uppercase check conclusions render as success",
+        actualCheckReceipt.includes(">SUCCESS<") && actualCheckReceipt.includes("receipt-status-success"));
 }
 
 // -- #2241 identity grouping, unknown fields, current vs retained history (#2200), and deduplication --
@@ -433,6 +451,25 @@ check("(control) an unheld queue does not",
         html.includes("data-tab=\"stream\"") && html.includes("data-tab=\"fleet\"")
         && html.includes("data-tab=\"queue\"") && html.includes("data-tab=\"quota\"")
         && html.includes("data-tab=\"history\"") && html.includes("data-tab=\"inbox\""));
+
+  const retriedWork = [
+    { id: 20, workId: "same-work", attemptId: "attempt-one", kind: "attemptStarted" },
+    { id: 21, workId: "same-work", attemptId: "attempt-one", kind: "attemptSettled", outcome: "Indeterminate" },
+    { id: 22, workId: "same-work", attemptId: "attempt-two", parentAttemptId: "attempt-one", kind: "attemptStarted" },
+  ];
+  const retriedHtml = streamGroupedEventsHtml(retriedWork);
+  check("retry attempts sharing one work id remain separate lifecycles",
+        retriedHtml.includes("Current Work (1)")
+        && retriedHtml.includes("Retained History · #2200 (1)")
+        && retriedHtml.includes("attempt: attempt-one")
+        && retriedHtml.includes("attempt: attempt-two")
+        && retriedHtml.includes("INDETERMINATE (RETAINED)"));
+
+  const teardownHtml = streamGroupedEventsHtml([
+    { id: 23, workId: "teardown-work", attemptId: "teardown-attempt", kind: "attemptSettled", outcome: "FinishedDuringTeardown" },
+  ]);
+  check("the second succeeded-shaped terminal outcome renders as success",
+        teardownHtml.includes("SUCCEEDED") && !teardownHtml.includes("ACTIVE"));
 }
 
 if (failures.length) {
