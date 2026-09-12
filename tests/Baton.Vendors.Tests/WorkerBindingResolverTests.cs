@@ -792,7 +792,7 @@ public class WorkerBindingResolverTests
     }
 
     [Fact]
-    public void A_hand_authored_non_audited_write_files_false_with_outputs_on_agy_still_throws_unsatisfiable_output_contract()
+    public void A_hand_authored_non_audited_write_files_false_with_outputs_on_agy_resolves_through_the_outbox_exemption()
     {
         var adapters = new Dictionary<string, IWorkerAdapter> { ["agy"] = new AgyWorkerAdapter() };
         var grant = new PermissionGrant(ReadFiles: true, WriteFiles: false);
@@ -803,7 +803,9 @@ public class WorkerBindingResolverTests
                 PermissionGrant: grant, GrantAuditMode: GrantAuditMode.Enforced),
         };
 
-        Assert.Throws<UnsatisfiableOutputContractException>(() => WorkerBindingResolver.Resolve(config, adapters));
+        var resolved = WorkerBindingResolver.Resolve(config, adapters);
+
+        Assert.IsType<WorkerBinding.Process>(resolved["review"]);
     }
 
     [Fact]

@@ -249,12 +249,12 @@ public class RoleDispatchTests
     }
 
     [Fact]
-    public void ToBinding_on_agy_adapter_for_write_files_false_role_with_outputs_materializes_audited_grant()
+    public void ToBinding_on_agy_adapter_for_write_files_false_role_with_outputs_keeps_enforced_grant()
     {
         var binding = RoleDispatch.ToBinding(Review, "spec", "agy");
 
-        Assert.True(binding.PermissionGrant?.WriteFiles);
-        Assert.Equal(GrantAuditMode.AuditedNotEnforced, binding.GrantAuditMode);
+        Assert.False(binding.PermissionGrant?.WriteFiles);
+        Assert.Equal(GrantAuditMode.Enforced, binding.GrantAuditMode);
     }
 
     [Fact]
@@ -351,8 +351,8 @@ public class RoleDispatchTests
         Assert.Equal(GrantAuditMode.Enforced, claudeBinding.GrantAuditMode);
 
         var agyBinding = RoleDispatch.ToBinding(patchRole, "Propose a patch.", "agy");
-        Assert.True(agyBinding.PermissionGrant?.WriteFiles);
-        Assert.Equal(GrantAuditMode.AuditedNotEnforced, agyBinding.GrantAuditMode);
+        Assert.False(agyBinding.PermissionGrant?.WriteFiles);
+        Assert.Equal(GrantAuditMode.Enforced, agyBinding.GrantAuditMode);
     }
 
     [Fact]
@@ -364,21 +364,19 @@ public class RoleDispatchTests
     }
 
     /// <summary>
-    /// R1's polarity, per <see cref="RoleDispatch.ToBinding"/>'s <c>autoProvisionWorktree</c> doc — this
-    /// mapping step declares the worktree spec but never stamps <see cref="WorkerBindingConfigEntry.IsWorktree"/>
-    /// itself, so a hand-authored or prematurely-set <c>true</c> can never claim an isolation this step
-    /// did not provide.
+    /// #2242: once agy's native hook and redirected settings make withheld writes reach only the
+    /// declared outbox, the grant remains enforced and no audited-write worktree is needed. The
+    /// caller's directory therefore remains the working directory rather than becoming a worktree
+    /// source declaration.
     /// </summary>
     [Fact]
-    public void Worktree_is_always_declared_fresh_for_an_audited_grant_regardless_of_the_callers_directory_shape()
+    public void Outbox_capable_agy_keeps_an_enforced_grant_in_the_callers_directory()
     {
         var binding = RoleDispatch.ToBinding(Review, "spec", adapterOverride: "agy", workingDirectory: "/any/caller/directory");
 
-        Assert.Equal(GrantAuditMode.AuditedNotEnforced, binding.GrantAuditMode);
-        Assert.NotNull(binding.Worktree);
-        Assert.Equal("/any/caller/directory", binding.Worktree!.Repository);
-        Assert.Equal("HEAD", binding.Worktree!.Ref);
-        Assert.Null(binding.WorkingDirectory);
+        Assert.Equal(GrantAuditMode.Enforced, binding.GrantAuditMode);
+        Assert.Null(binding.Worktree);
+        Assert.Equal("/any/caller/directory", binding.WorkingDirectory);
         Assert.False(binding.IsWorktree);
     }
 
@@ -439,7 +437,7 @@ public class RoleDispatchTests
     public void ChangesTree_stays_false_even_when_the_grant_widens_write_files_for_a_non_outbox_adapter()
     {
         var factCheck = WorkerRoleCatalog.For("fact-check");
-        var binding = RoleDispatch.ToBinding(factCheck, "spec", adapterOverride: "agy");
+        var binding = RoleDispatch.ToBinding(factCheck, "spec", adapterOverride: CommandWorkerAdapter.AdapterName);
 
         Assert.Equal(GrantAuditMode.AuditedNotEnforced, binding.GrantAuditMode);
         Assert.True(binding.PermissionGrant!.WriteFiles, "the widened grant this test targets must actually have fired");
