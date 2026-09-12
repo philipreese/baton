@@ -9,6 +9,25 @@ that carried them: `git show v0.35.0:src/Baton.Cli/CHANGELOG.md` (likewise `src/
 `release-please-config.json`. Everything below this line predates the split: the repo's single
 shared version through `0.14.0`.
 
+## [0.48.0](https://github.com/philipreese/baton/compare/v0.47.0...v0.48.0) (2026-09-12)
+
+
+### Features
+
+* **glass:** Gate mobile queue and cancel writes ([#2078](https://github.com/philipreese/baton/issues/2078)) ([#2245](https://github.com/philipreese/baton/issues/2245)) ([5f445db](https://github.com/philipreese/baton/commit/5f445db206880eb2cd53eaa324a657f0e180b216))
+* **glass:** Project durable fleet events into a mobile-first stream ([#2243](https://github.com/philipreese/baton/issues/2243)) ([e2d9d05](https://github.com/philipreese/baton/commit/e2d9d0505cc1460420219954f29dbf19fc0a6579))
+
+
+### Bug Fixes
+
+* **agy:** Declared outputs must be writable at Baton's exact outbox path ([#2242](https://github.com/philipreese/baton/issues/2242)) ([#2244](https://github.com/philipreese/baton/issues/2244)) ([373349e](https://github.com/philipreese/baton/commit/373349ea2e2ef20f3b390d27b415d3a552245feb))
+* **agy:** Disable behavioral plan expansion ([#2246](https://github.com/philipreese/baton/issues/2246)) ([#2247](https://github.com/philipreese/baton/issues/2247)) ([6e51151](https://github.com/philipreese/baton/commit/6e511515e82614e99ece18b805c14884c9fa8b0e))
+
+
+### Continuous Integration
+
+* Remove duplicate package build ([#2238](https://github.com/philipreese/baton/issues/2238)) ([02cecc4](https://github.com/philipreese/baton/commit/02cecc42370c43865dfd6b8755811d9600768860))
+
 ## [0.47.0](https://github.com/philipreese/baton/compare/v0.46.0...v0.47.0) (2026-09-11)
 
 
