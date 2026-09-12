@@ -35,6 +35,14 @@ public class AgyWorkerAdapterTests
         Assert.Equal(artifactsRootVar, target.Args[5]);
     }
 
+    [Fact]
+    public void Print_mode_disables_vendor_slash_and_skill_expansion()
+    {
+        var target = new AgyWorkerAdapter().Resolve(new WorkerInvocation("Advise now."), ArchitectContract);
+
+        Assert.Single(target.Args, argument => argument == "--disable-slash-commands");
+    }
+
     /// <summary>
     /// M23 Phase 3 (#272): WorkingDirectory carries no vendor-specific meaning — every adapter forwards
     /// it into CoreDispatchTarget unchanged. For <c>agy</c> that is necessary and <b>not sufficient</b>;

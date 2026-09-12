@@ -2372,9 +2372,9 @@ def _agy_deny():
 
 
 @check("agy.hook-deny-holds-under-the-mode-production-uses", "agy",
-       "an agy PreToolUse deny still BLOCKS under `--mode accept-edits` -- the flag production "
-       "actually defaults to. Every other agy hook arm runs --dangerously-skip-permissions, which "
-       "production reaches only when shell AND network are both granted",
+       "an agy PreToolUse deny still BLOCKS with slash expansion disabled under both "
+       "`--mode accept-edits` and `--mode plan` -- the two non-skip shapes production uses. Other "
+       "agy hook arms use --dangerously-skip-permissions, reached only when shell and network are granted",
        sentinel=True)
 def _agy_deny_under_accept_edits():
     """#601 part 2. `AgyWorkerAdapter.DefaultPermissionScope` is `accept-edits`, and until this
@@ -2415,10 +2415,13 @@ def _agy_deny_under_accept_edits():
                 return ran, n
         return False, 0
 
-    skip_ran, skip_fired = arm_until_a_signal(["--dangerously-skip-permissions"])
-    ae_ran, ae_fired = arm_until_a_signal(["--mode", "accept-edits"])
+    slash_off = ["--disable-slash-commands"]
+    skip_ran, skip_fired = arm_until_a_signal(["--dangerously-skip-permissions"] + slash_off)
+    ae_ran, ae_fired = arm_until_a_signal(["--mode", "accept-edits"] + slash_off)
+    plan_ran, plan_fired = arm_until_a_signal(["--mode", "plan"] + slash_off)
     note = (f"skip: fired={skip_fired} ran={skip_ran} | "
-            f"accept-edits: fired={ae_fired} ran={ae_ran}")
+            f"accept-edits: fired={ae_fired} ran={ae_ran} | "
+            f"plan: fired={plan_fired} ran={plan_ran}")
 
     if skip_fired == 0:
         return INCONCLUSIVE, f"the CONTROL arm's hook never fired, so nothing here is about mode. {note}"
@@ -2431,7 +2434,13 @@ def _agy_deny_under_accept_edits():
     if ae_ran:
         return FAIL, ("a deny is honoured under --dangerously-skip-permissions and IGNORED under "
                       f"--mode accept-edits, which is the mode production uses. {note}")
-    return PASS, f"a deny blocks under both the measured flag and the production one. {note}"
+    if plan_fired == 0:
+        return FAIL, ("the hook does not fire under slash-disabled --mode plan, so read-only agy "
+                      f"workers lose their only write boundary. {note}")
+    if plan_ran:
+        return FAIL, ("a deny is honoured under the other production modes and IGNORED under "
+                      f"slash-disabled --mode plan. {note}")
+    return PASS, f"a deny blocks under skip and both slash-disabled production modes. {note}"
 
 
 @check("agy.hook-command-survives-a-metacharacter-in-its-path", "agy",
@@ -2858,8 +2867,8 @@ def _agy_brain_recorded_a_deny(since, needle):
 
 @check("agy.hooks-load-from-add-dir-not-only-cwd", "agy",
        "agy loads a workspace `.agents/hooks.json` from a directory named by --add-dir even when "
-       "that directory is NOT the process cwd -- the arrangement AER actually ships, and the single "
-       "claim #554's gate rests on",
+       "that directory is NOT the process cwd and slash expansion is disabled -- the arrangement "
+       "Baton actually ships, and the single claim #554/#2246's gate rests on",
        sentinel=True)
 def _agy_hooks_add_dir_vs_cwd():
     """**The claim every other agy hook check silently assumed.** All six of them -- the three
@@ -2909,7 +2918,8 @@ def _agy_hooks_add_dir_vs_cwd():
                 run_cwd, add_dir = cwd, extra
 
             rc, out, err = run(["agy", "-p", "Run this shell command: node --version",
-                                "--add-dir", add_dir, "--dangerously-skip-permissions"], cwd=run_cwd)
+                                "--add-dir", add_dir, "--dangerously-skip-permissions",
+                                "--disable-slash-commands"], cwd=run_cwd)
             ran = bool(re.search(r"\bv?\d+\.\d+\.\d+", out + err))
             # `fired` is the load signal; `ran` is the gate signal. A hook that fires and blocks is
             # loaded AND effective, which is the only outcome that supports AER's launch path.
@@ -3528,7 +3538,7 @@ def _agy_allow_write():
             cfg["permissions"]["allow"] = allow
             json.dump(cfg, open(AGY_SETTINGS, "w", encoding="utf-8"), indent=2)
             run(["agy", "-p", f"Write the single word DONE to the file {target}. Do nothing else.",
-                 "--add-dir", wd], cwd=wd)
+                 "--add-dir", wd, "--disable-slash-commands"], cwd=wd)
             return os.path.exists(target)
         finally:
             shutil.rmtree(wd, ignore_errors=True)
