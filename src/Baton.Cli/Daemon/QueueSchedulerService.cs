@@ -47,6 +47,7 @@ public sealed class QueueSchedulerService : BackgroundService
     private readonly Func<double?> _freeGb;
     private readonly Func<DateTimeOffset> _now;
     private readonly Func<string, CancellationToken, Task<string?>> _workspaceHead;
+    private readonly Func<string, IReadOnlyList<string>> _workspaceLocks;
     private readonly WorkItemAdvancer _advancer;
     private readonly Func<CancellationToken, Task>? _beforeLaunchClaim;
     private readonly Func<FleetEventDraft, CancellationToken, Task<FleetEvent?>> _appendFleetEvent;
@@ -73,7 +74,8 @@ public sealed class QueueSchedulerService : BackgroundService
         Func<CancellationToken, Task<IReadOnlyList<QueueLaneAdoption>>>? adopt = null,
         Func<CancellationToken, Task>? beforeLaunchClaim = null,
         Func<FleetEventDraft, CancellationToken, Task<FleetEvent?>>? appendFleetEvent = null,
-        Func<string, CancellationToken, Task<string?>>? workspaceHead = null)
+        Func<string, CancellationToken, Task<string?>>? workspaceHead = null,
+        Func<string, IReadOnlyList<string>>? workspaceLocks = null)
     {
         _launch = launch ?? QueueLauncher.LaunchAsync;
         _adopt = adopt ?? QueueLauncher.AdoptLaunchedLanesAsync;
@@ -81,6 +83,7 @@ public sealed class QueueSchedulerService : BackgroundService
         _freeGb = freeGb ?? FreePhysicalMemory.TryReadGiB;
         _now = now ?? (() => DateTimeOffset.UtcNow);
         _workspaceHead = workspaceHead ?? WorkspaceHead.TryCaptureAsync;
+        _workspaceLocks = workspaceLocks ?? GitWorkspaceLockProbe.FindExisting;
         _beforeLaunchClaim = beforeLaunchClaim;
         _appendFleetEvent = appendFleetEvent ?? ((_, _) => Task.FromResult<FleetEvent?>(null));
         _advancer = advancer ?? new WorkItemAdvancer(null, null, appendFleetEvent: _appendFleetEvent);
@@ -319,6 +322,40 @@ public sealed class QueueSchedulerService : BackgroundService
             // written first, because it is what the next daemon reads to pick candidates; the LEDGER row
             // waits for the outcome, below.
             var roomDirectory = QueueLauncher.RoomDirectoryFor(item);
+            // #2115: this is the last production check before the queue claim and vendor spawn. Git
+            // locks carry no owner identity, while the recorded worker pid proves only worker
+            // liveness, so Baton may refuse reuse but must never infer that a lock is stale or remove
+            // it. The test-only hook below remains after the probe so the existing cancel/claim race
+            // can still pause in that gap; a lock created after this check is Git's own exclusion race.
+            IReadOnlyList<string> workspaceLocks;
+            try
+            {
+                workspaceLocks = _workspaceLocks(item.Workspace);
+            }
+            catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or InvalidDataException
+                or ArgumentException or NotSupportedException)
+            {
+                await FailAsync(
+                    item,
+                    $"Baton could not inspect Git lock state for workspace '{item.Workspace}': {ex.Message} "
+                    + "No lane was started. Repair the workspace metadata, then re-add the queue item.",
+                    room: null, now, decision, tier, cancellationToken, admission, attemptId).ConfigureAwait(false);
+                return interval;
+            }
+
+            if (workspaceLocks.Count > 0)
+            {
+                var listedLocks = string.Join(", ", workspaceLocks.Select(path => $"'{path}'"));
+                await FailAsync(
+                    item,
+                    $"Baton refused to reuse workspace '{item.Workspace}' because Git lock file(s) exist: "
+                    + $"{listedLocks}. Baton did not remove them because a Git lock carries no ownership evidence. "
+                    + "First stop or finish every Git writer using this workspace; remove a lock only after independently "
+                    + "establishing that no writer owns it, then re-add the queue item.",
+                    room: null, now, decision, tier, cancellationToken, admission, attemptId).ConfigureAwait(false);
+                return interval;
+            }
+
             if (_beforeLaunchClaim is not null)
             {
                 await _beforeLaunchClaim(cancellationToken).ConfigureAwait(false);
