@@ -16,6 +16,12 @@ public sealed class GlassWriteGateTests
         Assert.False(GlassWriteGate.Evaluate(
             settings, IPAddress.Loopback, ["OPERATOR@example.com"]).IsAllowed);
         Assert.False(GlassWriteGate.Evaluate(
+            settings, IPAddress.Loopback, [" operator@example.com "]).IsAllowed);
+        Assert.False(GlassWriteGate.Evaluate(
+            new GlassListenerSettings { OperatorLogin = " operator@example.com " },
+            IPAddress.Loopback,
+            ["operator@example.com"]).IsAllowed);
+        Assert.False(GlassWriteGate.Evaluate(
             settings, IPAddress.Loopback, []).IsAllowed);
         Assert.False(GlassWriteGate.Evaluate(
             settings, IPAddress.Loopback, ["operator@example.com", "other@example.com"]).IsAllowed);

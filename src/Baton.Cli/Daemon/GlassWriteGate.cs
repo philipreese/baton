@@ -35,8 +35,8 @@ internal static class GlassWriteGate
             return GlassWriteDecision.Refused("Glass writes require one authenticated Tailscale user login.", false);
         }
 
-        var login = identityHeaders[0].Trim();
-        if (!string.Equals(login, settings.OperatorLogin.Trim(), StringComparison.Ordinal))
+        var login = identityHeaders[0];
+        if (!string.Equals(login, settings.OperatorLogin, StringComparison.Ordinal))
         {
             return GlassWriteDecision.Refused("This Tailscale user is not the configured Glass operator.", true);
         }
