@@ -372,6 +372,68 @@ public class AgyHookCheckCommandTests
     }
 
     /// <summary>
+    /// #2242: #2177 repro — a worker whose grant withholds writes (e.g. read-only probe or review)
+    /// must still be able to write its declared outputs to the exact BATON_OUTPUT_DIR path, including
+    /// Windows paths with spaces and multiple declared outputs.
+    /// </summary>
+    [Fact]
+    public void A_withheld_write_into_the_outbox_is_allowed_including_paths_with_spaces_and_multiple_outputs()
+    {
+        var outboxWithSpaces = Path.Combine(Path.GetTempPath(), "baton task with spaces", "artifacts", "execution_1");
+
+        // First declared output (e.g. report.md)
+        Assert.Equal(
+            "allow",
+            Decide(WritePayload(Path.Combine(outboxWithSpaces, "report.md")), "agy:write_to_file", outboxWithSpaces, Workspace));
+
+        // Second declared output (e.g. summary.md)
+        Assert.Equal(
+            "allow",
+            Decide(WritePayload(Path.Combine(outboxWithSpaces, "summary.md")), "agy:write_to_file", outboxWithSpaces, Workspace));
+    }
+
+    /// <summary>
+    /// #2242: a withheld write attempting to write outside the outbox (into workspace or arbitrary
+    /// artifact/sibling-room paths) remains denied. The exemption does not widen writes.
+    /// </summary>
+    [Fact]
+    public void A_withheld_write_outside_the_outbox_is_denied()
+    {
+        var outboxWithSpaces = Path.Combine(Path.GetTempPath(), "baton task with spaces", "artifacts", "execution_1");
+        var artifactsRoot = Path.Combine(Path.GetTempPath(), "baton task with spaces", "artifacts");
+        var siblingOutbox = Path.Combine(artifactsRoot, "execution_sibling");
+
+        // Target in workspace
+        Assert.Equal(
+            "deny",
+            Decide(WritePayload(Path.Combine(Workspace, "file.txt")), "agy:write_to_file", outboxWithSpaces, Workspace));
+
+        // Target in sibling execution under artifacts root
+        Assert.Equal(
+            "deny",
+            Decide(WritePayload(Path.Combine(siblingOutbox, "escaped.md")), "agy:write_to_file", outboxWithSpaces, Workspace));
+    }
+
+    /// <summary>
+    /// #2242: missing or malformed outbox evidence fails closed.
+    /// </summary>
+    [Fact]
+    public void A_withheld_write_with_unrooted_or_missing_outbox_is_denied_fail_closed()
+    {
+        var target = Path.Combine(Outbox, "report.md");
+
+        // Null outbox
+        Assert.Equal(
+            "deny",
+            Decide(WritePayload(target), "agy:write_to_file", outbox: null, Workspace));
+
+        // Relative outbox
+        Assert.Equal(
+            "deny",
+            Decide(WritePayload(target), "agy:write_to_file", outbox: "relative/outbox", Workspace));
+    }
+
+    /// <summary>
     /// A write whose target this gate cannot read is denied — the condition
     /// <c>OutboxWriteExemptionTests</c>' claude equivalent states, and the one agy's own payload check
     /// is recorded as non-sentinel on.

@@ -75,7 +75,8 @@ public class WorkflowTemplateComposerTests
     {
         var template = new WorkflowTemplate("t", [Phase("check", "review")]);
 
-        var (_, bindings) = WorkflowTemplateComposer.Materialize(template, adapterOverride: "agy", workingDirectory: "/repo/root");
+        var (_, bindings) = WorkflowTemplateComposer.Materialize(
+            template, adapterOverride: CommandWorkerAdapter.AdapterName, workingDirectory: "/repo/root");
 
         var binding = bindings["check"];
         Assert.Equal(GrantAuditMode.AuditedNotEnforced, binding.GrantAuditMode);

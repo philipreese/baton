@@ -5847,6 +5847,19 @@ workspace line asks the bound adapter (`IWorkerAdapter.BindsDispatchedWorkspaceR
 carrying a vendor list of its own, so the sentence an operator reads names the arm they actually got
 and cannot drift from the argv that produces it.
 
+**Declared outputs must be writable at Baton's exact outbox path on `agy` (#2242).** When a
+lane's grant withholds writes (`WriteFiles: false`, e.g. read-only probe, review, or advise),
+declared outputs under `BATON_OUTPUT_DIR` remain writable via the #649 outbox exemption:
+(1) `AgyHookCheckCommand` allows write-family calls (`write_to_file`, `replace_file_content`)
+whose target resolves strictly inside `BATON_OUTPUT_DIR` before the withheld-tool branch can
+deny them; an unrooted or absent outbox path fails closed. (2) `AgyWorkerAdapter` reports
+`WithheldWritesReachTheOutbox = true`, allowing `WorkerBindingResolver` to bind read-only output
+contracts without forcing write-widening. (3) `AgyWorkerAdapter.Resolve` seeds `permissions.allow`
+rules for each declared output (`write_file(%BATON_OUTPUT_DIR%/<output>)`) in the redirected
+`settings.json` under all non-skip permission scopes (including `--mode plan`). (4) `BuildPrompt`
+instructs the worker that declared outputs are regular files rather than vendor artifacts, directing
+use of `write_to_file` without `ArtifactMetadata`.
+
 **Polling is not progress: three rules on the run-command grant (#2002).** Measured 2026-09-06 across
 121 rooms modified that day: one agy arm-A lane spent 53.6 % of its 207 `run_command` steps on
 `Get-Process -Id <n>` liveness polls of builds it had backgrounded itself, and byte-identical repeated
