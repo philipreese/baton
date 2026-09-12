@@ -1742,6 +1742,12 @@ function streamStatusSummaryHtml(snap, events){
         blockedItems.push(`attempt refused: ${esc(e.outcomeDetail || e.outcome)}`);
         break;
       }
+      if(e.kind === "admissionDecided" && e.admissionDecision && e.admissionDecision !== "admitted"){
+        const missing = Array.isArray(e.missingCapabilities) && e.missingCapabilities.length
+          ? `: ${e.missingCapabilities.join(", ")}` : "";
+        blockedItems.push(`admission ${esc(e.admissionDecision)}${esc(missing)}`);
+        break;
+      }
     }
   }
   const blockedSummary = blockedItems.length > 0
@@ -1835,7 +1841,7 @@ function streamEventReceiptHtml(e){
     case "admissionDecided":
       what = `Admission decided: ${e.admissionDecision || "unknown"}`;
       where = "queue.jsonl";
-      status = e.admissionDecision === "admitted" ? "success" : "pending";
+      status = e.admissionDecision === "admitted" ? "success" : e.admissionDecision ? "refused" : "pending";
       break;
     case "attemptStarted":
       what = `Attempt started: ${e.attemptId || "attempt"}${e.declaredRole ? " (" + e.declaredRole + ")" : ""}${e.vendor ? " on " + e.vendor : ""}`;
@@ -1982,12 +1988,14 @@ function streamGroupedEventsHtml(events, historyOnly = false){
 
     const settledEvt = evts.slice().reverse().find(e => e.kind === "attemptSettled");
     const refusedEvt = evts.slice().reverse().find(e => e.kind === "attemptRefused");
+    const refusedAdmissionEvt = evts.slice().reverse().find(
+      e => e.kind === "admissionDecided" && e.admissionDecision && e.admissionDecision !== "admitted");
     const mergedEvt = evts.slice().reverse().find(e => e.kind === "mergeObserved");
     const daemonEvt = key === "daemon";
 
-    const isSettled = !!(settledEvt || refusedEvt || mergedEvt || daemonEvt);
+    const isSettled = !!(settledEvt || refusedEvt || refusedAdmissionEvt || mergedEvt || daemonEvt);
     const outcome = settledEvt ? streamOutcomeToken(settledEvt.outcome)
-      : refusedEvt ? "refused"
+      : (refusedEvt || refusedAdmissionEvt) ? "refused"
       : mergedEvt ? "merged"
       : daemonEvt ? (last.kind === "daemonStopped" ? "stopped" : "running")
       : null;
@@ -2021,7 +2029,8 @@ function streamGroupedEventsHtml(events, historyOnly = false){
 
     let currentAction = "";
     if(isSettled){
-      currentAction = `Settled ${outcome || "terminal"}${settledEvt && settledEvt.elapsedMilliseconds ? " in " + durStr(settledEvt.elapsedMilliseconds) : ""}`;
+      currentAction = refusedAdmissionEvt ? `Admission ${refusedAdmissionEvt.admissionDecision}`
+        : `Settled ${outcome || "terminal"}${settledEvt && settledEvt.elapsedMilliseconds ? " in " + durStr(settledEvt.elapsedMilliseconds) : ""}`;
     } else {
       currentAction = last.kind === "attemptStarted" ? `Started ${declaredRole || "execution"}${vendor ? " on " + vendor : ""}`
         : last.kind === "attemptProgressed" ? "In progress"
@@ -2035,6 +2044,10 @@ function streamGroupedEventsHtml(events, historyOnly = false){
       lastResult = `Outcome: ${outcome}${settledEvt.outcomeDetail ? " — " + settledEvt.outcomeDetail : ""}`;
     } else if(refusedEvt){
       lastResult = `Refused: ${refusedEvt.outcomeDetail || refusedEvt.outcome || "missing capability"}`;
+    } else if(refusedAdmissionEvt){
+      const missing = Array.isArray(refusedAdmissionEvt.missingCapabilities)
+        ? refusedAdmissionEvt.missingCapabilities.join(", ") : "no reason recorded";
+      lastResult = `Admission refused: ${missing}`;
     } else if(mergedEvt){
       lastResult = "PR merged cleanly";
     } else if(revisionId){

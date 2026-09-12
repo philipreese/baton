@@ -470,6 +470,19 @@ check("(control) an unheld queue does not",
   ]);
   check("the second succeeded-shaped terminal outcome renders as success",
         teardownHtml.includes("SUCCEEDED") && !teardownHtml.includes("ACTIVE"));
+
+  const refusedAdmission = {
+    id: 24, workId: "review-work", attemptId: "review-attempt", kind: "admissionDecided",
+    admissionDecision: "refused", missingCapabilities: ["file-write", "network"],
+  };
+  const refusedAdmissionHtml = streamGroupedEventsHtml([refusedAdmission]);
+  check("a producer-shaped refused admission is retained rather than shown as active forever",
+        refusedAdmissionHtml.includes("Current Work (0)")
+        && refusedAdmissionHtml.includes("REFUSED (RETAINED)")
+        && refusedAdmissionHtml.includes("Admission refused: file-write, network"));
+  const refusedSummary = streamStatusSummaryHtml(null, [refusedAdmission]);
+  check("a refused admission appears in the blocked summary",
+        refusedSummary.includes("admission refused: file-write, network"));
 }
 
 if (failures.length) {
