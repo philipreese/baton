@@ -930,7 +930,7 @@ public static class MutationInterface
         // reports exactly like the rest of this surface (DecideCommand's own doc comment states the
         // same contract), not a round dispatching arbitrarily many concurrent siblings.
         await DispatchAndRecordOutcomeAsync(
-                prepared, processBinding, eventLogWriter, dispatcher, inFlightExecutions, dispatchCancellationToken, timeProvider ?? TimeProvider.System)
+                prepared, processBinding, eventLogWriter, dispatcher, inFlightExecutions, dispatchCancellationToken, cancellationToken, timeProvider ?? TimeProvider.System)
             .ConfigureAwait(false);
 
         var finalCheckpoint = ProjectionCheckpointStore.Load(roomDirectoryPath);
@@ -1538,7 +1538,7 @@ public static class MutationInterface
                         // Not awaited here: starts the dispatch and joins the in-flight set, so a slow
                         // step never blocks this round from dispatching the rest of its ready work.
                         inFlight.Add(DispatchAndRecordOutcomeAsync(
-                            prepared, processBinding, eventLogWriter, dispatcher, inFlightExecutions, dispatchCancellationToken, timeProvider));
+                            prepared, processBinding, eventLogWriter, dispatcher, inFlightExecutions, dispatchCancellationToken, cancellationToken, timeProvider));
                     }
                 }
 
@@ -1589,7 +1589,7 @@ public static class MutationInterface
 
                     var dispatchCancellationToken = inFlightExecutions.Register(executionId);
                     inFlight.Add(DispatchAndRecordOutcomeAsync(
-                        prepared, processBinding, eventLogWriter, dispatcher, inFlightExecutions, dispatchCancellationToken, timeProvider));
+                        prepared, processBinding, eventLogWriter, dispatcher, inFlightExecutions, dispatchCancellationToken, cancellationToken, timeProvider));
                 }
 
                 if (inFlight.Count == 0)
@@ -2000,6 +2000,7 @@ public static class MutationInterface
         ICoreDispatcher dispatcher,
         InFlightExecutionRegistry inFlightExecutions,
         CancellationToken dispatchCancellationToken,
+        CancellationToken hostCancellationToken,
         TimeProvider? timeProvider = null)
     {
         try
@@ -2151,7 +2152,7 @@ public static class MutationInterface
                 // under-it process would only produce a Cancelled/Failed verdict that this replaces
                 // wholesale, never Succeeded.
 
-                await RunArtifactCheckpointAsync(prepared, binding, budgetMonitor, dispatcher, eventLogWriter, dispatchCancellationToken)
+                await RunArtifactCheckpointAsync(prepared, binding, budgetMonitor, dispatcher, eventLogWriter, dispatchCancellationToken, hostCancellationToken)
                     .ConfigureAwait(false);
 
                 // #2134 (`spec/baton.md` §3, "The grace turn"): reuses #2029's VerifiesWorkspace set
@@ -2504,9 +2505,12 @@ public static class MutationInterface
         TokenBudgetMonitor budgetMonitor,
         ICoreDispatcher dispatcher,
         IEventLogWriter eventLogWriter,
-        CancellationToken cancellationToken)
+        CancellationToken cancellationToken,
+        CancellationToken hostCancellationToken)
     {
-        if (budgetMonitor.ArrestReasonValue is not (ArrestReason.TokenBudget or ArrestReason.ToolStepCap)
+        if (cancellationToken.IsCancellationRequested
+            || hostCancellationToken.IsCancellationRequested
+            || budgetMonitor.ArrestReasonValue is not (ArrestReason.TokenBudget or ArrestReason.ToolStepCap)
             || !string.Equals(prepared.Request.Adapter, "codex", StringComparison.OrdinalIgnoreCase))
         {
             return;
@@ -2531,14 +2535,22 @@ public static class MutationInterface
             target = target with { OnStdoutLine = line => { prior?.Invoke(line); monitor.OnStdoutLine(line); } };
         }
 
-        var request = prepared.Request with { Timeout = ArtifactCheckpoint.WallClockTimeout };
-        using var linked = monitor is null ? null : CancellationTokenSource.CreateLinkedTokenSource(cancellationToken, monitor.ArrestRequested);
+        var checkpointExecutionId = new ExecutionId($"checkpoint-{Guid.NewGuid():N}");
+        var request = prepared.Request with
+        {
+            ExecutionId = checkpointExecutionId,
+            Timeout = ArtifactCheckpoint.WallClockTimeout,
+        };
+        using var checkpointCancellation = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken, hostCancellationToken);
+        using var linked = monitor is null ? null : CancellationTokenSource.CreateLinkedTokenSource(checkpointCancellation.Token, monitor.ArrestRequested);
         CoreDispatchResult result;
         try
         {
-            result = await dispatcher.DispatchAsync(request, target, linked?.Token ?? cancellationToken).ConfigureAwait(false);
+            checkpointCancellation.Token.ThrowIfCancellationRequested();
+            result = await dispatcher.DispatchAsync(request, target, linked?.Token ?? checkpointCancellation.Token).ConfigureAwait(false);
         }
-        catch (Exception ex) when (ex is not OperationCanceledException || !cancellationToken.IsCancellationRequested)
+        catch (Exception ex) when (ex is not OperationCanceledException
+            || (!cancellationToken.IsCancellationRequested && !hostCancellationToken.IsCancellationRequested))
         {
             // The original arrest remains authoritative. A courtesy checkpoint that cannot start must
             // not prevent it from being recorded and cannot earn another ordinary dispatch.
@@ -2548,7 +2560,7 @@ public static class MutationInterface
         }
 
         await eventLogWriter.AppendAsync(new FlowEvent.ArtifactCheckpointAttempted(
-            prepared.Request.ExecutionId, missing, result.Reason, monitor?.SnapshotUsage(),
+            checkpointExecutionId, prepared.Request.ExecutionId, missing, result.Reason, monitor?.SnapshotUsage(),
             monitor is { Arrested: true } ? monitor.ArrestReasonValue : null), CancellationToken.None).ConfigureAwait(false);
     }
 

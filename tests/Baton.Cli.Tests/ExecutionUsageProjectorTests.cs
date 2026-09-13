@@ -46,6 +46,39 @@ public sealed class ExecutionUsageProjectorTests
     }
 
     [Fact]
+    public void An_artifact_checkpoint_has_its_own_usage_row_and_predecessor_lineage()
+    {
+        var testRoot = Path.Combine(Path.GetTempPath(), $"usage-projector-checkpoint-{Guid.NewGuid():N}");
+        try
+        {
+            var predecessor = new ExecutionId("exec-arrested");
+            var checkpoint = new ExecutionId("exec-checkpoint");
+            var start = new DateTime(2026, 1, 1, 12, 0, 0, DateTimeKind.Utc);
+            var entries = new List<LogEntry>
+            {
+                new LogEntry.CoreLogEntry(new CoreEvent.ExecutionStarted(predecessor, Pid: 123), start),
+                new LogEntry.CoreLogEntry(new CoreEvent.ExecutionExited(predecessor, -1, CoreExitReason.CancelRequested), start.AddSeconds(2)),
+                new LogEntry.CoreLogEntry(new CoreEvent.ExecutionStarted(checkpoint, Pid: 124), start.AddSeconds(2)),
+                new LogEntry.CoreLogEntry(new CoreEvent.ExecutionExited(checkpoint, 0, CoreExitReason.Natural), start.AddSeconds(3)),
+                new LogEntry.FlowLogEntry(new FlowEvent.ArtifactCheckpointAttempted(
+                    checkpoint, predecessor, ["report.md"], CoreExitReason.Natural, new WorkerUsage(TokensIn: 7, TokensOut: 3)), start.AddSeconds(3)),
+            };
+
+            var usage = ExecutionUsageProjector.BuildByExecutionId(entries, testRoot, WorkerAdapterRegistry.Default);
+
+            Assert.Equal(2, usage.Count);
+            var checkpointUsage = usage[checkpoint.Value];
+            Assert.Equal(predecessor.Value, checkpointUsage.PredecessorExecutionId);
+            Assert.Equal(7, checkpointUsage.TokensIn);
+            Assert.Equal(3, checkpointUsage.TokensOut);
+        }
+        finally
+        {
+            DirectoryCleanup.DeleteRecursively(testRoot);
+        }
+    }
+
+    [Fact]
     public void An_execution_with_only_a_start_event_is_entirely_absent_never_a_zero_wall_clock()
     {
         var testRoot = Path.Combine(Path.GetTempPath(), $"usage-projector-{Guid.NewGuid():N}");

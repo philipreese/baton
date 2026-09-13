@@ -531,7 +531,8 @@ public abstract record FlowEvent
 
     /// <summary>A bounded, artifact-only follow-up to an ordinary budget arrest.</summary>
     public sealed record ArtifactCheckpointAttempted(
-        ExecutionId ExecutionId,
+        ExecutionId CheckpointExecutionId,
+        ExecutionId PredecessorExecutionId,
         IReadOnlyList<string> OutputNames,
         CoreExitReason ExitReason,
         WorkerUsage? Usage = null,

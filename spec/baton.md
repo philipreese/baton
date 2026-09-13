@@ -2348,10 +2348,11 @@ stays display-only, never itself a gate. `StateProjector.DescribeArrest` is the 
 `Enum.GetValues<ArrestReason>()` rather than a claim.
 
 **Artifact checkpoint (#2276).** A `codex` execution arrested by its ordinary token or tool-step cap
-receives at most one engine-owned checkpoint only when one or more declared outputs remain absent. It
-keeps the original execution id as its predecessor, but `ArtifactCheckpointAttempted` records its own
-usage, exit reason, and any checkpoint arrest before the authoritative `ExecutionArrested` line; the
-status/ledger therefore shows both the original truthful cap and the smaller recovery spend. Its fixed
+receives at most one engine-owned checkpoint only when one or more declared outputs remain absent. The
+checkpoint has an independent execution id and records the original id as its predecessor in both
+`ArtifactCheckpointAttempted` and status usage; its usage, exit reason, and any checkpoint arrest precede
+the authoritative `ExecutionArrested` line, so status/ledger shows both the original truthful cap and the
+smaller recovery spend. Its fixed
 `Mutation.ArtifactCheckpoint` caps are separate from the ordinary role budget. The dispatch replaces
 the prompt and exposes only `artifact:<name>` tools for the still-missing declared names: no repository
 read, shell, network, workspace mutation, commit, push, or ordinary role tool survives. It is not a
