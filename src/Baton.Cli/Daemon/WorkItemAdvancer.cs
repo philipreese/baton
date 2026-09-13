@@ -88,9 +88,9 @@ public sealed class WorkItemAdvancer
         // `Halted` half is what stops a NeedsOperator item being re-observed on every tick forever —
         // see QueueItem.Halted for what that cost.
         var candidates = snapshot.Items
-            .Where(i => i.Stage is { } stage && !i.Halted
+            .Where(i => i.Stage is { } stage && i.Retirement is null
                 && (stage == WorkStage.Ready
-                    ? i.State == QueueItemState.Queued
+                    ? i.State == QueueItemState.Queued && !i.Halted
                     : i.State is QueueItemState.Done or QueueItemState.Failed
                         && i.RoomDirectory is { Length: > 0 }))
             .ToList();
@@ -141,6 +141,45 @@ public sealed class WorkItemAdvancer
         var head = await _workspaceHead(item.Workspace, cancellationToken).ConfigureAwait(false);
         await RecordOwnedObservationsAsync(item, stage, verdict, pr, head, now, cancellationToken)
             .ConfigureAwait(false);
+
+        if (pr.Succeeded && pr.MergeSha is { Length: > 0 }
+            && item.State is QueueItemState.Done or QueueItemState.Failed
+            && item.ReadinessMutationClaim is null)
+        {
+            var retired = false;
+            await QueueStore.MutateAsync(BatonPaths.QueueFile, snapshot =>
+            {
+                var current = snapshot.Items.FirstOrDefault(i => i.Tag == item.Tag);
+                if (current is null || current.Retirement is not null
+                    || current.State is QueueItemState.Launched
+                    || current.ReadinessMutationClaim is not null)
+                {
+                    return snapshot;
+                }
+                retired = true;
+                return snapshot with
+                {
+                    Items = snapshot.Items.Select(i => i.Tag == item.Tag
+                    ? i with
+                    {
+                        Retirement = new QueueRetirement(QueueRetirement.Merged, now,
+                        $"trusted merged observation for PR #{pr.Number}")
+                    } : i).ToList()
+                };
+            }, cancellationToken).ConfigureAwait(false);
+            if (retired)
+            {
+                return new QueueDecisionEntry(now, item.Tag, QueueDecisionEntry.Retired,
+                    $"merged: PR #{pr.Number}", 0, null, 0);
+            }
+        }
+
+        // A halted item remains available only for the trusted-merge retirement above. Its halt
+        // still forbids every ordinary lifecycle transition and retry.
+        if (item.Halted)
+        {
+            return null;
+        }
 
         WorkItemObservation Observation(PullRequestObservation reading) => new(
             stage, item.Round, item.AutomaticFixUsed, item.Branch, outcome, verdict,
@@ -632,7 +671,7 @@ public sealed class WorkItemAdvancer
 
     private static HashSet<QualifiedPullRequest> ObservationKeys(IReadOnlyList<QueueItem> items) =>
         items
-            .Where(i => i.Stage is not null && i.PullRequest is > 0 && i.Repository is { Length: > 0 })
+            .Where(i => i.Retirement is null && i.Stage is not null && i.PullRequest is > 0 && i.Repository is { Length: > 0 })
             .Select(i => new QualifiedPullRequest(i.Repository!, i.PullRequest!.Value))
             .ToHashSet();
 

@@ -91,6 +91,10 @@ public static class QueueBoard
         var pending = new List<QueuePendingView>();
         foreach (var item in OrderTwinsAdjacent(items))
         {
+            if (item.Retirement is not null)
+            {
+                continue;
+            }
             // Queued, OR halted. The second half is not a convenience: the lifecycle only ever writes
             // `Halted` together with `QueueItemState.Failed` (WorkItemAdvancer's own fail arm), so a
             // filter on Queued alone would put every item the queue has given up on nowhere at all

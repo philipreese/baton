@@ -106,6 +106,19 @@ public sealed class QueueSchedulerTests
     }
 
     [Fact]
+    public void A_retired_queued_item_is_not_a_scheduler_candidate()
+    {
+        var retired = Item("history") with
+        {
+            Retirement = new QueueRetirement(QueueRetirement.Operator, DateTimeOffset.UtcNow, "handled manually"),
+        };
+
+        var decision = QueueScheduler.Decide(LocalAt(12), [retired], 0, 8.0, Defaults, null, held: false);
+
+        Assert.Equal(QueueWaitReason.NoItems, decision.WaitReason);
+    }
+
+    [Fact]
     public void An_external_only_queue_waits_with_no_items_rather_than_launching_one()
     {
         var decision = QueueScheduler.Decide(

@@ -10,6 +10,8 @@ public enum QueueVerb
     Hold,
     Resume,
     Cancel,
+    Retire,
+    Restore,
     Import,
 }
 

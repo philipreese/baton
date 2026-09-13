@@ -134,6 +134,9 @@ public sealed record QueueItem
     /// </remarks>
     public string? ReadinessMutationClaim { get; init; }
 
+    /// <summary>A retained disposition, atomically recording kind, time, and reason.</summary>
+    public QueueRetirement? Retirement { get; init; }
+
     /// <summary>
     /// The verdict the last review produced, as an absolute path to that room's <c>verdict.json</c>.
     /// <b>Recorded, never inlined into the next brief from here</b> — the brief carries the findings'
@@ -274,6 +277,16 @@ public sealed record QueueItem
     /// rather than enforced — the enforcement is that no code path substitutes a model at all.
     /// </summary>
     public bool PinModel { get; init; }
+}
+
+/// <summary>Why a lifecycle row is retained as history rather than active attention.</summary>
+public sealed record QueueRetirement(
+    [property: JsonPropertyName("kind")] string Kind,
+    [property: JsonPropertyName("at")] DateTimeOffset At,
+    [property: JsonPropertyName("reason")] string Reason)
+{
+    public const string Merged = "merged";
+    public const string Operator = "operator";
 }
 
 /// <summary>

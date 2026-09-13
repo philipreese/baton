@@ -77,6 +77,8 @@ public sealed record QueueDecisionEntry(
 
     /// <summary>An operator cancelled a queued request before the scheduler claimed its launch.</summary>
     public const string Cancelled = "cancelled";
+    public const string Retired = "retired";
+    public const string Restored = "restored";
 
     /// <summary>
     /// A work item moved from one <see cref="WorkStage"/> to the next (#1934 slice 2). A fourth

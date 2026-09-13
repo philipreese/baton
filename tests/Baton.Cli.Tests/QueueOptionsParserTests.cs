@@ -287,6 +287,19 @@ public sealed class QueueOptionsParserTests
         Assert.Throws<CliArgumentException>(() => QueueOptionsParser.Parse(["cancel", "a", "b"]));
     }
 
+    [Theory]
+    [InlineData("retire", QueueVerb.Retire)]
+    [InlineData("restore", QueueVerb.Restore)]
+    public void Retirement_verbs_require_a_valid_tag_and_nonblank_reason(string word, QueueVerb verb)
+    {
+        var options = QueueOptionsParser.Parse([word, "2159-lane", "--reason", "handled by operator"]);
+
+        Assert.Equal(verb, options.Verb);
+        Assert.Equal("handled by operator", options.Reason);
+        Assert.Throws<CliArgumentException>(() => QueueOptionsParser.Parse([word, "2159-lane", "--reason", " "]));
+        Assert.Throws<CliArgumentException>(() => QueueOptionsParser.Parse([word, "not a tag", "--reason", "x"]));
+    }
+
     [Fact]
     public void Import_takes_exactly_one_path()
     {

@@ -18,7 +18,7 @@ public static class QueueOptionsParser
         "[--skill <name>] [--require repository-read|file-write|shell|network|github-read|github-write|artifact:<output-name>] " +
         "[--timeout <minutes>] " +
         "[--max-tool-steps <n>] [--token-budget <n>] [--override-runway <reason>] [--reason <why>] | " +
-        "baton queue list [--active] | baton queue hold | baton queue resume | baton queue cancel <tag> | baton queue import <file>. " +
+        "baton queue list [--active] | baton queue hold | baton queue resume | baton queue cancel <tag> | baton queue retire|restore <tag> --reason <text> | baton queue import <file>. " +
         "A worktree provisioned by --issue inherits its repository's recorded ceiling; " +
         "when no path in that repository is trusted it is recorded at 'all', and the add says which.";
 
@@ -38,6 +38,8 @@ public static class QueueOptionsParser
             "hold" => ParseBare(QueueVerb.Hold, args),
             "resume" => ParseBare(QueueVerb.Resume, args),
             "cancel" => ParseCancel(args),
+            "retire" => ParseRetirement(QueueVerb.Retire, args),
+            "restore" => ParseRetirement(QueueVerb.Restore, args),
             "import" => ParseImport(args),
             _ => throw new CliArgumentException($"Unknown 'baton queue' sub-verb '{args[0]}'. {Usage}"),
         };
@@ -94,6 +96,19 @@ public static class QueueOptionsParser
         }
 
         return new QueueOptions(QueueVerb.Cancel, Tag: args[1]);
+    }
+
+    private static QueueOptions ParseRetirement(QueueVerb verb, IReadOnlyList<string> args)
+    {
+        if (args.Count != 4 || args[2] != "--reason" || string.IsNullOrWhiteSpace(args[3]))
+        {
+            throw new CliArgumentException($"'baton queue {args[0]}' takes a tag and nonblank '--reason <text>'. {Usage}");
+        }
+        if (!QueueTag.IsValid(args[1]))
+        {
+            throw new CliArgumentException($"'{args[1]}' is not a usable queue tag ({QueueTag.Rule}).");
+        }
+        return new QueueOptions(verb, Tag: args[1], Reason: args[3].Trim());
     }
 
     private static QueueOptions ParseAdd(IReadOnlyList<string> args)
