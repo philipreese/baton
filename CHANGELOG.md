@@ -17,6 +17,7 @@ shared version through `0.14.0`.
 * **dispatch:** Allow a zero tool-step ceiling for no-tool probes ([#2279](https://github.com/philipreese/baton/issues/2279)) ([33c6469](https://github.com/philipreese/baton/commit/33c64692e911fc33651378e14dd548393927de8a))
 * **glass:** Gate mobile queue and cancel writes ([#2078](https://github.com/philipreese/baton/issues/2078)) ([#2245](https://github.com/philipreese/baton/issues/2245)) ([5f445db](https://github.com/philipreese/baton/commit/5f445db206880eb2cd53eaa324a657f0e180b216))
 * **glass:** Project durable fleet events into a mobile-first stream ([#2243](https://github.com/philipreese/baton/issues/2243)) ([e2d9d05](https://github.com/philipreese/baton/commit/e2d9d0505cc1460420219954f29dbf19fc0a6579))
+* **daemon:** Add durable fleet event substrate ([#2239](https://github.com/philipreese/baton/issues/2239)) ([ba647dec](https://github.com/philipreese/baton/commit/ba647dec6400ae6901a929d273306a6bd55985d3))
 * **queue:** Add active queue list ([#2280](https://github.com/philipreese/baton/issues/2280)) ([89d427e](https://github.com/philipreese/baton/commit/89d427ee989d9c0415edd6ee8c2694ff7974e311))
 
 
