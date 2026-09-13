@@ -1,4 +1,5 @@
 using System.Diagnostics;
+using Baton.Tests.Shared;
 using Baton.Tests.TestSupport;
 using Baton.Workspaces;
 
@@ -212,7 +213,7 @@ public sealed class GraceCheckpointRealGitTests
                 {
                     helper?.Dispose();
                     child?.Dispose();
-                    File.Delete(signalPath);
+                    FileCleanup.Delete(signalPath);
                 }
                 catch when (primaryFailure is not null)
                 {
