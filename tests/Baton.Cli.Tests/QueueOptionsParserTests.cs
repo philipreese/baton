@@ -256,8 +256,17 @@ public sealed class QueueOptionsParserTests
             ["add", "t", "--role", "implement", "--spec", "b.md", "--workspace", "C:\\x", "--nonsense", "1"]));
     }
 
+    [Fact]
+    public void List_accepts_only_the_active_flag()
+    {
+        Assert.False(QueueOptionsParser.Parse(["list"]).Active);
+        Assert.True(QueueOptionsParser.Parse(["list", "--active"]).Active);
+        Assert.Throws<CliArgumentException>(() => QueueOptionsParser.Parse(["list", "--active", "--active"]));
+        Assert.Throws<CliArgumentException>(() => QueueOptionsParser.Parse(["list", "--active=value"]));
+        Assert.Throws<CliArgumentException>(() => QueueOptionsParser.Parse(["list", "--unknown"]));
+    }
+
     [Theory]
-    [InlineData("list", QueueVerb.List)]
     [InlineData("hold", QueueVerb.Hold)]
     [InlineData("resume", QueueVerb.Resume)]
     public void The_bare_verbs_take_no_arguments(string word, QueueVerb verb)

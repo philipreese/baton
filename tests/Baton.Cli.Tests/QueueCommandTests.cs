@@ -227,6 +227,131 @@ public sealed class QueueCommandTests
     }
 
 
+    [Fact]
+    public async Task List_active_selects_live_work_and_lifecycle_terminal_obligations()
+    {
+        var home = CreateTempHome();
+        using var scope = BatonEnvironmentSnapshot.BeginScope(BatonEnvironmentSnapshot.Blank with { HomeOverride = home });
+        try
+        {
+            QueueItem Item(string tag, QueueItemState state, WorkStage? stage = null, bool halted = false,
+                IReadOnlyList<string>? requirements = null) => new()
+                {
+                    Tag = tag,
+                    Role = "implement",
+                    Workspace = home,
+                    SpecFile = Path.Combine(home, tag + ".md"),
+                    State = state,
+                    Stage = stage,
+                    Halted = halted,
+                    Requirements = requirements,
+                };
+
+            await QueueStore.MutateAsync(BatonPaths.QueueFile, s => s with
+            {
+                Items =
+                [
+                    Item("ordinary-queued", QueueItemState.Queued, requirements: []),
+                    Item("ready-lifecycle", QueueItemState.Queued, WorkStage.Ready, requirements: ["shell"]),
+                    Item("launched", QueueItemState.Launched, requirements: null),
+                    Item("done-lifecycle", QueueItemState.Done, WorkStage.Review, requirements: []),
+                    Item("failed-lifecycle", QueueItemState.Failed, WorkStage.Fix, requirements: []),
+                    Item("halted-failure", QueueItemState.Failed, WorkStage.Fix, halted: true, requirements: []),
+                    Item("done-history", QueueItemState.Done, requirements: []),
+                    Item("failed-history", QueueItemState.Failed, requirements: []),
+                    Item("cancelled", QueueItemState.Cancelled, WorkStage.Implement, requirements: []),
+                ],
+            }, Ct);
+
+            var output = new StringWriter();
+            Assert.Equal(0, await QueueCommand.ExecuteAsync(new QueueOptions(QueueVerb.List, Active: true), output, Ct));
+            var printed = output.ToString();
+
+            foreach (var selected in new[] { "ordinary-queued", "ready-lifecycle", "launched", "done-lifecycle", "failed-lifecycle", "halted-failure" })
+            {
+                Assert.Contains(selected, printed, StringComparison.Ordinal);
+            }
+
+            foreach (var excluded in new[] { "done-history", "failed-history", "cancelled" })
+            {
+                Assert.DoesNotContain(excluded, printed, StringComparison.Ordinal);
+            }
+
+            Assert.Contains("failed halted", printed, StringComparison.Ordinal);
+            Assert.Contains("Requirement coverage: 5/6 declared (selected); 1 unknown migration row(s).", printed, StringComparison.Ordinal);
+        }
+        finally
+        {
+            DirectoryCleanup.DeleteRecursively(home);
+        }
+    }
+
+    [Fact]
+    public async Task List_active_reports_an_empty_selection_without_losing_banners()
+    {
+        var home = CreateTempHome();
+        using var scope = BatonEnvironmentSnapshot.BeginScope(BatonEnvironmentSnapshot.Blank with { HomeOverride = home });
+        try
+        {
+            await QueueStore.MutateAsync(BatonPaths.QueueFile, s => s with
+            {
+                Held = true,
+                Items =
+                [
+                    new QueueItem
+                    {
+                        Tag = "history", Role = "implement", Workspace = home, SpecFile = Path.Combine(home, "history.md"),
+                        State = QueueItemState.Done,
+                    },
+                ],
+            }, Ct);
+
+            var output = new StringWriter();
+            Assert.Equal(0, await QueueCommand.ExecuteAsync(new QueueOptions(QueueVerb.List, Active: true), output, Ct));
+            Assert.Equal(
+                "Queue is HELD — no new launches until 'baton queue resume'. Live lanes are unaffected." + Environment.NewLine
+                + "No active queue items." + Environment.NewLine,
+                output.ToString());
+        }
+        finally
+        {
+            DirectoryCleanup.DeleteRecursively(home);
+        }
+    }
+
+    [Fact]
+    public async Task List_without_active_remains_byte_compatible()
+    {
+        var home = CreateTempHome();
+        using var scope = BatonEnvironmentSnapshot.BeginScope(BatonEnvironmentSnapshot.Blank with { HomeOverride = home });
+        try
+        {
+            await QueueStore.MutateAsync(BatonPaths.QueueFile, s => s with
+            {
+                Items =
+                [
+                    new QueueItem
+                    {
+                        Tag = "history", Role = "implement", Workspace = home, SpecFile = Path.Combine(home, "history.md"),
+                        State = QueueItemState.Done, Requirements = [],
+                    },
+                ],
+            }, Ct);
+
+            var output = new StringWriter();
+            Assert.Equal(0, await QueueCommand.ExecuteAsync(new QueueOptions(QueueVerb.List), output, Ct));
+            Assert.Equal(
+                "history  done  implement" + Environment.NewLine
+                + "  requirements: none" + Environment.NewLine
+                + "Requirement coverage: 1/1 declared; 0 unknown migration row(s)." + Environment.NewLine,
+                output.ToString());
+        }
+        finally
+        {
+            DirectoryCleanup.DeleteRecursively(home);
+        }
+    }
+
     private static string CreateTempHome()
     {
         var home = Path.Combine(Path.GetTempPath(), "baton_queue_cmd_" + Guid.NewGuid().ToString("n"));
