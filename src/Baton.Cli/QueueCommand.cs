@@ -581,40 +581,8 @@ public static class QueueCommand
 
     private static async Task<int> RetireAsync(string tag, string reason, TextWriter output, CancellationToken cancellationToken)
     {
-        QueueItem? observed = null;
-        var eligible = false;
-        var at = DateTimeOffset.UtcNow;
-        await QueueStore.MutateAsync(BatonPaths.QueueFile, snapshot =>
-        {
-            observed = snapshot.Items.FirstOrDefault(item => string.Equals(item.Tag, tag, StringComparison.Ordinal));
-            var readyClosed = observed is
-            {
-                Stage: WorkStage.Ready,
-                State: QueueItemState.Queued,
-                Repository: { Length: > 0 },
-                PullRequest: > 0,
-            }
-                && snapshot.PullRequestObservations?.Any(observation =>
-                    string.Equals(observation.Repository, observed.Repository, StringComparison.Ordinal)
-                    && observation.PullRequest == observed.PullRequest
-                    && observation.State == PullRequestObservationStates.Closed
-                    && observation.ObservedAt is not null
-                    && observation.Error is null) == true;
-            if (observed is not { Stage: not null, Retirement: null, ReadinessMutationClaim: null }
-                || observed.State == QueueItemState.Launched
-                || observed.State != QueueItemState.Failed && !readyClosed)
-            {
-                return snapshot;
-            }
-            eligible = true;
-            return snapshot with
-            {
-                Items = snapshot.Items.Select(item => item.Tag == tag
-                ? item with { Retirement = new QueueRetirement(QueueRetirement.Operator, at, reason) }
-                : item).ToList()
-            };
-        }, cancellationToken).ConfigureAwait(false);
-
+        var before = await QueueStore.LoadAsync(BatonPaths.QueueFile, cancellationToken).ConfigureAwait(false);
+        var observed = before.Items.FirstOrDefault(item => string.Equals(item.Tag, tag, StringComparison.Ordinal));
         if (observed is null)
         {
             throw new CliArgumentException($"Queue item '{tag}' does not exist.");
@@ -631,34 +599,65 @@ public static class QueueCommand
         {
             throw new CliArgumentException($"Queue item '{tag}' is live or has an in-flight readiness mutation and cannot be retired.");
         }
-        if (!eligible)
+        var readyClosed = observed is { Stage: WorkStage.Ready, State: QueueItemState.Queued, Repository: { Length: > 0 }, PullRequest: > 0 }
+            && before.PullRequestObservations?.Any(observation =>
+                string.Equals(observation.Repository, observed.Repository, StringComparison.Ordinal)
+                && observation.PullRequest == observed.PullRequest
+                && observation.State == PullRequestObservationStates.Closed
+                && observation.ObservedAt is not null
+                && observation.Error is null) == true;
+        if (observed.State != QueueItemState.Failed && !readyClosed)
         {
             throw new CliArgumentException($"Queue item '{tag}' has insufficient settled failure evidence or trusted closed-PR evidence for operator retirement.");
         }
+        var eligible = false;
+        var at = DateTimeOffset.UtcNow;
         await QueueDecisionLedgerStore.AppendAsync(new QueueDecisionEntry(at, tag, QueueDecisionEntry.Retired,
             $"operator: {reason}", 0, null, 0), null, BatonPaths.QueueDecisionLedgerFile, cancellationToken)
             .ConfigureAwait(false);
+        await QueueStore.MutateAsync(BatonPaths.QueueFile, snapshot =>
+        {
+            var current = snapshot.Items.FirstOrDefault(item => string.Equals(item.Tag, tag, StringComparison.Ordinal));
+            var currentReadyClosed = current is
+            {
+                Stage: WorkStage.Ready,
+                State: QueueItemState.Queued,
+                Repository: { Length: > 0 },
+                PullRequest: > 0,
+            }
+                && snapshot.PullRequestObservations?.Any(observation =>
+                    string.Equals(observation.Repository, current.Repository, StringComparison.Ordinal)
+                    && observation.PullRequest == current.PullRequest
+                    && observation.State == PullRequestObservationStates.Closed
+                    && observation.ObservedAt is not null
+                    && observation.Error is null) == true;
+            if (current is not { Stage: not null, Retirement: null, ReadinessMutationClaim: null }
+                || current.State == QueueItemState.Launched
+                || current.State != QueueItemState.Failed && !currentReadyClosed)
+            {
+                return snapshot;
+            }
+            eligible = true;
+            return snapshot with
+            {
+                Items = snapshot.Items.Select(item => item.Tag == tag
+                ? item with { Retirement = new QueueRetirement(QueueRetirement.Operator, at, reason) }
+                : item).ToList()
+            };
+        }, cancellationToken).ConfigureAwait(false);
+
+        if (!eligible)
+        {
+            throw new CliArgumentException($"Queue item '{tag}' changed while retirement was being recorded; retry after checking its current state.");
+        }
         output.WriteLine($"Retired lifecycle item '{tag}' as operator-handled. Its evidence was retained.");
         return 0;
     }
 
     private static async Task<int> RestoreAsync(string tag, string reason, TextWriter output, CancellationToken cancellationToken)
     {
-        QueueItem? observed = null;
-        var at = DateTimeOffset.UtcNow;
-        await QueueStore.MutateAsync(BatonPaths.QueueFile, snapshot =>
-        {
-            observed = snapshot.Items.FirstOrDefault(item => string.Equals(item.Tag, tag, StringComparison.Ordinal));
-            if (observed?.Retirement?.Kind != QueueRetirement.Operator)
-            {
-                return snapshot;
-            }
-            return snapshot with
-            {
-                Items = snapshot.Items.Select(item => item.Tag == tag
-                ? item with { Retirement = null } : item).ToList()
-            };
-        }, cancellationToken).ConfigureAwait(false);
+        var before = await QueueStore.LoadAsync(BatonPaths.QueueFile, cancellationToken).ConfigureAwait(false);
+        var observed = before.Items.FirstOrDefault(item => string.Equals(item.Tag, tag, StringComparison.Ordinal));
         if (observed is null)
         {
             throw new CliArgumentException($"Queue item '{tag}' does not exist.");
@@ -671,9 +670,29 @@ public static class QueueCommand
         {
             throw new CliArgumentException($"Queue item '{tag}' is not operator-retired.");
         }
+        var at = DateTimeOffset.UtcNow;
         await QueueDecisionLedgerStore.AppendAsync(new QueueDecisionEntry(at, tag, QueueDecisionEntry.Restored,
             $"operator: {reason}", 0, null, 0), null, BatonPaths.QueueDecisionLedgerFile, cancellationToken)
             .ConfigureAwait(false);
+        var restored = false;
+        await QueueStore.MutateAsync(BatonPaths.QueueFile, snapshot =>
+        {
+            var current = snapshot.Items.FirstOrDefault(item => string.Equals(item.Tag, tag, StringComparison.Ordinal));
+            if (current?.Retirement?.Kind != QueueRetirement.Operator)
+            {
+                return snapshot;
+            }
+            restored = true;
+            return snapshot with
+            {
+                Items = snapshot.Items.Select(item => item.Tag == tag
+                ? item with { Retirement = null } : item).ToList()
+            };
+        }, cancellationToken).ConfigureAwait(false);
+        if (!restored)
+        {
+            throw new CliArgumentException($"Queue item '{tag}' changed while restoration was being recorded; retry after checking its current state.");
+        }
         output.WriteLine($"Restored lifecycle item '{tag}' to active attention; its launch state was unchanged.");
         return 0;
     }

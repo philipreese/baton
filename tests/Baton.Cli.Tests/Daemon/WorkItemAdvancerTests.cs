@@ -249,6 +249,38 @@ public sealed class WorkItemAdvancerTests
     }
 
     [Fact]
+    public async Task A_merged_pr_retires_a_failed_item_only_after_its_room_is_terminal()
+    {
+        var home = CreateTempHome();
+        using var scope = BatonEnvironmentSnapshot.BeginScope(BatonEnvironmentSnapshot.Blank with { HomeOverride = home });
+        try
+        {
+            var room = await WriteSettledRoomAsync(home, WorkflowOutcome.Failed, verdictJson: null);
+            await SeedAsync(home, WorkStage.Fix, room, QueueItemState.Failed);
+            var merged = $$$"""
+                [{"number":77,"state":"MERGED","isDraft":false,"headRefOid":"{{{PushedSha}}}",
+                  "headRefName":"1934-lane","baseRefName":"main","isCrossRepository":false,
+                  "statusCheckRollup":[],"mergeCommit":{"oid":"{{{MergeSha}}}"}}]
+                """;
+
+            var facts = await new WorkItemAdvancer(new FakeGh(merged), (_, _) => Task.FromResult<string?>(PushedSha))
+                .AdvanceAsync(Now, Ct);
+
+            Assert.Empty(facts);
+            var retired = await ReadBackAsync();
+            Assert.Equal(QueueRetirement.Merged, retired.Retirement?.Kind);
+            Assert.Equal(Now, retired.Retirement?.At);
+            Assert.Equal("trusted merged observation for PR #77", retired.Retirement?.Reason);
+            var ledger = await QueueDecisionLedgerStore.ReadAllAsync(BatonPaths.QueueDecisionLedgerFile, Ct);
+            Assert.Contains(ledger, entry => entry is { Decision: QueueDecisionEntry.Retired, Tag: "1934-lane" });
+        }
+        finally
+        {
+            DirectoryCleanup.DeleteRecursively(home);
+        }
+    }
+
+    [Fact]
     public async Task A_succeeded_implement_lane_with_an_open_pr_is_queued_for_review()
     {
         var home = CreateTempHome();

@@ -142,16 +142,28 @@ public sealed class WorkItemAdvancer
         await RecordOwnedObservationsAsync(item, stage, verdict, pr, head, now, cancellationToken)
             .ConfigureAwait(false);
 
+        // A merged PR is delivery evidence, but it is not permission to abandon a room that is
+        // still running. In particular, the roomless-timeout sweep can mark a late launch Failed
+        // before that launch creates its room. Only the terminal sentinel is proof this room is no
+        // longer live; the state word is merely the queue's earlier observation.
         if (pr.Succeeded && pr.MergeSha is { Length: > 0 }
+            && sentinel is not null
             && item.State is QueueItemState.Done or QueueItemState.Failed
             && item.ReadinessMutationClaim is null)
         {
             var retired = false;
+            var retirement = new QueueRetirement(QueueRetirement.Merged, now,
+                $"trusted merged observation for PR #{pr.Number}");
+            await QueueDecisionLedgerStore.AppendAsync(
+                new QueueDecisionEntry(now, item.Tag, QueueDecisionEntry.Retired,
+                    $"merged: PR #{pr.Number}", 0, null, 0),
+                null, BatonPaths.QueueDecisionLedgerFile, cancellationToken).ConfigureAwait(false);
             await QueueStore.MutateAsync(BatonPaths.QueueFile, snapshot =>
             {
                 var current = snapshot.Items.FirstOrDefault(i => i.Tag == item.Tag);
                 if (current is null || current.Retirement is not null
-                    || current.State is QueueItemState.Launched
+                    || current.State is not (QueueItemState.Done or QueueItemState.Failed)
+                    || current.RoomDirectory != item.RoomDirectory
                     || current.ReadinessMutationClaim is not null)
                 {
                     return snapshot;
@@ -162,16 +174,11 @@ public sealed class WorkItemAdvancer
                     Items = snapshot.Items.Select(i => i.Tag == item.Tag
                     ? i with
                     {
-                        Retirement = new QueueRetirement(QueueRetirement.Merged, now,
-                        $"trusted merged observation for PR #{pr.Number}")
+                        Retirement = retirement
                     } : i).ToList()
                 };
             }, cancellationToken).ConfigureAwait(false);
-            if (retired)
-            {
-                return new QueueDecisionEntry(now, item.Tag, QueueDecisionEntry.Retired,
-                    $"merged: PR #{pr.Number}", 0, null, 0);
-            }
+            if (retired) return null;
         }
 
         // A halted item remains available only for the trusted-merge retirement above. Its halt

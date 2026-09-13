@@ -1616,6 +1616,9 @@ function queuePrRowsHtml(prs, heading){
       const lifecycle = cancelledOpen ? `<span class="q-halt">cancelled lane · open PR</span>`
         : l.state === "Cancelled" ? `<span class="q-halt">cancelled lane</span>`
         : l.halted ? `<span class="q-halt">halted lane</span>` : esc(l.stage);
+      const retirement = l.retirement
+        ? ` · retired ${esc(l.retirement.kind || "unknown")} ${esc(age(l.retirement.at) || "at an unknown time")} ago; ${esc(l.retirement.reason || "reason unavailable")}`
+        : "";
       const link = l.room
         ? `<a class="inboxlink" data-room="${esc(l.room)}">${esc(l.tag)}</a>`
         : esc(l.tag);
@@ -1625,7 +1628,7 @@ function queuePrRowsHtml(prs, heading){
       const twinLabel = l.twinIssue != null
         ? `<span class="q-twin">twin #${esc(l.twinIssue)}</span> `
         : "";
-      return `<div${twin}>${twinLabel}${link} · ${lifecycle} · round ${esc(l.round)} · ${esc(l.verdict || "no verdict")} · ${esc(checks)}</div>`;
+      return `<div${twin}>${twinLabel}${link} · ${lifecycle} · round ${esc(l.round)} · ${esc(l.verdict || "no verdict")} · ${esc(checks)}${retirement}</div>`;
     }).join("") || "retained lane unavailable";
     const error = p.observationError ? `<div class="q-halt">lookup: ${esc(p.observationError)}</div>` : "";
     return `<tr><td>${esc((p.repository ? p.repository + " " : "repository unknown ") + "#" + p.pr)}</td>`
@@ -1640,6 +1643,19 @@ function queuePrHistoryHtml(q){
   const prs = Array.isArray(q.pullRequestHistory) ? q.pullRequestHistory : [];
   if(!prs.length) return "";
   return `<details><summary>Completed PR history · ${esc(prs.length)}</summary>${queuePrRowsHtml(prs, "completed PR")}</details>`;
+}
+function queueRetiredHistoryHtml(q){
+  const retired = Array.isArray(q.retiredHistory) ? q.retiredHistory : [];
+  if(!retired.length) return "";
+  const rows = retired.map(r => {
+    const evidence = r.retirement || {};
+    const at = age(evidence.at);
+    const when = at === null ? "time unknown" : at === "just now" ? "just now" : `${at} ago`;
+    return `<tr><td class="q-tag">${esc(r.tag)}</td><td>${esc(r.stage || "—")}</td><td>${esc(r.state || "unknown")}</td>`
+      + `<td>${r.issue ? esc("#" + r.issue) : "—"}${r.pr ? " · " + esc("PR #" + r.pr) : ""}</td>`
+      + `<td>${esc(evidence.kind || "unknown")} · ${esc(when)} · ${esc(evidence.reason || "reason unavailable")}</td></tr>`;
+  }).join("");
+  return `<details><summary>Retired lifecycle history · ${esc(retired.length)}</summary><table><thead><tr><th>lane</th><th>stage</th><th>state</th><th>work</th><th>retirement evidence</th></tr></thead><tbody>${rows}</tbody></table></details>`;
 }
 function queueBoardHtml(q, unavailableReason){
   // Three ways there is no board, three different answers (#1912 fix round). FleetProjectionWriter's
@@ -1670,6 +1686,7 @@ function queueBoardHtml(q, unavailableReason){
     + queuePendingTableHtml(q)
     + queuePrTableHtml(q)
     + queuePrHistoryHtml(q)
+    + queueRetiredHistoryHtml(q)
     + `<div class="queueboard-note">${esc(decidedNote)}</div>`
     + `</div>`;
 }

@@ -30,7 +30,7 @@ if (beginAt < 0 || endAt < 0 || endAt < beginAt) {
   process.exit(1);
 }
 const source = html.slice(html.indexOf("\n", beginAt) + 1, endAt).replace(/^\s*\/\/.*$/gm, "");
-const REQUIRED = ["queueSlotsLineHtml", "queueLanesTableHtml", "queuePendingTableHtml", "queuePrTableHtml", "queuePrRowsHtml", "queuePrHistoryHtml", "queueBoardHtml", "streamStatusSummaryHtml", "streamEventReceiptHtml", "streamGroupedEventsHtml", "streamHistoryHtml", "streamHomeHtml"];
+const REQUIRED = ["queueSlotsLineHtml", "queueLanesTableHtml", "queuePendingTableHtml", "queuePrTableHtml", "queuePrRowsHtml", "queuePrHistoryHtml", "queueRetiredHistoryHtml", "queueBoardHtml", "streamStatusSummaryHtml", "streamEventReceiptHtml", "streamGroupedEventsHtml", "streamHistoryHtml", "streamHomeHtml"];
 const missing = REQUIRED.filter(fn => !source.includes(`function ${fn}`));
 if (missing.length) {
   console.error(`glass.selftest.mjs: FAIL -- the marked block no longer defines: ${missing.join(", ")}`);
@@ -123,7 +123,7 @@ check("a valid weekly-only account renders its vendor window without manufacturi
       && !vendorUsageSink.innerHTML.includes("5h"));
 
 const panel = new Function("esc", "age", `${source}\nreturn { ${REQUIRED.join(", ")} };`)(esc, age);
-const { queueSlotsLineHtml, queuePendingTableHtml, queuePrTableHtml, queuePrHistoryHtml, queueLanesTableHtml, queueBoardHtml, streamStatusSummaryHtml, streamEventReceiptHtml, streamGroupedEventsHtml, streamHistoryHtml, streamHomeHtml } = panel;
+const { queueSlotsLineHtml, queuePendingTableHtml, queuePrTableHtml, queuePrRowsHtml, queuePrHistoryHtml, queueRetiredHistoryHtml, queueLanesTableHtml, queueBoardHtml, streamStatusSummaryHtml, streamEventReceiptHtml, streamGroupedEventsHtml, streamHistoryHtml, streamHomeHtml } = panel;
 
 // -- no board is THREE facts, and each gets its own word (#1912 fix round) --
 // FleetProjectionWriter.BuildQueueSectionAsync's remarks are the register for which state produces
@@ -147,6 +147,16 @@ check("a daemon reason carrying markup is escaped -- an exception message is not
       && queueBoardHtml(undefined, "<img src=x onerror=1>").includes("&lt;img"));
 check("(control) a present-but-empty queue section DOES render a board -- 'no queue file' and 'an empty queue' are different facts",
       queueBoardHtml({ slots: { cap: 4, live: 0, floorGb: 2, nightBand: false, lanes: [] }, pending: [], pullRequests: [] }).includes("queueboard-head"));
+
+{
+  const retirement = { kind: "operator", at: new Date().toISOString(), reason: "operator completed recovery" };
+  const out = queueRetiredHistoryHtml({ retiredHistory: [{ tag: "failed-no-pr", stage: "fix", state: "Failed", retirement }] });
+  check("a retired lifecycle lane without a PR remains in Fleet Glass history with its evidence",
+        out.includes("failed-no-pr") && out.includes("operator") && out.includes("operator completed recovery"));
+  check("retirement evidence also accompanies a retained PR lane",
+        queuePrRowsHtml([{ pr: 2288, lanes: [{ tag: "merged", stage: "ready", state: "Done", round: 0, retirement }] }], "history")
+          .includes("operator completed recovery"));
+}
 
 // -- weighted slots --
 {
