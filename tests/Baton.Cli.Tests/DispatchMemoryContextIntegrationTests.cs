@@ -79,13 +79,16 @@ public sealed class DispatchMemoryContextIntegrationTests : IDisposable
         }
     }
 
-    [Fact]
-    public async Task Malformed_canonical_memory_refuses_before_the_worker_or_room_starts()
+    [Theory]
+    [InlineData(BatonPaths.MemoryEntriesFileName)]
+    [InlineData(BatonPaths.MemoryLinksFileName)]
+    [InlineData(BatonPaths.MemoryRetractionsFileName)]
+    public async Task Malformed_canonical_memory_refuses_before_the_worker_or_room_starts(string fileName)
     {
         var root = CreateRoot();
         try
         {
-            var entriesPath = BatonPaths.MemoryEntriesFile(FleetMemory.SlugFor(Repository));
+            var entriesPath = Path.Combine(BatonPaths.MemoryDirectory(FleetMemory.SlugFor(Repository)), fileName);
             Directory.CreateDirectory(Path.GetDirectoryName(entriesPath)!);
             await File.WriteAllTextAsync(entriesPath, "not json", TestContext.Current.CancellationToken);
             var options = await BuildOptionsAsync(root, memoryContextRepository: Repository);

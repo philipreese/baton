@@ -214,8 +214,11 @@ internal sealed class JsonLinesLedger<TEntry>(
     /// nesting ledger mutexes, provided it propagates sharing/I/O failures as a publication fence.
     /// With <paramref name="requireReadable"/>, only an open reporting a missing file/directory
     /// means empty; File.Exists must not disguise a denied or invalid canonical input as absence.
+    /// With <paramref name="requireValidJson"/>, a malformed row is a canonical-input failure rather
+    /// than being skipped; ordinary reads retain their deliberately tolerant behavior.
     /// </summary>
-    internal IReadOnlyList<TEntry> ReadAllUnlocked(string ledgerFilePath, bool requireReadable = false)
+    internal IReadOnlyList<TEntry> ReadAllUnlocked(
+        string ledgerFilePath, bool requireReadable = false, bool requireValidJson = false)
     {
         if (!requireReadable && !File.Exists(ledgerFilePath))
         {
@@ -240,7 +243,7 @@ internal sealed class JsonLinesLedger<TEntry>(
             {
                 entry = JsonSerializer.Deserialize<TEntry>(line, SerializerOptions);
             }
-            catch (JsonException)
+            catch (JsonException) when (!requireValidJson)
             {
                 continue;
             }
