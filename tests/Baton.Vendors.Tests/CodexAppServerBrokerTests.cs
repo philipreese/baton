@@ -231,21 +231,31 @@ public sealed class CodexAppServerBrokerTests
     public async Task Synchronous_read_prefix_late_fault_is_observed_without_extending_the_response_bound()
     {
         using var releaseRead = new ManualResetEventSlim();
+        using var responseTimeout = new CancellationTokenSource();
+        var readStarted = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
         using var error = new SignalingStringWriter("read failed after its deadline");
         var stopwatch = Stopwatch.StartNew();
         try
         {
-            var result = await CodexAppServerBroker.ReadRateLimitsWithinBoundsAsync(
+            var harvest = CodexAppServerBroker.ReadRateLimitsWithinBoundsAsync(
                 _ =>
                 {
+                    readStarted.TrySetResult();
                     releaseRead.Wait();
                     throw new IOException("late read fault");
                 },
                 _ => Task.CompletedTask,
                 error,
+                responseTimeout,
                 TimeSpan.FromMilliseconds(25),
                 TimeSpan.FromMilliseconds(25),
                 TestContext.Current.CancellationToken);
+
+            await readStarted.Task.WaitAsync(
+                TimeSpan.FromSeconds(5), TestContext.Current.CancellationToken);
+            responseTimeout.Cancel();
+
+            var result = await harvest;
 
             stopwatch.Stop();
             Assert.Null(result);

@@ -262,7 +262,11 @@ public static class CodexAppServerBroker
             .ConfigureAwait(false);
     }
 
-    private static async Task<JsonObject?> ReadRateLimitsWithinBoundsAsync(
+    /// <summary>
+    /// Internal deadline seam for lifecycle tests. The caller owns <paramref name="responseTimeout"/>
+    /// and may trigger it only after an injected synchronous prefix has entered.
+    /// </summary>
+    internal static async Task<JsonObject?> ReadRateLimitsWithinBoundsAsync(
         Func<CancellationToken, Task<JsonObject>> read,
         Func<CancellationToken, Task> cleanup,
         TextWriter error,
