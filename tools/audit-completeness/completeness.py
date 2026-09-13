@@ -771,7 +771,22 @@ LITERAL_NEWLINE_BEFORE_FINAL_DECLARATION = re.compile(
 
 def literal_newline_before_final_declaration(body: str) -> bool:
     """Whether a final closing declaration follows literal newline escape text, not a real line."""
-    return bool(LITERAL_NEWLINE_BEFORE_FINAL_DECLARATION.search(body or ""))
+    for escaped_newline in ("\\n", "\\r\\n"):
+        start = 0
+        while (newline := (body or "").find(escaped_newline, start)) >= 0:
+            declaration = body[newline + len(escaped_newline):].rstrip()
+            if ("\n" not in declaration and "\r" not in declaration
+                    and DECLARATION_LINE.match(declaration)
+                    and CLOSING_KEYWORD.search(declaration)):
+                return True
+            start = newline + len(escaped_newline)
+    for newline in re.finditer(r"\\\\(?:r\\\\)?n(?:\\\\(?:r\\\\)?n)*", body or "", re.IGNORECASE):
+        declaration = body[newline.end():].rstrip()
+        if ("\n" not in declaration and "\r" not in declaration
+                and DECLARATION_LINE.match(declaration)
+                and CLOSING_KEYWORD.search(declaration)):
+            return True
+    return False
 
 
 def negated_close_faults(body: str) -> list:
