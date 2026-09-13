@@ -2,6 +2,7 @@ using System.Diagnostics;
 using Baton.Dispatch;
 using Baton.Domain;
 using Baton.Mutation;
+using Baton.Status;
 using Baton.Store;
 using Baton.Tests.Shared;
 using static Baton.Tests.TestSupport.ShellWorkerCommands;
@@ -141,6 +142,122 @@ public sealed class MutationInterfaceWorkProductWiringTests : IDisposable
         Assert.Null(stepState.WorkspaceChanged);
         Assert.Null(stepState.Hollow);
         Assert.Null(stepState.HollowReason);
+    }
+
+    /// <summary>
+    /// #2281: this is the arrest producer, not a direct probe test. The fake dispatcher trips the
+    /// real budget monitor and returns through the real grace dispatch path; the assertion therefore
+    /// fails if MutationInterface drops the measurement, takes it before grace, or forgets the
+    /// engine-placement exclusion.
+    /// </summary>
+    [Theory]
+    [InlineData("worker-dirty", true)]
+    [InlineData("worker-commit", true)]
+    [InlineData("engine-only", false)]
+    [InlineData("unchanged", false)]
+    [InlineData("unmeasurable", null)]
+    public async Task An_arrest_records_attempt_boundary_workspace_evidence(string shape, bool? expectedWorkspaceChanged)
+    {
+        var repo = NewDir("arrest-repo");
+        RunGit(repo, "init", "-b", "main");
+        RunGit(repo, "config", "user.email", "test@example.com");
+        RunGit(repo, "config", "user.name", "Test");
+        File.WriteAllText(Path.Combine(repo, "committed.txt"), "committed content");
+        RunGit(repo, "add", ".");
+        RunGit(repo, "commit", "-m", "initial");
+
+        var worker = repo;
+        if (shape != "unmeasurable")
+        {
+            var remote = NewDir("arrest-remote");
+            RunGit(remote, "init", "--bare");
+            RunGit(repo, "remote", "add", "origin", remote);
+            RunGit(repo, "push", "-u", "origin", "main");
+            worker = Path.Combine(NewDir("arrest-worker-parent"), "worker");
+            RunGit(repo, "worktree", "add", worker, "-b", "worker-branch", "main");
+        }
+
+        var roomDirectory = Path.Combine(_root, $"room-{Guid.NewGuid():N}");
+        var artifactsRoot = Path.Combine(roomDirectory, "artifacts");
+        var logPath = Path.Combine(roomDirectory, "flow.jsonl");
+        var stepId = new StepId("implement-step");
+        var snapshot = new WorkflowDefinitionSnapshot(
+            new WorkflowDefinitionSnapshotId("snapshot-arrest-workspace"), new WorkflowTemplateId("implement"), 1,
+            [new WorkflowStepDefinition(stepId, "implement", [], [], DependsOn: [], RetryPolicy: new RetryPolicy(1))]);
+
+        Action<CoreDispatchTarget> prepareWorker = shape switch
+        {
+            "worker-dirty" => _ => File.WriteAllText(Path.Combine(worker, "worker.txt"), "worker edit"),
+            "worker-commit" => _ =>
+            {
+                File.WriteAllText(Path.Combine(worker, "worker.txt"), "worker commit");
+                RunGit(worker, "add", "worker.txt");
+                RunGit(worker, "commit", "-m", "worker change");
+            }
+            ,
+            "engine-only" => target =>
+            {
+                var engineFile = Path.Combine(worker, ".engine", "placement.txt");
+                Directory.CreateDirectory(Path.GetDirectoryName(engineFile)!);
+                File.WriteAllText(engineFile, "engine placement");
+                target.OnEngineFilesPlaced!.Invoke([new EnginePlacedFile(engineFile, EnginePlacedFile.TryDigest(engineFile))], []).GetAwaiter().GetResult();
+            }
+            ,
+            _ => _ => { }
+            ,
+        };
+
+        var bindings = new Dictionary<string, WorkerBinding>
+        {
+            ["implement"] = new WorkerBinding.Process(
+                new WorkerContract("implement", [], [], []),
+                ExitCleanlyWithoutWriting() with { WorkingDirectory = worker }, TimeSpan.FromSeconds(30),
+                Adapter: "claude", TokenBudget: 1, ChangesTree: true, VerifiesWorkspace: true),
+        };
+
+        await using var writer = new FlowEventLogWriter(logPath);
+        var reader = new FlowEventLogReader(logPath);
+        var dispatcher = new ArrestingWorkspaceDispatcher(prepareWorker);
+
+        var finalState = await MutationInterface.StartWorkflowAsync(
+            new WorkflowId("wf-arrest-workspace"), roomDirectory, snapshot, bindings, artifactsRoot,
+            reader, writer, dispatcher, cancellationToken: TestContext.Current.CancellationToken);
+
+        var entries = await reader.ReadAllAsync(TestContext.Current.CancellationToken);
+        var arrested = Assert.Single(entries
+            .OfType<FlowEvent.ExecutionArrested>());
+        Assert.Equal(expectedWorkspaceChanged, arrested.WorkspaceChanged);
+
+        // The advancer reads terminal.json, not flow.jsonl. Project and persist the same terminal
+        // shape the room runner writes so a producer regression cannot be hidden by a direct-event
+        // assertion alone.
+        var terminal = WorkflowStatusProjector.Project(finalState, snapshot, roomDirectory);
+        await TerminalSentinelWriter.WriteAsync(roomDirectory, terminal, TestContext.Current.CancellationToken);
+        var persisted = await TerminalSentinelWriter.TryReadAsync(roomDirectory, TestContext.Current.CancellationToken);
+        var terminalStep = Assert.Single(Assert.IsType<WorkflowStatusView>(persisted).Steps);
+        Assert.Equal("Arrested", terminalStep.IndeterminateProducerKind);
+        Assert.Equal(expectedWorkspaceChanged, terminalStep.WorkspaceChanged);
+    }
+
+    private sealed class ArrestingWorkspaceDispatcher(Action<CoreDispatchTarget> prepareWorker) : ICoreDispatcher
+    {
+        public int DispatchCount { get; private set; }
+
+        public async Task<CoreDispatchResult> DispatchAsync(ExecutionRequest request, CoreDispatchTarget target, CancellationToken cancellationToken = default)
+        {
+            DispatchCount++;
+            if (DispatchCount == 1)
+            {
+                prepareWorker(target);
+                target.OnStdoutLine!.Invoke("{\"type\":\"assistant\",\"message\":{\"usage\":{\"cache_creation_input_tokens\":2}}}");
+                var cancelled = new TaskCompletionSource();
+                await using var registration = cancellationToken.Register(() => cancelled.TrySetResult());
+                await cancelled.Task.WaitAsync(TimeSpan.FromSeconds(120), CancellationToken.None);
+                return new CoreDispatchResult(-1, CoreExitReason.CancelRequested);
+            }
+
+            return new CoreDispatchResult(0, CoreExitReason.Natural);
+        }
     }
 
     private string NewDir(string name)

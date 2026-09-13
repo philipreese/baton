@@ -2114,10 +2114,12 @@ public static class MutationInterface
             // FlowEvent.ExecutionAttemptStarted above already has. Composed the way OnStdoutLine is,
             // never replacing a callback a caller already wired.
             var innerOnEngineFilesPlaced = target.OnEngineFilesPlaced;
+            IReadOnlyCollection<EnginePlacedFile> enginePlacedFiles = [];
             target = target with
             {
                 OnEngineFilesPlaced = async (files, groups) =>
                 {
+                    enginePlacedFiles = files.ToArray();
                     await eventLogWriter.AppendAsync(
                             new FlowEvent.EngineFilesPlaced(prepared.Request.ExecutionId, files, groups),
                             CancellationToken.None)
@@ -2161,6 +2163,16 @@ public static class MutationInterface
                         .ConfigureAwait(false);
                 }
 
+                // #2253: take the tri-state measurement only after the grace path, so the arrest
+                // event says what this complete attempt left behind. A failed probe stays null:
+                // unknown must never be presented as known-no-change.
+                bool? workspaceChanged = null;
+                if (Workspaces.WorktreeProvisioner.TryReadWorkspaceChanged(
+                        mutationProbePath, workspaceHeadShaAtStart, out var changed, enginePlacedFiles))
+                {
+                    workspaceChanged = changed;
+                }
+
                 // #2002: read once and destructured, never twice inline -- the two halves of this
                 // reading must describe the same snapshot.
                 var dominantCommand = budgetMonitor.SnapshotDominantCommandShape();
@@ -2183,7 +2195,8 @@ public static class MutationInterface
                         // #2002: recorded on every arrest, like PeakBilledInWindow above, so the fact
                         // is durable even though only the tool-step-cap text reads it today.
                         dominantCommand?.Shape,
-                        dominantCommand?.Percent),
+                        dominantCommand?.Percent,
+                        workspaceChanged),
                     CancellationToken.None).ConfigureAwait(false);
                 return;
             }

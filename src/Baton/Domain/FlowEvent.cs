@@ -499,7 +499,13 @@ public abstract record FlowEvent
         long? BilledRateLimit = null,
         string? Adapter = null,
         string? DominantCommandShape = null,
-        int? DominantCommandSharePercent = null) : FlowEvent;
+        int? DominantCommandSharePercent = null,
+        // #2253: measured after any grace turn from this attempt's start SHA, excluding files the
+        // engine placed before the worker started. Null is deliberately distinct from false: older
+        // journal lines and failed probes are unmeasurable, so a queue must not spend a continuation
+        // on either without positive evidence.
+        [property: JsonPropertyName("workspaceChanged")]
+        bool? WorkspaceChanged = null) : FlowEvent;
 
     /// <summary>
     /// #2134: the grace turn's own outcome (`spec/baton.md` §3, "The grace turn", is the canonical

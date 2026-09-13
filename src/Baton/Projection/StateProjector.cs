@@ -400,6 +400,10 @@ public static class StateProjector
 
             case FlowEvent.ExecutionArrested arrested:
                 state.UnmatchedVerifyExecutionIds.Remove(arrested.ExecutionId);
+                if (state.StepIdByExecutionId.TryGetValue(arrested.ExecutionId, out var arrestedStepId))
+                {
+                    state.WorkspaceChangedByStepId[arrestedStepId] = arrested.WorkspaceChanged;
+                }
                 ApplyIndeterminate(state, arrested.ExecutionId, DescribeArrest(arrested), IndeterminateProducer.Arrested);
                 break;
 

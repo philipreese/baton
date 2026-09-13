@@ -133,6 +133,11 @@ public class FlowEventSerializationTests
         ];
         yield return [new FlowEvent.EngineFilesPlaced(ExecutionId, null, [])];
         yield return [new FlowEvent.ExecutionArrested(ExecutionId)];
+        // #2281: both known polarities are durable facts, while null remains the explicit
+        // compatibility/default shape for a probe that could not measure an older attempt.
+        yield return [new FlowEvent.ExecutionArrested(ExecutionId, WorkspaceChanged: true)];
+        yield return [new FlowEvent.ExecutionArrested(ExecutionId, WorkspaceChanged: false)];
+        yield return [new FlowEvent.ExecutionArrested(ExecutionId, WorkspaceChanged: null)];
         yield return
         [
             new FlowEvent.ExecutionArrested(
@@ -207,6 +212,22 @@ public class FlowEventSerializationTests
         var reserialized = JsonSerializer.Serialize(deserialized, typeof(FlowEvent), FlowEventLogJson.Options);
         Assert.Equal(json, reserialized);
         Assert.Equal(original.GetType(), deserialized.GetType());
+    }
+
+    [Fact]
+    public void ExecutionArrested_workspaceChanged_uses_the_exact_wire_name_and_replays_historical_absence()
+    {
+        var trueJson = JsonSerializer.Serialize<FlowEvent>(new FlowEvent.ExecutionArrested(ExecutionId, WorkspaceChanged: true), FlowEventLogJson.Options);
+        var falseJson = JsonSerializer.Serialize<FlowEvent>(new FlowEvent.ExecutionArrested(ExecutionId, WorkspaceChanged: false), FlowEventLogJson.Options);
+        var defaultJson = JsonSerializer.Serialize<FlowEvent>(new FlowEvent.ExecutionArrested(ExecutionId), FlowEventLogJson.Options);
+
+        Assert.Contains("\"workspaceChanged\":true", trueJson);
+        Assert.Contains("\"workspaceChanged\":false", falseJson);
+        Assert.Contains("\"workspaceChanged\":null", defaultJson);
+
+        const string historical = "{\"eventType\":\"executionArrested\",\"ExecutionId\":\"exec-1\"}";
+        var replayed = Assert.IsType<FlowEvent.ExecutionArrested>(JsonSerializer.Deserialize<FlowEvent>(historical, FlowEventLogJson.Options));
+        Assert.Null(replayed.WorkspaceChanged);
     }
 
     /// <summary>

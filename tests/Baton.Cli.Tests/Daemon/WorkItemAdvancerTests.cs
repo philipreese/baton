@@ -186,6 +186,18 @@ public sealed class WorkItemAdvancerTests
         return room;
     }
 
+    private static async Task<string> WriteArrestedRoomAsync(string home, bool? workspaceChanged)
+    {
+        var room = Path.Combine(home, "rooms", "queue-2253-lane-" + Guid.NewGuid().ToString("n")[..8]);
+        Directory.CreateDirectory(room);
+        await TerminalSentinelWriter.WriteAsync(room, new WorkflowStatusView(
+            WorkflowOutcome.Indeterminate,
+            [new WorkflowStatusStepView("implement-step", "Failed", "exec-2253",
+                IndeterminateProducerKind: "Arrested", WorkspaceChanged: workspaceChanged)],
+            [], "operator prose says workspaceChanged: true"), Ct);
+        return room;
+    }
+
     private static async Task<QueueItem> SeedAsync(
         string home, WorkStage stage, string room, QueueItemState state = QueueItemState.Done, int round = 0,
         bool? automaticFixUsed = false, IReadOnlyList<QueueStageSelection>? stageSelections = null)
@@ -1029,6 +1041,49 @@ public sealed class WorkItemAdvancerTests
 
             // Still text, never the path it was read back from (spec/baton.md §13).
             Assert.DoesNotContain(reviewRoom, brief, StringComparison.OrdinalIgnoreCase);
+        }
+        finally
+        {
+            DirectoryCleanup.DeleteRecursively(home);
+        }
+    }
+
+    [Theory]
+    [InlineData(true, false, "Continue", QueueItemState.Queued)]
+    [InlineData(false, false, "Implement", QueueItemState.Failed)]
+    [InlineData(null, false, "Implement", QueueItemState.Failed)]
+    [InlineData(false, true, "ReReview", QueueItemState.Queued)]
+    public async Task An_arrested_lane_advances_from_terminal_workspace_evidence(
+        bool? workspaceChanged, bool pushed, string expectedStage, QueueItemState expectedState)
+    {
+        var home = CreateTempHome();
+        using var scope = BatonEnvironmentSnapshot.BeginScope(BatonEnvironmentSnapshot.Blank with { HomeOverride = home });
+        try
+        {
+            var room = await WriteArrestedRoomAsync(home, workspaceChanged);
+            await SeedAsync(home, WorkStage.Implement, room, QueueItemState.Failed);
+            var workspaceHead = pushed ? PushedSha : "ffff0000ffff0000ffff0000ffff0000";
+
+            var facts = await new WorkItemAdvancer(
+                new FakeGh(PrJson(77, PushedSha)), (_, _) => Task.FromResult<string?>(workspaceHead))
+                .AdvanceAsync(Now, Ct);
+
+            var item = await ReadBackAsync();
+            Assert.Equal(Enum.Parse<WorkStage>(expectedStage), item.Stage);
+            Assert.Equal(expectedState, item.State);
+            var reason = Assert.Single(facts).Reason!;
+            if (pushed)
+            {
+                Assert.Contains("re-review", reason, StringComparison.Ordinal);
+            }
+            else if (workspaceChanged == true)
+            {
+                Assert.Contains("measured unpushed workspace changes", reason, StringComparison.Ordinal);
+            }
+            else
+            {
+                Assert.Contains("automatic continuation", reason, StringComparison.Ordinal);
+            }
         }
         finally
         {

@@ -23,9 +23,11 @@ public sealed class WorkItemLifecycleTests
         bool prObserved = true,
         bool? prOpen = true,
         bool? prDraft = true,
-        string? requiredChecks = PullRequestChecks.Passing) =>
+        string? requiredChecks = PullRequestChecks.Passing,
+        bool? workspaceChanged = null,
+        IndeterminateProducer? indeterminateProducer = null) =>
         new(stage, round, automaticFixUsed, "1934-lane", outcome, verdict, pr, prHead, workspaceHead,
-            prObserved, prOpen, prDraft, requiredChecks);
+            prObserved, prOpen, prDraft, requiredChecks, workspaceChanged, indeterminateProducer);
 
     /// <summary>
     /// A verdict whose DECISION and whose FINDINGS are set independently — which is the whole point of
@@ -415,6 +417,55 @@ public sealed class WorkItemLifecycleTests
 
         Assert.Equal(WorkItemTransitionKind.NeedsOperator, transition.Kind);
         Assert.Contains("nothing left to review", transition.Reason, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void An_arrested_mutating_lane_with_pushed_work_routes_to_re_review_before_reading_change_evidence()
+    {
+        var transition = WorkItemLifecycle.Decide(At(
+            WorkStage.Implement, outcome: WorkflowOutcome.Indeterminate,
+            workspaceChanged: false, indeterminateProducer: IndeterminateProducer.Arrested));
+
+        Assert.Equal(WorkItemTransitionKind.Dispatch, transition.Kind);
+        Assert.Equal(WorkStage.ReReview, transition.NextStage);
+    }
+
+    [Fact]
+    public void An_arrested_mutating_lane_with_unpushed_changed_work_continues()
+    {
+        var transition = WorkItemLifecycle.Decide(At(
+            WorkStage.Implement, outcome: WorkflowOutcome.Indeterminate,
+            workspaceHead: "0000111122223333", workspaceChanged: true,
+            indeterminateProducer: IndeterminateProducer.Arrested));
+
+        Assert.Equal(WorkItemTransitionKind.Dispatch, transition.Kind);
+        Assert.Equal(WorkStage.Continue, transition.NextStage);
+    }
+
+    [Theory]
+    [InlineData(false)]
+    [InlineData(null)]
+    public void An_arrested_mutating_lane_without_positive_workspace_evidence_stops_for_the_operator(bool? workspaceChanged)
+    {
+        var transition = WorkItemLifecycle.Decide(At(
+            WorkStage.Implement, outcome: WorkflowOutcome.Indeterminate,
+            workspaceHead: "0000111122223333", workspaceChanged: workspaceChanged,
+            indeterminateProducer: IndeterminateProducer.Arrested));
+
+        Assert.Equal(WorkItemTransitionKind.NeedsOperator, transition.Kind);
+        Assert.Contains(workspaceChanged == false ? "measured no workspace change" : "unmeasurable",
+            transition.Reason, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void Timeout_and_review_failure_behavior_remain_unchanged_without_an_arrest_producer()
+    {
+        var timeout = WorkItemLifecycle.Decide(At(
+            WorkStage.Implement, outcome: WorkflowOutcome.Failed, workspaceHead: "0000111122223333"));
+        var review = WorkItemLifecycle.Decide(At(WorkStage.Review, outcome: WorkflowOutcome.Failed));
+
+        Assert.Equal(WorkStage.Continue, timeout.NextStage);
+        Assert.Equal(WorkStage.ReReview, review.NextStage);
     }
 
     [Fact]

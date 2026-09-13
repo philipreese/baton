@@ -291,6 +291,26 @@ public static class WorkItemLifecycle
                 + "workspace head, so the round is re-review rather than fix"));
         }
 
+        // #2253: an arrest is not a retry budget. Only a positive measurement at the arrest
+        // boundary justifies recovering unpushed work; false and unknown both require a person.
+        // Other producers retain the established continuation behavior.
+        if (observation.IndeterminateProducer == Baton.Domain.IndeterminateProducer.Arrested)
+        {
+            return observation.WorkspaceChanged switch
+            {
+                true => EnsureDraft(observation, Dispatch(
+                    observation, WorkStage.Continue,
+                    $"the {WorkStages.Token(observation.Stage)} lane was arrested with measured unpushed workspace changes " +
+                    $"({DescribeUnpushed(observation)}) — finish and push them")),
+                false => EnsureDraft(observation, WorkItemTransition.NeedsOperator(
+                    $"the {WorkStages.Token(observation.Stage)} lane was arrested with measured no workspace change — " +
+                    "another automatic continuation has no observed work to recover; " + Recovery(observation.Stage))),
+                null => EnsureDraft(observation, WorkItemTransition.NeedsOperator(
+                    $"the {WorkStages.Token(observation.Stage)} lane was arrested but workspace change was unmeasurable — " +
+                    "the queue will not spend an automatic continuation without observed work; " + Recovery(observation.Stage))),
+            };
+        }
+
         return EnsureDraft(observation, Dispatch(
             observation, WorkStage.Continue,
             $"the {WorkStages.Token(observation.Stage)} lane settled {observation.TerminalOutcome} with work that "
@@ -432,7 +452,9 @@ public sealed record WorkItemObservation(
     bool PullRequestObservationSucceeded,
     bool? PullRequestIsOpen,
     bool? PullRequestIsDraft,
-    string? RequiredChecks);
+    string? RequiredChecks,
+    bool? WorkspaceChanged = null,
+    IndeterminateProducer? IndeterminateProducer = null);
 
 /// <summary>What the queue does with a work item next.</summary>
 /// <param name="Kind">Which of the three shapes below.</param>
