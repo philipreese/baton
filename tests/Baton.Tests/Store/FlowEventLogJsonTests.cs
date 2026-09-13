@@ -56,6 +56,10 @@ public class FlowEventLogJsonTests
         new FlowEvent.EngineFilesPlaced(
             ExecutionId, [new EnginePlacedFile(@"C:\repo\.claude\skills\audit-tool\SKILL.md", "9f2b1c")], ["audit-tool"]),
         new FlowEvent.ExecutionArrested(ExecutionId, new WorkerUsage(TokensIn: 500_000, TokensOut: 120_000), ["manage_task"]),
+        // #2281: terminal consumers distinguish both durable facts. The generic optional-member
+        // removal theory below covers the field-absent historical line.
+        new FlowEvent.ExecutionArrested(ExecutionId, WorkspaceChanged: true),
+        new FlowEvent.ExecutionArrested(ExecutionId, WorkspaceChanged: false),
         // #2134: both GraceTurnAttempted.ArrestReason polarities on the wire (FlowEvent.cs's own doc).
         new FlowEvent.GraceTurnAttempted(ExecutionId, WorkspaceCleanAfter: true, CoreExitReason.Natural),
         new FlowEvent.GraceTurnAttempted(ExecutionId, WorkspaceCleanAfter: false, CoreExitReason.CancelRequested, ArrestReason.TokenBudget),

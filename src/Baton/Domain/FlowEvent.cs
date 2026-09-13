@@ -504,6 +504,7 @@ public abstract record FlowEvent
         // engine placed before the worker started. Null is deliberately distinct from false: older
         // journal lines and failed probes are unmeasurable, so a queue must not spend a continuation
         // on either without positive evidence.
+        [property: JsonPropertyName("workspaceChanged")]
         bool? WorkspaceChanged = null) : FlowEvent;
 
     /// <summary>
