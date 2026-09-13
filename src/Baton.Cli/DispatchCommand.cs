@@ -209,9 +209,8 @@ public static class DispatchCommand
         {
             if (ClaudeInvocationModelPolicy.RefusalMessage(binding.Adapter, binding.Model, binding.ModelResolved) is { } refusal)
             {
-                throw new CliArgumentException(
-                    $"Worker '{workerName}' {refusal}",
-                    ClaudeInvocationModelPolicy.ExplicitModelRemedy + ".");
+                throw ClaudeInvocationModelPolicy.Refusal(
+                    $"Worker '{workerName}' {refusal}", binding.Adapter);
             }
         }
 

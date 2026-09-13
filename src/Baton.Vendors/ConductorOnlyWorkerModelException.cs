@@ -9,11 +9,15 @@ namespace Baton.Vendors;
 /// </summary>
 public sealed class ConductorOnlyWorkerModelException : BatonFlowException
 {
-    public ConductorOnlyWorkerModelException(string workerName, string refusal)
+    public ConductorOnlyWorkerModelException(string workerName, string? adapter, string refusal)
         : base($"Worker '{workerName}' {refusal}")
     {
         WorkerName = workerName;
-        TryInvocation = "pass --model sonnet, --model opus, or --model haiku.";
+        // Claude has a stable, adapter-owned alias list. The other adapters do not: Codex's
+        // measured CLI default is itself conductor-only, and naming one currently available model
+        // here would turn a safety remedy into a second model-policy register. Silence is safer than
+        // telling a Codex or Agy lane to pass Claude-only aliases.
+        TryInvocation = Baton.Domain.ConductorOnlyModelCatalog.WorkerRemedy(adapter);
     }
 
     public string WorkerName { get; }

@@ -90,7 +90,7 @@ public static class WorkerBindingResolver
             if (ConductorOnlyModelCatalog.ConductorOnlyWorkerRefusal(
                     entry.Adapter, entry.Model, entry.ModelResolved) is { } refusal)
             {
-                throw new ConductorOnlyWorkerModelException(workerName, refusal);
+                throw new ConductorOnlyWorkerModelException(workerName, entry.Adapter, refusal);
             }
         }
     }

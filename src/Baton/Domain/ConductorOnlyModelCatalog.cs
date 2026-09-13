@@ -39,6 +39,16 @@ public static class ConductorOnlyModelCatalog
     public static bool IsConductorOnly(string? model) => ConductorFamily(model) is not null;
 
     /// <summary>
+    /// Returns a trustworthy worker-model recovery command for the selected adapter. Claude's
+    /// stable aliases are known; other adapters deliberately return null rather than borrowing
+    /// Claude aliases or creating a second, fast-staling model catalog here.
+    /// </summary>
+    public static string? WorkerRemedy(string? adapter) =>
+        string.Equals(adapter?.Trim(), "claude", StringComparison.OrdinalIgnoreCase)
+            ? "pass --model sonnet, --model opus, or --model haiku."
+            : null;
+
+    /// <summary>
     /// Returns the worker-lane admission refusal for an invocation tuple, if any.  The requested
     /// model wins because it is what reaches the vendor; a resolved stamp is a bind-time default for
     /// an omitted request, and the shipped adapter default is the final fallback.  This is deliberately
