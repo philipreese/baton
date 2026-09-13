@@ -159,11 +159,11 @@ public static class RedispatchOptionsParser
     /// <summary>Same shape and rationale as <see cref="DispatchOptionsParser"/>'s own <c>--max-tool-steps</c> (#1686 review F2).</summary>
     private static int ParseMaxToolSteps(string rawValue)
     {
-        if (!int.TryParse(rawValue, out var steps) || steps <= 0)
+        if (!int.TryParse(rawValue, out var steps) || steps < 0)
         {
             throw new CliArgumentException(
-                $"'--max-tool-steps {rawValue}' is not a positive whole number of tool calls. {Usage}",
-                "pass a positive integer, e.g. --max-tool-steps 100.");
+                $"'--max-tool-steps {rawValue}' is not a non-negative whole number of tool calls. {Usage}",
+                "pass a non-negative integer, e.g. --max-tool-steps 0.");
         }
 
         return steps;

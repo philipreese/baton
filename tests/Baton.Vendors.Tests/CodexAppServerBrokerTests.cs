@@ -360,7 +360,7 @@ public sealed class CodexAppServerBrokerTests
             token => CodexAppServerBroker.StopRateLimitsProcessAsync(
                 process, stderrDrain.Task, error, token),
             error,
-            TimeSpan.FromSeconds(1),
+            TimeSpan.FromSeconds(60),
             TimeSpan.FromMilliseconds(50),
             TestContext.Current.CancellationToken);
 

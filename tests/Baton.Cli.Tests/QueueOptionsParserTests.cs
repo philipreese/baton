@@ -210,6 +210,15 @@ public sealed class QueueOptionsParserTests
         ]));
     }
 
+    [Fact]
+    public void Add_accepts_zero_max_tool_steps()
+    {
+        var options = QueueOptionsParser.Parse(
+            ["add", "t", "--role", "implement", "--spec", "b.md", "--workspace", "C:\\x", "--max-tool-steps", "0"]);
+
+        Assert.Equal(0, options.MaxToolSteps);
+    }
+
     [Theory]
     [InlineData("--timeout", "0")]
     [InlineData("--max-tool-steps", "-1")]
@@ -231,6 +240,15 @@ public sealed class QueueOptionsParserTests
     }
 
     [Fact]
+    public void Add_refuses_a_non_numeric_max_tool_steps()
+    {
+        var ex = Assert.Throws<CliArgumentException>(() => QueueOptionsParser.Parse(
+            ["add", "t", "--role", "implement", "--spec", "b.md", "--workspace", "C:\\x", "--max-tool-steps", "none"]));
+
+        Assert.Contains("whole number", ex.Message, StringComparison.Ordinal);
+    }
+
+    [Fact]
     public void Add_refuses_an_option_with_no_value_and_an_unknown_option()
     {
         Assert.Throws<CliArgumentException>(() => QueueOptionsParser.Parse(["add", "t", "--role"]));
@@ -238,8 +256,17 @@ public sealed class QueueOptionsParserTests
             ["add", "t", "--role", "implement", "--spec", "b.md", "--workspace", "C:\\x", "--nonsense", "1"]));
     }
 
+    [Fact]
+    public void List_accepts_only_the_active_flag()
+    {
+        Assert.False(QueueOptionsParser.Parse(["list"]).Active);
+        Assert.True(QueueOptionsParser.Parse(["list", "--active"]).Active);
+        Assert.Throws<CliArgumentException>(() => QueueOptionsParser.Parse(["list", "--active", "--active"]));
+        Assert.Throws<CliArgumentException>(() => QueueOptionsParser.Parse(["list", "--active=value"]));
+        Assert.Throws<CliArgumentException>(() => QueueOptionsParser.Parse(["list", "--unknown"]));
+    }
+
     [Theory]
-    [InlineData("list", QueueVerb.List)]
     [InlineData("hold", QueueVerb.Hold)]
     [InlineData("resume", QueueVerb.Resume)]
     public void The_bare_verbs_take_no_arguments(string word, QueueVerb verb)

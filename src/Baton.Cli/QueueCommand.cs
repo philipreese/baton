@@ -62,7 +62,7 @@ public static class QueueCommand
         {
             QueueVerb.Add => AddAsync(
                 options, output, repositoryDirectory, repositoryResolver, issueProvisioner, writeSpecFile, cancellationToken),
-            QueueVerb.List => ListAsync(output, cancellationToken),
+            QueueVerb.List => ListAsync(options.Active, output, cancellationToken),
             QueueVerb.Hold => SetHoldAsync(true, output, cancellationToken),
             QueueVerb.Resume => SetHoldAsync(false, output, cancellationToken),
             QueueVerb.Cancel => CancelAsync(options.Tag!, output, cancellationToken),
@@ -390,10 +390,11 @@ public static class QueueCommand
         }
     }
 
-    private static async Task<int> ListAsync(TextWriter output, CancellationToken cancellationToken)
+    private static async Task<int> ListAsync(bool active, TextWriter output, CancellationToken cancellationToken)
     {
         var snapshot = await QueueStore.LoadAsync(BatonPaths.QueueFile, cancellationToken).ConfigureAwait(false);
-        var settings = snapshot.Items.Any(i => i.Stage is not null)
+        var items = active ? snapshot.Items.Where(IsActive).ToList() : snapshot.Items;
+        var settings = items.Any(i => i.Stage is not null)
             ? (await DaemonSettingsStore.LoadAsync(BatonPaths.SettingsFile, cancellationToken).ConfigureAwait(false)).Queue
             : null;
         if (snapshot.Held)
@@ -403,13 +404,13 @@ public static class QueueCommand
 
         await PrintWaitAsync(output, cancellationToken).ConfigureAwait(false);
 
-        if (snapshot.Items.Count == 0)
+        if (items.Count == 0)
         {
-            output.WriteLine("Queue is empty.");
+            output.WriteLine(active && snapshot.Items.Count > 0 ? "No active queue items." : "Queue is empty.");
             return 0;
         }
 
-        foreach (var item in snapshot.Items)
+        foreach (var item in items)
         {
             // `halted` in the status column: an item the queue has given up on and one that merely
             // failed its lane and is still an advance candidate otherwise print identically, and
@@ -432,7 +433,11 @@ public static class QueueCommand
             {
                 output.WriteLine($"  effective stage plan: {DescribeStagePlan(item, settings)}");
             }
-            if (item.Error is { Length: > 0 } error)
+            if (await QueueRoomSettlementProjection.RenderAsync(item, cancellationToken).ConfigureAwait(false) is { } settlement)
+            {
+                output.WriteLine(settlement);
+            }
+            else if (item.Error is { Length: > 0 } error)
             {
                 output.WriteLine($"  error: {error}");
             }
@@ -449,12 +454,17 @@ public static class QueueCommand
             }
         }
 
-        var known = snapshot.Items.Count(item => item.Requirements is not null);
-        output.WriteLine($"Requirement coverage: {known}/{snapshot.Items.Count} declared; "
-            + $"{snapshot.Items.Count - known} unknown migration row(s).");
+        var known = items.Count(item => item.Requirements is not null);
+        output.WriteLine($"Requirement coverage: {known}/{items.Count} declared"
+            + (active ? " (selected)" : string.Empty) + "; "
+            + $"{items.Count - known} unknown migration row(s).");
 
         return 0;
     }
+
+    private static bool IsActive(QueueItem item) =>
+        item.State is QueueItemState.Queued or QueueItemState.Launched
+        || item.Stage is not null && item.State is QueueItemState.Done or QueueItemState.Failed;
 
     internal static async Task<int> SetHoldAsync(bool held, TextWriter output, CancellationToken cancellationToken)
     {
@@ -655,6 +665,7 @@ public static class QueueCommand
                 Adapter = adapter,
                 Model = options.Model,
                 Effort = options.Effort,
+                Reason = options.Reason,
                 StageSelections = stageSelections,
                 LifecyclePin = options.LifecyclePin,
             },
