@@ -126,14 +126,14 @@ def _probe_exemption_swallows_everything():
         yield
 
 
-@control("a PR body closes only the issues it declares, whatever the grammar around a keyword",
+@control("a PR body closes only the issues it declares, and rejects literal final newline escapes",
          "the lint stops flagging anything, so a negated keyword closes the issue again")
 def _negated_close_blind():
     with swap(selfcheck.completeness, "negated_close_faults", lambda body: []):
         yield
 
 
-@control("a PR body closes only the issues it declares, whatever the grammar around a keyword",
+@control("a PR body closes only the issues it declares, and rejects literal final newline escapes",
          "the lint flags every body, so `Closes #n` cannot be written")
 def _negated_close_cries_wolf():
     # The direction that gets a lint turned OFF rather than the one that lets a fault through. This

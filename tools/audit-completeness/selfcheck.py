@@ -262,7 +262,7 @@ def _probe_input_exemption():
     return "3 arms: marked exempt, unmarked still fails, marker position free"
 
 
-@check("a PR body closes only the issues it declares, whatever the grammar around a keyword")
+@check("a PR body closes only the issues it declares, and rejects literal final newline escapes")
 def _negated_close_lint():
     """Both must-fire fixtures are REAL BODIES, verbatim from the merges that auto-closed an issue.
 
@@ -319,8 +319,24 @@ def _negated_close_lint():
     assert completeness.negated_close_faults("Does not close #532 or #550") == [532], (
         "negated-close lint: reported the wrong issue number, or more than the keyword binds to")
 
+    literal_newline = completeness.literal_newline_before_final_declaration
+    assert literal_newline("The tooling passed.\\n\\nCloses #2253"), (
+        "PR-body lint: #2282's literal newline shape was accepted, so its final close is invisible")
+    assert literal_newline("The tooling passed.\\n\\nCloses #2253."), (
+        "PR-body lint: a final close with trailing punctuation was accepted")
+    assert literal_newline("The tooling passed.\\n\\n**Closes #2253.**"), (
+        "PR-body lint: a final Markdown closing declaration was accepted")
+    assert literal_newline("The tooling passed.\\r\\n\\r\\nCloses #2253"), (
+        "PR-body lint: a CRLF-shaped literal newline before a final close was accepted")
+    assert not literal_newline("The tooling passed.\n\nCloses #2253"), (
+        "PR-body lint: a real newline before a final closing declaration was refused")
+    assert not literal_newline("The tooling passed.\r\n\r\nCloses #2253"), (
+        "PR-body lint: a real CRLF before a final closing declaration was refused")
+    assert not literal_newline("Code renders \\n as two characters.\n\nCloses #2253\n\nMore prose follows."), (
+        "PR-body lint: prose mentioning a literal newline away from the final close was broadly banned")
+
     return (f"{len(must_fire)} must fire ({sum(1 for l, _ in must_fire if 'verbatim' in l)} real "
-            f"incident bodies) + {len(must_not_fire)} must NOT fire")
+            f"incident bodies) + {len(must_not_fire)} must NOT fire + 7 literal-newline arms")
 
 
 @check("a declared close is refused while its target issue still carries unchecked scope boxes")

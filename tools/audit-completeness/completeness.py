@@ -760,6 +760,22 @@ CLOSING_KEYWORD = re.compile(
 # never inspected its target.
 DECLARATION_LINE = re.compile(
     r"^\s*(?:(?:[-*+]|\d+[.)])\s+)?(?:[*_]{1,2})?(?:close[sd]?|fix(?:e[sd])?|resolve[sd]?)\b", re.IGNORECASE)
+# #2283: `gh pr create --body "...\\n\\nCloses #123"` stores the escapes literally. GitHub then
+# does not recognise the declaration as a separate line, so the normal position lint sees no
+# closing keyword at all. Limit this to a final declaration: prose or code mentioning `\n` is not
+# malformed PR-body structure by itself.
+LITERAL_NEWLINE = re.compile(r"\\(?:r\\)?n", re.IGNORECASE)
+
+
+def literal_newline_before_final_declaration(body: str) -> bool:
+    """Whether a final closing declaration follows literal newline escape text, not a real line."""
+    for newline in LITERAL_NEWLINE.finditer(body or ""):
+        declaration = body[newline.end():].rstrip()
+        if ("\n" not in declaration and "\r" not in declaration
+                and DECLARATION_LINE.match(declaration)
+                and CLOSING_KEYWORD.search(declaration)):
+            return True
+    return False
 
 
 def negated_close_faults(body: str) -> list:
@@ -1043,6 +1059,11 @@ def pr_body_mode() -> int:
         # LOOKS like this -- a path argument -- is refused above, before stdin is ever read.
         print("OK the body is empty; there is no keyword that could close anything.")
         return 0
+
+    if literal_newline_before_final_declaration(body):
+        print("!! this PR body's newline escapes are literal before its final closing declaration.")
+        print("   Use --body-file so GitHub receives real line breaks before `Closes #n`.")
+        return 1
 
     faults = negated_close_faults(body)
     if not faults:
