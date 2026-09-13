@@ -523,7 +523,7 @@ public static class WorktreeProvisioner
     }
 
     private static readonly TimeSpan GraceRemoteProbeTimeout = TimeSpan.FromSeconds(10);
-    private static readonly AsyncLocal<string?> GraceRemoteProbeProgramOverride = new();
+    private static readonly AsyncLocal<GraceRemoteProbeOverride?> GraceRemoteProbeOverrideScope = new();
 
     /// <summary>
     /// Test-only process seam for the bounded remote probe. An isolated async-flow override lets a
@@ -532,27 +532,42 @@ public static class WorktreeProvisioner
     internal static IDisposable BeginGraceRemoteProbeProgramScope(string program)
     {
         ArgumentException.ThrowIfNullOrWhiteSpace(program);
-        return new GraceRemoteProbeProgramScope(program);
+        return new GraceRemoteProbeScope(new GraceRemoteProbeOverride(program, null, null));
     }
 
-    private sealed class GraceRemoteProbeProgramScope : IDisposable
+    /// <summary>
+    /// Test-only process seam for exercising the timeout against a live helper. The complete command
+    /// override is isolated to the current async flow, so concurrent probes retain their git command.
+    /// </summary>
+    internal static IDisposable BeginGraceRemoteProbeScope(TimeSpan timeout, string program, params string[] arguments)
     {
-        private readonly string? prior = GraceRemoteProbeProgramOverride.Value;
+        ArgumentOutOfRangeException.ThrowIfLessThanOrEqual(timeout, TimeSpan.Zero);
+        ArgumentException.ThrowIfNullOrWhiteSpace(program);
+        ArgumentNullException.ThrowIfNull(arguments);
+        return new GraceRemoteProbeScope(new GraceRemoteProbeOverride(program, timeout, arguments));
+    }
 
-        public GraceRemoteProbeProgramScope(string program) => GraceRemoteProbeProgramOverride.Value = program;
+    private sealed record GraceRemoteProbeOverride(string Program, TimeSpan? Timeout, IReadOnlyList<string>? Arguments);
 
-        public void Dispose() => GraceRemoteProbeProgramOverride.Value = prior;
+    private sealed class GraceRemoteProbeScope : IDisposable
+    {
+        private readonly GraceRemoteProbeOverride? prior = GraceRemoteProbeOverrideScope.Value;
+
+        public GraceRemoteProbeScope(GraceRemoteProbeOverride value) => GraceRemoteProbeOverrideScope.Value = value;
+
+        public void Dispose() => GraceRemoteProbeOverrideScope.Value = prior;
     }
 
     private static async Task<string?> ReadRemoteTipAsync(
         string worktreePath, string endpoint, string mergeRef, CancellationToken cancellationToken)
     {
+        var probeOverride = GraceRemoteProbeOverrideScope.Value;
         using var bound = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
-        bound.CancelAfter(GraceRemoteProbeTimeout);
+        bound.CancelAfter(probeOverride?.Timeout ?? GraceRemoteProbeTimeout);
         Process? process = null;
         try
         {
-            var startInfo = ChildProcessStartInfo.Create(GraceRemoteProbeProgramOverride.Value ?? "git", startInfo =>
+            var startInfo = ChildProcessStartInfo.Create(probeOverride?.Program ?? "git", startInfo =>
             {
                 startInfo.WorkingDirectory = worktreePath;
                 startInfo.RedirectStandardOutput = true;
@@ -562,12 +577,11 @@ public static class WorktreeProvisioner
                 startInfo.Environment["GIT_TERMINAL_PROMPT"] = "0";
                 startInfo.Environment["GCM_INTERACTIVE"] = "never";
             });
-            startInfo.ArgumentList.Add("-c");
-            startInfo.ArgumentList.Add("credential.interactive=false");
-            startInfo.ArgumentList.Add("ls-remote");
-            startInfo.ArgumentList.Add("--exit-code");
-            startInfo.ArgumentList.Add(endpoint);
-            startInfo.ArgumentList.Add(mergeRef);
+            var arguments = probeOverride?.Arguments ?? ["-c", "credential.interactive=false", "ls-remote", "--exit-code", endpoint, mergeRef];
+            foreach (var argument in arguments)
+            {
+                startInfo.ArgumentList.Add(argument);
+            }
             process = Process.Start(startInfo);
             if (process is null)
             {

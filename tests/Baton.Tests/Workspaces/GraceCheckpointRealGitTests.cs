@@ -158,6 +158,39 @@ public sealed class GraceCheckpointRealGitTests
     }
 
     [Fact]
+    public async Task A_hung_remote_probe_is_timed_out_and_its_process_tree_is_reaped_without_mutating_the_repository()
+    {
+        using var fixture = new GraceRepository();
+        var originalHead = fixture.Head;
+        var signalPath = Path.Combine(Path.GetTempPath(), $"grace-remote-probe-{Guid.NewGuid():N}.txt");
+        var timeout = TimeSpan.FromSeconds(1);
+        var command = $"$child = Start-Process -FilePath powershell.exe -ArgumentList '-NoLogo','-NoProfile','-NonInteractive','-Command','Start-Sleep -Seconds 30' -PassThru; [IO.File]::WriteAllText('{signalPath.Replace("'", "''")}', \"$PID,$($child.Id)\"); Start-Sleep -Seconds 30";
+        try
+        {
+            using var probe = WorktreeProvisioner.BeginGraceRemoteProbeScope(
+                timeout, "powershell.exe", "-NoLogo", "-NoProfile", "-NonInteractive", "-Command", command);
+            var stopwatch = Stopwatch.StartNew();
+            var capture = WorktreeProvisioner.CaptureGraceCheckpointAsync(fixture.Repository, CancellationToken.None);
+            var (helper, child) = await ReadProbeProcessIdsAsync(signalPath, TimeSpan.FromSeconds(5));
+
+            Assert.False(helper.HasExited);
+            Assert.False(child.HasExited);
+            Assert.Null(await capture);
+            stopwatch.Stop();
+
+            Assert.InRange(stopwatch.Elapsed, timeout, TimeSpan.FromSeconds(10));
+            Assert.True(helper.HasExited);
+            Assert.True(child.HasExited);
+            Assert.Equal(originalHead, fixture.Head);
+            Assert.True(fixture.IsAncestor(originalHead, fixture.TrackingRef));
+        }
+        finally
+        {
+            File.Delete(signalPath);
+        }
+    }
+
+    [Fact]
     public void A_branch_without_a_configured_remote_cannot_capture_a_grace_checkpoint()
     {
         using var fixture = new GraceRepository();
@@ -264,5 +297,23 @@ public sealed class GraceCheckpointRealGitTests
 
             return Process.Start(startInfo) ?? throw new InvalidOperationException("git could not be started.");
         }
+    }
+
+    private static async Task<(Process Helper, Process Child)> ReadProbeProcessIdsAsync(string signalPath, TimeSpan timeout)
+    {
+        var deadline = DateTime.UtcNow + timeout;
+        while (!File.Exists(signalPath))
+        {
+            if (DateTime.UtcNow >= deadline)
+            {
+                throw new TimeoutException("The hung remote probe did not report its process tree.");
+            }
+
+            await Task.Delay(TimeSpan.FromMilliseconds(25));
+        }
+
+        var ids = (await File.ReadAllTextAsync(signalPath)).Split(',');
+        Assert.Equal(2, ids.Length);
+        return (Process.GetProcessById(int.Parse(ids[0])), Process.GetProcessById(int.Parse(ids[1])));
     }
 }
