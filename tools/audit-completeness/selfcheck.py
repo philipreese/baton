@@ -324,6 +324,8 @@ def _negated_close_lint():
         "PR-body lint: #2282's literal newline shape was accepted, so its final close is invisible")
     assert literal_newline("The tooling passed.\\n\\nCloses #2253."), (
         "PR-body lint: a final close with trailing punctuation was accepted")
+    assert literal_newline("The tooling passed.\\n\\n**Closes #2253.**"), (
+        "PR-body lint: a final Markdown closing declaration was accepted")
     assert literal_newline("The tooling passed.\\r\\n\\r\\nCloses #2253"), (
         "PR-body lint: a CRLF-shaped literal newline before a final close was accepted")
     assert not literal_newline("The tooling passed.\n\nCloses #2253"), (
@@ -334,7 +336,7 @@ def _negated_close_lint():
         "PR-body lint: prose mentioning a literal newline away from the final close was broadly banned")
 
     return (f"{len(must_fire)} must fire ({sum(1 for l, _ in must_fire if 'verbatim' in l)} real "
-            f"incident bodies) + {len(must_not_fire)} must NOT fire + 6 literal-newline arms")
+            f"incident bodies) + {len(must_not_fire)} must NOT fire + 7 literal-newline arms")
 
 
 @check("a declared close is refused while its target issue still carries unchecked scope boxes")

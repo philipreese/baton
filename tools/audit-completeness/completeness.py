@@ -764,23 +764,12 @@ DECLARATION_LINE = re.compile(
 # does not recognise the declaration as a separate line, so the normal position lint sees no
 # closing keyword at all. Limit this to a final declaration: prose or code mentioning `\n` is not
 # malformed PR-body structure by itself.
-LITERAL_NEWLINE_BEFORE_FINAL_DECLARATION = re.compile(
-    r"\\(?:r\\)?n(?:\\(?:r\\)?n)*(?=(?:close[sd]?|fix(?:e[sd])?|resolve[sd]?)\b\W{0,3}#\d+\s*$)",
-    re.IGNORECASE)
+LITERAL_NEWLINE = re.compile(r"\\(?:r\\)?n", re.IGNORECASE)
 
 
 def literal_newline_before_final_declaration(body: str) -> bool:
     """Whether a final closing declaration follows literal newline escape text, not a real line."""
-    for escaped_newline in ("\\n", "\\r\\n"):
-        start = 0
-        while (newline := (body or "").find(escaped_newline, start)) >= 0:
-            declaration = body[newline + len(escaped_newline):].rstrip()
-            if ("\n" not in declaration and "\r" not in declaration
-                    and DECLARATION_LINE.match(declaration)
-                    and CLOSING_KEYWORD.search(declaration)):
-                return True
-            start = newline + len(escaped_newline)
-    for newline in re.finditer(r"\\\\(?:r\\\\)?n(?:\\\\(?:r\\\\)?n)*", body or "", re.IGNORECASE):
+    for newline in LITERAL_NEWLINE.finditer(body or ""):
         declaration = body[newline.end():].rstrip()
         if ("\n" not in declaration and "\r" not in declaration
                 and DECLARATION_LINE.match(declaration)
