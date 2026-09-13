@@ -330,6 +330,24 @@ public sealed class TokenBudgetMonitorTests
     }
 
     [Fact]
+    public void A_zero_tool_step_cap_allows_response_only_output_and_arrests_on_the_first_countable_tool_call()
+    {
+        var monitor = new TokenBudgetMonitor(budget: null, maxToolSteps: 0, billedRateLimit: null, new ClaudeUsageParser());
+
+        monitor.OnStdoutLine("""{"type":"assistant","message":{"content":[{"type":"text","text":"response"}]}}""");
+
+        Assert.False(monitor.Arrested);
+        Assert.Equal(0, monitor.SnapshotToolStepCount());
+
+        monitor.OnStdoutLine(
+            """{"type":"assistant","message":{"content":[{"type":"tool_use","name":"Bash","input":{}}]}}""");
+
+        Assert.True(monitor.Arrested);
+        Assert.Equal(ArrestReason.ToolStepCap, monitor.ArrestReasonValue);
+        Assert.Equal(1, monitor.SnapshotToolStepCount());
+    }
+
+    [Fact]
     public void A_multi_tool_claude_turn_counts_every_block_toward_the_cap()
     {
         var monitor = new TokenBudgetMonitor(budget: null, maxToolSteps: 1, billedRateLimit: null, new ClaudeUsageParser());

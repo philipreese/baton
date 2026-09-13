@@ -210,6 +210,15 @@ public sealed class QueueOptionsParserTests
         ]));
     }
 
+    [Fact]
+    public void Add_accepts_zero_max_tool_steps()
+    {
+        var options = QueueOptionsParser.Parse(
+            ["add", "t", "--role", "implement", "--spec", "b.md", "--workspace", "C:\\x", "--max-tool-steps", "0"]);
+
+        Assert.Equal(0, options.MaxToolSteps);
+    }
+
     [Theory]
     [InlineData("--timeout", "0")]
     [InlineData("--max-tool-steps", "-1")]
@@ -228,6 +237,15 @@ public sealed class QueueOptionsParserTests
             ["add", "t", "--role", "implement", "--spec", "b.md", "--workspace", "C:\\x", "--timeout", "soon"]));
 
         Assert.Contains("soon", ex.Message, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void Add_refuses_a_non_numeric_max_tool_steps()
+    {
+        var ex = Assert.Throws<CliArgumentException>(() => QueueOptionsParser.Parse(
+            ["add", "t", "--role", "implement", "--spec", "b.md", "--workspace", "C:\\x", "--max-tool-steps", "none"]));
+
+        Assert.Contains("whole number", ex.Message, StringComparison.Ordinal);
     }
 
     [Fact]

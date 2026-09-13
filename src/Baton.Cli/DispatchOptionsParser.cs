@@ -453,17 +453,17 @@ public static class DispatchOptionsParser
     }
 
     /// <summary>
-    /// Parses <c>--max-tool-steps</c>'s value (#1686 review F11): a positive whole number of real tool
+    /// Parses <c>--max-tool-steps</c>'s value (#1686 review F11): a non-negative whole number of real tool
     /// calls (the fixed cross-vendor unit, spec/baton.md §3), same shape and no-ceiling rationale as
     /// <see cref="ParseTokenBudget"/>.
     /// </summary>
     private static int ParseMaxToolSteps(string rawValue)
     {
-        if (!int.TryParse(rawValue, out var steps) || steps <= 0)
+        if (!int.TryParse(rawValue, out var steps) || steps < 0)
         {
             throw new CliArgumentException(
-                $"'--max-tool-steps {rawValue}' is not a positive whole number of tool calls. {Usage}",
-                "pass a positive integer, e.g. --max-tool-steps 100.");
+                $"'--max-tool-steps {rawValue}' is not a non-negative whole number of tool calls. {Usage}",
+                "pass a non-negative integer, e.g. --max-tool-steps 0.");
         }
 
         return steps;

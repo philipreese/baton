@@ -2193,10 +2193,13 @@ and loose on claude, and #1691's premise is a direct consequence, since it compa
 against two claude reference rooms.
 
 **`--max-tool-steps <n>` (#1686 review F11)** is `baton dispatch`'s override for this axis, mirroring
-`--token-budget` end to end — a positive whole number of real tool calls (this fixed unit), or refused
-the same way `--token-budget` refuses a non-positive value; rejected on a workflow template dispatch
-the same way `--timeout`/`--token-budget` are, since a template's phases each carry their own role's
-cap. `baton redispatch` also carries it (#1686 review F2): `RedispatchCommand`'s amended-spec path
+`--token-budget` end to end — a non-negative whole number of real tool calls (this fixed unit), or
+refused when negative or non-integral; omission keeps the role or parent value. The ceiling arrests
+at cap+1, so zero permits response-only output and requests arrest when the first tool call becomes
+countable in that fixed cross-vendor unit; it cannot pre-empt a tool before the vendor emits the
+lifecycle event that makes that call countable. It is rejected on a workflow template dispatch the
+same way `--timeout`/`--token-budget` are, since a template's phases each carry their own role's cap.
+`baton redispatch` also carries it (#1686 review F2): `RedispatchCommand`'s amended-spec path
 previously dropped `MaxToolSteps` on the floor when rebuilding through `RoleDispatch.Materialize`, so
 an operator who dispatched with `--max-tool-steps` and then redispatched with an amended brief got the
 role's default back with no warning; both redispatch paths now pass

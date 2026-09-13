@@ -352,9 +352,9 @@ public static class QueueOptionsParser
             throw new CliArgumentException($"'--timeout' must be a positive number of minutes. {Usage}");
         }
 
-        if (maxToolSteps is <= 0)
+        if (maxToolSteps < 0)
         {
-            throw new CliArgumentException($"'--max-tool-steps' must be positive. {Usage}");
+            throw new CliArgumentException($"'--max-tool-steps' must be a non-negative whole number. {Usage}");
         }
 
         if (tokenBudget is <= 0)

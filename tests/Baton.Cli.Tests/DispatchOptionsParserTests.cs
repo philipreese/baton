@@ -408,11 +408,11 @@ public class DispatchOptionsParserTests
 
     /// <summary>#1686 review F11: --max-tool-steps mirrors --token-budget end to end.</summary>
     [Fact]
-    public void The_max_tool_steps_option_parses_to_a_positive_int()
+    public void The_max_tool_steps_option_parses_to_a_non_negative_int()
     {
-        var options = DispatchOptionsParser.Parse(["implement", "--spec", "t.md", "--max-tool-steps", "100"]);
+        var options = DispatchOptionsParser.Parse(["implement", "--spec", "t.md", "--max-tool-steps", "0"]);
 
-        Assert.Equal(100, options.MaxToolSteps);
+        Assert.Equal(0, options.MaxToolSteps);
     }
 
     [Fact]
@@ -424,10 +424,9 @@ public class DispatchOptionsParserTests
     }
 
     [Theory]
-    [InlineData("0")]
     [InlineData("-5")]
     [InlineData("not-a-number")]
-    public void A_non_positive_or_non_numeric_max_tool_steps_throws(string rawValue)
+    public void A_negative_or_non_numeric_max_tool_steps_throws(string rawValue)
     {
         var ex = Assert.Throws<CliArgumentException>(
             () => DispatchOptionsParser.Parse(["implement", "--spec", "t.md", "--max-tool-steps", rawValue]));
