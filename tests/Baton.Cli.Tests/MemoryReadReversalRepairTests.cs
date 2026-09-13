@@ -8,6 +8,57 @@ namespace Baton.Cli.Tests;
 public sealed partial class MemoryAutomaticProjectionTests
 {
     [Theory]
+    [InlineData("entries")]
+    [InlineData("links")]
+    [InlineData("retractions")]
+    public async Task Strict_io_reads_tolerate_malformed_rows_for_settlement(string input)
+    {
+        var path = input switch
+        {
+            "links" => BatonPaths.MemoryLinksFile(Slug),
+            "retractions" => BatonPaths.MemoryRetractionsFile(Slug),
+            _ => BatonPaths.MemoryEntriesFile(Slug),
+        };
+        Directory.CreateDirectory(Path.GetDirectoryName(path)!);
+        await File.WriteAllTextAsync(path, "not json", TestContext.Current.CancellationToken);
+
+        switch (input)
+        {
+            case "links":
+                Assert.Empty(await MemoryStore.ReadLinksStrictAsync(path, TestContext.Current.CancellationToken));
+                break;
+            case "retractions":
+                Assert.Empty(await MemoryStore.ReadRetractionsStrictAsync(path, TestContext.Current.CancellationToken));
+                break;
+            default:
+                Assert.Empty(await MemoryStore.ReadAllStrictAsync(path, TestContext.Current.CancellationToken));
+                break;
+        }
+    }
+
+    [Theory]
+    [InlineData("entries")]
+    [InlineData("links")]
+    [InlineData("retractions")]
+    public async Task Resolved_strict_read_rejects_malformed_canonical_input(string input)
+    {
+        var entries = BatonPaths.MemoryEntriesFile(Slug);
+        var links = BatonPaths.MemoryLinksFile(Slug);
+        var retractions = BatonPaths.MemoryRetractionsFile(Slug);
+        var path = input switch
+        {
+            "links" => links,
+            "retractions" => retractions,
+            _ => entries,
+        };
+        Directory.CreateDirectory(Path.GetDirectoryName(path)!);
+        await File.WriteAllTextAsync(path, "not json", TestContext.Current.CancellationToken);
+
+        await Assert.ThrowsAsync<JsonException>(() => MemoryStore.ReadResolvedStrictAsync(
+            entries, links, retractions, TestContext.Current.CancellationToken));
+    }
+
+    [Theory]
     [InlineData("identity")]
     [InlineData("entries")]
     [InlineData("links")]

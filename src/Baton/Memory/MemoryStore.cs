@@ -106,17 +106,23 @@ public static class MemoryStore
                 CancellationToken.None)
             .GetAwaiter().GetResult();
 
-    /// <summary>Strict rows for settlement and projection; I/O failure cannot become an empty snapshot.</summary>
+    /// <summary>
+    /// Rows for settlement and projection; I/O failure cannot become an empty snapshot, while a
+    /// malformed row remains absent just as it does for <see cref="ReadAllAsync"/>.
+    /// </summary>
     public static Task<IReadOnlyList<MemoryEntry>> ReadAllStrictAsync(
         string entriesFilePath, CancellationToken cancellationToken = default) =>
         Ledger.RunUnderLockAsync(
-            entriesFilePath, () => Ledger.ReadAllUnlocked(entriesFilePath, requireReadable: true, requireValidJson: true), cancellationToken);
+            entriesFilePath, () => Ledger.ReadAllUnlocked(entriesFilePath, requireReadable: true), cancellationToken);
 
-    /// <summary>Strict link rows for durable import settlement; I/O failure must retain the intent.</summary>
+    /// <summary>
+    /// Link rows for durable import settlement; I/O failure must retain the intent, while malformed
+    /// rows remain absent.
+    /// </summary>
     public static Task<IReadOnlyList<MemorySupersessionLink>> ReadLinksStrictAsync(
         string linksFilePath, CancellationToken cancellationToken = default) =>
         LinkLedger.RunUnderLockAsync(
-            linksFilePath, () => LinkLedger.ReadAllUnlocked(linksFilePath, requireReadable: true, requireValidJson: true), cancellationToken);
+            linksFilePath, () => LinkLedger.ReadAllUnlocked(linksFilePath, requireReadable: true), cancellationToken);
 
     /// <summary>
     /// Appends the subset of <paramref name="links"/> whose <see cref="MemorySupersessionLink.Id"/> is
@@ -161,20 +167,47 @@ public static class MemoryStore
         string retractionsFilePath, CancellationToken cancellationToken = default) =>
         RetractionLedger.ReadAllAsync(retractionsFilePath, cancellationToken);
 
-    /// <summary>Retractions for publication; a failed read must not restore retracted facts.</summary>
+    /// <summary>
+    /// Retractions for publication; a failed read must not restore retracted facts, while malformed
+    /// rows remain absent.
+    /// </summary>
     public static Task<IReadOnlyList<MemoryRetraction>> ReadRetractionsStrictAsync(
+        string retractionsFilePath, CancellationToken cancellationToken = default) =>
+        RetractionLedger.RunUnderLockAsync(
+            retractionsFilePath, () => RetractionLedger.ReadAllUnlocked(retractionsFilePath, requireReadable: true), cancellationToken);
+
+    /// <summary>
+    /// Entry rows for a fail-closed consumer: both unreadable input and every malformed JSON row
+    /// fail the read rather than producing a partial snapshot.
+    /// </summary>
+    private static Task<IReadOnlyList<MemoryEntry>> ReadAllValidJsonStrictAsync(
+        string entriesFilePath, CancellationToken cancellationToken = default) =>
+        Ledger.RunUnderLockAsync(
+            entriesFilePath, () => Ledger.ReadAllUnlocked(entriesFilePath, requireReadable: true, requireValidJson: true), cancellationToken);
+
+    /// <summary>Fail-closed link equivalent of <see cref="ReadAllValidJsonStrictAsync"/>.</summary>
+    private static Task<IReadOnlyList<MemorySupersessionLink>> ReadLinksValidJsonStrictAsync(
+        string linksFilePath, CancellationToken cancellationToken = default) =>
+        LinkLedger.RunUnderLockAsync(
+            linksFilePath, () => LinkLedger.ReadAllUnlocked(linksFilePath, requireReadable: true, requireValidJson: true), cancellationToken);
+
+    /// <summary>Fail-closed retraction equivalent of <see cref="ReadAllValidJsonStrictAsync"/>.</summary>
+    private static Task<IReadOnlyList<MemoryRetraction>> ReadRetractionsValidJsonStrictAsync(
         string retractionsFilePath, CancellationToken cancellationToken = default) =>
         RetractionLedger.RunUnderLockAsync(
             retractionsFilePath, () => RetractionLedger.ReadAllUnlocked(retractionsFilePath, requireReadable: true, requireValidJson: true), cancellationToken);
 
-    /// <summary>A resolved snapshot whose every canonical input propagates read and parse failures.</summary>
+    /// <summary>
+    /// A resolved snapshot for memory-context dispatch whose every canonical input propagates read
+    /// and parse failures.
+    /// </summary>
     public static async Task<IReadOnlyList<MemoryEntry>> ReadResolvedStrictAsync(
         string entriesFilePath, string linksFilePath, string retractionsFilePath,
         CancellationToken cancellationToken = default)
     {
-        var entries = await ReadAllStrictAsync(entriesFilePath, cancellationToken).ConfigureAwait(false);
-        var links = await ReadLinksStrictAsync(linksFilePath, cancellationToken).ConfigureAwait(false);
-        var retractions = await ReadRetractionsStrictAsync(retractionsFilePath, cancellationToken).ConfigureAwait(false);
+        var entries = await ReadAllValidJsonStrictAsync(entriesFilePath, cancellationToken).ConfigureAwait(false);
+        var links = await ReadLinksValidJsonStrictAsync(linksFilePath, cancellationToken).ConfigureAwait(false);
+        var retractions = await ReadRetractionsValidJsonStrictAsync(retractionsFilePath, cancellationToken).ConfigureAwait(false);
         return Resolve(entries, links, retractions);
     }
 
