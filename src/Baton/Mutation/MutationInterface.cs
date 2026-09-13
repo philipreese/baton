@@ -2498,6 +2498,23 @@ public static class MutationInterface
             return;
         }
 
+        // The grace process is a second writer with the same grant, so its prompt alone cannot protect
+        // commits the arrested execution already made. Pin the current branch tip before that process
+        // starts and accept only one new child commit afterwards. A missing pin is fail-closed: the
+        // worker's dirty tree remains available rather than risking an unprovable checkpoint.
+        var checkpoint = Workspaces.WorktreeProvisioner.CaptureGraceCheckpoint(workspacePath);
+        if (checkpoint is null)
+        {
+            Console.Error.WriteLine(
+                $"Grace turn (#2263) for execution '{prepared.Request.ExecutionId.Value}' did not start because its baseline commit could not be established.");
+            await eventLogWriter.AppendAsync(
+                    new FlowEvent.GraceTurnAttempted(
+                        prepared.Request.ExecutionId, WorkspaceCleanAfter: false, CoreExitReason.CancelRequested),
+                    CancellationToken.None)
+                .ConfigureAwait(false);
+            return;
+        }
+
         // A distinct BATON_OUTPUT_DIR, under the arrested execution's own artifacts directory, so this
         // dispatch's prompt.txt/stdout capture (CoreDispatcher.DispatchAsync writes both there) never
         // overwrites the arrested execution's own -- that archival copy is the only durable record of
@@ -2563,8 +2580,14 @@ public static class MutationInterface
             // CommandLineTooLongException, Core.BatonException) -- mapped to a structured result rather
             // than swallowed: a grace turn that could not even start leaves the workspace exactly as
             // dirty as the arrest found it ([development guide](../../../docs/agents/developing-baton.md)).
+            var restored = Workspaces.WorktreeProvisioner.RestoreGraceCheckpointToDirty(workspacePath, checkpoint);
             Console.Error.WriteLine(
                 $"Grace turn (#2134) for execution '{prepared.Request.ExecutionId.Value}' failed to spawn: {ex.Message}");
+            if (!restored)
+            {
+                Console.Error.WriteLine(
+                    $"Grace turn (#2263) for execution '{prepared.Request.ExecutionId.Value}' could not restore its pinned baseline after the failed dispatch.");
+            }
             await eventLogWriter.AppendAsync(
                     new FlowEvent.GraceTurnAttempted(
                         prepared.Request.ExecutionId, WorkspaceCleanAfter: false, CoreExitReason.CancelRequested),
@@ -2573,7 +2596,15 @@ public static class MutationInterface
             return;
         }
 
-        var workspaceCleanAfter = Workspaces.WorktreeProvisioner.Audit(workspacePath).IsClean;
+        var safeCheckpoint = Workspaces.WorktreeProvisioner.IsSafeGraceCheckpoint(workspacePath, checkpoint);
+        if (!safeCheckpoint)
+        {
+            var restored = Workspaces.WorktreeProvisioner.RestoreGraceCheckpointToDirty(workspacePath, checkpoint);
+            Console.Error.WriteLine(
+                $"Grace turn (#2263) for execution '{prepared.Request.ExecutionId.Value}' did not create a single child of its pinned baseline; preserving the resulting tree as dirty work{(restored ? "." : " failed to restore the baseline.")}");
+        }
+
+        var workspaceCleanAfter = safeCheckpoint && Workspaces.WorktreeProvisioner.Audit(workspacePath).IsClean;
         await eventLogWriter.AppendAsync(
                 new FlowEvent.GraceTurnAttempted(
                     prepared.Request.ExecutionId,

@@ -262,6 +262,96 @@ public static class WorktreeProvisioner
     }
 
     /// <summary>
+    /// Captures the commit that a grace turn must leave intact. The capture is deliberately immediately
+    /// before that separate worker process starts: it includes any unpushed worker commits, while still
+    /// making an amend or replacement of any earlier commit detectable. A git failure supplies no safe
+    /// baseline, so callers must leave the dirty tree alone rather than dispatch the grace worker.
+    /// </summary>
+    public static GraceCheckpoint? CaptureGraceCheckpoint(string? worktreePath)
+    {
+        if (string.IsNullOrWhiteSpace(worktreePath) || !Directory.Exists(worktreePath))
+        {
+            return null;
+        }
+
+        try
+        {
+            var (exitCode, stdout, _) = RunGit(worktreePath, "rev-parse", "--verify", "HEAD^{commit}");
+            var head = stdout.Trim();
+            return exitCode == 0 && !string.IsNullOrWhiteSpace(head)
+                ? new GraceCheckpoint(head)
+                : null;
+        }
+        catch (WorktreeProvisioningException)
+        {
+            return null;
+        }
+    }
+
+    /// <summary>
+    /// True only when the current HEAD is a non-merge commit whose sole parent is the captured grace
+    /// baseline. This proves a grace checkpoint added history without replacing a commit that existed
+    /// when the grace process began; ancestry that is merely reachable is intentionally insufficient.
+    /// </summary>
+    public static bool IsSafeGraceCheckpoint(string? worktreePath, GraceCheckpoint checkpoint)
+    {
+        ArgumentNullException.ThrowIfNull(checkpoint);
+        if (string.IsNullOrWhiteSpace(worktreePath) || !Directory.Exists(worktreePath))
+        {
+            return false;
+        }
+
+        try
+        {
+            var (exitCode, stdout, _) = RunGit(worktreePath, "rev-list", "--parents", "-n", "1", "HEAD");
+            var commits = stdout.Split((char[]?)null, StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries);
+            return exitCode == 0
+                && commits.Length == 2
+                && !string.Equals(commits[0], checkpoint.Head, StringComparison.OrdinalIgnoreCase)
+                && string.Equals(commits[1], checkpoint.Head, StringComparison.OrdinalIgnoreCase);
+        }
+        catch (WorktreeProvisioningException)
+        {
+            return false;
+        }
+    }
+
+    /// <summary>
+    /// Restores a grace turn that moved HEAD to its captured baseline with a mixed reset. A changed
+    /// commit's tree is therefore retained as unstaged work, while existing commits are never amended
+    /// or replaced. If HEAD did not move, this is a no-op and preserves the worker's index as well.
+    /// </summary>
+    public static bool RestoreGraceCheckpointToDirty(string? worktreePath, GraceCheckpoint checkpoint)
+    {
+        ArgumentNullException.ThrowIfNull(checkpoint);
+        if (string.IsNullOrWhiteSpace(worktreePath) || !Directory.Exists(worktreePath))
+        {
+            return false;
+        }
+
+        try
+        {
+            var (headExitCode, headOut, _) = RunGit(worktreePath, "rev-parse", "--verify", "HEAD^{commit}");
+            if (headExitCode != 0 || string.IsNullOrWhiteSpace(headOut))
+            {
+                return false;
+            }
+
+            if (string.Equals(headOut.Trim(), checkpoint.Head, StringComparison.OrdinalIgnoreCase))
+            {
+                return true;
+            }
+
+            var (resetExitCode, _, _) = RunGit(worktreePath, "reset", "--mixed", checkpoint.Head);
+            return resetExitCode == 0;
+        }
+        catch (WorktreeProvisioningException)
+        {
+            return false;
+        }
+    }
+
+    /// <summary>
     /// The bounded "carries N uncommitted/stray path(s): …" fragment <see cref="Audit"/> composes its
     /// own message from — factored out so F2 (#1593 review) can reuse the identical git-status read and
     /// formatting for a different audience (a room fact for a human, not a grant-enforcement refusal)
@@ -969,6 +1059,9 @@ public sealed record WorktreeTeardownResult(WorktreeTeardownOutcome Outcome, str
 
 /// <summary>The result of a post-run grant audit on a provisioned worktree.</summary>
 public sealed record WorktreeAuditResult(bool IsClean, string? FailureReason);
+
+/// <summary>The immutable HEAD commit a grace turn must retain as its direct parent.</summary>
+public sealed record GraceCheckpoint(string Head);
 
 /// <summary>
 /// A worktree provisioned for a run, held so <c>WorktreeProvisioner.Teardown</c> can be called on it
