@@ -19,6 +19,8 @@ namespace Baton.Cli.Tests.Daemon;
 /// </summary>
 public sealed class GlassHttpServiceTests : IDisposable
 {
+    private static readonly TimeSpan BlockedStartupWriteObservationCeiling = TimeSpan.FromSeconds(1);
+    private static readonly TimeSpan StartupLogWaitCeiling = TimeSpan.FromSeconds(5);
     private readonly string _tempHome;
 
     public GlassHttpServiceTests()
@@ -53,7 +55,56 @@ public sealed class GlassHttpServiceTests : IDisposable
         string ProjectionPath,
         string EventsPath,
         string EventsRolloverPath,
-        StringWriter Log);
+        StartupLogWriter Log);
+
+    private sealed class StartupLogWriter : TextWriter
+    {
+        private const string ServingPrefix = "GlassHttpService: serving the fleet glass at ";
+        private const string NoAddressCouldBeBound = "GlassHttpService: no address could be bound; the glass is not being served.";
+        private readonly StringWriter _buffer = new();
+        private readonly TaskCompletionSource _terminalStartupLogWritten =
+            new(TaskCreationOptions.RunContinuationsAsynchronously);
+        private readonly TaskCompletionSource? _startupWriteEntered;
+        private readonly TaskCompletionSource? _releaseStartupWrite;
+
+        public StartupLogWriter(bool blockTerminalStartupWrite = false)
+        {
+            if (blockTerminalStartupWrite)
+            {
+                _startupWriteEntered = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+                _releaseStartupWrite = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+            }
+        }
+
+        public override Encoding Encoding => _buffer.Encoding;
+
+        public Task TerminalStartupLogWritten => _terminalStartupLogWritten.Task;
+
+        public Task StartupWriteEntered => _startupWriteEntered?.Task ?? Task.CompletedTask;
+
+        public void ReleaseStartupWrite() => _releaseStartupWrite?.TrySetResult();
+
+        public override void WriteLine(string? value)
+        {
+            if (IsTerminalStartupLog(value))
+            {
+                _startupWriteEntered?.TrySetResult();
+                _releaseStartupWrite?.Task.GetAwaiter().GetResult();
+            }
+
+            _buffer.WriteLine(value);
+            if (IsTerminalStartupLog(value))
+            {
+                _terminalStartupLogWritten.TrySetResult();
+            }
+        }
+
+        public override string ToString() => _buffer.ToString();
+
+        private static bool IsTerminalStartupLog(string? value) =>
+            value == NoAddressCouldBeBound
+            || value?.StartsWith(ServingPrefix, StringComparison.Ordinal) == true;
+    }
 
     private async Task<Harness> StartAsync(
         CancellationToken cancellationToken,
@@ -61,7 +112,8 @@ public sealed class GlassHttpServiceTests : IDisposable
         string? projection = null,
         string? operatorLogin = null,
         Func<bool, CancellationToken, Task<string>>? setQueueHold = null,
-        Func<string, CancellationToken, Task<string>>? cancelRoom = null)
+        Func<string, CancellationToken, Task<string>>? cancelRoom = null,
+        StartupLogWriter? log = null)
     {
         var projectionPath = Path.Combine(_tempHome, "projection.json");
         var eventsPath = Path.Combine(_tempHome, Baton.Status.BatonPaths.FleetEventsFileName);
@@ -72,7 +124,7 @@ public sealed class GlassHttpServiceTests : IDisposable
         }
 
         var port = FreePort();
-        var log = new StringWriter();
+        log ??= new StartupLogWriter();
         var service = new GlassHttpService(
             new DaemonSettings
             {
@@ -94,18 +146,49 @@ public sealed class GlassHttpServiceTests : IDisposable
 
         await service.StartAsync(cancellationToken);
 
-        // StartAsync returns as soon as ExecuteAsync yields; the first yield is inside the accept
-        // loop, i.e. after every bind. Poll rather than sleep a fixed span so a slow machine does not
-        // flake and a fast one does not wait.
-        for (var attempt = 0; attempt < 200 && service.BoundPrefixes.Count == 0 && listen; attempt++)
+        if (listen)
         {
-            // A poll interval, not a ceiling: the 200 attempts around it are the ceiling.
-            // wait-ok: the ceiling is the attempt count above, plus the caller's CancellationToken.
-            await Task.Delay(25, cancellationToken);
+            // ExecuteAsync publishes BoundPrefixes before its terminal startup log. This task completes
+            // after StartupLogWriter has committed that terminal line to its buffer, so callers can
+            // safely assert the log without treating the earlier publication as proof of a later write.
+            // wait-ok: StartupLogWaitCeiling and the caller's CancellationToken bound a missing log.
+            await log.TerminalStartupLogWritten.WaitAsync(StartupLogWaitCeiling, cancellationToken);
         }
 
         return new Harness(
             service, $"http://127.0.0.1:{port}", projectionPath, eventsPath, eventsRolloverPath, log);
+    }
+
+    [Fact]
+    public async Task Does_not_return_until_the_startup_log_write_has_committed()
+    {
+        using var cts = new CancellationTokenSource(TimeSpan.FromMinutes(1));
+        var log = new StartupLogWriter(blockTerminalStartupWrite: true);
+        var starting = StartAsync(cts.Token, log: log);
+
+        try
+        {
+            await log.StartupWriteEntered.WaitAsync(cts.Token);
+            // wait-ok: the bounded wait proves the helper cannot complete before this blocked write
+            // commits; the ceiling prevents a regression from hanging the focused test indefinitely.
+            await Assert.ThrowsAsync<TimeoutException>(
+                async () => await starting.WaitAsync(BlockedStartupWriteObservationCeiling, cts.Token));
+            Assert.False(starting.IsCompleted);
+        }
+        finally
+        {
+            log.ReleaseStartupWrite();
+        }
+
+        var harness = await starting;
+        try
+        {
+            Assert.Contains("serving the fleet glass at", harness.Log.ToString(), StringComparison.Ordinal);
+        }
+        finally
+        {
+            await harness.Service.StopAsync(CancellationToken.None);
+        }
     }
 
     [Fact]
