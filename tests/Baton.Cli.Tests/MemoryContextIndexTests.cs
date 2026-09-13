@@ -31,6 +31,21 @@ public sealed class MemoryContextIndexTests
         Assert.Contains($"id={repository.Id} reason=beyond the memory-context budget", text, StringComparison.Ordinal);
     }
 
+    [Fact]
+    public void Build_refuses_omission_metadata_that_would_exceed_its_hard_bound()
+    {
+        var entries = Enumerable.Range(0, 1_000)
+            .Select(index => Entry(index.ToString("D4") + new string('a', MemoryContextIndex.MaxOmissionMetadataBytes), "body"))
+            .ToList();
+
+        var refusal = Assert.Throws<InvalidOperationException>(() => MemoryContextIndex.Build(
+            "example/repository",
+            entries.Select(entry => new MemoryProjectionCandidate(entry, MemoryFactOrigin.Vendor)).ToList(),
+            new ProjectionBudget(0, 0)));
+
+        Assert.Contains("omission metadata exceeds", refusal.Message, StringComparison.Ordinal);
+    }
+
     private static MemoryEntry Entry(string name, string text)
     {
         var repository = "example/repository";

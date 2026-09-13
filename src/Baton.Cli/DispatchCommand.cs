@@ -280,6 +280,31 @@ public static class DispatchCommand
         bindings = await ApplyRunwayGateAsync(options, bindings, workspace, evaluateRunway, reservationPolicy, cancellationToken)
             .ConfigureAwait(false);
 
+        byte[]? memoryContextIndexBytes = null;
+        if (options.MemoryContextRepository is { Length: > 0 } repository)
+        {
+            try
+            {
+                var slug = FleetMemory.SlugFor(repository);
+                var entries = await MemoryStore.ReadResolvedStrictAsync(
+                    BatonPaths.MemoryEntriesFile(slug), BatonPaths.MemoryLinksFile(slug), BatonPaths.MemoryRetractionsFile(slug),
+                    cancellationToken).ConfigureAwait(false);
+                var candidates = entries.Select(entry => new MemoryProjectionCandidate(entry, MemoryFactOrigin.Vendor)).ToList();
+                if (!FleetMemory.IsFleet(repository) && File.Exists(FleetMemory.EntriesFile))
+                {
+                    var fleet = await MemoryStore.ReadResolvedStrictAsync(
+                        FleetMemory.EntriesFile, FleetMemory.LinksFile, FleetMemory.RetractionsFile, cancellationToken).ConfigureAwait(false);
+                    candidates.InsertRange(0, fleet.Select(entry => new MemoryProjectionCandidate(entry, MemoryFactOrigin.Fleet)));
+                }
+
+                memoryContextIndexBytes = MemoryContextIndex.Build(repository, candidates, ProjectionBudget.Default).Bytes;
+            }
+            catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or JsonException or InvalidOperationException)
+            {
+                throw new CliArgumentException($"Could not read canonical memory for '{repository}': {ex.Message}");
+            }
+        }
+
         Directory.CreateDirectory(options.RoomDirectoryPath);
 
         // #1381: cross-room provenance -- the same room-marker lineage fields #1441's redispatch
@@ -323,22 +348,10 @@ public static class DispatchCommand
         // so it is never published as a deliverable (#1500 second-reader LOW-6 — state the mechanism
         // instead of the ambiguous phrase "never passes the gate").
         RoleSpecMaterializer.CopyAttachmentsIntoRoom(options.Attachments, options.RoomDirectoryPath);
-        if (options.MemoryContextRepository is { Length: > 0 } repository)
+        if (memoryContextIndexBytes is not null)
         {
-            var slug = FleetMemory.SlugFor(repository);
-            var entries = await MemoryStore.ReadResolvedStrictAsync(
-                BatonPaths.MemoryEntriesFile(slug), BatonPaths.MemoryLinksFile(slug), BatonPaths.MemoryRetractionsFile(slug),
-                cancellationToken).ConfigureAwait(false);
-            var candidates = entries.Select(entry => new MemoryProjectionCandidate(entry, MemoryFactOrigin.Vendor)).ToList();
-            if (!FleetMemory.IsFleet(repository) && File.Exists(FleetMemory.EntriesFile))
-            {
-                var fleet = await MemoryStore.ReadResolvedStrictAsync(
-                    FleetMemory.EntriesFile, FleetMemory.LinksFile, FleetMemory.RetractionsFile, cancellationToken).ConfigureAwait(false);
-                candidates.InsertRange(0, fleet.Select(entry => new MemoryProjectionCandidate(entry, MemoryFactOrigin.Fleet)));
-            }
-            var index = MemoryContextIndex.Build(repository, candidates, ProjectionBudget.Default);
             await RoleSpecMaterializer.WriteGeneratedAttachmentAsync(
-                "baton-memory-context-index.md", index.Bytes, options.RoomDirectoryPath, cancellationToken).ConfigureAwait(false);
+                RoleSpecMaterializer.MemoryContextIndexFileName, memoryContextIndexBytes, options.RoomDirectoryPath, cancellationToken).ConfigureAwait(false);
         }
 
         var primaryOutputName = definition.Steps.FirstOrDefault()?.Outputs.FirstOrDefault() ?? "output";
@@ -1376,7 +1389,7 @@ public static class DispatchCommand
             skills: options.Skills,
             // #2110: the role's own default_skills ride ahead of --skill unless opted out.
             attachDefaultSkills: !options.NoDefaultSkills,
-            generatedAttachmentName: options.MemoryContextRepository is null ? null : RoleSpecMaterializer.MemoryContextIndexFileName);
+            generatedAttachmentName: options.MemoryContextRepository is { Length: > 0 } ? RoleSpecMaterializer.MemoryContextIndexFileName : null);
     }
 
     /// <summary>

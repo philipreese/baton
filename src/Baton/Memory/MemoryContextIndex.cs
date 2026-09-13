@@ -8,6 +8,12 @@ namespace Baton.Memory;
 public static class MemoryContextIndex
 {
     public const string FormatMarker = "# baton-memory-context-index v1";
+    /// <summary>
+    /// The omission manifest is metadata rather than a row body, but it is still an attachment sent to
+    /// a worker. Keep it independently bounded: if every omitted id cannot be named within this limit,
+    /// refuse the projection rather than silently dropping ids or making the attachment unbounded.
+    /// </summary>
+    public const int MaxOmissionMetadataBytes = 65_536;
 
     /// <summary>Renders resolved candidates in the same fleet-first total order as <see cref="MemoryProjection"/>.</summary>
     public static MemoryContextIndexResult Build(string repository, IReadOnlyList<MemoryProjectionCandidate> candidates, ProjectionBudget budget)
@@ -53,6 +59,12 @@ public static class MemoryContextIndex
         var omittedSuffix = omitted.Count == 0
             ? string.Empty
             : "\nomitted-entries:\n" + string.Concat(omitted.Select(o => $"- id={o.EntryId} reason={o.Reason}\n"));
+        if (Encoding.UTF8.GetByteCount(omittedSuffix) > MaxOmissionMetadataBytes)
+        {
+            throw new InvalidOperationException(
+                $"Memory-context omission metadata exceeds its {MaxOmissionMetadataBytes}-byte limit; "
+                + "refusing to omit an entry id from the generated index.");
+        }
         var digest = Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(body))).ToLowerInvariant();
         var header = string.Create(CultureInfo.InvariantCulture, $"{FormatMarker}\nrepository={repository}\ncontent-sha256={digest}\nentries={rows.Count}\nomitted={omitted.Count}\n\n");
         return new MemoryContextIndexResult(Encoding.UTF8.GetBytes(header + body + omittedSuffix), digest, rows.Count, omitted);

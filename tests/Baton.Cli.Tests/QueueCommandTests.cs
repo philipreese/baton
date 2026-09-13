@@ -116,6 +116,42 @@ public sealed class QueueCommandTests
     }
 
     [Fact]
+    public async Task Add_persists_memory_context_and_list_distinguishes_legacy_null_rows()
+    {
+        var home = CreateTempHome();
+        using var scope = BatonEnvironmentSnapshot.BeginScope(BatonEnvironmentSnapshot.Blank with { HomeOverride = home });
+        try
+        {
+            var brief = Path.Combine(home, "brief.md");
+            await File.WriteAllTextAsync(brief, "implement this", Ct);
+
+            await QueueCommand.ExecuteAsync(
+                new QueueOptions(QueueVerb.Add, Tag: "with-memory", Role: "implement", SpecFilePath: brief,
+                    WorkspaceDirectory: home, MemoryContextRepository: "example/repository"),
+                TextWriter.Null, Ct);
+            await QueueStore.MutateAsync(BatonPaths.QueueFile, snapshot => snapshot with
+            {
+                Items = [.. snapshot.Items, new QueueItem
+                {
+                    Tag = "legacy-null-memory", Role = "implement", Workspace = home, SpecFile = brief,
+                }],
+            }, Ct);
+
+            var persisted = await QueueStore.LoadAsync(BatonPaths.QueueFile, Ct);
+            Assert.Equal("example/repository", persisted.Items.Single(item => item.Tag == "with-memory").MemoryContextRepository);
+            Assert.Null(persisted.Items.Single(item => item.Tag == "legacy-null-memory").MemoryContextRepository);
+            var output = new StringWriter();
+            await QueueCommand.ExecuteAsync(new QueueOptions(QueueVerb.List), output, Ct);
+            Assert.Contains("memory context: example/repository", output.ToString(), StringComparison.Ordinal);
+            Assert.DoesNotContain("legacy-null-memory\n  memory context:", output.ToString(), StringComparison.Ordinal);
+        }
+        finally
+        {
+            DirectoryCleanup.DeleteRecursively(home);
+        }
+    }
+
+    [Fact]
     public async Task Add_refuses_a_requirement_mismatch_before_issue_worktree_provisioning()
     {
         var home = CreateTempHome();
