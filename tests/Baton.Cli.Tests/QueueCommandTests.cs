@@ -731,6 +731,86 @@ public sealed class QueueCommandTests
         }
     }
 
+    [Theory]
+    [InlineData("unauthorized")]
+    [InlineData("io")]
+    public async Task Add_refuses_a_queue_spec_write_failure_without_mutating_the_queue_or_prior_brief(string failure)
+    {
+        var home = CreateTempHome();
+        using var scope = BatonEnvironmentSnapshot.BeginScope(BatonEnvironmentSnapshot.Blank with { HomeOverride = home });
+        try
+        {
+            Directory.CreateDirectory(BatonPaths.QueueSpecsDirectory);
+            var destination = BatonPaths.QueueSpecFile("write-failure");
+            await File.WriteAllTextAsync(destination, "the retained brief", Ct);
+            await QueueStore.MutateAsync(BatonPaths.QueueFile, snapshot => snapshot with
+            {
+                Items = [new QueueItem { Tag = "write-failure", Role = "implement", Workspace = home, SpecFile = destination }],
+            }, Ct);
+            var replacement = Path.Combine(home, "replacement.md");
+            await File.WriteAllTextAsync(replacement, "the replacement brief", Ct);
+
+            var refusal = await Assert.ThrowsAsync<CliArgumentException>(() => QueueCommand.ExecuteAsync(
+                new QueueOptions(QueueVerb.Add, Tag: "write-failure", Role: "implement", SpecFilePath: replacement,
+                    WorkspaceDirectory: home),
+                TextWriter.Null,
+                Ct,
+                home,
+                (_, _) => Task.FromResult<RepositoryIdentity?>(null),
+                (_, _, _, _, _, _) => Task.FromResult(home),
+                (_, _) =>
+                {
+                    if (failure == "unauthorized")
+                    {
+                        throw new UnauthorizedAccessException("test write denial");
+                    }
+
+                    throw new IOException("test write failure");
+                }));
+
+            Assert.Contains(destination, refusal.Message, StringComparison.Ordinal);
+            Assert.Equal("make the queue-spec path writable, then retry 'baton queue add'.", refusal.TryInvocation);
+            Assert.Equal("the retained brief", await File.ReadAllTextAsync(destination, Ct));
+            Assert.Single((await QueueStore.LoadAsync(BatonPaths.QueueFile, Ct)).Items);
+        }
+        finally
+        {
+            DirectoryCleanup.DeleteRecursively(home);
+        }
+    }
+
+    [Fact]
+    public async Task Add_refuses_a_windows_reader_held_queue_spec_replacement_without_truncating_it()
+    {
+        var home = CreateTempHome();
+        using var scope = BatonEnvironmentSnapshot.BeginScope(BatonEnvironmentSnapshot.Blank with { HomeOverride = home });
+        try
+        {
+            Directory.CreateDirectory(BatonPaths.QueueSpecsDirectory);
+            var destination = BatonPaths.QueueSpecFile("reader-held");
+            await File.WriteAllTextAsync(destination, "the retained brief", Ct);
+            await QueueStore.MutateAsync(BatonPaths.QueueFile, snapshot => snapshot with
+            {
+                Items = [new QueueItem { Tag = "reader-held", Role = "implement", Workspace = home, SpecFile = destination }],
+            }, Ct);
+            var replacement = Path.Combine(home, "replacement.md");
+            await File.WriteAllTextAsync(replacement, "the replacement brief", Ct);
+
+            using var reader = new FileStream(destination, FileMode.Open, FileAccess.Read, FileShare.Read);
+            var refusal = await Assert.ThrowsAsync<CliArgumentException>(() => QueueCommand.ExecuteAsync(
+                new QueueOptions(QueueVerb.Add, Tag: "reader-held", Role: "implement", SpecFilePath: replacement,
+                    WorkspaceDirectory: home), TextWriter.Null, Ct));
+
+            Assert.Contains(destination, refusal.Message, StringComparison.Ordinal);
+            Assert.Equal("the retained brief", await File.ReadAllTextAsync(destination, Ct));
+            Assert.Equal("reader-held", Assert.Single((await QueueStore.LoadAsync(BatonPaths.QueueFile, Ct)).Items).Tag);
+        }
+        finally
+        {
+            DirectoryCleanup.DeleteRecursively(home);
+        }
+    }
+
     [Fact]
     public async Task Re_adding_a_cancelled_tag_leaves_its_retained_brief_unchanged()
     {

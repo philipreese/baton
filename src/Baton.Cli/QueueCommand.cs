@@ -50,7 +50,8 @@ public static class QueueCommand
         CancellationToken cancellationToken,
         string? repositoryDirectory,
         Func<string, CancellationToken, Task<RepositoryIdentity?>> repositoryResolver,
-        Func<int, string, string?, string, TextWriter, CancellationToken, Task<string>> issueProvisioner)
+        Func<int, string, string?, string, TextWriter, CancellationToken, Task<string>> issueProvisioner,
+        Action<string, string>? writeSpecFile = null)
     {
         ArgumentNullException.ThrowIfNull(options);
         ArgumentNullException.ThrowIfNull(output);
@@ -60,7 +61,7 @@ public static class QueueCommand
         return options.Verb switch
         {
             QueueVerb.Add => AddAsync(
-                options, output, repositoryDirectory, repositoryResolver, issueProvisioner, cancellationToken),
+                options, output, repositoryDirectory, repositoryResolver, issueProvisioner, writeSpecFile, cancellationToken),
             QueueVerb.List => ListAsync(output, cancellationToken),
             QueueVerb.Hold => SetHoldAsync(true, output, cancellationToken),
             QueueVerb.Resume => SetHoldAsync(false, output, cancellationToken),
@@ -76,6 +77,7 @@ public static class QueueCommand
         string? repositoryDirectory,
         Func<string, CancellationToken, Task<RepositoryIdentity?>> repositoryResolver,
         Func<int, string, string?, string, TextWriter, CancellationToken, Task<string>> issueProvisioner,
+        Action<string, string>? writeSpecFile,
         CancellationToken cancellationToken)
     {
         var tag = options.Tag!;
@@ -174,7 +176,7 @@ public static class QueueCommand
         // Q6: the spec is COPIED, not referenced. The runner's briefs were rewritten inline eight
         // times in one evening (#1934 body); an item that launched days later against whatever the
         // file had become is the failure this copy exists to stop.
-        Directory.CreateDirectory(BatonPaths.QueueSpecsDirectory);
+        EnsureQueueSpecsDirectory();
         var specDestination = BatonPaths.QueueSpecFile(tag);
 
         var item = new QueueItem
@@ -245,7 +247,7 @@ public static class QueueCommand
             // The copied brief is part of replacing this tag, not a preliminary side effect. Keep it
             // inside the queue's authoritative mutation so a cancellation that wins the same lock is
             // refused before it can overwrite the retained brief.
-            File.WriteAllText(specDestination, specContents);
+            WriteSpecFile(specDestination, specContents, writeSpecFile ?? WriteSpecFileAtomically);
 
             replaced = existing is not null;
             var items = snapshot.Items.Where(i => !string.Equals(i.Tag, tag, StringComparison.Ordinal)).ToList();
@@ -262,6 +264,62 @@ public static class QueueCommand
         }
 
         return 0;
+    }
+
+    /// <summary>
+    /// Replaces a queued brief only after its complete successor is durable at a sibling path. A
+    /// destination held open by a Windows reader can therefore refuse replacement without exposing
+    /// that reader to a truncated brief or changing the queue row that still names the old one.
+    /// </summary>
+    private static void WriteSpecFile(string destination, string contents, Action<string, string> write)
+    {
+        try
+        {
+            write(destination, contents);
+        }
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
+        {
+            throw QueueSpecWriteFailure(destination, ex);
+        }
+    }
+
+    private static void EnsureQueueSpecsDirectory()
+    {
+        try
+        {
+            Directory.CreateDirectory(BatonPaths.QueueSpecsDirectory);
+        }
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
+        {
+            throw QueueSpecWriteFailure(BatonPaths.QueueSpecsDirectory, ex);
+        }
+    }
+
+    private static CliArgumentException QueueSpecWriteFailure(string path, Exception exception) => new(
+        $"Could not write the queue spec at '{path}': {exception.Message}",
+        "make the queue-spec path writable, then retry 'baton queue add'.");
+
+    private static void WriteSpecFileAtomically(string destination, string contents)
+    {
+        var temporary = $"{destination}.{Guid.NewGuid():N}.tmp";
+        try
+        {
+            File.WriteAllText(temporary, contents);
+            File.Move(temporary, destination, overwrite: true);
+        }
+        catch
+        {
+            try
+            {
+                File.Delete(temporary);
+            }
+            catch (Exception cleanupEx) when (cleanupEx is IOException or UnauthorizedAccessException)
+            {
+                // The destination remains authoritative; a failed cleanup must not hide its write failure.
+            }
+
+            throw;
+        }
     }
 
     /// <summary>

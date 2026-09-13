@@ -6995,7 +6995,9 @@ satisfied rather than avoided: `WorkItemLifecycle` is the code that advances the
   difference between "there is no queue yet" and "your work list just vanished".
 - **`~/.baton/queue/specs/<tag>.md`** — baton's own copy of each item's spec (Q6). `baton queue add`
   copies the operator's file at add time, so an item still launches the brief it was queued with after
-  the scratch file has been rewritten. The tag is a slug (lower-case letters, digits, `-`, `_`,
+  the scratch file has been rewritten. The copy is atomically replaced inside the queue's one locked
+  mutation; a write failure refuses the add without changing its row or a prior copied brief, and names
+  the path with a retry remedy. The tag is a slug (lower-case letters, digits, `-`, `_`,
   1–64 chars) because it names this file and labels the room.
 - **`~/.baton/fleet/queue.jsonl`** — the decision ledger. See "The recorded fact" below.
 - **`~/.baton/fleet/events.jsonl`** — Baton's prospective append-only event record, with one
