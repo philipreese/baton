@@ -745,6 +745,98 @@ public sealed class QueueSchedulerServiceTests
     }
 
     [Fact]
+    public async Task An_unreadable_workspace_git_metadata_path_fails_closed_without_starting_a_lane()
+    {
+        var home = CreateTempHome();
+        using var scope = BatonEnvironmentSnapshot.BeginScope(BatonEnvironmentSnapshot.Blank with { HomeOverride = home });
+        try
+        {
+            var workspace = Directory.CreateDirectory(Path.Combine(home, "workspace")).FullName;
+            var dotGit = Directory.CreateDirectory(Path.Combine(workspace, ".git")).FullName;
+            await QueueStore.MutateAsync(
+                BatonPaths.QueueFile,
+                state => state with { Items = [Item("metadata-denied") with { Workspace = workspace }] }, Ct);
+            var launched = false;
+            var service = new QueueSchedulerService(
+                (_, _) =>
+                {
+                    launched = true;
+                    return Task.FromResult(new QueueLaunchOutcome(null));
+                },
+                _ => Task.FromResult(0d),
+                () => 16d,
+                () => DateTimeOffset.UtcNow,
+                workspaceHead: (_, _) => Task.FromResult<string?>("89abcdef"),
+                workspaceLocks: candidateWorkspace => GitWorkspaceLockProbe.FindExisting(
+                    candidateWorkspace,
+                    path => path == dotGit
+                        ? throw new UnauthorizedAccessException("workspace metadata denied")
+                        : File.GetAttributes(path)));
+
+            await service.TickOnceAsync(Ct);
+
+            Assert.False(launched);
+            var item = Assert.Single((await QueueStore.LoadAsync(BatonPaths.QueueFile, Ct)).Items);
+            Assert.Equal(QueueItemState.Failed, item.State);
+            Assert.Null(item.RoomDirectory);
+            Assert.Null(item.LaunchedAt);
+            Assert.Contains("could not inspect Git lock state", item.Error!, StringComparison.Ordinal);
+            Assert.Contains("workspace metadata denied", item.Error, StringComparison.Ordinal);
+        }
+        finally
+        {
+            Cleanup(home);
+        }
+    }
+
+    [Fact]
+    public async Task An_unreadable_linked_worktree_gitdir_target_fails_closed_without_starting_a_lane()
+    {
+        var home = CreateTempHome();
+        using var scope = BatonEnvironmentSnapshot.BeginScope(BatonEnvironmentSnapshot.Blank with { HomeOverride = home });
+        try
+        {
+            var workspace = Directory.CreateDirectory(Path.Combine(home, "workspace")).FullName;
+            var dotGit = Path.Combine(workspace, ".git");
+            var gitDirectory = Path.Combine(home, "main", ".git", "worktrees", "workspace");
+            File.WriteAllText(dotGit, "gitdir: ../main/.git/worktrees/workspace\n");
+            await QueueStore.MutateAsync(
+                BatonPaths.QueueFile,
+                state => state with { Items = [Item("gitdir-denied") with { Workspace = workspace }] }, Ct);
+            var launched = false;
+            var service = new QueueSchedulerService(
+                (_, _) =>
+                {
+                    launched = true;
+                    return Task.FromResult(new QueueLaunchOutcome(null));
+                },
+                _ => Task.FromResult(0d),
+                () => 16d,
+                () => DateTimeOffset.UtcNow,
+                workspaceHead: (_, _) => Task.FromResult<string?>("89abcdef"),
+                workspaceLocks: candidateWorkspace => GitWorkspaceLockProbe.FindExisting(
+                    candidateWorkspace,
+                    path => path == gitDirectory
+                        ? throw new UnauthorizedAccessException("linked gitdir metadata denied")
+                        : File.GetAttributes(path)));
+
+            await service.TickOnceAsync(Ct);
+
+            Assert.False(launched);
+            var item = Assert.Single((await QueueStore.LoadAsync(BatonPaths.QueueFile, Ct)).Items);
+            Assert.Equal(QueueItemState.Failed, item.State);
+            Assert.Null(item.RoomDirectory);
+            Assert.Null(item.LaunchedAt);
+            Assert.Contains("could not inspect Git lock state", item.Error!, StringComparison.Ordinal);
+            Assert.Contains("linked gitdir metadata denied", item.Error, StringComparison.Ordinal);
+        }
+        finally
+        {
+            Cleanup(home);
+        }
+    }
+
+    [Fact]
     public async Task A_linked_worktree_whose_gitdir_target_is_missing_fails_closed_without_starting_a_lane()
     {
         var home = CreateTempHome();
