@@ -1150,11 +1150,6 @@ public sealed class CodexDynamicToolPolicy
         }
 
         var reference = "command-" + Guid.NewGuid().ToString("N");
-        using var windowsCommandScript = directCreateArguments is null && OperatingSystem.IsWindows()
-            ? WindowsCommandTransport.Create(
-                ResolveWithinRoot(_outputRoot, $".{reference}.cmd"), commandLine, EnsureNoReparsePoint)
-            : null;
-
         var startInfo = ChildProcessStartInfo.Create(
             directCreateArguments is not null
                 ? _pullRequestCreateProvenance!.ExecutablePath
@@ -1178,13 +1173,13 @@ public sealed class CodexDynamicToolPolicy
         }
         else if (OperatingSystem.IsWindows())
         {
-            startInfo.ArgumentList.Add("/d");
-            startInfo.ArgumentList.Add("/s");
-            startInfo.ArgumentList.Add("/c");
-            // The checked command is the exact UTF-16 batch body. Only this fixed `call` transport
-            // reaches /c, so cmd's outer quote stripping cannot reinterpret checked inner quotes.
-            startInfo.ArgumentList.Add("call");
-            startInfo.ArgumentList.Add(windowsCommandScript!.Path);
+            // Do not pass the checked command through ArgumentList: .NET's argv quoting and cmd's
+            // /s /c quote stripping are separate grammars. Arguments supplies cmd its one direct
+            // command-text input, so the matcher and the shell see the same representation and no
+            // batch-file parameter context or filesystem cleanup surface exists.
+            // This fixed outer quote pair is cmd's /s /c transport wrapper. It delimits the direct
+            // command text while leaving its inner quotes and shell operators for cmd's one parse.
+            startInfo.Arguments = "/d /s /c \"" + commandLine + "\"";
         }
         else
         {

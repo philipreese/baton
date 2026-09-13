@@ -739,20 +739,11 @@ public sealed class CodexDynamicToolPolicyTests
         Assert.False(deniedChain.Success);
     }
 
-    [Fact]
-    public void Windows_command_transport_keeps_the_checked_text_and_rejects_nul()
-    {
-        const string command = "rg -n -C 1 \"Protected grace invariant\" \"path with spaces.txt\"";
-
-        Assert.Equal(command, WindowsCommandTransport.ScriptText(command));
-        Assert.Throws<ArgumentException>(() => WindowsCommandTransport.ScriptText("echo safe\0unsafe"));
-    }
-
     /// <summary>
-    /// #2270's production regression: the policy's Windows callback must preserve quoted arguments
-    /// through cmd, rather than only proving a standalone formatter. The fake rg checks the phrase,
-    /// quoted pipe and space-containing path as distinct argv values. The final command uses a real
-    /// shell pipe, and its matcher's decision is asserted beside the policy result.
+    /// #2270's production regression: the policy's direct cmd route must preserve quoted arguments
+    /// rather than only proving a standalone formatter. The fake command checks the phrase, quoted
+    /// pipe, embedded escaped quote and space-containing path as distinct argv values. The final
+    /// command uses a real shell pipe, and its matcher's decision is asserted beside the policy result.
     /// </summary>
     [Fact]
     public async Task Windows_policy_preserves_quoted_arguments_and_real_shell_pipes_through_space_containing_output_root()
@@ -775,12 +766,15 @@ public sealed class CodexDynamicToolPolicyTests
 
         const string phrase = "quote-rg -n -C 1 \"Protected grace invariant\" \"path with spaces.txt\"";
         const string quotedPipe = "quote-rg \"quoted | pattern\" \"path with spaces.txt\"";
+        const string embeddedQuote = "echo embedded ^\"quote^\"";
         const string shellPipe = "echo shell-pipe-survived | findstr shell-pipe-survived";
 
         var phraseResult = await fixture.ExecuteAsync(
             CodexDynamicToolPolicy.RunCommandTool, new { command = phrase });
         var quotedPipeResult = await fixture.ExecuteAsync(
             CodexDynamicToolPolicy.RunCommandTool, new { command = quotedPipe });
+        var embeddedQuoteResult = await fixture.ExecuteAsync(
+            CodexDynamicToolPolicy.RunCommandTool, new { command = embeddedQuote });
         var shellPipeDecision = ShellCommandPatternMatcher.EvaluateChainedCommand(
             shellPipe, grant.ShellCommandPatterns, grant.DeniedShellCommandPatterns,
             grant.DeniedShellCommandExceptions);
@@ -791,10 +785,31 @@ public sealed class CodexDynamicToolPolicyTests
         Assert.Contains("phrase-and-path", phraseResult.Text, StringComparison.Ordinal);
         Assert.True(quotedPipeResult.Success, quotedPipeResult.Text);
         Assert.Contains("quoted-pipe", quotedPipeResult.Text, StringComparison.Ordinal);
+        Assert.True(embeddedQuoteResult.Success, embeddedQuoteResult.Text);
+        Assert.Contains("embedded \"quote\"", embeddedQuoteResult.Text, StringComparison.Ordinal);
         Assert.True(shellPipeDecision.IsAllowed);
         Assert.True(shellPipeResult.Success, shellPipeResult.Text);
         Assert.Contains("shell-pipe-survived", shellPipeResult.Text, StringComparison.Ordinal);
         Assert.Empty(Directory.EnumerateFiles(fixture.Output, "*.cmd"));
+    }
+
+    [Fact]
+    public async Task Windows_policy_keeps_percent_zero_in_direct_command_context()
+    {
+        if (!OperatingSystem.IsWindows())
+        {
+            return;
+        }
+
+        using var fixture = new PolicyFixture(
+            new PermissionGrant(RunShellCommands: true, ShellCommandPatterns: ["echo *"]), ["report.md"]);
+
+        var result = await fixture.ExecuteAsync(
+            CodexDynamicToolPolicy.RunCommandTool, new { command = "echo %0" });
+
+        Assert.True(result.Success, result.Text);
+        Assert.Contains("%0", result.Text, StringComparison.Ordinal);
+        Assert.DoesNotContain(".cmd", result.Text, StringComparison.OrdinalIgnoreCase);
     }
 
     /// <summary>
