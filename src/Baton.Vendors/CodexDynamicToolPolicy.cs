@@ -1149,6 +1149,7 @@ public sealed class CodexDynamicToolPolicy
                 break;
         }
 
+        var reference = "command-" + Guid.NewGuid().ToString("N");
         var startInfo = ChildProcessStartInfo.Create(
             directCreateArguments is not null
                 ? _pullRequestCreateProvenance!.ExecutablePath
@@ -1172,10 +1173,13 @@ public sealed class CodexDynamicToolPolicy
         }
         else if (OperatingSystem.IsWindows())
         {
-            startInfo.ArgumentList.Add("/d");
-            startInfo.ArgumentList.Add("/s");
-            startInfo.ArgumentList.Add("/c");
-            startInfo.ArgumentList.Add(commandLine);
+            // Do not pass the checked command through ArgumentList: .NET's argv quoting and cmd's
+            // /s /c quote stripping are separate grammars. Arguments supplies cmd its one direct
+            // command-text input, so the matcher and the shell see the same representation and no
+            // batch-file parameter context or filesystem cleanup surface exists.
+            // This fixed outer quote pair is cmd's /s /c transport wrapper. It delimits the direct
+            // command text while leaving its inner quotes and shell operators for cmd's one parse.
+            startInfo.Arguments = "/d /s /c \"" + commandLine + "\"";
         }
         else
         {
@@ -1183,7 +1187,6 @@ public sealed class CodexDynamicToolPolicy
             startInfo.ArgumentList.Add(commandLine);
         }
 
-        var reference = "command-" + Guid.NewGuid().ToString("N");
         var stdoutPath = ResolveWithinRoot(_outputRoot, $".{reference}.stdout.log");
         var stderrPath = ResolveWithinRoot(_outputRoot, $".{reference}.stderr.log");
         EnsureNoReparsePoint(stdoutPath, includeLeaf: false);

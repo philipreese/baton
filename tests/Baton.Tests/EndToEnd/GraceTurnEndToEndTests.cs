@@ -170,6 +170,10 @@ public sealed class GraceTurnEndToEndTests
 
         Directory.CreateDirectory(workspace);
         TempGitRepository.InitWithEverythingCommitted(workspace);
+        var remote = TempGitRepository.InitBareRepository(Path.Combine(roomDirectory, "origin.git"));
+        TempGitRepository.AddRemote(workspace, "origin", remote);
+        TempGitRepository.Push(workspace, "origin", "HEAD:refs/heads/main");
+        RunGit(workspace, "branch", "--set-upstream-to", "origin/main");
 
         var snapshot = new WorkflowDefinitionSnapshot(
             new WorkflowDefinitionSnapshotId("snapshot-2134"),
@@ -296,6 +300,7 @@ public sealed class GraceTurnEndToEndTests
                 target.OnStdoutLine?.Invoke("grace turn output");
                 RunGit(workspace, "add", ".");
                 RunGit(workspace, "commit", "-m", "fix: commit incomplete work under grace turn");
+                RunGit(workspace, "push", "origin", "HEAD:refs/heads/main");
                 return new CoreDispatchResult(0, CoreExitReason.Natural);
             }
 

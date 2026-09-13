@@ -18,7 +18,7 @@ public static class QueueOptionsParser
         "[--skill <name>] [--require repository-read|file-write|shell|network|github-read|github-write|artifact:<output-name>] " +
         "[--timeout <minutes>] " +
         "[--max-tool-steps <n>] [--token-budget <n>] [--override-runway <reason>] [--reason <why>] | " +
-        "baton queue list | baton queue hold | baton queue resume | baton queue cancel <tag> | baton queue import <file>. " +
+        "baton queue list [--active] | baton queue hold | baton queue resume | baton queue cancel <tag> | baton queue import <file>. " +
         "A worktree provisioned by --issue inherits its repository's recorded ceiling; " +
         "when no path in that repository is trusted it is recorded at 'all', and the add says which.";
 
@@ -34,7 +34,7 @@ public static class QueueOptionsParser
         return args[0] switch
         {
             "add" => ParseAdd(args),
-            "list" => ParseBare(QueueVerb.List, args),
+            "list" => ParseList(args),
             "hold" => ParseBare(QueueVerb.Hold, args),
             "resume" => ParseBare(QueueVerb.Resume, args),
             "cancel" => ParseCancel(args),
@@ -51,6 +51,22 @@ public static class QueueOptionsParser
         }
 
         return new QueueOptions(verb);
+    }
+
+    private static QueueOptions ParseList(IReadOnlyList<string> args)
+    {
+        if (args.Count == 1)
+        {
+            return new QueueOptions(QueueVerb.List);
+        }
+
+        if (args.Count == 2 && args[1] == "--active")
+        {
+            return new QueueOptions(QueueVerb.List, Active: true);
+        }
+
+        throw new CliArgumentException(
+            $"'baton queue list' takes no arguments or '--active' (got '{args[1]}'). {Usage}");
     }
 
     private static QueueOptions ParseImport(IReadOnlyList<string> args)
@@ -352,9 +368,9 @@ public static class QueueOptionsParser
             throw new CliArgumentException($"'--timeout' must be a positive number of minutes. {Usage}");
         }
 
-        if (maxToolSteps is <= 0)
+        if (maxToolSteps < 0)
         {
-            throw new CliArgumentException($"'--max-tool-steps' must be positive. {Usage}");
+            throw new CliArgumentException($"'--max-tool-steps' must be a non-negative whole number. {Usage}");
         }
 
         if (tokenBudget is <= 0)

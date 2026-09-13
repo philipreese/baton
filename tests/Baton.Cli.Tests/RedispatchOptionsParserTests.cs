@@ -79,6 +79,27 @@ public class RedispatchOptionsParserTests
         Assert.Equal("pixi run gates-quiet", options.VerifyCommand);
     }
 
+    [Theory]
+    [InlineData("0", 0)]
+    [InlineData("200", 200)]
+    public void Max_tool_steps_accepts_non_negative_whole_numbers(string rawValue, int expected)
+    {
+        var options = RedispatchOptionsParser.Parse(["parent-room", "--max-tool-steps", rawValue]);
+
+        Assert.Equal(expected, options.MaxToolSteps);
+    }
+
+    [Theory]
+    [InlineData("-1")]
+    [InlineData("not-a-number")]
+    public void Max_tool_steps_refuses_negative_or_non_numeric_values(string rawValue)
+    {
+        var ex = Assert.Throws<CliArgumentException>(
+            () => RedispatchOptionsParser.Parse(["parent-room", "--max-tool-steps", rawValue]));
+
+        Assert.Contains("non-negative whole number", ex.Message, StringComparison.Ordinal);
+    }
+
     [Fact]
     public void Attach_without_value_is_a_typed_argument_error()
     {

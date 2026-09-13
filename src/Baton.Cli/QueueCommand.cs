@@ -50,7 +50,8 @@ public static class QueueCommand
         CancellationToken cancellationToken,
         string? repositoryDirectory,
         Func<string, CancellationToken, Task<RepositoryIdentity?>> repositoryResolver,
-        Func<int, string, string?, string, TextWriter, CancellationToken, Task<string>> issueProvisioner)
+        Func<int, string, string?, string, TextWriter, CancellationToken, Task<string>> issueProvisioner,
+        Action<string, string>? writeSpecFile = null)
     {
         ArgumentNullException.ThrowIfNull(options);
         ArgumentNullException.ThrowIfNull(output);
@@ -60,8 +61,8 @@ public static class QueueCommand
         return options.Verb switch
         {
             QueueVerb.Add => AddAsync(
-                options, output, repositoryDirectory, repositoryResolver, issueProvisioner, cancellationToken),
-            QueueVerb.List => ListAsync(output, cancellationToken),
+                options, output, repositoryDirectory, repositoryResolver, issueProvisioner, writeSpecFile, cancellationToken),
+            QueueVerb.List => ListAsync(options.Active, output, cancellationToken),
             QueueVerb.Hold => SetHoldAsync(true, output, cancellationToken),
             QueueVerb.Resume => SetHoldAsync(false, output, cancellationToken),
             QueueVerb.Cancel => CancelAsync(options.Tag!, output, cancellationToken),
@@ -76,6 +77,7 @@ public static class QueueCommand
         string? repositoryDirectory,
         Func<string, CancellationToken, Task<RepositoryIdentity?>> repositoryResolver,
         Func<int, string, string?, string, TextWriter, CancellationToken, Task<string>> issueProvisioner,
+        Action<string, string>? writeSpecFile,
         CancellationToken cancellationToken)
     {
         var tag = options.Tag!;
@@ -174,7 +176,7 @@ public static class QueueCommand
         // Q6: the spec is COPIED, not referenced. The runner's briefs were rewritten inline eight
         // times in one evening (#1934 body); an item that launched days later against whatever the
         // file had become is the failure this copy exists to stop.
-        Directory.CreateDirectory(BatonPaths.QueueSpecsDirectory);
+        EnsureQueueSpecsDirectory();
         var specDestination = BatonPaths.QueueSpecFile(tag);
 
         var item = new QueueItem
@@ -245,7 +247,7 @@ public static class QueueCommand
             // The copied brief is part of replacing this tag, not a preliminary side effect. Keep it
             // inside the queue's authoritative mutation so a cancellation that wins the same lock is
             // refused before it can overwrite the retained brief.
-            File.WriteAllText(specDestination, specContents);
+            WriteSpecFile(specDestination, specContents, writeSpecFile ?? WriteSpecFileAtomically);
 
             replaced = existing is not null;
             var items = snapshot.Items.Where(i => !string.Equals(i.Tag, tag, StringComparison.Ordinal)).ToList();
@@ -262,6 +264,62 @@ public static class QueueCommand
         }
 
         return 0;
+    }
+
+    /// <summary>
+    /// Replaces a queued brief only after its complete successor is durable at a sibling path. A
+    /// destination held open by a Windows reader can therefore refuse replacement without exposing
+    /// that reader to a truncated brief or changing the queue row that still names the old one.
+    /// </summary>
+    private static void WriteSpecFile(string destination, string contents, Action<string, string> write)
+    {
+        try
+        {
+            write(destination, contents);
+        }
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
+        {
+            throw QueueSpecWriteFailure(destination, ex);
+        }
+    }
+
+    private static void EnsureQueueSpecsDirectory()
+    {
+        try
+        {
+            Directory.CreateDirectory(BatonPaths.QueueSpecsDirectory);
+        }
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
+        {
+            throw QueueSpecWriteFailure(BatonPaths.QueueSpecsDirectory, ex);
+        }
+    }
+
+    private static CliArgumentException QueueSpecWriteFailure(string path, Exception exception) => new(
+        $"Could not write the queue spec at '{path}': {exception.Message}",
+        "make the queue-spec path writable, then retry 'baton queue add'.");
+
+    private static void WriteSpecFileAtomically(string destination, string contents)
+    {
+        var temporary = $"{destination}.{Guid.NewGuid():N}.tmp";
+        try
+        {
+            File.WriteAllText(temporary, contents);
+            File.Move(temporary, destination, overwrite: true);
+        }
+        catch
+        {
+            try
+            {
+                File.Delete(temporary);
+            }
+            catch (Exception cleanupEx) when (cleanupEx is IOException or UnauthorizedAccessException)
+            {
+                // The destination remains authoritative; a failed cleanup must not hide its write failure.
+            }
+
+            throw;
+        }
     }
 
     /// <summary>
@@ -332,10 +390,11 @@ public static class QueueCommand
         }
     }
 
-    private static async Task<int> ListAsync(TextWriter output, CancellationToken cancellationToken)
+    private static async Task<int> ListAsync(bool active, TextWriter output, CancellationToken cancellationToken)
     {
         var snapshot = await QueueStore.LoadAsync(BatonPaths.QueueFile, cancellationToken).ConfigureAwait(false);
-        var settings = snapshot.Items.Any(i => i.Stage is not null)
+        var items = active ? snapshot.Items.Where(IsActive).ToList() : snapshot.Items;
+        var settings = items.Any(i => i.Stage is not null)
             ? (await DaemonSettingsStore.LoadAsync(BatonPaths.SettingsFile, cancellationToken).ConfigureAwait(false)).Queue
             : null;
         if (snapshot.Held)
@@ -345,13 +404,13 @@ public static class QueueCommand
 
         await PrintWaitAsync(output, cancellationToken).ConfigureAwait(false);
 
-        if (snapshot.Items.Count == 0)
+        if (items.Count == 0)
         {
-            output.WriteLine("Queue is empty.");
+            output.WriteLine(active && snapshot.Items.Count > 0 ? "No active queue items." : "Queue is empty.");
             return 0;
         }
 
-        foreach (var item in snapshot.Items)
+        foreach (var item in items)
         {
             // `halted` in the status column: an item the queue has given up on and one that merely
             // failed its lane and is still an advance candidate otherwise print identically, and
@@ -374,7 +433,11 @@ public static class QueueCommand
             {
                 output.WriteLine($"  effective stage plan: {DescribeStagePlan(item, settings)}");
             }
-            if (item.Error is { Length: > 0 } error)
+            if (await QueueRoomSettlementProjection.RenderAsync(item, cancellationToken).ConfigureAwait(false) is { } settlement)
+            {
+                output.WriteLine(settlement);
+            }
+            else if (item.Error is { Length: > 0 } error)
             {
                 output.WriteLine($"  error: {error}");
             }
@@ -391,12 +454,17 @@ public static class QueueCommand
             }
         }
 
-        var known = snapshot.Items.Count(item => item.Requirements is not null);
-        output.WriteLine($"Requirement coverage: {known}/{snapshot.Items.Count} declared; "
-            + $"{snapshot.Items.Count - known} unknown migration row(s).");
+        var known = items.Count(item => item.Requirements is not null);
+        output.WriteLine($"Requirement coverage: {known}/{items.Count} declared"
+            + (active ? " (selected)" : string.Empty) + "; "
+            + $"{items.Count - known} unknown migration row(s).");
 
         return 0;
     }
+
+    private static bool IsActive(QueueItem item) =>
+        item.State is QueueItemState.Queued or QueueItemState.Launched
+        || item.Stage is not null && item.State is QueueItemState.Done or QueueItemState.Failed;
 
     internal static async Task<int> SetHoldAsync(bool held, TextWriter output, CancellationToken cancellationToken)
     {
@@ -597,6 +665,7 @@ public static class QueueCommand
                 Adapter = adapter,
                 Model = options.Model,
                 Effort = options.Effort,
+                Reason = options.Reason,
                 StageSelections = stageSelections,
                 LifecyclePin = options.LifecyclePin,
             },
