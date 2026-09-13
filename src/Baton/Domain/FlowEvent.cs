@@ -42,6 +42,7 @@ namespace Baton.Domain;
 [JsonDerivedType(typeof(StreamLogLossDeclared), "streamLogLossDeclared")]
 [JsonDerivedType(typeof(EngineFilesPlaced), "engineFilesPlaced")]
 [JsonDerivedType(typeof(GraceTurnAttempted), "graceTurnAttempted")]
+[JsonDerivedType(typeof(ArtifactCheckpointAttempted), "artifactCheckpointAttempted")]
 public abstract record FlowEvent
 {
     private FlowEvent()
@@ -526,6 +527,14 @@ public abstract record FlowEvent
         ExecutionId ExecutionId,
         bool WorkspaceCleanAfter,
         CoreExitReason ExitReason,
+        ArrestReason? ArrestReason = null) : FlowEvent;
+
+    /// <summary>A bounded, artifact-only follow-up to an ordinary budget arrest.</summary>
+    public sealed record ArtifactCheckpointAttempted(
+        ExecutionId ExecutionId,
+        IReadOnlyList<string> OutputNames,
+        CoreExitReason ExitReason,
+        WorkerUsage? Usage = null,
         ArrestReason? ArrestReason = null) : FlowEvent;
 
     /// <summary>

@@ -2151,6 +2151,9 @@ public static class MutationInterface
                 // under-it process would only produce a Cancelled/Failed verdict that this replaces
                 // wholesale, never Succeeded.
 
+                await RunArtifactCheckpointAsync(prepared, binding, budgetMonitor, dispatcher, eventLogWriter, dispatchCancellationToken)
+                    .ConfigureAwait(false);
+
                 // #2134 (`spec/baton.md` §3, "The grace turn"): reuses #2029's VerifiesWorkspace set
                 // and #1373's own dirty-tree probe (Workspaces.WorktreeProvisioner.Audit) rather than a
                 // fresh one.
@@ -2495,6 +2498,60 @@ public static class MutationInterface
     /// failure here is caught and mapped rather than left to escape and orphan the arrest append that
     /// follows it.
     /// </summary>
+    private static async Task RunArtifactCheckpointAsync(
+        PreparedExecution prepared,
+        WorkerBinding.Process binding,
+        TokenBudgetMonitor budgetMonitor,
+        ICoreDispatcher dispatcher,
+        IEventLogWriter eventLogWriter,
+        CancellationToken cancellationToken)
+    {
+        if (budgetMonitor.ArrestReasonValue is not (ArrestReason.TokenBudget or ArrestReason.ToolStepCap)
+            || !string.Equals(prepared.Request.Adapter, "codex", StringComparison.OrdinalIgnoreCase))
+        {
+            return;
+        }
+
+        var missing = binding.Contract.ProducedOutputs.Select(output => output.Name)
+            .Where(name => !File.Exists(Path.Combine(prepared.OutputDirectory, name))).ToArray();
+        if (missing.Length == 0 || binding.Target.PromptText is null)
+        {
+            return;
+        }
+
+        var parser = StandardWorkerUsageParsers.Default.GetValueOrDefault(prepared.Request.Adapter!);
+        var monitor = parser is null ? null : new TokenBudgetMonitor(
+            ArtifactCheckpoint.TokenBudget, ArtifactCheckpoint.MaxToolSteps, billedRateLimit: null, parser);
+        var target = binding.Target.WithReplacedPrompt(ArtifactCheckpoint.PromptText).WithArtifactOnlyOutputs(missing)
+            with
+        { OnEngineFilesPlaced = null };
+        if (monitor is not null)
+        {
+            var prior = target.OnStdoutLine;
+            target = target with { OnStdoutLine = line => { prior?.Invoke(line); monitor.OnStdoutLine(line); } };
+        }
+
+        var request = prepared.Request with { Timeout = ArtifactCheckpoint.WallClockTimeout };
+        using var linked = monitor is null ? null : CancellationTokenSource.CreateLinkedTokenSource(cancellationToken, monitor.ArrestRequested);
+        CoreDispatchResult result;
+        try
+        {
+            result = await dispatcher.DispatchAsync(request, target, linked?.Token ?? cancellationToken).ConfigureAwait(false);
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException || !cancellationToken.IsCancellationRequested)
+        {
+            // The original arrest remains authoritative. A courtesy checkpoint that cannot start must
+            // not prevent it from being recorded and cannot earn another ordinary dispatch.
+            Console.Error.WriteLine(
+                $"Artifact checkpoint for execution '{prepared.Request.ExecutionId.Value}' did not start: {ex.Message}");
+            result = new CoreDispatchResult(-1, CoreExitReason.CancelRequested);
+        }
+
+        await eventLogWriter.AppendAsync(new FlowEvent.ArtifactCheckpointAttempted(
+            prepared.Request.ExecutionId, missing, result.Reason, monitor?.SnapshotUsage(),
+            monitor is { Arrested: true } ? monitor.ArrestReasonValue : null), CancellationToken.None).ConfigureAwait(false);
+    }
+
     private static async Task RunGraceTurnAsync(
         PreparedExecution prepared,
         WorkerBinding.Process binding,

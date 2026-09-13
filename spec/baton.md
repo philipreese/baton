@@ -2347,6 +2347,19 @@ stays display-only, never itself a gate. `StateProjector.DescribeArrest` is the 
 `TokenBudget`/`ToolStepCap`/`BilledRate`/`null`, and since #1691 that totality is a test over
 `Enum.GetValues<ArrestReason>()` rather than a claim.
 
+**Artifact checkpoint (#2276).** A `codex` execution arrested by its ordinary token or tool-step cap
+receives at most one engine-owned checkpoint only when one or more declared outputs remain absent. It
+keeps the original execution id as its predecessor, but `ArtifactCheckpointAttempted` records its own
+usage, exit reason, and any checkpoint arrest before the authoritative `ExecutionArrested` line; the
+status/ledger therefore shows both the original truthful cap and the smaller recovery spend. Its fixed
+`Mutation.ArtifactCheckpoint` caps are separate from the ordinary role budget. The dispatch replaces
+the prompt and exposes only `artifact:<name>` tools for the still-missing declared names: no repository
+read, shell, network, workspace mutation, commit, push, or ordinary role tool survives. It is not a
+second investigation budget and never changes the final arrested room from `Indeterminate`; absent or
+invalid outputs remain ordinary output-contract failures. Cancellation, rejection, validation refusal,
+workspace-safety arrest, billed-rate arrest, and timeout do not receive this checkpoint. A checkpoint
+spawn failure is itself journaled and never prevents the original arrest from being recorded.
+
 **The grace turn (#2134, operator ruling 2026-09-08 23:10 ET, "build it").** Three `agy` budget
 arrests the same night each landed after real work was done and before it was ever committed, leaving
 a dirty tree a follow-up lane had to rescue at several hundred thousand tokens — a grace turn costs one

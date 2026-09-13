@@ -96,6 +96,7 @@ public static class CodexAppServerBroker
             outputDirectory,
             inputPaths,
             configuration.ProducedOutputNames,
+            artifactOnlyOutputNames: ReadArtifactOnlyOutputs(),
             pullRequestCreateProvenance: configuration.PullRequestCreateProvenance);
 
         using var process = StartAppServer(configuration, isolatedHome);
@@ -142,6 +143,12 @@ public static class CodexAppServerBroker
             }
             await stderrDrain.ConfigureAwait(false);
         }
+    }
+
+    private static IReadOnlyList<string>? ReadArtifactOnlyOutputs()
+    {
+        var raw = Environment.GetEnvironmentVariable("BATON_ARTIFACT_ONLY_OUTPUTS");
+        return string.IsNullOrWhiteSpace(raw) ? null : raw.Split(';', StringSplitOptions.RemoveEmptyEntries);
     }
 
     /// <summary>

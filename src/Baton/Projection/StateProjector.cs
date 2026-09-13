@@ -448,6 +448,7 @@ public static class StateProjector
             case FlowEvent.DeliveryMerged:
             case FlowEvent.StreamLogLossDeclared:
             case FlowEvent.GraceTurnAttempted:
+            case FlowEvent.ArtifactCheckpointAttempted:
                 // Diagnostic-only facts: durable in the ledger, but no StepState/FlowState consequence.
                 // The two VerifyDeclaration* events are listed here on purpose rather than by falling off
                 // the end of this switch -- see their own docs for why they stay reader-less (#1708 H1/M1).

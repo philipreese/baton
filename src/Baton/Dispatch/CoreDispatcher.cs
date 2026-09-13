@@ -90,8 +90,23 @@ public sealed record CoreDispatchTarget(
     // AER's own copies as the worker's. Same seam and same composition rule as OnStdoutLine above: the
     // dispatcher supplies the fact and never interprets it (Architecture Rule 1). Null on every path
     // with no journal to write to (tests, CommandWorkerAdapter), which simply records nothing.
-    Func<IReadOnlyList<EnginePlacedFile>, IReadOnlyList<string>, Task>? OnEngineFilesPlaced = null)
+    Func<IReadOnlyList<EnginePlacedFile>, IReadOnlyList<string>, Task>? OnEngineFilesPlaced = null,
+    IReadOnlyList<string>? ArtifactOnlyOutputNames = null)
 {
+    /// <summary>Returns a target whose broker is restricted to the named declared-output tools.</summary>
+    public CoreDispatchTarget WithArtifactOnlyOutputs(IReadOnlyList<string> outputNames)
+    {
+        ArgumentNullException.ThrowIfNull(outputNames);
+        if (outputNames.Count == 0)
+        {
+            throw new ArgumentException("An artifact checkpoint needs at least one missing output.", nameof(outputNames));
+        }
+
+        var environment = (Environment ?? []).ToList();
+        environment.RemoveAll(variable => string.Equals(variable.Name, "BATON_ARTIFACT_ONLY_OUTPUTS", StringComparison.Ordinal));
+        environment.Add(("BATON_ARTIFACT_ONLY_OUTPUTS", string.Join(';', outputNames)));
+        return this with { ArtifactOnlyOutputNames = outputNames.ToArray(), Environment = environment };
+    }
     /// <summary>
     /// #1373: returns this target with <paramref name="preamble"/> prepended to the instructional text
     /// the worker actually receives — <b>both</b> <see cref="PromptText"/> and the <see cref="Args"/>
