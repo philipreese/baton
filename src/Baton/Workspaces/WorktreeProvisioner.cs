@@ -262,11 +262,12 @@ public static class WorktreeProvisioner
     }
 
     /// <summary>
-    /// Captures the local branch and published-ref identity a grace turn must preserve. The capture is
+    /// Captures the local branch and actual remote identity a grace turn must preserve. The capture is
     /// deliberately immediately before that separate worker process starts: it includes any unpushed
     /// worker commits, while still making an amend or replacement of any earlier commit detectable. A
-    /// detached HEAD, an unset/unresolvable upstream, or any git failure supplies no safe baseline, so
-    /// callers must leave the dirty tree alone rather than dispatch the grace worker.
+    /// detached HEAD, missing or ambiguous branch remote configuration, an unreadable actual remote tip,
+    /// or any git failure supplies no safe baseline, so callers must leave the dirty tree alone rather
+    /// than dispatch the grace worker.
     /// </summary>
     public static GraceCheckpoint? CaptureGraceCheckpoint(string? worktreePath)
     {
@@ -279,20 +280,23 @@ public static class WorktreeProvisioner
         {
             var (headCode, headOut, _) = RunGit(worktreePath, "rev-parse", "--verify", "HEAD^{commit}");
             var (branchCode, branchOut, _) = RunGit(worktreePath, "symbolic-ref", "--quiet", "HEAD");
-            var (upstreamCode, upstreamOut, _) = RunGit(worktreePath, "rev-parse", "--abbrev-ref", "--symbolic-full-name", "@{upstream}");
             var head = headOut.Trim();
             var branch = branchOut.Trim();
-            var upstream = upstreamOut.Trim();
-            if (headCode != 0 || branchCode != 0 || upstreamCode != 0
-                || string.IsNullOrWhiteSpace(head) || string.IsNullOrWhiteSpace(branch) || string.IsNullOrWhiteSpace(upstream))
+            if (headCode != 0 || branchCode != 0
+                || string.IsNullOrWhiteSpace(head) || string.IsNullOrWhiteSpace(branch))
             {
                 return null;
             }
 
-            var (upstreamHeadCode, upstreamHeadOut, _) = RunGit(worktreePath, "rev-parse", "--verify", $"{upstream}^{{commit}}");
-            var upstreamHead = upstreamHeadOut.Trim();
-            return upstreamHeadCode == 0 && !string.IsNullOrWhiteSpace(upstreamHead)
-                ? new GraceCheckpoint(head, branch, upstream, upstreamHead)
+            var remoteConfiguration = ReadBranchRemoteConfiguration(worktreePath, branch);
+            if (remoteConfiguration is null)
+            {
+                return null;
+            }
+
+            var remoteTip = ReadRemoteTip(worktreePath, remoteConfiguration.Value.Remote, remoteConfiguration.Value.MergeRef);
+            return remoteTip is not null
+                ? new GraceCheckpoint(head, branch, remoteConfiguration.Value.Remote, remoteConfiguration.Value.MergeRef, remoteTip)
                 : null;
         }
         catch (WorktreeProvisioningException)
@@ -302,11 +306,10 @@ public static class WorktreeProvisioner
     }
 
     /// <summary>
-    /// True only when the original symbolic branch remains checked out, its configured upstream remains
-    /// the captured ref and advances without rewriting, and HEAD is one non-merge child of the captured
-    /// baseline that the upstream contains. This proves both the local checkpoint and the published
-    /// result retained every captured commit; ancestry that is merely reachable is intentionally
-    /// insufficient.
+    /// True only when the original symbolic branch remains checked out, its configured remote and merge
+    /// ref remain unchanged, and the actual remote reports HEAD as one non-merge child of the captured
+    /// baseline. The actual remote tip must retain both the captured remote tip and local baseline;
+    /// ancestry that is merely reachable is intentionally insufficient.
     /// </summary>
     public static bool IsSafeGraceCheckpoint(string? worktreePath, GraceCheckpoint checkpoint)
     {
@@ -319,19 +322,22 @@ public static class WorktreeProvisioner
         try
         {
             var (branchCode, branchOut, _) = RunGit(worktreePath, "symbolic-ref", "--quiet", "HEAD");
-            var (upstreamCode, upstreamOut, _) = RunGit(worktreePath, "rev-parse", "--abbrev-ref", "--symbolic-full-name", "@{upstream}");
-            if (branchCode != 0 || upstreamCode != 0
-                || !string.Equals(branchOut.Trim(), checkpoint.BranchRef, StringComparison.Ordinal)
-                || !string.Equals(upstreamOut.Trim(), checkpoint.UpstreamRef, StringComparison.Ordinal))
+            if (branchCode != 0
+                || !string.Equals(branchOut.Trim(), checkpoint.BranchRef, StringComparison.Ordinal))
             {
                 return false;
             }
 
-            var (upstreamHeadCode, upstreamHeadOut, _) = RunGit(worktreePath, "rev-parse", "--verify", $"{checkpoint.UpstreamRef}^{{commit}}");
-            var upstreamHead = upstreamHeadOut.Trim();
-            if (upstreamHeadCode != 0 || string.IsNullOrWhiteSpace(upstreamHead)
-                || !IsAncestor(worktreePath, checkpoint.UpstreamHead, upstreamHead)
-                || !IsAncestor(worktreePath, checkpoint.Head, upstreamHead))
+            var remoteConfiguration = ReadBranchRemoteConfiguration(worktreePath, checkpoint.BranchRef);
+            if (remoteConfiguration is null
+                || !string.Equals(remoteConfiguration.Value.Remote, checkpoint.Remote, StringComparison.Ordinal)
+                || !string.Equals(remoteConfiguration.Value.MergeRef, checkpoint.MergeRef, StringComparison.Ordinal))
+            {
+                return false;
+            }
+
+            var remoteTip = ReadRemoteTip(worktreePath, checkpoint.Remote, checkpoint.MergeRef);
+            if (remoteTip is null)
             {
                 return false;
             }
@@ -342,7 +348,9 @@ public static class WorktreeProvisioner
                 && commits.Length == 2
                 && !string.Equals(commits[0], checkpoint.Head, StringComparison.OrdinalIgnoreCase)
                 && string.Equals(commits[1], checkpoint.Head, StringComparison.OrdinalIgnoreCase)
-                && IsAncestor(worktreePath, commits[0], upstreamHead);
+                && string.Equals(commits[0], remoteTip, StringComparison.OrdinalIgnoreCase)
+                && IsAncestor(worktreePath, checkpoint.RemoteTip, remoteTip)
+                && IsAncestor(worktreePath, checkpoint.Head, remoteTip);
         }
         catch (WorktreeProvisioningException)
         {
@@ -369,6 +377,54 @@ public static class WorktreeProvisioner
 
     private static bool IsAncestor(string worktreePath, string ancestor, string descendant) =>
         RunGit(worktreePath, "merge-base", "--is-ancestor", ancestor, descendant).ExitCode == 0;
+
+    private static (string Remote, string MergeRef)? ReadBranchRemoteConfiguration(string worktreePath, string branchRef)
+    {
+        const string localBranchPrefix = "refs/heads/";
+        if (!branchRef.StartsWith(localBranchPrefix, StringComparison.Ordinal) || branchRef.Length == localBranchPrefix.Length)
+        {
+            return null;
+        }
+
+        var branchName = branchRef[localBranchPrefix.Length..];
+        var remote = ReadSingleConfigValue(worktreePath, $"branch.{branchName}.remote");
+        var mergeRef = ReadSingleConfigValue(worktreePath, $"branch.{branchName}.merge");
+        if (remote is null || mergeRef is null
+            || remote.StartsWith("-", StringComparison.Ordinal)
+            || !mergeRef.StartsWith("refs/", StringComparison.Ordinal))
+        {
+            return null;
+        }
+
+        return (remote, mergeRef);
+    }
+
+    private static string? ReadSingleConfigValue(string worktreePath, string key)
+    {
+        var (exitCode, stdout, _) = RunGit(worktreePath, "config", "--get-all", key);
+        var values = stdout.Split(['\r', '\n'], StringSplitOptions.RemoveEmptyEntries);
+        return exitCode == 0 && values.Length == 1 && !string.IsNullOrWhiteSpace(values[0])
+            && string.Equals(values[0], values[0].Trim(), StringComparison.Ordinal)
+            ? values[0]
+            : null;
+    }
+
+    private static string? ReadRemoteTip(string worktreePath, string remote, string mergeRef)
+    {
+        var (exitCode, stdout, _) = RunGit(worktreePath, "ls-remote", "--exit-code", remote, mergeRef);
+        var lines = stdout.Split(['\r', '\n'], StringSplitOptions.RemoveEmptyEntries);
+        if (exitCode != 0 || lines.Length != 1)
+        {
+            return null;
+        }
+
+        var fields = lines[0].Split('\t', StringSplitOptions.None);
+        return fields.Length == 2
+            && !string.IsNullOrWhiteSpace(fields[0])
+            && string.Equals(fields[1], mergeRef, StringComparison.Ordinal)
+            ? fields[0]
+            : null;
+    }
 
     /// <summary>
     /// The bounded "carries N uncommitted/stray path(s): …" fragment <see cref="Audit"/> composes its
@@ -1079,8 +1135,8 @@ public sealed record WorktreeTeardownResult(WorktreeTeardownOutcome Outcome, str
 /// <summary>The result of a post-run grant audit on a provisioned worktree.</summary>
 public sealed record WorktreeAuditResult(bool IsClean, string? FailureReason);
 
-/// <summary>The immutable branch and upstream state a grace turn must retain and publish.</summary>
-public sealed record GraceCheckpoint(string Head, string BranchRef, string UpstreamRef, string UpstreamHead);
+/// <summary>The immutable branch, remote, and local baseline state a grace turn must retain and publish.</summary>
+public sealed record GraceCheckpoint(string Head, string BranchRef, string Remote, string MergeRef, string RemoteTip);
 
 /// <summary>
 /// A worktree provisioned for a run, held so <c>WorktreeProvisioner.Teardown</c> can be called on it

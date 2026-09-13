@@ -85,7 +85,7 @@ public sealed class TimeoutOnMutatedWorkspaceEndToEndTests
         {
             File.WriteAllText(Path.Combine(workspace, "seeded.txt"), "edited, not committed");
             File.WriteAllText(Path.Combine(workspace, "brand-new.txt"), "written, never added");
-        });
+        }, pushToOrigin: true);
 
         try
         {

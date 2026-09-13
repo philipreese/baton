@@ -2362,15 +2362,16 @@ under its own fixed, far smaller caps
 attempt at the original task, and never per-role configurable: there is no role-specific reason for a
 grace turn to run longer than the commit-and-push it exists for.
 
-**Protected grace invariant (#2263).** Before the dispatch, the engine captures the checked-out
-symbolic local branch, its configured and resolvable upstream ref and tip, and `HEAD`. It accepts a
-clean grace result only when that same branch remains checked out, the same upstream configuration has
-fast-forwarded without rewriting, `HEAD` is exactly one non-merge child of the captured `HEAD`, and the
-published upstream contains that child. Thus an unpushed pre-existing local commit is retained, while a
-detached HEAD, branch switch, amend/replacement, extra commit, upstream divergence, or ref rewrite is
-unsafe. On every unsafe or unprovable result the engine changes no commit, ref, index, or worktree path:
-it preserves all observed evidence and records `WorkspaceCleanAfter: false`; it never uses reset or
-another destructive repair to make the workspace appear clean.
+**Protected grace invariant (#2263/#2269).** Before the dispatch, the engine captures the checked-out
+symbolic local branch, its configured remote and exact merge ref, that ref's actual remote tip, and
+`HEAD`. It accepts a clean grace result only when that same branch and configuration remain, a
+read-only exact-ref remote query reports the one non-merge child of the captured `HEAD` as its tip, and
+that child retains both the captured remote-tip and local-baseline ancestry. Thus an unpushed
+pre-existing local commit is retained, while a detached HEAD, branch switch, amend/replacement, extra
+commit, upstream divergence, local tracking-ref spoof, remote ref rewrite, configuration drift, or an
+unprovable remote query is unsafe. On every unsafe or unprovable result the engine changes no commit,
+ref, index, or worktree path: it preserves all observed evidence and records `WorkspaceCleanAfter:
+false`; it never uses reset or another destructive repair to make the workspace appear clean.
 
 The prompt is self-contained on purpose — it names no prior turn — so no vendor session resume is
 needed to make it actionable: the workspace on disk already carries whatever the arrested execution

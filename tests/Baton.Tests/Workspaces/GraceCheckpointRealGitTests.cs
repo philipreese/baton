@@ -62,16 +62,50 @@ public sealed class GraceCheckpointRealGitTests
     }
 
     [Fact]
-    public void Rewritten_or_unpublished_upstream_is_not_safe()
+    public void Spoofing_only_the_local_tracking_ref_is_not_safe()
     {
         using var fixture = new GraceRepository();
         var checkpoint = fixture.Capture();
         fixture.Commit("grace child");
 
-        fixture.Run("update-ref", checkpoint.UpstreamRef, checkpoint.UpstreamHead);
+        fixture.Run("update-ref", fixture.TrackingRef, fixture.Head);
 
         Assert.False(WorktreeProvisioner.IsSafeGraceCheckpoint(fixture.Repository, checkpoint));
         Assert.Equal(checkpoint.Head, fixture.RevParse("HEAD~1"));
+    }
+
+    [Fact]
+    public void An_actual_remote_rewrite_is_not_safe()
+    {
+        using var fixture = new GraceRepository();
+        var checkpoint = fixture.Capture();
+        fixture.Commit("grace child");
+        fixture.Push();
+        fixture.UpdateRemoteReference(checkpoint.MergeRef, checkpoint.RemoteTip);
+
+        Assert.False(WorktreeProvisioner.IsSafeGraceCheckpoint(fixture.Repository, checkpoint));
+        Assert.Equal(fixture.Head, fixture.RevParse(fixture.TrackingRef));
+    }
+
+    [Fact]
+    public void Branch_remote_configuration_drift_is_not_safe()
+    {
+        using var fixture = new GraceRepository();
+        var checkpoint = fixture.Capture();
+        fixture.Commit("grace child");
+        fixture.Push();
+        fixture.Run("config", $"branch.{fixture.BranchName}.remote", "replacement");
+
+        Assert.False(WorktreeProvisioner.IsSafeGraceCheckpoint(fixture.Repository, checkpoint));
+    }
+
+    [Fact]
+    public void A_branch_without_a_configured_remote_cannot_capture_a_grace_checkpoint()
+    {
+        using var fixture = new GraceRepository();
+        fixture.Run("config", "--unset-all", $"branch.{fixture.BranchName}.remote");
+
+        Assert.Null(WorktreeProvisioner.CaptureGraceCheckpoint(fixture.Repository));
     }
 
     [Fact]
@@ -85,7 +119,7 @@ public sealed class GraceCheckpointRealGitTests
 
         Assert.True(WorktreeProvisioner.IsSafeGraceCheckpoint(fixture.Repository, checkpoint));
         Assert.Equal(checkpoint.Head, fixture.RevParse("HEAD~1"));
-        Assert.True(fixture.IsAncestor(checkpoint.Head, checkpoint.UpstreamRef));
+        Assert.True(fixture.IsAncestor(checkpoint.Head, fixture.TrackingRef));
     }
 
     private sealed class GraceRepository : IDisposable
@@ -97,13 +131,16 @@ public sealed class GraceCheckpointRealGitTests
             Repository = Path.Combine(root, "repo");
             Directory.CreateDirectory(Repository);
             TempGitRepository.InitWithEverythingCommitted(Repository);
-            var remote = TempGitRepository.InitBareRepository(Path.Combine(root, "origin.git"));
-            TempGitRepository.AddRemote(Repository, "origin", remote);
+            Remote = TempGitRepository.InitBareRepository(Path.Combine(root, "origin.git"));
+            TempGitRepository.AddRemote(Repository, "origin", Remote);
             TempGitRepository.Push(Repository, "origin", "HEAD:refs/heads/main");
             Run("branch", "--set-upstream-to", "origin/main");
         }
 
         public string Repository { get; }
+        public string Remote { get; }
+        public string TrackingRef => "refs/remotes/origin/main";
+        public string BranchName => RunCapturing("branch", "--show-current").Trim();
         public string Head => RevParse("HEAD");
 
         public GraceCheckpoint Capture() => Assert.IsType<GraceCheckpoint>(WorktreeProvisioner.CaptureGraceCheckpoint(Repository));
@@ -116,6 +153,7 @@ public sealed class GraceCheckpointRealGitTests
         }
 
         public void Push() => Run("push", "origin", "HEAD:refs/heads/main");
+        public void UpdateRemoteReference(string reference, string target) => Run("--git-dir", Remote, "update-ref", reference, target);
         public string RevParse(string reference) => RunCapturing("rev-parse", "--verify", $"{reference}^{{commit}}").Trim();
         public bool IsAncestor(string ancestor, string descendant) => RunExitCode("merge-base", "--is-ancestor", ancestor, descendant) == 0;
 
