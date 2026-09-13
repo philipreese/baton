@@ -7294,6 +7294,8 @@ written:
 | review / re-review | succeeded-shaped, verdict with no decision | **operator** | never guessed from the findings |
 | review / re-review | succeeded-shaped, no readable verdict | **operator** | silence is not an approval |
 | implement / fix / continue | anything else, work pushed | **re-review** | the PR head is the workspace head |
+| implement / fix / continue | `ExecutionArrested`, work unpushed, `workspaceChanged: true` | **continue** | structured arrest-boundary evidence proves work to recover |
+| implement / fix / continue | `ExecutionArrested`, work unpushed, `workspaceChanged: false` or absent | **operator** | no observed work, or no measurement, justifies an automatic continuation |
 | implement / fix / continue | anything else, work unpushed | **continue** | finish and push it |
 | review / re-review | anything else | **re-review** | a reviewer has nothing to push |
 | any stage, round at the ceiling | anything | **operator** | two of those arms are cycles with no natural end |
@@ -7313,6 +7315,15 @@ succeeded-shaped — `Succeeded` and `FinishedDuringTeardown` — take every row
 `WorkflowOutcome.IsSucceededShaped`, which is where that membership is spelled. This lifecycle is one of
 the consumers §3 obliges, and an ordinal `== "Succeeded"` here discarded a readable `verdict.json` and
 re-dispatched a full review lane against the same head.
+
+**Arrest continuation evidence (#2253).** The dispatcher captures the attempt-start SHA and the
+engine-placed-file list before the worker starts. After the existing grace turn, it records
+`ExecutionArrested.workspaceChanged` from `TryReadWorkspaceChanged`; `true`, `false`, and absent are
+respectively changed, known unchanged, and unmeasurable/legacy evidence. The status projection and
+terminal sentinel carry that nullable field beside the structured `indeterminateProducer`. The queue
+first preserves pushed-work re-review precedence, then applies the arrest rule only to a mutating
+lane whose producer is `Arrested`: only `true` continues. It never parses a diagnostic string or
+uses a clean tree as a substitute for this measurement.
 
 **The one automatic fix is separately recorded and every dispatch is bounded** (`WorkStages.MaxRounds`, 4).
 `automaticFixUsed` is explicitly false on a newly-created work item and becomes true atomically with

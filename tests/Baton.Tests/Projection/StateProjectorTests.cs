@@ -140,6 +140,36 @@ public class StateProjectorTests
         Assert.Null(architect.HollowReason);
     }
 
+    [Theory]
+    [InlineData(true)]
+    [InlineData(false)]
+    public void An_arrested_execution_projects_its_workspace_change_evidence(bool workspaceChanged)
+    {
+        var executionId = new ExecutionId("exec-arrested");
+        var state = StateProjector.Project(
+        [
+            new FlowEvent.ExecutionRequestAccepted(MakeRequest(executionId, Architect)),
+            new FlowEvent.ExecutionArrested(executionId, WorkspaceChanged: workspaceChanged),
+        ], TwoStepSnapshot());
+
+        var architect = StepFor(state, Architect);
+        Assert.Equal(IndeterminateProducer.Arrested, architect.IndeterminateProducer);
+        Assert.Equal(workspaceChanged, architect.WorkspaceChanged);
+    }
+
+    [Fact]
+    public void An_old_arrest_without_workspace_change_evidence_replays_as_unmeasurable()
+    {
+        var executionId = new ExecutionId("exec-old-arrest");
+        var state = StateProjector.Project(
+        [
+            new FlowEvent.ExecutionRequestAccepted(MakeRequest(executionId, Architect)),
+            new FlowEvent.ExecutionArrested(executionId),
+        ], TwoStepSnapshot());
+
+        Assert.Null(StepFor(state, Architect).WorkspaceChanged);
+    }
+
     [Fact]
     public void A_failed_execution_projects_as_Failed()
     {

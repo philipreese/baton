@@ -134,6 +134,8 @@ public sealed class WorkItemAdvancer
             : sentinel?.State ?? WorkflowOutcome.Failed;
         var verdictPath = item.Stage == WorkStage.Ready ? item.LastVerdict : FindVerdict(sentinel);
         var verdict = verdictPath is null ? null : TryReadVerdict(verdictPath);
+        var arrestedStep = sentinel?.Steps.FirstOrDefault(step =>
+            string.Equals(step.IndeterminateProducerKind, nameof(Baton.Domain.IndeterminateProducer.Arrested), StringComparison.Ordinal));
 
         var pr = await ReadPullRequestAsync(item, cancellationToken).ConfigureAwait(false);
         var head = await _workspaceHead(item.Workspace, cancellationToken).ConfigureAwait(false);
@@ -143,7 +145,8 @@ public sealed class WorkItemAdvancer
         WorkItemObservation Observation(PullRequestObservation reading) => new(
             stage, item.Round, item.AutomaticFixUsed, item.Branch, outcome, verdict,
             reading.Number, reading.HeadSha, head, reading.Succeeded, reading.IsOpen,
-            reading.IsDraft, reading.RequiredChecks);
+            reading.IsDraft, reading.RequiredChecks, arrestedStep?.WorkspaceChanged,
+            arrestedStep is null ? null : Baton.Domain.IndeterminateProducer.Arrested);
 
         var transition = WorkItemLifecycle.Decide(Observation(pr));
         var readinessClaimed = false;
