@@ -244,7 +244,7 @@ public sealed class QueueCommandTests
                 Items =
                 [
                     Item("ordinary-queued", QueueItemState.Queued, requirements: []),
-                    Item("ready-lifecycle", QueueItemState.Queued, WorkStage.Continue, requirements: ["shell"]),
+                    Item("ready-lifecycle", QueueItemState.Queued, WorkStage.Ready, requirements: ["shell"]),
                     Item("launched", QueueItemState.Launched, requirements: null),
                     Item("done-lifecycle", QueueItemState.Done, WorkStage.Review, requirements: []),
                     Item("failed-lifecycle", QueueItemState.Failed, WorkStage.Fix, requirements: []),
