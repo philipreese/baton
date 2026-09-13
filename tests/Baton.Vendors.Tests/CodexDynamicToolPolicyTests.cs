@@ -739,6 +739,64 @@ public sealed class CodexDynamicToolPolicyTests
         Assert.False(deniedChain.Success);
     }
 
+    [Fact]
+    public void Windows_command_transport_keeps_the_checked_text_and_rejects_nul()
+    {
+        const string command = "rg -n -C 1 \"Protected grace invariant\" \"path with spaces.txt\"";
+
+        Assert.Equal(command, WindowsCommandTransport.ScriptText(command));
+        Assert.Throws<ArgumentException>(() => WindowsCommandTransport.ScriptText("echo safe\0unsafe"));
+    }
+
+    /// <summary>
+    /// #2270's production regression: the policy's Windows callback must preserve quoted arguments
+    /// through cmd, rather than only proving a standalone formatter. The fake rg checks the phrase,
+    /// quoted pipe and space-containing path as distinct argv values. The final command uses a real
+    /// shell pipe, and its matcher's decision is asserted beside the policy result.
+    /// </summary>
+    [Fact]
+    public async Task Windows_policy_preserves_quoted_arguments_and_real_shell_pipes_through_space_containing_output_root()
+    {
+        if (!OperatingSystem.IsWindows())
+        {
+            return;
+        }
+
+        var grant = new PermissionGrant(
+            RunShellCommands: true,
+            ShellCommandPatterns: ["quote-rg*", "echo*", "findstr*"],
+            ShellCommandsAreReadOnly: true);
+        using var fixture = new PolicyFixture(grant, ["report.md"], outputRootWithSpaces: true);
+        File.WriteAllText(
+            Path.Combine(fixture.Workspace, "quote-rg.cmd"),
+            "@echo off\r\nsetlocal DisableDelayedExpansion\r\n"
+            + "if \"%~4\"==\"Protected grace invariant\" if \"%~5\"==\"path with spaces.txt\" if \"%~6\"==\"\" echo phrase-and-path\r\n"
+            + "if \"%~2\"==\"path with spaces.txt\" if \"%~3\"==\"\" echo quoted-pipe\r\n");
+
+        const string phrase = "quote-rg -n -C 1 \"Protected grace invariant\" \"path with spaces.txt\"";
+        const string quotedPipe = "quote-rg \"quoted | pattern\" \"path with spaces.txt\"";
+        const string shellPipe = "echo shell-pipe-survived | findstr shell-pipe-survived";
+
+        var phraseResult = await fixture.ExecuteAsync(
+            CodexDynamicToolPolicy.RunCommandTool, new { command = phrase });
+        var quotedPipeResult = await fixture.ExecuteAsync(
+            CodexDynamicToolPolicy.RunCommandTool, new { command = quotedPipe });
+        var shellPipeDecision = ShellCommandPatternMatcher.EvaluateChainedCommand(
+            shellPipe, grant.ShellCommandPatterns, grant.DeniedShellCommandPatterns,
+            grant.DeniedShellCommandExceptions);
+        var shellPipeResult = await fixture.ExecuteAsync(
+            CodexDynamicToolPolicy.RunCommandTool, new { command = shellPipe });
+
+        Assert.True(phraseResult.Success, phraseResult.Text);
+        Assert.Contains("phrase-and-path", phraseResult.Text, StringComparison.Ordinal);
+        Assert.True(quotedPipeResult.Success, quotedPipeResult.Text);
+        Assert.Contains("quoted-pipe", quotedPipeResult.Text, StringComparison.Ordinal);
+        Assert.True(shellPipeDecision.IsAllowed);
+        Assert.True(shellPipeResult.Success, shellPipeResult.Text);
+        Assert.Contains("shell-pipe-survived", shellPipeResult.Text, StringComparison.Ordinal);
+        Assert.Empty(Directory.EnumerateFiles(fixture.Output, "*.cmd"));
+    }
+
     /// <summary>
     /// #1921 review HIGH: the marker separates "the grant declined this" from "this ran and failed".
     /// Both arms in one test because the pair is the discrimination — an assertion that a refusal is
@@ -1366,6 +1424,10 @@ public sealed class CodexDynamicToolPolicyTests
         Assert.False(didNotStart.Success);
         Assert.Contains("synthetic open failure", didNotStart.Text, StringComparison.Ordinal);
         Assert.False(File.Exists(unopened.CounterPath));
+        if (OperatingSystem.IsWindows())
+        {
+            Assert.Empty(Directory.EnumerateFiles(openFailure.Output, "*.cmd"));
+        }
 
         var captureOpens = 0;
         using var writeFailure = new PolicyFixture(
@@ -1509,6 +1571,10 @@ public sealed class CodexDynamicToolPolicyTests
         Assert.Contains("AFTER!", commandAfter.Text, StringComparison.Ordinal);
         Assert.DoesNotContain("replayed: identical command", commandAfter.Text, StringComparison.Ordinal);
         Assert.Single(File.ReadAllLines(command.CounterPath));
+        if (OperatingSystem.IsWindows())
+        {
+            Assert.Empty(Directory.EnumerateFiles(fixture.Output, "*.cmd"));
+        }
     }
 
     /// <summary>
@@ -2789,11 +2855,12 @@ public sealed class CodexDynamicToolPolicyTests
             TimeProvider? timeProvider = null,
             Action<PolicyFixture, CancellationToken>? beforeCommandTimeoutStarts = null,
             string? directGhOutput = null,
-            int directGhExitCode = 0)
+            int directGhExitCode = 0,
+            bool outputRootWithSpaces = false)
         {
             Root = Path.Combine(Path.GetTempPath(), $"baton-codex-policy-{Guid.NewGuid():N}");
             Workspace = Path.Combine(Root, "workspace");
-            Output = Path.Combine(Root, "output");
+            Output = Path.Combine(Root, outputRootWithSpaces ? "output root with spaces" : "output");
             Input = Path.Combine(Root, "input.txt");
             Directory.CreateDirectory(Workspace);
             Directory.CreateDirectory(Output);
