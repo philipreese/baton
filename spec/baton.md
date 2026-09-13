@@ -7027,7 +7027,11 @@ effective grant — including its scoped `gh` shell patterns and declared output
 fails that item with the missing capability and a remedy; it never widens a role or guesses from the
 brief's prose. The item and its decision-ledger fact retain requested requirements, the effective
 grant, the admission result, and zero vendor usage for that refusal, so the avoided spend remains
-auditable. `queue list` prints each declaration and aggregate coverage. A missing `requirements` field
+auditable. Bare `queue list` prints each declaration and aggregate coverage. `queue list --active`
+selects queued and launched items plus lifecycle (`Stage != null`) done or failed items; it excludes
+one-lane terminal history and cancelled rows, including neither halted nor non-halted lifecycle failures
+in that exclusion. It filters before rendering, retains the hold and wait banners, reports selected
+requirement coverage, and says `No active queue items.` when retained history has no selected rows. A missing `requirements` field
 is visibly `unknown` during compatibility migration (distinct from a present empty list). When every
 producer has been upgraded, `Queue.RequireDeclaredRequirements: true` fails an execution-bearing
 legacy row closed; legacy read-only rows remain unknown. This switch is deliberately explicit: coverage

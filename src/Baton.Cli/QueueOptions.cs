@@ -55,6 +55,7 @@ public enum QueueVerb
 /// <param name="Requirements">Explicit task capabilities that must already be present in the effective
 /// role grant. Null is reserved for imported/legacy unknown rows; queue add writes an empty list when
 /// no <c>--require</c> flag is supplied.</param>
+/// <param name="Active">Limits <c>list</c> to queued, launched, and lifecycle terminal work that still needs attention.</param>
 public sealed record QueueOptions(
     QueueVerb Verb,
     string? Tag = null,
@@ -76,4 +77,5 @@ public sealed record QueueOptions(
     IReadOnlyList<QueueStageSelection>? StageSelections = null,
     bool LifecyclePin = false,
     IReadOnlyList<string>? Skills = null,
-    IReadOnlyList<string>? Requirements = null);
+    IReadOnlyList<string>? Requirements = null,
+    bool Active = false);
