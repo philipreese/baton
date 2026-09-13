@@ -262,6 +262,376 @@ public static class WorktreeProvisioner
     }
 
     /// <summary>
+    /// Captures the local branch and actual remote identity a grace turn must preserve. The capture is
+    /// deliberately immediately before that separate worker process starts: it includes any unpushed
+    /// worker commits, while still making an amend or replacement of any earlier commit detectable. A
+    /// detached HEAD, missing or ambiguous branch remote configuration, an unreadable actual remote tip,
+    /// or any git failure supplies no safe baseline, so callers must leave the dirty tree alone rather
+    /// than dispatch the grace worker.
+    /// </summary>
+    public static async Task<GraceCheckpoint?> CaptureGraceCheckpointAsync(string? worktreePath, CancellationToken cancellationToken)
+    {
+        if (string.IsNullOrWhiteSpace(worktreePath) || !Directory.Exists(worktreePath))
+        {
+            return null;
+        }
+
+        try
+        {
+            var (headCode, headOut, _) = RunGit(worktreePath, "rev-parse", "--verify", "HEAD^{commit}");
+            var (branchCode, branchOut, _) = RunGit(worktreePath, "symbolic-ref", "--quiet", "HEAD");
+            var head = headOut.Trim();
+            var branch = branchOut.Trim();
+            if (headCode != 0 || branchCode != 0
+                || string.IsNullOrWhiteSpace(head) || string.IsNullOrWhiteSpace(branch))
+            {
+                return null;
+            }
+
+            var remoteConfiguration = ReadBranchRemoteConfiguration(worktreePath, branch);
+            if (remoteConfiguration is null)
+            {
+                return null;
+            }
+
+            var endpointConfiguration = ReadFetchEndpointConfiguration(worktreePath, remoteConfiguration.Value.Remote);
+            if (endpointConfiguration is null || IsSelfRemoteEndpoint(worktreePath, endpointConfiguration.Value.Endpoint))
+            {
+                return null;
+            }
+
+            var remoteTip = await ReadRemoteTipAsync(
+                    worktreePath, endpointConfiguration.Value.Endpoint, remoteConfiguration.Value.MergeRef, cancellationToken)
+                .ConfigureAwait(false);
+            return remoteTip is not null
+                ? new GraceCheckpoint(
+                    head, branch, remoteConfiguration.Value.Remote, remoteConfiguration.Value.MergeRef, remoteTip,
+                    endpointConfiguration.Value.Endpoint, endpointConfiguration.Value.Configuration)
+                : null;
+        }
+        catch (WorktreeProvisioningException)
+        {
+            return null;
+        }
+    }
+
+    /// <summary>Compatibility entry point for callers that cannot carry cancellation.</summary>
+    public static GraceCheckpoint? CaptureGraceCheckpoint(string? worktreePath) =>
+        CaptureGraceCheckpointAsync(worktreePath, CancellationToken.None).GetAwaiter().GetResult();
+
+    /// <summary>
+    /// True only when the original symbolic branch remains checked out, its configured remote and merge
+    /// ref remain unchanged, and the actual remote reports HEAD as one non-merge child of the captured
+    /// baseline. Its reported tip must retain the remote state observed at capture and the local
+    /// baseline commit; ancestry that is merely reachable is intentionally insufficient.
+    /// </summary>
+    public static async Task<bool> IsSafeGraceCheckpointAsync(
+        string? worktreePath, GraceCheckpoint checkpoint, CancellationToken cancellationToken)
+    {
+        ArgumentNullException.ThrowIfNull(checkpoint);
+        if (string.IsNullOrWhiteSpace(worktreePath) || !Directory.Exists(worktreePath))
+        {
+            return false;
+        }
+
+        try
+        {
+            var (branchCode, branchOut, _) = RunGit(worktreePath, "symbolic-ref", "--quiet", "HEAD");
+            if (branchCode != 0
+                || !string.Equals(branchOut.Trim(), checkpoint.BranchRef, StringComparison.Ordinal))
+            {
+                return false;
+            }
+
+            var remoteConfiguration = ReadBranchRemoteConfiguration(worktreePath, checkpoint.BranchRef);
+            if (remoteConfiguration is null
+                || !string.Equals(remoteConfiguration.Value.Remote, checkpoint.Remote, StringComparison.Ordinal)
+                || !string.Equals(remoteConfiguration.Value.MergeRef, checkpoint.MergeRef, StringComparison.Ordinal))
+            {
+                return false;
+            }
+
+            var endpointConfiguration = ReadFetchEndpointConfiguration(worktreePath, checkpoint.Remote);
+            if (endpointConfiguration is null
+                || !string.Equals(endpointConfiguration.Value.Endpoint, checkpoint.Endpoint, StringComparison.Ordinal)
+                || !endpointConfiguration.Value.Configuration.SequenceEqual(checkpoint.EndpointConfiguration, StringComparer.Ordinal)
+                || IsSelfRemoteEndpoint(worktreePath, endpointConfiguration.Value.Endpoint))
+            {
+                return false;
+            }
+
+            var remoteTip = await ReadRemoteTipAsync(
+                    worktreePath, checkpoint.Endpoint, checkpoint.MergeRef, cancellationToken)
+                .ConfigureAwait(false);
+            if (remoteTip is null)
+            {
+                return false;
+            }
+
+            var (exitCode, stdout, _) = RunGit(worktreePath, "rev-list", "--parents", "-n", "1", "HEAD");
+            var commits = stdout.Split((char[]?)null, StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries);
+            return exitCode == 0
+                && commits.Length == 2
+                && !string.Equals(commits[0], checkpoint.Head, StringComparison.OrdinalIgnoreCase)
+                && string.Equals(commits[1], checkpoint.Head, StringComparison.OrdinalIgnoreCase)
+                && string.Equals(commits[0], remoteTip, StringComparison.OrdinalIgnoreCase)
+                && IsAncestor(worktreePath, checkpoint.RemoteTip, remoteTip)
+                && IsAncestor(worktreePath, checkpoint.Head, remoteTip);
+        }
+        catch (WorktreeProvisioningException)
+        {
+            return false;
+        }
+    }
+
+    /// <summary>Compatibility entry point for callers that cannot carry cancellation.</summary>
+    public static bool IsSafeGraceCheckpoint(string? worktreePath, GraceCheckpoint checkpoint) =>
+        IsSafeGraceCheckpointAsync(worktreePath, checkpoint, CancellationToken.None).GetAwaiter().GetResult();
+
+    /// <summary>
+    /// Preserves an unsafe grace result without changing any commit, ref, index, or worktree path.
+    /// Attribution cannot be proven after a branch switch, rewrite, or extra commit, so destructive
+    /// recovery would be able to discard an operator's concurrent work. False deliberately forces the
+    /// caller to record <c>WorkspaceCleanAfter: false</c>.
+    /// </summary>
+    public static bool RestoreGraceCheckpointToDirty(string? worktreePath, GraceCheckpoint checkpoint)
+    {
+        ArgumentNullException.ThrowIfNull(checkpoint);
+        if (string.IsNullOrWhiteSpace(worktreePath) || !Directory.Exists(worktreePath))
+        {
+            return false;
+        }
+
+        return false;
+    }
+
+    private static bool IsAncestor(string worktreePath, string ancestor, string descendant) =>
+        RunGit(worktreePath, "merge-base", "--is-ancestor", ancestor, descendant).ExitCode == 0;
+
+    private static (string Remote, string MergeRef)? ReadBranchRemoteConfiguration(string worktreePath, string branchRef)
+    {
+        const string localBranchPrefix = "refs/heads/";
+        if (!branchRef.StartsWith(localBranchPrefix, StringComparison.Ordinal) || branchRef.Length == localBranchPrefix.Length)
+        {
+            return null;
+        }
+
+        var branchName = branchRef[localBranchPrefix.Length..];
+        var remote = ReadSingleConfigValue(worktreePath, $"branch.{branchName}.remote");
+        var mergeRef = ReadSingleConfigValue(worktreePath, $"branch.{branchName}.merge");
+        if (remote is null || mergeRef is null
+            || remote.StartsWith("-", StringComparison.Ordinal)
+            || !mergeRef.StartsWith("refs/", StringComparison.Ordinal))
+        {
+            return null;
+        }
+
+        return (remote, mergeRef);
+    }
+
+    private static string? ReadSingleConfigValue(string worktreePath, string key)
+    {
+        var (exitCode, stdout, _) = RunGit(worktreePath, "config", "--get-all", key);
+        var values = stdout.Split(['\r', '\n'], StringSplitOptions.RemoveEmptyEntries);
+        return exitCode == 0 && values.Length == 1 && !string.IsNullOrWhiteSpace(values[0])
+            && string.Equals(values[0], values[0].Trim(), StringComparison.Ordinal)
+            ? values[0]
+            : null;
+    }
+
+    private static (string Endpoint, IReadOnlyList<string> Configuration)? ReadFetchEndpointConfiguration(
+        string worktreePath, string remote)
+    {
+        if (remote == ".")
+        {
+            return null;
+        }
+
+        var remoteUrl = ReadSingleConfigValue(worktreePath, $"remote.{remote}.url");
+        if (remoteUrl is null)
+        {
+            return null;
+        }
+
+        var (configurationExit, configurationOut, _) = RunGit(worktreePath, "config", "--null", "--list");
+        if (configurationExit != 0)
+        {
+            return null;
+        }
+
+        var rewrites = new List<string>();
+        foreach (var entry in configurationOut.Split('\0', StringSplitOptions.RemoveEmptyEntries))
+        {
+            var separator = entry.IndexOf('\n');
+            if (separator <= 0)
+            {
+                return null;
+            }
+
+            var key = entry[..separator];
+            if (key.StartsWith("url.", StringComparison.OrdinalIgnoreCase)
+                && key.EndsWith(".insteadof", StringComparison.OrdinalIgnoreCase))
+            {
+                rewrites.Add(entry);
+            }
+        }
+
+        var (endpointExit, endpointOut, _) = RunGit(worktreePath, "ls-remote", "--get-url", remote);
+        var endpoints = endpointOut.Split(['\r', '\n'], StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries);
+        if (endpointExit != 0 || endpoints.Length != 1 || string.IsNullOrWhiteSpace(endpoints[0]))
+        {
+            return null;
+        }
+
+        var configuration = new List<string> { $"remote.{remote}.url\n{remoteUrl}" };
+        configuration.AddRange(rewrites.OrderBy(value => value, StringComparer.Ordinal));
+        return (endpoints[0], configuration);
+    }
+
+    private static bool IsSelfRemoteEndpoint(string worktreePath, string endpoint)
+    {
+        if (endpoint == ".")
+        {
+            return true;
+        }
+
+        string? endpointPath = null;
+        if (Uri.TryCreate(endpoint, UriKind.Absolute, out var uri) && uri.IsFile)
+        {
+            endpointPath = uri.LocalPath;
+        }
+        else if (Path.IsPathFullyQualified(endpoint))
+        {
+            endpointPath = endpoint;
+        }
+        else if (!endpoint.Contains("://", StringComparison.Ordinal)
+                 && !endpoint.Contains('@')
+                 && !endpoint.Contains(':'))
+        {
+            endpointPath = Path.Combine(worktreePath, endpoint);
+        }
+
+        if (endpointPath is null || !Directory.Exists(endpointPath))
+        {
+            return false;
+        }
+
+        var (currentExit, currentOut, _) = RunGit(worktreePath, "rev-parse", "--path-format=absolute", "--git-common-dir");
+        var (endpointExit, endpointOut, _) = RunGit(endpointPath, "rev-parse", "--path-format=absolute", "--git-common-dir");
+        return currentExit == 0 && endpointExit == 0
+            && PathsEqual(currentOut.Trim(), endpointOut.Trim());
+    }
+
+    private static readonly TimeSpan GraceRemoteProbeTimeout = TimeSpan.FromSeconds(10);
+    private static readonly AsyncLocal<GraceRemoteProbeOverride?> GraceRemoteProbeOverrideScope = new();
+
+    /// <summary>
+    /// Test-only process seam for the bounded remote probe. An isolated async-flow override lets a
+    /// regression prove that a refused probe yields no publication proof without changing PATH.
+    /// </summary>
+    internal static IDisposable BeginGraceRemoteProbeProgramScope(string program)
+    {
+        ArgumentException.ThrowIfNullOrWhiteSpace(program);
+        return new GraceRemoteProbeScope(new GraceRemoteProbeOverride(program, null, null));
+    }
+
+    /// <summary>
+    /// Test-only process seam for exercising the timeout against a live helper. The complete command
+    /// override is isolated to the current async flow, so concurrent probes retain their git command.
+    /// </summary>
+    internal static IDisposable BeginGraceRemoteProbeScope(TimeSpan timeout, string program, params string[] arguments)
+    {
+        ArgumentOutOfRangeException.ThrowIfLessThanOrEqual(timeout, TimeSpan.Zero);
+        ArgumentException.ThrowIfNullOrWhiteSpace(program);
+        ArgumentNullException.ThrowIfNull(arguments);
+        return new GraceRemoteProbeScope(new GraceRemoteProbeOverride(program, timeout, arguments));
+    }
+
+    private sealed record GraceRemoteProbeOverride(string Program, TimeSpan? Timeout, IReadOnlyList<string>? Arguments);
+
+    private sealed class GraceRemoteProbeScope : IDisposable
+    {
+        private readonly GraceRemoteProbeOverride? prior = GraceRemoteProbeOverrideScope.Value;
+
+        public GraceRemoteProbeScope(GraceRemoteProbeOverride value) => GraceRemoteProbeOverrideScope.Value = value;
+
+        public void Dispose() => GraceRemoteProbeOverrideScope.Value = prior;
+    }
+
+    private static async Task<string?> ReadRemoteTipAsync(
+        string worktreePath, string endpoint, string mergeRef, CancellationToken cancellationToken)
+    {
+        var probeOverride = GraceRemoteProbeOverrideScope.Value;
+        using var bound = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
+        bound.CancelAfter(probeOverride?.Timeout ?? GraceRemoteProbeTimeout);
+        Process? process = null;
+        try
+        {
+            var startInfo = ChildProcessStartInfo.Create(probeOverride?.Program ?? "git", startInfo =>
+            {
+                startInfo.WorkingDirectory = worktreePath;
+                startInfo.RedirectStandardOutput = true;
+                startInfo.RedirectStandardError = true;
+                startInfo.StandardOutputEncoding = System.Text.Encoding.UTF8;
+                startInfo.StandardErrorEncoding = System.Text.Encoding.UTF8;
+                startInfo.Environment["GIT_TERMINAL_PROMPT"] = "0";
+                startInfo.Environment["GCM_INTERACTIVE"] = "never";
+            });
+            var arguments = probeOverride?.Arguments ?? ["-c", "credential.interactive=false", "ls-remote", "--exit-code", endpoint, mergeRef];
+            foreach (var argument in arguments)
+            {
+                startInfo.ArgumentList.Add(argument);
+            }
+            process = Process.Start(startInfo);
+            if (process is null)
+            {
+                return null;
+            }
+
+            var stdoutTask = process.StandardOutput.ReadToEndAsync(bound.Token);
+            var stderrTask = process.StandardError.ReadToEndAsync(bound.Token);
+            await process.WaitForExitAsync(bound.Token).ConfigureAwait(false);
+            var stdout = await stdoutTask.ConfigureAwait(false);
+            _ = await stderrTask.ConfigureAwait(false);
+            var lines = stdout.Split(['\r', '\n'], StringSplitOptions.RemoveEmptyEntries);
+            if (process.ExitCode != 0 || lines.Length != 1)
+            {
+                return null;
+            }
+
+            var fields = lines[0].Split('\t', StringSplitOptions.None);
+            return fields.Length == 2
+                && !string.IsNullOrWhiteSpace(fields[0])
+                && string.Equals(fields[1], mergeRef, StringComparison.Ordinal)
+                ? fields[0]
+                : null;
+        }
+        catch (Exception ex) when (ex is OperationCanceledException or Win32Exception or InvalidOperationException)
+        {
+            return null;
+        }
+        finally
+        {
+            if (process is not null)
+            {
+                try
+                {
+                    if (!process.HasExited)
+                    {
+                        process.Kill(entireProcessTree: true);
+                        await process.WaitForExitAsync(CancellationToken.None).ConfigureAwait(false);
+                    }
+                }
+                catch (InvalidOperationException)
+                {
+                    // A racing exit is already the desired terminal state.
+                }
+                process.Dispose();
+            }
+        }
+    }
+
+    /// <summary>
     /// The bounded "carries N uncommitted/stray path(s): …" fragment <see cref="Audit"/> composes its
     /// own message from — factored out so F2 (#1593 review) can reuse the identical git-status read and
     /// formatting for a different audience (a room fact for a human, not a grant-enforcement refusal)
@@ -969,6 +1339,16 @@ public sealed record WorktreeTeardownResult(WorktreeTeardownOutcome Outcome, str
 
 /// <summary>The result of a post-run grant audit on a provisioned worktree.</summary>
 public sealed record WorktreeAuditResult(bool IsClean, string? FailureReason);
+
+/// <summary>The immutable branch, remote, and local baseline state a grace turn must retain and publish.</summary>
+public sealed record GraceCheckpoint(
+    string Head,
+    string BranchRef,
+    string Remote,
+    string MergeRef,
+    string RemoteTip,
+    string Endpoint,
+    IReadOnlyList<string> EndpointConfiguration);
 
 /// <summary>
 /// A worktree provisioned for a run, held so <c>WorktreeProvisioner.Teardown</c> can be called on it

@@ -23,7 +23,9 @@ public static class GraceTurn
 
     /// <summary>The exact instruction the grace dispatch is spawned with — see `spec/baton.md` §3 for why it needs no session resume.</summary>
     public const string PromptText =
-        "Budget reached. Commit everything staged and unstaged on the current branch with a " +
-        "conventional subject that says the work is incomplete, push the branch, write `changes.md` " +
-        "naming what is done and what is not, then stop. No other action.";
+        "Budget reached. Preserve incomplete work without changing any existing commit. Create exactly " +
+        "one new commit from everything staged and unstaged on the current branch; its sole parent must " +
+        "be the current HEAD. Never amend, reset, rebase, or otherwise rewrite an existing commit, and " +
+        "never force-push. Use a conventional subject that says the work is incomplete, push the branch, " +
+        "write `changes.md` naming what is done and what is not, then stop. No other action.";
 }
