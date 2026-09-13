@@ -35,7 +35,7 @@ internal static class WindowsCommandTransport
         string scriptPath, string commandLine, Action<string, bool> ensureNoReparsePoint)
     {
         ArgumentNullException.ThrowIfNull(ensureNoReparsePoint);
-        ensureNoReparsePoint(scriptPath, includeLeaf: false);
+        ensureNoReparsePoint(scriptPath, false);
         var text = ScriptText(commandLine);
         var created = false;
         try
@@ -69,7 +69,7 @@ internal static class WindowsCommandTransport
     {
         // Check the leaf immediately before deletion so a replaced transport artifact never follows
         // a reparse point during cleanup.
-        ensureNoReparsePoint(scriptPath, includeLeaf: true);
+        ensureNoReparsePoint(scriptPath, true);
         File.Delete(scriptPath);
     }
 

@@ -1150,244 +1150,228 @@ public sealed class CodexDynamicToolPolicy
         }
 
         var reference = "command-" + Guid.NewGuid().ToString("N");
-        string? windowsCommandScriptPath = null;
-        if (directCreateArguments is null && OperatingSystem.IsWindows())
+        using var windowsCommandScript = directCreateArguments is null && OperatingSystem.IsWindows()
+            ? WindowsCommandTransport.Create(
+                ResolveWithinRoot(_outputRoot, $".{reference}.cmd"), commandLine, EnsureNoReparsePoint)
+            : null;
+
+        var startInfo = ChildProcessStartInfo.Create(
+            directCreateArguments is not null
+                ? _pullRequestCreateProvenance!.ExecutablePath
+                : OperatingSystem.IsWindows()
+                    ? Environment.GetEnvironmentVariable("COMSPEC") ?? "cmd.exe"
+                    : "/bin/sh",
+            info =>
         {
-            windowsCommandScriptPath = ResolveWithinRoot(_outputRoot, $".{reference}.cmd");
-            EnsureNoReparsePoint(windowsCommandScriptPath, includeLeaf: false);
-            WindowsCommandTransport.WriteScript(windowsCommandScriptPath, commandLine);
+            info.WorkingDirectory = _workspaceRoot ?? _outputRoot;
+            info.RedirectStandardOutput = true;
+            info.RedirectStandardError = true;
+            info.StandardOutputEncoding = Encoding.UTF8;
+            info.StandardErrorEncoding = Encoding.UTF8;
+        });
+        if (directCreateArguments is not null)
+        {
+            foreach (var argument in _directGhPrefixArguments.Concat(directCreateArguments))
+            {
+                startInfo.ArgumentList.Add(argument);
+            }
+        }
+        else if (OperatingSystem.IsWindows())
+        {
+            startInfo.ArgumentList.Add("/d");
+            startInfo.ArgumentList.Add("/s");
+            startInfo.ArgumentList.Add("/c");
+            // The checked command is the exact UTF-16 batch body. Only this fixed `call` transport
+            // reaches /c, so cmd's outer quote stripping cannot reinterpret checked inner quotes.
+            startInfo.ArgumentList.Add("call");
+            startInfo.ArgumentList.Add(windowsCommandScript!.Path);
+        }
+        else
+        {
+            startInfo.ArgumentList.Add("-c");
+            startInfo.ArgumentList.Add(commandLine);
         }
 
+        var stdoutPath = ResolveWithinRoot(_outputRoot, $".{reference}.stdout.log");
+        var stderrPath = ResolveWithinRoot(_outputRoot, $".{reference}.stderr.log");
+        EnsureNoReparsePoint(stdoutPath, includeLeaf: false);
+        EnsureNoReparsePoint(stderrPath, includeLeaf: false);
+
+        // Both durable sinks exist before spawn. If opening either fails, the command has not run and
+        // an identical retry is safe. Faults after spawn take the recorded-failure path below.
+        var stdoutDestination = _commandCaptureStreamFactory(stdoutPath);
+        Stream stderrDestination;
         try
         {
-            var startInfo = ChildProcessStartInfo.Create(
-                directCreateArguments is not null
-                    ? _pullRequestCreateProvenance!.ExecutablePath
-                    : OperatingSystem.IsWindows()
-                        ? Environment.GetEnvironmentVariable("COMSPEC") ?? "cmd.exe"
-                        : "/bin/sh",
-                info =>
-            {
-                info.WorkingDirectory = _workspaceRoot ?? _outputRoot;
-                info.RedirectStandardOutput = true;
-                info.RedirectStandardError = true;
-                info.StandardOutputEncoding = Encoding.UTF8;
-                info.StandardErrorEncoding = Encoding.UTF8;
-            });
-            if (directCreateArguments is not null)
-            {
-                foreach (var argument in _directGhPrefixArguments.Concat(directCreateArguments))
-                {
-                    startInfo.ArgumentList.Add(argument);
-                }
-            }
-            else if (OperatingSystem.IsWindows())
-            {
-                startInfo.ArgumentList.Add("/d");
-                startInfo.ArgumentList.Add("/s");
-                startInfo.ArgumentList.Add("/c");
-                // The checked command is the exact UTF-16 batch body. Only this fixed `call` transport
-                // reaches /c, so cmd's outer quote stripping cannot reinterpret checked inner quotes.
-                startInfo.ArgumentList.Add("call");
-                startInfo.ArgumentList.Add(windowsCommandScriptPath!);
-            }
-            else
-            {
-                startInfo.ArgumentList.Add("-c");
-                startInfo.ArgumentList.Add(commandLine);
-            }
+            stderrDestination = _commandCaptureStreamFactory(stderrPath);
+        }
+        catch
+        {
+            await stdoutDestination.DisposeAsync().ConfigureAwait(false);
+            throw;
+        }
 
-            var stdoutPath = ResolveWithinRoot(_outputRoot, $".{reference}.stdout.log");
-            var stderrPath = ResolveWithinRoot(_outputRoot, $".{reference}.stderr.log");
-            EnsureNoReparsePoint(stdoutPath, includeLeaf: false);
-            EnsureNoReparsePoint(stderrPath, includeLeaf: false);
+        Process process;
+        try
+        {
+            process = Process.Start(startInfo)
+                ?? throw new IOException("Baton could not start the granted command.");
+        }
+        catch
+        {
+            await stdoutDestination.DisposeAsync().ConfigureAwait(false);
+            await stderrDestination.DisposeAsync().ConfigureAwait(false);
+            throw;
+        }
 
-            // Both durable sinks exist before spawn. If opening either fails, the command has not run and
-            // an identical retry is safe. Faults after spawn take the recorded-failure path below.
-            var stdoutDestination = _commandCaptureStreamFactory(stdoutPath);
-            Stream stderrDestination;
-            try
+        using var processLifetime = process;
+        using var timeout = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
+        var testRendezvous = _beforeCommandTimeoutStartsForTest;
+        if (testRendezvous is null)
+        {
+            // Keep the production ordering unchanged: its ceiling is armed before capture starts.
+            timeout.CancelAfter(ceiling);
+        }
+        var stdout = CaptureCommandChannelAsync(
+            process.StandardOutput, stdoutPath, "stdout", stdoutDestination);
+        var stderr = CaptureCommandChannelAsync(
+            process.StandardError, stderrPath, "stderr", stderrDestination);
+        // The callback is an internal fixture seam: waiting for a child-process marker here proves
+        // the timer below begins after that marker, rather than merely hoping the child starts before
+        // a timer that is already running. Capture begins first so this test-only seam shares the
+        // command's post-spawn kill, drain, disposal and outcome-recording boundary. Production
+        // construction always leaves the callback null and follows the unchanged arm above.
+        string? timeoutFailure = null;
+        var callerCancelled = false;
+        Exception? captureFailure = null;
+        Exception? rendezvousFailure = null;
+        var rendezvousIsRunning = false;
+        try
+        {
+            if (testRendezvous is not null)
             {
-                stderrDestination = _commandCaptureStreamFactory(stderrPath);
-            }
-            catch
-            {
-                await stdoutDestination.DisposeAsync().ConfigureAwait(false);
-                throw;
-            }
-
-            Process process;
-            try
-            {
-                process = Process.Start(startInfo)
-                    ?? throw new IOException("Baton could not start the granted command.");
-            }
-            catch
-            {
-                await stdoutDestination.DisposeAsync().ConfigureAwait(false);
-                await stderrDestination.DisposeAsync().ConfigureAwait(false);
-                throw;
-            }
-
-            using var processLifetime = process;
-            using var timeout = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
-            var testRendezvous = _beforeCommandTimeoutStartsForTest;
-            if (testRendezvous is null)
-            {
-                // Keep the production ordering unchanged: its ceiling is armed before capture starts.
+                rendezvousIsRunning = true;
+                testRendezvous(cancellationToken);
+                rendezvousIsRunning = false;
                 timeout.CancelAfter(ceiling);
             }
-            var stdout = CaptureCommandChannelAsync(
-                process.StandardOutput, stdoutPath, "stdout", stdoutDestination);
-            var stderr = CaptureCommandChannelAsync(
-                process.StandardError, stderrPath, "stderr", stderrDestination);
-            // The callback is an internal fixture seam: waiting for a child-process marker here proves
-            // the timer below begins after that marker, rather than merely hoping the child starts before
-            // a timer that is already running. Capture begins first so this test-only seam shares the
-            // command's post-spawn kill, drain, disposal and outcome-recording boundary. Production
-            // construction always leaves the callback null and follows the unchanged arm above.
-            string? timeoutFailure = null;
-            var callerCancelled = false;
-            Exception? captureFailure = null;
-            Exception? rendezvousFailure = null;
-            var rendezvousIsRunning = false;
+            await WaitForExitOrCaptureFailureAsync(process, timeout.Token, stdout, stderr)
+                .ConfigureAwait(false);
+        }
+        catch (OperationCanceledException ex) when (
+            rendezvousIsRunning && !cancellationToken.IsCancellationRequested)
+        {
+            KillProcessTree(process);
+            rendezvousFailure = ex;
+        }
+        catch (OperationCanceledException) when (
+            !rendezvousIsRunning && !cancellationToken.IsCancellationRequested)
+        {
+            KillProcessTree(process);
+            // A timeout is a failure of a command the grant ALLOWED and Baton RAN. It costs the step
+            // and carries its retained diagnostics, but nothing here declined it, so it carries no
+            // refusal marker.
+            timeoutFailure = ShellCommandCeilings.DescribeTimeout(commandClass, ceiling);
+        }
+        catch (OperationCanceledException)
+        {
+            KillProcessTree(process);
+            callerCancelled = true;
+        }
+        catch (Exception ex) when (rendezvousIsRunning)
+        {
+            KillProcessTree(process);
+            rendezvousFailure = ex;
+        }
+        catch (Exception ex) when (IsCommandCaptureFailure(ex))
+        {
+            KillProcessTree(process);
+            captureFailure = ex;
+        }
+
+        RetainedCommandOutput? retained = null;
+        string? stdoutText = null;
+        string? stderrText = null;
+        if (captureFailure is null)
+        {
             try
             {
-                if (testRendezvous is not null)
-                {
-                    rendezvousIsRunning = true;
-                    testRendezvous(cancellationToken);
-                    rendezvousIsRunning = false;
-                    timeout.CancelAfter(ceiling);
-                }
-                await WaitForExitOrCaptureFailureAsync(process, timeout.Token, stdout, stderr)
-                    .ConfigureAwait(false);
-            }
-            catch (OperationCanceledException ex) when (
-                rendezvousIsRunning && !cancellationToken.IsCancellationRequested)
-            {
-                KillProcessTree(process);
-                rendezvousFailure = ex;
-            }
-            catch (OperationCanceledException) when (
-                !rendezvousIsRunning && !cancellationToken.IsCancellationRequested)
-            {
-                KillProcessTree(process);
-                // A timeout is a failure of a command the grant ALLOWED and Baton RAN. It costs the step
-                // and carries its retained diagnostics, but nothing here declined it, so it carries no
-                // refusal marker.
-                timeoutFailure = ShellCommandCeilings.DescribeTimeout(commandClass, ceiling);
-            }
-            catch (OperationCanceledException)
-            {
-                KillProcessTree(process);
-                callerCancelled = true;
-            }
-            catch (Exception ex) when (rendezvousIsRunning)
-            {
-                KillProcessTree(process);
-                rendezvousFailure = ex;
+                retained = new RetainedCommandOutput(
+                    reference,
+                    await stdout.ConfigureAwait(false),
+                    await stderr.ConfigureAwait(false));
+                stdoutText = ReadVerifiedCommandWindow(
+                    retained.Stdout, 0, retained.Stdout.RetainedCharacters);
+                stderrText = ReadVerifiedCommandWindow(
+                    retained.Stderr, 0, retained.Stderr.RetainedCharacters);
             }
             catch (Exception ex) when (IsCommandCaptureFailure(ex))
             {
                 KillProcessTree(process);
                 captureFailure = ex;
             }
+        }
 
-            RetainedCommandOutput? retained = null;
-            string? stdoutText = null;
-            string? stderrText = null;
-            if (captureFailure is null)
-            {
-                try
-                {
-                    retained = new RetainedCommandOutput(
-                        reference,
-                        await stdout.ConfigureAwait(false),
-                        await stderr.ConfigureAwait(false));
-                    stdoutText = ReadVerifiedCommandWindow(
-                        retained.Stdout, 0, retained.Stdout.RetainedCharacters);
-                    stderrText = ReadVerifiedCommandWindow(
-                        retained.Stderr, 0, retained.Stderr.RetainedCharacters);
-                }
-                catch (Exception ex) when (IsCommandCaptureFailure(ex))
-                {
-                    KillProcessTree(process);
-                    captureFailure = ex;
-                }
-            }
-
-            if (captureFailure is not null)
-            {
-                await ObserveCaptureCompletionAsync(stdout, stderr).ConfigureAwait(false);
-                var failedCapture = RenderCommandCaptureFailure(captureFailure);
-                RecordExecutedCommandOutcome(commandLine, failedCapture, toolSucceeded: false);
-                if (callerCancelled)
-                {
-                    throw new OperationCanceledException(cancellationToken);
-                }
-                return CodexDynamicToolResult.Failed(failedCapture);
-            }
-
-            _commandOutputs.Add(reference, retained!);
-
-            if (directCreateArguments is not null
-                && !callerCancelled && timeoutFailure is null && process.ExitCode == 0)
-            {
-                // The URL is attributable to the one preselected executable and exact argv above.
-                // General-shell output never reaches this evidence producer.
-                _ownPullRequestOnly?.Observe(PullRequestOwnershipEvidence.FromAttributedCreateOutput(
-                    _pullRequestCreateProvenance!.Repository, stdoutText + stderrText));
-            }
-
-            var status = callerCancelled
-                ? "Command was cancelled after it started."
-                : rendezvousFailure is not null
-                    ? RenderTestRendezvousFailure(rendezvousFailure)
-                    : timeoutFailure ?? $"Command exited {process.ExitCode}.";
-            var displayed = RenderCommandResult(status, retained!, stdoutText!, stderrText!);
+        if (captureFailure is not null)
+        {
+            await ObserveCaptureCompletionAsync(stdout, stderr).ConfigureAwait(false);
+            var failedCapture = RenderCommandCaptureFailure(captureFailure);
+            RecordExecutedCommandOutcome(commandLine, failedCapture, toolSucceeded: false);
             if (callerCancelled)
             {
-                RecordExecutedCommandOutcome(commandLine, displayed, toolSucceeded: false);
                 throw new OperationCanceledException(cancellationToken);
             }
-            if (timeoutFailure is not null)
-            {
-                RecordExecutedCommandOutcome(commandLine, displayed, toolSucceeded: false);
-                return CodexDynamicToolResult.Failed(displayed);
-            }
-            if (rendezvousFailure is not null)
-            {
-                RecordExecutedCommandOutcome(commandLine, displayed, toolSucceeded: false);
-                return CodexDynamicToolResult.Failed(displayed);
-            }
-            // #2002: a command is the broker's other write path, and the loud one -- see ForgetAllReads
-            // and ForgetAllCommands. Completion says that capture is trustworthy; it says neither that
-            // the exit was successful nor that a freshness-exempt command was mutation-free. Record the
-            // actual tool disposition so a non-zero exit replays as a failure, and evict unrelated state
-            // for every command that ran. The command's own failed entry remains available so a retry
-            // cannot repeat side effects.
-            RecordExecutedCommandOutcome(commandLine, displayed, toolSucceeded: process.ExitCode == 0);
+            return CodexDynamicToolResult.Failed(failedCapture);
+        }
 
-            // A non-zero exit is the command's own answer, with bounded channel previews and a recovery
-            // reference — `pixi run test` with three failing tests is the case that matters, and its
-            // retained output IS the information the step bought.
-            // Failed rather than Refused: stamping the refusal marker here counted every failing allowed
-            // command as budget the grant declined (#1921 review HIGH).
-            return process.ExitCode == 0
-                ? CodexDynamicToolResult.Allowed(displayed)
-                : CodexDynamicToolResult.Failed(displayed);
-        }
-        finally
+        _commandOutputs.Add(reference, retained!);
+
+        if (directCreateArguments is not null
+            && !callerCancelled && timeoutFailure is null && process.ExitCode == 0)
         {
-            if (windowsCommandScriptPath is not null)
-            {
-                // The parent was checked before CreateNew; check the leaf again before deletion so a
-                // replaced transport artifact never follows a reparse point during cleanup.
-                EnsureNoReparsePoint(windowsCommandScriptPath);
-                File.Delete(windowsCommandScriptPath);
-            }
+            // The URL is attributable to the one preselected executable and exact argv above.
+            // General-shell output never reaches this evidence producer.
+            _ownPullRequestOnly?.Observe(PullRequestOwnershipEvidence.FromAttributedCreateOutput(
+                _pullRequestCreateProvenance!.Repository, stdoutText + stderrText));
         }
+
+        var status = callerCancelled
+            ? "Command was cancelled after it started."
+            : rendezvousFailure is not null
+                ? RenderTestRendezvousFailure(rendezvousFailure)
+                : timeoutFailure ?? $"Command exited {process.ExitCode}.";
+        var displayed = RenderCommandResult(status, retained!, stdoutText!, stderrText!);
+        if (callerCancelled)
+        {
+            RecordExecutedCommandOutcome(commandLine, displayed, toolSucceeded: false);
+            throw new OperationCanceledException(cancellationToken);
+        }
+        if (timeoutFailure is not null)
+        {
+            RecordExecutedCommandOutcome(commandLine, displayed, toolSucceeded: false);
+            return CodexDynamicToolResult.Failed(displayed);
+        }
+        if (rendezvousFailure is not null)
+        {
+            RecordExecutedCommandOutcome(commandLine, displayed, toolSucceeded: false);
+            return CodexDynamicToolResult.Failed(displayed);
+        }
+        // #2002: a command is the broker's other write path, and the loud one -- see ForgetAllReads
+        // and ForgetAllCommands. Completion says that capture is trustworthy; it says neither that
+        // the exit was successful nor that a freshness-exempt command was mutation-free. Record the
+        // actual tool disposition so a non-zero exit replays as a failure, and evict unrelated state
+        // for every command that ran. The command's own failed entry remains available so a retry
+        // cannot repeat side effects.
+        RecordExecutedCommandOutcome(commandLine, displayed, toolSucceeded: process.ExitCode == 0);
+
+        // A non-zero exit is the command's own answer, with bounded channel previews and a recovery
+        // reference — `pixi run test` with three failing tests is the case that matters, and its
+        // retained output IS the information the step bought.
+        // Failed rather than Refused: stamping the refusal marker here counted every failing allowed
+        // command as budget the grant declined (#1921 review HIGH).
+        return process.ExitCode == 0
+            ? CodexDynamicToolResult.Allowed(displayed)
+            : CodexDynamicToolResult.Failed(displayed);
     }
 
     private async Task<RetainedCommandChannel> CaptureCommandChannelAsync(
