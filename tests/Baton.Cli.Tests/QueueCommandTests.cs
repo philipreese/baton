@@ -69,8 +69,9 @@ public sealed class QueueCommandTests
             var exit = await QueueCommand.ExecuteAsync(
                 new QueueOptions(
                     QueueVerb.Add, Tag: "override-reason", Role: "implement",
-                    SpecFilePath: brief, WorkspaceDirectory: home, Adapter: "codex", Model: "gpt-5.6-terra",
-                    Effort: "medium", Reason: "measured worker fit"),
+                    SpecFilePath: brief, WorkspaceDirectory: home, ScopeClass: "engine",
+                    Adapter: "codex", Model: "gpt-5.6-terra", Effort: "medium",
+                    Reason: "measured worker fit"),
                 output,
                 Ct);
 
