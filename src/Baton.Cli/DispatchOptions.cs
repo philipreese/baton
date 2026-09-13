@@ -176,6 +176,7 @@ public sealed record DispatchOptions(
     string? Label = null,
     string? Workstream = null,
     IReadOnlyList<string>? Attachments = null,
+    string? MemoryContextRepository = null,
     bool ListCapabilities = false,
     long? TokenBudget = null,
     string? RepoPath = null,

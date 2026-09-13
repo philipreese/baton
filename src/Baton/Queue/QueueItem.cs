@@ -50,6 +50,8 @@ public sealed record QueueItem
     /// </summary>
     public IReadOnlyList<string>? Skills { get; init; }
 
+    public string? MemoryContextRepository { get; init; }
+
     /// <summary>
     /// Explicit capabilities this task needs. Null is a compatibility row whose requirements are
     /// unknown; an empty list is an explicit declaration of none. <see cref="TaskRequirements"/>

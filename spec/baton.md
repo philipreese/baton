@@ -435,7 +435,7 @@ carry is the conductor's own merging rules, which are the conductor's and never 
 | Verb | Usage | Source |
 |---|---|---|
 | `run` | `baton run <workflow-file> --bindings <bindings-file> [--room-dir <dir>] [--workflow-id <id>] [--echo-worker] [--register] [--wait] [--wait-timeout <minutes>]` | `RunOptionsParser.cs` |
-| `dispatch` | `baton dispatch <name> [--spec <spec-file> \| --spec - \| --spec-text <text>] [--attach <file>] [--skill <name>] [--require <capability>] [--no-default-skills] [--adapter <name>] [--model <name>] [--effort <name>] [--room-dir <dir>] [--workspace <dir>] [--workflow-id <id>] [--output <path>] [--timeout <minutes>] [--token-budget <n>] [--max-tool-steps <n>] [--billed-rate-limit <n>] [--verify <cmd>] [--verify-cmd <cmd>] [--verify-timeout <minutes>] [--expect-pr <true\|false>] [--continue <room-dir>] [--override-runway <reason>] [--label <text>] [--workstream <slug>] [--repo <checkout-dir>] [--list-capabilities]` | `DispatchOptionsParser.cs` |
+| `dispatch` | `baton dispatch <name> [--spec <spec-file> \| --spec - \| --spec-text <text>] [--attach <file>] [--memory-context <repository>] [--skill <name>] [--require <capability>] [--no-default-skills] [--adapter <name>] [--model <name>] [--effort <name>] [--room-dir <dir>] [--workspace <dir>] [--workflow-id <id>] [--output <path>] [--timeout <minutes>] [--token-budget <n>] [--max-tool-steps <n>] [--billed-rate-limit <n>] [--verify <cmd>] [--verify-cmd <cmd>] [--verify-timeout <minutes>] [--expect-pr <true\|false>] [--continue <room-dir>] [--override-runway <reason>] [--label <text>] [--workstream <slug>] [--repo <checkout-dir>] [--list-capabilities]` | `DispatchOptionsParser.cs` |
 | `redispatch` | `baton redispatch <room-dir> [--spec <amended-brief>] [--attach <file>] [--adapter <name>] [--model <name>] [--effort <name>] [--workspace <dir>] [--output <path>] [--timeout <minutes>] [--token-budget <n>] [--max-tool-steps <n>] [--billed-rate-limit <n>] [--verify <cmd>] [--skill <name>] [--no-default-skills] [--label <text>] [--workstream <slug>]` | `RedispatchOptionsParser.cs` |
 | `resume` | `baton resume <room-dir> --worker <role> (--message <text> \| --message-file <path>) --bindings <bindings-file> [--workflow-id <id>]` | `ResumeOptionsParser.cs` |
 | `decide` | `baton decide <room-dir> --execution <execution-id> --type resume\|reject\|retry-with-revision\|supersede [--target-step <step-id>] [--supplementary <execution-id>] --bindings <bindings-file> [--workflow-id <id>]` | `DecideOptionsParser.cs` |
@@ -6598,6 +6598,14 @@ two senses share a noun and nothing else; where one file names both — the allo
 the issue for it, and for the phased plan and the Q1–Q5 rulings of 2026-09-05. What this section
 owns is the part that is now code: phase A's verb and the reading it produces.
 
+`baton dispatch --memory-context <repository>` is an opt-in, room-local reading: before a worker
+starts it resolves that repository's canonical store, merges fleet entries first, and writes exactly
+one Baton-owned body-free index in the room attachment area. Each row names immutable id, kind,
+kind-source, origin, and the literal non-semantic legacy cue `unlabelled`; it never derives a title or
+description from an entry body. The bytes are LF UTF-8 without BOM, clock-free, digest-labelled, and
+prefix-truncated with every omitted id named. It neither writes vendor roots nor proves vendor
+auto-ingestion or external conductor bootstrap.
+
 The one thing worth stating in the register, because every phase below rests on it: **the canonical
 store is keyed by `RepositoryIdentity`, not by a checkout path.** That is the same key §7's cost
 ledger already files under, reused rather than re-derived — see the "Canonical repository identity"
@@ -7474,7 +7482,13 @@ reading would invent a comparison nothing made.
 **The lane is its own process (#2082, superseding slice 1's in-process pump).** The scheduler starts
 `baton dispatch` as a separate process through `DetachedProcess` — the argv is
 `QueueLauncher.BuildArguments`, the inverse of the CLI's own parser for exactly the fields the queue
-forwards, pinned by a round-trip test — and returns as soon as the outcome is known. Slice 1 ran the
+forwards, pinned by a round-trip test — and returns as soon as the outcome is known.
+
+`queue add --memory-context <repository>` persists the optional repository exactly as supplied and
+`queue list` retains it in the durable row; the launcher forwards it to that same dispatch path. A
+missing value remains null for imported and pre-existing rows, preserving their ordinary dispatch.
+
+Slice 1 ran the
 dispatch in-process, on a `Task` inside the daemon, for one stated reason: a spawned CLI's exit code
 cannot distinguish a runway hold from a bad spec. What that bought was measured on 2026-09-08, when
 the daemon exited 70 with two lanes live: a pump that is a task inside the daemon cannot outlive it,

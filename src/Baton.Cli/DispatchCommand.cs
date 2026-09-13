@@ -6,6 +6,7 @@ using Baton.Runway;
 using Baton.Queue;
 using Baton.Status;
 using Baton.Templates;
+using Baton.Memory;
 
 namespace Baton.Cli;
 
@@ -322,6 +323,23 @@ public static class DispatchCommand
         // so it is never published as a deliverable (#1500 second-reader LOW-6 — state the mechanism
         // instead of the ambiguous phrase "never passes the gate").
         RoleSpecMaterializer.CopyAttachmentsIntoRoom(options.Attachments, options.RoomDirectoryPath);
+        if (options.MemoryContextRepository is { Length: > 0 } repository)
+        {
+            var slug = FleetMemory.SlugFor(repository);
+            var entries = await MemoryStore.ReadResolvedStrictAsync(
+                BatonPaths.MemoryEntriesFile(slug), BatonPaths.MemoryLinksFile(slug), BatonPaths.MemoryRetractionsFile(slug),
+                cancellationToken).ConfigureAwait(false);
+            var candidates = entries.Select(entry => new MemoryProjectionCandidate(entry, MemoryFactOrigin.Vendor)).ToList();
+            if (!FleetMemory.IsFleet(repository) && File.Exists(FleetMemory.EntriesFile))
+            {
+                var fleet = await MemoryStore.ReadResolvedStrictAsync(
+                    FleetMemory.EntriesFile, FleetMemory.LinksFile, FleetMemory.RetractionsFile, cancellationToken).ConfigureAwait(false);
+                candidates.InsertRange(0, fleet.Select(entry => new MemoryProjectionCandidate(entry, MemoryFactOrigin.Fleet)));
+            }
+            var index = MemoryContextIndex.Build(repository, candidates, ProjectionBudget.Default);
+            await RoleSpecMaterializer.WriteGeneratedAttachmentAsync(
+                "baton-memory-context-index.md", index.Bytes, options.RoomDirectoryPath, cancellationToken).ConfigureAwait(false);
+        }
 
         var primaryOutputName = definition.Steps.FirstOrDefault()?.Outputs.FirstOrDefault() ?? "output";
         Console.Out.WriteLine($"Room directory: {options.RoomDirectoryPath}");
@@ -1346,7 +1364,11 @@ public static class DispatchCommand
         return RoleSpecMaterializer.Materialize(
             role, spec, options.Adapter, workingDirectory: workspaceDirectory,
             modelOverride: options.Model, effortOverride: options.Effort, outputOverride: options.OutputPath,
-            timeoutOverride: options.Timeout, attachments: options.Attachments, roomDirectoryPath: options.RoomDirectoryPath,
+            timeoutOverride: options.Timeout,
+            attachments: options.MemoryContextRepository is null
+                ? options.Attachments
+                : (options.Attachments ?? []).Append(RoleSpecMaterializer.MemoryContextIndexFileName).ToList(),
+            roomDirectoryPath: options.RoomDirectoryPath,
             tokenBudgetOverride: options.TokenBudget, maxToolStepsOverride: options.MaxToolSteps,
             billedRateLimitOverride: options.BilledRateLimit,
             verifyCommandOverride: options.VerifyCommand, expectPrOverride: options.ExpectPr,

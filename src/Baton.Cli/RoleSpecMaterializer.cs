@@ -14,6 +14,7 @@ namespace Baton.Cli;
 internal static class RoleSpecMaterializer
 {
     private const string AttachmentsDirectoryName = "attachments";
+    public const string MemoryContextIndexFileName = "baton-memory-context-index.md";
 
     /// <summary>
     /// Validates <c>--attach</c> arguments (every file exists; no two collide on the same destination
@@ -117,6 +118,16 @@ internal static class RoleSpecMaterializer
         }
     }
 
+    /// <summary>Writes a Baton-generated input beside operator attachments without touching their sources.</summary>
+    public static async Task WriteGeneratedAttachmentAsync(string fileName, byte[] bytes, string roomDirectoryPath, CancellationToken cancellationToken)
+    {
+        ArgumentException.ThrowIfNullOrEmpty(fileName);
+        ArgumentNullException.ThrowIfNull(bytes);
+        var attachmentsDir = ComputeAttachmentsDirectory(roomDirectoryPath);
+        Directory.CreateDirectory(attachmentsDir);
+        await File.WriteAllBytesAsync(Path.Combine(attachmentsDir, fileName), bytes, cancellationToken).ConfigureAwait(false);
+    }
+
     private static string ComputeAttachmentsDirectory(string roomDirectoryPath) =>
         Path.Combine(roomDirectoryPath, Baton.Artifacts.ArtifactManager.ArtifactsDirectoryName, AttachmentsDirectoryName);
 
@@ -130,6 +141,11 @@ internal static class RoleSpecMaterializer
         var seenFileNames = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
         foreach (var file in attachmentsToValidate)
         {
+            if (string.Equals(Path.GetFileName(file), MemoryContextIndexFileName, StringComparison.OrdinalIgnoreCase))
+            {
+                throw new CliArgumentException(
+                    $"Attached file '{file}' uses Baton-reserved attachment name '{MemoryContextIndexFileName}'.");
+            }
             if (!File.Exists(file))
             {
                 throw new CliArgumentException($"Attached file '{file}' does not exist.");

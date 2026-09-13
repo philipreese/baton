@@ -76,4 +76,5 @@ public sealed record QueueOptions(
     IReadOnlyList<QueueStageSelection>? StageSelections = null,
     bool LifecyclePin = false,
     IReadOnlyList<string>? Skills = null,
-    IReadOnlyList<string>? Requirements = null);
+    IReadOnlyList<string>? Requirements = null,
+    string? MemoryContextRepository = null);

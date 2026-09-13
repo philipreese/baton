@@ -956,6 +956,7 @@ public static class QueueLauncher
             TokenBudget: item.TokenBudget,
             MaxToolSteps: item.MaxToolSteps,
             OverrideRunwayReason: item.OverrideRunwayReason,
+            MemoryContextRepository: item.MemoryContextRepository,
             Skills: NormalizeSkillsForLaunch(item));
     }
 

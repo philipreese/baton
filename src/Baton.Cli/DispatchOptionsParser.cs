@@ -15,7 +15,7 @@ public static class DispatchOptionsParser
 {
     /// <summary>The one copy of <c>baton dispatch</c>'s usage line, printed here on error and by <c>Program</c>.</summary>
     public const string Usage =
-        "Usage: baton dispatch <name> [--spec <spec-file> | --spec - | --spec-text <text>] [--attach <file>] [--skill <name>] [--require <capability>] [--no-default-skills] [--adapter <name>] [--model <name>] [--effort <name>] [--room-dir <dir>] [--workspace <dir>] [--workflow-id <id>] [--output <path>] [--timeout <minutes>] [--token-budget <n>] [--max-tool-steps <n>] [--billed-rate-limit <n>] [--verify <cmd>] [--verify-cmd <cmd>] [--verify-timeout <minutes>] [--expect-pr <true|false>] [--continue <room-dir>] [--override-runway <reason>] [--label <text>] [--workstream <slug>] [--repo <checkout-dir>] [--list-capabilities]";
+        "Usage: baton dispatch <name> [--spec <spec-file> | --spec - | --spec-text <text>] [--attach <file>] [--memory-context <repository>] [--skill <name>] [--require <capability>] [--no-default-skills] [--adapter <name>] [--model <name>] [--effort <name>] [--room-dir <dir>] [--workspace <dir>] [--workflow-id <id>] [--output <path>] [--timeout <minutes>] [--token-budget <n>] [--max-tool-steps <n>] [--billed-rate-limit <n>] [--verify <cmd>] [--verify-cmd <cmd>] [--verify-timeout <minutes>] [--expect-pr <true|false>] [--continue <room-dir>] [--override-runway <reason>] [--label <text>] [--workstream <slug>] [--repo <checkout-dir>] [--list-capabilities]";
 
     /// <summary>
     /// <c>--label</c>'s cap (#1499) — a Fleet Glass room title, not a description; long enough for "the
@@ -79,6 +79,7 @@ public static class DispatchOptionsParser
         string? continueFromRoomDirectoryPath = null;
         string? overrideRunwayReason = null;
         var attachments = new List<string>();
+        string? memoryContextRepository = null;
         var skills = new List<string>();
         var requirements = new List<string>();
         var noDefaultSkills = false;
@@ -122,6 +123,9 @@ public static class DispatchOptionsParser
                     break;
                 case "--attach":
                     attachments.Add(RequireValue(args, ref i, arg));
+                    break;
+                case "--memory-context":
+                    memoryContextRepository = RequireValue(args, ref i, arg);
                     break;
                 case "--skill":
                     skills.Add(RequireValue(args, ref i, arg));
@@ -269,6 +273,7 @@ public static class DispatchOptionsParser
             outputPath is null ? null : Path.GetFullPath(outputPath),
             timeout, label, workstream,
             attachments.Count > 0 ? attachments : null,
+            memoryContextRepository,
             listCapabilities,
             tokenBudget,
             repoPath is null ? null : Path.GetFullPath(repoPath),

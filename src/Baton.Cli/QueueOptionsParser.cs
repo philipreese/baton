@@ -15,7 +15,7 @@ public static class QueueOptionsParser
         "Usage: baton queue add <tag> --role <role> --spec <file> (--issue <n> | --workspace <dir>) " +
         "[--lifecycle [--stage implement|review|fix|re-review|continue] | --lifecycle-pin] " +
         "[--scope engine|tooling|docs] [--adapter <a>] [--model <m>] [--effort <e>] " +
-        "[--skill <name>] [--require repository-read|file-write|shell|network|github-read|github-write|artifact:<output-name>] " +
+        "[--skill <name>] [--memory-context <repository>] [--require repository-read|file-write|shell|network|github-read|github-write|artifact:<output-name>] " +
         "[--timeout <minutes>] " +
         "[--max-tool-steps <n>] [--token-budget <n>] [--override-runway <reason>] [--reason <why>] | " +
         "baton queue list | baton queue hold | baton queue resume | baton queue cancel <tag> | baton queue import <file>. " +
@@ -84,7 +84,7 @@ public static class QueueOptionsParser
     {
         string? tag = null;
         string? role = null, spec = null, workspace = null, scope = null;
-        string? adapter = null, model = null, effort = null, overrideRunway = null, reason = null;
+        string? adapter = null, model = null, effort = null, overrideRunway = null, reason = null, memoryContextRepository = null;
         int? issue = null, timeout = null, maxToolSteps = null;
         long? tokenBudget = null;
         var lifecycle = false;
@@ -126,6 +126,9 @@ public static class QueueOptionsParser
                     continue;
                 case "--skill":
                     skills.Add(TakeValue(args, ref i, "--skill"));
+                    continue;
+                case "--memory-context":
+                    memoryContextRepository = TakeValue(args, ref i, "--memory-context");
                     continue;
                 case "--require":
                     requirements.Add(TakeValue(args, ref i, "--require"));
@@ -381,7 +384,8 @@ public static class QueueOptionsParser
             QueueVerb.Add, tag, role, spec, issue, workspace, scope, adapter, model, effort,
             timeout, maxToolSteps, tokenBudget, overrideRunway, reason, ImportFilePath: null, Lifecycle: lifecycle,
             StageSelections: lifecycle ? stageSelections.Values.ToList() : null, LifecyclePin: lifecyclePin,
-            Skills: DispatchOptionsParser.NormalizeSkills(skills), Requirements: normalizedRequirements);
+            Skills: DispatchOptionsParser.NormalizeSkills(skills), Requirements: normalizedRequirements,
+            MemoryContextRepository: memoryContextRepository);
     }
 
     private static void SetAdapter(

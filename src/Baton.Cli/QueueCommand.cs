@@ -188,6 +188,7 @@ public static class QueueCommand
             Model = options.Model,
             Effort = options.Effort,
             Skills = options.Skills,
+            MemoryContextRepository = options.MemoryContextRepository,
             Requirements = requirements,
             LastAdmission = admission,
             StageSelections = stageSelections,
