@@ -1,6 +1,12 @@
+using System.Text.Json;
 using Baton.Accounting;
+using Baton.Cli.Tests.TestSupport;
+using Baton.Domain;
 using Baton.Queue;
 using Baton.Status;
+using Baton.Store;
+using Baton.Templates;
+using Baton.Vendors;
 using Xunit;
 
 namespace Baton.Cli.Tests;
@@ -16,6 +22,8 @@ namespace Baton.Cli.Tests;
 public sealed class QueueCommandTests
 {
     private static CancellationToken Ct => TestContext.Current.CancellationToken;
+    private static readonly IReadOnlyDictionary<string, IWorkerAdapter> Adapters =
+        new Dictionary<string, IWorkerAdapter> { ["shell"] = new ShellCommandWorkerAdapter() };
 
     [Theory]
     [InlineData("agy", null, "gemini-3.8-flash-high")]
@@ -1162,6 +1170,132 @@ public sealed class QueueCommandTests
         }
     }
 
+    /// <summary>
+    /// The queue keeps the original indeterminate transition as its audit fact, but its listing must
+    /// read the room's later conductor settlement rather than repeat a remedy that has already run.
+    /// This drives the real run, resolve, persisted queue reload, and queue-list command boundaries.
+    /// </summary>
+    [Fact]
+    public async Task List_replaces_a_stale_indeterminate_remedy_with_the_durable_conductor_settlement()
+    {
+        var home = CreateTempHome();
+        var room = Path.Combine(home, "room");
+        using var scope = BatonEnvironmentSnapshot.BeginScope(BatonEnvironmentSnapshot.Blank with { HomeOverride = home });
+        try
+        {
+            var workflowPath = Path.Combine(home, "workflow.json");
+            var bindingsPath = Path.Combine(home, "bindings.json");
+            var definition = new WorkflowDefinition(
+                new WorkflowTemplateId("queue-settlement"), 1,
+                [new WorkflowStepDefinition(new StepId("a"), "a", [], ["advice.md"], [], new RetryPolicy(1))]);
+            await File.WriteAllTextAsync(workflowPath, JsonSerializer.Serialize(definition), Ct);
+            await File.WriteAllTextAsync(bindingsPath, JsonSerializer.Serialize(new Dictionary<string, WorkerBindingConfigEntry>
+            {
+                ["a"] = new("shell", new WorkerContract("a", [], [new ProducedOutput("advice.md")], []),
+                    PromptTemplate: "exit 1", Timeout: TimeSpan.FromSeconds(30)),
+            }), Ct);
+
+            var run = await RunCommand.ExecuteAsync(new RunOptions(workflowPath, bindingsPath, room), Adapters, cancellationToken: Ct);
+            var executionId = Assert.Single(run.State.Steps).LatestExecutionId!.Value;
+            await using (var writer = new FlowEventLogWriter(Path.Combine(room, BatonPaths.FlowLogFileName)))
+            {
+                await writer.AppendAsync(new FlowEvent.VerifyFailed(executionId, ["fmt-check"], "GATES: FAIL 1 of 1"), Ct);
+            }
+
+            const string historicalError = "room room settled indeterminate: GATES: FAIL 1 of 1 — resolve it with 'baton resolve' and redispatch if you want it redone; awaiting conductor resolution";
+            await QueueStore.MutateAsync(BatonPaths.QueueFile, snapshot => snapshot with
+            {
+                Items = [new QueueItem
+                {
+                    Tag = "2268-lane", Role = "implement", Workspace = home,
+                    SpecFile = BatonPaths.QueueSpecFile("2268-lane"), State = QueueItemState.Failed,
+                    RoomDirectory = room, Error = historicalError,
+                }],
+            }, Ct);
+
+            await ResolveCommand.ExecuteAsync(
+                new ResolveOptions(room, executionId.Value, Accept: false, Reason: "operator verified the work already landed", Close: true), Ct);
+
+            var output = new StringWriter();
+            Assert.Equal(0, await QueueCommand.ExecuteAsync(new QueueOptions(QueueVerb.List), output, Ct));
+            Assert.DoesNotContain("awaiting conductor resolution", output.ToString(), StringComparison.Ordinal);
+            Assert.DoesNotContain("resolve it with 'baton resolve'", output.ToString(), StringComparison.Ordinal);
+            Assert.Contains("settlement: conductor closed (Failed)", output.ToString(), StringComparison.Ordinal);
+            Assert.Contains("operator verified the work already landed", output.ToString(), StringComparison.Ordinal);
+            Assert.Equal(historicalError, Assert.Single((await QueueStore.LoadAsync(BatonPaths.QueueFile, Ct)).Items).Error);
+        }
+        finally
+        {
+            DirectoryCleanup.DeleteRecursively(home);
+        }
+    }
+
+    [Fact]
+    public async Task List_reloads_and_distinguishes_capture_settlements_without_changing_unresolved_or_legacy_rows()
+    {
+        var home = CreateTempHome();
+        using var scope = BatonEnvironmentSnapshot.BeginScope(BatonEnvironmentSnapshot.Blank with { HomeOverride = home });
+        try
+        {
+            var acceptedRoom = await CreateCaptureRoomAsync(home, "accepted", accepted: true);
+            var rejectedRoom = await CreateCaptureRoomAsync(home, "rejected", accepted: false);
+            var unresolvedRoom = await CreateCaptureRoomAsync(home, "unresolved", accepted: null);
+            const string stale = "settled indeterminate — resolve it with 'baton resolve'; awaiting conductor resolution";
+
+            await QueueStore.MutateAsync(BatonPaths.QueueFile, snapshot => snapshot with
+            {
+                Items =
+                [
+                    SettlementQueueItem("accepted", acceptedRoom, stale),
+                    SettlementQueueItem("rejected", rejectedRoom, stale),
+                    SettlementQueueItem("unresolved", unresolvedRoom, stale),
+                    SettlementQueueItem("legacy", roomDirectory: null, stale),
+                ],
+            }, Ct);
+
+            var output = new StringWriter();
+            Assert.Equal(0, await QueueCommand.ExecuteAsync(new QueueOptions(QueueVerb.List), output, Ct));
+            var printed = output.ToString();
+
+            Assert.Contains("settlement: conductor accepted capture (Succeeded)", printed, StringComparison.Ordinal);
+            Assert.Contains("settlement: conductor rejected capture (Failed): capture rejected", printed, StringComparison.Ordinal);
+            Assert.Equal(2, printed.Split("awaiting conductor resolution", StringSplitOptions.None).Length - 1);
+            Assert.Equal(stale, (await QueueStore.LoadAsync(BatonPaths.QueueFile, Ct)).Items[0].Error);
+        }
+        finally
+        {
+            DirectoryCleanup.DeleteRecursively(home);
+        }
+    }
+
+    [Fact]
+    public async Task List_fails_when_a_stale_remedy_references_an_unreadable_room()
+    {
+        var home = CreateTempHome();
+        using var scope = BatonEnvironmentSnapshot.BeginScope(BatonEnvironmentSnapshot.Blank with { HomeOverride = home });
+        try
+        {
+            await QueueStore.MutateAsync(BatonPaths.QueueFile, snapshot => snapshot with
+            {
+                Items = [new QueueItem
+                {
+                    Tag = "unreadable-room", Role = "implement", Workspace = home,
+                    SpecFile = BatonPaths.QueueSpecFile("unreadable-room"), State = QueueItemState.Failed,
+                    RoomDirectory = Path.Combine(home, "missing-room"),
+                    Error = "settled indeterminate — awaiting conductor resolution",
+                }],
+            }, Ct);
+
+            var ex = await Assert.ThrowsAsync<QueueStoreException>(() => QueueCommand.ExecuteAsync(
+                new QueueOptions(QueueVerb.List), TextWriter.Null, Ct));
+            Assert.Contains("Could not read durable terminal state", ex.Message, StringComparison.Ordinal);
+        }
+        finally
+        {
+            DirectoryCleanup.DeleteRecursively(home);
+        }
+    }
+
     [Fact]
     public async Task Cancel_retains_a_queued_items_history_and_records_the_cancellation()
     {
@@ -1455,5 +1589,52 @@ public sealed class QueueCommandTests
         {
             DirectoryCleanup.DeleteRecursively(home);
         }
+    }
+
+    private static QueueItem SettlementQueueItem(string tag, string? roomDirectory, string error) => new()
+    {
+        Tag = tag,
+        Role = "implement",
+        Workspace = Directory.GetCurrentDirectory(),
+        SpecFile = BatonPaths.QueueSpecFile(tag),
+        State = QueueItemState.Failed,
+        RoomDirectory = roomDirectory,
+        Error = error,
+    };
+
+    private static async Task<string> CreateCaptureRoomAsync(string home, string name, bool? accepted)
+    {
+        var room = Path.Combine(home, name);
+        var workflowPath = Path.Combine(home, $"{name}-workflow.json");
+        var bindingsPath = Path.Combine(home, $"{name}-bindings.json");
+        var definition = new WorkflowDefinition(
+            new WorkflowTemplateId($"queue-{name}"), 1,
+            [new WorkflowStepDefinition(new StepId("a"), "a", [], ["advice.md"], [], new RetryPolicy(1))]);
+        await File.WriteAllTextAsync(workflowPath, JsonSerializer.Serialize(definition), Ct);
+        await File.WriteAllTextAsync(bindingsPath, JsonSerializer.Serialize(new Dictionary<string, WorkerBindingConfigEntry>
+        {
+            ["a"] = new("shell", new WorkerContract("a", [], [new ProducedOutput("advice.md")], []),
+                PromptTemplate: "exit 1", Timeout: TimeSpan.FromSeconds(30)),
+        }), Ct);
+
+        var run = await RunCommand.ExecuteAsync(new RunOptions(workflowPath, bindingsPath, room), Adapters, cancellationToken: Ct);
+        var executionId = Assert.Single(run.State.Steps).LatestExecutionId!.Value;
+        await using (var writer = new FlowEventLogWriter(Path.Combine(room, BatonPaths.FlowLogFileName)))
+        {
+            await writer.AppendAsync(new FlowEvent.ExecutionIndeterminate(
+                executionId, "captured; awaiting conductor resolution", ".captured-response.md", ["advice.md"]), Ct);
+        }
+
+        var artifacts = Path.Combine(room, "artifacts", $"execution_{executionId.Value}");
+        Directory.CreateDirectory(artifacts);
+        await File.WriteAllTextAsync(Path.Combine(artifacts, ".captured-response.md"),
+            "# Captured response\n\nanswer", Ct);
+        if (accepted is { } decision)
+        {
+            await ResolveCommand.ExecuteAsync(new ResolveOptions(
+                room, executionId.Value, decision, decision ? null : "capture rejected"), Ct);
+        }
+
+        return room;
     }
 }
