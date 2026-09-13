@@ -308,8 +308,8 @@ public static class WorktreeProvisioner
     /// <summary>
     /// True only when the original symbolic branch remains checked out, its configured remote and merge
     /// ref remain unchanged, and the actual remote reports HEAD as one non-merge child of the captured
-    /// baseline. The actual remote tip must retain both the captured remote tip and local baseline;
-    /// ancestry that is merely reachable is intentionally insufficient.
+    /// baseline. Its reported tip must retain the remote state observed at capture and the local
+    /// baseline commit; ancestry that is merely reachable is intentionally insufficient.
     /// </summary>
     public static bool IsSafeGraceCheckpoint(string? worktreePath, GraceCheckpoint checkpoint)
     {
