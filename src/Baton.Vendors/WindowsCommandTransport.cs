@@ -28,12 +28,14 @@ internal static class WindowsCommandTransport
     }
 
     /// <summary>
-    /// Creates a new script rather than overwriting an existing path. On a partial-write failure it
-    /// removes only that newly-created file before surfacing the failure, so no unchecked artifact is
-    /// left for a later command.
+    /// Creates a new script rather than overwriting an existing path. The returned artifact owns its
+    /// cleanup, including when the command cannot be started.
     /// </summary>
-    internal static void WriteScript(string scriptPath, string commandLine)
+    internal static WindowsCommandScript Create(
+        string scriptPath, string commandLine, Action<string, bool> ensureNoReparsePoint)
     {
+        ArgumentNullException.ThrowIfNull(ensureNoReparsePoint);
+        ensureNoReparsePoint(scriptPath, includeLeaf: false);
         var text = ScriptText(commandLine);
         var created = false;
         try
@@ -55,9 +57,34 @@ internal static class WindowsCommandTransport
         {
             if (created)
             {
-                File.Delete(scriptPath);
+                DeleteScript(scriptPath, ensureNoReparsePoint);
             }
             throw;
         }
+
+        return new WindowsCommandScript(scriptPath, ensureNoReparsePoint);
+    }
+
+    private static void DeleteScript(string scriptPath, Action<string, bool> ensureNoReparsePoint)
+    {
+        // Check the leaf immediately before deletion so a replaced transport artifact never follows
+        // a reparse point during cleanup.
+        ensureNoReparsePoint(scriptPath, includeLeaf: true);
+        File.Delete(scriptPath);
+    }
+
+    internal sealed class WindowsCommandScript : IDisposable
+    {
+        private readonly Action<string, bool> _ensureNoReparsePoint;
+
+        internal WindowsCommandScript(string path, Action<string, bool> ensureNoReparsePoint)
+        {
+            Path = path;
+            _ensureNoReparsePoint = ensureNoReparsePoint;
+        }
+
+        internal string Path { get; }
+
+        public void Dispose() => DeleteScript(Path, _ensureNoReparsePoint);
     }
 }
