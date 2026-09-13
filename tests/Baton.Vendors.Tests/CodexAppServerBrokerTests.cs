@@ -234,7 +234,6 @@ public sealed class CodexAppServerBrokerTests
         using var responseTimeout = new CancellationTokenSource();
         var readStarted = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
         using var error = new SignalingStringWriter("read failed after its deadline");
-        var stopwatch = Stopwatch.StartNew();
         try
         {
             var harvest = CodexAppServerBroker.ReadRateLimitsWithinBoundsAsync(
@@ -253,6 +252,7 @@ public sealed class CodexAppServerBrokerTests
 
             await readStarted.Task.WaitAsync(
                 TimeSpan.FromSeconds(5), TestContext.Current.CancellationToken);
+            var stopwatch = Stopwatch.StartNew();
             responseTimeout.Cancel();
 
             var result = await harvest;
