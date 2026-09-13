@@ -27,6 +27,7 @@ namespace Baton.Cli.Tests;
 /// would assert this file's own expectation back at itself.
 /// </para>
 /// </remarks>
+[Collection(MemoryStoreObserverCollection.Name)]
 public sealed class MemoryImportTests : IDisposable
 {
     private readonly string _root = Path.Combine(Path.GetTempPath(), $"baton-1852b-{Guid.NewGuid():N}");
