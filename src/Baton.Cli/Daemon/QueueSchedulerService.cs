@@ -268,8 +268,11 @@ public sealed class QueueSchedulerService : BackgroundService
             // fallback: the item records the actionable repair and no vendor process is started.
             if (ClaudeInvocationModelPolicy.RefusalMessage(tier.Adapter, tier.Model) is { } refusal)
             {
+                var remedy = ClaudeInvocationModelPolicy.TryInvocation(tier.Adapter) is { } suggestion
+                    ? $" Re-add the item with {suggestion}"
+                    : string.Empty;
                 await FailAsync(
-                    item, $"{refusal} Re-add the item with {ClaudeInvocationModelPolicy.ExplicitModelRemedy}.",
+                    item, refusal + remedy,
                     room: null, now, decision, tier, cancellationToken).ConfigureAwait(false);
                 return interval;
             }

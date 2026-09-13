@@ -81,6 +81,23 @@ public class WorkerBindingResolverTests
 
         Assert.Equal("architect", ex.WorkerName);
         Assert.Contains("Astra is conductor-only", ex.Message, StringComparison.Ordinal);
+        Assert.Null(ex.TryInvocation);
+    }
+
+    [Fact]
+    public void The_pre_provision_admission_check_keeps_the_Claude_specific_remedy_for_Claude()
+    {
+        var config = new Dictionary<string, WorkerBindingConfigEntry>
+        {
+            ["architect"] = new WorkerBindingConfigEntry(
+                "claude", ArchitectContract, "Draft a plan.", TimeSpan.FromMinutes(5),
+                Model: "claude-fable-5-1"),
+        };
+
+        var ex = Assert.Throws<ConductorOnlyWorkerModelException>(
+            () => WorkerBindingResolver.RefuseConductorOnlyWorkerModels(config));
+
+        Assert.Equal("pass --model sonnet, --model opus, or --model haiku.", ex.TryInvocation);
     }
 
     [Fact]

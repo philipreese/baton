@@ -235,6 +235,11 @@ public sealed class DispatchPreProvisionOrderingTests : IDisposable
                 options, Adapters, TestContext.Current.CancellationToken, evaluateRunway: Admit));
 
             Assert.Contains("conductor-only", refusal.Message, StringComparison.Ordinal);
+            Assert.Equal(
+                string.Equals(adapter, "claude", StringComparison.Ordinal)
+                    ? "pass --model sonnet, --model opus, or --model haiku."
+                    : null,
+                refusal.TryInvocation);
             Assert.False(Directory.Exists(options.RoomDirectoryPath));
         }
         finally

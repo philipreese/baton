@@ -175,6 +175,11 @@ public sealed class QueueCommandTests
                 TextWriter.Null, Ct));
 
             Assert.Contains($"{family} is conductor-only", refusal.Message, StringComparison.Ordinal);
+            Assert.Equal(
+                string.Equals(adapter, "claude", StringComparison.Ordinal)
+                    ? "pass --model sonnet, --model opus, or --model haiku."
+                    : null,
+                refusal.TryInvocation);
             Assert.False(File.Exists(BatonPaths.QueueFile));
             Assert.False(Directory.Exists(BatonPaths.QueueSpecsDirectory));
         }
