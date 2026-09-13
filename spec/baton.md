@@ -7621,6 +7621,17 @@ still waits for the outcome, because a `launched` line for a lane the runway the
 false fact in the file this queue exists to make auditable. A hold undoes the mark and returns the
 item to `queued`.
 
+**An existing Git lock refuses workspace reuse; Baton never removes it (#2115).** Immediately before
+the queue claim and vendor spawn, the scheduler checks the workspace's resolved Git directory — the
+`.git` directory for an ordinary checkout or the `gitdir:` target for a linked worktree — for
+`index.lock` and `HEAD.lock`. Finding either fails the queue item without claiming a room or starting
+a process, and the durable failure names every observed lock plus the recovery boundary. A Git lock
+contains no owner identity: the lane's recorded worker pid proves whether that worker is alive, not
+whether Git, an IDE, another room, or an operator owns the file. Baton therefore never calls a lock
+stale and never deletes one. Failure to read the gitfile is the same fail-closed refusal. A lock
+created after the check remains Git's own exclusion race to enforce; Baton does not claim global
+exclusivity over writers it did not launch.
+
 **Every evaluation writes a fact, including the ones that fail.** A throw that reaches no decision
 arm — a malformed `settings.json`, an unreadable queue file — is recorded as `failed` with a reason
 saying its counters were never read (`freeGb` absent, never a fabricated zero), and a throw out of

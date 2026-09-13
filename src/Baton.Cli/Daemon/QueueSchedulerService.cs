@@ -47,6 +47,7 @@ public sealed class QueueSchedulerService : BackgroundService
     private readonly Func<double?> _freeGb;
     private readonly Func<DateTimeOffset> _now;
     private readonly Func<string, CancellationToken, Task<string?>> _workspaceHead;
+    private readonly Func<string, IReadOnlyList<string>> _workspaceLocks;
     private readonly WorkItemAdvancer _advancer;
     private readonly Func<CancellationToken, Task>? _beforeLaunchClaim;
     private readonly Func<FleetEventDraft, CancellationToken, Task<FleetEvent?>> _appendFleetEvent;
@@ -73,7 +74,8 @@ public sealed class QueueSchedulerService : BackgroundService
         Func<CancellationToken, Task<IReadOnlyList<QueueLaneAdoption>>>? adopt = null,
         Func<CancellationToken, Task>? beforeLaunchClaim = null,
         Func<FleetEventDraft, CancellationToken, Task<FleetEvent?>>? appendFleetEvent = null,
-        Func<string, CancellationToken, Task<string?>>? workspaceHead = null)
+        Func<string, CancellationToken, Task<string?>>? workspaceHead = null,
+        Func<string, IReadOnlyList<string>>? workspaceLocks = null)
     {
         _launch = launch ?? QueueLauncher.LaunchAsync;
         _adopt = adopt ?? QueueLauncher.AdoptLaunchedLanesAsync;
@@ -81,6 +83,7 @@ public sealed class QueueSchedulerService : BackgroundService
         _freeGb = freeGb ?? FreePhysicalMemory.TryReadGiB;
         _now = now ?? (() => DateTimeOffset.UtcNow);
         _workspaceHead = workspaceHead ?? WorkspaceHead.TryCaptureAsync;
+        _workspaceLocks = workspaceLocks ?? (workspace => GitWorkspaceLockProbe.FindExisting(workspace));
         _beforeLaunchClaim = beforeLaunchClaim;
         _appendFleetEvent = appendFleetEvent ?? ((_, _) => Task.FromResult<FleetEvent?>(null));
         _advancer = advancer ?? new WorkItemAdvancer(null, null, appendFleetEvent: _appendFleetEvent);
@@ -319,6 +322,44 @@ public sealed class QueueSchedulerService : BackgroundService
             // written first, because it is what the next daemon reads to pick candidates; the LEDGER row
             // waits for the outcome, below.
             var roomDirectory = QueueLauncher.RoomDirectoryFor(item);
+            // #2115's final pre-launch Git-lock refusal; spec/baton.md §13 owns the safety boundary.
+            IReadOnlyList<string> workspaceLocks;
+            try
+            {
+                workspaceLocks = _workspaceLocks(item.Workspace);
+            }
+            catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or InvalidDataException
+                or ArgumentException or NotSupportedException)
+            {
+                var failed = await TryFailPreLaunchAsync(
+                    item,
+                    $"Baton could not inspect Git lock state for workspace '{item.Workspace}': {ex.Message} "
+                    + "No lane was started. Repair the workspace metadata, then re-add the queue item.",
+                    now, decision, tier, cancellationToken, admission, attemptId).ConfigureAwait(false);
+                if (failed)
+                {
+                    return interval;
+                }
+                continue;
+            }
+
+            if (workspaceLocks.Count > 0)
+            {
+                var listedLocks = string.Join(", ", workspaceLocks.Select(path => $"'{path}'"));
+                var failed = await TryFailPreLaunchAsync(
+                    item,
+                    $"Baton refused to reuse workspace '{item.Workspace}' because Git lock file(s) exist: "
+                    + $"{listedLocks}. Baton did not remove them because a Git lock carries no ownership evidence. "
+                    + "First stop or finish every Git writer using this workspace; remove a lock only after independently "
+                    + "establishing that no writer owns it, then re-add the queue item.",
+                    now, decision, tier, cancellationToken, admission, attemptId).ConfigureAwait(false);
+                if (failed)
+                {
+                    return interval;
+                }
+                continue;
+            }
+
             if (_beforeLaunchClaim is not null)
             {
                 await _beforeLaunchClaim(cancellationToken).ConfigureAwait(false);
@@ -538,6 +579,58 @@ public sealed class QueueSchedulerService : BackgroundService
                 tier.TierKey, tier.Adapter, tier.Model, tier.Effort, tier.IsOverride, tier.OverrideReason, room,
                 tier.SelectionSource, admission),
             cancellationToken).ConfigureAwait(false);
+    }
+
+    /// <summary>
+    /// Records a final pre-launch refusal only while the exact admitted row remains queued. The same
+    /// conditional mutation as the launch claim lets an operator cancellation or row replacement win.
+    /// </summary>
+    private async Task<bool> TryFailPreLaunchAsync(
+        QueueItem item,
+        string error,
+        DateTimeOffset now,
+        QueueDecision decision,
+        QueueTierResolution tier,
+        CancellationToken cancellationToken,
+        TaskRequirementAdmission admission,
+        FleetAttemptId attemptId)
+    {
+        var failed = false;
+        await QueueStore.MutateAsync(BatonPaths.QueueFile, snapshot =>
+        {
+            var current = snapshot.Items.FirstOrDefault(i => string.Equals(i.Tag, item.Tag, StringComparison.Ordinal));
+            if (current?.State != QueueItemState.Queued || !HasSameAdmissionDeclaration(current, item))
+            {
+                return snapshot;
+            }
+
+            failed = true;
+            return snapshot with
+            {
+                Items = Replace(snapshot.Items, item.Tag, existing => existing with
+                {
+                    State = QueueItemState.Failed,
+                    Error = error,
+                    RoomDirectory = null,
+                    LastAdmission = admission,
+                    AttemptId = attemptId,
+                }),
+            };
+        }, CancellationToken.None).ConfigureAwait(false);
+
+        if (!failed)
+        {
+            return false;
+        }
+
+        await RecordAsync(
+            new QueueDecisionEntry(
+                now, item.Tag, QueueDecisionEntry.Failed, error,
+                decision.LiveWeight, decision.FreeGb, decision.FloorGb,
+                tier.TierKey, tier.Adapter, tier.Model, tier.Effort, tier.IsOverride, tier.OverrideReason,
+                Room: null, tier.SelectionSource, admission),
+            cancellationToken).ConfigureAwait(false);
+        return true;
     }
 
     /// <summary>
