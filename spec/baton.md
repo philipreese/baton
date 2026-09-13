@@ -2388,7 +2388,13 @@ the arrest append that follows it.
 `Indeterminate` via the unchanged `ExecutionArrested` → `ApplyIndeterminate` path, exactly as it would
 with no grace turn at all. `WorkspaceCleanAfter` is the best LOCAL evidence that the grace dispatch
 committed and published under the protected invariant above: it is true only after the local status is
-clean and the captured branch/upstream proof succeeds.
+clean and the captured branch/upstream proof succeeds. That proof captures one configured fetch URL,
+its effective endpoint and every applicable `url.*.insteadOf` configuration entry before grace; after
+grace those values must be byte-for-byte unchanged, the endpoint must not resolve to this repository's
+common Git directory, and a bounded non-interactive `ls-remote` query of the captured endpoint must
+report the exact one-child checkpoint. Missing, multiple, rewritten, self, cancelled, malformed, or
+unreachable endpoint evidence is no proof and records `WorkspaceCleanAfter: false` without changing
+the workspace.
 
 **Scope: token/tool-step/billed-rate arrests and wall-clock timeouts.** The three budget-monitor
 producers enter through `budgetMonitor is { Arrested: true }`; a role's ordinary wall-clock `Timeout`

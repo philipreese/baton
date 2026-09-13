@@ -2502,7 +2502,9 @@ public static class MutationInterface
         // commits the arrested execution already made. Pin the current branch tip before that process
         // starts and accept only one new child commit afterwards. A missing pin is fail-closed: the
         // worker's dirty tree remains available rather than risking an unprovable checkpoint.
-        var checkpoint = Workspaces.WorktreeProvisioner.CaptureGraceCheckpoint(workspacePath);
+        var checkpoint = await Workspaces.WorktreeProvisioner
+            .CaptureGraceCheckpointAsync(workspacePath, cancellationToken)
+            .ConfigureAwait(false);
         if (checkpoint is null)
         {
             Console.Error.WriteLine(
@@ -2596,7 +2598,9 @@ public static class MutationInterface
             return;
         }
 
-        var safeCheckpoint = Workspaces.WorktreeProvisioner.IsSafeGraceCheckpoint(workspacePath, checkpoint);
+        var safeCheckpoint = await Workspaces.WorktreeProvisioner
+            .IsSafeGraceCheckpointAsync(workspacePath, checkpoint, cancellationToken)
+            .ConfigureAwait(false);
         if (!safeCheckpoint)
         {
             var restored = Workspaces.WorktreeProvisioner.RestoreGraceCheckpointToDirty(workspacePath, checkpoint);
