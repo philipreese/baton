@@ -9,6 +9,44 @@ that carried them: `git show v0.35.0:src/Baton.Cli/CHANGELOG.md` (likewise `src/
 `release-please-config.json`. Everything below this line predates the split: the repo's single
 shared version through `0.14.0`.
 
+## [0.48.0](https://github.com/philipreese/baton/compare/v0.47.0...v0.48.0) (2026-09-13)
+
+
+### Features
+
+* **dispatch:** Allow a zero tool-step ceiling for no-tool probes ([#2279](https://github.com/philipreese/baton/issues/2279)) ([33c6469](https://github.com/philipreese/baton/commit/33c64692e911fc33651378e14dd548393927de8a))
+* **glass:** Gate mobile queue and cancel writes ([#2078](https://github.com/philipreese/baton/issues/2078)) ([#2245](https://github.com/philipreese/baton/issues/2245)) ([5f445db](https://github.com/philipreese/baton/commit/5f445db206880eb2cd53eaa324a657f0e180b216))
+* **glass:** Project durable fleet events into a mobile-first stream ([#2243](https://github.com/philipreese/baton/issues/2243)) ([e2d9d05](https://github.com/philipreese/baton/commit/e2d9d0505cc1460420219954f29dbf19fc0a6579))
+* **queue:** Add active queue list ([#2280](https://github.com/philipreese/baton/issues/2280)) ([89d427e](https://github.com/philipreese/baton/commit/89d427ee989d9c0415edd6ee8c2694ff7974e311))
+
+
+### Bug Fixes
+
+* **agy:** Declared outputs must be writable at Baton's exact outbox path ([#2242](https://github.com/philipreese/baton/issues/2242)) ([#2244](https://github.com/philipreese/baton/issues/2244)) ([373349e](https://github.com/philipreese/baton/commit/373349ea2e2ef20f3b390d27b415d3a552245feb))
+* **agy:** Disable behavioral plan expansion ([#2246](https://github.com/philipreese/baton/issues/2246)) ([#2247](https://github.com/philipreese/baton/issues/2247)) ([6e51151](https://github.com/philipreese/baton/commit/6e511515e82614e99ece18b805c14884c9fa8b0e))
+* **codex:** Preserve quoted Windows command arguments ([#2272](https://github.com/philipreese/baton/issues/2272)) ([f3dd0cf](https://github.com/philipreese/baton/commit/f3dd0cf748329cb6df045f61f3c63c0c97ce6889))
+* **dispatch:** Keep model remedies adapter-correct ([#2254](https://github.com/philipreese/baton/issues/2254)) ([339d5f7](https://github.com/philipreese/baton/commit/339d5f7fbef9d832db009b674a8d4a293b956381))
+* **dispatch:** Preserve grace checkpoint ancestry ([#2267](https://github.com/philipreese/baton/issues/2267)) ([a24ac7d](https://github.com/philipreese/baton/commit/a24ac7d7361b312a07b394dd44ea7c049cce2354))
+* **queue:** Contain queue-spec write failures ([#2257](https://github.com/philipreese/baton/issues/2257)) ([043599d](https://github.com/philipreese/baton/commit/043599d31f83a79a5d6ec2efa74725efc1d551bf))
+* **queue:** Print the tier-override reason after add ([#2266](https://github.com/philipreese/baton/issues/2266)) ([fa654ab](https://github.com/philipreese/baton/commit/fa654ab34780f532ec17da88b945660d9ea08cf1))
+* **queue:** Reconcile dead-pump terminal journals ([#2249](https://github.com/philipreese/baton/issues/2249)) ([60d53d5](https://github.com/philipreese/baton/commit/60d53d50b00acede65bf480b0594ccf41ad63dc3))
+* **queue:** Refuse workspaces with Git locks ([#2250](https://github.com/philipreese/baton/issues/2250)) ([5614f7b](https://github.com/philipreese/baton/commit/5614f7be62c4ebc68fba51f7e43a5070e3ce4400))
+* **queue:** Suppress stale conductor remedy ([#2271](https://github.com/philipreese/baton/issues/2271)) ([a9f42cf](https://github.com/philipreese/baton/commit/a9f42cf90aed81c96af010a607de9ce5bfe6901e))
+
+
+### Continuous Integration
+
+* Remove duplicate package build ([#2238](https://github.com/philipreese/baton/issues/2238)) ([02cecc4](https://github.com/philipreese/baton/commit/02cecc42370c43865dfd6b8755811d9600768860))
+
+
+### Tests
+
+* **codex:** Decouple cleanup observer from response scheduling ([#2274](https://github.com/philipreese/baton/issues/2274)) ([70f9d8f](https://github.com/philipreese/baton/commit/70f9d8f875cfa0dfb15fdc9c24806508efa23cb7))
+* **codex:** Remove late-read observer scheduling race ([#2264](https://github.com/philipreese/baton/issues/2264)) ([1dee9ea](https://github.com/philipreese/baton/commit/1dee9ea57bddffb9eac78d64dc218e3ae668fcba))
+* **glass:** Wait for the startup log event the harness asserts ([#2277](https://github.com/philipreese/baton/issues/2277)) ([aa3babd](https://github.com/philipreese/baton/commit/aa3babdb60d06327f93d45f4fa3b0d4c9163db01))
+* **memory:** Isolate the concurrent-import observer fixture ([#2265](https://github.com/philipreese/baton/issues/2265)) ([1de35ed](https://github.com/philipreese/baton/commit/1de35ed2f2eab042fa52ce7dbb28c2f6549afd76))
+* **queue:** Pin Git metadata access-denial paths ([#2260](https://github.com/philipreese/baton/issues/2260)) ([5f1f881](https://github.com/philipreese/baton/commit/5f1f881209c3ed7e54a221f51c347b2a570f5d93))
+
 ## [0.47.0](https://github.com/philipreese/baton/compare/v0.46.0...v0.47.0) (2026-09-11)
 
 
