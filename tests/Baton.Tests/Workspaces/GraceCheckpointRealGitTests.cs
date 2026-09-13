@@ -165,13 +165,17 @@ public sealed class GraceCheckpointRealGitTests
         var signalPath = Path.Combine(Path.GetTempPath(), $"grace-remote-probe-{Guid.NewGuid():N}.txt");
         var timeout = TimeSpan.FromSeconds(1);
         var command = $"$child = Start-Process -FilePath powershell.exe -ArgumentList '-NoLogo','-NoProfile','-NonInteractive','-Command','Start-Sleep -Seconds 30' -PassThru; [IO.File]::WriteAllText('{signalPath.Replace("'", "''")}', \"$PID,$($child.Id)\"); Start-Sleep -Seconds 30";
+        Task<GraceCheckpoint?>? capture = null;
+        Process? helper = null;
+        Process? child = null;
+        Exception? primaryFailure = null;
         try
         {
             using var probe = WorktreeProvisioner.BeginGraceRemoteProbeScope(
                 timeout, "powershell.exe", "-NoLogo", "-NoProfile", "-NonInteractive", "-Command", command);
             var stopwatch = Stopwatch.StartNew();
-            var capture = WorktreeProvisioner.CaptureGraceCheckpointAsync(fixture.Repository, CancellationToken.None);
-            var (helper, child) = await ReadProbeProcessIdsAsync(signalPath, TimeSpan.FromSeconds(5));
+            capture = WorktreeProvisioner.CaptureGraceCheckpointAsync(fixture.Repository, CancellationToken.None);
+            (helper, child) = await ReadProbeProcessIdsAsync(signalPath, TimeSpan.FromSeconds(5));
 
             Assert.False(helper.HasExited);
             Assert.False(child.HasExited);
@@ -184,9 +188,37 @@ public sealed class GraceCheckpointRealGitTests
             Assert.Equal(originalHead, fixture.Head);
             Assert.True(fixture.IsAncestor(originalHead, fixture.TrackingRef));
         }
+        catch (Exception exception)
+        {
+            primaryFailure = exception;
+            throw;
+        }
         finally
         {
-            File.Delete(signalPath);
+            try
+            {
+                if (capture is not null)
+                {
+                    await capture;
+                }
+            }
+            catch when (primaryFailure is not null)
+            {
+                // Preserve the assertion or startup failure while still observing cleanup.
+            }
+            finally
+            {
+                try
+                {
+                    helper?.Dispose();
+                    child?.Dispose();
+                    File.Delete(signalPath);
+                }
+                catch when (primaryFailure is not null)
+                {
+                    // Preserve the assertion or startup failure if releasing a retained handle fails.
+                }
+            }
         }
     }
 
