@@ -21,6 +21,7 @@ public sealed class GlassHttpServiceTests : IDisposable
 {
     private static readonly TimeSpan BlockedStartupWriteObservationCeiling = TimeSpan.FromSeconds(1);
     private static readonly TimeSpan StartupLogWaitCeiling = TimeSpan.FromSeconds(5);
+    private static readonly TimeSpan StartupCleanupCeiling = TimeSpan.FromSeconds(5);
     private readonly string _tempHome;
 
     public GlassHttpServiceTests()
@@ -113,7 +114,9 @@ public sealed class GlassHttpServiceTests : IDisposable
         string? operatorLogin = null,
         Func<bool, CancellationToken, Task<string>>? setQueueHold = null,
         Func<string, CancellationToken, Task<string>>? cancelRoom = null,
-        StartupLogWriter? log = null)
+        StartupLogWriter? log = null,
+        Action<GlassHttpService>? serviceCreated = null,
+        Action<GlassHttpService>? serviceStopped = null)
     {
         var projectionPath = Path.Combine(_tempHome, "projection.json");
         var eventsPath = Path.Combine(_tempHome, Baton.Status.BatonPaths.FleetEventsFileName);
@@ -143,16 +146,38 @@ public sealed class GlassHttpServiceTests : IDisposable
             eventsMaxBytes: 100_000,
             setQueueHold: setQueueHold,
             cancelRoom: cancelRoom);
+        serviceCreated?.Invoke(service);
 
         await service.StartAsync(cancellationToken);
 
-        if (listen)
+        try
         {
-            // ExecuteAsync publishes BoundPrefixes before its terminal startup log. This task completes
-            // after StartupLogWriter has committed that terminal line to its buffer, so callers can
-            // safely assert the log without treating the earlier publication as proof of a later write.
-            // wait-ok: StartupLogWaitCeiling and the caller's CancellationToken bound a missing log.
-            await log.TerminalStartupLogWritten.WaitAsync(StartupLogWaitCeiling, cancellationToken);
+            if (listen)
+            {
+                // ExecuteAsync publishes BoundPrefixes before its terminal startup log. This task completes
+                // after StartupLogWriter has committed that terminal line to its buffer, so callers can
+                // safely assert the log without treating the earlier publication as proof of a later write.
+                // wait-ok: StartupLogWaitCeiling and the caller's CancellationToken bound a missing log.
+                await log.TerminalStartupLogWritten.WaitAsync(StartupLogWaitCeiling, cancellationToken);
+            }
+        }
+        catch
+        {
+            // A blocking test writer can hold ExecuteAsync inside WriteLine. Release it before stopping
+            // the started service; this idempotent test seam makes cleanup independent of a caller token.
+            log.ReleaseStartupWrite();
+            using var cleanup = new CancellationTokenSource(StartupCleanupCeiling);
+            try
+            {
+                await service.StopAsync(cleanup.Token);
+                serviceStopped?.Invoke(service);
+            }
+            catch
+            {
+                // The readiness failure is the helper's contract; bounded cleanup is best effort.
+            }
+
+            throw;
         }
 
         return new Harness(
@@ -188,6 +213,42 @@ public sealed class GlassHttpServiceTests : IDisposable
         finally
         {
             await harness.Service.StopAsync(CancellationToken.None);
+        }
+    }
+
+    [Fact]
+    public async Task Cancelling_startup_readiness_releases_the_writer_and_stops_the_started_service()
+    {
+        using var cts = new CancellationTokenSource(TimeSpan.FromMinutes(1));
+        var log = new StartupLogWriter(blockTerminalStartupWrite: true);
+        GlassHttpService? service = null;
+        GlassHttpService? stoppedService = null;
+        var starting = StartAsync(
+            cts.Token,
+            log: log,
+            serviceCreated: created => service = created,
+            serviceStopped: stopped => stoppedService = stopped);
+
+        try
+        {
+            await log.StartupWriteEntered.WaitAsync(TestContext.Current.CancellationToken);
+            cts.Cancel();
+
+            await Assert.ThrowsAnyAsync<OperationCanceledException>(async () => await starting);
+            await log.TerminalStartupLogWritten.WaitAsync(
+                BlockedStartupWriteObservationCeiling, TestContext.Current.CancellationToken);
+            Assert.NotNull(service);
+            Assert.NotEmpty(service.BoundPrefixes);
+            Assert.Same(service, stoppedService);
+        }
+        finally
+        {
+            // Keeps the regression itself safe when run against an older helper implementation.
+            log.ReleaseStartupWrite();
+            if (service is not null)
+            {
+                await service.StopAsync(CancellationToken.None);
+            }
         }
     }
 
