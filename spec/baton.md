@@ -2356,13 +2356,21 @@ mutation check already uses — no second, freshly-written `git status --porcela
 ONE further, bounded dispatch into the SAME workspace and under the SAME grant as the arrested
 execution (`WorkerBinding.Process.Target` verbatim — program, args, working directory, permission
 flags; only the prompt and the caps change, never a fresh, more permissive dispatch) before the arrest
-itself is appended. That dispatch carries a fixed, self-contained prompt (`Mutation.GraceTurn.PromptText`
-— "Budget reached. Commit everything staged and unstaged on the current branch with a conventional
-subject that says the work is incomplete, push the branch, write `changes.md` naming what is done and
-what is not, then stop. No other action.") under its own fixed, far smaller caps
+itself is appended. That dispatch carries a fixed, self-contained prompt (`Mutation.GraceTurn.PromptText`)
+under its own fixed, far smaller caps
 (`Mutation.GraceTurn.TokenBudget`/`MaxToolSteps`/`WallClockTimeout`) — one bounded reply, never a second
 attempt at the original task, and never per-role configurable: there is no role-specific reason for a
 grace turn to run longer than the commit-and-push it exists for.
+
+**Protected grace invariant (#2263).** Before the dispatch, the engine captures the checked-out
+symbolic local branch, its configured and resolvable upstream ref and tip, and `HEAD`. It accepts a
+clean grace result only when that same branch remains checked out, the same upstream configuration has
+fast-forwarded without rewriting, `HEAD` is exactly one non-merge child of the captured `HEAD`, and the
+published upstream contains that child. Thus an unpushed pre-existing local commit is retained, while a
+detached HEAD, branch switch, amend/replacement, extra commit, upstream divergence, or ref rewrite is
+unsafe. On every unsafe or unprovable result the engine changes no commit, ref, index, or worktree path:
+it preserves all observed evidence and records `WorkspaceCleanAfter: false`; it never uses reset or
+another destructive repair to make the workspace appear clean.
 
 The prompt is self-contained on purpose — it names no prior turn — so no vendor session resume is
 needed to make it actionable: the workspace on disk already carries whatever the arrested execution
@@ -2378,10 +2386,8 @@ the arrest append that follows it.
 `OutcomeClassifier.Classify` — a grace-committed, even grace-pushed, branch still settles the room
 `Indeterminate` via the unchanged `ExecutionArrested` → `ApplyIndeterminate` path, exactly as it would
 with no grace turn at all. `WorkspaceCleanAfter` is the best LOCAL evidence that the grace dispatch
-committed — real `git status --porcelain` after it returns — and is deliberately not itself proof of a
-push: confirming the branch actually reached the remote is left to whoever resolves the room, the same
-way #1373's own commit/push accounting already separates "committed" from "pushed" for a timed-out
-attempt.
+committed and published under the protected invariant above: it is true only after the local status is
+clean and the captured branch/upstream proof succeeds.
 
 **Scope: token/tool-step/billed-rate arrests and wall-clock timeouts.** The three budget-monitor
 producers enter through `budgetMonitor is { Arrested: true }`; a role's ordinary wall-clock `Timeout`

@@ -2586,7 +2586,7 @@ public static class MutationInterface
             if (!restored)
             {
                 Console.Error.WriteLine(
-                    $"Grace turn (#2263) for execution '{prepared.Request.ExecutionId.Value}' could not restore its pinned baseline after the failed dispatch.");
+                    $"Grace turn (#2263) for execution '{prepared.Request.ExecutionId.Value}' preserved the workspace after the failed dispatch because no destructive recovery is safe.");
             }
             await eventLogWriter.AppendAsync(
                     new FlowEvent.GraceTurnAttempted(
@@ -2601,7 +2601,7 @@ public static class MutationInterface
         {
             var restored = Workspaces.WorktreeProvisioner.RestoreGraceCheckpointToDirty(workspacePath, checkpoint);
             Console.Error.WriteLine(
-                $"Grace turn (#2263) for execution '{prepared.Request.ExecutionId.Value}' did not create a single child of its pinned baseline; preserving the resulting tree as dirty work{(restored ? "." : " failed to restore the baseline.")}");
+                $"Grace turn (#2263) for execution '{prepared.Request.ExecutionId.Value}' did not prove the captured branch and upstream invariant; preserving every observed commit and ref.");
         }
 
         var workspaceCleanAfter = safeCheckpoint && Workspaces.WorktreeProvisioner.Audit(workspacePath).IsClean;

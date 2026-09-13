@@ -262,10 +262,11 @@ public static class WorktreeProvisioner
     }
 
     /// <summary>
-    /// Captures the commit that a grace turn must leave intact. The capture is deliberately immediately
-    /// before that separate worker process starts: it includes any unpushed worker commits, while still
-    /// making an amend or replacement of any earlier commit detectable. A git failure supplies no safe
-    /// baseline, so callers must leave the dirty tree alone rather than dispatch the grace worker.
+    /// Captures the local branch and published-ref identity a grace turn must preserve. The capture is
+    /// deliberately immediately before that separate worker process starts: it includes any unpushed
+    /// worker commits, while still making an amend or replacement of any earlier commit detectable. A
+    /// detached HEAD, an unset/unresolvable upstream, or any git failure supplies no safe baseline, so
+    /// callers must leave the dirty tree alone rather than dispatch the grace worker.
     /// </summary>
     public static GraceCheckpoint? CaptureGraceCheckpoint(string? worktreePath)
     {
@@ -276,10 +277,22 @@ public static class WorktreeProvisioner
 
         try
         {
-            var (exitCode, stdout, _) = RunGit(worktreePath, "rev-parse", "--verify", "HEAD^{commit}");
-            var head = stdout.Trim();
-            return exitCode == 0 && !string.IsNullOrWhiteSpace(head)
-                ? new GraceCheckpoint(head)
+            var (headCode, headOut, _) = RunGit(worktreePath, "rev-parse", "--verify", "HEAD^{commit}");
+            var (branchCode, branchOut, _) = RunGit(worktreePath, "symbolic-ref", "--quiet", "HEAD");
+            var (upstreamCode, upstreamOut, _) = RunGit(worktreePath, "rev-parse", "--abbrev-ref", "--symbolic-full-name", "@{upstream}");
+            var head = headOut.Trim();
+            var branch = branchOut.Trim();
+            var upstream = upstreamOut.Trim();
+            if (headCode != 0 || branchCode != 0 || upstreamCode != 0
+                || string.IsNullOrWhiteSpace(head) || string.IsNullOrWhiteSpace(branch) || string.IsNullOrWhiteSpace(upstream))
+            {
+                return null;
+            }
+
+            var (upstreamHeadCode, upstreamHeadOut, _) = RunGit(worktreePath, "rev-parse", "--verify", $"{upstream}^{{commit}}");
+            var upstreamHead = upstreamHeadOut.Trim();
+            return upstreamHeadCode == 0 && !string.IsNullOrWhiteSpace(upstreamHead)
+                ? new GraceCheckpoint(head, branch, upstream, upstreamHead)
                 : null;
         }
         catch (WorktreeProvisioningException)
@@ -289,9 +302,11 @@ public static class WorktreeProvisioner
     }
 
     /// <summary>
-    /// True only when the current HEAD is a non-merge commit whose sole parent is the captured grace
-    /// baseline. This proves a grace checkpoint added history without replacing a commit that existed
-    /// when the grace process began; ancestry that is merely reachable is intentionally insufficient.
+    /// True only when the original symbolic branch remains checked out, its configured upstream remains
+    /// the captured ref and advances without rewriting, and HEAD is one non-merge child of the captured
+    /// baseline that the upstream contains. This proves both the local checkpoint and the published
+    /// result retained every captured commit; ancestry that is merely reachable is intentionally
+    /// insufficient.
     /// </summary>
     public static bool IsSafeGraceCheckpoint(string? worktreePath, GraceCheckpoint checkpoint)
     {
@@ -303,12 +318,31 @@ public static class WorktreeProvisioner
 
         try
         {
+            var (branchCode, branchOut, _) = RunGit(worktreePath, "symbolic-ref", "--quiet", "HEAD");
+            var (upstreamCode, upstreamOut, _) = RunGit(worktreePath, "rev-parse", "--abbrev-ref", "--symbolic-full-name", "@{upstream}");
+            if (branchCode != 0 || upstreamCode != 0
+                || !string.Equals(branchOut.Trim(), checkpoint.BranchRef, StringComparison.Ordinal)
+                || !string.Equals(upstreamOut.Trim(), checkpoint.UpstreamRef, StringComparison.Ordinal))
+            {
+                return false;
+            }
+
+            var (upstreamHeadCode, upstreamHeadOut, _) = RunGit(worktreePath, "rev-parse", "--verify", $"{checkpoint.UpstreamRef}^{{commit}}");
+            var upstreamHead = upstreamHeadOut.Trim();
+            if (upstreamHeadCode != 0 || string.IsNullOrWhiteSpace(upstreamHead)
+                || !IsAncestor(worktreePath, checkpoint.UpstreamHead, upstreamHead)
+                || !IsAncestor(worktreePath, checkpoint.Head, upstreamHead))
+            {
+                return false;
+            }
+
             var (exitCode, stdout, _) = RunGit(worktreePath, "rev-list", "--parents", "-n", "1", "HEAD");
             var commits = stdout.Split((char[]?)null, StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries);
             return exitCode == 0
                 && commits.Length == 2
                 && !string.Equals(commits[0], checkpoint.Head, StringComparison.OrdinalIgnoreCase)
-                && string.Equals(commits[1], checkpoint.Head, StringComparison.OrdinalIgnoreCase);
+                && string.Equals(commits[1], checkpoint.Head, StringComparison.OrdinalIgnoreCase)
+                && IsAncestor(worktreePath, commits[0], upstreamHead);
         }
         catch (WorktreeProvisioningException)
         {
@@ -317,9 +351,10 @@ public static class WorktreeProvisioner
     }
 
     /// <summary>
-    /// Restores a grace turn that moved HEAD to its captured baseline with a mixed reset. A changed
-    /// commit's tree is therefore retained as unstaged work, while existing commits are never amended
-    /// or replaced. If HEAD did not move, this is a no-op and preserves the worker's index as well.
+    /// Preserves an unsafe grace result without changing any commit, ref, index, or worktree path.
+    /// Attribution cannot be proven after a branch switch, rewrite, or extra commit, so destructive
+    /// recovery would be able to discard an operator's concurrent work. False deliberately forces the
+    /// caller to record <c>WorkspaceCleanAfter: false</c>.
     /// </summary>
     public static bool RestoreGraceCheckpointToDirty(string? worktreePath, GraceCheckpoint checkpoint)
     {
@@ -329,27 +364,11 @@ public static class WorktreeProvisioner
             return false;
         }
 
-        try
-        {
-            var (headExitCode, headOut, _) = RunGit(worktreePath, "rev-parse", "--verify", "HEAD^{commit}");
-            if (headExitCode != 0 || string.IsNullOrWhiteSpace(headOut))
-            {
-                return false;
-            }
-
-            if (string.Equals(headOut.Trim(), checkpoint.Head, StringComparison.OrdinalIgnoreCase))
-            {
-                return true;
-            }
-
-            var (resetExitCode, _, _) = RunGit(worktreePath, "reset", "--mixed", checkpoint.Head);
-            return resetExitCode == 0;
-        }
-        catch (WorktreeProvisioningException)
-        {
-            return false;
-        }
+        return false;
     }
+
+    private static bool IsAncestor(string worktreePath, string ancestor, string descendant) =>
+        RunGit(worktreePath, "merge-base", "--is-ancestor", ancestor, descendant).ExitCode == 0;
 
     /// <summary>
     /// The bounded "carries N uncommitted/stray path(s): …" fragment <see cref="Audit"/> composes its
@@ -1060,8 +1079,8 @@ public sealed record WorktreeTeardownResult(WorktreeTeardownOutcome Outcome, str
 /// <summary>The result of a post-run grant audit on a provisioned worktree.</summary>
 public sealed record WorktreeAuditResult(bool IsClean, string? FailureReason);
 
-/// <summary>The immutable HEAD commit a grace turn must retain as its direct parent.</summary>
-public sealed record GraceCheckpoint(string Head);
+/// <summary>The immutable branch and upstream state a grace turn must retain and publish.</summary>
+public sealed record GraceCheckpoint(string Head, string BranchRef, string UpstreamRef, string UpstreamHead);
 
 /// <summary>
 /// A worktree provisioned for a run, held so <c>WorktreeProvisioner.Teardown</c> can be called on it
