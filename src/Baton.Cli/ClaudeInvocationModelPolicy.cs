@@ -8,8 +8,14 @@ namespace Baton.Cli;
 /// </summary>
 internal static class ClaudeInvocationModelPolicy
 {
-    internal const string ExplicitModelRemedy = "pass --model sonnet, --model opus, or --model haiku";
-
     internal static string? RefusalMessage(string? adapter, string? requestedModel, string? resolvedModel = null)
         => ConductorOnlyModelCatalog.WorkerAdmissionRefusal(adapter, requestedModel, resolvedModel);
+
+    internal static string? TryInvocation(string? adapter) =>
+        ConductorOnlyModelCatalog.WorkerRemedy(adapter);
+
+    internal static CliArgumentException Refusal(string message, string? adapter) =>
+        TryInvocation(adapter) is { } remedy
+            ? new CliArgumentException(message, remedy)
+            : new CliArgumentException(message);
 }

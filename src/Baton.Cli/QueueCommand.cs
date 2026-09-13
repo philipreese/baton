@@ -133,7 +133,7 @@ public static class QueueCommand
         // spec copy, worktree provision, or queue mutation so a bad request leaves no queue side effect.
         if (ClaudeInvocationModelPolicy.RefusalMessage(tier.Adapter, tier.Model) is { } refusal)
         {
-            throw new CliArgumentException(refusal, ClaudeInvocationModelPolicy.ExplicitModelRemedy + ".");
+            throw ClaudeInvocationModelPolicy.Refusal(refusal, tier.Adapter);
         }
 
         // The launched-tag refusal is raised HERE, before the spec copy and before any worktree is
@@ -712,9 +712,8 @@ public static class QueueCommand
                 item, stage, settings, WorkerRoleCatalog.QueueTierFor, WorkerRoleCatalog.QueueTierForRole);
             if (ClaudeInvocationModelPolicy.RefusalMessage(tier.Adapter, tier.Model) is { } refusal)
             {
-                throw new CliArgumentException(
-                    $"The {WorkStages.Token(stage)} selection is invalid: {refusal}",
-                    ClaudeInvocationModelPolicy.ExplicitModelRemedy + ".");
+                throw ClaudeInvocationModelPolicy.Refusal(
+                    $"The {WorkStages.Token(stage)} selection is invalid: {refusal}", tier.Adapter);
             }
 
             if (tier.Adapter is { } adapter && tier.Model is { } model)
