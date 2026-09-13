@@ -597,6 +597,7 @@ public static class QueueCommand
                 Adapter = adapter,
                 Model = options.Model,
                 Effort = options.Effort,
+                Reason = options.Reason,
                 StageSelections = stageSelections,
                 LifecyclePin = options.LifecyclePin,
             },

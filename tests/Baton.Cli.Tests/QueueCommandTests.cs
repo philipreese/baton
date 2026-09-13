@@ -56,6 +56,37 @@ public sealed class QueueCommandTests
     }
 
     [Fact]
+    public async Task Add_prints_override_reason_and_persists_it_for_ordinary_adds()
+    {
+        var home = CreateTempHome();
+        using var scope = BatonEnvironmentSnapshot.BeginScope(BatonEnvironmentSnapshot.Blank with { HomeOverride = home });
+        try
+        {
+            var brief = Path.Combine(home, "brief.md");
+            await File.WriteAllTextAsync(brief, "implement this", Ct);
+            var output = new StringWriter();
+
+            var exit = await QueueCommand.ExecuteAsync(
+                new QueueOptions(
+                    QueueVerb.Add, Tag: "override-reason", Role: "implement",
+                    SpecFilePath: brief, WorkspaceDirectory: home, Adapter: "codex", Model: "gpt-5.6-terra",
+                    Effort: "medium", Reason: "measured worker fit"),
+                output,
+                Ct);
+
+            Assert.Equal(0, exit);
+            Assert.Contains("override: measured worker fit", output.ToString(), StringComparison.Ordinal);
+
+            var item = Assert.Single((await QueueStore.LoadAsync(BatonPaths.QueueFile, Ct)).Items);
+            Assert.Equal("measured worker fit", item.Reason);
+        }
+        finally
+        {
+            DirectoryCleanup.DeleteRecursively(home);
+        }
+    }
+
+    [Fact]
     public async Task Add_refuses_an_unpinned_claude_before_any_queue_side_effect()
     {
         var home = CreateTempHome();
