@@ -309,6 +309,7 @@ public sealed class GraceCheckpointRealGitTests
                 throw new TimeoutException("The hung remote probe did not report its process tree.");
             }
 
+            // wait-ok: this bounded startup-signal poll prevents a process-observation race; it is not an assertion delay.
             await Task.Delay(TimeSpan.FromMilliseconds(25));
         }
 
