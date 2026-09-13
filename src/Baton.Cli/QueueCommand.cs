@@ -374,7 +374,11 @@ public static class QueueCommand
             {
                 output.WriteLine($"  effective stage plan: {DescribeStagePlan(item, settings)}");
             }
-            if (item.Error is { Length: > 0 } error)
+            if (await QueueRoomSettlementProjection.RenderAsync(item, cancellationToken).ConfigureAwait(false) is { } settlement)
+            {
+                output.WriteLine(settlement);
+            }
+            else if (item.Error is { Length: > 0 } error)
             {
                 output.WriteLine($"  error: {error}");
             }
