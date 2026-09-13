@@ -4,7 +4,7 @@ using Baton.Workspaces;
 
 namespace Baton.Tests.Workspaces;
 
-/// <summary>Real-git regression coverage for §3's grace checkpoint invariant.</summary>
+/// <summary>Real-git regression coverage for the grace checkpoint invariant in spec/baton.md section 3.</summary>
 public sealed class GraceCheckpointRealGitTests
 {
     [Fact]
