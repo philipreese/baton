@@ -382,6 +382,10 @@ public static class QueueCommand
             output.WriteLine(item.Requirements is null
                 ? "  requirements: unknown (legacy migration row)"
                 : $"  requirements: {(item.Requirements.Count == 0 ? "none" : string.Join(", ", item.Requirements))}");
+            if (item.MemoryContextRepository is { Length: > 0 } memoryContextRepository)
+            {
+                output.WriteLine($"  memory context: {memoryContextRepository}");
+            }
             if (item.LastAdmission is { } admission)
             {
                 var missing = admission.Missing is { Count: > 0 }

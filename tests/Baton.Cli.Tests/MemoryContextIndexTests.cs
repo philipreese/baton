@@ -28,6 +28,7 @@ public sealed class MemoryContextIndexTests
         Assert.DoesNotContain(repository.Text, text, StringComparison.Ordinal);
         Assert.Single(first.Omitted);
         Assert.Equal(repository.Id, first.Omitted[0].EntryId);
+        Assert.Contains($"id={repository.Id} reason=beyond the memory-context budget", text, StringComparison.Ordinal);
     }
 
     private static MemoryEntry Entry(string name, string text)

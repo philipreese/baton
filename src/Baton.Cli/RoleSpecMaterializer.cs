@@ -39,9 +39,16 @@ internal static class RoleSpecMaterializer
         bool? expectPrOverride = null,
         string? verifyResultsPath = null,
         IReadOnlyList<string>? skills = null,
-        bool attachDefaultSkills = true)
+        bool attachDefaultSkills = true,
+        string? generatedAttachmentName = null)
     {
         ValidateAttachments(attachments);
+
+        // Generated context is not an operator --attach: validate the latter before composing the
+        // prompt list so the reserved basename remains fail-closed for user input only.
+        var promptAttachments = generatedAttachmentName is null
+            ? attachments
+            : (attachments ?? []).Append(generatedAttachmentName).ToList();
 
         // #1500: Spec/grant mismatch lint (WARN, never fail). The guarantee is asserted on
         // DispatchSpecLinter's own class doc and in docs/dispatch.md; this try/catch is what actually
@@ -65,12 +72,12 @@ internal static class RoleSpecMaterializer
             Console.Error.WriteLine(warning.Format());
         }
 
-        string? attachmentsDirectory = attachments is { Count: > 0 } ? ComputeAttachmentsDirectory(roomDirectoryPath) : null;
+        string? attachmentsDirectory = promptAttachments is { Count: > 0 } ? ComputeAttachmentsDirectory(roomDirectoryPath) : null;
 
         return RoleDispatch.Materialize(
             role, spec, adapterOverride, workingDirectory: workingDirectory,
             modelOverride: modelOverride, effortOverride: effortOverride, outputOverride: outputOverride,
-            timeoutOverride: timeoutOverride, attachments: attachments, attachmentsDirectory: attachmentsDirectory,
+            timeoutOverride: timeoutOverride, attachments: promptAttachments, attachmentsDirectory: attachmentsDirectory,
             tokenBudgetOverride: tokenBudgetOverride, maxToolStepsOverride: maxToolStepsOverride,
             billedRateLimitOverride: billedRateLimitOverride,
             verifyCommandOverride: verifyCommandOverride, expectPrOverride: expectPrOverride,

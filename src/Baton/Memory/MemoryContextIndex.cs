@@ -48,9 +48,14 @@ public static class MemoryContextIndex
             rows.Add(row); bytes += size;
         }
         var body = string.Concat(rows);
+        // Omission detail is deliberately metadata-only: a caller can identify exactly what was
+        // excluded without receiving any entry text. It follows the resolved total order above.
+        var omittedSuffix = omitted.Count == 0
+            ? string.Empty
+            : "\nomitted-entries:\n" + string.Concat(omitted.Select(o => $"- id={o.EntryId} reason={o.Reason}\n"));
         var digest = Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(body))).ToLowerInvariant();
         var header = string.Create(CultureInfo.InvariantCulture, $"{FormatMarker}\nrepository={repository}\ncontent-sha256={digest}\nentries={rows.Count}\nomitted={omitted.Count}\n\n");
-        return new MemoryContextIndexResult(Encoding.UTF8.GetBytes(header + body), digest, rows.Count, omitted);
+        return new MemoryContextIndexResult(Encoding.UTF8.GetBytes(header + body + omittedSuffix), digest, rows.Count, omitted);
     }
 }
 public sealed record MemoryContextIndexResult(byte[] Bytes, string ContentSha256, int EntryCount, IReadOnlyList<MemoryContextIndexOmission> Omitted);

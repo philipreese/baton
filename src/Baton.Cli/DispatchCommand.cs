@@ -1365,9 +1365,7 @@ public static class DispatchCommand
             role, spec, options.Adapter, workingDirectory: workspaceDirectory,
             modelOverride: options.Model, effortOverride: options.Effort, outputOverride: options.OutputPath,
             timeoutOverride: options.Timeout,
-            attachments: options.MemoryContextRepository is null
-                ? options.Attachments
-                : (options.Attachments ?? []).Append(RoleSpecMaterializer.MemoryContextIndexFileName).ToList(),
+            attachments: options.Attachments,
             roomDirectoryPath: options.RoomDirectoryPath,
             tokenBudgetOverride: options.TokenBudget, maxToolStepsOverride: options.MaxToolSteps,
             billedRateLimitOverride: options.BilledRateLimit,
@@ -1377,7 +1375,8 @@ public static class DispatchCommand
             // Directory.CreateDirectory below -- so an unknown --skill leaves no room behind.
             skills: options.Skills,
             // #2110: the role's own default_skills ride ahead of --skill unless opted out.
-            attachDefaultSkills: !options.NoDefaultSkills);
+            attachDefaultSkills: !options.NoDefaultSkills,
+            generatedAttachmentName: options.MemoryContextRepository is null ? null : RoleSpecMaterializer.MemoryContextIndexFileName);
     }
 
     /// <summary>

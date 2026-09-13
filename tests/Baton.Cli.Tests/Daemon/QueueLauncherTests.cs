@@ -674,6 +674,7 @@ public sealed class QueueLauncherTests : IDisposable
             TokenBudget = 250_000,
             MaxToolSteps = 400,
             OverrideRunwayReason = "conductor lane, week resets in 2h",
+            MemoryContextRepository = "example/repository",
             Skills = ["house-style", "thorough-review"],
         };
         var tier = new QueueTierResolution("engine", "claude", "opus", "high", IsOverride: true, OverrideReason: "spec says opus");
@@ -699,17 +700,22 @@ public sealed class QueueLauncherTests : IDisposable
         Assert.Equal(expected.TokenBudget, parsed.TokenBudget);
         Assert.Equal(expected.MaxToolSteps, parsed.MaxToolSteps);
         Assert.Equal(expected.OverrideRunwayReason, parsed.OverrideRunwayReason);
+        Assert.Equal(expected.MemoryContextRepository, parsed.MemoryContextRepository);
+        var memoryContextFlag = argv.ToList().IndexOf("--memory-context");
+        Assert.True(memoryContextFlag >= 0);
+        Assert.Equal("example/repository", argv[memoryContextFlag + 1]);
         Assert.Equal(expected.Skills, parsed.Skills);
 
         // Optional fields the queue never sets stay absent rather than being sent as empty flags.
         var minimal = QueueLauncher.BuildArguments(QueueLauncher.BuildOptions(new QueueLaunchRequest(
-            item with { TimeoutMinutes = null, TokenBudget = null, MaxToolSteps = null, OverrideRunwayReason = null },
+            item with { TimeoutMinutes = null, TokenBudget = null, MaxToolSteps = null, OverrideRunwayReason = null, MemoryContextRepository = null },
             new QueueTierResolution("engine", "claude", "opus", "high", false, null),
             room)));
         Assert.DoesNotContain("--timeout", minimal);
         Assert.DoesNotContain("--token-budget", minimal);
         Assert.DoesNotContain("--max-tool-steps", minimal);
         Assert.DoesNotContain("--override-runway", minimal);
+        Assert.DoesNotContain("--memory-context", minimal);
     }
 
     /// <summary>

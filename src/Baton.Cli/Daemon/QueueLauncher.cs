@@ -580,6 +580,7 @@ public static class QueueLauncher
         Add("--token-budget", options.TokenBudget?.ToString(CultureInfo.InvariantCulture));
         Add("--max-tool-steps", options.MaxToolSteps?.ToString(CultureInfo.InvariantCulture));
         Add("--override-runway", options.OverrideRunwayReason);
+        Add("--memory-context", options.MemoryContextRepository);
         foreach (var skill in options.Skills ?? [])
         {
             Add("--skill", skill);
