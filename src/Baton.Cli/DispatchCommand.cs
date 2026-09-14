@@ -213,6 +213,14 @@ public static class DispatchCommand
             bindings = new Dictionary<string, WorkerBindingConfigEntry> { [continuedWorkerName] = resumedEntry };
         }
 
+        if (options.OriginatingPullRequest is not null)
+        {
+            if (bindings.Count != 1)
+                throw new CliArgumentException("'--originating-pr' applies to one direct role dispatch, not a workflow template.");
+            var ownership = await OriginatingPullRequestVerifier.VerifyAsync(options.OriginatingPullRequest, workspace, cancellationToken).ConfigureAwait(false);
+            bindings = bindings.ToDictionary(pair => pair.Key, pair => pair.Value with { OriginatingPullRequestOwnership = ownership }, StringComparer.Ordinal);
+        }
+
         // The requested model reaches the vendor argv; ModelResolved supplies a bind-time default only
         // when it is absent. This is after role/template resolution and continuation inheritance, but
         // before runway admission, room provisioning, or any other dispatch write.

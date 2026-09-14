@@ -231,6 +231,21 @@ public static class RedispatchCommand
             ? GhPullRequestCreateProvenanceResolver.CaptureIdentityFor(entry, explicitWorkspace)
             : entry with { PullRequestCreateIdentity = parentEntry.PullRequestCreateIdentity };
 
+        if (options.OriginatingPullRequest is not null)
+        {
+            var workspaceForVerification = entry.WorkingDirectory ?? entry.Worktree?.Repository ?? Directory.GetCurrentDirectory();
+            entry = entry with
+            {
+                OriginatingPullRequestOwnership = await OriginatingPullRequestVerifier.VerifyAsync(
+                    options.OriginatingPullRequest, workspaceForVerification, cancellationToken).ConfigureAwait(false)
+            };
+        }
+        else if (options.WorkspaceDirectory is not null)
+        {
+            // A workspace move invalidates a parent binding's conductor-captured lineage.
+            entry = entry with { OriginatingPullRequestOwnership = null };
+        }
+
         if (options.Timeout is { } timeoutOverride && timeoutOverride > TimeSpan.FromMinutes(DispatchOptionsParser.WarnTimeoutMinutes))
         {
             Console.Error.WriteLine(
@@ -541,17 +556,17 @@ public static class RedispatchCommand
                 roomDirectoryPath: options.RoomDirectoryPath,
                 tokenBudgetOverride: options.TokenBudget ?? parentEntry.TokenBudget,
                 maxToolStepsOverride: options.MaxToolSteps ?? parentEntry.MaxToolSteps,
-                // #1691: threaded on the amended-spec path too, which is exactly where #1686 review F2
-                // found --max-tool-steps silently dropped. Both paths, or the override does not survive
-                // a redispatch.
-                billedRateLimitOverride: options.BilledRateLimit ?? parentEntry.BilledRateLimit,
-                verifyCommandOverride: options.VerifyCommand ?? parentEntry.VerifyCommandOverride,
-                // #1151: resolved and requirement-checked by RoleDispatch.ToBinding on this path too,
-                // so an amended-spec redispatch inheriting a parent's skill that has since been deleted
-                // refuses here rather than dispatching without it.
-                skills: ResolveSkills(parentEntry, options),
-                // #2110: ToBinding re-attaches the role's defaults on this path unless opted out.
-                attachDefaultSkills: !options.NoDefaultSkills);
+            // #1691: threaded on the amended-spec path too, which is exactly where #1686 review F2
+            // found --max-tool-steps silently dropped. Both paths, or the override does not survive
+            // a redispatch.
+            billedRateLimitOverride: options.BilledRateLimit ?? parentEntry.BilledRateLimit,
+            verifyCommandOverride: options.VerifyCommand ?? parentEntry.VerifyCommandOverride,
+            // #1151: resolved and requirement-checked by RoleDispatch.ToBinding on this path too,
+            // so an amended-spec redispatch inheriting a parent's skill that has since been deleted
+            // refuses here rather than dispatching without it.
+            skills: ResolveSkills(parentEntry, options),
+            // #2110: ToBinding re-attaches the role's defaults on this path unless opted out.
+            attachDefaultSkills: !options.NoDefaultSkills);
 
             // #1927 review HIGH: both paths re-resolve the display stamps through the same rule --
             // ToBinding stamped them from the inherited axes above, which reach it as overrides and so
