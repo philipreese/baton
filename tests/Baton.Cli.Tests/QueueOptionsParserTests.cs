@@ -9,6 +9,34 @@ namespace Baton.Cli.Tests;
 /// </summary>
 public sealed class QueueOptionsParserTests
 {
+    [Theory]
+    [InlineData("small")]
+    [InlineData("medium")]
+    [InlineData("large")]
+    public void Lifecycle_add_parses_each_declared_size(string size)
+    {
+        var options = QueueOptionsParser.Parse([
+            "add", "sized-lane", "--issue", "2301", "--lifecycle", "--declared-size", size, "--size-rationale", "one coherent acceptance cluster",
+        ]);
+
+        Assert.Equal(size, options.DeclaredTaskSize!.Size.ToString().ToLowerInvariant());
+        Assert.Equal("one coherent acceptance cluster", options.DeclaredTaskSize.Rationale);
+    }
+
+    [Theory]
+    [InlineData("tiny", "because")]
+    [InlineData("small", " ")]
+    [InlineData(null, "because")]
+    [InlineData("small", null)]
+    public void Declared_size_requires_a_supported_band_and_nonblank_rationale(string? size, string? rationale)
+    {
+        var args = new List<string> { "add", "sized-lane", "--issue", "2301", "--lifecycle" };
+        if (size is not null) { args.Add("--declared-size"); args.Add(size); }
+        if (rationale is not null) { args.Add("--size-rationale"); args.Add(rationale); }
+
+        Assert.Throws<CliArgumentException>(() => QueueOptionsParser.Parse(args));
+    }
+
     [Fact]
     public void Add_parses_every_flag_the_runner_used()
     {

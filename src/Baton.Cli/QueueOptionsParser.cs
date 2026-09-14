@@ -426,9 +426,7 @@ public static class QueueOptionsParser
             timeout, maxToolSteps, tokenBudget, overrideRunway, reason, ImportFilePath: null, Lifecycle: lifecycle,
             StageSelections: lifecycle ? stageSelections.Values.ToList() : null, LifecyclePin: lifecyclePin,
             Skills: DispatchOptionsParser.NormalizeSkills(skills), Requirements: normalizedRequirements,
-            DeclaredTaskSize: declaredSize is null && sizeRationale is null ? null : TaskSizeDeclaration.Parse(
-                declaredSize ?? throw new CliArgumentException("'--size-rationale' requires '--declared-size'."),
-                sizeRationale ?? throw new CliArgumentException("'--declared-size' requires '--size-rationale'.")));
+            DeclaredTaskSize: DispatchOptionsParser.ParseTaskSizeDeclaration(declaredSize, sizeRationale));
     }
 
     private static void SetAdapter(

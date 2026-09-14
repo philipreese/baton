@@ -294,9 +294,26 @@ public static class DispatchOptionsParser
             NormalizeSkills(skills),
             noDefaultSkills,
             requirements.Count > 0 ? NormalizeRequirements(requirements) : null,
-            declaredSize is null && sizeRationale is null ? null : TaskSizeDeclaration.Parse(
+            ParseTaskSizeDeclaration(declaredSize, sizeRationale));
+    }
+
+    internal static TaskSizeDeclaration? ParseTaskSizeDeclaration(string? declaredSize, string? sizeRationale)
+    {
+        if (declaredSize is null && sizeRationale is null)
+        {
+            return null;
+        }
+
+        try
+        {
+            return TaskSizeDeclaration.Parse(
                 declaredSize ?? throw new CliArgumentException("'--size-rationale' requires '--declared-size'."),
-                sizeRationale ?? throw new CliArgumentException("'--declared-size' requires '--size-rationale'.")));
+                sizeRationale ?? throw new CliArgumentException("'--declared-size' requires '--size-rationale'."));
+        }
+        catch (ArgumentException ex)
+        {
+            throw new CliArgumentException(ex.Message);
+        }
     }
 
     private static IReadOnlyList<string> NormalizeRequirements(IReadOnlyList<string> requirements)

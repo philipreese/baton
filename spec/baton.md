@@ -7007,6 +7007,24 @@ source" looks like on disk rather than as a promise.
 
 ## §13 The conductor queue (#1934 slices 1–2)
 
+### Declared task size (#2301)
+
+`declaredSize` is the conductor's pre-dispatch routing input, never an estimate of effort, duration,
+or eventual diff shape. Its closed vocabulary is `small`, `medium`, and `large`, each accompanied by
+a non-blank one-clause `sizeRationale`: **small** changes one established module/interface and one
+acceptance cluster without a new cross-module contract; **medium** changes one seam or durable
+contract while retaining one coherent acceptance cluster; **large** changes multiple seams,
+protocols, or durable-state contracts, or has independently reviewable acceptance clusters. A task
+between bands is declared in the larger band.
+
+The first launch freezes this declaration for the workstream. Queue persistence and restart, room
+bindings, continuation, redispatch, lifecycle stages, and cost-ledger projections preserve that same
+value; a supplied conflicting continuation or redispatch value refuses before a worker is spawned.
+Lifecycle queue admission requires both fields because it makes a routing choice. A direct,
+non-lifecycle dispatch may omit them for compatibility. Historical queue, room, and ledger records
+without the declaration render `unknown`, never `small`; no reader infers or backfills it from
+observed diff shape.
+
 The conductor's dispatch queue was a PowerShell loop in a per-session scratchpad directory: a JSON
 item list, weighted concurrency slots, a time-of-day memory floor, per-vendor model defaults, and a
 `baton dispatch` shell-out. Every operator ruling about concurrency, tiers and defaults lived in that
