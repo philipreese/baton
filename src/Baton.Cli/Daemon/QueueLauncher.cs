@@ -108,7 +108,17 @@ public static class QueueLauncher
         }
 
         var roomDirectory = request.RoomDirectory;
-        var arguments = BuildArguments(BuildOptions(request));
+        DispatchOptions options;
+        try
+        {
+            options = BuildOptions(request);
+        }
+        catch (CliArgumentException ex)
+        {
+            return new QueueLaunchOutcome(null, Error: ex.Message);
+        }
+
+        var arguments = BuildArguments(options);
         var (fileName, leadingArguments) = ResolveLaneCommand();
 
         Process process;
@@ -939,6 +949,12 @@ public static class QueueLauncher
         ArgumentNullException.ThrowIfNull(request);
         var item = request.Item;
         var tier = request.Tier;
+        var followOn = item.Stage is WorkStage.Continue or WorkStage.Fix;
+        if (followOn && (item.Repository is not { Length: > 0 } || item.PullRequest is null))
+        {
+            throw new CliArgumentException(
+                $"Queue {WorkStages.Token(item.Stage!.Value)} cannot launch without its canonical repository and tracked open PR.");
+        }
 
         return new DispatchOptions(
             Name: item.Role,
@@ -964,7 +980,12 @@ public static class QueueLauncher
             Skills: NormalizeSkillsForLaunch(item),
             DeclaredTaskSize: item.DeclaredTaskSize.Size == DeclaredTaskSize.Unknown
                 ? null
-                : item.DeclaredTaskSize);
+                : item.DeclaredTaskSize,
+            OriginatingPullRequest: followOn
+                && item.Repository is { Length: > 0 } repository
+                && item.PullRequest is { } pullRequest
+                ? $"{repository}#{pullRequest}"
+                : null);
     }
 
     /// <summary>
