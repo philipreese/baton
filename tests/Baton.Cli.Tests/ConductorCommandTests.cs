@@ -294,9 +294,12 @@ public sealed class ConductorCommandTests
             using var second = StartClaimProcess(workspace, batonRoot, "conductor-beta");
             first.Start();
             second.Start();
-            await Task.WhenAll(first.WaitForExitAsync(TestContext.Current.CancellationToken), second.WaitForExitAsync(TestContext.Current.CancellationToken));
+            var outputs = await Task.WhenAll(
+                BoundedProcessWait.RunToExitAsync(first, TimeSpan.FromSeconds(30), TestContext.Current.CancellationToken),
+                BoundedProcessWait.RunToExitAsync(second, TimeSpan.FromSeconds(30), TestContext.Current.CancellationToken));
 
-            Assert.Equal(1, new[] { first.ExitCode, second.ExitCode }.Count(code => code == 0));
+            Assert.True(new[] { first.ExitCode, second.ExitCode }.Count(code => code == 0) == 1,
+                string.Join(Environment.NewLine, outputs.Select(output => $"stdout: {output.Stdout}{Environment.NewLine}stderr: {output.Stderr}")));
             Assert.Equal(1, new[] { first.ExitCode, second.ExitCode }.Count(code => code != 0));
             var identity = await RepositoryIdentityResolver.TryResolveAsync(workspace, TestContext.Current.CancellationToken);
             Assert.NotNull(identity);
@@ -315,6 +318,8 @@ public sealed class ConductorCommandTests
         var startInfo = new ProcessStartInfo("dotnet")
         {
             WorkingDirectory = workspace,
+            RedirectStandardOutput = true,
+            RedirectStandardError = true,
             UseShellExecute = false,
         };
         startInfo.ArgumentList.Add(typeof(ConductorCommand).Assembly.Location);
