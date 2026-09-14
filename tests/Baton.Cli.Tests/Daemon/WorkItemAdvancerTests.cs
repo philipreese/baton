@@ -281,6 +281,39 @@ public sealed class WorkItemAdvancerTests
     }
 
     [Fact]
+    public async Task A_terminal_sentinel_removed_before_the_retirement_mutation_keeps_the_row_active()
+    {
+        var home = CreateTempHome();
+        using var scope = BatonEnvironmentSnapshot.BeginScope(BatonEnvironmentSnapshot.Blank with { HomeOverride = home });
+        try
+        {
+            var room = await WriteSettledRoomAsync(home, WorkflowOutcome.Failed, verdictJson: null);
+            await SeedAsync(home, WorkStage.Fix, room, QueueItemState.Failed);
+            var merged = $$$"""
+                [{"number":77,"state":"MERGED","isDraft":false,"headRefOid":"{{{PushedSha}}}",
+                  "headRefName":"1934-lane","baseRefName":"main","isCrossRepository":false,
+                  "statusCheckRollup":[],"mergeCommit":{"oid":"{{{MergeSha}}}"}}]
+                """;
+
+            Task<string?> RemoveSentinelBeforeMutation(string _, CancellationToken __)
+            {
+                File.Delete(Path.Combine(room, TerminalSentinelWriter.TerminalSentinelFileName));
+                return Task.FromResult<string?>(PushedSha);
+            }
+
+            await new WorkItemAdvancer(new FakeGh(merged), RemoveSentinelBeforeMutation).AdvanceAsync(Now, Ct);
+
+            var retained = await ReadBackAsync();
+            Assert.Null(retained.Retirement);
+            Assert.Equal(room, retained.RoomDirectory);
+        }
+        finally
+        {
+            DirectoryCleanup.DeleteRecursively(home);
+        }
+    }
+
+    [Fact]
     public async Task A_merged_ready_row_persisted_as_roomless_queued_retires()
     {
         var home = CreateTempHome();

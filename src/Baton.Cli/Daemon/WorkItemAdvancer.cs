@@ -205,7 +205,8 @@ public sealed class WorkItemAdvancer
                 // This is only the sentinel-backed, room-bearing path observed above. A roomless
                 // terminal row must re-prove its refused admission at the mutation point instead.
                 var currentTerminalRoomDelivery = terminalRoomDelivery
-                    && current.RoomDirectory is { Length: > 0 }
+                    && current.RoomDirectory is { Length: > 0 } currentRoom
+                    && HasReadableTerminalSentinelAtMutation(currentRoom)
                     && current.State is QueueItemState.Done or QueueItemState.Failed;
                 var currentAdmissionRefusedRoomlessDelivery = IsAdmissionRefusedRoomlessFailure(current);
                 if (!currentNormalDeliveredReady && !currentTerminalRoomDelivery
@@ -1279,6 +1280,31 @@ public sealed class WorkItemAdvancer
         catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
         {
             return null;
+        }
+    }
+
+    /// <summary>
+    /// Re-proves a room-bearing terminal row while the queue mutation lock is held. The earlier
+    /// asynchronous read drives lifecycle observation; it cannot authorize retirement after later
+    /// PR and workspace awaits if the sentinel has since disappeared or become unreadable.
+    /// </summary>
+    private static bool HasReadableTerminalSentinelAtMutation(string roomDirectory)
+    {
+        var path = Path.Combine(roomDirectory, TerminalSentinelWriter.TerminalSentinelFileName);
+        if (!File.Exists(path))
+        {
+            return false;
+        }
+
+        try
+        {
+            using var stream = new FileStream(
+                path, FileMode.Open, FileAccess.Read, FileShare.ReadWrite | FileShare.Delete);
+            return JsonSerializer.Deserialize<WorkflowStatusView>(stream) is not null;
+        }
+        catch (Exception ex) when (ex is JsonException or IOException or UnauthorizedAccessException)
+        {
+            return false;
         }
     }
 
