@@ -7362,7 +7362,8 @@ written:
 | fix | succeeded-shaped, PR open | **re-review** | the prior verdict's findings are being checked |
 | implement / fix / continue | succeeded-shaped, no PR | **operator** | the queue never opens a PR |
 | review / re-review | succeeded-shaped, `decision: approve`, exact full `reviewedRef` = current PR head, required checks passing | **ready** | only current-head approval plus green required checks may clear draft |
-| review / re-review | succeeded-shaped, `decision: approve`, stale `reviewedRef` | **re-review** | a new head invalidates the approval and the PR is reconciled to draft first |
+| review / re-review | succeeded-shaped, `decision: approve`, canonical full-SHA `reviewedRef` differs from current PR head | **re-review** | a new head invalidates the approval and the PR is reconciled to draft first |
+| review / re-review | succeeded-shaped, `decision: approve`, noncanonical `reviewedRef` | **operator** | lifecycle approval requires exactly one full 40-character hexadecimal PR-head SHA; halt rather than spend a re-review |
 | review / re-review | succeeded-shaped, exact-head `decision: approve`, required checks pending, failing, or unknown | **wait in draft** | approval is retained while required checks are re-observed; it is not readiness evidence by itself |
 | review / re-review | succeeded-shaped, `decision: block`, `automaticFixUsed: false` | **fix** | the one automatic fix has not been used |
 | review / re-review | succeeded-shaped, `decision: block`, `automaticFixUsed: true` or absent | **operator** | a second fix or untrustworthy legacy history needs conductor judgment |
@@ -7372,8 +7373,8 @@ written:
 | implement / fix / continue | `ExecutionArrested`, work unpushed, `workspaceChanged: true` | **continue** | structured arrest-boundary evidence proves work to recover |
 | implement / fix / continue | `ExecutionArrested`, work unpushed, `workspaceChanged: false` or absent | **operator** | no observed work, or no measurement, justifies an automatic continuation |
 | implement / fix / continue | anything else, work unpushed | **continue** | finish and push it |
-| review / re-review | anything else, no readable verdict | **operator** | no reviewer decision exists to authorize another lifecycle spend |
-| review / re-review | anything else, readable verdict | route on the verdict | the decision remains usable even when the lane did not settle successfully |
+| review / re-review | anything else, readable verdict | **route by decision** | a later failed or indeterminate settlement does not discard a readable reviewer decision |
+| review / re-review | anything else, no readable verdict | **operator** | silence cannot spend another review round |
 | fix, `automaticFixUsed: true`, round at the ceiling | succeeded-shaped, PR open | **re-review** | the one automatic repair is not operator-ready before its paired exact-head review |
 | any other stage, round at the ceiling | anything | **operator** | two of those arms are cycles with no natural end |
 | ready | anything | nothing | it stops here |

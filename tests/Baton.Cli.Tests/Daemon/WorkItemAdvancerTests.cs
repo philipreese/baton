@@ -24,7 +24,7 @@ public sealed class WorkItemAdvancerTests
 
     private static readonly DateTimeOffset Now = new(2026, 9, 6, 12, 0, 0, TimeSpan.Zero);
 
-    private const string PushedSha = "aaaaaaaabbbbbbbbccccccccdddddddd";
+    private const string PushedSha = "aaaaaaaabbbbbbbbccccccccddddddddeeeeeeee";
 
     private const string FullPushedSha = "0123456789abcdef0123456789abcdef01234567";
 
@@ -155,9 +155,13 @@ public sealed class WorkItemAdvancerTests
     /// <summary>The polarity partner, and crossed the other way: two CONFIRMED HIGHS the reviewer
     /// nonetheless approved.</summary>
     private const string ApprovingVerdict = """
-        {"reviewedRef":"aaaaaaaabbbbbbbbccccccccdddddddd","decision":"approve","summary":"nothing blocking","findings":[
+        {"reviewedRef":"aaaaaaaabbbbbbbbccccccccddddddddeeeeeeee","decision":"approve","summary":"nothing blocking","findings":[
           {"claim":"a real one, already fixed on the branch","severity":"high","status":"confirmed"},
           {"claim":"another","severity":"high","status":"confirmed"}]}
+        """;
+
+    private const string NoncanonicalApprovingVerdict = """
+        {"reviewedRef":"aaaaaaaabbbbbbbbccccccccdddddddd","decision":"approve","summary":"nothing blocking","findings":[]}
         """;
 
     /// <summary>A readable verdict the reviewer left no decision on — the arm that has to reach a
@@ -1343,7 +1347,7 @@ public sealed class WorkItemAdvancerTests
             Assert.True(halted.Halted);
             Assert.Equal(room, halted.RoomDirectory);
             Assert.Contains("review lane settled Indeterminate", halted.Error!, StringComparison.Ordinal);
-            Assert.Contains("no reviewer decision exists", halted.Error!, StringComparison.Ordinal);
+            Assert.Contains("wrote no readable verdict.json", halted.Error!, StringComparison.Ordinal);
 
             // A new advancer is the daemon restart/reload boundary. The halted row cannot issue a
             // second launch decision, create another room, or reserve another admission.
@@ -1660,7 +1664,7 @@ public sealed class WorkItemAdvancerTests
         using var scope = BatonEnvironmentSnapshot.BeginScope(BatonEnvironmentSnapshot.Blank with { HomeOverride = home });
         try
         {
-            var room = await WriteSettledRoomAsync(home, WorkflowOutcome.Succeeded, ApprovingVerdict);
+            var room = await WriteSettledRoomAsync(home, WorkflowOutcome.Succeeded, NoncanonicalApprovingVerdict);
             var seeded = await SeedAsync(home, WorkStage.Review, room, round: 2);
             var attemptId = new FleetAttemptId("attempt-review-2");
             await QueueStore.MutateAsync(
