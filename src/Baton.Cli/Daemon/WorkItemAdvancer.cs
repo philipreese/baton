@@ -433,9 +433,7 @@ public sealed class WorkItemAdvancer
             Checks = pr.Checks ?? existing.Checks,
             ChecksObservedAt = pr.Checks is null ? existing.ChecksObservedAt : now,
             ChecksHeadSha = pr.Checks is null ? existing.ChecksHeadSha : pr.HeadSha,
-            RequiredCheckEvidenceWait = pr.RequiredChecks == PullRequestChecks.None
-                ? existing.RequiredCheckEvidenceWait
-                : null,
+            RequiredCheckEvidenceWait = RequiredCheckEvidenceWaitAfter(pr, existing.RequiredCheckEvidenceWait),
             Error = reason,
             ReadinessMutationClaim = null,
         }).ConfigureAwait(false);
@@ -500,6 +498,7 @@ public sealed class WorkItemAdvancer
             Checks = pr.Checks ?? existing.Checks,
             ChecksObservedAt = pr.Checks is null ? existing.ChecksObservedAt : now,
             ChecksHeadSha = pr.Checks is null ? existing.ChecksHeadSha : pr.HeadSha,
+            RequiredCheckEvidenceWait = RequiredCheckEvidenceWaitAfter(pr, existing.RequiredCheckEvidenceWait),
             LastVerdict = verdictPath ?? existing.LastVerdict,
             // The lifecycle is the one authority that says a BLOCK may spend this budget. Preserve
             // false, true, and legacy-null through every other transition so retries and
@@ -538,6 +537,7 @@ public sealed class WorkItemAdvancer
             Checks = pr.Checks ?? existing.Checks,
             ChecksObservedAt = pr.Checks is null ? existing.ChecksObservedAt : now,
             ChecksHeadSha = pr.Checks is null ? existing.ChecksHeadSha : pr.HeadSha,
+            RequiredCheckEvidenceWait = RequiredCheckEvidenceWaitAfter(pr, existing.RequiredCheckEvidenceWait),
             LastVerdict = verdictPath ?? existing.LastVerdict,
             State = QueueItemState.Queued,
             RoomDirectory = null,
@@ -548,6 +548,14 @@ public sealed class WorkItemAdvancer
 
         return stopped ? Fact(item, from, WorkStage.Ready, transition, now, room) : null;
     }
+
+    private static RequiredCheckEvidenceWait? RequiredCheckEvidenceWaitAfter(
+        PullRequestObservation pr, RequiredCheckEvidenceWait? existing) =>
+        pr.Succeeded
+        && pr.RequiredChecks is not null
+        && pr.RequiredChecks != PullRequestChecks.None
+            ? null
+            : existing;
 
     private static async Task<QueueDecisionEntry?> FailAsync(
         QueueItem item,

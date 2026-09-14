@@ -2173,9 +2173,11 @@ public sealed class WorkItemAdvancerTests
         {
             var room = await WriteSettledRoomAsync(home, WorkflowOutcome.Succeeded, null);
             await SeedAsync(home, WorkStage.Implement, room);
-            var checks = "[]";
+            string? checks = "[]";
             var gh = new DelegateGh((_, args, _) => Task.FromResult(args is ["pr", "checks", ..]
-                ? new GhCliResult(true, 0, checks, string.Empty)
+                ? checks is null
+                    ? new GhCliResult(true, 1, string.Empty, "transient check read failure")
+                    : new GhCliResult(true, 0, checks, string.Empty)
                 : new GhCliResult(true, 0, args is ["pr", "view", ..]
                     ? PrObject(77, FullPushedSha)
                     : PrJson(77, FullPushedSha), string.Empty)));
@@ -2188,12 +2190,18 @@ public sealed class WorkItemAdvancerTests
             Assert.Equal(1, waiting.RequiredCheckEvidenceWait!.AttemptCount);
             Assert.Equal(FullPushedSha, waiting.RequiredCheckEvidenceWait.HeadSha);
 
+            checks = null;
+            Assert.Single(await advancer.AdvanceAsync(Now.AddSeconds(31), Ct));
+            var failedObservation = await ReadBackAsync();
+            Assert.Equal(waiting.RequiredCheckEvidenceWait, failedObservation.RequiredCheckEvidenceWait);
+
             checks = "[{\"name\":\"ci\",\"bucket\":\"pass\"}]";
-            var facts = await advancer.AdvanceAsync(Now.AddSeconds(31), Ct);
+            var facts = await advancer.AdvanceAsync(Now.AddSeconds(62), Ct);
             Assert.Single(facts);
             var recovered = await ReadBackAsync();
             Assert.Equal(QueueItemState.Queued, recovered.State);
             Assert.Equal(WorkStage.Review, recovered.Stage);
+            Assert.Null(recovered.RequiredCheckEvidenceWait);
         }
         finally
         {
