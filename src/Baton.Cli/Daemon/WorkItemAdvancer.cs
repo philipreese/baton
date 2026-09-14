@@ -79,6 +79,18 @@ public sealed class WorkItemAdvancer
     {
         var snapshot = await QueueStore.LoadAsync(BatonPaths.QueueFile, cancellationToken).ConfigureAwait(false);
 
+        // A disposition CAS is the linearization point; ledger availability must never manufacture
+        // a fact before it. Replay only operations retained by committed queue rows.
+        foreach (var committed in snapshot.Items.Where(item => item.DispositionOutbox.Count > 0))
+        {
+            foreach (var operation in committed.DispositionOutbox)
+            {
+                await QueueDecisionLedgerStore.AppendDispositionAsync(
+                    committed.Tag, operation, BatonPaths.QueueDecisionLedgerFile, cancellationToken)
+                    .ConfigureAwait(false);
+            }
+        }
+
         // Settled, staged, and not one this advance has already given up on. Ready items are included
         // even though they have no room: their persisted verdict must be reconciled against a later
         // GitHub head/check change. State
@@ -88,9 +100,9 @@ public sealed class WorkItemAdvancer
         // `Halted` half is what stops a NeedsOperator item being re-observed on every tick forever —
         // see QueueItem.Halted for what that cost.
         var candidates = snapshot.Items
-            .Where(i => i.Stage is { } stage && !i.Halted
+            .Where(i => i.Stage is { } stage && i.Retirement is null
                 && (stage == WorkStage.Ready
-                    ? i.State == QueueItemState.Queued
+                    ? i.State == QueueItemState.Queued && !i.Halted
                     : i.State is QueueItemState.Done or QueueItemState.Failed
                         && i.RoomDirectory is { Length: > 0 }))
             .ToList();
@@ -141,6 +153,72 @@ public sealed class WorkItemAdvancer
         var head = await _workspaceHead(item.Workspace, cancellationToken).ConfigureAwait(false);
         await RecordOwnedObservationsAsync(item, stage, verdict, pr, head, now, cancellationToken)
             .ConfigureAwait(false);
+
+        // A merged PR is delivery evidence, but it is not permission to abandon a room that is
+        // still running. In particular, the roomless-timeout sweep can mark a late launch Failed
+        // before that launch creates its room. Only the terminal sentinel is proof this room is no
+        // longer live; the state word is merely the queue's earlier observation.
+        var normalDeliveredReady = item is
+        {
+            Stage: WorkStage.Ready,
+            State: QueueItemState.Queued,
+            RoomDirectory: null,
+            ReadinessMutationClaim: null,
+        };
+        var terminalRoomDelivery = sentinel is not null
+            && item.State is QueueItemState.Done or QueueItemState.Failed
+            && item.ReadinessMutationClaim is null;
+        if (pr.Succeeded && pr.MergeSha is { Length: > 0 }
+            && (normalDeliveredReady || terminalRoomDelivery))
+        {
+            var retired = false;
+            var retirement = new QueueRetirement(QueueRetirement.Merged, now,
+                $"trusted merged observation for PR #{pr.Number}");
+            var operation = new QueueDispositionOperation(
+                Guid.NewGuid().ToString("N"), now, QueueDecisionEntry.Retired, $"merged: PR #{pr.Number}");
+            await QueueStore.MutateAsync(BatonPaths.QueueFile, snapshot =>
+            {
+                var current = snapshot.Items.FirstOrDefault(i => i.Tag == item.Tag);
+                if (current is null || current.Retirement is not null
+                    || current.RoomDirectory != item.RoomDirectory
+                    || current.ReadinessMutationClaim is not null)
+                {
+                    return snapshot;
+                }
+                var currentNormalDeliveredReady = current is
+                {
+                    Stage: WorkStage.Ready, State: QueueItemState.Queued, RoomDirectory: null,
+                };
+                var currentTerminalRoomDelivery = current.State is QueueItemState.Done or QueueItemState.Failed;
+                if (!currentNormalDeliveredReady && !currentTerminalRoomDelivery)
+                {
+                    return snapshot;
+                }
+                retired = true;
+                return snapshot with
+                {
+                    Items = snapshot.Items.Select(i => i.Tag == item.Tag
+                    ? i with
+                    {
+                        Retirement = retirement,
+                        DispositionOperations = [.. i.DispositionOutbox, operation],
+                    } : i).ToList()
+                };
+            }, cancellationToken).ConfigureAwait(false);
+            if (retired)
+            {
+                await QueueDecisionLedgerStore.AppendDispositionAsync(
+                    item.Tag, operation, BatonPaths.QueueDecisionLedgerFile, cancellationToken).ConfigureAwait(false);
+                return null;
+            }
+        }
+
+        // A halted item remains available only for the trusted-merge retirement above. Its halt
+        // still forbids every ordinary lifecycle transition and retry.
+        if (item.Halted)
+        {
+            return null;
+        }
 
         WorkItemObservation Observation(PullRequestObservation reading) => new(
             stage, item.Round, item.AutomaticFixUsed, item.Branch, outcome, verdict,
@@ -632,7 +710,7 @@ public sealed class WorkItemAdvancer
 
     private static HashSet<QualifiedPullRequest> ObservationKeys(IReadOnlyList<QueueItem> items) =>
         items
-            .Where(i => i.Stage is not null && i.PullRequest is > 0 && i.Repository is { Length: > 0 })
+            .Where(i => i.Retirement is null && i.Stage is not null && i.PullRequest is > 0 && i.Repository is { Length: > 0 })
             .Select(i => new QualifiedPullRequest(i.Repository!, i.PullRequest!.Value))
             .ToHashSet();
 

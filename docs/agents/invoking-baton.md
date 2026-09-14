@@ -763,6 +763,8 @@ effective choice and whether it came from a stage default, stage override, lifec
 compatibility rule for a persisted item.
 
 `baton queue list` shows each item's state, stage and room. `baton queue hold` / `resume` pause new
-launches without stopping the daemon or touching live lanes. Every decision, including each stage
-change and the evidence it was derived from, lands in `~/.baton/fleet/queue.jsonl`.
+launches without stopping the daemon or touching live lanes. `baton queue retire my-tag --reason "handled by operator"`
+retains a settled lifecycle item outside active attention; `restore` takes the same tag and reason
+for an operator retirement. Every decision, including each stage change and the evidence it was
+derived from, lands in `~/.baton/fleet/queue.jsonl`.
 `spec/baton.md` §13 is the contract.

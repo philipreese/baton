@@ -77,6 +77,8 @@ public sealed record QueueDecisionEntry(
 
     /// <summary>An operator cancelled a queued request before the scheduler claimed its launch.</summary>
     public const string Cancelled = "cancelled";
+    public const string Retired = "retired";
+    public const string Restored = "restored";
 
     /// <summary>
     /// A work item moved from one <see cref="WorkStage"/> to the next (#1934 slice 2). A fourth
@@ -111,6 +113,13 @@ public sealed record QueueDecisionEntry(
         Decision == Cancelled && Tag is { Length: > 0 } tag
             ? $"{tag}|{At.ToUniversalTime():O}"
             : null;
+
+    [JsonIgnore]
+    internal string? DurableOperationKey => OperationKey ?? CancellationKey;
+
+    [property: JsonPropertyName("operationKey")]
+    [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    public string? OperationKey { get; init; }
 }
 
 /// <summary>
@@ -137,7 +146,33 @@ public sealed record QueueDecisionEntry(
 public static class QueueDecisionLedgerStore
 {
     internal static readonly JsonLinesLedger<QueueDecisionEntry> Ledger =
-        new("baton-queue-ledger", "queue decision ledger", entry => entry.CancellationKey);
+        new("baton-queue-ledger", "queue decision ledger", entry => entry.DurableOperationKey);
+
+    /// <summary>
+    /// Deterministic test seam for the disposition append that follows its queue CAS. Production
+    /// callers leave this null; a non-null returned exception prevents any ledger write.
+    /// </summary>
+    public static Func<string, QueueDispositionOperation, Exception?>? DispositionAppendFault { get; set; }
+
+    /// <summary>Writes the single ledger fact promised by a committed disposition operation.</summary>
+    public static Task AppendDispositionAsync(
+        string tag,
+        QueueDispositionOperation operation,
+        string ledgerFilePath,
+        CancellationToken cancellationToken = default)
+    {
+        ArgumentException.ThrowIfNullOrEmpty(tag);
+        ArgumentNullException.ThrowIfNull(operation);
+        var fault = DispositionAppendFault?.Invoke(tag, operation);
+        if (fault is not null)
+        {
+            return Task.FromException(fault);
+        }
+        return Ledger.AppendAsync(
+            [new QueueDecisionEntry(operation.At, tag, operation.Decision, operation.Reason,
+                LiveWeight: 0, FreeGb: null, FloorGb: 0) { OperationKey = operation.Key }],
+            ledgerFilePath, cancellationToken);
+    }
 
     /// <summary>
     /// Appends <paramref name="entry"/> unless <paramref name="previousVerdictKey"/> already equals

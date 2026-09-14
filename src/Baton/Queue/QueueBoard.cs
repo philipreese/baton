@@ -91,6 +91,10 @@ public static class QueueBoard
         var pending = new List<QueuePendingView>();
         foreach (var item in OrderTwinsAdjacent(items))
         {
+            if (item.Retirement is not null)
+            {
+                continue;
+            }
             // Queued, OR halted. The second half is not a convenience: the lifecycle only ever writes
             // `Halted` together with `QueueItemState.Failed` (WorkItemAdvancer's own fail arm), so a
             // filter on Queued alone would put every item the queue has given up on nowhere at all
@@ -146,7 +150,7 @@ public static class QueueBoard
             .ToDictionary(g => g.Key, g => g.OrderByDescending(o => o.AttemptedAt).First());
         var freshness = observationFreshness ?? TimeSpan.Zero;
         var prItems = OrderTwinsAdjacent(items)
-            .Where(item => item.Stage is not null && item.PullRequest is not null)
+            .Where(item => item.Stage is not null && item.PullRequest is not null && item.Retirement is null)
             .GroupBy(item => item.Repository is { Length: > 0 } repository
                 ? $"{repository}\0{item.PullRequest}"
                 : $"\0{item.Tag}", StringComparer.Ordinal);
@@ -197,7 +201,8 @@ public static class QueueBoard
                 ChecksHeadSha: item.ChecksHeadSha,
                 Halted: item.Halted,
                 Arm: ArmLabel(item),
-                TwinIssue: item.Issue is { } prIssue && twinIssues.Contains(prIssue) ? prIssue : null))
+                TwinIssue: item.Issue is { } prIssue && twinIssues.Contains(prIssue) ? prIssue : null,
+                Retirement: item.Retirement))
                 .ToList();
             var view = new QueuePullRequestView(
                 Repository: repository,
@@ -228,13 +233,25 @@ public static class QueueBoard
             }
         }
 
+        var retiredHistory = OrderTwinsAdjacent(items)
+            .Where(item => item.Retirement is not null)
+            .Select(item => new QueueRetiredView(
+                item.Tag,
+                item.Stage is { } stage ? WorkStages.Token(stage) : null,
+                item.State,
+                item.Issue,
+                item.PullRequest,
+                item.Retirement!))
+            .ToList();
+
         return new QueueBoardView(
             Held: held,
             Slots: slots,
             LastDecisionAt: lastDecision?.At,
             Pending: pending,
             PullRequests: pullRequests,
-            PullRequestHistory: pullRequestHistory);
+            PullRequestHistory: pullRequestHistory,
+            RetiredHistory: retiredHistory);
     }
 
     /// <summary>
@@ -311,13 +328,13 @@ public static class QueueBoard
     }
 
     /// <summary>
-    /// Every issue carrying more than one <em>work item</em> — the comparator arms of #1912's ask.
-    /// <b>Stage-bearing items only</b>: two stage-less dispatch requests naming one issue are two
-    /// one-shot lanes, not an A/B, and calling them twins would invent an experiment.
+    /// Every issue carrying more than one current <em>work item</em> — the comparator arms of #1912's
+    /// ask. <b>Stage-bearing, non-retired items only</b>: two stage-less dispatch requests naming one
+    /// issue are two one-shot lanes, not an A/B, and retained history is not current attention.
     /// </summary>
     internal static IReadOnlySet<int> TwinIssues(IReadOnlyList<QueueItem> items) =>
         items
-            .Where(i => i.Stage is not null && i.Issue is not null)
+            .Where(i => i.Retirement is null && i.Stage is not null && i.Issue is not null)
             .GroupBy(i => i.Issue!.Value)
             .Where(g => g.Count() > 1)
             .Select(g => g.Key)
@@ -504,7 +521,25 @@ public sealed record QueuePullRequestLaneView(
     string? Arm,
     [property: JsonPropertyName("twinIssue")]
     [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
-    int? TwinIssue);
+    int? TwinIssue,
+    [property: JsonPropertyName("retirement")]
+    [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    QueueRetirement? Retirement);
+
+/// <summary>One retired lifecycle row retained for Fleet Glass history.</summary>
+public sealed record QueueRetiredView(
+    [property: JsonPropertyName("tag")] string Tag,
+    [property: JsonPropertyName("stage")]
+    [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    string? Stage,
+    [property: JsonPropertyName("state")] QueueItemState State,
+    [property: JsonPropertyName("issue")]
+    [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    int? Issue,
+    [property: JsonPropertyName("pr")]
+    [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    int? PullRequest,
+    [property: JsonPropertyName("retirement")] QueueRetirement Retirement);
 
 /// <summary>One repository-qualified PR observation and all retained lanes that refer to it.</summary>
 public sealed record QueuePullRequestView(
@@ -585,4 +620,5 @@ public sealed record QueueBoardView(
     DateTimeOffset? LastDecisionAt,
     [property: JsonPropertyName("pending")] IReadOnlyList<QueuePendingView> Pending,
     [property: JsonPropertyName("pullRequests")] IReadOnlyList<QueuePullRequestView> PullRequests,
-    [property: JsonPropertyName("pullRequestHistory")] IReadOnlyList<QueuePullRequestView> PullRequestHistory);
+    [property: JsonPropertyName("pullRequestHistory")] IReadOnlyList<QueuePullRequestView> PullRequestHistory,
+    [property: JsonPropertyName("retiredHistory")] IReadOnlyList<QueueRetiredView> RetiredHistory);

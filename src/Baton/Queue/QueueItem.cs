@@ -134,6 +134,28 @@ public sealed record QueueItem
     /// </remarks>
     public string? ReadinessMutationClaim { get; init; }
 
+    /// <summary>A retained disposition, atomically recording kind, time, and reason.</summary>
+    public QueueRetirement? Retirement { get; init; }
+
+    /// <summary>
+    /// Legacy single-operation shape. New writers retain every committed operation in
+    /// <see cref="DispositionOperations"/>; this remains readable for queue files written before the
+    /// ordered outbox existed.
+    /// </summary>
+    public QueueDispositionOperation? DispositionOperation { get; init; }
+
+    /// <summary>
+    /// Ordered durable outbox of committed retirement and restoration facts. Operations are retained
+    /// after acknowledgement: a queue CAS must never make an earlier append failure unrecoverable
+    /// when a later disposition is requested.
+    /// </summary>
+    public IReadOnlyList<QueueDispositionOperation>? DispositionOperations { get; init; }
+
+    /// <summary>All durable disposition facts, including the backward-compatible single-operation shape.</summary>
+    [JsonIgnore]
+    public IReadOnlyList<QueueDispositionOperation> DispositionOutbox =>
+        DispositionOperations ?? (DispositionOperation is null ? [] : [DispositionOperation]);
+
     /// <summary>
     /// The verdict the last review produced, as an absolute path to that room's <c>verdict.json</c>.
     /// <b>Recorded, never inlined into the next brief from here</b> — the brief carries the findings'
@@ -275,6 +297,23 @@ public sealed record QueueItem
     /// </summary>
     public bool PinModel { get; init; }
 }
+
+/// <summary>Why a lifecycle row is retained as history rather than active attention.</summary>
+public sealed record QueueRetirement(
+    [property: JsonPropertyName("kind")] string Kind,
+    [property: JsonPropertyName("at")] DateTimeOffset At,
+    [property: JsonPropertyName("reason")] string Reason)
+{
+    public const string Merged = "merged";
+    public const string Operator = "operator";
+}
+
+/// <summary>One queue-committed retirement or restoration awaiting (or retaining) its ledger fact.</summary>
+public sealed record QueueDispositionOperation(
+    [property: JsonPropertyName("key")] string Key,
+    [property: JsonPropertyName("at")] DateTimeOffset At,
+    [property: JsonPropertyName("decision")] string Decision,
+    [property: JsonPropertyName("reason")] string Reason);
 
 /// <summary>
 /// Where an item is with respect to <em>launching</em>. Five states: cancellation is terminal, while the
