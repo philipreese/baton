@@ -48,10 +48,21 @@ The [arm comparator](benchmarks/comparator.md) records the matched-brief routing
 | `baton queue add <tag> --role <r> --spec <f> (--issue <n> \| --workspace <d>) [--scope engine\|tooling\|docs] [--adapter] [--model] [--effort] [--skill <name>] [--require <capability>] [--timeout] [--max-tool-steps] [--token-budget] [--override-runway <reason>] [--reason <why>]` | Queue a dispatch request. `--skill` and `--require` are repeatable; requirements are compared with the effective role grant before a lane has a room or vendor process, never used to broaden that grant. `queue list` exposes declared/unknown migration coverage. Copies the spec into `~/.baton/queue/specs/<tag>.md`; `--issue` provisions and trusts a worktree there and then. |
 | `baton queue add --issue <n> --lifecycle [--spec <f>] [--scope …]` | Queue an issue-anchored **work item** instead: the daemon derives its next dispatch (implement → review → fix round → re-review → ready) from the PR's and the last verdict's state, and renders each brief from `~/.baton/queue/templates/`. Without `--spec` the implement brief comes from the issue body; with one, that file's text becomes its "## Do" section. |
 | `baton queue list [--active]` / `baton queue hold` / `baton queue resume` / `baton queue import <file>` | Show each item's state, stage and room, pause and unpause launches without stopping the daemon, and import the pre-Baton scratchpad queue file. `--active` limits the view to queued or launched work and lifecycle terminal items that still need attention. |
+| `baton conductor claim <holder> [--workspace <dir>]` / `list [--json]` / `release <holder> [--workspace <dir>] --reason <text>` / `takeover <holder> [--workspace <dir>] --reason <text>` | Durable repository-claim register coordinating external conductor sessions across disjoint repositories (`spec/baton.md` §14). Mutation enforcement is deferred. |
 | `baton mcp` / `baton daemon` | The stdio MCP server workers connect to (`fleet_status`, `yield`, `memory-edit-proposal`, `promote-artifact`, `room_detail`), and the narrowed background daemon (`spec/baton.md` §7). |
 
 `spec/baton.md` is the authority on every verb's exact contract — this table is an index, not a
 restatement.
+
+## Conductor repository claims
+
+`baton conductor` is a durable coordination register for external conductors: one canonical
+repository identity has at most one current holder. Its claim file is
+`~/.baton/<repository-slug>/conductor-claim.json`; a missing file is unheld, while corrupt or
+unreadable state fails closed and is preserved for operator recovery rather than overwritten.
+Use `claim`, `list`, `release`, and `takeover` as listed above. Claims do not yet enforce queue,
+room, or other mutations. The normative contract and recovery details are in
+[`spec/baton.md` §14](spec/baton.md#14-conductor-claims-durable-repository-ownership-register-2296).
 
 ## The conductor queue
 

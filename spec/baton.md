@@ -7732,6 +7732,37 @@ to one line.
 
 ---
 
+## §14 Conductor claims: durable repository-ownership register (#2296)
+
+Two external conductor sessions may use the same Baton daemon only when they own disjoint repositories. Baton previously had no durable register for that ownership, so agreement existed only in operator chat and one conductor could not distinguish an unheld repository from one actively conducted elsewhere.
+
+This section defines the first bounded slice: a durable, auditable repository-claim register and CLI. This slice deliberately does **not** enforce claims on queue or room mutations yet; it creates the single authoritative seam that the enforcement slice will consume.
+
+### Protected invariant
+
+- **At most one current holder exists for one canonical repository identity.** Claims are keyed by `RepositoryIdentity.FileSlug`, derived from the canonical remote URL or, when no origin is available, the canonical git common directory via `RepositoryIdentityResolver`. The common-directory fallback is shared by linked worktrees; it is not a root commit. A path that cannot produce a canonical repository identity is refused; claims are never keyed by an ad hoc checkout path or free-form spelling.
+- **Two worktrees of the same repository share the exact same claim.** A claim acquired in one worktree holds the canonical repository identity across all linked checkouts.
+- **Racing claims yield exactly one winner.** When two conductors race to claim the same repository, mutex-guarded serialization ensures exactly one succeeds and the other fails closed. Claims for different repositories do not block one another.
+- **Durable across restarts.** Claim, release, and takeover transitions are serialized and durable across CLI and daemon restart.
+- **Corruption fails closed.** A missing file indicates an unheld repository, but an empty or malformed claim file produces a handled domain error (`ConductorClaimException`) and preserves the existing file on disk byte-for-byte; corrupt state is never interpreted as an empty registry.
+- **Coordination, not adversarial security.** There is no automatic lease expiry or heartbeat inference: a quiet or sleeping conductor is not evidence of abandonment. Takeover is explicit and requires a non-blank reason.
+
+### Commands
+
+- `baton conductor claim <holder> [--workspace <dir>]`: Acquires the canonical repository containing the workspace (workspace defaults to current directory). If already held by the same holder, succeeds idempotently without updating acquisition timestamp. If held by another conductor, fails closed naming the current holder and the explicit takeover invocation.
+- `baton conductor list [--json]`: Lists all currently held repository claims in deterministic alphabetical order by repository identity. Shows repository, holder, acquisition timestamp, and takeover provenance (displaced holder, takeover timestamp, reason). Text and JSON formats expose sufficient provenance for Fleet Glass.
+- `baton conductor release <holder> [--workspace <dir>] --reason <text>`: Releases a claim currently held by `<holder>`. Fails closed if held by anyone else, if unheld, or if `--reason` is blank.
+- `baton conductor takeover <holder> [--workspace <dir>] --reason <text>`: Explicitly replaces another holder. Fails closed if the repository is unheld, already held by `<holder>`, or if `--reason` is blank. Records displaced holder, reason, and takeover timestamp.
+
+### Where it lives and persistence
+
+- **`{Root}/<repository-slug>/conductor-claim.json`** (`BatonPaths.ConductorClaimFile(repositorySlug)`) — the per-repository claim document stored in the per-repository directory under Baton root (`~/.baton/<repository-slug>/`).
+- Writes are serialized with `MutexGuardedFileLock` using the `baton-conductor-claim` mutex prefix.
+- Writes use atomic replacement (`.tmp` file written then replaced via `File.Move(..., overwrite: true)`).
+- The durable record maintains full audit history in `transitions[]`, tracking every `Claim`, `Takeover`, and `Release` transition with timestamps, holders, displaced holders, and reasons.
+
+---
+
 ## Appendix: full subsystem ruling table
 
 One vocabulary note, so this table and §11 never diverge: code is **DELETED** or **NARROWED** —
