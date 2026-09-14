@@ -50,6 +50,20 @@ public static class ExecutionBindingResolver
                     modelByExecutionId[executionId] = model;
                 }
             }
+            else if (entry is LogEntry.FlowLogEntry { Event: FlowEvent.ArtifactCheckpointAttempted { Request: { } checkpointRequest } })
+            {
+                var executionId = checkpointRequest.ExecutionId.Value;
+                executionIds.Add(executionId);
+                if (checkpointRequest.Adapter is { Length: > 0 } adapter)
+                {
+                    adapterByExecutionId[executionId] = adapter;
+                }
+
+                if (checkpointRequest.Model is { Length: > 0 } model)
+                {
+                    modelByExecutionId[executionId] = model;
+                }
+            }
             else if (entry is LogEntry.FlowLogEntry { Event: FlowEvent.StepRebound rebound })
             {
                 var executionId = rebound.ForExecutionId.Value;

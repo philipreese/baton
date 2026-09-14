@@ -707,7 +707,7 @@ public sealed class CodexWorkerAdapter : IWorkerAdapter, IPermissionGrantTransla
         args.Add(feature);
     }
 
-    private static CoreDispatchTarget ResolveBroker(
+    private CoreDispatchTarget ResolveBroker(
         WorkerInvocation invocation, WorkerContract contract, PermissionGrant grant)
     {
         ValidateModel(invocation.Model);
@@ -747,17 +747,20 @@ public sealed class CodexWorkerAdapter : IWorkerAdapter, IPermissionGrantTransla
             contract.ProducedOutputs.Select(output => output.Name).ToArray(),
             invocation.AllowsSubagents,
             pullRequestCreateProvenance);
-        var configJson = JsonSerializer.Serialize(configuration);
-
-        return new CoreDispatchTarget(
+        CoreDispatchTarget BuildBrokerTarget(CodexBrokerConfiguration brokerConfiguration, string brokerPrompt) => new(
             "dotnet",
-            [hostDllPath, "codex-broker", "--config", configPath, prompt],
+            [hostDllPath, "codex-broker", "--config", configPath, brokerPrompt],
             invocation.WorkingDirectory,
-            PromptText: prompt,
+            PromptText: brokerPrompt,
             OversizePromptWrapper: OversizePromptWrapperText,
-            SeedFiles: [new CoreDispatchSeedFile(configPath, configJson)],
+            SeedFiles: [new CoreDispatchSeedFile(configPath, JsonSerializer.Serialize(brokerConfiguration))],
             DetectsTerminalSuccess: IsTerminalSuccessLine,
-            DetectsTerminalResult: IsTerminalResultLine);
+            DetectsTerminalResult: IsTerminalResultLine,
+            TryGetSessionId: line => TryParseSessionId(line, out var sessionId) ? sessionId : null,
+            ResumeTarget: (sessionId, replacementPrompt) => BuildBrokerTarget(
+                brokerConfiguration with { SessionId = sessionId, ResumeSession = true }, replacementPrompt));
+
+        return BuildBrokerTarget(configuration, prompt);
     }
 
     private static string ResolvePermissionMode(WorkerInvocation invocation)

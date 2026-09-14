@@ -2589,7 +2589,7 @@ public static class MutationInterface
             // This is the one durable spend claim. If the process dies after this append, replay sees
             // the checkpoint as spent and never grants the arrested execution another recovery turn.
             await eventLogWriter.AppendAsync(new FlowEvent.ArtifactCheckpointAttempted(
-                checkpointExecutionId, prepared.Request.ExecutionId, missing), CancellationToken.None).ConfigureAwait(false);
+                checkpointExecutionId, prepared.Request.ExecutionId, missing, request), CancellationToken.None).ConfigureAwait(false);
             result = await dispatcher.DispatchAsync(request, target, linked?.Token ?? checkpointCancellation.Token).ConfigureAwait(false);
         }
         catch (Exception ex) when (ex is not OperationCanceledException

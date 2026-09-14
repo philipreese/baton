@@ -290,6 +290,11 @@ public static class ExecutionUsageProjector
                 workerNameByExecutionId[accepted.Request.ExecutionId.Value] = accepted.Request.Worker;
             }
 
+            if (entry is LogEntry.FlowLogEntry { Event: FlowEvent.ArtifactCheckpointAttempted { Request: { } checkpointRequest } })
+            {
+                workerNameByExecutionId[checkpointRequest.ExecutionId.Value] = checkpointRequest.Worker;
+            }
+
             if (entry is LogEntry.FlowLogEntry flowEntry)
             {
                 (ExecutionId, long)? peak = flowEntry.Event switch

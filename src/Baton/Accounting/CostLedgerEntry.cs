@@ -635,4 +635,13 @@ public sealed record CostLedgerEntry(
     /// </summary>
     [property: JsonPropertyName("identitySource")]
     [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
-    RepositoryIdentitySource? IdentitySource = null);
+    RepositoryIdentitySource? IdentitySource = null,
+    [property: JsonPropertyName("predecessorExecution")]
+    [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    string? PredecessorExecution = null,
+    [property: JsonPropertyName("exitReason")]
+    [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    CoreExitReason? ExitReason = null,
+    [property: JsonPropertyName("arrestReason")]
+    [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    ArrestReason? ArrestReason = null);

@@ -153,6 +153,10 @@ public static class QuotaLedgerStore
                 case FlowEvent.ExecutionArrested arrested:
                     outcomeByExecutionId[arrested.ExecutionId.Value] = "Arrested";
                     break;
+
+                case FlowEvent.ArtifactCheckpointCompleted checkpoint:
+                    outcomeByExecutionId[checkpoint.CheckpointExecutionId.Value] = "ArtifactCheckpoint";
+                    break;
             }
         }
 

@@ -96,7 +96,8 @@ public sealed record CoreDispatchTarget(
     // prompt and streams must remain an independently attributable capture.
     string? CaptureDirectory = null,
     Func<string, string?>? TryGetSessionId = null,
-    Func<string, string, IReadOnlyList<string>>? ResumeArgs = null)
+    Func<string, string, IReadOnlyList<string>>? ResumeArgs = null,
+    Func<string, string, CoreDispatchTarget>? ResumeTarget = null)
 {
     /// <summary>Returns a target whose broker is restricted to the named declared-output tools.</summary>
     public CoreDispatchTarget WithArtifactOnlyOutputs(IReadOnlyList<string> outputNames)
@@ -118,6 +119,11 @@ public sealed record CoreDispatchTarget(
     {
         ArgumentException.ThrowIfNullOrWhiteSpace(sessionId);
         ArgumentException.ThrowIfNullOrWhiteSpace(prompt);
+        if (ResumeTarget is not null)
+        {
+            return ResumeTarget(sessionId, prompt);
+        }
+
         if (ResumeArgs is null)
         {
             throw new InvalidOperationException($"'{Program}' did not provide a session-resume shape.");

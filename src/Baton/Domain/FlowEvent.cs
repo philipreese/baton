@@ -534,7 +534,8 @@ public abstract record FlowEvent
     public sealed record ArtifactCheckpointAttempted(
         ExecutionId CheckpointExecutionId,
         ExecutionId PredecessorExecutionId,
-        IReadOnlyList<string> OutputNames) : FlowEvent;
+        IReadOnlyList<string> OutputNames,
+        ExecutionRequest? Request = null) : FlowEvent;
 
     /// <summary>The separately attributable completion account for an already-claimed artifact checkpoint.</summary>
     public sealed record ArtifactCheckpointCompleted(

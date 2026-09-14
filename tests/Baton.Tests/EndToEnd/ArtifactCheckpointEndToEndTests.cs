@@ -75,9 +75,9 @@ public sealed class ArtifactCheckpointEndToEndTests
         {
             var snapshot = new WorkflowDefinitionSnapshot(
                 new WorkflowDefinitionSnapshotId("artifact-checkpoint-cancel"), new WorkflowTemplateId("review"), 1,
-                [new WorkflowStepDefinition(new StepId("review"), "review", [], ["report.md"], DependsOn: [], RetryPolicy: new RetryPolicy(1))]);
+                [new WorkflowStepDefinition(new StepId("review"), "review", [], ["report.md", "verdict.json"], DependsOn: [], RetryPolicy: new RetryPolicy(1))]);
             var binding = new WorkerBinding.Process(
-                new WorkerContract("review", [], [new ProducedOutput("report.md")], []),
+                new WorkerContract("review", [], [new ProducedOutput("report.md"), new ProducedOutput("verdict.json")], []),
                 CheckpointTarget(workspace),
                 TimeSpan.FromSeconds(30), Adapter: "codex", TokenBudget: 100, VerifiesWorkspace: false);
             using var cancellation = new CancellationTokenSource();

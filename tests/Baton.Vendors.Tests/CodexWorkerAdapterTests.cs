@@ -223,6 +223,20 @@ public sealed class CodexWorkerAdapterTests
         Assert.Equal(target.PromptText, target.Args[^1]);
     }
 
+    [Fact]
+    public void Broker_target_captures_the_observed_session_and_reseeds_a_resuming_configuration()
+    {
+        var target = new CodexWorkerAdapter().Resolve(
+            new WorkerInvocation("Review.", PermissionGrant: new PermissionGrant(ReadFiles: true)), SingleOutputContract);
+
+        Assert.Equal("observed-session", target.TryGetSessionId!("""{"type":"thread.started","thread_id":"observed-session"}"""));
+        var resumed = target.WithResumedSession("observed-session", "Write only the missing artifact.");
+
+        Assert.Equal("Write only the missing artifact.", resumed.PromptText);
+        Assert.Equal("observed-session", BrokerConfiguration(resumed).SessionId);
+        Assert.True(BrokerConfiguration(resumed).ResumeSession);
+    }
+
     public static TheoryData<PermissionGrant> BrokeredGrants => new()
     {
         new PermissionGrant(),

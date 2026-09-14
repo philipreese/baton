@@ -124,6 +124,8 @@ public static partial class CostLedgerStore
         var startedAtByExecutionId = new Dictionary<string, DateTime>(StringComparer.Ordinal);
         var exitedAtByExecutionId = new Dictionary<string, DateTime>(StringComparer.Ordinal);
         var requestByExecutionId = new Dictionary<string, ExecutionRequest>(StringComparer.Ordinal);
+        var checkpointPredecessorByExecutionId = new Dictionary<string, string>(StringComparer.Ordinal);
+        var checkpointTerminalByExecutionId = new Dictionary<string, (CoreExitReason ExitReason, ArrestReason? ArrestReason)>(StringComparer.Ordinal);
 
         foreach (var entry in entries)
         {
@@ -149,6 +151,15 @@ public static partial class CostLedgerStore
             {
                 case FlowEvent.ExecutionRequestAccepted accepted:
                     requestByExecutionId[accepted.Request.ExecutionId.Value] = accepted.Request;
+                    break;
+
+                case FlowEvent.ArtifactCheckpointAttempted { Request: { } checkpointRequest } checkpoint:
+                    requestByExecutionId[checkpointRequest.ExecutionId.Value] = checkpointRequest;
+                    checkpointPredecessorByExecutionId[checkpoint.CheckpointExecutionId.Value] = checkpoint.PredecessorExecutionId.Value;
+                    break;
+
+                case FlowEvent.ArtifactCheckpointAttempted checkpoint:
+                    checkpointPredecessorByExecutionId[checkpoint.CheckpointExecutionId.Value] = checkpoint.PredecessorExecutionId.Value;
                     break;
 
                 // The same closed outcome token set QuotaLedgerEntry.Outcome documents -- one
@@ -180,6 +191,11 @@ public static partial class CostLedgerStore
 
                 case FlowEvent.ExecutionArrested arrested:
                     outcomeByExecutionId[arrested.ExecutionId.Value] = "Arrested";
+                    break;
+
+                case FlowEvent.ArtifactCheckpointCompleted checkpoint:
+                    outcomeByExecutionId[checkpoint.CheckpointExecutionId.Value] = "ArtifactCheckpoint";
+                    checkpointTerminalByExecutionId[checkpoint.CheckpointExecutionId.Value] = (checkpoint.ExitReason, checkpoint.ArrestReason);
                     break;
             }
         }
@@ -316,7 +332,14 @@ public static partial class CostLedgerStore
                     && labelByWorker.TryGetValue(labelWorker, out var label)
                         ? label
                         : null,
-                IdentitySource: identitySource));
+                IdentitySource: identitySource,
+                PredecessorExecution: checkpointPredecessorByExecutionId.GetValueOrDefault(executionId),
+                ExitReason: checkpointTerminalByExecutionId.TryGetValue(executionId, out var checkpointTerminal)
+                    ? checkpointTerminal.ExitReason
+                    : null,
+                ArrestReason: checkpointTerminalByExecutionId.TryGetValue(executionId, out checkpointTerminal)
+                    ? checkpointTerminal.ArrestReason
+                    : null));
         }
 
         return result;
