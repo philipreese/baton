@@ -2361,8 +2361,11 @@ smaller recovery spend. Its fixed
 `Mutation.ArtifactCheckpoint` caps are separate from the ordinary role budget. The dispatch replaces
 the prompt and exposes only `artifact:<name>` tools for the still-missing declared names: no repository
 read, shell, network, workspace mutation, commit, push, or ordinary role tool survives. It is not a
-second investigation budget and never changes the final arrested room from `Indeterminate`; absent or
-invalid outputs remain ordinary output-contract failures. Cancellation, rejection, validation refusal,
+second investigation budget. After it returns, a read-shaped role whose complete contract now validates
+settles successfully while retaining its truthful cap measurement; an already-valid sibling remains
+untouched, and an absent or invalid output remains an ordinary output-contract failure and `Indeterminate`.
+Roles with workspace, verification, or delivery obligations remain arrested for their separate recovery
+path. Cancellation, rejection, validation refusal,
 workspace-safety arrest, billed-rate arrest, and timeout do not receive this checkpoint. A checkpoint
 spawn failure is itself journaled and never prevents the original arrest from being recorded.
 

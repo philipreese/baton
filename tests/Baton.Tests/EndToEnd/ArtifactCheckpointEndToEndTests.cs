@@ -147,8 +147,8 @@ public sealed class ArtifactCheckpointEndToEndTests
             Assert.Equal(ArtifactCheckpoint.PromptText, dispatcher.CheckpointTarget.PromptText);
             Assert.NotNull(dispatcher.CheckpointTarget.CaptureDirectory);
             Assert.NotEqual(artifacts, dispatcher.CheckpointTarget.CaptureDirectory);
-            Assert.True(File.Exists(Path.Combine(artifacts, "report.md")));
-            Assert.False(File.Exists(Path.Combine(artifacts, "verdict.json")));
+            Assert.True(File.Exists(Path.Combine(dispatcher.OutputDirectory!, "report.md")));
+            Assert.False(File.Exists(Path.Combine(dispatcher.OutputDirectory!, "verdict.json")));
             var checkpoint = Assert.Single(events.OfType<FlowEvent.ArtifactCheckpointAttempted>());
             Assert.Equal(["report.md", "verdict.json"], checkpoint.OutputNames);
             Assert.NotEqual(checkpoint.PredecessorExecutionId, checkpoint.CheckpointExecutionId);
@@ -157,6 +157,36 @@ public sealed class ArtifactCheckpointEndToEndTests
             var ordered = events.Where(e => e is FlowEvent.ArtifactCheckpointAttempted or FlowEvent.ExecutionArrested).ToArray();
             Assert.IsType<FlowEvent.ArtifactCheckpointAttempted>(ordered[0]);
             Assert.IsType<FlowEvent.ExecutionArrested>(ordered[1]);
+        }
+        finally
+        {
+            DirectoryCleanup.DeleteRecursively(room);
+        }
+    }
+
+    [Fact]
+    public async Task A_partial_valid_review_contract_survives_the_checkpoint_and_settles_successfully()
+    {
+        var room = Path.Combine(Path.GetTempPath(), "baton-artifact-checkpoint-partial-" + Guid.NewGuid().ToString("N"));
+        var workspace = Path.Combine(room, "workspace");
+        var artifacts = Path.Combine(room, "artifacts");
+        var log = Path.Combine(room, "flow.jsonl");
+        Directory.CreateDirectory(workspace);
+        try
+        {
+            var state = await RunCheckpointExecutionAsync(
+                room, workspace, artifacts, log,
+                [new ProducedOutput("report.md", Schema: OutputSchema.NonEmptyText),
+                 new ProducedOutput("verdict.json", Schema: OutputSchema.NonEmptyText)],
+                artifactDirectory => File.WriteAllText(Path.Combine(artifactDirectory, "report.md"), "Review complete."),
+                artifactDirectory => File.WriteAllText(Path.Combine(artifactDirectory, "verdict.json"), "{\"decision\":\"approve\"}"));
+
+            var events = await new FlowEventLogReader(log).ReadAllAsync(TestContext.Current.CancellationToken);
+            Assert.Equal(StepStatus.Succeeded, Assert.Single(state.Steps).Status);
+            Assert.Single(events.OfType<FlowEvent.ExecutionArrested>());
+            Assert.Single(events.OfType<FlowEvent.ExecutionSucceeded>());
+            var checkpoint = Assert.Single(events.OfType<FlowEvent.ArtifactCheckpointAttempted>());
+            Assert.Equal(["verdict.json"], checkpoint.OutputNames);
         }
         finally
         {
@@ -306,14 +336,41 @@ public sealed class ArtifactCheckpointEndToEndTests
             cancellationToken: TestContext.Current.CancellationToken);
     }
 
+    private static async Task<FlowState> RunCheckpointExecutionAsync(
+        string room,
+        string workspace,
+        string artifacts,
+        string log,
+        IReadOnlyList<ProducedOutput> outputs,
+        Action<string> writeAtCap,
+        Action<string> writeAtCheckpoint)
+    {
+        var stepId = new StepId("review");
+        var snapshot = new WorkflowDefinitionSnapshot(
+            new WorkflowDefinitionSnapshotId("artifact-checkpoint-partial"), new WorkflowTemplateId("review"), 1,
+            [new WorkflowStepDefinition(stepId, "review", [], outputs.Select(output => output.Name).ToArray(), DependsOn: [], RetryPolicy: new RetryPolicy(1))]);
+        var binding = new WorkerBinding.Process(
+            new WorkerContract("review", [], outputs, []), CheckpointTarget(workspace), TimeSpan.FromSeconds(30),
+            Adapter: "codex", TokenBudget: 100, VerifiesWorkspace: false);
+        var dispatcher = new CheckpointDispatcher(artifacts, writeAtCap: writeAtCap, writeAtCheckpoint: writeAtCheckpoint);
+        await using var writer = new FlowEventLogWriter(log);
+        var reader = new FlowEventLogReader(log);
+        return await MutationInterface.StartWorkflowAsync(
+            new WorkflowId("artifact-checkpoint-partial"), room, snapshot,
+            new Dictionary<string, WorkerBinding> { ["review"] = binding }, artifacts, reader, writer, dispatcher,
+            cancellationToken: TestContext.Current.CancellationToken);
+    }
+
     private sealed class CheckpointDispatcher(
         string artifacts,
         Action? cancelAfterCap = null,
         Action<string>? writeAtCap = null,
+        Action<string>? writeAtCheckpoint = null,
         bool finishAtCap = false) : ICoreDispatcher
     {
         public int CallCount { get; private set; }
         public CoreDispatchTarget? CheckpointTarget { get; private set; }
+        public string? OutputDirectory { get; private set; }
 
         public async Task<CoreDispatchResult> DispatchAsync(
             ExecutionRequest request, CoreDispatchTarget target, CancellationToken cancellationToken = default)
@@ -323,12 +380,13 @@ public sealed class ArtifactCheckpointEndToEndTests
             {
                 target.OnStdoutLine?.Invoke("""{"type":"thread.started","thread_id":"checkpoint-session"}""");
                 target.OnStdoutLine?.Invoke(ArrestingUsage);
-                var outputDirectory = request.Environment
+                var primaryOutputDirectory = request.Environment
                     .OfType<EnvironmentVariable.BatonComputed>()
                     .Single(variable => variable.Name == "BATON_OUTPUT_DIR")
                     .Value;
-                Directory.CreateDirectory(outputDirectory);
-                writeAtCap?.Invoke(outputDirectory);
+                OutputDirectory = primaryOutputDirectory;
+                Directory.CreateDirectory(primaryOutputDirectory);
+                writeAtCap?.Invoke(primaryOutputDirectory);
                 if (finishAtCap)
                 {
                     return new CoreDispatchResult(0, CoreExitReason.Natural);
@@ -342,8 +400,20 @@ public sealed class ArtifactCheckpointEndToEndTests
             }
 
             CheckpointTarget = target;
+            var outputDirectory = request.Environment
+                .OfType<EnvironmentVariable.BatonComputed>()
+                .Single(variable => variable.Name == "BATON_OUTPUT_DIR")
+                .Value;
             Directory.CreateDirectory(artifacts);
-            File.WriteAllText(Path.Combine(artifacts, "report.md"), "BLOCK: insufficient observed evidence.");
+            Directory.CreateDirectory(outputDirectory);
+            if (writeAtCheckpoint is not null)
+            {
+                writeAtCheckpoint(outputDirectory);
+            }
+            else
+            {
+                File.WriteAllText(Path.Combine(outputDirectory, "report.md"), "BLOCK: insufficient observed evidence.");
+            }
             return new CoreDispatchResult(0, CoreExitReason.Natural);
         }
     }

@@ -2204,6 +2204,30 @@ public static class MutationInterface
                 await RunArtifactCheckpointAsync(prepared, binding, checkpointSessionId, budgetMonitor, dispatcher, eventLogReader, eventLogWriter, dispatchCancellationToken, hostCancellationToken)
                     .ConfigureAwait(false);
 
+                // The checkpoint can complete a partially-written read-shaped contract without
+                // changing the ordinary cap account. Re-validate the whole contract here: the
+                // checkpoint may write only absent names, so an already-invalid sibling cannot be
+                // repaired or turned into success by this path. Mutating, verifying, and delivering
+                // roles still require their normal post-dispatch obligations and therefore retain
+                // the authoritative arrest below even if changes.md is now present.
+                if (!binding.VerifiesWorkspace
+                    && !binding.ChangesTree
+                    && !binding.DeliversBranch
+                    && ContractValidator.IsSatisfied(binding.Contract, prepared.OutputDirectory))
+                {
+                    await eventLogWriter.AppendAsync(
+                            CreateExecutionArrested(prepared, binding, budgetMonitor, workspaceChanged: null),
+                            CancellationToken.None)
+                        .ConfigureAwait(false);
+                    await eventLogWriter.AppendAsync(
+                            new FlowEvent.ExecutionSucceeded(
+                                prepared.Request.ExecutionId,
+                                PeakBilledInWindow: budgetMonitor.SnapshotPeakBilledInWindow()),
+                            CancellationToken.None)
+                        .ConfigureAwait(false);
+                    return;
+                }
+
                 // #2134 (`spec/baton.md` §3, "The grace turn"): reuses #2029's VerifiesWorkspace set
                 // and #1373's own dirty-tree probe (Workspaces.WorktreeProvisioner.Audit) rather than a
                 // fresh one.
