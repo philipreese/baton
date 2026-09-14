@@ -347,7 +347,8 @@ public sealed class FleetStatusTool : IMcpTool
                 ContinuedSessionId: terminalLineage.ContinuedSessionId,
                 TerminalAt: sentinel.TerminalAt,
                 Delivery: await TryResolveDeliveryAsync(roomDir, sentinel.Outputs, cancellationToken).ConfigureAwait(false),
-                Runway: ExtractRoomRunway(terminalBindings));
+                Runway: ExtractRoomRunway(terminalBindings),
+                DeclaredTaskSize: ExtractRoomDeclaredTaskSize(terminalBindings));
         }
 
         // 2. Active room: load snapshot + flow events and project
@@ -372,7 +373,8 @@ public sealed class FleetStatusTool : IMcpTool
                     EffortSource: effortSource,
                     Label: ExtractRoomLabel(bindings),
                     Workstream: ExtractRoomWorkstream(bindings),
-                    Runway: ExtractRoomRunway(bindings));
+                    Runway: ExtractRoomRunway(bindings),
+                    DeclaredTaskSize: ExtractRoomDeclaredTaskSize(bindings));
             }
 
             return new FleetRoomStatusView(
@@ -520,7 +522,8 @@ public sealed class FleetStatusTool : IMcpTool
                 Delivery: await TryResolveDeliveryAsync(roomDir, view.Outputs, cancellationToken).ConfigureAwait(false),
                 Arrests: view.Arrests,
                 ArrestLedgerUnavailableReason: view.ArrestLedgerUnavailableReason,
-                Runway: ExtractRoomRunway(bindings));
+                Runway: ExtractRoomRunway(bindings),
+                DeclaredTaskSize: ExtractRoomDeclaredTaskSize(bindings));
         }
         catch (Exception ex) when (ex is not OperationCanceledException)
         {
@@ -731,6 +734,10 @@ public sealed class FleetStatusTool : IMcpTool
     private static string? ExtractRoomWorkstream(IReadOnlyDictionary<string, WorkerBindingConfigEntry>? bindings) =>
         bindings?.Values.Select(entry => entry.Workstream).FirstOrDefault(workstream => workstream is not null);
 
+    private static DeclaredTaskSize ExtractRoomDeclaredTaskSize(IReadOnlyDictionary<string, WorkerBindingConfigEntry>? bindings) =>
+        bindings?.Values.Select(entry => entry.DeclaredTaskSize?.Size).FirstOrDefault(size => size is not null)
+        ?? DeclaredTaskSize.Unknown;
+
     /// <summary>
     /// Extracts a room's runway admissions (#1896) off its loaded <c>bindings.json</c> — read the same way
     /// <see cref="ExtractRoomLabel"/> reads its own room-level stamp, but kept as a LIST: unlike a label,
@@ -830,6 +837,8 @@ public sealed record FleetRoomStatusView(
     [property: JsonPropertyName("terminalAt")]
     [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
     string? TerminalAt = null,
+    [property: JsonPropertyName("declaredTaskSize")]
+    DeclaredTaskSize DeclaredTaskSize = DeclaredTaskSize.Unknown,
     // #734: spec/baton.md §6 schema states this field's shape and its absence rule -- see there.
     [property: JsonPropertyName("delivery")]
     [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]

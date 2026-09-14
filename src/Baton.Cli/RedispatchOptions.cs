@@ -1,3 +1,5 @@
+using Baton.Domain;
+
 namespace Baton.Cli;
 
 /// <summary>
@@ -64,4 +66,5 @@ public sealed record RedispatchOptions(
     string? VerifyCommand = null,
     IReadOnlyList<string>? Skills = null,
     bool SkillsSpecified = false,
-    bool NoDefaultSkills = false);
+    bool NoDefaultSkills = false,
+    TaskSizeDeclaration? DeclaredTaskSize = null);

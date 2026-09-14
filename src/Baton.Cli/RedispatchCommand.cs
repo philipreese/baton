@@ -89,6 +89,16 @@ public static class RedispatchCommand
 
         var (workerName, parentEntry) = parentBindings.Single();
 
+        // A first launch freezes its routing declaration. Reject an attempted replacement while
+        // this command still has only the parent binding in hand: no child room or worker exists.
+        if (options.DeclaredTaskSize is { } requestedSize
+            && parentEntry.DeclaredTaskSize is { } recordedSize
+            && requestedSize != recordedSize)
+        {
+            throw new CliArgumentException(
+                $"This workstream recorded declared size '{recordedSize.Size.ToString().ToLowerInvariant()}'; redispatch cannot replace it.");
+        }
+
         // #1586 S1 (ratified amendment, consumer obligation item 2): an Indeterminate parent refuses
         // bare, mirroring #1604's signage pattern (a diagnosis plus a concrete next step) rather than
         // the ordinary warn-and-proceed a Failed/Cancelled parent gets below. "Indeterminate" means
@@ -204,6 +214,7 @@ public static class RedispatchCommand
                 Label = (options.LabelSpecified || options.Label is not null) ? options.Label : parentEntry.Label,
                 Workstream = (options.WorkstreamSpecified || options.Workstream is not null) ? options.Workstream : parentEntry.Workstream,
                 ToolSha = BatonPaths.TryResolveCurrentToolSha() ?? parentEntry.ToolSha,
+                DeclaredTaskSize = parentEntry.DeclaredTaskSize,
                 // #1151 is deliberately NOT restated here: RebuildFromAmendedSpecAsync hands the same
                 // ResolveSkills list to RoleSpecMaterializer, and RoleDispatch.ToBinding sets Skills from
                 // it (including the --skill "" clear, which resolves to an empty list and lands as null).
@@ -340,6 +351,7 @@ public static class RedispatchCommand
             Workstream = (options.WorkstreamSpecified || options.Workstream is not null) ? options.Workstream : parentEntry.Workstream, // #1619, spec/baton.md §2
             ToolSha = BatonPaths.TryResolveCurrentToolSha() ?? parentEntry.ToolSha, // #1668
             Skills = ResolveSkills(parentEntry, options), // #1151, spec/baton.md §9
+            DeclaredTaskSize = parentEntry.DeclaredTaskSize,
             // Adapter-derived, not role-derived, so it CAN be recomputed here — carrying the parent's
             // value across a vendor swap would stream-json a claude/agy worker (or text-mode a non-streaming one).
             // Grant/GrantAuditMode/worktree intent stay inherited: spec/baton.md §2 states why.
