@@ -72,7 +72,7 @@ VERB_RE = re.compile(r"\bbaton\s+([a-z][a-z0-9-]*)(?:\s+([a-z][a-z0-9-]*))?")
 VERB_GROUPS = frozenset({"audit", "ledger", "memory", "room", "rooms"})
 
 USAGE_CONST_RE = re.compile(
-    r'const\s+string\s+Usage\s*=\s*((?:"(?:[^"\\]|\\.)*"\s*\+?\s*)+);')
+    r'const\s+string\s+Usage\s*=\s*((?:\$?"(?:[^"\\]|\\.)*"\s*\+?\s*)+);')
 STRING_LITERAL_RE = re.compile(r'"((?:[^"\\]|\\.)*)"')
 CLASS_RE = re.compile(r"class\s+(\w+OptionsParser)\b")
 
@@ -478,6 +478,19 @@ def _selftest() -> int:
         problems = find_drift(parsers, known_verbs, clean_doc)
         if problems:
             failures.append(f"arm 4 FAILED: a clean doc invocation was reported as drift: {problems}")
+
+    # Constant interpolation lets a parser reference a shared vocabulary without making its Usage
+    # invisible to this check. The placeholder's prose is irrelevant here; the grammar flags remain
+    # literal and must still be extracted.
+    interpolated_usage_source = (
+        'namespace Baton.Cli;\npublic static class DispatchOptionsParser {\n'
+        'public const string Usage = $"Usage: baton dispatch <role> '
+        '[--declared-size <{TaskSizeDeclaration.Usage}>] [--size-rationale <clause>]";\n}\n')
+    interpolated_contract = parse_parser_file(
+        interpolated_usage_source, "src/Baton.Cli/DispatchOptionsParser.cs")
+    if interpolated_contract is None or interpolated_contract.all_flags != {
+            "--declared-size", "--size-rationale"}:
+        failures.append("arm 4b FAILED: a compile-time interpolated Usage constant was not extracted")
 
     # Arm 5: OR-group satisfied by either alternative, not both.
     fake_resume_usage = (

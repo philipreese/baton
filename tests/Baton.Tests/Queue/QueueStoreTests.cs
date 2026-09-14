@@ -126,16 +126,24 @@ public sealed class QueueStoreTests
         try
         {
             await File.WriteAllTextAsync(path, """
-                {"items":[{"tag":"legacy","role":"implement","workspace":"C:\\\\repos\\\\w1","specFile":"C:\\\\baton\\\\queue\\\\specs\\\\t.md","declaredTaskSize":null}],"held":false}
+                {"items":[{"Tag":"absent","Role":"implement","Workspace":"C:\\repos\\w1","SpecFile":"C:\\baton\\queue\\specs\\t.md"},{"Tag":"null","Role":"implement","Workspace":"C:\\repos\\w2","SpecFile":"C:\\baton\\queue\\specs\\t.md","DeclaredTaskSize":null}],"held":false}
                 """, Ct);
 
             var reloaded = await QueueStore.LoadAsync(path, Ct);
-            Assert.Equal(DeclaredTaskSize.Unknown, Assert.Single(reloaded.Items).DeclaredTaskSize.Size);
-            Assert.Null(reloaded.Items[0].DeclaredTaskSize.Rationale);
+            Assert.Equal(2, reloaded.Items.Count);
+            Assert.All(reloaded.Items, item => Assert.Equal(DeclaredTaskSize.Unknown, item.DeclaredTaskSize.Size));
+            Assert.All(reloaded.Items, item => Assert.Null(item.DeclaredTaskSize.Rationale));
 
             await QueueStore.MutateAsync(path, snapshot => snapshot, Ct);
             var json = await File.ReadAllTextAsync(path, Ct);
-            Assert.Contains("\"declaredTaskSize\":{\"size\":\"unknown\"", json, StringComparison.Ordinal);
+            using var document = System.Text.Json.JsonDocument.Parse(json);
+            var persistedItems = document.RootElement.GetProperty("items").EnumerateArray().ToList();
+            Assert.All(persistedItems, persisted =>
+            {
+                var declaration = persisted.GetProperty("DeclaredTaskSize");
+                Assert.Equal("unknown", declaration.GetProperty("size").GetString());
+                Assert.False(declaration.TryGetProperty("rationale", out _));
+            });
         }
         finally
         {

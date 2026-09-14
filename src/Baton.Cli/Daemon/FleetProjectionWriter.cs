@@ -298,7 +298,8 @@ public sealed class FleetProjectionWriter : BackgroundService
             if (view.State == "Running")
             {
                 liveLanes.Add(new QueueLiveLane(
-                    view.Path, view.Label, view.Role, view.Adapter, QueueWeights.For(view.Role, view.Adapter)));
+                    view.Path, view.Label, view.Role, view.Adapter, QueueWeights.For(view.Role, view.Adapter),
+                    view.DeclaredTaskSize));
             }
 
             var timelineEntries = await ResolveTimelineAsync(view.Path, diagnostics, cancellationToken)

@@ -11,7 +11,7 @@ namespace Baton.Cli;
 public static class RedispatchOptionsParser
 {
     /// <summary><c>baton redispatch</c>'s usage string, same role as <see cref="DispatchOptionsParser"/>'s own.</summary>
-    public static readonly string Usage =
+    public const string Usage =
         "Usage: baton redispatch <room-dir> [--spec <amended-brief>] [--attach <file>] [--adapter <name>] "
         + "[--model <name>] [--effort <name>] [--workspace <dir>] [--output <path>] [--timeout <minutes>] "
         + $"[--token-budget <n>] [--max-tool-steps <n>] [--billed-rate-limit <n>] [--verify <cmd>] [--skill <name>] [--no-default-skills] [--label <text>] [--workstream <slug>] [--declared-size <{Baton.Domain.TaskSizeDeclaration.Usage}>] [--size-rationale <clause>]";

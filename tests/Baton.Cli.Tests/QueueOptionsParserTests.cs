@@ -9,6 +9,13 @@ namespace Baton.Cli.Tests;
 /// </summary>
 public sealed class QueueOptionsParserTests
 {
+    [Fact]
+    public void Usage_names_the_lifecycle_declaration_flags_and_shared_vocabulary()
+    {
+        Assert.Contains($"--declared-size <{Baton.Domain.TaskSizeDeclaration.Usage}>", QueueOptionsParser.Usage, StringComparison.Ordinal);
+        Assert.Contains("--size-rationale <clause>", QueueOptionsParser.Usage, StringComparison.Ordinal);
+    }
+
     [Theory]
     [InlineData("small")]
     [InlineData("medium")]

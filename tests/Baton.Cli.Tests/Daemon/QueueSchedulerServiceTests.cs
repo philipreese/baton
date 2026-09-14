@@ -469,7 +469,7 @@ public sealed class QueueSchedulerServiceTests
     }
 
     [Fact]
-    public async Task A_replaced_task_size_declaration_cannot_be_claimed_or_launched_with_the_stale_rationale()
+    public async Task A_replaced_task_size_declaration_rejects_the_stale_claim_and_launches_the_reevaluated_rationale()
     {
         var home = CreateTempHome();
         using var scope = BatonEnvironmentSnapshot.BeginScope(BatonEnvironmentSnapshot.Blank with { HomeOverride = home });
@@ -499,9 +499,10 @@ public sealed class QueueSchedulerServiceTests
 
             await service.TickOnceAsync(Ct);
 
-            Assert.Empty(launches);
+            var launch = Assert.Single(launches);
+            Assert.Equal("a replacement rationale", launch.Item.DeclaredTaskSize.Rationale);
             var item = Assert.Single((await QueueStore.LoadAsync(BatonPaths.QueueFile, Ct)).Items);
-            Assert.Equal(QueueItemState.Queued, item.State);
+            Assert.Equal(QueueItemState.Launched, item.State);
             Assert.Equal("a replacement rationale", item.DeclaredTaskSize.Rationale);
         }
         finally

@@ -15,6 +15,7 @@ public static class QueueOptionsParser
     public const string Usage =
         "Usage: baton queue add <tag> --role <role> --spec <file> (--issue <n> | --workspace <dir>) " +
         "[--lifecycle [--stage implement|review|fix|re-review|continue] | --lifecycle-pin] " +
+        $"[--declared-size <{TaskSizeDeclaration.Usage}>] [--size-rationale <clause>] " +
         "[--scope engine|tooling|docs] [--adapter <a>] [--model <m>] [--effort <e>] " +
         "[--skill <name>] [--require repository-read|file-write|shell|network|github-read|github-write|artifact:<output-name>] " +
         "[--timeout <minutes>] " +
