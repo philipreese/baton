@@ -250,6 +250,7 @@ check("(control) an unheld queue does not",
       { tag: "a", stage: "review", state: "Done", round: 1, verdict: "block", checks: "failing", checksObservedAt: "2026-09-07T11:00:00Z", checksHeadSha: "bbbbbbbb22222222", twinIssue: 1530 },
       { tag: "cancelled", stage: "review", state: "Cancelled", round: 2 },
       { tag: "halted", stage: "fix", state: "Failed", round: 2, halted: true, twinIssue: 1600 },
+      { tag: "waiting", stage: "ready", state: "Queued", round: 2, requiredCheckEvidenceWait: { headSha: "cccccccc33333333", firstUnreadableAt: "2026-09-07T11:00:00Z", latestObservationAt: "2026-09-07T11:59:30Z", attemptCount: 2, reason: "required checks have not materialized" } },
     ] },
     { repository: "github.com/acme/two", pr: 2035, freshness: "unknown", attemptedAt: "2026-09-07T11:59:30Z", observationError: "repository identity invalid", deployment: "not-recorded", lanes: [
       { tag: "b", stage: "ready", state: "Queued", round: 3, verdict: "approve", checks: "passing", checksObservedAt: "2026-09-07T11:59:30Z" },
@@ -262,6 +263,8 @@ check("(control) an unheld queue does not",
   check("historical checks name their commit, while legacy checks say commit unknown",
         out.includes("failing (1h ago; bbbbbbbb)") && out.includes("passing (just now; commit unknown)"));
   check("(control) checks never observed says so, not 'passing'", out.includes("checks not observed"));
+  check("a required-check-evidence wait is operator-visible with its bounded-observation evidence",
+        out.includes("waiting for check evidence (2 observations; first observed 1h ago; last observed just now; cccccccc; required checks have not materialized)"));
   check("a halted work item remains marked on its grouped PR row", out.includes("halted lane"));
   check("a cancelled lane on a confirmed-open PR is labelled explicitly", out.includes("cancelled lane · open PR"));
   check("grouped current lanes retain their own twin markers, including different twins",

@@ -1609,7 +1609,12 @@ function queuePrRowsHtml(prs, heading){
       : observed === "just now" ? "last confirmed just now" : `last confirmed ${observed} ago`;
     const lanes = (Array.isArray(p.lanes) ? p.lanes : []).map(l => {
       const checksAge = age(l.checksObservedAt);
-      const checks = l.checks
+      const requiredCheckEvidenceWait = l.requiredCheckEvidenceWait;
+      const waitLatestAge = age(requiredCheckEvidenceWait && requiredCheckEvidenceWait.latestObservationAt);
+      const waitFirstAge = age(requiredCheckEvidenceWait && requiredCheckEvidenceWait.firstUnreadableAt);
+      const checks = requiredCheckEvidenceWait
+        ? `waiting for check evidence (${requiredCheckEvidenceWait.attemptCount || 0} observations; ${waitFirstAge === null ? "first observation age unknown" : waitFirstAge === "just now" ? "first observed just now" : "first observed " + waitFirstAge + " ago"}; ${waitLatestAge === null ? "latest observation age unknown" : waitLatestAge === "just now" ? "last observed just now" : "last observed " + waitLatestAge + " ago"}; ${requiredCheckEvidenceWait.headSha ? requiredCheckEvidenceWait.headSha.slice(0, 8) : "commit unknown"}; ${requiredCheckEvidenceWait.reason || "reason unavailable"})`
+        : l.checks
         ? `${l.checks} (${checksAge === null ? "age unknown" : checksAge === "just now" ? "just now" : checksAge + " ago"}; ${l.checksHeadSha ? l.checksHeadSha.slice(0, 8) : "commit unknown"})`
         : "checks not observed";
       const cancelledOpen = current && p.prState === "open" && l.state === "Cancelled";

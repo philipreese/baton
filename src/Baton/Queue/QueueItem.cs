@@ -223,6 +223,9 @@ public sealed record QueueItem
     /// </summary>
     public string? ChecksHeadSha { get; init; }
 
+    /// <summary>A bounded wait for GitHub to materialize required-check evidence for an open PR head.</summary>
+    public RequiredCheckEvidenceWait? RequiredCheckEvidenceWait { get; init; }
+
     /// <summary>The directory the worker runs in. Always set by the time an item is queued — an
     /// <c>--issue</c> item gets it from the worktree provisioned at add time.</summary>
     public required string Workspace { get; init; }
@@ -313,6 +316,14 @@ public sealed record QueueDispositionOperation(
     [property: JsonPropertyName("key")] string Key,
     [property: JsonPropertyName("at")] DateTimeOffset At,
     [property: JsonPropertyName("decision")] string Decision,
+    [property: JsonPropertyName("reason")] string Reason);
+
+/// <summary>Durable retry history for an open PR head whose required checks have not appeared yet.</summary>
+public sealed record RequiredCheckEvidenceWait(
+    [property: JsonPropertyName("headSha")] string HeadSha,
+    [property: JsonPropertyName("firstUnreadableAt")] DateTimeOffset FirstUnreadableAt,
+    [property: JsonPropertyName("latestObservationAt")] DateTimeOffset LatestObservationAt,
+    [property: JsonPropertyName("attemptCount")] int AttemptCount,
     [property: JsonPropertyName("reason")] string Reason);
 
 /// <summary>
