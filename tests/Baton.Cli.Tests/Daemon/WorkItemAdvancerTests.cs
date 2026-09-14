@@ -314,6 +314,113 @@ public sealed class WorkItemAdvancerTests
     }
 
     [Fact]
+    public async Task A_merged_admission_refused_roomless_failed_row_retires()
+    {
+        var home = CreateTempHome();
+        using var scope = BatonEnvironmentSnapshot.BeginScope(BatonEnvironmentSnapshot.Blank with { HomeOverride = home });
+        try
+        {
+            var seeded = await SeedAsync(home, WorkStage.Implement, Path.Combine(home, "unused"), QueueItemState.Failed);
+            await QueueStore.MutateAsync(BatonPaths.QueueFile, snapshot => snapshot with
+            {
+                Items = [seeded with
+                {
+                    RoomDirectory = null,
+                    LastAdmission = new TaskRequirementAdmission(
+                        [], ["repository-read"], TaskRequirementAdmission.Refused, ["file-write"], VendorUsage: 0),
+                }],
+            }, Ct);
+            var merged = $$$"""
+                [{"number":77,"state":"MERGED","isDraft":false,"headRefOid":"{{{PushedSha}}}",
+                  "headRefName":"1934-lane","baseRefName":"main","isCrossRepository":false,
+                  "statusCheckRollup":[],"mergeCommit":{"oid":"{{{MergeSha}}}"}}]
+                """;
+
+            await new WorkItemAdvancer(new FakeGh(merged), (_, _) => Task.FromResult<string?>(PushedSha))
+                .AdvanceAsync(Now, Ct);
+
+            var retired = await ReadBackAsync();
+            Assert.Equal(QueueRetirement.Merged, retired.Retirement?.Kind);
+            Assert.Null(retired.RoomDirectory);
+            Assert.Equal(TaskRequirementAdmission.Refused, retired.LastAdmission?.Result);
+        }
+        finally
+        {
+            DirectoryCleanup.DeleteRecursively(home);
+        }
+    }
+
+    [Theory]
+    [InlineData(TaskRequirementAdmission.Admitted)]
+    [InlineData(TaskRequirementAdmission.Unknown)]
+    public async Task A_merged_roomless_failed_row_without_refused_admission_stays_active(string admissionResult)
+    {
+        var home = CreateTempHome();
+        using var scope = BatonEnvironmentSnapshot.BeginScope(BatonEnvironmentSnapshot.Blank with { HomeOverride = home });
+        try
+        {
+            var seeded = await SeedAsync(home, WorkStage.Implement, Path.Combine(home, "unused"), QueueItemState.Failed);
+            await QueueStore.MutateAsync(BatonPaths.QueueFile, snapshot => snapshot with
+            {
+                Items = [seeded with
+                {
+                    RoomDirectory = null,
+                    LastAdmission = new TaskRequirementAdmission([], ["repository-read"], admissionResult),
+                }],
+            }, Ct);
+            var merged = $$$"""
+                [{"number":77,"state":"MERGED","isDraft":false,"headRefOid":"{{{PushedSha}}}",
+                  "headRefName":"1934-lane","baseRefName":"main","isCrossRepository":false,
+                  "statusCheckRollup":[],"mergeCommit":{"oid":"{{{MergeSha}}}"}}]
+                """;
+
+            await new WorkItemAdvancer(new FakeGh(merged), (_, _) => Task.FromResult<string?>(PushedSha))
+                .AdvanceAsync(Now, Ct);
+
+            var retained = await ReadBackAsync();
+            Assert.Null(retained.Retirement);
+            Assert.Equal(admissionResult, retained.LastAdmission?.Result);
+        }
+        finally
+        {
+            DirectoryCleanup.DeleteRecursively(home);
+        }
+    }
+
+    [Fact]
+    public async Task A_closed_unmerged_admission_refused_roomless_failed_row_stays_active()
+    {
+        var home = CreateTempHome();
+        using var scope = BatonEnvironmentSnapshot.BeginScope(BatonEnvironmentSnapshot.Blank with { HomeOverride = home });
+        try
+        {
+            var seeded = await SeedAsync(home, WorkStage.Implement, Path.Combine(home, "unused"), QueueItemState.Failed);
+            await QueueStore.MutateAsync(BatonPaths.QueueFile, snapshot => snapshot with
+            {
+                Items = [seeded with
+                {
+                    RoomDirectory = null,
+                    LastAdmission = new TaskRequirementAdmission([], ["repository-read"], TaskRequirementAdmission.Refused),
+                }],
+            }, Ct);
+            var closed = $$$"""
+                [{"number":77,"state":"CLOSED","isDraft":false,"headRefOid":"{{{PushedSha}}}",
+                  "headRefName":"1934-lane","baseRefName":"main","isCrossRepository":false,
+                  "statusCheckRollup":[],"mergeCommit":null}]
+                """;
+
+            await new WorkItemAdvancer(new FakeGh(closed), (_, _) => Task.FromResult<string?>(PushedSha))
+                .AdvanceAsync(Now, Ct);
+
+            Assert.Null((await ReadBackAsync()).Retirement);
+        }
+        finally
+        {
+            DirectoryCleanup.DeleteRecursively(home);
+        }
+    }
+
+    [Fact]
     public async Task A_succeeded_implement_lane_with_an_open_pr_is_queued_for_review()
     {
         var home = CreateTempHome();

@@ -104,7 +104,10 @@ public sealed class WorkItemAdvancer
                 && (stage == WorkStage.Ready
                     ? i.State == QueueItemState.Queued && !i.Halted
                     : i.State is QueueItemState.Done or QueueItemState.Failed
-                        && i.RoomDirectory is { Length: > 0 }))
+                        && (i.RoomDirectory is { Length: > 0 }
+                            // A refusal is recorded before a launch can create a room, so unlike a
+                            // roomless failure it is durable proof there is no late live room.
+                            || IsAdmissionRefusedRoomlessFailure(i))))
             .ToList();
         if (candidates.Count == 0)
         {
@@ -123,6 +126,14 @@ public sealed class WorkItemAdvancer
 
         return facts;
     }
+
+    private static bool IsAdmissionRefusedRoomlessFailure(QueueItem item) =>
+        item is
+        {
+            State: QueueItemState.Failed,
+            RoomDirectory: null,
+            LastAdmission.Result: TaskRequirementAdmission.Refused,
+        };
 
     private async Task<QueueDecisionEntry?> AdvanceOneAsync(
         QueueItem item, DateTimeOffset now, CancellationToken cancellationToken)
@@ -168,8 +179,10 @@ public sealed class WorkItemAdvancer
         var terminalRoomDelivery = sentinel is not null
             && item.State is QueueItemState.Done or QueueItemState.Failed
             && item.ReadinessMutationClaim is null;
+        var admissionRefusedRoomlessDelivery = IsAdmissionRefusedRoomlessFailure(item)
+            && item.ReadinessMutationClaim is null;
         if (pr.Succeeded && pr.MergeSha is { Length: > 0 }
-            && (normalDeliveredReady || terminalRoomDelivery))
+            && (normalDeliveredReady || terminalRoomDelivery || admissionRefusedRoomlessDelivery))
         {
             var retired = false;
             var retirement = new QueueRetirement(QueueRetirement.Merged, now,
@@ -190,7 +203,9 @@ public sealed class WorkItemAdvancer
                     Stage: WorkStage.Ready, State: QueueItemState.Queued, RoomDirectory: null,
                 };
                 var currentTerminalRoomDelivery = current.State is QueueItemState.Done or QueueItemState.Failed;
-                if (!currentNormalDeliveredReady && !currentTerminalRoomDelivery)
+                var currentAdmissionRefusedRoomlessDelivery = IsAdmissionRefusedRoomlessFailure(current);
+                if (!currentNormalDeliveredReady && !currentTerminalRoomDelivery
+                    && !currentAdmissionRefusedRoomlessDelivery)
                 {
                     return snapshot;
                 }

@@ -7041,7 +7041,11 @@ append-only ledger fact. Queue mutation linearizes before ledger append; replay 
 retained operation in order after a crash or append failure, and a successor disposition is forbidden
 until its predecessors have been durably acknowledged. A failed row with no room directory is not
 terminal proof: a late room may exist before its directory is persisted, so operator retirement must
-refuse it. Room-bearing terminal rows require a readable terminal sentinel at the mutation point.
+refuse it. The sole automatic exception is a failed row whose durable `admission.result` is explicitly
+`refused`: that refusal happened before execution, proves no room launch was admitted, and permits a
+trusted positive merged-PR observation to retire the row. An admitted, unknown, or legacy admission
+does not prove this and remains active; neither does a closed-but-unmerged PR. Room-bearing terminal
+rows require a readable terminal sentinel at the mutation point.
 
 ### Where it lives
 
