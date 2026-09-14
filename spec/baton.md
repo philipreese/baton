@@ -2347,7 +2347,12 @@ stays display-only, never itself a gate. `StateProjector.DescribeArrest` is the 
 `TokenBudget`/`ToolStepCap`/`BilledRate`/`null`, and since #1691 that totality is a test over
 `Enum.GetValues<ArrestReason>()` rather than a claim.
 
-**Artifact checkpoint (#2276).** A `codex` execution arrested by its ordinary token or tool-step cap
+**Artifact checkpoint (#2276).** Once an ordinary token or tool-step cap has quiesced a `codex`
+execution, the engine first validates every declared artifact already in its outbox. Only a role that
+does not verify the workspace, change the tree, or deliver a branch can settle successfully from valid
+artifacts at this boundary; it records the truthful cap measurement and neither discards the account nor
+spends a checkpoint. Roles with any of those obligations continue through grace, workspace audit,
+verification, and delivery behavior. Invalid or hollow artifacts do not qualify. Otherwise, an execution
 receives at most one engine-owned checkpoint only when one or more declared outputs remain absent. The
 checkpoint has an independent execution id and records the original id as its predecessor in both
 `ArtifactCheckpointAttempted` and status usage; its usage, exit reason, and any checkpoint arrest precede

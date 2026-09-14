@@ -164,6 +164,14 @@ public static class StateProjector
                 state.TerminalStatusByExecutionId[succeeded.ExecutionId] = StepStatus.Succeeded;
                 if (state.StepIdByExecutionId.TryGetValue(succeeded.ExecutionId, out var succeededStepId))
                 {
+                    // #2276: an ordinary cap remains durably recorded before a worker that had already
+                    // quiesced with every declared artifact valid settles successfully. This is the
+                    // one same-execution successor of ExecutionArrested, so it must clear the
+                    // indeterminate projection just as a fresh accepted execution does.
+                    state.IndeterminateAwaitingResolutionStepIds.Remove(succeededStepId);
+                    state.IndeterminateReasonByStepId.Remove(succeededStepId);
+                    state.IndeterminateProducerByStepId.Remove(succeededStepId);
+                    state.IndeterminateVerifyTailByStepId.Remove(succeededStepId);
                     state.ConsecutiveFailureCountByStepId[succeededStepId] = 0;
                     state.LatestFailureClassificationByStepId[succeededStepId] = null;
                     state.LatestFailureReasonByStepId[succeededStepId] = null;
