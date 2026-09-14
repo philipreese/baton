@@ -505,6 +505,195 @@ check("(control) an unheld queue does not",
         refusedSummary.includes("admission refused: file-write, network"));
 }
 
+const batcherSource = sliceOne(/^function createFleetEventBatcher\(options\)\{[\s\S]*?\n\}$/gm, "definition of `createFleetEventBatcher`");
+const { createFleetEventBatcher } = new Function(`${batcherSource}\nreturn { createFleetEventBatcher };`)();
+
+// #2297: Batch Fleet Glass event replay rendering.
+// A burst of replayed events performs O(N) ingestion and a bounded number of full renders.
+{
+  class FakeScheduler {
+    constructor() {
+      this.currentTime = 0;
+      this.nextId = 1;
+      this.tasks = new Map();
+    }
+    schedule(fn, delayMs) {
+      const id = this.nextId++;
+      this.tasks.set(id, { fn, runAt: this.currentTime + delayMs, id });
+      return id;
+    }
+    cancel(id) {
+      this.tasks.delete(id);
+    }
+    now() {
+      return this.currentTime;
+    }
+    advance(ms) {
+      this.currentTime += ms;
+      while (true) {
+        let nextTask = null;
+        for (const task of this.tasks.values()) {
+          if (task.runAt <= this.currentTime) {
+            if (!nextTask || task.runAt < nextTask.runAt || (task.runAt === nextTask.runAt && task.id < nextTask.id)) {
+              nextTask = task;
+            }
+          }
+        }
+        if (!nextTask) break;
+        this.tasks.delete(nextTask.id);
+        nextTask.fn();
+      }
+    }
+  }
+
+  // Acceptance 1: Deliver at least 673 distinct event messages without advancing scheduler -> 0 renders.
+  // One scheduler flush produces exactly one ordered render of all events.
+  {
+    const scheduler = new FakeScheduler();
+    let renderCount = 0;
+    let lastRenderedEvents = null;
+    const batcher = createFleetEventBatcher({
+      debounceMs: 16,
+      maxDelayMs: 50,
+      scheduler,
+      onRender: (evts) => {
+        renderCount++;
+        lastRenderedEvents = [...evts];
+      },
+    });
+
+    const TOTAL_EVENTS = 673;
+    // Feed 673 events in reverse order to prove sorting occurs on flush
+    for (let i = TOTAL_EVENTS; i >= 1; i--) {
+      batcher.recordEvent({ id: i, kind: "attemptStarted", attemptId: `att-${i}` });
+    }
+
+    check("673 event messages delivered without advancing scheduler cause 0 renders", renderCount === 0);
+    check("all 673 events are immediately ingested into pending collection", batcher.events.length === TOTAL_EVENTS);
+    check("flush is scheduled", batcher.isScheduled() && batcher.isDirty());
+
+    // Advance scheduler past the bound
+    scheduler.advance(50);
+
+    check("one scheduler flush produces exactly 1 render for 673 events", renderCount === 1);
+    check("rendered events count is 673", lastRenderedEvents?.length === TOTAL_EVENTS);
+    check("rendered events are sorted in ascending order by ID",
+          lastRenderedEvents?.[0]?.id === 1 && lastRenderedEvents?.[TOTAL_EVENTS - 1]?.id === TOTAL_EVENTS);
+    check("batcher is no longer dirty or scheduled after flush", !batcher.isDirty() && !batcher.isScheduled());
+  }
+
+  // Acceptance 2: Duplicate IDs remain deduplicated across pending batch and already-rendered collection.
+  {
+    const scheduler = new FakeScheduler();
+    let renderCount = 0;
+    const batcher = createFleetEventBatcher({
+      debounceMs: 16,
+      maxDelayMs: 50,
+      scheduler,
+      onRender: () => { renderCount++; },
+    });
+
+    batcher.recordEvent({ id: 10, kind: "first" });
+    const dupPendingAccepted = batcher.recordEvent({ id: 10, kind: "duplicate-pending" });
+    check("duplicate ID in pending batch is rejected immediately", !dupPendingAccepted);
+    check("pending collection has exactly 1 event for duplicate ID", batcher.events.length === 1);
+
+    scheduler.advance(50);
+    check("render occurred once", renderCount === 1);
+
+    const dupRenderedAccepted = batcher.recordEvent({ id: 10, kind: "duplicate-after-render" });
+    check("duplicate ID after flush is rejected immediately", !dupRenderedAccepted);
+    check("collection still has exactly 1 event", batcher.events.length === 1);
+    check("no new flush scheduled for duplicate event", !batcher.isScheduled() && !batcher.isDirty());
+  }
+
+  // Acceptance 3: An isolated event schedules and completes a visible render within the explicit bound.
+  {
+    const scheduler = new FakeScheduler();
+    let renderCount = 0;
+    let renderedAt = null;
+    const batcher = createFleetEventBatcher({
+      debounceMs: 16,
+      maxDelayMs: 50,
+      scheduler,
+      onRender: () => {
+        renderCount++;
+        renderedAt = scheduler.now();
+      },
+    });
+
+    scheduler.advance(100);
+    batcher.recordEvent({ id: 1, kind: "isolated" });
+    check("isolated event does not render synchronously", renderCount === 0);
+
+    // Before debounce (at 115ms), still no render
+    scheduler.advance(15);
+    check("isolated event does not render before debounce delay", renderCount === 0);
+
+    // At 116ms (16ms debounce), flush runs
+    scheduler.advance(1);
+    check("isolated event completes render within explicit debounce bound", renderCount === 1 && renderedAt === 116);
+    check("visibility delay (16ms) is <= explicit max delay bound (50ms)", (renderedAt - 100) <= 50);
+  }
+
+  // Acceptance 4: Events arriving during or immediately after a flush cannot be stranded or require a second external event.
+  {
+    const scheduler = new FakeScheduler();
+    let renderCount = 0;
+    let batcher;
+    batcher = createFleetEventBatcher({
+      debounceMs: 16,
+      maxDelayMs: 50,
+      scheduler,
+      onRender: () => {
+        renderCount++;
+        if (renderCount === 1) {
+          // Event arriving during first flush execution
+          batcher.recordEvent({ id: 2, kind: "during-flush" });
+        }
+      },
+    });
+
+    batcher.recordEvent({ id: 1, kind: "initial" });
+    scheduler.advance(50);
+
+    check("first flush ran and recorded re-entrant event", renderCount === 1);
+    check("re-entrant event marked batcher dirty and scheduled next flush", batcher.isDirty() && batcher.isScheduled());
+
+    // Advance scheduler to let the second flush run without any second external trigger
+    scheduler.advance(16);
+    check("re-entrant event completed render without second external event", renderCount === 2);
+    check("both events rendered and sorted", batcher.events.length === 2 && batcher.events[1].id === 2);
+
+    // Event arriving immediately after flush completes
+    batcher.recordEvent({ id: 3, kind: "after-flush" });
+    check("event immediately after flush is scheduled", batcher.isScheduled() && batcher.isDirty());
+    scheduler.advance(16);
+    check("event immediately after flush renders promptly", renderCount === 3 && batcher.events.length === 3);
+  }
+
+  // Acceptance 5: Continuous burst respects maximum delay bound (maxDelayMs).
+  {
+    const scheduler = new FakeScheduler();
+    let renderTimes = [];
+    const batcher = createFleetEventBatcher({
+      debounceMs: 16,
+      maxDelayMs: 50,
+      scheduler,
+      onRender: () => {
+        renderTimes.push(scheduler.now());
+      },
+    });
+
+    for (let t = 0; t <= 100; t += 5) {
+      batcher.recordEvent({ id: t + 1, kind: "continuous" });
+      scheduler.advance(5);
+    }
+    check("continuous event stream flushes within explicit maxDelayMs bound (50ms)",
+          renderTimes.length >= 2 && renderTimes[0] === 50 && renderTimes[1] === 100);
+  }
+}
+
 if (failures.length) {
   console.error(`glass.selftest.mjs: FAIL -- ${failures.length} check(s):`);
   for (const f of failures) console.error(`  !! ${f}`);

@@ -2574,16 +2574,85 @@ let dismissedRooms = loadPersistedDismissed();
 let fleetEvents = [];
 const seenFleetEventIds = new Set();
 
-function recordFleetEvent(evt){
-  if(!evt || typeof evt !== "object") return;
-  if(typeof evt.id === "number"){
-    if(seenFleetEventIds.has(evt.id)) return;
-    seenFleetEventIds.add(evt.id);
+const EVENT_RENDER_DEBOUNCE_MS = 16;
+const EVENT_RENDER_MAX_DELAY_MS = 50;
+
+function createFleetEventBatcher(options){
+  const opts = options || {};
+  const events = opts.events || [];
+  const seenIds = opts.seenIds || new Set();
+  const debounceMs = typeof opts.debounceMs === "number" ? opts.debounceMs : 16;
+  const maxDelayMs = typeof opts.maxDelayMs === "number" ? opts.maxDelayMs : 50;
+  const scheduler = opts.scheduler || {
+    schedule: (fn, ms) => setTimeout(fn, ms),
+    cancel: (id) => clearTimeout(id),
+    now: () => ((typeof performance !== "undefined" && typeof performance.now === "function") ? performance.now() : Date.now()),
+  };
+  const onRender = typeof opts.onRender === "function" ? opts.onRender : () => {};
+
+  let dirty = false;
+  let timerId = null;
+  let firstScheduledAt = null;
+  let isFlushing = false;
+
+  function scheduleFlush(){
+    dirty = true;
+    if(isFlushing) return;
+    const now = scheduler.now();
+    if(firstScheduledAt === null){
+      firstScheduledAt = now;
+    }
+    const elapsed = Math.max(0, now - firstScheduledAt);
+    const remaining = Math.max(0, maxDelayMs - elapsed);
+    const delay = Math.min(debounceMs, remaining);
+    if(timerId !== null){
+      scheduler.cancel(timerId);
+    }
+    timerId = scheduler.schedule(flush, delay);
   }
-  fleetEvents.push(evt);
-  fleetEvents.sort((a, b) => (a.id ?? 0) - (b.id ?? 0));
-  renderStream();
-  renderHistory();
+
+  function flush(){
+    if(timerId !== null){
+      scheduler.cancel(timerId);
+      timerId = null;
+    }
+    firstScheduledAt = null;
+    if(!dirty) return;
+    dirty = false;
+    isFlushing = true;
+    try {
+      events.sort((a, b) => (a.id ?? 0) - (b.id ?? 0));
+      onRender(events);
+    } finally {
+      isFlushing = false;
+    }
+    if(dirty && timerId === null){
+      scheduleFlush();
+    }
+  }
+
+  function recordEvent(evt){
+    if(!evt || typeof evt !== "object") return false;
+    if(typeof evt.id === "number"){
+      if(seenIds.has(evt.id)) return false;
+      seenIds.add(evt.id);
+    }
+    events.push(evt);
+    scheduleFlush();
+    return true;
+  }
+
+  return {
+    recordEvent,
+    flush,
+    scheduleFlush,
+    isDirty: () => dirty,
+    isScheduled: () => timerId !== null,
+    events,
+    seenIds,
+    debounceMs,
+    maxDelayMs,
+  };
 }
 
 function renderStream(){
@@ -2596,6 +2665,25 @@ function renderStream(){
 function renderHistory(){
   const historyEl = $("historycontent");
   if(historyEl) historyEl.innerHTML = streamHistoryHtml(fleetEvents);
+}
+
+const fleetEventBatcher = createFleetEventBatcher({
+  events: fleetEvents,
+  seenIds: seenFleetEventIds,
+  debounceMs: EVENT_RENDER_DEBOUNCE_MS,
+  maxDelayMs: EVENT_RENDER_MAX_DELAY_MS,
+  onRender: () => {
+    renderStream();
+    renderHistory();
+  },
+});
+
+function recordFleetEvent(evt){
+  fleetEventBatcher.recordEvent(evt);
+}
+
+function flushFleetEvents(){
+  fleetEventBatcher.flush();
 }
 
 // #1656: the pushed snapshot's `rooms` only carries non-terminal rooms plus the newest
@@ -2622,8 +2710,12 @@ function rerenderFromLastGood(){
   if(lastGood && Array.isArray(lastGood.rooms)){
     render(lastGood.rooms, lastGood.pushed_at, lastGood.underhood, lastGood.heartbeat_at, accumulatedTimelines, lastGood.stale_hidden_count, dismissedRooms, lastGood.conductor);
   }
-  renderStream();
-  renderHistory();
+  if(typeof fleetEventBatcher !== "undefined" && fleetEventBatcher.isDirty()){
+    flushFleetEvents();
+  } else {
+    renderStream();
+    renderHistory();
+  }
 }
 document.addEventListener("click", (ev) => {
   // #1678: selecting a board card (or the conductor card) just changes which room the detail pane
@@ -3016,8 +3108,12 @@ function startDaemonFeed(applySnapshot){
         // #1912: same footing -- fleet-wide, absent on the mailbox delivery by construction. The second
         // argument is what tells that absence apart from the daemon's own two (queueBoardHtml says how).
         renderQueueBoard(snap.queue, snap.queueUnavailableReason);
-        renderStream();
-        renderHistory();
+        if(typeof fleetEventBatcher !== "undefined" && fleetEventBatcher.isDirty()){
+          flushFleetEvents();
+        } else {
+          renderStream();
+          renderHistory();
+        }
       } else if(snap && snap.rooms === null){
         $("content").innerHTML = "";
         $("dismissnote").innerHTML = "";
