@@ -176,6 +176,12 @@ public static class DispatchCommand
                 pair => pair.Key, pair => pair.Value with { Workstream = options.Workstream }, StringComparer.Ordinal);
         }
 
+        if (options.DeclaredTaskSize is not null)
+        {
+            bindings = bindings.ToDictionary(
+                pair => pair.Key, pair => pair.Value with { DeclaredTaskSize = options.DeclaredTaskSize }, StringComparer.Ordinal);
+        }
+
         // #1668: record the active tool commit SHA on each binding for room version tracking.
         if (BatonPaths.TryResolveCurrentToolSha() is { } toolSha)
         {
@@ -198,6 +204,12 @@ public static class DispatchCommand
             WorkerBindingConfigEntry resumedEntry;
             (resumedEntry, continuation) = await ResolveContinuationAsync(
                 options.ContinueFromRoomDirectoryPath, continuedEntry, cancellationToken).ConfigureAwait(false);
+            if (options.DeclaredTaskSize is not null && resumedEntry.DeclaredTaskSize is not null
+                && options.DeclaredTaskSize != resumedEntry.DeclaredTaskSize)
+            {
+                throw new CliArgumentException(
+                    $"This workstream recorded declared size '{resumedEntry.DeclaredTaskSize.Size.ToString().ToLowerInvariant()}'; it cannot be replaced on continuation.");
+            }
             bindings = new Dictionary<string, WorkerBindingConfigEntry> { [continuedWorkerName] = resumedEntry };
         }
 

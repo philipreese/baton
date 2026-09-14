@@ -286,7 +286,8 @@ public sealed record WorkerBindingConfigEntry(
     // bindings.json compatibility. Neither field grants authority; readers can distinguish a task
     // that asked for nothing from an older binding that predates requirement declarations.
     IReadOnlyList<string>? TaskRequirements = null,
-    TaskRequirementAdmission? TaskRequirementAdmission = null);
+    TaskRequirementAdmission? TaskRequirementAdmission = null,
+    TaskSizeDeclaration? DeclaredTaskSize = null);
 
 /// <summary>
 /// #1927: the closed vocabulary <see cref="WorkerBindingConfigEntry.ModelSource"/> and

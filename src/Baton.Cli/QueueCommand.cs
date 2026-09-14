@@ -192,6 +192,7 @@ public static class QueueCommand
             Adapter = adapter,
             Model = options.Model,
             Effort = options.Effort,
+            DeclaredTaskSize = options.DeclaredTaskSize,
             Skills = options.Skills,
             Requirements = requirements,
             LastAdmission = admission,

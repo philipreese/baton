@@ -100,7 +100,7 @@ public sealed class QueueOptionsParserTests
         Assert.Contains("contradictory", contradictory.Message, StringComparison.Ordinal);
 
         var lifecycle = Assert.Throws<CliArgumentException>(() => QueueOptionsParser.Parse([
-            "add", "2231-lane", "--issue", "2231", "--lifecycle", "--skill", "house-style",
+            "add", "2231-lane", "--issue", "2231", "--lifecycle", "--declared-size", "medium", "--size-rationale", "one seam", "--skill", "house-style",
         ]));
         Assert.Contains("one stage or the whole lifecycle", lifecycle.Message, StringComparison.Ordinal);
     }
@@ -180,7 +180,7 @@ public sealed class QueueOptionsParserTests
     public void Lifecycle_axes_default_to_implement_while_named_stage_axes_stay_on_that_stage()
     {
         var options = QueueOptionsParser.Parse([
-            "add", "2181-lane", "--issue", "2181", "--lifecycle",
+            "add", "2181-lane", "--issue", "2181", "--lifecycle", "--declared-size", "medium", "--size-rationale", "one seam",
             "--model", "gpt-6-astra",
             "--stage", "review", "--model", "gpt-5.6-sol",
         ]);
@@ -196,17 +196,17 @@ public sealed class QueueOptionsParserTests
     public void Lifecycle_pin_is_explicit_and_cannot_be_combined_with_a_stage_selection()
     {
         var pin = QueueOptionsParser.Parse([
-            "add", "2181-lane", "--issue", "2181", "--lifecycle", "--lifecycle-pin", "--model", "gpt-6-astra",
+            "add", "2181-lane", "--issue", "2181", "--lifecycle", "--declared-size", "medium", "--size-rationale", "one seam", "--lifecycle-pin", "--model", "gpt-6-astra",
         ]);
         Assert.True(pin.LifecyclePin);
         Assert.Equal("gpt-6-astra", pin.Model);
         Assert.Null(pin.StageSelections!.SingleOrDefault());
 
         Assert.Throws<CliArgumentException>(() => QueueOptionsParser.Parse([
-            "add", "2181-lane", "--issue", "2181", "--lifecycle", "--lifecycle-pin", "--stage", "review", "--model", "gpt-5.6-sol",
+            "add", "2181-lane", "--issue", "2181", "--lifecycle", "--declared-size", "medium", "--size-rationale", "one seam", "--lifecycle-pin", "--stage", "review", "--model", "gpt-5.6-sol",
         ]));
         Assert.Throws<CliArgumentException>(() => QueueOptionsParser.Parse([
-            "add", "2181-lane", "--issue", "2181", "--lifecycle", "--stage", "review",
+            "add", "2181-lane", "--issue", "2181", "--lifecycle", "--declared-size", "medium", "--size-rationale", "one seam", "--stage", "review",
         ]));
     }
 
