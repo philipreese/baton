@@ -16,16 +16,12 @@ internal static class BoundedProcessWait
         TimeSpan timeout,
         CancellationToken cancellationToken = default)
     {
-        var waitTask = process.WaitForExitAsync(cancellationToken);
-        var delay = Task.Delay(timeout, cancellationToken);
-
-        if (await Task.WhenAny(waitTask, delay) == delay)
+        var waitTask = process.WaitForExitAsync(CancellationToken.None);
+        if (!await CompletesBeforeTimeoutAsync(waitTask, timeout, cancellationToken))
         {
             TryKill(process);
             throw new TimeoutException($"Process '{process.StartInfo.FileName}' did not exit within {timeout}.");
         }
-
-        await waitTask;
     }
 
     public static async Task<(string Stdout, string Stderr)> RunToExitAsync(
@@ -33,15 +29,12 @@ internal static class BoundedProcessWait
         TimeSpan timeout,
         CancellationToken cancellationToken = default)
     {
-        var stdoutTask = process.StandardOutput.ReadToEndAsync(cancellationToken);
-        var stderrTask = process.StandardError.ReadToEndAsync(cancellationToken);
-        var waitTask = process.WaitForExitAsync(cancellationToken);
+        var stdoutTask = process.StandardOutput.ReadToEndAsync(CancellationToken.None);
+        var stderrTask = process.StandardError.ReadToEndAsync(CancellationToken.None);
+        var waitTask = process.WaitForExitAsync(CancellationToken.None);
 
         var all = Task.WhenAll(waitTask, stdoutTask, stderrTask);
-        var delay = Task.Delay(timeout, cancellationToken);
-        var finished = await Task.WhenAny(all, delay);
-
-        if (finished == delay)
+        if (!await CompletesBeforeTimeoutAsync(all, timeout, cancellationToken))
         {
             TryKill(process);
             var partialStdout = await SnapshotAsync(stdoutTask);
@@ -52,6 +45,31 @@ internal static class BoundedProcessWait
         }
 
         return (await stdoutTask, await stderrTask);
+    }
+
+    private static async Task<bool> CompletesBeforeTimeoutAsync(
+        Task operation,
+        TimeSpan timeout,
+        CancellationToken cancellationToken)
+    {
+        var timeoutTask = Task.Delay(timeout, CancellationToken.None);
+        var cancellationTask = Task.Delay(Timeout.InfiniteTimeSpan, cancellationToken);
+        var completed = await Task.WhenAny(operation, timeoutTask, cancellationTask);
+
+        if (completed == operation)
+        {
+            await operation;
+            return true;
+        }
+
+        if (completed == cancellationTask)
+        {
+            await cancellationTask;
+        }
+
+        // If cancellation raced the timeout, cancellation wins before any destructive cleanup.
+        cancellationToken.ThrowIfCancellationRequested();
+        return false;
     }
 
     private static void TryKill(Process process)
