@@ -493,7 +493,8 @@ public sealed class QueueCommandTests
             await QueueCommand.ExecuteAsync(
                 new QueueOptions(
                     QueueVerb.Add, Tag: "2225-lane", Role: "implement", SpecFilePath: brief,
-                    Issue: 2225, Lifecycle: true),
+                    Issue: 2225, Lifecycle: true,
+                    DeclaredTaskSize: new TaskSizeDeclaration(DeclaredTaskSize.Small, "one lifecycle fixture")),
                 TextWriter.Null,
                 Ct,
                 sourceRepository,
@@ -704,6 +705,7 @@ public sealed class QueueCommandTests
                 new QueueOptions(
                     QueueVerb.Add, Tag: "2181-lane", Role: "implement", Issue: 2181, Lifecycle: true,
                     ScopeClass: "tooling",
+                    DeclaredTaskSize: new TaskSizeDeclaration(DeclaredTaskSize.Small, "one validation fixture"),
                     StageSelections:
                     [
                         new QueueStageSelection { Stage = WorkStage.Review, Model = "opus", Reason = "test" },
@@ -731,6 +733,7 @@ public sealed class QueueCommandTests
             var refusal = await Assert.ThrowsAsync<CliArgumentException>(() => QueueCommand.ExecuteAsync(
                 new QueueOptions(
                     QueueVerb.Add, Tag: "2142-lifecycle", Role: "implement", Issue: 2142, Lifecycle: true,
+                    DeclaredTaskSize: new TaskSizeDeclaration(DeclaredTaskSize.Small, "one validation fixture"),
                     StageSelections:
                     [
                         new QueueStageSelection { Stage = WorkStage.Review, Adapter = "claude" },
@@ -758,6 +761,7 @@ public sealed class QueueCommandTests
             var refusal = await Assert.ThrowsAsync<CliArgumentException>(() => QueueCommand.ExecuteAsync(
                 new QueueOptions(
                     QueueVerb.Add, Tag: "astra-review", Role: "implement", Issue: 2233, Lifecycle: true,
+                    DeclaredTaskSize: new TaskSizeDeclaration(DeclaredTaskSize.Small, "one validation fixture"),
                     StageSelections:
                     [
                         new QueueStageSelection
@@ -800,7 +804,8 @@ public sealed class QueueCommandTests
             var refusal = await Assert.ThrowsAsync<CliArgumentException>(() => QueueCommand.ExecuteAsync(
                 new QueueOptions(
                     QueueVerb.Add, Tag: "2181-pin", Role: "implement", Issue: 2181, Lifecycle: true,
-                    ScopeClass: "tooling", Adapter: "agy", LifecyclePin: true),
+                    ScopeClass: "tooling", Adapter: "agy", LifecyclePin: true,
+                    DeclaredTaskSize: new TaskSizeDeclaration(DeclaredTaskSize.Small, "one validation fixture")),
                 TextWriter.Null, Ct));
 
             Assert.Contains("cannot use", refusal.Message, StringComparison.Ordinal);
