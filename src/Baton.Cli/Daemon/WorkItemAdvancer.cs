@@ -104,7 +104,10 @@ public sealed class WorkItemAdvancer
                 && (stage == WorkStage.Ready
                     ? i.State == QueueItemState.Queued && !i.Halted
                     : i.State is QueueItemState.Done or QueueItemState.Failed
-                        && i.RoomDirectory is { Length: > 0 }))
+                        && (i.RoomDirectory is { Length: > 0 }
+                            // A refusal is recorded before a launch can create a room, so unlike a
+                            // roomless failure it is durable proof there is no late live room.
+                            || IsAdmissionRefusedRoomlessFailure(i))))
             .ToList();
         if (candidates.Count == 0)
         {
@@ -123,6 +126,14 @@ public sealed class WorkItemAdvancer
 
         return facts;
     }
+
+    private static bool IsAdmissionRefusedRoomlessFailure(QueueItem item) =>
+        item is
+        {
+            State: QueueItemState.Failed,
+            RoomDirectory: null,
+            LastAdmission.Result: TaskRequirementAdmission.Refused,
+        };
 
     private async Task<QueueDecisionEntry?> AdvanceOneAsync(
         QueueItem item, DateTimeOffset now, CancellationToken cancellationToken)
@@ -168,8 +179,10 @@ public sealed class WorkItemAdvancer
         var terminalRoomDelivery = sentinel is not null
             && item.State is QueueItemState.Done or QueueItemState.Failed
             && item.ReadinessMutationClaim is null;
+        var admissionRefusedRoomlessDelivery = IsAdmissionRefusedRoomlessFailure(item)
+            && item.ReadinessMutationClaim is null;
         if (pr.Succeeded && pr.MergeSha is { Length: > 0 }
-            && (normalDeliveredReady || terminalRoomDelivery))
+            && (normalDeliveredReady || terminalRoomDelivery || admissionRefusedRoomlessDelivery))
         {
             var retired = false;
             var retirement = new QueueRetirement(QueueRetirement.Merged, now,
@@ -189,8 +202,15 @@ public sealed class WorkItemAdvancer
                 {
                     Stage: WorkStage.Ready, State: QueueItemState.Queued, RoomDirectory: null,
                 };
-                var currentTerminalRoomDelivery = current.State is QueueItemState.Done or QueueItemState.Failed;
-                if (!currentNormalDeliveredReady && !currentTerminalRoomDelivery)
+                // This is only the sentinel-backed, room-bearing path observed above. A roomless
+                // terminal row must re-prove its refused admission at the mutation point instead.
+                var currentTerminalRoomDelivery = terminalRoomDelivery
+                    && current.RoomDirectory is { Length: > 0 } currentRoom
+                    && HasReadableTerminalSentinelAtMutation(currentRoom)
+                    && current.State is QueueItemState.Done or QueueItemState.Failed;
+                var currentAdmissionRefusedRoomlessDelivery = IsAdmissionRefusedRoomlessFailure(current);
+                if (!currentNormalDeliveredReady && !currentTerminalRoomDelivery
+                    && !currentAdmissionRefusedRoomlessDelivery)
                 {
                     return snapshot;
                 }
@@ -1260,6 +1280,31 @@ public sealed class WorkItemAdvancer
         catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
         {
             return null;
+        }
+    }
+
+    /// <summary>
+    /// Re-proves a room-bearing terminal row while the queue mutation lock is held. The earlier
+    /// asynchronous read drives lifecycle observation; it cannot authorize retirement after later
+    /// PR and workspace awaits if the sentinel has since disappeared or become unreadable.
+    /// </summary>
+    private static bool HasReadableTerminalSentinelAtMutation(string roomDirectory)
+    {
+        var path = Path.Combine(roomDirectory, TerminalSentinelWriter.TerminalSentinelFileName);
+        if (!File.Exists(path))
+        {
+            return false;
+        }
+
+        try
+        {
+            using var stream = new FileStream(
+                path, FileMode.Open, FileAccess.Read, FileShare.ReadWrite | FileShare.Delete);
+            return JsonSerializer.Deserialize<WorkflowStatusView>(stream) is not null;
+        }
+        catch (Exception ex) when (ex is JsonException or IOException or UnauthorizedAccessException)
+        {
+            return false;
         }
     }
 
