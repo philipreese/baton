@@ -183,6 +183,21 @@ public sealed class CodexWorkerAdapter : IWorkerAdapter, IPermissionGrantTransla
 
         args.Add(prompt);
 
+        IReadOnlyList<string> ResumeArgs(string sessionId, string replacementPrompt)
+        {
+            var resumed = args.ToList();
+            resumed.RemoveAt(resumed.Count - 1);
+            if (invocation.ResumeSession && invocation.SessionId is { Length: > 0 })
+            {
+                resumed.RemoveRange(resumed.Count - 2, 2);
+            }
+
+            resumed.Add("resume");
+            resumed.Add(sessionId);
+            resumed.Add(replacementPrompt);
+            return resumed;
+        }
+
         return new CoreDispatchTarget(
             CodexExecutableResolver.Resolve(),
             args,
@@ -190,7 +205,9 @@ public sealed class CodexWorkerAdapter : IWorkerAdapter, IPermissionGrantTransla
             PromptText: prompt,
             OversizePromptWrapper: OversizePromptWrapperText,
             DetectsTerminalSuccess: IsTerminalSuccessLine,
-            DetectsTerminalResult: IsTerminalResultLine);
+            DetectsTerminalResult: IsTerminalResultLine,
+            TryGetSessionId: line => TryParseSessionId(line, out var sessionId) ? sessionId : null,
+            ResumeArgs: ResumeArgs);
     }
 
     public bool TryParseProgressEvent(string rawLine, out WorkerProgressEvent? progressEvent)

@@ -930,7 +930,7 @@ public static class MutationInterface
         // reports exactly like the rest of this surface (DecideCommand's own doc comment states the
         // same contract), not a round dispatching arbitrarily many concurrent siblings.
         await DispatchAndRecordOutcomeAsync(
-                prepared, processBinding, eventLogWriter, dispatcher, inFlightExecutions, dispatchCancellationToken, cancellationToken, timeProvider ?? TimeProvider.System)
+                prepared, processBinding, eventLogReader, eventLogWriter, dispatcher, inFlightExecutions, dispatchCancellationToken, cancellationToken, timeProvider ?? TimeProvider.System)
             .ConfigureAwait(false);
 
         var finalCheckpoint = ProjectionCheckpointStore.Load(roomDirectoryPath);
@@ -1538,7 +1538,7 @@ public static class MutationInterface
                         // Not awaited here: starts the dispatch and joins the in-flight set, so a slow
                         // step never blocks this round from dispatching the rest of its ready work.
                         inFlight.Add(DispatchAndRecordOutcomeAsync(
-                            prepared, processBinding, eventLogWriter, dispatcher, inFlightExecutions, dispatchCancellationToken, cancellationToken, timeProvider));
+                            prepared, processBinding, eventLogReader, eventLogWriter, dispatcher, inFlightExecutions, dispatchCancellationToken, cancellationToken, timeProvider));
                     }
                 }
 
@@ -1589,7 +1589,7 @@ public static class MutationInterface
 
                     var dispatchCancellationToken = inFlightExecutions.Register(executionId);
                     inFlight.Add(DispatchAndRecordOutcomeAsync(
-                        prepared, processBinding, eventLogWriter, dispatcher, inFlightExecutions, dispatchCancellationToken, cancellationToken, timeProvider));
+                        prepared, processBinding, eventLogReader, eventLogWriter, dispatcher, inFlightExecutions, dispatchCancellationToken, cancellationToken, timeProvider));
                 }
 
                 if (inFlight.Count == 0)
@@ -1996,6 +1996,7 @@ public static class MutationInterface
     private static async Task DispatchAndRecordOutcomeAsync(
         PreparedExecution prepared,
         WorkerBinding.Process binding,
+        IEventLogReader eventLogReader,
         IEventLogWriter eventLogWriter,
         ICoreDispatcher dispatcher,
         InFlightExecutionRegistry inFlightExecutions,
@@ -2021,6 +2022,10 @@ public static class MutationInterface
             // unwatched rather than refusing to dispatch.
             TokenBudgetMonitor? budgetMonitor = null;
             var target = binding.Target;
+            // The checkpoint must continue the conversation that produced the arrest, never make a
+            // fresh claim from a bare recovery instruction. The adapter alone recognizes its session
+            // marker; Flow merely retains the opaque id long enough for this bounded follow-up.
+            string? checkpointSessionId = prepared.Request.SessionId;
 
             // #1373: applied before every other `target with` rewrite below, and to the ARGUMENT the
             // worker is invoked with as well as the archival PromptText -- see
@@ -2029,6 +2034,23 @@ public static class MutationInterface
             if (prepared.ContinuationBrief is { } continuationBrief)
             {
                 target = target.WithPromptPreamble(continuationBrief);
+            }
+            if (target.TryGetSessionId is { } tryGetSessionId)
+            {
+                var innerOnStdoutLine = target.OnStdoutLine;
+                target = target with
+                {
+                    OnStdoutLine = line =>
+                    {
+                        var observedSessionId = tryGetSessionId(line);
+                        if (observedSessionId is { Length: > 0 })
+                        {
+                            checkpointSessionId = observedSessionId;
+                        }
+
+                        innerOnStdoutLine?.Invoke(line);
+                    },
+                };
             }
             // #1682: a monitor now arms on EITHER trigger existing -- a role with only a tool-step cap
             // and no token budget still watches, where before this issue a budget was required for a
@@ -2152,7 +2174,7 @@ public static class MutationInterface
                 // under-it process would only produce a Cancelled/Failed verdict that this replaces
                 // wholesale, never Succeeded.
 
-                await RunArtifactCheckpointAsync(prepared, binding, budgetMonitor, dispatcher, eventLogWriter, dispatchCancellationToken, hostCancellationToken)
+                await RunArtifactCheckpointAsync(prepared, binding, checkpointSessionId, budgetMonitor, dispatcher, eventLogReader, eventLogWriter, dispatchCancellationToken, hostCancellationToken)
                     .ConfigureAwait(false);
 
                 // #2134 (`spec/baton.md` §3, "The grace turn"): reuses #2029's VerifiesWorkspace set
@@ -2502,8 +2524,10 @@ public static class MutationInterface
     private static async Task RunArtifactCheckpointAsync(
         PreparedExecution prepared,
         WorkerBinding.Process binding,
+        string? sessionId,
         TokenBudgetMonitor budgetMonitor,
         ICoreDispatcher dispatcher,
+        IEventLogReader eventLogReader,
         IEventLogWriter eventLogWriter,
         CancellationToken cancellationToken,
         CancellationToken hostCancellationToken)
@@ -2511,7 +2535,17 @@ public static class MutationInterface
         if (cancellationToken.IsCancellationRequested
             || hostCancellationToken.IsCancellationRequested
             || budgetMonitor.ArrestReasonValue is not (ArrestReason.TokenBudget or ArrestReason.ToolStepCap)
-            || !string.Equals(prepared.Request.Adapter, "codex", StringComparison.OrdinalIgnoreCase))
+            || string.IsNullOrWhiteSpace(sessionId)
+            || binding.Target.ResumeArgs is null)
+        {
+            return;
+        }
+
+        // A claim may outlive a crash between its fsync and the checkpoint process outcome. It is a
+        // spent capability, not an invitation to dispatch a replacement checkpoint on replay.
+        var priorEvents = await eventLogReader.ReadAllAsync(CancellationToken.None).ConfigureAwait(false);
+        if (priorEvents.OfType<FlowEvent.ArtifactCheckpointAttempted>()
+            .Any(checkpoint => checkpoint.PredecessorExecutionId == prepared.Request.ExecutionId))
         {
             return;
         }
@@ -2526,16 +2560,21 @@ public static class MutationInterface
         var parser = StandardWorkerUsageParsers.Default.GetValueOrDefault(prepared.Request.Adapter!);
         var monitor = parser is null ? null : new TokenBudgetMonitor(
             ArtifactCheckpoint.TokenBudget, ArtifactCheckpoint.MaxToolSteps, billedRateLimit: null, parser);
-        var target = binding.Target.WithReplacedPrompt(ArtifactCheckpoint.PromptText).WithArtifactOnlyOutputs(missing)
+        var checkpointExecutionId = new ExecutionId($"checkpoint-{Guid.NewGuid():N}");
+        // The artifact sink stays the arrested execution's declared outbox. Only the engine capture
+        // moves: prompt and streams for this distinct execution id must never overwrite the truthful
+        // account of the ordinary arrested turn.
+        var captureDirectory = Path.Combine(prepared.OutputDirectory, $"artifact-checkpoint-{checkpointExecutionId.Value}");
+        Directory.CreateDirectory(captureDirectory);
+        var target = binding.Target.WithResumedSession(sessionId, ArtifactCheckpoint.PromptText).WithArtifactOnlyOutputs(missing)
             with
-        { OnEngineFilesPlaced = null };
+        { OnEngineFilesPlaced = null, CaptureDirectory = captureDirectory };
         if (monitor is not null)
         {
             var prior = target.OnStdoutLine;
             target = target with { OnStdoutLine = line => { prior?.Invoke(line); monitor.OnStdoutLine(line); } };
         }
 
-        var checkpointExecutionId = new ExecutionId($"checkpoint-{Guid.NewGuid():N}");
         var request = prepared.Request with
         {
             ExecutionId = checkpointExecutionId,
@@ -2547,6 +2586,10 @@ public static class MutationInterface
         try
         {
             checkpointCancellation.Token.ThrowIfCancellationRequested();
+            // This is the one durable spend claim. If the process dies after this append, replay sees
+            // the checkpoint as spent and never grants the arrested execution another recovery turn.
+            await eventLogWriter.AppendAsync(new FlowEvent.ArtifactCheckpointAttempted(
+                checkpointExecutionId, prepared.Request.ExecutionId, missing), CancellationToken.None).ConfigureAwait(false);
             result = await dispatcher.DispatchAsync(request, target, linked?.Token ?? checkpointCancellation.Token).ConfigureAwait(false);
         }
         catch (Exception ex) when (ex is not OperationCanceledException
@@ -2559,8 +2602,8 @@ public static class MutationInterface
             result = new CoreDispatchResult(-1, CoreExitReason.CancelRequested);
         }
 
-        await eventLogWriter.AppendAsync(new FlowEvent.ArtifactCheckpointAttempted(
-            checkpointExecutionId, prepared.Request.ExecutionId, missing, result.Reason, monitor?.SnapshotUsage(),
+        await eventLogWriter.AppendAsync(new FlowEvent.ArtifactCheckpointCompleted(
+            checkpointExecutionId, result.Reason, monitor?.SnapshotUsage(),
             monitor is { Arrested: true } ? monitor.ArrestReasonValue : null), CancellationToken.None).ConfigureAwait(false);
     }
 

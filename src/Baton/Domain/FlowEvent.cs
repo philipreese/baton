@@ -43,6 +43,7 @@ namespace Baton.Domain;
 [JsonDerivedType(typeof(EngineFilesPlaced), "engineFilesPlaced")]
 [JsonDerivedType(typeof(GraceTurnAttempted), "graceTurnAttempted")]
 [JsonDerivedType(typeof(ArtifactCheckpointAttempted), "artifactCheckpointAttempted")]
+[JsonDerivedType(typeof(ArtifactCheckpointCompleted), "artifactCheckpointCompleted")]
 public abstract record FlowEvent
 {
     private FlowEvent()
@@ -529,11 +530,15 @@ public abstract record FlowEvent
         CoreExitReason ExitReason,
         ArrestReason? ArrestReason = null) : FlowEvent;
 
-    /// <summary>A bounded, artifact-only follow-up to an ordinary budget arrest.</summary>
+    /// <summary>A durable claim of the one bounded, artifact-only follow-up to an ordinary budget arrest.</summary>
     public sealed record ArtifactCheckpointAttempted(
         ExecutionId CheckpointExecutionId,
         ExecutionId PredecessorExecutionId,
-        IReadOnlyList<string> OutputNames,
+        IReadOnlyList<string> OutputNames) : FlowEvent;
+
+    /// <summary>The separately attributable completion account for an already-claimed artifact checkpoint.</summary>
+    public sealed record ArtifactCheckpointCompleted(
+        ExecutionId CheckpointExecutionId,
         CoreExitReason ExitReason,
         WorkerUsage? Usage = null,
         ArrestReason? ArrestReason = null) : FlowEvent;

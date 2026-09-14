@@ -61,7 +61,9 @@ public sealed class ExecutionUsageProjectorTests
                 new LogEntry.CoreLogEntry(new CoreEvent.ExecutionStarted(checkpoint, Pid: 124), start.AddSeconds(2)),
                 new LogEntry.CoreLogEntry(new CoreEvent.ExecutionExited(checkpoint, 0, CoreExitReason.Natural), start.AddSeconds(3)),
                 new LogEntry.FlowLogEntry(new FlowEvent.ArtifactCheckpointAttempted(
-                    checkpoint, predecessor, ["report.md"], CoreExitReason.Natural, new WorkerUsage(TokensIn: 7, TokensOut: 3)), start.AddSeconds(3)),
+                    checkpoint, predecessor, ["report.md"]), start.AddSeconds(2)),
+                new LogEntry.FlowLogEntry(new FlowEvent.ArtifactCheckpointCompleted(
+                    checkpoint, CoreExitReason.Natural, new WorkerUsage(TokensIn: 7, TokensOut: 3)), start.AddSeconds(3)),
             };
 
             var usage = ExecutionUsageProjector.BuildByExecutionId(entries, testRoot, WorkerAdapterRegistry.Default);

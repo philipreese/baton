@@ -26,7 +26,7 @@ public sealed class ArtifactCheckpointEndToEndTests
             var snapshot = new WorkflowDefinitionSnapshot(
                 new WorkflowDefinitionSnapshotId("artifact-checkpoint"), new WorkflowTemplateId("review"), 1,
                 [new WorkflowStepDefinition(stepId, "review", [], ["report.md", "verdict.json"], DependsOn: [], RetryPolicy: new RetryPolicy(1))]);
-            var target = new CoreDispatchTarget("fake", ["ORIGINAL"], workspace, PromptText: "ORIGINAL");
+            var target = CheckpointTarget(workspace);
             var binding = new WorkerBinding.Process(
                 new WorkerContract("review", [], [new ProducedOutput("report.md"), new ProducedOutput("verdict.json")], []),
                 target, TimeSpan.FromSeconds(30), Adapter: "codex", TokenBudget: 100, VerifiesWorkspace: false);
@@ -44,11 +44,15 @@ public sealed class ArtifactCheckpointEndToEndTests
             Assert.Equal(2, dispatcher.CallCount);
             Assert.Equal(["report.md", "verdict.json"], dispatcher.CheckpointTarget!.ArtifactOnlyOutputNames);
             Assert.Equal(ArtifactCheckpoint.PromptText, dispatcher.CheckpointTarget.PromptText);
+            Assert.NotNull(dispatcher.CheckpointTarget.CaptureDirectory);
+            Assert.NotEqual(artifacts, dispatcher.CheckpointTarget.CaptureDirectory);
             Assert.True(File.Exists(Path.Combine(artifacts, "report.md")));
             Assert.False(File.Exists(Path.Combine(artifacts, "verdict.json")));
             var checkpoint = Assert.Single(events.OfType<FlowEvent.ArtifactCheckpointAttempted>());
             Assert.Equal(["report.md", "verdict.json"], checkpoint.OutputNames);
             Assert.NotEqual(checkpoint.PredecessorExecutionId, checkpoint.CheckpointExecutionId);
+            var completion = Assert.Single(events.OfType<FlowEvent.ArtifactCheckpointCompleted>());
+            Assert.Equal(checkpoint.CheckpointExecutionId, completion.CheckpointExecutionId);
             var ordered = events.Where(e => e is FlowEvent.ArtifactCheckpointAttempted or FlowEvent.ExecutionArrested).ToArray();
             Assert.IsType<FlowEvent.ArtifactCheckpointAttempted>(ordered[0]);
             Assert.IsType<FlowEvent.ExecutionArrested>(ordered[1]);
@@ -74,7 +78,7 @@ public sealed class ArtifactCheckpointEndToEndTests
                 [new WorkflowStepDefinition(new StepId("review"), "review", [], ["report.md"], DependsOn: [], RetryPolicy: new RetryPolicy(1))]);
             var binding = new WorkerBinding.Process(
                 new WorkerContract("review", [], [new ProducedOutput("report.md")], []),
-                new CoreDispatchTarget("fake", ["ORIGINAL"], workspace, PromptText: "ORIGINAL"),
+                CheckpointTarget(workspace),
                 TimeSpan.FromSeconds(30), Adapter: "codex", TokenBudget: 100, VerifiesWorkspace: false);
             using var cancellation = new CancellationTokenSource();
             var dispatcher = new CheckpointDispatcher(artifacts, cancellation.Cancel);
@@ -89,12 +93,19 @@ public sealed class ArtifactCheckpointEndToEndTests
             var events = await reader.ReadAllAsync(TestContext.Current.CancellationToken);
             Assert.Equal(1, dispatcher.CallCount);
             Assert.Empty(events.OfType<FlowEvent.ArtifactCheckpointAttempted>());
+            Assert.Empty(events.OfType<FlowEvent.ArtifactCheckpointCompleted>());
+            Assert.Single(events.OfType<FlowEvent.ExecutionArrested>());
         }
         finally
         {
             DirectoryCleanup.DeleteRecursively(room);
         }
     }
+
+    private static CoreDispatchTarget CheckpointTarget(string workspace) => new(
+        "fake", ["ORIGINAL"], workspace, PromptText: "ORIGINAL",
+        TryGetSessionId: _ => "checkpoint-session",
+        ResumeArgs: (_, prompt) => [prompt]);
 
     private sealed class CheckpointDispatcher(string artifacts, Action? cancelAfterCap = null) : ICoreDispatcher
     {

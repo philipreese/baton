@@ -315,10 +315,11 @@ public static class ExecutionUsageProjector
                 if (flowEntry.Event is FlowEvent.ArtifactCheckpointAttempted checkpoint)
                 {
                     checkpointPredecessorByExecutionId[checkpoint.CheckpointExecutionId.Value] = checkpoint.PredecessorExecutionId.Value;
-                    if (checkpoint.Usage is { } checkpointUsage)
-                    {
-                        checkpointUsageByExecutionId[checkpoint.CheckpointExecutionId.Value] = checkpointUsage;
-                    }
+                }
+
+                if (flowEntry.Event is FlowEvent.ArtifactCheckpointCompleted { Usage: { } } checkpointCompletion)
+                {
+                    checkpointUsageByExecutionId[checkpointCompletion.CheckpointExecutionId.Value] = checkpointCompletion.Usage;
                 }
 
                 if (flowEntry.Event is FlowEvent.StreamLogLossDeclared loss
