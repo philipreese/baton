@@ -759,6 +759,31 @@ public sealed class WorkItemAdvancerTests
     }
 
     [Fact]
+    public async Task Discovery_queries_the_exact_persisted_suffixed_branch()
+    {
+        var home = CreateTempHome();
+        using var scope = BatonEnvironmentSnapshot.BeginScope(BatonEnvironmentSnapshot.Blank with { HomeOverride = home });
+        try
+        {
+            var room = await WriteSettledRoomAsync(home, WorkflowOutcome.Succeeded, ApprovingVerdict);
+            var seeded = await SeedAsync(home, WorkStage.Review, room);
+            await QueueStore.MutateAsync(
+                BatonPaths.QueueFile,
+                state => state with { Items = [seeded with { Branch = "2293-lane-2" }] }, Ct);
+            var gh = new FakeGh($"[{PrObject(77, PushedSha, headBranch: "2293-lane-2")}]");
+
+            await Advancer(gh, (_, _) => Task.FromResult<string?>(PushedSha)).AdvanceAsync(Now, Ct);
+
+            Assert.Contains(gh.Calls, args => args is
+                ["pr", "list", "--head", "2293-lane-2", "--state", "open", "--limit", "100", ..]);
+        }
+        finally
+        {
+            DirectoryCleanup.DeleteRecursively(home);
+        }
+    }
+
+    [Fact]
     public async Task Discovery_fails_closed_when_two_identity_valid_open_PRs_share_the_branch()
     {
         var home = CreateTempHome();

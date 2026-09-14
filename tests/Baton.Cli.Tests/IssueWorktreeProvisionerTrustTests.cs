@@ -37,7 +37,7 @@ public sealed class IssueWorktreeProvisionerTrustTests : IDisposable
             2076, repository, _root, CapturedRepository, Runner(worktree), Probe(commonDir, repository, worktree),
             output, TestContext.Current.CancellationToken);
 
-        Assert.Equal(worktree, provisioned);
+        Assert.Equal(worktree, provisioned.Workspace);
         var recorded = ProjectCeilingStore.TryGet(worktree, ProjectCeilingStore.DefaultPath);
         Assert.NotNull(recorded);
         Assert.False(recorded.NetworkAccess);
@@ -64,7 +64,7 @@ public sealed class IssueWorktreeProvisionerTrustTests : IDisposable
             2076, repository, _root, CapturedRepository, Runner(worktree), Probe(commonDir, repository, worktree),
             output, TestContext.Current.CancellationToken);
 
-        var recorded = ProjectCeilingStore.TryGet(provisioned, ProjectCeilingStore.DefaultPath);
+        var recorded = ProjectCeilingStore.TryGet(provisioned.Workspace, ProjectCeilingStore.DefaultPath);
         Assert.NotNull(recorded);
         Assert.True(recorded.IsUnrestricted);
         Assert.Null(recorded.InheritedFrom);
@@ -158,7 +158,7 @@ public sealed class IssueWorktreeProvisionerTrustTests : IDisposable
             2121, repository, _root, CapturedRepository, Runner(worktree), Probe(commonDir, repository, worktree),
             output, TestContext.Current.CancellationToken);
 
-        var recorded = ProjectCeilingStore.TryGet(provisioned, ProjectCeilingStore.DefaultPath);
+        var recorded = ProjectCeilingStore.TryGet(provisioned.Workspace, ProjectCeilingStore.DefaultPath);
         Assert.NotNull(recorded);
         Assert.False(recorded.NetworkAccess);
         Assert.Equal(ProjectCeilingStore.CanonicalKey(repository), recorded.InheritedFrom);
@@ -190,7 +190,7 @@ public sealed class IssueWorktreeProvisionerTrustTests : IDisposable
             2121, repository, _root, CapturedRepository, Runner(worktree), Probe(commonDir, repository, worktree),
             output, TestContext.Current.CancellationToken);
 
-        var recorded = ProjectCeilingStore.TryGet(provisioned, ProjectCeilingStore.DefaultPath);
+        var recorded = ProjectCeilingStore.TryGet(provisioned.Workspace, ProjectCeilingStore.DefaultPath);
         Assert.NotNull(recorded);
         Assert.True(recorded.IsUnrestricted);
         Assert.Null(recorded.InheritedFrom);
@@ -257,6 +257,14 @@ public sealed class IssueWorktreeProvisionerTrustTests : IDisposable
             calls.Add(args.ToArray());
             if (fileName == "git")
             {
+                if (args is ["show-ref", "--verify", "--quiet", ..])
+                {
+                    return (1, string.Empty);
+                }
+                if (args is ["ls-remote", "--heads", "origin", ..])
+                {
+                    return (0, string.Empty);
+                }
                 Directory.CreateDirectory(worktree);
             }
 
@@ -278,13 +286,277 @@ public sealed class IssueWorktreeProvisionerTrustTests : IDisposable
             ["issue", "develop", "2212", "--name", "2212-lane", "--repo", CapturedRepository]);
     }
 
+    [Fact]
+    public async Task Provision_uses_the_lowest_suffix_after_a_proven_branch_collision()
+    {
+        using var home = new IsolatedBatonHome();
+        var repository = MakeDirectory("baton");
+        var first = Path.Combine(_root, "w2293");
+        var second = Path.Combine(_root, "w2293-2");
+        var commonDir = Path.Combine(repository, ".git");
+        var calls = new List<string[]>();
+        async Task<(int ExitCode, string Output)> Runner(string file, IReadOnlyList<string> args, string workingDirectory, CancellationToken cancellationToken)
+        {
+            calls.Add(args.ToArray());
+            if (args is ["issue", "develop", _, "--name", "2293-lane", ..])
+            {
+                return (1, "failed to create linked branch: API returned empty branch name");
+            }
+            if (args is ["show-ref", "--verify", "--quiet", "refs/heads/2293-lane"])
+            {
+                return (1, string.Empty);
+            }
+            if (args is ["ls-remote", "--heads", "origin", "refs/heads/2293-lane"])
+            {
+                return (0, "deadbeef\trefs/heads/2293-lane\n");
+            }
+            if (args is ["show-ref", "--verify", "--quiet", "refs/heads/2293-lane-2"])
+            {
+                return (1, string.Empty);
+            }
+            if (args is ["ls-remote", "--heads", "origin", "refs/heads/2293-lane-2"])
+            {
+                return (0, string.Empty);
+            }
+            if (file == "git" && args is ["worktree", "add", ..])
+            {
+                Directory.CreateDirectory(second);
+            }
+            return (0, string.Empty);
+        }
+
+        var provisioned = await IssueWorktreeProvisioner.ProvisionAsync(
+            2293, repository, _root, CapturedRepository, Runner, Probe(commonDir, repository, second),
+            TextWriter.Null, TestContext.Current.CancellationToken);
+
+        Assert.Equal(new IssueWorktreeProvisioner.ProvisionedIssueWorktree(second, "2293-lane-2"), provisioned);
+        Assert.DoesNotContain(calls, args => args is ["worktree", "add", var workspace, ..] && workspace == first);
+    }
+
+    [Fact]
+    public async Task Provision_skips_an_existing_canonical_branch_without_asking_GitHub_to_create_it()
+    {
+        using var home = new IsolatedBatonHome();
+        var repository = MakeDirectory("baton");
+        var second = Path.Combine(_root, "w2293-2");
+        var commonDir = Path.Combine(repository, ".git");
+        var calls = new List<string[]>();
+        Task<(int ExitCode, string Output)> Runner(string file, IReadOnlyList<string> args, string workingDirectory, CancellationToken cancellationToken)
+        {
+            calls.Add(args.ToArray());
+            if (args is ["show-ref", "--verify", "--quiet", "refs/heads/2293-lane"])
+            {
+                return Task.FromResult((0, string.Empty));
+            }
+            if (args is ["show-ref", "--verify", "--quiet", ..])
+            {
+                return Task.FromResult((1, string.Empty));
+            }
+            if (args is ["ls-remote", "--heads", "origin", ..])
+            {
+                return Task.FromResult((0, string.Empty));
+            }
+            if (file == "git" && args is ["worktree", "add", ..])
+            {
+                Directory.CreateDirectory(second);
+            }
+
+            return Task.FromResult((0, string.Empty));
+        }
+
+        var provisioned = await IssueWorktreeProvisioner.ProvisionAsync(
+            2293, repository, _root, CapturedRepository, Runner, Probe(commonDir, repository, second),
+            TextWriter.Null, TestContext.Current.CancellationToken);
+
+        Assert.Equal(new IssueWorktreeProvisioner.ProvisionedIssueWorktree(second, "2293-lane-2"), provisioned);
+        Assert.DoesNotContain(calls, args => args is ["issue", "develop", "2293", "--name", "2293-lane", ..]);
+        Assert.Contains(calls, args => args is ["issue", "develop", "2293", "--name", "2293-lane-2", ..]);
+    }
+
+    [Fact]
+    public async Task Provision_reuses_an_existing_canonical_workspace_registered_on_its_branch()
+    {
+        using var home = new IsolatedBatonHome();
+        var repository = MakeDirectory("baton");
+        var workspace = Path.Combine(_root, "w2293");
+        var commonDir = Path.Combine(repository, ".git");
+        Directory.CreateDirectory(workspace);
+        var calls = new List<string[]>();
+        Task<(int ExitCode, string Output)> Runner(string file, IReadOnlyList<string> args, string workingDirectory, CancellationToken cancellationToken)
+        {
+            calls.Add(args.ToArray());
+            return Task.FromResult(args is ["worktree", "list", "--porcelain"]
+                ? (0, $"worktree {workspace}\nbranch refs/heads/2293-lane\n\n")
+                : (0, string.Empty));
+        }
+
+        var provisioned = await IssueWorktreeProvisioner.ProvisionAsync(
+            2293, repository, _root, CapturedRepository, Runner, Probe(commonDir, repository, workspace),
+            TextWriter.Null, TestContext.Current.CancellationToken);
+
+        Assert.Equal(new IssueWorktreeProvisioner.ProvisionedIssueWorktree(workspace, "2293-lane"), provisioned);
+        Assert.Contains(calls, args => args is ["worktree", "list", "--porcelain"]);
+        Assert.DoesNotContain(calls, args => args is ["issue", "develop", ..]);
+    }
+
+    [Fact]
+    public async Task Provision_refuses_an_existing_canonical_workspace_registered_on_another_branch()
+    {
+        using var home = new IsolatedBatonHome();
+        var repository = MakeDirectory("baton");
+        var workspace = Path.Combine(_root, "w2293");
+        Directory.CreateDirectory(workspace);
+        var calls = new List<string[]>();
+        Task<(int ExitCode, string Output)> Runner(string file, IReadOnlyList<string> args, string workingDirectory, CancellationToken cancellationToken)
+        {
+            calls.Add(args.ToArray());
+            return Task.FromResult(args is ["worktree", "list", "--porcelain"]
+                ? (0, $"worktree {workspace}\nbranch refs/heads/some-other-branch\n\n")
+                : (0, string.Empty));
+        }
+
+        var refusal = await Assert.ThrowsAsync<CliArgumentException>(() => IssueWorktreeProvisioner.ProvisionAsync(
+            2293, repository, _root, CapturedRepository, Runner, probe: null,
+            output: TextWriter.Null, cancellationToken: TestContext.Current.CancellationToken));
+
+        Assert.Contains("some-other-branch", refusal.Message, StringComparison.Ordinal);
+        Assert.DoesNotContain(calls, args => args is ["issue", "develop", ..]);
+    }
+
+    [Fact]
+    public async Task Provision_treats_only_an_exact_remote_branch_ref_as_a_collision()
+    {
+        using var home = new IsolatedBatonHome();
+        var repository = MakeDirectory("baton");
+        var workspace = Path.Combine(_root, "w2293");
+        var commonDir = Path.Combine(repository, ".git");
+        var calls = new List<string[]>();
+        Task<(int ExitCode, string Output)> Runner(string file, IReadOnlyList<string> args, string workingDirectory, CancellationToken cancellationToken)
+        {
+            calls.Add(args.ToArray());
+            if (args is ["show-ref", "--verify", "--quiet", "refs/heads/2293-lane"])
+            {
+                return Task.FromResult((1, string.Empty));
+            }
+            if (args is ["ls-remote", "--heads", "origin", "refs/heads/2293-lane"])
+            {
+                return Task.FromResult((0, "deadbeef\trefs/heads/foo/2293-lane\n"));
+            }
+            if (file == "git" && args is ["worktree", "add", ..])
+            {
+                Directory.CreateDirectory(workspace);
+            }
+
+            return Task.FromResult((0, string.Empty));
+        }
+
+        var provisioned = await IssueWorktreeProvisioner.ProvisionAsync(
+            2293, repository, _root, CapturedRepository, Runner, Probe(commonDir, repository, workspace),
+            TextWriter.Null, TestContext.Current.CancellationToken);
+
+        Assert.Equal(new IssueWorktreeProvisioner.ProvisionedIssueWorktree(workspace, "2293-lane"), provisioned);
+        Assert.Contains(calls, args => args is ["issue", "develop", "2293", "--name", "2293-lane", ..]);
+        Assert.DoesNotContain(calls, args => args is ["issue", "develop", "2293", "--name", "2293-lane-2", ..]);
+    }
+
+    [Fact]
+    public async Task Provision_refuses_an_arbitrary_develop_failure_without_selecting_a_suffix()
+    {
+        using var home = new IsolatedBatonHome();
+        var repository = MakeDirectory("baton");
+        var commonDir = Path.Combine(repository, ".git");
+        var calls = new List<string[]>();
+        Task<(int ExitCode, string Output)> Runner(string file, IReadOnlyList<string> args, string workingDirectory, CancellationToken cancellationToken)
+        {
+            calls.Add(args.ToArray());
+            return Task.FromResult(args switch
+            {
+                ["issue", "develop", ..] => (1, "authentication required"),
+                ["show-ref", ..] => (1, string.Empty),
+                ["ls-remote", ..] => (0, string.Empty),
+                _ => (0, string.Empty),
+            });
+        }
+
+        var refusal = await Assert.ThrowsAsync<CliArgumentException>(() => IssueWorktreeProvisioner.ProvisionAsync(
+            2293, repository, _root, CapturedRepository, Runner, Probe(commonDir, repository),
+            TextWriter.Null, TestContext.Current.CancellationToken));
+
+        Assert.Contains("authentication required", refusal.Message, StringComparison.Ordinal);
+        Assert.DoesNotContain(calls, args => args is ["issue", "develop", _, "--name", "2293-lane-2", ..]);
+    }
+
+    [Fact]
+    public async Task Concurrent_provisioning_selects_distinct_branch_and_workspace_pairs()
+    {
+        using var home = new IsolatedBatonHome();
+        var repository = MakeDirectory("baton");
+        var first = Path.Combine(_root, "w2293");
+        var second = Path.Combine(_root, "w2293-2");
+        var commonDir = Path.Combine(repository, ".git");
+        var branches = new HashSet<string>(StringComparer.Ordinal);
+        var sync = new object();
+        async Task<(int ExitCode, string Output)> Runner(string file, IReadOnlyList<string> args, string workingDirectory, CancellationToken cancellationToken)
+        {
+            await Task.Yield();
+            if (args is ["issue", "develop", _, "--name", var branch, ..])
+            {
+                lock (sync)
+                {
+                    return branches.Add(branch) ? (0, string.Empty) : (1, "branch already exists");
+                }
+            }
+            if (args is ["show-ref", "--verify", "--quiet", var reference])
+            {
+                lock (sync)
+                {
+                    return branches.Contains(reference["refs/heads/".Length..]) ? (0, string.Empty) : (1, string.Empty);
+                }
+            }
+            if (args is ["ls-remote", "--heads", "origin", var remoteBranch])
+            {
+                lock (sync)
+                {
+                    return branches.Contains(remoteBranch) ? (0, $"sha\trefs/heads/{remoteBranch}\n") : (0, string.Empty);
+                }
+            }
+            if (file == "git" && args is ["worktree", "add", var workspace, ..])
+            {
+                lock (sync)
+                {
+                    if (Directory.Exists(workspace)) return (1, "workspace already exists");
+                    Directory.CreateDirectory(workspace);
+                }
+            }
+            return (0, string.Empty);
+        }
+
+        var both = await Task.WhenAll(
+            IssueWorktreeProvisioner.ProvisionAsync(2293, repository, _root, CapturedRepository, Runner,
+                Probe(commonDir, repository, first, second), TextWriter.Null, TestContext.Current.CancellationToken),
+            IssueWorktreeProvisioner.ProvisionAsync(2293, repository, _root, CapturedRepository, Runner,
+                Probe(commonDir, repository, first, second), TextWriter.Null, TestContext.Current.CancellationToken));
+
+        Assert.Equal(2, both.Select(result => result.Workspace).Distinct(StringComparer.OrdinalIgnoreCase).Count());
+        Assert.Equal(2, both.Select(result => result.Branch).Distinct(StringComparer.Ordinal).Count());
+        Assert.All(both, result => Assert.True(Directory.Exists(result.Workspace)));
+    }
+
     /// <summary>Reports both spawns successful and creates the worktree the way <c>git worktree add</c> would.</summary>
     private static Func<string, IReadOnlyList<string>, string, CancellationToken, Task<(int ExitCode, string Output)>> Runner(
         string worktree) =>
-        (fileName, _, _, _) =>
+        (fileName, args, _, _) =>
         {
             if (fileName == "git")
             {
+                if (args is ["show-ref", "--verify", "--quiet", ..])
+                {
+                    return Task.FromResult((1, string.Empty));
+                }
+                if (args is ["ls-remote", "--heads", "origin", ..])
+                {
+                    return Task.FromResult((0, string.Empty));
+                }
                 Directory.CreateDirectory(worktree);
             }
 

@@ -55,6 +55,13 @@ namespace Baton.Cli;
 /// </remarks>
 public static class IssueWorktreeProvisioner
 {
+    // ProjectCeilingStore is a read-modify-write file store. Concurrent issue provisions may reach
+    // the trust step after claiming distinct branch/worktree pairs, so serialize that store update.
+    private static readonly SemaphoreSlim TrustGate = new(1, 1);
+
+    /// <summary>The exact workspace and branch selected while provisioning an issue lane.</summary>
+    public sealed record ProvisionedIssueWorktree(string Workspace, string Branch);
+
     /// <summary>
     /// The branch <c>gh issue develop</c> is asked to create for <paramref name="issue"/>. <b>Derived,
     /// never queried</b> — the name is this method's ruling (spec/baton.md §13), so a later reader that
@@ -123,7 +130,7 @@ public static class IssueWorktreeProvisioner
     public static readonly TimeSpan SpawnTimeout = TimeSpan.FromMinutes(2);
 
     /// <summary>
-    /// Provisions and trusts the worktree for <paramref name="issue"/>, returning its path.
+    /// Provisions and trusts the worktree for <paramref name="issue"/>, returning the exact path and branch selected.
     /// </summary>
     /// <param name="issue">The GitHub issue number.</param>
     /// <param name="repositoryDirectory">The checkout <c>gh</c> and <c>git</c> are run in.</param>
@@ -147,7 +154,7 @@ public static class IssueWorktreeProvisioner
     /// </param>
     /// <exception cref="CliArgumentException">Any of the three steps failed, with the tool's own output in the message.</exception>
     /// <exception cref="ProjectNotTrustedException">The trust step's identity probe answered nothing (for the workspace or for a recorded path), or the repository is revoked (#2121), so no ceiling was recorded — see the type remarks.</exception>
-    public static async Task<string> ProvisionAsync(
+    public static async Task<ProvisionedIssueWorktree> ProvisionAsync(
         int issue,
         string repositoryDirectory,
         string? worktreeRoot,
@@ -168,40 +175,155 @@ public static class IssueWorktreeProvisioner
                 $"Cannot derive a worktree root from '{repositoryDirectory}' — it has no parent directory.",
                 "set Queue.WorktreeRoot in ~/.baton/settings.json to say where w<n> worktrees belong.");
 
-        var workspace = Path.Combine(root, $"w{issue}");
-        var branch = BranchNameFor(issue);
+        var firstWorkspace = Path.Combine(root, $"w{issue}");
+        var firstBranch = BranchNameFor(issue);
 
-        if (Directory.Exists(workspace))
+        if (Directory.Exists(firstWorkspace))
         {
-            // Not an error: the runner's own habit is to re-queue against a worktree that already
-            // exists. Trust it and hand it back rather than failing the add -- `git worktree add` would
-            // refuse anyway, and refusing here would make a re-add of a live lane impossible.
-            await TrustAsync(workspace, probe, output: output, cancellationToken: cancellationToken).ConfigureAwait(false);
-            return workspace;
+            // A directory named w<n> is not evidence that it is the live lane. Re-use is safe only
+            // when git itself still registers that exact path on the first-lane branch.
+            await VerifyReusableWorktreeAsync(firstWorkspace, firstBranch, repositoryDirectory, runner, cancellationToken)
+                .ConfigureAwait(false);
+            await TrustAsync(firstWorkspace, probe, output: output, cancellationToken: cancellationToken).ConfigureAwait(false);
+            return new ProvisionedIssueWorktree(firstWorkspace, firstBranch);
         }
 
-        var (developExit, developOutput) = await runner(
-            "gh", ["issue", "develop", issue.ToString(System.Globalization.CultureInfo.InvariantCulture),
-                "--name", branch, "--repo", repository],
-            repositoryDirectory, cancellationToken).ConfigureAwait(false);
-        if (developExit != 0)
+        for (var suffix = 1; suffix <= 100; suffix++)
         {
-            throw new CliArgumentException(
-                $"'gh issue develop {issue} --name {branch}' failed (exit {developExit}): {developOutput.Trim()}",
-                "check that the issue exists and that 'gh' is authenticated for this repository.");
-        }
+            var branch = suffix == 1 ? firstBranch : $"{firstBranch}-{suffix}";
+            var workspace = suffix == 1 ? firstWorkspace : Path.Combine(root, $"w{issue}-{suffix}");
+            if (Directory.Exists(workspace))
+            {
+                continue;
+            }
 
-        var (worktreeExit, worktreeOutput) = await runner(
-            "git", ["worktree", "add", workspace, branch], repositoryDirectory, cancellationToken).ConfigureAwait(false);
-        if (worktreeExit != 0)
-        {
+            // Check every candidate before asking GitHub to create it. In particular, the canonical
+            // name may have survived a merged PR even when its w<n> worktree did not.
+            if (await BranchExistsAsync(branch, repositoryDirectory, runner, cancellationToken).ConfigureAwait(false))
+            {
+                continue;
+            }
+
+            var (developExit, developOutput) = await runner(
+                "gh", ["issue", "develop", issue.ToString(System.Globalization.CultureInfo.InvariantCulture),
+                    "--name", branch, "--repo", repository],
+                repositoryDirectory, cancellationToken).ConfigureAwait(false);
+            if (developExit != 0)
+            {
+                if (await BranchExistsAsync(branch, repositoryDirectory, runner, cancellationToken).ConfigureAwait(false))
+                {
+                    continue;
+                }
+
+                throw new CliArgumentException(
+                    $"'gh issue develop {issue} --name {branch}' failed (exit {developExit}): {developOutput.Trim()}",
+                    "check that the issue exists and that 'gh' is authenticated for this repository.");
+            }
+
+            var (worktreeExit, worktreeOutput) = await runner(
+                "git", ["worktree", "add", workspace, branch], repositoryDirectory, cancellationToken).ConfigureAwait(false);
+            if (worktreeExit == 0)
+            {
+                await TrustAsync(workspace, probe, output: output, cancellationToken: cancellationToken).ConfigureAwait(false);
+                return new ProvisionedIssueWorktree(workspace, branch);
+            }
+
+            if (Directory.Exists(workspace))
+            {
+                continue;
+            }
+
             throw new CliArgumentException(
                 $"'git worktree add {workspace} {branch}' failed (exit {worktreeExit}): {worktreeOutput.Trim()}",
-                $"the branch '{branch}' exists on the remote now — remove any stale worktree at '{workspace}' and retry.");
+                $"the branch '{branch}' could not be attached at '{workspace}'; inspect the diagnostic and retry.");
         }
 
-        await TrustAsync(workspace, probe, output: output, cancellationToken: cancellationToken).ConfigureAwait(false);
-        return workspace;
+        throw new CliArgumentException(
+            $"Could not select a free branch and workspace for issue {issue} after 100 deterministic attempts.",
+            "remove stale issue worktrees or retry after concurrent queue adds finish.");
+    }
+
+    private static async Task<bool> BranchExistsAsync(
+        string branch,
+        string repositoryDirectory,
+        Func<string, IReadOnlyList<string>, string, CancellationToken, Task<(int ExitCode, string Output)>> runner,
+        CancellationToken cancellationToken)
+    {
+        var (localExit, localOutput) = await runner(
+            "git", ["show-ref", "--verify", "--quiet", $"refs/heads/{branch}"], repositoryDirectory, cancellationToken)
+            .ConfigureAwait(false);
+        if (localExit == 0)
+        {
+            return true;
+        }
+        if (localExit != 1)
+        {
+            throw new CliArgumentException(
+                $"Could not determine whether local branch '{branch}' exists (exit {localExit}): {localOutput.Trim()}",
+                "resolve the git error and retry; a branch suffix is selected only after a proven collision.");
+        }
+
+        var (remoteExit, remoteOutput) = await runner(
+            "git", ["ls-remote", "--heads", "origin", $"refs/heads/{branch}"], repositoryDirectory, cancellationToken).ConfigureAwait(false);
+        if (remoteExit != 0)
+        {
+            throw new CliArgumentException(
+                $"Could not determine whether remote branch '{branch}' exists (exit {remoteExit}): {remoteOutput.Trim()}",
+                "resolve the git error and retry; a branch suffix is selected only after a proven collision.");
+        }
+
+        return remoteOutput.Split('\n', StringSplitOptions.RemoveEmptyEntries).Any(line =>
+            line.EndsWith($"\trefs/heads/{branch}", StringComparison.Ordinal));
+    }
+
+    private static async Task VerifyReusableWorktreeAsync(
+        string workspace,
+        string branch,
+        string repositoryDirectory,
+        Func<string, IReadOnlyList<string>, string, CancellationToken, Task<(int ExitCode, string Output)>> runner,
+        CancellationToken cancellationToken)
+    {
+        var (exit, output) = await runner(
+            "git", ["worktree", "list", "--porcelain"], repositoryDirectory, cancellationToken).ConfigureAwait(false);
+        if (exit != 0)
+        {
+            throw new CliArgumentException(
+                $"Could not verify existing workspace '{workspace}' as a git worktree (exit {exit}): {output.Trim()}",
+                "resolve the git error or move the unexpected directory before retrying.");
+        }
+
+        var expectedPath = Path.GetFullPath(workspace).TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar);
+        string? foundBranch = null;
+        string? listedPath = null;
+        foreach (var line in output.Split('\n'))
+        {
+            var trimmed = line.TrimEnd('\r');
+            if (trimmed.StartsWith("worktree ", StringComparison.Ordinal))
+            {
+                listedPath = trimmed["worktree ".Length..];
+                continue;
+            }
+
+            if (trimmed.StartsWith("branch ", StringComparison.Ordinal)
+                && listedPath is not null
+                && string.Equals(
+                    Path.GetFullPath(listedPath).TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar),
+                    expectedPath,
+                    StringComparison.OrdinalIgnoreCase))
+            {
+                foundBranch = trimmed["branch ".Length..];
+                break;
+            }
+        }
+
+        var expectedBranch = $"refs/heads/{branch}";
+        if (!string.Equals(foundBranch, expectedBranch, StringComparison.Ordinal))
+        {
+            var detail = foundBranch is null ? "is not registered as a git worktree" : $"checks out '{foundBranch}'";
+            throw new CliArgumentException(
+                $"Existing workspace '{workspace}' {detail}; expected branch '{expectedBranch}'.",
+                "move or remove the unexpected directory, or re-add the issue from the worktree that owns its recorded branch.");
+        }
     }
 
     /// <summary>
@@ -229,37 +351,45 @@ public static class IssueWorktreeProvisioner
         storePath ??= ProjectCeilingStore.DefaultPath;
         probe ??= RepositoryIdentityResolver.TryResolveAsync;
 
-        var result = await InheritedProjectCeiling.TryInheritAsync(workspace, storePath, probe, cancellationToken)
-            .ConfigureAwait(false);
-        switch (result.Outcome)
+        await TrustGate.WaitAsync(cancellationToken).ConfigureAwait(false);
+        try
         {
-            case InheritanceOutcome.Inherited:
-                (output ?? Console.Out).WriteLine(result.Fact);
-                return;
-            case InheritanceOutcome.AlreadyTrusted:
-                return;
-            case InheritanceOutcome.NoIdentity:
-                throw new ProjectNotTrustedException(
-                    workspace,
-                    "the repository-identity probe answered nothing (git missing, timed out, or exited non-zero).");
-            case InheritanceOutcome.CandidateUnknown:
-                // #2121: nothing live matched and a recorded path that cannot be identified might be the
-                // tombstone, so the never-trusted fallback below is not known to apply. The exception's
-                // own remedy names that path (not the workspace, which probed fine) so the operator can
-                // repair it or `baton trust <path> --forget` the record.
-                throw new ProjectNotTrustedException(workspace, result.CandidatePath!, result.ProbeFailure!);
-            case InheritanceOutcome.Revoked:
-                // #2121: the fallback below is for a repository the operator never trusted, and this one
-                // the operator revoked. The refusal names the tombstone so the operator knows which
-                // revocation `baton trust` would be undoing.
-                throw new ProjectNotTrustedException(workspace, result.RevokedPath!, result.RevokedAt!.Value);
-            case InheritanceOutcome.NoTrustedSource:
-                ProjectCeilingStore.Set(workspace, ProjectCeiling.Unrestricted, storePath);
-                (output ?? Console.Out).WriteLine(
-                    $"workspace {ProjectCeilingStore.CanonicalKey(workspace)}: no trusted repository to inherit from; recorded ceiling all");
-                return;
-            default:
-                throw new ArgumentOutOfRangeException(nameof(result), result.Outcome, "Unhandled inheritance outcome.");
+            var result = await InheritedProjectCeiling.TryInheritAsync(workspace, storePath, probe, cancellationToken)
+                .ConfigureAwait(false);
+            switch (result.Outcome)
+            {
+                case InheritanceOutcome.Inherited:
+                    (output ?? Console.Out).WriteLine(result.Fact);
+                    return;
+                case InheritanceOutcome.AlreadyTrusted:
+                    return;
+                case InheritanceOutcome.NoIdentity:
+                    throw new ProjectNotTrustedException(
+                        workspace,
+                        "the repository-identity probe answered nothing (git missing, timed out, or exited non-zero).");
+                case InheritanceOutcome.CandidateUnknown:
+                    // #2121: nothing live matched and a recorded path that cannot be identified might be the
+                    // tombstone, so the never-trusted fallback below is not known to apply. The exception's
+                    // own remedy names that path (not the workspace, which probed fine) so the operator can
+                    // repair it or `baton trust <path> --forget` the record.
+                    throw new ProjectNotTrustedException(workspace, result.CandidatePath!, result.ProbeFailure!);
+                case InheritanceOutcome.Revoked:
+                    // #2121: the fallback below is for a repository the operator never trusted, and this one
+                    // the operator revoked. The refusal names the tombstone so the operator knows which
+                    // revocation `baton trust` would be undoing.
+                    throw new ProjectNotTrustedException(workspace, result.RevokedPath!, result.RevokedAt!.Value);
+                case InheritanceOutcome.NoTrustedSource:
+                    ProjectCeilingStore.Set(workspace, ProjectCeiling.Unrestricted, storePath);
+                    (output ?? Console.Out).WriteLine(
+                        $"workspace {ProjectCeilingStore.CanonicalKey(workspace)}: no trusted repository to inherit from; recorded ceiling all");
+                    return;
+                default:
+                    throw new ArgumentOutOfRangeException(nameof(result), result.Outcome, "Unhandled inheritance outcome.");
+            }
+        }
+        finally
+        {
+            TrustGate.Release();
         }
     }
 

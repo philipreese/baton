@@ -181,7 +181,7 @@ public sealed class QueueCommandTests
                 (_, _, _, _, _, _) =>
                 {
                     provisioned = true;
-                    return Task.FromResult("never");
+                    return Task.FromResult(new IssueWorktreeProvisioner.ProvisionedIssueWorktree("never", "never-lane"));
                 }));
 
             Assert.Contains("file-write, shell", refusal.Message, StringComparison.Ordinal);
@@ -418,7 +418,7 @@ public sealed class QueueCommandTests
                     Assert.Equal(sourceRepository, source);
                     provisionedRepository = repository;
                     Directory.CreateDirectory(workspace);
-                    return Task.FromResult(workspace);
+                    return Task.FromResult(new IssueWorktreeProvisioner.ProvisionedIssueWorktree(workspace, "2202-lane"));
                 });
 
             Assert.Equal(0, exit);
@@ -429,7 +429,7 @@ public sealed class QueueCommandTests
             Assert.Equal(workspace, item.Workspace);
             Assert.Equal("github.com/owner/repo", item.Repository);
             Assert.Null(item.Stage);
-            Assert.Null(item.Branch);
+            Assert.Equal("2202-lane", item.Branch);
         }
         finally
         {
@@ -461,13 +461,13 @@ public sealed class QueueCommandTests
                 (_, _, _, _, _, _) =>
                 {
                     Directory.CreateDirectory(workspace);
-                    return Task.FromResult(workspace);
+                    return Task.FromResult(new IssueWorktreeProvisioner.ProvisionedIssueWorktree(workspace, "2225-lane-2"));
                 });
 
             var item = Assert.Single((await QueueStore.LoadAsync(BatonPaths.QueueFile, Ct)).Items);
             Assert.Equal("github.com/owner/repo", item.Repository);
             Assert.Null(item.Stage);
-            Assert.Null(item.Branch);
+            Assert.Equal("2225-lane-2", item.Branch);
             Assert.Null(item.AutomaticFixUsed);
             Assert.Equal(["house-style"], item.Skills);
         }
@@ -501,7 +501,7 @@ public sealed class QueueCommandTests
                 (_, _, _, _, _, _) =>
                 {
                     Directory.CreateDirectory(workspace);
-                    return Task.FromResult(workspace);
+                    return Task.FromResult(new IssueWorktreeProvisioner.ProvisionedIssueWorktree(workspace, "2225-lane"));
                 });
 
             var item = Assert.Single((await QueueStore.LoadAsync(BatonPaths.QueueFile, Ct)).Items);
@@ -545,7 +545,7 @@ public sealed class QueueCommandTests
                 (_, _, _, _, _, _) =>
                 {
                     provisionerCalled = true;
-                    return Task.FromResult(workspace);
+                    return Task.FromResult(new IssueWorktreeProvisioner.ProvisionedIssueWorktree(workspace, "unused-lane"));
                 });
 
             Assert.False(resolverCalled);
@@ -591,7 +591,7 @@ public sealed class QueueCommandTests
                 {
                     provisionerCalled = true;
                     Directory.CreateDirectory(workspace);
-                    return Task.FromResult(workspace);
+                    return Task.FromResult(new IssueWorktreeProvisioner.ProvisionedIssueWorktree(workspace, "unused-lane"));
                 }));
 
             Assert.Contains("canonical remote repository identity", refusal.Message, StringComparison.Ordinal);
@@ -922,7 +922,7 @@ public sealed class QueueCommandTests
                 Ct,
                 home,
                 (_, _) => Task.FromResult<RepositoryIdentity?>(null),
-                (_, _, _, _, _, _) => Task.FromResult(home),
+                (_, _, _, _, _, _) => Task.FromResult(new IssueWorktreeProvisioner.ProvisionedIssueWorktree(home, "write-failure-lane")),
                 (_, _) =>
                 {
                     if (failure == "unauthorized")
