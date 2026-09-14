@@ -33,10 +33,10 @@ public class StandardHandleInheritanceWiringTests
     // out at four call sites, and this test could only ever read the one it happened to anchor on.
     // Pointing at the definition is what makes "the verb set cannot drift" true rather than
     // "the copy next to the call cannot drift".
-    private const string ResultVerbPredicate = "static bool IsResultVerb(string verb)";
+    private const string LaneVerbPredicate = "static bool IsLaneVerb(string verb)";
 
     [Fact]
-    public void The_cli_clears_its_own_standard_handle_inheritance_on_every_terminal_result_verb()
+    public void The_cli_clears_its_own_standard_handle_inheritance_on_every_lane_verb()
     {
         string[] lines = File.ReadAllLines(Path.Combine(RepoRoot(), EntryPoint));
 
@@ -49,7 +49,7 @@ public class StandardHandleInheritanceWiringTests
 
         // The guard immediately above it, reading the named set rather than a copy of the tuple.
         int guardLine = Array.FindLastIndex(
-            lines, callLine, line => line.Contains("IsResultVerb(", StringComparison.Ordinal));
+            lines, callLine, line => line.Contains("IsLaneVerb(", StringComparison.Ordinal));
         Assert.True(
             guardLine >= 0,
             $"the {Call} call in {EntryPoint} has no IsResultVerb guard above it. If the guard was rewritten "
@@ -59,22 +59,24 @@ public class StandardHandleInheritanceWiringTests
         // The set itself, so a fifth lane verb cannot be added without this test seeing it, and so a
         // guard reformatted across two lines cannot evade the check by moving the literals.
         int definitionLine = Array.FindIndex(
-            lines, line => line.Contains(ResultVerbPredicate, StringComparison.Ordinal));
+            lines, line => line.Contains(LaneVerbPredicate, StringComparison.Ordinal));
         Assert.True(
             definitionLine >= 0,
-            $"{EntryPoint} no longer defines `{ResultVerbPredicate}`, so nothing in this file states once "
-            + "which verbs report a terminal room result (#2030 review, record-once).");
+            $"{EntryPoint} no longer defines `{LaneVerbPredicate}`, so nothing in this file states once "
+            + "which verbs launch a lane (#2030 review, record-once).");
 
         // The predicate's expression may wrap, so read its declaration and the short list that
         // follows rather than only the signature line.
         var definition = string.Join(' ', lines.Skip(definitionLine).Take(4));
-        foreach (var verb in new[] { "run", "dispatch", "redispatch", "cancel", "decide", "resolve", "resume", "supply" })
+        foreach (var verb in new[] { "run", "dispatch", "redispatch", "resume" })
         {
             Assert.Contains($"\"{verb}\"", definition, StringComparison.Ordinal);
         }
 
         Assert.DoesNotContain("\"watch\"", definition, StringComparison.Ordinal);
         Assert.DoesNotContain("\"daemon\"", definition, StringComparison.Ordinal);
+        Assert.DoesNotContain("\"cancel\"", definition, StringComparison.Ordinal);
+        Assert.DoesNotContain("\"resolve\"", definition, StringComparison.Ordinal);
     }
 
     [Fact]

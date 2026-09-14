@@ -163,13 +163,14 @@ if (args.Length == 0 || !knownSubcommands.Contains(args[0]))
 // waiting for redirected stdout/stderr to reach EOF. Every child .NET spawns inherits a duplicate of
 // those handles whether or not its own streams are redirected, so one straggler can keep both the
 // wrapper and this installed command alive after its result is complete. Clear them before the first
-// handler spawn for every command that reports a CommandResult, including cancel and resolve --close.
+// handler spawn for every command that drives a lane. Cancel and resolve settle through the shared
+// TerminalSettleRecorder seam, whose direct children are contained independently.
 // Protected invariant: after a one-shot command has reported its result and room settlement, Baton
 // owns no background activity or child/process handle that can keep that command or its install alive.
 // The daemon is deliberately outside this set: DetachedProcess clears its handles only when it launches
 // a detached lane, preserving the daemon's distinct lifetime. Why redirects alone cannot fix this is
-// StandardHandleInheritance's own remarks; the result-verb set is IsResultVerb at this file's foot.
-if (IsResultVerb(args[0]))
+// StandardHandleInheritance's own remarks; the lane-verb set is IsLaneVerb at this file's foot.
+if (IsLaneVerb(args[0]))
 {
     Baton.Core.Internal.StandardHandleInheritance.Disable();
 }
@@ -690,12 +691,6 @@ catch (BatonFlowException ex)
 // The one predicate that is not this set (the pre-ledger sentinel write in the BatonFlowException
 // catch above) says at its own site why it is narrower.
 static bool IsLaneVerb(string verb) => verb is "run" or "dispatch" or "redispatch" or "resume";
-
-// #2030: the CommandResult verbs share Program's report-and-terminal-settle tail. This is wider than
-// IsLaneVerb because cancel/decide/resolve/supply can settle a room too, and narrower than all CLI
-// verbs so the persistent daemon and stdio endpoints retain their independently-owned lifetimes.
-static bool IsResultVerb(string verb) => verb is
-    "run" or "dispatch" or "redispatch" or "cancel" or "decide" or "resolve" or "resume" or "supply";
 
 // #1382 F8: the one place either BatonFlowException catch above prints an error, so a Try line set on
 // a future WorkflowLockedException/FlowJournalHeldException is never silently dropped again.

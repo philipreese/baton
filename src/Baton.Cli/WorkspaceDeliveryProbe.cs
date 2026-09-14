@@ -389,18 +389,19 @@ public static class WorkspaceDeliveryProbe
             startInfo.ArgumentList.Add(arg);
         }
 
-        Process process;
+        ChildProcessTree child;
         try
         {
-            process = Process.Start(startInfo) ?? throw new InvalidOperationException($"{program} did not start.");
+            child = ChildProcessTree.Start(startInfo);
         }
         catch (Exception ex) when (ex is Win32Exception or InvalidOperationException)
         {
             return new Daemon.GhCliResult(Started: false, ExitCode: -1, Stdout: string.Empty, Stderr: $"{program} was not found on PATH.");
         }
 
-        using (process)
+        using (child)
         {
+            var process = child.Process;
             var stdoutTask = process.StandardOutput.ReadToEndAsync(cancellationToken);
             var stderrTask = process.StandardError.ReadToEndAsync(cancellationToken);
             try
@@ -414,13 +415,7 @@ public static class WorkspaceDeliveryProbe
                 // outlive the baton process that started it. Tree-wide because git spawns helpers.
                 // Best-effort by construction -- a process that exited between the timeout firing and
                 // this line throws, and there is nothing left to kill.
-                try
-                {
-                    process.Kill(entireProcessTree: true);
-                }
-                catch (Exception ex) when (ex is InvalidOperationException or Win32Exception or NotSupportedException)
-                {
-                }
+                child.Terminate();
 
                 throw;
             }
