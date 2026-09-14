@@ -7362,7 +7362,8 @@ written:
 | fix | succeeded-shaped, PR open | **re-review** | the prior verdict's findings are being checked |
 | implement / fix / continue | succeeded-shaped, no PR | **operator** | the queue never opens a PR |
 | review / re-review | succeeded-shaped, `decision: approve`, exact full `reviewedRef` = current PR head, required checks passing | **ready** | only current-head approval plus green required checks may clear draft |
-| review / re-review | succeeded-shaped, `decision: approve`, stale `reviewedRef` | **re-review** | a new head invalidates the approval and the PR is reconciled to draft first |
+| review / re-review | succeeded-shaped, `decision: approve`, canonical full-SHA `reviewedRef` differs from current PR head | **re-review** | a new head invalidates the approval and the PR is reconciled to draft first |
+| review / re-review | succeeded-shaped, `decision: approve`, noncanonical `reviewedRef` | **operator** | lifecycle approval requires exactly one full 40-character hexadecimal PR-head SHA; halt rather than spend a re-review |
 | review / re-review | succeeded-shaped, exact-head `decision: approve`, required checks pending, failing, or unknown | **wait in draft** | approval is retained while required checks are re-observed; it is not readiness evidence by itself |
 | review / re-review | succeeded-shaped, `decision: block`, `automaticFixUsed: false` | **fix** | the one automatic fix has not been used |
 | review / re-review | succeeded-shaped, `decision: block`, `automaticFixUsed: true` or absent | **operator** | a second fix or untrustworthy legacy history needs conductor judgment |

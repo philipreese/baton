@@ -11,13 +11,16 @@ namespace Baton.Tests.Queue;
 /// </summary>
 public sealed class WorkItemLifecycleTests
 {
+    private const string CurrentHead = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+    private const string PreviousHead = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
+
     private static WorkItemObservation At(
         WorkStage stage,
         string? outcome = WorkflowOutcome.Succeeded,
         ReviewVerdict? verdict = null,
         int? pr = 42,
-        string? prHead = "aaaaaaaabbbbbbbb",
-        string? workspaceHead = "aaaaaaaabbbbbbbb",
+        string? prHead = CurrentHead,
+        string? workspaceHead = CurrentHead,
         int round = 0,
         bool? automaticFixUsed = false,
         bool prObserved = true,
@@ -35,7 +38,7 @@ public sealed class WorkItemLifecycleTests
     /// cannot pass.
     /// </summary>
     private static ReviewVerdict Verdict(ReviewDecision? decision, params ReviewFinding[] findings) =>
-        new("aaaaaaaabbbbbbbb", findings, "the summary, which nothing routes on", Decision: decision);
+        new(CurrentHead, findings, "the summary, which nothing routes on", Decision: decision);
 
     private static ReviewFinding Finding(
         ReviewFindingSeverity severity, ReviewFindingStatus status, string claim = "the claim") =>
@@ -169,7 +172,7 @@ public sealed class WorkItemLifecycleTests
     [Fact]
     public void An_approval_for_a_previous_head_re_drafts_and_re_reviews_the_new_head()
     {
-        var stale = new ReviewVerdict("1111111122222222", [], Decision: ReviewDecision.Approve);
+        var stale = new ReviewVerdict(PreviousHead, [], Decision: ReviewDecision.Approve);
 
         var transition = WorkItemLifecycle.Decide(At(
             WorkStage.Review, verdict: stale, prDraft: false));
@@ -178,6 +181,46 @@ public sealed class WorkItemLifecycleTests
         Assert.Equal(WorkStage.ReReview, transition.NextStage);
         Assert.Equal(PullRequestReadinessAction.MarkDraft, transition.PullRequestAction);
         Assert.Contains("approval is stale", transition.Reason, StringComparison.Ordinal);
+    }
+
+    public static IEnumerable<object?[]> NoncanonicalApprovingReviewedRefs =>
+    [
+        ["aaaaaaaaaaaa", "'aaaaaaaaaaaa'"],
+        [$"PR #42 at {CurrentHead}", $"'PR #42 at {CurrentHead}'"],
+        ["main", "'main'"],
+        [null, "missing"],
+        ["", "missing"],
+        [$" {CurrentHead}", $"' {CurrentHead}'"],
+        [$"{CurrentHead} ", $"'{CurrentHead} '"],
+    ];
+
+    [Theory]
+    [MemberData(nameof(NoncanonicalApprovingReviewedRefs))]
+    public void A_noncanonical_approving_reviewed_ref_stops_for_the_operator_without_spending_a_round(
+        string? reviewedRef, string describedRef)
+    {
+        var transition = WorkItemLifecycle.Decide(At(
+            WorkStage.Review,
+            verdict: new ReviewVerdict(reviewedRef!, [], Decision: ReviewDecision.Approve),
+            round: 3));
+
+        Assert.Equal(WorkItemTransitionKind.NeedsOperator, transition.Kind);
+        Assert.Null(transition.NextStage);
+        Assert.Equal(0, transition.Round);
+        Assert.Equal(PullRequestReadinessAction.None, transition.PullRequestAction);
+        Assert.Contains($"noncanonical reviewedRef {describedRef}", transition.Reason, StringComparison.Ordinal);
+        Assert.Contains("carry the round by hand", transition.Reason, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void A_case_varied_full_sha_approval_covers_the_current_head()
+    {
+        var transition = WorkItemLifecycle.Decide(At(
+            WorkStage.Review,
+            verdict: new ReviewVerdict(CurrentHead.ToUpperInvariant(), [], Decision: ReviewDecision.Approve)));
+
+        Assert.Equal(WorkItemTransitionKind.Stop, transition.Kind);
+        Assert.Equal(WorkStage.Ready, transition.NextStage);
     }
 
     [Theory]
@@ -231,7 +274,7 @@ public sealed class WorkItemLifecycleTests
     [Fact]
     public void A_ready_item_with_a_new_head_is_re_drafted_and_re_reviewed()
     {
-        var stale = new ReviewVerdict("1111111122222222", [], Decision: ReviewDecision.Approve);
+        var stale = new ReviewVerdict(PreviousHead, [], Decision: ReviewDecision.Approve);
 
         var transition = WorkItemLifecycle.Decide(At(
             WorkStage.Ready, verdict: stale, prDraft: false));
@@ -239,6 +282,23 @@ public sealed class WorkItemLifecycleTests
         Assert.Equal(WorkItemTransitionKind.Dispatch, transition.Kind);
         Assert.Equal(WorkStage.ReReview, transition.NextStage);
         Assert.Equal(PullRequestReadinessAction.MarkDraft, transition.PullRequestAction);
+    }
+
+    [Fact]
+    public void A_ready_item_with_a_noncanonical_approval_is_re_drafted_and_stops_for_the_operator()
+    {
+        var transition = WorkItemLifecycle.Decide(At(
+            WorkStage.Ready,
+            verdict: new ReviewVerdict($"PR #42 at {CurrentHead}", [], Decision: ReviewDecision.Approve),
+            prDraft: false,
+            round: 3));
+
+        Assert.Equal(WorkItemTransitionKind.NeedsOperator, transition.Kind);
+        Assert.Null(transition.NextStage);
+        Assert.Equal(0, transition.Round);
+        Assert.Equal(PullRequestReadinessAction.MarkDraft, transition.PullRequestAction);
+        Assert.Contains("noncanonical reviewedRef", transition.Reason, StringComparison.Ordinal);
+        Assert.Contains("carry the round by hand", transition.Reason, StringComparison.Ordinal);
     }
 
     [Fact]

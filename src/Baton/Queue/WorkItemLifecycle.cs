@@ -150,6 +150,14 @@ public static class WorkItemLifecycle
                 + "the queue will not preserve a ready signal without that evidence"));
         }
 
+        if (!HasCanonicalFullSha(verdict.ReviewedRef))
+        {
+            return EnsureDraft(observation, WorkItemTransition.NeedsOperator(
+                $"the ready item's approving verdict has noncanonical reviewedRef {DescribeReviewedRef(verdict.ReviewedRef)}; "
+                + "a lifecycle approval must name exactly one full 40-character hexadecimal PR head SHA; "
+                + Recovery(observation.Stage)));
+        }
+
         if (!ReviewCoversCurrentHead(verdict, observation.PullRequestHeadSha))
         {
             return EnsureDraft(observation, Dispatch(
@@ -227,6 +235,14 @@ public static class WorkItemLifecycle
 
         if (decision == ReviewDecision.Approve)
         {
+            if (!HasCanonicalFullSha(verdict.ReviewedRef))
+            {
+                return EnsureDraft(observation, WorkItemTransition.NeedsOperator(
+                    $"the approving verdict has noncanonical reviewedRef {DescribeReviewedRef(verdict.ReviewedRef)}; "
+                    + "a lifecycle approval must name exactly one full 40-character hexadecimal PR head SHA; "
+                    + Recovery(observation.Stage)));
+            }
+
             if (!ReviewCoversCurrentHead(verdict, observation.PullRequestHeadSha))
             {
                 return EnsureDraft(observation, Dispatch(
@@ -332,13 +348,20 @@ public static class WorkItemLifecycle
             : transition;
 
     /// <summary>
-    /// Current-head coverage is deliberately exact. A branch or PR reference can identify what the
-    /// reviewer meant to inspect, but cannot prove which commit it actually covered; a short SHA can
-    /// collide. The generated review brief asks for this exact full head.
+    /// A lifecycle approval must identify one full SHA, without surrounding prose or whitespace. A
+    /// branch or PR reference can identify what the reviewer meant to inspect, but cannot prove which
+    /// commit it actually covered; a short SHA can collide. The generated review brief asks for this
+    /// exact full head.
     /// </summary>
     private static bool ReviewCoversCurrentHead(ReviewVerdict verdict, string? headSha) =>
         headSha is { Length: > 0 }
-        && string.Equals(verdict.ReviewedRef.Trim(), headSha, StringComparison.OrdinalIgnoreCase);
+        && string.Equals(verdict.ReviewedRef, headSha, StringComparison.OrdinalIgnoreCase);
+
+    private static bool HasCanonicalFullSha(string? value) =>
+        value is { Length: 40 } && value.All(Uri.IsHexDigit);
+
+    private static string DescribeReviewedRef(string? value) =>
+        string.IsNullOrEmpty(value) ? "missing" : $"'{value}'";
 
     /// <summary>
     /// <b>Every dispatch this type issues goes through here</b> — the round is incremented in one place
