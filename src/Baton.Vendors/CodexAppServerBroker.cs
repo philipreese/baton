@@ -710,12 +710,7 @@ public static class CodexAppServerBroker
         }
         if (configuration.ResumeSession)
         {
-            result.Clear();
             result["threadId"] = configuration.SessionId;
-            result["cwd"] = configuration.WorkingDirectory;
-            result["approvalPolicy"] = "never";
-            result["sandbox"] = "read-only";
-            result["model"] = configuration.Model;
         }
         return result;
     }

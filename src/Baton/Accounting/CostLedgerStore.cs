@@ -194,7 +194,7 @@ public static partial class CostLedgerStore
                     break;
 
                 case FlowEvent.ArtifactCheckpointCompleted checkpoint:
-                    outcomeByExecutionId[checkpoint.CheckpointExecutionId.Value] = "ArtifactCheckpoint";
+                    outcomeByExecutionId[checkpoint.CheckpointExecutionId.Value] = checkpoint.TerminalOutcome;
                     checkpointTerminalByExecutionId[checkpoint.CheckpointExecutionId.Value] = (checkpoint.ExitReason, checkpoint.ArrestReason);
                     break;
             }

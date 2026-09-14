@@ -182,7 +182,16 @@ public sealed record ExecutionUsageView(
     /// <summary>The arrested execution from which an artifact checkpoint was dispatched.</summary>
     [property: JsonPropertyName("predecessorExecutionId")]
     [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
-    string? PredecessorExecutionId = null)
+    string? PredecessorExecutionId = null,
+    [property: JsonPropertyName("outcome")]
+    [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    string? Outcome = null,
+    [property: JsonPropertyName("exitReason")]
+    [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    CoreExitReason? ExitReason = null,
+    [property: JsonPropertyName("arrestReason")]
+    [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    ArrestReason? ArrestReason = null)
 {
     /// <summary>The capture is provably not the whole stream — <see cref="Dispatch.ExecutionStreamLogger.StdoutTruncationMarkerFileName"/>.</summary>
     public const string StreamTruncatedByRolloverReason = "stream-truncated-by-rollover";
@@ -277,6 +286,7 @@ public static class ExecutionUsageProjector
         var arrestedUsageByExecutionId = new Dictionary<string, WorkerUsage>(StringComparer.Ordinal);
         var checkpointUsageByExecutionId = new Dictionary<string, WorkerUsage>(StringComparer.Ordinal);
         var checkpointPredecessorByExecutionId = new Dictionary<string, string>(StringComparer.Ordinal);
+        var checkpointTerminalByExecutionId = new Dictionary<string, FlowEvent.ArtifactCheckpointCompleted>(StringComparer.Ordinal);
         // #1885: the JOURNALLED half of the loss announcement, filtered to the one stream that bears on
         // a billed reconciliation -- spec/baton.md §3 is where that scoping is ruled. Last one wins,
         // which is the terminal re-announcement when there is one; the reason is identical either way,
@@ -322,9 +332,13 @@ public static class ExecutionUsageProjector
                     checkpointPredecessorByExecutionId[checkpoint.CheckpointExecutionId.Value] = checkpoint.PredecessorExecutionId.Value;
                 }
 
-                if (flowEntry.Event is FlowEvent.ArtifactCheckpointCompleted { Usage: { } } checkpointCompletion)
+                if (flowEntry.Event is FlowEvent.ArtifactCheckpointCompleted checkpointCompletion)
                 {
-                    checkpointUsageByExecutionId[checkpointCompletion.CheckpointExecutionId.Value] = checkpointCompletion.Usage;
+                    checkpointTerminalByExecutionId[checkpointCompletion.CheckpointExecutionId.Value] = checkpointCompletion;
+                    if (checkpointCompletion.Usage is { } checkpointUsage)
+                    {
+                        checkpointUsageByExecutionId[checkpointCompletion.CheckpointExecutionId.Value] = checkpointUsage;
+                    }
                 }
 
                 if (flowEntry.Event is FlowEvent.StreamLogLossDeclared loss
@@ -498,7 +512,16 @@ public static class ExecutionUsageProjector
                 reading?.ToolStepCounts?.Refused,
                 reading?.ToolStepCounts?.Repeated,
                 reading?.ToolStepCounts?.EmptyResults,
-                checkpointPredecessorByExecutionId.GetValueOrDefault(executionId));
+                checkpointPredecessorByExecutionId.GetValueOrDefault(executionId),
+                checkpointTerminalByExecutionId.TryGetValue(executionId, out var checkpointTerminal)
+                    ? checkpointTerminal.TerminalOutcome
+                    : null,
+                checkpointTerminalByExecutionId.TryGetValue(executionId, out checkpointTerminal)
+                    ? checkpointTerminal.ExitReason
+                    : null,
+                checkpointTerminalByExecutionId.TryGetValue(executionId, out checkpointTerminal)
+                    ? checkpointTerminal.ArrestReason
+                    : null);
         }
 
         return result;

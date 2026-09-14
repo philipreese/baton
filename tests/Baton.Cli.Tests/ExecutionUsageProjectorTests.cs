@@ -71,6 +71,9 @@ public sealed class ExecutionUsageProjectorTests
             Assert.Equal(2, usage.Count);
             var checkpointUsage = usage[checkpoint.Value];
             Assert.Equal(predecessor.Value, checkpointUsage.PredecessorExecutionId);
+            Assert.Equal("Succeeded", checkpointUsage.Outcome);
+            Assert.Equal(CoreExitReason.Natural, checkpointUsage.ExitReason);
+            Assert.Null(checkpointUsage.ArrestReason);
             Assert.Equal(7, checkpointUsage.TokensIn);
             Assert.Equal(3, checkpointUsage.TokensOut);
         }

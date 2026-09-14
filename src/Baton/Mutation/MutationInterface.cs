@@ -2536,7 +2536,7 @@ public static class MutationInterface
             || hostCancellationToken.IsCancellationRequested
             || budgetMonitor.ArrestReasonValue is not (ArrestReason.TokenBudget or ArrestReason.ToolStepCap)
             || string.IsNullOrWhiteSpace(sessionId)
-            || binding.Target.ResumeArgs is null)
+            || (binding.Target.ResumeArgs is null && binding.Target.ResumeTarget is null))
         {
             return;
         }

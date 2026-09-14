@@ -542,7 +542,16 @@ public abstract record FlowEvent
         ExecutionId CheckpointExecutionId,
         CoreExitReason ExitReason,
         WorkerUsage? Usage = null,
-        ArrestReason? ArrestReason = null) : FlowEvent;
+        ArrestReason? ArrestReason = null) : FlowEvent
+    {
+        /// <summary>The terminal outcome for readers; the checkpoint remains separately attributable.</summary>
+        [JsonIgnore]
+        public string TerminalOutcome => ArrestReason is not null
+            ? "Arrested"
+            : ExitReason == CoreExitReason.Natural ? "Succeeded"
+            : ExitReason == CoreExitReason.CancelRequested ? "Cancelled"
+            : "Failed";
+    }
 
     /// <summary>
     /// S6 (spec/baton.md §3, #802 section 3.3, pulled forward by #1583): records that a step's execution was rebound to a different

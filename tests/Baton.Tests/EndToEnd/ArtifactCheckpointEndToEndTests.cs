@@ -3,6 +3,7 @@ using Baton.Domain;
 using Baton.Mutation;
 using Baton.Store;
 using Baton.Tests.Shared;
+using Baton.Vendors;
 
 namespace Baton.Tests.EndToEnd;
 
@@ -102,6 +103,46 @@ public sealed class ArtifactCheckpointEndToEndTests
         }
     }
 
+    [Fact]
+    public async Task A_structured_grant_broker_target_resumes_the_captured_thread_for_the_checkpoint()
+    {
+        var room = Path.Combine(Path.GetTempPath(), "baton-artifact-checkpoint-broker-" + Guid.NewGuid().ToString("N"));
+        var workspace = Path.Combine(room, "workspace");
+        var artifacts = Path.Combine(room, "artifacts");
+        var log = Path.Combine(room, "flow.jsonl");
+        Directory.CreateDirectory(workspace);
+        try
+        {
+            var contract = new WorkerContract("review", [], [new ProducedOutput("report.md")], []);
+            var target = new CodexWorkerAdapter().Resolve(
+                new WorkerInvocation("Review.", PermissionGrant: new PermissionGrant(ReadFiles: true)), contract);
+            var snapshot = new WorkflowDefinitionSnapshot(
+                new WorkflowDefinitionSnapshotId("artifact-checkpoint-broker"), new WorkflowTemplateId("review"), 1,
+                [new WorkflowStepDefinition(new StepId("review"), "review", [], ["report.md"], DependsOn: [], RetryPolicy: new RetryPolicy(1))]);
+            var binding = new WorkerBinding.Process(
+                contract, target, TimeSpan.FromSeconds(30), Adapter: "codex", TokenBudget: 100, VerifiesWorkspace: false);
+            var dispatcher = new CheckpointDispatcher(artifacts);
+            await using var writer = new FlowEventLogWriter(log);
+            var reader = new FlowEventLogReader(log);
+
+            await MutationInterface.StartWorkflowAsync(
+                new WorkflowId("artifact-checkpoint-broker"), room, snapshot,
+                new Dictionary<string, WorkerBinding> { ["review"] = binding }, artifacts, reader, writer, dispatcher,
+                cancellationToken: TestContext.Current.CancellationToken);
+
+            Assert.Equal(2, dispatcher.CallCount);
+            Assert.NotNull(dispatcher.CheckpointTarget);
+            Assert.Equal("dotnet", dispatcher.CheckpointTarget.Program);
+            Assert.Contains("codex-broker", dispatcher.CheckpointTarget.Args);
+            Assert.NotNull(dispatcher.CheckpointTarget.ResumeTarget);
+            Assert.Equal(["report.md"], dispatcher.CheckpointTarget.ArtifactOnlyOutputNames);
+        }
+        finally
+        {
+            DirectoryCleanup.DeleteRecursively(room);
+        }
+    }
+
     private static CoreDispatchTarget CheckpointTarget(string workspace) => new(
         "fake", ["ORIGINAL"], workspace, PromptText: "ORIGINAL",
         TryGetSessionId: _ => "checkpoint-session",
@@ -118,6 +159,7 @@ public sealed class ArtifactCheckpointEndToEndTests
             CallCount++;
             if (CallCount == 1)
             {
+                target.OnStdoutLine?.Invoke("""{"type":"thread.started","thread_id":"checkpoint-session"}""");
                 target.OnStdoutLine?.Invoke(ArrestingUsage);
                 cancelAfterCap?.Invoke();
                 var cancelled = new TaskCompletionSource();
