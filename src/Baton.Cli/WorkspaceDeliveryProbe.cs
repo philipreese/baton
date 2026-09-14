@@ -407,6 +407,12 @@ public static class WorkspaceDeliveryProbe
             try
             {
                 await process.WaitForExitAsync(cancellationToken).ConfigureAwait(false);
+
+                // Protected invariant: no delivery-probe descendant can survive this spawn or keep
+                // either redirected reader open after its direct parent exits. End the job before
+                // awaiting those readers: awaiting first makes the descendant prevent the cleanup
+                // that would close the pipe (#2030).
+                child.Terminate();
             }
             catch (OperationCanceledException)
             {

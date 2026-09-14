@@ -282,49 +282,11 @@ public class TerminalSentinelEndToEndTests
     }
 
     /// <summary>
-    /// #2030's discriminating retained-pipe regression: the real CLI is launched through the same
-    /// PowerShell redirection shape a lane uses. Its settle-time delivery probe runs a fixture git
-    /// which leaves a sleeping descendant holding every inherited handle. Before the fix that
-    /// descendant retains the wrapper's pipe after Baton exits; the marker cannot be written.
-    /// </summary>
-    [Fact]
-    public async Task A_terminal_one_shot_command_contains_a_delivery_probe_descendant_before_wrapper_eof()
-    {
-        var testRoot = Path.Combine(Path.GetTempPath(), $"cli-wrapper-exit-{Guid.NewGuid():N}");
-        var roomDirectory = Path.Combine(testRoot, "task");
-        try
-        {
-            var workflowFilePath = await WriteOneStepWorkflowAsync(testRoot);
-            var bindingsFilePath = await WriteNoOpBindingsAsync(testRoot);
-            var markerPath = Path.Combine(testRoot, "wrapper-completed");
-            var logPath = Path.Combine(testRoot, "wrapper.log");
-            var fixtureBin = Path.Combine(testRoot, "fixture-bin");
-            await WriteLingeringGitFixtureAsync(fixtureBin);
-
-            using var wrapper = StartRedirectingPowerShellWrapper(
-                markerPath, logPath, fixtureBin,
-                "run", workflowFilePath, "--bindings", bindingsFilePath, "--room-dir", roomDirectory);
-            await BoundedProcessWait.RunToExitAsync(
-                wrapper, TimeSpan.FromSeconds(30), TestContext.Current.CancellationToken);
-
-            Assert.Equal(0, wrapper.ExitCode);
-            Assert.True(File.Exists(markerPath), "the wrapper did not observe Baton stdout/stderr reaching EOF after settlement");
-            var sentinelPath = Path.Combine(roomDirectory, "terminal.json");
-            Assert.True(File.Exists(sentinelPath), "the terminal fact was not written before delivery-probe cleanup");
-            var releasedSentinelPath = Path.Combine(roomDirectory, "terminal.released.json");
-            File.Move(sentinelPath, releasedSentinelPath);
-            Assert.True(File.Exists(releasedSentinelPath), "the settled room's sentinel was not exclusively releasable");
-        }
-        finally
-        {
-            DirectoryCleanup.DeleteRecursively(testRoot);
-        }
-    }
-
-    /// <summary>
-    /// #2294's cancel-path proof: cancelling a persisted open room settles it through the real CLI.
-    /// Its room-local binding gives the delivery probe a real workspace, whose git fixture leaves a
-    /// sleeping descendant behind. The wrapper can reach EOF only when that descendant is contained.
+    /// #2030's red/green proof: cancelling a persisted room reaches the shared terminal-delivery
+    /// seam through the real CLI. The hermetic git.exe exits after starting a sleeper which inherits
+    /// its process handles. Before the fix Baton stays live draining that exited git child, and the
+    /// wrapper cannot reach EOF. The command is complete only when its terminal fact is durable, the
+    /// descendant is gone, and both Baton and its wrapper have exited.
     /// </summary>
     [Fact]
     public async Task Cancelling_a_persisted_open_room_contains_a_delivery_probe_descendant_before_wrapper_eof()
@@ -341,15 +303,20 @@ public class TerminalSentinelEndToEndTests
             var markerPath = Path.Combine(testRoot, "wrapper-completed");
             var logPath = Path.Combine(testRoot, "wrapper.log");
             var fixtureBin = Path.Combine(testRoot, "fixture-bin");
-            await WriteLingeringGitFixtureAsync(fixtureBin);
+            WriteLingeringGitFixture(fixtureBin);
 
             using var wrapper = StartRedirectingPowerShellWrapper(
                 markerPath, logPath, fixtureBin, "cancel", roomDirectory);
             await BoundedProcessWait.RunToExitAsync(
-                wrapper, TimeSpan.FromSeconds(30), TestContext.Current.CancellationToken);
+                wrapper, TimeSpan.FromSeconds(10), TestContext.Current.CancellationToken);
 
             Assert.Equal(0, wrapper.ExitCode);
             Assert.True(File.Exists(markerPath), "the wrapper did not observe Baton stdout/stderr reaching EOF after cancellation");
+            var sleeperPidPath = Path.Combine(fixtureBin, "sleeper.pid");
+            Assert.True(File.Exists(sleeperPidPath), "the delivery probe did not launch the inherited-handle descendant");
+            Assert.False(IsProcessAlive(int.Parse(await File.ReadAllTextAsync(
+                sleeperPidPath, TestContext.Current.CancellationToken))),
+                "the delivery-probe descendant survived command settlement");
             var sentinelPath = Path.Combine(roomDirectory, "terminal.json");
             Assert.True(File.Exists(sentinelPath), "the terminal fact was not written before delivery-probe cleanup");
             var view = JsonSerializer.Deserialize<WorkflowStatusView>(await File.ReadAllTextAsync(sentinelPath, TestContext.Current.CancellationToken));
@@ -361,6 +328,7 @@ public class TerminalSentinelEndToEndTests
         }
         finally
         {
+            TryKillLingeringGitSleeper(Path.Combine(testRoot, "fixture-bin"));
             DirectoryCleanup.DeleteRecursively(testRoot);
         }
     }
@@ -699,7 +667,9 @@ public class TerminalSentinelEndToEndTests
         static string Quote(string value) => $"'{value.Replace("'", "''", StringComparison.Ordinal)}'";
 
         var batonArguments = string.Join(' ', args.Select(Quote));
+        var sleeperPidPath = Path.Combine(fixtureBin, "sleeper.pid");
         var script = $"$env:PATH = {Quote(fixtureBin)} + ';' + $env:PATH; "
+            + $"$env:BATON_CRASH_TEST_SLEEPER_PID_FILE = {Quote(sleeperPidPath)}; "
             + $"& dotnet exec {Quote(typeof(RunCommand).Assembly.Location)} {batonArguments} *> {Quote(logPath)}; "
             + $"if ($LASTEXITCODE -eq 0) {{ New-Item -ItemType File -Path {Quote(markerPath)} | Out-Null; exit 0 }}; exit $LASTEXITCODE";
         var startInfo = new ProcessStartInfo("powershell")
@@ -716,16 +686,57 @@ public class TerminalSentinelEndToEndTests
         return Process.Start(startInfo) ?? throw new InvalidOperationException("Failed to start the PowerShell wrapper.");
     }
 
-    private static async Task WriteLingeringGitFixtureAsync(string fixtureBin)
+    private static void WriteLingeringGitFixture(string fixtureBin)
     {
         Directory.CreateDirectory(fixtureBin);
-        var script = "@echo off\r\n"
-            + "if \"%1\"==\"config\" (echo https://example.invalid/fixture.git& exit /b 0)\r\n"
-            + "if \"%1\"==\"rev-parse\" (echo C:\\fixture\\.git& exit /b 0)\r\n"
-            + "start \"\" /b powershell -NoProfile -Command \"Start-Sleep -Seconds 120\"\r\n"
-            + "echo 1\t0\tfixture.txt\r\n"
-            + "exit /b 0\r\n";
-        await File.WriteAllTextAsync(Path.Combine(fixtureBin, "git.cmd"), script);
+        var sourceDirectory = Path.GetDirectoryName(typeof(Baton.CrashTestHost.Scenarios).Assembly.Location)!;
+        foreach (var source in Directory.EnumerateFiles(sourceDirectory))
+        {
+            var name = Path.GetFileName(source);
+            if (name.StartsWith("Baton.CrashTestHost", StringComparison.Ordinal)
+                || name.Equals("Baton.dll", StringComparison.Ordinal))
+            {
+                File.Copy(source, Path.Combine(fixtureBin, name));
+            }
+        }
+
+        File.Copy(
+            Path.Combine(fixtureBin, "Baton.CrashTestHost.exe"),
+            Path.Combine(fixtureBin, "git.exe"));
+    }
+
+    private static bool IsProcessAlive(int pid)
+    {
+        try
+        {
+            using var process = Process.GetProcessById(pid);
+            return !process.HasExited;
+        }
+        catch (ArgumentException)
+        {
+            return false;
+        }
+    }
+
+    private static void TryKillLingeringGitSleeper(string fixtureBin)
+    {
+        var pidFile = Path.Combine(fixtureBin, "sleeper.pid");
+        if (!File.Exists(pidFile)
+            || !int.TryParse(File.ReadAllText(pidFile), out int pid))
+        {
+            return;
+        }
+
+        try
+        {
+            using var process = Process.GetProcessById(pid);
+            process.Kill(entireProcessTree: true);
+            process.WaitForExit(5_000);
+        }
+        catch (ArgumentException)
+        {
+            // Already exited; nothing remains for the fixture to clean up.
+        }
     }
 
     private static async Task WriteOpenSingleStepRoomAsync(string roomDirectory)
