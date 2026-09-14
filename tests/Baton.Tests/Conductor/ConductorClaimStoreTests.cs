@@ -309,6 +309,78 @@ public sealed class ConductorClaimStoreTests
         }
     }
 
+    [Theory]
+    [InlineData("{\"repository\":\"github.com/philipreese/repo-a\",\"repositorySlug\":\"wrong\",\"holder\":\"conductor-1\",\"acquiredAt\":\"2026-09-14T10:00:00Z\",\"transitions\":[{\"kind\":\"Claim\",\"holder\":\"conductor-1\",\"timestamp\":\"2026-09-14T10:00:00Z\"}]}")]
+    [InlineData("{\"repository\":\"github.com/philipreese/repo-a\",\"repositorySlug\":\"github-com-philipreese-repo-a-00000000\",\"holder\":\"\",\"acquiredAt\":\"0001-01-01T00:00:00\",\"transitions\":[]}")]
+    [InlineData("{\"repository\":\"github.com/philipreese/repo-a\",\"repositorySlug\":\"github-com-philipreese-repo-a-00000000\",\"holder\":\"conductor-2\",\"acquiredAt\":\"2026-09-14T10:00:00Z\",\"transitions\":[{\"kind\":99,\"holder\":\"conductor-2\",\"timestamp\":\"2026-09-14T10:00:00Z\"}]}")]
+    public async Task Parseable_semantic_corruption_fails_closed_and_preserves_file(string corruptContent)
+    {
+        var temp = NewTempDir();
+        try
+        {
+            var filePath = Path.Combine(temp, RepoA.FileSlug, BatonPaths.ConductorClaimFileName);
+            Directory.CreateDirectory(Path.GetDirectoryName(filePath)!);
+            corruptContent = corruptContent.Replace("github-com-philipreese-repo-a-00000000", RepoA.FileSlug, StringComparison.Ordinal);
+            await File.WriteAllTextAsync(filePath, corruptContent, TestContext.Current.CancellationToken);
+
+            await Assert.ThrowsAsync<ConductorClaimException>(() => ConductorClaimStore.ClaimAsync(RepoA, "conductor-3", batonRoot: temp, cancellationToken: TestContext.Current.CancellationToken));
+            await Assert.ThrowsAsync<ConductorClaimException>(() => ConductorClaimStore.GetClaimAsync(RepoA, batonRoot: temp, cancellationToken: TestContext.Current.CancellationToken));
+            await Assert.ThrowsAsync<ConductorClaimException>(() => ConductorClaimStore.ListHeldClaimsAsync(batonRoot: temp, cancellationToken: TestContext.Current.CancellationToken));
+            Assert.Equal(corruptContent, await File.ReadAllTextAsync(filePath, TestContext.Current.CancellationToken));
+        }
+        finally { DirectoryCleanup.DeleteRecursively(temp); }
+    }
+
+    [Fact]
+    public async Task Unreadable_state_fails_closed_with_a_domain_error()
+    {
+        var temp = NewTempDir();
+        try
+        {
+            await ConductorClaimStore.ClaimAsync(RepoA, "conductor-1", batonRoot: temp, cancellationToken: TestContext.Current.CancellationToken);
+            ConductorClaimStore.ReadText = _ => throw new IOException("injected read failure");
+            var ex = await Assert.ThrowsAsync<ConductorClaimException>(() => ConductorClaimStore.GetClaimAsync(RepoA, batonRoot: temp, cancellationToken: TestContext.Current.CancellationToken));
+            Assert.Contains("Could not read", ex.Message);
+        }
+        finally { ConductorClaimStore.ResetFileOperations(); DirectoryCleanup.DeleteRecursively(temp); }
+    }
+
+    [Fact]
+    public async Task Failed_atomic_replacement_preserves_the_old_durable_record_and_cleans_the_temp_file()
+    {
+        var temp = NewTempDir();
+        try
+        {
+            await ConductorClaimStore.ClaimAsync(RepoA, "conductor-1", batonRoot: temp, cancellationToken: TestContext.Current.CancellationToken);
+            var filePath = Path.Combine(temp, RepoA.FileSlug, BatonPaths.ConductorClaimFileName);
+            var original = await File.ReadAllTextAsync(filePath, TestContext.Current.CancellationToken);
+            ConductorClaimStore.MoveOverwriting = (_, _) => throw new IOException("injected replacement failure");
+            await Assert.ThrowsAsync<ConductorClaimException>(() => ConductorClaimStore.TakeoverAsync(RepoA, "conductor-2", "operator approved", batonRoot: temp, cancellationToken: TestContext.Current.CancellationToken));
+            Assert.Equal(original, await File.ReadAllTextAsync(filePath, TestContext.Current.CancellationToken));
+            Assert.Empty(Directory.EnumerateFiles(Path.GetDirectoryName(filePath)!, "*.tmp"));
+        }
+        finally { ConductorClaimStore.ResetFileOperations(); DirectoryCleanup.DeleteRecursively(temp); }
+    }
+
+    [Fact]
+    public async Task Failed_temporary_file_cleanup_preserves_the_old_durable_record_and_surfaces_the_write_error()
+    {
+        var temp = NewTempDir();
+        try
+        {
+            await ConductorClaimStore.ClaimAsync(RepoA, "conductor-1", batonRoot: temp, cancellationToken: TestContext.Current.CancellationToken);
+            var filePath = Path.Combine(temp, RepoA.FileSlug, BatonPaths.ConductorClaimFileName);
+            var original = await File.ReadAllTextAsync(filePath, TestContext.Current.CancellationToken);
+            ConductorClaimStore.MoveOverwriting = (_, _) => throw new IOException("injected replacement failure");
+            ConductorClaimStore.DeleteFile = _ => throw new IOException("injected cleanup failure");
+            var ex = await Assert.ThrowsAsync<ConductorClaimException>(() => ConductorClaimStore.TakeoverAsync(RepoA, "conductor-2", "operator approved", batonRoot: temp, cancellationToken: TestContext.Current.CancellationToken));
+            Assert.Contains("Could not write", ex.Message);
+            Assert.Equal(original, await File.ReadAllTextAsync(filePath, TestContext.Current.CancellationToken));
+            Assert.Single(Directory.EnumerateFiles(Path.GetDirectoryName(filePath)!, "*.tmp"));
+        }
+        finally { ConductorClaimStore.ResetFileOperations(); DirectoryCleanup.DeleteRecursively(temp); }
+    }
+
     [Fact]
     public async Task Release_requires_nonblank_reason_and_leaves_unheld_state()
     {

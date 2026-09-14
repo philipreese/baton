@@ -54,6 +54,16 @@ The [arm comparator](benchmarks/comparator.md) records the matched-brief routing
 `spec/baton.md` is the authority on every verb's exact contract — this table is an index, not a
 restatement.
 
+## Conductor repository claims
+
+`baton conductor` is a durable coordination register for external conductors: one canonical
+repository identity has at most one current holder. Its claim file is
+`~/.baton/<repository-slug>/conductor-claim.json`; a missing file is unheld, while corrupt or
+unreadable state fails closed and is preserved for operator recovery rather than overwritten.
+Use `claim`, `list`, `release`, and `takeover` as listed above. Claims do not yet enforce queue,
+room, or other mutations. The normative contract and recovery details are in
+[`spec/baton.md` §14](spec/baton.md#14-conductor-claims-durable-repository-ownership-register-2296).
+
 ## The conductor queue
 
 `baton queue` is the dispatch queue the running daemon drains. The verbs only write the queue file —

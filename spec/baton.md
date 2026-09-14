@@ -7740,7 +7740,7 @@ This section defines the first bounded slice: a durable, auditable repository-cl
 
 ### Protected invariant
 
-- **At most one current holder exists for one canonical repository identity.** Claims are keyed by `RepositoryIdentity.FileSlug`, derived from the canonical remote URL or root commit via `RepositoryIdentityResolver`. A path that cannot produce a canonical repository identity is refused; claims are never keyed by an ad hoc checkout path or free-form spelling.
+- **At most one current holder exists for one canonical repository identity.** Claims are keyed by `RepositoryIdentity.FileSlug`, derived from the canonical remote URL or, when no origin is available, the canonical git common directory via `RepositoryIdentityResolver`. The common-directory fallback is shared by linked worktrees; it is not a root commit. A path that cannot produce a canonical repository identity is refused; claims are never keyed by an ad hoc checkout path or free-form spelling.
 - **Two worktrees of the same repository share the exact same claim.** A claim acquired in one worktree holds the canonical repository identity across all linked checkouts.
 - **Racing claims yield exactly one winner.** When two conductors race to claim the same repository, mutex-guarded serialization ensures exactly one succeeds and the other fails closed. Claims for different repositories do not block one another.
 - **Durable across restarts.** Claim, release, and takeover transitions are serialized and durable across CLI and daemon restart.

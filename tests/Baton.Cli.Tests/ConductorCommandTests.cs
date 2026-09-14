@@ -280,6 +280,53 @@ public sealed class ConductorCommandTests
         }
     }
 
+    [Fact]
+    public async Task Two_independent_CLI_processes_racing_one_repository_leave_exactly_one_owner()
+    {
+        var root = NewTempDirectory();
+        try
+        {
+            var workspace = Path.Combine(root, "repository");
+            var batonRoot = Path.Combine(root, "baton-home");
+            await InitGitRepoAsync(workspace);
+
+            using var first = StartClaimProcess(workspace, batonRoot, "conductor-alpha");
+            using var second = StartClaimProcess(workspace, batonRoot, "conductor-beta");
+            first.Start();
+            second.Start();
+            await Task.WhenAll(first.WaitForExitAsync(TestContext.Current.CancellationToken), second.WaitForExitAsync(TestContext.Current.CancellationToken));
+
+            Assert.Equal(1, new[] { first.ExitCode, second.ExitCode }.Count(code => code == 0));
+            Assert.Equal(1, new[] { first.ExitCode, second.ExitCode }.Count(code => code != 0));
+            var identity = await RepositoryIdentityResolver.TryResolveAsync(workspace, TestContext.Current.CancellationToken);
+            Assert.NotNull(identity);
+            var claim = await ConductorClaimStore.GetClaimAsync(identity, batonRoot, TestContext.Current.CancellationToken);
+            Assert.NotNull(claim);
+            Assert.Contains(claim.Holder, new[] { "conductor-alpha", "conductor-beta" });
+        }
+        finally
+        {
+            DirectoryCleanup.DeleteRecursively(root);
+        }
+    }
+
+    private static Process StartClaimProcess(string workspace, string batonRoot, string holder)
+    {
+        var startInfo = new ProcessStartInfo("dotnet")
+        {
+            WorkingDirectory = workspace,
+            UseShellExecute = false,
+        };
+        startInfo.ArgumentList.Add(typeof(ConductorCommand).Assembly.Location);
+        startInfo.ArgumentList.Add("conductor");
+        startInfo.ArgumentList.Add("claim");
+        startInfo.ArgumentList.Add(holder);
+        startInfo.ArgumentList.Add("--workspace");
+        startInfo.ArgumentList.Add(workspace);
+        startInfo.Environment["BATON_HOME"] = batonRoot;
+        return new Process { StartInfo = startInfo };
+    }
+
     private static string NewTempDirectory()
     {
         var path = Path.Combine(Path.GetTempPath(), $"baton-conductor-test-{Guid.NewGuid():N}");

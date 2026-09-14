@@ -20,6 +20,23 @@ public static class ConductorClaimStore
         DefaultIgnoreCondition = JsonIgnoreCondition.WhenWritingNull,
     };
 
+    // Test-only file-operation seams keep failed replacement paths observable without touching an
+    // operator's Baton root. Production always uses the platform file APIs below.
+    internal static Func<string, string> ReadText { get; set; } = path => File.ReadAllText(path, Encoding.UTF8);
+    internal static Action<string, string> WriteText { get; set; } =
+        (path, text) => File.WriteAllText(path, text, new UTF8Encoding(false));
+    internal static Action<string, string> MoveOverwriting { get; set; } =
+        (source, destination) => File.Move(source, destination, overwrite: true);
+    internal static Action<string> DeleteFile { get; set; } = File.Delete;
+
+    internal static void ResetFileOperations()
+    {
+        ReadText = path => File.ReadAllText(path, Encoding.UTF8);
+        WriteText = (path, text) => File.WriteAllText(path, text, new UTF8Encoding(false));
+        MoveOverwriting = (source, destination) => File.Move(source, destination, overwrite: true);
+        DeleteFile = File.Delete;
+    }
+
     /// <summary>
     /// Acquires a claim on <paramref name="identity"/> for <paramref name="holder"/> (spec/baton.md §14).
     /// </summary>
@@ -323,7 +340,7 @@ public static class ConductorClaimStore
         string text;
         try
         {
-            text = File.ReadAllText(path, Encoding.UTF8);
+            text = ReadText(path);
         }
         catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
         {
@@ -353,11 +370,7 @@ public static class ConductorClaimStore
                 ex);
         }
 
-        if (record is null || string.IsNullOrWhiteSpace(record.Repository) || string.IsNullOrWhiteSpace(record.RepositorySlug))
-        {
-            throw new ConductorClaimException(
-                $"The conductor claim file at '{path}' has an invalid or incomplete shape. Refusing to proceed.");
-        }
+        ValidateRecord(path, record);
 
         return record;
     }
@@ -367,14 +380,14 @@ public static class ConductorClaimStore
         var tempPath = $"{path}.{Guid.NewGuid():N}.tmp";
         try
         {
-            File.WriteAllText(tempPath, JsonSerializer.Serialize(record, SerializerOptions) + "\n", new UTF8Encoding(false));
-            File.Move(tempPath, path, overwrite: true);
+            WriteText(tempPath, JsonSerializer.Serialize(record, SerializerOptions) + "\n");
+            MoveOverwriting(tempPath, path);
         }
         catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
         {
             try
             {
-                File.Delete(tempPath);
+                DeleteFile(tempPath);
             }
             catch (Exception cleanupEx) when (cleanupEx is IOException or UnauthorizedAccessException)
             {
@@ -383,4 +396,82 @@ public static class ConductorClaimStore
             throw new ConductorClaimException($"Could not write the conductor claim at '{path}': {ex.Message}", ex);
         }
     }
+
+    private static void ValidateRecord(string path, ConductorClaimRecord? record)
+    {
+        if (record is null || string.IsNullOrWhiteSpace(record.Repository) || string.IsNullOrWhiteSpace(record.RepositorySlug))
+        {
+            throw Corrupt(path, "it has an invalid or incomplete shape");
+        }
+
+        var canonical = RepositoryIdentity.TryCanonicalize(record.Repository);
+        if (canonical is null || !string.Equals(canonical, record.Repository, StringComparison.Ordinal)
+            || !string.Equals(RepositoryIdentity.FileSlugFor(canonical), record.RepositorySlug, StringComparison.Ordinal)
+            || !string.Equals(Path.GetFileName(Path.GetDirectoryName(path)), record.RepositorySlug, StringComparison.Ordinal))
+        {
+            throw Corrupt(path, "its repository identity or repository slug does not match its storage location");
+        }
+
+        if (record.Transitions is not { Count: > 0 })
+        {
+            throw Corrupt(path, "its audit transition history is missing");
+        }
+
+        string? holder = null;
+        DateTime? acquiredAt = null;
+        ConductorTakeoverProvenance? takeover = null;
+        DateTime? previousTimestamp = null;
+
+        foreach (var transition in record.Transitions)
+        {
+            if (transition is null || !Enum.IsDefined(transition.Kind) || !IsUtcTimestamp(transition.Timestamp)
+                || (previousTimestamp.HasValue && transition.Timestamp < previousTimestamp.Value))
+            {
+                throw Corrupt(path, "its audit transition history is malformed or impossible");
+            }
+
+            switch (transition.Kind)
+            {
+                case ConductorClaimTransitionKind.Claim when holder is null
+                    && !string.IsNullOrWhiteSpace(transition.Holder)
+                    && transition.DisplacedHolder is null && transition.Reason is null:
+                    holder = transition.Holder;
+                    acquiredAt = transition.Timestamp;
+                    takeover = null;
+                    break;
+                case ConductorClaimTransitionKind.Takeover when holder is not null
+                    && !string.IsNullOrWhiteSpace(transition.Holder)
+                    && !string.Equals(holder, transition.Holder, StringComparison.Ordinal)
+                    && string.Equals(holder, transition.DisplacedHolder, StringComparison.Ordinal)
+                    && !string.IsNullOrWhiteSpace(transition.Reason):
+                    holder = transition.Holder;
+                    acquiredAt = transition.Timestamp;
+                    takeover = new ConductorTakeoverProvenance(transition.DisplacedHolder!, transition.Reason!, transition.Timestamp);
+                    break;
+                case ConductorClaimTransitionKind.Release when holder is not null
+                    && string.Equals(holder, transition.Holder, StringComparison.Ordinal)
+                    && transition.DisplacedHolder is null && !string.IsNullOrWhiteSpace(transition.Reason):
+                    holder = null;
+                    acquiredAt = null;
+                    takeover = null;
+                    break;
+                default:
+                    throw Corrupt(path, "its audit transition history is malformed or impossible");
+            }
+
+            previousTimestamp = transition.Timestamp;
+        }
+
+        if (!string.Equals(holder, record.Holder, StringComparison.Ordinal)
+            || acquiredAt != record.AcquiredAt || !Equals(takeover, record.Takeover))
+        {
+            throw Corrupt(path, "its current claim projection does not match its audit transition history");
+        }
+    }
+
+    private static bool IsUtcTimestamp(DateTime timestamp) =>
+        timestamp != default && timestamp.Kind == DateTimeKind.Utc;
+
+    private static ConductorClaimException Corrupt(string path, string detail) =>
+        new($"The conductor claim file at '{path}' is corrupt: {detail}. Refusing to proceed and preserving the existing file.");
 }
