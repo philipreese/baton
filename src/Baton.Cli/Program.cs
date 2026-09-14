@@ -159,16 +159,14 @@ if (args.Length == 0 || !knownSubcommands.Contains(args[0]))
     return 64;
 }
 
-// #2030: a lane runs as `pwsh -Command "baton dispatch ... *> lane.log"`, and that wrapper only
-// proceeds once the redirected stream reaches EOF. Every child .NET spawns inherits a duplicate of
-// this process's stdout/stderr whether or not its own streams are redirected, so one straggler
-// outliving the lane held the wrapper open for an hour. Cleared here, before the first spawn, for
-// the verbs that run a lane; `watch` is not one (nothing wraps it waiting for EOF), and since #2117
-// its notify command redirects both output streams anyway, so the flag's state is nothing it reads.
-// The daemon clears the same flags itself, at its first queue launch (DetachedProcess). Why
-// redirects alone cannot fix this is StandardHandleInheritance's own remarks; which verbs run a lane
-// is IsLaneVerb at the foot of this file, the same symbol the exit-code table below reads.
-if (IsLaneVerb(args[0]))
+// #2030: a one-shot command can run terminal delivery probes after reporting its room result, and a
+// wrapper such as `pwsh -Command "baton cancel ... *> lane.log"` only proceeds once Baton's redirected
+// stream reaches EOF. Every child .NET spawns can inherit a duplicate of that stream, so clear the
+// flags before any command which can reach TerminalSettleRecorder starts a child. This is also the
+// fail-closed backstop for the narrow Start->Job-assignment race: an escaped helper may outlive an
+// already-exited root, but it cannot retain the wrapper's handles. The daemon has a distinct lifetime
+// and clears the same flags itself at its first detached launch.
+if (CanRecordTerminalSettle(args[0]))
 {
     Baton.Core.Internal.StandardHandleInheritance.Disable();
 }
@@ -689,6 +687,12 @@ catch (BatonFlowException ex)
 // The one predicate that is not this set (the pre-ledger sentinel write in the BatonFlowException
 // catch above) says at its own site why it is narrower.
 static bool IsLaneVerb(string verb) => verb is "run" or "dispatch" or "redispatch" or "resume";
+
+// Every explicit one-shot command which can return a CommandResult and reach TerminalSettleRecorder.
+// `supply` is included even though its result is supplementary: it can settle the room. Unknown verbs
+// are refused by their parser and therefore cannot reach the recorder.
+static bool CanRecordTerminalSettle(string verb) =>
+    IsLaneVerb(verb) || verb is "cancel" or "decide" or "resolve" or "supply";
 
 // #1382 F8: the one place either BatonFlowException catch above prints an error, so a Try line set on
 // a future WorkflowLockedException/FlowJournalHeldException is never silently dropped again.

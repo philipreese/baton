@@ -1,6 +1,5 @@
 using System.ComponentModel;
 using System.Diagnostics;
-using System.Text;
 using System.Text.Json;
 using Baton.Accounting;
 using Baton.Vendors;
@@ -365,45 +364,39 @@ public static class WorkspaceDeliveryProbe
     private static async Task<Daemon.GhCliResult> SpawnAsync(
         string program, string workingDirectory, IReadOnlyList<string> args, CancellationToken cancellationToken)
     {
-        var startInfo = ChildProcessStartInfo.Create(program, startInfo =>
-        {
-            startInfo.WorkingDirectory = workingDirectory;
-            startInfo.RedirectStandardOutput = true;
-            startInfo.RedirectStandardError = true;
-            startInfo.StandardOutputEncoding = Encoding.UTF8;
-            startInfo.StandardErrorEncoding = Encoding.UTF8;
-        });
-
-        // Non-interactive hardening, the same pair Baton.Mutation.DeliveryVerifier applies to its own
-        // network-touching git spawns: a host whose credential helper needs a refresh can block on a
-        // prompt that reads no stdin. It makes that LESS LIKELY and does not prevent it -- neither
-        // variable is read by an OS credential manager, which DeliveryVerifier's own doc records and
-        // answers with a third measure -- so what actually stops a hang here is BoundedSpawner's time
-        // bound, not this pair (#1913 review finding 2). `gh` reads its own non-interactive mode
-        // implicitly when stdout is not a terminal, which is always true of a spawned child here.
-        startInfo.Environment["GIT_TERMINAL_PROMPT"] = "0";
-        startInfo.Environment["GCM_INTERACTIVE"] = "never";
-
-        foreach (var arg in args)
-        {
-            startInfo.ArgumentList.Add(arg);
-        }
-
         ChildProcessTree child;
         try
         {
-            child = ChildProcessTree.Start(startInfo);
+            child = ChildProcessTree.Start(program, startInfo =>
+            {
+                startInfo.WorkingDirectory = workingDirectory;
+
+                // Non-interactive hardening, the same pair Baton.Mutation.DeliveryVerifier applies to
+                // its own network-touching git spawns. They make a credential prompt less likely but
+                // do not stop an OS credential manager; BoundedSpawner's time bound does (#1913).
+                startInfo.Environment["GIT_TERMINAL_PROMPT"] = "0";
+                startInfo.Environment["GCM_INTERACTIVE"] = "never";
+
+                foreach (var arg in args)
+                {
+                    startInfo.ArgumentList.Add(arg);
+                }
+            });
         }
         catch (Exception ex) when (ex is Win32Exception or InvalidOperationException)
         {
-            return new Daemon.GhCliResult(Started: false, ExitCode: -1, Stdout: string.Empty, Stderr: $"{program} was not found on PATH.");
+            return new Daemon.GhCliResult(
+                Started: false,
+                ExitCode: -1,
+                Stdout: string.Empty,
+                Stderr: $"Could not start a contained {program} delivery probe: {ex.Message}");
         }
 
         using (child)
         {
             var process = child.Process;
-            var stdoutTask = process.StandardOutput.ReadToEndAsync(cancellationToken);
-            var stderrTask = process.StandardError.ReadToEndAsync(cancellationToken);
+            var stdoutTask = child.StandardOutput.ReadToEndAsync(cancellationToken);
+            var stderrTask = child.StandardError.ReadToEndAsync(cancellationToken);
             try
             {
                 await process.WaitForExitAsync(cancellationToken).ConfigureAwait(false);

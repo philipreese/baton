@@ -23,10 +23,11 @@ namespace Baton.Core.Internal;
 /// non-inheritable before the first spawn is what actually closes that path.
 /// </para>
 /// <para>
-/// <b>Only stdout and stderr, deliberately.</b> Those are the two the wrapper waits on. Stdin is
-/// left inheritable because clearing it would hand an invalid stdin to the several children that
-/// redirect only stdout/stderr (the git and gh spawns), changing behavior this has no reason to
-/// touch.
+/// <b>Only stdout and stderr at this process-wide seam, deliberately.</b> Those are the two the wrapper
+/// waits on. Clearing stdin here would change every Baton child, including ones outside #2030's
+/// delivery probe. The narrower <see cref="ContainedProcessLauncher"/> gives its non-interactive
+/// git/gh probe NUL stdin explicitly, so a credential prompt cannot consume operator input and reads
+/// immediate EOF instead; other child-spawn seams keep their existing stdin behavior.
 /// </para>
 /// <para>
 /// <b>The other half of the same guarantee is elsewhere.</b> A grandchild under a dispatched worker

@@ -63,11 +63,12 @@ public class VendorSpawnGateTests
         ["src/Baton/Core/DetachedProcess.cs"] = "#2082 finding 2: the one spawn seam that deliberately does NOT contain its child -- no Job Object, no breakaway -- so a queue-launched lane outlives the daemon that started it. Like ChildProcessStartInfo.cs above it constructs nothing vendor-specific: it starts whatever start info its caller built through ChildProcessStartInfo.Create, after clearing the daemon's own inheritable stdout/stderr (#2030) and refusing a start info that redirects one output stream without the other. What it inherits: nothing of the daemon's standard handles by design, and no job, which is the point. Every caller is separately enumerated here; today that is QueueLauncher.cs below and the test-only Baton.CrashTestHost sleeper. Reviewed in #2117 (the review that found it unregistered).",
         ["src/Baton.Cli/Daemon/QueueLauncher.cs"] = "#2082 finding 2: the daemon's queue scheduler starting `baton dispatch <role> ...` as a separate, detached process through DetachedProcess -- Baton's OWN binary re-entered (ResolveLaneCommand reads the executable off this process, never a configured path), not a vendor CLI. The vendor worker that lane goes on to spawn is CoreDispatcher's gated spawn inside the child, where the adapter builds the mandatory PreToolUse gate into the target exactly as for a hand-typed dispatch; nothing here shortens that path or hands the child an ungated target. Both output streams are redirected with UTF-8 pinned and relayed into daemon.log; the lane's timeout is enforced inside the lane by its own --timeout, so this file's only waits are the bounded refusal poll and a stream drain bounded by StreamDrainBound. Reviewed in #2117.",
         ["src/Baton.Cli/WorkspaceDeliveryProbe.cs"] = "#1901: spawns 'git rev-parse', 'git diff --numstat' and 'gh pr list --json number' against a room's workspace at settle, to stamp issue, PR and diff shape on the cost-ledger row — git and gh, not a vendor CLI, the same read-only forge/repo questions IGhCliRunner and DeliveryVerifier already ask; every spawn goes through one injected CommandRunner and fails open. Hang safety is the TIME BOUND plus #2030's Windows Job Object containment: after the direct process exits its descendants are terminated before redirected-stream drain, and a spawn still running at WorkspaceDeliveryProbe.SpawnTimeout (20s, three spawns per distinct workspace) or host cancellation is terminated as a tree, so a helper cannot retain Baton's pipe or outlive the settle. GIT_TERMINAL_PROMPT=0 and GCM_INTERACTIVE=never only make a credential prompt less likely — DeliveryVerifier's own doc records that they do not stop an OS credential manager, which is why the bound remains required.",
-        ["src/Baton/Core/ChildProcessTree.cs"] = "#2030: the containment primitive used only by WorkspaceDeliveryProbe's already-reviewed read-only git/gh delivery queries. It accepts a caller-built ProcessStartInfo and cannot select a program, construct vendor arguments, or bypass the caller's reviewed ownership boundary; on Windows its Job Object closes every direct child's descendants when the probe finishes. It is not a vendor dispatch seam.",
+        ["src/Baton/Core/ChildProcessTree.cs"] = "#2030: the containment primitive used only by WorkspaceDeliveryProbe's already-reviewed read-only git/gh delivery queries. It constructs start info through ChildProcessStartInfo, then fails closed rather than returning a child whose Windows Job Object assignment failed. It is not a vendor dispatch seam.",
+        ["src/Baton/Core/Internal/ContainedProcessLauncher.cs"] = "#2030 exact-head review: the Windows half of ChildProcessTree's containment seam. CreateProcessW receives a Job-list attribute and CREATE_SUSPENDED in the same call, so child code cannot spawn a helper before association; only NUL stdin and the two redirected probe handles are inherited. The git/gh probe is deliberately non-interactive: stdin reads immediate EOF rather than consuming operator input. It consumes already-reviewed ChildProcessStartInfo and is not a vendor dispatch seam.",
     };
 
     private static readonly string[] SpawnMarkers =
-        ["new ProcessStartInfo", "ChildProcessStartInfo.Create", "Process.Start", "new BatonTask"];
+        ["new ProcessStartInfo", "ChildProcessStartInfo.Create", "ChildProcessTree.Start", "CreateProcessW", "Process.Start", "new BatonTask"];
     private static readonly string[] DirectSpawnMarkers = ["Process.Start", ".Start()"];
     private const string SharedStartInfoFactoryCall = "ChildProcessStartInfo.Create";
 
@@ -107,8 +108,8 @@ public class VendorSpawnGateTests
             .Where(path =>
             {
                 var source = File.ReadAllText(Path.Combine(root, path));
-                return DirectSpawnMarkers.Any(marker => source.Contains(marker, StringComparison.Ordinal))
-                    && !source.Contains(SharedStartInfoFactoryCall, StringComparison.Ordinal);
+                return DirectSpawnMarkers.Any(marker => ContainsCodeToken(source, marker))
+                    && !ContainsCodeToken(source, SharedStartInfoFactoryCall);
             })
             .OrderBy(path => path, StringComparer.Ordinal)
             .ToList();
@@ -118,6 +119,16 @@ public class VendorSpawnGateTests
             "A reviewed direct process spawn bypasses the shared start-info factory:\n  "
             + string.Join("\n  ", bypasses));
     }
+
+    private static bool ContainsCodeToken(string source, string token) =>
+        source.Split('\n').Any(line =>
+        {
+            string code = line.Split("//", 2, StringSplitOptions.None)[0];
+            string trimmed = code.TrimStart();
+            return !trimmed.StartsWith("/*", StringComparison.Ordinal)
+                && !trimmed.StartsWith('*')
+                && code.Contains(token, StringComparison.Ordinal);
+        });
 
     // The per-file check above is satisfied by a file that calls the factory ONCE and also constructs a
     // bare ProcessStartInfo elsewhere in the same file — Contains() cannot tell one from two. This
