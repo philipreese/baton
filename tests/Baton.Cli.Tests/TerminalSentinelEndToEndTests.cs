@@ -281,6 +281,40 @@ public class TerminalSentinelEndToEndTests
         }
     }
 
+    /// <summary>
+    /// #2030's retained-install regression: the real CLI is launched through the same PowerShell
+    /// redirection shape a lane uses. The marker is after the redirect, so it can exist only after
+    /// the wrapper observed EOF from Baton; a bounded wrapper exit proves no inherited handle kept
+    /// the command (and therefore its loaded Baton.Cli.dll) alive after terminal settlement.
+    /// </summary>
+    [Fact]
+    public async Task A_terminal_one_shot_command_releases_its_redirecting_wrapper_after_settlement()
+    {
+        var testRoot = Path.Combine(Path.GetTempPath(), $"cli-wrapper-exit-{Guid.NewGuid():N}");
+        var roomDirectory = Path.Combine(testRoot, "task");
+        try
+        {
+            var workflowFilePath = await WriteOneStepWorkflowAsync(testRoot);
+            var bindingsFilePath = await WriteNoOpBindingsAsync(testRoot);
+            var markerPath = Path.Combine(testRoot, "wrapper-completed");
+            var logPath = Path.Combine(testRoot, "wrapper.log");
+
+            using var wrapper = StartRedirectingPowerShellWrapper(
+                markerPath, logPath,
+                "run", workflowFilePath, "--bindings", bindingsFilePath, "--room-dir", roomDirectory);
+            await BoundedProcessWait.RunToExitAsync(
+                wrapper, TimeSpan.FromSeconds(30), TestContext.Current.CancellationToken);
+
+            Assert.Equal(0, wrapper.ExitCode);
+            Assert.True(File.Exists(markerPath), "the wrapper did not observe Baton stdout/stderr reaching EOF after settlement");
+            Assert.True(File.Exists(Path.Combine(roomDirectory, "terminal.json")));
+        }
+        finally
+        {
+            DirectoryCleanup.DeleteRecursively(testRoot);
+        }
+    }
+
     [Fact]
     public async Task A_second_real_CLI_run_against_an_already_completed_room_does_not_overwrite_its_sentinel()
     {
@@ -607,6 +641,27 @@ public class TerminalSentinelEndToEndTests
         }
 
         return Process.Start(startInfo) ?? throw new InvalidOperationException("Failed to start 'baton'.");
+    }
+
+    private static Process StartRedirectingPowerShellWrapper(string markerPath, string logPath, params string[] args)
+    {
+        static string Quote(string value) => $"'{value.Replace("'", "''", StringComparison.Ordinal)}'";
+
+        var batonArguments = string.Join(' ', args.Select(Quote));
+        var script = $"& dotnet exec {Quote(typeof(RunCommand).Assembly.Location)} {batonArguments} *> {Quote(logPath)}; "
+            + $"if ($LASTEXITCODE -eq 0) {{ New-Item -ItemType File -Path {Quote(markerPath)} | Out-Null; exit 0 }}; exit $LASTEXITCODE";
+        var startInfo = new ProcessStartInfo("powershell")
+        {
+            UseShellExecute = false,
+            RedirectStandardOutput = true,
+            RedirectStandardError = true,
+            CreateNoWindow = true,
+        };
+        startInfo.ArgumentList.Add("-NoProfile");
+        startInfo.ArgumentList.Add("-Command");
+        startInfo.ArgumentList.Add(script);
+
+        return Process.Start(startInfo) ?? throw new InvalidOperationException("Failed to start the PowerShell wrapper.");
     }
 
     private static async Task<string> WriteOneStepWorkflowAsync(string directory)

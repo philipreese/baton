@@ -4,7 +4,8 @@ namespace Baton.Architecture.Tests;
 /// #2030's wiring half. <c>Baton.Tests.Core.StandardHandleInheritanceTests</c> proves the
 /// mechanism — an inherited handle keeps a wrapper shell's redirected stream from ever reaching EOF,
 /// and clearing the inherit flag ends it. This asserts the far cheaper, far more deletable thing:
-/// that the CLI actually calls it, on the verbs that run a lane, before anything is spawned.
+/// that the CLI actually calls it, on every one-shot verb that can report a terminal room result,
+/// before anything is spawned.
 /// </summary>
 /// <remarks>
 /// <para>
@@ -20,7 +21,7 @@ namespace Baton.Architecture.Tests;
 /// so "the call precedes that <c>try</c>" is the honest positional expression of "before this process
 /// starts a child". It says nothing about the vendor-subprocess verbs that return ABOVE the guard —
 /// <c>hook-check</c>, <c>agy-hook-check</c>, <c>codex-broker</c>, <c>mcp</c>, <c>daemon</c> — which
-/// are outside the lane-verb set on purpose and are not covered by any assertion here.
+/// are outside the result-verb set on purpose and are not covered by any assertion here.
 /// </para>
 /// </remarks>
 public class StandardHandleInheritanceWiringTests
@@ -32,10 +33,10 @@ public class StandardHandleInheritanceWiringTests
     // out at four call sites, and this test could only ever read the one it happened to anchor on.
     // Pointing at the definition is what makes "the verb set cannot drift" true rather than
     // "the copy next to the call cannot drift".
-    private const string LaneVerbPredicate = "static bool IsLaneVerb(string verb)";
+    private const string ResultVerbPredicate = "static bool IsResultVerb(string verb)";
 
     [Fact]
-    public void The_cli_clears_its_own_standard_handle_inheritance_on_the_lane_running_verbs()
+    public void The_cli_clears_its_own_standard_handle_inheritance_on_every_terminal_result_verb()
     {
         string[] lines = File.ReadAllLines(Path.Combine(RepoRoot(), EntryPoint));
 
@@ -48,25 +49,32 @@ public class StandardHandleInheritanceWiringTests
 
         // The guard immediately above it, reading the named set rather than a copy of the tuple.
         int guardLine = Array.FindLastIndex(
-            lines, callLine, line => line.Contains("IsLaneVerb(", StringComparison.Ordinal));
+            lines, callLine, line => line.Contains("IsResultVerb(", StringComparison.Ordinal));
         Assert.True(
             guardLine >= 0,
-            $"the {Call} call in {EntryPoint} has no IsLaneVerb guard above it. If the guard was rewritten "
+            $"the {Call} call in {EntryPoint} has no IsResultVerb guard above it. If the guard was rewritten "
             + "as a literal verb tuple, put it back on the named set -- that is the only thing keeping this "
             + "test's verb assertions below pointed at the set the rest of the file actually branches on.");
 
         // The set itself, so a fifth lane verb cannot be added without this test seeing it, and so a
         // guard reformatted across two lines cannot evade the check by moving the literals.
         int definitionLine = Array.FindIndex(
-            lines, line => line.Contains(LaneVerbPredicate, StringComparison.Ordinal));
+            lines, line => line.Contains(ResultVerbPredicate, StringComparison.Ordinal));
         Assert.True(
             definitionLine >= 0,
-            $"{EntryPoint} no longer defines `{LaneVerbPredicate}`, so nothing in this file states once "
-            + "which verbs run a lane (#2030 review, record-once).");
+            $"{EntryPoint} no longer defines `{ResultVerbPredicate}`, so nothing in this file states once "
+            + "which verbs report a terminal room result (#2030 review, record-once).");
 
-        string definition = lines[definitionLine];
-        Assert.Contains("\"dispatch\"", definition, StringComparison.Ordinal);
+        // The predicate's expression may wrap, so read its declaration and the short list that
+        // follows rather than only the signature line.
+        var definition = string.Join(' ', lines.Skip(definitionLine).Take(4));
+        foreach (var verb in new[] { "run", "dispatch", "redispatch", "cancel", "decide", "resolve", "resume", "supply" })
+        {
+            Assert.Contains($"\"{verb}\"", definition, StringComparison.Ordinal);
+        }
+
         Assert.DoesNotContain("\"watch\"", definition, StringComparison.Ordinal);
+        Assert.DoesNotContain("\"daemon\"", definition, StringComparison.Ordinal);
     }
 
     [Fact]

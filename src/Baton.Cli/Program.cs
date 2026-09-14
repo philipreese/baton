@@ -159,16 +159,17 @@ if (args.Length == 0 || !knownSubcommands.Contains(args[0]))
     return 64;
 }
 
-// #2030: a lane runs as `pwsh -Command "baton dispatch ... *> lane.log"`, and that wrapper only
-// proceeds once the redirected stream reaches EOF. Every child .NET spawns inherits a duplicate of
-// this process's stdout/stderr whether or not its own streams are redirected, so one straggler
-// outliving the lane held the wrapper open for an hour. Cleared here, before the first spawn, for
-// the verbs that run a lane; `watch` is not one (nothing wraps it waiting for EOF), and since #2117
-// its notify command redirects both output streams anyway, so the flag's state is nothing it reads.
-// The daemon clears the same flags itself, at its first queue launch (DetachedProcess). Why
-// redirects alone cannot fix this is StandardHandleInheritance's own remarks; which verbs run a lane
-// is IsLaneVerb at the foot of this file, the same symbol the exit-code table below reads.
-if (IsLaneVerb(args[0]))
+// #2030: a one-shot command can settle a room and then spawn a delivery probe while its caller is
+// waiting for redirected stdout/stderr to reach EOF. Every child .NET spawns inherits a duplicate of
+// those handles whether or not its own streams are redirected, so one straggler can keep both the
+// wrapper and this installed command alive after its result is complete. Clear them before the first
+// handler spawn for every command that reports a CommandResult, including cancel and resolve --close.
+// Protected invariant: after a one-shot command has reported its result and room settlement, Baton
+// owns no background activity or child/process handle that can keep that command or its install alive.
+// The daemon is deliberately outside this set: DetachedProcess clears its handles only when it launches
+// a detached lane, preserving the daemon's distinct lifetime. Why redirects alone cannot fix this is
+// StandardHandleInheritance's own remarks; the result-verb set is IsResultVerb at this file's foot.
+if (IsResultVerb(args[0]))
 {
     Baton.Core.Internal.StandardHandleInheritance.Disable();
 }
@@ -689,6 +690,12 @@ catch (BatonFlowException ex)
 // The one predicate that is not this set (the pre-ledger sentinel write in the BatonFlowException
 // catch above) says at its own site why it is narrower.
 static bool IsLaneVerb(string verb) => verb is "run" or "dispatch" or "redispatch" or "resume";
+
+// #2030: the CommandResult verbs share Program's report-and-terminal-settle tail. This is wider than
+// IsLaneVerb because cancel/decide/resolve/supply can settle a room too, and narrower than all CLI
+// verbs so the persistent daemon and stdio endpoints retain their independently-owned lifetimes.
+static bool IsResultVerb(string verb) => verb is
+    "run" or "dispatch" or "redispatch" or "cancel" or "decide" or "resolve" or "resume" or "supply";
 
 // #1382 F8: the one place either BatonFlowException catch above prints an error, so a Try line set on
 // a future WorkflowLockedException/FlowJournalHeldException is never silently dropped again.
