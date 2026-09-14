@@ -112,23 +112,26 @@ def fixture(name: str):
 @fixture("workflow-recovery-selftest")
 def _sabotage_workflow_recovery(
     run_in_temp_tree: Callable[[str, Callable[[Path], None]], None] = _run_temp_tree_fixture,
+    run_process: Callable[..., subprocess.CompletedProcess] = subprocess.run,
 ) -> None:
     def exercise(dest: Path) -> None:
         for relative in ["tools/workflow-recovery/selftest.py", ".github/workflows/ci.yml",
-                         ".github/workflows/release-please.yml", "pixi.toml", "tools/gates/gates.py"]:
+                         ".github/workflows/release-please.yml"]:
             target = dest / relative
             target.parent.mkdir(parents=True, exist_ok=True)
             shutil.copy2(ROOT / relative, target)
-        def run(control: str | None = None) -> tuple[subprocess.CompletedProcess, float]:
+        def run(control: str) -> tuple[subprocess.CompletedProcess, float]:
             command = [sys.executable, "-B", str(dest / "tools/workflow-recovery/selftest.py")]
-            if control is not None:
-                command.append(control)
+            command.append(control)
             started = time.perf_counter()
-            result = subprocess.run(
+            result = run_process(
                 command, cwd=dest, capture_output=True, text=True, timeout=30)
             return result, time.perf_counter() - started
-        baseline, baseline_seconds = run()
-        assert baseline.returncode == 0, baseline.stdout + baseline.stderr
+        positive_seconds: list[tuple[str, float]] = []
+        for control in ["ci-live-sha", "ci-pack-success", "release-result-input"]:
+            positive, seconds = run(control)
+            positive_seconds.append((control, seconds))
+            assert positive.returncode == 0, positive.stdout + positive.stderr
         workflow = dest / ".github/workflows/ci.yml"
         original = workflow.read_text(encoding="utf-8")
         mutant_seconds: list[tuple[str, float]] = []
@@ -150,8 +153,13 @@ def _sabotage_workflow_recovery(
         mutated, seconds = run("release-result-input")
         mutant_seconds.append(("release-result-input", seconds))
         assert mutated.returncode != 0 and "AssertionError" in mutated.stderr, mutated.stderr
-        timings = ", ".join(f"{name}={seconds:.3f}s" for name, seconds in mutant_seconds)
-        print(f"  workflow-recovery sabotage timing: baseline={baseline_seconds:.3f}s, {timings}")
+        positive_timings = ", ".join(
+            f"{name}={seconds:.3f}s" for name, seconds in positive_seconds)
+        mutant_timings = ", ".join(
+            f"{name}={seconds:.3f}s" for name, seconds in mutant_seconds)
+        print(
+            "  workflow-recovery sabotage timing: "
+            f"positive [{positive_timings}], mutant [{mutant_timings}]")
 
     run_in_temp_tree("workflow-recovery-sabotage-", exercise)
 
@@ -825,6 +833,35 @@ def _cleanup_retry_selftest() -> list[str]:
         failures.append(f"workflow recovery fixture did not expose its cleanup boundary: {error}")
     if wired_runner_calls != ["workflow-recovery-sabotage-"]:
         failures.append(f"workflow recovery fixture bypassed bounded cleanup: {wired_runner_calls}")
+
+    workflow_process_calls: list[str] = []
+
+    def record_workflow_process(command: list[str], **kwargs) -> subprocess.CompletedProcess:
+        control = command[-1]
+        workflow_process_calls.append(control)
+        root = Path(kwargs["cwd"])
+        ci_text = (root / ".github/workflows/ci.yml").read_text(encoding="utf-8")
+        release_text = (root / ".github/workflows/release-please.yml").read_text(encoding="utf-8")
+        violated = {
+            "ci-live-sha": '[ "$live_sha" = "$EXPECTED_SHA" ]' in ci_text,
+            "ci-pack-success": "needs.test.result != 'success'" in ci_text,
+            "release-result-input": "RELEASE_RESULT: success" in release_text,
+        }[control]
+        return subprocess.CompletedProcess(
+            command, 1 if violated else 0, "", "AssertionError" if violated else "")
+
+    try:
+        _sabotage_workflow_recovery(run_process=record_workflow_process)
+    except Exception as error:  # noqa: BLE001 -- this is the fixture's own polarity control
+        failures.append(f"workflow recovery focused-control fixture failed: {error}")
+    expected_workflow_calls = [
+        "ci-live-sha", "ci-pack-success", "release-result-input",
+        "ci-live-sha", "ci-pack-success", "release-result-input",
+    ]
+    if workflow_process_calls != expected_workflow_calls:
+        failures.append(
+            "workflow recovery fixture did not pair focused positive and mutant controls: "
+            f"{workflow_process_calls}")
 
     primary = AssertionError("primary workflow mutation assertion")
     cleanup = PermissionError(32, "persistent workflow cleanup refusal", "fixture")
