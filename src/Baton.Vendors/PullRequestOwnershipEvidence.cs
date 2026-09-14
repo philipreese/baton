@@ -67,6 +67,23 @@ public sealed record PullRequestOwnershipEvidence
     }
 }
 
+/// <summary>
+/// Conductor-authored ownership of the pull request a follow-on room continues. This is binding
+/// metadata, not worker input: the conductor verifies repository, branch, state, and launch head
+/// before writing it. Created and continued PRs reduce to the same enforcement evidence.
+/// </summary>
+public sealed record OriginatingPullRequestOwnership(
+    string Repository,
+    int Number,
+    string HeadBranch,
+    string LaunchHead)
+{
+    public PullRequestOwnershipEvidence? ToEvidence() =>
+        string.IsNullOrWhiteSpace(HeadBranch) || string.IsNullOrWhiteSpace(LaunchHead)
+            ? null
+            : PullRequestOwnershipEvidence.FromVerified(Repository, Number);
+}
+
 internal static class GitHubRepository
 {
     public static string? TryCanonicalize(string? value)

@@ -97,7 +97,8 @@ public static class CodexAppServerBroker
             inputPaths,
             configuration.ProducedOutputNames,
             artifactOnlyOutputNames: ReadArtifactOnlyOutputs(),
-            pullRequestCreateProvenance: configuration.PullRequestCreateProvenance);
+            pullRequestCreateProvenance: configuration.PullRequestCreateProvenance,
+            originatingPullRequestOwnership: configuration.OriginatingPullRequestOwnership);
 
         using var process = StartAppServer(configuration, isolatedHome);
         if (process is null)

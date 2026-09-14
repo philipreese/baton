@@ -282,6 +282,8 @@ public sealed record WorkerBindingConfigEntry(
     // #2190: conductor-captured before the workspace is worker-controlled and persisted so resume
     // never re-derives repository/head authority from mutable Git metadata.
     GhPullRequestCreateIdentity? PullRequestCreateIdentity = null,
+    // #2178: only a conductor verification boundary writes this. A legacy/null value is unowned.
+    OriginatingPullRequestOwnership? OriginatingPullRequestOwnership = null,
     // #2234: retained task-demand declaration and the exact pre-vendor comparison, appended for
     // bindings.json compatibility. Neither field grants authority; readers can distinguish a task
     // that asked for nothing from an older binding that predates requirement declarations.
