@@ -61,7 +61,7 @@ public static class ConductorClaimStore
         EnsureParentDirectory(path);
 
         return Task.Run(
-            () => MutexGuardedFileLock.RunUnderLock(path, LockNamePrefix, LockTimeout, () =>
+            () => RunUnderClaimLock(path, () =>
             {
                 var existing = ReadUnlocked(path);
                 if (existing is not null && !string.IsNullOrWhiteSpace(existing.Holder))
@@ -133,7 +133,7 @@ public static class ConductorClaimStore
         EnsureParentDirectory(path);
 
         return Task.Run(
-            () => MutexGuardedFileLock.RunUnderLock(path, LockNamePrefix, LockTimeout, () =>
+            () => RunUnderClaimLock(path, () =>
             {
                 var existing = ReadUnlocked(path);
                 if (existing is null || string.IsNullOrWhiteSpace(existing.Holder))
@@ -210,7 +210,7 @@ public static class ConductorClaimStore
         EnsureParentDirectory(path);
 
         return Task.Run(
-            () => MutexGuardedFileLock.RunUnderLock(path, LockNamePrefix, LockTimeout, () =>
+            () => RunUnderClaimLock(path, () =>
             {
                 var existing = ReadUnlocked(path);
                 if (existing is null || string.IsNullOrWhiteSpace(existing.Holder))
@@ -260,13 +260,8 @@ public static class ConductorClaimStore
         var root = batonRoot ?? BatonPaths.Root;
         var path = GetClaimFilePath(root, identity.FileSlug);
 
-        if (!File.Exists(path))
-        {
-            return Task.FromResult<ConductorClaimRecord?>(null);
-        }
-
         return Task.Run(
-            () => MutexGuardedFileLock.RunUnderLock(path, LockNamePrefix, LockTimeout, () => ReadUnlocked(path)),
+            () => RunUnderClaimLock(path, () => ReadUnlocked(path)),
             cancellationToken);
     }
 
@@ -278,27 +273,19 @@ public static class ConductorClaimStore
         CancellationToken cancellationToken = default)
     {
         var root = batonRoot ?? BatonPaths.Root;
-        if (!Directory.Exists(root))
-        {
-            return Task.FromResult<IReadOnlyList<ConductorClaimSummary>>([]);
-        }
 
         return Task.Run(
             () =>
             {
                 var summaries = new List<ConductorClaimSummary>();
 
-                foreach (var directory in Directory.EnumerateDirectories(root))
+                foreach (var directory in EnumerateClaimDirectories(root))
                 {
                     var path = Path.Combine(directory, BatonPaths.ConductorClaimFileName);
-                    if (!File.Exists(path))
-                    {
-                        continue;
-                    }
 
-                    // Read under lock to serialize against in-flight transitions.
-                    var record = MutexGuardedFileLock.RunUnderLock(
-                        path, LockNamePrefix, LockTimeout, () => ReadUnlocked(path));
+                    // The read itself classifies absence under lock, so an inaccessible claim can
+                    // never be projected as absent between an existence probe and the read.
+                    var record = RunUnderClaimLock(path, () => ReadUnlocked(path));
 
                     if (record is not null && !string.IsNullOrWhiteSpace(record.Holder) && record.AcquiredAt.HasValue)
                     {
@@ -319,30 +306,37 @@ public static class ConductorClaimStore
     }
 
     private static string GetClaimFilePath(string root, string repositorySlug) =>
-        Path.Combine(root, repositorySlug, BatonPaths.ConductorClaimFileName);
+        InClaimStoreBoundary(
+            () => Path.Combine(root, repositorySlug, BatonPaths.ConductorClaimFileName),
+            $"Could not determine the conductor claim file location for repository '{repositorySlug}'");
 
     private static void EnsureParentDirectory(string path)
     {
-        var directory = Path.GetDirectoryName(path);
-        if (!string.IsNullOrEmpty(directory))
-        {
-            Directory.CreateDirectory(directory);
-        }
+        InClaimStoreBoundary(
+            () =>
+            {
+                var directory = Path.GetDirectoryName(path);
+                if (!string.IsNullOrEmpty(directory))
+                {
+                    Directory.CreateDirectory(directory);
+                }
+            },
+            $"Could not access the conductor claim directory for '{path}'");
     }
 
     internal static ConductorClaimRecord? ReadUnlocked(string path)
     {
-        if (!File.Exists(path))
-        {
-            return null;
-        }
-
         string text;
         try
         {
             text = ReadText(path);
         }
-        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
+        catch (Exception ex) when (ex is FileNotFoundException or DirectoryNotFoundException)
+        {
+            // Only the actual open result may establish that a claim is absent.
+            return null;
+        }
+        catch (Exception ex) when (IsClaimStoreBoundaryFailure(ex))
         {
             throw new ConductorClaimException(
                 $"Could not read the conductor claim file at '{path}': {ex.Message}. "
@@ -374,6 +368,68 @@ public static class ConductorClaimStore
 
         return record;
     }
+
+    private static IReadOnlyList<string> EnumerateClaimDirectories(string root)
+    {
+        try
+        {
+            return Directory.EnumerateDirectories(root).ToList();
+        }
+        catch (DirectoryNotFoundException)
+        {
+            return [];
+        }
+        catch (Exception ex) when (IsClaimStoreBoundaryFailure(ex))
+        {
+            throw new ConductorClaimException(
+                $"Could not enumerate conductor claim files under '{root}': {ex.Message}. "
+                + "Refusing to proceed — state cannot be verified.",
+                ex);
+        }
+    }
+
+    private static T RunUnderClaimLock<T>(string path, Func<T> operation)
+    {
+        try
+        {
+            return MutexGuardedFileLock.RunUnderLock(path, LockNamePrefix, LockTimeout, operation);
+        }
+        catch (ConductorClaimException)
+        {
+            throw;
+        }
+        catch (Exception ex) when (IsClaimStoreBoundaryFailure(ex))
+        {
+            throw new ConductorClaimException(
+                $"Could not access the conductor claim file at '{path}': {ex.Message}. "
+                + "Refusing to proceed — state cannot be verified.",
+                ex);
+        }
+    }
+
+    private static T InClaimStoreBoundary<T>(Func<T> operation, string message)
+    {
+        try
+        {
+            return operation();
+        }
+        catch (Exception ex) when (IsClaimStoreBoundaryFailure(ex))
+        {
+            throw new ConductorClaimException($"{message}: {ex.Message}. Refusing to proceed — state cannot be verified.", ex);
+        }
+    }
+
+    private static void InClaimStoreBoundary(Action operation, string message) =>
+        InClaimStoreBoundary(
+            () =>
+            {
+                operation();
+                return true;
+            },
+            message);
+
+    private static bool IsClaimStoreBoundaryFailure(Exception ex) =>
+        ex is IOException or UnauthorizedAccessException or ArgumentException or NotSupportedException;
 
     internal static void WriteUnlocked(string path, ConductorClaimRecord record)
     {

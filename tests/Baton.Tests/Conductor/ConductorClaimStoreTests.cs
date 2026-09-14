@@ -332,15 +332,28 @@ public sealed class ConductorClaimStoreTests
     }
 
     [Fact]
-    public async Task Unreadable_state_fails_closed_with_a_domain_error()
+    public async Task Attribute_or_read_failure_fails_closed_for_get_list_and_claim_without_overwriting_state()
     {
         var temp = NewTempDir();
         try
         {
             await ConductorClaimStore.ClaimAsync(RepoA, "conductor-1", batonRoot: temp, cancellationToken: TestContext.Current.CancellationToken);
-            ConductorClaimStore.ReadText = _ => throw new IOException("injected read failure");
-            var ex = await Assert.ThrowsAsync<ConductorClaimException>(() => ConductorClaimStore.GetClaimAsync(RepoA, batonRoot: temp, cancellationToken: TestContext.Current.CancellationToken));
-            Assert.Contains("Could not read", ex.Message);
+            var filePath = Path.Combine(temp, RepoA.FileSlug, BatonPaths.ConductorClaimFileName);
+            var original = await File.ReadAllTextAsync(filePath, TestContext.Current.CancellationToken);
+            ConductorClaimStore.ReadText = _ => throw new UnauthorizedAccessException("injected attribute access failure");
+
+            var exGet = await Assert.ThrowsAsync<ConductorClaimException>(() =>
+                ConductorClaimStore.GetClaimAsync(RepoA, batonRoot: temp, cancellationToken: TestContext.Current.CancellationToken));
+            var exList = await Assert.ThrowsAsync<ConductorClaimException>(() =>
+                ConductorClaimStore.ListHeldClaimsAsync(batonRoot: temp, cancellationToken: TestContext.Current.CancellationToken));
+            var exClaim = await Assert.ThrowsAsync<ConductorClaimException>(() =>
+                ConductorClaimStore.ClaimAsync(RepoA, "conductor-2", batonRoot: temp, cancellationToken: TestContext.Current.CancellationToken));
+
+            Assert.Contains("Could not read", exGet.Message);
+            Assert.Contains("Could not read", exList.Message);
+            Assert.Contains("Could not read", exClaim.Message);
+            ConductorClaimStore.ResetFileOperations();
+            Assert.Equal(original, await File.ReadAllTextAsync(filePath, TestContext.Current.CancellationToken));
         }
         finally { ConductorClaimStore.ResetFileOperations(); DirectoryCleanup.DeleteRecursively(temp); }
     }
