@@ -2,6 +2,7 @@ using System.Reflection;
 using System.Text.Json;
 using System.Text.Json.Serialization;
 using Baton.Accounting;
+using Baton.Domain;
 using Baton.Status;
 using Baton.Tests.Shared;
 
@@ -180,6 +181,12 @@ public sealed class LedgerViewCommandTests : IDisposable
         Assert.Equal(LedgerCsv.Columns.Count, cells.Length);
         Assert.Equal(string.Empty, cells[LedgerCsv.Columns.ToList().IndexOf("cacheCreation")]);
         Assert.Equal("40", cells[LedgerCsv.Columns.ToList().IndexOf("cacheRead")]);
+
+        var checkpointLine = lines.Single(l => l.Contains(",e2,", StringComparison.Ordinal));
+        var checkpointCells = checkpointLine.Split(',');
+        Assert.Equal("e1", checkpointCells[LedgerCsv.Columns.ToList().IndexOf("predecessorExecution")]);
+        Assert.Equal("0", checkpointCells[LedgerCsv.Columns.ToList().IndexOf("exitReason")]);
+        Assert.Equal("ToolStepCap", checkpointCells[LedgerCsv.Columns.ToList().IndexOf("arrestReason")]);
     }
 
     /// <summary>
@@ -658,7 +665,17 @@ public sealed class LedgerViewCommandTests : IDisposable
             // has something to be wrong about in both directions (a PR that over-matches, and rows with
             // no PR being swept in).
             claude with { PullRequest = "1907" },
-            claude with { Execution = "e2", Outcome = "Failed", EndedAt = Sep4.AddHours(11), TokensIn = 200, PullRequest = "1907" },
+            claude with
+            {
+                Execution = "e2",
+                Outcome = "Failed",
+                EndedAt = Sep4.AddHours(11),
+                TokensIn = 200,
+                PullRequest = "1907",
+                PredecessorExecution = "e1",
+                ExitReason = CoreExitReason.Natural,
+                ArrestReason = ArrestReason.ToolStepCap,
+            },
             claude with
             {
                 Execution = "e3",
