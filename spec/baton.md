@@ -7356,7 +7356,8 @@ written:
 | implement / fix / continue | `ExecutionArrested`, work unpushed, `workspaceChanged: false` or absent | **operator** | no observed work, or no measurement, justifies an automatic continuation |
 | implement / fix / continue | anything else, work unpushed | **continue** | finish and push it |
 | review / re-review | anything else | **re-review** | a reviewer has nothing to push |
-| any stage, round at the ceiling | anything | **operator** | two of those arms are cycles with no natural end |
+| fix, `automaticFixUsed: true`, round at the ceiling | succeeded-shaped, PR open | **re-review** | the one automatic repair is not operator-ready before its paired exact-head review |
+| any other stage, round at the ceiling | anything | **operator** | two of those arms are cycles with no natural end |
 | ready | anything | nothing | it stops here |
 
 **Draft is the lifecycle's visible readiness signal, not merge authority.** Every open PR with an
@@ -7395,7 +7396,11 @@ two arms that can repeat forever are `re-review → re-review` (a review lane th
 clock) and `continue → continue` (a lane whose work never reaches the PR), and neither passes through a
 verdict. The ceiling still arrests those cycles; it is not the fix budget. Unattended overnight running
 is the whole point of the daemon, so an unbounded cycle is a frontier lane per tick with nothing putting
-it in front of a person.
+it in front of a person. The sole ceiling exception is the first re-review immediately after the
+persisted automatic fix: a successful fix at round four dispatches its exact-head re-review at round
+five, records the exception in the durable queue decision evidence shown by `baton queue list`, and
+then the ordinary ceiling resumes. It cannot admit a continuation, implementation, second re-review,
+or second fix; BLOCK at that paired re-review stops for the operator and APPROVE follows the ready path.
 
 **APPROVE and BLOCK are READ from the verdict's `decision`, never derived** (operator ruling,
 2026-09-06 evening). `verdict.json` carries `"decision": "approve" | "block"` — the reviewer's own

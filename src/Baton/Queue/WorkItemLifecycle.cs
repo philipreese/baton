@@ -347,14 +347,19 @@ public static class WorkItemLifecycle
     /// </summary>
     /// <remarks>
     /// Over the bound it is <see cref="WorkItemTransitionKind.NeedsOperator"/> rather than a longer
-    /// wait: the reason names the count and the stage pair it stopped at, and lands on the item where
-    /// <c>baton queue list</c> shows it.
+    /// wait, except for the one paired re-review owed by a successful automatic fix. The exception is
+    /// deliberately expressed in terms of its durable history and stage pair, so it cannot authorize
+    /// a continuation, implementation, or another re-review. Its reason becomes the queue decision
+    /// ledger fact that <c>baton queue list</c> shows.
     /// </remarks>
     private static WorkItemTransition Dispatch(
         WorkItemObservation observation, WorkStage next, string reason, bool usesAutomaticFix = false)
     {
         var round = observation.Round + 1;
-        if (round > WorkStages.MaxRounds)
+        var pairedAutomaticFixReReview = observation.Stage == WorkStage.Fix
+            && next == WorkStage.ReReview
+            && observation.AutomaticFixUsed == true;
+        if (round > WorkStages.MaxRounds && !pairedAutomaticFixReReview)
         {
             return WorkItemTransition.NeedsOperator(
                 $"the queue has already dispatched {observation.Round} automatic round(s) for this item — its "
@@ -362,7 +367,11 @@ public static class WorkItemLifecycle
                 + $"{WorkStages.Token(next)} round again ({reason}); {Recovery(observation.Stage)}");
         }
 
-        return WorkItemTransition.Dispatch(next, round, reason, usesAutomaticFix);
+        var admissionReason = round > WorkStages.MaxRounds
+            ? $"{reason}; admitting the paired automatic-fix re-review beyond the ordinary "
+                + $"{WorkStages.MaxRounds}-round ceiling"
+            : reason;
+        return WorkItemTransition.Dispatch(next, round, admissionReason, usesAutomaticFix);
     }
 
     /// <summary>
