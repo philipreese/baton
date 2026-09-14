@@ -2210,6 +2210,143 @@ public sealed class WorkItemAdvancerTests
     }
 
     [Fact]
+    public async Task A_new_head_during_an_unreadable_check_read_discards_the_old_heads_wait_and_evidence()
+    {
+        var home = CreateTempHome();
+        using var scope = BatonEnvironmentSnapshot.BeginScope(BatonEnvironmentSnapshot.Blank with { HomeOverride = home });
+        try
+        {
+            var room = await WriteSettledRoomAsync(home, WorkflowOutcome.Succeeded, null);
+            await SeedAsync(home, WorkStage.Implement, room);
+            var headSha = FullPushedSha;
+            string? checks = "[]";
+            var gh = new DelegateGh((_, args, _) => Task.FromResult(args is ["pr", "checks", ..]
+                ? checks is null
+                    ? new GhCliResult(true, 1, string.Empty, "transient check read failure")
+                    : new GhCliResult(true, 0, checks, string.Empty)
+                : new GhCliResult(true, 0, args is ["pr", "view", ..]
+                    ? PrObject(77, headSha)
+                    : PrJson(77, headSha), string.Empty)));
+            var advancer = Advancer(gh, (_, _) => Task.FromResult<string?>(headSha));
+
+            Assert.Empty(await advancer.AdvanceAsync(Now, Ct));
+            var oldHeadWait = await ReadBackAsync();
+            Assert.Equal(FullPushedSha, oldHeadWait.RequiredCheckEvidenceWait!.HeadSha);
+
+            headSha = "89abcdef0123456789abcdef0123456789abcdef";
+            checks = null;
+            Assert.Single(await advancer.AdvanceAsync(Now.AddSeconds(31), Ct));
+            var changedHeadFailure = await ReadBackAsync();
+            Assert.Null(changedHeadFailure.RequiredCheckEvidenceWait);
+            Assert.Null(changedHeadFailure.Checks);
+            Assert.Null(changedHeadFailure.ChecksObservedAt);
+            Assert.Null(changedHeadFailure.ChecksHeadSha);
+            Assert.False(changedHeadFailure.Halted);
+
+            checks = "[]";
+            Assert.Empty(await advancer.AdvanceAsync(Now.AddSeconds(32), Ct));
+            var restarted = await ReadBackAsync();
+            Assert.Equal(headSha, restarted.RequiredCheckEvidenceWait!.HeadSha);
+            Assert.Equal(1, restarted.RequiredCheckEvidenceWait.AttemptCount);
+            Assert.Equal(Now.AddSeconds(32), restarted.RequiredCheckEvidenceWait.FirstUnreadableAt);
+        }
+        finally
+        {
+            DirectoryCleanup.DeleteRecursively(home);
+        }
+    }
+
+    [Fact]
+    public async Task Exhausting_empty_check_observations_persists_the_final_attempt_before_halting()
+    {
+        var home = CreateTempHome();
+        using var scope = BatonEnvironmentSnapshot.BeginScope(BatonEnvironmentSnapshot.Blank with { HomeOverride = home });
+        try
+        {
+            var room = await WriteSettledRoomAsync(home, WorkflowOutcome.Succeeded, null);
+            await SeedAsync(home, WorkStage.Implement, room);
+            var gh = new DelegateGh((_, args, _) => Task.FromResult(new GhCliResult(
+                true,
+                0,
+                args is ["pr", "checks", ..] ? "[]"
+                    : args is ["pr", "view", ..] ? PrObject(77, FullPushedSha)
+                    : PrJson(77, FullPushedSha),
+                string.Empty)));
+            var advancer = Advancer(gh, (_, _) => Task.FromResult<string?>(FullPushedSha));
+
+            for (var attempt = 1; attempt < 6; attempt++)
+            {
+                Assert.Empty(await advancer.AdvanceAsync(Now.AddSeconds(31 * (attempt - 1)), Ct));
+                Assert.Equal(attempt, (await ReadBackAsync()).RequiredCheckEvidenceWait!.AttemptCount);
+            }
+
+            var finalObservationAt = Now.AddSeconds(31 * 5);
+            var fact = Assert.Single(await advancer.AdvanceAsync(finalObservationAt, Ct));
+            var exhausted = await ReadBackAsync();
+            Assert.Equal(QueueDecisionEntry.Failed, fact.Decision);
+            Assert.Equal(QueueItemState.Failed, exhausted.State);
+            Assert.True(exhausted.Halted);
+            Assert.Equal(6, exhausted.RequiredCheckEvidenceWait!.AttemptCount);
+            Assert.Equal(Now, exhausted.RequiredCheckEvidenceWait.FirstUnreadableAt);
+            Assert.Equal(finalObservationAt, exhausted.RequiredCheckEvidenceWait.LatestObservationAt);
+            Assert.Contains("attempt 6/6", exhausted.RequiredCheckEvidenceWait.Reason, StringComparison.Ordinal);
+            Assert.Contains("attempt 6/6", exhausted.Error!, StringComparison.Ordinal);
+        }
+        finally
+        {
+            DirectoryCleanup.DeleteRecursively(home);
+        }
+    }
+
+    [Fact]
+    public async Task An_approving_review_with_empty_checks_clears_its_wait_when_passing_checks_make_it_ready()
+    {
+        var home = CreateTempHome();
+        using var scope = BatonEnvironmentSnapshot.BeginScope(BatonEnvironmentSnapshot.Blank with { HomeOverride = home });
+        try
+        {
+            var room = await WriteSettledRoomAsync(home, WorkflowOutcome.Succeeded, ApprovingVerdict);
+            await SeedAsync(home, WorkStage.Review, room);
+            var isDraft = true;
+            var checks = "[]";
+            var gh = new DelegateGh((_, args, _) =>
+            {
+                if (args is ["pr", "checks", ..])
+                {
+                    return Task.FromResult(new GhCliResult(true, 0, checks, string.Empty));
+                }
+
+                if (args is ["pr", "ready", ..])
+                {
+                    isDraft = false;
+                    return Task.FromResult(new GhCliResult(true, 0, "ok", string.Empty));
+                }
+
+                return Task.FromResult(new GhCliResult(true, 0, args is ["pr", "view", ..]
+                    ? PrObject(77, PushedSha, isDraft)
+                    : PrJson(77, PushedSha, isDraft), string.Empty));
+            });
+            var advancer = Advancer(gh, (_, _) => Task.FromResult<string?>(PushedSha));
+
+            Assert.Empty(await advancer.AdvanceAsync(Now, Ct));
+            Assert.NotNull((await ReadBackAsync()).RequiredCheckEvidenceWait);
+
+            checks = "[{\"name\":\"ci\",\"bucket\":\"pass\"}]";
+            var fact = Assert.Single(await advancer.AdvanceAsync(Now.AddSeconds(31), Ct));
+            var ready = await ReadBackAsync();
+            Assert.Equal(WorkStage.Ready, ready.Stage);
+            Assert.Equal(QueueItemState.Queued, ready.State);
+            Assert.Null(ready.RequiredCheckEvidenceWait);
+            Assert.False(isDraft);
+            Assert.Contains("approved", fact.Reason!, StringComparison.Ordinal);
+        }
+        finally
+        {
+            DirectoryCleanup.DeleteRecursively(home);
+        }
+    }
+
+    [Fact]
     public async Task Observation_refresh_attempts_one_qualified_PR_per_poll_and_rotates_the_remainder()
     {
         var home = CreateTempHome();

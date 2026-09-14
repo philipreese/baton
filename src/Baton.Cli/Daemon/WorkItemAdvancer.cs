@@ -278,12 +278,14 @@ public sealed class WorkItemAdvancer
             var changedHead = !string.Equals(prior?.HeadSha, headSha, StringComparison.Ordinal);
             var attempts = changedHead ? 1 : prior!.AttemptCount + 1;
             var reason = $"waiting for required-check evidence for open PR #{number} at {headSha} (attempt {attempts}/{MaxRequiredCheckEvidenceAttempts})";
+            var wait = new RequiredCheckEvidenceWait(
+                headSha, changedHead ? now : prior!.FirstUnreadableAt, now, attempts, reason);
             if (attempts >= MaxRequiredCheckEvidenceAttempts)
             {
                 var exhausted = new WorkItemTransition(WorkItemTransitionKind.NeedsOperator, null, 0,
                     $"{reason}; observation bound exhausted after first unreadable observation at "
                     + $"{(changedHead ? now : prior!.FirstUnreadableAt):O}; the settled room remains attached and no worker was dispatched");
-                return await FailAsync(item, stage, exhausted, verdictPath, now, room).ConfigureAwait(false);
+                return await FailAsync(item, stage, exhausted, verdictPath, now, room, wait).ConfigureAwait(false);
             }
 
             await TryMarkAsync(item, existing => existing with
@@ -292,8 +294,7 @@ public sealed class WorkItemAdvancer
                 Checks = changedHead ? null : existing.Checks,
                 ChecksObservedAt = changedHead ? null : existing.ChecksObservedAt,
                 ChecksHeadSha = changedHead ? null : existing.ChecksHeadSha,
-                RequiredCheckEvidenceWait = new RequiredCheckEvidenceWait(
-                    headSha, changedHead ? now : prior!.FirstUnreadableAt, now, attempts, reason),
+                RequiredCheckEvidenceWait = wait,
                 Error = reason,
                 ReadinessMutationClaim = null,
             }).ConfigureAwait(false);
@@ -429,10 +430,17 @@ public sealed class WorkItemAdvancer
     {
         var retained = await TryMarkAsync(item, existing => existing with
         {
+            // A failed required-check read can still carry the PR snapshot that preceded it. If that
+            // snapshot names a new head, no evidence or bounded-wait history from the old head may
+            // survive under the new identity. The next readable observation starts its own wait.
             PullRequest = pr.Number ?? existing.PullRequest,
-            Checks = pr.Checks ?? existing.Checks,
-            ChecksObservedAt = pr.Checks is null ? existing.ChecksObservedAt : now,
-            ChecksHeadSha = pr.Checks is null ? existing.ChecksHeadSha : pr.HeadSha,
+            Checks = InvalidatesPriorCheckEvidence(pr, existing) ? null : pr.Checks ?? existing.Checks,
+            ChecksObservedAt = InvalidatesPriorCheckEvidence(pr, existing)
+                ? null
+                : pr.Checks is null ? existing.ChecksObservedAt : now,
+            ChecksHeadSha = InvalidatesPriorCheckEvidence(pr, existing)
+                ? null
+                : pr.Checks is null ? existing.ChecksHeadSha : pr.HeadSha,
             RequiredCheckEvidenceWait = RequiredCheckEvidenceWaitAfter(pr, existing.RequiredCheckEvidenceWait),
             Error = reason,
             ReadinessMutationClaim = null,
@@ -551,11 +559,23 @@ public sealed class WorkItemAdvancer
 
     private static RequiredCheckEvidenceWait? RequiredCheckEvidenceWaitAfter(
         PullRequestObservation pr, RequiredCheckEvidenceWait? existing) =>
-        pr.Succeeded
-        && pr.RequiredChecks is not null
-        && pr.RequiredChecks != PullRequestChecks.None
+        existing is not null
+        && pr.HeadSha is { Length: > 0 } observedHead
+        && !string.Equals(existing.HeadSha, observedHead, StringComparison.Ordinal)
+            ? null
+            : pr.Succeeded
+              && pr.RequiredChecks is not null
+              && pr.RequiredChecks != PullRequestChecks.None
             ? null
             : existing;
+
+    private static bool InvalidatesPriorCheckEvidence(PullRequestObservation pr, QueueItem existing) =>
+        !pr.Succeeded
+        && pr.HeadSha is { Length: > 0 } observedHead
+        && (existing.RequiredCheckEvidenceWait is { } wait
+                && !string.Equals(wait.HeadSha, observedHead, StringComparison.Ordinal)
+            || existing.ChecksHeadSha is { Length: > 0 } checksHead
+                && !string.Equals(checksHead, observedHead, StringComparison.Ordinal));
 
     private static async Task<QueueDecisionEntry?> FailAsync(
         QueueItem item,
@@ -563,7 +583,8 @@ public sealed class WorkItemAdvancer
         WorkItemTransition transition,
         string? verdictPath,
         DateTimeOffset now,
-        string? room)
+        string? room,
+        RequiredCheckEvidenceWait? requiredCheckEvidenceWait = null)
     {
         // Failed, not silently left: every arm that reaches here is one where the queue would have to
         // guess, and a guess dispatches a lane against evidence nobody checked. The reason is on the
@@ -577,6 +598,7 @@ public sealed class WorkItemAdvancer
             State = QueueItemState.Failed,
             Error = transition.Reason,
             LastVerdict = verdictPath ?? existing.LastVerdict,
+            RequiredCheckEvidenceWait = requiredCheckEvidenceWait ?? existing.RequiredCheckEvidenceWait,
             Halted = true,
             ReadinessMutationClaim = null,
         }).ConfigureAwait(false);
