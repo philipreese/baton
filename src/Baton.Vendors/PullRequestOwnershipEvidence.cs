@@ -82,6 +82,14 @@ public sealed record OriginatingPullRequestOwnership(
         string.IsNullOrWhiteSpace(HeadBranch) || string.IsNullOrWhiteSpace(LaunchHead)
             ? null
             : PullRequestOwnershipEvidence.FromVerified(Repository, Number);
+
+    public static PullRequestOwnershipEvidence? FromHookValue(string? value)
+    {
+        var separator = value?.LastIndexOf('#') ?? -1;
+        return separator > 0 && int.TryParse(value![(separator + 1)..], out var number)
+            ? PullRequestOwnershipEvidence.FromVerified(value[..separator], number)
+            : null;
+    }
 }
 
 internal static class GitHubRepository

@@ -301,6 +301,11 @@ public sealed class OwnPullRequestOnlyRule
         return null;
     }
 
+    /// <summary>Hook entry point when the conductor supplied verified originating ownership.</summary>
+    public static string? RefusalForOwnBranchOnly(
+        string? commandLine, PullRequestOwnershipEvidence? ownPullRequest) =>
+        ownPullRequest is null ? RefusalForOwnBranchOnly(commandLine) : RefusalFor(commandLine, ownPullRequest);
+
     private static string Refusal(string what, PullRequestOwnershipEvidence? ownPullRequest)
     {
         var own = ownPullRequest is { } evidence

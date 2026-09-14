@@ -78,6 +78,9 @@ public static class AgyHookCheckCommand
     public const string ShellPatternsEnvironmentVariable =
         HookCheckCommand.ShellPatternsEnvironmentVariable;
 
+    public const string OriginatingPullRequestEnvironmentVariable =
+        HookCheckCommand.OriginatingPullRequestEnvironmentVariable;
+
     /// <summary>
     /// Mirror-name for <see cref="Baton.Vendors.AgyWorkerAdapter.DeniedShellPatternsVariable"/> — the one
     /// canonical literal, owned there because that adapter emits it, read here. See it for what the
@@ -161,7 +164,8 @@ public static class AgyHookCheckCommand
         TextReader stdin, TextWriter stdout, string? deniedToolsRaw, string? shellPatternsRaw = null,
         string? outboxDirectory = null, string? workspaceDirectory = null,
         string? deniedShellPatternsRaw = null, string? deniedShellOptionTokensRaw = null,
-        string? verdictLedgerPath = null, string? deniedShellExceptionsRaw = null)
+        string? verdictLedgerPath = null, string? deniedShellExceptionsRaw = null,
+        string? originatingPullRequestRaw = null)
     {
         ArgumentNullException.ThrowIfNull(stdin);
         ArgumentNullException.ThrowIfNull(stdout);
@@ -174,7 +178,8 @@ public static class AgyHookCheckCommand
         {
             stdout.Write(Decide(
                 scribe, stdin, deniedToolsRaw, shellPatternsRaw, outboxDirectory, workspaceDirectory,
-                deniedShellPatternsRaw, deniedShellOptionTokensRaw, deniedShellExceptionsRaw));
+                deniedShellPatternsRaw, deniedShellOptionTokensRaw, deniedShellExceptionsRaw,
+                originatingPullRequestRaw));
         }
         catch
         {
@@ -243,7 +248,8 @@ public static class AgyHookCheckCommand
     private static string Decide(
         GrantDecisionScribe scribe, TextReader stdin, string? deniedToolsRaw, string? shellPatternsRaw,
         string? outboxDirectory, string? workspaceDirectory, string? deniedShellPatternsRaw,
-        string? deniedShellOptionTokensRaw, string? deniedShellExceptionsRaw)
+        string? deniedShellOptionTokensRaw, string? deniedShellExceptionsRaw,
+        string? originatingPullRequestRaw)
     {
         // Drain stdin first and unconditionally: agy is the writer on the other end of this pipe,
         // and exiting before reading its full payload risks a blocked write on its side for any
@@ -601,7 +607,8 @@ public static class AgyHookCheckCommand
                         "payload and denied this call rather than allowing it unchecked.");
                 }
 
-                if (Baton.Vendors.OwnPullRequestOnlyRule.RefusalForOwnBranchOnly(commandLine)
+                if (Baton.Vendors.OwnPullRequestOnlyRule.RefusalForOwnBranchOnly(commandLine,
+                    Baton.Vendors.OriginatingPullRequestOwnership.FromHookValue(originatingPullRequestRaw))
                     is { } siblingPullRequestRefusal)
                 {
                     return DenyJson(scribe, GrantRules.OwnPullRequestOnly,

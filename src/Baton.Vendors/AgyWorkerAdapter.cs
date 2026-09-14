@@ -144,6 +144,8 @@ public sealed partial class AgyWorkerAdapter : IWorkerAdapter, IPermissionGrantT
 
     public const string ShellPatternsVariable = ClaudeWorkerAdapter.ShellPatternsVariable;
 
+    public const string OriginatingPullRequestVariable = ClaudeWorkerAdapter.OriginatingPullRequestVariable;
+
     /// <summary>
     /// The environment variable carrying this invocation's <b>denied</b> shell command patterns —
     /// 0022's DenyAlways rung (#390). agy has no <c>--disallowedTools</c> equivalent that can express a
@@ -686,6 +688,8 @@ public sealed partial class AgyWorkerAdapter : IWorkerAdapter, IPermissionGrantT
             // same allow. See #600.
             (DeniedToolsVariable, $"{DeniedToolsVendorTag}:{BuildDeniedTools(invocation.PermissionGrant, invocation.AllowsSubagents)}"),
             (ShellPatternsVariable, $"{ShellPatternsVendorTag}:{BuildShellPatterns(invocation.PermissionGrant)}"),
+            (OriginatingPullRequestVariable, invocation.OriginatingPullRequestOwnership is { } originating
+                ? $"{originating.Repository}#{originating.Number}" : string.Empty),
             (DeniedShellPatternsVariable, $"{ShellPatternsVendorTag}:{BuildDeniedShellPatterns(invocation.PermissionGrant)}"),
             (DeniedShellOptionTokensVariable,
                 $"{ShellPatternsVendorTag}:{BuildDeniedShellOptionTokens(invocation.PermissionGrant)}"),

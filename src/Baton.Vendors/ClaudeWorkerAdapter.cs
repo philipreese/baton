@@ -282,6 +282,8 @@ public sealed partial class ClaudeWorkerAdapter : IWorkerAdapter, IPermissionGra
             // #600 tags it with the vendor; #649 makes its contents differ from the flag.
             (DeniedToolsVariable, $"{DeniedToolsVendorTag}:{withheld}"),
             (SimpleModeVariable, "0"),
+            (OriginatingPullRequestVariable, invocation.OriginatingPullRequestOwnership is { } originating
+                ? $"{originating.Repository}#{originating.Number}" : string.Empty),
             // #1459: always set, even empty -- an empty-but-tagged list is the deliberate
             // unscoped-shell reading (HookCheckCommand.Decide skips the segment-level check), where an
             // absent/wrong-vendor one is a broken channel and also skips it (see that method's own
@@ -393,6 +395,8 @@ public sealed partial class ClaudeWorkerAdapter : IWorkerAdapter, IPermissionGra
     /// and <c>HookCheckCommand.Decide</c> for what reads it.
     /// </summary>
     public const string ShellPatternsVariable = "BATON_HOOK_SHELL_PATTERNS";
+
+    public const string OriginatingPullRequestVariable = "BATON_HOOK_ORIGINATING_PULL_REQUEST";
 
     /// <summary>
     /// The vendor tag prefixing <see cref="ShellPatternsVariable"/>'s and
