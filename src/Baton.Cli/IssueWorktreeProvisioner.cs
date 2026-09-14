@@ -180,9 +180,10 @@ public static class IssueWorktreeProvisioner
 
         if (Directory.Exists(firstWorkspace))
         {
-            // Not an error: the runner's own habit is to re-queue against a worktree that already
-            // exists. Trust it and hand it back rather than failing the add -- `git worktree add` would
-            // refuse anyway, and refusing here would make a re-add of a live lane impossible.
+            // A directory named w<n> is not evidence that it is the live lane. Re-use is safe only
+            // when git itself still registers that exact path on the first-lane branch.
+            await VerifyReusableWorktreeAsync(firstWorkspace, firstBranch, repositoryDirectory, runner, cancellationToken)
+                .ConfigureAwait(false);
             await TrustAsync(firstWorkspace, probe, output: output, cancellationToken: cancellationToken).ConfigureAwait(false);
             return new ProvisionedIssueWorktree(firstWorkspace, firstBranch);
         }
@@ -196,7 +197,9 @@ public static class IssueWorktreeProvisioner
                 continue;
             }
 
-            if (suffix > 1 && await BranchExistsAsync(branch, repositoryDirectory, runner, cancellationToken).ConfigureAwait(false))
+            // Check every candidate before asking GitHub to create it. In particular, the canonical
+            // name may have survived a merged PR even when its w<n> worktree did not.
+            if (await BranchExistsAsync(branch, repositoryDirectory, runner, cancellationToken).ConfigureAwait(false))
             {
                 continue;
             }
@@ -261,7 +264,7 @@ public static class IssueWorktreeProvisioner
         }
 
         var (remoteExit, remoteOutput) = await runner(
-            "git", ["ls-remote", "--heads", "origin", branch], repositoryDirectory, cancellationToken).ConfigureAwait(false);
+            "git", ["ls-remote", "--heads", "origin", $"refs/heads/{branch}"], repositoryDirectory, cancellationToken).ConfigureAwait(false);
         if (remoteExit != 0)
         {
             throw new CliArgumentException(
@@ -269,7 +272,58 @@ public static class IssueWorktreeProvisioner
                 "resolve the git error and retry; a branch suffix is selected only after a proven collision.");
         }
 
-        return !string.IsNullOrWhiteSpace(remoteOutput);
+        return remoteOutput.Split('\n', StringSplitOptions.RemoveEmptyEntries).Any(line =>
+            line.EndsWith($"\trefs/heads/{branch}", StringComparison.Ordinal));
+    }
+
+    private static async Task VerifyReusableWorktreeAsync(
+        string workspace,
+        string branch,
+        string repositoryDirectory,
+        Func<string, IReadOnlyList<string>, string, CancellationToken, Task<(int ExitCode, string Output)>> runner,
+        CancellationToken cancellationToken)
+    {
+        var (exit, output) = await runner(
+            "git", ["worktree", "list", "--porcelain"], repositoryDirectory, cancellationToken).ConfigureAwait(false);
+        if (exit != 0)
+        {
+            throw new CliArgumentException(
+                $"Could not verify existing workspace '{workspace}' as a git worktree (exit {exit}): {output.Trim()}",
+                "resolve the git error or move the unexpected directory before retrying.");
+        }
+
+        var expectedPath = Path.GetFullPath(workspace).TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar);
+        string? foundBranch = null;
+        string? listedPath = null;
+        foreach (var line in output.Split('\n'))
+        {
+            var trimmed = line.TrimEnd('\r');
+            if (trimmed.StartsWith("worktree ", StringComparison.Ordinal))
+            {
+                listedPath = trimmed["worktree ".Length..];
+                continue;
+            }
+
+            if (trimmed.StartsWith("branch ", StringComparison.Ordinal)
+                && listedPath is not null
+                && string.Equals(
+                    Path.GetFullPath(listedPath).TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar),
+                    expectedPath,
+                    StringComparison.OrdinalIgnoreCase))
+            {
+                foundBranch = trimmed["branch ".Length..];
+                break;
+            }
+        }
+
+        var expectedBranch = $"refs/heads/{branch}";
+        if (!string.Equals(foundBranch, expectedBranch, StringComparison.Ordinal))
+        {
+            var detail = foundBranch is null ? "is not registered as a git worktree" : $"checks out '{foundBranch}'";
+            throw new CliArgumentException(
+                $"Existing workspace '{workspace}' {detail}; expected branch '{expectedBranch}'.",
+                "move or remove the unexpected directory, or re-add the issue from the worktree that owns its recorded branch.");
+        }
     }
 
     /// <summary>
