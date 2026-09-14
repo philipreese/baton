@@ -34,6 +34,9 @@ namespace Baton.Cli.Daemon;
 /// </remarks>
 public sealed class WorkItemAdvancer
 {
+    private const int MaxRequiredCheckEvidenceAttempts = 6;
+    private static readonly TimeSpan RequiredCheckEvidenceBackoff = TimeSpan.FromSeconds(30);
+
     private const string PullRequestJsonFields =
         "number,state,isDraft,headRefOid,statusCheckRollup,headRefName,baseRefName,isCrossRepository,mergeCommit";
     private const string BoardObservationJsonFields = "number,state,headRefOid";
@@ -101,6 +104,8 @@ public sealed class WorkItemAdvancer
         // see QueueItem.Halted for what that cost.
         var candidates = snapshot.Items
             .Where(i => i.Stage is { } stage && i.Retirement is null
+                && (i.RequiredCheckEvidenceWait is not { } waiting
+                    || now - waiting.LatestObservationAt >= RequiredCheckEvidenceBackoff)
                 && (stage == WorkStage.Ready
                     ? i.State == QueueItemState.Queued && !i.Halted
                     : i.State is QueueItemState.Done or QueueItemState.Failed
@@ -265,6 +270,36 @@ public sealed class WorkItemAdvancer
             readinessClaimed = true;
         }
 
+        // An empty required set for this exact open head is neither green nor a failed worker.
+        if (pr is { Succeeded: true, Number: { } number, HeadSha: { Length: > 0 } headSha, IsOpen: true }
+            && pr.RequiredChecks == PullRequestChecks.None)
+        {
+            var prior = item.RequiredCheckEvidenceWait;
+            var changedHead = !string.Equals(prior?.HeadSha, headSha, StringComparison.Ordinal);
+            var attempts = changedHead ? 1 : prior!.AttemptCount + 1;
+            var reason = $"waiting for required-check evidence for open PR #{number} at {headSha} (attempt {attempts}/{MaxRequiredCheckEvidenceAttempts})";
+            if (attempts >= MaxRequiredCheckEvidenceAttempts)
+            {
+                var exhausted = new WorkItemTransition(WorkItemTransitionKind.NeedsOperator, null, 0,
+                    $"{reason}; observation bound exhausted after first unreadable observation at "
+                    + $"{(changedHead ? now : prior!.FirstUnreadableAt):O}; the settled room remains attached and no worker was dispatched");
+                return await FailAsync(item, stage, exhausted, verdictPath, now, room).ConfigureAwait(false);
+            }
+
+            await TryMarkAsync(item, existing => existing with
+            {
+                PullRequest = number,
+                Checks = changedHead ? null : existing.Checks,
+                ChecksObservedAt = changedHead ? null : existing.ChecksObservedAt,
+                ChecksHeadSha = changedHead ? null : existing.ChecksHeadSha,
+                RequiredCheckEvidenceWait = new RequiredCheckEvidenceWait(
+                    headSha, changedHead ? now : prior!.FirstUnreadableAt, now, attempts, reason),
+                Error = reason,
+                ReadinessMutationClaim = null,
+            }).ConfigureAwait(false);
+            return null;
+        }
+
         // A readiness mutation is never trusted from the command receipt. Re-observe the PR after
         // every attempt, then ask the pure lifecycle again. The bounded loop covers the one real
         // race: a head changes while a mark-ready is in flight, so the post-read requests mark-draft.
@@ -353,6 +388,7 @@ public sealed class WorkItemAdvancer
                     Checks = pr.Checks ?? existing.Checks,
                     ChecksObservedAt = pr.Checks is null ? existing.ChecksObservedAt : now,
                     ChecksHeadSha = pr.Checks is null ? existing.ChecksHeadSha : pr.HeadSha,
+                    RequiredCheckEvidenceWait = null,
                     Error = null,
                     ReadinessMutationClaim = null,
                 }).ConfigureAwait(false);
@@ -397,6 +433,9 @@ public sealed class WorkItemAdvancer
             Checks = pr.Checks ?? existing.Checks,
             ChecksObservedAt = pr.Checks is null ? existing.ChecksObservedAt : now,
             ChecksHeadSha = pr.Checks is null ? existing.ChecksHeadSha : pr.HeadSha,
+            RequiredCheckEvidenceWait = pr.RequiredChecks == PullRequestChecks.None
+                ? existing.RequiredCheckEvidenceWait
+                : null,
             Error = reason,
             ReadinessMutationClaim = null,
         }).ConfigureAwait(false);

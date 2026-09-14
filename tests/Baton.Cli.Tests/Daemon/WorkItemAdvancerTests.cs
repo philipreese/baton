@@ -2165,6 +2165,43 @@ public sealed class WorkItemAdvancerTests
     }
 
     [Fact]
+    public async Task Empty_required_checks_wait_on_the_exact_head_then_recover_without_a_worker_round()
+    {
+        var home = CreateTempHome();
+        using var scope = BatonEnvironmentSnapshot.BeginScope(BatonEnvironmentSnapshot.Blank with { HomeOverride = home });
+        try
+        {
+            var room = await WriteSettledRoomAsync(home, WorkflowOutcome.Succeeded, null);
+            await SeedAsync(home, WorkStage.Implement, room);
+            var checks = "[]";
+            var gh = new DelegateGh((_, args, _) => Task.FromResult(args is ["pr", "checks", ..]
+                ? new GhCliResult(true, 0, checks, string.Empty)
+                : new GhCliResult(true, 0, args is ["pr", "view", ..]
+                    ? PrObject(77, FullPushedSha)
+                    : PrJson(77, FullPushedSha), string.Empty)));
+            var advancer = Advancer(gh, (_, _) => Task.FromResult<string?>(FullPushedSha));
+
+            Assert.Empty(await advancer.AdvanceAsync(Now, Ct));
+            var waiting = await ReadBackAsync();
+            Assert.Equal(QueueItemState.Done, waiting.State);
+            Assert.Equal(WorkStage.Implement, waiting.Stage);
+            Assert.Equal(1, waiting.RequiredCheckEvidenceWait!.AttemptCount);
+            Assert.Equal(FullPushedSha, waiting.RequiredCheckEvidenceWait.HeadSha);
+
+            checks = "[{\"name\":\"ci\",\"bucket\":\"pass\"}]";
+            var facts = await advancer.AdvanceAsync(Now.AddSeconds(31), Ct);
+            Assert.Single(facts);
+            var recovered = await ReadBackAsync();
+            Assert.Equal(QueueItemState.Queued, recovered.State);
+            Assert.Equal(WorkStage.Review, recovered.Stage);
+        }
+        finally
+        {
+            DirectoryCleanup.DeleteRecursively(home);
+        }
+    }
+
+    [Fact]
     public async Task Observation_refresh_attempts_one_qualified_PR_per_poll_and_rotates_the_remainder()
     {
         var home = CreateTempHome();

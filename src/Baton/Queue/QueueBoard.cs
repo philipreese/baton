@@ -199,6 +199,7 @@ public static class QueueBoard
                 Checks: item.Checks,
                 ChecksObservedAt: item.ChecksObservedAt,
                 ChecksHeadSha: item.ChecksHeadSha,
+                RequiredCheckEvidenceWait: item.RequiredCheckEvidenceWait,
                 Halted: item.Halted,
                 Arm: ArmLabel(item),
                 TwinIssue: item.Issue is { } prIssue && twinIssues.Contains(prIssue) ? prIssue : null,
@@ -515,6 +516,9 @@ public sealed record QueuePullRequestLaneView(
     [property: JsonPropertyName("checksHeadSha")]
     [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
     string? ChecksHeadSha,
+    [property: JsonPropertyName("requiredCheckEvidenceWait")]
+    [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    RequiredCheckEvidenceWait? RequiredCheckEvidenceWait,
     [property: JsonPropertyName("halted")] bool Halted,
     [property: JsonPropertyName("arm")]
     [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
