@@ -1323,6 +1323,46 @@ public sealed class WorkItemAdvancerTests
     }
 
     [Fact]
+    public async Task An_artifactless_terminal_review_halts_once_across_repeated_ticks_and_reload()
+    {
+        var home = CreateTempHome();
+        using var scope = BatonEnvironmentSnapshot.BeginScope(BatonEnvironmentSnapshot.Blank with { HomeOverride = home });
+        try
+        {
+            var room = await WriteSettledRoomAsync(home, WorkflowOutcome.Indeterminate, verdictJson: null);
+            await SeedAsync(home, WorkStage.Review, room, QueueItemState.Failed);
+            var gh = new FakeGh(PrJson(77, PushedSha));
+
+            var firstFacts = await new WorkItemAdvancer(
+                gh, (_, _) => Task.FromResult<string?>(PushedSha)).AdvanceAsync(Now, Ct);
+
+            var halted = await ReadBackAsync();
+            Assert.Equal(QueueDecisionEntry.Failed, Assert.Single(firstFacts).Decision);
+            Assert.Equal(WorkStage.Review, halted.Stage);
+            Assert.Equal(QueueItemState.Failed, halted.State);
+            Assert.True(halted.Halted);
+            Assert.Equal(room, halted.RoomDirectory);
+            Assert.Contains("review lane settled Indeterminate", halted.Error!, StringComparison.Ordinal);
+            Assert.Contains("no reviewer decision exists", halted.Error!, StringComparison.Ordinal);
+
+            // A new advancer is the daemon restart/reload boundary. The halted row cannot issue a
+            // second launch decision, create another room, or reserve another admission.
+            var afterReload = await new WorkItemAdvancer(
+                gh, (_, _) => Task.FromResult<string?>(PushedSha)).AdvanceAsync(Now.AddMinutes(1), Ct);
+
+            var retained = await ReadBackAsync();
+            Assert.Empty(afterReload);
+            Assert.Equal(room, retained.RoomDirectory);
+            Assert.Equal(halted.LastAdmission, retained.LastAdmission);
+            Assert.Equal(WorkStage.Review, retained.Stage);
+        }
+        finally
+        {
+            DirectoryCleanup.DeleteRecursively(home);
+        }
+    }
+
+    [Fact]
     public async Task A_re_review_after_a_fix_lane_carries_the_last_reviews_findings_not_an_empty_section()
     {
         var home = CreateTempHome();

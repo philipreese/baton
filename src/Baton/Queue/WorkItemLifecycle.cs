@@ -91,6 +91,13 @@ public static class WorkItemLifecycle
         // already on disk. WorkflowOutcome owns the membership test (spec/baton.md §3).
         if (!Status.WorkflowOutcome.IsSucceededShaped(observation.TerminalOutcome))
         {
+            // A readable review verdict is still the reviewer's decision even when settlement was
+            // non-successful; only the absence of that decision must halt lifecycle spending.
+            if (observation.Stage is WorkStage.Review or WorkStage.ReReview && observation.Verdict is not null)
+            {
+                return DecideFromVerdict(observation);
+            }
+
             return DecideAfterIncompleteLane(observation);
         }
 
@@ -262,24 +269,19 @@ public static class WorkItemLifecycle
 
     /// <summary>
     /// A lane that did not reach a clean Terminal — timed out, faulted, was cancelled, or settled
-    /// indeterminate. spec/baton.md §13's two arms, and the type's remarks say why the discriminator is
-    /// pushed-ness rather than the outcome word.
+    /// indeterminate. A reviewer in that state made no decision, so it stops for an operator; mutating
+    /// lanes retain spec/baton.md §13's pushed-ness discriminator.
     /// </summary>
     private static WorkItemTransition DecideAfterIncompleteLane(WorkItemObservation observation)
     {
-        // A review lane has nothing to push, so "unpushed work" is not a reading its failure can have:
-        // the remedy for a review that did not finish is the review again, at whatever head the PR
-        // carries now.
+        // A review lane has nothing to push, and an absent verdict is no authorization to buy another
+        // review. Preserve the actual review stage and its room/error/spend evidence for an operator.
         if (observation.Stage is WorkStage.Review or WorkStage.ReReview)
         {
-            return EnsureDraft(observation, observation.PullRequest is { } reviewPr
-                ? Dispatch(
-                    observation, WorkStage.ReReview,
-                    $"the review lane settled {observation.TerminalOutcome} without a verdict; PR #{reviewPr} is "
-                    + $"still open at {Short(observation.PullRequestHeadSha)}")
-                : WorkItemTransition.NeedsOperator(
-                    $"the review lane settled {observation.TerminalOutcome} and no pull request is open on "
-                    + $"'{observation.Branch}' — there is nothing left to review; {Recovery(observation.Stage)}"));
+            return EnsureDraft(observation, WorkItemTransition.NeedsOperator(
+                $"the {WorkStages.Token(observation.Stage)} lane settled {observation.TerminalOutcome} without a "
+                + $"readable verdict.json — no reviewer decision exists, so the queue will not dispatch another "
+                + $"review; read the room's report.md and decide the round by hand; {Recovery(observation.Stage)}"));
         }
 
         if (IsPushed(observation))

@@ -296,13 +296,35 @@ public sealed class WorkItemLifecycleTests
         Assert.Equal(WorkStage.Continue, transition.NextStage);
     }
 
-    [Fact]
-    public void A_stalled_review_lane_is_re_reviewed_rather_than_continued()
+    [Theory]
+    [InlineData(WorkflowOutcome.Failed)]
+    [InlineData(WorkflowOutcome.Indeterminate)]
+    [InlineData(WorkflowOutcome.Cancelled)]
+    [InlineData("TimedOut")]
+    public void An_artifactless_terminal_review_stops_for_the_operator_without_spending_another_round(string outcome)
     {
-        var transition = WorkItemLifecycle.Decide(At(WorkStage.Review, outcome: WorkflowOutcome.Cancelled));
+        var transition = WorkItemLifecycle.Decide(At(
+            WorkStage.Review, outcome: outcome, round: 2, prDraft: false));
 
-        Assert.Equal(WorkStage.ReReview, transition.NextStage);
-        Assert.False(transition.UsesAutomaticFix);
+        Assert.Equal(WorkItemTransitionKind.NeedsOperator, transition.Kind);
+        Assert.Null(transition.NextStage);
+        Assert.Equal(0, transition.Round);
+        Assert.Equal(PullRequestReadinessAction.MarkDraft, transition.PullRequestAction);
+        Assert.Contains("review lane settled", transition.Reason, StringComparison.Ordinal);
+        Assert.Contains("no reviewer decision exists", transition.Reason, StringComparison.Ordinal);
+    }
+
+    [Theory]
+    [InlineData(ReviewDecision.Approve, WorkItemTransitionKind.Stop, WorkStage.Ready)]
+    [InlineData(ReviewDecision.Block, WorkItemTransitionKind.Dispatch, WorkStage.Fix)]
+    public void A_non_successful_review_with_a_readable_verdict_retains_its_decision(
+        ReviewDecision decision, WorkItemTransitionKind expectedKind, WorkStage expectedStage)
+    {
+        var transition = WorkItemLifecycle.Decide(At(
+            WorkStage.ReReview, outcome: WorkflowOutcome.Indeterminate, verdict: Verdict(decision), round: 1));
+
+        Assert.Equal(expectedKind, transition.Kind);
+        Assert.Equal(expectedStage, transition.NextStage);
     }
 
     [Fact]
@@ -324,11 +346,11 @@ public sealed class WorkItemLifecycleTests
         Assert.Equal(WorkStage.Fix, teardown.NextStage);
 
         // The control that makes this arm about the WORD and not about the verdict: a word that is not
-        // succeeded-shaped discards the same verdict and re-dispatches a review of the same head.
+        // succeeded-shaped still preserves the readable decision and routes from it.
         var failed = WorkItemLifecycle.Decide(At(
             WorkStage.Review, outcome: WorkflowOutcome.Failed, verdict: verdict, round: 1));
 
-        Assert.Equal(WorkStage.ReReview, failed.NextStage);
+        Assert.Equal(WorkStage.Fix, failed.NextStage);
     }
 
     [Fact]
@@ -344,24 +366,15 @@ public sealed class WorkItemLifecycleTests
     }
 
     [Fact]
-    public void A_re_review_cycle_reaches_the_operator_at_the_ceiling_rather_than_running_forever()
+    public void An_artifactless_re_review_stops_before_the_ceiling_without_spending_another_round()
     {
-        // One below the ceiling is the control: the same stalled review lane still dispatches, so the
-        // arm below measures the ROUND and not the stall.
-        var below = WorkItemLifecycle.Decide(At(
-            WorkStage.ReReview, outcome: WorkflowOutcome.Failed, round: WorkStages.MaxRounds - 1));
-
-        Assert.Equal(WorkItemTransitionKind.Dispatch, below.Kind);
-        Assert.Equal(WorkStages.MaxRounds, below.Round);
-
         var atCeiling = WorkItemLifecycle.Decide(At(
-            WorkStage.ReReview, outcome: WorkflowOutcome.Failed, round: WorkStages.MaxRounds));
+            WorkStage.ReReview, outcome: WorkflowOutcome.Failed, round: WorkStages.MaxRounds, prDraft: false));
 
         Assert.Equal(WorkItemTransitionKind.NeedsOperator, atCeiling.Kind);
         Assert.Contains("re-review", atCeiling.Reason, StringComparison.Ordinal);
-        Assert.Contains(
-            WorkStages.MaxRounds.ToString(System.Globalization.CultureInfo.InvariantCulture),
-            atCeiling.Reason, StringComparison.Ordinal);
+        Assert.Contains("no reviewer decision exists", atCeiling.Reason, StringComparison.Ordinal);
+        Assert.Equal(PullRequestReadinessAction.MarkDraft, atCeiling.PullRequestAction);
     }
 
     [Fact]
@@ -455,15 +468,13 @@ public sealed class WorkItemLifecycleTests
     }
 
     [Fact]
-    public void A_stalled_review_lane_with_no_open_pr_has_nothing_left_to_review()
+    public void An_artifactless_stalled_review_without_a_pr_still_names_the_missing_verdict()
     {
-        // The polarity partner of A_stalled_review_lane_is_re_reviewed_rather_than_continued: the ONE
-        // input that differs is the PR, and without one there is no head to review at.
         var transition = WorkItemLifecycle.Decide(At(
             WorkStage.Review, outcome: WorkflowOutcome.Cancelled, pr: null, prHead: null));
 
         Assert.Equal(WorkItemTransitionKind.NeedsOperator, transition.Kind);
-        Assert.Contains("nothing left to review", transition.Reason, StringComparison.Ordinal);
+        Assert.Contains("no reviewer decision exists", transition.Reason, StringComparison.Ordinal);
     }
 
     [Fact]
@@ -505,14 +516,15 @@ public sealed class WorkItemLifecycleTests
     }
 
     [Fact]
-    public void Timeout_and_review_failure_behavior_remain_unchanged_without_an_arrest_producer()
+    public void Timeout_continues_mutating_work_but_an_artifactless_review_stops()
     {
         var timeout = WorkItemLifecycle.Decide(At(
             WorkStage.Implement, outcome: WorkflowOutcome.Failed, workspaceHead: "0000111122223333"));
         var review = WorkItemLifecycle.Decide(At(WorkStage.Review, outcome: WorkflowOutcome.Failed));
 
         Assert.Equal(WorkStage.Continue, timeout.NextStage);
-        Assert.Equal(WorkStage.ReReview, review.NextStage);
+        Assert.Equal(WorkItemTransitionKind.NeedsOperator, review.Kind);
+        Assert.Null(review.NextStage);
     }
 
     [Fact]
