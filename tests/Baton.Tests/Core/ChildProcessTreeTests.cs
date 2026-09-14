@@ -56,8 +56,10 @@ public class ChildProcessTreeTests
             Assert.True(IsProcessAlive(helperPid), "the helper did not survive long enough to test Job teardown");
 
             child.Terminate();
-            await child.Process.WaitForExitAsync(TestContext.Current.CancellationToken)
-                .WaitAsync(TimeSpan.FromSeconds(60), TestContext.Current.CancellationToken);
+            await BoundedProcessWait.WaitForExitAsync(
+                child.Process,
+                TimeSpan.FromSeconds(60),
+                TestContext.Current.CancellationToken);
             Assert.True(
                 SpinWait.SpinUntil(() => !IsProcessAlive(helperPid), TimeSpan.FromSeconds(5)),
                 "a helper spawned by the atomically-contained root survived Job teardown");
@@ -70,7 +72,6 @@ public class ChildProcessTreeTests
                 {
                     using var helper = Process.GetProcessById(helperPid);
                     helper.Kill(entireProcessTree: true);
-                    helper.WaitForExit(5_000);
                 }
                 catch (Exception ex) when (ex is ArgumentException or InvalidOperationException or Win32Exception)
                 {
@@ -117,8 +118,10 @@ public class ChildProcessTreeTests
             using var job = SafeJobObjectHandle.Create();
             Assert.True(job.TryAssign(root.SafeHandle), "the live negative-control root did not enter its Job");
             job.Terminate();
-            await root.WaitForExitAsync(TestContext.Current.CancellationToken)
-                .WaitAsync(TimeSpan.FromSeconds(60), TestContext.Current.CancellationToken);
+            await BoundedProcessWait.WaitForExitAsync(
+                root,
+                TimeSpan.FromSeconds(60),
+                TestContext.Current.CancellationToken);
 
             Assert.True(
                 IsProcessAlive(helperPid),
@@ -148,8 +151,10 @@ public class ChildProcessTreeTests
         });
 
         var stdout = child.StandardOutput.ReadToEndAsync(TestContext.Current.CancellationToken);
-        await child.Process.WaitForExitAsync(TestContext.Current.CancellationToken)
-            .WaitAsync(TimeSpan.FromSeconds(60), TestContext.Current.CancellationToken);
+        await BoundedProcessWait.WaitForExitAsync(
+            child.Process,
+            TimeSpan.FromSeconds(60),
+            TestContext.Current.CancellationToken);
         child.Terminate();
 
         Assert.Equal("0", (await stdout).Trim());
@@ -160,7 +165,10 @@ public class ChildProcessTreeTests
         + "$startInfo.UseShellExecute = $false; "
         + "$startInfo.Arguments = '-n 9999 127.0.0.1'; "
         + "$helper = [System.Diagnostics.Process]::Start($startInfo); "
-        + $"[System.IO.File]::WriteAllText('{EscapePowerShell(helperPidPath)}', $helper.Id.ToString()); "
+        + $"$helperPidPath = '{EscapePowerShell(helperPidPath)}'; "
+        + "$temporaryPidPath = $helperPidPath + '.' + [System.Guid]::NewGuid().ToString('N') + '.tmp'; "
+        + "[System.IO.File]::WriteAllText($temporaryPidPath, $helper.Id.ToString()); "
+        + "[System.IO.File]::Move($temporaryPidPath, $helperPidPath); "
         + "Start-Sleep -Seconds 600";
 
     private static void KillRecordedHelper(string helperPidPath)
@@ -174,7 +182,6 @@ public class ChildProcessTreeTests
         {
             using var helper = Process.GetProcessById(helperPid);
             helper.Kill(entireProcessTree: true);
-            helper.WaitForExit(5_000);
         }
         catch (Exception ex) when (ex is ArgumentException or InvalidOperationException or Win32Exception)
         {

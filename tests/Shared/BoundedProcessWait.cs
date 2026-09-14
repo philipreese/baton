@@ -11,6 +11,23 @@ namespace Baton.Tests.Shared;
 /// </summary>
 internal static class BoundedProcessWait
 {
+    public static async Task WaitForExitAsync(
+        Process process,
+        TimeSpan timeout,
+        CancellationToken cancellationToken = default)
+    {
+        var waitTask = process.WaitForExitAsync(cancellationToken);
+        var delay = Task.Delay(timeout, cancellationToken);
+
+        if (await Task.WhenAny(waitTask, delay) == delay)
+        {
+            TryKill(process);
+            throw new TimeoutException($"Process '{process.StartInfo.FileName}' did not exit within {timeout}.");
+        }
+
+        await waitTask;
+    }
+
     public static async Task<(string Stdout, string Stderr)> RunToExitAsync(
         Process process,
         TimeSpan timeout,
