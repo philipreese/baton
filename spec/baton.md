@@ -7163,6 +7163,14 @@ in the CLI rather than in the background host. `<root>` — which the issue left
 `Queue.WorktreeRoot`, defaulting to **the parent directory of the checkout the verb was invoked from**,
 which is the sibling-repos layout the runner assumed.
 
+When the first lane has no reusable `w<n>` worktree but its branch is positively found locally or on
+`origin`, add selects the lowest free matching pair in order: `<n>-lane-2` with `<root>/w<n>-2`, then
+`-3`, and so on. A failed `gh issue develop` alone is not collision evidence: authentication, network,
+and other ambiguous failures refuse with their original diagnostic. Selection is retried after a
+concurrent creator wins, so two adds never write rows pointing at one branch or workspace. Every
+`--issue` queue row, lifecycle or ordinary, persists the exact selected branch; later PR discovery and
+lifecycle advancement read that value rather than re-deriving `<n>-lane`.
+
 `import <file>` reads the runner's own shape (`{tag, role, model, effort, skills, timeout, workspace|issue,
 adapter, maxToolSteps, tokenBudget, overrideRunway, reason, pinModel, external}`) for Q7's cutover. A
 **launched tag comes in launched** — resetting it would re-dispatch a lane the operator already has

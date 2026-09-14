@@ -204,7 +204,9 @@ public static class QueueCommand
             Reason = options.Reason,
             Issue = options.Issue,
             Stage = options.Lifecycle ? WorkStage.Implement : null,
-            Branch = options.Lifecycle ? provisioned!.Branch : null,
+            // Every --issue row needs the provisioner's exact branch. Lifecycle rows use it for
+            // advancement; ordinary rows retain the same durable anchor for later PR discovery.
+            Branch = provisioned?.Branch,
             Repository = issueRepository,
             // Explicit false distinguishes a newly-created lifecycle item from a pre-#2131 item
             // whose persisted history has no trustworthy automatic-fix budget.
