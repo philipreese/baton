@@ -1,4 +1,5 @@
 using System.Diagnostics;
+using System.Text;
 using System.Text.Json;
 using Baton.Vendors;
 
@@ -17,7 +18,14 @@ internal static class OriginatingPullRequestVerifier
         var launchHead = await WorkspaceHead.TryCaptureAsync(workspace, cancellationToken).ConfigureAwait(false);
         if (identity is null || launchHead is null || identity.Repository != repository)
             throw new CliArgumentException("The workspace repository and launch HEAD must be readable before originating PR ownership can be granted.");
-        var start = ChildProcessStartInfo.Create("gh", info => { info.WorkingDirectory = workspace; info.RedirectStandardOutput = true; info.RedirectStandardError = true; });
+        var start = ChildProcessStartInfo.Create("gh", info =>
+        {
+            info.WorkingDirectory = workspace;
+            info.RedirectStandardOutput = true;
+            info.RedirectStandardError = true;
+            info.StandardOutputEncoding = Encoding.UTF8;
+            info.StandardErrorEncoding = Encoding.UTF8;
+        });
         foreach (var argument in new[] { "pr", "view", number.ToString(), "--repo", repository, "--json", "state,headRefName,headRefOid" }) start.ArgumentList.Add(argument);
         using var process = Process.Start(start) ?? throw new CliArgumentException("Could not start gh to verify '--originating-pr'.");
         var output = await process.StandardOutput.ReadToEndAsync(cancellationToken).ConfigureAwait(false);
