@@ -561,6 +561,7 @@ public sealed class WorkItemLifecycleTests
         Assert.Null(transition.NextStage);
         Assert.Equal(0, transition.Round);
         Assert.Contains("no readable", transition.Reason, StringComparison.Ordinal);
+        Assert.Contains(outcome, transition.Reason, StringComparison.Ordinal);
         Assert.Contains("carry the round by hand", transition.Reason, StringComparison.Ordinal);
     }
 

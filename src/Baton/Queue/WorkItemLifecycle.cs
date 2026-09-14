@@ -219,7 +219,7 @@ public static class WorkItemLifecycle
             // Not treated as an approval. A review that produced no readable verdict has said nothing,
             // and reading silence as APPROVE would merge on the strength of a missing file.
             return EnsureDraft(observation, WorkItemTransition.NeedsOperator(
-                $"the {WorkStages.Token(observation.Stage)} lane settled succeeded but wrote no readable "
+                $"the {WorkStages.Token(observation.Stage)} lane settled {observation.TerminalOutcome} but wrote no readable "
                 + $"verdict.json — read the room's report.md and decide the round by hand; {Recovery(observation.Stage)}"));
         }
 
