@@ -14,7 +14,7 @@ public static class RedispatchOptionsParser
     public const string Usage =
         "Usage: baton redispatch <room-dir> [--spec <amended-brief>] [--attach <file>] [--adapter <name>] "
         + "[--model <name>] [--effort <name>] [--workspace <dir>] [--output <path>] [--timeout <minutes>] "
-        + "[--token-budget <n>] [--max-tool-steps <n>] [--billed-rate-limit <n>] [--verify <cmd>] [--skill <name>] [--no-default-skills] [--label <text>] [--workstream <slug>]";
+        + $"[--token-budget <n>] [--max-tool-steps <n>] [--billed-rate-limit <n>] [--verify <cmd>] [--skill <name>] [--no-default-skills] [--label <text>] [--workstream <slug>] [--declared-size <{Baton.Domain.TaskSizeDeclaration.Usage}>] [--size-rationale <clause>]";
 
     public static RedispatchOptions Parse(IReadOnlyList<string> args)
     {
@@ -38,6 +38,8 @@ public static class RedispatchOptionsParser
         var skills = new List<string>();
         var skillsSpecified = false;
         var noDefaultSkills = false;
+        string? declaredSize = null;
+        string? sizeRationale = null;
 
         var i = 0;
         while (i < args.Count)
@@ -101,6 +103,12 @@ public static class RedispatchOptionsParser
                     workstream = DispatchOptionsParser.SanitizeWorkstream(RequireValue(args, ref i, arg));
                     workstreamSpecified = true;
                     break;
+                case "--declared-size":
+                    declaredSize = RequireValue(args, ref i, arg);
+                    break;
+                case "--size-rationale":
+                    sizeRationale = RequireValue(args, ref i, arg);
+                    break;
                 default:
                     if (arg.StartsWith("--", StringComparison.Ordinal))
                     {
@@ -140,7 +148,8 @@ public static class RedispatchOptionsParser
             outputPath is null ? null : Path.GetFullPath(outputPath),
             timeout, label, labelSpecified, tokenBudget, workstream, workstreamSpecified,
             attachments.Count > 0 ? attachments : null, maxToolSteps, billedRateLimit, verifyCommand,
-            DispatchOptionsParser.NormalizeSkills(skills), skillsSpecified, noDefaultSkills);
+            DispatchOptionsParser.NormalizeSkills(skills), skillsSpecified, noDefaultSkills,
+            DispatchOptionsParser.ParseTaskSizeDeclaration(declaredSize, sizeRationale));
     }
 
     /// <summary>Same shape and rationale as <see cref="DispatchOptionsParser"/>'s own <c>--token-budget</c> (#1623).</summary>

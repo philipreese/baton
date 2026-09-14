@@ -1,3 +1,4 @@
+using Baton.Domain;
 using Baton.Queue;
 
 namespace Baton.Tests.Queue;
@@ -84,6 +85,34 @@ public sealed class QueueBoardTests
         Assert.Equal(6.4, board.Slots.FreeGb);
         Assert.Equal(QueueSettings.DefaultFloorGbDay, board.Slots.FloorGb);
         Assert.False(board.Slots.NightBand);
+    }
+
+    [Fact]
+    public void Every_queue_item_projection_carries_the_complete_declaration_and_legacy_unknown()
+    {
+        var declaration = new TaskSizeDeclaration(DeclaredTaskSize.Medium, "one durable seam");
+        var pending = Item("pending", stage: WorkStage.Implement) with { DeclaredTaskSize = declaration };
+        var pr = Item("pr", stage: WorkStage.Review, pr: 77, repository: "github.com/owner/repo") with
+        {
+            DeclaredTaskSize = declaration,
+        };
+        var retired = Item("retired", stage: WorkStage.Ready) with
+        {
+            DeclaredTaskSize = declaration,
+            Retirement = new QueueRetirement(QueueRetirement.Merged, DateTimeOffset.UtcNow, "merged"),
+        };
+        var live = new QueueLiveLane("/r/live", "live", "implement", "codex", 1, declaration);
+
+        var board = Project([pending, pr, retired], lanes: [live]);
+
+        Assert.Equal(declaration, Assert.Single(board.Pending, row => row.Tag == pending.Tag).DeclaredTaskSize);
+        Assert.Equal(declaration, Assert.Single(board.PullRequests).Lanes.Single().DeclaredTaskSize);
+        Assert.Equal(declaration, Assert.Single(board.RetiredHistory).DeclaredTaskSize);
+        Assert.Equal(declaration, Assert.Single(board.Slots.Lanes).DeclaredTaskSize);
+
+        var legacy = Project([Item("legacy", stage: WorkStage.Implement)]);
+        Assert.Equal(DeclaredTaskSize.Unknown, Assert.Single(legacy.Pending).DeclaredTaskSize.Size);
+        Assert.Null(Assert.Single(legacy.Pending).DeclaredTaskSize.Rationale);
     }
 
     [Fact]

@@ -48,6 +48,7 @@ public static class LedgerCsv
     [
         "sourceKind", "repository", "room", "parentRoom", "workstream", "workflow", "step", "execution",
         "attempt", "role", "adapter", "model", "modelEchoed", "modelAnomaly", "modelsObserved", "effort", "outcome",
+        "declaredTaskSize", "sizeRationale",
         "issue", "pr", "startedAt", "endedAt", "tokensIn", "tokensOut", "cacheRead", "cacheCreation",
         "thinking", "turns", "wallClockMs", "toolSteps", "refusedToolSteps", "repeatedToolSteps",
         "verifyStepMs", "verifyResultsBytes", "pushWaitMs", "prePushGateMs",

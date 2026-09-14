@@ -214,6 +214,7 @@ public sealed class QueueSchedulerService : BackgroundService
             }
 
             var item = decision.Item!;
+            var admittedDeclaration = item.DeclaredTaskSize;
             QueueTierResolution tier;
             WorkerRole role;
             try
@@ -376,7 +377,7 @@ public sealed class QueueSchedulerService : BackgroundService
             {
                 var current = snapshot.Items.FirstOrDefault(i => string.Equals(i.Tag, item.Tag, StringComparison.Ordinal));
                 if (current?.State != QueueItemState.Queued
-                    || !HasSameAdmissionDeclaration(current, item))
+                    || !HasSameAdmissionDeclaration(current, item, admittedDeclaration))
                 {
                     return snapshot;
                 }
@@ -904,10 +905,18 @@ public sealed class QueueSchedulerService : BackgroundService
     /// Queue replacement is allowed while an item is queued, so claiming by tag/state alone could
     /// otherwise launch a just-replaced imported task under an old verdict or revision baseline.
     /// </summary>
-    private static bool HasSameAdmissionDeclaration(QueueItem current, QueueItem admitted) =>
+    private static bool HasSameAdmissionDeclaration(
+        QueueItem current,
+        QueueItem admitted,
+        TaskSizeDeclaration? declaredTaskSize = null) =>
         string.Equals(current.Role, admitted.Role, StringComparison.Ordinal)
         && current.Stage == admitted.Stage
         && string.Equals(current.Workspace, admitted.Workspace, StringComparison.Ordinal)
+        && current.DeclaredTaskSize.Size == (declaredTaskSize ?? admitted.DeclaredTaskSize).Size
+        && string.Equals(
+            current.DeclaredTaskSize.Rationale,
+            (declaredTaskSize ?? admitted.DeclaredTaskSize).Rationale,
+            StringComparison.Ordinal)
         && SameRequirements(current.Requirements, admitted.Requirements);
 
     private static bool SameRequirements(IReadOnlyList<string>? left, IReadOnlyList<string>? right) =>

@@ -85,7 +85,15 @@ public static class StatusCommand
             var sentinel = await TerminalSentinelWriter.TryReadAsync(options.RoomDirectoryPath, cancellationToken).ConfigureAwait(false);
             if (sentinel is not null)
             {
-                PrintSentinel(output, options.Json, sentinel);
+                var sentinelBindings = await RoomAdapterLookup.TryLoadBindingsAsync(
+                    options.RoomDirectoryPath, cancellationToken).ConfigureAwait(false);
+                PrintSentinel(
+                    output,
+                    options.Json,
+                    sentinel with
+                    {
+                        DeclaredTaskSize = DeclaredTaskSizeFrom(sentinelBindings, sentinel.DeclaredTaskSize),
+                    });
                 return;
             }
         }
@@ -164,10 +172,10 @@ public static class StatusCommand
             // fail-open like every other display read here — a room with no bindings.json (or one this
             // build cannot parse) simply has no runway line, exactly as every room dispatched before
             // #1896 does.
-            var runway = RunwayAdmissionView.AllFrom(
-                (await RoomAdapterLookup.TryLoadBindingsAsync(options.RoomDirectoryPath, cancellationToken)
-                    .ConfigureAwait(false))
-                .Values.Select(entry => entry.RunwayAdmission));
+            var roomBindings = await RoomAdapterLookup.TryLoadBindingsAsync(options.RoomDirectoryPath, cancellationToken)
+                .ConfigureAwait(false);
+            var runway = RunwayAdmissionView.AllFrom(roomBindings.Values.Select(entry => entry.RunwayAdmission));
+            var declaredTaskSize = DeclaredTaskSizeFrom(roomBindings, TaskSizeDeclaration.Unknown);
 
             if (options.Json)
             {
@@ -177,7 +185,7 @@ public static class StatusCommand
                 var view = WorkflowStatusProjector.Project(
                     state, snapshot, options.RoomDirectoryPath, entries, WorkerAdapterRegistry.Default, arrestLedger,
                     arrestLedgerUnavailableReason);
-                output.WriteLine(JsonSerializer.Serialize(view with { Runway = runway }));
+                output.WriteLine(JsonSerializer.Serialize(view with { Runway = runway, DeclaredTaskSize = declaredTaskSize }));
                 return;
             }
 
@@ -589,6 +597,21 @@ public static class StatusCommand
         {
             output.WriteLine($"  {sentinel.Error}");
         }
+    }
+
+    private static TaskSizeDeclaration DeclaredTaskSizeFrom(
+        IReadOnlyDictionary<string, WorkerBindingConfigEntry> bindings,
+        TaskSizeDeclaration fallback)
+    {
+        foreach (var binding in bindings.Values)
+        {
+            if (binding.DeclaredTaskSize is { } declaration && declaration.Size != DeclaredTaskSize.Unknown)
+            {
+                return declaration;
+            }
+        }
+
+        return fallback;
     }
 
     private static void PrintState(

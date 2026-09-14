@@ -1,4 +1,5 @@
 using Baton.Vendors;
+using Baton.Domain;
 
 namespace Baton.Cli;
 
@@ -40,13 +41,15 @@ namespace Baton.Cli;
 public sealed record RoomBindingStamps(
     IReadOnlyDictionary<string, string> LabelByWorker,
     IReadOnlyDictionary<string, string> RunwayOverrideReasonByWorker,
-    IReadOnlyDictionary<string, string> ModelResolvedByWorker)
+    IReadOnlyDictionary<string, string> ModelResolvedByWorker,
+    IReadOnlyDictionary<string, TaskSizeDeclaration> DeclaredTaskSizeByWorker)
 {
     /// <summary>What a room with no readable bindings yields: every projection empty, never null.</summary>
     public static RoomBindingStamps None { get; } = new(
         new Dictionary<string, string>(StringComparer.Ordinal),
         new Dictionary<string, string>(StringComparer.Ordinal),
-        new Dictionary<string, string>(StringComparer.Ordinal));
+        new Dictionary<string, string>(StringComparer.Ordinal),
+        new Dictionary<string, TaskSizeDeclaration>(StringComparer.Ordinal));
 
     /// <summary>
     /// Both stamps for one room. <see cref="None"/> when the room has no bindings file, it cannot be
@@ -88,6 +91,7 @@ public sealed record RoomBindingStamps(
         var labels = new Dictionary<string, string>(StringComparer.Ordinal);
         var reasons = new Dictionary<string, string>(StringComparer.Ordinal);
         var resolvedModels = new Dictionary<string, string>(StringComparer.Ordinal);
+        var declaredSizes = new Dictionary<string, TaskSizeDeclaration>(StringComparer.Ordinal);
         foreach (var (worker, entry) in bindings)
         {
             if (entry.Label is { Length: > 0 } label)
@@ -104,8 +108,13 @@ public sealed record RoomBindingStamps(
             {
                 resolvedModels[worker] = modelResolved;
             }
+
+            if (entry.DeclaredTaskSize is { } declaredSize)
+            {
+                declaredSizes[worker] = declaredSize;
+            }
         }
 
-        return new RoomBindingStamps(labels, reasons, resolvedModels);
+        return new RoomBindingStamps(labels, reasons, resolvedModels, declaredSizes);
     }
 }

@@ -56,6 +56,17 @@ public class RedispatchBindingTests
     }
 
     [Fact]
+    public void Redispatch_inherits_the_frozen_declared_task_size()
+    {
+        var declaration = new TaskSizeDeclaration(DeclaredTaskSize.Medium, "one durable seam");
+        var entry = RedispatchCommand.InheritBinding(
+            ParentEntry() with { DeclaredTaskSize = declaration },
+            new RedispatchOptions("parent-room", "new-room"));
+
+        Assert.Equal(declaration, entry.DeclaredTaskSize);
+    }
+
+    [Fact]
     public void Redispatch_inherits_the_conductor_captured_pull_request_identity()
     {
         var identity = new GhPullRequestCreateIdentity(

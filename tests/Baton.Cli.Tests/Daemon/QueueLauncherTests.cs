@@ -675,6 +675,7 @@ public sealed class QueueLauncherTests : IDisposable
             MaxToolSteps = 400,
             OverrideRunwayReason = "conductor lane, week resets in 2h",
             Skills = ["house-style", "thorough-review"],
+            DeclaredTaskSize = new(DeclaredTaskSize.Medium, "one durable seam"),
         };
         var tier = new QueueTierResolution("engine", "claude", "opus", "high", IsOverride: true, OverrideReason: "spec says opus");
         var room = Path.Combine(BatonPaths.Rooms, "queue-t7-0badf00d");
@@ -700,16 +701,26 @@ public sealed class QueueLauncherTests : IDisposable
         Assert.Equal(expected.MaxToolSteps, parsed.MaxToolSteps);
         Assert.Equal(expected.OverrideRunwayReason, parsed.OverrideRunwayReason);
         Assert.Equal(expected.Skills, parsed.Skills);
+        Assert.Equal(expected.DeclaredTaskSize, parsed.DeclaredTaskSize);
 
         // Optional fields the queue never sets stay absent rather than being sent as empty flags.
         var minimal = QueueLauncher.BuildArguments(QueueLauncher.BuildOptions(new QueueLaunchRequest(
-            item with { TimeoutMinutes = null, TokenBudget = null, MaxToolSteps = null, OverrideRunwayReason = null },
+            item with
+            {
+                TimeoutMinutes = null,
+                TokenBudget = null,
+                MaxToolSteps = null,
+                OverrideRunwayReason = null,
+                DeclaredTaskSize = TaskSizeDeclaration.Unknown,
+            },
             new QueueTierResolution("engine", "claude", "opus", "high", false, null),
             room)));
         Assert.DoesNotContain("--timeout", minimal);
         Assert.DoesNotContain("--token-budget", minimal);
         Assert.DoesNotContain("--max-tool-steps", minimal);
         Assert.DoesNotContain("--override-runway", minimal);
+        Assert.DoesNotContain("--declared-size", minimal);
+        Assert.DoesNotContain("--size-rationale", minimal);
     }
 
     /// <summary>

@@ -1,4 +1,5 @@
 using System.Text.Json.Serialization;
+using Baton.Domain;
 
 namespace Baton.Queue;
 
@@ -125,7 +126,8 @@ public static class QueueBoard
                 External: item.External,
                 Halted: item.Halted,
                 Arm: ArmLabel(item),
-                TwinIssue: null));
+                TwinIssue: null,
+                DeclaredTaskSize: item.DeclaredTaskSize));
         }
 
         // Issue membership AND a stage, both -- the stage read is not redundant with TwinIssues. That
@@ -203,7 +205,8 @@ public static class QueueBoard
                 Halted: item.Halted,
                 Arm: ArmLabel(item),
                 TwinIssue: item.Issue is { } prIssue && twinIssues.Contains(prIssue) ? prIssue : null,
-                Retirement: item.Retirement))
+                Retirement: item.Retirement,
+                DeclaredTaskSize: item.DeclaredTaskSize))
                 .ToList();
             var view = new QueuePullRequestView(
                 Repository: repository,
@@ -242,7 +245,8 @@ public static class QueueBoard
                 item.State,
                 item.Issue,
                 item.PullRequest,
-                item.Retirement!))
+                item.Retirement!,
+                item.DeclaredTaskSize))
             .ToList();
 
         return new QueueBoardView(
@@ -435,7 +439,9 @@ public sealed record QueueLiveLane(
     [property: JsonPropertyName("adapter")]
     [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
     string? Adapter,
-    [property: JsonPropertyName("weight")] double Weight);
+    [property: JsonPropertyName("weight")] double Weight,
+    [property: JsonPropertyName("declaredTaskSize")]
+    TaskSizeDeclaration DeclaredTaskSize = default);
 
 /// <summary>The weighted-slot row: the cap, what is live against it, and the memory floor beside the
 /// reading it is compared with.</summary>
@@ -481,7 +487,9 @@ public sealed record QueuePendingView(
     string? Arm,
     [property: JsonPropertyName("twinIssue")]
     [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
-    int? TwinIssue);
+    int? TwinIssue,
+    [property: JsonPropertyName("declaredTaskSize")]
+    TaskSizeDeclaration DeclaredTaskSize = default);
 
 /// <summary>One retained lane link beneath a repository-qualified PR row.</summary>
 /// <param name="Verdict">Whatever the caller's <c>verdictDecision</c> delegate returned — its own
@@ -528,7 +536,9 @@ public sealed record QueuePullRequestLaneView(
     int? TwinIssue,
     [property: JsonPropertyName("retirement")]
     [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
-    QueueRetirement? Retirement);
+    QueueRetirement? Retirement,
+    [property: JsonPropertyName("declaredTaskSize")]
+    TaskSizeDeclaration DeclaredTaskSize = default);
 
 /// <summary>One retired lifecycle row retained for Fleet Glass history.</summary>
 public sealed record QueueRetiredView(
@@ -543,7 +553,9 @@ public sealed record QueueRetiredView(
     [property: JsonPropertyName("pr")]
     [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
     int? PullRequest,
-    [property: JsonPropertyName("retirement")] QueueRetirement Retirement);
+    [property: JsonPropertyName("retirement")] QueueRetirement Retirement,
+    [property: JsonPropertyName("declaredTaskSize")]
+    TaskSizeDeclaration DeclaredTaskSize = default);
 
 /// <summary>One repository-qualified PR observation and all retained lanes that refer to it.</summary>
 public sealed record QueuePullRequestView(

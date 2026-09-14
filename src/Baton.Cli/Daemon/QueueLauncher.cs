@@ -580,6 +580,11 @@ public static class QueueLauncher
         Add("--token-budget", options.TokenBudget?.ToString(CultureInfo.InvariantCulture));
         Add("--max-tool-steps", options.MaxToolSteps?.ToString(CultureInfo.InvariantCulture));
         Add("--override-runway", options.OverrideRunwayReason);
+        if (options.DeclaredTaskSize is { } declaredSize)
+        {
+            Add("--declared-size", declaredSize.Size.ToString().ToLowerInvariant());
+            Add("--size-rationale", declaredSize.Rationale);
+        }
         foreach (var skill in options.Skills ?? [])
         {
             Add("--skill", skill);
@@ -956,7 +961,10 @@ public static class QueueLauncher
             TokenBudget: item.TokenBudget,
             MaxToolSteps: item.MaxToolSteps,
             OverrideRunwayReason: item.OverrideRunwayReason,
-            Skills: NormalizeSkillsForLaunch(item));
+            Skills: NormalizeSkillsForLaunch(item),
+            DeclaredTaskSize: item.DeclaredTaskSize.Size == DeclaredTaskSize.Unknown
+                ? null
+                : item.DeclaredTaskSize);
     }
 
     /// <summary>

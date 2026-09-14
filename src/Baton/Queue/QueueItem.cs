@@ -43,6 +43,15 @@ public sealed record QueueItem
 
     public string? Effort { get; init; }
 
+    private TaskSizeDeclaration _declaredTaskSize = TaskSizeDeclaration.Unknown;
+
+    /// <summary>The frozen conductor routing declaration; absent or null legacy JSON is projected explicitly as unknown.</summary>
+    public TaskSizeDeclaration DeclaredTaskSize
+    {
+        get => _declaredTaskSize;
+        init => _declaredTaskSize = value;
+    }
+
     /// <summary>
     /// Normalized explicit skill package names for an ordinary single-dispatch item. Null is the
     /// backward-compatible shape for entries written before queue skill declarations existed.

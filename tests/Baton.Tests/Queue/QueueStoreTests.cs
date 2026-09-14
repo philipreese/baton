@@ -1,4 +1,5 @@
 using Baton.Queue;
+using Baton.Domain;
 
 namespace Baton.Tests.Queue;
 
@@ -110,6 +111,66 @@ public sealed class QueueStoreTests
 
             var read = await QueueStore.LoadAsync(path, Ct);
             Assert.Equal(["a", "b"], read.Items.Select(i => i.Tag));
+        }
+        finally
+        {
+            Cleanup(path);
+        }
+    }
+
+    [Fact]
+    public async Task An_absent_or_null_legacy_declaration_reloads_and_resaves_as_explicit_unknown()
+    {
+        var path = TempQueuePath();
+        Directory.CreateDirectory(Path.GetDirectoryName(path)!);
+        try
+        {
+            await File.WriteAllTextAsync(path, """
+                {"items":[{"Tag":"absent","Role":"implement","Workspace":"C:\\repos\\w1","SpecFile":"C:\\baton\\queue\\specs\\t.md"},{"Tag":"null","Role":"implement","Workspace":"C:\\repos\\w2","SpecFile":"C:\\baton\\queue\\specs\\t.md","DeclaredTaskSize":null}],"held":false}
+                """, Ct);
+
+            var reloaded = await QueueStore.LoadAsync(path, Ct);
+            Assert.Equal(2, reloaded.Items.Count);
+            Assert.All(reloaded.Items, item => Assert.Equal(DeclaredTaskSize.Unknown, item.DeclaredTaskSize.Size));
+            Assert.All(reloaded.Items, item => Assert.Null(item.DeclaredTaskSize.Rationale));
+
+            await QueueStore.MutateAsync(path, snapshot => snapshot, Ct);
+            var json = await File.ReadAllTextAsync(path, Ct);
+            using var document = System.Text.Json.JsonDocument.Parse(json);
+            var persistedItems = document.RootElement.GetProperty("items").EnumerateArray().ToList();
+            Assert.All(persistedItems, persisted =>
+            {
+                var declaration = persisted.GetProperty("DeclaredTaskSize");
+                Assert.Equal("unknown", declaration.GetProperty("size").GetString());
+                Assert.False(declaration.TryGetProperty("rationale", out _));
+            });
+        }
+        finally
+        {
+            Cleanup(path);
+        }
+    }
+
+    [Theory]
+    [InlineData("{}")]
+    [InlineData("{\"size\":\"small\"}")]
+    [InlineData("{\"size\":\"small\",\"rationale\":\" \"}")]
+    [InlineData("{\"size\":1,\"rationale\":\"one cluster\"}")]
+    [InlineData("{\"size\":\"small\",\"rationale\":42}")]
+    [InlineData("{\"size\":\"unknown\",\"rationale\":\"guessed\"}")]
+    [InlineData("{\"size\":\"unknown\",\"rationale\":\" \"}")]
+    public async Task A_malformed_current_declaration_is_refused_as_invalid_queue_json(string declarationJson)
+    {
+        var path = TempQueuePath();
+        Directory.CreateDirectory(Path.GetDirectoryName(path)!);
+        try
+        {
+            var json = """
+                {"items":[{"Tag":"malformed","Role":"implement","Workspace":"C:\\repos\\w1","SpecFile":"C:\\baton\\queue\\specs\\t.md","DeclaredTaskSize":DECLARATION}],"held":false}
+                """.Replace("DECLARATION", declarationJson, StringComparison.Ordinal);
+            await File.WriteAllTextAsync(path, json, Ct);
+
+            await Assert.ThrowsAsync<QueueStoreException>(() => QueueStore.LoadAsync(path, Ct));
         }
         finally
         {

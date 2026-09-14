@@ -83,6 +83,12 @@ public static class QueueCommand
         CancellationToken cancellationToken)
     {
         var tag = options.Tag!;
+        if (options.Lifecycle && options.DeclaredTaskSize is null)
+        {
+            throw new CliArgumentException(
+                $"A lifecycle queue item requires '--declared-size <{Baton.Domain.TaskSizeDeclaration.Usage}>' and '--size-rationale <clause>'.");
+        }
+
         var specSource = options.SpecFilePath;
         if (specSource is not null && !File.Exists(specSource))
         {
@@ -192,6 +198,7 @@ public static class QueueCommand
             Adapter = adapter,
             Model = options.Model,
             Effort = options.Effort,
+            DeclaredTaskSize = options.DeclaredTaskSize ?? Baton.Domain.TaskSizeDeclaration.Unknown,
             Skills = options.Skills,
             Requirements = requirements,
             LastAdmission = admission,

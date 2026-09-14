@@ -19,6 +19,55 @@ public class StatusJsonEndToEndTests
         new Dictionary<string, IWorkerAdapter> { ["shell"] = new ShellCommandWorkerAdapter() };
 
     [Fact]
+    public void Status_json_view_serializes_the_complete_declaration_and_legacy_unknown()
+    {
+        var declared = JsonSerializer.Serialize(new WorkflowStatusView(
+            "Running", [], [], null, null, DeclaredTaskSize: new TaskSizeDeclaration(DeclaredTaskSize.Large, "multiple durable contracts")));
+        var legacy = JsonSerializer.Serialize(new WorkflowStatusView("Running", [], [], null, null));
+
+        Assert.Contains("\"declaredTaskSize\":{\"size\":\"large\",\"rationale\":\"multiple durable contracts\"}", declared, StringComparison.Ordinal);
+        Assert.Contains("\"declaredTaskSize\":{\"size\":\"unknown\"", legacy, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task A_pre_ledger_terminal_status_uses_the_binding_declaration_and_keeps_legacy_unknown()
+    {
+        var testRoot = Path.Combine(Path.GetTempPath(), $"cli-status-json-sentinel-size-{Guid.NewGuid():N}");
+        var declaredRoom = Path.Combine(testRoot, "declared");
+        var legacyRoom = Path.Combine(testRoot, "legacy");
+        try
+        {
+            var sentinel = new WorkflowStatusView(WorkflowOutcome.Failed, [], [], "pre-ledger refusal", null);
+            await TerminalSentinelWriter.WriteAsync(declaredRoom, sentinel, TestContext.Current.CancellationToken);
+            await WriteOneStepBindingsAsync(
+                declaredRoom,
+                WriteFileCommand("plan", "unused"),
+                new TaskSizeDeclaration(DeclaredTaskSize.Medium, "one durable seam"));
+
+            using var declaredOutput = new StringWriter();
+            await StatusCommand.ExecuteAsync(
+                new StatusOptions(declaredRoom, Json: true), declaredOutput, TestContext.Current.CancellationToken);
+            var declared = ParseSingleObject(declaredOutput.ToString());
+            Assert.Equal(DeclaredTaskSize.Medium, declared.DeclaredTaskSize.Size);
+            Assert.Equal("one durable seam", declared.DeclaredTaskSize.Rationale);
+
+            await TerminalSentinelWriter.WriteAsync(legacyRoom, sentinel, TestContext.Current.CancellationToken);
+            await WriteOneStepBindingsAsync(legacyRoom, WriteFileCommand("plan", "unused"));
+
+            using var legacyOutput = new StringWriter();
+            await StatusCommand.ExecuteAsync(
+                new StatusOptions(legacyRoom, Json: true), legacyOutput, TestContext.Current.CancellationToken);
+            var legacy = ParseSingleObject(legacyOutput.ToString());
+            Assert.Equal(DeclaredTaskSize.Unknown, legacy.DeclaredTaskSize.Size);
+            Assert.Null(legacy.DeclaredTaskSize.Rationale);
+        }
+        finally
+        {
+            DirectoryCleanup.DeleteRecursively(testRoot);
+        }
+    }
+
+    [Fact]
     public async Task A_succeeded_room_reports_state_Succeeded_with_step_states_and_output_paths()
     {
         var testRoot = Path.Combine(Path.GetTempPath(), $"cli-status-json-ok-{Guid.NewGuid():N}");
@@ -382,13 +431,17 @@ public class StatusJsonEndToEndTests
         return path;
     }
 
-    private static async Task<string> WriteOneStepBindingsAsync(string directory, string command)
+    private static async Task<string> WriteOneStepBindingsAsync(
+        string directory,
+        string command,
+        TaskSizeDeclaration? declaredTaskSize = null)
     {
         Directory.CreateDirectory(directory);
         var config = new Dictionary<string, WorkerBindingConfigEntry>
         {
             ["solo"] = new WorkerBindingConfigEntry(
-                "shell", new WorkerContract("solo", [], [new ProducedOutput("plan")], []), command, TimeSpan.FromSeconds(30)),
+                "shell", new WorkerContract("solo", [], [new ProducedOutput("plan")], []), command,
+                TimeSpan.FromSeconds(30), DeclaredTaskSize: declaredTaskSize),
         };
 
         var path = Path.Combine(directory, "bindings.json");

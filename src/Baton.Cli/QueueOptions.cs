@@ -1,4 +1,5 @@
 using Baton.Queue;
+using Baton.Domain;
 
 namespace Baton.Cli;
 
@@ -80,4 +81,5 @@ public sealed record QueueOptions(
     bool LifecyclePin = false,
     IReadOnlyList<string>? Skills = null,
     IReadOnlyList<string>? Requirements = null,
-    bool Active = false);
+    bool Active = false,
+    TaskSizeDeclaration? DeclaredTaskSize = null);

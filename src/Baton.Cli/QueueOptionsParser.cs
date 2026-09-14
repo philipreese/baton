@@ -1,4 +1,5 @@
 using System.Globalization;
+using Baton.Domain;
 using Baton.Queue;
 
 namespace Baton.Cli;
@@ -14,6 +15,7 @@ public static class QueueOptionsParser
     public const string Usage =
         "Usage: baton queue add <tag> --role <role> --spec <file> (--issue <n> | --workspace <dir>) " +
         "[--lifecycle [--stage implement|review|fix|re-review|continue] | --lifecycle-pin] " +
+        $"[--declared-size <{TaskSizeDeclaration.Usage}>] [--size-rationale <clause>] " +
         "[--scope engine|tooling|docs] [--adapter <a>] [--model <m>] [--effort <e>] " +
         "[--skill <name>] [--require repository-read|file-write|shell|network|github-read|github-write|artifact:<output-name>] " +
         "[--timeout <minutes>] " +
@@ -116,6 +118,7 @@ public static class QueueOptionsParser
         string? tag = null;
         string? role = null, spec = null, workspace = null, scope = null;
         string? adapter = null, model = null, effort = null, overrideRunway = null, reason = null;
+        string? declaredSize = null, sizeRationale = null;
         int? issue = null, timeout = null, maxToolSteps = null;
         long? tokenBudget = null;
         var lifecycle = false;
@@ -151,6 +154,12 @@ public static class QueueOptionsParser
                     continue;
                 case "--effort":
                     SetEffort(selectedStage, stageSelections, TakeValue(args, ref i, "--effort"), ref effort);
+                    continue;
+                case "--declared-size":
+                    declaredSize = TakeValue(args, ref i, "--declared-size");
+                    continue;
+                case "--size-rationale":
+                    sizeRationale = TakeValue(args, ref i, "--size-rationale");
                     continue;
                 case "--reason":
                     SetReason(selectedStage, stageSelections, TakeValue(args, ref i, "--reason"), ref reason);
@@ -212,6 +221,11 @@ public static class QueueOptionsParser
         // ordinary invocation is `baton queue add --issue 1934 --lifecycle` and nothing more.
         if (lifecycle)
         {
+            if (declaredSize is null || sizeRationale is null)
+            {
+                throw new CliArgumentException($"'--lifecycle' requires '--declared-size <{TaskSizeDeclaration.Usage}>' and '--size-rationale <clause>'.");
+            }
+
             if (issue is null)
             {
                 throw new CliArgumentException(
@@ -412,7 +426,8 @@ public static class QueueOptionsParser
             QueueVerb.Add, tag, role, spec, issue, workspace, scope, adapter, model, effort,
             timeout, maxToolSteps, tokenBudget, overrideRunway, reason, ImportFilePath: null, Lifecycle: lifecycle,
             StageSelections: lifecycle ? stageSelections.Values.ToList() : null, LifecyclePin: lifecyclePin,
-            Skills: DispatchOptionsParser.NormalizeSkills(skills), Requirements: normalizedRequirements);
+            Skills: DispatchOptionsParser.NormalizeSkills(skills), Requirements: normalizedRequirements,
+            DeclaredTaskSize: DispatchOptionsParser.ParseTaskSizeDeclaration(declaredSize, sizeRationale));
     }
 
     private static void SetAdapter(

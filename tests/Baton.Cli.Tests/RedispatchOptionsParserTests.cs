@@ -1,3 +1,5 @@
+using Baton.Domain;
+
 namespace Baton.Cli.Tests;
 
 /// <summary>
@@ -259,5 +261,15 @@ public class RedispatchOptionsParserTests
     public void The_usage_line_advertises_billed_rate_limit()
     {
         Assert.Contains("--billed-rate-limit <n>", RedispatchOptionsParser.Usage, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void Parses_a_complete_declared_task_size()
+    {
+        var options = RedispatchOptionsParser.Parse(
+            ["parent-room", "--declared-size", "medium", "--size-rationale", "one durable seam"]);
+
+        Assert.Equal(DeclaredTaskSize.Medium, options.DeclaredTaskSize!.Value.Size);
+        Assert.Equal("one durable seam", options.DeclaredTaskSize!.Value.Rationale);
     }
 }

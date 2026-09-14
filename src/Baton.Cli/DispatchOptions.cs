@@ -1,3 +1,5 @@
+using Baton.Domain;
+
 namespace Baton.Cli;
 
 /// <summary>
@@ -191,4 +193,5 @@ public sealed record DispatchOptions(
     string? OverrideRunwayReason = null,
     IReadOnlyList<string>? Skills = null,
     bool NoDefaultSkills = false,
-    IReadOnlyList<string>? Requirements = null);
+    IReadOnlyList<string>? Requirements = null,
+    TaskSizeDeclaration? DeclaredTaskSize = null);
