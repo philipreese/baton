@@ -297,20 +297,25 @@ public sealed class WorkItemLifecycleTests
     }
 
     [Theory]
-    [InlineData(WorkflowOutcome.Failed)]
-    [InlineData(WorkflowOutcome.Indeterminate)]
-    [InlineData(WorkflowOutcome.Cancelled)]
-    [InlineData("TimedOut")]
-    public void An_artifactless_terminal_review_stops_for_the_operator_without_spending_another_round(string outcome)
+    [InlineData(WorkStage.Review, WorkflowOutcome.Failed)]
+    [InlineData(WorkStage.Review, WorkflowOutcome.Indeterminate)]
+    [InlineData(WorkStage.Review, WorkflowOutcome.Cancelled)]
+    [InlineData(WorkStage.Review, "TimedOut")]
+    [InlineData(WorkStage.ReReview, WorkflowOutcome.Failed)]
+    [InlineData(WorkStage.ReReview, WorkflowOutcome.Indeterminate)]
+    [InlineData(WorkStage.ReReview, WorkflowOutcome.Cancelled)]
+    [InlineData(WorkStage.ReReview, "TimedOut")]
+    public void An_artifactless_terminal_review_or_re_review_stops_for_the_operator_without_spending_another_round(
+        WorkStage stage, string outcome)
     {
         var transition = WorkItemLifecycle.Decide(At(
-            WorkStage.Review, outcome: outcome, round: 2, prDraft: false));
+            stage, outcome: outcome, round: 2, prDraft: false));
 
         Assert.Equal(WorkItemTransitionKind.NeedsOperator, transition.Kind);
         Assert.Null(transition.NextStage);
         Assert.Equal(0, transition.Round);
         Assert.Equal(PullRequestReadinessAction.MarkDraft, transition.PullRequestAction);
-        Assert.Contains("review lane settled", transition.Reason, StringComparison.Ordinal);
+        Assert.Contains(stage == WorkStage.Review ? "review lane settled" : "re-review lane settled", transition.Reason, StringComparison.Ordinal);
         Assert.Contains("no reviewer decision exists", transition.Reason, StringComparison.Ordinal);
     }
 

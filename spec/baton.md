@@ -7372,7 +7372,8 @@ written:
 | implement / fix / continue | `ExecutionArrested`, work unpushed, `workspaceChanged: true` | **continue** | structured arrest-boundary evidence proves work to recover |
 | implement / fix / continue | `ExecutionArrested`, work unpushed, `workspaceChanged: false` or absent | **operator** | no observed work, or no measurement, justifies an automatic continuation |
 | implement / fix / continue | anything else, work unpushed | **continue** | finish and push it |
-| review / re-review | anything else | **re-review** | a reviewer has nothing to push |
+| review / re-review | anything else, no readable verdict | **operator** | no reviewer decision exists to authorize another lifecycle spend |
+| review / re-review | anything else, readable verdict | route on the verdict | the decision remains usable even when the lane did not settle successfully |
 | fix, `automaticFixUsed: true`, round at the ceiling | succeeded-shaped, PR open | **re-review** | the one automatic repair is not operator-ready before its paired exact-head review |
 | any other stage, round at the ceiling | anything | **operator** | two of those arms are cycles with no natural end |
 | ready | anything | nothing | it stops here |
@@ -7502,9 +7503,9 @@ the stage.** A re-review brief asserts a round that happened — its header, its
 found" section, its instruction to say whether the new head closes each finding — so rendering it for
 the first review told the reviewer about findings that did not exist: every sentence true of the
 template, the reader's conclusion false. What decides is whether there is a verdict to carry
-(`lastVerdict`, or findings rendered for this brief), not the round number and not the stage, so a
-re-review of a review lane that stalled without writing one renders the first-review brief, which is
-the correct brief for it.
+(`lastVerdict`, or findings rendered for this brief), not the round number and not the stage. A review
+or re-review lane that stalls without writing a readable verdict stops for the operator, so it never
+renders another review brief from silence.
 
 **The findings a brief inlines come from the last REVIEW round, not from the room that just settled.**
 A fix lane writes no verdict, so the obvious reading — render what this room produced — handed a
