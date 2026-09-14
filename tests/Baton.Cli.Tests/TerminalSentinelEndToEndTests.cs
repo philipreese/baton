@@ -321,6 +321,50 @@ public class TerminalSentinelEndToEndTests
         }
     }
 
+    /// <summary>
+    /// #2294's cancel-path proof: cancelling a persisted open room settles it through the real CLI.
+    /// Its room-local binding gives the delivery probe a real workspace, whose git fixture leaves a
+    /// sleeping descendant behind. The wrapper can reach EOF only when that descendant is contained.
+    /// </summary>
+    [Fact]
+    public async Task Cancelling_a_persisted_open_room_contains_a_delivery_probe_descendant_before_wrapper_eof()
+    {
+        var testRoot = Path.Combine(Path.GetTempPath(), $"cli-cancel-wrapper-exit-{Guid.NewGuid():N}");
+        var roomDirectory = Path.Combine(testRoot, "task");
+        try
+        {
+            var workspaceDirectory = Path.Combine(testRoot, "workspace");
+            Directory.CreateDirectory(workspaceDirectory);
+            await WriteOpenSingleStepRoomAsync(roomDirectory);
+            await WriteDeliveryProbeBindingsAsync(roomDirectory, workspaceDirectory);
+
+            var markerPath = Path.Combine(testRoot, "wrapper-completed");
+            var logPath = Path.Combine(testRoot, "wrapper.log");
+            var fixtureBin = Path.Combine(testRoot, "fixture-bin");
+            await WriteLingeringGitFixtureAsync(fixtureBin);
+
+            using var wrapper = StartRedirectingPowerShellWrapper(
+                markerPath, logPath, fixtureBin, "cancel", roomDirectory);
+            await BoundedProcessWait.RunToExitAsync(
+                wrapper, TimeSpan.FromSeconds(30), TestContext.Current.CancellationToken);
+
+            Assert.Equal(0, wrapper.ExitCode);
+            Assert.True(File.Exists(markerPath), "the wrapper did not observe Baton stdout/stderr reaching EOF after cancellation");
+            var sentinelPath = Path.Combine(roomDirectory, "terminal.json");
+            Assert.True(File.Exists(sentinelPath), "the terminal fact was not written before delivery-probe cleanup");
+            var view = JsonSerializer.Deserialize<WorkflowStatusView>(await File.ReadAllTextAsync(sentinelPath, TestContext.Current.CancellationToken));
+            Assert.Equal("Failed", view!.State);
+
+            var releasedSentinelPath = Path.Combine(roomDirectory, "terminal.released.json");
+            File.Move(sentinelPath, releasedSentinelPath);
+            Assert.True(File.Exists(releasedSentinelPath), "the settled room's sentinel was not exclusively releasable");
+        }
+        finally
+        {
+            DirectoryCleanup.DeleteRecursively(testRoot);
+        }
+    }
+
     [Fact]
     public async Task A_second_real_CLI_run_against_an_already_completed_room_does_not_overwrite_its_sentinel()
     {
@@ -682,6 +726,39 @@ public class TerminalSentinelEndToEndTests
             + "echo 1\t0\tfixture.txt\r\n"
             + "exit /b 0\r\n";
         await File.WriteAllTextAsync(Path.Combine(fixtureBin, "git.cmd"), script);
+    }
+
+    private static async Task WriteOpenSingleStepRoomAsync(string roomDirectory)
+    {
+        Directory.CreateDirectory(roomDirectory);
+        var step = new StepId("a");
+        var definition = new WorkflowDefinition(
+            new WorkflowTemplateId("one-open-step"), 1,
+            [new WorkflowStepDefinition(step, "a", [], ["out"], [], new RetryPolicy(1))]);
+        var snapshot = SnapshotBinder.Bind(definition);
+        await SnapshotBinder.PersistAsync(
+            snapshot, Path.Combine(roomDirectory, BatonPaths.SnapshotFileName), TestContext.Current.CancellationToken);
+
+        await using var writer = new FlowEventLogWriter(Path.Combine(roomDirectory, BatonPaths.FlowLogFileName));
+        await writer.AppendAsync(
+            new FlowEvent.ExecutionRequestAccepted(new ExecutionRequest(
+                new ExecutionId("exec-open-cancel-1"), new WorkflowId("wf-cancel"), step, "a",
+                Inputs: [], Outputs: [], Timeout: TimeSpan.FromMinutes(5), Environment: [],
+                UpstreamExecutionIds: new Dictionary<StepId, ExecutionId>())),
+            TestContext.Current.CancellationToken);
+    }
+
+    private static async Task WriteDeliveryProbeBindingsAsync(string roomDirectory, string workspaceDirectory)
+    {
+        var bindings = new Dictionary<string, WorkerBindingConfigEntry>
+        {
+            ["a"] = new WorkerBindingConfigEntry(
+                NoOpWorkerAdapter.AdapterName,
+                new WorkerContract("a", [], [new ProducedOutput("out")], []),
+                PromptTemplate: "unused-by-noop", Timeout: TimeSpan.FromSeconds(30), WorkingDirectory: workspaceDirectory),
+        };
+        await File.WriteAllTextAsync(
+            Path.Combine(roomDirectory, "bindings.json"), JsonSerializer.Serialize(bindings), TestContext.Current.CancellationToken);
     }
 
     private static async Task<string> WriteOneStepWorkflowAsync(string directory)
