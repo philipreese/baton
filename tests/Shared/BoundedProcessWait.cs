@@ -27,14 +27,15 @@ internal static class BoundedProcessWait
     public static async Task<(string Stdout, string Stderr)> RunToExitAsync(
         Process process,
         TimeSpan timeout,
-        CancellationToken cancellationToken = default)
+        CancellationToken cancellationToken = default,
+        Action? waitsArmed = null)
     {
         var stdoutTask = process.StandardOutput.ReadToEndAsync(CancellationToken.None);
         var stderrTask = process.StandardError.ReadToEndAsync(CancellationToken.None);
         var waitTask = process.WaitForExitAsync(CancellationToken.None);
 
         var all = Task.WhenAll(waitTask, stdoutTask, stderrTask);
-        if (!await CompletesBeforeTimeoutAsync(all, timeout, cancellationToken))
+        if (!await CompletesBeforeTimeoutAsync(all, timeout, cancellationToken, waitsArmed))
         {
             TryKill(process);
             var partialStdout = await SnapshotAsync(stdoutTask);
@@ -50,10 +51,12 @@ internal static class BoundedProcessWait
     private static async Task<bool> CompletesBeforeTimeoutAsync(
         Task operation,
         TimeSpan timeout,
-        CancellationToken cancellationToken)
+        CancellationToken cancellationToken,
+        Action? waitsArmed = null)
     {
         var timeoutTask = Task.Delay(timeout, CancellationToken.None);
         var cancellationTask = Task.Delay(Timeout.InfiniteTimeSpan, cancellationToken);
+        waitsArmed?.Invoke();
         var completed = await Task.WhenAny(operation, timeoutTask, cancellationTask);
 
         if (completed == operation)

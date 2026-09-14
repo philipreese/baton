@@ -32,6 +32,37 @@ public sealed class BoundedProcessWaitTests
     }
 
     [Fact]
+    public async Task Caller_cancellation_after_io_and_exit_waits_are_armed_does_not_kill_the_process()
+    {
+        using var process = StartSleeper(redirectOutput: true);
+        using var cancellation = new CancellationTokenSource();
+        var armed = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
+
+        try
+        {
+            var waiting = BoundedProcessWait.RunToExitAsync(
+                process,
+                TimeSpan.FromMinutes(1),
+                cancellation.Token,
+                () => armed.TrySetResult(true));
+            await armed.Task.WaitAsync(TimeSpan.FromMinutes(1), Ct);
+            cancellation.Cancel();
+
+            await Assert.ThrowsAnyAsync<OperationCanceledException>(() => waiting);
+            Assert.False(process.HasExited);
+        }
+        finally
+        {
+            if (!process.HasExited)
+            {
+                process.Kill(entireProcessTree: true);
+            }
+
+            await BoundedProcessWait.WaitForExitAsync(process, TimeSpan.FromMinutes(1), Ct);
+        }
+    }
+
+    [Fact]
     public async Task Elapsed_timeout_kills_the_process_tree_and_reports_a_timeout()
     {
         using var process = StartSleeper();
@@ -45,12 +76,14 @@ public sealed class BoundedProcessWaitTests
         Assert.True(process.WaitForExit(5_000), "The timed-out child process was not killed.");
     }
 
-    private static Process StartSleeper()
+    private static Process StartSleeper(bool redirectOutput = false)
     {
         var startInfo = new ProcessStartInfo("powershell.exe")
         {
             CreateNoWindow = true,
             UseShellExecute = false,
+            RedirectStandardOutput = redirectOutput,
+            RedirectStandardError = redirectOutput,
         };
         startInfo.ArgumentList.Add("-NoLogo");
         startInfo.ArgumentList.Add("-NoProfile");
