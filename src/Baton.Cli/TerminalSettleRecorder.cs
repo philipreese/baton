@@ -130,7 +130,8 @@ public static class TerminalSettleRecorder
                     deliveryByWorker: delivery,
                     labelByWorker: stamps.LabelByWorker,
                     identitySource: identitySource,
-                    modelResolvedByWorker: stamps.ModelResolvedByWorker);
+                    modelResolvedByWorker: stamps.ModelResolvedByWorker,
+                    declaredTaskSizeByWorker: stamps.DeclaredTaskSizeByWorker);
                 await CostLedgerStore.AppendAsync(costEntries, costLedgerPath, CancellationToken.None).ConfigureAwait(false);
             }
             else

@@ -108,7 +108,8 @@ public static partial class CostLedgerStore
         IReadOnlyDictionary<string, WorkspaceDelivery>? deliveryByWorker = null,
         IReadOnlyDictionary<string, string>? labelByWorker = null,
         RepositoryIdentitySource? identitySource = null,
-        IReadOnlyDictionary<string, string>? modelResolvedByWorker = null)
+        IReadOnlyDictionary<string, string>? modelResolvedByWorker = null,
+        IReadOnlyDictionary<string, TaskSizeDeclaration>? declaredTaskSizeByWorker = null)
     {
         ArgumentNullException.ThrowIfNull(entries);
         ArgumentException.ThrowIfNullOrEmpty(roomDirectoryPath);
@@ -299,6 +300,14 @@ public static partial class CostLedgerStore
                 // absence means and does not mean.
                 PushWaitMs: pushTiming?.PushWaitMs,
                 PrePushGateMs: pushTiming?.PrePushGateMs,
+                DeclaredTaskSize: request?.Worker is { } sizeWorker && declaredTaskSizeByWorker is not null
+                    && declaredTaskSizeByWorker.TryGetValue(sizeWorker, out var declaration)
+                        ? declaration.Size
+                        : DeclaredTaskSize.Unknown,
+                SizeRationale: request?.Worker is { } rationaleWorker && declaredTaskSizeByWorker is not null
+                    && declaredTaskSizeByWorker.TryGetValue(rationaleWorker, out declaration)
+                        ? declaration.Rationale
+                        : null,
                 BilledTokens: usage.BilledTokens,
                 LiveBilledTokens: usage.LiveBilledTokens,
                 BilledUnderReadTokens: usage.BilledUnderReadTokens,

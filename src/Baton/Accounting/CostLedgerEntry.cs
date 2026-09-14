@@ -397,6 +397,12 @@ public sealed record CostLedgerEntry(
     [property: JsonPropertyName("prePushGateMs")]
     [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
     long? PrePushGateMs = null,
+    /// <summary>The frozen conductor routing declaration; legacy rows explicitly remain unknown.</summary>
+    [property: JsonPropertyName("declaredTaskSize")]
+    DeclaredTaskSize DeclaredTaskSize = DeclaredTaskSize.Unknown,
+    [property: JsonPropertyName("sizeRationale")]
+    [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    string? SizeRationale = null,
 
     // The vendor-derived billed figures ExecutionUsageView already owns the definitions of -- carried
     // through under the same names rather than recomputed, so #1706's reconciliation triple means one
