@@ -2179,7 +2179,14 @@ public static class MutationInterface
                 // this validation. Preserve the arrest as the truthful cap account, then let a complete
                 // validated contract settle the same execution rather than spending a checkpoint or
                 // discarding its account.
-                if (ContractValidator.IsSatisfied(binding.Contract, prepared.OutputDirectory))
+                // This bypass settles without the normal grace, workspace audit, verification, or
+                // delivery path. It is therefore safe only for a read-shaped role: an artifact from
+                // a role that can verify or change the workspace, or deliver a branch, is not proof
+                // that its workspace and delivery obligations are complete.
+                if (!binding.VerifiesWorkspace
+                    && !binding.ChangesTree
+                    && !binding.DeliversBranch
+                    && ContractValidator.IsSatisfied(binding.Contract, prepared.OutputDirectory))
                 {
                     await eventLogWriter.AppendAsync(
                             CreateExecutionArrested(prepared, binding, budgetMonitor, workspaceChanged: null),

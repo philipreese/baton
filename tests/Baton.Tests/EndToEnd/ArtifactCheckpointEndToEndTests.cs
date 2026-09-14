@@ -1,3 +1,4 @@
+using System.Diagnostics;
 using Baton.Dispatch;
 using Baton.Domain;
 using Baton.Mutation;
@@ -12,6 +13,40 @@ public sealed class ArtifactCheckpointEndToEndTests
 {
     private const string ArrestingUsage =
         """{"type":"turn.usage","usage":{"input_tokens":500,"cached_input_tokens":0,"output_tokens":1,"round_trip":1}}""";
+
+    [Fact]
+    public async Task A_cap_arrest_with_valid_artifacts_from_a_mutating_delivering_role_continues_through_workspace_safety()
+    {
+        var room = Path.Combine(Path.GetTempPath(), "baton-artifact-boundary-mutating-" + Guid.NewGuid().ToString("N"));
+        var workspace = Path.Combine(room, "workspace");
+        var artifacts = Path.Combine(room, "artifacts");
+        var log = Path.Combine(room, "flow.jsonl");
+        Directory.CreateDirectory(workspace);
+        try
+        {
+            InitializeGitRepository(workspace);
+            var state = await RunBoundaryExecutionAsync(
+                room, workspace, artifacts, log,
+                [new ProducedOutput("changes.md", Schema: OutputSchema.NonEmptyText)],
+                artifactDirectory =>
+                {
+                    File.WriteAllText(Path.Combine(artifactDirectory, "changes.md"), "Work is unfinished.");
+                    File.WriteAllText(Path.Combine(workspace, "unfinished.txt"), "dirty");
+                },
+                role: "implement", changesTree: true, verifiesWorkspace: true, deliversBranch: true);
+
+            var events = await new FlowEventLogReader(log).ReadAllAsync(TestContext.Current.CancellationToken);
+            Assert.Equal(StepStatus.Failed, Assert.Single(state.Steps).Status);
+            Assert.Single(events.OfType<FlowEvent.ExecutionArrested>());
+            Assert.Empty(events.OfType<FlowEvent.ExecutionSucceeded>());
+            Assert.Single(events.OfType<FlowEvent.GraceTurnAttempted>());
+            Assert.Empty(events.OfType<FlowEvent.ArtifactCheckpointAttempted>());
+        }
+        finally
+        {
+            DirectoryCleanup.DeleteRecursively(room);
+        }
+    }
 
     [Fact]
     public async Task A_cap_arrest_with_valid_quiesced_artifacts_preserves_the_completed_account_without_a_checkpoint()
@@ -213,27 +248,61 @@ public sealed class ArtifactCheckpointEndToEndTests
         TryGetSessionId: _ => "checkpoint-session",
         ResumeArgs: (_, prompt) => [prompt]);
 
+    private static void InitializeGitRepository(string workspace)
+    {
+        RunGit(workspace, "init", "-b", "main");
+        RunGit(workspace, "config", "user.email", "test@example.com");
+        RunGit(workspace, "config", "user.name", "Test");
+        RunGit(workspace, "commit", "--allow-empty", "-m", "initial");
+    }
+
+    private static void RunGit(string workingDirectory, params string[] args)
+    {
+        var startInfo = new ProcessStartInfo("git")
+        {
+            WorkingDirectory = workingDirectory,
+            RedirectStandardOutput = true,
+            RedirectStandardError = true,
+            UseShellExecute = false,
+        };
+        foreach (var arg in args)
+        {
+            startInfo.ArgumentList.Add(arg);
+        }
+
+        using var process = Process.Start(startInfo)!;
+        var stderr = process.StandardError.ReadToEndAsync();
+        _ = process.StandardOutput.ReadToEndAsync();
+        process.WaitForExit();
+        Assert.True(process.ExitCode == 0, $"git {string.Join(' ', args)} failed: {stderr.Result}");
+    }
+
     private static async Task<FlowState> RunBoundaryExecutionAsync(
         string room,
         string workspace,
         string artifacts,
         string log,
         IReadOnlyList<ProducedOutput> outputs,
-        Action<string> writeArtifacts)
+        Action<string> writeArtifacts,
+        string role = "review",
+        bool changesTree = false,
+        bool verifiesWorkspace = false,
+        bool deliversBranch = false)
     {
-        var stepId = new StepId("review");
+        var stepId = new StepId(role);
         var snapshot = new WorkflowDefinitionSnapshot(
             new WorkflowDefinitionSnapshotId("artifact-boundary"), new WorkflowTemplateId("review"), 1,
-            [new WorkflowStepDefinition(stepId, "review", [], outputs.Select(output => output.Name).ToArray(), DependsOn: [], RetryPolicy: new RetryPolicy(1))]);
+            [new WorkflowStepDefinition(stepId, role, [], outputs.Select(output => output.Name).ToArray(), DependsOn: [], RetryPolicy: new RetryPolicy(1))]);
         var binding = new WorkerBinding.Process(
-            new WorkerContract("review", [], outputs, []),
-            CheckpointTarget(workspace), TimeSpan.FromSeconds(30), Adapter: "codex", TokenBudget: 100, VerifiesWorkspace: false);
+            new WorkerContract(role, [], outputs, []),
+            CheckpointTarget(workspace), TimeSpan.FromSeconds(30), Adapter: "codex", TokenBudget: 100,
+            ChangesTree: changesTree, VerifiesWorkspace: verifiesWorkspace, DeliversBranch: deliversBranch);
         var dispatcher = new CheckpointDispatcher(artifacts, writeAtCap: writeArtifacts, finishAtCap: true);
         await using var writer = new FlowEventLogWriter(log);
         var reader = new FlowEventLogReader(log);
         return await MutationInterface.StartWorkflowAsync(
             new WorkflowId("artifact-boundary"), room, snapshot,
-            new Dictionary<string, WorkerBinding> { ["review"] = binding }, artifacts, reader, writer, dispatcher,
+            new Dictionary<string, WorkerBinding> { [role] = binding }, artifacts, reader, writer, dispatcher,
             cancellationToken: TestContext.Current.CancellationToken);
     }
 
