@@ -81,11 +81,14 @@ public sealed class WorkItemAdvancer
 
         // A disposition CAS is the linearization point; ledger availability must never manufacture
         // a fact before it. Replay only operations retained by committed queue rows.
-        foreach (var committed in snapshot.Items.Where(item => item.DispositionOperation is not null))
+        foreach (var committed in snapshot.Items.Where(item => item.DispositionOutbox.Count > 0))
         {
-            await QueueDecisionLedgerStore.AppendDispositionAsync(
-                committed.Tag, committed.DispositionOperation!, BatonPaths.QueueDecisionLedgerFile, cancellationToken)
-                .ConfigureAwait(false);
+            foreach (var operation in committed.DispositionOutbox)
+            {
+                await QueueDecisionLedgerStore.AppendDispositionAsync(
+                    committed.Tag, operation, BatonPaths.QueueDecisionLedgerFile, cancellationToken)
+                    .ConfigureAwait(false);
+            }
         }
 
         // Settled, staged, and not one this advance has already given up on. Ready items are included
@@ -198,7 +201,7 @@ public sealed class WorkItemAdvancer
                     ? i with
                     {
                         Retirement = retirement,
-                        DispositionOperation = operation,
+                        DispositionOperations = [.. i.DispositionOutbox, operation],
                     } : i).ToList()
                 };
             }, cancellationToken).ConfigureAwait(false);

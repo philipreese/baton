@@ -305,7 +305,7 @@ public sealed class WorkItemAdvancerTests
             Assert.Equal(QueueRetirement.Merged, retired.Retirement?.Kind);
             Assert.Equal(QueueItemState.Queued, retired.State);
             Assert.Null(retired.RoomDirectory);
-            Assert.NotNull(retired.DispositionOperation);
+            Assert.Single(retired.DispositionOutbox);
         }
         finally
         {

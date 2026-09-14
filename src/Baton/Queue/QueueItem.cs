@@ -138,10 +138,23 @@ public sealed record QueueItem
     public QueueRetirement? Retirement { get; init; }
 
     /// <summary>
-    /// The last committed retirement disposition's durable ledger operation. It remains after a
-    /// restore so a process that dies after the queue CAS can repair precisely that missing fact.
+    /// Legacy single-operation shape. New writers retain every committed operation in
+    /// <see cref="DispositionOperations"/>; this remains readable for queue files written before the
+    /// ordered outbox existed.
     /// </summary>
     public QueueDispositionOperation? DispositionOperation { get; init; }
+
+    /// <summary>
+    /// Ordered durable outbox of committed retirement and restoration facts. Operations are retained
+    /// after acknowledgement: a queue CAS must never make an earlier append failure unrecoverable
+    /// when a later disposition is requested.
+    /// </summary>
+    public IReadOnlyList<QueueDispositionOperation>? DispositionOperations { get; init; }
+
+    /// <summary>All durable disposition facts, including the backward-compatible single-operation shape.</summary>
+    [JsonIgnore]
+    public IReadOnlyList<QueueDispositionOperation> DispositionOutbox =>
+        DispositionOperations ?? (DispositionOperation is null ? [] : [DispositionOperation]);
 
     /// <summary>
     /// The verdict the last review produced, as an absolute path to that room's <c>verdict.json</c>.

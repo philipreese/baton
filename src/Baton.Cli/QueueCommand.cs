@@ -359,6 +359,13 @@ public static class QueueCommand
     /// </remarks>
     private static void RefuseIfNotReplaceable(QueueItem? existing, string tag)
     {
+        if (existing?.Retirement is not null)
+        {
+            throw new CliArgumentException(
+                $"Item '{tag}' is retired as '{existing.Retirement.Kind}'. Re-adding it would erase its retained disposition evidence.",
+                "pick a different tag; merged work cannot be restored, and operator-retired work must be restored in place.");
+        }
+
         if (existing?.ReadinessMutationClaim is { Length: > 0 })
         {
             throw new CliArgumentException(
@@ -589,7 +596,8 @@ public static class QueueCommand
         }
         if (observed.Retirement is not null)
         {
-            if (observed.DispositionOperation is
+            await ReconcileDispositionOutboxAsync(observed, cancellationToken).ConfigureAwait(false);
+            if (observed.DispositionOutbox.LastOrDefault() is
                 {
                     Decision: QueueDecisionEntry.Retired,
                 } committed
@@ -658,7 +666,7 @@ public static class QueueCommand
                 ? item with
                 {
                     Retirement = new QueueRetirement(QueueRetirement.Operator, at, reason),
-                    DispositionOperation = operation,
+                    DispositionOperations = AppendDisposition(item, operation),
                 }
                 : item).ToList()
             };
@@ -686,22 +694,25 @@ public static class QueueCommand
         {
             throw new CliArgumentException($"Queue item '{tag}' was retired after merge and cannot be restored.");
         }
-        if (observed.Retirement is null
-            && observed.DispositionOperation is
-            {
-                Decision: QueueDecisionEntry.Restored,
-            } committed
-            && string.Equals(committed.Reason, $"operator: {reason}", StringComparison.Ordinal))
+        if (observed.Retirement is null)
         {
-            await QueueDecisionLedgerStore.AppendDispositionAsync(
-                tag, committed, BatonPaths.QueueDecisionLedgerFile, cancellationToken).ConfigureAwait(false);
-            output.WriteLine($"Restored lifecycle item '{tag}' to active attention; its launch state was unchanged.");
-            return 0;
+            await ReconcileDispositionOutboxAsync(observed, cancellationToken).ConfigureAwait(false);
+            if (observed.DispositionOutbox.LastOrDefault() is
+                {
+                    Decision: QueueDecisionEntry.Restored,
+                } committed && string.Equals(committed.Reason, $"operator: {reason}", StringComparison.Ordinal))
+            {
+                output.WriteLine($"Restored lifecycle item '{tag}' to active attention; its launch state was unchanged.");
+                return 0;
+            }
         }
         if (observed.Retirement?.Kind != QueueRetirement.Operator)
         {
             throw new CliArgumentException($"Queue item '{tag}' is not operator-retired.");
         }
+        // Do not permit a successor CAS until every predecessor can be durably replayed. A keyed
+        // append is idempotent, so this is safe after a successful prior acknowledgement too.
+        await ReconcileDispositionOutboxAsync(observed, cancellationToken).ConfigureAwait(false);
         var at = DateTimeOffset.UtcNow;
         var operation = new QueueDispositionOperation(
             Guid.NewGuid().ToString("N"), at, QueueDecisionEntry.Restored, $"operator: {reason}");
@@ -717,7 +728,7 @@ public static class QueueCommand
             return snapshot with
             {
                 Items = snapshot.Items.Select(item => item.Tag == tag
-                ? item with { Retirement = null, DispositionOperation = operation } : item).ToList()
+                ? item with { Retirement = null, DispositionOperations = AppendDisposition(item, operation) } : item).ToList()
             };
         }, cancellationToken).ConfigureAwait(false);
         if (!restored)
@@ -734,7 +745,9 @@ public static class QueueCommand
     {
         if (item.RoomDirectory is not { Length: > 0 } room)
         {
-            return true;
+            // A roomless timeout can mark the row failed before a late launcher persists its room.
+            // No directory is absence of proof, never proof that a live room cannot exist.
+            return false;
         }
 
         return await TerminalSentinelWriter.TryReadAsync(room, cancellationToken).ConfigureAwait(false) is not null;
@@ -786,6 +799,15 @@ public static class QueueCommand
                     "remove that tag from the import, or use a different tag for new work.");
             }
 
+            var retired = snapshot.Items.FirstOrDefault(
+                item => item.Retirement is not null && importedTags.Contains(item.Tag));
+            if (retired is not null)
+            {
+                throw new CliArgumentException(
+                    $"Item '{retired.Tag}' is retired as '{retired.Retirement!.Kind}'. Importing it would overwrite retained disposition evidence.",
+                    "remove that tag from the import, or use a different tag for new work.");
+            }
+
             var kept = snapshot.Items.Where(i => !importedTags.Contains(i.Tag)).ToList();
             kept.AddRange(imported);
             return snapshot with { Items = kept };
@@ -801,6 +823,18 @@ public static class QueueCommand
         }
 
         return 0;
+    }
+
+    private static IReadOnlyList<QueueDispositionOperation> AppendDisposition(
+        QueueItem item, QueueDispositionOperation operation) => [.. item.DispositionOutbox, operation];
+
+    private static async Task ReconcileDispositionOutboxAsync(QueueItem item, CancellationToken cancellationToken)
+    {
+        foreach (var operation in item.DispositionOutbox)
+        {
+            await QueueDecisionLedgerStore.AppendDispositionAsync(
+                item.Tag, operation, BatonPaths.QueueDecisionLedgerFile, cancellationToken).ConfigureAwait(false);
+        }
     }
 
     private static (string? Adapter, QueueTierResolution Tier, bool AdapterFromModel,

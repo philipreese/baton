@@ -1828,6 +1828,103 @@ public sealed class QueueCommandTests
         }
     }
 
+    [Fact]
+    public async Task Retire_refuses_a_roomless_failed_row_that_may_have_a_late_live_room()
+    {
+        var home = CreateTempHome();
+        using var scope = BatonEnvironmentSnapshot.BeginScope(BatonEnvironmentSnapshot.Blank with { HomeOverride = home });
+        try
+        {
+            await QueueStore.MutateAsync(BatonPaths.QueueFile, s => s with
+            {
+                Items = [new QueueItem
+                {
+                    Tag = "late-room", Role = "implement", Workspace = home,
+                    SpecFile = BatonPaths.QueueSpecFile("late-room"), Stage = WorkStage.Implement,
+                    State = QueueItemState.Failed,
+                }],
+            }, Ct);
+
+            var refusal = await Assert.ThrowsAsync<CliArgumentException>(() => QueueCommand.ExecuteAsync(
+                new QueueOptions(QueueVerb.Retire, Tag: "late-room", Reason: "operator handled"), TextWriter.Null, Ct));
+
+            Assert.Contains("insufficient settled failure evidence", refusal.Message, StringComparison.Ordinal);
+            Assert.Null((await QueueStore.LoadAsync(BatonPaths.QueueFile, Ct)).Items.Single().Retirement);
+        }
+        finally
+        {
+            DirectoryCleanup.DeleteRecursively(home);
+        }
+    }
+
+    [Fact]
+    public async Task Restore_replays_the_retire_fact_before_committing_its_successor()
+    {
+        var home = CreateTempHome();
+        using var scope = BatonEnvironmentSnapshot.BeginScope(BatonEnvironmentSnapshot.Blank with { HomeOverride = home });
+        try
+        {
+            var at = new DateTimeOffset(2026, 9, 13, 12, 0, 0, TimeSpan.Zero);
+            var retire = new QueueDispositionOperation("retire-key", at, QueueDecisionEntry.Retired, "operator: handled");
+            await QueueStore.MutateAsync(BatonPaths.QueueFile, s => s with
+            {
+                Items = [new QueueItem
+                {
+                    Tag = "restore-outbox", Role = "implement", Workspace = home,
+                    SpecFile = BatonPaths.QueueSpecFile("restore-outbox"), Stage = WorkStage.Implement,
+                    State = QueueItemState.Failed,
+                    Retirement = new QueueRetirement(QueueRetirement.Operator, at, "handled"),
+                    DispositionOperations = [retire],
+                }],
+            }, Ct);
+
+            Assert.Equal(0, await QueueCommand.ExecuteAsync(
+                new QueueOptions(QueueVerb.Restore, Tag: "restore-outbox", Reason: "resume attention"), TextWriter.Null, Ct));
+
+            var item = (await QueueStore.LoadAsync(BatonPaths.QueueFile, Ct)).Items.Single();
+            Assert.Null(item.Retirement);
+            Assert.Equal([QueueDecisionEntry.Retired, QueueDecisionEntry.Restored], item.DispositionOutbox.Select(x => x.Decision));
+            Assert.Equal([QueueDecisionEntry.Retired, QueueDecisionEntry.Restored],
+                (await QueueDecisionLedgerStore.ReadAllAsync(BatonPaths.QueueDecisionLedgerFile, Ct)).Select(x => x.Decision));
+        }
+        finally
+        {
+            DirectoryCleanup.DeleteRecursively(home);
+        }
+    }
+
+    [Fact]
+    public async Task Add_refuses_to_replace_a_retired_tag()
+    {
+        var home = CreateTempHome();
+        using var scope = BatonEnvironmentSnapshot.BeginScope(BatonEnvironmentSnapshot.Blank with { HomeOverride = home });
+        try
+        {
+            var brief = Path.Combine(home, "brief.md");
+            await File.WriteAllTextAsync(brief, "new work", Ct);
+            await QueueStore.MutateAsync(BatonPaths.QueueFile, s => s with
+            {
+                Items = [new QueueItem
+                {
+                    Tag = "retained", Role = "implement", Workspace = home,
+                    SpecFile = BatonPaths.QueueSpecFile("retained"), Stage = WorkStage.Ready,
+                    State = QueueItemState.Queued,
+                    Retirement = new QueueRetirement(QueueRetirement.Merged, DateTimeOffset.UtcNow, "merged"),
+                }],
+            }, Ct);
+
+            var refusal = await Assert.ThrowsAsync<CliArgumentException>(() => QueueCommand.ExecuteAsync(
+                new QueueOptions(QueueVerb.Add, Tag: "retained", Role: "implement", SpecFilePath: brief, WorkspaceDirectory: home),
+                TextWriter.Null, Ct));
+
+            Assert.Contains("retired as 'merged'", refusal.Message, StringComparison.Ordinal);
+        }
+        finally
+        {
+            DirectoryCleanup.DeleteRecursively(home);
+        }
+    }
+
     private static QueueItem SettlementQueueItem(string tag, string? roomDirectory, string error) => new()
     {
         Tag = tag,

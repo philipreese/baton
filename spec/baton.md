@@ -7002,6 +7002,28 @@ runs exactly that lane. A **work item** (slice 2, answer (b)) is anchored on an 
 a field carrying a lifecycle no code advances is a promise the product does not keep — is now
 satisfied rather than avoided: `WorkItemLifecycle` is the code that advances these.
 
+### Retirement, restoration, and retained disposition history
+
+Retirement is an orthogonal, atomic lifecycle disposition: `retirement` records its `kind`, `at`, and
+`reason` together and never changes the row's launch state, stage, room, verdict, error, attempts,
+branch, issue, PR, or provenance. `retire` records either trusted `merged` delivery or an
+operator-handled safe terminal/closed-PR case; `restore` is available only for an `operator`
+retirement, clears only that retirement value, and never reopens, resets, unhalts, or dispatches the
+work. A merged retirement cannot be restored.
+
+Retired rows remain queue and Fleet Glass history, including their disposition evidence, but are
+excluded from every active/current/follow-up projection, scheduler selection, lifecycle advancement,
+and repeated PR observation. Thus the active list does **not** include every lifecycle `Done` or
+`Failed` row: it includes only those not retired. Their tags remain reserved across add and import so
+replacement cannot erase evidence or relaunch work.
+
+Each committed retire or restore has an ordered durable disposition outbox entry and one keyed
+append-only ledger fact. Queue mutation linearizes before ledger append; replay reconciles every
+retained operation in order after a crash or append failure, and a successor disposition is forbidden
+until its predecessors have been durably acknowledged. A failed row with no room directory is not
+terminal proof: a late room may exist before its directory is persisted, so operator retirement must
+refuse it. Room-bearing terminal rows require a readable terminal sentinel at the mutation point.
+
 ### Where it lives
 
 - **`~/.baton/queue/queue.json`** — the items, in operator order, and the `held` flag. Two writers
