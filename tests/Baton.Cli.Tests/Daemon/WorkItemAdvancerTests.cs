@@ -703,6 +703,32 @@ public sealed class WorkItemAdvancerTests
     }
 
     [Fact]
+    public async Task A_ceiling_fix_records_its_paired_re_review_admission_in_queue_evidence()
+    {
+        var home = CreateTempHome();
+        using var scope = BatonEnvironmentSnapshot.BeginScope(BatonEnvironmentSnapshot.Blank with { HomeOverride = home });
+        try
+        {
+            var room = await WriteSettledRoomAsync(home, WorkflowOutcome.Succeeded, verdictJson: null);
+            await SeedAsync(home, WorkStage.Fix, room, round: WorkStages.MaxRounds, automaticFixUsed: true);
+
+            var fact = Assert.Single(await new WorkItemAdvancer(
+                    new FakeGh(PrJson(77, PushedSha)), (_, _) => Task.FromResult<string?>(PushedSha))
+                .AdvanceAsync(Now, Ct));
+
+            var item = await ReadBackAsync();
+            Assert.Equal(QueueDecisionEntry.Advanced, fact.Decision);
+            Assert.Contains("paired automatic-fix re-review", fact.Reason, StringComparison.Ordinal);
+            Assert.Equal(WorkStage.ReReview, item.Stage);
+            Assert.Equal(WorkStages.MaxRounds + 1, item.Round);
+        }
+        finally
+        {
+            DirectoryCleanup.DeleteRecursively(home);
+        }
+    }
+
+    [Fact]
     public async Task A_legacy_block_halts_instead_of_inventing_an_automatic_fix_budget()
     {
         var home = CreateTempHome();

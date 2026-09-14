@@ -383,6 +383,53 @@ public sealed class WorkItemLifecycleTests
         Assert.Contains("continue", atCeiling.Reason, StringComparison.Ordinal);
     }
 
+    [Theory]
+    [InlineData(ReviewDecision.Approve, WorkItemTransitionKind.Stop, WorkStage.Ready)]
+    [InlineData(ReviewDecision.Block, WorkItemTransitionKind.NeedsOperator, null)]
+    public void The_automatic_fix_gets_one_paired_re_review_after_pre_review_continuations_at_the_ceiling(
+        ReviewDecision reReviewDecision, WorkItemTransitionKind expectedKind, WorkStage? expectedStage)
+    {
+        // #2286: an arrested implement and a delivery retry consume two rounds before the first
+        // review. The BLOCK then spends the one automatic fix at the ordinary ceiling.
+        var firstContinue = WorkItemLifecycle.Decide(At(
+            WorkStage.Implement, outcome: WorkflowOutcome.Indeterminate,
+            workspaceHead: "0000111122223333"));
+        var secondContinue = WorkItemLifecycle.Decide(At(
+            WorkStage.Continue, outcome: WorkflowOutcome.Failed,
+            workspaceHead: "0000111122223333", round: firstContinue.Round));
+        var review = WorkItemLifecycle.Decide(At(WorkStage.Continue, round: secondContinue.Round));
+        var fix = WorkItemLifecycle.Decide(At(
+            WorkStage.Review, verdict: Verdict(ReviewDecision.Block), round: review.Round));
+
+        Assert.Equal(WorkStages.MaxRounds, fix.Round);
+        Assert.True(fix.UsesAutomaticFix);
+
+        var pairedReReview = WorkItemLifecycle.Decide(At(
+            WorkStage.Fix, round: fix.Round, automaticFixUsed: true));
+
+        Assert.Equal(WorkItemTransitionKind.Dispatch, pairedReReview.Kind);
+        Assert.Equal(WorkStage.ReReview, pairedReReview.NextStage);
+        Assert.Equal(WorkStages.MaxRounds + 1, pairedReReview.Round);
+        Assert.Contains("paired automatic-fix re-review", pairedReReview.Reason, StringComparison.Ordinal);
+
+        var settled = WorkItemLifecycle.Decide(At(
+            WorkStage.ReReview, verdict: Verdict(reReviewDecision), round: pairedReReview.Round,
+            automaticFixUsed: true));
+
+        Assert.Equal(expectedKind, settled.Kind);
+        Assert.Equal(expectedStage, settled.NextStage);
+    }
+
+    [Fact]
+    public void A_fix_without_the_durable_automatic_history_cannot_use_the_ceiling_exemption()
+    {
+        var transition = WorkItemLifecycle.Decide(At(
+            WorkStage.Fix, round: WorkStages.MaxRounds, automaticFixUsed: false));
+
+        Assert.Equal(WorkItemTransitionKind.NeedsOperator, transition.Kind);
+        Assert.Null(transition.NextStage);
+    }
+
     [Fact]
     public void The_ordinary_path_to_ready_never_reaches_the_ceiling()
     {
