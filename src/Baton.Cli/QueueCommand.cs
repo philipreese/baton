@@ -7,7 +7,7 @@ using Baton.Vendors;
 namespace Baton.Cli;
 
 /// <summary>
-/// <c>baton queue add|list|hold|resume|cancel|import</c> (#1934 slice 1): the operator's control surface over
+/// <c>baton queue add|list|hold|resume|cancel|retire|restore|import</c> (#1934 slice 1): the operator's control surface over
 /// the dispatch queue the daemon's scheduler drains. Produces no <see cref="CommandResult"/> — there
 /// is no workflow to pump — so it joins <c>trust</c>/<c>keep</c>/<c>watch</c> in <c>Program.cs</c>'s
 /// carve-out rather than the CommandResult/FlowStateReporter switch.

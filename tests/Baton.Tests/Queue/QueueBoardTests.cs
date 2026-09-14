@@ -252,6 +252,28 @@ public sealed class QueueBoardTests
             && row.Retirement == withPr.Retirement);
     }
 
+    [Fact]
+    public void A_retired_former_companion_does_not_mark_the_remaining_live_issue_row_as_a_twin()
+    {
+        var retirement = new QueueRetirement(
+            QueueRetirement.Operator,
+            new DateTimeOffset(2026, 9, 13, 18, 0, 0, TimeSpan.Zero),
+            "operator completed the former comparator arm");
+        var live = Item("live", stage: WorkStage.Implement, issue: 2286);
+        var retired = Item("retired", stage: WorkStage.Implement, issue: 2286) with { Retirement = retirement };
+
+        var board = Project([live, retired]);
+
+        Assert.Null(Assert.Single(board.Pending).TwinIssue);
+        Assert.Equal("live", Assert.Single(board.Pending).Tag);
+        Assert.Equal(retirement, Assert.Single(board.RetiredHistory).Retirement);
+
+        // Control: two live rows on the same issue remain comparator arms, so the assertion above
+        // specifically fences retained history from the current projection.
+        var activePair = Project([live, Item("other-live", stage: WorkStage.Implement, issue: 2286)]);
+        Assert.All(activePair.Pending, row => Assert.Equal(2286, row.TwinIssue));
+    }
+
     /// <summary>Live lanes summing exactly to the shipped cap, so a full implement lane is over it.</summary>
     private static QueueLiveLane[] AtCap() =>
         Enumerable.Range(0, (int)QueueSettings.DefaultMaxLiveWeight)

@@ -328,13 +328,13 @@ public static class QueueBoard
     }
 
     /// <summary>
-    /// Every issue carrying more than one <em>work item</em> — the comparator arms of #1912's ask.
-    /// <b>Stage-bearing items only</b>: two stage-less dispatch requests naming one issue are two
-    /// one-shot lanes, not an A/B, and calling them twins would invent an experiment.
+    /// Every issue carrying more than one current <em>work item</em> — the comparator arms of #1912's
+    /// ask. <b>Stage-bearing, non-retired items only</b>: two stage-less dispatch requests naming one
+    /// issue are two one-shot lanes, not an A/B, and retained history is not current attention.
     /// </summary>
     internal static IReadOnlySet<int> TwinIssues(IReadOnlyList<QueueItem> items) =>
         items
-            .Where(i => i.Stage is not null && i.Issue is not null)
+            .Where(i => i.Retirement is null && i.Stage is not null && i.Issue is not null)
             .GroupBy(i => i.Issue!.Value)
             .Where(g => g.Count() > 1)
             .Select(g => g.Key)
