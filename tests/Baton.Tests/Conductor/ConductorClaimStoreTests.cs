@@ -332,15 +332,17 @@ public sealed class ConductorClaimStoreTests
     }
 
     [Fact]
-    public async Task Attribute_or_read_failure_fails_closed_for_get_list_and_claim_without_overwriting_state()
+    public async Task Directory_at_claim_file_path_fails_closed_for_get_list_and_claim_without_overwriting_state()
     {
         var temp = NewTempDir();
         try
         {
-            await ConductorClaimStore.ClaimAsync(RepoA, "conductor-1", batonRoot: temp, cancellationToken: TestContext.Current.CancellationToken);
             var filePath = Path.Combine(temp, RepoA.FileSlug, BatonPaths.ConductorClaimFileName);
-            var original = await File.ReadAllTextAsync(filePath, TestContext.Current.CancellationToken);
-            ConductorClaimStore.ReadText = _ => throw new UnauthorizedAccessException("injected attribute access failure");
+            // A directory at the file path is the deterministic, account-independent false-negative
+            // for an existence probe: File.Exists returns false, while opening it as a file fails.
+            // The old probe-first implementation therefore projected this indeterminate state as
+            // absent; the read-first implementation must classify it as an access failure.
+            Directory.CreateDirectory(filePath);
 
             var exGet = await Assert.ThrowsAsync<ConductorClaimException>(() =>
                 ConductorClaimStore.GetClaimAsync(RepoA, batonRoot: temp, cancellationToken: TestContext.Current.CancellationToken));
@@ -352,10 +354,10 @@ public sealed class ConductorClaimStoreTests
             Assert.Contains("Could not read", exGet.Message);
             Assert.Contains("Could not read", exList.Message);
             Assert.Contains("Could not read", exClaim.Message);
-            ConductorClaimStore.ResetFileOperations();
-            Assert.Equal(original, await File.ReadAllTextAsync(filePath, TestContext.Current.CancellationToken));
+            Assert.True(Directory.Exists(filePath));
+            Assert.Empty(Directory.EnumerateFiles(Path.GetDirectoryName(filePath)!, "*.tmp"));
         }
-        finally { ConductorClaimStore.ResetFileOperations(); DirectoryCleanup.DeleteRecursively(temp); }
+        finally { DirectoryCleanup.DeleteRecursively(temp); }
     }
 
     [Fact]
