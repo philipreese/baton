@@ -281,6 +281,39 @@ public sealed class WorkItemAdvancerTests
     }
 
     [Fact]
+    public async Task A_merged_ready_row_persisted_as_roomless_queued_retires()
+    {
+        var home = CreateTempHome();
+        using var scope = BatonEnvironmentSnapshot.BeginScope(BatonEnvironmentSnapshot.Blank with { HomeOverride = home });
+        try
+        {
+            var item = await SeedAsync(home, WorkStage.ReReview, Path.Combine(home, "unused"), QueueItemState.Queued);
+            await QueueStore.MutateAsync(BatonPaths.QueueFile, snapshot => snapshot with
+            {
+                Items = [item with { Stage = WorkStage.Ready, RoomDirectory = null, LastVerdict = null }],
+            }, Ct);
+            var merged = $$$"""
+                [{"number":77,"state":"MERGED","isDraft":false,"headRefOid":"{{{PushedSha}}}",
+                  "headRefName":"1934-lane","baseRefName":"main","isCrossRepository":false,
+                  "statusCheckRollup":[],"mergeCommit":{"oid":"{{{MergeSha}}}"}}]
+                """;
+
+            await new WorkItemAdvancer(new FakeGh(merged), (_, _) => Task.FromResult<string?>(PushedSha))
+                .AdvanceAsync(Now, Ct);
+
+            var retired = await ReadBackAsync();
+            Assert.Equal(QueueRetirement.Merged, retired.Retirement?.Kind);
+            Assert.Equal(QueueItemState.Queued, retired.State);
+            Assert.Null(retired.RoomDirectory);
+            Assert.NotNull(retired.DispositionOperation);
+        }
+        finally
+        {
+            DirectoryCleanup.DeleteRecursively(home);
+        }
+    }
+
+    [Fact]
     public async Task A_succeeded_implement_lane_with_an_open_pr_is_queued_for_review()
     {
         var home = CreateTempHome();

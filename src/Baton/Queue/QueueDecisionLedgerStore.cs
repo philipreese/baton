@@ -113,6 +113,13 @@ public sealed record QueueDecisionEntry(
         Decision == Cancelled && Tag is { Length: > 0 } tag
             ? $"{tag}|{At.ToUniversalTime():O}"
             : null;
+
+    [JsonIgnore]
+    internal string? DurableOperationKey => OperationKey ?? CancellationKey;
+
+    [property: JsonPropertyName("operationKey")]
+    [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    public string? OperationKey { get; init; }
 }
 
 /// <summary>
@@ -139,7 +146,22 @@ public sealed record QueueDecisionEntry(
 public static class QueueDecisionLedgerStore
 {
     internal static readonly JsonLinesLedger<QueueDecisionEntry> Ledger =
-        new("baton-queue-ledger", "queue decision ledger", entry => entry.CancellationKey);
+        new("baton-queue-ledger", "queue decision ledger", entry => entry.DurableOperationKey);
+
+    /// <summary>Writes the single ledger fact promised by a committed disposition operation.</summary>
+    public static Task AppendDispositionAsync(
+        string tag,
+        QueueDispositionOperation operation,
+        string ledgerFilePath,
+        CancellationToken cancellationToken = default)
+    {
+        ArgumentException.ThrowIfNullOrEmpty(tag);
+        ArgumentNullException.ThrowIfNull(operation);
+        return Ledger.AppendAsync(
+            [new QueueDecisionEntry(operation.At, tag, operation.Decision, operation.Reason,
+                LiveWeight: 0, FreeGb: null, FloorGb: 0) { OperationKey = operation.Key }],
+            ledgerFilePath, cancellationToken);
+    }
 
     /// <summary>
     /// Appends <paramref name="entry"/> unless <paramref name="previousVerdictKey"/> already equals

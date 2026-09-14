@@ -79,6 +79,15 @@ public sealed class WorkItemAdvancer
     {
         var snapshot = await QueueStore.LoadAsync(BatonPaths.QueueFile, cancellationToken).ConfigureAwait(false);
 
+        // A disposition CAS is the linearization point; ledger availability must never manufacture
+        // a fact before it. Replay only operations retained by committed queue rows.
+        foreach (var committed in snapshot.Items.Where(item => item.DispositionOperation is not null))
+        {
+            await QueueDecisionLedgerStore.AppendDispositionAsync(
+                committed.Tag, committed.DispositionOperation!, BatonPaths.QueueDecisionLedgerFile, cancellationToken)
+                .ConfigureAwait(false);
+        }
+
         // Settled, staged, and not one this advance has already given up on. Ready items are included
         // even though they have no room: their persisted verdict must be reconciled against a later
         // GitHub head/check change. State
@@ -146,25 +155,39 @@ public sealed class WorkItemAdvancer
         // still running. In particular, the roomless-timeout sweep can mark a late launch Failed
         // before that launch creates its room. Only the terminal sentinel is proof this room is no
         // longer live; the state word is merely the queue's earlier observation.
-        if (pr.Succeeded && pr.MergeSha is { Length: > 0 }
-            && sentinel is not null
+        var normalDeliveredReady = item is
+        {
+            Stage: WorkStage.Ready,
+            State: QueueItemState.Queued,
+            RoomDirectory: null,
+            ReadinessMutationClaim: null,
+        };
+        var terminalRoomDelivery = sentinel is not null
             && item.State is QueueItemState.Done or QueueItemState.Failed
-            && item.ReadinessMutationClaim is null)
+            && item.ReadinessMutationClaim is null;
+        if (pr.Succeeded && pr.MergeSha is { Length: > 0 }
+            && (normalDeliveredReady || terminalRoomDelivery))
         {
             var retired = false;
             var retirement = new QueueRetirement(QueueRetirement.Merged, now,
                 $"trusted merged observation for PR #{pr.Number}");
-            await QueueDecisionLedgerStore.AppendAsync(
-                new QueueDecisionEntry(now, item.Tag, QueueDecisionEntry.Retired,
-                    $"merged: PR #{pr.Number}", 0, null, 0),
-                null, BatonPaths.QueueDecisionLedgerFile, cancellationToken).ConfigureAwait(false);
+            var operation = new QueueDispositionOperation(
+                Guid.NewGuid().ToString("N"), now, QueueDecisionEntry.Retired, $"merged: PR #{pr.Number}");
             await QueueStore.MutateAsync(BatonPaths.QueueFile, snapshot =>
             {
                 var current = snapshot.Items.FirstOrDefault(i => i.Tag == item.Tag);
                 if (current is null || current.Retirement is not null
-                    || current.State is not (QueueItemState.Done or QueueItemState.Failed)
                     || current.RoomDirectory != item.RoomDirectory
                     || current.ReadinessMutationClaim is not null)
+                {
+                    return snapshot;
+                }
+                var currentNormalDeliveredReady = current is
+                {
+                    Stage: WorkStage.Ready, State: QueueItemState.Queued, RoomDirectory: null,
+                };
+                var currentTerminalRoomDelivery = current.State is QueueItemState.Done or QueueItemState.Failed;
+                if (!currentNormalDeliveredReady && !currentTerminalRoomDelivery)
                 {
                     return snapshot;
                 }
@@ -174,11 +197,17 @@ public sealed class WorkItemAdvancer
                     Items = snapshot.Items.Select(i => i.Tag == item.Tag
                     ? i with
                     {
-                        Retirement = retirement
+                        Retirement = retirement,
+                        DispositionOperation = operation,
                     } : i).ToList()
                 };
             }, cancellationToken).ConfigureAwait(false);
-            if (retired) return null;
+            if (retired)
+            {
+                await QueueDecisionLedgerStore.AppendDispositionAsync(
+                    item.Tag, operation, BatonPaths.QueueDecisionLedgerFile, cancellationToken).ConfigureAwait(false);
+                return null;
+            }
         }
 
         // A halted item remains available only for the trusted-merge retirement above. Its halt

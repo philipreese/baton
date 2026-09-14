@@ -589,6 +589,17 @@ public static class QueueCommand
         }
         if (observed.Retirement is not null)
         {
+            if (observed.DispositionOperation is
+                {
+                    Decision: QueueDecisionEntry.Retired,
+                } committed
+                && string.Equals(committed.Reason, $"operator: {reason}", StringComparison.Ordinal))
+            {
+                await QueueDecisionLedgerStore.AppendDispositionAsync(
+                    tag, committed, BatonPaths.QueueDecisionLedgerFile, cancellationToken).ConfigureAwait(false);
+                output.WriteLine($"Retired lifecycle item '{tag}' as operator-handled. Its evidence was retained.");
+                return 0;
+            }
             throw new CliArgumentException($"Queue item '{tag}' is already retired as '{observed.Retirement.Kind}'.");
         }
         if (observed.Stage is null)
@@ -606,15 +617,15 @@ public static class QueueCommand
                 && observation.State == PullRequestObservationStates.Closed
                 && observation.ObservedAt is not null
                 && observation.Error is null) == true;
-        if (observed.State != QueueItemState.Failed && !readyClosed)
+        var terminalRoomProof = await HasTerminalRoomProofAsync(observed, cancellationToken).ConfigureAwait(false);
+        if ((observed.State != QueueItemState.Failed || !terminalRoomProof) && !readyClosed)
         {
             throw new CliArgumentException($"Queue item '{tag}' has insufficient settled failure evidence or trusted closed-PR evidence for operator retirement.");
         }
         var eligible = false;
         var at = DateTimeOffset.UtcNow;
-        await QueueDecisionLedgerStore.AppendAsync(new QueueDecisionEntry(at, tag, QueueDecisionEntry.Retired,
-            $"operator: {reason}", 0, null, 0), null, BatonPaths.QueueDecisionLedgerFile, cancellationToken)
-            .ConfigureAwait(false);
+        var operation = new QueueDispositionOperation(
+            Guid.NewGuid().ToString("N"), at, QueueDecisionEntry.Retired, $"operator: {reason}");
         await QueueStore.MutateAsync(BatonPaths.QueueFile, snapshot =>
         {
             var current = snapshot.Items.FirstOrDefault(item => string.Equals(item.Tag, tag, StringComparison.Ordinal));
@@ -633,7 +644,10 @@ public static class QueueCommand
                     && observation.Error is null) == true;
             if (current is not { Stage: not null, Retirement: null, ReadinessMutationClaim: null }
                 || current.State == QueueItemState.Launched
-                || current.State != QueueItemState.Failed && !currentReadyClosed)
+                || current.RoomDirectory != observed.RoomDirectory
+                || (current.State != QueueItemState.Failed
+                    || !HasTerminalRoomProofAsync(current, cancellationToken).GetAwaiter().GetResult())
+                    && !currentReadyClosed)
             {
                 return snapshot;
             }
@@ -641,7 +655,11 @@ public static class QueueCommand
             return snapshot with
             {
                 Items = snapshot.Items.Select(item => item.Tag == tag
-                ? item with { Retirement = new QueueRetirement(QueueRetirement.Operator, at, reason) }
+                ? item with
+                {
+                    Retirement = new QueueRetirement(QueueRetirement.Operator, at, reason),
+                    DispositionOperation = operation,
+                }
                 : item).ToList()
             };
         }, cancellationToken).ConfigureAwait(false);
@@ -650,6 +668,8 @@ public static class QueueCommand
         {
             throw new CliArgumentException($"Queue item '{tag}' changed while retirement was being recorded; retry after checking its current state.");
         }
+        await QueueDecisionLedgerStore.AppendDispositionAsync(tag, operation, BatonPaths.QueueDecisionLedgerFile, cancellationToken)
+            .ConfigureAwait(false);
         output.WriteLine($"Retired lifecycle item '{tag}' as operator-handled. Its evidence was retained.");
         return 0;
     }
@@ -666,14 +686,25 @@ public static class QueueCommand
         {
             throw new CliArgumentException($"Queue item '{tag}' was retired after merge and cannot be restored.");
         }
+        if (observed.Retirement is null
+            && observed.DispositionOperation is
+            {
+                Decision: QueueDecisionEntry.Restored,
+            } committed
+            && string.Equals(committed.Reason, $"operator: {reason}", StringComparison.Ordinal))
+        {
+            await QueueDecisionLedgerStore.AppendDispositionAsync(
+                tag, committed, BatonPaths.QueueDecisionLedgerFile, cancellationToken).ConfigureAwait(false);
+            output.WriteLine($"Restored lifecycle item '{tag}' to active attention; its launch state was unchanged.");
+            return 0;
+        }
         if (observed.Retirement?.Kind != QueueRetirement.Operator)
         {
             throw new CliArgumentException($"Queue item '{tag}' is not operator-retired.");
         }
         var at = DateTimeOffset.UtcNow;
-        await QueueDecisionLedgerStore.AppendAsync(new QueueDecisionEntry(at, tag, QueueDecisionEntry.Restored,
-            $"operator: {reason}", 0, null, 0), null, BatonPaths.QueueDecisionLedgerFile, cancellationToken)
-            .ConfigureAwait(false);
+        var operation = new QueueDispositionOperation(
+            Guid.NewGuid().ToString("N"), at, QueueDecisionEntry.Restored, $"operator: {reason}");
         var restored = false;
         await QueueStore.MutateAsync(BatonPaths.QueueFile, snapshot =>
         {
@@ -686,15 +717,27 @@ public static class QueueCommand
             return snapshot with
             {
                 Items = snapshot.Items.Select(item => item.Tag == tag
-                ? item with { Retirement = null } : item).ToList()
+                ? item with { Retirement = null, DispositionOperation = operation } : item).ToList()
             };
         }, cancellationToken).ConfigureAwait(false);
         if (!restored)
         {
             throw new CliArgumentException($"Queue item '{tag}' changed while restoration was being recorded; retry after checking its current state.");
         }
+        await QueueDecisionLedgerStore.AppendDispositionAsync(tag, operation, BatonPaths.QueueDecisionLedgerFile, cancellationToken)
+            .ConfigureAwait(false);
         output.WriteLine($"Restored lifecycle item '{tag}' to active attention; its launch state was unchanged.");
         return 0;
+    }
+
+    private static async Task<bool> HasTerminalRoomProofAsync(QueueItem item, CancellationToken cancellationToken)
+    {
+        if (item.RoomDirectory is not { Length: > 0 } room)
+        {
+            return true;
+        }
+
+        return await TerminalSentinelWriter.TryReadAsync(room, cancellationToken).ConfigureAwait(false) is not null;
     }
 
     private static async Task<int> ImportAsync(QueueOptions options, TextWriter output, CancellationToken cancellationToken)

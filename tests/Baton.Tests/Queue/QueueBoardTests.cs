@@ -246,8 +246,10 @@ public sealed class QueueBoardTests
         Assert.Equal(QueueRetirement.Operator, board.RetiredHistory[0].Retirement.Kind);
         Assert.Equal(at, board.RetiredHistory[0].Retirement.At);
         Assert.Equal("operator completed recovery", board.RetiredHistory[0].Retirement.Reason);
-        var prLane = Assert.Single(Assert.Single(board.PullRequests).Lanes);
-        Assert.Equal(withPr.Retirement, prLane.Retirement);
+        Assert.DoesNotContain(board.PullRequests, row => row.PullRequest == 2288);
+        Assert.DoesNotContain(board.PullRequestHistory, row => row.PullRequest == 2288);
+        Assert.Contains(board.RetiredHistory, row => row.Tag == "merged-pr"
+            && row.Retirement == withPr.Retirement);
     }
 
     /// <summary>Live lanes summing exactly to the shipped cap, so a full implement lane is over it.</summary>

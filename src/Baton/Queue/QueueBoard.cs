@@ -150,7 +150,7 @@ public static class QueueBoard
             .ToDictionary(g => g.Key, g => g.OrderByDescending(o => o.AttemptedAt).First());
         var freshness = observationFreshness ?? TimeSpan.Zero;
         var prItems = OrderTwinsAdjacent(items)
-            .Where(item => item.Stage is not null && item.PullRequest is not null)
+            .Where(item => item.Stage is not null && item.PullRequest is not null && item.Retirement is null)
             .GroupBy(item => item.Repository is { Length: > 0 } repository
                 ? $"{repository}\0{item.PullRequest}"
                 : $"\0{item.Tag}", StringComparer.Ordinal);

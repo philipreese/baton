@@ -138,6 +138,12 @@ public sealed record QueueItem
     public QueueRetirement? Retirement { get; init; }
 
     /// <summary>
+    /// The last committed retirement disposition's durable ledger operation. It remains after a
+    /// restore so a process that dies after the queue CAS can repair precisely that missing fact.
+    /// </summary>
+    public QueueDispositionOperation? DispositionOperation { get; init; }
+
+    /// <summary>
     /// The verdict the last review produced, as an absolute path to that room's <c>verdict.json</c>.
     /// <b>Recorded, never inlined into the next brief from here</b> — the brief carries the findings'
     /// text, and spec/baton.md §13 says why a room path must not travel into one.
@@ -288,6 +294,13 @@ public sealed record QueueRetirement(
     public const string Merged = "merged";
     public const string Operator = "operator";
 }
+
+/// <summary>One queue-committed retirement or restoration awaiting (or retaining) its ledger fact.</summary>
+public sealed record QueueDispositionOperation(
+    [property: JsonPropertyName("key")] string Key,
+    [property: JsonPropertyName("at")] DateTimeOffset At,
+    [property: JsonPropertyName("decision")] string Decision,
+    [property: JsonPropertyName("reason")] string Reason);
 
 /// <summary>
 /// Where an item is with respect to <em>launching</em>. Five states: cancellation is terminal, while the
