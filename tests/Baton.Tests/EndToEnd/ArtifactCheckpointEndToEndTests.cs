@@ -195,6 +195,46 @@ public sealed class ArtifactCheckpointEndToEndTests
     }
 
     [Fact]
+    public async Task A_checkpoint_cannot_turn_an_invalid_surviving_sibling_into_success()
+    {
+        var cases = new (string Name, ProducedOutput Report, string ReportContent)[]
+        {
+            ("hollow", new ProducedOutput("report.md", Schema: OutputSchema.NonEmptyText), "   "),
+            ("malformed", new ProducedOutput("report.md", Schema: OutputSchema.ReviewVerdict), "not json"),
+            ("condition", new ProducedOutput(
+                "report.md",
+                Condition: new OutputCondition("/decision", new JsonScalar.String("approve"))), "{\"decision\":\"block\"}"),
+        };
+
+        foreach (var testCase in cases)
+        {
+            var room = Path.Combine(Path.GetTempPath(), "baton-artifact-checkpoint-invalid-" + testCase.Name + "-" + Guid.NewGuid().ToString("N"));
+            var workspace = Path.Combine(room, "workspace");
+            var artifacts = Path.Combine(room, "artifacts");
+            var log = Path.Combine(room, "flow.jsonl");
+            Directory.CreateDirectory(workspace);
+            try
+            {
+                var state = await RunCheckpointExecutionAsync(
+                    room, workspace, artifacts, log,
+                    [testCase.Report, new ProducedOutput("verdict.json", Schema: OutputSchema.NonEmptyText)],
+                    artifactDirectory => File.WriteAllText(Path.Combine(artifactDirectory, "report.md"), testCase.ReportContent),
+                    artifactDirectory => File.WriteAllText(Path.Combine(artifactDirectory, "verdict.json"), "{\"decision\":\"approve\"}"));
+
+                var events = await new FlowEventLogReader(log).ReadAllAsync(TestContext.Current.CancellationToken);
+                Assert.Equal(StepStatus.Failed, Assert.Single(state.Steps).Status);
+                Assert.Single(events.OfType<FlowEvent.ExecutionArrested>());
+                Assert.Empty(events.OfType<FlowEvent.ExecutionSucceeded>());
+                Assert.Equal(["verdict.json"], Assert.Single(events.OfType<FlowEvent.ArtifactCheckpointAttempted>()).OutputNames);
+            }
+            finally
+            {
+                DirectoryCleanup.DeleteRecursively(room);
+            }
+        }
+    }
+
+    [Fact]
     public async Task A_cancellation_racing_a_cap_arrest_does_not_start_an_artifact_checkpoint()
     {
         var room = Path.Combine(Path.GetTempPath(), "baton-artifact-checkpoint-cancel-" + Guid.NewGuid().ToString("N"));
