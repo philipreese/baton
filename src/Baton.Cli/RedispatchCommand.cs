@@ -288,6 +288,8 @@ public static class RedispatchCommand
         await WorkerBindingConfigWriter.SaveToFileAsync(
             new Dictionary<string, WorkerBindingConfigEntry> { [workerName] = entry }, bindingsFilePath, cancellationToken)
             .ConfigureAwait(false);
+        await OriginatingPullRequestOwnership.WriteProvenanceAsync(
+            entry.OriginatingPullRequestOwnership, options.RoomDirectoryPath, cancellationToken).ConfigureAwait(false);
 
         var workspace = entry.WorkingDirectory ?? entry.Worktree?.Repository ?? Directory.GetCurrentDirectory();
 

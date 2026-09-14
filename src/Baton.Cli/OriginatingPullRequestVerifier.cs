@@ -79,9 +79,21 @@ internal static class OriginatingPullRequestVerifier
         using (document)
         {
             var root = document.RootElement;
-            var state = root.GetProperty("state").GetString();
-            var branch = root.GetProperty("headRefName").GetString();
-            var head = root.GetProperty("headRefOid").GetString();
+            if (root.ValueKind != JsonValueKind.Object
+                || !root.TryGetProperty("state", out var stateValue)
+                || !root.TryGetProperty("headRefName", out var branchValue)
+                || !root.TryGetProperty("headRefOid", out var headValue)
+                || stateValue.ValueKind != JsonValueKind.String
+                || branchValue.ValueKind != JsonValueKind.String
+                || headValue.ValueKind != JsonValueKind.String)
+            {
+                throw new CliArgumentException(
+                    "The originating pull request returned a malformed response; retry after GitHub is reachable.");
+            }
+
+            var state = stateValue.GetString();
+            var branch = branchValue.GetString();
+            var head = headValue.GetString();
             if (!string.Equals(state, "OPEN", StringComparison.OrdinalIgnoreCase)
                 || !string.Equals(branch, identity.HeadBranch, StringComparison.Ordinal)
                 || !string.Equals(head, launchHead, StringComparison.OrdinalIgnoreCase))

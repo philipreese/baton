@@ -1,4 +1,5 @@
 using System.Text.RegularExpressions;
+using System.Text.Json;
 
 namespace Baton.Vendors;
 
@@ -90,6 +91,33 @@ public sealed record OriginatingPullRequestOwnership(
             ? PullRequestOwnershipEvidence.FromVerified(value[..separator], number)
             : null;
     }
+
+    internal const string ProvenanceFileName = "originating-pr-provenance.json";
+
+    internal bool IsVerifiedForBindingsDirectory(string? bindingsFileDirectory)
+    {
+        if (string.IsNullOrWhiteSpace(bindingsFileDirectory)) return false;
+        try
+        {
+            var path = Path.Combine(bindingsFileDirectory, ProvenanceFileName);
+            var recorded = File.Exists(path)
+                ? JsonSerializer.Deserialize<OriginatingPullRequestOwnership>(File.ReadAllText(path))
+                : null;
+            return recorded is not null
+                && string.Equals(recorded.Repository, Repository, StringComparison.Ordinal)
+                && recorded.Number == Number
+                && string.Equals(recorded.HeadBranch, HeadBranch, StringComparison.Ordinal)
+                && string.Equals(recorded.LaunchHead, LaunchHead, StringComparison.OrdinalIgnoreCase);
+        }
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or JsonException)
+        {
+            return false;
+        }
+    }
+
+    public static Task WriteProvenanceAsync(OriginatingPullRequestOwnership? ownership, string roomDirectory, CancellationToken cancellationToken) =>
+        ownership is null ? Task.CompletedTask : File.WriteAllTextAsync(
+            Path.Combine(roomDirectory, ProvenanceFileName), JsonSerializer.Serialize(ownership), cancellationToken);
 }
 
 internal static class GitHubRepository

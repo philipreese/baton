@@ -469,6 +469,9 @@ public static class DispatchCommand
         var bindingsFilePath = Path.Combine(options.RoomDirectoryPath, BindingsFileName);
         await WorkflowDefinitionWriter.SaveToFileAsync(definition, workflowFilePath, cancellationToken).ConfigureAwait(false);
         await WorkerBindingConfigWriter.SaveToFileAsync(bindings, bindingsFilePath, cancellationToken).ConfigureAwait(false);
+        await OriginatingPullRequestOwnership.WriteProvenanceAsync(
+            bindings.Values.Select(binding => binding.OriginatingPullRequestOwnership).SingleOrDefault(),
+            options.RoomDirectoryPath, cancellationToken).ConfigureAwait(false);
 
         // Register: true -- rationale is spec/baton.md §8 (#1657).
         var runOptions = new RunOptions(

@@ -271,7 +271,10 @@ public static class WorkerBindingResolver
             AllowsSubagents: entry.AllowsSubagents,
             Skills: skills,
             PullRequestCreateIdentity: entry.PullRequestCreateIdentity,
-            OriginatingPullRequestOwnership: entry.OriginatingPullRequestOwnership);
+            OriginatingPullRequestOwnership: entry.OriginatingPullRequestOwnership is { } originating
+                && originating.IsVerifiedForBindingsDirectory(bindingsFileDirectory)
+                    ? originating
+                    : null);
         var target = adapter.Resolve(invocation, entry.Contract);
 
         if (onWorkerStdoutLine is not null)
