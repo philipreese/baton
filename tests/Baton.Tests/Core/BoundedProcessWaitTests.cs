@@ -36,8 +36,10 @@ public sealed class BoundedProcessWaitTests
     {
         using var process = StartSleeper();
 
+        // wait-ok: deliberately short to exercise the timeout-and-kill branch in this focused control.
+        var timeout = TimeSpan.FromMilliseconds(50);
         await Assert.ThrowsAsync<TimeoutException>(() =>
-            BoundedProcessWait.WaitForExitAsync(process, TimeSpan.FromMilliseconds(50), Ct));
+            BoundedProcessWait.WaitForExitAsync(process, timeout, Ct));
 
         // wait-ok: the helper already issued Kill; this only gives Windows time to publish process exit.
         Assert.True(process.WaitForExit(5_000), "The timed-out child process was not killed.");
