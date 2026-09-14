@@ -1,3 +1,4 @@
+using System.Diagnostics;
 using Baton.CrashTestHost;
 using Baton.Dispatch;
 using Baton.Domain;
@@ -17,9 +18,11 @@ using Baton.Store;
 // job-contained path every worker takes); `spawn-detached <pidFile>` starts one through
 // DetachedProcess (the path a queue-launched lane takes). Either way the host writes the sleeper's
 // pid to <pidFile> and then waits to be killed; the test asserts the sleeper's fate.
-// #2190: when a copy of this apphost is named git/git.exe, the two read-only probe argv below make a
-// hermetic native executable for the public dispatch provenance route. No shell or callback seam is
-// involved: GhPullRequestCreateProvenanceResolver starts the copied apphost directly.
+// #2190: when a copy of this apphost is named git/git.exe, the read-only probe argv below make a
+// hermetic native executable for the public dispatch provenance route. #2030 reuses that executable
+// for a diff probe which exits after starting a sleeper that inherits its process handles; the PID
+// file named by BATON_CRASH_TEST_SLEEPER_PID_FILE lets the E2E prove the descendant is gone. No shell
+// or callback seam is involved: production starts the copied apphost directly.
 if (args is ["config", "--get", "remote.origin.url"])
 {
     await Console.Out.WriteLineAsync("https://github.com/aer-works/baton.git");
@@ -28,6 +31,31 @@ if (args is ["config", "--get", "remote.origin.url"])
 if (args is ["rev-parse", "--abbrev-ref", "HEAD"])
 {
     await Console.Out.WriteLineAsync("2190-verified-pr-ownership");
+    return 0;
+}
+if (args is ["rev-parse", "--path-format=absolute", "--git-common-dir"])
+{
+    await Console.Out.WriteLineAsync("C:\\fixture\\.git");
+    return 0;
+}
+if (args.Contains("diff", StringComparer.Ordinal))
+{
+    var sleeperStart = new ProcessStartInfo("ping.exe")
+    {
+        UseShellExecute = false,
+        CreateNoWindow = true,
+    };
+    sleeperStart.ArgumentList.Add("-n");
+    sleeperStart.ArgumentList.Add("9999");
+    sleeperStart.ArgumentList.Add("127.0.0.1");
+    using var sleeper = Process.Start(sleeperStart)
+        ?? throw new InvalidOperationException("Could not start the inherited-handle sleeper.");
+    if (Environment.GetEnvironmentVariable("BATON_CRASH_TEST_SLEEPER_PID_FILE") is { Length: > 0 } pidFile)
+    {
+        WritePidAtomically(pidFile, sleeper.Id);
+    }
+
+    await Console.Out.WriteLineAsync("1\t0\tfixture.txt");
     return 0;
 }
 
