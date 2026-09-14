@@ -55,6 +55,10 @@ namespace Baton.Cli;
 /// </remarks>
 public static class IssueWorktreeProvisioner
 {
+    // ProjectCeilingStore is a read-modify-write file store. Concurrent issue provisions may reach
+    // the trust step after claiming distinct branch/worktree pairs, so serialize that store update.
+    private static readonly SemaphoreSlim TrustGate = new(1, 1);
+
     /// <summary>The exact workspace and branch selected while provisioning an issue lane.</summary>
     public sealed record ProvisionedIssueWorktree(string Workspace, string Branch);
 
@@ -293,37 +297,45 @@ public static class IssueWorktreeProvisioner
         storePath ??= ProjectCeilingStore.DefaultPath;
         probe ??= RepositoryIdentityResolver.TryResolveAsync;
 
-        var result = await InheritedProjectCeiling.TryInheritAsync(workspace, storePath, probe, cancellationToken)
-            .ConfigureAwait(false);
-        switch (result.Outcome)
+        await TrustGate.WaitAsync(cancellationToken).ConfigureAwait(false);
+        try
         {
-            case InheritanceOutcome.Inherited:
-                (output ?? Console.Out).WriteLine(result.Fact);
-                return;
-            case InheritanceOutcome.AlreadyTrusted:
-                return;
-            case InheritanceOutcome.NoIdentity:
-                throw new ProjectNotTrustedException(
-                    workspace,
-                    "the repository-identity probe answered nothing (git missing, timed out, or exited non-zero).");
-            case InheritanceOutcome.CandidateUnknown:
-                // #2121: nothing live matched and a recorded path that cannot be identified might be the
-                // tombstone, so the never-trusted fallback below is not known to apply. The exception's
-                // own remedy names that path (not the workspace, which probed fine) so the operator can
-                // repair it or `baton trust <path> --forget` the record.
-                throw new ProjectNotTrustedException(workspace, result.CandidatePath!, result.ProbeFailure!);
-            case InheritanceOutcome.Revoked:
-                // #2121: the fallback below is for a repository the operator never trusted, and this one
-                // the operator revoked. The refusal names the tombstone so the operator knows which
-                // revocation `baton trust` would be undoing.
-                throw new ProjectNotTrustedException(workspace, result.RevokedPath!, result.RevokedAt!.Value);
-            case InheritanceOutcome.NoTrustedSource:
-                ProjectCeilingStore.Set(workspace, ProjectCeiling.Unrestricted, storePath);
-                (output ?? Console.Out).WriteLine(
-                    $"workspace {ProjectCeilingStore.CanonicalKey(workspace)}: no trusted repository to inherit from; recorded ceiling all");
-                return;
-            default:
-                throw new ArgumentOutOfRangeException(nameof(result), result.Outcome, "Unhandled inheritance outcome.");
+            var result = await InheritedProjectCeiling.TryInheritAsync(workspace, storePath, probe, cancellationToken)
+                .ConfigureAwait(false);
+            switch (result.Outcome)
+            {
+                case InheritanceOutcome.Inherited:
+                    (output ?? Console.Out).WriteLine(result.Fact);
+                    return;
+                case InheritanceOutcome.AlreadyTrusted:
+                    return;
+                case InheritanceOutcome.NoIdentity:
+                    throw new ProjectNotTrustedException(
+                        workspace,
+                        "the repository-identity probe answered nothing (git missing, timed out, or exited non-zero).");
+                case InheritanceOutcome.CandidateUnknown:
+                    // #2121: nothing live matched and a recorded path that cannot be identified might be the
+                    // tombstone, so the never-trusted fallback below is not known to apply. The exception's
+                    // own remedy names that path (not the workspace, which probed fine) so the operator can
+                    // repair it or `baton trust <path> --forget` the record.
+                    throw new ProjectNotTrustedException(workspace, result.CandidatePath!, result.ProbeFailure!);
+                case InheritanceOutcome.Revoked:
+                    // #2121: the fallback below is for a repository the operator never trusted, and this one
+                    // the operator revoked. The refusal names the tombstone so the operator knows which
+                    // revocation `baton trust` would be undoing.
+                    throw new ProjectNotTrustedException(workspace, result.RevokedPath!, result.RevokedAt!.Value);
+                case InheritanceOutcome.NoTrustedSource:
+                    ProjectCeilingStore.Set(workspace, ProjectCeiling.Unrestricted, storePath);
+                    (output ?? Console.Out).WriteLine(
+                        $"workspace {ProjectCeilingStore.CanonicalKey(workspace)}: no trusted repository to inherit from; recorded ceiling all");
+                    return;
+                default:
+                    throw new ArgumentOutOfRangeException(nameof(result), result.Outcome, "Unhandled inheritance outcome.");
+            }
+        }
+        finally
+        {
+            TrustGate.Release();
         }
     }
 

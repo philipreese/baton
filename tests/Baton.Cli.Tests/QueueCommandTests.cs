@@ -181,7 +181,7 @@ public sealed class QueueCommandTests
                 (_, _, _, _, _, _) =>
                 {
                     provisioned = true;
-                    return Task.FromResult("never");
+                    return Task.FromResult(new IssueWorktreeProvisioner.ProvisionedIssueWorktree("never", "never-lane"));
                 }));
 
             Assert.Contains("file-write, shell", refusal.Message, StringComparison.Ordinal);
@@ -922,7 +922,7 @@ public sealed class QueueCommandTests
                 Ct,
                 home,
                 (_, _) => Task.FromResult<RepositoryIdentity?>(null),
-                (_, _, _, _, _, _) => Task.FromResult(home),
+                (_, _, _, _, _, _) => Task.FromResult(new IssueWorktreeProvisioner.ProvisionedIssueWorktree(home, "write-failure-lane")),
                 (_, _) =>
                 {
                     if (failure == "unauthorized")

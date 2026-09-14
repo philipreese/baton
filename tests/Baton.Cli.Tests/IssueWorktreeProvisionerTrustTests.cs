@@ -37,7 +37,7 @@ public sealed class IssueWorktreeProvisionerTrustTests : IDisposable
             2076, repository, _root, CapturedRepository, Runner(worktree), Probe(commonDir, repository, worktree),
             output, TestContext.Current.CancellationToken);
 
-        Assert.Equal(worktree, provisioned);
+        Assert.Equal(worktree, provisioned.Workspace);
         var recorded = ProjectCeilingStore.TryGet(worktree, ProjectCeilingStore.DefaultPath);
         Assert.NotNull(recorded);
         Assert.False(recorded.NetworkAccess);
@@ -64,7 +64,7 @@ public sealed class IssueWorktreeProvisionerTrustTests : IDisposable
             2076, repository, _root, CapturedRepository, Runner(worktree), Probe(commonDir, repository, worktree),
             output, TestContext.Current.CancellationToken);
 
-        var recorded = ProjectCeilingStore.TryGet(provisioned, ProjectCeilingStore.DefaultPath);
+        var recorded = ProjectCeilingStore.TryGet(provisioned.Workspace, ProjectCeilingStore.DefaultPath);
         Assert.NotNull(recorded);
         Assert.True(recorded.IsUnrestricted);
         Assert.Null(recorded.InheritedFrom);
@@ -158,7 +158,7 @@ public sealed class IssueWorktreeProvisionerTrustTests : IDisposable
             2121, repository, _root, CapturedRepository, Runner(worktree), Probe(commonDir, repository, worktree),
             output, TestContext.Current.CancellationToken);
 
-        var recorded = ProjectCeilingStore.TryGet(provisioned, ProjectCeilingStore.DefaultPath);
+        var recorded = ProjectCeilingStore.TryGet(provisioned.Workspace, ProjectCeilingStore.DefaultPath);
         Assert.NotNull(recorded);
         Assert.False(recorded.NetworkAccess);
         Assert.Equal(ProjectCeilingStore.CanonicalKey(repository), recorded.InheritedFrom);
@@ -190,7 +190,7 @@ public sealed class IssueWorktreeProvisionerTrustTests : IDisposable
             2121, repository, _root, CapturedRepository, Runner(worktree), Probe(commonDir, repository, worktree),
             output, TestContext.Current.CancellationToken);
 
-        var recorded = ProjectCeilingStore.TryGet(provisioned, ProjectCeilingStore.DefaultPath);
+        var recorded = ProjectCeilingStore.TryGet(provisioned.Workspace, ProjectCeilingStore.DefaultPath);
         Assert.NotNull(recorded);
         Assert.True(recorded.IsUnrestricted);
         Assert.Null(recorded.InheritedFrom);
@@ -379,11 +379,11 @@ public sealed class IssueWorktreeProvisionerTrustTests : IDisposable
                     return branches.Contains(reference["refs/heads/".Length..]) ? (0, string.Empty) : (1, string.Empty);
                 }
             }
-            if (args is ["ls-remote", "--heads", "origin", var branch])
+            if (args is ["ls-remote", "--heads", "origin", var remoteBranch])
             {
                 lock (sync)
                 {
-                    return branches.Contains(branch) ? (0, $"sha\trefs/heads/{branch}\n") : (0, string.Empty);
+                    return branches.Contains(remoteBranch) ? (0, $"sha\trefs/heads/{remoteBranch}\n") : (0, string.Empty);
                 }
             }
             if (file == "git" && args is ["worktree", "add", var workspace, ..])
