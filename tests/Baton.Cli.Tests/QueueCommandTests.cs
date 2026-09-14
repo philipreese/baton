@@ -1894,6 +1894,61 @@ public sealed class QueueCommandTests
     }
 
     [Fact]
+    public async Task Retire_replays_a_failed_restore_before_its_successor_and_fails_closed_until_that_replay_succeeds()
+    {
+        var home = CreateTempHome();
+        using var scope = BatonEnvironmentSnapshot.BeginScope(BatonEnvironmentSnapshot.Blank with { HomeOverride = home });
+        try
+        {
+            await QueueStore.MutateAsync(BatonPaths.QueueFile, s => s with
+            {
+                Items = [new QueueItem
+                {
+                    Tag = "ordered-retire", Role = "implement", Workspace = home,
+                    SpecFile = BatonPaths.QueueSpecFile("ordered-retire"), Stage = WorkStage.Ready,
+                    State = QueueItemState.Queued, Repository = "owner/repo", PullRequest = 42,
+                }],
+                PullRequestObservations = [new QueuePullRequestObservation(
+                    "owner/repo", 42, PullRequestObservationStates.Closed, "head",
+                    DateTimeOffset.UtcNow, DateTimeOffset.UtcNow, null)],
+            }, Ct);
+
+            Assert.Equal(0, await QueueCommand.ExecuteAsync(
+                new QueueOptions(QueueVerb.Retire, Tag: "ordered-retire", Reason: "handled"), TextWriter.Null, Ct));
+
+            QueueDecisionLedgerStore.DispositionAppendFault = (_, operation) =>
+                operation.Decision == QueueDecisionEntry.Restored ? new IOException("planned restore append failure") : null;
+            await Assert.ThrowsAsync<IOException>(() => QueueCommand.ExecuteAsync(
+                new QueueOptions(QueueVerb.Restore, Tag: "ordered-retire", Reason: "resume"), TextWriter.Null, Ct));
+
+            var afterFailedRestore = (await QueueStore.LoadAsync(BatonPaths.QueueFile, Ct)).Items.Single();
+            Assert.Null(afterFailedRestore.Retirement);
+            Assert.Equal([QueueDecisionEntry.Retired, QueueDecisionEntry.Restored],
+                afterFailedRestore.DispositionOutbox.Select(operation => operation.Decision));
+
+            await Assert.ThrowsAsync<IOException>(() => QueueCommand.ExecuteAsync(
+                new QueueOptions(QueueVerb.Retire, Tag: "ordered-retire", Reason: "handled again"), TextWriter.Null, Ct));
+            var afterFencedRetire = (await QueueStore.LoadAsync(BatonPaths.QueueFile, Ct)).Items.Single();
+            Assert.Null(afterFencedRetire.Retirement);
+            Assert.Equal([QueueDecisionEntry.Retired, QueueDecisionEntry.Restored],
+                afterFencedRetire.DispositionOutbox.Select(operation => operation.Decision));
+            Assert.Equal([QueueDecisionEntry.Retired],
+                (await QueueDecisionLedgerStore.ReadAllAsync(BatonPaths.QueueDecisionLedgerFile, Ct)).Select(entry => entry.Decision));
+
+            QueueDecisionLedgerStore.DispositionAppendFault = null;
+            Assert.Equal(0, await QueueCommand.ExecuteAsync(
+                new QueueOptions(QueueVerb.Retire, Tag: "ordered-retire", Reason: "handled again"), TextWriter.Null, Ct));
+            Assert.Equal([QueueDecisionEntry.Retired, QueueDecisionEntry.Restored, QueueDecisionEntry.Retired],
+                (await QueueDecisionLedgerStore.ReadAllAsync(BatonPaths.QueueDecisionLedgerFile, Ct)).Select(entry => entry.Decision));
+        }
+        finally
+        {
+            QueueDecisionLedgerStore.DispositionAppendFault = null;
+            DirectoryCleanup.DeleteRecursively(home);
+        }
+    }
+
+    [Fact]
     public async Task Add_refuses_to_replace_a_retired_tag()
     {
         var home = CreateTempHome();

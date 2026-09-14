@@ -148,6 +148,12 @@ public static class QueueDecisionLedgerStore
     internal static readonly JsonLinesLedger<QueueDecisionEntry> Ledger =
         new("baton-queue-ledger", "queue decision ledger", entry => entry.DurableOperationKey);
 
+    /// <summary>
+    /// Deterministic test seam for the disposition append that follows its queue CAS. Production
+    /// callers leave this null; a non-null returned exception prevents any ledger write.
+    /// </summary>
+    public static Func<string, QueueDispositionOperation, Exception?>? DispositionAppendFault { get; set; }
+
     /// <summary>Writes the single ledger fact promised by a committed disposition operation.</summary>
     public static Task AppendDispositionAsync(
         string tag,
@@ -157,6 +163,11 @@ public static class QueueDecisionLedgerStore
     {
         ArgumentException.ThrowIfNullOrEmpty(tag);
         ArgumentNullException.ThrowIfNull(operation);
+        var fault = DispositionAppendFault?.Invoke(tag, operation);
+        if (fault is not null)
+        {
+            return Task.FromException(fault);
+        }
         return Ledger.AppendAsync(
             [new QueueDecisionEntry(operation.At, tag, operation.Decision, operation.Reason,
                 LiveWeight: 0, FreeGb: null, FloorGb: 0) { OperationKey = operation.Key }],

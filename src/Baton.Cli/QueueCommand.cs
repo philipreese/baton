@@ -630,6 +630,10 @@ public static class QueueCommand
         {
             throw new CliArgumentException($"Queue item '{tag}' has insufficient settled failure evidence or trusted closed-PR evidence for operator retirement.");
         }
+        // A restoration can have committed its CAS while its ledger append failed. Replaying every
+        // retained predecessor here is a fence: do not commit this successor unless the full ordered
+        // outbox is durably acknowledged.
+        await ReconcileDispositionOutboxAsync(observed, cancellationToken).ConfigureAwait(false);
         var eligible = false;
         var at = DateTimeOffset.UtcNow;
         var operation = new QueueDispositionOperation(
