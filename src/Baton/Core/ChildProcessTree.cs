@@ -22,6 +22,8 @@ public sealed class ChildProcessTree : IDisposable
 
     public static ChildProcessTree Start(ProcessStartInfo startInfo)
     {
+        // Callers must obtain this through ChildProcessStartInfo.Create: containment owns only the
+        // already-reviewed launch, never construction of a new process command.
         ArgumentNullException.ThrowIfNull(startInfo);
 
         SafeJobObjectHandle? job = OperatingSystem.IsWindows() ? SafeJobObjectHandle.Create() : null;

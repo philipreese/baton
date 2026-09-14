@@ -33,7 +33,7 @@ public class StandardHandleInheritanceWiringTests
     // out at four call sites, and this test could only ever read the one it happened to anchor on.
     // Pointing at the definition is what makes "the verb set cannot drift" true rather than
     // "the copy next to the call cannot drift".
-    private const string LaneVerbPredicate = "static bool IsLaneVerb(string verb)";
+    private const string LaneVerbPredicate = "static bool CanRecordTerminalSettle(string verb)";
 
     [Fact]
     public void The_cli_clears_its_own_standard_handle_inheritance_on_every_lane_verb()
@@ -49,10 +49,10 @@ public class StandardHandleInheritanceWiringTests
 
         // The guard immediately above it, reading the named set rather than a copy of the tuple.
         int guardLine = Array.FindLastIndex(
-            lines, callLine, line => line.Contains("IsLaneVerb(", StringComparison.Ordinal));
+            lines, callLine, line => line.Contains("CanRecordTerminalSettle(", StringComparison.Ordinal));
         Assert.True(
             guardLine >= 0,
-            $"the {Call} call in {EntryPoint} has no IsResultVerb guard above it. If the guard was rewritten "
+            $"the {Call} call in {EntryPoint} has no CanRecordTerminalSettle guard above it. If the guard was rewritten "
             + "as a literal verb tuple, put it back on the named set -- that is the only thing keeping this "
             + "test's verb assertions below pointed at the set the rest of the file actually branches on.");
 
@@ -65,18 +65,23 @@ public class StandardHandleInheritanceWiringTests
             $"{EntryPoint} no longer defines `{LaneVerbPredicate}`, so nothing in this file states once "
             + "which verbs launch a lane (#2030 review, record-once).");
 
-        // The predicate's expression may wrap, so read its declaration and the short list that
-        // follows rather than only the signature line.
         var definition = string.Join(' ', lines.Skip(definitionLine).Take(4));
-        foreach (var verb in new[] { "run", "dispatch", "redispatch", "resume" })
+        foreach (var verb in new[] { "cancel", "decide", "resolve" })
         {
             Assert.Contains($"\"{verb}\"", definition, StringComparison.Ordinal);
         }
 
-        Assert.DoesNotContain("\"watch\"", definition, StringComparison.Ordinal);
-        Assert.DoesNotContain("\"daemon\"", definition, StringComparison.Ordinal);
-        Assert.DoesNotContain("\"cancel\"", definition, StringComparison.Ordinal);
-        Assert.DoesNotContain("\"resolve\"", definition, StringComparison.Ordinal);
+        var laneDefinitionLine = Array.FindIndex(
+            lines, line => line.Contains("static bool IsLaneVerb(string verb)", StringComparison.Ordinal));
+        Assert.True(laneDefinitionLine >= 0, $"{EntryPoint} no longer defines IsLaneVerb.");
+        var laneDefinition = string.Join(' ', lines.Skip(laneDefinitionLine).Take(2));
+        foreach (var verb in new[] { "run", "dispatch", "redispatch", "resume" })
+        {
+            Assert.Contains($"\"{verb}\"", laneDefinition, StringComparison.Ordinal);
+        }
+
+        Assert.DoesNotContain("\"watch\"", laneDefinition, StringComparison.Ordinal);
+        Assert.DoesNotContain("\"daemon\"", laneDefinition, StringComparison.Ordinal);
     }
 
     [Fact]

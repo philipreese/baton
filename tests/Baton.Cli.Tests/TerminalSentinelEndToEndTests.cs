@@ -282,13 +282,13 @@ public class TerminalSentinelEndToEndTests
     }
 
     /// <summary>
-    /// #2030's retained-install regression: the real CLI is launched through the same PowerShell
-    /// redirection shape a lane uses. The marker is after the redirect, so it can exist only after
-    /// the wrapper observed EOF from Baton; a bounded wrapper exit proves no inherited handle kept
-    /// the command (and therefore its loaded Baton.Cli.dll) alive after terminal settlement.
+    /// #2030's discriminating retained-pipe regression: the real CLI is launched through the same
+    /// PowerShell redirection shape a lane uses. Its settle-time delivery probe runs a fixture git
+    /// which leaves a sleeping descendant holding every inherited handle. Before the fix that
+    /// descendant retains the wrapper's pipe after Baton exits; the marker cannot be written.
     /// </summary>
     [Fact]
-    public async Task A_terminal_one_shot_command_releases_its_redirecting_wrapper_after_settlement()
+    public async Task A_terminal_one_shot_command_contains_a_delivery_probe_descendant_before_wrapper_eof()
     {
         var testRoot = Path.Combine(Path.GetTempPath(), $"cli-wrapper-exit-{Guid.NewGuid():N}");
         var roomDirectory = Path.Combine(testRoot, "task");
@@ -298,16 +298,22 @@ public class TerminalSentinelEndToEndTests
             var bindingsFilePath = await WriteNoOpBindingsAsync(testRoot);
             var markerPath = Path.Combine(testRoot, "wrapper-completed");
             var logPath = Path.Combine(testRoot, "wrapper.log");
+            var fixtureBin = Path.Combine(testRoot, "fixture-bin");
+            await WriteLingeringGitFixtureAsync(fixtureBin);
 
             using var wrapper = StartRedirectingPowerShellWrapper(
-                markerPath, logPath,
+                markerPath, logPath, fixtureBin,
                 "run", workflowFilePath, "--bindings", bindingsFilePath, "--room-dir", roomDirectory);
             await BoundedProcessWait.RunToExitAsync(
                 wrapper, TimeSpan.FromSeconds(30), TestContext.Current.CancellationToken);
 
             Assert.Equal(0, wrapper.ExitCode);
             Assert.True(File.Exists(markerPath), "the wrapper did not observe Baton stdout/stderr reaching EOF after settlement");
-            Assert.True(File.Exists(Path.Combine(roomDirectory, "terminal.json")));
+            var sentinelPath = Path.Combine(roomDirectory, "terminal.json");
+            Assert.True(File.Exists(sentinelPath), "the terminal fact was not written before delivery-probe cleanup");
+            var releasedSentinelPath = Path.Combine(roomDirectory, "terminal.released.json");
+            File.Move(sentinelPath, releasedSentinelPath);
+            Assert.True(File.Exists(releasedSentinelPath), "the settled room's sentinel was not exclusively releasable");
         }
         finally
         {
@@ -643,12 +649,14 @@ public class TerminalSentinelEndToEndTests
         return Process.Start(startInfo) ?? throw new InvalidOperationException("Failed to start 'baton'.");
     }
 
-    private static Process StartRedirectingPowerShellWrapper(string markerPath, string logPath, params string[] args)
+    private static Process StartRedirectingPowerShellWrapper(
+        string markerPath, string logPath, string fixtureBin, params string[] args)
     {
         static string Quote(string value) => $"'{value.Replace("'", "''", StringComparison.Ordinal)}'";
 
         var batonArguments = string.Join(' ', args.Select(Quote));
-        var script = $"& dotnet exec {Quote(typeof(RunCommand).Assembly.Location)} {batonArguments} *> {Quote(logPath)}; "
+        var script = $"$env:PATH = {Quote(fixtureBin)} + ';' + $env:PATH; "
+            + $"& dotnet exec {Quote(typeof(RunCommand).Assembly.Location)} {batonArguments} *> {Quote(logPath)}; "
             + $"if ($LASTEXITCODE -eq 0) {{ New-Item -ItemType File -Path {Quote(markerPath)} | Out-Null; exit 0 }}; exit $LASTEXITCODE";
         var startInfo = new ProcessStartInfo("powershell")
         {
@@ -662,6 +670,18 @@ public class TerminalSentinelEndToEndTests
         startInfo.ArgumentList.Add(script);
 
         return Process.Start(startInfo) ?? throw new InvalidOperationException("Failed to start the PowerShell wrapper.");
+    }
+
+    private static async Task WriteLingeringGitFixtureAsync(string fixtureBin)
+    {
+        Directory.CreateDirectory(fixtureBin);
+        var script = "@echo off\r\n"
+            + "if \"%1\"==\"config\" (echo https://example.invalid/fixture.git& exit /b 0)\r\n"
+            + "if \"%1\"==\"rev-parse\" (echo C:\\fixture\\.git& exit /b 0)\r\n"
+            + "start \"\" /b powershell -NoProfile -Command \"Start-Sleep -Seconds 120\"\r\n"
+            + "echo 1\t0\tfixture.txt\r\n"
+            + "exit /b 0\r\n";
+        await File.WriteAllTextAsync(Path.Combine(fixtureBin, "git.cmd"), script);
     }
 
     private static async Task<string> WriteOneStepWorkflowAsync(string directory)

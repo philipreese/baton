@@ -163,14 +163,15 @@ if (args.Length == 0 || !knownSubcommands.Contains(args[0]))
 // waiting for redirected stdout/stderr to reach EOF. Every child .NET spawns inherits a duplicate of
 // those handles whether or not its own streams are redirected, so one straggler can keep both the
 // wrapper and this installed command alive after its result is complete. Clear them before the first
-// handler spawn for every command that drives a lane. Cancel and resolve settle through the shared
-// TerminalSettleRecorder seam, whose direct children are contained independently.
+// handler spawn for every command that can settle a room. Run, dispatch, cancel and resolve all
+// reach TerminalSettleRecorder, whose delivery probe starts direct children after terminal.json is
+// durable, so they share this ownership boundary rather than each reimplementing it.
 // Protected invariant: after a one-shot command has reported its result and room settlement, Baton
 // owns no background activity or child/process handle that can keep that command or its install alive.
 // The daemon is deliberately outside this set: DetachedProcess clears its handles only when it launches
 // a detached lane, preserving the daemon's distinct lifetime. Why redirects alone cannot fix this is
-// StandardHandleInheritance's own remarks; the lane-verb set is IsLaneVerb at this file's foot.
-if (IsLaneVerb(args[0]))
+// StandardHandleInheritance's own remarks; the terminal-delivery verb set is at this file's foot.
+if (CanRecordTerminalSettle(args[0]))
 {
     Baton.Core.Internal.StandardHandleInheritance.Disable();
 }
@@ -691,6 +692,11 @@ catch (BatonFlowException ex)
 // The one predicate that is not this set (the pre-ledger sentinel write in the BatonFlowException
 // catch above) says at its own site why it is narrower.
 static bool IsLaneVerb(string verb) => verb is "run" or "dispatch" or "redispatch" or "resume";
+
+// Every one-shot command which can reach TerminalSettleRecorder. The daemon deliberately remains
+// outside this set: DetachedProcess owns its distinct, detached lifetime.
+static bool CanRecordTerminalSettle(string verb) =>
+    IsLaneVerb(verb) || verb is "cancel" or "decide" or "resolve";
 
 // #1382 F8: the one place either BatonFlowException catch above prints an error, so a Try line set on
 // a future WorkflowLockedException/FlowJournalHeldException is never silently dropped again.
