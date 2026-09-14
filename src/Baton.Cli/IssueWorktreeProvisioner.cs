@@ -55,6 +55,9 @@ namespace Baton.Cli;
 /// </remarks>
 public static class IssueWorktreeProvisioner
 {
+    /// <summary>The exact workspace and branch selected while provisioning an issue lane.</summary>
+    public sealed record ProvisionedIssueWorktree(string Workspace, string Branch);
+
     /// <summary>
     /// The branch <c>gh issue develop</c> is asked to create for <paramref name="issue"/>. <b>Derived,
     /// never queried</b> — the name is this method's ruling (spec/baton.md §13), so a later reader that
@@ -123,7 +126,7 @@ public static class IssueWorktreeProvisioner
     public static readonly TimeSpan SpawnTimeout = TimeSpan.FromMinutes(2);
 
     /// <summary>
-    /// Provisions and trusts the worktree for <paramref name="issue"/>, returning its path.
+    /// Provisions and trusts the worktree for <paramref name="issue"/>, returning the exact path and branch selected.
     /// </summary>
     /// <param name="issue">The GitHub issue number.</param>
     /// <param name="repositoryDirectory">The checkout <c>gh</c> and <c>git</c> are run in.</param>
@@ -147,7 +150,7 @@ public static class IssueWorktreeProvisioner
     /// </param>
     /// <exception cref="CliArgumentException">Any of the three steps failed, with the tool's own output in the message.</exception>
     /// <exception cref="ProjectNotTrustedException">The trust step's identity probe answered nothing (for the workspace or for a recorded path), or the repository is revoked (#2121), so no ceiling was recorded — see the type remarks.</exception>
-    public static async Task<string> ProvisionAsync(
+    public static async Task<ProvisionedIssueWorktree> ProvisionAsync(
         int issue,
         string repositoryDirectory,
         string? worktreeRoot,
@@ -168,40 +171,101 @@ public static class IssueWorktreeProvisioner
                 $"Cannot derive a worktree root from '{repositoryDirectory}' — it has no parent directory.",
                 "set Queue.WorktreeRoot in ~/.baton/settings.json to say where w<n> worktrees belong.");
 
-        var workspace = Path.Combine(root, $"w{issue}");
-        var branch = BranchNameFor(issue);
+        var firstWorkspace = Path.Combine(root, $"w{issue}");
+        var firstBranch = BranchNameFor(issue);
 
-        if (Directory.Exists(workspace))
+        if (Directory.Exists(firstWorkspace))
         {
             // Not an error: the runner's own habit is to re-queue against a worktree that already
             // exists. Trust it and hand it back rather than failing the add -- `git worktree add` would
             // refuse anyway, and refusing here would make a re-add of a live lane impossible.
-            await TrustAsync(workspace, probe, output: output, cancellationToken: cancellationToken).ConfigureAwait(false);
-            return workspace;
+            await TrustAsync(firstWorkspace, probe, output: output, cancellationToken: cancellationToken).ConfigureAwait(false);
+            return new ProvisionedIssueWorktree(firstWorkspace, firstBranch);
         }
 
-        var (developExit, developOutput) = await runner(
-            "gh", ["issue", "develop", issue.ToString(System.Globalization.CultureInfo.InvariantCulture),
-                "--name", branch, "--repo", repository],
-            repositoryDirectory, cancellationToken).ConfigureAwait(false);
-        if (developExit != 0)
+        for (var suffix = 1; suffix <= 100; suffix++)
         {
-            throw new CliArgumentException(
-                $"'gh issue develop {issue} --name {branch}' failed (exit {developExit}): {developOutput.Trim()}",
-                "check that the issue exists and that 'gh' is authenticated for this repository.");
-        }
+            var branch = suffix == 1 ? firstBranch : $"{firstBranch}-{suffix}";
+            var workspace = suffix == 1 ? firstWorkspace : Path.Combine(root, $"w{issue}-{suffix}");
+            if (Directory.Exists(workspace))
+            {
+                continue;
+            }
 
-        var (worktreeExit, worktreeOutput) = await runner(
-            "git", ["worktree", "add", workspace, branch], repositoryDirectory, cancellationToken).ConfigureAwait(false);
-        if (worktreeExit != 0)
-        {
+            if (suffix > 1 && await BranchExistsAsync(branch, repositoryDirectory, runner, cancellationToken).ConfigureAwait(false))
+            {
+                continue;
+            }
+
+            var (developExit, developOutput) = await runner(
+                "gh", ["issue", "develop", issue.ToString(System.Globalization.CultureInfo.InvariantCulture),
+                    "--name", branch, "--repo", repository],
+                repositoryDirectory, cancellationToken).ConfigureAwait(false);
+            if (developExit != 0)
+            {
+                if (await BranchExistsAsync(branch, repositoryDirectory, runner, cancellationToken).ConfigureAwait(false))
+                {
+                    continue;
+                }
+
+                throw new CliArgumentException(
+                    $"'gh issue develop {issue} --name {branch}' failed (exit {developExit}): {developOutput.Trim()}",
+                    "check that the issue exists and that 'gh' is authenticated for this repository.");
+            }
+
+            var (worktreeExit, worktreeOutput) = await runner(
+                "git", ["worktree", "add", workspace, branch], repositoryDirectory, cancellationToken).ConfigureAwait(false);
+            if (worktreeExit == 0)
+            {
+                await TrustAsync(workspace, probe, output: output, cancellationToken: cancellationToken).ConfigureAwait(false);
+                return new ProvisionedIssueWorktree(workspace, branch);
+            }
+
+            if (Directory.Exists(workspace))
+            {
+                continue;
+            }
+
             throw new CliArgumentException(
                 $"'git worktree add {workspace} {branch}' failed (exit {worktreeExit}): {worktreeOutput.Trim()}",
-                $"the branch '{branch}' exists on the remote now — remove any stale worktree at '{workspace}' and retry.");
+                $"the branch '{branch}' could not be attached at '{workspace}'; inspect the diagnostic and retry.");
         }
 
-        await TrustAsync(workspace, probe, output: output, cancellationToken: cancellationToken).ConfigureAwait(false);
-        return workspace;
+        throw new CliArgumentException(
+            $"Could not select a free branch and workspace for issue {issue} after 100 deterministic attempts.",
+            "remove stale issue worktrees or retry after concurrent queue adds finish.");
+    }
+
+    private static async Task<bool> BranchExistsAsync(
+        string branch,
+        string repositoryDirectory,
+        Func<string, IReadOnlyList<string>, string, CancellationToken, Task<(int ExitCode, string Output)>> runner,
+        CancellationToken cancellationToken)
+    {
+        var (localExit, localOutput) = await runner(
+            "git", ["show-ref", "--verify", "--quiet", $"refs/heads/{branch}"], repositoryDirectory, cancellationToken)
+            .ConfigureAwait(false);
+        if (localExit == 0)
+        {
+            return true;
+        }
+        if (localExit != 1)
+        {
+            throw new CliArgumentException(
+                $"Could not determine whether local branch '{branch}' exists (exit {localExit}): {localOutput.Trim()}",
+                "resolve the git error and retry; a branch suffix is selected only after a proven collision.");
+        }
+
+        var (remoteExit, remoteOutput) = await runner(
+            "git", ["ls-remote", "--heads", "origin", branch], repositoryDirectory, cancellationToken).ConfigureAwait(false);
+        if (remoteExit != 0)
+        {
+            throw new CliArgumentException(
+                $"Could not determine whether remote branch '{branch}' exists (exit {remoteExit}): {remoteOutput.Trim()}",
+                "resolve the git error and retry; a branch suffix is selected only after a proven collision.");
+        }
+
+        return !string.IsNullOrWhiteSpace(remoteOutput);
     }
 
     /// <summary>

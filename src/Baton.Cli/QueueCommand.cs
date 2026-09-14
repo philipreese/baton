@@ -50,7 +50,7 @@ public static class QueueCommand
         CancellationToken cancellationToken,
         string? repositoryDirectory,
         Func<string, CancellationToken, Task<RepositoryIdentity?>> repositoryResolver,
-        Func<int, string, string?, string, TextWriter, CancellationToken, Task<string>> issueProvisioner,
+        Func<int, string, string?, string, TextWriter, CancellationToken, Task<IssueWorktreeProvisioner.ProvisionedIssueWorktree>> issueProvisioner,
         Action<string, string>? writeSpecFile = null)
     {
         ArgumentNullException.ThrowIfNull(options);
@@ -78,7 +78,7 @@ public static class QueueCommand
         TextWriter output,
         string? repositoryDirectory,
         Func<string, CancellationToken, Task<RepositoryIdentity?>> repositoryResolver,
-        Func<int, string, string?, string, TextWriter, CancellationToken, Task<string>> issueProvisioner,
+        Func<int, string, string?, string, TextWriter, CancellationToken, Task<IssueWorktreeProvisioner.ProvisionedIssueWorktree>> issueProvisioner,
         Action<string, string>? writeSpecFile,
         CancellationToken cancellationToken)
     {
@@ -158,7 +158,7 @@ public static class QueueCommand
         // Provisioning first, before anything is written to the queue: a `gh issue develop` that fails
         // must leave no half-added item behind, the same pre-provision-refusal placement
         // DispatchCommand's own drain/continue checks use.
-        var workspace = options.Issue is { } issue
+        var provisioned = options.Issue is { } issue
             ? await issueProvisioner(
                 issue,
                 sourceRepository,
@@ -166,7 +166,8 @@ public static class QueueCommand
                 issueRepository!,
                 output,
                 cancellationToken).ConfigureAwait(false)
-            : Path.GetFullPath(options.WorkspaceDirectory!);
+            : null;
+        var workspace = provisioned?.Workspace ?? Path.GetFullPath(options.WorkspaceDirectory!);
 
         if (!Directory.Exists(workspace))
         {
@@ -203,7 +204,7 @@ public static class QueueCommand
             Reason = options.Reason,
             Issue = options.Issue,
             Stage = options.Lifecycle ? WorkStage.Implement : null,
-            Branch = options.Lifecycle ? IssueWorktreeProvisioner.BranchNameFor(options.Issue!.Value) : null,
+            Branch = options.Lifecycle ? provisioned!.Branch : null,
             Repository = issueRepository,
             // Explicit false distinguishes a newly-created lifecycle item from a pre-#2131 item
             // whose persisted history has no trustworthy automatic-fix budget.

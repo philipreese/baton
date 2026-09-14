@@ -104,9 +104,9 @@ public sealed record QueueItem
     public WorkStage? Stage { get; init; }
 
     /// <summary>
-    /// The lane's branch — <c>&lt;issue&gt;-lane</c>, what <c>IssueWorktreeProvisioner</c> created.
-    /// Recorded rather than re-derived at read time so an item whose branch was renamed by hand still
-    /// says which branch its PR was looked for on.
+    /// The exact branch selected by <c>IssueWorktreeProvisioner</c> (first lane
+    /// <c>&lt;issue&gt;-lane</c>, or its collision suffix). Recorded rather than re-derived at read time
+    /// so PR discovery follows the provisioned lane.
     /// </summary>
     public string? Branch { get; init; }
 
