@@ -151,6 +151,33 @@ public sealed class QueueStoreTests
         }
     }
 
+    [Theory]
+    [InlineData("{}")]
+    [InlineData("{\"size\":\"small\"}")]
+    [InlineData("{\"size\":\"small\",\"rationale\":\" \"}")]
+    [InlineData("{\"size\":1,\"rationale\":\"one cluster\"}")]
+    [InlineData("{\"size\":\"small\",\"rationale\":42}")]
+    [InlineData("{\"size\":\"unknown\",\"rationale\":\"guessed\"}")]
+    [InlineData("{\"size\":\"unknown\",\"rationale\":\" \"}")]
+    public async Task A_malformed_current_declaration_is_refused_as_invalid_queue_json(string declarationJson)
+    {
+        var path = TempQueuePath();
+        Directory.CreateDirectory(Path.GetDirectoryName(path)!);
+        try
+        {
+            var json = """
+                {"items":[{"Tag":"malformed","Role":"implement","Workspace":"C:\\repos\\w1","SpecFile":"C:\\baton\\queue\\specs\\t.md","DeclaredTaskSize":DECLARATION}],"held":false}
+                """.Replace("DECLARATION", declarationJson, StringComparison.Ordinal);
+            await File.WriteAllTextAsync(path, json, Ct);
+
+            await Assert.ThrowsAsync<QueueStoreException>(() => QueueStore.LoadAsync(path, Ct));
+        }
+        finally
+        {
+            Cleanup(path);
+        }
+    }
+
     [Fact]
     public async Task A_malformed_file_is_refused_rather_than_read_as_an_empty_queue()
     {

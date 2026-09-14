@@ -962,7 +962,9 @@ public static class QueueLauncher
             MaxToolSteps: item.MaxToolSteps,
             OverrideRunwayReason: item.OverrideRunwayReason,
             Skills: NormalizeSkillsForLaunch(item),
-            DeclaredTaskSize: item.DeclaredTaskSize);
+            DeclaredTaskSize: item.DeclaredTaskSize.Size == DeclaredTaskSize.Unknown
+                ? null
+                : item.DeclaredTaskSize);
     }
 
     /// <summary>

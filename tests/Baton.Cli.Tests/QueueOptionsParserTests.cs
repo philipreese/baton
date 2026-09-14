@@ -32,6 +32,11 @@ public sealed class QueueOptionsParserTests
 
     [Theory]
     [InlineData("tiny", "because")]
+    [InlineData("0", "because")]
+    [InlineData("1", "because")]
+    [InlineData("2", "because")]
+    [InlineData("3", "because")]
+    [InlineData("4", "because")]
     [InlineData("small", " ")]
     [InlineData(null, "because")]
     [InlineData("small", null)]

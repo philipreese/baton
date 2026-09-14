@@ -26,7 +26,10 @@ public readonly record struct TaskSizeDeclaration(
 
     public static TaskSizeDeclaration Parse(string size, string rationale)
     {
-        if (!Enum.TryParse<DeclaredTaskSize>(size, true, out var parsed) || parsed == DeclaredTaskSize.Unknown)
+        if (!Enum.TryParse<DeclaredTaskSize>(size, true, out var parsed)
+            || !Enum.IsDefined(parsed)
+            || parsed == DeclaredTaskSize.Unknown
+            || !string.Equals(size, parsed.ToString(), StringComparison.OrdinalIgnoreCase))
         {
             throw new ArgumentException($"Declared task size must be one of {Usage}.", nameof(size));
         }
@@ -61,23 +64,46 @@ public sealed class TaskSizeDeclarationJsonConverter : JsonConverter<TaskSizeDec
             throw new JsonException("A task-size declaration must be an object or null.");
         }
 
-        var size = DeclaredTaskSize.Unknown;
+        string? size = null;
         string? rationale = null;
-        while (reader.Read() && reader.TokenType != JsonTokenType.EndObject)
+        var sawSize = false;
+        var sawRationale = false;
+        var ended = false;
+        while (reader.Read())
         {
+            if (reader.TokenType == JsonTokenType.EndObject)
+            {
+                ended = true;
+                break;
+            }
+
             if (reader.TokenType != JsonTokenType.PropertyName)
             {
                 throw new JsonException("A task-size declaration contains invalid JSON.");
             }
 
             var propertyName = reader.GetString();
-            reader.Read();
+            if (!reader.Read())
+            {
+                throw new JsonException("A task-size declaration ended before its property value.");
+            }
+
             switch (propertyName)
             {
                 case "size":
-                    size = JsonSerializer.Deserialize<DeclaredTaskSize>(ref reader, options);
+                    if (sawSize || reader.TokenType != JsonTokenType.String)
+                    {
+                        throw new JsonException("A task-size declaration requires one textual size.");
+                    }
+                    sawSize = true;
+                    size = reader.GetString();
                     break;
                 case "rationale":
+                    if (sawRationale || reader.TokenType is not (JsonTokenType.String or JsonTokenType.Null))
+                    {
+                        throw new JsonException("A task-size declaration permits one textual rationale or null.");
+                    }
+                    sawRationale = true;
                     rationale = reader.TokenType == JsonTokenType.Null ? null : reader.GetString();
                     break;
                 default:
@@ -86,7 +112,28 @@ public sealed class TaskSizeDeclarationJsonConverter : JsonConverter<TaskSizeDec
             }
         }
 
-        return new TaskSizeDeclaration(size, rationale);
+        if (!ended || !sawSize || size is null)
+        {
+            throw new JsonException("A task-size declaration object requires a size.");
+        }
+
+        if (string.Equals(size, "unknown", StringComparison.OrdinalIgnoreCase))
+        {
+            if (rationale is not null)
+            {
+                throw new JsonException("An unknown legacy task-size declaration cannot carry a rationale.");
+            }
+            return TaskSizeDeclaration.Unknown;
+        }
+
+        try
+        {
+            return TaskSizeDeclaration.Parse(size, rationale ?? string.Empty);
+        }
+        catch (ArgumentException ex)
+        {
+            throw new JsonException(ex.Message, ex);
+        }
     }
 
     public override void Write(

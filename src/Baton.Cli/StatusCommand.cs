@@ -85,7 +85,15 @@ public static class StatusCommand
             var sentinel = await TerminalSentinelWriter.TryReadAsync(options.RoomDirectoryPath, cancellationToken).ConfigureAwait(false);
             if (sentinel is not null)
             {
-                PrintSentinel(output, options.Json, sentinel);
+                var sentinelBindings = await RoomAdapterLookup.TryLoadBindingsAsync(
+                    options.RoomDirectoryPath, cancellationToken).ConfigureAwait(false);
+                PrintSentinel(
+                    output,
+                    options.Json,
+                    sentinel with
+                    {
+                        DeclaredTaskSize = DeclaredTaskSizeFrom(sentinelBindings, sentinel.DeclaredTaskSize),
+                    });
                 return;
             }
         }
@@ -167,8 +175,7 @@ public static class StatusCommand
             var roomBindings = await RoomAdapterLookup.TryLoadBindingsAsync(options.RoomDirectoryPath, cancellationToken)
                 .ConfigureAwait(false);
             var runway = RunwayAdmissionView.AllFrom(roomBindings.Values.Select(entry => entry.RunwayAdmission));
-            var declaredTaskSize = roomBindings.Values.Select(entry => entry.DeclaredTaskSize)
-                .FirstOrDefault(size => size is not null) ?? TaskSizeDeclaration.Unknown;
+            var declaredTaskSize = DeclaredTaskSizeFrom(roomBindings, TaskSizeDeclaration.Unknown);
 
             if (options.Json)
             {
@@ -590,6 +597,21 @@ public static class StatusCommand
         {
             output.WriteLine($"  {sentinel.Error}");
         }
+    }
+
+    private static TaskSizeDeclaration DeclaredTaskSizeFrom(
+        IReadOnlyDictionary<string, WorkerBindingConfigEntry> bindings,
+        TaskSizeDeclaration fallback)
+    {
+        foreach (var binding in bindings.Values)
+        {
+            if (binding.DeclaredTaskSize is { } declaration && declaration.Size != DeclaredTaskSize.Unknown)
+            {
+                return declaration;
+            }
+        }
+
+        return fallback;
     }
 
     private static void PrintState(
