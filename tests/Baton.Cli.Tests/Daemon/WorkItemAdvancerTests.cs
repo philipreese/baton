@@ -297,7 +297,7 @@ public sealed class WorkItemAdvancerTests
 
             Task<string?> RemoveSentinelBeforeMutation(string _, CancellationToken __)
             {
-                File.Delete(Path.Combine(room, TerminalSentinelWriter.TerminalSentinelFileName));
+                FileCleanup.EnsureDeleted(Path.Combine(room, TerminalSentinelWriter.TerminalSentinelFileName));
                 return Task.FromResult<string?>(PushedSha);
             }
 
