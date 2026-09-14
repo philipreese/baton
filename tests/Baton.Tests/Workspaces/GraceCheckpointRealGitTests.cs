@@ -164,8 +164,9 @@ public sealed class GraceCheckpointRealGitTests
         using var fixture = new GraceRepository();
         var originalHead = fixture.Head;
         var signalPath = Path.Combine(Path.GetTempPath(), $"grace-remote-probe-{Guid.NewGuid():N}.txt");
+        var temporarySignalPath = signalPath + ".tmp";
         var timeout = TimeSpan.FromSeconds(1);
-        var command = $"$child = Start-Process -FilePath powershell.exe -ArgumentList '-NoLogo','-NoProfile','-NonInteractive','-Command','Start-Sleep -Seconds 30' -PassThru; [IO.File]::WriteAllText('{signalPath.Replace("'", "''")}', \"$PID,$($child.Id)\"); Start-Sleep -Seconds 30";
+        var command = $"$child = Start-Process -FilePath powershell.exe -ArgumentList '-NoLogo','-NoProfile','-NonInteractive','-Command','Start-Sleep -Seconds 30' -PassThru; [IO.File]::WriteAllText('{temporarySignalPath.Replace("'", "''")}', \"$PID,$($child.Id)\"); [IO.File]::Move('{temporarySignalPath.Replace("'", "''")}', '{signalPath.Replace("'", "''")}'); Start-Sleep -Seconds 30";
         Task<GraceCheckpoint?>? capture = null;
         Process? helper = null;
         Process? child = null;
@@ -214,6 +215,7 @@ public sealed class GraceCheckpointRealGitTests
                     helper?.Dispose();
                     child?.Dispose();
                     FileCleanup.Delete(signalPath);
+                    FileCleanup.Delete(temporarySignalPath);
                 }
                 catch when (primaryFailure is not null)
                 {
@@ -348,6 +350,8 @@ public sealed class GraceCheckpointRealGitTests
 
         var ids = (await File.ReadAllTextAsync(signalPath)).Split(',');
         Assert.Equal(2, ids.Length);
-        return (Process.GetProcessById(int.Parse(ids[0])), Process.GetProcessById(int.Parse(ids[1])));
+        Assert.True(int.TryParse(ids[0], out var helperPid) && helperPid > 0, "The probe root PID was invalid.");
+        Assert.True(int.TryParse(ids[1], out var childPid) && childPid > 0, "The probe child PID was invalid.");
+        return (Process.GetProcessById(helperPid), Process.GetProcessById(childPid));
     }
 }
