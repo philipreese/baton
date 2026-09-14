@@ -116,7 +116,85 @@ public sealed class CostLedgerStoreTests
         new LogEntry.FlowLogEntry(new FlowEvent.ExecutionSucceeded(executionId)),
     ];
 
+    [Fact]
+    public void Artifact_checkpoint_has_its_own_attributable_row_without_repricing_its_predecessor()
+    {
+        var room = NewRoom();
+        Directory.CreateDirectory(room);
+        try
+        {
+            var original = new ExecutionId("original");
+            var checkpoint = new ExecutionId("checkpoint");
+            var checkpointRequest = AcceptedRequest(checkpoint, "review", "claude", "claude-opus-5");
+            var entries = SettledExecution(original, "claude", "claude-opus-5", Start, "review");
+            entries.Add(new LogEntry.FlowLogEntry(new FlowEvent.ArtifactCheckpointAttempted(
+                checkpoint, original, ["report.md"], checkpointRequest)));
+            entries.Add(new LogEntry.CoreLogEntry(new CoreEvent.ExecutionStarted(checkpoint, 2), Start.AddSeconds(3)));
+            entries.Add(new LogEntry.CoreLogEntry(new CoreEvent.ExecutionExited(checkpoint, 0, CoreExitReason.Natural), Start.AddSeconds(4)));
+            entries.Add(new LogEntry.FlowLogEntry(new FlowEvent.ArtifactCheckpointCompleted(
+                checkpoint, CoreExitReason.Natural, new WorkerUsage(TokensIn: 7, TokensOut: 3))));
+
+            var rows = CostLedgerStore.BuildEntries(entries, room, Repository);
+
+            Assert.Equal(2, rows.Count);
+            var checkpointRow = Assert.Single(rows, row => row.Execution == checkpoint.Value);
+            Assert.Equal("review", checkpointRow.Role);
+            Assert.Equal("claude", checkpointRow.Adapter);
+            Assert.Equal("claude-opus-5", checkpointRow.Model);
+            Assert.Equal("Succeeded", checkpointRow.Outcome);
+            Assert.Equal(original.Value, checkpointRow.PredecessorExecution);
+            Assert.Equal(CoreExitReason.Natural, checkpointRow.ExitReason);
+            Assert.Equal(7, checkpointRow.TokensIn);
+            Assert.Equal(3, checkpointRow.TokensOut);
+            Assert.Single(rows, row => row.Execution == original.Value);
+        }
+        finally
+        {
+            DirectoryCleanup.DeleteRecursively(room);
+        }
+    }
+
     private static string NewRoom() => Path.Combine(Path.GetTempPath(), $"cost-ledger-{Guid.NewGuid():N}");
+
+    [Fact]
+    public void Artifact_checkpoint_terminal_outcomes_remain_separate_cost_rows()
+    {
+        var room = NewRoom();
+        Directory.CreateDirectory(room);
+        try
+        {
+            var predecessor = new ExecutionId("original");
+            var cancelled = new ExecutionId("checkpoint-cancelled");
+            var arrested = new ExecutionId("checkpoint-arrested");
+            var entries = new List<LogEntry>();
+            foreach (var (checkpoint, exitReason, arrestReason) in new[]
+            {
+                (cancelled, CoreExitReason.CancelRequested, (ArrestReason?)null),
+                (arrested, CoreExitReason.TimedOut, (ArrestReason?)ArrestReason.ToolStepCap),
+            })
+            {
+                entries.Add(new LogEntry.FlowLogEntry(new FlowEvent.ArtifactCheckpointAttempted(
+                    checkpoint, predecessor, ["report.md"], AcceptedRequest(checkpoint, "review", "claude", "claude-opus-5"))));
+                entries.Add(new LogEntry.CoreLogEntry(new CoreEvent.ExecutionStarted(checkpoint, 1), Start));
+                entries.Add(new LogEntry.CoreLogEntry(new CoreEvent.ExecutionExited(checkpoint, 0, exitReason), Start.AddSeconds(1)));
+                entries.Add(new LogEntry.FlowLogEntry(new FlowEvent.ArtifactCheckpointCompleted(
+                    checkpoint, exitReason, new WorkerUsage(TokensIn: 1), arrestReason)));
+            }
+
+            var rows = CostLedgerStore.BuildEntries(entries, room, Repository).ToDictionary(row => row.Execution!);
+
+            Assert.Equal(2, rows.Count);
+            Assert.Equal("Cancelled", rows[cancelled.Value].Outcome);
+            Assert.Equal("Arrested", rows[arrested.Value].Outcome);
+            Assert.All(rows.Values, row => Assert.Equal(predecessor.Value, row.PredecessorExecution));
+            Assert.Equal(CoreExitReason.CancelRequested, rows[cancelled.Value].ExitReason);
+            Assert.Equal(ArrestReason.ToolStepCap, rows[arrested.Value].ArrestReason);
+        }
+        finally
+        {
+            DirectoryCleanup.DeleteRecursively(room);
+        }
+    }
 
     private static string NewLedgerPath() =>
         Path.Combine(Path.GetTempPath(), $"cost-ledger-{Guid.NewGuid():N}.jsonl");

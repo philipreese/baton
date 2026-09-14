@@ -843,18 +843,21 @@ public sealed class CodexAppServerBrokerTests
     }
 
     [Fact]
-    public void Resume_request_reuses_the_persisted_thread_without_redeclaring_tools()
+    public void Resume_request_reuses_the_persisted_thread_with_its_narrowed_dynamic_tools()
     {
         var grant = new PermissionGrant(ReadFiles: true);
         var configuration = new CodexBrokerConfiguration(
             "C:/workspace", "gpt-5.6-luna", "low", "thread-1", true, grant, ["report.md"], false);
-        var policy = new CodexDynamicToolPolicy(grant, Path.GetTempPath(), Path.GetTempPath(), [], ["report.md"]);
+        var policy = new CodexDynamicToolPolicy(
+            grant, Path.GetTempPath(), Path.GetTempPath(), [], ["report.md"], artifactOnlyOutputNames: ["report.md"]);
 
         var parameters = CodexAppServerBroker.BuildThreadParams(configuration, policy);
 
         Assert.Equal("thread-1", parameters["threadId"]!.GetValue<string>());
-        Assert.Null(parameters["dynamicTools"]);
-        Assert.Null(parameters["config"]);
+        var tools = parameters["dynamicTools"]!.AsArray();
+        Assert.Single(tools);
+        Assert.Equal("baton_write_output", tools[0]!["name"]!.GetValue<string>());
+        Assert.NotNull(parameters["config"]);
     }
 
     [Fact]

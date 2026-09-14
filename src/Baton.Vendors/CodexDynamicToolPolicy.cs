@@ -87,6 +87,7 @@ public sealed class CodexDynamicToolPolicy
     private readonly string _outputRoot;
     private readonly IReadOnlyList<string> _inputRoots;
     private readonly HashSet<string> _declaredOutputs;
+    private readonly HashSet<string>? _artifactOnlyOutputs;
     private readonly Func<ShellCommandClass, TimeSpan> _commandCeiling;
     private readonly Func<string, Stream> _commandCaptureStreamFactory;
     private readonly Action<CancellationToken>? _beforeCommandTimeoutStartsForTest;
@@ -130,7 +131,8 @@ public sealed class CodexDynamicToolPolicy
         IEnumerable<string> producedOutputNames,
         Func<ShellCommandClass, TimeSpan>? commandCeiling = null,
         TimeProvider? timeProvider = null,
-        GhPullRequestCreateProvenance? pullRequestCreateProvenance = null)
+        GhPullRequestCreateProvenance? pullRequestCreateProvenance = null,
+        IEnumerable<string>? artifactOnlyOutputNames = null)
     {
         ArgumentNullException.ThrowIfNull(grant);
         ArgumentException.ThrowIfNullOrWhiteSpace(outputDirectory);
@@ -144,6 +146,12 @@ public sealed class CodexDynamicToolPolicy
             .Select(Path.GetFullPath).Distinct(PathComparer).ToArray();
         _declaredOutputs = producedOutputNames.Where(name => !string.IsNullOrWhiteSpace(name))
             .Select(NormalizeRelativeOutput).ToHashSet(PathComparer);
+        _artifactOnlyOutputs = artifactOnlyOutputNames is null ? null : artifactOnlyOutputNames
+            .Select(NormalizeRelativeOutput).ToHashSet(PathComparer);
+        if (_artifactOnlyOutputs is not null && !_artifactOnlyOutputs.IsSubsetOf(_declaredOutputs))
+        {
+            throw new ArgumentException("Artifact-only outputs must be declared by the worker contract.", nameof(artifactOnlyOutputNames));
+        }
         _commandCeiling = commandCeiling ?? ShellCommandCeilings.For;
         _commandCaptureStreamFactory = CreateCommandCaptureStream;
         _beforeCommandTimeoutStartsForTest = null;
@@ -215,6 +223,15 @@ public sealed class CodexDynamicToolPolicy
     public JsonArray BuildToolDefinitions()
     {
         var tools = new JsonArray();
+        if (_artifactOnlyOutputs is not null)
+        {
+            var outputSchema = TwoStringSchema("name", "One declared output name.", "content", "Complete UTF-8 file content.");
+            ((JsonObject)((JsonObject)outputSchema["properties"]!)["name"]!)["enum"] =
+                new JsonArray(_artifactOnlyOutputs.Order(PathComparer)
+                    .Select(name => (JsonNode?)JsonValue.Create(name)).ToArray());
+            tools.Add(Function(WriteOutputTool, "Write one exact missing declared output.", outputSchema));
+            return tools;
+        }
         if (_grant.ReadFiles || _inputRoots.Count > 0)
         {
             tools.Add(Function(
@@ -372,6 +389,10 @@ public sealed class CodexDynamicToolPolicy
     {
         try
         {
+            if (_artifactOnlyOutputs is not null && toolName != WriteOutputTool)
+            {
+                return CodexDynamicToolResult.Refused("Artifact checkpoint permits only declared output writes.", GrantRules.WithheldTool);
+            }
             return toolName switch
             {
                 ReadTextTool => ReadText(
@@ -768,6 +789,10 @@ public sealed class CodexDynamicToolPolicy
 
     private CodexDynamicToolResult WriteOutput(string outputName, string content)
     {
+        if (_artifactOnlyOutputs is not null && !_artifactOnlyOutputs.Contains(NormalizeRelativeOutput(outputName)))
+        {
+            throw new CodexGrantRefusedException("Artifact checkpoint permits only its still-missing declared outputs.", GrantRules.WithheldTool);
+        }
         var normalized = NormalizeRelativeOutput(outputName);
         if (!_declaredOutputs.Contains(normalized))
         {

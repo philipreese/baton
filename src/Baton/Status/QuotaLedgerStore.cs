@@ -60,7 +60,16 @@ public sealed record QuotaLedgerEntry(
     // Display/grouping only, like WorkflowStatusStepView.FailureKind; nothing parses it back.
     [property: JsonPropertyName("outcome")]
     [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
-    string? Outcome = null);
+    string? Outcome = null,
+    [property: JsonPropertyName("predecessorExecution")]
+    [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    string? PredecessorExecution = null,
+    [property: JsonPropertyName("exitReason")]
+    [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    CoreExitReason? ExitReason = null,
+    [property: JsonPropertyName("arrestReason")]
+    [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    ArrestReason? ArrestReason = null);
 
 /// <summary>
 /// Reads and writes <see cref="BatonPaths.QuotaLedgerFile"/> — the spec/baton.md §7 fleet-level burn
@@ -114,6 +123,8 @@ public static class QuotaLedgerStore
         // ExecutionBindingResolver's own doc comment for why this used to be a second, untested copy.
         var resolvedBindings = ExecutionBindingResolver.Resolve(entries);
         var outcomeByExecutionId = new Dictionary<string, string>(StringComparer.Ordinal);
+        var checkpointPredecessorByExecutionId = new Dictionary<string, string>(StringComparer.Ordinal);
+        var checkpointTerminalByExecutionId = new Dictionary<string, FlowEvent.ArtifactCheckpointCompleted>(StringComparer.Ordinal);
         var exitedAtByExecutionId = new Dictionary<string, DateTime>(StringComparer.Ordinal);
 
         foreach (var entry in entries)
@@ -130,6 +141,9 @@ public static class QuotaLedgerStore
 
             switch (flowEntry.Event)
             {
+                case FlowEvent.ArtifactCheckpointAttempted checkpoint:
+                    checkpointPredecessorByExecutionId[checkpoint.CheckpointExecutionId.Value] = checkpoint.PredecessorExecutionId.Value;
+                    break;
                 case FlowEvent.ExecutionSucceeded succeeded:
                     // #1945: kept identical to CostLedgerStore's own arm, whose remark states why the
                     // flag is read here at all.
@@ -152,6 +166,11 @@ public static class QuotaLedgerStore
 
                 case FlowEvent.ExecutionArrested arrested:
                     outcomeByExecutionId[arrested.ExecutionId.Value] = "Arrested";
+                    break;
+
+                case FlowEvent.ArtifactCheckpointCompleted checkpoint:
+                    outcomeByExecutionId[checkpoint.CheckpointExecutionId.Value] = checkpoint.TerminalOutcome;
+                    checkpointTerminalByExecutionId[checkpoint.CheckpointExecutionId.Value] = checkpoint;
                     break;
             }
         }
@@ -177,7 +196,14 @@ public static class QuotaLedgerStore
                 ThinkingTokens: usage.ThinkingTokens,
                 Turns: usage.Turns,
                 WallClockMs: usage.WallClockMs,
-                Outcome: outcome));
+                Outcome: outcome,
+                PredecessorExecution: checkpointPredecessorByExecutionId.GetValueOrDefault(executionId),
+                ExitReason: checkpointTerminalByExecutionId.TryGetValue(executionId, out var checkpointTerminal)
+                    ? checkpointTerminal.ExitReason
+                    : null,
+                ArrestReason: checkpointTerminalByExecutionId.TryGetValue(executionId, out checkpointTerminal)
+                    ? checkpointTerminal.ArrestReason
+                    : null));
         }
 
         return result;

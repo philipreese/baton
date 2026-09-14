@@ -98,6 +98,50 @@ public sealed class QuotaLedgerStoreTests
     }
 
     [Fact]
+    public void BuildEntries_preserves_each_checkpoint_terminal_outcome_without_merging_its_usage()
+    {
+        var testRoot = Path.Combine(Path.GetTempPath(), $"ledger-checkpoints-{Guid.NewGuid():N}");
+        try
+        {
+            var start = DateTime.UtcNow;
+            var predecessor = new ExecutionId("original");
+            var natural = new ExecutionId("checkpoint-natural");
+            var cancelled = new ExecutionId("checkpoint-cancelled");
+            var arrested = new ExecutionId("checkpoint-arrested");
+            var entries = new List<LogEntry>();
+            foreach (var (checkpoint, exitReason, arrestReason) in new[]
+            {
+                (natural, CoreExitReason.Natural, (ArrestReason?)null),
+                (cancelled, CoreExitReason.CancelRequested, (ArrestReason?)null),
+                (arrested, CoreExitReason.TimedOut, (ArrestReason?)ArrestReason.ToolStepCap),
+            })
+            {
+                entries.Add(new LogEntry.FlowLogEntry(new FlowEvent.ArtifactCheckpointAttempted(
+                    checkpoint, predecessor, ["report.md"])));
+                entries.Add(new LogEntry.CoreLogEntry(new CoreEvent.ExecutionStarted(checkpoint, 1), start));
+                entries.Add(new LogEntry.CoreLogEntry(new CoreEvent.ExecutionExited(checkpoint, 0, exitReason), start.AddSeconds(1)));
+                entries.Add(new LogEntry.FlowLogEntry(new FlowEvent.ArtifactCheckpointCompleted(
+                    checkpoint, exitReason, new WorkerUsage(TokensIn: 1), arrestReason)));
+            }
+
+            var built = QuotaLedgerStore.BuildEntries(entries, testRoot).ToDictionary(entry => entry.Execution!);
+
+            Assert.Equal(3, built.Count);
+            Assert.Equal("Succeeded", built[natural.Value].Outcome);
+            Assert.Equal("Cancelled", built[cancelled.Value].Outcome);
+            Assert.Equal("Arrested", built[arrested.Value].Outcome);
+            Assert.All(built.Values, entry => Assert.Equal(predecessor.Value, entry.PredecessorExecution));
+            Assert.Equal(CoreExitReason.Natural, built[natural.Value].ExitReason);
+            Assert.Equal(CoreExitReason.CancelRequested, built[cancelled.Value].ExitReason);
+            Assert.Equal(ArrestReason.ToolStepCap, built[arrested.Value].ArrestReason);
+        }
+        finally
+        {
+            DirectoryCleanup.DeleteRecursively(testRoot);
+        }
+    }
+
+    [Fact]
     public void BuildEntries_attributes_a_rebound_execution_to_its_new_adapter_and_model()
     {
         // #1781 review finding 1: BuildEntries used to re-derive the StepRebound override itself,

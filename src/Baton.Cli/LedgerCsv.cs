@@ -58,6 +58,7 @@ public static class LedgerCsv
         "runwayOverrideReason", "filesChanged", "additions", "deletions", "testFilesChanged",
         "reviewedRef", "reviewedPr", "reviewedHead", "findingsHigh", "findingsMedium", "findingsLow",
         "resolution", "resolutionReason", "label", "commits", "reviewCount", "identitySource",
+        "predecessorExecution", "exitReason", "arrestReason",
     ];
 
     /// <summary>

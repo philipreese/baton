@@ -1,4 +1,4 @@
-﻿<Project Sdk="Microsoft.NET.Sdk">
+<Project Sdk="Microsoft.NET.Sdk">
 
   <PropertyGroup>
     <TargetFramework>net10.0</TargetFramework>
@@ -25,6 +25,8 @@
 
   <ItemGroup>
     <ProjectReference Include="..\..\src\Baton\Baton.csproj" />
+    <ProjectReference Include="..\..\src\Baton.Vendors\Baton.Vendors.csproj" />
+    <ProjectReference Include="..\..\src\Baton.Cli\Baton.Cli.csproj" />
     <!-- M10 Phase 4 (issue #72): shares Baton.CrashTestHost's Scenarios builder, so this
          project's in-process recovery run binds against the identical WorkflowDefinitionSnapshot
          the killed run used, and locates that project's built assembly (via its Scenarios type's

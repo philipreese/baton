@@ -178,7 +178,20 @@ public sealed record ExecutionUsageView(
     /// </summary>
     [property: JsonPropertyName("emptyToolResults")]
     [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
-    int? EmptyToolResults = null)
+    int? EmptyToolResults = null,
+    /// <summary>The arrested execution from which an artifact checkpoint was dispatched.</summary>
+    [property: JsonPropertyName("predecessorExecutionId")]
+    [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    string? PredecessorExecutionId = null,
+    [property: JsonPropertyName("outcome")]
+    [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    string? Outcome = null,
+    [property: JsonPropertyName("exitReason")]
+    [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    CoreExitReason? ExitReason = null,
+    [property: JsonPropertyName("arrestReason")]
+    [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    ArrestReason? ArrestReason = null)
 {
     /// <summary>The capture is provably not the whole stream — <see cref="Dispatch.ExecutionStreamLogger.StdoutTruncationMarkerFileName"/>.</summary>
     public const string StreamTruncatedByRolloverReason = "stream-truncated-by-rollover";
@@ -271,6 +284,9 @@ public static class ExecutionUsageProjector
         // stream yielded no terminal reading of its own; see that site for why it is deliberately not
         // allowed to stand in for the AUTHORITATIVE terminal figure.
         var arrestedUsageByExecutionId = new Dictionary<string, WorkerUsage>(StringComparer.Ordinal);
+        var checkpointUsageByExecutionId = new Dictionary<string, WorkerUsage>(StringComparer.Ordinal);
+        var checkpointPredecessorByExecutionId = new Dictionary<string, string>(StringComparer.Ordinal);
+        var checkpointTerminalByExecutionId = new Dictionary<string, FlowEvent.ArtifactCheckpointCompleted>(StringComparer.Ordinal);
         // #1885: the JOURNALLED half of the loss announcement, filtered to the one stream that bears on
         // a billed reconciliation -- spec/baton.md §3 is where that scoping is ruled. Last one wins,
         // which is the terminal re-announcement when there is one; the reason is identical either way,
@@ -282,6 +298,11 @@ public static class ExecutionUsageProjector
             if (entry is LogEntry.FlowLogEntry { Event: FlowEvent.ExecutionRequestAccepted accepted })
             {
                 workerNameByExecutionId[accepted.Request.ExecutionId.Value] = accepted.Request.Worker;
+            }
+
+            if (entry is LogEntry.FlowLogEntry { Event: FlowEvent.ArtifactCheckpointAttempted { Request: { } checkpointRequest } })
+            {
+                workerNameByExecutionId[checkpointRequest.ExecutionId.Value] = checkpointRequest.Worker;
             }
 
             if (entry is LogEntry.FlowLogEntry flowEntry)
@@ -304,6 +325,20 @@ public static class ExecutionUsageProjector
                 if (flowEntry.Event is FlowEvent.ExecutionArrested { Usage: { } arrestedUsage } arrestedEvent)
                 {
                     arrestedUsageByExecutionId[arrestedEvent.ExecutionId.Value] = arrestedUsage;
+                }
+
+                if (flowEntry.Event is FlowEvent.ArtifactCheckpointAttempted checkpoint)
+                {
+                    checkpointPredecessorByExecutionId[checkpoint.CheckpointExecutionId.Value] = checkpoint.PredecessorExecutionId.Value;
+                }
+
+                if (flowEntry.Event is FlowEvent.ArtifactCheckpointCompleted checkpointCompletion)
+                {
+                    checkpointTerminalByExecutionId[checkpointCompletion.CheckpointExecutionId.Value] = checkpointCompletion;
+                    if (checkpointCompletion.Usage is { } checkpointUsage)
+                    {
+                        checkpointUsageByExecutionId[checkpointCompletion.CheckpointExecutionId.Value] = checkpointUsage;
+                    }
                 }
 
                 if (flowEntry.Event is FlowEvent.StreamLogLossDeclared loss
@@ -399,7 +434,9 @@ public static class ExecutionUsageProjector
             // figure would fabricate exactly the under-read the reconciliation triple exists to expose.
             // So a fallback reading reports dimensions, never a reconciliation -- the triple stays
             // withheld and the reason string stays whatever it already was.
-            var dimensions = usage ?? (arrestedUsageByExecutionId.TryGetValue(executionId, out var fromArrest) ? fromArrest : null);
+            var dimensions = usage
+                ?? (arrestedUsageByExecutionId.TryGetValue(executionId, out var fromArrest) ? fromArrest : null)
+                ?? (checkpointUsageByExecutionId.TryGetValue(executionId, out var fromCheckpoint) ? fromCheckpoint : null);
 
             // #1885: the other channel, read FIRST (spec/baton.md §3). A journalled loss must SUPPRESS
             // the reconciliation, not merely fill a reason string that happened to be empty -- so the
@@ -474,7 +511,17 @@ public static class ExecutionUsageProjector
                 reading?.ToolStepCounts?.ToolSteps,
                 reading?.ToolStepCounts?.Refused,
                 reading?.ToolStepCounts?.Repeated,
-                reading?.ToolStepCounts?.EmptyResults);
+                reading?.ToolStepCounts?.EmptyResults,
+                checkpointPredecessorByExecutionId.GetValueOrDefault(executionId),
+                checkpointTerminalByExecutionId.TryGetValue(executionId, out var checkpointTerminal)
+                    ? checkpointTerminal.TerminalOutcome
+                    : null,
+                checkpointTerminalByExecutionId.TryGetValue(executionId, out checkpointTerminal)
+                    ? checkpointTerminal.ExitReason
+                    : null,
+                checkpointTerminalByExecutionId.TryGetValue(executionId, out checkpointTerminal)
+                    ? checkpointTerminal.ArrestReason
+                    : null);
         }
 
         return result;

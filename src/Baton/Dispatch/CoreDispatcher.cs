@@ -90,8 +90,47 @@ public sealed record CoreDispatchTarget(
     // AER's own copies as the worker's. Same seam and same composition rule as OnStdoutLine above: the
     // dispatcher supplies the fact and never interprets it (Architecture Rule 1). Null on every path
     // with no journal to write to (tests, CommandWorkerAdapter), which simply records nothing.
-    Func<IReadOnlyList<EnginePlacedFile>, IReadOnlyList<string>, Task>? OnEngineFilesPlaced = null)
+    Func<IReadOnlyList<EnginePlacedFile>, IReadOnlyList<string>, Task>? OnEngineFilesPlaced = null,
+    IReadOnlyList<string>? ArtifactOnlyOutputNames = null,
+    // A bounded follow-up may write its declared artifacts into the predecessor's outbox, while its
+    // prompt and streams must remain an independently attributable capture.
+    string? CaptureDirectory = null,
+    Func<string, string?>? TryGetSessionId = null,
+    Func<string, string, IReadOnlyList<string>>? ResumeArgs = null,
+    Func<string, string, CoreDispatchTarget>? ResumeTarget = null)
 {
+    /// <summary>Returns a target whose broker is restricted to the named declared-output tools.</summary>
+    public CoreDispatchTarget WithArtifactOnlyOutputs(IReadOnlyList<string> outputNames)
+    {
+        ArgumentNullException.ThrowIfNull(outputNames);
+        if (outputNames.Count == 0)
+        {
+            throw new ArgumentException("An artifact checkpoint needs at least one missing output.", nameof(outputNames));
+        }
+
+        var environment = (Environment ?? []).ToList();
+        environment.RemoveAll(variable => string.Equals(variable.Name, "BATON_ARTIFACT_ONLY_OUTPUTS", StringComparison.Ordinal));
+        environment.Add(("BATON_ARTIFACT_ONLY_OUTPUTS", string.Join(';', outputNames)));
+        return this with { ArtifactOnlyOutputNames = outputNames.ToArray(), Environment = environment };
+    }
+
+    /// <summary>Returns a target for the same vendor conversation with a replacement turn prompt.</summary>
+    public CoreDispatchTarget WithResumedSession(string sessionId, string prompt)
+    {
+        ArgumentException.ThrowIfNullOrWhiteSpace(sessionId);
+        ArgumentException.ThrowIfNullOrWhiteSpace(prompt);
+        if (ResumeTarget is not null)
+        {
+            return ResumeTarget(sessionId, prompt);
+        }
+
+        if (ResumeArgs is null)
+        {
+            throw new InvalidOperationException($"'{Program}' did not provide a session-resume shape.");
+        }
+
+        return this with { Args = ResumeArgs(sessionId, prompt), PromptText = prompt };
+    }
     /// <summary>
     /// #1373: returns this target with <paramref name="preamble"/> prepended to the instructional text
     /// the worker actually receives — <b>both</b> <see cref="PromptText"/> and the <see cref="Args"/>
@@ -796,7 +835,8 @@ public sealed class CoreDispatcher(ICoreEventLogWriter coreEventLogWriter, IStre
         // capture) is a deliberate no-op, not a missing-data condition.
         if (target.PromptText is { } promptText && pathVariables.TryGetValue("BATON_OUTPUT_DIR", out var outputDirectory))
         {
-            var promptFilePath = Path.Combine(outputDirectory, ArtifactManager.PromptFileName);
+            var captureDirectory = target.CaptureDirectory ?? outputDirectory;
+            var promptFilePath = Path.Combine(captureDirectory, ArtifactManager.PromptFileName);
             var expandedPromptText = ExpandVariables(promptText, pathVariables);
             await File.WriteAllTextAsync(promptFilePath, expandedPromptText, CancellationToken.None)
                 .ConfigureAwait(false);
@@ -1048,7 +1088,8 @@ public sealed class CoreDispatcher(ICoreEventLogWriter coreEventLogWriter, IStre
         {
             try
             {
-                streamLogger = new ExecutionStreamLogger(outputDir, onLossDeclared: JournalStreamLogLoss);
+                var captureDirectory = target.CaptureDirectory ?? outputDir;
+                streamLogger = new ExecutionStreamLogger(captureDirectory, onLossDeclared: JournalStreamLogLoss);
             }
             catch (Exception ex)
             {

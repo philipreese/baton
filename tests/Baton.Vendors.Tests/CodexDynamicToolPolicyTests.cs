@@ -42,6 +42,28 @@ public sealed class CodexDynamicToolPolicyTests
     }
 
     [Fact]
+    public async Task Artifact_checkpoint_exposes_only_the_missing_declared_output_and_refuses_workspace_tools()
+    {
+        using var fixture = new PolicyFixture(
+            new PermissionGrant(ReadFiles: true, WriteFiles: true, RunShellCommands: true), ["report.md", "verdict.json"]);
+        var policy = new CodexDynamicToolPolicy(
+            new PermissionGrant(ReadFiles: true, WriteFiles: true, RunShellCommands: true),
+            fixture.Workspace, fixture.Output, [], ["report.md", "verdict.json"],
+            artifactOnlyOutputNames: ["verdict.json"]);
+
+        Assert.Equal([CodexDynamicToolPolicy.WriteOutputTool], ToolNames(policy));
+        using var refusedArguments = JsonDocument.Parse("""{"input":"*** Begin Patch\\n*** End Patch"}""");
+        var refused = await policy.ExecuteAsync(CodexDynamicToolPolicy.ApplyPatchTool, refusedArguments.RootElement, TestContext.Current.CancellationToken);
+        Assert.False(refused.Success);
+        Assert.Equal(GrantRules.WithheldTool, refused.Rule);
+
+        using var writtenArguments = JsonDocument.Parse("""{"name":"verdict.json","content":"BLOCK"}""");
+        var written = await policy.ExecuteAsync(CodexDynamicToolPolicy.WriteOutputTool, writtenArguments.RootElement, TestContext.Current.CancellationToken);
+        Assert.True(written.Success);
+        Assert.False(File.Exists(Path.Combine(fixture.Output, "report.md")));
+    }
+
+    [Fact]
     public void Command_output_schema_requires_an_opaque_reference_and_channel_and_bounds_ranges()
     {
         using var fixture = new PolicyFixture(
