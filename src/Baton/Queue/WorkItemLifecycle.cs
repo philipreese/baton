@@ -91,9 +91,11 @@ public static class WorkItemLifecycle
         // already on disk. WorkflowOutcome owns the membership test (spec/baton.md §3).
         if (!Status.WorkflowOutcome.IsSucceededShaped(observation.TerminalOutcome))
         {
-            // A readable review verdict is still the reviewer's decision even when settlement was
-            // non-successful; only the absence of that decision must halt lifecycle spending.
-            if (observation.Stage is WorkStage.Review or WorkStage.ReReview && observation.Verdict is not null)
+            // A reviewer can write its verdict before a later failure or indeterminate settlement.
+            // That decision is still the only routing evidence this seam reads: discarding a BLOCK
+            // spends a re-review instead of its existing fix, while treating an absent verdict as a
+            // retry spends a round on silence.
+            if (observation.Stage is WorkStage.Review or WorkStage.ReReview)
             {
                 return DecideFromVerdict(observation);
             }
@@ -206,8 +208,9 @@ public static class WorkItemLifecycle
     }
 
     /// <summary>
-    /// A review lane that reached Terminal cleanly. <b>The reviewer's own decision decides</b> — see
-    /// the type's remarks, and <see cref="ReviewVerdict.Decision"/> for the field.
+    /// A settled review lane. <b>The reviewer's own decision decides</b>, even when its terminal
+    /// outcome was incomplete — see the type's remarks, and <see cref="ReviewVerdict.Decision"/> for
+    /// the field.
     /// </summary>
     private static WorkItemTransition DecideFromVerdict(WorkItemObservation observation)
     {
@@ -284,22 +287,13 @@ public static class WorkItemLifecycle
     }
 
     /// <summary>
-    /// A lane that did not reach a clean Terminal — timed out, faulted, was cancelled, or settled
-    /// indeterminate. A reviewer in that state made no decision, so it stops for an operator; mutating
-    /// lanes retain spec/baton.md §13's pushed-ness discriminator.
+    /// A mutating lane that did not reach a clean Terminal — timed out, faulted, was cancelled, or
+    /// settled indeterminate. Review lanes route through their persisted verdict instead. spec/baton.md
+    /// §13's two arms, and the type's remarks say why the discriminator is pushed-ness rather than the
+    /// outcome word.
     /// </summary>
     private static WorkItemTransition DecideAfterIncompleteLane(WorkItemObservation observation)
     {
-        // A review lane has nothing to push, and an absent verdict is no authorization to buy another
-        // review. Preserve the actual review stage and its room/error/spend evidence for an operator.
-        if (observation.Stage is WorkStage.Review or WorkStage.ReReview)
-        {
-            return EnsureDraft(observation, WorkItemTransition.NeedsOperator(
-                $"the {WorkStages.Token(observation.Stage)} lane settled {observation.TerminalOutcome} without a "
-                + $"readable verdict.json — no reviewer decision exists, so the queue will not dispatch another "
-                + $"review; read the room's report.md and decide the round by hand; {Recovery(observation.Stage)}"));
-        }
-
         if (IsPushed(observation))
         {
             return EnsureDraft(observation, Dispatch(

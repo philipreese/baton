@@ -7373,8 +7373,8 @@ written:
 | implement / fix / continue | `ExecutionArrested`, work unpushed, `workspaceChanged: true` | **continue** | structured arrest-boundary evidence proves work to recover |
 | implement / fix / continue | `ExecutionArrested`, work unpushed, `workspaceChanged: false` or absent | **operator** | no observed work, or no measurement, justifies an automatic continuation |
 | implement / fix / continue | anything else, work unpushed | **continue** | finish and push it |
-| review / re-review | anything else, no readable verdict | **operator** | no reviewer decision exists to authorize another lifecycle spend |
-| review / re-review | anything else, readable verdict | route on the verdict | the decision remains usable even when the lane did not settle successfully |
+| review / re-review | anything else, readable verdict | **route by decision** | a later failed or indeterminate settlement does not discard a readable reviewer decision |
+| review / re-review | anything else, no readable verdict | **operator** | silence cannot spend another review round |
 | fix, `automaticFixUsed: true`, round at the ceiling | succeeded-shaped, PR open | **re-review** | the one automatic repair is not operator-ready before its paired exact-head review |
 | any other stage, round at the ceiling | anything | **operator** | two of those arms are cycles with no natural end |
 | ready | anything | nothing | it stops here |
