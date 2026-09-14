@@ -3,6 +3,7 @@ using Baton.Vendors;
 using Baton.Cli;
 using Baton;
 using Baton.Accounting;
+using Baton.Conductor;
 using Baton.Domain;
 using Baton.Status;
 using Baton.Store;
@@ -150,6 +151,7 @@ if (args.Length == 0 || !knownSubcommands.Contains(args[0]))
     Console.Error.WriteLine(
         "              (adding an item queues it; the running daemon is what launches it, and 'baton queue hold' " +
         "pauses launches without stopping the daemon)");
+    Console.Error.WriteLine($"       {ConductorOptionsParser.Usage[7..]}");
     Console.Error.WriteLine(
         "       baton mcp [--capture-file <path>] [--memory-proposal-tool] [--fleet-status-tool] [--room-detail-tool]");
     Console.Error.WriteLine("       baton daemon [--no-mutex]");
@@ -391,6 +393,15 @@ try
         var queueOptions = QueueOptionsParser.Parse(args[1..]);
         return await QueueCommand
             .ExecuteAsync(queueOptions, Console.Out, hostStopSource.Token).ConfigureAwait(false);
+    }
+
+    // #2296: durable repository claims for external conductors. Produces no CommandResult,
+    // so it joins queue/room/rooms above rather than the CommandResult/FlowStateReporter switch below.
+    if (args[0] == "conductor")
+    {
+        var conductorOptions = ConductorOptionsParser.Parse(args[1..]);
+        return await ConductorCommand
+            .ExecuteAsync(conductorOptions, Console.Out, cancellationToken: hostStopSource.Token).ConfigureAwait(false);
     }
 
     CommandResult result;

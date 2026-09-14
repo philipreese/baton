@@ -257,6 +257,18 @@ public static class BatonPaths
     }
 
     /// <summary>
+    /// <c>{Root}/&lt;repository-slug&gt;/conductor-claim.json</c> — the repository-scoped conductor claim
+    /// register (#2296), inside the per-repository directory per Q3's layout. One file per canonical
+    /// repository identity, coordinating external conductor sessions.
+    /// </summary>
+    /// <param name="repositorySlug"><c>RepositoryIdentity.FileSlug</c> — never a raw identity or a checkout path.</param>
+    public static string ConductorClaimFile(string repositorySlug) =>
+        Path.Combine(RepositoryDirectory(repositorySlug), ConductorClaimFileName);
+
+    /// <summary>Filename of <see cref="ConductorClaimFile"/> relative to <see cref="RepositoryDirectory"/>.</summary>
+    public const string ConductorClaimFileName = "conductor-claim.json";
+
+    /// <summary>
     /// <c>{Root}/&lt;repository-slug&gt;/memory</c> — the canonical memory store for one repository
     /// (#1852 phase B, spec/baton.md §12). See <c>Baton.Memory.MemoryStore</c> for what it holds.
     /// </summary>
