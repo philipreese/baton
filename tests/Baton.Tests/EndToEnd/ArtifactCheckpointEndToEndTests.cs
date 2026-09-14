@@ -14,6 +14,71 @@ public sealed class ArtifactCheckpointEndToEndTests
         """{"type":"turn.usage","usage":{"input_tokens":500,"cached_input_tokens":0,"output_tokens":1,"round_trip":1}}""";
 
     [Fact]
+    public async Task A_cap_arrest_with_valid_quiesced_artifacts_preserves_the_completed_account_without_a_checkpoint()
+    {
+        var room = Path.Combine(Path.GetTempPath(), "baton-artifact-boundary-valid-" + Guid.NewGuid().ToString("N"));
+        var workspace = Path.Combine(room, "workspace");
+        var artifacts = Path.Combine(room, "artifacts");
+        var log = Path.Combine(room, "flow.jsonl");
+        Directory.CreateDirectory(workspace);
+        try
+        {
+            var state = await RunBoundaryExecutionAsync(
+                room, workspace, artifacts, log,
+                [new ProducedOutput("report.md", Schema: OutputSchema.NonEmptyText),
+                 new ProducedOutput("verdict.json", Schema: OutputSchema.NonEmptyText)],
+                artifactDirectory =>
+                {
+                    File.WriteAllText(Path.Combine(artifactDirectory, "report.md"), "Review complete.");
+                    File.WriteAllText(Path.Combine(artifactDirectory, "verdict.json"), "{\"decision\":\"APPROVE\"}");
+                });
+
+            var events = await new FlowEventLogReader(log).ReadAllAsync(TestContext.Current.CancellationToken);
+            Assert.Equal(StepStatus.Succeeded, Assert.Single(state.Steps).Status);
+            Assert.Single(events.OfType<FlowEvent.ExecutionArrested>());
+            Assert.Single(events.OfType<FlowEvent.ExecutionSucceeded>());
+            Assert.Empty(events.OfType<FlowEvent.ArtifactCheckpointAttempted>());
+            Assert.Empty(events.OfType<FlowEvent.ArtifactCheckpointCompleted>());
+        }
+        finally
+        {
+            DirectoryCleanup.DeleteRecursively(room);
+        }
+    }
+
+    [Fact]
+    public async Task A_cap_arrest_with_hollow_boundary_artifacts_remains_indeterminate()
+    {
+        var room = Path.Combine(Path.GetTempPath(), "baton-artifact-boundary-hollow-" + Guid.NewGuid().ToString("N"));
+        var workspace = Path.Combine(room, "workspace");
+        var artifacts = Path.Combine(room, "artifacts");
+        var log = Path.Combine(room, "flow.jsonl");
+        Directory.CreateDirectory(workspace);
+        try
+        {
+            var state = await RunBoundaryExecutionAsync(
+                room, workspace, artifacts, log,
+                [new ProducedOutput("report.md", Schema: OutputSchema.NonEmptyText),
+                 new ProducedOutput("verdict.json", Schema: OutputSchema.NonEmptyText)],
+                artifactDirectory =>
+                {
+                    File.WriteAllText(Path.Combine(artifactDirectory, "report.md"), "   ");
+                    File.WriteAllText(Path.Combine(artifactDirectory, "verdict.json"), "{\"decision\":\"APPROVE\"}");
+                });
+
+            var events = await new FlowEventLogReader(log).ReadAllAsync(TestContext.Current.CancellationToken);
+            Assert.Equal(StepStatus.Failed, Assert.Single(state.Steps).Status);
+            Assert.Single(events.OfType<FlowEvent.ExecutionArrested>());
+            Assert.Empty(events.OfType<FlowEvent.ExecutionSucceeded>());
+            Assert.Empty(events.OfType<FlowEvent.ArtifactCheckpointAttempted>());
+        }
+        finally
+        {
+            DirectoryCleanup.DeleteRecursively(room);
+        }
+    }
+
+    [Fact]
     public async Task A_codex_cap_arrest_gets_one_artifact_only_checkpoint_before_the_indeterminate_arrest()
     {
         var room = Path.Combine(Path.GetTempPath(), "baton-artifact-checkpoint-" + Guid.NewGuid().ToString("N"));
@@ -148,7 +213,35 @@ public sealed class ArtifactCheckpointEndToEndTests
         TryGetSessionId: _ => "checkpoint-session",
         ResumeArgs: (_, prompt) => [prompt]);
 
-    private sealed class CheckpointDispatcher(string artifacts, Action? cancelAfterCap = null) : ICoreDispatcher
+    private static async Task<FlowState> RunBoundaryExecutionAsync(
+        string room,
+        string workspace,
+        string artifacts,
+        string log,
+        IReadOnlyList<ProducedOutput> outputs,
+        Action<string> writeArtifacts)
+    {
+        var stepId = new StepId("review");
+        var snapshot = new WorkflowDefinitionSnapshot(
+            new WorkflowDefinitionSnapshotId("artifact-boundary"), new WorkflowTemplateId("review"), 1,
+            [new WorkflowStepDefinition(stepId, "review", [], outputs.Select(output => output.Name).ToArray(), DependsOn: [], RetryPolicy: new RetryPolicy(1))]);
+        var binding = new WorkerBinding.Process(
+            new WorkerContract("review", [], outputs, []),
+            CheckpointTarget(workspace), TimeSpan.FromSeconds(30), Adapter: "codex", TokenBudget: 100, VerifiesWorkspace: false);
+        var dispatcher = new CheckpointDispatcher(artifacts, writeAtCap: writeArtifacts, finishAtCap: true);
+        await using var writer = new FlowEventLogWriter(log);
+        var reader = new FlowEventLogReader(log);
+        return await MutationInterface.StartWorkflowAsync(
+            new WorkflowId("artifact-boundary"), room, snapshot,
+            new Dictionary<string, WorkerBinding> { ["review"] = binding }, artifacts, reader, writer, dispatcher,
+            cancellationToken: TestContext.Current.CancellationToken);
+    }
+
+    private sealed class CheckpointDispatcher(
+        string artifacts,
+        Action? cancelAfterCap = null,
+        Action<string>? writeAtCap = null,
+        bool finishAtCap = false) : ICoreDispatcher
     {
         public int CallCount { get; private set; }
         public CoreDispatchTarget? CheckpointTarget { get; private set; }
@@ -161,6 +254,17 @@ public sealed class ArtifactCheckpointEndToEndTests
             {
                 target.OnStdoutLine?.Invoke("""{"type":"thread.started","thread_id":"checkpoint-session"}""");
                 target.OnStdoutLine?.Invoke(ArrestingUsage);
+                var outputDirectory = request.Environment
+                    .OfType<EnvironmentVariable.BatonComputed>()
+                    .Single(variable => variable.Name == "BATON_OUTPUT_DIR")
+                    .Value;
+                Directory.CreateDirectory(outputDirectory);
+                writeAtCap?.Invoke(outputDirectory);
+                if (finishAtCap)
+                {
+                    return new CoreDispatchResult(0, CoreExitReason.Natural);
+                }
+
                 cancelAfterCap?.Invoke();
                 var cancelled = new TaskCompletionSource();
                 await using var registration = cancellationToken.Register(() => cancelled.TrySetResult());

@@ -2173,6 +2173,26 @@ public static class MutationInterface
                 // asked). No OutcomeClassifier.Classify call at all: classifying a cancelled-out-from-
                 // under-it process would only produce a Cancelled/Failed verdict that this replaces
                 // wholesale, never Succeeded.
+                //
+                // A final allowed/in-flight artifact write can finish while the monitor is asking the
+                // worker to stop. The dispatcher has returned here, so that writer is quiesced before
+                // this validation. Preserve the arrest as the truthful cap account, then let a complete
+                // validated contract settle the same execution rather than spending a checkpoint or
+                // discarding its account.
+                if (ContractValidator.IsSatisfied(binding.Contract, prepared.OutputDirectory))
+                {
+                    await eventLogWriter.AppendAsync(
+                            CreateExecutionArrested(prepared, binding, budgetMonitor, workspaceChanged: null),
+                            CancellationToken.None)
+                        .ConfigureAwait(false);
+                    await eventLogWriter.AppendAsync(
+                            new FlowEvent.ExecutionSucceeded(
+                                prepared.Request.ExecutionId,
+                                PeakBilledInWindow: budgetMonitor.SnapshotPeakBilledInWindow()),
+                            CancellationToken.None)
+                        .ConfigureAwait(false);
+                    return;
+                }
 
                 await RunArtifactCheckpointAsync(prepared, binding, checkpointSessionId, budgetMonitor, dispatcher, eventLogReader, eventLogWriter, dispatchCancellationToken, hostCancellationToken)
                     .ConfigureAwait(false);
@@ -2199,30 +2219,8 @@ public static class MutationInterface
                     workspaceChanged = changed;
                 }
 
-                // #2002: read once and destructured, never twice inline -- the two halves of this
-                // reading must describe the same snapshot.
-                var dominantCommand = budgetMonitor.SnapshotDominantCommandShape();
                 await eventLogWriter.AppendAsync(
-                    new FlowEvent.ExecutionArrested(
-                        prepared.Request.ExecutionId,
-                        budgetMonitor.SnapshotUsage(),
-                        budgetMonitor.SnapshotLastToolNames(),
-                        budgetMonitor.ArrestReasonValue,
-                        budgetMonitor.SnapshotToolStepCount(),
-                        // #1691: recorded on EVERY arrest, not only a BilledRate one -- see
-                        // TokenBudgetMonitor.SnapshotPeakBilledInWindow for why.
-                        budgetMonitor.SnapshotPeakBilledInWindow(),
-                        binding.BilledRateLimit,
-                        // #1745: same recorded-adapter preference as usageParser above -- the LIVE
-                        // adapter this execution actually ran on, not binding.Adapter (the CATALOG's
-                        // pre-crash-recovery value), so a rebound execution's arrest text names the
-                        // vendor whose figure actually fired.
-                        prepared.Request.Adapter,
-                        // #2002: recorded on every arrest, like PeakBilledInWindow above, so the fact
-                        // is durable even though only the tool-step-cap text reads it today.
-                        dominantCommand?.Shape,
-                        dominantCommand?.Percent,
-                        workspaceChanged),
+                    CreateExecutionArrested(prepared, binding, budgetMonitor, workspaceChanged),
                     CancellationToken.None).ConfigureAwait(false);
                 return;
             }
@@ -2512,6 +2510,29 @@ public static class MutationInterface
         {
             inFlightExecutions.Unregister(prepared.Request.ExecutionId);
         }
+    }
+
+    private static FlowEvent.ExecutionArrested CreateExecutionArrested(
+        PreparedExecution prepared,
+        WorkerBinding.Process binding,
+        TokenBudgetMonitor budgetMonitor,
+        bool? workspaceChanged)
+    {
+        // #2002: read once and destructured, never twice inline -- the two halves of this
+        // reading must describe the same snapshot.
+        var dominantCommand = budgetMonitor.SnapshotDominantCommandShape();
+        return new FlowEvent.ExecutionArrested(
+            prepared.Request.ExecutionId,
+            budgetMonitor.SnapshotUsage(),
+            budgetMonitor.SnapshotLastToolNames(),
+            budgetMonitor.ArrestReasonValue,
+            budgetMonitor.SnapshotToolStepCount(),
+            budgetMonitor.SnapshotPeakBilledInWindow(),
+            binding.BilledRateLimit,
+            prepared.Request.Adapter,
+            dominantCommand?.Shape,
+            dominantCommand?.Percent,
+            workspaceChanged);
     }
 
     /// <summary>
