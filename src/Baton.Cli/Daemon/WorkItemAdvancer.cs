@@ -202,7 +202,11 @@ public sealed class WorkItemAdvancer
                 {
                     Stage: WorkStage.Ready, State: QueueItemState.Queued, RoomDirectory: null,
                 };
-                var currentTerminalRoomDelivery = current.State is QueueItemState.Done or QueueItemState.Failed;
+                // This is only the sentinel-backed, room-bearing path observed above. A roomless
+                // terminal row must re-prove its refused admission at the mutation point instead.
+                var currentTerminalRoomDelivery = terminalRoomDelivery
+                    && current.RoomDirectory is { Length: > 0 }
+                    && current.State is QueueItemState.Done or QueueItemState.Failed;
                 var currentAdmissionRefusedRoomlessDelivery = IsAdmissionRefusedRoomlessFailure(current);
                 if (!currentNormalDeliveredReady && !currentTerminalRoomDelivery
                     && !currentAdmissionRefusedRoomlessDelivery)
