@@ -188,6 +188,7 @@ public sealed class WorkItemLifecycleTests
         ["aaaaaaaaaaaa", "'aaaaaaaaaaaa'"],
         [$"PR #42 at {CurrentHead}", $"'PR #42 at {CurrentHead}'"],
         ["main", "'main'"],
+        ["aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaag", "'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaag'"],
         [null, "missing"],
         ["", "missing"],
         [$" {CurrentHead}", $"' {CurrentHead}'"],
@@ -420,6 +421,23 @@ public sealed class WorkItemLifecycleTests
         Assert.Equal(WorkStage.Fix, transition.NextStage);
         Assert.Equal(2, transition.Round);
         Assert.True(transition.UsesAutomaticFix);
+    }
+
+    [Theory]
+    [InlineData(WorkStage.Review, WorkflowOutcome.Failed)]
+    [InlineData(WorkStage.Review, WorkflowOutcome.Indeterminate)]
+    [InlineData(WorkStage.ReReview, WorkflowOutcome.Failed)]
+    [InlineData(WorkStage.ReReview, WorkflowOutcome.Indeterminate)]
+    public void A_readable_approval_from_an_incomplete_review_reaches_ready(
+        WorkStage stage, string outcome)
+    {
+        var transition = WorkItemLifecycle.Decide(At(
+            stage, outcome: outcome, verdict: Verdict(ReviewDecision.Approve), round: 1));
+
+        Assert.Equal(WorkItemTransitionKind.Stop, transition.Kind);
+        Assert.Equal(WorkStage.Ready, transition.NextStage);
+        Assert.Equal(0, transition.Round);
+        Assert.False(transition.UsesAutomaticFix);
     }
 
     [Fact]
