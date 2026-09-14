@@ -19,8 +19,8 @@ public sealed class QueueOptionsParserTests
             "add", "sized-lane", "--issue", "2301", "--lifecycle", "--declared-size", size, "--size-rationale", "one coherent acceptance cluster",
         ]);
 
-        Assert.Equal(size, options.DeclaredTaskSize!.Size.ToString().ToLowerInvariant());
-        Assert.Equal("one coherent acceptance cluster", options.DeclaredTaskSize.Rationale);
+        Assert.Equal(size, options.DeclaredTaskSize!.Value.Size.ToString().ToLowerInvariant());
+        Assert.Equal("one coherent acceptance cluster", options.DeclaredTaskSize!.Value.Rationale);
     }
 
     [Theory]

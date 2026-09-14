@@ -269,7 +269,7 @@ public class RedispatchOptionsParserTests
         var options = RedispatchOptionsParser.Parse(
             ["parent-room", "--declared-size", "medium", "--size-rationale", "one durable seam"]);
 
-        Assert.Equal(DeclaredTaskSize.Medium, options.DeclaredTaskSize!.Size);
-        Assert.Equal("one durable seam", options.DeclaredTaskSize.Rationale);
+        Assert.Equal(DeclaredTaskSize.Medium, options.DeclaredTaskSize!.Value.Size);
+        Assert.Equal("one durable seam", options.DeclaredTaskSize!.Value.Rationale);
     }
 }

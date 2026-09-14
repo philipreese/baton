@@ -13,9 +13,12 @@ public enum DeclaredTaskSize
 }
 
 /// <summary>Immutable conductor input recorded before a worker is launched.</summary>
-public sealed record TaskSizeDeclaration(DeclaredTaskSize Size, string Rationale)
+public readonly record struct TaskSizeDeclaration(DeclaredTaskSize Size, string? Rationale)
 {
     public static readonly string Usage = "small|medium|large";
+
+    /// <summary>The explicit projection for records written before declarations existed.</summary>
+    public static TaskSizeDeclaration Unknown { get; } = new(DeclaredTaskSize.Unknown, null);
 
     public static TaskSizeDeclaration Parse(string size, string rationale)
     {

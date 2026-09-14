@@ -15,8 +15,8 @@ namespace Baton.Cli;
 public static class DispatchOptionsParser
 {
     /// <summary>The one copy of <c>baton dispatch</c>'s usage line, printed here on error and by <c>Program</c>.</summary>
-    public const string Usage =
-        "Usage: baton dispatch <name> [--spec <spec-file> | --spec - | --spec-text <text>] [--declared-size <small|medium|large> --size-rationale <clause>] [--attach <file>] [--skill <name>] [--require <capability>] [--no-default-skills] [--adapter <name>] [--model <name>] [--effort <name>] [--room-dir <dir>] [--workspace <dir>] [--workflow-id <id>] [--output <path>] [--timeout <minutes>] [--token-budget <n>] [--max-tool-steps <n>] [--billed-rate-limit <n>] [--verify <cmd>] [--verify-cmd <cmd>] [--verify-timeout <minutes>] [--expect-pr <true|false>] [--continue <room-dir>] [--override-runway <reason>] [--label <text>] [--workstream <slug>] [--repo <checkout-dir>] [--list-capabilities]";
+    public static readonly string Usage =
+        $"Usage: baton dispatch <name> [--spec <spec-file> | --spec - | --spec-text <text>] [--declared-size <{TaskSizeDeclaration.Usage}> --size-rationale <clause>] [--attach <file>] [--skill <name>] [--require <capability>] [--no-default-skills] [--adapter <name>] [--model <name>] [--effort <name>] [--room-dir <dir>] [--workspace <dir>] [--workflow-id <id>] [--output <path>] [--timeout <minutes>] [--token-budget <n>] [--max-tool-steps <n>] [--billed-rate-limit <n>] [--verify <cmd>] [--verify-cmd <cmd>] [--verify-timeout <minutes>] [--expect-pr <true|false>] [--continue <room-dir>] [--override-runway <reason>] [--label <text>] [--workstream <slug>] [--repo <checkout-dir>] [--list-capabilities]";
 
     /// <summary>
     /// <c>--label</c>'s cap (#1499) — a Fleet Glass room title, not a description; long enough for "the

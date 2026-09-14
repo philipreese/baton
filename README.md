@@ -73,7 +73,10 @@ adapter/model/effort from a role-and-scope tier table. Every evaluation lands as
 `~/.baton/fleet/queue.jsonl`, so "why did this lane start when it did" is answerable afterwards. The
 numbers and the tier table live in `~/.baton/settings.json` under `Queue`.
 
-An item added with `--lifecycle` carries a **stage** as well as a state, and the daemon advances it:
+An item added with `--lifecycle` carries a required declared task size and one-clause rationale
+(`--declared-size` and `--size-rationale`; the single vocabulary definition is
+[`TaskSizeDeclaration`](src/Baton/Domain/DeclaredTaskSize.cs)), as well as a **stage** and state. The
+declaration is frozen before the first launch and the daemon advances the lifecycle item:
 a settled lane's room, its `verdict.json` and `gh pr view` decide whether the next round is a review,
 a fix round carrying the reviewer's findings verbatim, a re-review, or a continuation of work that
 never reached the PR. The review role's `verdict.json` carries a `decision` of `approve` or `block` —

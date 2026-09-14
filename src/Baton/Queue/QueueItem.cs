@@ -43,8 +43,14 @@ public sealed record QueueItem
 
     public string? Effort { get; init; }
 
-    /// <summary>The frozen conductor routing declaration; null is a legacy row and renders as unknown.</summary>
-    public TaskSizeDeclaration? DeclaredTaskSize { get; init; }
+    private TaskSizeDeclaration _declaredTaskSize = TaskSizeDeclaration.Unknown;
+
+    /// <summary>The frozen conductor routing declaration; absent or null legacy JSON is projected explicitly as unknown.</summary>
+    public TaskSizeDeclaration DeclaredTaskSize
+    {
+        get => _declaredTaskSize;
+        init => _declaredTaskSize = value;
+    }
 
     /// <summary>
     /// Normalized explicit skill package names for an ordinary single-dispatch item. Null is the

@@ -225,7 +225,7 @@ public sealed record WorkflowStatusView(
     [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
     IReadOnlyList<Baton.Runway.RunwayAdmissionView>? Runway = null,
     [property: JsonPropertyName("declaredTaskSize")]
-    Baton.Domain.DeclaredTaskSize DeclaredTaskSize = Baton.Domain.DeclaredTaskSize.Unknown);
+    Baton.Domain.TaskSizeDeclaration DeclaredTaskSize = default);
 
 /// <summary>
 /// #1530: the wire shape for one <see cref="ArrestLedgerEntry"/> — plain strings throughout, the

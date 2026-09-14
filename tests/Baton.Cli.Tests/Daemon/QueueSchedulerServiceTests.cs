@@ -469,6 +469,48 @@ public sealed class QueueSchedulerServiceTests
     }
 
     [Fact]
+    public async Task A_replaced_task_size_declaration_cannot_be_claimed_or_launched_with_the_stale_rationale()
+    {
+        var home = CreateTempHome();
+        using var scope = BatonEnvironmentSnapshot.BeginScope(BatonEnvironmentSnapshot.Blank with { HomeOverride = home });
+        try
+        {
+            await QueueStore.MutateAsync(BatonPaths.QueueFile, s => s with
+            {
+                Items = [Item() with { DeclaredTaskSize = new(DeclaredTaskSize.Medium, "one durable seam") }],
+            }, Ct);
+            var launches = new List<QueueLaunchRequest>();
+            var service = new QueueSchedulerService(
+                (request, _) =>
+                {
+                    launches.Add(request);
+                    return Task.FromResult(new QueueLaunchOutcome(request.RoomDirectory));
+                },
+                _ => Task.FromResult(0.0),
+                () => 16.0,
+                () => DateTimeOffset.UtcNow,
+                beforeLaunchClaim: _ => QueueStore.MutateAsync(BatonPaths.QueueFile, snapshot => snapshot with
+                {
+                    Items = snapshot.Items.Select(item => item with
+                    {
+                        DeclaredTaskSize = new(DeclaredTaskSize.Medium, "a replacement rationale"),
+                    }).ToList(),
+                }, Ct));
+
+            await service.TickOnceAsync(Ct);
+
+            Assert.Empty(launches);
+            var item = Assert.Single((await QueueStore.LoadAsync(BatonPaths.QueueFile, Ct)).Items);
+            Assert.Equal(QueueItemState.Queued, item.State);
+            Assert.Equal("a replacement rationale", item.DeclaredTaskSize.Rationale);
+        }
+        finally
+        {
+            Cleanup(home);
+        }
+    }
+
+    [Fact]
     public async Task A_legacy_read_only_review_row_remains_unknown_after_requirement_migration()
     {
         var home = CreateTempHome();

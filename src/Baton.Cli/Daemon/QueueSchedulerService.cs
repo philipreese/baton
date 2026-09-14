@@ -908,6 +908,7 @@ public sealed class QueueSchedulerService : BackgroundService
         string.Equals(current.Role, admitted.Role, StringComparison.Ordinal)
         && current.Stage == admitted.Stage
         && string.Equals(current.Workspace, admitted.Workspace, StringComparison.Ordinal)
+        && current.DeclaredTaskSize == admitted.DeclaredTaskSize
         && SameRequirements(current.Requirements, admitted.Requirements);
 
     private static bool SameRequirements(IReadOnlyList<string>? left, IReadOnlyList<string>? right) =>

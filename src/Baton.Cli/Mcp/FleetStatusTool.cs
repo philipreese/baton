@@ -734,9 +734,9 @@ public sealed class FleetStatusTool : IMcpTool
     private static string? ExtractRoomWorkstream(IReadOnlyDictionary<string, WorkerBindingConfigEntry>? bindings) =>
         bindings?.Values.Select(entry => entry.Workstream).FirstOrDefault(workstream => workstream is not null);
 
-    private static DeclaredTaskSize ExtractRoomDeclaredTaskSize(IReadOnlyDictionary<string, WorkerBindingConfigEntry>? bindings) =>
-        bindings?.Values.Select(entry => entry.DeclaredTaskSize?.Size).FirstOrDefault(size => size is not null)
-        ?? DeclaredTaskSize.Unknown;
+    private static TaskSizeDeclaration ExtractRoomDeclaredTaskSize(IReadOnlyDictionary<string, WorkerBindingConfigEntry>? bindings) =>
+        bindings?.Values.Select(entry => entry.DeclaredTaskSize).FirstOrDefault(size => size is not null)
+        ?? TaskSizeDeclaration.Unknown;
 
     /// <summary>
     /// Extracts a room's runway admissions (#1896) off its loaded <c>bindings.json</c> — read the same way
@@ -838,7 +838,7 @@ public sealed record FleetRoomStatusView(
     [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
     string? TerminalAt = null,
     [property: JsonPropertyName("declaredTaskSize")]
-    DeclaredTaskSize DeclaredTaskSize = DeclaredTaskSize.Unknown,
+    TaskSizeDeclaration DeclaredTaskSize = default,
     // #734: spec/baton.md §6 schema states this field's shape and its absence rule -- see there.
     [property: JsonPropertyName("delivery")]
     [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]

@@ -19,6 +19,17 @@ public class StatusJsonEndToEndTests
         new Dictionary<string, IWorkerAdapter> { ["shell"] = new ShellCommandWorkerAdapter() };
 
     [Fact]
+    public void Status_json_view_serializes_the_complete_declaration_and_legacy_unknown()
+    {
+        var declared = JsonSerializer.Serialize(new WorkflowStatusView(
+            "Running", [], [], null, null, DeclaredTaskSize: new TaskSizeDeclaration(DeclaredTaskSize.Large, "multiple durable contracts")));
+        var legacy = JsonSerializer.Serialize(new WorkflowStatusView("Running", [], [], null, null));
+
+        Assert.Contains("\"declaredTaskSize\":{\"size\":\"large\",\"rationale\":\"multiple durable contracts\"}", declared, StringComparison.Ordinal);
+        Assert.Contains("\"declaredTaskSize\":{\"size\":\"unknown\"", legacy, StringComparison.Ordinal);
+    }
+
+    [Fact]
     public async Task A_succeeded_room_reports_state_Succeeded_with_step_states_and_output_paths()
     {
         var testRoot = Path.Combine(Path.GetTempPath(), $"cli-status-json-ok-{Guid.NewGuid():N}");

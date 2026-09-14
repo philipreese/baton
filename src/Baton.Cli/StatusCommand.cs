@@ -167,8 +167,8 @@ public static class StatusCommand
             var roomBindings = await RoomAdapterLookup.TryLoadBindingsAsync(options.RoomDirectoryPath, cancellationToken)
                 .ConfigureAwait(false);
             var runway = RunwayAdmissionView.AllFrom(roomBindings.Values.Select(entry => entry.RunwayAdmission));
-            var declaredTaskSize = roomBindings.Values.Select(entry => entry.DeclaredTaskSize?.Size)
-                .FirstOrDefault(size => size is not null) ?? DeclaredTaskSize.Unknown;
+            var declaredTaskSize = roomBindings.Values.Select(entry => entry.DeclaredTaskSize)
+                .FirstOrDefault(size => size is not null) ?? TaskSizeDeclaration.Unknown;
 
             if (options.Json)
             {

@@ -44,6 +44,17 @@ public sealed class FleetStatusToolTests : IDisposable
     }
 
     [Fact]
+    public void Fleet_projection_serializes_the_complete_declaration_and_legacy_unknown()
+    {
+        var declared = JsonSerializer.Serialize(new FleetRoomStatusView(
+            "room", "path", DeclaredTaskSize: new TaskSizeDeclaration(DeclaredTaskSize.Medium, "one durable seam")));
+        var legacy = JsonSerializer.Serialize(new FleetRoomStatusView("room", "path"));
+
+        Assert.Contains("\"declaredTaskSize\":{\"size\":\"medium\",\"rationale\":\"one durable seam\"}", declared, StringComparison.Ordinal);
+        Assert.Contains("\"declaredTaskSize\":{\"size\":\"unknown\"", legacy, StringComparison.Ordinal);
+    }
+
+    [Fact]
     public async Task Enumeration_IncludesExtraRoots_AndDiscoversRoomsAcrossRoots()
     {
         var defaultRoomsDir = Path.Combine(_tempHome, BatonPaths.RoomsDirectoryName);

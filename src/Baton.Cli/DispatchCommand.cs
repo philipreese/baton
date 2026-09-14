@@ -208,7 +208,7 @@ public static class DispatchCommand
                 && options.DeclaredTaskSize != resumedEntry.DeclaredTaskSize)
             {
                 throw new CliArgumentException(
-                    $"This workstream recorded declared size '{resumedEntry.DeclaredTaskSize.Size.ToString().ToLowerInvariant()}'; it cannot be replaced on continuation.");
+                    $"This workstream recorded declared size '{resumedEntry.DeclaredTaskSize.Value.Size.ToString().ToLowerInvariant()}'; it cannot be replaced on continuation.");
             }
             bindings = new Dictionary<string, WorkerBindingConfigEntry> { [continuedWorkerName] = resumedEntry };
         }

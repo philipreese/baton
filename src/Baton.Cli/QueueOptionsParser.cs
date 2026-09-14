@@ -222,7 +222,7 @@ public static class QueueOptionsParser
         {
             if (declaredSize is null || sizeRationale is null)
             {
-                throw new CliArgumentException("'--lifecycle' requires '--declared-size <small|medium|large>' and '--size-rationale <clause>'.");
+                throw new CliArgumentException($"'--lifecycle' requires '--declared-size <{TaskSizeDeclaration.Usage}>' and '--size-rationale <clause>'.");
             }
 
             if (issue is null)

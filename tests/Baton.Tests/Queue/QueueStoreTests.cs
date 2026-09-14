@@ -1,4 +1,5 @@
 using Baton.Queue;
+using Baton.Domain;
 
 namespace Baton.Tests.Queue;
 
@@ -110,6 +111,31 @@ public sealed class QueueStoreTests
 
             var read = await QueueStore.LoadAsync(path, Ct);
             Assert.Equal(["a", "b"], read.Items.Select(i => i.Tag));
+        }
+        finally
+        {
+            Cleanup(path);
+        }
+    }
+
+    [Fact]
+    public async Task An_absent_or_null_legacy_declaration_reloads_and_resaves_as_explicit_unknown()
+    {
+        var path = TempQueuePath();
+        Directory.CreateDirectory(Path.GetDirectoryName(path)!);
+        try
+        {
+            await File.WriteAllTextAsync(path, """
+                {"items":[{"tag":"legacy","role":"implement","workspace":"C:\\\\repos\\\\w1","specFile":"C:\\\\baton\\\\queue\\\\specs\\\\t.md","declaredTaskSize":null}],"held":false}
+                """, Ct);
+
+            var reloaded = await QueueStore.LoadAsync(path, Ct);
+            Assert.Equal(DeclaredTaskSize.Unknown, Assert.Single(reloaded.Items).DeclaredTaskSize.Size);
+            Assert.Null(reloaded.Items[0].DeclaredTaskSize.Rationale);
+
+            await QueueStore.MutateAsync(path, snapshot => snapshot, Ct);
+            var json = await File.ReadAllTextAsync(path, Ct);
+            Assert.Contains("\"declaredTaskSize\":{\"size\":\"unknown\"", json, StringComparison.Ordinal);
         }
         finally
         {
