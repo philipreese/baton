@@ -2004,6 +2004,10 @@ public sealed class QueueCommandTests
                 BatonPaths.FleetEventsRolloverFile,
                 maxLiveBytes: new FileInfo(BatonPaths.FleetEventsFile).Length + 1);
             await rotatedLog.Append(new FleetEventDraft(
+                FleetEventKind.AdmissionDecided, $"admission:{current.Value}", at.AddMinutes(2),
+                AttemptId: current, ParentAttemptId: parent, WorkId: new FleetWorkId(tag),
+                AdmissionDecision: TaskRequirementAdmission.Admitted), Ct);
+            await rotatedLog.Append(new FleetEventDraft(
                 FleetEventKind.AttemptRefused, $"attempt-refused:{current.Value}", at.AddMinutes(2),
                 AttemptId: current, ParentAttemptId: parent, WorkId: new FleetWorkId(tag),
                 Outcome: "Queue continue cannot launch without its canonical repository, recorded branch, and tracked open PR."), Ct);
@@ -2138,6 +2142,7 @@ public sealed class QueueCommandTests
     [InlineData("wrong-work-tag")]
     [InlineData("valid-plus-wrong-parent")]
     [InlineData("valid-plus-wrong-work-tag")]
+    [InlineData("valid-plus-wrong-admission")]
     [InlineData("nonterminal-parent")]
     public async Task Retire_refuses_legacy_proof_with_a_live_attempt_or_broken_parent(string brokenProof)
     {
@@ -2169,12 +2174,23 @@ public sealed class QueueCommandTests
                     $"attempt-refused:{current.Value}", at.AddMinutes(2), AttemptId: current,
                     ParentAttemptId: parent, WorkId: new FleetWorkId(tag)), Ct);
             }
-            await log.Append(new FleetEventDraft(FleetEventKind.AttemptRefused,
-                $"attempt-refused:{current.Value}:conflict", at.AddMinutes(2), AttemptId: current,
-                ParentAttemptId: brokenProof is "wrong-parent" or "valid-plus-wrong-parent"
-                    ? new FleetAttemptId("some-other-parent") : parent,
-                WorkId: new FleetWorkId(brokenProof is "wrong-work-tag" or "valid-plus-wrong-work-tag"
-                    ? "other-work" : tag)), Ct);
+            if (brokenProof == "valid-plus-wrong-admission")
+            {
+                await log.Append(new FleetEventDraft(FleetEventKind.AdmissionDecided,
+                    $"admission:{current.Value}:conflict", at.AddMinutes(2), AttemptId: current,
+                    ParentAttemptId: new FleetAttemptId("some-other-parent"),
+                    WorkId: new FleetWorkId(tag),
+                    AdmissionDecision: TaskRequirementAdmission.Admitted), Ct);
+            }
+            else
+            {
+                await log.Append(new FleetEventDraft(FleetEventKind.AttemptRefused,
+                    $"attempt-refused:{current.Value}:conflict", at.AddMinutes(2), AttemptId: current,
+                    ParentAttemptId: brokenProof is "wrong-parent" or "valid-plus-wrong-parent"
+                        ? new FleetAttemptId("some-other-parent") : parent,
+                    WorkId: new FleetWorkId(brokenProof is "wrong-work-tag" or "valid-plus-wrong-work-tag"
+                        ? "other-work" : tag)), Ct);
+            }
             if (brokenProof == "started-current")
             {
                 await log.Append(new FleetEventDraft(FleetEventKind.AttemptStarted,

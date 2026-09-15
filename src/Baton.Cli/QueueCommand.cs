@@ -838,13 +838,18 @@ public static class QueueCommand
             {
                 var current = item.AttemptId!.Value;
                 var currentEvents = events.Events.Where(e => e.AttemptId == current).ToList();
+                var admission = currentEvents.Where(e => e.Kind == FleetEventKind.AdmissionDecided).ToList();
                 var refusal = currentEvents.Where(e => e.Kind == FleetEventKind.AttemptRefused
                     && e.ParentAttemptId == parent && e.RoomId is null
                     && e.WorkId?.Value == item.Tag).ToList();
-                // A second same-ID event, even another refusal with a different parent/work,
-                // makes the identity history contradictory rather than more convincing.
-                if (currentEvents.Count != 1 || refusal.Count != 1
-                    || refusal[0].At < settled[0].At)
+                // Permission admission is not a launch. Every other same-ID event must be the
+                // sole exact refusal; conflicting metadata or attempt history fails closed.
+                if (refusal.Count != 1 || admission.Count > 1
+                    || currentEvents.Count != refusal.Count + admission.Count
+                    || refusal[0].At < settled[0].At
+                    || admission.Any(e => e.WorkId?.Value != item.Tag
+                        || e.ParentAttemptId != parent || e.RoomId is not null
+                        || e.At < settled[0].At || e.At > refusal[0].At))
                 {
                     return null;
                 }

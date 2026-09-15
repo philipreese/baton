@@ -7140,6 +7140,9 @@ terminal proof: a late room may exist before its directory is persisted, so oper
 refuse it unless the current attempt has an exact typed `attemptRefused` event with no
 `attemptStarted`/`attemptSettled` event, and its named parent attempt has matching `attemptStarted`
 and `attemptSettled` events for one room whose terminal sentinel agrees with the settled outcome.
+One correctly keyed, roomless `admissionDecided` permission fact may precede the exact refusal;
+`admitted` is not a launch. A conflicting admission identity or any other current-attempt event
+forbids retirement.
 An older `Cancelled` next-stage row may likewise be operator-retired only when it has no claimed
 current attempt or room, its exact parent has that same settled-room proof, every recorded prior
 launched room has a terminal sentinel, and an exact keyed
