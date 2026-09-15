@@ -180,12 +180,16 @@ public static class IssueWorktreeProvisioner
 
         if (Directory.Exists(firstWorkspace))
         {
-            // A directory named w<n> is not evidence that it is the live lane. Re-use is safe only
-            // when git itself still registers that exact path on the first-lane branch.
-            await VerifyReusableWorktreeAsync(firstWorkspace, firstBranch, repositoryDirectory, runner, cancellationToken)
-                .ConfigureAwait(false);
-            await TrustAsync(firstWorkspace, probe, output: output, cancellationToken: cancellationToken).ConfigureAwait(false);
-            return new ProvisionedIssueWorktree(firstWorkspace, firstBranch);
+            // A directory named w<n> is not evidence that it is the live lane. Only an exact Git
+            // registration on the first-lane branch permits reuse. A positively different attached
+            // branch plus a proven canonical branch collision leaves the old directory untouched and
+            // selects a free suffix; an unreadable or unregistered path still refuses fail-closed.
+            if (await CanReuseCanonicalWorktreeAsync(firstWorkspace, firstBranch, repositoryDirectory, runner, cancellationToken)
+                    .ConfigureAwait(false))
+            {
+                await TrustAsync(firstWorkspace, probe, output: output, cancellationToken: cancellationToken).ConfigureAwait(false);
+                return new ProvisionedIssueWorktree(firstWorkspace, firstBranch);
+            }
         }
 
         for (var suffix = 1; suffix <= 100; suffix++)
@@ -276,7 +280,7 @@ public static class IssueWorktreeProvisioner
             line.EndsWith($"\trefs/heads/{branch}", StringComparison.Ordinal));
     }
 
-    private static async Task VerifyReusableWorktreeAsync(
+    private static async Task<bool> CanReuseCanonicalWorktreeAsync(
         string workspace,
         string branch,
         string repositoryDirectory,
@@ -317,13 +321,24 @@ public static class IssueWorktreeProvisioner
         }
 
         var expectedBranch = $"refs/heads/{branch}";
-        if (!string.Equals(foundBranch, expectedBranch, StringComparison.Ordinal))
+        if (string.Equals(foundBranch, expectedBranch, StringComparison.Ordinal))
         {
-            var detail = foundBranch is null ? "is not registered as a git worktree" : $"checks out '{foundBranch}'";
-            throw new CliArgumentException(
-                $"Existing workspace '{workspace}' {detail}; expected branch '{expectedBranch}'.",
-                "move or remove the unexpected directory, or re-add the issue from the worktree that owns its recorded branch.");
+            return true;
         }
+
+        // A registered worktree on another branch is occupied, not orphaned. The spec's reopened
+        // issue suffix route is reachable only when Git positively proves the canonical ref already
+        // exists; a failed/empty probe must not silently make an unexpected directory look reusable.
+        if (foundBranch is not null && await BranchExistsAsync(branch, repositoryDirectory, runner, cancellationToken)
+                .ConfigureAwait(false))
+        {
+            return false;
+        }
+
+        var detail = foundBranch is null ? "is not registered as a git worktree" : $"checks out '{foundBranch}'";
+        throw new CliArgumentException(
+            $"Existing workspace '{workspace}' {detail}; expected branch '{expectedBranch}'.",
+            "move or remove the unexpected directory, or re-add the issue from the worktree that owns its recorded branch.");
     }
 
     /// <summary>
