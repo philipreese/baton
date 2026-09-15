@@ -1090,7 +1090,7 @@ public sealed class WorkItemAdvancerTests
     }
 
     [Fact]
-    public async Task Cancellation_that_changes_the_row_before_readiness_authorization_prevents_the_GitHub_mutation()
+    public async Task Cancellation_of_started_ready_lifecycle_is_refused_before_readiness_authorization()
     {
         var home = CreateTempHome();
         using var scope = BatonEnvironmentSnapshot.BeginScope(BatonEnvironmentSnapshot.Blank with { HomeOverride = home });
@@ -1118,8 +1118,8 @@ public sealed class WorkItemAdvancerTests
 
             async Task<string?> CancelBeforeClaim(string _, CancellationToken cancellationToken)
             {
-                await QueueCommand.ExecuteAsync(
-                    new QueueOptions(QueueVerb.Cancel, Tag: "1934-lane"), TextWriter.Null, cancellationToken);
+                await Assert.ThrowsAsync<CliArgumentException>(() => QueueCommand.ExecuteAsync(
+                    new QueueOptions(QueueVerb.Cancel, Tag: "1934-lane"), TextWriter.Null, cancellationToken));
                 return PushedSha;
             }
 
@@ -1127,9 +1127,9 @@ public sealed class WorkItemAdvancerTests
 
             var item = await ReadBackAsync();
             Assert.Empty(facts);
-            Assert.Equal(QueueItemState.Cancelled, item.State);
+            Assert.Equal(QueueItemState.Queued, item.State);
             Assert.Null(item.ReadinessMutationClaim);
-            Assert.DoesNotContain(gh.Calls, args => args is ["pr", "ready", ..]);
+            Assert.Contains(gh.Calls, args => args is ["pr", "ready", "77", "--repo", Repository]);
         }
         finally
         {
@@ -1260,7 +1260,7 @@ public sealed class WorkItemAdvancerTests
     }
 
     [Fact]
-    public async Task A_failed_readiness_mutation_releases_the_claim_for_operator_cancellation()
+    public async Task A_failed_readiness_mutation_releases_the_claim_without_cancelling_the_started_lifecycle()
     {
         var home = CreateTempHome();
         using var scope = BatonEnvironmentSnapshot.BeginScope(BatonEnvironmentSnapshot.Blank with { HomeOverride = home });
@@ -1293,9 +1293,9 @@ public sealed class WorkItemAdvancerTests
             Assert.Equal(QueueDecisionEntry.Failed, fact.Decision);
             Assert.Null(retained.ReadinessMutationClaim);
             Assert.Contains("readiness obligation remains", retained.Error!, StringComparison.Ordinal);
-            Assert.Equal(0, await QueueCommand.ExecuteAsync(
+            await Assert.ThrowsAsync<CliArgumentException>(() => QueueCommand.ExecuteAsync(
                 new QueueOptions(QueueVerb.Cancel, Tag: "1934-lane"), TextWriter.Null, Ct));
-            Assert.Equal(QueueItemState.Cancelled, (await ReadBackAsync()).State);
+            Assert.Equal(QueueItemState.Queued, (await ReadBackAsync()).State);
         }
         finally
         {
