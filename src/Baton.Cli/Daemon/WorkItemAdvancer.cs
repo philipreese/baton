@@ -257,7 +257,7 @@ public sealed class WorkItemAdvancer
         // supplied the exact forge object. Re-observation is the supported recovery seam; it does
         // not infer a PR from a branch or manufacture another failure fact each scheduler tick.
         if (awaitingMissingPullRequest
-            && (!pr.Succeeded || pr.Number is null || pr.IsOpen != true))
+            && (!pr.Succeeded || pr.Number is null || pr.IsOpen != true || pr.IsDraft != true))
         {
             return null;
         }

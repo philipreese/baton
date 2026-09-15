@@ -30,8 +30,8 @@ namespace Baton.Queue;
 /// spec/baton.md §13 has the argument. What it means for the code below: nothing reads
 /// <c>WorkflowOutcome</c> beyond <see cref="Status.WorkflowOutcome.IsSucceededShaped"/> — the membership
 /// test that owns both succeeded-shaped words — and <see cref="IsPushed"/> is the whole discriminator
-/// for work that reached a PR. Positive zero-step terminal evidence separately stops an unpushed,
-/// PR-less attempt before it could buy a continuation to recover nonexistent work.
+/// for work that reached a PR. Every incomplete PR-less lane stops before it could buy a continuation
+/// that admission is known to refuse; positive zero-step evidence is not a substitute for forge identity.
 /// </para>
 /// <para>
 /// <b>Every dispatch is counted and bounded</b> (<see cref="WorkStages.MaxRounds"/>). Two of the arms

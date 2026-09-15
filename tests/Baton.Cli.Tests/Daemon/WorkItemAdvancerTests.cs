@@ -1560,8 +1560,16 @@ public sealed class WorkItemAdvancerTests
                 .AdvanceAsync(Now.AddMinutes(2), Ct));
             Assert.Equal(halted, await ReadBackAsync());
 
-            var recovered = Assert.Single(await Advancer(new FakeGh(PrJson(77, PushedSha)), head)
+            // An open but already-ready PR is not the operator's promised draft recovery object.
+            // Keep the halt rather than mutating an unreviewed visible readiness signal.
+            var readyGh = new FakeGh(PrJson(77, PushedSha, isDraft: false));
+            Assert.Empty(await Advancer(readyGh, head)
                 .AdvanceAsync(Now.AddMinutes(3), Ct));
+            Assert.Equal(halted, await ReadBackAsync());
+            Assert.DoesNotContain(readyGh.Calls, args => args is ["pr", "ready", ..]);
+
+            var recovered = Assert.Single(await Advancer(new FakeGh(PrJson(77, PushedSha)), head)
+                .AdvanceAsync(Now.AddMinutes(4), Ct));
             Assert.Equal(QueueDecisionEntry.Advanced, recovered.Decision);
             var item = await ReadBackAsync();
             Assert.Equal(WorkStage.ReReview, item.Stage);
